@@ -1,0 +1,3 @@
+[submodule "portsource/sipjsserver"]
+	path = portsource/sipjsserver
+	url = https://github.com/vcharbon/sipjsserver.git
