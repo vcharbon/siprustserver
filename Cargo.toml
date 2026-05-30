@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sip-message",
+    "xtask",
+]
+
+# One crate per migration layer (see MIGRATION_STATUS.md). Slice 1 is the
+# pure SIP message layer (`sip-message`); later slices add sibling crates
+# (sip-net, call, rules, limiter). A shared foundation/types crate is to be
+# extracted only when the first cross-layer cycle forces it — not before.
+# See docs/adr/0002-cargo-workspace-crate-per-layer.md.
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# rvoip-sip-core is the dev-only parity oracle for the message layer.
+# Pinned via path against the vendored source when present; see
+# docs/adr/0001-port-custom-parser-rvoip-as-parity-oracle.md.
+# rvoip-sip-core = { path = "portsource/sipjsserver/repos/rvoip/crates/rvoip-sip-core" }
+thiserror = "2"
+proptest = "1"
+criterion = "0.5"

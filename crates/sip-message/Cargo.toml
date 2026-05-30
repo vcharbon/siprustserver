@@ -1,0 +1,26 @@
+[package]
+name = "sip-message"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Pure SIP message layer (parse / serialize / strict-validate) — Rust port of sipjsserver src/sip message core."
+
+[features]
+default = []
+# `rvoip-oracle` pulls in rvoip-sip-core as the parity-oracle second impl for
+# the compliance matrix. Off by default (production builds never link it);
+# enable in CI test runs: `cargo test -p sip-message --features rvoip-oracle`.
+rvoip-oracle = ["dep:rvoip-sip-core"]
+
+[dependencies]
+rvoip-sip-core = { version = "0.1.26", optional = true }
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "sip_parser"
+harness = false

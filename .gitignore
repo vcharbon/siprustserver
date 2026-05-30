@@ -1,0 +1,10 @@
+# Rust build artifacts
+/target
+**/target
+
+# ABNF fuzz output (regenerated on demand via `cargo run -p xtask -- abnf-regen`)
+/tmp/abnf-fuzz-out
+
+# Editor / OS
+*.swp
+.DS_Store
