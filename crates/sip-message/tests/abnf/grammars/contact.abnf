@@ -1,0 +1,15 @@
+; Contact value: STAR or contact-param-list (after `Contact:`).
+contact-value =
+    "*" /  ( contact-param  *( COMMA  contact-param ) )
+
+; RFC 3261 §20.10 — bare addr-spec is ambiguous when the URI may contain
+; `,`, `;`, or `?`. Use name-addr for the list form.
+contact-param =
+    name-addr  *( SEMI  contact-params )
+
+; Collapse all extension contact-params to just generic-param.
+contact-params =
+    generic-param
+
+SEMI = ";"
+COMMA = ","

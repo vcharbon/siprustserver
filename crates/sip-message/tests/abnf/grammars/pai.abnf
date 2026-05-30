@@ -1,0 +1,55 @@
+; P-Asserted-Identity value (RFC 3325 §9.1):
+;   PAssertedID = "P-Asserted-Identity" HCOLON PAssertedID-value
+;                  *(COMMA PAssertedID-value)
+;   PAssertedID-value = name-addr / addr-spec
+; Caller delivers the part AFTER `P-Asserted-Identity:`, which can be a
+; single value or a comma-separated list, and may include `tel:` URIs.
+pai-header-value =
+    pai-value  *( COMMA  pai-value )
+
+; RFC 3261 §20.10 — when the URI contains comma/semicolon/question-mark,
+; angle-bracket form is mandatory, otherwise bare addr-spec is allowed.
+; Generate BOTH valid shapes:
+;   - name-addr: always `<...>`, so the inner URI may carry `;`/`?`/`,`.
+;   - bare addr-spec: only the "safe" subset with no `;`/`?`/`,`, which is
+;     the only unambiguous bare form (`splitTopLevelCommas` can't tell a
+;     userinfo `,` from an inter-value `,` without LL(∞) lookahead).
+pai-value =
+    name-addr /  tel-name-addr /  bare-safe-uri /  bare-safe-tel
+
+; RFC 3325 explicitly permits `tel:` URIs in P-Asserted-Identity; the SIP
+; parser must accept them transparently. We model them with a permissive
+; shape (tel scheme + telephone-subscriber-ish payload).
+tel-name-addr =
+    [ display-name ]  LAQUOT  tel-addr-spec  RAQUOT
+
+tel-addr-spec =
+    "tel:"  tel-payload
+
+; Bare addr-spec, unambiguous subset: no uri-parameters / headers and a
+; user portion that excludes `;` `?` `,`. Always RFC 3261 §20.10-legal
+; without angle brackets.
+bare-safe-uri =
+    ( "sip:" /  "sips:" )  [ safe-userinfo ]  hostport
+
+safe-userinfo =
+    safe-user  "@"
+
+safe-user =
+    1*( unreserved /  escaped /  safe-user-unreserved )
+
+safe-user-unreserved =
+    "&" /  "=" /  "+" /  "$" /  "/"
+
+; Bare tel: addr-spec without `;`-params (those would be header-params in a
+; non-bracketed context).
+bare-safe-tel =
+    "tel:"  [ "+" ]  1*( DIGIT /  "-" /  "." /  "(" /  ")" )
+
+tel-payload =
+    [ "+" ]  1*( DIGIT /  "-" /  "." /  "(" /  ")" )  *( ";" tel-par )
+
+tel-par =
+    1*( alphanum /  "-" )  [ "="  1*( alphanum /  "-" /  "." /  "+" ) ]
+
+COMMA = ","

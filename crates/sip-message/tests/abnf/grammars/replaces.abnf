@@ -1,0 +1,27 @@
+; Replaces value (after `Replaces:`). RFC 3891 §6.1 ABNF allows arbitrary
+; params, but §3 mandates BOTH to-tag and from-tag in any order. Encode the
+; semantic constraint here so the generator emits useful inputs.
+replaces-value =
+    callid  required-params  *( SEMI  extra-param )
+
+required-params =
+    SEMI  to-tag-p  SEMI  from-tag-p /
+    SEMI  from-tag-p  SEMI  to-tag-p
+
+to-tag-p =
+    "to-tag="  token
+
+from-tag-p =
+    "from-tag="  token
+
+extra-param =
+    "early-only" /  generic-param
+
+callid =
+    word  [ "@"  word ]
+
+word =
+    1*( alphanum /  "-" /  "." /  "!" /  "%" /  "*" /  "_" /  "+" /
+        "`" /  "'" /  "~" /  "(" /  ")" /  ":" /  "/" /  "?" )
+
+SEMI = ";"

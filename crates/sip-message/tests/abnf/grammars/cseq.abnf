@@ -1,0 +1,11 @@
+; CSeq value (after `CSeq:`). number SP Method.
+cseq-value =
+    1*9DIGIT  SP  cseq-method
+
+cseq-method =
+    "INVITE" /  "ACK" /  "OPTIONS" /  "BYE" /  "CANCEL" /  "REGISTER" /
+    "INFO" /  "PRACK" /  "SUBSCRIBE" /  "NOTIFY" /  "UPDATE" /
+    "MESSAGE" /  "REFER" /  "PUBLISH" /  extension-method
+
+extension-method =
+    token

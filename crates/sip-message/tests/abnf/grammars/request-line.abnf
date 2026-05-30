@@ -1,0 +1,12 @@
+; Request-Line: Method SP Request-URI SP "SIP/2.0".
+; Drop CRLF — the caller frames lines elsewhere; we test the line content.
+request-line =
+    method-token  SP  request-uri  SP  "SIP/2.0"
+
+method-token =
+    "INVITE" /  "ACK" /  "OPTIONS" /  "BYE" /  "CANCEL" /  "REGISTER" /
+    "INFO" /  "PRACK" /  "SUBSCRIBE" /  "NOTIFY" /  "UPDATE" /
+    "MESSAGE" /  "REFER" /  "PUBLISH" /  token
+
+request-uri =
+    SIP-URI /  SIPS-URI

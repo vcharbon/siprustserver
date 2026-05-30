@@ -1,0 +1,146 @@
+; Shared productions extracted from xsnpdngv/SIP-ABNF
+; (RFC 3261 §19.1 + §25.1, plus a few RFC 5234 cores not preloaded
+; identically by abnfgen). Concatenated with each per-header grammar.
+
+; ─── SIP-URI subgrammar ─────────────────────────────────────────────────────
+
+SIP-URI =
+    "sip:"   [ userinfo ]  hostport  uri-parameters  [ headers ]
+
+SIPS-URI =
+    "sips:"  [ userinfo ]  hostport  uri-parameters  [ headers ]
+
+userinfo =
+    user  [ ":"  password ]  "@"
+
+user  =
+    1*( unreserved /  escaped /  user-unreserved )
+
+user-unreserved =
+    "&" /  "=" /  "+" /  "$" /  "," /  ";" /  "?" /  "/"
+
+password =
+    *( unreserved /  escaped /  "&" /  "=" /  "+" /  "$" /  "," )
+
+hostport =
+    host  [ ":"  port ]
+
+host =
+    hostname /  IPv4address
+
+hostname =
+    *( domainlabel  "." )  toplabel  [ "." ]
+
+domainlabel =
+    alphanum /  alphanum  *( alphanum /  "-" )  alphanum
+
+toplabel =
+    ALPHA /  ALPHA  *( alphanum /  "-" )  alphanum
+
+IPv4address =
+    dec-octet  "."  dec-octet  "."  dec-octet  "."  dec-octet
+
+dec-octet =
+    DIGIT /
+    %x31-39   DIGIT /
+    "1"  2DIGIT /
+    "2"  %x30-34   DIGIT /
+    "25"  %x30-35
+
+; RFC 3261 §19.1.2 — port is bounded to 1-65535 (TCP/UDP semantics).
+; Pure `1*DIGIT` lets abnfgen emit 0 and >65535, which the parser
+; correctly rejects — but those policy-rejections drown out real bugs.
+; Constrain generation to always-valid ports: 1-9999 (leading non-zero,
+; covers 5060/80/etc.) plus 10000-19999 for 5-digit coverage. Every
+; value here is guaranteed in (0, 65535].
+port =
+    %x31-39   *3DIGIT /
+    "1"   4DIGIT
+
+uri-parameters =
+    *( ";"  uri-parameter )
+
+uri-parameter =
+    pname  [ "="  pvalue ]
+
+pname =
+    1*paramchar
+
+pvalue =
+    1*paramchar
+
+paramchar =
+    param-unreserved /  unreserved /  escaped
+
+param-unreserved =
+    "[" /  "]" /  "/" /  ":" /  "&" /  "+" /  "$"
+
+headers =
+    "?"  header  *( "&"  header )
+
+header =
+    hname  "="  hvalue
+
+hname =
+    1*( hnv-unreserved /  unreserved /  escaped )
+
+hvalue =
+    *( hnv-unreserved /  unreserved /  escaped )
+
+hnv-unreserved =
+    "[" /  "]" /  "/" /  "?" /  ":" /  "+" /  "$"
+
+; ─── Tokens / quoted strings ───────────────────────────────────────────────
+
+alphanum =
+    ALPHA /  DIGIT
+
+escaped =
+    "%"   HEXDIG   HEXDIG
+
+mark =
+    "-" /  "_" /  "." /  "!" /  "~" /  "*" /  "'" /  "(" /  ")"
+
+unreserved =
+    alphanum /  mark
+
+reserved =
+    ";" /  "/" /  "?" /  ":" /  "@" /  "&" /  "=" /  "+" /  "$" /  ","
+
+; RFC 3261 token (NB: includes "!" "%" "*" "_" "+" "`" "'" "~", among others)
+token =
+    1*( alphanum /  "-" /  "." /  "!" /  "%" /  "*" /  "_" /  "+" /  "`" /  "'" /  "~" )
+
+quoted-string =
+    DQUOTE  *( qdtext /  quoted-pair )  DQUOTE
+
+qdtext =
+    %x21 / %x23-5B / %x5D-7E
+
+quoted-pair =
+    "\"  ( %x00-09 / %x0B-0C / %x0E-7F )
+
+; ─── name-addr / addr-spec ─────────────────────────────────────────────────
+
+name-addr =
+    [ display-name ]  LAQUOT  addr-spec  RAQUOT
+
+; Restrict abnfgen so it doesn't generate display names that explode with
+; embedded angle brackets, quotes, etc. Token-form is plenty for shape coverage.
+display-name =
+    token *(WSP token) /  quoted-string
+
+addr-spec =
+    SIP-URI /  SIPS-URI
+
+LAQUOT =
+    "<"
+
+RAQUOT =
+    ">"
+
+generic-param =
+    pname  [ "="  gen-value ]
+
+gen-value =
+    token /  quoted-string

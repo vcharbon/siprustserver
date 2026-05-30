@@ -1,0 +1,8 @@
+; RAck value (after `RAck:`). RFC 3262 §7.1.
+rack-value =
+    1*9DIGIT  SP  1*9DIGIT  SP  rack-method
+
+rack-method =
+    "INVITE" /  "ACK" /  "OPTIONS" /  "BYE" /  "CANCEL" /  "REGISTER" /
+    "INFO" /  "PRACK" /  "SUBSCRIBE" /  "NOTIFY" /  "UPDATE" /
+    "MESSAGE" /  "REFER" /  "PUBLISH" /  token

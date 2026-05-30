@@ -1,0 +1,11 @@
+; Refer-To value (after `Refer-To:`). RFC 3515 §2.1:
+;   Refer-To = ("Refer-To" / "r") HCOLON (name-addr / addr-spec) *(SEMI refer-param)
+; RFC 3261 §20.10 — bare addr-spec would conflict with the trailing
+; `*(SEMI refer-param)`. Force name-addr.
+refer-to-value =
+    name-addr  *( SEMI  refer-param )
+
+refer-param =
+    generic-param
+
+SEMI = ";"

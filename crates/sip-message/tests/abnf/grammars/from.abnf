@@ -1,0 +1,19 @@
+; From-spec value (the part AFTER `From: `). Same shape used by To, PAI/PPI
+; entries, Diversion entries, etc.
+; RFC 3261 §20.10 mandates angle-bracket form when the URI contains `,`,
+; `?`, or `;` — which our SIP-URI grammar can generate at any position. To
+; avoid creating ambiguous bare addr-spec/header-param boundaries, always
+; emit name-addr form here.
+from-spec =
+    name-addr  *( SEMI  from-param )
+
+from-param =
+    tag-param /  generic-param
+
+tag-param =
+    "tag"  "="  token
+
+; abnfgen's `SEMI` etc. defaults from the SIP-ABNF expand to surrounding
+; LWS. We tighten to the bare punctuation to keep generated strings on one
+; physical line.
+SEMI = ";"

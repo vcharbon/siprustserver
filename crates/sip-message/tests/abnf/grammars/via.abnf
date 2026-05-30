@@ -1,0 +1,48 @@
+; Via value (after `Via:`). Comma-separated list of via-parm.
+via-header-value =
+    via-parm  *( COMMA  via-parm )
+
+via-parm =
+    sent-protocol  SP  sent-by  *( SEMI  via-params )
+
+sent-protocol =
+    protocol-name  "/"  protocol-version  "/"  transport
+
+protocol-name =
+    "SIP" /  token
+
+protocol-version =
+    token
+
+transport =
+    "UDP" /  "TCP" /  "TLS" /  "SCTP" /  "WS" /  "WSS" /  token
+
+; sent-by uses the same hostport machinery as SIP-URI host[:port].
+sent-by =
+    host  [ ":"  port ]
+
+; via-params — RFC 3261 §20.42 lists branch, ttl, maddr, received, etc.
+; All are name=value pairs (or branch flag). Use generic-param.
+via-params =
+    via-branch /  via-ttl /  via-maddr /  via-received /  via-extension
+
+via-branch =
+    "branch="  token
+
+via-ttl =
+    "ttl="  1*3DIGIT
+
+via-maddr =
+    "maddr="  host
+
+via-received =
+    "received="  ( IPv4address /  ipv6-no-brackets )
+
+ipv6-no-brackets =
+    1*4HEXDIG *( ":" 1*4HEXDIG )
+
+via-extension =
+    generic-param
+
+SEMI = ";"
+COMMA = ","
