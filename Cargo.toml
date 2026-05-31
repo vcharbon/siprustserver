@@ -11,6 +11,8 @@ members = [
     "crates/scenario-harness",
     "crates/b2bua",
     "crates/b2bua-harness",
+    "crates/b2bua-runner",
+    "crates/sip-proxy-runner",
     "xtask",
 ]
 

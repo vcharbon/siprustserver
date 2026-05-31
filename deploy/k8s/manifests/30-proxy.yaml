@@ -1,0 +1,62 @@
+# SIP front proxy + load balancer. ONE replica: it balances new dialogs across
+# the worker pool with HMAC Record-Route stickiness; proxy-level HA (multiple
+# proxies behind a VIP) needs the keepalived/VIP machinery and is out of scope
+# for this thin runner. Pinned to tier=edge like the sipjs proxy.
+#
+# PROXY_WORKERS is injected by run.sh as IP literals (e.g.
+# w0@10.244.3.4:5060,w1@10.244.4.5:5060) because the proxy's send path resolves
+# IP literals only (the k8s watcher registry is a deferred slice, ADR-0009).
+# PROXY_ADVERTISE = the proxy's own pod IP so in-dialog Route/Record-Route is
+# routable cluster-internally and pins back to this single proxy.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sip-front-proxy
+  namespace: sip-test
+  labels: { app: sip-front-proxy }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: sip-front-proxy } }
+  template:
+    metadata:
+      labels: { app: sip-front-proxy }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      nodeSelector: { tier: edge }
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: sip-front-proxy
+          image: ${SUT_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/sip-proxy-runner"]
+          env:
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - { name: PROXY_LISTEN,    value: "0.0.0.0:5060" }
+            - { name: PROXY_ADVERTISE, value: "$(POD_IP):5060" }
+            - { name: PROXY_METRICS,   value: "0.0.0.0:9090" }
+            - { name: PROXY_WORKERS,   value: "${PROXY_WORKERS}" }
+          ports:
+            - { name: sip,     containerPort: 5060, protocol: UDP }
+            - { name: metrics, containerPort: 9090, protocol: TCP }
+          readinessProbe:
+            tcpSocket: { port: 9090 }
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          resources:
+            requests: { cpu: "500m", memory: "64Mi" }
+            limits:   { memory: "512Mi" }
+---
+# UDP service the SIPp UAC targets. ClusterIP -> the single proxy pod.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sip-front-proxy
+  namespace: sip-test
+spec:
+  selector: { app: sip-front-proxy }
+  ports:
+    - { name: sip,     port: 5060, targetPort: 5060, protocol: UDP }
+    - { name: metrics, port: 9090, targetPort: 9090, protocol: TCP }

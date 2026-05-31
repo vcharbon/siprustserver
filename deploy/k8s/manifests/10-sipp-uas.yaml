@@ -1,0 +1,53 @@
+# Downstream SIPp UAS: answers INVITE / 180 / (ring) / 200 / ACK / BYE.
+# Uses the shared sipp:dev image (built from sipjsserver's sipp chart Dockerfile)
+# and the shared uas-basic.xml scenario (mounted from the sipp-scenarios CM that
+# run.sh builds out of the symlinked scenarios dir). Pinned to tier=load so the
+# load generators sit off the proxy/worker nodes, mirroring the sipjs topology.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sipp-uas
+  namespace: sip-test
+  labels: { app: sipp-uas }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: sipp-uas } }
+  template:
+    metadata:
+      labels: { app: sipp-uas }
+    spec:
+      nodeSelector: { tier: load }
+      containers:
+        - name: sipp-uas
+          image: sipp:dev
+          imagePullPolicy: IfNotPresent
+          command: ["sipp"]
+          # -i $(POD_IP) so SDP/Contact are routable inside the cluster.
+          args:
+            - "-sf"
+            - "/scenarios/uas-basic.xml"
+            - "-i"
+            - "$(POD_IP)"
+            - "-p"
+            - "5060"
+            - "-trace_err"
+          env:
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+          ports:
+            - { containerPort: 5060, protocol: UDP }
+          volumeMounts:
+            - { name: scenarios, mountPath: /scenarios }
+      volumes:
+        - name: scenarios
+          configMap: { name: sipp-scenarios }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sipp-uas
+  namespace: sip-test
+spec:
+  selector: { app: sipp-uas }
+  ports:
+    - { port: 5060, targetPort: 5060, protocol: UDP }

@@ -8,3 +8,13 @@
 # Editor / OS
 *.swp
 .DS_Store
+
+# Load-test / SIPp run outputs (never commit logs, traces, stats)
+**/results/
+*.log
+*_errors.log
+*_stat.csv
+sipp-*.csv
+
+# Vendored reference source snapshot (not part of the build)
+/portsource

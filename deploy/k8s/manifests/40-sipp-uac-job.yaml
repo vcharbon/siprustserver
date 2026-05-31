@@ -1,0 +1,53 @@
+# SIPp UAC load generator. One-shot Job: place ${CAPS} calls/sec for the
+# duration the runner controls (it deletes the Job to stop). Targets the proxy
+# Service. Reuses the shared uac-basic.xml scenario. Pinned to tier=load.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${UAC_JOB_NAME}
+  namespace: sip-test
+  labels: { app: sipp-uac }
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 120
+  template:
+    metadata:
+      labels: { app: sipp-uac }
+    spec:
+      restartPolicy: Never
+      nodeSelector: { tier: load }
+      containers:
+        - name: sipp-uac
+          image: sipp:dev
+          imagePullPolicy: IfNotPresent
+          command: ["sipp"]
+          args:
+            - "sip-front-proxy.sip-test.svc.cluster.local:5060"
+            - "-sf"
+            - "/scenarios/uac-basic.xml"
+            - "-s"
+            - "service"
+            - "-i"
+            - "$(POD_IP)"
+            - "-p"
+            - "5060"
+            - "-r"
+            - "${CAPS}"
+            - "-rp"
+            - "1000"
+            - "-m"
+            - "${MAX_CALLS}"
+            - "-trace_err"
+            - "-trace_stat"
+            - "-stf"
+            - "/dev/stdout"
+            - "-fd"
+            - "5"
+          env:
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+          volumeMounts:
+            - { name: scenarios, mountPath: /scenarios }
+      volumes:
+        - name: scenarios
+          configMap: { name: sipp-scenarios }

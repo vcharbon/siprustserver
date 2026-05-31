@@ -1,0 +1,62 @@
+# B2BUA worker pool. A StatefulSet (not Deployment) so each worker has a stable
+# ordinal (b2bua-worker-0, -1, ...) used as B2BUA_ORDINAL (encoded into callRef
+# for the proxy's partition routing). Routes every call to the sipp-uas Service
+# (B2BUA_DEST resolves DNS at startup). Pinned to tier=app like the sipjs worker.
+#
+# Image: ${SUT_IMAGE} (default siprustserver:dev), command = b2bua-runner.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: b2bua-worker
+  namespace: sip-test
+  labels: { app: b2bua-worker }
+spec:
+  serviceName: b2bua-worker
+  replicas: ${WORKER_REPLICAS}
+  selector: { matchLabels: { app: b2bua-worker } }
+  template:
+    metadata:
+      labels: { app: b2bua-worker }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+    spec:
+      nodeSelector: { tier: app }
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: b2bua-worker
+          image: ${SUT_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/b2bua-runner"]
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: B2BUA_LISTEN,  value: "0.0.0.0:5060" }
+            - { name: B2BUA_DEST,    value: "sipp-uas.sip-test.svc.cluster.local:5060" }
+            - { name: B2BUA_METRICS, value: "0.0.0.0:9091" }
+            # Ordinal = pod name (stable per StatefulSet replica).
+            - { name: B2BUA_ORDINAL, value: "$(POD_NAME)" }
+          ports:
+            - { name: sip,     containerPort: 5060, protocol: UDP }
+            - { name: metrics, containerPort: 9091, protocol: TCP }
+          readinessProbe:
+            tcpSocket: { port: 9091 }
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          resources:
+            requests: { cpu: "250m", memory: "64Mi" }
+            limits:   { memory: "512Mi" }
+---
+# Headless service: gives each worker stable DNS (b2bua-worker-0.b2bua-worker...)
+# and lets run.sh enumerate the pool's pod IPs for the proxy's static registry.
+apiVersion: v1
+kind: Service
+metadata:
+  name: b2bua-worker
+  namespace: sip-test
+spec:
+  clusterIP: None
+  selector: { app: b2bua-worker }
+  ports:
+    - { name: sip,     port: 5060, targetPort: 5060, protocol: UDP }
+    - { name: metrics, port: 9091, targetPort: 9091, protocol: TCP }

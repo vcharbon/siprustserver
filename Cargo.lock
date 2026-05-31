@@ -91,6 +91,20 @@ dependencies = [
  "sip-clock",
  "sip-message",
  "sip-net",
+ "sip-proxy",
+ "sip-txn",
+ "tokio",
+]
+
+[[package]]
+name = "b2bua-runner"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "b2bua",
+ "call",
+ "sip-clock",
+ "sip-net",
  "sip-txn",
  "tokio",
 ]
@@ -1213,6 +1227,17 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "sip-proxy-runner"
+version = "0.1.0"
+dependencies = [
+ "sip-clock",
+ "sip-net",
+ "sip-proxy",
+ "sip-txn",
+ "tokio",
 ]
 
 [[package]]

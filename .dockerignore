@@ -1,0 +1,8 @@
+target/
+**/target/
+.git/
+portsource/
+docs/
+bench/*/results/
+*.diff
+.effect/
