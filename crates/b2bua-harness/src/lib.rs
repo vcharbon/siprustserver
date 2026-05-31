@@ -57,15 +57,31 @@ impl B2buaSut {
         decision: Arc<dyn CallDecisionEngine>,
         outbound_proxy: Option<(String, u16)>,
     ) -> Self {
+        Self::start_with_config(h, name, addr, decision, outbound_proxy, |_| {}).await
+    }
+
+    /// Bind a B2BUA with a config mutator hook. The base config is the default
+    /// (with `self_ordinal`/local IP+port/outbound-proxy wired); `tune` may
+    /// override any other field (the faithful equivalent of a per-scenario
+    /// `configOverrides` — the source stack applies them worker-wide too).
+    pub async fn start_with_config(
+        h: &Harness,
+        name: &str,
+        addr: &str,
+        decision: Arc<dyn CallDecisionEngine>,
+        outbound_proxy: Option<(String, u16)>,
+        tune: impl FnOnce(&mut B2buaConfig),
+    ) -> Self {
         let (endpoint, sa) = h.bind_sut(name, addr).await;
         let cdr = InMemoryCdrWriter::new();
-        let config = B2buaConfig {
+        let mut config = B2buaConfig {
             self_ordinal: "w0".into(),
             sip_local_ip: sa.ip().to_string(),
             sip_local_port: sa.port(),
             b2b_outbound_proxy: outbound_proxy,
             ..Default::default()
         };
+        tune(&mut config);
         let deps = B2buaDeps {
             config,
             decision,
@@ -110,6 +126,28 @@ impl B2buaSut {
     ) -> Self {
         let decision = Arc::new(ScriptedDecisionEngine::route_all_with_refer(dest_host, dest_port));
         Self::start(h, name, addr, decision).await
+    }
+
+    /// Like [`route_all_with_refer`](Self::route_all_with_refer) but with the
+    /// REFER realignment / overall-safety timers overridden (the per-scenario
+    /// `configOverrides` the `refer-timers` corpus uses: push
+    /// `refer_reinvite_answer` out past `refer_overall_safety` so the overall
+    /// watchdog trips first while a realign re-INVITE is stuck unanswered).
+    pub async fn route_all_with_refer_timers(
+        h: &Harness,
+        name: &str,
+        addr: &str,
+        dest_host: &str,
+        dest_port: u16,
+        refer_reinvite_answer_sec: i64,
+        refer_overall_safety_sec: i64,
+    ) -> Self {
+        let decision = Arc::new(ScriptedDecisionEngine::route_all_with_refer(dest_host, dest_port));
+        Self::start_with_config(h, name, addr, decision, None, move |c| {
+            c.refer_reinvite_answer_sec = refer_reinvite_answer_sec;
+            c.refer_overall_safety_sec = refer_overall_safety_sec;
+        })
+        .await
     }
 
     /// Bind a B2BUA that routes every call to `dest` with the
