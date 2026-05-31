@@ -1,0 +1,17 @@
+[package]
+name = "sip-net"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "SIP signaling network layer (UDP transport + SignalingNetwork) — Rust port of sipjsserver src/sip/{SignalingNetwork,UdpTransport} core. Real (tokio), simulated (in-memory fabric), and a recording/audit decorator."
+
+[dependencies]
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+layer-harness = { path = "../layer-harness" }
+sip-message = { path = "../sip-message" }
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -2,14 +2,28 @@
 resolver = "2"
 members = [
     "crates/sip-message",
+    "crates/sip-clock",
+    "crates/layer-harness",
+    "crates/sip-net",
+    "crates/scenario-harness",
     "xtask",
 ]
 
 # One crate per migration layer (see MIGRATION_STATUS.md). Slice 1 is the
-# pure SIP message layer (`sip-message`); later slices add sibling crates
-# (sip-net, call, rules, limiter). A shared foundation/types crate is to be
-# extracted only when the first cross-layer cycle forces it — not before.
-# See docs/adr/0002-cargo-workspace-crate-per-layer.md.
+# pure SIP message layer (`sip-message`); slice 2 adds the network layer
+# (`sip-net`). `layer-harness` is the test-only contract+recording foundation
+# (Recorder / RunContext / severity / recording helpers) shared by sip-net and
+# every later layer's `contracts` module — it carries no production code and no
+# domain types, so it does not contradict ADR-0002's "no premature shared
+# types crate" reasoning (that is about *production* cross-layer cycles). A
+# shared *production* foundation/types crate is still extracted only when the
+# first production cross-layer cycle forces it. See ADR-0002 + ADR-0004.
+#
+# `sip-clock` is a leaf utility crate (depends only on tokio): the injectable
+# wall-clock `now_ms()` timestamp seam. It is *production* code but creates no
+# cross-layer cycle (nothing depends back on its consumers), so it sidesteps the
+# same ADR-0002 concern by being a pure leaf. Behavioural time stays on
+# `tokio::time` directly — this crate is timestamps only. See MIGRATION_PLAN_B2B §2.
 
 [workspace.package]
 edition = "2021"
@@ -24,3 +38,7 @@ publish = false
 thiserror = "2"
 proptest = "1"
 criterion = "0.5"
+# Network layer onward: all async I/O + logic-path time goes through tokio
+# (see docs/MIGRATION_STRATEGY.md, Effect→Rust construct map).
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"

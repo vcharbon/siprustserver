@@ -33,14 +33,15 @@ in-process store.
 | **Mutation as explicit action + apply step** | rules are **pure** — `handle(ctx) -> { actions, state }`; `ActionExecutor` applies the `RuleAction[]` | Port the purity boundary intact: rules decide, executor mutates |
 | **Per-call deterministic state** | `ruleState` (per-rule opaque blobs), explicit `Call`/`Leg`/`Dialog` model, `nowMs` injected via Clock | Keep all state in the `Call` aggregate; inject time (§2) |
 | **Serializable state** | `CallCodec.ts` / `call/codec/` (msgpack-ish) | Port the codec; it is what replication ships |
-| **Storage seam** | `PartitionedRelayStorage` (Redis prod / in-memory fake test) behind `CallState` | Port as a `CallStore` **trait**; in-process impl now, replicating decorator later |
+| **Storage seam** | `PartitionedRelayStorage` over a `KvBackend` (Redis prod / in-memory test) behind `CallState` | Port the seam; in-memory `KvBackend` now, networked impl + **pull-based** replication later (see [HIGH_LEVEL.md](./HIGH_LEVEL.md) §5) |
 | **HA topology already modelled** | `Call._topology { pri, bak, gen }`, `workerIndex`, `src/replication/`, `docs/replication/` | Carry the fields through the model now even if unused; do not strip them |
 
 **Therefore the plan's HA stance is conservative: faithfully port the source's
 purity + single-writer + codec + storage-trait seams; drop only the Redis backing
 (per [MIGRATION_STRATEGY.md] "Redis sidecar for call cache → dropped") in favour
-of an in-memory buffer + tokio cleanup. The future HA slice becomes a
-`ReplicatingCallStore` decorator + a replication channel — no call-site churn.**
+of an in-memory buffer + tokio cleanup. The future HA slice becomes a networked
+`KvBackend` impl + a **pull-based** replication puller/server — no `call`/`rules`
+call-site churn (see [HIGH_LEVEL.md](./HIGH_LEVEL.md) §5 for the exact seam).**
 The one thing to guard against is *losing* a seam under porting expediency (e.g.
 mutating `Call` inside a rule instead of returning an action) — every such
 shortcut converts the future HA slice from "add a decorator" into "rewrite."
@@ -109,24 +110,60 @@ observe intermediate values (`tests/harness/runner.ts`). Clock is consumed by
 ([MIGRATION_STRATEGY.md] construct map). Confidence **high**. The virtual-time
 behaviour ports via `tokio::time::pause`/`advance`.
 
-**Decision — thickness of the seam (load-bearing for HA + test determinism).**
+**Decision — DECIDED (2026-05-31): split the two jobs Effect fused.**
+Implemented in `crates/sip-clock`.
 
-- **A — use `tokio::time` directly; test with `tokio::time::pause`.** *Pros:* zero
-  abstraction; literally what the strategy says. *Cons:* "now" is ambient global;
-  no clean way to inject a clock into a *pure* reducer/rule path or to reconstruct
-  deadlines on a replica.
-- **B (recommended) — a tiny `Clock` trait** (`now`, `sleep_until`, `timer`) with
-  `TokioClock` (thin shim over `tokio::time`) and `TestClock` (manually advanced)
-  impls. *Pros:* keeps the tokio mandate (prod impl is a shim) **and** gives a real
-  DI seam so `nowMs` enters rule/timer logic as data — replicas compute identical
-  deadlines (HA invariant); pure-logic tests need no runtime. *Cons:* slight
-  ceremony; enforce "logic never calls `tokio::time` directly, only the trait."
+Effect's `Clock`/`TestClock` did two jobs through one runtime-injected seam:
+answer *"what time is it?"* (the `nowMs` value) **and** *"wake me later"*
+(scheduling). Its universal power came from runtime DI, not from the type's
+existence — Rust gives no free universal interception, so a hand-threaded trait
+would only be as universal as the discipline threading it. The two jobs split
+cleanly here, and **only one of them needs a seam:**
 
-**Recommendation: B.** Mirror the source's 100 ms-chunk advance helper in the
-testkit so ported timer scenarios behave identically.
+- **Behaviour — timers, deadlines, `CallState` timers, `CallLimiter` windows,
+  idle-sweeps, `OverloadController` — runs on monotonic time via `tokio::time`
+  directly** (`sleep`, `sleep_until`, `interval`, `timeout`, `Instant`).
+  `tokio::time::pause`/`advance` is the universal test lever, ambient within the
+  runtime exactly as `TestClock` was ambient within the Effect runtime — so it
+  recovers Effect's transparent-test-clock power for *all* scheduling, for free,
+  with **no trait** (wrapping it would re-implement a worse tokio). Confirmed
+  with the user: all load-bearing behaviour is expressible in monotonic time;
+  wall time is needed only for *timestamps*.
+- **Wall-clock `now_ms()` is timestamps only** (log lines, call records) — never
+  a behavioural input. It is the one thing `tokio::time::pause` cannot bend
+  (pause moves the monotonic clock, not `SystemTime`), so it gets the injectable
+  seam: a tiny `Clock` value (not a trait) — `Clock::system()` in prod,
+  `Clock::test_at(anchor_ms)` in tests.
 
-**Tests.** Port TestClock-driven timer tests; property test "deadline = f(injected
-now, configured timeout)".
+**The construction — monotonic-anchored `now_ms`.** `now_ms = anchor_wall_ms +
+elapsed_since_anchor`, where the elapsed rides `tokio::time::Instant`. Two
+properties fall out for free: (1) the prod timestamp never jumps backward (rides
+the monotonic clock); (2) in tests the elapsed rides the *same* clock
+`tokio::time` controls, so a single `tokio::time::advance(d)` moves the
+behavioural timers **and** `now_ms()` together — one lever, no separate
+`TestClock` counter.
+
+Rejected the earlier draft's option B (a `Clock` trait with `now`/`sleep_until`/
+`timer`): the `sleep_until`/`timer` methods duplicate what tokio already gives
+ambiently and tempt a worse re-implementation of its timer wheel; only the
+`now()` value is load-bearing.
+
+**Caveats (recorded in `sip-clock` rustdoc).**
+- `now_ms` drifts from true wall clock over long uptime (rides monotonic, won't
+  track NTP). Fine for logs/records; read `SystemTime` directly at the rare site
+  that must reconcile with an external wall clock (SIP `Date` header, billing).
+- The HA "replicas compute identical deadlines" invariant changes shape: since
+  behaviour is monotonic-local and `Instant`s are *not* portable across
+  processes/restarts/replicas, replicated events must carry a *remaining
+  duration* or an *absolute wall deadline* and the standby rebuilds its monotonic
+  timer locally — never ship a raw `Instant`. Revisit at the failover slice.
+
+**Tests (done).** `now_ms` advances in lockstep with `tokio::time::advance`;
+monotonic non-decreasing; clones share one timeline; property test "`now_ms ==
+anchor + advanced`" (replaces the old "deadline = f(now, timeout)" property —
+deadlines are now monotonic). The source's 100 ms-chunk advance helper is
+mirrored as `sip_clock::testkit::advance_in_chunks` (behind the `testkit`
+feature) so ported timer scenarios observe intermediate values identically.
 
 ---
 
@@ -319,31 +356,38 @@ read them through typed views). Port as a **`TypeMap`/`AnyMap` keyed by type**
 The source *already* separates decision from mutation: rules return `RuleAction[]`,
 `ActionExecutor` applies them to `Call`. **Keep this boundary intact**: external
 inputs (messages, timers) → the per-call owner runs rules → gets actions →
-`ActionExecutor` applies → state changes. The applied action stream is exactly
-what a replica needs.
+`ActionExecutor` applies → state changes → `flush` snapshots the post-apply `Call`.
+The **body snapshot** (callGen-versioned) is what replication ships — see
+[HIGH_LEVEL.md](./HIGH_LEVEL.md) §5.
 - *Anti-pattern to forbid:* mutating `Call` directly inside a rule's `handle`
   (the source forbids it; rules are pure and return state). Any such shortcut in
   the port is HA debt — record it explicitly.
-- *Do we add an explicit `CallEvent` log?* Not required now — `RuleAction[]` +
-  the resulting `Call` snapshot (via `CallCodec`) already give replication "ship
-  the actions" or "ship the snapshot+seq" options. Decide the exact replication
-  payload at the HA slice; the codec makes both viable.
+- *Replication payload (settled by the source):* the source ships the **body
+  snapshot**, pulled by the backup and applied under a `callGen` content gate (not
+  an event/action log). The Rust port keeps that; an action/event log stays a
+  possible-but-unneeded alternative. The codec (`CallBodyCodec`) is what makes the
+  snapshot shippable — finalize it at the `call` slice.
 
-**Decision C3 — storage seam + lifecycle (in-process now, HA-ready).** Port
-`PartitionedRelayStorage` as a **`CallStore` trait** (`create`, owner-scoped
-`with`/`get`, `apply`, `end`/reap, `snapshot`/`restore` via `CallCodec`). The
-in-process impl = the §5 per-call owner registry + the SIP-key index. **Cleanup
-via the §2 clock** (tokio timer reaps idle/terminated calls — the Rust replacement
-for Redis TTL). **Carry `_topology {pri,bak,gen}` + `workerIndex` in the model
-even though unused now** — stripping them is the kind of seam-loss that makes HA a
-rewrite. HA later = `ReplicatingCallStore<S: CallStore>` that publishes
-actions/snapshots to peers on `apply` — no call-site changes.
+**Decision C3 — storage seam + lifecycle (in-process now, HA-ready).** Port the
+source's **three-trait stack** (detailed in [HIGH_LEVEL.md](./HIGH_LEVEL.md) §5):
+`CallStore` (hot map + per-call single-writer) → `PartitionedRelayStorage`
+(role-partitioned `pri:`/`bak:` + flat `idx:`) → **`KvBackend`** (the actual
+swap point: in-memory now, networked later; its atomic `channel_write_update`
+populates the replication log on every `flush`). **Cleanup via the §2 clock**
+(tokio timer reaps idle/terminated calls — the Rust replacement for Redis TTL).
+**Carry `_topology {pri,bak,gen}` + `workerIndex` in the model even though unused
+now** — stripping them is the kind of seam-loss that makes HA a rewrite. HA later =
+a networked `KvBackend` + a **pull-based** puller/repl-log server (the backup
+*pulls* body snapshots from the primary and applies them under a `callGen` gate) —
+no call-site changes in `call`/`rules`.
 
 > **Cross-worker shared state note.** [MIGRATION_STRATEGY.md] already flags Redis
 > (or a small Rust service) *may* back the **limiter**'s cross-worker state,
-> decided at that layer. For call-context HA we deliberately favour **peer event
-> replication over a channel** (the source's `_topology`/`replication/` model),
-> not a shared DB — keeps the hot path in-process. Capture in an ADR at the HA slice.
+> decided at that layer. For call-context HA we follow the source: **pull-based
+> body-snapshot replication** between workers (topology assigned by the front-proxy
+> via the Record-Route cookie, *not* a shared DB) — keeps the hot path in-process.
+> The wire format itself is open to change ([HIGH_LEVEL.md](./HIGH_LEVEL.md) §5.5);
+> capture the chosen one in an ADR at the HA slice.
 
 **Tests.** Port `call/` unit tests + `CallCodec` round-trip; property-test the
 apply step (apply random valid action sequences, assert invariants: legs
@@ -497,9 +541,10 @@ scenario. List un-ported rules with justification (ritual).
 - **ADR — network concurrency & partitioning:** single-recv now, `SO_REUSEPORT`
   shard later, partition key = Call-ID (§3 N1); recording = `realTracing`-style
   decorator with bounded sink (§3 N2/N3).
-- **ADR — call storage seam & HA strategy:** `CallStore` trait (port of
-  `PartitionedRelayStorage`), in-process now, peer event replication later
-  (not shared DB); carry `_topology` (§6 C3).
+- **ADR — call storage seam & HA strategy:** `CallStore` (hot map) over
+  `PartitionedRelayStorage` over `KvBackend`; in-memory now, **pull-based**
+  body-snapshot replication later (not shared DB); carry `_topology` (§6 C3,
+  [HIGH_LEVEL.md](./HIGH_LEVEL.md) §5).
 - **ADR — preserve rule purity & dispatch model:** data `Match` + interpreting
   `Matcher` + trait rules + pure `handle` + `ActionExecutor` (§7 R1/R2/R3).
 - **ADR — extension model:** typed `ext` `TypeMap` (port of source ADR-0016) (§6 C1).

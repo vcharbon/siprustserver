@@ -1,0 +1,20 @@
+[package]
+name = "layer-harness"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Test-only contract + recording machinery shared by every migration layer. Rust port of sipjsserver src/test-harness/framework (Recorder, RunContext, EventSequencer, three-tier severity, recording helpers, anomaly ledger). See the effect-layer-test SKILL."
+
+[dependencies]
+# Recording timestamps + the bounded-quiescence poll in scoped-audit
+# finalizers go through tokio so they work under a paused test clock.
+tokio = { version = "1", features = ["time", "sync", "rt", "macros"] }
+# The clock seam: recording `at_ms` stamps ride sip-clock's monotonic-anchored
+# Clock so that under a paused tokio runtime they advance with
+# `tokio::time::advance` (deterministic report timestamps). See sip-clock's
+# crate docs and docs/MIGRATION_PLAN_B2B.md §2.
+sip-clock = { path = "../sip-clock" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["time", "sync", "rt", "macros", "rt-multi-thread"] }
