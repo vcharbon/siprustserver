@@ -339,7 +339,8 @@ impl<'a> ActionExecutor<'a> {
         };
         let res = generators::generate_in_dialog_request(method, &gen_dialog, &opts);
         let dest = relay::dest_of(&relay::strip_uri(&gen_dialog.remote_target));
-        let (out_req, dest) = relay::apply_b_leg_egress(self.config, target_leg, res.request, dest);
+        let (out_req, dest) =
+            relay::apply_b_leg_egress(self.config, target_leg, &gen_dialog.route_set, res.request, dest);
         let kind = if method == InDialogMethod::Invite {
             TxnKind::Invite
         } else {
@@ -773,7 +774,8 @@ impl<'a> ActionExecutor<'a> {
         };
         let res = generators::generate_in_dialog_request(m, &dialog, &opts);
         let dest = relay::dest_of(&relay::strip_uri(&dialog.remote_target));
-        let (out_req, dest) = relay::apply_b_leg_egress(self.config, leg_id, res.request, dest);
+        let (out_req, dest) =
+            relay::apply_b_leg_egress(self.config, leg_id, &dialog.route_set, res.request, dest);
         let kind = if m == InDialogMethod::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
         fx.outbound.push(OutboundSipEffect {
             body: OutboundBody::Request(out_req),
@@ -807,7 +809,8 @@ impl<'a> ActionExecutor<'a> {
         };
         let res = generators::generate_in_dialog_request(InDialogMethod::Bye, &dialog, &opts);
         let dest = relay::dest_of(&relay::strip_uri(&dialog.remote_target));
-        let (req, dest) = relay::apply_b_leg_egress(self.config, leg_id, res.request, dest);
+        let (req, dest) =
+            relay::apply_b_leg_egress(self.config, leg_id, &dialog.route_set, res.request, dest);
         Some(OutboundSipEffect {
             body: OutboundBody::Request(req),
             mode: OutboundTxnMode::NewClient(TxnKind::NonInvite),

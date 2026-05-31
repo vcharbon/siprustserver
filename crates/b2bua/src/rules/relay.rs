@@ -94,22 +94,47 @@ pub fn dest_of(uri_host_port: &str) -> (String, u16) {
     (hp.to_string(), 5060)
 }
 
-/// Apply the b-leg outbound-proxy egress policy (port of `helpers.ts`
-/// b2bOutboundProxy + `ActionExecutor.ts` `applyEgressRouting`).
+/// Apply the egress routing policy to an outbound in-dialog request (port of
+/// `ActionExecutor.ts` `applyEgressRouting` / `applyRouteSet`).
 ///
-/// When `config.b2b_outbound_proxy` is set and `leg_id` is a b-leg, preload a
-/// loose `;outbound` `Route` at the proxy and redirect the **wire** destination
-/// there (RFC 3261 §16.12: a UAC with a preloaded outbound-proxy route sends to
-/// the top Route while keeping the remote target in the Request-URI). The
-/// `;outbound` param is the proxy's deterministic worker-outbound classifier
-/// (`ProxyCore` §16.4). For the a-leg (`leg_id == "a"`) or when no proxy is
-/// configured this is a no-op — the natural route set / remote target stands.
+/// Two effects, both RFC 3261 §16.12:
+///   1. **Loose-route wire destination** (any leg): when the dialog's route set
+///      is non-empty and its first route is a loose router (`;lr`), the request
+///      is *sent* to that route's host:port while the Request-URI stays at the
+///      remote target. The generator already emitted the Route headers from the
+///      route set; this fixes only the wire destination so in-dialog requests
+///      toward a record-routing proxy traverse it instead of going pod-direct.
+///   2. **b-leg outbound-proxy fallback**: when the route set is empty, `leg_id`
+///      is a b-leg, and `config.b2b_outbound_proxy` is set, preload a loose
+///      `;outbound` `Route` at the proxy and redirect the wire destination there
+///      (the b-leg invariant: every B2BUA→callee message traverses the front
+///      proxy). The `;outbound` param is the proxy's deterministic
+///      worker-outbound classifier (`ProxyCore` §16.4).
+///
+/// `route_set` is the source dialog's route set in dialog order. For the a-leg
+/// the natural route set (from the inbound INVITE's Record-Route) carries the
+/// routing; `b2b_outbound_proxy` is a b-leg concept and is not applied there.
 pub fn apply_b_leg_egress(
     config: &B2buaConfig,
     leg_id: &str,
+    route_set: &[String],
     mut req: SipRequest,
     dest: (String, u16),
 ) -> (SipRequest, (String, u16)) {
+    // (1) Loose-route: send to the top route's host:port (R-URI unchanged).
+    if let Some(first) = route_set.first() {
+        if generators::first_route_is_loose(first) {
+            // The route value is an angle-bracketed name-addr (`<sip:host;lr>`);
+            // unwrap to the bare URI before reducing to host:port.
+            let uri = generators::strip_route_uri_to_request_uri(first);
+            let dest = dest_of(&strip_uri(&uri));
+            return (req, dest);
+        }
+        // Strict routing is handled by the generator's R-URI rewrite; the wire
+        // destination already resolves to the first route via `remote_target`.
+        return (req, dest);
+    }
+    // (2) Empty route set + b-leg outbound-proxy fallback.
     if leg_id == "a" {
         return (req, dest);
     }
@@ -164,7 +189,7 @@ pub fn build_b_leg(
     // `;outbound` Route and make the wire destination the proxy (R-URI stays the
     // callee). `wire_dest` drives the client transaction's send + retransmits;
     // the preloaded Route rides the snapshot so retransmits carry it too.
-    let (invite, wire_dest) = apply_b_leg_egress(config, leg_id, invite, dest.clone());
+    let (invite, wire_dest) = apply_b_leg_egress(config, leg_id, &[], invite, dest.clone());
 
     let dialog = Dialog {
         sip: StackDialog {
@@ -325,7 +350,7 @@ pub fn ack_b_leg(
     };
     let ack = generators::generate_ack_for_2xx(None, &gen_dialog, &opts);
     let dest = dest_of(&strip_uri(&dialog.sip.remote_target));
-    let (ack, dest) = apply_b_leg_egress(config, &leg.leg_id, ack, dest);
+    let (ack, dest) = apply_b_leg_egress(config, &leg.leg_id, &gen_dialog.route_set, ack, dest);
     Some(OutboundSipEffect {
         body: OutboundBody::Request(ack),
         mode: OutboundTxnMode::Raw,

@@ -598,6 +598,8 @@ scenario-harness in a dedicated `crates/b2bua-harness` test crate.
 | `prack-forking.ts` | delayed-offer forking: two reliable 183s with distinct callee fork-tags → two independent early dialogs on one b-leg, each mapped to its own a-facing tag; per-fork PRACK routed by To-tag through the tag map | `b2bua-harness/tests/prack_forking.rs` | ✅ 1 |
 | `keepalive-happy.ts` | long call: keepalive timer sends in-dialog OPTIONS to both legs every interval, each 200 absorbed + timer re-armed; two cycles | `b2bua-harness/tests/keepalive.rs` | ✅ 1 |
 | `options-keepalive-timeout.ts` | auto-cutoff: a leg that never answers its keepalive OPTIONS trips the per-leg `KeepaliveTimeout`, which terminates that leg and BYEs the healthy peer | `b2bua-harness/tests/keepalive_timeout.rs` | ✅ 1 |
+| `keepalive-481.ts` | keepalive where bob answers the OPTIONS with `481 Call/Transaction Does Not Exist` → `handle-481` marks bob's leg dead (`ByeTimeout` disposition, BYE suppressed), records the 481 CDR, and `begin-termination` BYEs only the healthy peer (alice). Asserts no BYE reaches bob on the recording | `b2bua-harness/tests/keepalive_481.rs` | ✅ 1 |
+| `keepalive-via-proxy.ts` (`keepaliveViaProxy`) | keepalive OPTIONS through the `proxy+b2b` SUT: both legs' in-dialog OPTIONS traverse the front proxy (a-leg via the inbound INVITE's Record-Route route set; b-leg via the `b2bOutboundProxy` `;outbound` preload), each arriving with ≥2 Via; two cycles confirm re-arm, then BYE via the proxy | `b2bua-harness/tests/keepalive_via_proxy.rs` | ✅ 1 |
 | `reinvite.ts` (`aliceReInvite`) | in-dialog re-INVITE from the caller, delayed offer: bodyless re-INVITE relayed to bob → 200 carries bob's offer → ACK carries alice's answer (relayed end-to-end). Exercises `relay-reinvite` + `relay-reinvite-response` (pending-relay snapshot correlation, incl. re-INVITE now snapshotted) + ACK body passthrough | `b2bua-harness/tests/reinvite.rs` | ✅ 1 |
 | `reinvite.ts` (`bobReInvite`) | in-dialog re-INVITE from the callee, offer in the re-INVITE: bob's re-INVITE(offer) relayed to alice → 200(answer) → ACK. Confirms a-leg-target ACK relay + response correlation in the from-a direction | `b2bua-harness/tests/reinvite.rs` | ✅ 1 |
 | `reinvite.ts` (`crossingReInvite`) | crossing re-INVITEs → glare: alice's re-INVITE is relayed to bob; bob's crossing re-INVITE meets a pending inbound INVITE on his dialog → `reinvite-glare` rejects it 491 Request Pending while alice's completes (200/ACK) | `b2bua-harness/tests/reinvite.rs` | ✅ 1 |
@@ -647,7 +649,24 @@ custom headers, per-fork To-tag).
 - **`proxy+b2b` variants beyond the single-worker basic call** — the `sipproxyHA`
   two-worker topology (`tests/support/proxyB2bFakeStack.ts`
   `sipproxyHAFakeStackLayer`), the bob-initiated-BYE direction (cookie-decoded
-  reverse path), `keepalive-via-proxy` / `route-set-propagation`, and the
-  `simulateMissingOutboundProxy` regression guard land with the HA / keepalive
-  slices. The `b2bOutboundProxy` egress + the proxy's worker-outbound classifier
-  that those build on are ported and exercised by `proxy_b2bua.rs`.
+  reverse path), and `route-set-propagation` land with the HA slice. The
+  `keepalive-via-proxy` happy path is **now ported** (`keepalive_via_proxy.rs`).
+  The `keepaliveMissingOutboundProxyRegressionGuard` (built with
+  `simulateMissingOutboundProxy`, asserts the b-leg OPTIONS goes worker-direct
+  with exactly one Via) is **still deferred** — the Rust `B2buaSut` has no
+  "missing outbound proxy" build variant, and the bug it guards is structurally
+  prevented here because the b-leg always egresses via `apply_b_leg_egress`. The
+  `b2bOutboundProxy` egress + the proxy's worker-outbound classifier are ported
+  and exercised by `proxy_b2bua.rs` + `keepalive_via_proxy.rs`.
+
+> **Egress-routing fix (load-bearing, ported alongside `keepalive-via-proxy`):**
+> `apply_b_leg_egress` (port of `ActionExecutor.ts` `applyEgressRouting`/
+> `applyRouteSet`) previously only handled the b-leg `b2bOutboundProxy` `;outbound`
+> preload and ignored the dialog route set when computing the *wire destination*.
+> A B2BUA-originated in-dialog request on a dialog with a loose (`;lr`) route set
+> (e.g. the a-leg keepalive OPTIONS, whose route set comes from the inbound
+> INVITE's proxy Record-Route) therefore went pod-direct instead of to the top
+> Route — the exact k8s-endurance teardown shape `keepalive-via-proxy` guards.
+> Now, when the first route is loose, the request is sent to that route's
+> host:port (R-URI unchanged, Route headers from the generator), for *any* leg
+> (`relay.rs`). All five in-dialog egress call sites pass the dialog route set.
