@@ -456,6 +456,50 @@ impl Agent {
             }
         }
     }
+
+    /// Send an out-of-dialog REFER addressed to `dst` whose To carries a bogus
+    /// tag and whose Request-URI carries a `callRef` the B2BUA never minted — so
+    /// the router resolves the (non-existent) call, finds no state, and rejects
+    /// it 481 (`maybe_reject_orphan`). Used by the out-of-dialog REFER reject
+    /// scenario. Returns a client-transaction handle to `expect` the 481 on.
+    pub async fn send_out_of_dialog_refer(
+        &self,
+        dst: SocketAddr,
+        refer_to: &str,
+    ) -> InDialogTxn {
+        // A synthetic dialog the B2BUA has never seen: fresh Call-ID, a bogus
+        // remote (To) tag, and a remote target carrying a bogus stamped callRef
+        // (unreserved chars → no escaping needed; the router reads it verbatim),
+        // so resolution succeeds but hydration fails → the orphan 481 path.
+        let view = StackDialog {
+            call_id: format!("orphan-{}-{}", self.name, self.ids.next()),
+            local_tag: self.tag(),
+            remote_tag: "bogus-refer-tag".into(),
+            local_uri: self.uri.clone(),
+            remote_uri: format!("sip:unknown@{}", dst.ip()),
+            remote_target: format!(
+                "sip:unknown@{}:{};callRef=w0-orphan-bogus;leg=b-1",
+                dst.ip(),
+                dst.port()
+            ),
+            local_cseq: 0,
+            route_set: vec![],
+        };
+        let opts = GenerateInDialogRequestOpts {
+            via: Some(self.via()),
+            contact: Some(self.contact()),
+            extra_headers: vec![SipHeader {
+                name: "Refer-To".into(),
+                value: refer_to.into(),
+            }],
+            ..Default::default()
+        };
+        let res = generate_in_dialog_request(InDialogMethod::Refer, &view, &opts);
+        self.send(&SipMessage::Request(res.request), dst).await;
+        InDialogTxn {
+            agent: self.clone(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
