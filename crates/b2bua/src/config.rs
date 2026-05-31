@@ -29,6 +29,13 @@ pub struct B2buaConfig {
     pub max_messages_per_call: u64,
     /// Bounded CDR submit queue; `0` disables buffering (passthrough).
     pub cdr_buffer_queue_max: usize,
+    /// REFER implicit-subscription expiry (RFC 3515), seconds. Armed at REFER
+    /// intercept; fires while still `refer-authorizing` (HTTP hung). TS default 60.
+    pub refer_subscription_expiry_sec: i64,
+    /// Per re-INVITE answer watchdog during REFER realignment, seconds. TS default 32.
+    pub refer_reinvite_answer_sec: i64,
+    /// Overall REFER safety timer covering the whole transfer FSM, seconds. TS default 120.
+    pub refer_overall_safety_sec: i64,
 }
 
 impl Default for B2buaConfig {
@@ -43,6 +50,9 @@ impl Default for B2buaConfig {
             per_call_queue_cap: 200_000,
             max_messages_per_call: 5_000,
             cdr_buffer_queue_max: 1_024,
+            refer_subscription_expiry_sec: 60,
+            refer_reinvite_answer_sec: 32,
+            refer_overall_safety_sec: 120,
         }
     }
 }

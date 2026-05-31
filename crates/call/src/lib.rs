@@ -34,5 +34,5 @@ pub use model::{
     ExtMap, HostPort, InviteTxnHandle, Leg, LegDisposition, LegKind, LegState, PendingRequest,
     PolicyUpdateBody, PromotePemState, RelayFirst18xState, RemoteInfo, SipHeader, StackDialog,
     TagMapping,
-    TimerEntry, TimerType,
+    TimerEntry, TimerType, TransferPhase, TransferState,
 };

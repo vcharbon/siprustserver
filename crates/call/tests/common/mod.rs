@@ -255,6 +255,7 @@ pub fn representative_call() -> Call {
         terminating_refresh_legs: None,
         relay_first_18x: None,
         promote_pem: None,
+        transfer: None,
     }
 }
 
@@ -694,6 +695,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             terminating_refresh_legs,
             relay_first_18x: None,
             promote_pem: None,
+            transfer: None,
         },
     )
 }

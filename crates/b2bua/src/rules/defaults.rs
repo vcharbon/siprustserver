@@ -47,9 +47,15 @@ fn max_duration(ctx: &RuleContext) -> i64 {
 /// feature (their column+filter gate keeps them out of `pick_ranked` otherwise),
 /// and `pick_ranked` ranks SERVICE_LAYER above CORE so they win when active.
 pub fn default_rules() -> Vec<RuleDefinition> {
-    let mut rules = core_rules();
+    // The REFER seed rules are CORE_LAYER and must out-rank the generic
+    // `relay-non-invite` REFER relay; registration order (earlier wins within a
+    // layer) puts them first. Their match columns + `no_transfer_active` filter
+    // keep them inert for non-REFER traffic.
+    let mut rules = super::refer_transfer::transfer_seed_rules();
+    rules.extend(core_rules());
     rules.extend(super::relay_first_18x::relay_first_18x_rules());
     rules.extend(super::promote_pem::promote_pem_rules());
+    rules.extend(super::refer_transfer::transfer_rules());
     rules
 }
 

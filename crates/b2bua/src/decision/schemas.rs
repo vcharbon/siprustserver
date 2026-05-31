@@ -124,16 +124,38 @@ pub enum CallFailureResponse {
     Terminate,
 }
 
-#[derive(Debug, Clone)]
+/// The REFER authorization request POSTed to `/call/refer` (port of TS
+/// `CallReferRequest`, requests.ts:57-64). Built by `transfer-intercept-refer`.
+#[derive(Debug, Clone, Default)]
 pub struct CallReferRequest {
+    /// A-leg Call-ID.
+    pub call_id: String,
+    /// `Call-ID;to-tag=…;from-tag=…` from the referrer (B) leg's perspective.
+    pub dialog_id: String,
     pub callback_context: Option<String>,
     pub refer_to: String,
+    pub referred_by: Option<String>,
+    /// Non-structural REFER headers forwarded verbatim (incl. `X-Api-Call`).
+    pub sip_headers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
 pub enum CallReferResponse {
-    Allow { destination: SipDestination },
-    Reject { code: u16, reason: Option<String> },
+    Allow {
+        destination: SipDestination,
+        /// Rewritten Refer-To URI (`new_refer_to`).
+        new_refer_to: Option<String>,
+        /// Header set/remove directives applied to the C INVITE.
+        update_headers: Option<SipHeaderUpdates>,
+        /// No-answer timeout for the C leg (seconds).
+        no_answer_timeout_sec: Option<i64>,
+        /// Callback context propagated onto the transfer slice.
+        callback_context: Option<String>,
+    },
+    Reject {
+        code: u16,
+        reason: Option<String>,
+    },
 }
 
 /// Mandatory platform features every successful route must carry (the source

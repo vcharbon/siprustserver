@@ -17,11 +17,11 @@ use tokio::sync::mpsc;
 
 use crate::cdr::CdrWriter;
 use crate::config::B2buaConfig;
-use crate::decision::CallDecisionEngine;
+use crate::decision::{CallDecisionEngine, CallReferResponse};
 use crate::dispatch::PerCallDispatcher;
 use crate::effects::{
-    BufferedObservabilityEffect, CriticalStateEffect, HandlerResult, OutboundBody, OutboundTxnMode,
-    SoftBoundedEffect,
+    BufferedObservabilityEffect, CriticalStateEffect, FireAndForgetEffect, HandlerResult,
+    OutboundBody, OutboundTxnMode, SoftBoundedEffect,
 };
 use crate::event::CallEvent;
 use crate::initial_invite::{build_initial_call, handle_initial_invite};
@@ -49,6 +49,11 @@ pub struct RouterCtx {
     /// Self-reported readiness driving the OPTIONS health responder (S7). The
     /// default/legacy path uses [`Readiness::always_ready`] → always 200.
     pub readiness: Readiness,
+    /// Re-entrant event sink: fire-and-forget work (the async `/call/refer`
+    /// round-trip) folds its result back into the router by sending a
+    /// `CallEvent::InternalEvent` here, which `run` consumes via `on_event` —
+    /// keeping re-entry single-threaded and out of a non-`Send` async cycle.
+    pub reentry_tx: mpsc::UnboundedSender<CallEvent>,
 }
 
 /// How an event resolves to a call + the leg it arrived on.
@@ -64,6 +69,7 @@ pub async fn run(
     ctx: Arc<RouterCtx>,
     mut txn_rx: mpsc::Receiver<sip_txn::TransactionEvent>,
     mut timer_rx: mpsc::UnboundedReceiver<CallEvent>,
+    mut reentry_rx: mpsc::UnboundedReceiver<CallEvent>,
 ) {
     loop {
         tokio::select! {
@@ -72,6 +78,11 @@ pub async fn run(
                 None => break,
             },
             ev = timer_rx.recv() => {
+                if let Some(ev) = ev {
+                    on_event(&ctx, ev).await;
+                }
+            },
+            ev = reentry_rx.recv() => {
                 if let Some(ev) = ev {
                     on_event(&ctx, ev).await;
                 }
@@ -377,7 +388,7 @@ async fn maybe_reject_orphan(ctx: &RouterCtx, event: &CallEvent) {
 }
 
 /// Interpret a handler result: persist → critical → outbound → soft → buffered.
-async fn process_result(ctx: &RouterCtx, call_ref: &str, result: HandlerResult, now_ms: i64) {
+async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerResult, now_ms: i64) {
     // Persist first (the source's invariant: state lands before effects run).
     ctx.state.update(result.call.clone());
 
@@ -453,7 +464,98 @@ async fn process_result(ctx: &RouterCtx, call_ref: &str, result: HandlerResult, 
         }
     }
 
-    // Fire-and-forget (refer/re-entry) is deferred with its consumers.
+    // Fire-and-forget: detached async work that folds its result back into the
+    // call via a re-entrant internal event (the REFER `/call/refer` round-trip,
+    // and the generic re-enter path).
+    for eff in result.effects.fire_and_forget {
+        match eff {
+            FireAndForgetEffect::ReferAsyncHttp { call_ref, request } => {
+                let ctx2 = ctx.clone();
+                tokio::spawn(async move {
+                    // Deserialize the request the seed rule built (mirrors the
+                    // TS POST body); call the decision backend; map to a
+                    // `refer-http-result` internal event; re-enter the chain.
+                    let req = parse_call_refer_request(&request);
+                    let (outcome, payload) = match ctx2.decision.call_refer(req).await {
+                        Ok(CallReferResponse::Allow {
+                            destination,
+                            new_refer_to,
+                            update_headers,
+                            no_answer_timeout_sec,
+                            callback_context,
+                        }) => {
+                            let mut p = serde_json::Map::new();
+                            p.insert("action".into(), serde_json::json!("allow"));
+                            p.insert(
+                                "destination".into(),
+                                serde_json::json!({
+                                    "host": destination.host,
+                                    "port": destination.port,
+                                    "transport": destination.transport,
+                                }),
+                            );
+                            if let Some(v) = new_refer_to {
+                                p.insert("new_refer_to".into(), serde_json::json!(v));
+                            }
+                            if let Some(v) = update_headers {
+                                p.insert("update_headers".into(), serde_json::json!(v));
+                            }
+                            if let Some(v) = no_answer_timeout_sec {
+                                p.insert("no_answer_timeout_sec".into(), serde_json::json!(v));
+                            }
+                            if let Some(v) = callback_context {
+                                p.insert("callback_context".into(), serde_json::json!(v));
+                            }
+                            ("allow", serde_json::Value::Object(p))
+                        }
+                        Ok(CallReferResponse::Reject { code, reason }) => (
+                            "reject",
+                            serde_json::json!({ "reject_code": code, "reject_reason": reason }),
+                        ),
+                        Err(_) => ("error", serde_json::json!({})),
+                    };
+                    let ev = CallEvent::InternalEvent {
+                        call_ref,
+                        topic: "refer-http-result".to_string(),
+                        outcome: outcome.to_string(),
+                        payload,
+                    };
+                    // Re-enter via the router's event channel rather than
+                    // calling `on_event` directly: the `on_event → process →
+                    // process_result → on_event` cycle has an opaque future type
+                    // the compiler cannot prove `Send`. Routing the event back
+                    // through `run`'s loop keeps re-entry single-threaded and
+                    // breaks the recursion.
+                    let _ = ctx2.reentry_tx.send(ev);
+                });
+            }
+            FireAndForgetEffect::Reenter(ev) => {
+                let _ = ctx.reentry_tx.send(*ev);
+            }
+        }
+    }
+}
+
+/// Rebuild a [`CallReferRequest`] from the JSON the seed rule emitted.
+fn parse_call_refer_request(v: &serde_json::Value) -> crate::decision::CallReferRequest {
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let sip_headers = v
+        .get("sip_headers")
+        .and_then(|x| x.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    crate::decision::CallReferRequest {
+        call_id: s("call_id").unwrap_or_default(),
+        dialog_id: s("dialog_id").unwrap_or_default(),
+        callback_context: s("callback_context"),
+        refer_to: s("refer_to").unwrap_or_default(),
+        referred_by: s("referred_by"),
+        sip_headers,
+    }
 }
 
 /// Extract `(cr, lg)` from a Via header value's `;cr=`/`;lg=` params.

@@ -403,6 +403,59 @@ impl Agent {
             ),
         }
     }
+
+    /// Like [`receive`](Agent::receive), but first drains (and 200-OKs) any
+    /// requests whose method is in `tolerate` — the harness equivalent of the
+    /// TS `allowExtra(method)`. Under a paused clock an advance that crosses a
+    /// timer deadline emits a request whose 2xx round-trip races the txn-layer
+    /// retransmit, so several identical copies queue before the awaited message
+    /// (CLAUDE.md: tolerate retransmits, don't relax the assertion). Returns the
+    /// first request matching `method`.
+    pub async fn receive_tolerating(&self, method: &str, tolerate: &[&str]) -> ServerTxn {
+        loop {
+            let msg = self.recv().await;
+            match msg {
+                SipMessage::Request(r) => {
+                    if r.method.eq_ignore_ascii_case(method) {
+                        let route_set = get_headers(&r.headers, "record-route")
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect();
+                        return ServerTxn {
+                            agent: self.clone(),
+                            request: r,
+                            to_tag: None,
+                            route_set,
+                        };
+                    }
+                    if tolerate.iter().any(|t| t.eq_ignore_ascii_case(&r.method)) {
+                        // Drain + answer the duplicate so the txn layer stops
+                        // retransmitting it, then keep waiting for `method`.
+                        let route_set: Vec<String> = get_headers(&r.headers, "record-route")
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect();
+                        let mut txn = ServerTxn {
+                            agent: self.clone(),
+                            request: r,
+                            to_tag: None,
+                            route_set,
+                        };
+                        txn.respond(200, "OK").send().await;
+                        continue;
+                    }
+                    panic!(
+                        "{} expected a {method} request (tolerating {tolerate:?}), got {}",
+                        self.name, r.method
+                    );
+                }
+                SipMessage::Response(r) => panic!(
+                    "{} expected a {method} request, got a {} {} response",
+                    self.name, r.status, r.reason
+                ),
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

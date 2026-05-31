@@ -14,7 +14,7 @@ pub use schemas::{
     NewCallRequest, NewCallResponse, RejectDecision, RouteDecision, SipDestination,
     SipHeaderUpdates,
 };
-pub use test_adapter::ScriptedDecisionEngine;
+pub use test_adapter::{default_call_refer, ReferOutcome, ScriptedDecisionEngine};
 
 use async_trait::async_trait;
 

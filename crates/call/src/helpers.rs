@@ -389,6 +389,30 @@ pub fn set_promote_pem(mut call: Call, state: Option<crate::model::PromotePemSta
     call
 }
 
+// ── REFER transfer service slice (port of TS `TransferCallExt` accessors) ────
+
+/// The current REFER transfer runtime slice, if any.
+pub fn transfer_state(call: &Call) -> Option<&crate::model::TransferState> {
+    call.transfer.as_ref()
+}
+
+/// The current transfer phase, if a transfer is active.
+pub fn transfer_phase(call: &Call) -> Option<crate::model::TransferPhase> {
+    call.transfer.as_ref().map(|s| s.phase)
+}
+
+/// Whether a transfer is active (the slice is present) — the service guard
+/// (mirrors the TS `noTransferActive` negation).
+pub fn transfer_active(call: &Call) -> bool {
+    call.transfer.is_some()
+}
+
+/// Overwrite the transfer runtime slice (`None` clears it — the terminal path).
+pub fn set_transfer(mut call: Call, state: Option<crate::model::TransferState>) -> Call {
+    call.transfer = state;
+    call
+}
+
 // ── Service ext + rule helpers (ADR-0016) ───────────────────────────────────
 
 /// Write an encoded ext slice into `call.ext[serviceId]`; `None` drops the key.

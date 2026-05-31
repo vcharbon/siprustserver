@@ -456,6 +456,58 @@ pub struct Call {
     /// replaces the shared ext blob (ADR-0016 full typed-ext is out of scope for
     /// the early port). `None` until the first 183+PEM is promoted.
     pub promote_pem: Option<PromotePemState>,
+    /// Per-call runtime state for the REFER blind-transfer service. Mirrors the
+    /// TS `TransferCallExt` (`referTransfer.ts`); the typed slice replaces the
+    /// `defineService` call-ext blob (ADR-0016 full typed-ext is out of scope
+    /// for the early port). `None` until a REFER is intercepted; presence is the
+    /// service-activation guard. Cleared (`None`) on every terminal transition.
+    pub transfer: Option<TransferState>,
+}
+
+/// REFER blind-transfer phase — gates which transfer service rules can match
+/// (each rule's `filter` reads `transfer_phase`). Port of the TS
+/// `TransferPhase` literal union (`referTransfer.ts:38-47`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TransferPhase {
+    /// REFER received, awaiting the HTTP authorization decision.
+    ReferAuthorizing,
+    /// C-leg INVITE sent, awaiting its final response.
+    CRinging,
+    /// Re-INVITE toward C with A's SDP in flight (slice 5b+).
+    CRealigning,
+    /// Re-INVITE toward A with C's endpoint in flight (slice 5b+).
+    ARealigning,
+}
+
+/// Per-call REFER transfer state. Holds the phase + addressable leg ids (actions
+/// and filters address legs by id) and the payload carried across phases. Port
+/// of the TS `TransferCallExt` (`referTransfer.ts:56-85`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferState {
+    /// Current transfer phase.
+    pub phase: TransferPhase,
+    /// B-leg that issued the REFER (origin of the implicit subscription).
+    pub referrer_leg_id: String,
+    /// Raw Refer-To URI as received from the referrer.
+    pub refer_to_uri: String,
+    /// Refer-To URI after any HTTP-driven rewrite (`new_refer_to`).
+    pub effective_refer_to_uri: Option<String>,
+    /// Callback context propagated from the /call/refer response.
+    pub callback_context: Option<String>,
+    /// Newly-created C-leg identifier (set when create-leg fires).
+    pub c_leg_id: Option<String>,
+    /// CSeq of the REFER request on the referrer's dialog (NOTIFY correlation).
+    pub refer_cseq: Option<u32>,
+    /// Wall-clock ms when the REFER was received.
+    pub started_at_ms: i64,
+    /// Last 1xx status forwarded on the subscription as a NOTIFY sipfrag — used
+    /// by `transfer-c-1xx-to-notify` to dedupe repeats.
+    pub last_c_leg_notified_status: Option<u16>,
+    /// C-leg's initial 200-OK answer SDP, carried across `c-realigning` so the
+    /// a-realign re-INVITE (slice 5b) can offer it back to A.
+    #[serde(with = "serde_bytes")]
+    pub c_initial_sdp: Option<Vec<u8>>,
 }
 
 /// Runtime state for the `relayFirst18xTo180` service. Strategy itself lives on

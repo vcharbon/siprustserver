@@ -75,6 +75,10 @@ pub enum InDialogMethod {
     Info,
     Update,
     Message,
+    /// REFER (RFC 3515). The B2BUA never *originates* a REFER; this exists for
+    /// the harness to send one from an agent (Refer-To / Replaces ride via
+    /// `extra_headers`).
+    Refer,
 }
 
 impl InDialogMethod {
@@ -88,6 +92,7 @@ impl InDialogMethod {
             InDialogMethod::Info => "INFO",
             InDialogMethod::Update => "UPDATE",
             InDialogMethod::Message => "MESSAGE",
+            InDialogMethod::Refer => "REFER",
         }
     }
 }

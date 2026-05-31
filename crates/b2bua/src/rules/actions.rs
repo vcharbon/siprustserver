@@ -134,6 +134,8 @@ impl<'a> ActionExecutor<'a> {
                 new_ruri,
                 no_answer_timeout_sec,
                 callback_context,
+                body_override,
+                header_updates,
             } => {
                 let n = call.b_legs.len() + 1;
                 let leg_id = format!("b-{n}");
@@ -147,6 +149,8 @@ impl<'a> ActionExecutor<'a> {
                     *no_answer_timeout_sec,
                     self.config,
                     self.id_gen,
+                    body_override.as_deref(),
+                    header_updates,
                 );
                 if let Some(ctx_str) = callback_context {
                     call.callback_context = Some(ctx_str.clone());
@@ -275,7 +279,78 @@ impl<'a> ActionExecutor<'a> {
             RuleAction::SetPromotePem { state } => {
                 *call = call::helpers::set_promote_pem(call.clone(), state.clone());
             }
+            RuleAction::SendNotify {
+                leg_id,
+                event,
+                subscription_state,
+                content_type,
+                body,
+            } => {
+                self.send_notify(call, fx, leg_id, event, subscription_state, content_type.as_deref(), body);
+            }
+            RuleAction::ReferAsyncHttp { request } => {
+                fx.fire_and_forget.push(crate::effects::FireAndForgetEffect::ReferAsyncHttp {
+                    call_ref: call.call_ref.clone(),
+                    request: request.clone(),
+                });
+            }
+            RuleAction::SetTransfer { state } => {
+                *call = call::helpers::set_transfer(call.clone(), state.clone());
+            }
         }
+    }
+
+    /// Originate a NOTIFY on `leg_id`'s confirmed dialog (toward the referrer)
+    /// carrying the REFER implicit-subscription state (RFC 3515 §2.4.4): `Event:
+    /// refer`, `Subscription-State`, and a `message/sipfrag` body. The B2BUA is
+    /// the UAS of the referrer leg, so the NOTIFY rides that dialog's local
+    /// sequence. Port of `executeSendNotify` (ActionExecutor.ts:2157).
+    #[allow(clippy::too_many_arguments)]
+    fn send_notify(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        event: &str,
+        subscription_state: &str,
+        content_type: Option<&str>,
+        body: &[u8],
+    ) {
+        let idx = match leg_index(call, leg_id) {
+            Some(i) => i,
+            None => return,
+        };
+        let dialog = match leg_at(call, idx).dialogs.first() {
+            Some(d) => d.clone(),
+            None => return,
+        };
+        let t_id = dialog_identity_tag(leg_id, &dialog);
+        let outbound_cseq = dialog.sip.local_cseq + 1;
+        *call = bump_local_cseq(call.clone(), leg_id, &t_id, 1);
+
+        let branch = self.id_gen.new_branch();
+        let gen_dialog = relay::to_gen_dialog(&dialog.sip);
+        let opts = GenerateInDialogRequestOpts {
+            via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, branch)),
+            contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id)),
+            body: body.to_vec(),
+            content_type: content_type.map(str::to_string),
+            cseq: Some(outbound_cseq as u32),
+            event: Some(event.to_string()),
+            subscription_state: Some(subscription_state.to_string()),
+            ..Default::default()
+        };
+        let res = generators::generate_in_dialog_request(InDialogMethod::Notify, &gen_dialog, &opts);
+        let dest = relay::dest_of(&relay::strip_uri(&gen_dialog.remote_target));
+        let (out_req, dest) =
+            relay::apply_b_leg_egress(self.config, leg_id, &gen_dialog.route_set, res.request, dest);
+        fx.outbound.push(OutboundSipEffect {
+            body: OutboundBody::Request(out_req),
+            mode: OutboundTxnMode::NewClient(TxnKind::NonInvite),
+            destination: dest,
+            label: format!("NOTIFY → {leg_id}"),
+            leg_id: Some(leg_id.to_string()),
+        });
     }
 
     /// Originate a re-INVITE on `leg_id` carrying `body` as the new offer plus

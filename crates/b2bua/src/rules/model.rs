@@ -95,6 +95,17 @@ impl Match {
     pub fn cancelled() -> Self {
         Self::base(MatchKind::Cancelled)
     }
+    pub fn internal_event() -> Self {
+        Self::base(MatchKind::InternalEvent)
+    }
+    pub fn topic(mut self, t: &'static str) -> Self {
+        self.topic = Some(t);
+        self
+    }
+    pub fn outcome(mut self, o: &'static str) -> Self {
+        self.outcome = Some(o);
+        self
+    }
     pub fn method(mut self, m: &'static str) -> Self {
         self.methods.get_or_insert_with(Vec::new).push(m);
         self
@@ -295,6 +306,12 @@ pub enum RuleAction {
         new_ruri: Option<String>,
         no_answer_timeout_sec: Option<i64>,
         callback_context: Option<String>,
+        /// Body override for the C INVITE (REFER transfer held SDP). `None`
+        /// keeps A's INVITE body; `Some(bytes)` replaces it (empty = drop).
+        body_override: Option<Vec<u8>>,
+        /// Header overrides applied to the C INVITE (`update_headers` from the
+        /// /call/refer allow). `(name, Some(value))` sets, `(name, None)` removes.
+        header_updates: Vec<(String, Option<String>)>,
     },
     DestroyLeg { leg_id: String },
     CancelLeg { leg_id: String },
@@ -358,6 +375,26 @@ pub enum RuleAction {
     },
     /// Overwrite the per-call PEM runtime slice (`None` → pre-promotion state).
     SetPromotePem { state: Option<call::PromotePemState> },
+    // ── referTransfer (SERVICE_LAYER) ───────────────────────────────────────
+    /// Send a NOTIFY toward `leg_id`'s confirmed dialog carrying the REFER
+    /// subscription state (`Event` + `Subscription-State` + sipfrag body). The
+    /// B2BUA is the UAS of the referrer leg, so the NOTIFY rides that dialog.
+    /// Port of `executeSendNotify` (ActionExecutor.ts:2157).
+    SendNotify {
+        leg_id: String,
+        event: String,
+        subscription_state: String,
+        content_type: Option<String>,
+        body: Vec<u8>,
+    },
+    /// Kick the async /call/refer authorization: push a `ReferAsyncHttp`
+    /// fire-and-forget effect carrying the request JSON. The router interpreter
+    /// calls `decision.call_refer` then re-enters via a `refer-http-result`
+    /// internal event.
+    ReferAsyncHttp { request: serde_json::Value },
+    /// Overwrite the per-call REFER transfer runtime slice (`None` clears it —
+    /// the terminal path; mirrors `SetPromotePem`).
+    SetTransfer { state: Option<call::TransferState> },
 }
 
 /// The resolved context a rule sees. Built by the executor/router from the

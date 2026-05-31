@@ -151,6 +151,7 @@ pub fn apply_b_leg_egress(
 
 /// Build a fresh b-leg + its outbound INVITE effect (initial route + failover).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn build_b_leg(
     call_ref: &str,
     leg_id: &str,
@@ -160,6 +161,11 @@ pub fn build_b_leg(
     no_answer_timeout_sec: Option<i64>,
     config: &B2buaConfig,
     id_gen: &IdGen,
+    // REFER transfer overrides: `body_override` replaces the cloned a-leg body
+    // (held SDP, or empty = drop); `header_updates` set/remove extra headers on
+    // the C INVITE. The basic-B2BUA path passes `(None, &[])`.
+    body_override: Option<&[u8]>,
+    header_updates: &[(String, Option<String>)],
 ) -> (Leg, OutboundSipEffect) {
     let branch = id_gen.new_branch();
     let from_tag = id_gen.new_tag();
@@ -167,7 +173,24 @@ pub fn build_b_leg(
     let request_uri = new_ruri.map(str::to_string).unwrap_or_else(|| a_leg_invite.uri.clone());
     let from_uri = a_leg_invite.from.uri.clone();
     let to_uri = a_leg_invite.to.uri.clone();
-    let content_type = get_header(&a_leg_invite.headers, "content-type").map(str::to_string);
+    let body = match body_override {
+        Some(b) => b.to_vec(),
+        None => a_leg_invite.body.clone(),
+    };
+    let content_type = if body.is_empty() {
+        None
+    } else {
+        get_header(&a_leg_invite.headers, "content-type").map(str::to_string)
+            .or_else(|| body_override.map(|_| "application/sdp".to_string()))
+    };
+    // `(name, Some(v))` sets, `(name, None)` removes. Removals never apply to
+    // structural headers (the generator owns those); only extra sets ride here.
+    let extra_headers: Vec<MsgHeader> = header_updates
+        .iter()
+        .filter_map(|(n, v)| {
+            v.as_ref().map(|val| MsgHeader { name: n.clone(), value: val.clone() })
+        })
+        .collect();
 
     let opts = GenerateOutOfDialogRequestOpts {
         request_uri: request_uri.clone(),
@@ -180,9 +203,9 @@ pub fn build_b_leg(
         via: Some(leg_via(config, call_ref, leg_id, branch.clone())),
         contact: Some(leg_contact(config, call_ref, leg_id)),
         max_forwards: Some(70),
-        body: a_leg_invite.body.clone(),
+        body,
         content_type,
-        extra_headers: vec![],
+        extra_headers,
     };
     let invite = generators::generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
     // Behind the front proxy, the b-leg INVITE traverses the proxy: preload a

@@ -60,6 +60,8 @@ pub async fn apply_route(
         no_answer,
         config,
         id_gen,
+        None,
+        &[],
     );
 
     // Body substitution on the b-leg INVITE (route.update_body).

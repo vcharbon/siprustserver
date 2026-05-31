@@ -98,6 +98,20 @@ impl B2buaSut {
         Self::start(h, name, addr, decision).await
     }
 
+    /// Bind a B2BUA that routes every call to `dest` and authorizes REFER
+    /// transfers via the default `X-Api-Call`-keyed `/call/refer` behavior (the
+    /// REFER-scenario constructor).
+    pub async fn route_all_with_refer(
+        h: &Harness,
+        name: &str,
+        addr: &str,
+        dest_host: &str,
+        dest_port: u16,
+    ) -> Self {
+        let decision = Arc::new(ScriptedDecisionEngine::route_all_with_refer(dest_host, dest_port));
+        Self::start(h, name, addr, decision).await
+    }
+
     /// Bind a B2BUA that routes every call to `dest` with the
     /// `relayFirst18xTo180` feature active under `strategy` (suppress / fake-prack).
     pub async fn route_all_to_with_18x(

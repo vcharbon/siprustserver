@@ -185,6 +185,7 @@ impl B2buaCore {
             metrics.clone(),
         );
 
+        let (reentry_tx, reentry_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(RouterCtx {
             config,
             state,
@@ -199,9 +200,10 @@ impl B2buaCore {
             rules: Arc::new(default_rules()),
             metrics: metrics.clone(),
             readiness: readiness.clone(),
+            reentry_tx,
         });
 
-        tasks.push(tokio::spawn(router::run(ctx.clone(), txn_rx, timer_rx)));
+        tasks.push(tokio::spawn(router::run(ctx.clone(), txn_rx, timer_rx, reentry_rx)));
 
         Self {
             ctx,
