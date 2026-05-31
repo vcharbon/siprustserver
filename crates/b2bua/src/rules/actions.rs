@@ -85,7 +85,7 @@ impl<'a> ActionExecutor<'a> {
             RuleAction::AckLeg { leg_id } => {
                 if let Some(leg) = call.b_legs.iter().find(|l| &l.leg_id == leg_id) {
                     if let Some(e) =
-                        relay::ack_b_leg(&call.call_ref, leg, self.config, self.id_gen)
+                        relay::ack_b_leg(&call.call_ref, leg, self.config, self.id_gen, vec![], None)
                     {
                         fx.outbound.push(e);
                     }
@@ -253,10 +253,26 @@ impl<'a> ActionExecutor<'a> {
         target_to_tag: Option<String>,
     ) {
         // ACK for 2xx: reuse the INVITE CSeq (no dialog-sequence advance,
-        // §13.2.2.4) — delegate to the dedicated builder.
+        // §13.2.2.4) — delegate to the dedicated builder, carrying the inbound
+        // ACK's body through (the delayed-offer re-INVITE answer rides the ACK,
+        // RFC 3264 §4). The target may be either side (a re-INVITE answered by
+        // bob is ACKed toward bob; one answered by alice is ACKed toward alice).
         if req.method.eq_ignore_ascii_case("ACK") {
-            if let Some(leg) = call.b_legs.iter().find(|l| l.leg_id == target_leg) {
-                if let Some(e) = relay::ack_b_leg(&call.call_ref, leg, self.config, self.id_gen) {
+            let leg = if target_leg == call.a_leg.leg_id {
+                Some(&call.a_leg)
+            } else {
+                call.b_legs.iter().find(|l| l.leg_id == target_leg)
+            };
+            if let Some(leg) = leg {
+                let content_type = get_header(&req.headers, "content-type").map(str::to_string);
+                if let Some(e) = relay::ack_b_leg(
+                    &call.call_ref,
+                    leg,
+                    self.config,
+                    self.id_gen,
+                    req.body.clone(),
+                    content_type,
+                ) {
                     fx.outbound.push(e);
                 }
             }
@@ -312,7 +328,7 @@ impl<'a> ActionExecutor<'a> {
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&target_dialog.sip);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, &call.call_ref, target_leg, branch)),
+            via: Some(relay::leg_via(self.config, &call.call_ref, target_leg, branch.clone())),
             contact: Some(relay::leg_contact(self.config, &call.call_ref, target_leg)),
             body: req.body.clone(),
             content_type: get_header(&req.headers, "content-type").map(str::to_string),
@@ -330,10 +346,26 @@ impl<'a> ActionExecutor<'a> {
             TxnKind::NonInvite
         };
 
+        // For a re-INVITE, cache its client-transaction handle on the *target*
+        // dialog so the eventual ACK-for-2xx echoes the re-INVITE CSeq
+        // (RFC 3261 §13.2.2.4) and CANCEL can reuse the branch (§9.1). Port of
+        // `relayRequest`'s `pendingInviteTxn` capture. (The initial INVITE never
+        // reaches this path — it is built by `CreateLeg`/`build_b_leg`.)
+        if method == InDialogMethod::Invite {
+            *call = call::helpers::update_dialog(call.clone(), target_leg, &t_id, |d| {
+                d.ext.pending_invite_txn = Some(call::InviteTxnHandle {
+                    branch: branch.clone(),
+                    original_invite: sip_message::serialize(&SipMessage::Request(out_req.clone())),
+                    destination: call::HostPort { host: dest.0.clone(), port: dest.1 },
+                });
+            });
+        }
+
         // Snapshot the inbound request so the response can echo its Via/From/To/
-        // Call-ID/CSeq (§8.1.3.3). The B2BUA answers BYE locally and ACK has no
-        // response, so neither needs correlation.
-        if !matches!(method, InDialogMethod::Bye | InDialogMethod::Invite) {
+        // Call-ID/CSeq (§8.1.3.3) and so glare detection on the target dialog
+        // sees the in-flight re-INVITE (`reinvite-glare`). The B2BUA answers BYE
+        // locally and ACK has no response, so neither needs correlation.
+        if !matches!(method, InDialogMethod::Bye) {
             let pending = PendingRequest {
                 method: req.method.to_uppercase(),
                 outbound_cseq,

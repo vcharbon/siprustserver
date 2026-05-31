@@ -302,14 +302,25 @@ pub fn response_to_a_leg(
     }
 }
 
-/// Build an ACK-for-2xx on a b-leg dialog (toward bob), sent raw.
-pub fn ack_b_leg(call_ref: &str, leg: &Leg, config: &B2buaConfig, id_gen: &IdGen) -> Option<OutboundSipEffect> {
+/// Build an ACK-for-2xx on a b-leg dialog (toward bob), sent raw. `body` carries
+/// the inbound ACK's payload through (the delayed-offer re-INVITE answer rides
+/// the ACK, RFC 3264 §4); pass empty for a bodyless ACK.
+pub fn ack_b_leg(
+    call_ref: &str,
+    leg: &Leg,
+    config: &B2buaConfig,
+    id_gen: &IdGen,
+    body: Vec<u8>,
+    content_type: Option<String>,
+) -> Option<OutboundSipEffect> {
     let dialog = leg.dialogs.first()?;
     let gen_dialog = to_gen_dialog(&dialog.sip);
     let branch = id_gen.new_branch();
     let opts = GenerateAckFor2xxOpts {
         via: Some(leg_via(config, call_ref, &leg.leg_id, branch)),
         cseq: Some(dialog.sip.local_cseq.max(0) as u32),
+        body,
+        content_type,
         ..Default::default()
     };
     let ack = generators::generate_ack_for_2xx(None, &gen_dialog, &opts);

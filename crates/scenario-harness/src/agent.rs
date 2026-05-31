@@ -565,6 +565,23 @@ impl Dialog {
         self.request(InDialogMethod::Bye, None).await
     }
 
+    /// ACK a re-INVITE's 2xx on this confirmed dialog (RFC 3261 §13.2.2.4 — the
+    /// ACK echoes the re-INVITE's CSeq, which `request(INVITE, …)` left as the
+    /// dialog's `local_cseq`). Carries an optional SDP answer (the delayed-offer
+    /// case where the answer rides the ACK, RFC 3264 §4). Routed to the next hop
+    /// like any in-dialog request; the B2BUA relays it end-to-end.
+    pub async fn ack(&mut self, sdp: Option<&str>) {
+        let opts = GenerateAckFor2xxOpts {
+            via: Some(self.agent.via()),
+            cseq: Some(self.dialog.local_cseq),
+            body: sdp.map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
+            ..Default::default()
+        };
+        let ack = generate_ack_for_2xx(None, &self.dialog, &opts);
+        let dst = next_hop(&self.dialog, self.fallback_addr);
+        self.agent.send(&SipMessage::Request(ack), dst).await;
+    }
+
     /// Send any in-dialog request (re-INVITE, INFO, …); attach an SDP body
     /// with `sdp`.
     pub async fn request(&mut self, method: InDialogMethod, sdp: Option<&str>) -> InDialogTxn {

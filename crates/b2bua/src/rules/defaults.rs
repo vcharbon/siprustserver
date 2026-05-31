@@ -89,6 +89,43 @@ pub fn default_rules() -> Vec<RuleDefinition> {
                 .filter(|ctx| ctx.response().map(|r| r.status >= 300).unwrap_or(false)),
             |_ctx| ok(vec![]),
         ),
+        // Re-INVITE glare (RFC 3261 §14.1 / §3.1 of RFC 5407): an INVITE arrives
+        // on a dialog that already carries an in-flight inbound INVITE (a
+        // re-INVITE we relayed onto this dialog and have not yet seen a final
+        // response for) → reject the newcomer 491 Request Pending. More specific
+        // than `relay-reinvite` (no filter), so it wins on glare. Port of
+        // `reinviteGlareRule`.
+        rule(
+            "reinvite-glare",
+            &["relay-reinvite"],
+            Match::request().method("INVITE").filter(|ctx| {
+                ctx.source_dialog()
+                    .map(|d| d.ext.inbound_pending_requests.iter().any(|p| p.method.eq_ignore_ascii_case("INVITE")))
+                    .unwrap_or(false)
+            }),
+            |_ctx| ok(vec![RuleAction::Respond { status: 491, reason: "Request Pending".into(), body: vec![], content_type: None }]),
+        ),
+        // Relay a re-INVITE response (1xx/2xx/3xx+) back to the originator. The
+        // source dialog carries a pending-relay snapshot for the response CSeq
+        // (captured when the re-INVITE was relayed onto this dialog) — so the
+        // relay path rebuilds the response from that snapshot and removes the
+        // entry on the final response. Outranks `relay-provisional`,
+        // `confirm-dialog` and `route-failure`, which would otherwise claim an
+        // INVITE response. Port of `relayReinviteResponseRule`.
+        rule(
+            "relay-reinvite-response",
+            &["relay-provisional", "confirm-dialog", "route-failure"],
+            Match::response().method("INVITE").filter(|ctx| {
+                let cseq = match ctx.response() {
+                    Some(r) => r.cseq.seq as i64,
+                    None => return false,
+                };
+                ctx.source_dialog()
+                    .map(|d| call::helpers::find_pending_request(d, cseq).is_some())
+                    .unwrap_or(false)
+            }),
+            |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
+        ),
         // ── dialog ──────────────────────────────────────────────────────────
         rule(
             "relay-provisional",

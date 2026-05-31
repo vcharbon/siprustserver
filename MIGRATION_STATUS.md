@@ -568,7 +568,7 @@ scenario-harness in a dedicated `crates/b2bua-harness` test crate.
 | `PartitionedRelayStorage` + `BufferedTerminateWriter` | `store/{call_store,memory,terminate_writer}.rs` | ✅ trait + in-memory + buffered writer (HA params carried, no-op'd) |
 | `TimerService.ts` | `timers.rs` | ✅ one `DelayQueue` driver firing `CallEvent::Timer` |
 | `rules/framework/*` | `rules/{model,matcher(executor),actions,relay,invariants}.rs` | ✅ basic-B2BUA subset |
-| `rules/defaults/*` | `rules/defaults.rs` | ✅ relay/dialog/absorb/lifecycle/terminating/corner-case/failure/timer |
+| `rules/defaults/*` | `rules/defaults.rs` | ✅ relay/dialog/absorb/lifecycle/terminating/corner-case/failure/timer; incl. `reinvite-glare` + `relay-reinvite-response` (re-INVITE, `CornerCaseRules.ts`) |
 | `decision/CallDecisionEngine.ts` + `schemas/*` | `decision/{mod,schemas}.rs` | ✅ trait + request/response shapes |
 | `decision/apply/applyRoute.ts` + `InitialInviteHandler.ts` | `decision/apply_route.rs` + `initial_invite.rs` | ✅ |
 | (HTTP backend) | `decision/test_adapter.rs` (`ScriptedDecisionEngine`) | ✅ jssip-emulating test impl |
@@ -598,6 +598,9 @@ scenario-harness in a dedicated `crates/b2bua-harness` test crate.
 | `prack-forking.ts` | delayed-offer forking: two reliable 183s with distinct callee fork-tags → two independent early dialogs on one b-leg, each mapped to its own a-facing tag; per-fork PRACK routed by To-tag through the tag map | `b2bua-harness/tests/prack_forking.rs` | ✅ 1 |
 | `keepalive-happy.ts` | long call: keepalive timer sends in-dialog OPTIONS to both legs every interval, each 200 absorbed + timer re-armed; two cycles | `b2bua-harness/tests/keepalive.rs` | ✅ 1 |
 | `options-keepalive-timeout.ts` | auto-cutoff: a leg that never answers its keepalive OPTIONS trips the per-leg `KeepaliveTimeout`, which terminates that leg and BYEs the healthy peer | `b2bua-harness/tests/keepalive_timeout.rs` | ✅ 1 |
+| `reinvite.ts` (`aliceReInvite`) | in-dialog re-INVITE from the caller, delayed offer: bodyless re-INVITE relayed to bob → 200 carries bob's offer → ACK carries alice's answer (relayed end-to-end). Exercises `relay-reinvite` + `relay-reinvite-response` (pending-relay snapshot correlation, incl. re-INVITE now snapshotted) + ACK body passthrough | `b2bua-harness/tests/reinvite.rs` | ✅ 1 |
+| `reinvite.ts` (`bobReInvite`) | in-dialog re-INVITE from the callee, offer in the re-INVITE: bob's re-INVITE(offer) relayed to alice → 200(answer) → ACK. Confirms a-leg-target ACK relay + response correlation in the from-a direction | `b2bua-harness/tests/reinvite.rs` | ✅ 1 |
+| `reinvite.ts` (`crossingReInvite`) | crossing re-INVITEs → glare: alice's re-INVITE is relayed to bob; bob's crossing re-INVITE meets a pending inbound INVITE on his dialog → `reinvite-glare` rejects it 491 Request Pending while alice's completes (200/ACK) | `b2bua-harness/tests/reinvite.rs` | ✅ 1 |
 
 **Behaviour ported alongside these tests** (was dormant before this slice): the
 back-to-back-UA in-dialog relay now does faithful per-dialog CSeq bookkeeping
