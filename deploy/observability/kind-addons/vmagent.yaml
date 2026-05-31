@@ -1,0 +1,158 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vmagent
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vmagent
+rules:
+  - apiGroups: [""]
+    resources: [nodes, nodes/metrics, nodes/proxy, services, endpoints, pods]
+    verbs: [get, list, watch]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+  - apiGroups: ["networking.k8s.io"]
+    resources: [ingresses]
+    verbs: [get, list, watch]
+  - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vmagent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vmagent
+subjects:
+  - kind: ServiceAccount
+    name: vmagent
+    namespace: observability
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vmagent-config
+  namespace: observability
+data:
+  vmagent.yaml: |
+    global:
+      scrape_interval: 15s
+      external_labels:
+        cluster: kind-sip-e2e
+
+    scrape_configs:
+      # --- pods with prometheus.io/scrape: "true" (sipjsserver, KSM, node-exporter, ...)
+      - job_name: 'kubernetes-pods'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          # K8s pod role creates one target per declared container port. Keep
+          # only the target whose container port matches the annotation (so
+          # we don't try /metrics on side-ports like KSM telemetry 8081 or
+          # b2bua sip-udp). vmagent uses RE2 (no regex backreferences), so
+          # we use the keepequal action which compares two label values.
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            target_label: __tmp_pod_port
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: keepequal
+            target_label: __tmp_pod_port
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: node
+          - source_labels: [__meta_kubernetes_pod_container_name]
+            target_label: container
+
+      # --- kubelet itself (/metrics on every node)
+      - job_name: 'kubernetes-kubelet'
+        scheme: https
+        tls_config: { insecure_skip_verify: true }
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs: [{ role: node }]
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics
+
+      # --- cAdvisor (per-container CPU/mem/io via kubelet proxy)
+      - job_name: 'kubernetes-cadvisor'
+        scheme: https
+        tls_config: { insecure_skip_verify: true }
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs: [{ role: node }]
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+
+      # --- vmagent self-scrape
+      - job_name: 'vmagent'
+        static_configs: [{ targets: ['127.0.0.1:8429'] }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmagent
+  namespace: observability
+  labels: { app: vmagent }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: vmagent }
+  template:
+    metadata:
+      labels: { app: vmagent }
+    spec:
+      serviceAccountName: vmagent
+      containers:
+        - name: vmagent
+          image: victoriametrics/vmagent:v1.143.0
+          args:
+            - "-promscrape.config=/config/vmagent.yaml"
+            - "-promscrape.configCheckInterval=10s"
+            - "-remoteWrite.url=http://__HOST_IP__:8428/api/v1/write"
+            - "-remoteWrite.tmpDataPath=/cache"
+            - "-httpListenAddr=:8429"
+          ports:
+            - { name: http, containerPort: 8429 }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: cache,  mountPath: /cache }
+      volumes:
+        - { name: config, configMap: { name: vmagent-config } }
+        - { name: cache,  emptyDir: {} }

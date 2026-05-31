@@ -1,0 +1,77 @@
+services:
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.143.0
+    container_name: victoriametrics
+    restart: unless-stopped
+    networks: [default, kind]
+    ports:
+      - "8428:8428"
+    volumes:
+      - ./data/victoriametrics:/storage
+      - ./victoriametrics/prometheus.yml:/etc/vm/prometheus.yml:ro
+    command:
+      - "-storageDataPath=/storage"
+      - "-retentionPeriod=2d"
+      - "-promscrape.config=/etc/vm/prometheus.yml"
+      - "-httpListenAddr=:8428"
+    deploy:
+      resources: { limits: { memory: 1g } }
+
+  victorialogs:
+    image: victoriametrics/victoria-logs:v1.40.0
+    container_name: victorialogs
+    restart: unless-stopped
+    networks: [default, kind]
+    ports:
+      - "9428:9428"
+    volumes:
+      - ./data/victorialogs:/storage
+    command:
+      - "-storageDataPath=/storage"
+      - "-retentionPeriod=7d"
+      - "-httpListenAddr=:9428"
+    deploy:
+      resources: { limits: { memory: 1g } }
+
+  victoria-traces:
+    image: victoriametrics/victoria-traces:v0.8.2
+    container_name: victoria-traces
+    restart: unless-stopped
+    networks: [default, kind]
+    ports:
+      - "10428:10428"
+    volumes:
+      - ./data/victoria-traces:/storage
+    command:
+      - "-storageDataPath=/storage"
+      - "-retentionPeriod=2d"
+      - "-httpListenAddr=:10428"
+    deploy:
+      resources: { limits: { memory: 1g } }
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: grafana
+    restart: unless-stopped
+    networks: [default, kind]
+    ports:
+      - "3333:3000"
+    volumes:
+      - ./data/grafana:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_INSTALL_PLUGINS=victoriametrics-logs-datasource
+    depends_on: [victoriametrics, victorialogs, victoria-traces]
+    deploy:
+      resources: { limits: { memory: 512m } }
+
+networks:
+  default:
+    name: victoria-default
+  kind:
+    external: true
+    name: kind

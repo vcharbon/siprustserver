@@ -1,0 +1,13 @@
+# Almost all scraping is done by vmagent inside the kind cluster, which
+# remote-writes to this VictoriaMetrics instance via the kind docker
+# network. We keep one static job here so VM has its own self-metrics.
+
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: "victoriametrics"
+    static_configs:
+      - targets: ["localhost:8428"]
+        labels:
+          app: "victoriametrics"

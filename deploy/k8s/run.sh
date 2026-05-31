@@ -19,14 +19,22 @@
 # this" switch. Run `down` when done so the host is free for the other SUT.
 #
 # Usage:
-#   ./run.sh up                      # (re)create cluster + build/load images
+#   ./run.sh up                      # (re)create cluster + build/load images + observability
 #   ./run.sh deploy                  # apply uas + workers + proxy, wait ready
+#   ./run.sh obs                     # (re)deploy observability stack only (idempotent)
 #   ./run.sh caps 200 30             # 200 cps for 30s, sample CPU/mem
 #   ./run.sh sweep 30 50 100 200 400 # run a list of caps, 30s sampling each
 #   ./run.sh all 30 50 100 200 400   # up + deploy + sweep (leaves cluster up)
 #   ./run.sh down                    # delete the cluster
 #
+# Observability (VictoriaMetrics + Grafana + vmagent/KSM/node-exporter/fluent-bit)
+# is brought up automatically by `up` via deploy/observability/install.sh and
+# survives across runs (host docker-compose); the in-cluster scrapers are
+# re-applied on every `up` since recreating the cluster wipes them. Grafana:
+# http://localhost:3333 (anonymous admin). Set OBS_ENABLE=0 to skip.
+#
 # Env: SUT_IMAGE=siprustserver:dev  WORKER_REPLICAS=2  CLUSTER=sip-e2e  NS=sip-test
+#      OBS_ENABLE=1
 set -euo pipefail
 cd "$(dirname "$0")"
 HERE="$(pwd)"
@@ -46,6 +54,12 @@ REPL_ENABLE="${REPL_ENABLE:-0}"
 REPL_PORT="${REPL_PORT:-9092}"
 SCENARIO="${SCENARIO:-uac-basic.xml}"   # UAC scenario the load sweep drives
 export SUT_IMAGE WORKER_REPLICAS REPL_ENABLE REPL_PORT SCENARIO
+# Observability: VictoriaMetrics + Grafana host stack + in-cluster vmagent/KSM/
+# node-exporter/fluent-bit. Deployed automatically on `up` so the freshly
+# (re)created cluster always has scraping wired and Grafana dashboards loaded.
+# Set OBS_ENABLE=0 to skip (e.g. CI without docker compose).
+OBS_ENABLE="${OBS_ENABLE:-1}"
+OBS_DIR="$REPO_ROOT/deploy/observability"
 
 log() { printf '\033[1;36m>> %s\033[0m\n' "$*" >&2; }
 die() { printf '\033[1;31m!! %s\033[0m\n' "$*" >&2; exit 1; }
@@ -71,6 +85,19 @@ up() {
   log "loading images into kind"
   kind load docker-image "$SUT_IMAGE" --name "$CLUSTER"
   kind load docker-image sipp:dev --name "$CLUSTER"
+
+  obs   # bring up / refresh observability against the new cluster
+}
+
+# Deploy (or re-apply) the observability stack: host VM+Grafana via docker
+# compose + the in-cluster scrapers (vmagent/KSM/node-exporter/fluent-bit).
+# install.sh is idempotent; recreating the cluster wipes the in-cluster
+# `observability` namespace, so this must re-run after every `up`.
+obs() {
+  [ "$OBS_ENABLE" = "1" ] || { log "OBS_ENABLE=0 — skipping observability"; return 0; }
+  [ -x "$OBS_DIR/install.sh" ] || die "observability installer missing: $OBS_DIR/install.sh"
+  log "deploying observability (Grafana http://localhost:3333, VictoriaMetrics :8428)"
+  "$OBS_DIR/install.sh" --bootstrap
 }
 
 deploy() {
@@ -174,9 +201,10 @@ cmd="${1:-}"; shift || true
 case "$cmd" in
   up)     up ;;
   deploy) deploy ;;
+  obs)    obs ;;
   caps)   caps "$@" ;;
   sweep)  sweep "$@" ;;
   all)    up; deploy; sweep "$@" ;;
   down)   down ;;
-  *) die "usage: $0 {up|deploy|caps <cps> <secs>|sweep <secs> <cps...>|all <secs> <cps...>|down}" ;;
+  *) die "usage: $0 {up|deploy|obs|caps <cps> <secs>|sweep <secs> <cps...>|all <secs> <cps...>|down}" ;;
 esac

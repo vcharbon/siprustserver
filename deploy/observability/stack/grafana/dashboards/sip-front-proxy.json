@@ -1,0 +1,114 @@
+{
+  "uid": "sip-front-proxy",
+  "title": "SIP front-proxy — Load balancer (Rust)",
+  "tags": ["siprustserver", "proxy", "lb"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "pod",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "vm" },
+        "query": "label_values(sip_proxy_pending_invite_lru_size, pod)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Pending-INVITE LRU size",
+      "description": "Size of the proxy-local (Call-ID, CSeq#) → target LRU (`sip_proxy_pending_invite_lru_size`). Short-TTL pending-INVITE cache, NOT a dialog count — see the B2BUA worker dashboard for `b2bua_active_calls`.",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(sip_proxy_pending_invite_lru_size{pod=~\"$pod\"})", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "id": 2, "type": "stat", "title": "Workers alive (proxy view)",
+      "description": "`sip_worker_health{health=\"alive\"}` — count of upstream b2bua workers the proxy's health band considers admissible.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "max(sip_worker_health{health=\"alive\", pod=~\"$pod\"})", "refId": "A" }],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 1 }, { "color": "green", "value": 2 }] } } }
+    },
+    {
+      "id": 3, "type": "stat", "title": "Workers dead / draining / not-ready",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "max(sip_worker_health{health=\"dead\", pod=~\"$pod\"}) + max(sip_worker_health{health=\"draining\", pod=~\"$pod\"}) + max(sip_worker_health{health=\"not-ready\", pod=~\"$pod\"})", "refId": "A" }],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 2 }] } } }
+    },
+    {
+      "id": 4, "type": "stat", "title": "HMAC failures / sec",
+      "description": "Record-Route HMAC verification failures (`sip_proxy_hmac_failures_total`). Any sustained rate means stickiness tokens are being rejected.",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(rate(sip_proxy_hmac_failures_total{pod=~\"$pod\"}[1m]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "cps", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.01 }] } } }
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Worker health by state",
+      "description": "`sip_worker_health` gauge — number of upstream workers in each health band (alive / draining / not-ready / unknown / dead).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "max by (health) (sip_worker_health{pod=~\"$pod\"})", "refId": "A", "legendFormat": "{{health}}" }],
+      "fieldConfig": { "defaults": { "unit": "none", "min": 0 } }
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Messages / sec by direction:result",
+      "description": "`sip_messages_total` — the Rust proxy emits a single `label` dimension holding `direction:result` (e.g. `inbound:forwarded`, `outbound:responded`, `inbound:dropped`).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (label) (rate(sip_messages_total{pod=~\"$pod\", label!=\"none\"}[1m]))", "refId": "A", "legendFormat": "{{label}}" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Routing decisions / sec by kind",
+      "description": "`sip_routing_decision_total{kind}` — select_new / decode_forward / decode_forward_backup / loose_route / worker_outbound / cancel / reject.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (kind) (rate(sip_routing_decision_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "{{kind}}" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Routing decision latency (avg)",
+      "description": "Mean routing-decision duration = rate(`sip_routing_duration_seconds_sum`) / rate(`_count`). The Rust exporter currently emits only the +Inf bucket, so quantiles are not available — this is the true average over the window.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(rate(sip_routing_duration_seconds_sum{pod=~\"$pod\"}[1m])) / clamp_min(sum(rate(sip_routing_duration_seconds_count{pod=~\"$pod\"}[1m])), 1e-9)", "refId": "A", "legendFormat": "avg" }],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "HMAC failures / sec by reason",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (reason) (rate(sip_proxy_hmac_failures_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "{{reason}}" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Record-Route inserted & ACK synthesized / sec",
+      "description": "`sip_proxy_record_route_inserted_total` (stickiness tokens stamped) and `sip_proxy_ack_synthesized_total` (hop-by-hop ACKs synthesized for non-2xx final responses).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum(rate(sip_proxy_record_route_inserted_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "record-route inserted" },
+        { "expr": "sum(rate(sip_proxy_ack_synthesized_total{pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "ack synthesized" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 11, "type": "table", "title": "Worker health snapshot (per proxy pod)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sip_worker_health{pod=~\"$pod\"}", "refId": "A", "format": "table", "instant": true }],
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "job": true, "namespace": true, "container": true, "instance": true, "node": true, "app_kubernetes_io_instance": true, "app_kubernetes_io_name": true, "pod_template_hash": true } } }
+      ]
+    }
+  ]
+}

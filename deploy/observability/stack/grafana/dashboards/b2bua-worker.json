@@ -1,0 +1,119 @@
+{
+  "uid": "b2bua-worker",
+  "title": "B2BUA — Worker (Rust)",
+  "tags": ["siprustserver", "b2bua"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "pod",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "vm" },
+        "query": "label_values(b2bua_active_calls, pod)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Active calls",
+      "description": "`b2bua_active_calls` gauge = creations − removals, summed across worker pods. Authoritative live dialog count.",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(b2bua_active_calls{pod=~\"$pod\"})", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "id": 2, "type": "stat", "title": "Call setups / sec",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(rate(b2bua_call_creations_total{pod=~\"$pod\"}[1m]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 3, "type": "stat", "title": "Dispatch drops / sec",
+      "description": "Sum of per-call queue-full drops + global call-cap drops (`b2bua_dispatch_queue_drops_total` + `b2bua_dispatch_cap_drops_total`). Non-zero means the worker is shedding load.",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(rate(b2bua_dispatch_queue_drops_total{pod=~\"$pod\"}[1m])) + sum(rate(b2bua_dispatch_cap_drops_total{pod=~\"$pod\"}[1m]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "cps", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.1 }, { "color": "red", "value": 1 }] } } }
+    },
+    {
+      "id": 4, "type": "stat", "title": "CDRs dropped / sec",
+      "description": "`b2bua_cdr_dropped_total` — CDRs lost to buffer overflow. Should be flat zero.",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(rate(b2bua_cdr_dropped_total{pod=~\"$pod\"}[1m]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "cps", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.001 }] } } }
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Active calls per pod",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "b2bua_active_calls{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}}" }],
+      "fieldConfig": { "defaults": { "unit": "none", "min": 0 } }
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Call creations vs removals / sec",
+      "description": "`b2bua_call_creations_total` (per-call dispatch queues created) vs `b2bua_call_removals_total` (removed). Steady state: the two track each other; a persistent gap is the active-call ramp.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum(rate(b2bua_call_creations_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "creations" },
+        { "expr": "sum(rate(b2bua_call_removals_total{pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "removals" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Dispatch backpressure / sec",
+      "description": "queue_drops (per-call FIFO full) · cap_drops (global call cap) · saturation (global handler-concurrency hits).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (pod) (rate(b2bua_dispatch_queue_drops_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "queue_drops {{pod}}" },
+        { "expr": "sum by (pod) (rate(b2bua_dispatch_cap_drops_total{pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "cap_drops {{pod}}" },
+        { "expr": "sum by (pod) (rate(b2bua_dispatch_saturation_total{pod=~\"$pod\"}[1m]))", "refId": "C", "legendFormat": "saturation {{pod}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Handler faults / sec",
+      "description": "handler_timeouts · force_purge (loop-guard purges) · fast_reject_terminating (requests rejected on a terminating call) · unroutable_dropped (no route resolved).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum(rate(b2bua_handler_timeouts_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "handler_timeouts" },
+        { "expr": "sum(rate(b2bua_force_purge_total{pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "force_purge" },
+        { "expr": "sum(rate(b2bua_fast_reject_terminating_total{pod=~\"$pod\"}[1m]))", "refId": "C", "legendFormat": "fast_reject_terminating" },
+        { "expr": "sum(rate(b2bua_unroutable_dropped_total{pod=~\"$pod\"}[1m]))", "refId": "D", "legendFormat": "unroutable_dropped" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "CDR written vs dropped / sec",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum(rate(b2bua_cdr_written_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "written" },
+        { "expr": "sum(rate(b2bua_cdr_dropped_total{pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "dropped" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Cumulative call lifecycle",
+      "description": "Monotonic creations / removals counters — useful to confirm the worker is making forward progress and that removals are not stalling (would manifest as a growing active-call gap).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum(b2bua_call_creations_total{pod=~\"$pod\"})", "refId": "A", "legendFormat": "creations total" },
+        { "expr": "sum(b2bua_call_removals_total{pod=~\"$pod\"})", "refId": "B", "legendFormat": "removals total" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    }
+  ]
+}
