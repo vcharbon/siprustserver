@@ -541,11 +541,18 @@ impl ClientInvite {
     /// RFC 3261 §13.2.2.4), then return the confirmed [`Dialog`]. With a route
     /// set the ACK carries Route headers and goes to the first hop (the proxy).
     pub async fn ack(&mut self) -> Dialog {
+        self.ack_with(None).await
+    }
+
+    /// ACK the 2xx carrying an optional SDP body — the delayed-offer answer
+    /// rides the ACK when the 200 OK carried the offer (RFC 3264 §4).
+    pub async fn ack_with(&mut self, sdp: Option<&str>) -> Dialog {
         let handle = InviteClientTransactionHandle {
             original_invite: self.original_invite.clone(),
         };
         let opts = GenerateAckFor2xxOpts {
             via: Some(self.agent.via()),
+            body: sdp.map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
             ..Default::default()
         };
         let ack = generate_ack_for_2xx(Some(&handle), &self.dialog, &opts);
