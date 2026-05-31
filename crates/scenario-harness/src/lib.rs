@@ -29,9 +29,27 @@
 //! **TEST-ONLY.** This crate composes the recording/audit decorators, which
 //! never belong in a production network tree.
 
+pub mod agent;
 pub mod dsl;
 pub mod report;
 pub mod run;
 
-pub use dsl::{Agent, AgentId, Match, Scenario, Step};
+/// Default one-hop transit delay (ms) the harness gives the simulated fabric.
+/// A non-zero delay makes the fake network behave like a real one: a sent
+/// datagram is delivered `SIMULATED_TRANSIT_DELAY_MS` later, so every recorded
+/// message shows `received_ms == sent_ms + delay`. Under a paused runtime the
+/// delay is virtual (tokio auto-advances to the delivery timer); under a real
+/// runtime it is a real sleep. Override per session with
+/// [`Harness::with_transit_delay`].
+pub const SIMULATED_TRANSIT_DELAY_MS: u64 = 100;
+
+// The fluent, dialog-aware DSL (auto-generates correct-by-default B2B messages).
+// This is the primary surface — scenarios should not hand-author headers.
+pub use agent::{
+    Agent, ClientInvite, Dialog, Harness, InDialogTxn, Invite, Proxy, Respond, ServerTxn,
+};
+// The low-level scenarios-as-data DSL — for raw/torture cases that must send
+// exact (possibly malformed) bytes. `dsl::Agent` is the data-DSL agent handle;
+// the fluent `agent::Agent` (re-exported above) is the stateful UA.
+pub use dsl::{AgentId, Match, Scenario, Step};
 pub use run::{run, ExpectOutcome, RunReport};

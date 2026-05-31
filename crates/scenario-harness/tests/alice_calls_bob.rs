@@ -1,25 +1,39 @@
-//! End-to-end smoke test of the scenario harness — the "one basic real test
-//! that just tests the harness" (CLAUDE.md migration ritual).
+//! End-to-end test of the scenario harness — a full one-call dialog
+//! (CLAUDE.md migration ritual: "one basic real test that just tests the
+//! harness", here grown to a complete INVITE transaction + in-dialog BYE).
 //!
-//! Alice INVITEs Bob over the recording-wrapped simulated `SignalingNetwork`,
-//! Bob 200-OKs. Nothing here builds a trace: pseudo-agents send/recv through the
-//! recording layer, and we assert that
-//!   1. both `Expect`s matched (the driver works),
-//!   2. the **recording** projects back into exactly the two delivered wire
-//!      entries (`sip_net::to_sip_entries` — the record is the source of truth),
-//!   3. the renderers produce the SVG diagram, the `global.txt`, and the
-//!      per-endpoint `ext/<agent>.txt` views from that recording.
+//! Flow (alice = UAC @ 5060, bob = UAS @ 5070), all over the recording-wrapped
+//! simulated `SignalingNetwork`:
 //!
-//! This is the smallest exercise of the whole harness; the dialog/transaction
-//! machinery the source DSL carried is out of scope until those layers land
-//! (see MIGRATION_STATUS.md).
+//! ```text
+//!   alice ──INVITE (CSeq 1 INVITE)──▶ bob
+//!   alice ◀──180 Ringing (CSeq 1)─── bob
+//!   alice ◀──200 OK     (CSeq 1)─── bob
+//!   alice ──ACK   (CSeq 1 ACK)────▶ bob
+//!   alice ──BYE   (CSeq 2 BYE)────▶ bob
+//!   alice ◀──200 OK     (CSeq 2)─── bob
+//! ```
+//!
+//! Nothing here builds a trace: pseudo-agents send/recv through the recording
+//! layer, and we assert that (1) every `Expect` matched, (2) the **recording**
+//! projects back into exactly the six delivered wire entries in order, (3) the
+//! CSeq numbering/method is carried faithfully end to end (1 INVITE → 1 ACK →
+//! 2 BYE; responses echo their request's CSeq), and (4) the renderers produce
+//! the SVG / global.txt / per-endpoint / clickable HTML from that recording.
 
 use std::path::PathBuf;
 
 use scenario_harness::{run, Match, Scenario};
+use sip_message::parser::custom::CustomParser;
+use sip_message::{SipMessage, SipParser};
 
 const SDP_OFFER: &str = "v=0\r\no=alice 2890 2890 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 const SDP_ANSWER: &str = "v=0\r\no=bob 2890 2890 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49180 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+
+const CALL_ID: &str = "call-abc@127.0.0.1";
+const INVITE_BRANCH: &str = "z9hG4bK-alice-invite";
+const ACK_BRANCH: &str = "z9hG4bK-alice-ack";
+const BYE_BRANCH: &str = "z9hG4bK-alice-bye";
 
 /// Build a valid SIP datagram, computing `Content-Length` from the body so the
 /// strict parser the harness uses to match accepts it.
@@ -38,106 +52,207 @@ fn sip(start_line: &str, headers: &[(&str, &str)], body: &str) -> Vec<u8> {
     s.into_bytes()
 }
 
+fn parse(raw: &[u8]) -> SipMessage {
+    CustomParser::new()
+        .parse(raw)
+        .unwrap_or_else(|e| panic!("entry did not parse: {e}\n---\n{}", String::from_utf8_lossy(raw)))
+}
+
+/// Assert a request entry's method + CSeq.
+fn assert_request(raw: &[u8], method: &str, cseq_seq: u32) {
+    match parse(raw) {
+        SipMessage::Request(r) => {
+            assert_eq!(r.method, method, "method");
+            assert_eq!(r.cseq.method, method, "CSeq method must equal request method");
+            assert_eq!(r.cseq.seq, cseq_seq, "CSeq seq for {method}");
+            assert_eq!(r.call_id, CALL_ID, "Call-ID continuity");
+        }
+        other => panic!("expected {method} request, got {other:?}"),
+    }
+}
+
+/// Assert a response entry's status + the CSeq it echoes from its request.
+fn assert_response(raw: &[u8], status: u16, cseq_seq: u32, cseq_method: &str) {
+    match parse(raw) {
+        SipMessage::Response(r) => {
+            assert_eq!(r.status, status, "status");
+            assert_eq!(r.cseq.seq, cseq_seq, "echoed CSeq seq for {status}");
+            assert_eq!(r.cseq.method, cseq_method, "echoed CSeq method for {status}");
+            assert_eq!(r.call_id, CALL_ID, "Call-ID continuity");
+        }
+        other => panic!("expected {status} response, got {other:?}"),
+    }
+}
+
 #[tokio::test]
-async fn alice_calls_bob_end_to_end() {
+async fn alice_calls_bob_full_dialog() {
+    // --- messages ---------------------------------------------------------
     let invite = sip(
         "INVITE sip:bob@127.0.0.1:5070 SIP/2.0",
         &[
-            ("Via", "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-alice-invite-1"),
+            ("Via", &format!("SIP/2.0/UDP 127.0.0.1:5060;branch={INVITE_BRANCH}")),
             ("Max-Forwards", "70"),
             ("From", "<sip:alice@127.0.0.1>;tag=alicetag"),
             ("To", "<sip:bob@127.0.0.1>"),
-            ("Call-ID", "call-abc@127.0.0.1"),
+            ("Call-ID", CALL_ID),
             ("CSeq", "1 INVITE"),
             ("Contact", "<sip:alice@127.0.0.1:5060>"),
             ("Content-Type", "application/sdp"),
         ],
         SDP_OFFER,
     );
-
-    let ok = sip(
-        "SIP/2.0 200 OK",
+    let ringing = sip(
+        "SIP/2.0 180 Ringing",
         &[
-            ("Via", "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-alice-invite-1"),
+            ("Via", &format!("SIP/2.0/UDP 127.0.0.1:5060;branch={INVITE_BRANCH}")),
             ("From", "<sip:alice@127.0.0.1>;tag=alicetag"),
             ("To", "<sip:bob@127.0.0.1>;tag=bobtag"),
-            ("Call-ID", "call-abc@127.0.0.1"),
+            ("Call-ID", CALL_ID),
+            ("CSeq", "1 INVITE"),
+            ("Contact", "<sip:bob@127.0.0.1:5070>"),
+        ],
+        "",
+    );
+    let ok_invite = sip(
+        "SIP/2.0 200 OK",
+        &[
+            ("Via", &format!("SIP/2.0/UDP 127.0.0.1:5060;branch={INVITE_BRANCH}")),
+            ("From", "<sip:alice@127.0.0.1>;tag=alicetag"),
+            ("To", "<sip:bob@127.0.0.1>;tag=bobtag"),
+            ("Call-ID", CALL_ID),
             ("CSeq", "1 INVITE"),
             ("Contact", "<sip:bob@127.0.0.1:5070>"),
             ("Content-Type", "application/sdp"),
         ],
         SDP_ANSWER,
     );
+    let ack = sip(
+        "ACK sip:bob@127.0.0.1:5070 SIP/2.0",
+        &[
+            ("Via", &format!("SIP/2.0/UDP 127.0.0.1:5060;branch={ACK_BRANCH}")),
+            ("Max-Forwards", "70"),
+            ("From", "<sip:alice@127.0.0.1>;tag=alicetag"),
+            ("To", "<sip:bob@127.0.0.1>;tag=bobtag"),
+            ("Call-ID", CALL_ID),
+            ("CSeq", "1 ACK"),
+        ],
+        "",
+    );
+    let bye = sip(
+        "BYE sip:bob@127.0.0.1:5070 SIP/2.0",
+        &[
+            ("Via", &format!("SIP/2.0/UDP 127.0.0.1:5060;branch={BYE_BRANCH}")),
+            ("Max-Forwards", "70"),
+            ("From", "<sip:alice@127.0.0.1>;tag=alicetag"),
+            ("To", "<sip:bob@127.0.0.1>;tag=bobtag"),
+            ("Call-ID", CALL_ID),
+            ("CSeq", "2 BYE"),
+        ],
+        "",
+    );
+    let ok_bye = sip(
+        "SIP/2.0 200 OK",
+        &[
+            ("Via", &format!("SIP/2.0/UDP 127.0.0.1:5060;branch={BYE_BRANCH}")),
+            ("From", "<sip:alice@127.0.0.1>;tag=alicetag"),
+            ("To", "<sip:bob@127.0.0.1>;tag=bobtag"),
+            ("Call-ID", CALL_ID),
+            ("CSeq", "2 BYE"),
+        ],
+        "",
+    );
 
+    // --- scenario ---------------------------------------------------------
     let mut scn = Scenario::new("alice-calls-bob");
     let alice = scn.agent("alice", "127.0.0.1:5060");
     let bob = scn.agent("bob", "127.0.0.1:5070");
     scn.send(alice, bob, invite);
     scn.expect(bob, Match::method("INVITE"));
-    scn.send(bob, alice, ok);
+    scn.send(bob, alice, ringing);
+    scn.expect(alice, Match::status(180));
+    scn.send(bob, alice, ok_invite);
+    scn.expect(alice, Match::status(200));
+    scn.send(alice, bob, ack);
+    scn.expect(bob, Match::method("ACK"));
+    scn.send(alice, bob, bye);
+    scn.expect(bob, Match::method("BYE"));
+    scn.send(bob, alice, ok_bye);
     scn.expect(alice, Match::status(200));
     let scn = scn.describe(
-        "Smallest happy-path: alice INVITEs bob, bob 200-OKs. Exercises the \
-         harness end to end over the recording-wrapped simulated network.",
+        "Full one-call dialog: INVITE / 180 / 200 / ACK / BYE / 200. Verifies \
+         CSeq numbering (1 INVITE → 1 ACK → 2 BYE, responses echo their \
+         request) survives the send → record → project → render pipeline.",
     );
 
     let report = run(&scn).await;
 
-    // 1. The driver matched both expectations.
+    // 1. Every expectation matched.
     assert!(report.passed(), "expects did not all pass: {:#?}", report.expects);
-    assert_eq!(report.expects.len(), 2);
+    assert_eq!(report.expects.len(), 6);
 
-    // 2. The recording projects back into exactly the two delivered messages,
-    //    in send order, with both halves (send + recv) paired.
+    // 2. The recording projects six delivered entries in send order.
     let entries = report.entries();
-    assert_eq!(entries.len(), 2, "entries: {entries:#?}");
+    assert_eq!(entries.len(), 6, "entries: {entries:#?}");
     assert!(entries.iter().all(|e| e.delivered), "a message was not delivered");
 
     let alice_addr = "127.0.0.1:5060".parse().unwrap();
     let bob_addr = "127.0.0.1:5070".parse().unwrap();
-    assert_eq!(entries[0].from, alice_addr);
-    assert_eq!(entries[0].to, bob_addr);
-    assert!(entries[0].received_ms.is_some());
-    assert_eq!(entries[1].from, bob_addr);
-    assert_eq!(entries[1].to, alice_addr);
+    let dirs: Vec<_> = entries.iter().map(|e| (e.from, e.to)).collect();
+    assert_eq!(
+        dirs,
+        vec![
+            (alice_addr, bob_addr), // INVITE
+            (bob_addr, alice_addr), // 180
+            (bob_addr, alice_addr), // 200 (INVITE)
+            (alice_addr, bob_addr), // ACK
+            (alice_addr, bob_addr), // BYE
+            (bob_addr, alice_addr), // 200 (BYE)
+        ]
+    );
 
-    // The lane registry recorded both named agents.
+    // 3. CSeq is carried faithfully through the whole pipeline.
+    assert_request(&entries[0].raw, "INVITE", 1);
+    assert_response(&entries[1].raw, 180, 1, "INVITE");
+    assert_response(&entries[2].raw, 200, 1, "INVITE");
+    assert_request(&entries[3].raw, "ACK", 1); // 2xx ACK reuses the INVITE CSeq number
+    assert_request(&entries[4].raw, "BYE", 2); // new in-dialog request increments CSeq
+    assert_response(&entries[5].raw, 200, 2, "BYE");
+
+    // Both named lanes recorded.
     let scenario = report.scenario();
     assert_eq!(scenario.lanes.len(), 2);
-    assert!(scenario.lanes.iter().any(|l| l.names.contains(&"alice".to_string())));
-    assert!(scenario.lanes.iter().any(|l| l.names.contains(&"bob".to_string())));
 
-    // 3. Render the three report flavours and assert on their content.
+    // 4. Render and assert on the artifacts.
     let out = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("alice-calls-bob");
     let _ = std::fs::remove_dir_all(&out);
     let written = scenario_harness::report::write_all(&report, &out).expect("write reports");
     assert!(!written.is_empty());
 
-    // SVG: both lanes labelled, both arrow captions present.
     let svg = std::fs::read_to_string(out.join("alice-calls-bob.svg")).unwrap();
-    assert!(svg.contains("127.0.0.1:5060"), "svg missing alice lane");
-    assert!(svg.contains("127.0.0.1:5070"), "svg missing bob lane");
-    assert!(svg.contains("alice") && svg.contains("bob"), "svg missing lane names");
-    assert!(svg.contains("INVITE"), "svg missing INVITE label");
-    assert!(svg.contains("200 OK"), "svg missing 200 OK label");
+    assert!(svg.contains("INVITE") && svg.contains("180 Ringing") && svg.contains("200 OK"));
+    assert!(svg.contains("ACK") && svg.contains("BYE"));
+    // Arrows are clickable targets (index carried for the HTML handler).
+    assert!(svg.contains(r#"data-trace-index="0""#));
+    assert!(svg.contains("cursor:pointer"));
 
-    // global.txt: the wire text of both messages (exact bytes, not re-serialised).
     let global = std::fs::read_to_string(out.join("alice-calls-bob.global.txt")).unwrap();
-    assert!(global.contains("Global (all endpoints)"));
-    assert!(global.contains("INVITE sip:bob@127.0.0.1:5070 SIP/2.0"), "global missing INVITE wire");
-    assert!(global.contains("SIP/2.0 200 OK"), "global missing 200 wire");
-    assert!(global.contains("o=bob 2890"), "global missing SDP answer body");
+    assert!(global.contains("INVITE sip:bob@127.0.0.1:5070 SIP/2.0"));
+    assert!(global.contains("180 Ringing"));
+    assert!(global.contains("ACK sip:bob@127.0.0.1:5070 SIP/2.0"));
+    assert!(global.contains("BYE sip:bob@127.0.0.1:5070 SIP/2.0"));
+    assert!(global.contains("CSeq: 1 ACK"));
+    assert!(global.contains("CSeq: 2 BYE"));
 
-    // Per-endpoint views exist under the ext/ fabric folder.
+    // Per-endpoint views exist; both peers saw the whole dialog.
     let alice_txt = std::fs::read_to_string(out.join("ext/alice.txt")).unwrap();
     let bob_txt = std::fs::read_to_string(out.join("ext/bob.txt")).unwrap();
     assert!(alice_txt.contains("alice (endpoint, network=ext)"));
     assert!(bob_txt.contains("bob (endpoint, network=ext)"));
-    // Both endpoints saw both messages (alice sent INVITE + received 200).
-    assert!(alice_txt.contains("INVITE") && alice_txt.contains("200 OK"));
+    assert!(alice_txt.contains("INVITE") && alice_txt.contains("BYE"));
 
-    // HTML wrapper embeds the diagram.
+    // HTML: embeds the diagram and wires the click-to-reveal handler.
     let html = std::fs::read_to_string(out.join("alice-calls-bob.html")).unwrap();
     assert!(html.contains("<svg"), "html did not embed the svg");
-    assert!(html.contains("SIP Exchange Report"));
+    assert!(html.contains("addEventListener('click'"), "html missing click handler");
+    assert!(html.contains(r#"id="msg-0""#), "html missing message panel ids");
 }

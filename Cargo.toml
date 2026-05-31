@@ -5,6 +5,9 @@ members = [
     "crates/sip-clock",
     "crates/layer-harness",
     "crates/sip-net",
+    "crates/sip-txn",
+    "crates/call",
+    "crates/sip-proxy",
     "crates/scenario-harness",
     "xtask",
 ]
@@ -41,4 +44,31 @@ criterion = "0.5"
 # Network layer onward: all async I/O + logic-path time goes through tokio
 # (see docs/MIGRATION_STRATEGY.md, Effect→Rust construct map).
 tokio = { version = "1", features = ["full"] }
+# DelayQueue (the transaction layer's single timer-wheel driver — see
+# docs/adr/0007). `time` pulls in the keyed timer set; rides `tokio::time`, so
+# `pause`/`advance` controls it in tests exactly like every other behavioural
+# timer. Not a hand-rolled wheel (sip-clock ADR's caveat) — it IS tokio's.
+tokio-util = { version = "0.7", features = ["time"] }
 async-trait = "0.1"
+# CallContext data-model layer (`crates/call`): the call body is a pure
+# serializable struct tree. `rmp-serde` default (positional/array) encoding
+# keeps field names off the wire (smallest + least CPU); `serde_bytes` keeps
+# SDP/INVITE byte fields as msgpack `bin`, not an int array. `serde_json::Value`
+# carries the per-service opaque `ext` slices losslessly. See ADR-0008.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_bytes = "0.11"
+rmp-serde = "1"
+# Front proxy (`crates/sip-proxy`, slice 9). The routing cookie stamped on the
+# Record-Route is HMAC-SHA256 truncated to 128 bits (`hmac` + `sha2`),
+# base64url-encoded (`base64`); `subtle` is the constant-time compare
+# (`timingSafeEqual` analogue) used to verify it. `sha1` is NOT a crypto
+# primitive here — it is the fast, well-distributed hash behind rendezvous
+# (HRW) worker selection (top 8 bytes as a u64). `arc-swap` backs the lock-free
+# worker-registry snapshot read on the routing hot path. See ADR-0009.
+hmac = "0.12"
+sha2 = "0.10"
+sha1 = "0.10"
+base64 = "0.22"
+subtle = "2"
+arc-swap = "1"

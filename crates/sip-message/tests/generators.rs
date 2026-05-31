@@ -297,6 +297,44 @@ fn emits_one_route_header_per_entry_in_order() {
         get_headers(&result.request.headers, "Route"),
         vec!["<sip:proxy1.example.com;lr>", "<sip:proxy2.example.com;lr>"]
     );
+    // Loose: Request-URI stays at the remote target.
+    assert_eq!(result.request.uri, "sip:bob@192.0.2.20:5060");
+}
+
+#[test]
+fn strict_route_rewrites_request_uri_and_appends_remote_target() {
+    // First route has NO `;lr` → strict routing (RFC 3261 §16.12): Request-URI
+    // becomes the first route's URI, the remaining routes follow, and the
+    // remote target is appended as the final Route.
+    let d = StackDialog {
+        route_set: vec![
+            "<sip:strict1.example.com>".to_string(),
+            "<sip:proxy2.example.com;lr>".to_string(),
+        ],
+        ..dialog()
+    };
+    let result = generate_in_dialog_request(
+        InDialogMethod::Bye,
+        &d,
+        &GenerateInDialogRequestOpts { via: Some(via()), contact: Some(contact()), ..Default::default() },
+    );
+    assert_eq!(result.request.uri, "sip:strict1.example.com", "R-URI = first (strict) route");
+    assert_eq!(
+        get_headers(&result.request.headers, "Route"),
+        vec!["<sip:proxy2.example.com;lr>", "<sip:bob@192.0.2.20:5060>"],
+        "rest of route set then the remote target as the last Route"
+    );
+}
+
+#[test]
+fn first_route_is_loose_detects_lr_param_only() {
+    use sip_message::generators::first_route_is_loose;
+    assert!(first_route_is_loose("<sip:p;lr>"));
+    assert!(first_route_is_loose("<sip:p;maddr=x;lr>"));
+    assert!(first_route_is_loose("<sip:p:5060;lr;ob>"));
+    assert!(!first_route_is_loose("<sip:p>"));
+    assert!(!first_route_is_loose("<sip:lr-host.example.com>")); // not a `;lr` param
+    assert!(!first_route_is_loose("<sip:p;lrx>")); // `;lr` must end the token
 }
 
 #[test]

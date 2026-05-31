@@ -143,7 +143,9 @@ pub fn render(entries: &[RecordedSipEntry], lanes: &[Lane], transport_kind: Tran
         let arrow_from = if left_to_right { from_x + 5 } else { from_x - 5 };
         let arrow_to = if left_to_right { to_x - 5 } else { to_x + 5 };
 
-        p.push(format!(r##"<g class="trace-arrow" data-trace-index="{idx}">"##));
+        p.push(format!(
+            r##"<g class="trace-arrow" data-trace-index="{idx}" style="cursor:pointer">"##
+        ));
         p.push(format!(
             r##"<line x1="{arrow_from}" y1="{ay}" x2="{arrow_to}" y2="{ay}" stroke="{line_color}" stroke-width="1.5" marker-end="{marker}"{dash}/>"##
         ));

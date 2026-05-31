@@ -219,6 +219,65 @@ fn wrap_uri(uri_or_name_addr: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Loose / strict routing (RFC 3261 §12.2.1.1 / §16.12). Port of the
+// `firstRouteIsLoose` / `stripRouteUriToRequestUri` helpers in
+// `message-builder.ts`. Zero-regex per ADR-0001.
+// ---------------------------------------------------------------------------
+
+/// `true` if a Route / Record-Route header value carries the `;lr` loose-route
+/// flag as a URI parameter — i.e. `;lr` followed by `;`, `>`, `,`, whitespace,
+/// or end-of-string (not as a substring of some other token). Loose routing is
+/// the modern default; strict routing is the legacy fallback.
+pub fn first_route_is_loose(route_value: &str) -> bool {
+    let lower = route_value.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find(";lr") {
+        let idx = from + rel;
+        let after = idx + ";lr".len();
+        if after == bytes.len()
+            || matches!(bytes[after], b';' | b'>' | b',' | b' ' | b'\t' | b'\r' | b'\n')
+        {
+            return true;
+        }
+        from = after;
+    }
+    false
+}
+
+/// Extract the URI portion of a Route value for use as a strict-route
+/// Request-URI: strips the surrounding angle brackets (RFC 3261 §16.12).
+pub fn strip_route_uri_to_request_uri(route_value: &str) -> String {
+    let trimmed = route_value.trim();
+    if let Some(rest) = trimmed.strip_prefix('<') {
+        if let Some(end) = rest.find('>') {
+            return rest[..end].to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Compute the Request-URI and ordered Route header values for an in-dialog
+/// request, given the dialog's remote target and route set (RFC 3261
+/// §12.2.1.1 / §16.12):
+///   - empty route set → `(remote_target, [])`;
+///   - loose (first route has `;lr`) → `(remote_target, route_set)` as-is;
+///   - strict → `(first route URI, rest of route_set ++ <remote_target>)`.
+fn route_for_in_dialog(remote_target: &str, route_set: &[String]) -> (String, Vec<String>) {
+    if route_set.is_empty() {
+        return (remote_target.to_string(), Vec::new());
+    }
+    if first_route_is_loose(&route_set[0]) {
+        (remote_target.to_string(), route_set.to_vec())
+    } else {
+        let request_uri = strip_route_uri_to_request_uri(&route_set[0]);
+        let mut routes: Vec<String> = route_set[1..].to_vec();
+        routes.push(format!("<{remote_target}>"));
+        (request_uri, routes)
+    }
+}
+
 /// Append Content-Type (when body is non-empty and the caller didn't already
 /// include one) + Content-Length (RFC 3261 §7.4.1).
 fn append_body_headers(headers: &mut Vec<SipHeader>, body: &[u8], content_type: Option<&str>) {
@@ -396,7 +455,11 @@ pub fn generate_in_dialog_request(
 ) -> InDialogResult {
     let body = opts.body.clone();
     let next_cseq = opts.cseq.unwrap_or(dialog.local_cseq + 1);
-    let request_uri = opts.request_uri.clone().unwrap_or_else(|| dialog.remote_target.clone());
+    let remote_target = opts.request_uri.clone().unwrap_or_else(|| dialog.remote_target.clone());
+    // RFC 3261 §12.2.1.1 / §16.12: Request-URI + Route headers from the route
+    // set (loose → R-URI = remote target, routes as-is; strict → R-URI = first
+    // route, remote target appended as the final Route).
+    let (request_uri, route_values) = route_for_in_dialog(&remote_target, &dialog.route_set);
     let via = opts.via.as_ref().expect("ViaSpec required");
 
     let mut headers: Vec<SipHeader> = vec![
@@ -414,8 +477,7 @@ pub fn generate_in_dialog_request(
         headers.push(h("Contact", build_contact_value(contact)));
     }
 
-    // Route set — one Route header per entry, preserving order.
-    for route in &dialog.route_set {
+    for route in &route_values {
         headers.push(h("Route", route.clone()));
     }
 
@@ -474,7 +536,10 @@ pub fn generate_ack_for_2xx(
         .cseq
         .or_else(|| invite_txn.map(|t| t.original_invite.cseq.seq))
         .expect("generate_ack_for_2xx: either invite_txn or opts.cseq must be provided");
-    let request_uri = opts.request_uri.clone().unwrap_or_else(|| dialog.remote_target.clone());
+    let remote_target = opts.request_uri.clone().unwrap_or_else(|| dialog.remote_target.clone());
+    // ACK honours the dialog route set the same way (RFC 3261 §13.2.2.4 routes
+    // the ACK like any in-dialog request).
+    let (request_uri, route_values) = route_for_in_dialog(&remote_target, &dialog.route_set);
     let via = opts.via.as_ref().expect("ViaSpec required");
 
     let mut headers: Vec<SipHeader> = vec![
@@ -485,7 +550,7 @@ pub fn generate_ack_for_2xx(
         h("Call-ID", dialog.call_id.clone()),
         h("CSeq", format!("{invite_cseq} ACK")),
     ];
-    for route in &dialog.route_set {
+    for route in &route_values {
         headers.push(h("Route", route.clone()));
     }
     headers.extend(opts.extra_headers.iter().cloned());

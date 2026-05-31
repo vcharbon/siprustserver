@@ -54,6 +54,27 @@ pub struct RunReport {
 }
 
 impl RunReport {
+    /// Build a report straight from a recording — used by the fluent
+    /// [`crate::agent::Harness`], whose `expect`s assert (panic) in-line rather
+    /// than collecting outcomes, so `expects` is empty and `passed()` is
+    /// vacuously true (a failure would have panicked before `finish`).
+    pub(crate) fn from_recording(
+        scenario_name: String,
+        description: Option<String>,
+        recorder: Recorder,
+        events: Vec<Stamped<SignalingNetworkEvent>>,
+        audit: Result<(), SignalingAuditViolation>,
+    ) -> Self {
+        Self {
+            scenario_name,
+            description,
+            expects: Vec::new(),
+            audit,
+            recorder,
+            events,
+        }
+    }
+
     /// `true` when every `Expect` matched.
     pub fn passed(&self) -> bool {
         self.expects.iter().all(|e| e.passed)
@@ -103,7 +124,7 @@ pub async fn run(scenario: &Scenario) -> RunReport {
     // with `tokio::time::advance` / the `Advance` step's 100 ms chunks. Anchor
     // at 0 → the first event sits at `T+0.000s`. See sip-clock crate docs.
     let recorder = Recorder::with_clock(TransportKind::Fake, Clock::test_at(0));
-    let sim = Arc::new(SimulatedSignalingNetwork::new(0));
+    let sim = Arc::new(SimulatedSignalingNetwork::new(crate::SIMULATED_TRANSIT_DELAY_MS));
     let wrapped = with_all_contracts(
         sim,
         recorder.clone(),

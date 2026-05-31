@@ -60,13 +60,39 @@ scenarios-as-data) over a close replica.
   the fabric's `arrival_ms` and decorators' anomaly `at_ms` (neither rendered
   as a timeline) keep the wall-clock `time::now_ms()`.
 
+## The fluent dialog builder (added 2026-05-31)
+
+The thin data-DSL alone meant scenarios hand-authored every byte. That does not
+scale, so the **fluent, dialog-aware layer** (`agent.rs`) was added as the
+*primary* surface — the port of `recorder.ts`'s `AgentProxy`/`DialogRef` + the
+dialog state in `message-builder.ts`. It is built on `sip-message::generators`
+(the correct-by-default B2B builders ported in slice 1) plus the `StackDialog`
+state shape:
+
+- `Harness` owns the recording-wrapped simulated network; `agent(name, addr)`
+  binds a stateful UA.
+- `alice.invite(&bob).with_sdp(..).send()` → `ClientInvite`; `.expect(180/200)`
+  learns the remote tag + remote target from the response; `.ack()` →
+  `Dialog`; `dialog.bye()`/`request(..)` auto-increment CSeq.
+- `bob.receive("INVITE")` → `ServerTxn`; `.respond(200,"OK").with_sdp(..)`
+  echoes Via/From/To/Call-ID/CSeq and mints a stable To-tag.
+- The harness fills in, per RFC 3261: Via (fresh branch per transaction, magic
+  cookie), From/To tags, Call-ID continuity, CSeq (1 INVITE → 1 ACK → n BYE;
+  responses echo), Contact, Max-Forwards, Content-*; in-dialog requests route to
+  the learned remote target.
+
+It stays **recording-first**: messages still flow through the recording network,
+so the reports project from the record unchanged — auto-generation only changes
+*who writes the bytes*. The low-level `Scenario`/`Send`/`Expect` data-DSL is kept
+as the escape hatch for raw/torture cases that must put exact (possibly
+malformed) bytes on the wire.
+
 ## What is dropped (until the producing layers land)
 
-The fluent dialog builder + `message-builder` dialog state, `or`-branching,
-`parallel`, media (RTP, ADR-0017), and k8s/chaos steps. The SUT/tier machinery
-(`runOn`, tiers) is dropped permanently — there is no SUT topology to select.
-See MIGRATION_STATUS.md (Slice "Scenario harness") for the per-feature
-justification.
+`or`-branching, `parallel`, media (RTP, ADR-0017), and k8s/chaos steps. The
+SUT/tier machinery (`runOn`, tiers) is dropped permanently — there is no SUT
+topology to select. See MIGRATION_STATUS.md (Slice "Scenario harness") for the
+per-feature justification.
 
 ## Consequences
 

@@ -30,12 +30,14 @@ pub fn render(
     let status_color = if passed { "#059669" } else { "#dc2626" };
 
     let mut rows = String::new();
-    for entry in entries {
+    for (i, entry) in entries.iter().enumerate() {
         let f = facets(&entry.raw);
         let rcvd = entry.received_ms.unwrap_or(entry.sent_ms) as i64 - base_ts;
         let badge = if entry.delivered { "" } else { " ⚠ UNDELIVERED" };
+        // `id` + `data-trace-index` let the SVG arrow (same index) target this
+        // panel — clicking the arrow opens and flashes it.
         rows.push_str(&format!(
-            "<details><summary><code>{} → {}</code> &nbsp; <b>{}</b> &nbsp; <span class=\"ts\">{}</span>{}</summary><pre>{}</pre></details>\n",
+            "<details id=\"msg-{i}\" data-trace-index=\"{i}\"><summary><code>{} → {}</code> &nbsp; <b>{}</b> &nbsp; <span class=\"ts\">{}</span>{}</summary><pre>{}</pre></details>\n",
             entry.from,
             entry.to,
             escape_html(&f.label),
@@ -61,18 +63,43 @@ pub fn render(
   .status {{ font-weight: bold; color: {status_color}; }}
   .desc {{ color: #4b5563; }}
   .diagram {{ overflow-x: auto; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px; }}
-  details {{ border-bottom: 1px solid #e5e7eb; padding: 4px 0; }}
+  details {{ border-bottom: 1px solid #e5e7eb; padding: 4px 0; scroll-margin-top: 1rem; }}
   summary {{ cursor: pointer; }}
   .ts {{ color: #6b7280; font-family: monospace; }}
   pre {{ background: #f9fafb; padding: 8px; overflow-x: auto; border-radius: 4px; }}
+  .trace-arrow:hover line {{ stroke-width: 3; }}
+  @keyframes flash {{ from {{ background: #fde68a; }} to {{ background: transparent; }} }}
+  details.flash {{ animation: flash 1.2s ease-out; }}
+  .hint {{ color: #6b7280; font-size: 0.85rem; }}
 </style></head>
 <body>
   <h1>SIP Exchange Report: {name}</h1>
   <p>Status: <span class="status">{status}</span> &middot; {anomaly_count} anomalies recorded</p>
   {desc}
+  <p class="hint">Tip: click any arrow in the diagram to jump to that message.</p>
   <div class="diagram">{diagram}</div>
   <h2>Exchanges</h2>
   {rows}
+  <script>
+  (function () {{
+    function reveal(idx) {{
+      var el = document.getElementById('msg-' + idx);
+      if (!el) return;
+      el.open = true;
+      el.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+      el.classList.remove('flash');
+      // force reflow so the animation re-triggers on repeat clicks
+      void el.offsetWidth;
+      el.classList.add('flash');
+    }}
+    var arrows = document.querySelectorAll('.diagram .trace-arrow');
+    arrows.forEach(function (g) {{
+      g.addEventListener('click', function () {{
+        reveal(g.getAttribute('data-trace-index'));
+      }});
+    }});
+  }})();
+  </script>
 </body></html>"#,
         name = escape_html(scenario_name),
     )

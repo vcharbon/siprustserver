@@ -1,0 +1,17 @@
+[package]
+name = "call"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "CallContext data model (Call→Leg→Dialog) + pluggable body codec — Rust port of sipjsserver src/call/{CallModel,timer-helpers,codec}. Pure synchronous leaf; the stateful CallState + TimerService are a later slice (see MIGRATION_STATUS row 18 / ADR-0008)."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_bytes = { workspace = true }
+rmp-serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
