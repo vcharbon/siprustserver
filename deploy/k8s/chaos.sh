@@ -13,9 +13,12 @@
 # --workspace`. Run it explicitly when you want the real chaos signal.
 #
 #   ./chaos.sh failover        # up + deploy(repl) + hold-failover under pod kill
+#   ./chaos.sh bringback       # failover + restart the killed primary + prove it
+#                              #   re-hydrates and serves a fresh batch (reclaim)
 #   ./chaos.sh up              # just (re)create cluster + build/load images (repl)
 #   ./chaos.sh deploy          # just deploy the repl-enabled stack
 #   ./chaos.sh kill            # inject one worker kill against a running stack
+#   ./chaos.sh recover         # wait the killed primary back + assert re-hydration
 #   ./chaos.sh down            # tear the cluster down
 #
 # Env knobs:
@@ -129,13 +132,88 @@ failover() {
   fi
 }
 
+# Wait for the StatefulSet to RE-CREATE the killed pod and for it to re-hydrate
+# to Ready. The /ready probe only flips 200 once the fresh worker has bootstrap
+# re-pulled from its peer (reclaim its pri partition) and gone backup-current, so
+# "Ready again" is the bring-back gate: if re-hydration is broken the pod never
+# becomes Ready and this times out.
+wait_brought_back() {
+  log "waiting for $KILL_TARGET to be re-created + re-hydrate to Ready (bring-back)"
+  # The old pod is terminating; give the StatefulSet a moment to spawn the
+  # replacement under the same name before we wait on it.
+  sleep 5
+  kubectl -n "$NS" wait --for=condition=ready "pod/$KILL_TARGET" --timeout=150s \
+    || fail "bring-back: $KILL_TARGET did not re-hydrate to Ready after restart"
+  kubectl -n "$NS" get pod "$KILL_TARGET" -o wide || true
+}
+
+# Assert the brought-back worker actually RE-PULLED state from its peer (not just
+# came up empty): its repl_pull_applied counter must be > 0. A fresh worker that
+# reclaims its calls on reboot drains the peer's compacted changelog — zero here
+# means re-hydration silently delivered nothing (the goal-3 failure mode).
+assert_rehydrated() {
+  log "asserting $KILL_TARGET re-pulled state from its peer (repl_pull_applied > 0)"
+  local pf applied
+  kubectl -n "$NS" port-forward "$KILL_TARGET" 19091:9091 >/dev/null 2>&1 &
+  pf=$!
+  sleep 3
+  applied="$(curl -s --max-time 4 localhost:19091/metrics 2>/dev/null \
+    | grep -aE '^b2bua_repl_pull_applied_total ' | grep -oE '[0-9]+$' | tail -1)"
+  kill "$pf" 2>/dev/null || true
+  applied="${applied:-0}"
+  printf '  %s repl_pull_applied_total = %s\n' "$KILL_TARGET" "$applied" >&2
+  if [ "$applied" -gt 0 ]; then
+    ok "bring-back re-hydration: $KILL_TARGET re-pulled $applied entries from its peer"
+  else
+    fail "bring-back: $KILL_TARGET re-pulled 0 entries — re-hydration delivered nothing"
+  fi
+}
+
+# Bring-back / reclaim acceptance: shut a primary mid-hold (its dialogs fail over
+# to the backup), let the StatefulSet restart it, prove it re-hydrates, then place
+# a SECOND batch of dialogs on the recovered topology and assert THEY survive too
+# — i.e. the brought-back worker serves traffic again, not just boots.
+bringback() {
+  up
+  deploy
+  wait_ready
+  launch_calls
+  local settle=$(( CALLS / CPS + 4 ))
+  log "letting batch-1 dialogs establish (~${settle}s) before the kill"
+  sleep "$settle"
+  kill_worker
+  # (1) batch-1 survived the kill (failover to the backup replica).
+  assert_survival
+  # (2) the killed primary comes back + re-hydrates.
+  wait_brought_back
+  assert_rehydrated
+  # (3) the recreated pod has a fresh IP → the proxy's static registry is stale;
+  # refresh it (run.sh recomputes PROXY_WORKERS from live pod IPs), then re-gate
+  # readiness before driving traffic again.
+  deploy
+  wait_ready
+  # (4) batch-2: NEW dialogs on the recovered topology must all succeed.
+  JOB="sipp-uac-bringback"
+  launch_calls
+  log "letting batch-2 dialogs run to completion (no kill — pure serve)"
+  assert_survival
+  ok "bring-back: recovered topology served a fresh batch after primary restart"
+  if [ "${KEEP:-0}" = "1" ]; then
+    log "KEEP=1 — leaving cluster up (./chaos.sh down to tear down)"
+  else
+    down
+  fi
+}
+
 cmd="${1:-failover}"; shift || true
 case "$cmd" in
-  failover) failover ;;
-  up)       up ;;
-  deploy)   deploy; wait_ready ;;
-  kill)     kill_worker ;;
-  assert)   assert_survival ;;
-  down)     down ;;
-  *) fail "usage: $0 {failover|up|deploy|kill|assert|down}" ;;
+  failover)  failover ;;
+  bringback) bringback ;;
+  up)        up ;;
+  deploy)    deploy; wait_ready ;;
+  kill)      kill_worker ;;
+  recover)   wait_brought_back; assert_rehydrated ;;
+  assert)    assert_survival ;;
+  down)      down ;;
+  *) fail "usage: $0 {failover|bringback|up|deploy|kill|recover|assert|down}" ;;
 esac

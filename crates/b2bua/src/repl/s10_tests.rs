@@ -28,12 +28,14 @@ use sip_message::{SipMessage, SipParser, SipRequest};
 use topology::{Peer, SimulatedMembership};
 
 use super::{
-    Changelog, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor,
+    Changelog, Puller, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor,
 };
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::metrics::B2buaMetrics;
-use crate::store::{BufferedTerminateWriter, CallState, CallStore, PartitionRole};
+use crate::store::{
+    BufferedTerminateWriter, CallState, CallStore, PartitionRole, PropagateDirection, PutOpts,
+};
 
 const BAK: PartitionRole = PartitionRole::Backup;
 
@@ -269,4 +271,74 @@ async fn update_bumps_call_gen() {
 
 fn gen(state: &CallState, call_ref: &str) -> i64 {
     state.peek(call_ref).unwrap().topology.unwrap().gen
+}
+
+// ---------------------------------------------------------------------------
+// (4) `repl_backup_held` must count a replica whose FIRST delivery is an
+// `Op::Update`, not just `Op::Create`. The changelog COMPACTS: a call created
+// then updated before the backup drains collapses to a single `Op::Update`
+// entry (and the steady-state tail likewise pushes the latest state as
+// `Update`). Keying the gauge on `op == Create` undercounted every such replica
+// — the live cluster's `repl_backup_held = 0` despite the body being held. This
+// is a pure apply-path logic bug, reproducible in-memory (no real socket).
+// ---------------------------------------------------------------------------
+#[tokio::test(start_paused = true)]
+async fn backup_held_counts_update_first_replica() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+
+    let w0 = Node::spawn("w0", SocketAddr::from(([127, 0, 0, 1], 9931)), 1, &net, &clock).await;
+
+    // w1's backup store + a puller pulling w0 — built directly so we hold the
+    // metrics handle the supervisor would otherwise own privately.
+    let w1 = ReplicatingCallStore::with_changelog(
+        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
+        clock.clone(),
+    );
+    let metrics = B2buaMetrics::new();
+    let (puller, _status) = Puller::new(
+        "w0",
+        "w1",
+        w0.addr,
+        net.clone() as Arc<dyn ReplicationNetwork>,
+        w1.clone(),
+        fast_config(),
+        repl_net::frame::Watermark::new(0, 0),
+        metrics.clone(),
+    );
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move { puller.run(cancel_rx).await });
+    tick(50).await;
+
+    // Create THEN update the same callRef before the puller drains: the changelog
+    // compacts to one entry with effective op = Update (the Create slot is moved).
+    let call_ref = "w0|compacted|tag".to_string();
+    let fwd = PutOpts {
+        peer: Some("w1".into()),
+        direction: Some(PropagateDirection::Forward),
+    };
+    w0.store
+        .put_call(PartitionRole::Primary, "w0", &call_ref, b"v1".to_vec(), &[], 30_000, 1, &fwd)
+        .await
+        .unwrap();
+    w0.store
+        .put_call(PartitionRole::Primary, "w0", &call_ref, b"v2".to_vec(), &[], 30_000, 2, &fwd)
+        .await
+        .unwrap();
+    tick(150).await;
+
+    assert_eq!(
+        w0.store.changelog().peer_len("w1"),
+        1,
+        "changelog compacted create+update to a single entry"
+    );
+    assert!(
+        w1.get_call(BAK, "w0", &call_ref).await.unwrap().is_some(),
+        "the compacted (Update) replica was delivered + stored"
+    );
+    assert_eq!(
+        metrics.repl_backup_held(),
+        1,
+        "an Update-first replica still grows the backup-held gauge",
+    );
 }

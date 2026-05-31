@@ -3,9 +3,14 @@
 # proxies behind a VIP) needs the keepalived/VIP machinery and is out of scope
 # for this thin runner. Pinned to tier=edge like the sipjs proxy.
 #
-# PROXY_WORKERS is injected by run.sh as IP literals (e.g.
-# w0@10.244.3.4:5060,w1@10.244.4.5:5060) because the proxy's send path resolves
-# IP literals only (the k8s watcher registry is a deferred slice, ADR-0009).
+# PROXY_WORKERS is injected by run.sh as pod-name id @ IP literal (e.g.
+# b2bua-worker-0@10.244.3.4:5060,b2bua-worker-1@10.244.4.5:5060): the IP because
+# the proxy's send path resolves IP literals only (the k8s watcher registry is a
+# deferred slice, ADR-0009); the pod-name id because it is signed into the
+# w_pri/w_bak cookie that the b2bua echoes into the callRef primary / topology.bak
+# (the replication changelog peer key), which MUST equal each worker's
+# B2BUA_ORDINAL (= POD_NAME = replication membership ordinal) or replicas never
+# reach the backup. See run.sh's PROXY_WORKERS construction.
 # PROXY_ADVERTISE = the proxy's own pod IP so in-dialog Route/Record-Route is
 # routable cluster-internally and pins back to this single proxy.
 apiVersion: apps/v1

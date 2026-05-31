@@ -115,14 +115,19 @@ fn boot_incarnation() -> u64 {
 /// unspecified addr the puller simply fails to connect to and retries.
 fn make_addr_resolver(repl_port: u16) -> Arc<dyn Fn(&Peer) -> SocketAddr + Send + Sync> {
     Arc::new(move |peer: &Peer| {
-        if let Ok(ip) = peer.host.parse::<IpAddr>() {
-            return SocketAddr::new(ip, repl_port);
-        }
-        (peer.host.as_str(), repl_port)
-            .to_socket_addrs()
-            .ok()
-            .and_then(|mut it| it.next())
-            .unwrap_or_else(|| SocketAddr::from((Ipv4Addr::UNSPECIFIED, repl_port)))
+        let addr = if let Ok(ip) = peer.host.parse::<IpAddr>() {
+            SocketAddr::new(ip, repl_port)
+        } else {
+            (peer.host.as_str(), repl_port)
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut it| it.next())
+                .unwrap_or_else(|| SocketAddr::from((Ipv4Addr::UNSPECIFIED, repl_port)))
+        };
+        // Fires once per puller (re)spawn — its presence proves a peer was
+        // discovered and a puller is being started toward it.
+        eprintln!("b2bua-runner repl: spawning puller -> peer={} addr={addr}", peer.ordinal);
+        addr
     })
 }
 
@@ -261,6 +266,24 @@ async fn main() {
                 eprintln!(
                     "b2bua-runner replication ENABLED: listen={repl_listen} peer_port={repl_port} incarnation_gen={incarnation_gen}"
                 );
+                // Diagnostic: log the discovered peer set a few times so we can
+                // see whether the K8sMembership informer actually populates peers
+                // (it starts empty and fills async). Empty after several seconds
+                // ⇒ informer/watch problem; populated ⇒ the issue is downstream.
+                {
+                    let m = membership.clone();
+                    tokio::spawn(async move {
+                        for _ in 0..6 {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            let peers: Vec<String> = m
+                                .snapshot()
+                                .into_iter()
+                                .map(|p| format!("{}@{}", p.ordinal, p.host))
+                                .collect();
+                            eprintln!("b2bua-runner repl membership snapshot: [{}]", peers.join(", "));
+                        }
+                    });
+                }
                 Some(ReplicationSetup {
                     network: Arc::new(RealReplicationNetwork::new()),
                     membership,

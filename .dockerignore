@@ -6,3 +6,8 @@ docs/
 bench/*/results/
 *.diff
 .effect/
+# Observability stack runtime data (Grafana/Victoria volumes) — not part of the
+# SUT build, and its container-owned files break the build-context sender with
+# permission-denied. The image only needs the Rust workspace.
+deploy/observability/
+deploy/k8s/results/

@@ -117,6 +117,8 @@ struct SupervisorInner {
     store: ReplicatingCallStore,
     resolve: AddrResolver,
     config: PullerConfig,
+    /// Replication observability, handed to each spawned puller.
+    metrics: crate::metrics::B2buaMetrics,
     #[allow(dead_code)]
     clock: Clock,
     /// `ordinal → PeerEntry`.
@@ -139,11 +141,14 @@ impl ReplicationSupervisor {
         store: ReplicatingCallStore,
         resolve: AddrResolver,
         clock: Clock,
+        metrics: crate::metrics::B2buaMetrics,
     ) -> Self {
-        Self::with_config(self_ordinal, network, store, resolve, clock, PullerConfig::default())
+        Self::build(self_ordinal, network, store, resolve, clock, PullerConfig::default(), metrics)
     }
 
     /// Build with explicit puller backoff config (tests inject short backoff).
+    /// Replication metrics default to a throwaway here; the live runner uses
+    /// [`new`](Self::new) to share the worker's real `B2buaMetrics`.
     pub fn with_config(
         self_ordinal: impl Into<String>,
         network: Arc<dyn ReplicationNetwork>,
@@ -152,6 +157,19 @@ impl ReplicationSupervisor {
         clock: Clock,
         config: PullerConfig,
     ) -> Self {
+        Self::build(self_ordinal, network, store, resolve, clock, config, crate::metrics::B2buaMetrics::new())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        self_ordinal: impl Into<String>,
+        network: Arc<dyn ReplicationNetwork>,
+        store: ReplicatingCallStore,
+        resolve: AddrResolver,
+        clock: Clock,
+        config: PullerConfig,
+        metrics: crate::metrics::B2buaMetrics,
+    ) -> Self {
         Self {
             inner: Arc::new(SupervisorInner {
                 self_ordinal: self_ordinal.into(),
@@ -159,6 +177,7 @@ impl ReplicationSupervisor {
                 store,
                 resolve,
                 config,
+                metrics,
                 clock,
                 peers: Mutex::new(HashMap::new()),
                 reconcile: Mutex::new(None),
@@ -230,6 +249,7 @@ impl ReplicationSupervisor {
             self.inner.store.clone(),
             self.inner.config,
             start_w,
+            self.inner.metrics.clone(),
         );
         let (cancel_tx, cancel_rx) = watch::channel(false);
 

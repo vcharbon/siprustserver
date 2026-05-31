@@ -171,6 +171,8 @@ pub struct Puller {
     config: PullerConfig,
     /// Published status (current flag + watermark) the supervisor observes.
     status_tx: watch::Sender<PullerStatus>,
+    /// Replication observability (inbound apply counters + backup-held gauge).
+    metrics: crate::metrics::B2buaMetrics,
 }
 
 impl Puller {
@@ -186,6 +188,7 @@ impl Puller {
         store: ReplicatingCallStore,
         config: PullerConfig,
         start_w: Watermark,
+        metrics: crate::metrics::B2buaMetrics,
     ) -> (Self, watch::Receiver<PullerStatus>) {
         // A warm resume (W > (0,0)) needs no bootstrap — mark it complete up
         // front so readiness doesn't wait on a bootstrap that won't happen.
@@ -206,6 +209,7 @@ impl Puller {
                 store,
                 config,
                 status_tx,
+                metrics,
             },
             status_rx,
         )
@@ -621,13 +625,32 @@ impl Puller {
                             &PutOpts::default(),
                         )
                         .await;
+                    // Inbound replica admitted. `pull_applied` is the proof the
+                    // changelog→puller delivery path actually works; `backup_held`
+                    // tracks the live replica count — it grows whenever a ref NOT
+                    // previously held (`stored.is_none()`) lands in a backup
+                    // partition. We must NOT gate this on `op == Create`: the
+                    // changelog COMPACTS, so a call created then updated before the
+                    // backup drains collapses to a single `Op::Update` entry (and
+                    // the steady-state tail likewise delivers the latest state as
+                    // `Update`). Keying on the op undercounted every replica whose
+                    // first delivery was an Update — the live cluster's
+                    // `repl_backup_held = 0` despite `flush_propagated = 62`.
+                    self.metrics.bump_repl_pull_applied();
+                    if role == PartitionRole::Backup && stored.is_none() {
+                        self.metrics.inc_repl_backup_held();
+                    }
                 }
             }
             Op::Delete => {
+                let had = self.store.current_call_gen(role, &primary, call_ref).is_some();
                 let _ = self
                     .store
                     .delete_call(role, &primary, call_ref, indexes, &PutOpts::default())
                     .await;
+                if role == PartitionRole::Backup && had {
+                    self.metrics.dec_repl_backup_held();
+                }
             }
         }
     }

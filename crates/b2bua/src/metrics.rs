@@ -21,6 +21,17 @@ struct Inner {
     // cdr
     cdr_written: AtomicU64,
     cdr_dropped: AtomicU64,
+    // replication (peer-to-peer HA; separate namespace `b2bua_repl_*`). These
+    // localise an HA failure to a layer: `flush_propagated` rising on the PRIMARY
+    // proves it is attempting to replicate (the proxy cookie stamped
+    // `topology.bak`); `pull_applied` rising + `backup_held` > 0 on the BACKUP
+    // proves the replica actually arrived; `takeover_resolved`/`hydrated` prove a
+    // failed-over in-dialog request found + loaded the replica on the backup.
+    repl_flush_propagated: AtomicU64,
+    repl_pull_applied: AtomicU64,
+    repl_backup_held: AtomicU64, // gauge: replicas currently held as backup
+    repl_takeover_resolved: AtomicU64,
+    repl_takeover_hydrated: AtomicU64,
 }
 
 /// Clone-cheap handle to the B2BUA counter set.
@@ -61,6 +72,30 @@ impl B2buaMetrics {
     counter!(bump_cdr_written, cdr_written_total, cdr_written);
     counter!(bump_cdr_dropped, cdr_dropped_total, cdr_dropped);
 
+    // --- replication ---
+    counter!(bump_repl_flush_propagated, repl_flush_propagated_total, repl_flush_propagated);
+    counter!(bump_repl_pull_applied, repl_pull_applied_total, repl_pull_applied);
+    counter!(bump_repl_takeover_resolved, repl_takeover_resolved_total, repl_takeover_resolved);
+    counter!(bump_repl_takeover_hydrated, repl_takeover_hydrated_total, repl_takeover_hydrated);
+
+    /// A backup replica was admitted to a backup partition (puller applied a
+    /// `Create`). Pairs with [`dec_repl_backup_held`](Self::dec_repl_backup_held)
+    /// to track the live replica count this node holds for its peers.
+    pub fn inc_repl_backup_held(&self) {
+        self.inner.repl_backup_held.fetch_add(1, Ordering::Relaxed);
+    }
+    /// A backup replica left a backup partition (puller applied a `Delete`).
+    pub fn dec_repl_backup_held(&self) {
+        // Saturating: a Delete with no prior Create (cold) must not underflow.
+        let _ = self
+            .inner
+            .repl_backup_held
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
+    }
+    pub fn repl_backup_held(&self) -> u64 {
+        self.inner.repl_backup_held.load(Ordering::Relaxed)
+    }
+
     /// Render the counter set as Prometheus text-exposition format. Used by the
     /// runner's `/metrics` endpoint so an endurance recorder can scrape worker
     /// application metrics alongside container CPU/memory. The
@@ -84,8 +119,18 @@ impl B2buaMetrics {
         counter("b2bua_unroutable_dropped_total", "messages dropped: no route resolved", self.unroutable_dropped_total());
         counter("b2bua_cdr_written_total", "CDRs written", self.cdr_written_total());
         counter("b2bua_cdr_dropped_total", "CDRs dropped on buffer overflow", self.cdr_dropped_total());
+        // ── replication (peer-to-peer HA) — own namespace, distinct from the
+        // data-path counters above so an HA failure can be localised by layer. ──
+        counter("b2bua_repl_flush_propagated_total", "primary flushes that propagated to a backup peer (topology.bak set)", self.repl_flush_propagated_total());
+        counter("b2bua_repl_pull_applied_total", "inbound replica entries applied from a peer's changelog", self.repl_pull_applied_total());
+        counter("b2bua_repl_takeover_resolved_total", "in-dialog requests whose callRef was recovered from the replica index (acting-backup)", self.repl_takeover_resolved_total());
+        counter("b2bua_repl_takeover_hydrated_total", "calls hydrated from a backup replica to serve a failed-over request", self.repl_takeover_hydrated_total());
+
+        // Gauges last (direct writes — they end the `counter` closure's borrow).
         s.push_str("# HELP b2bua_active_calls live calls (creations - removals)\n# TYPE b2bua_active_calls gauge\n");
         s.push_str(&format!("b2bua_active_calls {active}\n"));
+        s.push_str("# HELP b2bua_repl_backup_held replicas currently held in backup partitions for peers\n# TYPE b2bua_repl_backup_held gauge\n");
+        s.push_str(&format!("b2bua_repl_backup_held {}\n", self.repl_backup_held()));
         s
     }
 }

@@ -167,6 +167,7 @@ impl B2buaCore {
                     (*setup.store).clone(),
                     setup.addr_resolver.clone(),
                     clock.clone(),
+                    metrics.clone(),
                 );
                 supervisor.start(setup.membership.clone());
 

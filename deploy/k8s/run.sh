@@ -117,15 +117,25 @@ deploy() {
   kubectl -n "$NS" rollout status statefulset/b2bua-worker --timeout=120s
 
   # Resolve worker pod IPs -> proxy's static registry (IP literals required).
+  #
+  # The worker *id* MUST be the pod name, not a synthetic w${i}: the proxy signs
+  # this id into the w_pri/w_bak stickiness cookie, the b2bua echoes w_pri into
+  # the callRef primary and w_bak into topology.bak (the changelog peer key), and
+  # each worker's B2BUA_ORDINAL / replication membership ordinal is its POD_NAME
+  # (StatefulSet pod == EndpointSlice targetRef.name). If the proxy used w0/w1
+  # while the workers key on b2bua-worker-0/1, the changelog is bumped under a
+  # peer no puller ever subscribes as (caller = pod name) → the server drains
+  # nothing → repl_pull_applied stays 0 and the backup holds no replicas, so
+  # takeover has nothing to serve. Pod-name ids make callRef ownership, the
+  # cookie, and replication membership agree by construction (see 20-worker.yaml).
   log "resolving worker pod IPs for the proxy registry"
-  local ips entries i=0
+  local ips entries
   ips="$(kubectl -n "$NS" get pods -l app=b2bua-worker \
          -o jsonpath='{range .items[*]}{.metadata.name} {.status.podIP}{"\n"}{end}' | sort)"
   entries=""
   while read -r name ip; do
     [ -z "$ip" ] && continue
-    entries="${entries:+$entries,}w${i}@${ip}:5060"
-    i=$((i+1))
+    entries="${entries:+$entries,}${name}@${ip}:5060"
   done <<< "$ips"
   [ -n "$entries" ] || die "no worker pod IPs resolved"
   export PROXY_WORKERS="$entries"

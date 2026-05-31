@@ -51,7 +51,6 @@ pub struct CallState {
     terminate_writer: BufferedTerminateWriter,
     codec: MsgpackCodec,
     self_ordinal: String,
-    #[allow(dead_code)]
     metrics: B2buaMetrics,
 }
 
@@ -143,6 +142,10 @@ impl CallState {
         }
         Self::reindex(&mut inner, &call);
         inner.calls.insert(call_ref.to_string(), call.clone());
+        drop(inner);
+        // A failed-over in-dialog request just loaded its dialog from a backup
+        // replica — the acting-backup takeover actually fired.
+        self.metrics.bump_repl_takeover_hydrated();
         Some(call)
     }
 
@@ -254,6 +257,13 @@ impl CallState {
             .map(|t| t.gen)
             .unwrap_or(0);
         let (role, primary, opts) = self.store_target(&call.call_ref);
+        // Observability: a propagating flush is one whose call carries a backup
+        // peer (topology.bak from the proxy cookie). Rising on the PRIMARY proves
+        // the b2bua is attempting replication — distinguishing a cookie/topology
+        // gap (stays 0) from a downstream changelog/puller delivery gap.
+        if self.backup_of(&call.call_ref).is_some() {
+            self.metrics.bump_repl_flush_propagated();
+        }
         self.terminate_writer.submit_put(
             role,
             primary,
@@ -298,10 +308,15 @@ impl CallState {
         let repl = self.repl_store.as_ref()?;
         if !tag.is_empty() {
             if let Ok(Some(r)) = repl.get_index(&format!("leg:{call_id}|{tag}")).await {
+                self.metrics.bump_repl_takeover_resolved();
                 return Some(r);
             }
         }
-        repl.get_index(&format!("leg:{call_id}")).await.ok().flatten()
+        let hit = repl.get_index(&format!("leg:{call_id}")).await.ok().flatten();
+        if hit.is_some() {
+            self.metrics.bump_repl_takeover_resolved();
+        }
+        hit
     }
 
     /// Acquire the per-callRef serialization lock (held across a handler run).
