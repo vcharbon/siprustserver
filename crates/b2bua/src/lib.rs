@@ -27,13 +27,14 @@ pub mod event;
 pub mod initial_invite;
 pub mod limiter;
 pub mod metrics;
+pub mod repl;
 pub mod router;
 pub mod rules;
 pub mod stack_identity;
 pub mod store;
 pub mod timers;
 
-pub use b2bua_core::{B2buaCore, B2buaDeps};
+pub use b2bua_core::{B2buaCore, B2buaDeps, ReplicationSetup};
 
 pub use config::B2buaConfig;
 pub use effects::{HandlerEffects, HandlerResult};

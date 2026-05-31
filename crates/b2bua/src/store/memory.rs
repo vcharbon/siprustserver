@@ -5,7 +5,7 @@
 //! transport lands, a replicating impl honours them with no caller changes.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -13,7 +13,10 @@ use super::call_store::{CallStore, PartitionRole, PutOpts, StoreError};
 
 #[derive(Default)]
 struct Inner {
-    bodies: HashMap<String, Vec<u8>>,
+    /// Encoded bodies as immutable shared slices: a rewrite REPLACES the `Arc`
+    /// (never mutates in place), so an in-flight drain holding an older clone is
+    /// safe (Decision 9 / ADR-0011 X8 immutable-shared-body invariant).
+    bodies: HashMap<String, Arc<[u8]>>,
     indexes: HashMap<String, String>,
 }
 
@@ -41,8 +44,9 @@ impl CallStore for InMemoryCallStore {
         role: PartitionRole,
         primary: &str,
         call_ref: &str,
-    ) -> Result<Option<Vec<u8>>, StoreError> {
+    ) -> Result<Option<Arc<[u8]>>, StoreError> {
         let inner = self.inner.lock().unwrap();
+        // `Arc` clone == refcount bump, no byte copy.
         Ok(inner.bodies.get(&Self::body_key(role, primary, call_ref)).cloned())
     }
 
@@ -58,7 +62,10 @@ impl CallStore for InMemoryCallStore {
         _opts: &PutOpts,
     ) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().unwrap();
-        inner.bodies.insert(Self::body_key(role, primary, call_ref), body);
+        // Wrap the owned encoded bytes in an `Arc` once, here.
+        inner
+            .bodies
+            .insert(Self::body_key(role, primary, call_ref), Arc::from(body));
         for idx in indexes {
             inner.indexes.insert(format!("idx:{idx}"), call_ref.to_string());
         }
@@ -110,7 +117,7 @@ impl CallStore for InMemoryCallStore {
             .bodies
             .iter()
             .filter(|(k, _)| k.starts_with(&prefix))
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.to_vec())
             .collect())
     }
 }

@@ -8,10 +8,10 @@
 use std::net::SocketAddr;
 
 use call::{
-    ALegInviteSnapshot, Call, CallModelState, CdrEvent, CdrEventType, Leg, LegDisposition, LegKind,
-    LegState, RemoteInfo,
+    ALegInviteSnapshot, Call, CallModelState, CallTopology, CdrEvent, CdrEventType, Leg,
+    LegDisposition, LegKind, LegState, RemoteInfo,
 };
-use sip_message::message_helpers::{get_header, get_headers};
+use sip_message::message_helpers::{get_header, get_headers, parse_uri_params};
 use sip_message::SipRequest;
 use sip_txn::IdGen;
 
@@ -27,6 +27,38 @@ const STANDARD_HEADERS: &[&str] = &[
     "from", "to", "via", "contact", "content-type", "call-id", "cseq", "max-forwards",
     "content-length",
 ];
+
+/// Derive the HA [`CallTopology`] from the proxy's stickiness cookie, carried as
+/// URI params on the **topmost Record-Route** the front proxy inserted
+/// (`w_pri`/`w_bak`/`e`/`v`/`kid`/`sig`; see `sip-proxy` `load_balancer.rs` /
+/// `build_record_route_value`). The b2bua reads `w_pri`/`w_bak` so the backup
+/// peer AGREES with the proxy's rendezvous (HRW 2nd-best) choice by construction
+/// rather than re-deriving it (the proxy keys HRW off the alive-set + Call-ID the
+/// b2bua cannot reproduce locally — see [`crate::repl::replication_target`]).
+///
+/// - Cookie present → `Some(CallTopology { pri: w_pri (or self_ordinal if the
+///   param is absent/empty), bak: w_bak (may be empty), gen: 1 })`. A brand-new
+///   call starts at `gen = 1`; the b2bua's update path bumps it per mutation (see
+///   [`crate::store::CallState::update`]).
+/// - No cookie (non-proxied / legacy INVITE) → `None`: the flush path then stays
+///   non-replicating (`PutOpts::default()`), preserving today's behaviour.
+fn topology_from_cookie(invite: &SipRequest, self_ordinal: &str) -> Option<CallTopology> {
+    // The topmost Record-Route is the LAST proxy to add one on the request path
+    // (proxies prepend), i.e. the FIRST Record-Route header here.
+    let rr = get_header(&invite.headers, "record-route")?;
+    let params = parse_uri_params(rr);
+    // Treat it as a cookie only if it actually carries the stickiness grammar.
+    if !params.contains_key("w_pri") && !params.contains_key("w_bak") {
+        return None;
+    }
+    let pri = params
+        .get("w_pri")
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_else(|| self_ordinal.to_string());
+    let bak = params.get("w_bak").cloned().unwrap_or_default();
+    Some(CallTopology { pri, bak, gen: 1 })
+}
 
 /// Build the initial [`Call`] (a-leg only) from an inbound INVITE. Pure.
 pub fn build_initial_call(
@@ -61,6 +93,7 @@ pub fn build_initial_call(
         kind: Some(LegKind::A),
         adopted: Some(false),
     };
+    let topology = topology_from_cookie(invite, &config.self_ordinal);
     let a_leg_invite = ALegInviteSnapshot {
         uri: invite.uri.clone(),
         headers: invite
@@ -99,7 +132,7 @@ pub fn build_initial_call(
         root_span_id: None,
         sampled: None,
         worker_index: None,
-        topology: None,
+        topology,
         emergency: None,
         features: None,
         policy_update_headers: None,

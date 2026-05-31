@@ -17,6 +17,15 @@ use scenario_harness::Harness;
 use sip_clock::Clock;
 use sip_txn::IdGen;
 
+mod failover;
+
+pub use failover::{FailoverHarness, ProxySut, ReplicatedB2buaSut};
+
+// Re-export the engine value types the failover tests touch so a consumer needs
+// only this crate (+ scenario-harness) for the canonical scenario.
+pub use b2bua::store::PartitionRole;
+pub use sip_proxy::registry::WorkerHealth;
+
 /// A running B2BUA bound on the harness fabric. Keep it alive for the duration
 /// of the scenario (drop tears the worker tasks down with the endpoint).
 pub struct B2buaSut {
@@ -65,6 +74,7 @@ impl B2buaSut {
             store: Arc::new(InMemoryCallStore::new()),
             clock: Clock::test_at(0),
             id_gen: Arc::new(IdGen::seeded(0xB2B0)),
+            replication: None,
         };
         let core = B2buaCore::spawn(endpoint, deps);
         let metrics = core.metrics().clone();

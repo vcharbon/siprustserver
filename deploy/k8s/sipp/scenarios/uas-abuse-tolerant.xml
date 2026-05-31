@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!--
+  Abuse-UAS tolerant scenario. Receives ALL b-leg traffic from the
+  abuse stream (call-control mock routes Call-ID prefix `abuse-` here)
+  and stays cooperative no matter what the UAC throws at it:
+    - re-INVITE: answers 200 OK and re-enters the wait loop
+    - in-dialog OPTIONS: answers 200 OK and re-enters the wait loop
+    - silent UAC (ghost): waits at the terminator label until sipp's
+      -recv_timeout fires (configured by the harness to 16 min)
+    - BYE: answers 200 OK and exits cleanly
+  This pod must never crash, throttle, or emit ERR; the whole point of
+  isolating it from the standard sipp-uas is so abuse can't impact
+  real-call success rates via shared infrastructure.
+-->
+<scenario name="K8s UAS abuse-tolerant — answers INVITE/re-INVITE/OPTIONS/BYE forever">
+  <recv request="INVITE" crlf="true"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 100 Trying
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+    ]]>
+  </send>
+  <send>
+    <![CDATA[
+      SIP/2.0 180 Ringing
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:];tag=[pid]SIPpTag01[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <send retrans="500">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:];tag=[pid]SIPpTag01[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=user1 53655765 2353687637 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+  <recv request="ACK" rtd="true" crlf="true" optional="true"/>
+
+  <label id="wait_terminator"/>
+  <!-- Tolerant of arbitrary in-dialog traffic: re-INVITE / OPTIONS /
+       BYE. Order of <recv optional> entries matters: BYE is the only
+       non-optional terminator, so it sits last. -->
+  <recv request="OPTIONS" optional="true" crlf="true" next="answer_options"/>
+  <recv request="INVITE" optional="true" crlf="true" next="answer_reinvite"/>
+  <recv request="INFO" optional="true" crlf="true" next="answer_info"/>
+  <recv request="UPDATE" optional="true" crlf="true" next="answer_update"/>
+  <recv request="BYE" crlf="true"/>
+  <nop next="answer_bye"/>
+
+  <label id="answer_options"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop next="wait_terminator"/>
+
+  <label id="answer_reinvite"/>
+  <!-- Send 200 then return immediately to the wait loop. ACK is NOT
+       explicitly recv'd here: sipp does not allow `<recv optional>`
+       directly before `<nop>` (element 19 / "Please remove one
+       optional=true"). The next iteration of the wait_terminator
+       optional-recv sequence will absorb the in-dialog ACK or
+       any subsequent request. -->
+  <send retrans="500">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=user1 53655765 2353687637 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+  <nop next="wait_terminator"/>
+
+  <label id="answer_info"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop next="wait_terminator"/>
+
+  <label id="answer_update"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop next="wait_terminator"/>
+
+  <label id="answer_bye"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+    ]]>
+  </send>
+</scenario>

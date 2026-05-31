@@ -1,0 +1,18 @@
+[package]
+name = "ha-harness"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Goal-1 pure-HA-framework test harness (ADR-0011 X10 / plan Decision 7): N in-process replication-subsystem nodes under a paused clock, with put/delete/crash/reboot/partition drivers, convergence assertions, and a recording-first replication-exchange report. No SIP / router / rules — it packages the b2bua repl engine (crates/b2bua/src/repl) into a reusable cluster harness. Carries no production code."
+
+[dependencies]
+b2bua = { path = "../b2bua" }
+repl-net = { path = "../repl-net" }
+topology = { path = "../topology" }
+sip-clock = { path = "../sip-clock", features = ["testkit"] }
+call = { path = "../call" }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

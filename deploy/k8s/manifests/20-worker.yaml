@@ -1,7 +1,19 @@
 # B2BUA worker pool. A StatefulSet (not Deployment) so each worker has a stable
 # ordinal (b2bua-worker-0, -1, ...) used as B2BUA_ORDINAL (encoded into callRef
-# for the proxy's partition routing). Routes every call to the sipp-uas Service
-# (B2BUA_DEST resolves DNS at startup). Pinned to tier=app like the sipjs worker.
+# for the proxy's partition routing AND matched against the membership ordinal
+# the K8sMembership informer derives from each EndpointSlice's targetRef.name —
+# so callRef ownership and replication membership agree by construction). Routes
+# every call to the sipp-uas Service (B2BUA_DEST resolves DNS at startup).
+# Pinned to tier=app like the sipjs worker.
+#
+# HA replication (S11) is opt-in via ${REPL_ENABLE} (default "0" for the plain
+# load runner; the chaos suite sets "1"). When on, each worker:
+#   - serves its changelog on the repl TCP port (B2BUA_REPL_LISTEN);
+#   - discovers peers by watching the headless b2bua-worker Service's
+#     EndpointSlices (needs the 15-worker-rbac ServiceAccount/Role);
+#   - reaches every peer at peer-pod-IP:${REPL_PORT};
+#   - reports NotReady via /ready until re-hydrated + backup-current, and
+#     Draining on SIGTERM (terminationGracePeriodSeconds gives drain headroom).
 #
 # Image: ${SUT_IMAGE} (default siprustserver:dev), command = b2bua-runner.
 apiVersion: apps/v1
@@ -21,8 +33,11 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9091"
     spec:
+      serviceAccountName: b2bua-worker
       nodeSelector: { tier: app }
-      terminationGracePeriodSeconds: 20
+      # Drain grace: SIGTERM latches Draining (OPTIONS 503 + /ready NotReady),
+      # the runner waits B2BUA_DRAIN_GRACE_MS, then exits. Keep this > grace.
+      terminationGracePeriodSeconds: 30
       containers:
         - name: b2bua-worker
           image: ${SUT_IMAGE}
@@ -31,24 +46,43 @@ spec:
           env:
             - name: POD_NAME
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
             - { name: B2BUA_LISTEN,  value: "0.0.0.0:5060" }
             - { name: B2BUA_DEST,    value: "sipp-uas.sip-test.svc.cluster.local:5060" }
             - { name: B2BUA_METRICS, value: "0.0.0.0:9091" }
-            # Ordinal = pod name (stable per StatefulSet replica).
+            # Ordinal = pod name (stable per StatefulSet replica == membership ordinal).
             - { name: B2BUA_ORDINAL, value: "$(POD_NAME)" }
+            # --- replication (opt-in) ---
+            - { name: B2BUA_REPL,           value: "${REPL_ENABLE}" }
+            - { name: B2BUA_REPL_LISTEN,    value: "0.0.0.0:${REPL_PORT}" }
+            - { name: B2BUA_REPL_PORT,      value: "${REPL_PORT}" }
+            - { name: B2BUA_REPL_SERVICE,   value: "b2bua-worker" }
+            - { name: B2BUA_DRAIN_GRACE_MS, value: "5000" }
           ports:
             - { name: sip,     containerPort: 5060, protocol: UDP }
             - { name: metrics, containerPort: 9091, protocol: TCP }
+            - name: repl
+              containerPort: ${REPL_PORT}
+              protocol: TCP
+          # Readiness reflects replication state: /ready returns 503 while the
+          # worker is re-hydrating or draining, so the EndpointSlice the proxy
+          # (and peers) watch drops it from the ready set — k8s respects
+          # NotReady/Draining exactly as the worker's OPTIONS self-report does.
           readinessProbe:
-            tcpSocket: { port: 9091 }
+            httpGet: { path: /ready, port: 9091 }
             initialDelaySeconds: 1
             periodSeconds: 2
+            failureThreshold: 2
           resources:
             requests: { cpu: "250m", memory: "64Mi" }
             limits:   { memory: "512Mi" }
 ---
 # Headless service: gives each worker stable DNS (b2bua-worker-0.b2bua-worker...)
-# and lets run.sh enumerate the pool's pod IPs for the proxy's static registry.
+# and — crucially for replication — is the Service whose EndpointSlices the
+# K8sMembership informer watches to discover the peer set. Exposes the repl port
+# so peers can connect. `publishNotReadyAddresses: false` (the default) means a
+# NotReady/draining worker drops out of the slice, which is what gates routing.
 apiVersion: v1
 kind: Service
 metadata:
@@ -60,3 +94,7 @@ spec:
   ports:
     - { name: sip,     port: 5060, targetPort: 5060, protocol: UDP }
     - { name: metrics, port: 9091, targetPort: 9091, protocol: TCP }
+    - name: repl
+      port: ${REPL_PORT}
+      targetPort: ${REPL_PORT}
+      protocol: TCP

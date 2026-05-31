@@ -14,8 +14,13 @@ sip-net = { path = "../sip-net" }
 sip-txn = { path = "../sip-txn" }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
 scenario-harness = { path = "../scenario-harness" }
+# S10b failover harness: the proxy SUT (real LoadBalancer), the replication
+# fabric/membership, and the S9 replication-exchange report renderer.
+sip-proxy = { path = "../sip-proxy" }
+repl-net = { path = "../repl-net" }
+topology = { path = "../topology" }
+ha-harness = { path = "../ha-harness" }
 tokio = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-sip-proxy = { path = "../sip-proxy" }

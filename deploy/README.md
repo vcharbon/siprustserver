@@ -20,9 +20,13 @@ sipp UAC ──INVITE──▶ sip-front-proxy ──INVITE──▶ b2bua-worke
 | `b2bua-runner` | `crates/b2bua-runner` | Real UDP transport · system clock · `BufferedCdrWriter` over a discarding sink (no endurance leak) · `InMemoryCallStore` · `NoopLimiter` · `ScriptedDecisionEngine` routing all calls to the UAS · Prometheus `/metrics` |
 
 Both are configured entirely by env vars (see the module docs at the top of each
-`main.rs`). Deferred per ADR-0009/0010 and **not** wired here: the HTTP
-call-control decision adapter, the real sliding-window limiter, HA/Redis call
-replication, the real proxy self-gate, the AIMD per-worker bucket, proxy VIP/HA.
+`main.rs`). **HA call replication is now wirable** in `b2bua-runner` (opt-in via
+`B2BUA_REPL=1`: real TCP repl transport + `K8sMembership` EndpointSlice
+discovery + SIGTERM drain + `/ready` probe — ADR-0011 / the chaos suite below).
+Still deferred per ADR-0009/0010 and **not** wired here: the HTTP call-control
+decision adapter, the real sliding-window limiter, the real proxy self-gate, the
+AIMD per-worker bucket, proxy VIP/HA, and the proxy's own k8s registry (it still
+takes IP literals via `PROXY_WORKERS`).
 
 ### Image
 
@@ -49,20 +53,51 @@ Each cap prints per-pod CPU% and RSS(MB) (sampled from `/proc/1` via
 `kubectl exec`, so no metrics-server needed). App metrics:
 `kubectl -n sip-test port-forward deploy/sip-front-proxy 9090 & curl localhost:9090/metrics`.
 
-## Sharing with sipjsserver (the "best way")
+## HA replication chaos suite — `deploy/k8s/chaos.sh`
 
-This runner is **independent** (its own bash + manifests) but **shares the two
-pieces that must stay identical** with sipjsserver, via relative symlinks
-(assumes both repos are sibling checkouts under the same parent):
+Goal-3 (S11) acceptance: the **real-clock, real-TCP, real-k8s** test of
+peer-to-peer call replication (ADR-0011). It stands up the stack with
+replication **on** (`REPL_ENABLE=1`, ≥2 workers), drives long-hold dialogs, then
+kills the worker holding a dialog mid-call and asserts the dialog **survives**
+(the in-dialog BYE lands on the backup worker that holds the replica).
 
-| Shared artifact | Symlink | Why shared |
+```bash
+cd deploy/k8s
+./chaos.sh failover     # up + deploy(repl) + hold-failover under pod kill + assert
+./chaos.sh up           # just cluster + images (repl)
+./chaos.sh kill         # inject one worker kill against a running stack
+./chaos.sh down
+# knobs: CALLS=30 CPS=3 KILL_TARGET=b2bua-worker-0 PASS_THRESHOLD=90 KEEP=1
+```
+
+It is a **shell script, not a `cargo test`** — real kind clusters + image builds
+are slow and WSL2-flaky, so it must never gate `cargo test --workspace`. The
+delta-translation logic it exercises *is* unit-tested fast (`cargo test -p
+topology --features kube`); chaos.sh is the end-to-end signal you run on demand.
+
+When `REPL_ENABLE=1`, each worker discovers peers via the **K8sMembership**
+EndpointSlice informer (RBAC in `manifests/15-worker-rbac.yaml`), serves its
+changelog on the repl TCP port, reports `NotReady` via `/ready` until
+re-hydrated, and `Draining` on SIGTERM. See `deploy/k8s/manifests/20-worker.yaml`
+and the b2bua-runner module docs for the env grammar
+(`B2BUA_REPL*`/`B2BUA_PEERS`).
+
+## Sharing with sipjsserver (vendored, divergeable)
+
+This runner is **independent** (its own bash + manifests). As of S11 the two
+pieces it used to **symlink** from a sibling `sipjsserver` checkout are now
+**vendored copies** in-tree, so the runner stands alone and the artifacts may
+diverge (the chaos/endurance scenarios especially):
+
+| Artifact | Location (was a symlink) | Note |
 |---|---|---|
-| Cluster topology | `deploy/k8s/cluster.yaml` → `sipjsserver/tests/k8s/cluster.yaml` | Same node tiers + the load-node port mapping; **same cluster name `sip-e2e`** |
-| SIPp scenarios | `deploy/k8s/scenarios` → `sipjsserver/tests/k8s/charts/sipp/scenarios` | Identical call flows ⇒ comparable results across SUTs |
-| SIPp image | built in `run.sh` from `sipjsserver/.../charts/sipp` | One `sipp:dev` driver for both |
+| Cluster topology | `deploy/k8s/cluster.yaml` | Copied from `sipjsserver/tests/k8s/cluster.yaml`; **same cluster name `sip-e2e`** (WSL one-cluster switch) |
+| SIPp scenarios | `deploy/k8s/sipp/scenarios/` | Copied from the sipjs sipp chart; free to diverge |
+| SIPp image | built in `run.sh` from `deploy/k8s/sipp/Dockerfile` | One `sipp:dev` driver, built from the vendored context |
 
-Everything SUT-specific (image build, worker/proxy manifests, env, metrics ports)
-lives here in `siprustserver` and never touches the Node repo.
+To still compare Node vs Rust head-to-head, keep the *scenarios* byte-identical
+where you want comparable results; everything else is SUT-specific and lives
+here.
 
 ### WSL one-cluster constraint
 

@@ -1,0 +1,31 @@
+[package]
+name = "repl-net"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "HA replication wire layer (slice S2): the five positional-msgpack replication frames + single-frame codec + 4-byte length-prefix framing. Call-agnostic — bodies are opaque bytes. The transport seam itself is slice S3. See ADR-0011 X9 / docs/plan/on-proper-migration-of-lazy-pancake.md."
+
+[dependencies]
+# Low-level msgpack: hand-write array_len + per-element writes for exact
+# positional control of the [tag, ...] frame layout (ADR-0008 ethos). A
+# serde-derived enum would not produce clean tag-led arrays.
+rmp = { workspace = true }
+thiserror = { workspace = true }
+# Transport seam (S3): tokio for the sim fabric's spawned-sleep delivery +
+# bounded mpsc channels (sync), the real TCP impl (net, io-util), and the
+# runtime/macros the impls + tests ride. `tokio::time::pause`/`advance` drives
+# sim delivery under the paused-clock tests exactly like sip-net's fabric.
+tokio = { workspace = true }
+async-trait = { workspace = true }
+# Recording timestamps come from the injected wall-clock seam.
+sip-clock = { path = "../sip-clock" }
+
+[dev-dependencies]
+proptest = { workspace = true }
+# The error-path tests hand-build malformed msgpack arrays directly.
+rmp = { workspace = true }
+# Paused-time test harness (`#[tokio::test(start_paused = true)]` +
+# `advance_in_100ms_chunks`); real-TCP tests use a non-paused runtime.
+tokio = { workspace = true }
+sip-clock = { path = "../sip-clock", features = ["testkit"] }

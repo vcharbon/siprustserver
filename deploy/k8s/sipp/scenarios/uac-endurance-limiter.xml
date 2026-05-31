@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!--
+  Endurance limiter probe — INVITE with X-Api-Call call_limiter
+  directive. 10s hold then BYE. Offered concurrency (sipp CPS x 10s)
+  exceeds the cap so a healthy system pins steady-state in-flight at
+  the cap; the analyzer reads the shared limiter Redis to verify
+  convergence.
+
+  IMPORTANT: the X-Api-Call value contains `[`/`]` (the JSON array
+  for `call_limiter`). Sipp 3.6 parses any `[...]` in CDATA as a
+  built-in keyword reference and rejects the JSON ("Unsupported
+  keyword '{...}'"). The workaround is sipp's `-key keyword value`
+  CLI flag: the substitution is single-pass, so the value's brackets
+  are NOT re-parsed. The orchestrator passes
+  `-key xapi '{...full JSON...}'`; here we just reference `[xapi]`.
+
+  Limiter id is fixed at `endurance-probe`; cap defaults to 10 in the
+  JSON the orchestrator constructs.
+-->
+<scenario name="K8s UAC endurance limiter probe — INVITE / 10s hold / BYE with limiter cap">
+
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: sut <sip:[service]@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Max-Forwards: 70
+      Subject: K8s endurance limiter probe
+      Resource-Priority: esnet.0
+      X-Api-Call: [xapi]
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=user1 53655765 2353687637 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="200" rtd="true" rrs="true"/>
+
+  <send>
+    <![CDATA[
+      ACK [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: sut <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <pause milliseconds="10000"/>
+
+  <send retrans="500">
+    <![CDATA[
+      BYE [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: sut <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 2 BYE
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <recv response="200" crlf="true"/>
+
+  <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
+  <CallLengthRepartition value="100, 1000, 10000, 15000"/>
+</scenario>

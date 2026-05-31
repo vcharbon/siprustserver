@@ -7,7 +7,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::Direction;
+use call::{CallModelState, Direction};
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::message_helpers::parse_uri_params;
@@ -27,6 +27,7 @@ use crate::event::CallEvent;
 use crate::initial_invite::{build_initial_call, handle_initial_invite};
 use crate::limiter::CallLimiter;
 use crate::metrics::B2buaMetrics;
+use crate::repl::{Readiness, ReadinessState};
 use crate::rules::{execute_rules, ActionExecutor, RuleContext, RuleDefinition};
 use crate::store::CallState;
 use crate::timers::TimerService;
@@ -45,6 +46,9 @@ pub struct RouterCtx {
     pub clock: Clock,
     pub rules: Arc<Vec<RuleDefinition>>,
     pub metrics: B2buaMetrics,
+    /// Self-reported readiness driving the OPTIONS health responder (S7). The
+    /// default/legacy path uses [`Readiness::always_ready`] → always 200.
+    pub readiness: Readiness,
 }
 
 /// How an event resolves to a call + the leg it arrived on.
@@ -77,22 +81,13 @@ pub async fn run(
 }
 
 async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
-    // Out-of-dialog OPTIONS keepalive: answer 200 inline (drain/health deferred).
+    // Out-of-dialog OPTIONS keepalive: self-report readiness (S7, ADR-0011 X6).
+    // The front proxy probe keys on the status + Reason header text
+    // (`sip-proxy::health::probe::classify_503`).
     if let CallEvent::Sip { message, src } = &event {
         if let SipMessage::Request(req) = message.as_ref() {
             if req.method.eq_ignore_ascii_case("OPTIONS") && req.to.tag.is_none() {
-                // A 2xx to an out-of-dialog OPTIONS still needs a To-tag
-                // (RFC 3261 §8.2.6.2 / §12.1.1); omitting it makes
-                // `hydrate_response` reject the message. Mint a local tag.
-                let resp = generate_response(
-                    req,
-                    200,
-                    "OK",
-                    &GenerateResponseOpts {
-                        to_tag: Some(ctx.id_gen.new_tag()),
-                        ..Default::default()
-                    },
-                );
+                let resp = build_options_health_response(&ctx.readiness, &ctx.id_gen, req);
                 ctx.txn.send_response(resp, *src).await;
                 return;
             }
@@ -117,6 +112,57 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     );
 }
 
+/// Build the self-reported readiness reply to an out-of-dialog OPTIONS
+/// keepalive (S7). Every reply mints a local To-tag: RFC 3261 §8.2.6.2 requires
+/// a To-tag on any response > 100 to an out-of-dialog request (the 2xx path
+/// always did; the 503 path needs it too, and `hydrate_response` rejects a
+/// tagless response otherwise). The status + `Reason` header text is the
+/// contract `sip-proxy::health::probe::classify_503` keys on:
+///   - `Ready`    → `200 OK`.
+///   - `NotReady` → `503` + `Reason: SIP;cause=503;text="not-ready"`.
+///   - `Draining` → `503` + `Reason: SIP;cause=503;text="draining"` +
+///     `Retry-After: 0`.
+pub(crate) fn build_options_health_response(
+    readiness: &Readiness,
+    id_gen: &IdGen,
+    req: &sip_message::SipRequest,
+) -> sip_message::SipResponse {
+    use sip_message::types::SipHeader;
+
+    let hdr = |name: &str, value: &str| SipHeader {
+        name: name.to_string(),
+        value: value.to_string(),
+    };
+
+    let (status, reason, extra_headers): (u16, &str, Vec<SipHeader>) = match readiness.state() {
+        ReadinessState::Ready => (200, "OK", Vec::new()),
+        ReadinessState::NotReady => (
+            503,
+            "Service Unavailable",
+            vec![hdr("Reason", "SIP;cause=503;text=\"not-ready\"")],
+        ),
+        ReadinessState::Draining => (
+            503,
+            "Service Unavailable",
+            vec![
+                hdr("Reason", "SIP;cause=503;text=\"draining\""),
+                hdr("Retry-After", "0"),
+            ],
+        ),
+    };
+
+    generate_response(
+        req,
+        status,
+        reason,
+        &GenerateResponseOpts {
+            to_tag: Some(id_gen.new_tag()),
+            extra_headers,
+            ..Default::default()
+        },
+    )
+}
+
 /// Resolve the `callRef` + source leg for an event (synchronous, no blocking).
 fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
     match event {
@@ -136,13 +182,19 @@ fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                     };
                 }
                 // In-dialog request: read our cr/lg from the Request-URI params.
+                // NB `parse_uri_params` lower-cases param NAMES (URI params are
+                // case-insensitive per RFC 3261 §19.1.1), so the stamped `callRef`
+                // is keyed as `callref`. The primary path masks a mismatch via the
+                // in-memory `sip_index` fallback below; the acting-backup takeover
+                // path has no such index, so the param IS the only key — read it by
+                // its normalised (lower-case) name.
                 let params = parse_uri_params(&req.uri);
                 let leg = params
                     .get("leg")
                     .map(|v| crate::stack_identity::decode_param(v))
                     .unwrap_or_else(|| "a".into());
                 let call_ref = params
-                    .get("callRef")
+                    .get("callref")
                     .map(|v| crate::stack_identity::decode_param(v))
                     .or_else(|| {
                         ctx.state.resolve_from_sip_key_sync(
@@ -245,7 +297,11 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
             handle_initial_invite(call.clone(), ctx.decision.as_ref(), ctx.limiter.as_ref(), &ctx.config, &ctx.id_gen, now_ms).await;
         crate::rules::invariants::enforce(&call, crate::rules::invariants::finalize(result))
     } else {
-        let call = match ctx.state.peek(&call_ref) {
+        // In-dialog: peek the in-memory map, falling back to the acting-backup
+        // takeover read-path (S10b) — hydrate the call from the replica store's
+        // backup partition when the primary crashed and the proxy failed this
+        // dialog over to us. A genuine orphan (no replica) still rejects.
+        let call = match ctx.state.hydrate_from_replica(&call_ref).await {
             Some(c) => c,
             None => {
                 maybe_reject_orphan(ctx, &event).await;
@@ -297,6 +353,25 @@ async fn maybe_reject_orphan(ctx: &RouterCtx, event: &CallEvent) {
 async fn process_result(ctx: &RouterCtx, call_ref: &str, result: HandlerResult, now_ms: i64) {
     // Persist first (the source's invariant: state lands before effects run).
     ctx.state.update(result.call.clone());
+
+    // Replicate an active, backed-up call to its peer after each authoritative
+    // mutation (the S10 flush-on-mutation wiring point — `replication.rs` defers
+    // sourcing the backup peer to S10, which the cookie-stamped `topology.bak`
+    // now provides). `CallState::flush` is a no-op for calls with no replicable
+    // topology, so the non-HA path is unchanged; for a backed-up call it routes
+    // through the S8 write-side policy (Forward when primary, Reverse when
+    // acting-backup) so the backup holds the latest `call_gen`. The flush rides
+    // the buffered terminate-writer (non-blocking). Terminated calls take the
+    // `remove` path instead (propagates a delete), so gate on the active state.
+    if result.call.state == CallModelState::Active
+        && result
+            .call
+            .topology
+            .as_ref()
+            .is_some_and(|t| !t.bak.is_empty())
+    {
+        ctx.state.flush(&result.call);
+    }
 
     for eff in &result.effects.critical {
         match eff {

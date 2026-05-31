@@ -18,6 +18,8 @@ sip-message = { path = "../sip-message" }
 sip-net = { path = "../sip-net" }
 sip-txn = { path = "../sip-txn" }
 sip-clock = { path = "../sip-clock" }
+repl-net = { path = "../repl-net" }
+topology = { path = "../topology" }
 
 [dev-dependencies]
 # Paused-clock lever for timer tests (tokio::time::pause/advance).

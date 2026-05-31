@@ -7,13 +7,32 @@
 //! On expiry the driver emits a [`CallEvent::Timer`] on its fire channel; the
 //! router selects on that channel and routes it through the per-call dispatcher
 //! exactly like an inbound message — so timer handling shares the per-call FIFO.
+//!
+//! ## Cancellation is logical (epoch/tombstone), never by `DelayQueue` `Key`
+//!
+//! A `DelayQueue` `Key` is a bare slab index with no generation stamp: when an
+//! entry expires or is removed, its slot is freed and the **next insert reuses
+//! it, yielding the same `Key` value**. A side `id → Key` map therefore aliases
+//! the moment any cleanup is missed, and `try_remove(stale_key)` then evicts
+//! whatever *live* timer now occupies that slot — a silent, catastrophic
+//! wrong-timer cancel (this is the bug where a keepalive-timeout cancel killed
+//! the rescheduled keepalive). See `[[test-time clock & timers]]` in CLAUDE.md.
+//!
+//! So we do **not** keep `Key`s and never call `try_remove`. Each scheduled
+//! timer carries a monotonic `epoch`; the live epoch per id lives in `active`.
+//! Cancel/CancelAll are pure map removals; a re-`Schedule` just bumps the epoch.
+//! On expiry a `Fired` is delivered only if its epoch still matches `active`,
+//! else it is a tombstone (superseded/cancelled) and dropped. Correctness rests
+//! on a single invariant — `active[id] == fired.epoch` — with no `Key` to alias.
+//! Cost: a cancelled/rescheduled entry lingers in the queue until its original
+//! deadline, then drops harmlessly. Bounded and short-lived for SIP timers.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use sip_clock::Clock;
 use tokio::sync::mpsc;
-use tokio_util::time::{delay_queue::Key, DelayQueue};
+use tokio_util::time::DelayQueue;
 
 use call::{TimerEntry, TimerType};
 
@@ -21,6 +40,7 @@ use crate::event::CallEvent;
 
 struct Fired {
     id: String,
+    epoch: u64,
     timer_type: TimerType,
     call_ref: String,
     leg_id: Option<String>,
@@ -75,8 +95,12 @@ async fn driver(
     fire_tx: mpsc::Sender<CallEvent>,
 ) {
     let mut queue: DelayQueue<Fired> = DelayQueue::new();
-    let mut keys: HashMap<String, Key> = HashMap::new();
+    // The live epoch per timer id. An id absent from `active` is cancelled; an
+    // id whose epoch differs from a fired entry's was rescheduled (the old
+    // entry is a tombstone). `by_call` indexes ids for `CancelAll`.
+    let mut active: HashMap<String, u64> = HashMap::new();
     let mut by_call: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut next_epoch: u64 = 0;
 
     loop {
         tokio::select! {
@@ -84,46 +108,48 @@ async fn driver(
             cmd = cmd_rx.recv() => match cmd {
                 None => break, // all handles dropped
                 Some(TimerCmd::Schedule { entry, call_ref }) => {
-                    // Replace any existing timer with the same id (idempotent re-arm).
-                    if let Some(old) = keys.remove(&entry.id) {
-                        queue.try_remove(&old);
-                    }
+                    // Re-arm = bump the epoch; the previous queue entry (if any)
+                    // becomes a tombstone and is filtered when it expires. No
+                    // `try_remove`, so no `Key` aliasing is possible.
+                    next_epoch += 1;
+                    let epoch = next_epoch;
+                    active.insert(entry.id.clone(), epoch);
+                    by_call.entry(call_ref.clone()).or_default().insert(entry.id.clone());
                     let delay = (entry.fire_at - clock.now_ms()).max(0) as u64;
-                    let key = queue.insert(
+                    queue.insert(
                         Fired {
-                            id: entry.id.clone(),
+                            id: entry.id,
+                            epoch,
                             timer_type: entry.timer_type,
-                            call_ref: call_ref.clone(),
-                            leg_id: entry.leg_id.clone(),
+                            call_ref,
+                            leg_id: entry.leg_id,
                         },
                         Duration::from_millis(delay),
                     );
-                    keys.insert(entry.id.clone(), key);
-                    by_call.entry(call_ref).or_default().insert(entry.id);
                 }
                 Some(TimerCmd::Cancel { id }) => {
-                    if let Some(key) = keys.remove(&id) {
-                        queue.try_remove(&key);
+                    // Logical cancel: forget the live epoch. The queued entry
+                    // stays and drops as a tombstone at its deadline.
+                    active.remove(&id);
+                    for ids in by_call.values_mut() {
+                        ids.remove(&id);
                     }
                 }
                 Some(TimerCmd::CancelAll { call_ref }) => {
                     if let Some(ids) = by_call.remove(&call_ref) {
                         for id in ids {
-                            if let Some(key) = keys.remove(&id) {
-                                queue.try_remove(&key);
-                            }
+                            active.remove(&id);
                         }
                     }
                 }
             },
             expired = next_expired(&mut queue), if !queue.is_empty() => {
-                // Drop the fired timer's bookkeeping. This is load-bearing, not
-                // cosmetic: `DelayQueue` recycles the slab slot of a removed
-                // entry, so a stale `keys[id]` would alias a *different* live
-                // timer — a later `Cancel`/re-`Schedule` of `id` would then evict
-                // the wrong timer (e.g. a keepalive-timeout cancel killing the
-                // rescheduled keepalive). Prune on expiry so ids never alias.
-                keys.remove(&expired.id);
+                // Deliver only the live generation; a stale epoch (rescheduled)
+                // or a missing id (cancelled) is a tombstone — drop it.
+                if active.get(&expired.id) != Some(&expired.epoch) {
+                    continue;
+                }
+                active.remove(&expired.id);
                 if let Some(ids) = by_call.get_mut(&expired.call_ref) {
                     ids.remove(&expired.id);
                 }
@@ -197,5 +223,58 @@ mod tests {
         // Give the driver a tick to process.
         tokio::task::yield_now().await;
         assert!(fire_rx.try_recv().is_err());
+    }
+
+    /// Regression for the `DelayQueue` `Key`-aliasing bug (the keepalive cycle-2
+    /// hang). Replays the real sequence: a timer fires (freeing its slab slot),
+    /// a second timer reuses that slot, the first is rescheduled, then the second
+    /// is cancelled. Under the old `try_remove`-by-`Key` driver the cancel
+    /// aliased the freed slot and evicted the *rescheduled* first timer, which
+    /// then silently never fired. With logical (epoch) cancellation it must fire.
+    #[tokio::test(start_paused = true)]
+    async fn reschedule_survives_aliasing_cancel() {
+        let clock = Clock::test_at(0);
+        let (timers, mut fire_rx) = TimerService::spawn(clock);
+        let cref = "w0|cid|tag".to_string();
+
+        // 1. Arm "keepalive" for t=30s and let it fire (slot freed).
+        timers
+            .schedule(
+                TimerEntry { id: "keepalive".into(), timer_type: TimerType::Keepalive, fire_at: 30_000, leg_id: None },
+                cref.clone(),
+            )
+            .await;
+        tokio::time::advance(Duration::from_millis(30_000)).await;
+        assert!(
+            matches!(fire_rx.recv().await, Some(CallEvent::Timer { timer_type: TimerType::Keepalive, .. })),
+            "first keepalive fires at 30s",
+        );
+
+        // 2. Arm a per-leg timeout (reuses the freed slot) ...
+        timers
+            .schedule(
+                TimerEntry { id: "KeepaliveTimeout:a".into(), timer_type: TimerType::KeepaliveTimeout, fire_at: 35_000, leg_id: Some("a".into()) },
+                cref.clone(),
+            )
+            .await;
+        // 3. ... reschedule keepalive for t=60s ...
+        timers
+            .schedule(
+                TimerEntry { id: "keepalive".into(), timer_type: TimerType::Keepalive, fire_at: 60_000, leg_id: None },
+                cref.clone(),
+            )
+            .await;
+        // 4. ... and cancel the timeout (the aliasing trigger in the old driver).
+        timers.cancel("KeepaliveTimeout:a".into()).await;
+
+        // The cancelled timeout must NOT fire; the rescheduled keepalive MUST.
+        tokio::time::advance(Duration::from_millis(30_000)).await; // → t=60s
+        let ev = fire_rx.recv().await;
+        assert!(
+            matches!(ev, Some(CallEvent::Timer { timer_type: TimerType::Keepalive, .. })),
+            "rescheduled keepalive survives the aliasing cancel and fires at 60s, got {ev:?}",
+        );
+        // Nothing else pending (the timeout was a dropped tombstone).
+        assert!(fire_rx.try_recv().is_err(), "cancelled timeout must not fire");
     }
 }

@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use call::{call_index_keys, Call, CallBodyCodec, MsgpackCodec};
 
 use crate::metrics::B2buaMetrics;
+use crate::repl::{ReplicatingCallStore, ReplicationPlan};
 
 /// Stored-call TTL handed to the (HA) store; ignored by the in-memory impl.
 const CALL_TTL_MS: i64 = 3_600_000;
@@ -41,6 +42,12 @@ struct Inner {
 pub struct CallState {
     inner: Arc<Mutex<Inner>>,
     store: Arc<dyn CallStore>,
+    /// The replicating store, set only when replication is wired (S10). When
+    /// `Some`, [`flush`](CallState::flush)/[`remove`](CallState::remove) route a
+    /// call that carries a non-empty `topology.bak` through the S8 write-side
+    /// policy ([`flush_replicated`]); when `None`, the legacy `PutOpts::default()`
+    /// path is used (backward compatible + correct for non-proxied calls).
+    repl_store: Option<Arc<ReplicatingCallStore>>,
     terminate_writer: BufferedTerminateWriter,
     codec: MsgpackCodec,
     self_ordinal: String,
@@ -72,11 +79,22 @@ impl CallState {
         Self {
             inner: Arc::new(Mutex::new(Inner::default())),
             store,
+            repl_store: None,
             terminate_writer,
             codec: MsgpackCodec::new(),
             self_ordinal: self_ordinal.into(),
             metrics,
         }
+    }
+
+    /// Opt into replication: route the flush/remove of any call that carries a
+    /// non-empty `topology.bak` through the S8 write-side policy. Builder-style so
+    /// existing [`CallState::new`] callers are unchanged (backward compatible).
+    /// `repl` MUST be the same store the [`BufferedTerminateWriter`] drains to, so
+    /// the changelog bump (keyed off the `PutOpts.peer` this path sets) fires.
+    pub fn with_replication(mut self, repl: Arc<ReplicatingCallStore>) -> Self {
+        self.repl_store = Some(repl);
+        self
     }
 
     /// Insert a freshly-created call + index it. Returns its `callRef`.
@@ -93,16 +111,107 @@ impl CallState {
         self.inner.lock().unwrap().calls.get(call_ref).cloned()
     }
 
+    /// **Acting-backup takeover read-path (S10b).** When an in-dialog request for
+    /// `call_ref` misses the in-memory map (this node never primary-served it),
+    /// try to hydrate it from the replicating store's backup partition: the
+    /// `call_ref` encodes its original primary, so `partition_of` resolves the
+    /// `(Backup, primary)` slot the S5/S6 puller imported the replica into. On a
+    /// hit the decoded call is inserted into the in-memory map + re-indexed, so
+    /// the router proceeds exactly as if it had primary-served the call — the
+    /// failover takeover. Returns the hydrated call (or `None` if no replica /
+    /// no replicating store / decode failure). Idempotent: a present call is
+    /// returned as-is without a store read.
+    pub async fn hydrate_from_replica(&self, call_ref: &str) -> Option<Call> {
+        if let Some(c) = self.peek(call_ref) {
+            return Some(c);
+        }
+        let repl = self.repl_store.as_ref()?;
+        // The call's natural primary (from the encoded ref); on the acting-backup
+        // path this names the crashed peer, and the body lives in `bak:{primary}`.
+        let (role, primary) = partition_of(&self.self_ordinal, call_ref);
+        // Only the backup partition is a takeover source; a primary-role miss is a
+        // genuine orphan (the call is simply gone), not a failover.
+        if role != PartitionRole::Backup {
+            return None;
+        }
+        let body = repl.get_call(role, &primary, call_ref).await.ok().flatten()?;
+        let call = self.codec.decode(&body).ok()?;
+        let mut inner = self.inner.lock().unwrap();
+        // Re-check under the lock (a concurrent hydrate may have won the race).
+        if let Some(c) = inner.calls.get(call_ref) {
+            return Some(c.clone());
+        }
+        Self::reindex(&mut inner, &call);
+        inner.calls.insert(call_ref.to_string(), call.clone());
+        Some(call)
+    }
+
     /// Replace the in-memory call and refresh its routing index.
-    pub fn update(&self, call: Call) {
+    ///
+    /// **callGen bump rule (resolves the plan's deferred S10 decision):** each
+    /// authoritative mutation of a call increments that call's
+    /// `CallTopology.gen` (monotonic per call) — this is the central, single
+    /// bump-point. A brand-new call enters at `gen = 1` (stamped at INVITE time in
+    /// [`crate::initial_invite`]); every `update` here represents a handler that
+    /// just mutated the call, so it out-gens the prior value. Because a takeover
+    /// mutation by an acting-backup is therefore *necessarily* higher than the
+    /// pre-crash gen, it WINS the replication LWW gate when the rebooting primary
+    /// reclaims (see [`crate::repl::replication`]'s `call_gen` rule). The bump is
+    /// a no-op for non-proxied calls that carry no `topology`.
+    pub fn update(&self, mut call: Call) {
+        if let Some(t) = call.topology.as_mut() {
+            t.gen += 1;
+        }
         let mut inner = self.inner.lock().unwrap();
         Self::reindex(&mut inner, &call);
         inner.calls.insert(call.call_ref.clone(), call);
     }
 
+    /// The backup peer for a call from its `CallTopology.bak`, or `None` when no
+    /// replicating store is wired / the call has no topology / `bak` is empty.
+    /// This is the resolver the S8 write-side policy ([`ReplicationPlan`]) needs:
+    /// the proxy already signed the backup into the `w_bak` cookie and the b2bua
+    /// stamped it onto `topology.bak` at INVITE time (see [`crate::initial_invite`]),
+    /// so the b2bua never recomputes HRW — it just echoes `w_bak`.
+    fn backup_of(&self, call_ref: &str) -> Option<String> {
+        self.repl_store.as_ref()?;
+        let inner = self.inner.lock().unwrap();
+        inner
+            .calls
+            .get(call_ref)
+            .and_then(|c| c.topology.as_ref())
+            .map(|t| t.bak.clone())
+            .filter(|bak| !bak.is_empty())
+    }
+
+    /// Resolve the store target + propagate opts for `call_ref`. When a backup is
+    /// resolvable (replicating store + non-empty `topology.bak`) this is the S8
+    /// write-side policy ([`ReplicationPlan`]) — Forward when we own the ref,
+    /// Reverse (acting-backup) when the ref names a crashed peer. Otherwise it is
+    /// today's local-only path: `(partition_of, PutOpts::default())`, no peer →
+    /// the replicating store makes NO changelog bump (backward compatible).
+    fn store_target(&self, call_ref: &str) -> (PartitionRole, String, PutOpts) {
+        match self.backup_of(call_ref) {
+            Some(bak) => {
+                let plan = ReplicationPlan::resolve(&self.self_ordinal, call_ref, &|_| {
+                    Some(bak.clone())
+                });
+                (plan.role, plan.primary.clone(), plan.put_opts())
+            }
+            None => {
+                let (role, primary) = partition_of(&self.self_ordinal, call_ref);
+                (role, primary, PutOpts::default())
+            }
+        }
+    }
+
     /// Drop a call from memory + the store (its txns/queue are torn down by the
     /// router's `RemoveCall` interpreter step, not here).
     pub fn remove(&self, call_ref: &str) {
+        // Resolve the replication target BEFORE evicting the in-memory call (the
+        // topology lookup `backup_of` needs the call still present).
+        let (role, primary, opts) = self.store_target(call_ref);
+
         let mut inner = self.inner.lock().unwrap();
         let keys = inner.indexed.remove(call_ref).unwrap_or_default();
         for k in &keys {
@@ -112,22 +221,39 @@ impl CallState {
         inner.locks.remove(call_ref);
         drop(inner);
 
-        let (role, primary) = partition_of(&self.self_ordinal, call_ref);
         self.terminate_writer.submit_delete(
             role,
             primary,
             call_ref.to_string(),
             keys,
-            PutOpts::default(),
+            opts,
         );
     }
 
     /// Encode + submit the call to the store (replication path; non-blocking).
+    ///
+    /// When the call carries a non-empty `topology.bak` and a replicating store is
+    /// wired, the put rides the S8 write-side policy (`call_gen = topology.gen`,
+    /// peer = the backup, direction Forward/Reverse). The `ReplicatingCallStore`
+    /// the [`BufferedTerminateWriter`] drains to then bumps its changelog for that
+    /// peer. With no topology / no backup / no replicating store it is today's
+    /// `PutOpts::default()` (no propagation) path.
     pub fn flush(&self, call: &Call) {
         let body = self.codec.encode(call);
         let indexes = call_index_keys(call);
-        let call_gen = call.topology.as_ref().map(|t| t.gen).unwrap_or(0);
-        let (role, primary) = partition_of(&self.self_ordinal, &call.call_ref);
+        // The authoritative gen lives on the in-memory call (bumped by `update`);
+        // the passed `call` may be a pre-bump clone, so prefer the stored gen.
+        let call_gen = self
+            .inner
+            .lock()
+            .unwrap()
+            .calls
+            .get(&call.call_ref)
+            .and_then(|c| c.topology.as_ref())
+            .or(call.topology.as_ref())
+            .map(|t| t.gen)
+            .unwrap_or(0);
+        let (role, primary, opts) = self.store_target(&call.call_ref);
         self.terminate_writer.submit_put(
             role,
             primary,
@@ -136,7 +262,7 @@ impl CallState {
             indexes,
             CALL_TTL_MS,
             call_gen,
-            PutOpts::default(),
+            opts,
         );
     }
 

@@ -77,3 +77,59 @@ The two classes a parser rejection of a grammar-valid input falls into.
 *Policy* = a documented ADR-0007 strictness rule (expected; the grammar is
 looser than the parser). *Buggy* = matches no known policy → a real parser
 bug. A clean ABNF run has zero buggy rejections and zero silent misparses.
+
+## HA replication glossary
+
+The peer-to-peer call-replication vocabulary (ADR-0011 / `docs/plan/
+on-proper-migration-of-lazy-pancake.md`). Each b2bua is *both* a replication
+server (serves its change stream) and a client (pulls from every peer).
+
+**Element**:
+One replicated call replica — a `(partition, callRef)` entry in a backup's
+store. "Which elements do I back up" is not a separate retrieval: it *is* the
+contents of each peer's per-peer changelog (HRW 2nd-best backup, full mesh).
+_Avoid_: "shard", "partition key" (the partition is just pri/bak).
+
+**Forward replication** vs **Reverse replication**:
+*Forward* = a primary pushing its own calls to the peer that backs them up
+(`partition=bak` on the wire). *Reverse* = a rebooted primary reclaiming calls
+its backup mutated while it was down (`partition=pri`). Both ride the **same**
+pull stream — `partition` tags which is which.
+
+**Re-hydration** (bootstrap):
+A booting primary's bulk pre-seed: it scans a backup's `bak:{primary}` callRef
+keys (brief lock), streams the bodies in ~128 batches, captures `W = changelog
+head at scan start`, seeds its watermark to `W`, and keeps tailing. Correctness
+is bootstrap + conservative watermark + tail, *not* snapshot consistency.
+
+**Backup re-subscription**:
+The steady-state tail a node opens against each peer (`PullRequest(Replog,
+since=W)`) to keep its backups current. Same stream as re-hydration; bootstrap
+is just its bulk prefix.
+
+**Incarnation-gen** vs **callGen** (the two-generations trap):
+*Incarnation-gen* (`gen`) = per-worker-restart epoch, the high word of the
+watermark — in prod it is **boot wall-clock seconds** (monotonic across pod
+restarts, so `(new_gen, 0) > (old_gen, *)`). *callGen* (`CallTopology.gen`) =
+content version of one call, the LWW tiebreak. Never conflate them.
+
+**Watermark** `(gen, counter)`:
+A puller's per-peer cursor; it applies a `Data` frame iff `(gen, counter) >
+watermark`, then advances. Retained per ordinal across disconnects so a
+returning peer resumes rather than re-bootstraps.
+
+**Current flag** (`everCaughtUp`):
+Set the instant the head `Noop` arrives on a peer's tail — "I have drained this
+peer's backlog." **Sticky** across reconnects; a transient TCP blip does not
+revert a node to NotReady.
+
+**Readiness states** (`NotReady → Ready → Draining`):
+Self-reported via OPTIONS (`200` / `503 not-ready` / `503 draining`) and, in
+k8s, via the `/ready` HTTP probe. **Ready** = re-hydration done for all
+*reachable* peers (best-effort, hard-timer bounded) **and** every forward pull
+is current. **Draining** = latched on SIGTERM; terminal.
+
+**K8sMembership**:
+The real `topology::Membership` source (S11): a kube EndpointSlice informer over
+the headless worker Service. *Ready* endpoints → `Peer{ordinal = pod name, host
+= pod IP}`; written once, consumed by both proxy and b2bua (ADR-0011 X7).

@@ -1,1 +1,34 @@
-../../../sipjsserver/tests/k8s/cluster.yaml
+# kind cluster topology for the Rust SIP SUT — VENDORED COPY.
+#
+# Originally a symlink to ../../../sipjsserver/tests/k8s/cluster.yaml; copied
+# in-tree at S11 so the Rust runner no longer depends on a sibling checkout and
+# the two topologies may diverge. Still uses cluster name `sip-e2e` (the WSL
+# one-cluster switch — see README), so `run.sh up` tears down any existing
+# sip-e2e first, including sipjsserver's.
+#
+# Tiers: edge = front proxy, app = b2bua workers (two app nodes so a primary and
+# its backup land on different nodes for real failover), load = sipp UAC/UAS.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: sip-e2e
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      tier: edge
+  - role: worker
+    labels:
+      tier: edge
+  - role: worker
+    labels:
+      tier: app
+  - role: worker
+    labels:
+      tier: app
+  - role: worker
+    labels:
+      tier: load
+    extraPortMappings:
+      - containerPort: 30060
+        hostPort: 5060
+        protocol: UDP

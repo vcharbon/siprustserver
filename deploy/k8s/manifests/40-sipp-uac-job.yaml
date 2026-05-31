@@ -1,6 +1,8 @@
 # SIPp UAC load generator. One-shot Job: place ${CAPS} calls/sec for the
 # duration the runner controls (it deletes the Job to stop). Targets the proxy
-# Service. Reuses the shared uac-basic.xml scenario. Pinned to tier=load.
+# Service. Runs scenario ${SCENARIO} (default uac-basic.xml; the chaos suite sets
+# uac-hold-failover.xml so calls sit in a hold long enough to kill a worker
+# mid-dialog). Pinned to tier=load.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -24,7 +26,7 @@ spec:
           args:
             - "sip-front-proxy.sip-test.svc.cluster.local:5060"
             - "-sf"
-            - "/scenarios/uac-basic.xml"
+            - "/scenarios/${SCENARIO}"
             - "-s"
             - "service"
             - "-i"

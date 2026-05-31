@@ -1,0 +1,36 @@
+# RBAC for the b2bua worker's K8sMembership EndpointSlice informer (S11).
+#
+# Each worker is BOTH a replication server and a client: to discover its peers
+# it watches the EndpointSlices of the headless `b2bua-worker` Service (the same
+# ones kube-proxy consumes). That requires list/watch on `endpointslices` in the
+# `discovery.k8s.io` API group, scoped to this namespace (a Role, not a
+# ClusterRole — least privilege). The StatefulSet runs as this ServiceAccount.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: b2bua-worker
+  namespace: sip-test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: b2bua-endpointslice-reader
+  namespace: sip-test
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: b2bua-worker-endpointslice-reader
+  namespace: sip-test
+subjects:
+  - kind: ServiceAccount
+    name: b2bua-worker
+    namespace: sip-test
+roleRef:
+  kind: Role
+  name: b2bua-endpointslice-reader
+  apiGroup: rbac.authorization.k8s.io

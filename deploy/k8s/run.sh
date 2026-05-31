@@ -5,9 +5,12 @@
 #                        -> b2bua-worker pool (tier=app) -> sipp UAS (tier=load)
 #
 # Deliberately minimal: deploy-all, run SIPp at a list of CAPS, sample per-pod
-# CPU% + RSS from /proc, tear down. It SHARES the cluster topology (cluster.yaml)
-# and SIPp scenarios with sipjsserver via symlinks in this directory, and reuses
-# the SAME kind cluster name (`sip-e2e`).
+# CPU% + RSS from /proc, tear down. As of S11 the cluster topology
+# (./cluster.yaml), the SIPp build context (./sipp/Dockerfile) and the SIPp
+# scenarios (./sipp/scenarios/) are VENDORED COPIES (no longer symlinks into the
+# sibling sipjsserver checkout) so the Rust SUT runner stands alone and the two
+# can diverge — especially the endurance/chaos scenarios. Reuses the SAME kind
+# cluster name (`sip-e2e`).
 #
 # >>> WSL ONE-CLUSTER CONSTRAINT <<<
 # Only one kind cluster runs at a time on this host. `up` (and `all`) FIRST run
@@ -34,16 +37,24 @@ NS="${NS:-sip-test}"
 SUT_IMAGE="${SUT_IMAGE:-siprustserver:dev}"
 WORKER_REPLICAS="${WORKER_REPLICAS:-2}"
 RESULTS="${RESULTS:-$HERE/results}"
-SIPP_CHART="$(dirname "$(readlink -f scenarios)")"   # sipjs .../charts/sipp
-export SUT_IMAGE WORKER_REPLICAS
+SIPP_DIR="$HERE/sipp"          # vendored sipp build context + scenarios
+SCENARIOS="$SIPP_DIR/scenarios"
+# Replication: off by default for the plain load/endurance sweep (the chaos
+# suite — chaos.sh — sets REPL_ENABLE=1). REPL_PORT is the cluster-wide repl TCP
+# port (peer.host:REPL_PORT), templated into the worker manifest + headless svc.
+REPL_ENABLE="${REPL_ENABLE:-0}"
+REPL_PORT="${REPL_PORT:-9092}"
+SCENARIO="${SCENARIO:-uac-basic.xml}"   # UAC scenario the load sweep drives
+export SUT_IMAGE WORKER_REPLICAS REPL_ENABLE REPL_PORT SCENARIO
 
 log() { printf '\033[1;36m>> %s\033[0m\n' "$*" >&2; }
 die() { printf '\033[1;31m!! %s\033[0m\n' "$*" >&2; exit 1; }
 
 preflight() {
   for t in kind kubectl docker envsubst; do command -v "$t" >/dev/null || die "missing tool: $t"; done
-  [ -f cluster.yaml ] || die "cluster.yaml symlink broken (expected sibling sipjsserver checkout)"
-  [ -d scenarios ]    || die "scenarios symlink broken (expected sibling sipjsserver checkout)"
+  [ -f cluster.yaml ]          || die "cluster.yaml missing"
+  [ -f "$SIPP_DIR/Dockerfile" ] || die "sipp/Dockerfile missing (vendored sipp build context)"
+  [ -d "$SCENARIOS" ]          || die "sipp/scenarios/ missing (vendored sipp scenarios)"
 }
 
 up() {
@@ -55,8 +66,8 @@ up() {
 
   log "building SUT image $SUT_IMAGE"
   docker build -f "$REPO_ROOT/deploy/docker/Dockerfile" -t "$SUT_IMAGE" "$REPO_ROOT"
-  log "building sipp:dev from shared chart ($SIPP_CHART)"
-  docker build -t sipp:dev "$SIPP_CHART"
+  log "building sipp:dev from vendored context ($SIPP_DIR)"
+  docker build -t sipp:dev "$SIPP_DIR"
   log "loading images into kind"
   kind load docker-image "$SUT_IMAGE" --name "$CLUSTER"
   kind load docker-image sipp:dev --name "$CLUSTER"
@@ -65,12 +76,15 @@ up() {
 deploy() {
   preflight
   kubectl apply -f manifests/00-namespace.yaml
-  log "building sipp-scenarios ConfigMap from shared scenarios"
+  log "building sipp-scenarios ConfigMap from vendored scenarios"
   kubectl -n "$NS" create configmap sipp-scenarios \
-    --from-file=scenarios/ -o yaml --dry-run=client | kubectl apply -f -
+    --from-file="$SCENARIOS/" -o yaml --dry-run=client | kubectl apply -f -
 
-  log "deploying sipp-uas + b2bua workers"
+  log "deploying sipp-uas + b2bua workers (repl=${REPL_ENABLE}, repl_port=${REPL_PORT})"
   kubectl apply -f manifests/10-sipp-uas.yaml
+  # RBAC for the worker's EndpointSlice informer (needed when REPL_ENABLE=1; a
+  # harmless ServiceAccount/Role otherwise).
+  kubectl apply -f manifests/15-worker-rbac.yaml
   envsubst < manifests/20-worker.yaml | kubectl apply -f -
   kubectl -n "$NS" rollout status deploy/sipp-uas --timeout=120s
   kubectl -n "$NS" rollout status statefulset/b2bua-worker --timeout=120s

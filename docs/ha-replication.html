@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SIP Rust Server — HA replication design</title>
+<style>
+  :root {
+    --fg: #1d2733; --muted: #5b6b7c; --bg: #f6f8fa; --card: #ffffff;
+    --accent: #2b6cb0; --accent2: #b0392b; --line: #dde3ea; --code: #f0f3f6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--fg); background: var(--bg);
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 80px; }
+  header.hero {
+    background: linear-gradient(135deg, #1d2733, #2b3a4d); color: #fff;
+    padding: 40px 24px; margin-bottom: 28px;
+  }
+  header.hero .wrap { padding-bottom: 0; }
+  header.hero h1 { margin: 0 0 8px; font-size: 30px; letter-spacing: -0.3px; }
+  header.hero p { margin: 4px 0; color: #c9d6e3; max-width: 760px; }
+  header.hero .tags { margin-top: 14px; }
+  .tag {
+    display: inline-block; background: rgba(255,255,255,.12); color: #e7eef5;
+    border: 1px solid rgba(255,255,255,.18); border-radius: 999px;
+    padding: 3px 11px; font-size: 12.5px; margin: 3px 6px 3px 0;
+  }
+  nav.toc {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 18px; margin: 0 0 30px; font-size: 14.5px;
+  }
+  nav.toc strong { display:block; color: var(--muted); text-transform: uppercase; font-size: 11.5px; letter-spacing: .08em; margin-bottom: 6px; }
+  nav.toc a { color: var(--accent); text-decoration: none; margin-right: 4px; }
+  nav.toc a:hover { text-decoration: underline; }
+  nav.toc ol { margin: 4px 0; padding-left: 22px; }
+  h2 {
+    font-size: 23px; margin: 44px 0 6px; padding-top: 12px;
+    border-top: 3px solid var(--accent); display: inline-block;
+  }
+  h2.repl { border-top-color: var(--accent2); }
+  h3 { font-size: 18px; margin: 30px 0 4px; color: var(--fg); }
+  p.lead { color: var(--muted); margin-top: 2px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px 6px; margin: 14px 0 26px; overflow-x: auto;
+  }
+  .card .cap { font-size: 13px; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  pre.mermaid { text-align: center; margin: 0; }
+  table.frames { border-collapse: collapse; width: 100%; font-size: 13.5px; margin: 10px 0 4px; }
+  table.frames th, table.frames td { border: 1px solid var(--line); padding: 7px 9px; text-align: left; vertical-align: top; }
+  table.frames th { background: var(--code); }
+  table.frames code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: 13.5px; }
+  .legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap: 10px 22px; }
+  .legend dt { font-weight: 700; color: var(--accent); }
+  .legend dd { margin: 0 0 8px; color: var(--fg); font-size: 14.5px; }
+  .note { background: #fff8e6; border: 1px solid #f0d98a; border-radius: 8px; padding: 10px 14px; font-size: 14px; margin: 14px 0; }
+  footer { color: var(--muted); font-size: 13.5px; border-top: 1px solid var(--line); padding-top: 16px; margin-top: 40px; }
+  footer a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <h1>SIP Rust Server — High-Availability replication</h1>
+    <p>How call context survives a worker crash: the front-proxy load-balancer + OPTIONS health/readiness layer,
+       and the peer-to-peer replication message exchange that keeps a backup current and re-hydrates a rebooted primary.</p>
+    <p>No Redis — each b2bua is both a replication server and a client. See
+       <strong>ADR&nbsp;0011</strong> for the decisions and the plan file for the full wire spec + reconnect FSM.</p>
+    <div class="tags">
+      <span class="tag">peer-to-peer pull</span>
+      <span class="tag">compacted changelog</span>
+      <span class="tag">HRW + stickiness cookie</span>
+      <span class="tag">OPTIONS readiness</span>
+      <span class="tag">fake-clock testable</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <nav class="toc">
+    <strong>Contents</strong>
+    <ol>
+      <li><a href="#part1">Part 1 — SIP-level HA: LB proxy + OPTIONS</a>
+        — <a href="#topology">topology</a>, <a href="#newcall">new-call routing</a>,
+          <a href="#health">health FSM</a>, <a href="#decision">routing decision</a>,
+          <a href="#failover">crash → failover → reboot → reclaim</a></li>
+      <li><a href="#part2">Part 2 — HA replication message exchange</a>
+        — <a href="#mesh">dual-channel mesh</a>, <a href="#steady">steady-state</a>,
+          <a href="#writepath">write path</a>, <a href="#bootstrap">re-hydration</a>,
+          <a href="#fsm">reconnect FSM</a>, <a href="#frames">frame reference</a></li>
+      <li><a href="#glossary">Glossary</a></li>
+    </ol>
+  </nav>
+
+  <div class="card" style="background:#fbfdff">
+    <p style="margin:6px 0"><strong>Two replication directions, always name them:</strong>
+    <em>Forward</em> = primary → backup (continuous; the backup pulls).
+    <em>Re-hydration</em> = backup → rebooting primary (once, on boot).
+    <em>Reverse</em> = acting-backup → original primary (after a takeover).
+    <strong>Two generations:</strong> <code>gen</code> = incarnation (per worker-restart);
+    <code>call_gen</code> = content version (last-writer-wins).</p>
+  </div>
+
+  <!-- ============================ PART 1 ============================ -->
+  <h2 id="part1">Part 1 — SIP-level HA: load-balancer proxy + OPTIONS</h2>
+  <p class="lead">The stateless front proxy picks a primary + backup per call with rendezvous hashing,
+     pins the choice in a signed Record-Route cookie, health-probes workers with OPTIONS, and routes around a
+     dead/draining/not-ready worker to its backup.</p>
+
+  <h3 id="topology">1.1 — Cluster topology</h3>
+  <div class="card">
+    <p class="cap">Endpoints talk only to the proxy; the proxy load-balances across the b2bua StatefulSet; the b2buas replicate peer-to-peer. Membership comes from k8s.</p>
+<pre class="mermaid">
+graph LR
+  A["Alice (UAC)"]
+  Bob["Bob (UAS)"]
+  P["Front Proxy\nstateless RFC 3261 sec.16\nHRW select + signed cookie\nOPTIONS health probe"]
+  subgraph cluster["b2bua StatefulSet"]
+    B0["b2bua-0"]
+    B1["b2bua-1"]
+    B2["b2bua-2"]
+  end
+  K["k8s EndpointSlice\ntopology::Membership"]
+  A -->|SIP| P
+  P -->|SIP| Bob
+  P -->|"forward + w_pri / w_bak cookie"| B0
+  P -.->|OPTIONS| B0
+  P -.->|OPTIONS| B1
+  P -.->|OPTIONS| B2
+  B0 -->|"repl pull (repl-net)"| B1
+  B1 -->|repl pull| B2
+  B0 -->|repl pull| B2
+  K -.->|membership| P
+  K -.->|membership| B0
+</pre>
+  </div>
+
+  <h3 id="newcall">1.2 — New call: HRW pick + stickiness cookie</h3>
+  <div class="card">
+    <p class="cap">The proxy hashes the Call-ID to a deterministic primary (and 2nd-best backup), stamps them into a signed cookie, and the primary replicates the call forward to the backup.</p>
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant A as Alice
+  participant P as Proxy
+  participant B0 as b2bua-0 (primary)
+  participant B1 as b2bua-1 (backup)
+  participant Bob
+  A->>P: INVITE
+  Note over P: HRW(Call-ID) -> pri=b0, bak=b1
+  Note over P: stamp Record-Route cookie w_pri=b0; w_bak=b1; sig=HMAC
+  P->>B0: INVITE (+ cookie)
+  B0->>P: INVITE (b-leg, regenerated)
+  P->>Bob: INVITE
+  Bob-->>P: 200 OK
+  P-->>B0: 200 OK
+  B0-->>P: 200 OK
+  P-->>A: 200 OK
+  Note over B0,B1: b0 replicates the call to b1 (Forward)
+  A->>P: ACK / in-dialog (carries cookie)
+  Note over P: decode cookie -> primary b0 Alive -> forward to b0
+  P->>B0: ACK / in-dialog
+</pre>
+  </div>
+
+  <h3 id="health">1.3 — Worker health state machine (proxy view)</h3>
+  <div class="card">
+    <p class="cap">The proxy classifies each worker from its OPTIONS reply. <code>NotReady</code> is "up but boot-replication drain unfinished"; <code>Draining</code> is SIGTERM; <code>Dead</code> is repeated probe timeout.</p>
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --> Unknown: registered, not yet probed
+  Unknown --> Alive: OPTIONS 200
+  Unknown --> Dead: probe timeout x threshold
+  Alive --> NotReady: OPTIONS 503 not-ready
+  NotReady --> Alive: OPTIONS 200 (re-hydrated + current)
+  Alive --> Draining: OPTIONS 503 Retry-After 0 (SIGTERM)
+  Draining --> Dead: grace expired
+  Alive --> Dead: probe timeout x threshold
+  Dead --> Unknown: pod respawn (fresh-pod guard)
+</pre>
+  </div>
+
+  <h3 id="decision">1.4 — In-dialog routing decision</h3>
+  <div class="card">
+    <p class="cap">On each in-dialog request the proxy verifies the cookie HMAC, then routes by primary health — to the primary, or (on dead/draining/fresh-pod) to the backup that holds the replica.</p>
+<pre class="mermaid">
+graph TD
+  M["in-dialog request w/ cookie"] --> V{HMAC valid?}
+  V -->|no| R403["403 reject"]
+  V -->|yes| AC{ACK or CANCEL?}
+  AC -->|"yes, primary alive"| Fp["forward to PRIMARY\n(owns UAS txn state)"]
+  AC -->|no| PA{primary health}
+  PA -->|"Alive, fresh-pod window"| Fb1["forward to BACKUP\n(recovery guard)"]
+  PA -->|"Alive, normal"| Fp2["forward to PRIMARY"]
+  PA -->|"Draining, in grace"| Fb2["forward to BACKUP"]
+  PA -->|"Dead / NotReady"| U{backup alive?}
+  U -->|yes| Fb3["forward to BACKUP"]
+  U -->|no| FR["fresh HRW selection"]
+</pre>
+  </div>
+
+  <h3 id="failover">1.5 — Crash → failover → reboot → reclaim (the whole SIP story)</h3>
+  <div class="card">
+    <p class="cap">b0 crashes mid-call; the proxy routes in-dialog traffic to b1 (which holds the replica and takes over); b0 reboots, stays NotReady until re-hydrated, then reclaims.</p>
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant A as Alice
+  participant P as Proxy
+  participant B0 as b2bua-0 (primary)
+  participant B1 as b2bua-1 (backup)
+  Note over A,B1: call active on b0, replicated to b1
+  rect rgb(255,233,233)
+  Note over B0: b0 CRASHES (memory lost)
+  P-xB0: OPTIONS (timeout x threshold)
+  Note over P: b0 -> Dead
+  end
+  A->>P: in-dialog (re-INVITE / BYE)
+  Note over P: cookie pri=b0 Dead -> route to backup b1
+  P->>B1: in-dialog
+  Note over B1: b1 has the replica -> acts as primary
+  Note over B1: mutates bak:b0, marks Reverse (announce-back)
+  B1-->>P: 200 OK
+  P-->>A: 200 OK
+  rect rgb(232,243,255)
+  Note over B0: b0 reboots (empty memory)
+  P->>B0: OPTIONS
+  B0-->>P: 503 not-ready
+  Note over B0: re-hydrate from b1 (bootstrap) + tail
+  B0-->>P: 200 OK (Ready)
+  end
+  A->>P: next in-dialog
+  Note over P: fresh-pod guard elapsed -> route to b0
+  P->>B0: in-dialog (state intact)
+</pre>
+  </div>
+
+  <!-- ============================ PART 2 ============================ -->
+  <h2 id="part2" class="repl">Part 2 — HA replication message exchange</h2>
+  <p class="lead">The replication engine (<code>repl-net</code> transport + <code>b2bua/src/repl</code>): a compacted
+     per-peer changelog, a push-after-subscribe pull stream, and a bootstrap scan — all message-granular so every
+     frame is recordable.</p>
+
+  <h3 id="mesh">2.1 — Dual-channel mesh (each worker is primary AND backup)</h3>
+  <div class="card">
+    <p class="cap">With HRW, calls split across the cluster, so every pair has two Forward channels. Bootstrap (dotted) flows the other way only when a primary reboots.</p>
+<pre class="mermaid">
+graph LR
+  subgraph A["b2bua-0"]
+    A_pri["pri:b0  (owns)"]
+    A_bak["bak:b1  (backs up b1)"]
+    A_log["changelog -> b1"]
+  end
+  subgraph B["b2bua-1"]
+    B_pri["pri:b1  (owns)"]
+    B_bak["bak:b0  (backs up b0)"]
+    B_log["changelog -> b0"]
+  end
+  A_log -->|"Forward: b0's calls"| B_bak
+  B_log -->|"Forward: b1's calls"| A_bak
+  B_bak -.->|"re-hydrate on b0 reboot"| A_pri
+  A_bak -.->|"re-hydrate on b1 reboot"| B_pri
+</pre>
+  </div>
+
+  <h3 id="steady">2.2 — Steady-state Forward replication (push-after-subscribe)</h3>
+  <div class="card">
+    <p class="cap">The backup subscribes once; the primary pushes Data as calls mutate and a Noop when the changelog drains. The body is read from the store (zero-copy Arc) at send time — never re-encoded.</p>
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant B as b2bua-1 (backup / puller)
+  participant A as b2bua-0 (primary / server)
+  participant LOG as A changelog -> b1
+  participant ST as A CallStore (Arc bytes)
+  B->>A: PullRequest(Replog, since=(gen,ctr), chunk=128)
+  loop entries with (gen,counter) > since
+    A->>LOG: next ref at cursor
+    A->>ST: get_call(ref) -> Arc clone (brief lock)
+    A-->>B: Data(gen, ctr, op, partition=bak, call_ref, call_gen, body)
+    B->>B: apply iff newer than W; LWW by call_gen; advance W
+  end
+  A-->>B: Noop(head)
+  Note over B: current = true (sticky) -> feeds readiness gate
+  Note over A,B: connection stays open; A keeps PUSHING new Data live
+  B->>A: Ack(up_to) periodic -> A trims retention
+</pre>
+  </div>
+
+  <h3 id="writepath">2.3 — Write path: non-blocking append, compaction, drain</h3>
+  <div class="card">
+    <p class="cap">The call handler bumps the changelog non-blocking (never waits on a subscriber). The drain task reads the body under a brief lock then writes on owned bytes — no lock held across I/O, survives the call being removed mid-send.</p>
+<pre class="mermaid">
+graph TD
+  H["call handler (per-call FIFO)"] -->|mutate Call| F["flush: encode once -> Arc bytes"]
+  F -->|put_call| RCS["ReplicatingCallStore"]
+  RCS -->|store Arc body| ST[("CallStore  pri:self")]
+  RCS -->|"try_send: move ref to new counter (non-blocking)"| CL[("per-peer changelog\ncompacted by callRef")]
+  CL -. notify .-> D["drain task (per subscriber)"]
+  D -->|"get_call -> Arc clone (brief lock)"| ST
+  D -->|"write owned Arc (no lock held)"| SOCK(["TCP socket / sim"])
+  CL --- N["compaction: re-update X moves entry\ncounter 5 -> 22, old dropped\nmemory ~ live call count"]
+</pre>
+  </div>
+
+  <h3 id="bootstrap">2.4 — Re-hydration / bootstrap (rebooting primary pulls itself back)</h3>
+  <div class="card">
+    <p class="cap">b0 reboots empty and scans b1's <code>bak:b0</code> partition. b1 snapshots the keys (brief lock) and captures the head watermark at scan start, then streams bodies lazily. b0 seeds that watermark and tails — so any takeover mutation b1 made during the scan is re-delivered.</p>
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant A as b2bua-0 (rebooting primary)
+  participant B as b2bua-1 (backup / server)
+  Note over A: boot: memory wiped, NotReady
+  A->>B: PullRequest(Bootstrap, caller=b0)
+  Note over B: snapshot bak:b0 KEYS (brief lock)
+  Note over B: W = changelog head AT SCAN START
+  loop ~128 keys per batch
+    B->>B: read current body (short per-call lock)
+    B-->>A: Data(op=create, partition=pri, call_ref=b0|..., body)
+    A->>A: import as pri:b0
+  end
+  B-->>A: Noop(W)  [bootstrap terminal]
+  Note over A: seed Replog watermark = W
+  A->>B: PullRequest(Replog, since=W)  [same connection]
+  B-->>A: Data... takeover deltas (counter > W) ... Noop
+  Note over A: re-hydrated + current -> answer OPTIONS 200 Ready
+</pre>
+  </div>
+
+  <h3 id="fsm">2.5 — Puller reconnect state machine (per peer)</h3>
+  <div class="card">
+    <p class="cap">Covers TCP death, exponential backoff, topology-driven park/resume (k8s pod gone/back), and the watermark-retained reconnect. A pod reboot bumps <code>gen</code>, so frames apply without a manual reset.</p>
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --> Connecting: topology adds peer
+  Connecting --> Bootstrapping: ok + self cold-start/reset
+  Connecting --> Tailing: ok + self has state (TCP blip)
+  Connecting --> Backoff: connect fails
+  Bootstrapping --> Tailing: terminal Noop, seed W
+  Tailing --> Tailing: Data apply / Noop sets current
+  Tailing --> Bootstrapping: ResetToBootstrap
+  Tailing --> Backoff: recv None / send fail (peer crash)
+  Bootstrapping --> Backoff: recv None / send fail
+  Backoff --> Connecting: backoff elapsed
+  Tailing --> Parked: topology removes peer (retain W)
+  Backoff --> Parked: topology removes peer
+  Parked --> Connecting: topology re-adds (maybe new addr)
+</pre>
+  </div>
+
+  <h3 id="frames">2.6 — Frame reference</h3>
+  <div class="card">
+    <p class="cap">Each message is a positional-msgpack array, tag-discriminated by element 0 (ADR-0008 ethos). Real TCP delimits with a 4-byte big-endian length prefix; the sim delivers whole messages.</p>
+    <table class="frames">
+      <tr><th>Message</th><th>Dir</th><th>Positional fields</th><th>Purpose</th></tr>
+      <tr><td><code>PullRequest</code></td><td>client → server</td>
+          <td><code>[0, proto_ver, caller, mode, since_gen, since_counter, chunk]</code><br>mode: 0=Replog, 1=Bootstrap</td>
+          <td>Open a subscription (tail) or a bootstrap scan. <code>since_*</code> ignored for Bootstrap.</td></tr>
+      <tr><td><code>Ack</code></td><td>client → server</td>
+          <td><code>[1, caller, up_to_gen, up_to_counter]</code></td>
+          <td>Optional; lets the server trim changelog retention.</td></tr>
+      <tr><td><code>Data</code></td><td>server → client</td>
+          <td><code>[2, gen, counter, op, partition, call_ref, call_gen, body_ttl_ms, indexes, body]</code><br>op: 0=create 1=update 2=delete; partition: 0=pri 1=bak</td>
+          <td>One replicated call mutation. <code>body</code> = positional-msgpack Call (nil for delete/expired). Apply iff <code>(gen,counter)</code> beats the watermark; LWW by <code>call_gen</code>.</td></tr>
+      <tr><td><code>Noop</code></td><td>server → client</td>
+          <td><code>[3, gen, counter]</code></td>
+          <td>Caught-up heartbeat / bootstrap terminal — sets the sticky <code>current</code> flag.</td></tr>
+      <tr><td><code>ResetToBootstrap</code></td><td>server → client</td>
+          <td><code>[4, reason]</code></td>
+          <td>The watermark fell off the compacted tail; the client must re-pull from scratch.</td></tr>
+    </table>
+    <div class="note"><strong>Reboot / incarnation:</strong> a rebooted worker serves under a higher <code>gen</code> with the counter reset to 0, so <code>(new_gen, 0) &gt; (old_gen, *)</code> — pullers apply the fresh stream without an explicit reset. A delete missed during a disconnect self-evicts via the call <code>ttl</code> (<code>body_ttl_ms</code>).</div>
+  </div>
+
+  <!-- ============================ GLOSSARY ============================ -->
+  <h2 id="glossary">Glossary</h2>
+  <div class="card">
+    <dl class="legend">
+      <dt>Forward replication</dt><dd>primary → backup; continuous; the backup pulls. Source: the compacted changelog.</dd>
+      <dt>Re-hydration (bootstrap)</dt><dd>backup → rebooting primary; once, on boot; primary pulls back the calls it owns.</dd>
+      <dt>Backup re-subscription</dt><dd>peer → rebooted backup; Forward replication starting cold from <code>(gen, 0)</code>.</dd>
+      <dt>Reverse replication</dt><dd>acting-backup → original primary; after a takeover, so the primary picks up the latest on return.</dd>
+      <dt>Incarnation gen</dt><dd>per worker-restart; the high word of the <code>(gen, counter)</code> watermark.</dd>
+      <dt>callGen</dt><dd>per-call content version (<code>CallTopology.gen</code>); resolves conflicts last-writer-wins.</dd>
+      <dt>Watermark</dt><dd><code>(gen, counter)</code> pull cursor; retained forever per ordinal across disappear/reappear.</dd>
+      <dt>current flag</dt><dd>sticky per-peer "caught up to head" signal, set on a Noop; gates readiness.</dd>
+      <dt>element</dt><dd>a Call / call-context replica — the unit a backup holds.</dd>
+      <dt>Readiness states</dt><dd><code>NotReady</code> (boot drain unfinished) → <code>Ready</code> → <code>Draining</code> (SIGTERM).</dd>
+    </dl>
+  </div>
+
+  <footer>
+    <p>Design records: <strong>ADR-0011</strong> (<code>docs/adr/0011-ha-replication-peer-to-peer.md</code>) ·
+       plan (<code>docs/plan/on-proper-migration-of-lazy-pancake.md</code>) ·
+       glossary in <code>CONTEXT.md</code>. Source lineage: sipjsserver
+       <code>src/replication/</code>, <code>src/cache/</code>, <code>src/sip-front-proxy/health/</code> @ <code>fffc4ac6</code>.</p>
+  </footer>
+</div>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({
+    startOnLoad: true,
+    securityLevel: 'loose',
+    theme: 'default',
+    flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis' },
+    sequence: { useMaxWidth: true, wrap: true },
+  });
+</script>
+</body>
+</html>

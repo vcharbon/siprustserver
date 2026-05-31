@@ -7,6 +7,8 @@
 //!
 //! [`InMemoryCallStore`]: super::memory::InMemoryCallStore
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use call::parse_call_ref;
@@ -53,12 +55,15 @@ pub enum StoreError {
 /// The call body + index persistence seam.
 #[async_trait]
 pub trait CallStore: Send + Sync {
+    /// Read a call body as a shared, immutable `Arc<[u8]>` (Decision 9 / ADR-0011
+    /// X8). A rewrite REPLACES the slot's `Arc`, so a holder of a prior clone
+    /// keeps reading the body it observed — the immutable-shared-body invariant.
     async fn get_call(
         &self,
         role: PartitionRole,
         primary: &str,
         call_ref: &str,
-    ) -> Result<Option<Vec<u8>>, StoreError>;
+    ) -> Result<Option<Arc<[u8]>>, StoreError>;
 
     #[allow(clippy::too_many_arguments)]
     async fn put_call(
