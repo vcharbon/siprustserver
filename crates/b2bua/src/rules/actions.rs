@@ -4,16 +4,18 @@
 //! lens helpers; outbound messages use the [`relay`] primitives.
 
 use call::helpers::{
-    add_b_leg, add_cdr_event, add_tag_mapping, deactivate_rule, merge_leg, replace_timer_by_id,
-    set_bye_disposition, set_leg_disposition, set_leg_state, split_leg, TERMINATING_TIMEOUT_MS,
+    add_b_leg, add_cdr_event, add_pending_request, add_tag_mapping, bump_local_cseq,
+    deactivate_rule, find_by_b_tag, find_pending_request, merge_leg, relay_cseq_delta,
+    remove_pending_request, replace_timer_by_id, set_bye_disposition, set_leg_disposition,
+    set_leg_state, split_leg, update_remote_cseq, TERMINATING_TIMEOUT_MS,
 };
 use call::{
-    B2buaDialogExt, ByeDisposition, Call, CdrEvent, Dialog, LegDisposition, LegState, StackDialog,
-    TagMapping, TimerEntry, TimerType,
+    B2buaDialogExt, ByeDisposition, Call, CdrEvent, Dialog, LegDisposition, LegState,
+    PendingRequest, StackDialog, TagMapping, TimerEntry, TimerType,
 };
 use sip_message::generators::{
-    self, GenerateInDialogRequestOpts, GenerateResponseOpts, InDialogMethod,
-    InviteClientTransactionHandle,
+    self, GenerateInDialogRequestOpts, GenerateRelayedResponseOpts, GenerateResponseOpts,
+    InDialogMethod, InviteClientTransactionHandle,
 };
 use sip_message::message_helpers::get_header;
 use sip_message::parser::custom::CustomParser;
@@ -49,12 +51,13 @@ impl<'a> ActionExecutor<'a> {
     fn apply(&self, action: &RuleAction, ctx: &RuleContext, call: &mut Call, fx: &mut HandlerEffects) {
         match action {
             RuleAction::RelayToPeer { transform } => {
-                if let Some(peer) = peer_leg_id(call, ctx.source_leg_id) {
-                    self.relay_to(call, fx, ctx, &peer, transform);
+                let (peer, target_to_tag) = resolve_peer(call, ctx);
+                if let Some(peer) = peer {
+                    self.relay_to(call, fx, ctx, &peer, transform, target_to_tag);
                 }
             }
             RuleAction::RelayToLeg { leg_id, transform } => {
-                self.relay_to(call, fx, ctx, leg_id, transform);
+                self.relay_to(call, fx, ctx, leg_id, transform, None);
             }
             RuleAction::Respond {
                 status,
@@ -216,7 +219,7 @@ impl<'a> ActionExecutor<'a> {
 
     /// Relay the current event to `target_leg` (response → regenerate on the
     /// a-leg; ACK → ack the b-leg; other in-dialog request → regenerate on the
-    /// peer dialog).
+    /// peer dialog). Port of `ActionExecutor.ts` `relayRequest` / `relayResponseMsg`.
     fn relay_to(
         &self,
         call: &mut Call,
@@ -224,72 +227,325 @@ impl<'a> ActionExecutor<'a> {
         ctx: &RuleContext,
         target_leg: &str,
         transform: &MessageTransform,
+        target_to_tag: Option<String>,
     ) {
         if let Some(resp) = ctx.response() {
-            // Response from a b-leg → regenerate on the a-leg server transaction.
-            let status = transform.status.unwrap_or(resp.status);
-            let reason = transform
-                .reason
-                .clone()
-                .unwrap_or_else(|| resp.reason.clone());
-            let a_tag = self.ensure_a_dialog(call);
+            self.relay_response(call, fx, ctx, target_leg, transform, resp);
+            return;
+        }
+        if let Some(req) = ctx.request() {
+            self.relay_request(call, fx, ctx, target_leg, req, target_to_tag);
+        }
+    }
+
+    /// Relay an inbound SIP request to `target_leg`. Replicates the source's
+    /// per-dialog CSeq bookkeeping (`relayCSeqDelta` — each dialog has its own
+    /// sequence, RFC 3261 §12.2.1.1), the PRACK `RAck` CSeq rewrite (RFC 3262
+    /// §7.2), and the pending-request snapshot used to correlate the eventual
+    /// response (RFC 3261 §8.1.3.3).
+    fn relay_request(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        ctx: &RuleContext,
+        target_leg: &str,
+        req: &sip_message::SipRequest,
+        target_to_tag: Option<String>,
+    ) {
+        // ACK for 2xx: reuse the INVITE CSeq (no dialog-sequence advance,
+        // §13.2.2.4) — delegate to the dedicated builder.
+        if req.method.eq_ignore_ascii_case("ACK") {
+            if let Some(leg) = call.b_legs.iter().find(|l| l.leg_id == target_leg) {
+                if let Some(e) = relay::ack_b_leg(&call.call_ref, leg, self.config, self.id_gen) {
+                    fx.outbound.push(e);
+                }
+            }
+            return;
+        }
+        let Some(method) = in_dialog_method(&req.method) else {
+            return;
+        };
+        let Some(t_idx) = leg_index(call, target_leg) else {
+            return;
+        };
+        // Forking: pick the early dialog by its callee tag (RFC 3261 §12.2.1.1 —
+        // each forked early dialog is independent); else the first/only dialog.
+        let target_dialog = {
+            let leg = leg_at(call, t_idx);
+            let picked = target_to_tag
+                .as_deref()
+                .and_then(|tt| leg.dialogs.iter().find(|d| d.sip.remote_tag == tt))
+                .or_else(|| leg.dialogs.first());
+            match picked {
+                Some(d) => d.clone(),
+                None => return,
+            }
+        };
+
+        // ── Per-dialog CSeq (§12.2.1.1): outbound = target.localCSeq + delta,
+        //    delta = relayCSeqDelta(inbound, sourceDialog.remoteCSeq). ──
+        let inbound_cseq = req.cseq.seq as i64;
+        let source_leg_id = ctx.source_leg_id.to_string();
+        let source_dialog = ctx.source_dialog().cloned();
+        let source_remote_cseq = source_dialog.as_ref().and_then(|d| d.ext.remote_cseq);
+        let delta = relay_cseq_delta(inbound_cseq, source_remote_cseq);
+        let target_invite_cseq = invite_cseq_from_handle(&target_dialog)
+            .unwrap_or(target_dialog.sip.local_cseq);
+        let outbound_cseq = target_dialog.sip.local_cseq + delta;
+
+        // Advance the sequences: source learns the inbound CSeq; target bumps.
+        if let Some(sd) = &source_dialog {
+            let s_id = dialog_identity_tag(&source_leg_id, sd);
+            *call = update_remote_cseq(call.clone(), &source_leg_id, &s_id, inbound_cseq);
+        }
+        let t_id = dialog_identity_tag(target_leg, &target_dialog);
+        *call = bump_local_cseq(call.clone(), target_leg, &t_id, delta);
+
+        // RFC 3262 §7.2: rewrite RAck's middle (CSeq) token to the INVITE CSeq
+        // that produced the reliable 1xx *on the target leg*.
+        let rack = if method == InDialogMethod::Prack {
+            get_header(&req.headers, "rack").map(|r| rewrite_rack(r, target_invite_cseq))
+        } else {
+            None
+        };
+
+        let branch = self.id_gen.new_branch();
+        let gen_dialog = relay::to_gen_dialog(&target_dialog.sip);
+        let opts = GenerateInDialogRequestOpts {
+            via: Some(relay::leg_via(self.config, &call.call_ref, target_leg, branch)),
+            contact: Some(relay::leg_contact(self.config, &call.call_ref, target_leg)),
+            body: req.body.clone(),
+            content_type: get_header(&req.headers, "content-type").map(str::to_string),
+            rack,
+            cseq: Some(outbound_cseq as u32),
+            extra_headers: relay::relay_request_passthrough_headers(req),
+            ..Default::default()
+        };
+        let res = generators::generate_in_dialog_request(method, &gen_dialog, &opts);
+        let dest = relay::dest_of(&relay::strip_uri(&gen_dialog.remote_target));
+        let (out_req, dest) = relay::apply_b_leg_egress(self.config, target_leg, res.request, dest);
+        let kind = if method == InDialogMethod::Invite {
+            TxnKind::Invite
+        } else {
+            TxnKind::NonInvite
+        };
+
+        // Snapshot the inbound request so the response can echo its Via/From/To/
+        // Call-ID/CSeq (§8.1.3.3). The B2BUA answers BYE locally and ACK has no
+        // response, so neither needs correlation.
+        if !matches!(method, InDialogMethod::Bye | InDialogMethod::Invite) {
+            let pending = PendingRequest {
+                method: req.method.to_uppercase(),
+                outbound_cseq,
+                inbound_cseq,
+                source_vias: sip_message::message_helpers::get_headers(&req.headers, "via")
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+                source_call_id: req.call_id.clone(),
+                source_from: get_header(&req.headers, "from").unwrap_or_default().to_string(),
+                source_to: get_header(&req.headers, "to").unwrap_or_default().to_string(),
+                direction: ctx.direction,
+            };
+            *call = add_pending_request(call.clone(), target_leg, &t_id, pending);
+        }
+
+        fx.outbound.push(OutboundSipEffect {
+            body: OutboundBody::Request(out_req),
+            mode: OutboundTxnMode::NewClient(kind),
+            destination: dest,
+            label: format!("relay {} → {target_leg}", req.method),
+            leg_id: Some(target_leg.to_string()),
+        });
+    }
+
+    /// Relay an inbound SIP response toward `target_leg` (normally the a-leg).
+    /// Two paths, mirroring the source:
+    ///   - **pending-correlated** (in-dialog non-INVITE: PRACK/OPTIONS/INFO/
+    ///     UPDATE/…): rebuild from the snapshot captured when the request was
+    ///     relayed, so the response echoes the caller's Via/From/To/CSeq.
+    ///   - **default** (initial-INVITE 1xx/2xx): regenerate on the a-leg server
+    ///     transaction, establishing the b-leg early dialog + a-facing tag map
+    ///     on a reliable 1xx so a later PRACK can target the callee.
+    fn relay_response(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        ctx: &RuleContext,
+        target_leg: &str,
+        transform: &MessageTransform,
+        resp: &sip_message::SipResponse,
+    ) {
+        let status = transform.status.unwrap_or(resp.status);
+        let reason = transform.reason.clone().unwrap_or_else(|| resp.reason.clone());
+        let cseq_num = resp.cseq.seq as i64;
+        let cseq_method = if resp.cseq.method.is_empty() {
+            "INVITE".to_string()
+        } else {
+            resp.cseq.method.to_uppercase()
+        };
+        let to_tag = resp.to.tag.clone().unwrap_or_default();
+        let source_leg_id = ctx.source_leg_id.to_string();
+
+        // ── Pending transparent-relay correlation (§8.1.3.3) ──
+        if let Some(src_dialog) = ctx.source_dialog().cloned() {
+            if let Some(pending) = find_pending_request(&src_dialog, cseq_num).cloned() {
+                let contact = relay::leg_contact(self.config, &call.call_ref, target_leg);
+                let content_type = get_header(&resp.headers, "content-type").map(str::to_string);
+                let opts = GenerateRelayedResponseOpts {
+                    vias: pending.source_vias.clone(),
+                    record_routes: vec![],
+                    from: pending.source_from.clone(),
+                    to: pending.source_to.clone(),
+                    call_id: pending.source_call_id.clone(),
+                    cseq: format!("{} {}", pending.inbound_cseq, cseq_method),
+                    body: resp.body.clone(),
+                    transparent_headers: relay::relay_response_passthrough_headers(resp),
+                    content_type,
+                    contact: Some(contact),
+                };
+                let relayed = generators::generate_relayed_response(status, &reason, &opts);
+                let s_id = dialog_identity_tag(&source_leg_id, &src_dialog);
+                *call = remove_pending_request(call.clone(), &source_leg_id, &s_id, cseq_num);
+                let dest = pending
+                    .source_vias
+                    .first()
+                    .map(|v| via_sent_by(v))
+                    .unwrap_or_else(|| ("127.0.0.1".to_string(), 5060));
+                fx.outbound.push(OutboundSipEffect {
+                    body: OutboundBody::Response(relayed),
+                    mode: OutboundTxnMode::ServerResponse,
+                    destination: dest,
+                    label: format!("{status} {cseq_method} → {target_leg}"),
+                    leg_id: Some(target_leg.to_string()),
+                });
+                return;
+            }
+        }
+
+        // ── Reliable-1xx early-dialog tracking (b-leg) + a-facing tag map ──
+        // Each callee early dialog (forking → several per b-leg) gets its own
+        // a-facing tag so the caller sees independent early dialogs; the 1xx is
+        // relayed under that per-fork tag (RFC 3261 §12; source confirm/relay).
+        if cseq_method == "INVITE"
+            && (100..200).contains(&resp.status)
+            && !to_tag.is_empty()
+            && source_leg_id != "a"
+        {
+            self.track_b_early_dialog(call, &source_leg_id, resp, &to_tag);
+            let a_face = match find_by_b_tag(call, &source_leg_id, &to_tag) {
+                Some(m) => m.a_tag.clone(),
+                None => {
+                    // First fork on this leg reuses the leg's primary a-tag (keeps
+                    // a single confirmed a-dialog stable); later forks mint fresh.
+                    let primary = self.ensure_a_dialog(call);
+                    let a_face = if call.tag_map.iter().any(|m| m.b_leg_id == source_leg_id) {
+                        self.id_gen.new_tag()
+                    } else {
+                        primary
+                    };
+                    *call = add_tag_mapping(
+                        call.clone(),
+                        TagMapping {
+                            a_tag: a_face.clone(),
+                            b_leg_id: source_leg_id.clone(),
+                            b_tag: to_tag.clone(),
+                        },
+                    );
+                    a_face
+                }
+            };
             let a_invite = relay::rebuild_a_leg_invite(call);
             let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
             let content_type = get_header(&resp.headers, "content-type").map(str::to_string);
+            let passthrough = relay::relay_response_passthrough_headers(resp);
             let effect = relay::response_to_a_leg(
                 &a_invite,
                 status,
                 &reason,
-                Some(a_tag),
+                Some(a_face),
                 Some(contact),
                 resp.body.clone(),
                 content_type,
                 None,
+                passthrough,
             );
             fx.outbound.push(effect);
             return;
         }
-        if let Some(req) = ctx.request() {
-            if req.method.eq_ignore_ascii_case("ACK") {
-                if let Some(leg) = call.b_legs.iter().find(|l| l.leg_id == target_leg) {
-                    if let Some(e) = relay::ack_b_leg(&call.call_ref, leg, self.config, self.id_gen)
-                    {
-                        fx.outbound.push(e);
-                    }
-                }
-                return;
-            }
-            // Other in-dialog request → regenerate on the target dialog.
-            let method = in_dialog_method(&req.method);
-            if let (Some(method), Some(idx)) = (method, leg_index(call, target_leg)) {
-                let branch = self.id_gen.new_branch();
-                let dialog = match leg_at(call, idx).dialogs.first() {
-                    Some(d) => relay::to_gen_dialog(&d.sip),
-                    None => return,
-                };
-                let opts = GenerateInDialogRequestOpts {
-                    via: Some(relay::leg_via(self.config, &call.call_ref, target_leg, branch)),
-                    contact: Some(relay::leg_contact(self.config, &call.call_ref, target_leg)),
-                    body: req.body.clone(),
-                    content_type: get_header(&req.headers, "content-type").map(str::to_string),
-                    ..Default::default()
-                };
-                let res = generators::generate_in_dialog_request(method, &dialog, &opts);
-                let dest = relay::dest_of(&relay::strip_uri(&dialog.remote_target));
-                let kind = if method == InDialogMethod::Invite {
-                    TxnKind::Invite
-                } else {
-                    TxnKind::NonInvite
-                };
-                fx.outbound.push(OutboundSipEffect {
-                    body: OutboundBody::Request(res.request),
-                    mode: OutboundTxnMode::NewClient(kind),
-                    destination: dest,
-                    label: format!("{} → {target_leg}", req.method),
-                    leg_id: Some(target_leg.to_string()),
-                });
-            }
+
+        // ── Default: regenerate the INVITE response on the a-leg server txn ──
+        let a_tag = self.ensure_a_dialog(call);
+        let a_invite = relay::rebuild_a_leg_invite(call);
+        let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
+        let content_type = get_header(&resp.headers, "content-type").map(str::to_string);
+        // Reliable-provisional negotiation headers (Require/Supported/RSeq) pass
+        // through transparently so end-to-end PRACK keeps working (RFC 3262).
+        let passthrough = relay::relay_response_passthrough_headers(resp);
+        let effect = relay::response_to_a_leg(
+            &a_invite,
+            status,
+            &reason,
+            Some(a_tag),
+            Some(contact),
+            resp.body.clone(),
+            content_type,
+            None,
+            passthrough,
+        );
+        fx.outbound.push(effect);
+    }
+
+    /// Establish (or refresh) a b-leg early dialog from a reliable 1xx so a
+    /// subsequent in-dialog request (PRACK/UPDATE) can target the callee with
+    /// the right To-tag (RFC 3261 §12.1.2). Single early dialog per leg here;
+    /// multi-fork early dialogs are a forking-slice concern.
+    fn track_b_early_dialog(
+        &self,
+        call: &mut Call,
+        source_leg_id: &str,
+        resp: &sip_message::SipResponse,
+        to_tag: &str,
+    ) {
+        let contact = get_header(&resp.headers, "contact").map(unwrap_angle).unwrap_or_default();
+        // The response echoes the INVITE's CSeq (§8.1.3.3); seed each forked
+        // early dialog's sequence from it so they advance independently.
+        let invite_cseq = resp.cseq.seq as i64;
+        let already = call
+            .b_legs
+            .iter()
+            .find(|l| l.leg_id == source_leg_id)
+            .map(|l| l.dialogs.iter().any(|d| d.sip.remote_tag == to_tag))
+            .unwrap_or(false);
+        if already {
+            return;
         }
+        *call = call::helpers::update_leg(call.clone(), source_leg_id, |leg| {
+            leg.state = LegState::Early;
+            if let Some(d) = leg.dialogs.iter_mut().find(|d| d.sip.remote_tag.is_empty()) {
+                // First real fork: seed the placeholder dialog in place so it
+                // keeps its pending INVITE handle (ACK-for-2xx / RAck CSeq).
+                d.sip.remote_tag = to_tag.to_string();
+                if !contact.is_empty() {
+                    d.sip.remote_target = contact.clone();
+                }
+            } else {
+                // Additional fork: append a fresh independent early dialog
+                // (RFC 3261 §12.1.2). Its INVITE handle falls back to the leg's.
+                let ctx = call::helpers::MakeDialogLegCtx {
+                    call_id: &leg.call_id,
+                    local_uri: leg.local_uri.as_deref().unwrap_or(""),
+                    remote_uri: leg.remote_uri.as_deref().unwrap_or(""),
+                    local_tag: &leg.from_tag,
+                    remote_tag: to_tag,
+                };
+                let mut d = call::helpers::make_empty_dialog(&ctx, invite_cseq);
+                if !contact.is_empty() {
+                    d.sip.remote_target = contact.clone();
+                }
+                leg.dialogs.push(d);
+            }
+        });
     }
 
     /// Confirm a b-leg dialog from the 2xx response event (learn remote tag /
@@ -474,9 +730,10 @@ impl<'a> ActionExecutor<'a> {
         };
         let res = generators::generate_in_dialog_request(m, &dialog, &opts);
         let dest = relay::dest_of(&relay::strip_uri(&dialog.remote_target));
+        let (out_req, dest) = relay::apply_b_leg_egress(self.config, leg_id, res.request, dest);
         let kind = if m == InDialogMethod::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
         fx.outbound.push(OutboundSipEffect {
-            body: OutboundBody::Request(res.request),
+            body: OutboundBody::Request(out_req),
             mode: OutboundTxnMode::NewClient(kind),
             destination: dest,
             label: format!("{method} → {leg_id}"),
@@ -507,8 +764,9 @@ impl<'a> ActionExecutor<'a> {
         };
         let res = generators::generate_in_dialog_request(InDialogMethod::Bye, &dialog, &opts);
         let dest = relay::dest_of(&relay::strip_uri(&dialog.remote_target));
+        let (req, dest) = relay::apply_b_leg_egress(self.config, leg_id, res.request, dest);
         Some(OutboundSipEffect {
-            body: OutboundBody::Request(res.request),
+            body: OutboundBody::Request(req),
             mode: OutboundTxnMode::NewClient(TxnKind::NonInvite),
             destination: dest,
             label: format!("BYE → {leg_id}"),
@@ -548,6 +806,64 @@ fn terminate_all(call: &mut Call) {
 }
 
 /// The peer of `leg_id`: the other side of the active pair, else a↔(first b-leg).
+/// Dialog identity tag: a-leg → its local (B2BUA) tag; b-leg → the remote
+/// (callee) tag (port of `dialogIdentityTag`). Selects the dialog within a leg.
+fn dialog_identity_tag(leg_id: &str, dialog: &Dialog) -> String {
+    if leg_id == "a" {
+        dialog.sip.local_tag.clone()
+    } else {
+        dialog.sip.remote_tag.clone()
+    }
+}
+
+/// The INVITE CSeq cached on a dialog's pending INVITE handle (RFC 3261
+/// §13.2.2.4 / RFC 3262 §7.2). Parses the snapshot; `None` if absent/unparseable.
+fn invite_cseq_from_handle(dialog: &Dialog) -> Option<i64> {
+    let handle = dialog.ext.pending_invite_txn.as_ref()?;
+    match CustomParser::new().parse(&handle.original_invite).ok()? {
+        SipMessage::Request(r) => Some(r.cseq.seq as i64),
+        _ => None,
+    }
+}
+
+/// Rewrite the middle (CSeq) token of an `RAck` (`<rseq> <cseq> <method>`) to
+/// `cseq`, preserving RSeq + method (RFC 3262 §7.2).
+fn rewrite_rack(rack: &str, cseq: i64) -> String {
+    let parts: Vec<&str> = rack.split_whitespace().collect();
+    if parts.len() == 3 {
+        format!("{} {} {}", parts[0], cseq, parts[2])
+    } else {
+        rack.to_string()
+    }
+}
+
+/// Parse a Via header's sent-by `host:port` (RFC 3261 §18.2.2) for response
+/// routing.
+fn via_sent_by(via: &str) -> (String, u16) {
+    via.split_whitespace()
+        .nth(1)
+        .and_then(|s| s.split(';').next())
+        .map(|hp| relay::dest_of(hp.trim()))
+        .unwrap_or_else(|| ("127.0.0.1".to_string(), 5060))
+}
+
+/// Resolve the relay target leg plus, for forking, the specific callee early-
+/// dialog tag. Port of `executeRelayToPeer`'s fallback: an a-leg in-dialog
+/// request (PRACK/UPDATE) before the a↔b merge carries the B2BUA's a-facing tag
+/// in its To, which the tag map resolves to the right b-leg + callee fork tag.
+fn resolve_peer(call: &Call, ctx: &RuleContext) -> (Option<String>, Option<String>) {
+    if ctx.source_leg_id == call.a_leg.leg_id {
+        if let Some(req) = ctx.request() {
+            if let Some(tag) = req.to.tag.as_deref() {
+                if let Some(m) = call::helpers::find_by_a_tag(call, tag) {
+                    return (Some(m.b_leg_id.clone()), Some(m.b_tag.clone()));
+                }
+            }
+        }
+    }
+    (peer_leg_id(call, ctx.source_leg_id), None)
+}
+
 fn peer_leg_id(call: &Call, leg_id: &str) -> Option<String> {
     if let Some(p) = &call.active_peer {
         if p.leg_a == leg_id {

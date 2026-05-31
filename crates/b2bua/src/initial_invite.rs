@@ -156,6 +156,7 @@ fn reject_call(
         vec![],
         None,
         None,
+        vec![],
     );
     call.cdr_events.push(CdrEvent {
         event_type: CdrEventType::Reject,

@@ -94,6 +94,36 @@ pub fn dest_of(uri_host_port: &str) -> (String, u16) {
     (hp.to_string(), 5060)
 }
 
+/// Apply the b-leg outbound-proxy egress policy (port of `helpers.ts`
+/// b2bOutboundProxy + `ActionExecutor.ts` `applyEgressRouting`).
+///
+/// When `config.b2b_outbound_proxy` is set and `leg_id` is a b-leg, preload a
+/// loose `;outbound` `Route` at the proxy and redirect the **wire** destination
+/// there (RFC 3261 §16.12: a UAC with a preloaded outbound-proxy route sends to
+/// the top Route while keeping the remote target in the Request-URI). The
+/// `;outbound` param is the proxy's deterministic worker-outbound classifier
+/// (`ProxyCore` §16.4). For the a-leg (`leg_id == "a"`) or when no proxy is
+/// configured this is a no-op — the natural route set / remote target stands.
+pub fn apply_b_leg_egress(
+    config: &B2buaConfig,
+    leg_id: &str,
+    mut req: SipRequest,
+    dest: (String, u16),
+) -> (SipRequest, (String, u16)) {
+    if leg_id == "a" {
+        return (req, dest);
+    }
+    let Some((host, port)) = config.b2b_outbound_proxy.clone() else {
+        return (req, dest);
+    };
+    let route = MsgHeader {
+        name: "Route".to_string(),
+        value: format!("<sip:{host}:{port};lr;outbound>"),
+    };
+    req.headers.insert(0, route);
+    (req, (host, port))
+}
+
 /// Build a fresh b-leg + its outbound INVITE effect (initial route + failover).
 #[allow(clippy::too_many_arguments)]
 pub fn build_b_leg(
@@ -130,6 +160,11 @@ pub fn build_b_leg(
         extra_headers: vec![],
     };
     let invite = generators::generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
+    // Behind the front proxy, the b-leg INVITE traverses the proxy: preload a
+    // `;outbound` Route and make the wire destination the proxy (R-URI stays the
+    // callee). `wire_dest` drives the client transaction's send + retransmits;
+    // the preloaded Route rides the snapshot so retransmits carry it too.
+    let (invite, wire_dest) = apply_b_leg_egress(config, leg_id, invite, dest.clone());
 
     let dialog = Dialog {
         sip: StackDialog {
@@ -150,14 +185,16 @@ pub fn build_b_leg(
                 branch: branch.clone(),
                 original_invite: sip_message::serialize(&SipMessage::Request(invite.clone())),
                 destination: call::HostPort {
-                    host: dest.0.clone(),
-                    port: dest.1,
+                    host: wire_dest.0.clone(),
+                    port: wire_dest.1,
                 },
             }),
             cached_sdp: None,
         },
     };
 
+    // Capture the INVITE handle before `dialog` is moved into the leg.
+    let leg_invite_handle = dialog.ext.pending_invite_txn.clone();
     let leg = Leg {
         leg_id: leg_id.to_string(),
         call_id: b_call_id,
@@ -174,7 +211,10 @@ pub fn build_b_leg(
         local_uri: Some(from_uri),
         remote_uri: Some(to_uri),
         invite_request_uri: Some(request_uri),
-        pending_invite_txn: None,
+        // Also stamp the INVITE handle on the leg: a forked early dialog created
+        // from a later 18x has no per-dialog handle, so ACK-for-2xx / RAck CSeq
+        // fall back to the leg's (RFC 3261 §13.2.2.4 / RFC 3262 §7.2).
+        pending_invite_txn: leg_invite_handle,
         ext: None,
         kind: Some(call::LegKind::Destination),
         adopted: Some(false),
@@ -183,11 +223,48 @@ pub fn build_b_leg(
     let effect = OutboundSipEffect {
         body: OutboundBody::Request(invite),
         mode: OutboundTxnMode::NewClient(TxnKind::Invite),
-        destination: dest,
+        destination: wire_dest,
         label: format!("b-leg INVITE ({leg_id})"),
         leg_id: Some(leg_id.to_string()),
     };
     (leg, effect)
+}
+
+/// Headers a B2BUA must carry transparently when relaying an INVITE response
+/// from the b-leg to the a-leg so end-to-end reliable-provisional (RFC 3262)
+/// keeps working: `Require`/`Supported` (the `100rel` option-tag negotiation)
+/// and `RSeq` (the provisional sequence the caller's PRACK acknowledges).
+///
+/// This is plain transparent relay — distinct from the deferred B2BUA-side
+/// 18x-management *policies* (`relayFirst18xTo180`/`promote18xPemTo200`), which
+/// would instead *rewrite* these provisionals.
+pub fn relay_response_passthrough_headers(resp: &sip_message::SipResponse) -> Vec<MsgHeader> {
+    const PASSTHROUGH: [&str; 3] = ["require", "rseq", "supported"];
+    resp.headers
+        .iter()
+        .filter(|h| PASSTHROUGH.contains(&h.name.to_ascii_lowercase().as_str()))
+        .map(|h| MsgHeader {
+            name: h.name.clone(),
+            value: h.value.clone(),
+        })
+        .collect()
+}
+
+/// Headers carried transparently when relaying an in-dialog *request* across
+/// the back-to-back UA (RFC 3261 §16.6 spirit — non-structural headers pass
+/// through; structural ones are owned by the generator). For the basic-B2BUA
+/// set this is the reliable-provisional negotiation (`Require`/`Supported`);
+/// `RAck` is rewritten separately (RFC 3262 §7.2), not copied verbatim.
+pub fn relay_request_passthrough_headers(req: &SipRequest) -> Vec<MsgHeader> {
+    const PASSTHROUGH: [&str; 2] = ["require", "supported"];
+    req.headers
+        .iter()
+        .filter(|h| PASSTHROUGH.contains(&h.name.to_ascii_lowercase().as_str()))
+        .map(|h| MsgHeader {
+            name: h.name.clone(),
+            value: h.value.clone(),
+        })
+        .collect()
 }
 
 /// Build a UAS response on a leg's inbound INVITE (toward alice). `to_tag` pins
@@ -202,13 +279,14 @@ pub fn response_to_a_leg(
     body: Vec<u8>,
     content_type: Option<String>,
     incoming_source: Option<(String, u16)>,
+    extra_headers: Vec<MsgHeader>,
 ) -> OutboundSipEffect {
     let opts = GenerateResponseOpts {
         to_tag,
         contact,
         body,
         content_type,
-        extra_headers: vec![],
+        extra_headers,
         incoming_source,
     };
     let resp = generators::generate_response(a_leg_invite, status, reason, &opts);
@@ -236,6 +314,7 @@ pub fn ack_b_leg(call_ref: &str, leg: &Leg, config: &B2buaConfig, id_gen: &IdGen
     };
     let ack = generators::generate_ack_for_2xx(None, &gen_dialog, &opts);
     let dest = dest_of(&strip_uri(&dialog.sip.remote_target));
+    let (ack, dest) = apply_b_leg_egress(config, &leg.leg_id, ack, dest);
     Some(OutboundSipEffect {
         body: OutboundBody::Request(ack),
         mode: OutboundTxnMode::Raw,

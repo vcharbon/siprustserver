@@ -20,6 +20,7 @@ use call::{TimerEntry, TimerType};
 use crate::event::CallEvent;
 
 struct Fired {
+    id: String,
     timer_type: TimerType,
     call_ref: String,
     leg_id: Option<String>,
@@ -90,6 +91,7 @@ async fn driver(
                     let delay = (entry.fire_at - clock.now_ms()).max(0) as u64;
                     let key = queue.insert(
                         Fired {
+                            id: entry.id.clone(),
                             timer_type: entry.timer_type,
                             call_ref: call_ref.clone(),
                             leg_id: entry.leg_id.clone(),
@@ -115,8 +117,16 @@ async fn driver(
                 }
             },
             expired = next_expired(&mut queue), if !queue.is_empty() => {
-                // Drop bookkeeping for the fired id (best-effort: id not tracked back
-                // from the entry, so we let CancelAll/Cancel prune lazily).
+                // Drop the fired timer's bookkeeping. This is load-bearing, not
+                // cosmetic: `DelayQueue` recycles the slab slot of a removed
+                // entry, so a stale `keys[id]` would alias a *different* live
+                // timer — a later `Cancel`/re-`Schedule` of `id` would then evict
+                // the wrong timer (e.g. a keepalive-timeout cancel killing the
+                // rescheduled keepalive). Prune on expiry so ids never alias.
+                keys.remove(&expired.id);
+                if let Some(ids) = by_call.get_mut(&expired.call_ref) {
+                    ids.remove(&expired.id);
+                }
                 let event = CallEvent::Timer {
                     timer_type: expired.timer_type,
                     call_ref: expired.call_ref,

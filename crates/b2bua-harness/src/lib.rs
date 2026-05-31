@@ -34,12 +34,27 @@ impl B2buaSut {
         addr: &str,
         decision: Arc<dyn CallDecisionEngine>,
     ) -> Self {
+        Self::start_with_outbound_proxy(h, name, addr, decision, None).await
+    }
+
+    /// Bind a B2BUA at `addr` driven by `decision`, optionally deployed behind
+    /// the front proxy: when `outbound_proxy` is `Some((host, port))`, every
+    /// b-leg outbound request traverses that proxy (see
+    /// [`B2buaConfig::b2b_outbound_proxy`]).
+    pub async fn start_with_outbound_proxy(
+        h: &Harness,
+        name: &str,
+        addr: &str,
+        decision: Arc<dyn CallDecisionEngine>,
+        outbound_proxy: Option<(String, u16)>,
+    ) -> Self {
         let (endpoint, sa) = h.bind_sut(name, addr).await;
         let cdr = InMemoryCdrWriter::new();
         let config = B2buaConfig {
             self_ordinal: "w0".into(),
             sip_local_ip: sa.ip().to_string(),
             sip_local_port: sa.port(),
+            b2b_outbound_proxy: outbound_proxy,
             ..Default::default()
         };
         let deps = B2buaDeps {
@@ -71,6 +86,29 @@ impl B2buaSut {
     ) -> Self {
         let decision = Arc::new(ScriptedDecisionEngine::route_all_to(dest_host, dest_port));
         Self::start(h, name, addr, decision).await
+    }
+
+    /// Bind a B2BUA that routes every call to `dest` but sends its b-leg
+    /// (worker→callee) traffic through the front proxy at `proxy` — the
+    /// `alice → proxy → b2bua → proxy → bob` topology.
+    pub async fn route_all_to_via_proxy(
+        h: &Harness,
+        name: &str,
+        addr: &str,
+        dest_host: &str,
+        dest_port: u16,
+        proxy_host: &str,
+        proxy_port: u16,
+    ) -> Self {
+        let decision = Arc::new(ScriptedDecisionEngine::route_all_to(dest_host, dest_port));
+        Self::start_with_outbound_proxy(
+            h,
+            name,
+            addr,
+            decision,
+            Some((proxy_host.to_string(), proxy_port)),
+        )
+        .await
     }
 
     pub fn cdr_records(&self) -> Vec<CdrRecord> {

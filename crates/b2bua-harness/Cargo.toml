@@ -18,3 +18,4 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+sip-proxy = { path = "../sip-proxy" }

@@ -81,7 +81,18 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     if let CallEvent::Sip { message, src } = &event {
         if let SipMessage::Request(req) = message.as_ref() {
             if req.method.eq_ignore_ascii_case("OPTIONS") && req.to.tag.is_none() {
-                let resp = generate_response(req, 200, "OK", &GenerateResponseOpts::default());
+                // A 2xx to an out-of-dialog OPTIONS still needs a To-tag
+                // (RFC 3261 §8.2.6.2 / §12.1.1); omitting it makes
+                // `hydrate_response` reject the message. Mint a local tag.
+                let resp = generate_response(
+                    req,
+                    200,
+                    "OK",
+                    &GenerateResponseOpts {
+                        to_tag: Some(ctx.id_gen.new_tag()),
+                        ..Default::default()
+                    },
+                );
                 ctx.txn.send_response(resp, *src).await;
                 return;
             }

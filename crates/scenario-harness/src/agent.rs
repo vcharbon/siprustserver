@@ -409,6 +409,14 @@ impl ClientInvite {
         resp
     }
 
+    /// Begin an in-dialog request on the *early* dialog (before the final 2xx /
+    /// ACK) — the PRACK path (RFC 3262): alice PRACKs a reliable 183 while the
+    /// INVITE transaction is still pending. The CSeq advances on the shared
+    /// dialog state, so the later BYE numbers correctly.
+    pub fn send_request(&mut self, method: InDialogMethod) -> InDialogRequest<'_> {
+        InDialogRequest::new(self.agent.clone(), &mut self.dialog, self.fallback_addr, method)
+    }
+
     /// Generate and send the ACK for the 2xx (CSeq reused from the INVITE per
     /// RFC 3261 §13.2.2.4), then return the confirmed [`Dialog`]. With a route
     /// set the ACK carries Route headers and goes to the first hop (the proxy).
@@ -466,6 +474,101 @@ impl Dialog {
             agent: self.agent.clone(),
         }
     }
+
+    /// Begin an in-dialog request with fine-grained control over RAck (RFC 3262
+    /// PRACK) and arbitrary extra headers. Returns a builder; call
+    /// [`InDialogRequest::send`]. Use this over [`request`](Dialog::request) when
+    /// the request needs an `RAck` header (PRACK) or other custom headers.
+    pub fn send_request(&mut self, method: InDialogMethod) -> InDialogRequest<'_> {
+        InDialogRequest::new(self.agent.clone(), &mut self.dialog, self.fallback_addr, method)
+    }
+}
+
+/// Builder for an in-dialog request carrying an `RAck` and/or custom headers
+/// (the PRACK path, RFC 3262 §7.2). Borrows the originating dialog's
+/// [`StackDialog`] so the CSeq bump persists — works over both a confirmed
+/// [`Dialog`] and an early [`ClientInvite`] (PRACK precedes the final 2xx/ACK).
+pub struct InDialogRequest<'a> {
+    agent: Agent,
+    dialog: &'a mut StackDialog,
+    fallback: SocketAddr,
+    method: InDialogMethod,
+    sdp: Option<String>,
+    rack: Option<String>,
+    extra_headers: Vec<SipHeader>,
+    to_tag: Option<String>,
+}
+
+impl<'a> InDialogRequest<'a> {
+    fn new(agent: Agent, dialog: &'a mut StackDialog, fallback: SocketAddr, method: InDialogMethod) -> Self {
+        InDialogRequest {
+            agent,
+            dialog,
+            fallback,
+            method,
+            sdp: None,
+            rack: None,
+            extra_headers: vec![],
+            to_tag: None,
+        }
+    }
+
+    /// Address this request to a specific early dialog by overriding the remote
+    /// (To) tag — the per-fork PRACK in `prack-forking` (RFC 3262 §5). The shared
+    /// CSeq counter still advances; the slim harness does not assert per-fork CSeq
+    /// independence (the B2BUA recomputes the outbound CSeq per dialog anyway).
+    pub fn with_to_tag(mut self, tag: &str) -> Self {
+        self.to_tag = Some(tag.to_string());
+        self
+    }
+
+    /// Attach an SDP body (e.g. the answer carried in a PRACK to a delayed
+    /// offer, RFC 3264 §4).
+    pub fn with_sdp(mut self, sdp: &str) -> Self {
+        self.sdp = Some(sdp.to_string());
+        self
+    }
+
+    /// Set the `RAck` header (`<rseq> <cseq> <method>`, RFC 3262 §7.2).
+    pub fn with_rack(mut self, rack: &str) -> Self {
+        self.rack = Some(rack.to_string());
+        self
+    }
+
+    /// Attach an arbitrary extra header.
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.extra_headers.push(SipHeader {
+            name: name.to_string(),
+            value: value.to_string(),
+        });
+        self
+    }
+
+    /// Generate and send the request; returns its client transaction.
+    pub async fn send(self) -> InDialogTxn {
+        let opts = GenerateInDialogRequestOpts {
+            via: Some(self.agent.via()),
+            contact: Some(self.agent.contact()),
+            body: self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
+            rack: self.rack,
+            extra_headers: self.extra_headers,
+            ..Default::default()
+        };
+        // Per-fork addressing: generate against a dialog view with the chosen
+        // remote tag, but persist the CSeq advance back to the shared dialog.
+        let mut view = self.dialog.clone();
+        if let Some(t) = &self.to_tag {
+            view.remote_tag = t.clone();
+        }
+        let res = generate_in_dialog_request(self.method, &view, &opts);
+        let next_cseq = res.dialog.local_cseq;
+        self.dialog.local_cseq = next_cseq;
+        let dst = next_hop(self.dialog, self.fallback);
+        self.agent.send(&SipMessage::Request(res.request), dst).await;
+        InDialogTxn {
+            agent: self.agent.clone(),
+        }
+    }
 }
 
 /// Client transaction for an in-dialog request.
@@ -499,13 +602,16 @@ impl ServerTxn {
         &self.request
     }
 
-    /// Send a response. Returns a builder for attaching an SDP answer.
+    /// Send a response. Returns a builder for attaching an SDP answer and/or
+    /// custom headers (e.g. `Require: 100rel` + `RSeq` on a reliable 18x).
     pub fn respond(&mut self, status: u16, reason: &str) -> Respond<'_> {
         Respond {
             txn: self,
             status,
             reason: reason.to_string(),
             sdp: None,
+            extra_headers: vec![],
+            to_tag: None,
         }
     }
 
@@ -540,12 +646,15 @@ impl ServerTxn {
     }
 }
 
-/// Builder for a UAS response (lets an SDP answer be attached fluently).
+/// Builder for a UAS response (lets an SDP answer and custom headers be
+/// attached fluently).
 pub struct Respond<'a> {
     txn: &'a mut ServerTxn,
     status: u16,
     reason: String,
     sdp: Option<String>,
+    extra_headers: Vec<SipHeader>,
+    to_tag: Option<String>,
 }
 
 impl<'a> Respond<'a> {
@@ -554,12 +663,37 @@ impl<'a> Respond<'a> {
         self
     }
 
+    /// Force a specific To-tag on this response instead of the auto-minted one.
+    /// Used to simulate a forking endpoint emitting several early dialogs with
+    /// distinct tags (RFC 3261 §12.1; the per-fork 18x in `prack-forking`).
+    pub fn with_to_tag(mut self, tag: &str) -> Self {
+        self.to_tag = Some(tag.to_string());
+        self
+    }
+
+    /// Attach a custom header (e.g. `Require: 100rel`, `RSeq: 1` on a reliable
+    /// provisional, RFC 3262). Repeatable; order is preserved.
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.extra_headers.push(SipHeader {
+            name: name.to_string(),
+            value: value.to_string(),
+        });
+        self
+    }
+
     /// Generate and send the response.
     pub async fn send(self) {
         let txn = self.txn;
-        if self.status > 100 && txn.to_tag.is_none() {
-            txn.to_tag = Some(txn.agent.tag());
-        }
+        // An explicit per-fork To-tag overrides (and does not disturb) the txn's
+        // sticky auto-minted tag, so distinct early dialogs keep distinct tags.
+        let to_tag = if let Some(t) = self.to_tag {
+            Some(t)
+        } else {
+            if self.status > 100 && txn.to_tag.is_none() {
+                txn.to_tag = Some(txn.agent.tag());
+            }
+            txn.to_tag.clone()
+        };
         // Contact is required on 2xx and useful on 18x to establish the early
         // dialog's remote target; omit on plain 100.
         let contact = if self.status >= 180 {
@@ -568,11 +702,11 @@ impl<'a> Respond<'a> {
             None
         };
         let opts = GenerateResponseOpts {
-            to_tag: txn.to_tag.clone(),
+            to_tag,
             contact,
             body: self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
             content_type: None,
-            extra_headers: vec![],
+            extra_headers: self.extra_headers.clone(),
             incoming_source: None,
         };
         let resp = generate_response(&txn.request, self.status, &self.reason, &opts);

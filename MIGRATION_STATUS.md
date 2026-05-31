@@ -569,6 +569,7 @@ scenario-harness in a dedicated `crates/b2bua-harness` test crate.
 | `cdr/CdrWriter.ts` (+ `BufferedCdrLayer`) | `cdr/{mod,memory,buffered}.rs` | ✅ |
 | `CallLimiter*.ts` | `limiter.rs` (`NoopLimiter`) | 🟡 no-op seam (real limiter = row 20) |
 | `b2bua/stack-identity.ts` | `stack_identity.rs` | ✅ Via/Contact `cr`/`lg` stamping + param codec |
+| `b2bua/helpers.ts` b2bOutboundProxy + `ActionExecutor` `applyEgressRouting` | `rules/relay.rs` (`apply_b_leg_egress`) + `config.b2b_outbound_proxy` | ✅ b-leg INVITE/ACK/BYE preload `;outbound` Route at the proxy; wire dest = proxy, R-URI = callee (RFC 3261 §16.12). Empty-routeSet error-fallback + the `;outbound` source-IP hardening folded into the one helper |
 | `B2buaCore.ts` (layer composition) | `b2bua_core.rs` | ✅ |
 
 ### Tests
@@ -581,12 +582,49 @@ scenario-harness in a dedicated `crates/b2bua-harness` test crate.
 | matcher ranking + invariant enforcement | `tests/rules.rs` | ✅ 3 |
 | alice↔b2bua↔bob basic call (INVITE/180/200/ACK/BYE) + one CDR | `b2bua-harness/tests/basic_call.rs` | ✅ 1 |
 | b-leg 486 relayed + terminate; decision reject 403 | `b2bua-harness/tests/failure.rs` | ✅ 2 |
+| alice→proxy→b2bua→proxy→bob basic call (port of `basicCall` on the `proxy+b2b` SUT): real LB `ProxyCore` fronting one real `B2buaCore` worker behind `b2bOutboundProxy`; asserts INVITE **and** BYE make all four hops + one CDR | `b2bua-harness/tests/proxy_b2bua.rs` (+ `tests/common`) | ✅ 1 |
+
+#### SIP-behaviour scenarios (ports of `tests/scenarios/*`)
+| Source scenario | Behaviour exercised | Rust home | Status |
+|---|---|---|---|
+| `prack.ts` | end-to-end reliable provisional: 183(100rel,RSeq) → PRACK(RAck) → 200(PRACK) → 200(INVITE). The B2BUA relays it as a back-to-back UA with **per-dialog CSeq** (`relayCSeqDelta`), **RAck CSeq rewrite** (RFC 3262 §7.2), b-leg early-dialog capture, and pending-request response correlation (`generate_relayed_response`) | `b2bua-harness/tests/prack.rs` | ✅ 1 |
+| `prack-forking.ts` | delayed-offer forking: two reliable 183s with distinct callee fork-tags → two independent early dialogs on one b-leg, each mapped to its own a-facing tag; per-fork PRACK routed by To-tag through the tag map | `b2bua-harness/tests/prack_forking.rs` | ✅ 1 |
+| `keepalive-happy.ts` | long call: keepalive timer sends in-dialog OPTIONS to both legs every interval, each 200 absorbed + timer re-armed; two cycles | `b2bua-harness/tests/keepalive.rs` | ✅ 1 |
+| `options-keepalive-timeout.ts` | auto-cutoff: a leg that never answers its keepalive OPTIONS trips the per-leg `KeepaliveTimeout`, which terminates that leg and BYEs the healthy peer | `b2bua-harness/tests/keepalive_timeout.rs` | ✅ 1 |
+
+**Behaviour ported alongside these tests** (was dormant before this slice): the
+back-to-back-UA in-dialog relay now does faithful per-dialog CSeq bookkeeping
+(`relay_cseq_delta` + `bump_local_cseq`/`update_remote_cseq`), the PRACK `RAck`
+rewrite, reliable-provisional header passthrough (`Require`/`Supported`/`RSeq`),
+b-leg early-dialog establishment from a 1xx, **multi-early-dialog forking** with
+per-fork a-facing tag mapping + tag-map-routed in-dialog requests, and
+non-INVITE response correlation via the pending-request snapshot. Harness gained
+`Respond::with_header`/`with_to_tag` + `Dialog/ClientInvite::send_request` (RAck,
+custom headers, per-fork To-tag).
+
+> **Timer-driver fix (load-bearing):** the B2BUA `TimerService` left a fired
+> timer's id in its `keys` map; `DelayQueue` recycles the freed slab slot, so a
+> later `Cancel`/re-`Schedule` of that id aliased and evicted the *wrong* live
+> timer (a keepalive-timeout cancel was killing the rescheduled keepalive,
+> breaking the second keepalive cycle). Fired timers now prune their `keys`/
+> `by_call` bookkeeping on expiry (`timers.rs`).
 
 ### Un-ported with justification
 - **18x-management strategies** (`relayFirst18xTo180`, `promote18xPemTo200`,
   PEM/fake-prack) + **REFER transfer** (`referTransfer`, `TransferRules`,
   `/call/refer`) — SERVICE_LAYER policy modules; user-deferred. The action
-  vocabulary they need is defined but dormant.
+  vocabulary they need is defined but dormant. Concretely this defers
+  `fake-prack.ts` (all 8 cases: B2BUA-**originated** PRACK, cached-SDP-at-200,
+  UPDATE skeleton-fit answer/488, the failover/forking variants that ride the
+  policy) — the *transparent* end-to-end PRACK relay it regression-guards
+  (`fake-prack-no-policy-control`) is what `prack.rs` covers.
+- **`prack-forking.ts` per-fork CSeq-independence assertion** — the source
+  framework validates that each forked early dialog advances its own CSeq from
+  the shared INVITE baseline (caller side). The slim Rust harness keeps one CSeq
+  counter per `ClientInvite` and does not assert this; the B2BUA recomputes the
+  *outbound* (callee-side) CSeq per dialog regardless (`relay_cseq_delta`), which
+  `prack_forking.rs` does exercise. The loser-fork cancellation + winner-SDP
+  caching shape is the `fake-prack` policy's, deferred above.
 - **Real HTTP decision adapter** — the scripted backend stands in.
 - **Failover via `call_failure`** — route-failure relays the failure + tears the
   call down; the async failover round-trip + `refer-async-http` re-entrant
@@ -596,3 +634,10 @@ scenario-harness in a dedicated `crates/b2bua-harness` test crate.
   `CallStore` seam carries the HA params; the replicating impl is the HA slice.
 - **Draining / readiness / overload** — minimal OPTIONS 200 only (own row above).
 - **Tracing / OTel span machinery** — no tokio analogue this slice.
+- **`proxy+b2b` variants beyond the single-worker basic call** — the `sipproxyHA`
+  two-worker topology (`tests/support/proxyB2bFakeStack.ts`
+  `sipproxyHAFakeStackLayer`), the bob-initiated-BYE direction (cookie-decoded
+  reverse path), `keepalive-via-proxy` / `route-set-propagation`, and the
+  `simulateMissingOutboundProxy` regression guard land with the HA / keepalive
+  slices. The `b2bOutboundProxy` egress + the proxy's worker-outbound classifier
+  that those build on are ported and exercised by `proxy_b2bua.rs`.
