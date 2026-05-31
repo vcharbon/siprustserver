@@ -34,12 +34,14 @@
 //! `SignalingNetwork`, so the reports are projected from the record exactly as
 //! before — the auto-generation only changes *who writes the bytes*.
 
+use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use layer_harness::{NetworkTag, Recorder, RunContext, TransportKind};
+use layer_harness::{Channel, NetworkTag, Recorder, RunContext, TransportKind};
 use sip_clock::Clock;
 use sip_message::generators::{
     generate_ack_for_2xx, generate_in_dialog_request, generate_out_of_dialog_request,
@@ -52,10 +54,11 @@ use sip_message::message_helpers::{get_header, get_headers};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{serialize, SipHeader, SipMessage, SipParser, SipRequest, SipResponse};
 use sip_net::{
-    with_all_contracts, BindUdpOpts, ScopedAuditOptions, SignalingNetwork, SimulatedSignalingNetwork,
-    UdpEndpoint,
+    to_sip_entries, with_all_contracts, BindUdpOpts, ScopedAuditOptions, SignalingNetwork,
+    SignalingNetworkEvent, SimulatedSignalingNetwork, UdpEndpoint,
 };
 
+use crate::report::wire::{facets, format_relative};
 use crate::run::RunReport;
 
 const RECV_TIMEOUT: Duration = Duration::from_secs(2);
@@ -78,6 +81,9 @@ pub struct Harness {
     ids: Arc<Ids>,
     name: String,
     description: Option<String>,
+    /// Dumps the recorded trace to stderr if the scenario task unwinds before
+    /// [`finish`](Harness::finish) renders a report. `finish` disarms it.
+    dump: PanicDump,
 }
 
 impl Harness {
@@ -91,9 +97,13 @@ impl Harness {
     }
 
     /// Like [`new`](Harness::new) but with an explicit one-hop transit delay
-    /// (ms). Use `0` for instant delivery (e.g. when a test asserts exact,
-    /// transit-free timestamps).
+    /// (ms). A delay of `0` is coerced to `1`: zero transit under a paused
+    /// runtime is a determinism trap (the delivery `sleep(0)` races the txn →
+    /// router → dispatcher pipeline, so timer cancels land after the timer
+    /// fired). A non-zero delay makes each `recv` park auto-advance
+    /// deterministically. See [`SimulatedSignalingNetwork::new`].
     pub fn with_transit_delay(scenario_name: impl Into<String>, transit_delay_ms: u64) -> Self {
+        let transit_delay_ms = transit_delay_ms.max(1);
         let recorder = Recorder::with_clock(TransportKind::Fake, Clock::test_at(0));
         let sim = Arc::new(SimulatedSignalingNetwork::new(transit_delay_ms));
         let wrapped = with_all_contracts(
@@ -103,13 +113,21 @@ impl Harness {
             ScopedAuditOptions::default(),
             true,
         );
+        let name = scenario_name.into();
+        let dump = PanicDump {
+            name: name.clone(),
+            channel: wrapped.recording.channel(),
+            recorder: recorder.clone(),
+            armed: Cell::new(true),
+        };
         Self {
             network: wrapped.network,
             recording: wrapped.recording,
             recorder,
             ids: Arc::new(Ids(AtomicU64::new(1))),
-            name: scenario_name.into(),
+            name,
             description: None,
+            dump,
         }
     }
 
@@ -181,9 +199,99 @@ impl Harness {
     /// from the recording). Failures in the fluent flow panic in-line, so a
     /// returned report is by construction a passing run.
     pub async fn finish(self) -> RunReport {
+        // A returned report is by construction a passing run, so the post-mortem
+        // dump is no longer wanted: disarm it before tearing the session down.
+        self.dump.disarm();
         let events = self.recording.channel().snapshot();
         let audit = self.recording.close().await;
         RunReport::from_recording(self.name, self.description, self.recorder, events, audit)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Post-mortem trace dump
+// ---------------------------------------------------------------------------
+
+/// RAII trace dumper. A failing scenario `panic!`s — a `recv` timeout
+/// (`Agent::recv`), an `expect` status mismatch (`expect_response`), a wrong
+/// method (`Agent::receive`) — and aborts *before* [`Harness::finish`], the only
+/// path that renders the recording. Without this guard the most common failure
+/// (a message that never arrived / wrong method) yields a one-line panic and
+/// zero visibility into what was actually on the wire.
+///
+/// This guard's `Drop` notices the in-flight unwind (`std::thread::panicking`)
+/// and dumps a compact wire trace to stderr, so every panicking scenario
+/// self-documents with no per-test instrumentation. `finish` disarms it (a
+/// clean run already has its report). It projects the **synchronous**
+/// `channel().snapshot()` — no async, no `close()` — and is best-effort and
+/// panic-safe: it never panics inside `Drop` (a poisoned mutex etc. is
+/// swallowed).
+struct PanicDump {
+    name: String,
+    channel: Channel<SignalingNetworkEvent>,
+    recorder: Recorder,
+    armed: Cell<bool>,
+}
+
+impl PanicDump {
+    fn disarm(&self) {
+        self.armed.set(false);
+    }
+
+    /// Render the compact one-line-per-message trace from the recording.
+    fn render(&self) -> String {
+        let events = self.channel.snapshot();
+        let entries = to_sip_entries(&events);
+        let names: BTreeMap<SocketAddr, String> = self
+            .recorder
+            .snapshot()
+            .lanes
+            .into_iter()
+            .map(|l| (l.addr, l.names.first().cloned().unwrap_or_default()))
+            .collect();
+        let label_for = |addr: &SocketAddr| match names.get(addr) {
+            Some(n) if !n.is_empty() => format!("{n} ({addr})"),
+            _ => addr.to_string(),
+        };
+        let base = entries.iter().map(|e| e.sent_ms as i64).min().unwrap_or(0);
+
+        let mut out = format!(
+            "\n══ SIP trace for '{}' (dumped on panic — finish() not reached) ══\n",
+            self.name
+        );
+        if entries.is_empty() {
+            out.push_str("  (no messages recorded)\n");
+        }
+        for e in &entries {
+            let sent = format_relative(e.sent_ms as i64 - base);
+            let ts = match e.received_ms {
+                Some(r) if r != e.sent_ms => format!("{sent} → {}", format_relative(r as i64 - base)),
+                _ => sent,
+            };
+            let undelivered = if e.delivered { "" } else { "  [UNDELIVERED]" };
+            out.push_str(&format!(
+                "  [{ts}] {} → {}  {}{}\n",
+                label_for(&e.from),
+                label_for(&e.to),
+                facets(&e.raw).label,
+                undelivered
+            ));
+        }
+        out.push_str(&format!("══ end SIP trace ({} message(s)) ══\n", entries.len()));
+        out
+    }
+}
+
+impl Drop for PanicDump {
+    fn drop(&mut self) {
+        if !self.armed.get() || !std::thread::panicking() {
+            return;
+        }
+        // Never panic while already unwinding: a second panic in `Drop` aborts
+        // the process. Swallow any failure (e.g. a poisoned mutex on snapshot).
+        if let Ok(text) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.render())) {
+            eprint!("{text}");
+        }
     }
 }
 

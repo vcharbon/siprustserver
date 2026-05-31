@@ -57,7 +57,16 @@ pub struct SimulatedSignalingNetwork {
 
 impl SimulatedSignalingNetwork {
     /// Build a fabric with the given per-hop transit delay (ms).
+    ///
+    /// A request for `0` is coerced to `1`. Zero transit under a paused runtime
+    /// is a determinism trap: delivery is a spawned `sleep(0)` task that races
+    /// the multi-stage pipeline (txn actor → router → dispatcher → net), so a
+    /// response is processed a turn late (during the next `advance`) and a timer
+    /// cancel can land after the timer already fired. A non-zero delay makes
+    /// every `recv` park the runtime and auto-advance deterministically. There
+    /// is no upside to zero for timer/paused tests, so it is forbidden here.
     pub fn new(transit_delay_ms: u64) -> Self {
+        let transit_delay_ms = transit_delay_ms.max(1);
         Self {
             shared: Arc::new(SimShared {
                 routing: Mutex::new(HashMap::new()),
