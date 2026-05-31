@@ -1,0 +1,26 @@
+[package]
+name = "sip-proxy"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+sip-message = { path = "../sip-message" }
+sip-net = { path = "../sip-net" }
+sip-clock = { path = "../sip-clock" }
+sip-txn = { path = "../sip-txn" } # IdGen (Via branch generation) only — the proxy is stateless
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+sha1 = { workspace = true }
+base64 = { workspace = true }
+subtle = { workspace = true }
+arc-swap = { workspace = true }
+
+[dev-dependencies]
+scenario-harness = { path = "../scenario-harness" }
+layer-harness = { path = "../layer-harness" }
