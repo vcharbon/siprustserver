@@ -40,11 +40,20 @@
 //! per-direction state the actor consults each loop; `cut/partition` flip a
 //! cut flag (the actor closes the inbound channel and exits, `recv`→`None`,
 //! `send`→`Closed`); `heal`/reconnect is just a fresh `connect` succeeding once
-//! the partition is cleared.
+//! the partition is cleared. Three disconnect flavours are modelled so a test
+//! can cover every case:
+//! - **clean cut** ([`Fault::Cut`]) — immediate close: `recv`→`None`,
+//!   `send`→`Closed` (a graceful FIN/RST).
+//! - **black-hole / hung** ([`Fault::Block`]) — the peer stops pulling, so
+//!   `send` BLOCKS on a full in-flight window with no error and no close
+//!   (a half-open peer that never sends a reset). Cleared by [`Fault::Resume`].
+//! - **error after a delay** ([`Fault::ErrorAfter`]) — after `ms`, `send`
+//!   returns [`SendError::Io`], `recv`→`None`, and a fresh `connect_from` is
+//!   rejected with [`ConnectError::Io`] (a reset some time into the connection).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -125,6 +134,35 @@ pub enum Fault {
         /// Destination endpoint.
         dst: SocketAddr,
     },
+    /// **Black-hole** `src → dst`: the peer stops pulling, so the application
+    /// `send` BLOCKS once the in-flight window is full — modelling a TCP sender
+    /// stuck on a full socket buffer with a dead reader. No error, no close:
+    /// `send` simply never completes until the peer drains (its `recv` releases a
+    /// window slot), the block is cleared by [`Fault::Resume`], or the direction
+    /// is later [`Cut`](Fault::Cut)/[`ErrorAfter`](Fault::ErrorAfter). This is the
+    /// half-open / hung-peer case that a clean `Cut` (immediate close) does not
+    /// cover.
+    Block {
+        /// Source endpoint.
+        src: SocketAddr,
+        /// Destination endpoint.
+        dst: SocketAddr,
+    },
+    /// **Network error after a delay** on `src → dst`: after `ms` elapse, an
+    /// established `send` returns [`SendError::Io`], the delivery actor tears the
+    /// inbound down (`recv` → `None`), and a fresh [`connect_from`] on this pair
+    /// is rejected with [`ConnectError::Io`] — modelling a reset (ECONNRESET)
+    /// some time into the connection's life, distinct from a clean `Cut`.
+    ///
+    /// [`connect_from`]: SimulatedReplicationNetwork::connect_from
+    ErrorAfter {
+        /// Source endpoint.
+        src: SocketAddr,
+        /// Destination endpoint.
+        dst: SocketAddr,
+        /// Delay before the error fires, in milliseconds.
+        ms: u64,
+    },
 }
 
 /// Directed pair key for the fault tables.
@@ -141,19 +179,45 @@ struct DirState {
     cut: AtomicBool,
     /// On a full bounded buffer, cut instead of awaiting space.
     drop_on_overflow: AtomicBool,
-    /// Woken when any of the above flip, so a stalled/parked actor re-checks.
+    /// Flow-control black-hole ([`Fault::Block`]): the application `send` blocks
+    /// once `inflight` reaches `cap`. Cleared by [`Fault::Resume`].
+    block: AtomicBool,
+    /// Frames sent on this direction but not yet consumed by the peer's `recv` —
+    /// the flow-control window used by `block`. Always tracked; only gates `send`
+    /// while `block` is set.
+    inflight: AtomicUsize,
+    /// Window capacity (= the inbound buffer cap) for the `block` flow control.
+    cap: usize,
+    /// Simulated network error ([`Fault::ErrorAfter`]) has fired: `send` returns
+    /// `Io`, the delivery actor tears the inbound down (`recv` → `None`).
+    errored: AtomicBool,
+    /// Absolute deadline at which a fresh `connect_from` on this pair is rejected
+    /// with `ConnectError::Io` ([`Fault::ErrorAfter`]).
+    error_at: Mutex<Option<tokio::time::Instant>>,
+    /// Woken when any of the above flip (or a window slot frees), so a
+    /// stalled/parked actor — or a `block`ed writer — re-checks.
     wake: Notify,
 }
 
 impl DirState {
-    fn new(delay_ms: u64, drop_on_overflow: bool) -> Self {
+    fn new(delay_ms: u64, drop_on_overflow: bool, cap: usize) -> Self {
         Self {
             delay_ms: AtomicU64::new(delay_ms.max(1)),
             stalled: AtomicBool::new(false),
             cut: AtomicBool::new(false),
             drop_on_overflow: AtomicBool::new(drop_on_overflow),
+            block: AtomicBool::new(false),
+            inflight: AtomicUsize::new(0),
+            cap: cap.max(1),
+            errored: AtomicBool::new(false),
+            error_at: Mutex::new(None),
             wake: Notify::new(),
         }
+    }
+
+    /// A terminal condition that should fail/short-circuit `send` and the actor.
+    fn is_dead(&self) -> bool {
+        self.cut.load(Ordering::SeqCst) || self.errored.load(Ordering::SeqCst)
     }
 }
 
@@ -191,7 +255,7 @@ impl SimShared {
                     .lock()
                     .unwrap()
                     .contains(&(src, dst));
-                Arc::new(DirState::new(self.default_delay_ms, drop_on))
+                Arc::new(DirState::new(self.default_delay_ms, drop_on, self.buffer_cap))
             })
             .clone()
     }
@@ -246,8 +310,11 @@ impl SimulatedReplicationNetwork {
                 self.shared.dir(src, dst).stalled.store(true, Ordering::SeqCst);
             }
             Fault::Resume { src, dst } => {
+                // Resume clears any pause on this direction: a `Stall` (delivery
+                // hold) and a `Block` (writer backpressure black-hole) alike.
                 let d = self.shared.dir(src, dst);
                 d.stalled.store(false, Ordering::SeqCst);
+                d.block.store(false, Ordering::SeqCst);
                 d.wake.notify_waiters();
             }
             Fault::Cut { src, dst } => {
@@ -288,6 +355,25 @@ impl SimulatedReplicationNetwork {
                     .dir(src, dst)
                     .drop_on_overflow
                     .store(true, Ordering::SeqCst);
+            }
+            Fault::Block { src, dst } => {
+                // Arm the flow-control black-hole. No wake needed: arming only
+                // makes a *future* send park once the window fills.
+                self.shared.dir(src, dst).block.store(true, Ordering::SeqCst);
+            }
+            Fault::ErrorAfter { src, dst, ms } => {
+                let d = self.shared.dir(src, dst);
+                let at = tokio::time::Instant::now() + Duration::from_millis(ms);
+                *d.error_at.lock().unwrap() = Some(at);
+                // Drive the error on the live (established) connection: after the
+                // delay, flip `errored` and wake the actor so it tears the inbound
+                // down (recv → None) even if the connection is otherwise idle.
+                let d2 = d.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep_until(at).await;
+                    d2.errored.store(true, Ordering::SeqCst);
+                    d2.wake.notify_waiters();
+                });
             }
         }
     }
@@ -354,6 +440,21 @@ impl SimulatedReplicationNetwork {
                 addr: dst,
                 reason: "partitioned".into(),
             });
+        }
+
+        // Network error armed on this pair? Reject the connect — immediately if it
+        // has already fired, else after the remaining `ErrorAfter` delay (models a
+        // connect that resets / errors out rather than being cleanly refused).
+        {
+            let d = self.shared.dir(local, dst);
+            if d.errored.load(Ordering::SeqCst) {
+                return Err(ConnectError::Io("simulated network error".into()));
+            }
+            let at = *d.error_at.lock().unwrap();
+            if let Some(at) = at {
+                tokio::time::sleep_until(at).await;
+                return Err(ConnectError::Io("simulated network error".into()));
+            }
         }
 
         let incoming_tx = {
@@ -446,8 +547,8 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
         let mut last_deadline = tokio::time::Instant::now();
 
         loop {
-            if dir_actor.cut.load(Ordering::SeqCst) {
-                drop(inbound_tx); // peer recv → None
+            if dir_actor.is_dead() {
+                drop(inbound_tx); // peer recv → None (cut or simulated error)
                 return;
             }
 
@@ -510,7 +611,7 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
                 _ = tokio::time::sleep_until(head_deadline) => {}
             }
 
-            if dir_actor.cut.load(Ordering::SeqCst) {
+            if dir_actor.is_dead() {
                 // Account for everything still pending as no-longer-in-flight.
                 shared_actor.in_flight.fetch_sub(pending.len() as i64, Ordering::Relaxed);
                 drop(inbound_tx);
@@ -556,7 +657,7 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
                     }
                     shared_actor.in_flight.fetch_sub(1, Ordering::Relaxed);
                     // A fault may have flipped while we awaited buffer space.
-                    if dir_actor.cut.load(Ordering::SeqCst) {
+                    if dir_actor.is_dead() {
                         shared_actor.in_flight.fetch_sub(pending.len() as i64, Ordering::Relaxed);
                         drop(inbound_tx);
                         return;
@@ -605,24 +706,60 @@ struct SimConnection {
     out_dir: Arc<DirState>,
     /// Inbound decoded-frame source.
     inbound: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
-    /// Inbound direction state (for completeness / future introspection).
-    #[allow(dead_code)]
+    /// Inbound direction state — `recv` releases its flow-control window slot
+    /// (waking a `block`ed writer) on this direction.
     in_dir: Arc<DirState>,
 }
 
 #[async_trait]
 impl ReplicationConnection for SimConnection {
     async fn send(&self, frame: Frame) -> Result<(), SendError> {
+        // A simulated network error wins over a clean cut.
+        if self.out_dir.errored.load(Ordering::SeqCst) {
+            return Err(SendError::Io("simulated network error".into()));
+        }
         if self.out_dir.cut.load(Ordering::SeqCst) {
             return Err(SendError::Closed);
         }
+
+        // Flow-control black-hole ([`Fault::Block`]): when the peer is not pulling
+        // and the in-flight window is full, the write BLOCKS on buffer space —
+        // modelling a TCP sender stuck on a full socket buffer with a dead reader.
+        // It unblocks when the peer drains (recv releases a slot), the block is
+        // cleared (Resume), or the direction is cut/errored. Arming the `Notified`
+        // future before the window check avoids a lost wakeup vs `recv`'s notify.
+        while self.out_dir.block.load(Ordering::SeqCst) {
+            if self.out_dir.errored.load(Ordering::SeqCst) {
+                return Err(SendError::Io("simulated network error".into()));
+            }
+            if self.out_dir.cut.load(Ordering::SeqCst) {
+                return Err(SendError::Closed);
+            }
+            let notified = self.out_dir.wake.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.out_dir.inflight.load(Ordering::SeqCst) < self.out_dir.cap {
+                break;
+            }
+            notified.await;
+        }
+
         // The codec plays through every path: encode to bytes, move bytes.
         let bytes = encode_frame(&frame);
+        // Account the frame against the flow-control window (released by the
+        // peer's `recv`). Always tracked so `block` can be armed mid-stream.
+        self.out_dir.inflight.fetch_add(1, Ordering::SeqCst);
         self.out.send(bytes).map_err(|_| SendError::Closed)
     }
 
     async fn recv(&self) -> Option<Frame> {
         let bytes = self.inbound.lock().await.recv().await?;
+        // Release one flow-control window slot for the sender + wake a blocked
+        // writer (`in_dir` == the sender's `out_dir` for this direction).
+        if self.in_dir.inflight.load(Ordering::SeqCst) > 0 {
+            self.in_dir.inflight.fetch_sub(1, Ordering::SeqCst);
+        }
+        self.in_dir.wake.notify_waiters();
         // Decode back from bytes — sim moves encoded `Vec<u8>`, never `Frame`.
         // A decode failure here is a codec/test bug, not a peer condition;
         // surface it as a clean close rather than panicking the actor.
@@ -881,5 +1018,111 @@ mod tests {
         let net = SimulatedReplicationNetwork::with_delay(5);
         let r = net.connect_from(addr(1009), addr(2009)).await;
         assert!(matches!(r, Err(ConnectError::Refused(_))));
+    }
+
+    // --- Block: half-open / hung peer — writer blocks, no error/close ----------
+
+    #[tokio::test(start_paused = true)]
+    async fn block_fault_blocks_writer_until_peer_pulls() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Window cap 2: the in-flight window holds two unacked frames.
+        let net = SimulatedReplicationNetwork::new(1, 2);
+        let (a, b) = (addr(1100), addr(2100));
+        let (client, server, _l) = connected_pair(&net, a, b).await;
+        net.apply_fault(Fault::Block { src: a, dst: b });
+
+        let sent = StdArc::new(AtomicUsize::new(0));
+        let s2 = sent.clone();
+        let h = tokio::spawn(async move {
+            for i in 0..3u64 {
+                client.send(noop(i)).await.unwrap();
+                s2.fetch_add(1, Ordering::SeqCst);
+            }
+            client // hand back for cleanup
+        });
+
+        // The window holds 2; the 3rd send BLOCKS because the peer isn't pulling.
+        advance_in_100ms_chunks(Duration::from_millis(20)).await;
+        assert_eq!(sent.load(Ordering::SeqCst), 2, "writer blocks once the window fills");
+        assert!(!h.is_finished(), "send is parked — no error, no close");
+
+        // The peer pulls one frame → releases a window slot → the 3rd completes.
+        assert_eq!(server.recv().await, Some(noop(0)));
+        advance_in_100ms_chunks(Duration::from_millis(20)).await;
+        assert_eq!(sent.load(Ordering::SeqCst), 3, "writer unblocks once the peer drains");
+        let _client = h.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn block_fault_cleared_by_resume_unblocks_writer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let net = SimulatedReplicationNetwork::new(1, 1); // window cap 1
+        let (a, b) = (addr(1101), addr(2101));
+        let (client, _server, _l) = connected_pair(&net, a, b).await;
+        net.apply_fault(Fault::Block { src: a, dst: b });
+
+        let sent = StdArc::new(AtomicUsize::new(0));
+        let s2 = sent.clone();
+        let h = tokio::spawn(async move {
+            for i in 0..2u64 {
+                client.send(noop(i)).await.unwrap();
+                s2.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        advance_in_100ms_chunks(Duration::from_millis(20)).await;
+        assert_eq!(sent.load(Ordering::SeqCst), 1, "blocked at the 1-frame window");
+
+        // Resume clears the block (peer recovers) → the parked write completes
+        // without the peer ever pulling.
+        net.apply_fault(Fault::Resume { src: a, dst: b });
+        advance_in_100ms_chunks(Duration::from_millis(20)).await;
+        assert_eq!(sent.load(Ordering::SeqCst), 2, "Resume unblocks the writer");
+        h.await.unwrap();
+    }
+
+    // --- ErrorAfter: network reset after a delay -------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn error_after_delay_faults_established_connection() {
+        let net = SimulatedReplicationNetwork::with_delay(1);
+        let (a, b) = (addr(1102), addr(2102));
+        let (client, server, _l) = connected_pair(&net, a, b).await;
+
+        client.send(noop(1)).await.unwrap();
+        advance_in_100ms_chunks(Duration::from_millis(5)).await;
+        assert_eq!(server.recv().await, Some(noop(1)), "healthy before the error");
+
+        net.apply_fault(Fault::ErrorAfter { src: a, dst: b, ms: 50 });
+        advance_in_100ms_chunks(Duration::from_millis(60)).await;
+
+        // After the delay the direction errors. Drive the teardown via the peer's
+        // recv first (it parks, letting the error-timer + actor run) → the peer
+        // sees a reset; then the local send observes the network error.
+        assert_eq!(server.recv().await, None, "the peer sees a reset (recv → None)");
+        assert!(
+            matches!(client.send(noop(2)).await, Err(SendError::Io(_))),
+            "established send returns a network error after the delay"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn error_after_delay_rejects_fresh_connect() {
+        let net = SimulatedReplicationNetwork::with_delay(1);
+        let (a, b) = (addr(1103), addr(2103));
+        let _l = net.listen(b).await.unwrap();
+        net.apply_fault(Fault::ErrorAfter { src: a, dst: b, ms: 50 });
+
+        let net2 = net.clone();
+        let h = tokio::spawn(async move { net2.connect_from(a, b).await });
+        advance_in_100ms_chunks(Duration::from_millis(60)).await;
+
+        let r = h.await.unwrap();
+        assert!(
+            matches!(r, Err(ConnectError::Io(_))),
+            "a fresh connect is rejected with a network error after the delay"
+        );
     }
 }

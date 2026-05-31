@@ -270,11 +270,30 @@ impl HaCluster {
         self.mark(from, Some(to), "stall", "");
     }
 
-    /// Resume a stalled direction `from → to` (buffered frames flush in order).
+    /// Resume a stalled OR blocked direction `from → to` (buffered frames flush
+    /// in order; a [`block`](Self::block)ed writer unblocks).
     pub fn resume(&mut self, from: &str, to: &str) {
         let (fa, ta) = (self.addrs[from], self.addrs[to]);
         self.sim.apply_fault(Fault::Resume { src: fa, dst: ta });
         self.mark(from, Some(to), "resume", "");
+    }
+
+    /// Black-hole `from → to`: the peer stops pulling, so `send` BLOCKS once the
+    /// in-flight window fills (a hung/half-open peer that never resets). No error,
+    /// no close — cleared by [`resume`](Self::resume). Marker.
+    pub fn block(&mut self, from: &str, to: &str) {
+        let (fa, ta) = (self.addrs[from], self.addrs[to]);
+        self.sim.apply_fault(Fault::Block { src: fa, dst: ta });
+        self.mark(from, Some(to), "block", "");
+    }
+
+    /// Fail `from → to` with a network error after `ms`: an established `send`
+    /// returns an Io error, `recv` closes (reset), and a fresh connect on the pair
+    /// is rejected — modelling ECONNRESET some time into the connection. Marker.
+    pub fn error_after(&mut self, from: &str, to: &str, ms: u64) {
+        let (fa, ta) = (self.addrs[from], self.addrs[to]);
+        self.sim.apply_fault(Fault::ErrorAfter { src: fa, dst: ta, ms });
+        self.mark(from, Some(to), "error_after", &format!("{ms}ms"));
     }
 
     /// Arm buffer-overflow → drop-subscriber on `from → to`.
