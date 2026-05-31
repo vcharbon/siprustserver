@@ -219,7 +219,11 @@ fn decode_data(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
     let call_gen = read_i64(rd, "call_gen")?;
     let body_ttl_ms = read_i64(rd, "body_ttl_ms")?;
     let idx_len = read_array_len(rd, "indexes")?;
-    let mut indexes = Vec::with_capacity(idx_len as usize);
+    // Clamp the pre-allocation to the bytes still in the buffer: every msgpack
+    // element costs >= 1 byte, so a legitimate count can never exceed `rd.len()`.
+    // A hostile/desynced Array32 count (up to u32::MAX) therefore cannot force a
+    // multi-GB allocation; a genuinely truncated frame still errors in the loop.
+    let mut indexes = Vec::with_capacity((idx_len as usize).min(rd.len()));
     for _ in 0..idx_len {
         indexes.push(read_str(rd, "indexes[]")?);
     }

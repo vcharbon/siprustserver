@@ -330,3 +330,99 @@ async fn no_peer_stores_body_without_bump() {
     assert!(!store.changelog().has_peer("A"));
     assert_eq!(store.changelog().head(), Watermark::new(1, 0));
 }
+
+// ---------------------------------------------------------------------------
+// Review regressions: retention floor + ResetToBootstrap trigger (#1), TTL
+// backstop for `ttl<=0` replicas (#2), subscriber-aware reap (#7).
+// ---------------------------------------------------------------------------
+
+const BAK: PartitionRole = PartitionRole::Backup;
+
+/// A reaped delete-tombstone raises the per-peer retention floor, so a warm
+/// puller whose `since` is below it is told to re-bootstrap (`needs_reset`),
+/// while one at/above the floor — or on a cold (lower-gen) pull — is not.
+#[tokio::test(start_paused = true)]
+async fn needs_reset_after_tombstone_reap_raises_floor() {
+    let clock = Clock::test_at(0);
+    let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 60_000);
+    let store = ReplicatingCallStore::with_changelog(cl.clone(), clock.clone());
+
+    put(&store, "c1", b"v1", 0, 1, &fwd("A")).await; // counter 1
+    store.delete_call(PRI, SELF, "c1", &[], &fwd("A")).await.unwrap(); // counter 2 (tombstone)
+
+    // Before the reap: a puller that saw up to counter 1 is NOT told to reset
+    // (the tombstone at counter 2 is still live and would be re-delivered).
+    assert!(!cl.needs_reset("A", Watermark::new(1, 1)), "tombstone still live → no reset");
+
+    // Advance past the tombstone TTL and reap: the delete at counter 2 is gone,
+    // the floor rises to 2.
+    tokio::time::advance(Duration::from_millis(1_001)).await;
+    cl.reap(clock.now_ms());
+
+    assert!(cl.needs_reset("A", Watermark::new(1, 1)), "since below reaped tail → reset");
+    assert!(!cl.needs_reset("A", Watermark::new(1, 2)), "since AT the floor → no reset");
+    assert!(!cl.needs_reset("A", Watermark::new(0, 1)), "lower gen is a cold pull → no reset");
+    assert!(!cl.needs_reset("Z", Watermark::new(1, 1)), "unknown peer → no reset");
+}
+
+/// A peer log with a live `serve_replog` subscription is NOT reaped while idle
+/// past the dead-peer TTL (so a parked server never holds an orphaned Notify);
+/// once the subscription drops, the next reap evicts it.
+#[tokio::test(start_paused = true)]
+async fn subscribed_peer_log_survives_reap_until_unsubscribed() {
+    let clock = Clock::test_at(0);
+    let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 2_000); // dead-peer TTL 2s
+    let _store = ReplicatingCallStore::with_changelog(cl.clone(), clock.clone());
+
+    let sub = cl.subscribe("A");
+    assert!(cl.has_peer("A"));
+
+    // Idle well past the dead-peer TTL, then reap: the subscribed log survives.
+    tokio::time::advance(Duration::from_millis(3_000)).await;
+    cl.reap(clock.now_ms());
+    assert!(cl.has_peer("A"), "subscribed peer log must survive an idle reap");
+
+    // Park a real waiter on the subscription (as serve_replog does), then bump:
+    // it must wake — proving the post-reap Notify was NOT orphaned/recreated.
+    let waiter = tokio::spawn(async move {
+        sub.notified().await;
+        sub // hand the guard back so we can drop it after the wake
+    });
+    for _ in 0..16 {
+        tokio::task::yield_now().await; // let the waiter park on the Notify
+    }
+    cl.bump("A", "c1", Op::Create, Partition::Bak);
+    let sub = tokio::time::timeout(Duration::from_millis(50), waiter)
+        .await
+        .expect("a bump after reap wakes the parked subscriber (Notify not orphaned)")
+        .unwrap();
+
+    // Drop the subscription → once idle past the dead-peer TTL again, reap evicts
+    // the now-unsubscribed log (the bump above refreshed its last-active stamp).
+    drop(sub);
+    tokio::time::advance(Duration::from_millis(3_000)).await;
+    cl.reap(clock.now_ms());
+    assert!(!cl.has_peer("A"), "unsubscribed idle log is reaped");
+}
+
+/// A replica stored with `ttl_ms <= 0` self-evicts via the backstop TTL (so a
+/// missed delete cannot linger forever), instead of the old `expiry = None`.
+#[tokio::test(start_paused = true)]
+async fn nonpositive_ttl_replica_self_evicts_via_backstop() {
+    let clock = Clock::test_at(0);
+    let store = ReplicatingCallStore::new(1, clock.clone()).with_default_ttl_ms(1_000);
+
+    // Apply-path replica (peer:None, ttl 0) — the shape a puller stores.
+    store
+        .put_call(BAK, "A", "c1", b"v1".to_vec(), &[], 0, 1, &PutOpts::default())
+        .await
+        .unwrap();
+    assert!(store.get_call(BAK, "A", "c1").await.unwrap().is_some());
+
+    // Past the backstop → lazily evicted on access (no permanent ghost).
+    tokio::time::advance(Duration::from_millis(1_001)).await;
+    assert!(
+        store.get_call(BAK, "A", "c1").await.unwrap().is_none(),
+        "ttl<=0 replica self-evicts via the backstop"
+    );
+}

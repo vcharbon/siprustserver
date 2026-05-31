@@ -231,9 +231,22 @@ impl ReplServer {
         caller: &str,
         mut w: Watermark,
     ) {
+        // If the caller's `since` fell below the compacted/reaped tail it has
+        // missed a now-vanished mutation (e.g. a tombstone reaped during a long
+        // disconnect). Tell it to re-bootstrap rather than silently diverge.
+        if self.changelog.needs_reset(caller, w) {
+            let _ = conn
+                .send(Frame::ResetToBootstrap {
+                    reason: "since fell below the compacted tail".into(),
+                })
+                .await;
+            return;
+        }
+
         // Subscribe BEFORE the first drain so a bump racing the drain is not
-        // missed (edge-triggered Notify; subscribing first arms the permit).
-        let notify = self.changelog.subscribe(caller);
+        // missed (edge-triggered Notify; subscribing first arms the permit). The
+        // returned guard keeps the peer log reap-immune for this loop's lifetime.
+        let sub = self.changelog.subscribe(caller);
 
         loop {
             // Drain everything strictly above `w`, send ascending.
@@ -261,7 +274,7 @@ impl ReplServer {
 
             // Park until a new bump or the connection closes, whichever first.
             tokio::select! {
-                _ = notify.notified() => {}
+                _ = sub.notified() => {}
                 // A peer that cuts the connection wakes recv with None; end.
                 msg = conn.recv() => match msg {
                     // Inbound Ack mid-stream: retention-trim hint. No-op stub.

@@ -342,3 +342,29 @@ fn watermark_gen_is_high_word() {
     // Lexicographic, explicit.
     assert!(Watermark::new(2, 0) > Watermark::new(1, u64::MAX));
 }
+
+/// Review regression (#10): a hostile/desynced Data frame whose `indexes` array
+/// advertises a huge `Array32` count with no following elements must decode to a
+/// typed error WITHOUT a pathological pre-allocation. The decoder clamps its
+/// `Vec::with_capacity` to the bytes actually present (each element costs >= 1
+/// byte), so `u32::MAX` indexes cannot force a multi-GB allocation; the read loop
+/// then errors on the first missing element.
+#[test]
+fn err_data_inflated_indexes_count_is_typed_error_not_oom() {
+    let mut b = Vec::new();
+    rmp::encode::write_array_len(&mut b, 10).unwrap(); // DATA arity
+    rmp::encode::write_uint(&mut b, 2).unwrap(); // tag Data
+    rmp::encode::write_uint(&mut b, 0).unwrap(); // gen
+    rmp::encode::write_uint(&mut b, 0).unwrap(); // counter
+    rmp::encode::write_uint(&mut b, 1).unwrap(); // op (Update)
+    rmp::encode::write_uint(&mut b, 0).unwrap(); // partition (Pri)
+    rmp::encode::write_str(&mut b, "r").unwrap(); // call_ref
+    rmp::encode::write_sint(&mut b, 0).unwrap(); // call_gen
+    rmp::encode::write_sint(&mut b, 0).unwrap(); // body_ttl_ms
+    b.push(0xdd); // msgpack array32 marker
+    b.extend_from_slice(&u32::MAX.to_be_bytes()); // hostile element count, no elements
+    match decode_frame(&b) {
+        Err(ReplCodecError::Truncated(_)) | Err(ReplCodecError::Type { .. }) => {}
+        other => panic!("expected a typed Truncated/Type error, got {other:?}"),
+    }
+}

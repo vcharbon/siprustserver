@@ -13,11 +13,12 @@
 //! emit the proxy-level [`RegistryEvent`]s. Health and draining are proxy-layer
 //! concerns emitted by this layer directly, never by topology.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use sip_clock::Clock;
 use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::TryRecvError;
 use topology::{MemberDelta, Membership, Peer, SimulatedMembership};
 
 use crate::addr::ProxyAddr;
@@ -108,23 +109,27 @@ impl SimulatedWorkerRegistry {
                 let mut rx = self.deltas.lock().unwrap();
                 match rx.try_recv() {
                     Ok(d) => d,
-                    Err(_) => break,
+                    // Empty (drained) / Closed (sender gone) → stop draining.
+                    Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+                    // Lagged: the broadcast channel overflowed and DROPPED deltas.
+                    // Delta replay can no longer converge, so reconcile the whole
+                    // `state` against a fresh membership snapshot by diff (lag-
+                    // immune), then keep draining whatever arrived after the lag.
+                    Err(TryRecvError::Lagged(_)) => {
+                        drop(rx);
+                        self.resync_from_snapshot();
+                        continue;
+                    }
                 }
             };
             match delta {
                 MemberDelta::Added(peer) => {
                     // Materialise the proxy entry from the intended `add`
                     // annotations (port/health/timing), with the host owned by
-                    // membership.
-                    let pend = self.pending.lock().unwrap().add.remove(&peer.ordinal);
-                    let entry = match pend {
-                        Some(mut e) => {
-                            e.address.host = peer.host;
-                            e
-                        }
-                        // No stash (shouldn't happen via the public API) — fall
-                        // back to a default alive entry on the membership host.
-                        None => WorkerEntry::alive(peer.ordinal.clone(), ProxyAddr::new(peer.host, 0)),
+                    // membership. Skip if we cannot determine a real port rather
+                    // than route to a dead port-0 entry.
+                    let Some(entry) = self.materialise_added(&peer) else {
+                        continue;
                     };
                     let event = RegistryEvent::Added { entry: entry.clone() };
                     self.state.mutate(
@@ -167,6 +172,89 @@ impl SimulatedWorkerRegistry {
         }
     }
 
+    /// Build the proxy [`WorkerEntry`] for an `Added`/present `peer`. Prefers the
+    /// in-flight `add()` stash (carries the real port/health/timing); else
+    /// preserves an existing entry's address (host updated to membership's);
+    /// returns `None` when neither is available — a foreign ordinal with no known
+    /// port, which is skipped rather than materialised onto a dead port-0 entry.
+    fn materialise_added(&self, peer: &Peer) -> Option<WorkerEntry> {
+        if let Some(mut e) = self.pending.lock().unwrap().add.remove(&peer.ordinal) {
+            e.address.host = peer.host.clone();
+            return Some(e);
+        }
+        if let Some(mut cur) = self.state.resolve(&peer.ordinal) {
+            cur.address.host = peer.host.clone();
+            return Some(cur);
+        }
+        None
+    }
+
+    /// Full reconcile of the proxy `state` against the authoritative membership
+    /// snapshot, by diff. Used after a broadcast `Lagged` (dropped deltas), where
+    /// replaying the remaining deltas can no longer converge. Depends only on
+    /// current state — never on the lost delta history — so it is lag-immune.
+    fn resync_from_snapshot(&self) {
+        let desired = self.membership.snapshot();
+        let desired_ords: HashSet<String> =
+            desired.iter().map(|p| p.ordinal.clone()).collect();
+
+        // Removals: a current worker whose ordinal is no longer in membership.
+        for w in self.state.snapshot() {
+            if !desired_ords.contains(&w.id) {
+                let id = w.id.clone();
+                self.state.mutate(
+                    |entries| entries.retain(|e| e.id != id),
+                    RegistryEvent::Removed { id: id.clone() },
+                );
+            }
+        }
+
+        // Adds + host changes.
+        for peer in desired {
+            match self.state.resolve(&peer.ordinal) {
+                None => {
+                    let Some(entry) = self.materialise_added(&peer) else {
+                        continue;
+                    };
+                    let event = RegistryEvent::Added { entry: entry.clone() };
+                    self.state.mutate(
+                        |entries| {
+                            entries.retain(|w| w.id != entry.id);
+                            entries.push(entry);
+                        },
+                        event,
+                    );
+                }
+                Some(cur) if cur.address.host != peer.host => {
+                    let port = self
+                        .pending
+                        .lock()
+                        .unwrap()
+                        .port
+                        .remove(&peer.ordinal)
+                        .unwrap_or(cur.address.port);
+                    let new_addr = ProxyAddr::new(peer.host.clone(), port);
+                    let event = RegistryEvent::AddressChanged {
+                        id: peer.ordinal.clone(),
+                        from: cur.address,
+                        to: new_addr.clone(),
+                    };
+                    self.state.mutate(
+                        |entries| {
+                            if let Some(w) =
+                                entries.iter_mut().find(|w| w.id == peer.ordinal)
+                            {
+                                w.address = new_addr;
+                            }
+                        },
+                        event,
+                    );
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
     /// Add (or replace) a worker, emitting `Added`. Membership identity flows
     /// through the topology layer; this stamps the proxy's port/health/timing.
     pub fn add(&self, mut entry: WorkerEntry) {
@@ -194,25 +282,7 @@ impl SimulatedWorkerRegistry {
     /// Health is a **proxy-layer** concern (not membership), so it is applied
     /// directly to `state` and does not flow through topology.
     pub fn set_health(&self, id: &str, health: WorkerHealth) {
-        let Some(cur) = self.state.resolve(id) else {
-            return;
-        };
-        if cur.health == health {
-            return;
-        }
-        let now = self.now_ms();
-        let event = RegistryEvent::HealthChanged { id: id.to_string(), from: cur.health, to: health };
-        self.state.mutate(
-            |entries| {
-                if let Some(w) = entries.iter_mut().find(|w| w.id == id) {
-                    w.health = health;
-                    if health == WorkerHealth::Draining && w.draining_since.is_none() {
-                        w.draining_since = Some(now);
-                    }
-                }
-            },
-            event,
-        );
+        self.state.set_health(id, health, self.now_ms());
     }
 
     /// Change a worker's address, emitting `AddressChanged` (no-op if unknown or
@@ -325,5 +395,48 @@ mod tests {
         assert_eq!(reg.resolve("w").unwrap().address, ProxyAddr::new("10.0.0.1", 5080));
         // topology host unchanged (port is port-agnostic to membership).
         assert_eq!(reg.membership.resolve("w").unwrap().host, "10.0.0.1");
+    }
+
+    /// Review regression (#6): when the topology delta broadcast overflows (more
+    /// than its 256-deep capacity of membership mutations before a reconcile),
+    /// `try_recv` returns `Lagged` and delta replay can no longer converge. The
+    /// reconciler must fall back to a full snapshot diff — not silently `break`
+    /// and leave the proxy routing to a stale peer set forever.
+    #[test]
+    fn lagged_delta_channel_resyncs_from_snapshot() {
+        let reg = SimulatedWorkerRegistry::with_clock(
+            vec![
+                WorkerEntry::alive("keep", ProxyAddr::new("10.0.0.1", 5070)),
+                WorkerEntry::alive("drop", ProxyAddr::new("10.0.0.2", 5070)),
+            ],
+            Clock::test_at(0),
+        );
+        assert!(reg.resolve("keep").is_some() && reg.resolve("drop").is_some());
+
+        // Overflow the 256-deep delta channel WITHOUT reconciling: drive the
+        // membership identity directly (these emit deltas but do not reconcile),
+        // then make a real change — remove "drop".
+        for i in 0..300 {
+            reg.membership.add(Peer::new(format!("ghost{i}"), "h"));
+        }
+        reg.membership.remove("drop");
+
+        // A single reconcile now sees `Lagged` first; it must resync to the
+        // current membership snapshot rather than break on the error.
+        reg.reconcile();
+
+        assert!(
+            reg.resolve("drop").is_none(),
+            "Lagged resync converged: the removed worker is dropped from the proxy view"
+        );
+        assert!(
+            reg.resolve("keep").is_some(),
+            "Lagged resync kept the surviving worker (no spurious removal)"
+        );
+        // Survivor's real port is intact — never materialised onto a dead port-0.
+        assert_eq!(
+            reg.resolve("keep").unwrap().address,
+            ProxyAddr::new("10.0.0.1", 5070)
+        );
     }
 }

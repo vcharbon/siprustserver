@@ -10,11 +10,14 @@
 //! membership to materialise the richer [`WorkerEntry`] view.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use sip_clock::Clock;
 use topology::{Peer, StaticMembership};
 
 use crate::addr::ProxyAddr;
 
+use super::control::{RegistryStateControl, WorkerRegistryControl};
 use super::{RegistryState, WorkerEntry, WorkerRegistry};
 
 /// Layer-build-time parse failure.
@@ -77,8 +80,11 @@ pub fn parse_worker_list(source: &str, raw: &str) -> Result<Vec<WorkerEntry>, St
 pub struct StaticWorkerRegistry {
     /// Membership identity source of truth (ordinal + host, port-agnostic).
     membership: StaticMembership,
-    /// Port-and-health-annotated materialisation read on the hot path.
-    state: RegistryState,
+    /// Port-and-health-annotated materialisation read on the hot path. Shared
+    /// (`Arc`) so a [`control`](Self::control) handle and the read seam mutate
+    /// and observe the same lock-free state — the OPTIONS probe demotes a dead
+    /// worker here and the routing path sees it immediately.
+    state: Arc<RegistryState>,
 }
 
 impl StaticWorkerRegistry {
@@ -97,7 +103,17 @@ impl StaticWorkerRegistry {
             entries.iter().map(|e| Peer::new(e.id.clone(), e.address.host.clone())).collect(),
         );
         let materialised = materialise(&membership, &entries);
-        Self { membership, state: RegistryState::new(materialised) }
+        Self { membership, state: Arc::new(RegistryState::new(materialised)) }
+    }
+
+    /// A health-write [`WorkerRegistryControl`] over this registry's shared
+    /// state. The OPTIONS [`HealthProbe`](crate::health::HealthProbe) writes
+    /// through this so an unanswered worker is demoted (`Dead`/`NotReady`/
+    /// `Draining`) and in-dialog requests fail over to the backup. Unlike the
+    /// historical `NoopControl` wiring, the "static" pool's *identity* stays
+    /// fixed but its *health* now tracks live OPTIONS reachability.
+    pub fn control(&self, clock: Clock) -> Arc<dyn WorkerRegistryControl> {
+        Arc::new(RegistryStateControl::new(self.state.clone(), clock))
     }
 
     /// The cluster membership identity backing this registry (ordinal + host).

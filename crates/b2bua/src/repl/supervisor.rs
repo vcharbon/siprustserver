@@ -55,6 +55,16 @@ struct PeerEntry {
     /// puller hit the terminal bootstrap `Noop`, the hard timer fired, or it
     /// resumed warm. S7 readiness consumes `all_bootstrapped`.
     bootstrap_complete: bool,
+    /// Highest reset generation absorbed from any puller for this ordinal. A
+    /// puller bumps its `reset_gen` when the server pushes `ResetToBootstrap`
+    /// (watermark forced back to `(0,0)`); a higher value here means we must pull
+    /// the retained watermark DOWN so a respawn re-bootstraps instead of resuming
+    /// the now-invalid high W.
+    reset_gen: u64,
+    /// Sticky: this peer was reached by a successful `connect` at least once.
+    /// An unreachable peer (never connected) that goes bootstrap-complete only by
+    /// the hard timer must NOT pin readiness NotReady (Decision 4 — liveness).
+    ever_connected: bool,
 }
 
 impl PeerEntry {
@@ -65,18 +75,31 @@ impl PeerEntry {
             watermark: Watermark::new(0, 0),
             current: false,
             bootstrap_complete: false,
+            reset_gen: 0,
+            ever_connected: false,
         }
     }
 
     /// Fold the puller's latest published status into the retained copy. Current
-    /// + bootstrap-complete are sticky (OR); the watermark only advances.
+    /// + ever-connected are sticky (OR). A `reset_gen` advance means the server
+    /// forced a re-bootstrap: pull the watermark DOWN to `(0,0)` and clear
+    /// bootstrap-complete so a respawn re-bootstraps. Otherwise bootstrap-complete
+    /// is sticky and the watermark only advances.
     fn absorb(&mut self) {
         if let Some(rx) = &self.status_rx {
             let s = *rx.borrow();
             self.current |= s.current;
-            self.bootstrap_complete |= s.bootstrap_complete;
-            if s.watermark > self.watermark {
-                self.watermark = s.watermark;
+            self.ever_connected |= s.ever_connected;
+            if s.reset_gen > self.reset_gen {
+                // Server-driven reset: honour the pull-down, don't sticky-OR it away.
+                self.reset_gen = s.reset_gen;
+                self.watermark = s.watermark; // (0,0)
+                self.bootstrap_complete = s.bootstrap_complete; // false
+            } else {
+                self.bootstrap_complete |= s.bootstrap_complete;
+                if s.watermark > self.watermark {
+                    self.watermark = s.watermark;
+                }
             }
         }
     }
@@ -98,6 +121,13 @@ struct SupervisorInner {
     clock: Clock,
     /// `ordinal → PeerEntry`.
     peers: Mutex<HashMap<String, PeerEntry>>,
+    /// The topology-reconcile loop's handle, retained so [`shutdown`] can abort
+    /// it. Without this the loop outlives `crash()`/`shutdown()` (it holds an
+    /// `Arc<SupervisorInner>`) and keeps spawning pullers against a dead node on
+    /// later membership deltas — a task/memory leak + double-replication.
+    ///
+    /// [`shutdown`]: ReplicationSupervisor::shutdown
+    reconcile: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl ReplicationSupervisor {
@@ -131,6 +161,7 @@ impl ReplicationSupervisor {
                 config,
                 clock,
                 peers: Mutex::new(HashMap::new()),
+                reconcile: Mutex::new(None),
             }),
         }
     }
@@ -147,7 +178,7 @@ impl ReplicationSupervisor {
             }
         }
         let this = self.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 match changes.recv().await {
                     Ok(MemberDelta::Added(peer)) => {
@@ -170,6 +201,7 @@ impl ReplicationSupervisor {
                 }
             }
         });
+        *self.inner.reconcile.lock().unwrap() = Some(handle);
     }
 
     /// Spawn (or re-spawn) a puller for `peer`, seeded from its retained W. If a
@@ -219,6 +251,12 @@ impl ReplicationSupervisor {
     /// any Park). Used by [`B2buaCore::abort`](crate::B2buaCore::abort) to stop a
     /// crashed worker's pullers without changing replication behaviour.
     pub fn shutdown(&self) {
+        // Stop reacting to membership deltas FIRST: abort the reconcile loop so it
+        // can't spawn a new puller against this (about-to-be-dead) node after we
+        // park the existing ones. Also frees the loop's `Arc<SupervisorInner>`.
+        if let Some(h) = self.inner.reconcile.lock().unwrap().take() {
+            h.abort();
+        }
         let ordinals: Vec<String> = self.inner.peers.lock().unwrap().keys().cloned().collect();
         for ordinal in ordinals {
             self.park(&ordinal);
@@ -258,10 +296,19 @@ impl ReplicationSupervisor {
             .unwrap_or(false)
     }
 
-    /// Are ALL known peers current? (S7 readiness gate.) Empty set → `true`.
+    /// Are ALL known peers current — or unreachable? (S7 readiness gate.) Empty
+    /// set → `true`. A peer that is bootstrap-complete only via the hard timer
+    /// and was **never reached** (`!ever_connected`) does NOT block readiness:
+    /// per Decision 4 a node must boot and serve even when peers are unreachable.
+    /// A reachable-then-blipped peer keeps the strict gate (sticky `current`).
     pub fn all_current(&self) -> bool {
         self.sync();
-        self.inner.peers.lock().unwrap().values().all(|e| e.current)
+        self.inner
+            .peers
+            .lock()
+            .unwrap()
+            .values()
+            .all(|e| e.current || (e.bootstrap_complete && !e.ever_connected))
     }
 
     /// Has `peer`'s bootstrap completed (terminal `Noop`, hard timer, or warm

@@ -32,6 +32,14 @@ use crate::store::{
     CallStore, InMemoryCallStore, PartitionRole, PropagateDirection, PutOpts, StoreError,
 };
 
+/// Backstop body-TTL (ms) applied to a replicated call stored with a non-positive
+/// `ttl_ms`. It bounds a ghost — a replica whose `delete` was missed during a
+/// disconnect and can no longer be re-delivered (the peer log was dropped, or a
+/// `ResetToBootstrap` was itself lost) — to at most this lifetime, instead of
+/// lingering forever. Must comfortably exceed the live dialog-refresh cadence so
+/// a healthy call is refreshed (re-`put`) before the backstop bites. One hour.
+pub const DEFAULT_REPLICATED_TTL_MS: i64 = 3_600_000;
+
 /// Per-callRef side metadata kept in lockstep with the body so the drain can
 /// fill a `Frame::Data` without touching the typed call map.
 #[derive(Clone, Debug)]
@@ -53,6 +61,9 @@ pub struct ReplicatingCallStore {
     clock: Clock,
     /// `callRef → CallMeta`, updated atomically with the body.
     meta: Arc<Mutex<HashMap<String, CallMeta>>>,
+    /// Backstop TTL applied when a call is stored with `ttl_ms <= 0`
+    /// ([`DEFAULT_REPLICATED_TTL_MS`] by default; tests inject a short value).
+    default_ttl_ms: i64,
 }
 
 impl ReplicatingCallStore {
@@ -68,6 +79,25 @@ impl ReplicatingCallStore {
             changelog,
             clock,
             meta: Arc::new(Mutex::new(HashMap::new())),
+            default_ttl_ms: DEFAULT_REPLICATED_TTL_MS,
+        }
+    }
+
+    /// Override the backstop TTL applied to calls stored with `ttl_ms <= 0`
+    /// (tests inject a short value to exercise the missed-delete self-eviction).
+    pub fn with_default_ttl_ms(mut self, default_ttl_ms: i64) -> Self {
+        self.default_ttl_ms = default_ttl_ms;
+        self
+    }
+
+    /// The absolute body-expiry for a call stored with `ttl_ms`, applying the
+    /// backstop when `ttl_ms <= 0`. `None` only if the backstop is also disabled.
+    fn expiry_for(&self, now: i64, ttl_ms: i64) -> Option<i64> {
+        let effective = if ttl_ms > 0 { ttl_ms } else { self.default_ttl_ms };
+        if effective > 0 {
+            Some(now + effective)
+        } else {
+            None
         }
     }
 
@@ -201,7 +231,9 @@ impl CallStore for ReplicatingCallStore {
             .await?;
 
         let now = self.clock.now_ms();
-        let expiry_at_ms = if ttl_ms > 0 { Some(now + ttl_ms) } else { None };
+        // Apply the backstop TTL for ttl_ms <= 0 so a missed-delete replica still
+        // self-evicts (the wire-carried `body_ttl_ms` keeps the original ttl_ms).
+        let expiry_at_ms = self.expiry_for(now, ttl_ms);
 
         // Update per-ref metadata atomically (single critical section).
         {
@@ -268,7 +300,7 @@ impl CallStore for ReplicatingCallStore {
             if !indexes.is_empty() {
                 m.meta.indexes = indexes.to_vec();
             }
-            m.expiry_at_ms = if ttl_ms > 0 { Some(now + ttl_ms) } else { None };
+            m.expiry_at_ms = self.expiry_for(now, ttl_ms);
         }
         Ok(())
     }

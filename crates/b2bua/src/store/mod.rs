@@ -279,6 +279,31 @@ impl CallState {
         inner.sip_index.get(&format!("leg:{call_id}")).cloned()
     }
 
+    /// **Acting-backup dialog resolution (the production takeover key).** Recover
+    /// a `callRef` for an in-dialog SIP `(callId, tag)` from the replicating
+    /// store's SIP index — populated when the S5/S6 puller imported the backup
+    /// replica (`put_call` writes `idx:leg:…` → callRef). This is the resolution
+    /// path a *real* UAC needs: per RFC 3261 it routes in-dialog requests to the
+    /// proxy with the stickiness cookie in the `Route` header, so the request-URI
+    /// carries **no** `callref` param and a pure backup's in-memory `sip_index`
+    /// is empty — [`resolve_from_sip_key_sync`](Self::resolve_from_sip_key_sync)
+    /// misses. Async (the store read may be remote), so the router awaits it only
+    /// on the sync-resolve miss. `None` with no replicating store / no replica.
+    ///
+    /// NB: the simulated failover harness's UAs preserve the b2bua's `callref` in
+    /// the in-dialog request-URI, so they resolve via the R-URI param and never
+    /// exercised this fallback — the blind spot that let a real-traffic takeover
+    /// gap pass the unit tests. See `b2bua-harness` `failover_real_uac_routing`.
+    pub async fn resolve_from_replica_index(&self, call_id: &str, tag: &str) -> Option<String> {
+        let repl = self.repl_store.as_ref()?;
+        if !tag.is_empty() {
+            if let Ok(Some(r)) = repl.get_index(&format!("leg:{call_id}|{tag}")).await {
+                return Some(r);
+            }
+        }
+        repl.get_index(&format!("leg:{call_id}")).await.ok().flatten()
+    }
+
     /// Acquire the per-callRef serialization lock (held across a handler run).
     pub async fn lock(&self, call_ref: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {

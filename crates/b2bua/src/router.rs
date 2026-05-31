@@ -63,7 +63,7 @@ struct Resolution {
 pub async fn run(
     ctx: Arc<RouterCtx>,
     mut txn_rx: mpsc::Receiver<sip_txn::TransactionEvent>,
-    mut timer_rx: mpsc::Receiver<CallEvent>,
+    mut timer_rx: mpsc::UnboundedReceiver<CallEvent>,
 ) {
     loop {
         tokio::select! {
@@ -94,7 +94,18 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         }
     }
 
-    let res = resolve(ctx, &event);
+    let mut res = resolve(ctx, &event);
+    if res.call_ref.is_none() {
+        // Acting-backup takeover fallback (production resolution path). A real
+        // UAC routes in-dialog requests through the proxy (stickiness cookie in
+        // the Route header, no `callref` request-URI param), so a pure backup —
+        // which never primary-served the call — can key the dialog neither from
+        // the message nor from its empty in-memory `sip_index`. Recover the
+        // callRef from the replica store's SIP index (the puller imported it)
+        // before declaring the event unroutable. Without this the failed-over
+        // BYE is silently dropped and the dialog never terminates on the backup.
+        res.call_ref = replica_takeover_call_ref(ctx, &event).await;
+    }
     let call_ref = match res.call_ref.clone() {
         Some(r) => r,
         None => {
@@ -264,6 +275,22 @@ fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
             initial_invite: false,
         },
     }
+}
+
+/// Recover the takeover `callRef` for an in-dialog SIP request from the replica
+/// store's SIP index (the acting-backup production path). Only in-dialog requests
+/// (those carrying a To-tag) are candidates; an initial request, a response, or a
+/// non-SIP event is never a dialog takeover. `None` when not applicable or no
+/// replica matches — the caller then treats the event as unroutable.
+async fn replica_takeover_call_ref(ctx: &RouterCtx, event: &CallEvent) -> Option<String> {
+    let CallEvent::Sip { message, .. } = event else { return None };
+    let SipMessage::Request(req) = message.as_ref() else { return None };
+    if req.to.tag.is_none() {
+        return None; // initial request — a brand-new dialog, not a takeover
+    }
+    ctx.state
+        .resolve_from_replica_index(&req.call_id, req.from.tag.as_deref().unwrap_or(""))
+        .await
 }
 
 fn leg_direction(_ctx: &RouterCtx, _call_ref: Option<&str>, leg: &str) -> Direction {

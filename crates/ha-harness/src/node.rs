@@ -39,6 +39,10 @@ pub(crate) struct NodeWiring {
     /// Changelog TTLs `(tombstone, dead_peer)` so dead-peer auto-clean is
     /// reachable within a test budget.
     pub ttls: (i64, i64),
+    /// Backstop body-TTL for a replica stored with `ttl_ms <= 0` (the missed-
+    /// delete self-eviction bound). Long by default; split-brain tests inject a
+    /// short value so the ghost evicts within the test budget.
+    pub replica_backstop_ms: i64,
 }
 
 /// One in-process HA node. Owns its store + the handles to abort on crash.
@@ -95,7 +99,8 @@ impl HaNode {
     ) {
         let changelog =
             Changelog::new(gen, clock.clone()).with_ttls(wiring.ttls.0, wiring.ttls.1);
-        let store = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
+        let store = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone())
+            .with_default_ttl_ms(wiring.replica_backstop_ms);
 
         // Server: accept + serve the changelog over the fabric.
         let listener = wiring.network.listen(addr).await.expect("listen");
@@ -202,6 +207,12 @@ impl HaNode {
         self.supervisor.is_current(peer)
     }
 
+    /// Whether a puller is currently running (not Parked) for `peer`. Used to
+    /// assert a crashed node spawns no pullers on later membership deltas.
+    pub fn is_running(&self, peer: &str) -> bool {
+        self.supervisor.is_running(peer)
+    }
+
     /// Has `peer`'s bootstrap completed on this node?
     pub fn is_bootstrapped(&self, peer: &str) -> bool {
         self.supervisor.bootstrap_complete(peer)
@@ -232,10 +243,13 @@ impl HaNode {
     /// [`HaCluster::crash`](crate::HaCluster::crash).
     pub(crate) fn crash(&mut self) {
         self.server_task.abort();
-        // Cancel the supervisor's pullers by replacing it with an inert one over
-        // a throwaway store; the old supervisor's `Arc<SupervisorInner>` is the
-        // only thing keeping its puller tasks' store alive once we drop our copy.
-        // Replacing `store`/`supervisor` here drops the harness's strong refs.
+        // Stop the supervisor for real: abort its topology-reconcile loop AND park
+        // every puller. Without this the reconcile loop (which holds its own
+        // `Arc<SupervisorInner>`) outlives the crash and keeps spawning pullers
+        // against the dead node on later membership deltas — a task leak +
+        // double-replication. `shutdown()` also frees that Arc.
+        self.supervisor.shutdown();
+        // Replace the store so a lingering `get` sees an empty (crashed) node.
         let dead = ReplicatingCallStore::new(self.gen, self.clock.clone());
         self.store = dead;
         // The membership view is left in place; reboot rebuilds everything.

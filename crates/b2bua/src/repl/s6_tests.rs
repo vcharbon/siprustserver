@@ -501,3 +501,88 @@ async fn empty_bak_partition_immediate_terminal_noop() {
     // Watermark advanced past (0,0) once the tail Noop / delta landed.
     assert!(a_sup.watermark("B") >= Watermark::new(1, 0));
 }
+
+// ---------------------------------------------------------------------------
+// Review regression (#9): an unreachable, NEVER-connected peer that only goes
+// bootstrap-complete via the hard timer must NOT pin readiness NotReady — the
+// node must boot and serve (Decision 4). A reachable-then-blipped peer keeps the
+// strict sticky-current gate (covered elsewhere).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn readiness_not_pinned_by_unreachable_peer() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let b_addr = addr(61); // B never listens → every connect is refused.
+
+    let a_store = ReplicatingCallStore::new(1, clock.clone());
+    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)]);
+    a_sup.start(Arc::new(SimulatedMembership::with_clock(
+        vec![Peer::new("B", "B")],
+        clock.clone(),
+    )));
+
+    // Before the hard timeout: not current (still trying to reach B).
+    tick(200).await;
+    assert!(!a_sup.all_current(), "not current before the hard timer fires");
+
+    // Past the 2s hard timeout: bootstrap-complete best-effort, and readiness is
+    // NOT pinned by the unreachable peer (it was never connected).
+    tick(2_500).await;
+    assert!(a_sup.all_bootstrapped(), "boots best-effort despite unreachable B");
+    assert!(
+        a_sup.all_current(),
+        "an unreachable, never-connected peer must not pin NotReady"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Review regression (#5): a node whose bootstrap hard timer fired against an
+// unreachable peer (bootstrap_complete=true, W still (0,0)) must STILL bootstrap
+// — not cold-Replog — once the peer becomes reachable, or it silently misses the
+// `bak:{me}` backups the peer holds (which live only in the peer's bak keyset,
+// never in its changelog-for-me).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn cold_start_bootstraps_after_hard_timeout_reconnect() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let b_addr = addr(72);
+    let ca = cref("A", "1");
+
+    // A is cold and pulls B; B is NOT listening yet → A's connect is refused and
+    // the bootstrap hard timer trips (complete best-effort, W still (0,0)).
+    let a_store = ReplicatingCallStore::new(1, clock.clone());
+    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)]);
+    a_sup.start(Arc::new(SimulatedMembership::with_clock(
+        vec![Peer::new("B", "B")],
+        clock.clone(),
+    )));
+    tick(2_500).await;
+    assert!(a_sup.bootstrap_complete("B"), "hard timer completed bootstrap best-effort");
+    assert!(
+        a_store.get_call(PRI, "A", &ca).await.unwrap().is_none(),
+        "nothing reclaimed while B was unreachable"
+    );
+
+    // B comes up holding A's call as a bak:A backup (the apply-path shape: stored
+    // with peer:None so it is NOT in B's changelog-for-A), and starts serving.
+    let b_changelog = Changelog::new(1, clock.clone());
+    let b_store = ReplicatingCallStore::with_changelog(b_changelog.clone(), clock.clone());
+    b_store
+        .put_call(BAK, "A", &ca, b"v1".to_vec(), &[], 0, 1, &PutOpts::default())
+        .await
+        .unwrap();
+    let b_listener = net.listen(b_addr).await.unwrap();
+    tokio::spawn(ReplServer::new("B", b_changelog, Arc::new(b_store.clone())).run(b_listener));
+
+    // A reconnects: because its watermark is still (0,0) it must BOOTSTRAP (scan
+    // B's bak:A keyset) and reclaim `ca` as pri:A — not cold-Replog past it.
+    tick(2_000).await;
+    assert_eq!(
+        a_store.get_call(PRI, "A", &ca).await.unwrap().as_deref(),
+        Some(&b"v1"[..]),
+        "after the peer becomes reachable the cold node bootstraps its bak backups"
+    );
+}

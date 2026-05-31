@@ -61,9 +61,19 @@ pub struct TimerService {
 impl TimerService {
     /// Spawn the driver. Returns the handle + the channel of fired timer events
     /// the router consumes.
-    pub fn spawn(clock: Clock) -> (Self, mpsc::Receiver<CallEvent>) {
+    pub fn spawn(clock: Clock) -> (Self, mpsc::UnboundedReceiver<CallEvent>) {
         let (cmd_tx, cmd_rx) = mpsc::channel(1024);
-        let (fire_tx, fire_rx) = mpsc::channel(1024);
+        // The fire channel is UNBOUNDED on purpose: timer fires are already bounded
+        // by real time and by the live `DelayQueue` entries (one per scheduled
+        // timer). A bounded buffer smaller than the queue could silently drop a
+        // keepalive/no-answer/max-duration fire on overflow — and the router's
+        // single consumer awaits real I/O between drains, so a paused-clock advance
+        // crossing many deadlines, or a scale burst, could overflow it. Load-
+        // shedding still happens downstream at the bounded, *counted* per-call
+        // dispatcher. Do NOT use a blocking `send().await` here: the driver shares
+        // its task with the cmd channel, so blocking on a full fire channel would
+        // deadlock against the router draining via cmd.
+        let (fire_tx, fire_rx) = mpsc::unbounded_channel();
         tokio::spawn(driver(clock, cmd_rx, fire_tx));
         (Self { cmd_tx }, fire_rx)
     }
@@ -92,7 +102,7 @@ impl TimerService {
 async fn driver(
     clock: Clock,
     mut cmd_rx: mpsc::Receiver<TimerCmd>,
-    fire_tx: mpsc::Sender<CallEvent>,
+    fire_tx: mpsc::UnboundedSender<CallEvent>,
 ) {
     let mut queue: DelayQueue<Fired> = DelayQueue::new();
     // The live epoch per timer id. An id absent from `active` is cancelled; an
@@ -158,7 +168,9 @@ async fn driver(
                     call_ref: expired.call_ref,
                     leg_id: expired.leg_id,
                 };
-                let _ = fire_tx.try_send(event);
+                // Unbounded: only fails if the router (receiver) is gone — i.e. the
+                // worker is shutting down — in which case dropping the fire is fine.
+                let _ = fire_tx.send(event);
             }
         }
     }
@@ -276,5 +288,52 @@ mod tests {
         );
         // Nothing else pending (the timeout was a dropped tombstone).
         assert!(fire_rx.try_recv().is_err(), "cancelled timeout must not fire");
+    }
+
+    /// Review regression (#8): a burst of more timers than the old bounded fire
+    /// channel held (1024) must deliver EVERY fire — the `DelayQueue` is the only
+    /// bound, not an in-front buffer. Under the old `try_send` into `channel(1024)`
+    /// the overflow was silently dropped (a lost keepalive/no-answer/max-duration).
+    #[tokio::test(start_paused = true)]
+    async fn timer_flood_past_old_channel_cap_delivers_every_fire() {
+        let clock = Clock::test_at(0);
+        let (timers, mut fire_rx) = TimerService::spawn(clock);
+
+        const N: usize = 3_000; // comfortably past the old 1024 cap
+        for i in 0..N {
+            timers
+                .schedule(
+                    TimerEntry {
+                        id: format!("t{i}"),
+                        timer_type: TimerType::Keepalive,
+                        fire_at: 1_000,
+                        leg_id: None,
+                    },
+                    format!("call-{i}"),
+                )
+                .await;
+        }
+
+        // Cross the single deadline so all N fire in one go, with NO interleaved
+        // draining (the worst case the bounded channel dropped on).
+        tokio::time::advance(Duration::from_millis(1_500)).await;
+
+        // Drain, letting the driver flush the DelayQueue between empties. Stop
+        // when all N are in or the channel stays empty across many settle passes.
+        let mut got = 0;
+        let mut idle = 0;
+        while got < N && idle < 64 {
+            match fire_rx.try_recv() {
+                Ok(_) => {
+                    got += 1;
+                    idle = 0;
+                }
+                Err(_) => {
+                    idle += 1;
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+        assert_eq!(got, N, "every fire delivered — no silent overflow drop");
     }
 }

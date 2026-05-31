@@ -104,6 +104,18 @@ struct PeerLog {
     notify: Arc<Notify>,
     /// `now_ms` of the last [`bump`](Changelog::bump) — drives idle reaping.
     last_active_ms: i64,
+    /// Count of live [`serve_replog`] subscribers parked on `notify`. A peer log
+    /// with `subscribers > 0` is NOT reaped while idle, so a parked server never
+    /// ends up holding an orphaned `Notify` after a reap+recreate.
+    ///
+    /// [`serve_replog`]: super::server::ReplServer
+    subscribers: usize,
+    /// Highest counter that has been DROPPED by tombstone reaping (a delete the
+    /// puller may have missed). A warm puller resuming from `since.counter` below
+    /// this has fallen off the compacted tail and must be told to re-bootstrap
+    /// ([`needs_reset`](Changelog::needs_reset)). NOT raised by compaction-moves
+    /// in [`bump`](Changelog::bump) — those keep the ref live at a higher counter.
+    retained_floor: u64,
 }
 
 impl PeerLog {
@@ -113,6 +125,35 @@ impl PeerLog {
             by_ref: HashMap::new(),
             notify: Arc::new(Notify::new()),
             last_active_ms: now_ms,
+            subscribers: 0,
+            retained_floor: 0,
+        }
+    }
+}
+
+/// RAII handle for a [`serve_replog`] subscription. Holds the peer's `Notify`
+/// and keeps the peer log reap-immune for its lifetime; decrements the
+/// subscriber count on drop.
+///
+/// [`serve_replog`]: super::server::ReplServer
+pub struct Subscription {
+    changelog: Changelog,
+    peer: String,
+    notify: Arc<Notify>,
+}
+
+impl Subscription {
+    /// Await the next changelog bump for this peer (edge-triggered).
+    pub async fn notified(&self) {
+        self.notify.notified().await;
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        let mut inner = self.changelog.inner.lock().unwrap();
+        if let Some(log) = inner.peers.get_mut(&self.peer) {
+            log.subscribers = log.subscribers.saturating_sub(1);
         }
     }
 }
@@ -163,16 +204,43 @@ impl Changelog {
     }
 
     /// Subscribe to a peer's new-entry notifications (S5's server loop awaits
-    /// this). Creates the peer log if absent.
-    pub fn subscribe(&self, peer: &str) -> Arc<Notify> {
-        let mut inner = self.inner.lock().unwrap();
-        let now = self.clock.now_ms();
+    /// this). Creates the peer log if absent and increments its subscriber count
+    /// so an idle [`reap`](Changelog::reap) cannot drop the log (and orphan the
+    /// `Notify`) while a server is parked on it. The returned [`Subscription`]
+    /// decrements on drop.
+    pub fn subscribe(&self, peer: &str) -> Subscription {
+        let notify = {
+            let mut inner = self.inner.lock().unwrap();
+            let now = self.clock.now_ms();
+            let log = inner
+                .peers
+                .entry(peer.to_string())
+                .or_insert_with(|| PeerLog::new(now));
+            log.subscribers += 1;
+            log.notify.clone()
+        };
+        Subscription {
+            changelog: self.clone(),
+            peer: peer.to_string(),
+            notify,
+        }
+    }
+
+    /// Whether a warm puller resuming from `since` has fallen off the compacted
+    /// tail and must re-bootstrap (the server emits `ResetToBootstrap`). True iff
+    /// `since` is same-incarnation (`since.gen >= self.gen`; a lower gen is a
+    /// cold pull that re-hydrates fully anyway) **and** `since.counter` is below
+    /// the peer's `retained_floor` — i.e. a reaped tombstone the puller never saw.
+    pub fn needs_reset(&self, peer: &str, since: Watermark) -> bool {
+        if since.gen < self.gen {
+            return false;
+        }
+        let inner = self.inner.lock().unwrap();
         inner
             .peers
-            .entry(peer.to_string())
-            .or_insert_with(|| PeerLog::new(now))
-            .notify
-            .clone()
+            .get(peer)
+            .map(|log| since.counter < log.retained_floor)
+            .unwrap_or(false)
     }
 
     /// Record a mutation for `peer`: assign the next counter, **compact** (drop
@@ -339,11 +407,14 @@ impl Changelog {
     pub fn reap(&self, now_ms: i64) {
         let dead_peer_ttl = self.dead_peer_ttl_ms;
         let mut inner = self.inner.lock().unwrap();
-        // Drop idle peers wholesale.
+        // Drop idle peers wholesale — but NEVER one with a live subscriber (a
+        // parked server would otherwise keep an orphaned Notify and miss bumps).
         inner
             .peers
-            .retain(|_, log| now_ms - log.last_active_ms < dead_peer_ttl);
-        // Reap expired tombstones from surviving peers.
+            .retain(|_, log| log.subscribers > 0 || now_ms - log.last_active_ms < dead_peer_ttl);
+        // Reap expired tombstones from surviving peers, raising the retention
+        // floor: a warm puller below a reaped counter has missed that delete and
+        // must re-bootstrap (`needs_reset`).
         for log in inner.peers.values_mut() {
             let expired: Vec<String> = log
                 .by_ref
@@ -354,6 +425,7 @@ impl Changelog {
             for call_ref in expired {
                 if let Some(st) = log.by_ref.remove(&call_ref) {
                     log.entries.remove(&st.counter);
+                    log.retained_floor = log.retained_floor.max(st.counter);
                 }
             }
         }

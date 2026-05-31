@@ -35,7 +35,6 @@ use sip_proxy::health::{HealthProbe, HealthProbeConfig};
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use sip_proxy::observability::metrics_server::MetricsServer;
 use sip_proxy::observability::ProxyMetrics;
-use sip_proxy::registry::control::NoopControl;
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
 use sip_proxy::registry::WorkerRegistry;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
@@ -102,10 +101,8 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("bind probe socket failed: {e:?}"));
 
-    let registry: Arc<dyn WorkerRegistry> = Arc::new(
-        StaticWorkerRegistry::from_string(&workers, "PROXY_WORKERS")
-            .unwrap_or_else(|e| panic!("bad PROXY_WORKERS {workers:?}: {e}")),
-    );
+    let static_reg = StaticWorkerRegistry::from_string(&workers, "PROXY_WORKERS")
+        .unwrap_or_else(|e| panic!("bad PROXY_WORKERS {workers:?}: {e}"));
     let hmac = Arc::new(
         StaticHmacKeyProvider::new(HmacKey::new(hmac_kid, hmac_key.into_bytes()), None)
             .unwrap_or_else(|e| panic!("bad PROXY_HMAC_KEY: {e}")),
@@ -114,6 +111,13 @@ async fn main() {
     let metrics = Arc::new(ProxyMetrics::new());
     let clock = Clock::system();
     let id_gen = Arc::new(IdGen::from_entropy());
+
+    // OPTIONS probe → health write-through over the static pool's shared state:
+    // an unanswered worker is demoted (Dead/NotReady/Draining) so in-dialog
+    // requests fail over to the backup. (Was `NoopControl`, which pinned the
+    // pool Alive and defeated failover.)
+    let health_control = static_reg.control(clock.clone());
+    let registry: Arc<dyn WorkerRegistry> = Arc::new(static_reg);
 
     let strategy: Arc<dyn RoutingStrategy> = Arc::new(LoadBalancerStrategy::new(
         registry.clone(),
@@ -128,7 +132,7 @@ async fn main() {
     let probe = HealthProbe::new(
         probe_ep,
         registry.clone(),
-        Arc::new(NoopControl),
+        health_control,
         observer,
         clock.clone(),
         id_gen.clone(),

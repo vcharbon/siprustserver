@@ -117,8 +117,18 @@ pub struct PullerStatus {
     /// Sticky **bootstrap-complete** flag (X5 / Decision 4). Set when the
     /// terminal bootstrap `Noop` arrives OR the bootstrap hard timer fires
     /// (best-effort) OR the puller resumes warm (`W > (0,0)` — no bootstrap
-    /// needed). Never cleared. S7 readiness consumes this per reachable peer.
+    /// needed). Cleared only by a `ResetToBootstrap`. S7 readiness consumes this.
     pub bootstrap_complete: bool,
+    /// Monotonic reset generation: bumped each time the server pushes
+    /// `ResetToBootstrap` (watermark forced back to `(0,0)`). Lets the supervisor
+    /// distinguish "never advanced past `(0,0)`" from "was just reset" and pull
+    /// the retained watermark down accordingly (survives the `watch` channel's
+    /// last-value-wins coalescing of a reset-then-advance).
+    pub reset_gen: u64,
+    /// Set the first time `connect` succeeds for this peer. Readiness uses it so
+    /// an unreachable peer (hard-timer bootstrap-complete, never connected) does
+    /// not pin the node NotReady.
+    pub ever_connected: bool,
 }
 
 /// What ended a single `run_once` connection attempt — drives the supervisor's
@@ -184,6 +194,8 @@ impl Puller {
             current: false,
             watermark: start_w,
             bootstrap_complete: warm,
+            reset_gen: 0,
+            ever_connected: false,
         });
         (
             Self {
@@ -348,10 +360,22 @@ impl Puller {
             Ok(c) => c,
             Err(_) => return RunOutcome::ConnectFailed,
         };
+        // Mark the peer reached so readiness no longer treats it as unreachable.
+        if !self.status_tx.borrow().ever_connected {
+            self.status_tx.send_modify(|s| s.ever_connected = true);
+        }
 
         // Decide cold-start (Bootstrapping) vs. resume (Tailing) from retained W.
+        // Cold iff we have never advanced past `(0,0)` — i.e. never received a
+        // terminal `Noop` or any tail data from this peer. We deliberately do NOT
+        // also gate on `bootstrap_complete`: the bootstrap hard timer may set it
+        // for an unreachable peer WITHOUT a real pre-seed (W still `(0,0)`), and
+        // suppressing the bootstrap on the eventual real connect would skip the
+        // static `bak:{me}` keyset scan (which the cold-Replog walk does not
+        // cover) and silently leave the node missing those backups. Re-running
+        // bootstrap when already current is at worst a redundant, idempotent pass.
         let w = self.status_tx.borrow().watermark;
-        let cold = w == Watermark::new(0, 0) && !self.status_tx.borrow().bootstrap_complete;
+        let cold = w == Watermark::new(0, 0);
 
         let since = if cold {
             // ---- Bootstrapping ---- request the lazy-batch pre-seed; the server
@@ -453,10 +477,13 @@ impl Puller {
                 Some(Frame::ResetToBootstrap { .. }) => {
                     // → Bootstrapping: the server says our `since` fell off the
                     // compacted tail. Discard W AND clear bootstrap-complete so
-                    // the next connect re-runs the full lazy-batch pre-seed.
+                    // the next connect re-runs the full lazy-batch pre-seed. Bump
+                    // `reset_gen` so the supervisor pulls its retained watermark
+                    // DOWN too (a respawn must not resume from the now-invalid W).
                     self.status_tx.send_modify(|s| {
                         s.watermark = Watermark::new(0, 0);
                         s.bootstrap_complete = false;
+                        s.reset_gen = s.reset_gen.saturating_add(1);
                     });
                     return RunOutcome::Disconnected;
                 }

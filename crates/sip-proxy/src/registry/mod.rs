@@ -119,4 +119,28 @@ impl RegistryState {
         self.entries.store(Arc::new(next));
         let _ = self.tx.send(event);
     }
+
+    /// Annotate a worker's health, emitting `HealthChanged` (no-op if unknown or
+    /// unchanged). Entering `Draining` stamps `draining_since` from `now_ms`.
+    /// The canonical health write shared by every registry + control adapter.
+    pub(crate) fn set_health(&self, id: &str, health: WorkerHealth, now_ms: u64) {
+        let Some(cur) = self.resolve(id) else {
+            return;
+        };
+        if cur.health == health {
+            return;
+        }
+        let event = RegistryEvent::HealthChanged { id: id.to_string(), from: cur.health, to: health };
+        self.mutate(
+            |entries| {
+                if let Some(w) = entries.iter_mut().find(|w| w.id == id) {
+                    w.health = health;
+                    if health == WorkerHealth::Draining && w.draining_since.is_none() {
+                        w.draining_since = Some(now_ms);
+                    }
+                }
+            },
+            event,
+        );
+    }
 }

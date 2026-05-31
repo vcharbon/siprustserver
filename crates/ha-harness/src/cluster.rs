@@ -62,7 +62,16 @@ pub struct HaCluster {
     markers: Vec<Marker>,
     config: PullerConfig,
     ttls: (i64, i64),
+    /// Backstop body-TTL for replicas stored with `ttl_ms <= 0` (long by default;
+    /// split-brain tests inject a short value via [`with_replica_backstop_ms`]).
+    ///
+    /// [`with_replica_backstop_ms`]: HaCluster::with_replica_backstop_ms
+    replica_backstop_ms: i64,
 }
+
+/// Default replica backstop: long enough not to evict steady-state replicas in
+/// any existing test (which advance seconds), matching the store default.
+const DEFAULT_REPLICA_BACKSTOP_MS: i64 = 3_600_000;
 
 impl HaCluster {
     /// Build an N-node cluster from `node_ordinals` with a fresh paused clock at
@@ -76,6 +85,25 @@ impl HaCluster {
     /// [`new`](Self::new) with a caller-supplied clock (share one timeline with
     /// other harness pieces).
     pub async fn with_clock(node_ordinals: &[&str], clock: Clock) -> Self {
+        Self::build_cluster(node_ordinals, clock, DEFAULT_REPLICA_BACKSTOP_MS).await
+    }
+
+    /// [`with_clock`](Self::with_clock) with an explicit replica backstop TTL
+    /// (split-brain tests inject a short value so a missed-delete ghost evicts
+    /// within the test budget while live replicas are kept alive by re-puts).
+    pub async fn with_replica_backstop_ms(
+        node_ordinals: &[&str],
+        clock: Clock,
+        replica_backstop_ms: i64,
+    ) -> Self {
+        Self::build_cluster(node_ordinals, clock, replica_backstop_ms).await
+    }
+
+    async fn build_cluster(
+        node_ordinals: &[&str],
+        clock: Clock,
+        replica_backstop_ms: i64,
+    ) -> Self {
         let sim = Arc::new(SimulatedReplicationNetwork::with_delay(1));
         let recording =
             RecordingReplicationNetwork::new(sim.clone() as Arc<dyn ReplicationNetwork>, clock.clone());
@@ -94,6 +122,7 @@ impl HaCluster {
             markers: Vec::new(),
             config: fast_config(),
             ttls: DEFAULT_TTLS,
+            replica_backstop_ms,
         };
 
         // Spawn each node with a full-mesh peer list (every other ordinal).
@@ -130,6 +159,7 @@ impl HaCluster {
             peers,
             config: self.config,
             ttls: self.ttls,
+            replica_backstop_ms: self.replica_backstop_ms,
         }
     }
 
