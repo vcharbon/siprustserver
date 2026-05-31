@@ -9,6 +9,8 @@ members = [
     "crates/call",
     "crates/sip-proxy",
     "crates/scenario-harness",
+    "crates/b2bua",
+    "crates/b2bua-harness",
     "xtask",
 ]
 

@@ -1,0 +1,24 @@
+[package]
+name = "b2bua"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "B2BUA core: per-call FIFO dispatch (SipRouter/PerCallDispatcher) + rule engine + in-memory call store (over a replication-aware CallStore seam) + decision-engine adapter + buffered CDR. Rust port of sipjsserver src/sip/{SipRouter,PerCallDispatcher}.ts, src/call/CallState.ts, src/b2bua/rules/, src/decision/."
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+call = { path = "../call" }
+sip-message = { path = "../sip-message" }
+sip-net = { path = "../sip-net" }
+sip-txn = { path = "../sip-txn" }
+sip-clock = { path = "../sip-clock" }
+
+[dev-dependencies]
+# Paused-clock lever for timer tests (tokio::time::pause/advance).
+tokio = { workspace = true, features = ["test-util"] }

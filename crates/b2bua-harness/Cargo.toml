@@ -1,0 +1,20 @@
+[package]
+name = "b2bua-harness"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Test-only harness: binds a real `b2bua` B2buaCore as a System-Under-Test on the scenario-harness simulated network for deterministic alice ↔ b2bua ↔ bob e2e tests. Carries no production code."
+
+[dependencies]
+b2bua = { path = "../b2bua" }
+call = { path = "../call" }
+sip-message = { path = "../sip-message" }
+sip-net = { path = "../sip-net" }
+sip-txn = { path = "../sip-txn" }
+sip-clock = { path = "../sip-clock", features = ["testkit"] }
+scenario-harness = { path = "../scenario-harness" }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

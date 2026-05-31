@@ -15,10 +15,12 @@ each maps to a workspace **crate**. Status legend:
 | **Test/contract foundation** (Recorder, RunContext, 4 wrappers) | `crates/layer-harness` | `src/test-harness/framework/*` | ✅ Recorder + typed channels + projectors + RunContext/severity + recording helpers + 4-wrapper vocabulary ported (test-only, SIP-agnostic); 5 tests green. Recorder now stamps `at_ms` via an injected `sip-clock` `Clock` (deterministic report timestamps). [ADR-0004](docs/adr/0004-layer-harness-test-foundation.md) |
 | **Scenario harness + reports** (DSL, driver, SVG/txt/HTML) | `crates/scenario-harness` | `src/test-harness/framework/{dsl,interpreter,recorder,message-builder,*-report,svg-sequence-diagram}.ts` | ✅ **fluent dialog-aware DSL** (`Harness`/`Agent`/`invite`/`receive`/`respond`/`ack`/`bye`) auto-generating correct-by-default B2B messages via `sip-message::generators` + tracked `StackDialog` state, **plus** the thin scenarios-as-data DSL as a raw escape hatch; recording-first driver; SVG (clickable in HTML)/global.txt/per-endpoint/HTML renderers; trace **projected from the recording** (`sip-net::to_sip_entries`); virtual-time `advance` + 100 ms fake-net transit delay; UAC/UAS route-set construction from Record-Route + a loose-routing `Proxy` test agent (for the LB/front-proxy slice); 4 e2e tests green (incl. `proxy_record_route`). `or`/`parallel`/media/chaos **deferred**. [ADR-0006](docs/adr/0006-scenario-harness-recording-first.md) |
 | **Transaction** (RFC 3261 §17 FSMs + retransmit timers) | `crates/sip-txn` *(slice 4)* | `src/sip/TransactionLayer.ts` | ✅ client/server INVITE+non-INVITE FSMs, A/B/E/F/H/J timers, dedup, CANCEL→200+487, ACK absorption, cached-response retransmit, bounded drop-newest event queue; actor owns the map + a single `DelayQueue` ([ADR-0007](docs/adr/0007-transaction-layer-rust-shape.md)); 14 tests green. RNG seam (`IdGen`) ported here |
-| **Dispatch / per-call FIFO** | `sip-router` / `call` slice | `src/sip/{SipRouter,PerCallDispatcher}.ts` | ⬜ pending — B2BUA-only (the txn layer is proxy+B2BUA shared); needs the call layer + rule engine ([ADR-0007 §X3](docs/adr/0007-transaction-layer-rust-shape.md)) |
-| **CallContext data model** | `crates/call` | `src/call/` (`CallModel`/`timer-helpers`/`codec`) | ✅ data model + codec ported — Call→Leg→Dialog structs + lens/index helpers + `callRef`/index-keys + positional-msgpack `CallBodyCodec`; 24 tests green. Stateful `CallState` + `TimerService` + protobuf codec **deferred** ([slice below](#slice--callcontext-data-model-cratescall), [ADR-0008](docs/adr/0008-call-context-data-model.md)) |
-| **Rule engine** | `rules` | `src/b2bua/rules/` | ⬜ pending |
-| **Call limiter** | `limiter` | `src/call/CallLimiter*.ts` | ⬜ pending |
+| **Dispatch / per-call FIFO** | `crates/b2bua` | `src/sip/{SipRouter,PerCallDispatcher}.ts`, `src/call/CallState.ts` | ✅ per-call queue+worker+global-semaphore dispatcher + router (`routeKey`/`withCall`/`processResult` typed-effect interpreter) + in-memory `CallState` over a replication-aware `CallStore` seam (HA params no-op'd) + B2BUA-local timer `DelayQueue` + decision-engine adapter seam (scripted jssip-emulating test impl) + buffered CDR; alice↔b2bua↔bob basic/failure/reject e2e green ([ADR-0010](docs/adr/0010-b2bua-dispatch-rules-rust-shape.md), [slice below](#slice--b2bua-dispatch--rule-engine-cratesb2bua)) |
+| **CallContext data model** | `crates/call` | `src/call/` (`CallModel`/`timer-helpers`/`codec`) | ✅ data model + codec ported — Call→Leg→Dialog structs + lens/index helpers + `callRef`/index-keys + positional-msgpack `CallBodyCodec`; 24 tests green. Stateful `CallState` now ported in `crates/b2bua` (in-memory; Redis/HA-replication transport still deferred). `TimerService` ported as the B2BUA-local `DelayQueue`. protobuf codec **deferred** ([slice below](#slice--callcontext-data-model-cratescall), [ADR-0008](docs/adr/0008-call-context-data-model.md)) |
+| **Rule engine** | `crates/b2bua` (`rules/`) | `src/b2bua/rules/` | ✅ first-match/layer-ranked engine (declarative `Match` + `ActionExecutor` + `InvariantEnforcer` + bye-disposition net) + the basic-B2BUA default rule set (relay/dialog/absorb/lifecycle/terminating/corner-case/failure/timer). 18x-management strategies (`relayFirst18xTo180`/`promote18xPemTo200`) + REFER transfer (SERVICE_LAYER) **deferred** ([ADR-0010](docs/adr/0010-b2bua-dispatch-rules-rust-shape.md)) |
+| **Draining / readiness / overload** (health-check) | `crates/b2bua` | `src/b2bua/{DrainingState,OverloadController}.ts`, `WorkerReadiness` | ⬜ pending — out-of-dialog OPTIONS answers a plain 200; the serving/draining/ready 200/503/silence matrix + Tier-3 admission gate are deferred ([ADR-0010 §X8](docs/adr/0010-b2bua-dispatch-rules-rust-shape.md)) |
+| **Call limiter** | `limiter` | `src/call/CallLimiter*.ts` | ⬜ pending — a no-op `CallLimiter` seam ships in `crates/b2bua` (always admit); the real sliding-window limiter is its own slice |
+| **Front proxy + LB** (stateless RFC 3261 §16) | `crates/sip-proxy` *(slice 9)* | `src/sip-front-proxy/{ProxyCore,RoutingStrategy,CancelBranchLru,strategies,registry,health,observability}` | ✅ stateless proxy data path + HRW load balancer (signed Record-Route cookie + routing matrix) + worker registry (static/simulated) + OPTIONS health probe + metrics (counters + Prometheus HTTP); scenario-harness gains a **SUT seam** (`bind_sut`) running a real `ProxyCore` on the recording fabric. 62 tests green. Registrar/REGISTER, real self-gate, AIMD bucket, k8s registry **deferred** ([slice below](#slice-9--front-proxy--load-balancer-cratessip-proxy), [ADR-0009](docs/adr/0009-front-proxy-rust-shape.md)) |
 
 ---
 
@@ -445,3 +447,152 @@ unported).
   constructors take the initial CSeq as a parameter. Plumbed from `sip-txn`'s
   `IdGen` when `CallState` lands (mirrors the message slice's deferred RNG
   identifier generators).
+
+---
+
+## Slice 9 — Front proxy + load balancer (`crates/sip-proxy`)
+
+**Source release:** sipjsserver @ submodule `fffc4ac69c8aeef26cf48fe73469503145c9732b`.
+Source: `src/sip-front-proxy/`.
+**Scope (confirmed with user):** the **stateless** RFC 3261 §16 proxy data path
++ the load balancer + the worker registry (static + simulated) + OPTIONS health
+probing toward the B2BUA + the metrics layer (counters **and** the Prometheus
+HTTP server). **Excludes** the SIP registrar / REGISTER path. The proxy
+self-overload gate is a **stub** (always-admit); worker overload is **band
+classification only** (the AIMD rate-cap bucket is deferred).
+
+### Decisions (see [ADR-0009](docs/adr/0009-front-proxy-rust-shape.md))
+- X1 stateless proxy — reuses `sip-txn::IdGen` (Via branches) + `sip-clock::Clock`,
+  **not** the txn FSMs; CANCEL/ACK correlation is a proxy-local `(Call-ID|CSeq#)` LRU.
+- X2 scenario-harness gains a **SUT seam** (`Harness::bind_sut`) — a real
+  `ProxyCore` runs on the same recording-wrapped `SimulatedSignalingNetwork` the
+  agents use; the recording stays the trace (extends [ADR-0006](docs/adr/0006-scenario-harness-recording-first.md)).
+- X3 cookie = HMAC-SHA256 truncated to 128 bits, base64url; HRW = SHA-1 as a
+  non-crypto hash. X4 self-gate stubbed (overload = OPTIONS health/band +
+  `sip-net` tail-drop). X5 lock-free registry (`ArcSwap`) + `broadcast` changes.
+  X6 AIMD bucket deferred.
+
+### Source → Rust (port checklist)
+| Source | Rust module | Status |
+|---|---|---|
+| `RoutingStrategy.ts` (Tag + DecodeResult/errors) | `strategy.rs` | ✅ trait + `DecodeResult`/`SelectError`/`RouteParams`/`SelectOpts` |
+| `strategies/RendezvousHash.ts` | `strategies/rendezvous.rs` | ✅ HRW (SHA-1 top-8-bytes × weight) |
+| `strategies/ForwardAll.ts` | `strategies/forward_all.rs` | ✅ static target + `target=host:port` cookie |
+| `strategies/LoadBalancer.ts` | `strategies/load_balancer.rs` | ✅ HRW select + band filter + v=3 signed cookie + routing matrix (band-only select; AIMD bucket deferred) |
+| `WorkerLoadObserver.ts` | `load_observer.rs` | ✅ ELU-band classification + hysteresis + `X-Overload` parse (AIMD token bucket **deferred**) |
+| `security/HmacKeyProvider.ts` (`static`) | `security/hmac.rs` | ✅ HMAC-SHA256 sign + truncated constant-time verify (k8s-secret fs-watch deferred) |
+| `registry/WorkerRegistry.ts` | `registry/mod.rs` | ✅ trait + `WorkerEntry`/`WorkerHealth`/`RegistryEvent`, lock-free `ArcSwap` state |
+| `registry/static.ts` | `registry/static_reg.rs` | ✅ `id@host:port,…` parser, all-alive, empty changes |
+| `registry/simulated.ts` | `registry/simulated.rs` | ✅ add/remove/set_health/set_address + events + draining-since stamping |
+| `health/WorkerRegistryControl.ts` | `registry/control.rs` | ✅ simulated adapter + noop |
+| `CancelBranchLru.ts` | `cancel_lru.rs` | ✅ `(Call-ID\|CSeq#)→{target,branch}` TTL cache + sweep |
+| `ProxyCore.ts` (`handleRequestImpl`/`handleResponseImpl`) | `core/{mod,request,response}.rs` | ✅ single-endpoint data path (Max-Forwards, ACK absorption, Route strip, worker-outbound, cookie decode, received/rport, Record-Route, Via push/pop, reverse-path failover, non-2xx ACK synthesis) |
+| `health/HealthProbe.ts` (`optionsKeepalive`) | `health/probe.rs` | ✅ fan-out/drain/reap tick loop, 200/503-reason/timeout→health, X-Overload→observer |
+| `ProxySelfGate.ts` | `self_gate.rs` | ✅ **always-admit stub** (real ELU/CPS gate deferred) |
+| `observability/Metrics.ts` | `observability/metrics.rs` | ✅ atomics counters/gauges + Prometheus text |
+| `observability/MetricsServer.ts` | `observability/metrics_server.rs` | ✅ hand-rolled tokio `/metrics` HTTP |
+| `observability/Logger.ts` | `observability/logger.rs` | ✅ structured routing-decision log (trait + capturing/noop) |
+| `RoutingStrategy.ts` `SocketAddr` | `addr.rs` | ✅ `ProxyAddr` policy type |
+| (new) harness SUT seam | `scenario-harness::Harness::bind_sut` | ✅ binds a SUT endpoint on the shared recording fabric |
+
+### Tests ported
+| Source test | Rust home | Status |
+|---|---|---|
+| `load-balancer/{hmac-tampering,cookie-route-fallback,decode-forward-not-ready,decode-forward-respawn-window,unresolvable-id-falls-back,add-remove-resharding,initial-health,distribution,selectForNewDialog-overload(band part)}` | `tests/load_balancer.rs` | ✅ 11 |
+| RendezvousHash distribution + HMAC sign/verify + header surgery + registry parse + cancel-LRU + observer bands + metrics/logger/metrics-server | `src/**` `#[cfg(test)]` | ✅ 46 |
+| `transit-only/{invite-200-ack-bye, malformed-message-rejected, max-forwards(483)}` | `tests/transit_only.rs` (real `ProxyCore` SUT) | ✅ 3 |
+| `load-balancer/callid-routing-guard` + `distribution` (wire) | `tests/load_balancer_routing.rs` (real SUT) | ✅ 1 |
+| `integration/options-end-to-end` | `tests/options_e2e.rs` (probe ↔ simulated B2BUA responder) | ✅ 1 |
+
+### Un-ported with justification
+- **Registrar / REGISTER path** (`RegisterStrategy`, `Registrar`,
+  `CoreToExtRoutingStrategy`, `RegistrarProxyConfig`, `handleRequestRegistrarMode`,
+  dual-endpoint `;net=` egress) — user scope. The single-endpoint path drops the
+  dual-fabric branching entirely. Tests: all `registrar/**`, `registrar-503-on-drop`.
+- **`ProxySelfGate` real impl** (ELU EWMA + CPS bucket) — `self_gate.rs` is an
+  always-admit stub; overload protection = OPTIONS-driven worker health/band +
+  `sip-net` receive-buffer tail-drop. Test: `ingress-concurrency`.
+- **AIMD per-worker rate-cap token bucket** + `selectForNewDialog-overload` bucket
+  cases — deferred (X6); band classification + the CRITICAL filter are ported and
+  tested.
+- **Kubernetes registry** (`registry/kubernetes.ts`) + **k8s HMAC fs-watch** —
+  production-only; static + simulated cover the slice.
+- **Failover / replication / call-limiter** (`failover/**`, k8s `proxy-*`) — depend
+  on the unported B2BUA call cache + replication; only the proxy *request-path*
+  `forwardBackup`/reverse-path mechanics are ported (covered by `decode-forward-*`).
+- **Real B2BUA OPTIONS handler** (`b2bua/{options-readiness-distinct,draining-options}`)
+  — `options-e2e` is retargeted to a simulated responder; the readiness-disambiguation
+  tests are deferred with the B2BUA.
+- **`transparency/*` dual-mode + `health-probe-late-reply`** — the happy-call,
+  routing, and health-state transitions they assert are covered by `transit_only`,
+  `load_balancer_routing`, and `options_e2e`; the direct-vs-withProxy equivalence
+  harness + the late-reply endurance race are deferred (not load-bearing for the
+  proxy mechanics).
+- **`forbidden-import` lint** — superseded by Cargo crate-dependency boundaries
+  (`sip-proxy` simply does not depend on the call/rule crates).
+
+---
+
+## Slice — B2BUA dispatch + rule engine (`crates/b2bua`)
+
+**Source release:** sipjsserver @ `fffc4ac69c8aeef26cf48fe73469503145c9732b`.
+Source: `src/sip/{SipRouter,PerCallDispatcher}.ts`, `src/call/CallState.ts`,
+`src/b2bua/rules/`, `src/decision/`, `src/cdr/CdrWriter.ts`.
+**Scope (confirmed with user):** the per-call FIFO dispatcher + router, the
+in-memory `CallState` over a replication-aware `CallStore` seam, the rule engine
++ the **basic-B2BUA** default rule set (ignore the 18x-management strategies),
+the decision-engine adapter seam + a deterministic test backend that emulates
+the jssip reference backend (so SIPp scripts reuse), a no-op call limiter, and a
+buffered CDR layer wired through the recording. Tested e2e through the
+scenario-harness in a dedicated `crates/b2bua-harness` test crate.
+
+### Decisions (see [ADR-0010](docs/adr/0010-b2bua-dispatch-rules-rust-shape.md))
+- One crate (mutual deps); per-call queue+worker+global-semaphore FIFO (not the
+  txn actor); replication-aware `CallStore` (in-memory no-ops the HA params);
+  decision adapter seam + scripted backend; first-match/layer-ranked rules +
+  invariants; B2BUA-local timer `DelayQueue`; buffered CDR; OPTIONS-200 minimal;
+  `b2bua-harness` SUT crate.
+
+### Source → Rust (port checklist)
+| Source | Rust module | Status |
+|---|---|---|
+| `PerCallDispatcher.ts` | `dispatch.rs` | ✅ per-call queue + worker + global semaphore + cap/queue/saturation counters |
+| `SipRouter.ts` (`routeKey`/`withCall`/`processResult`) | `router.rs` | ✅ sync callRef resolution, per-call dispatch, typed-effect interpreter |
+| `CallState.ts` (in-memory map/index/lock/flush/remove) | `store/mod.rs` (`CallState`) | ✅ in-memory (Redis/HA transport deferred) |
+| `PartitionedRelayStorage` + `BufferedTerminateWriter` | `store/{call_store,memory,terminate_writer}.rs` | ✅ trait + in-memory + buffered writer (HA params carried, no-op'd) |
+| `TimerService.ts` | `timers.rs` | ✅ one `DelayQueue` driver firing `CallEvent::Timer` |
+| `rules/framework/*` | `rules/{model,matcher(executor),actions,relay,invariants}.rs` | ✅ basic-B2BUA subset |
+| `rules/defaults/*` | `rules/defaults.rs` | ✅ relay/dialog/absorb/lifecycle/terminating/corner-case/failure/timer |
+| `decision/CallDecisionEngine.ts` + `schemas/*` | `decision/{mod,schemas}.rs` | ✅ trait + request/response shapes |
+| `decision/apply/applyRoute.ts` + `InitialInviteHandler.ts` | `decision/apply_route.rs` + `initial_invite.rs` | ✅ |
+| (HTTP backend) | `decision/test_adapter.rs` (`ScriptedDecisionEngine`) | ✅ jssip-emulating test impl |
+| `cdr/CdrWriter.ts` (+ `BufferedCdrLayer`) | `cdr/{mod,memory,buffered}.rs` | ✅ |
+| `CallLimiter*.ts` | `limiter.rs` (`NoopLimiter`) | 🟡 no-op seam (real limiter = row 20) |
+| `b2bua/stack-identity.ts` | `stack_identity.rs` | ✅ Via/Contact `cr`/`lg` stamping + param codec |
+| `B2buaCore.ts` (layer composition) | `b2bua_core.rs` | ✅ |
+
+### Tests
+| Area | Rust home | Status |
+|---|---|---|
+| per-call FIFO order + cap/queue drops | `dispatch.rs` | ✅ 2 |
+| timer fire/cancel under paused clock | `timers.rs` | ✅ 2 |
+| scripted decision route/reject | `decision/test_adapter.rs` | ✅ 2 |
+| stack-identity param round-trip | `stack_identity.rs` | ✅ 2 |
+| matcher ranking + invariant enforcement | `tests/rules.rs` | ✅ 3 |
+| alice↔b2bua↔bob basic call (INVITE/180/200/ACK/BYE) + one CDR | `b2bua-harness/tests/basic_call.rs` | ✅ 1 |
+| b-leg 486 relayed + terminate; decision reject 403 | `b2bua-harness/tests/failure.rs` | ✅ 2 |
+
+### Un-ported with justification
+- **18x-management strategies** (`relayFirst18xTo180`, `promote18xPemTo200`,
+  PEM/fake-prack) + **REFER transfer** (`referTransfer`, `TransferRules`,
+  `/call/refer`) — SERVICE_LAYER policy modules; user-deferred. The action
+  vocabulary they need is defined but dormant.
+- **Real HTTP decision adapter** — the scripted backend stands in.
+- **Failover via `call_failure`** — route-failure relays the failure + tears the
+  call down; the async failover round-trip + `refer-async-http` re-entrant
+  fire-and-forget land with the decision-HTTP/transfer slice.
+- **Real CallLimiter** (row 20) — no-op admit/decrement.
+- **HA replication transport + orphan sweep / `loadOwnedCalls` rehydrate** — the
+  `CallStore` seam carries the HA params; the replicating impl is the HA slice.
+- **Draining / readiness / overload** — minimal OPTIONS 200 only (own row above).
+- **Tracing / OTel span machinery** — no tokio analogue this slice.

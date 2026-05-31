@@ -720,19 +720,25 @@ fn strip_top_via_if_self(headers: &mut Vec<SipHeader>, me: SocketAddr) {
 // ---------------------------------------------------------------------------
 
 async fn expect_response(agent: &Agent, status: u16) -> SipResponse {
-    match agent.recv().await {
-        SipMessage::Response(r) => {
-            assert_eq!(
-                r.status, status,
-                "{} expected a {status} response, got {} {}",
-                agent.name, r.status, r.reason
-            );
-            r
+    loop {
+        match agent.recv().await {
+            // A real UAC absorbs an unsolicited 100 Trying (RFC 3261 §8.1.3.2) —
+            // a stateful upstream (B2BUA / proxy txn layer) emits it before the
+            // first real provisional. Skip it unless 100 is what we await.
+            SipMessage::Response(r) if r.status == 100 && status != 100 => continue,
+            SipMessage::Response(r) => {
+                assert_eq!(
+                    r.status, status,
+                    "{} expected a {status} response, got {} {}",
+                    agent.name, r.status, r.reason
+                );
+                return r;
+            }
+            SipMessage::Request(r) => panic!(
+                "{} expected a {status} response, got a {} request",
+                agent.name, r.method
+            ),
         }
-        SipMessage::Request(r) => panic!(
-            "{} expected a {status} response, got a {} request",
-            agent.name, r.method
-        ),
     }
 }
 

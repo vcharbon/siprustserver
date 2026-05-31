@@ -1,0 +1,342 @@
+//! The basic-B2BUA default rule set (CORE_LAYER) — port of the load-bearing
+//! rules in `src/b2bua/rules/defaults/`. Covers the bridged-call lifecycle:
+//! INVITE → 18x → 200 → ACK → in-dialog → BYE, plus CANCEL, b-leg failure, and
+//! the housekeeping timers. The 18x-management strategies, PEM/fake-prack, and
+//! REFER transfer (SERVICE_LAYER) are deferred (see MIGRATION_STATUS / ADR-0010).
+//!
+//! Rules are registered in priority order: corner cases + failure resolution
+//! first (narrow matches), broad relays last. `overrides` removes a displaced
+//! rule regardless of order.
+
+use call::{ByeDisposition, CdrEventType, Direction, CallModelState, LegDisposition, LegState, TimerType};
+
+use super::model::{CORE_LAYER, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult};
+
+fn rule(
+    id: &'static str,
+    overrides: &'static [&'static str],
+    matcher: Match,
+    handle: fn(&RuleContext) -> Option<RuleHandleResult>,
+) -> RuleDefinition {
+    RuleDefinition {
+        id,
+        layer: CORE_LAYER,
+        overrides,
+        matcher,
+        handle,
+    }
+}
+
+fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
+    Some(RuleHandleResult::new(actions))
+}
+
+fn no_transform() -> MessageTransform {
+    MessageTransform::default()
+}
+
+fn keepalive_interval(ctx: &RuleContext) -> i64 {
+    ctx.call.features.as_ref().map(|f| f.platform.keepalive.interval_sec).unwrap_or(30)
+}
+fn max_duration(ctx: &RuleContext) -> i64 {
+    ctx.call.features.as_ref().map(|f| f.platform.max_duration_sec).unwrap_or(3600)
+}
+
+/// The ordered basic-B2BUA rule list.
+pub fn default_rules() -> Vec<RuleDefinition> {
+    vec![
+        // ── corner cases ────────────────────────────────────────────────────
+        rule(
+            "cancel-200-crossing",
+            &[],
+            Match::response()
+                .method("INVITE")
+                .status_class(2)
+                .leg_disposition(LegDisposition::Cancelling)
+                .direction(Direction::FromB),
+            |ctx| {
+                let b = ctx.source_leg_id.to_string();
+                ok(vec![
+                    RuleAction::ConfirmDialog { leg_id: b.clone() },
+                    RuleAction::AckLeg { leg_id: b.clone() },
+                    RuleAction::DestroyLeg { leg_id: b },
+                ])
+            },
+        ),
+        rule(
+            "resolve-cancel-response",
+            &["route-failure", "absorb-stale-failure"],
+            Match::response()
+                .method("INVITE")
+                .leg_disposition(LegDisposition::Cancelling)
+                .direction(Direction::FromB)
+                .filter(|ctx| ctx.response().map(|r| r.status >= 300).unwrap_or(false)),
+            |ctx| {
+                let b = ctx.source_leg_id.to_string();
+                ok(vec![RuleAction::TerminateLeg {
+                    leg_id: b,
+                    bye_disposition: Some(ByeDisposition::Cancelled),
+                }])
+            },
+        ),
+        rule(
+            "absorb-stale-failure",
+            &[],
+            Match::response()
+                .method("INVITE")
+                .leg_states(&[LegState::Terminated])
+                .direction(Direction::FromB)
+                .filter(|ctx| ctx.response().map(|r| r.status >= 300).unwrap_or(false)),
+            |_ctx| ok(vec![]),
+        ),
+        // ── dialog ──────────────────────────────────────────────────────────
+        rule(
+            "relay-provisional",
+            &[],
+            Match::response().method("INVITE").status_class(1).direction(Direction::FromB),
+            |ctx| {
+                let b = ctx.source_leg_id.to_string();
+                let status = ctx.response().map(|r| r.status as i64);
+                ok(vec![
+                    RuleAction::UpdateLegState {
+                        leg_id: b.clone(),
+                        state: LegState::Early,
+                        disposition: None,
+                    },
+                    RuleAction::RelayToPeer { transform: no_transform() },
+                    RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Provisional,
+                        leg_id: b,
+                        status_code: status,
+                        reason: None,
+                    },
+                ])
+            },
+        ),
+        rule(
+            "confirm-dialog",
+            &[],
+            Match::response()
+                .method("INVITE")
+                .status_class(2)
+                .leg_states(&[LegState::Trying, LegState::Early])
+                .direction(Direction::FromB),
+            |ctx| {
+                let b = ctx.source_leg_id.to_string();
+                let a = ctx.call.a_leg.leg_id.clone();
+                ok(vec![
+                    RuleAction::ConfirmDialog { leg_id: b.clone() },
+                    RuleAction::Merge { leg_a: a, leg_b: b.clone() },
+                    RuleAction::RelayToPeer { transform: no_transform() },
+                    RuleAction::CancelTimer { id: format!("NoAnswer:{b}") },
+                    RuleAction::ScheduleTimer {
+                        timer_type: TimerType::GlobalDuration,
+                        delay_sec: max_duration(ctx),
+                        leg_id: None,
+                    },
+                    RuleAction::ScheduleTimer {
+                        timer_type: TimerType::Keepalive,
+                        delay_sec: keepalive_interval(ctx),
+                        leg_id: None,
+                    },
+                    RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Answer,
+                        leg_id: b,
+                        status_code: Some(200),
+                        reason: None,
+                    },
+                ])
+            },
+        ),
+        rule(
+            "relay-non-invite-200",
+            &[],
+            Match::response()
+                .methods(&["OPTIONS", "INFO", "PRACK", "UPDATE", "REFER", "MESSAGE", "SUBSCRIBE"])
+                .status_class(2),
+            |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
+        ),
+        // ── failure ─────────────────────────────────────────────────────────
+        rule(
+            "route-failure",
+            &[],
+            Match::response()
+                .method("INVITE")
+                .direction(Direction::FromB)
+                .filter(|ctx| ctx.response().map(|r| r.status >= 300).unwrap_or(false)),
+            |ctx| {
+                let b = ctx.source_leg_id.to_string();
+                let (status, reason) = ctx
+                    .response()
+                    .map(|r| (r.status as i64, r.reason.clone()))
+                    .unwrap_or((500, "Server Error".into()));
+                ok(vec![
+                    RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Reject,
+                        leg_id: b,
+                        status_code: Some(status),
+                        reason: Some(reason),
+                    },
+                    // Relay the failure to the caller (no failover decision this
+                    // slice), then tear the whole call down.
+                    RuleAction::RelayToPeer { transform: no_transform() },
+                    RuleAction::TerminateCall,
+                ])
+            },
+        ),
+        rule(
+            "handle-481",
+            &[],
+            Match::response().status_code(481).call_state(CallModelState::Active),
+            |ctx| {
+                let src = ctx.source_leg_id.to_string();
+                ok(vec![
+                    RuleAction::TerminateLeg { leg_id: src.clone(), bye_disposition: Some(ByeDisposition::ByeTimeout) },
+                    RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: src, status_code: Some(481), reason: Some("Call/Transaction Does Not Exist".into()) },
+                    RuleAction::BeginTermination { reason: Some("481".into()) },
+                ])
+            },
+        ),
+        // ── absorption ──────────────────────────────────────────────────────
+        rule(
+            "absorb-bye-200",
+            &[],
+            Match::response().methods(&["BYE", "CANCEL"]).status_class(2),
+            |_ctx| ok(vec![]),
+        ),
+        rule(
+            "absorb-options-200",
+            &["relay-non-invite-200"],
+            Match::response().method("OPTIONS").status_class(2),
+            |ctx| {
+                let leg = ctx.source_leg_id.to_string();
+                ok(vec![RuleAction::CancelTimer { id: format!("KeepaliveTimeout:{leg}") }])
+            },
+        ),
+        rule(
+            "absorb-notify-200",
+            &[],
+            Match::response().method("NOTIFY").status_class(2),
+            |_ctx| ok(vec![]),
+        ),
+        // ── terminating ─────────────────────────────────────────────────────
+        rule(
+            "resolve-bye-response",
+            &["absorb-bye-200"],
+            Match::response()
+                .method("BYE")
+                .filter(|ctx| {
+                    ctx.source_leg()
+                        .and_then(|l| l.bye_disposition)
+                        .map(|d| d == ByeDisposition::ByeSent)
+                        .unwrap_or(false)
+                }),
+            |ctx| {
+                ok(vec![RuleAction::TerminateLeg {
+                    leg_id: ctx.source_leg_id.to_string(),
+                    bye_disposition: Some(ByeDisposition::ByeConfirmed),
+                }])
+            },
+        ),
+        rule(
+            "resolve-cross-bye",
+            &[],
+            Match::request().method("BYE").call_state(CallModelState::Terminating),
+            |ctx| {
+                ok(vec![
+                    RuleAction::Respond { status: 200, reason: "OK".into(), body: vec![], content_type: None },
+                    RuleAction::TerminateLeg {
+                        leg_id: ctx.source_leg_id.to_string(),
+                        bye_disposition: Some(ByeDisposition::ByeReceived),
+                    },
+                ])
+            },
+        ),
+        // ── relay (broad) ───────────────────────────────────────────────────
+        rule("relay-ack", &[], Match::request().method("ACK"), |_| {
+            ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
+        }),
+        rule("relay-bye", &[], Match::request().method("BYE").call_state(CallModelState::Active), |ctx| {
+            ok(vec![
+                RuleAction::Respond { status: 200, reason: "OK".into(), body: vec![], content_type: None },
+                RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: ctx.source_leg_id.to_string(), status_code: None, reason: None },
+                RuleAction::BeginTermination { reason: Some("BYE".into()) },
+            ])
+        }),
+        rule("relay-reinvite", &[], Match::request().method("INVITE"), |_| {
+            ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
+        }),
+        rule("relay-prack", &[], Match::request().method("PRACK"), |_| {
+            ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
+        }),
+        rule("relay-options", &[], Match::request().method("OPTIONS"), |_| {
+            ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
+        }),
+        rule("relay-info", &[], Match::request().method("INFO"), |_| {
+            ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
+        }),
+        rule("relay-update", &[], Match::request().method("UPDATE"), |_| {
+            ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
+        }),
+        rule("relay-message", &[], Match::request().method("MESSAGE"), |_| {
+            ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
+        }),
+        // ── lifecycle ───────────────────────────────────────────────────────
+        rule("handle-cancel", &[], Match::cancelled(), |ctx| {
+            let mut actions = Vec::new();
+            for b in &ctx.call.b_legs {
+                match b.state {
+                    LegState::Confirmed => actions.push(RuleAction::DestroyLeg { leg_id: b.leg_id.clone() }),
+                    LegState::Trying | LegState::Early => actions.push(RuleAction::CancelLeg { leg_id: b.leg_id.clone() }),
+                    LegState::Terminated => {}
+                }
+            }
+            actions.push(RuleAction::AddCdrEvent {
+                event_type: CdrEventType::Cancel,
+                leg_id: ctx.call.a_leg.leg_id.clone(),
+                status_code: None,
+                reason: None,
+            });
+            actions.push(RuleAction::BeginTermination { reason: Some("CANCEL".into()) });
+            ok(actions)
+        }),
+        rule("handle-timeout", &[], Match::timeout(), |_| {
+            ok(vec![RuleAction::BeginTermination { reason: Some("timeout".into()) }])
+        }),
+        // ── timers ──────────────────────────────────────────────────────────
+        rule("no-answer", &[], Match::timer().timer_type(TimerType::NoAnswer), |ctx| {
+            let leg = ctx.source_leg_id.to_string();
+            ok(vec![
+                RuleAction::AddCdrEvent { event_type: CdrEventType::Timeout, leg_id: leg.clone(), status_code: None, reason: Some("no_answer_timeout".into()) },
+                RuleAction::DestroyLeg { leg_id: leg },
+                RuleAction::BeginTermination { reason: Some("no-answer".into()) },
+            ])
+        }),
+        rule("max-duration", &[], Match::timer().timer_type(TimerType::GlobalDuration), |ctx| {
+            ok(vec![
+                RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: ctx.call.a_leg.leg_id.clone(), status_code: None, reason: Some("max_duration".into()) },
+                RuleAction::BeginTermination { reason: Some("max-duration".into()) },
+            ])
+        }),
+        rule("keepalive", &[], Match::timer().timer_type(TimerType::Keepalive).call_state(CallModelState::Active), |ctx| {
+            let mut actions = Vec::new();
+            for leg_id in call::helpers::all_peered_legs(ctx.call) {
+                actions.push(RuleAction::SendRequestToLeg { leg_id: leg_id.clone(), method: "OPTIONS".into() });
+                actions.push(RuleAction::ScheduleTimer { timer_type: TimerType::KeepaliveTimeout, delay_sec: 5, leg_id: Some(leg_id) });
+            }
+            actions.push(RuleAction::ScheduleTimer { timer_type: TimerType::Keepalive, delay_sec: keepalive_interval(ctx), leg_id: None });
+            ok(actions)
+        }),
+        rule("keepalive-timeout", &[], Match::timer().timer_type(TimerType::KeepaliveTimeout).call_state(CallModelState::Active), |ctx| {
+            ok(vec![
+                RuleAction::TerminateLeg { leg_id: ctx.source_leg_id.to_string(), bye_disposition: Some(ByeDisposition::ByeTimeout) },
+                RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: ctx.source_leg_id.to_string(), status_code: None, reason: Some("keepalive timeout".into()) },
+                RuleAction::BeginTermination { reason: Some("keepalive-timeout".into()) },
+            ])
+        }),
+        rule("terminating-safety-timeout", &[], Match::timer().timer_type(TimerType::TerminatingTimeout).call_state(CallModelState::Terminating), |_| {
+            // Canary: the structural auto-arm means this should not fire. No-op.
+            ok(vec![])
+        }),
+    ]
+}
