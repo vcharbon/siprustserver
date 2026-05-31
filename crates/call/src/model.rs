@@ -446,4 +446,20 @@ pub struct Call {
     pub message_count: Option<i64>,
     /// Leg IDs that already triggered one safety-timer refresh while terminating.
     pub terminating_refresh_legs: Option<Vec<String>>,
+    /// Per-call runtime state for the `relayFirst18xTo180` service (the typed
+    /// slice that replaces the TS shared `ruleState` blob; ADR-0016's full
+    /// typed-ext is out of scope for the early port). `None` until the first
+    /// 18x is processed under an active strategy.
+    pub relay_first_18x: Option<RelayFirst18xState>,
+}
+
+/// Runtime state for the `relayFirst18xTo180` service. Strategy itself lives on
+/// `features.relay_first_18x_to_180`; this carries the per-call progress.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayFirst18xState {
+    /// Whether the first 18x has been relayed as a bare 180 to the caller.
+    pub first_relayed: bool,
+    /// The a-facing To-tag minted on the first 18x — reused on the 200 OK so the
+    /// caller sees one stable callee identity across forking/failover.
+    pub stored_a_tag: Option<String>,
 }

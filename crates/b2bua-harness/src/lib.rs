@@ -98,6 +98,31 @@ impl B2buaSut {
         Self::start(h, name, addr, decision).await
     }
 
+    /// Bind a B2BUA that routes every call to `dest` with the
+    /// `relayFirst18xTo180` feature active under `strategy` (suppress / fake-prack).
+    pub async fn route_all_to_with_18x(
+        h: &Harness,
+        name: &str,
+        addr: &str,
+        dest_host: &str,
+        dest_port: u16,
+        strategy: call::features::RelayFirst18xStrategy,
+    ) -> Self {
+        let dest = (dest_host.to_string(), dest_port);
+        let decision = Arc::new(
+            b2bua::decision::ScriptedDecisionEngine::builder()
+                .fallback(move |_req| {
+                    b2bua::decision::NewCallResponse::Route(
+                        b2bua::decision::test_adapter::route_to_with_18x(
+                            &dest.0, dest.1, strategy,
+                        ),
+                    )
+                })
+                .build(),
+        );
+        Self::start(h, name, addr, decision).await
+    }
+
     /// Bind a B2BUA that routes every call to `dest` but sends its b-leg
     /// (worker→callee) traffic through the front proxy at `proxy` — the
     /// `alice → proxy → b2bua → proxy → bob` topology.

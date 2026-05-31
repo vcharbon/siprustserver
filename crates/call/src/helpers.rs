@@ -305,6 +305,67 @@ pub fn all_peered_legs(call: &Call) -> Vec<String> {
     }
 }
 
+// ── relayFirst18xTo180 runtime-state helpers ────────────────────────────────
+
+/// The active `relayFirst18xTo180` strategy for this call, if any.
+pub fn relay_first_18x_strategy(call: &Call) -> Option<crate::features::RelayFirst18xStrategy> {
+    call.features
+        .as_ref()
+        .and_then(|f| f.relay_first_18x_to_180.as_ref())
+        .map(|r| r.strategy)
+}
+
+/// Whether the first 18x has already been relayed under the strategy.
+pub fn relay_first_18x_first_relayed(call: &Call) -> bool {
+    call.relay_first_18x
+        .as_ref()
+        .map(|s| s.first_relayed)
+        .unwrap_or(false)
+}
+
+/// The a-facing To-tag minted on the first 18x (reused on the 200 OK).
+pub fn relay_first_18x_stored_a_tag(call: &Call) -> Option<&str> {
+    call.relay_first_18x
+        .as_ref()
+        .and_then(|s| s.stored_a_tag.as_deref())
+}
+
+/// Mark the first 18x relayed and record the minted a-facing tag.
+pub fn set_relay_first_18x_relayed(mut call: Call, stored_a_tag: &str) -> Call {
+    call.relay_first_18x = Some(crate::model::RelayFirst18xState {
+        first_relayed: true,
+        stored_a_tag: Some(stored_a_tag.to_string()),
+    });
+    call
+}
+
+/// Cache an SDP body on a b-leg dialog selected by its callee (remote) tag,
+/// falling back to the leg's first dialog when no tag matches.
+pub fn cache_sdp_on_leg_dialog(mut call: Call, leg_id: &str, b_tag: &str, body: Vec<u8>) -> Call {
+    if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
+        let idx = leg
+            .dialogs
+            .iter()
+            .position(|d| d.sip.remote_tag == b_tag)
+            .or(if leg.dialogs.is_empty() { None } else { Some(0) });
+        if let Some(i) = idx {
+            leg.dialogs[i].ext.cached_sdp = Some(body);
+        }
+    }
+    call
+}
+
+/// The SDP cached on a b-leg dialog selected by callee tag (else first dialog).
+pub fn cached_sdp_for_leg_dialog<'a>(call: &'a Call, leg_id: &str, b_tag: &str) -> Option<&'a [u8]> {
+    let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
+    let dialog = leg
+        .dialogs
+        .iter()
+        .find(|d| d.sip.remote_tag == b_tag)
+        .or_else(|| leg.dialogs.first())?;
+    dialog.ext.cached_sdp.as_deref()
+}
+
 // ── Service ext + rule helpers (ADR-0016) ───────────────────────────────────
 
 /// Write an encoded ext slice into `call.ext[serviceId]`; `None` drops the key.

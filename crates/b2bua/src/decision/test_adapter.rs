@@ -63,6 +63,20 @@ pub fn route_to(host: &str, port: u16) -> RouteDecision {
     }
 }
 
+/// Build a [`RouteDecision`] to `host:port` with the `relayFirst18xTo180`
+/// feature active under `strategy` (the scripted equivalent of the wire
+/// `relay_first_18x_to_180` field; `true`→`DropSdp` is the suppress mode).
+pub fn route_to_with_18x(
+    host: &str,
+    port: u16,
+    strategy: call::features::RelayFirst18xStrategy,
+) -> RouteDecision {
+    let mut r = route_to(host, port);
+    r.features.relay_first_18x_to_180 =
+        Some(call::features::RelayFirst18xTo180Feature { strategy });
+    r
+}
+
 /// A reject decision.
 pub fn reject(code: u16, reason: impl Into<String>) -> NewCallResponse {
     NewCallResponse::Reject(RejectDecision {

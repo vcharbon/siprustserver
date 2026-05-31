@@ -32,5 +32,6 @@ pub use model::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, B2buaDialogExt, ByeDisposition, Call,
     CallLimiterState, CallModelState, CallTopology, CdrEvent, CdrEventType, Dialog, Direction,
     ExtMap, HostPort, InviteTxnHandle, Leg, LegDisposition, LegKind, LegState, PendingRequest,
-    PolicyUpdateBody, RemoteInfo, SipHeader, StackDialog, TagMapping, TimerEntry, TimerType,
+    PolicyUpdateBody, RelayFirst18xState, RemoteInfo, SipHeader, StackDialog, TagMapping,
+    TimerEntry, TimerType,
 };

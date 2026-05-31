@@ -17,7 +17,7 @@ each maps to a workspace **crate**. Status legend:
 | **Transaction** (RFC 3261 §17 FSMs + retransmit timers) | `crates/sip-txn` *(slice 4)* | `src/sip/TransactionLayer.ts` | ✅ client/server INVITE+non-INVITE FSMs, A/B/E/F/H/J timers, dedup, CANCEL→200+487, ACK absorption, cached-response retransmit, bounded drop-newest event queue; actor owns the map + a single `DelayQueue` ([ADR-0007](docs/adr/0007-transaction-layer-rust-shape.md)); 14 tests green. RNG seam (`IdGen`) ported here |
 | **Dispatch / per-call FIFO** | `crates/b2bua` | `src/sip/{SipRouter,PerCallDispatcher}.ts`, `src/call/CallState.ts` | ✅ per-call queue+worker+global-semaphore dispatcher + router (`routeKey`/`withCall`/`processResult` typed-effect interpreter) + in-memory `CallState` over a replication-aware `CallStore` seam (HA params no-op'd) + B2BUA-local timer `DelayQueue` + decision-engine adapter seam (scripted jssip-emulating test impl) + buffered CDR; alice↔b2bua↔bob basic/failure/reject e2e green ([ADR-0010](docs/adr/0010-b2bua-dispatch-rules-rust-shape.md), [slice below](#slice--b2bua-dispatch--rule-engine-cratesb2bua)) |
 | **CallContext data model** | `crates/call` | `src/call/` (`CallModel`/`timer-helpers`/`codec`) | ✅ data model + codec ported — Call→Leg→Dialog structs + lens/index helpers + `callRef`/index-keys + positional-msgpack `CallBodyCodec`; 24 tests green. Stateful `CallState` now ported in `crates/b2bua` (in-memory; Redis/HA-replication transport still deferred). `TimerService` ported as the B2BUA-local `DelayQueue`. protobuf codec **deferred** ([slice below](#slice--callcontext-data-model-cratescall), [ADR-0008](docs/adr/0008-call-context-data-model.md)) |
-| **Rule engine** | `crates/b2bua` (`rules/`) | `src/b2bua/rules/` | ✅ first-match/layer-ranked engine (declarative `Match` + `ActionExecutor` + `InvariantEnforcer` + bye-disposition net) + the basic-B2BUA default rule set (relay/dialog/absorb/lifecycle/terminating/corner-case/failure/timer). 18x-management strategies (`relayFirst18xTo180`/`promote18xPemTo200`) + REFER transfer (SERVICE_LAYER) **deferred** ([ADR-0010](docs/adr/0010-b2bua-dispatch-rules-rust-shape.md)) |
+| **Rule engine** | `crates/b2bua` (`rules/`) | `src/b2bua/rules/` | ✅ first-match/layer-ranked engine (declarative `Match` + `ActionExecutor` + `InvariantEnforcer` + bye-disposition net) + the basic-B2BUA default rule set (relay/dialog/absorb/lifecycle/terminating/corner-case/failure/timer) + the first **SERVICE_LAYER** rule `relayFirst18xTo180` (`drop-sdp`/suppress + `fake-prack`: bare-180 downgrade, 18x suppression, B2BUA-originated PRACK, per-dialog SDP cache + cached-SDP-at-200 injection, To-tag continuity, UPDATE skeleton-fit answer/488, delayed-offer self-disable). `promote18xPemTo200` + REFER transfer (SERVICE_LAYER) **deferred** ([ADR-0010](docs/adr/0010-b2bua-dispatch-rules-rust-shape.md)) |
 | **Draining / readiness / overload** (health-check) | `crates/b2bua` | `src/b2bua/{DrainingState,OverloadController}.ts`, `WorkerReadiness` | ⬜ pending — out-of-dialog OPTIONS answers a plain 200; the serving/draining/ready 200/503/silence matrix + Tier-3 admission gate are deferred ([ADR-0010 §X8](docs/adr/0010-b2bua-dispatch-rules-rust-shape.md)) |
 | **Call limiter** | `limiter` | `src/call/CallLimiter*.ts` | ⬜ pending — a no-op `CallLimiter` seam ships in `crates/b2bua` (always admit); the real sliding-window limiter is its own slice |
 | **Front proxy + LB** (stateless RFC 3261 §16) | `crates/sip-proxy` *(slice 9)* | `src/sip-front-proxy/{ProxyCore,RoutingStrategy,CancelBranchLru,strategies,registry,health,observability}` | ✅ stateless proxy data path + HRW load balancer (signed Record-Route cookie + routing matrix) + worker registry (static/simulated) + OPTIONS health probe + metrics (counters + Prometheus HTTP); scenario-harness gains a **SUT seam** (`bind_sut`) running a real `ProxyCore` on the recording fabric. 62 tests green. Registrar/REGISTER, real self-gate, AIMD bucket, k8s registry **deferred** ([slice below](#slice-9--front-proxy--load-balancer-cratessip-proxy), [ADR-0009](docs/adr/0009-front-proxy-rust-shape.md)) |
@@ -603,6 +603,16 @@ scenario-harness in a dedicated `crates/b2bua-harness` test crate.
 | `reinvite.ts` (`aliceReInvite`) | in-dialog re-INVITE from the caller, delayed offer: bodyless re-INVITE relayed to bob → 200 carries bob's offer → ACK carries alice's answer (relayed end-to-end). Exercises `relay-reinvite` + `relay-reinvite-response` (pending-relay snapshot correlation, incl. re-INVITE now snapshotted) + ACK body passthrough | `b2bua-harness/tests/reinvite.rs` | ✅ 1 |
 | `reinvite.ts` (`bobReInvite`) | in-dialog re-INVITE from the callee, offer in the re-INVITE: bob's re-INVITE(offer) relayed to alice → 200(answer) → ACK. Confirms a-leg-target ACK relay + response correlation in the from-a direction | `b2bua-harness/tests/reinvite.rs` | ✅ 1 |
 | `reinvite.ts` (`crossingReInvite`) | crossing re-INVITEs → glare: alice's re-INVITE is relayed to bob; bob's crossing re-INVITE meets a pending inbound INVITE on his dialog → `reinvite-glare` rejects it 491 Request Pending while alice's completes (200/ACK) | `b2bua-harness/tests/reinvite.rs` | ✅ 1 |
+| `suppress-18x.ts` (`basic`) | `relayFirst18xTo180` strategy `drop-sdp` (wire `true`): first reliable 183 → **bare 180** (no SDP/Require/RSeq), B2BUA-originated PRACK to bob, subsequent 18x suppressed, 200 OK To-tag == first 180's tag; `Supported:100rel` stripped from bob's INVITE | `b2bua-harness/tests/suppress_18x.rs` | ✅ 1 |
+| `suppress-18x.ts` (`disabled`) | no policy → normal 180 relay (regression guard the SERVICE_LAYER path stays off the default flow) | `b2bua-harness/tests/suppress_18x.rs` | ✅ 1 |
+| `suppress-18x.ts` (`failoverNoAnswer`, `failoverReject`) | failover-shaped tag-continuity across a second b-leg | — | ⛔ blocked — see "Un-ported" (no SIP b-leg failover yet) |
+| `fake-prack.ts` (`basic`) | strategy `fake-prack`: bob reliable 183(100rel,SDP) → bare 180 to alice, B2BUA PRACKs bob + **caches** his SDP, bob's bodyless 200 → alice's 200 carries the cached SDP; `Supported:100rel` **kept** to bob | `b2bua-harness/tests/fake_prack.rs` | ✅ 1 |
+| `fake-prack.ts` (`multiple-18x`) | two reliable 18x, one PRACK each, latest cached SDP wins on the 200 | `b2bua-harness/tests/fake_prack.rs` | ✅ 1 |
+| `fake-prack.ts` (`update-happy`) | bob UPDATE(offer) → B2BUA local 200 with skeleton-fit answer (codec ∩ alice's INVITE) + cache advances | `b2bua-harness/tests/fake_prack.rs` | ✅ 1 |
+| `fake-prack.ts` (`update-codec-mismatch`) | bob UPDATE(opus-only) → no codec overlap → B2BUA local 488; call continues on the original cached SDP | `b2bua-harness/tests/fake_prack.rs` | ✅ 1 |
+| `fake-prack.ts` (`delayed-offer-fallback`) | alice INVITE has no SDP → outbound INVITE strips `Supported:100rel` and the policy self-disables (plain relay) | `b2bua-harness/tests/fake_prack.rs` | ✅ 1 |
+| `fake-prack.ts` (`no-policy-control`) | no policy → full end-to-end PRACK (183/Require:100rel relayed verbatim, alice PRACKs end-to-end) | `b2bua-harness/tests/fake_prack.rs` | ✅ 1 |
+| `fake-prack.ts` (`forking`, `failover`) | failover-on-503 to a second b-leg (loser cache discarded) | — | ⛔ blocked — see "Un-ported" (no SIP b-leg failover yet) |
 
 **Behaviour ported alongside these tests** (was dormant before this slice): the
 back-to-back-UA in-dialog relay now does faithful per-dialog CSeq bookkeeping
@@ -622,14 +632,30 @@ custom headers, per-fork To-tag).
 > `by_call` bookkeeping on expiry (`timers.rs`).
 
 ### Un-ported with justification
-- **18x-management strategies** (`relayFirst18xTo180`, `promote18xPemTo200`,
-  PEM/fake-prack) + **REFER transfer** (`referTransfer`, `TransferRules`,
-  `/call/refer`) — SERVICE_LAYER policy modules; user-deferred. The action
-  vocabulary they need is defined but dormant. Concretely this defers
-  `fake-prack.ts` (all 8 cases: B2BUA-**originated** PRACK, cached-SDP-at-200,
-  UPDATE skeleton-fit answer/488, the failover/forking variants that ride the
-  policy) — the *transparent* end-to-end PRACK relay it regression-guards
-  (`fake-prack-no-policy-control`) is what `prack.rs` covers.
+- **`relayFirst18xTo180` SERVICE_LAYER rule** — **now ported** (Slice 3) for the
+  `drop-sdp` (suppress, wire `true`) and `fake-prack` strategies: bare-180
+  downgrade, 18x suppression, B2BUA-originated PRACK, per-dialog SDP cache +
+  cached-SDP-at-200 injection, To-tag continuity, UPDATE skeleton-fit answer/488,
+  delayed-offer self-disable. `crates/b2bua/src/rules/relay_first_18x.rs` +
+  `sdp_answer.rs`. The `keep-sdp` strategy variant is carried in the enum but has
+  no dedicated scenario (none exists in the TS corpus). `promote-pem-to-200` is
+  owned by the PEM service (Slice 4) — the enum variant is wired through but the
+  rule is not implemented here.
+- **The 4 failover-shaped 18x scenarios** (`suppress-18x` `failoverNoAnswer` /
+  `failoverReject`; `fake-prack` `forking` / `failover`) — **BLOCKED on SIP
+  b-leg failover**, which does not exist in the Rust port: `route-failure` /
+  `no-answer` are pure CORE no-failover (relay + `TerminateCall` /
+  begin-termination), and `CallDecisionEngine::call_failure`
+  (`/call/failure` → `Failover(RouteDecision)`) is defined but never invoked
+  (`grep '\.call_failure(' crates/` → 0). These four need a `/call/failure`
+  failover service first (the same deferral Slice 0 recorded for
+  `route-failure`/`no-answer`); they are not a `relayFirst18xTo180` gap. Tag
+  continuity *across failover* (the property they assert) is implemented and
+  unit-covered by the non-failover `basic` case's 200-To-tag==180-To-tag check.
+  `crates/b2bua-harness/tests/failover.rs` is HA worker-crash failover (a
+  different mechanism), not this.
+- **`promote18xPemTo200` (PEM) + REFER transfer** (`referTransfer`,
+  `TransferRules`, `/call/refer`) — SERVICE_LAYER policy modules; Slices 4–5.
 - **`prack-forking.ts` per-fork CSeq-independence assertion** — the source
   framework validates that each forked early dialog advances its own CSeq from
   the shared INVITE baseline (caller side). The slim Rust harness keeps one CSeq

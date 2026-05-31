@@ -76,6 +76,15 @@ pub async fn apply_route(
         }
     }
 
+    // ── relayFirst18xTo180 → strategy-aware Supported: 100rel + self-disable ─
+    //
+    // The B2BUA forwards alice's `Supported` to bob; the 18x-management policy
+    // then strips `100rel` (and self-disables) depending on the strategy and
+    // whether alice offered SDP. Port of `applyRoute.ts`'s Supported handling.
+    if let crate::effects::OutboundBody::Request(req) = &mut effect.body {
+        apply_supported_for_18x(req, a_invite, &mut call);
+    }
+
     call.b_legs.push(leg);
     call.cdr_events.push(CdrEvent {
         event_type: CdrEventType::InviteSent,
@@ -99,4 +108,71 @@ pub async fn apply_route(
     }
 
     HandlerResult { call, effects: fx }
+}
+
+/// Forward alice's `Supported` onto the b-leg INVITE with strategy-aware
+/// `100rel` handling, and self-disable the policy on the delayed-offer fallback.
+/// Port of the `relayFirst18xTo180` block in `applyRoute.ts`:
+///   - `drop-sdp`/`keep-sdp`: strip `100rel` (we never relay PRACK, alice was
+///     not told to expect reliable provisional).
+///   - `fake-prack` with alice SDP: keep `100rel` (bob goes reliable so we can
+///     originate PRACK + cache his SDP).
+///   - `fake-prack` with NO alice SDP (delayed offer): strip `100rel` AND
+///     disable the policy (fall back to plain relay; no half-active state).
+/// `promote-pem-to-200` is owned by the PEM service (Slice 4) and is left alone.
+fn apply_supported_for_18x(invite: &mut SipRequest, a_invite: &SipRequest, call: &mut Call) {
+    use call::features::RelayFirst18xStrategy;
+    let strategy = match call::helpers::relay_first_18x_strategy(call) {
+        Some(s) => s,
+        None => return,
+    };
+    if strategy == RelayFirst18xStrategy::PromotePemTo200 {
+        return; // PEM service owns this.
+    }
+
+    let alice_supported =
+        sip_message::message_helpers::get_header(&a_invite.headers, "supported").map(str::to_string);
+    let ct = sip_message::message_helpers::get_header(&a_invite.headers, "content-type")
+        .unwrap_or("");
+    let alice_has_sdp =
+        !a_invite.body.is_empty() && ct.to_ascii_lowercase().contains("application/sdp");
+
+    let keep_100rel = strategy == RelayFirst18xStrategy::FakePrack && alice_has_sdp;
+
+    // Self-disable on the fake-prack delayed-offer fallback.
+    if strategy == RelayFirst18xStrategy::FakePrack && !alice_has_sdp {
+        if let Some(f) = call.features.as_mut() {
+            f.relay_first_18x_to_180 = None;
+        }
+    }
+
+    // Compute the Supported value to forward to bob.
+    let supported_out: Option<String> = match &alice_supported {
+        None => None,
+        Some(v) => {
+            if keep_100rel {
+                Some(v.clone())
+            } else {
+                let kept: Vec<&str> = v
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|t| !t.eq_ignore_ascii_case("100rel") && !t.is_empty())
+                    .collect();
+                if kept.is_empty() {
+                    None
+                } else {
+                    Some(kept.join(", "))
+                }
+            }
+        }
+    };
+
+    // The b-leg INVITE has no Supported yet (build_b_leg omits it); set or drop.
+    invite.headers.retain(|h| !h.name.eq_ignore_ascii_case("supported"));
+    if let Some(val) = supported_out {
+        invite.headers.push(sip_message::SipHeader {
+            name: "Supported".to_string(),
+            value: val,
+        });
+    }
 }

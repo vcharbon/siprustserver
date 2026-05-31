@@ -367,6 +367,7 @@ impl Agent {
             caller: self,
             peer,
             sdp: None,
+            extra_headers: vec![],
             wire_dst: None,
         }
     }
@@ -413,6 +414,7 @@ pub struct Invite<'a> {
     caller: &'a Agent,
     peer: &'a Agent,
     sdp: Option<String>,
+    extra_headers: Vec<SipHeader>,
     /// Wire destination override — the INVITE is *addressed* to `peer` (its
     /// Contact is the Request-URI) but *sent* here. Set by [`Invite::through`]
     /// to route an initial INVITE via a proxy/LB.
@@ -423,6 +425,16 @@ impl<'a> Invite<'a> {
     /// Attach an SDP offer body.
     pub fn with_sdp(mut self, sdp: &str) -> Self {
         self.sdp = Some(sdp.to_string());
+        self
+    }
+
+    /// Attach an arbitrary extra header on the initial INVITE (e.g. `Supported:
+    /// 100rel, timer` to drive the 18x-management strategies).
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.extra_headers.push(SipHeader {
+            name: name.to_string(),
+            value: value.to_string(),
+        });
         self
     }
 
@@ -458,7 +470,7 @@ impl<'a> Invite<'a> {
             max_forwards: Some(70),
             body: self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
             content_type: None,
-            extra_headers: vec![],
+            extra_headers: self.extra_headers.clone(),
         };
         let invite = generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
         caller.send(&SipMessage::Request(invite.clone()), wire_dst).await;

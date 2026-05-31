@@ -253,6 +253,11 @@ impl RuleHandleResult {
 pub struct MessageTransform {
     pub status: Option<u16>,
     pub reason: Option<String>,
+    /// Drop the body (+ Content-Type) — bare-180 downgrade (`relayFirst18x`).
+    pub drop_body: bool,
+    /// Passthrough headers to suppress on the relayed message (case-insensitive),
+    /// e.g. `Require`/`RSeq` when downgrading a reliable 18x to a bare 180.
+    pub remove_headers: Vec<&'static str>,
 }
 
 /// The action vocabulary. The basic-B2BUA subset is exercised now; the trailing
@@ -310,8 +315,34 @@ pub enum RuleAction {
         reason: Option<String>,
     },
     DeactivateRule { rule_id: String },
-    // Deferred (18x / transfer) — defined, dormant.
     SendRequestToLeg { leg_id: String, method: String },
+    // ── relayFirst18xTo180 (SERVICE_LAYER) ──────────────────────────────────
+    /// Originate a PRACK toward `leg_id`'s early dialog (selected by `b_tag`),
+    /// acknowledging the reliable 1xx with RAck `<rseq> <invite_cseq> INVITE`
+    /// (RFC 3262 §7.2). The B2BUA PRACKs the b-leg itself because alice never
+    /// saw the reliable provisional (it was downgraded to a bare 180).
+    SendPrackToLeg {
+        leg_id: String,
+        rseq: i64,
+        invite_cseq: i64,
+        b_tag: String,
+    },
+    /// Cache an SDP body on a b-leg dialog (selected by `b_tag`) for later
+    /// substitution into the 200 OK toward alice (`fake-prack`).
+    CacheSdpOnLegDialog {
+        leg_id: String,
+        b_tag: String,
+        body: Vec<u8>,
+    },
+    /// Stage `body` into `call.policy_update_body` so the response relay path
+    /// substitutes it into the next relayed body (`fake-prack` 200-OK SDP).
+    SetPolicyUpdateBody { body: Vec<u8> },
+    /// First-18x bare-180 downgrade (`relayFirst18xTo180`): mint an a-facing
+    /// To-tag (the executor owns the IdGen), seed the tag map for this b-leg
+    /// dialog, record it as `stored_a_tag` + `first_relayed`, and relay the
+    /// current 1xx to the caller as a bare 180 (no body / Require / RSeq). The
+    /// minted tag is the single source the relay path resolves via the tag map.
+    RelayFirstBare180 { leg_id: String, b_tag: String },
 }
 
 /// The resolved context a rule sees. Built by the executor/router from the

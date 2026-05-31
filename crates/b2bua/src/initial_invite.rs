@@ -141,6 +141,7 @@ pub fn build_initial_call(
         ext: None,
         message_count: Some(1),
         terminating_refresh_legs: None,
+        relay_first_18x: None,
     }
 }
 

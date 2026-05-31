@@ -253,6 +253,7 @@ pub fn representative_call() -> Call {
         ext: Some(ext),
         message_count: Some(7),
         terminating_refresh_legs: None,
+        relay_first_18x: None,
     }
 }
 
@@ -690,6 +691,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             ext,
             message_count,
             terminating_refresh_legs,
+            relay_first_18x: None,
         },
     )
 }

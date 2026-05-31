@@ -214,6 +214,51 @@ impl<'a> ActionExecutor<'a> {
             RuleAction::SendRequestToLeg { leg_id, method } => {
                 self.send_request_to_leg(call, fx, leg_id, method);
             }
+            RuleAction::SendPrackToLeg {
+                leg_id,
+                rseq,
+                invite_cseq,
+                b_tag,
+            } => {
+                self.send_prack_to_leg(call, fx, leg_id, *rseq, *invite_cseq, b_tag);
+            }
+            RuleAction::CacheSdpOnLegDialog { leg_id, b_tag, body } => {
+                *call = call::helpers::cache_sdp_on_leg_dialog(
+                    call.clone(),
+                    leg_id,
+                    b_tag,
+                    body.clone(),
+                );
+            }
+            RuleAction::SetPolicyUpdateBody { body } => {
+                call.policy_update_body = Some(call::PolicyUpdateBody::Bytes(body.clone()));
+            }
+            RuleAction::RelayFirstBare180 { leg_id, b_tag } => {
+                // Mint the a-facing To-tag (executor owns the IdGen), seed the
+                // tag map for this b-leg dialog, record it, then relay the
+                // current 1xx as a bare 180. The relay path resolves the
+                // a-facing tag from the map (`find_by_b_tag`).
+                let a_facing_tag = self.id_gen.new_tag();
+                *call = add_tag_mapping(
+                    call.clone(),
+                    TagMapping {
+                        a_tag: a_facing_tag.clone(),
+                        b_leg_id: leg_id.clone(),
+                        b_tag: b_tag.clone(),
+                    },
+                );
+                *call = call::helpers::set_relay_first_18x_relayed(call.clone(), &a_facing_tag);
+                let transform = MessageTransform {
+                    status: Some(180),
+                    reason: Some("Ringing".to_string()),
+                    drop_body: true,
+                    remove_headers: vec!["Require", "RSeq"],
+                };
+                let (peer, target_to_tag) = resolve_peer(call, ctx);
+                if let Some(peer) = peer {
+                    self.relay_to(call, fx, ctx, &peer, &transform, target_to_tag);
+                }
+            }
         }
     }
 
@@ -411,6 +456,35 @@ impl<'a> ActionExecutor<'a> {
     ) {
         let status = transform.status.unwrap_or(resp.status);
         let reason = transform.reason.clone().unwrap_or_else(|| resp.reason.clone());
+        // The body relayed toward alice: dropped (bare-180 downgrade), replaced
+        // by a staged policy body (fake-prack cached SDP on the 200 OK), or the
+        // response's own body verbatim.
+        let (relay_body, relay_content_type): (Vec<u8>, Option<String>) = if transform.drop_body {
+            (vec![], None)
+        } else if let Some(call::PolicyUpdateBody::Bytes(b)) = call.policy_update_body.clone() {
+            (b, Some("application/sdp".to_string()))
+        } else {
+            (
+                resp.body.clone(),
+                get_header(&resp.headers, "content-type").map(str::to_string),
+            )
+        };
+        // Passthrough headers minus any the transform suppresses (e.g.
+        // Require/RSeq on a bare-180 downgrade).
+        let filter_passthrough = |hs: Vec<sip_message::SipHeader>| -> Vec<sip_message::SipHeader> {
+            if transform.remove_headers.is_empty() {
+                hs
+            } else {
+                hs.into_iter()
+                    .filter(|h| {
+                        !transform
+                            .remove_headers
+                            .iter()
+                            .any(|r| r.eq_ignore_ascii_case(&h.name))
+                    })
+                    .collect()
+            }
+        };
         let cseq_num = resp.cseq.seq as i64;
         let cseq_method = if resp.cseq.method.is_empty() {
             "INVITE".to_string()
@@ -424,7 +498,6 @@ impl<'a> ActionExecutor<'a> {
         if let Some(src_dialog) = ctx.source_dialog().cloned() {
             if let Some(pending) = find_pending_request(&src_dialog, cseq_num).cloned() {
                 let contact = relay::leg_contact(self.config, &call.call_ref, target_leg);
-                let content_type = get_header(&resp.headers, "content-type").map(str::to_string);
                 let opts = GenerateRelayedResponseOpts {
                     vias: pending.source_vias.clone(),
                     record_routes: vec![],
@@ -432,9 +505,9 @@ impl<'a> ActionExecutor<'a> {
                     to: pending.source_to.clone(),
                     call_id: pending.source_call_id.clone(),
                     cseq: format!("{} {}", pending.inbound_cseq, cseq_method),
-                    body: resp.body.clone(),
-                    transparent_headers: relay::relay_response_passthrough_headers(resp),
-                    content_type,
+                    body: relay_body.clone(),
+                    transparent_headers: filter_passthrough(relay::relay_response_passthrough_headers(resp)),
+                    content_type: relay_content_type.clone(),
                     contact: Some(contact),
                 };
                 let relayed = generators::generate_relayed_response(status, &reason, &opts);
@@ -490,16 +563,15 @@ impl<'a> ActionExecutor<'a> {
             };
             let a_invite = relay::rebuild_a_leg_invite(call);
             let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
-            let content_type = get_header(&resp.headers, "content-type").map(str::to_string);
-            let passthrough = relay::relay_response_passthrough_headers(resp);
+            let passthrough = filter_passthrough(relay::relay_response_passthrough_headers(resp));
             let effect = relay::response_to_a_leg(
                 &a_invite,
                 status,
                 &reason,
                 Some(a_face),
                 Some(contact),
-                resp.body.clone(),
-                content_type,
+                relay_body,
+                relay_content_type,
                 None,
                 passthrough,
             );
@@ -511,18 +583,17 @@ impl<'a> ActionExecutor<'a> {
         let a_tag = self.ensure_a_dialog(call);
         let a_invite = relay::rebuild_a_leg_invite(call);
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
-        let content_type = get_header(&resp.headers, "content-type").map(str::to_string);
         // Reliable-provisional negotiation headers (Require/Supported/RSeq) pass
         // through transparently so end-to-end PRACK keeps working (RFC 3262).
-        let passthrough = relay::relay_response_passthrough_headers(resp);
+        let passthrough = filter_passthrough(relay::relay_response_passthrough_headers(resp));
         let effect = relay::response_to_a_leg(
             &a_invite,
             status,
             &reason,
             Some(a_tag),
             Some(contact),
-            resp.body.clone(),
-            content_type,
+            relay_body,
+            relay_content_type,
             None,
             passthrough,
         );
@@ -590,6 +661,7 @@ impl<'a> ActionExecutor<'a> {
             None => return,
         };
         let remote_tag = resp.to.tag.clone().unwrap_or_default();
+        let remote_tag_clone = remote_tag.clone();
         let remote_target = get_header(&resp.headers, "contact")
             .map(unwrap_angle)
             .unwrap_or_default();
@@ -606,19 +678,29 @@ impl<'a> ActionExecutor<'a> {
             leg.state = LegState::Confirmed;
             leg.disposition = LegDisposition::Bridged;
         }
-        self.ensure_a_dialog(call);
+        // Reuse the a-facing tag pre-seeded for this callee (relayFirst18x's
+        // `force-tag-consistency`) so the 200 OK To-tag matches the first 180.
+        let preferred = find_by_b_tag(call, leg_id, &remote_tag_clone).map(|m| m.a_tag.clone());
+        self.ensure_a_dialog_with(call, preferred);
         *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
     }
 
     /// Ensure the a-leg has a dialog with a stable B2BUA-minted local tag; return
     /// that tag (the To-tag presented to alice on every a-facing response).
     fn ensure_a_dialog(&self, call: &mut Call) -> String {
+        self.ensure_a_dialog_with(call, None)
+    }
+
+    /// Like [`ensure_a_dialog`] but, when the a-dialog is being created, uses
+    /// `preferred` as its local tag instead of minting a fresh one (tag
+    /// continuity across forking/failover, `relayFirst18xTo180`).
+    fn ensure_a_dialog_with(&self, call: &mut Call, preferred: Option<String>) -> String {
         if let Some(d) = call.a_leg.dialogs.first() {
             if !d.sip.local_tag.is_empty() {
                 return d.sip.local_tag.clone();
             }
         }
-        let tag = self.id_gen.new_tag();
+        let tag = preferred.unwrap_or_else(|| self.id_gen.new_tag());
         let a_invite = relay::rebuild_a_leg_invite(call);
         let remote_target = get_header(&a_invite.headers, "contact")
             .map(unwrap_angle)
@@ -782,6 +864,63 @@ impl<'a> ActionExecutor<'a> {
             mode: OutboundTxnMode::NewClient(kind),
             destination: dest,
             label: format!("{method} → {leg_id}"),
+            leg_id: Some(leg_id.to_string()),
+        });
+    }
+
+    /// Originate a PRACK toward the b-leg early dialog (selected by callee tag)
+    /// acknowledging a reliable 1xx (RFC 3262 §4). The RAck is
+    /// `<rseq> <invite_cseq> INVITE`; the dialog's local CSeq advances by one.
+    /// Used by `relayFirst18xTo180` (B2BUA PRACKs bob since alice never saw the
+    /// reliable provisional).
+    fn send_prack_to_leg(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        rseq: i64,
+        invite_cseq: i64,
+        b_tag: &str,
+    ) {
+        let idx = match leg_index(call, leg_id) {
+            Some(i) => i,
+            None => return,
+        };
+        // Pick the early dialog by callee tag (forking → independent dialogs).
+        let dialog = {
+            let leg = leg_at(call, idx);
+            let picked = leg
+                .dialogs
+                .iter()
+                .find(|d| d.sip.remote_tag == b_tag)
+                .or_else(|| leg.dialogs.first());
+            match picked {
+                Some(d) => d.clone(),
+                None => return,
+            }
+        };
+        let t_id = dialog_identity_tag(leg_id, &dialog);
+        let outbound_cseq = dialog.sip.local_cseq + 1;
+        *call = bump_local_cseq(call.clone(), leg_id, &t_id, 1);
+
+        let branch = self.id_gen.new_branch();
+        let gen_dialog = relay::to_gen_dialog(&dialog.sip);
+        let opts = GenerateInDialogRequestOpts {
+            via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, branch)),
+            contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id)),
+            rack: Some(format!("{rseq} {invite_cseq} INVITE")),
+            cseq: Some(outbound_cseq as u32),
+            ..Default::default()
+        };
+        let res = generators::generate_in_dialog_request(InDialogMethod::Prack, &gen_dialog, &opts);
+        let dest = relay::dest_of(&relay::strip_uri(&gen_dialog.remote_target));
+        let (out_req, dest) =
+            relay::apply_b_leg_egress(self.config, leg_id, &gen_dialog.route_set, res.request, dest);
+        fx.outbound.push(OutboundSipEffect {
+            body: OutboundBody::Request(out_req),
+            mode: OutboundTxnMode::NewClient(TxnKind::NonInvite),
+            destination: dest,
+            label: format!("PRACK → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
         });
     }

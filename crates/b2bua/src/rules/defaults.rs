@@ -42,8 +42,18 @@ fn max_duration(ctx: &RuleContext) -> i64 {
     ctx.call.features.as_ref().map(|f| f.platform.max_duration_sec).unwrap_or(3600)
 }
 
-/// The ordered basic-B2BUA rule list.
+/// The ordered basic-B2BUA rule list. The SERVICE_LAYER `relayFirst18xTo180`
+/// rules are appended at the end; they are dormant unless a call activates the
+/// feature (their column+filter gate keeps them out of `pick_ranked` otherwise),
+/// and `pick_ranked` ranks SERVICE_LAYER above CORE so they win when active.
 pub fn default_rules() -> Vec<RuleDefinition> {
+    let mut rules = core_rules();
+    rules.extend(super::relay_first_18x::relay_first_18x_rules());
+    rules
+}
+
+/// The CORE_LAYER rule set.
+fn core_rules() -> Vec<RuleDefinition> {
     vec![
         // ── corner cases ────────────────────────────────────────────────────
         rule(
