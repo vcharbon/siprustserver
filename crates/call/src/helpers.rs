@@ -366,6 +366,29 @@ pub fn cached_sdp_for_leg_dialog<'a>(call: &'a Call, leg_id: &str, b_tag: &str) 
     dialog.ext.cached_sdp.as_deref()
 }
 
+// ── promote18xPemTo200 runtime-state helpers ────────────────────────────────
+
+/// The current PEM runtime slice, if any.
+pub fn promote_pem_state(call: &Call) -> Option<&crate::model::PromotePemState> {
+    call.promote_pem.as_ref()
+}
+
+/// Whether the first 183+PEM has been promoted to a synthetic 200 OK.
+pub fn promote_pem_promoted(call: &Call) -> bool {
+    call.promote_pem.as_ref().map(|s| s.promoted).unwrap_or(false)
+}
+
+/// Whether the promotion window is open (Alice's in-dialog requests rejected).
+pub fn promote_pem_window_open(call: &Call) -> bool {
+    call.promote_pem.as_ref().map(|s| s.window_open).unwrap_or(false)
+}
+
+/// Overwrite the PEM runtime slice (`None` resets to the pre-promotion state).
+pub fn set_promote_pem(mut call: Call, state: Option<crate::model::PromotePemState>) -> Call {
+    call.promote_pem = state;
+    call
+}
+
 // ── Service ext + rule helpers (ADR-0016) ───────────────────────────────────
 
 /// Write an encoded ext slice into `call.ext[serviceId]`; `None` drops the key.

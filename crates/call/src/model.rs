@@ -451,6 +451,11 @@ pub struct Call {
     /// typed-ext is out of scope for the early port). `None` until the first
     /// 18x is processed under an active strategy.
     pub relay_first_18x: Option<RelayFirst18xState>,
+    /// Per-call runtime state for the `promote18xPemTo200` service (strategy
+    /// `promote-pem-to-200`). Mirrors the TS `PemCallExt`; the typed slice
+    /// replaces the shared ext blob (ADR-0016 full typed-ext is out of scope for
+    /// the early port). `None` until the first 183+PEM is promoted.
+    pub promote_pem: Option<PromotePemState>,
 }
 
 /// Runtime state for the `relayFirst18xTo180` service. Strategy itself lives on
@@ -462,4 +467,21 @@ pub struct RelayFirst18xState {
     /// The a-facing To-tag minted on the first 18x — reused on the 200 OK so the
     /// caller sees one stable callee identity across forking/failover.
     pub stored_a_tag: Option<String>,
+}
+
+/// Runtime state for the `promote18xPemTo200` service (port of the TS
+/// `PemCallExt`). Strategy itself lives on `features.relay_first_18x_to_180`;
+/// this carries the per-call promotion progress.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromotePemState {
+    /// True once the first 183+SDP+PEM has been promoted to a synthetic 200 OK.
+    pub promoted: bool,
+    /// SDP sent to Alice in the synthetic 200 OK; compared against B's final
+    /// answer to decide whether a resync re-INVITE toward Alice is needed.
+    #[serde(with = "serde_bytes")]
+    pub promoted_sdp: Vec<u8>,
+    /// While true, Alice's in-dialog requests (other than BYE) are rejected.
+    pub window_open: bool,
+    /// CSeq of an outstanding B2BUA-originated resync re-INVITE toward Alice.
+    pub resync_reinvite_cseq: Option<i64>,
 }

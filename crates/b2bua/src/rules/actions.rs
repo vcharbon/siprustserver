@@ -83,7 +83,12 @@ impl<'a> ActionExecutor<'a> {
                 }
             }
             RuleAction::AckLeg { leg_id } => {
-                if let Some(leg) = call.b_legs.iter().find(|l| &l.leg_id == leg_id) {
+                let leg = if leg_id == &call.a_leg.leg_id {
+                    Some(&call.a_leg)
+                } else {
+                    call.b_legs.iter().find(|l| &l.leg_id == leg_id)
+                };
+                if let Some(leg) = leg {
                     if let Some(e) =
                         relay::ack_b_leg(&call.call_ref, leg, self.config, self.id_gen, vec![], None)
                     {
@@ -179,8 +184,8 @@ impl<'a> ActionExecutor<'a> {
             RuleAction::TerminateCall => {
                 terminate_all(call);
             }
-            RuleAction::BeginTermination { .. } => {
-                self.begin_termination(call, fx, ctx.source_leg_id);
+            RuleAction::BeginTermination { reason } => {
+                self.begin_termination(call, fx, ctx.source_leg_id, reason.as_deref());
             }
             RuleAction::TerminateLeg {
                 leg_id,
@@ -253,13 +258,92 @@ impl<'a> ActionExecutor<'a> {
                     reason: Some("Ringing".to_string()),
                     drop_body: true,
                     remove_headers: vec!["Require", "RSeq"],
+                    add_headers: vec![],
                 };
                 let (peer, target_to_tag) = resolve_peer(call, ctx);
                 if let Some(peer) = peer {
                     self.relay_to(call, fx, ctx, &peer, &transform, target_to_tag);
                 }
             }
+            RuleAction::SendReinvite {
+                leg_id,
+                body,
+                add_headers,
+            } => {
+                self.send_reinvite(call, fx, leg_id, body, add_headers);
+            }
+            RuleAction::SetPromotePem { state } => {
+                *call = call::helpers::set_promote_pem(call.clone(), state.clone());
+            }
         }
+    }
+
+    /// Originate a re-INVITE on `leg_id` carrying `body` as the new offer plus
+    /// `add_headers` (Allow/Supported). CSeq = dialog.localCSeq + 1. Used by
+    /// `promote18xPemTo200` to resync Alice when bob's final SDP differs from the
+    /// early-media SDP promoted into the synthetic 200 OK. The response comes back
+    /// classified from-a (the B2BUA's stamped Via cr/lg) and is claimed by the
+    /// `promote-resync-reinvite-response` rule.
+    fn send_reinvite(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        body: &[u8],
+        add_headers: &[(&'static str, String)],
+    ) {
+        let idx = match leg_index(call, leg_id) {
+            Some(i) => i,
+            None => return,
+        };
+        let dialog = match leg_at(call, idx).dialogs.first() {
+            Some(d) => d.clone(),
+            None => return,
+        };
+        let t_id = dialog_identity_tag(leg_id, &dialog);
+        let outbound_cseq = dialog.sip.local_cseq + 1;
+        *call = bump_local_cseq(call.clone(), leg_id, &t_id, 1);
+
+        let branch = self.id_gen.new_branch();
+        let gen_dialog = relay::to_gen_dialog(&dialog.sip);
+        let extra: Vec<sip_message::SipHeader> = add_headers
+            .iter()
+            .map(|(n, v)| sip_message::SipHeader {
+                name: (*n).to_string(),
+                value: v.clone(),
+            })
+            .collect();
+        let opts = GenerateInDialogRequestOpts {
+            via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, branch.clone())),
+            contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id)),
+            body: body.to_vec(),
+            content_type: (!body.is_empty()).then(|| "application/sdp".to_string()),
+            cseq: Some(outbound_cseq as u32),
+            extra_headers: extra,
+            ..Default::default()
+        };
+        let res = generators::generate_in_dialog_request(InDialogMethod::Invite, &gen_dialog, &opts);
+        let dest = relay::dest_of(&relay::strip_uri(&gen_dialog.remote_target));
+        let (out_req, dest) =
+            relay::apply_b_leg_egress(self.config, leg_id, &gen_dialog.route_set, res.request, dest);
+
+        // Cache the re-INVITE's client-transaction handle so the ACK-for-2xx
+        // echoes its CSeq (§13.2.2.4).
+        *call = call::helpers::update_dialog(call.clone(), leg_id, &t_id, |d| {
+            d.ext.pending_invite_txn = Some(call::InviteTxnHandle {
+                branch: branch.clone(),
+                original_invite: sip_message::serialize(&SipMessage::Request(out_req.clone())),
+                destination: call::HostPort { host: dest.0.clone(), port: dest.1 },
+            });
+        });
+
+        fx.outbound.push(OutboundSipEffect {
+            body: OutboundBody::Request(out_req),
+            mode: OutboundTxnMode::NewClient(TxnKind::Invite),
+            destination: dest,
+            label: format!("resync re-INVITE → {leg_id}"),
+            leg_id: Some(leg_id.to_string()),
+        });
     }
 
     /// Relay the current event to `target_leg` (response → regenerate on the
@@ -470,20 +554,28 @@ impl<'a> ActionExecutor<'a> {
             )
         };
         // Passthrough headers minus any the transform suppresses (e.g.
-        // Require/RSeq on a bare-180 downgrade).
-        let filter_passthrough = |hs: Vec<sip_message::SipHeader>| -> Vec<sip_message::SipHeader> {
-            if transform.remove_headers.is_empty() {
-                hs
-            } else {
-                hs.into_iter()
-                    .filter(|h| {
-                        !transform
-                            .remove_headers
-                            .iter()
-                            .any(|r| r.eq_ignore_ascii_case(&h.name))
-                    })
-                    .collect()
+        // Require/RSeq on a bare-180 downgrade), plus any the transform stamps
+        // with replace semantics (Allow/Supported on the synthetic 200 / resync
+        // re-INVITE, `promote18xPemTo200`).
+        let add_headers = transform.add_headers.clone();
+        let filter_passthrough = move |hs: Vec<sip_message::SipHeader>| -> Vec<sip_message::SipHeader> {
+            let mut out: Vec<sip_message::SipHeader> = hs
+                .into_iter()
+                .filter(|h| {
+                    !transform
+                        .remove_headers
+                        .iter()
+                        .any(|r| r.eq_ignore_ascii_case(&h.name))
+                        && !add_headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(&h.name))
+                })
+                .collect();
+            for (name, value) in &add_headers {
+                out.push(sip_message::SipHeader {
+                    name: (*name).to_string(),
+                    value: value.clone(),
+                });
             }
+            out
         };
         let cseq_num = resp.cseq.seq as i64;
         let cseq_method = if resp.cseq.method.is_empty() {
@@ -765,7 +857,19 @@ impl<'a> ActionExecutor<'a> {
     /// `source_leg_id` is intentionally *not* special-cased here: rules that
     /// consume a BYE/CANCEL pre-mark their source leg's disposition before
     /// emitting begin-termination, so the skip guard below leaves it untouched.
-    fn begin_termination(&self, call: &mut Call, fx: &mut HandlerEffects, _source_leg_id: &str) {
+    fn begin_termination(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        _source_leg_id: &str,
+        reason: Option<&str>,
+    ) {
+        // RFC 3326: stamp the teardown cause on each BYE only when the firing
+        // rule supplied a structured `SIP;cause=…` value (the
+        // `promote18xPemTo200` diagnostic teardown). The CORE rules pass opaque
+        // labels ("BYE"/"CANCEL"/"481"); those are not RFC 3326 values and are
+        // not emitted on the wire (matches the prior behaviour for them).
+        let reason_header = reason.filter(|r| r.trim_start().starts_with("SIP"));
         // a-leg ∪ b-legs, in that order (mirrors the TS leg iteration).
         let legs: Vec<(String, LegState, LegDisposition, Option<ByeDisposition>, bool)> =
             std::iter::once(&call.a_leg)
@@ -785,7 +889,11 @@ impl<'a> ActionExecutor<'a> {
             }
             match state {
                 LegState::Confirmed => {
-                    let e = if is_a { self.bye_to_leg_a(call) } else { self.bye_to_b_leg(call, &id) };
+                    let e = if is_a {
+                        self.bye_to_leg_a(call, reason_header)
+                    } else {
+                        self.bye_to_b_leg(call, &id, reason_header)
+                    };
                     if let Some(e) = e {
                         fx.outbound.push(e);
                     }
@@ -819,7 +927,7 @@ impl<'a> ActionExecutor<'a> {
             .or_else(|| (call.a_leg.leg_id == leg_id).then_some(call.a_leg.state));
         match state {
             Some(LegState::Confirmed) => {
-                if let Some(e) = self.bye_to_b_leg(call, leg_id) {
+                if let Some(e) = self.bye_to_b_leg(call, leg_id, None) {
                     fx.outbound.push(e);
                 }
                 *call = set_bye_disposition(call.clone(), leg_id, ByeDisposition::ByeSent);
@@ -925,25 +1033,40 @@ impl<'a> ActionExecutor<'a> {
         });
     }
 
-    fn bye_to_b_leg(&self, call: &Call, leg_id: &str) -> Option<OutboundSipEffect> {
+    fn bye_to_b_leg(&self, call: &Call, leg_id: &str, reason: Option<&str>) -> Option<OutboundSipEffect> {
         let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
         let d = leg.dialogs.first()?;
-        self.bye_on_dialog(&call.call_ref, leg_id, &d.sip)
+        self.bye_on_dialog(&call.call_ref, leg_id, &d.sip, reason)
     }
 
-    fn bye_to_leg_a(&self, call: &Call) -> Option<OutboundSipEffect> {
+    fn bye_to_leg_a(&self, call: &Call, reason: Option<&str>) -> Option<OutboundSipEffect> {
         let d = call.a_leg.dialogs.first()?;
-        self.bye_on_dialog(&call.call_ref, &call.a_leg.leg_id, &d.sip)
+        self.bye_on_dialog(&call.call_ref, &call.a_leg.leg_id, &d.sip, reason)
     }
 
-    fn bye_on_dialog(&self, call_ref: &str, leg_id: &str, sip: &StackDialog) -> Option<OutboundSipEffect> {
+    fn bye_on_dialog(
+        &self,
+        call_ref: &str,
+        leg_id: &str,
+        sip: &StackDialog,
+        reason: Option<&str>,
+    ) -> Option<OutboundSipEffect> {
         if sip.remote_tag.is_empty() {
             return None; // not a confirmed dialog
         }
         let dialog = relay::to_gen_dialog(sip);
         let branch = self.id_gen.new_branch();
+        let extra_headers = reason
+            .map(|r| {
+                vec![sip_message::SipHeader {
+                    name: "Reason".to_string(),
+                    value: r.to_string(),
+                }]
+            })
+            .unwrap_or_default();
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, call_ref, leg_id, branch)),
+            extra_headers,
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(InDialogMethod::Bye, &dialog, &opts);

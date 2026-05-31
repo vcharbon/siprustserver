@@ -17,7 +17,7 @@ each maps to a workspace **crate**. Status legend:
 | **Transaction** (RFC 3261 §17 FSMs + retransmit timers) | `crates/sip-txn` *(slice 4)* | `src/sip/TransactionLayer.ts` | ✅ client/server INVITE+non-INVITE FSMs, A/B/E/F/H/J timers, dedup, CANCEL→200+487, ACK absorption, cached-response retransmit, bounded drop-newest event queue; actor owns the map + a single `DelayQueue` ([ADR-0007](docs/adr/0007-transaction-layer-rust-shape.md)); 14 tests green. RNG seam (`IdGen`) ported here |
 | **Dispatch / per-call FIFO** | `crates/b2bua` | `src/sip/{SipRouter,PerCallDispatcher}.ts`, `src/call/CallState.ts` | ✅ per-call queue+worker+global-semaphore dispatcher + router (`routeKey`/`withCall`/`processResult` typed-effect interpreter) + in-memory `CallState` over a replication-aware `CallStore` seam (HA params no-op'd) + B2BUA-local timer `DelayQueue` + decision-engine adapter seam (scripted jssip-emulating test impl) + buffered CDR; alice↔b2bua↔bob basic/failure/reject e2e green ([ADR-0010](docs/adr/0010-b2bua-dispatch-rules-rust-shape.md), [slice below](#slice--b2bua-dispatch--rule-engine-cratesb2bua)) |
 | **CallContext data model** | `crates/call` | `src/call/` (`CallModel`/`timer-helpers`/`codec`) | ✅ data model + codec ported — Call→Leg→Dialog structs + lens/index helpers + `callRef`/index-keys + positional-msgpack `CallBodyCodec`; 24 tests green. Stateful `CallState` now ported in `crates/b2bua` (in-memory; Redis/HA-replication transport still deferred). `TimerService` ported as the B2BUA-local `DelayQueue`. protobuf codec **deferred** ([slice below](#slice--callcontext-data-model-cratescall), [ADR-0008](docs/adr/0008-call-context-data-model.md)) |
-| **Rule engine** | `crates/b2bua` (`rules/`) | `src/b2bua/rules/` | ✅ first-match/layer-ranked engine (declarative `Match` + `ActionExecutor` + `InvariantEnforcer` + bye-disposition net) + the basic-B2BUA default rule set (relay/dialog/absorb/lifecycle/terminating/corner-case/failure/timer) + the first **SERVICE_LAYER** rule `relayFirst18xTo180` (`drop-sdp`/suppress + `fake-prack`: bare-180 downgrade, 18x suppression, B2BUA-originated PRACK, per-dialog SDP cache + cached-SDP-at-200 injection, To-tag continuity, UPDATE skeleton-fit answer/488, delayed-offer self-disable). `promote18xPemTo200` + REFER transfer (SERVICE_LAYER) **deferred** ([ADR-0010](docs/adr/0010-b2bua-dispatch-rules-rust-shape.md)) |
+| **Rule engine** | `crates/b2bua` (`rules/`) | `src/b2bua/rules/` | ✅ first-match/layer-ranked engine (declarative `Match` + `ActionExecutor` + `InvariantEnforcer` + bye-disposition net) + the basic-B2BUA default rule set (relay/dialog/absorb/lifecycle/terminating/corner-case/failure/timer) + the first **SERVICE_LAYER** rule `relayFirst18xTo180` (`drop-sdp`/suppress + `fake-prack`: bare-180 downgrade, 18x suppression, B2BUA-originated PRACK, per-dialog SDP cache + cached-SDP-at-200 injection, To-tag continuity, UPDATE skeleton-fit answer/488, delayed-offer self-disable) + the **SERVICE_LAYER** `promote18xPemTo200` early-media service (`promote-pem-to-200`: 183+SDP+PEM → synthetic 200, promotion-window gating, SDP-diff resync re-INVITE toward A, upstream-fork re-seed, diagnostic-Reason teardown). REFER transfer (SERVICE_LAYER) **deferred** ([ADR-0010](docs/adr/0010-b2bua-dispatch-rules-rust-shape.md)) |
 | **Draining / readiness / overload** (health-check) | `crates/b2bua` | `src/b2bua/{DrainingState,OverloadController}.ts`, `WorkerReadiness` | ⬜ pending — out-of-dialog OPTIONS answers a plain 200; the serving/draining/ready 200/503/silence matrix + Tier-3 admission gate are deferred ([ADR-0010 §X8](docs/adr/0010-b2bua-dispatch-rules-rust-shape.md)) |
 | **Call limiter** | `limiter` | `src/call/CallLimiter*.ts` | ⬜ pending — a no-op `CallLimiter` seam ships in `crates/b2bua` (always admit); the real sliding-window limiter is its own slice |
 | **Front proxy + LB** (stateless RFC 3261 §16) | `crates/sip-proxy` *(slice 9)* | `src/sip-front-proxy/{ProxyCore,RoutingStrategy,CancelBranchLru,strategies,registry,health,observability}` | ✅ stateless proxy data path + HRW load balancer (signed Record-Route cookie + routing matrix) + worker registry (static/simulated) + OPTIONS health probe + metrics (counters + Prometheus HTTP); scenario-harness gains a **SUT seam** (`bind_sut`) running a real `ProxyCore` on the recording fabric. 62 tests green. Registrar/REGISTER, real self-gate, AIMD bucket, k8s registry **deferred** ([slice below](#slice-9--front-proxy--load-balancer-cratessip-proxy), [ADR-0009](docs/adr/0009-front-proxy-rust-shape.md)) |
@@ -614,6 +614,35 @@ scenario-harness in a dedicated `crates/b2bua-harness` test crate.
 | `fake-prack.ts` (`no-policy-control`) | no policy → full end-to-end PRACK (183/Require:100rel relayed verbatim, alice PRACKs end-to-end) | `b2bua-harness/tests/fake_prack.rs` | ✅ 1 |
 | `fake-prack.ts` (`forking`, `failover`) | failover-on-503 to a second b-leg (loser cache discarded) | — | ⛔ blocked — see "Un-ported" (no SIP b-leg failover yet) |
 
+#### Slice 4 — `promote18xPemTo200` (early-media 183→synthetic 200)
+
+**Source release:** sipjsserver @ `fffc4ac69c8aeef26cf48fe73469503145c9732b`.
+Source rule: `src/b2bua/rules/custom/promote18xPemTo200.ts` + shared
+`_shared/sdpDiff.ts`. Rust: `crates/b2bua/src/rules/promote_pem.rs` +
+`rules/sdp_diff.rs`; per-call state `Call.promote_pem` (`PromotePemState`) +
+`call::helpers`; new RuleActions `SendReinvite`/`SetPromotePem`; `AckLeg`
+extended to the a-leg; `BeginTermination` now emits a RFC 3326 `Reason:` header
+on teardown BYEs when the firing rule supplies a `SIP;cause=…` value;
+`MessageTransform.add_headers` (Allow/Supported stamping).
+
+| TS scenario (`promote-pem-to-200.ts`) | what it asserts | Rust test | Status |
+|---|---|---|---|
+| `promotePemHappyNoResync` | 183+SDP+PEM → synthetic **200** to alice (SDP verbatim, PEM stripped, Allow + Supported-no-100rel); A ACK absorbed; B 200(same SDP) → silent bridge, no resync | `promote_pem.rs::promote_pem_happy_no_resync` | ✅ 1 |
+| `promotePemResyncSdpChanged` | B 200(diff SDP) → B2BUA **re-INVITEs A** with the new SDP; A 200 → B2BUA ACK closes window; A's INFO then relays to B | `promote_pem.rs::resync_sdp_changed` | ✅ 1 |
+| `promotePemBFailsPostPromote` | B 503 post-promote → **BYE A** with `Reason: SIP;cause=503` | `promote_pem.rs::b_fails_post_promote` | ✅ 1 |
+| `promotePemResyncFailedByA` | A 488s the resync re-INVITE → **BYE both** legs with `Reason: …cause=488` | `promote_pem.rs::resync_failed_by_a` | ✅ 1 |
+| `promotePemABYEDuringWindow` | A BYEs during the window → A's BYE 200 + **CANCEL B**'s open INVITE | `promote_pem.rs::a_bye_during_window` | ✅ 1 |
+| `promotePemForkingResync` | upstream fork: 183(PEM,tag t1) promoted, 200(diff SDP,tag t2) wins → local ACK carries **t2**, resync re-INVITE to A, A-BYE routes via t2 | `promote_pem.rs::forking_resync` | ✅ 1 |
+| `promotePemInDialogRejection` | window open → A UPDATE→**491**, INFO→**488**; then B 200(same SDP) closes window | `promote_pem.rs::in_dialog_rejection` | ✅ 1 |
+| `promotePemNoPolicyControl` | policy OFF → A sees a **183** (not 200), SDP body survives (regression guard) | `promote_pem.rs::no_policy_control` | ✅ 1 |
+
+All 7 TS cases (+ the no-policy guard) ported; **none required SIP b-leg
+failover** (the forking case is upstream forking on one b-leg, not B2BUA
+failover), so the Slice 3 failover blocker does not apply. One minor fidelity
+note recorded in the test: the no-policy 183 loses its `P-Early-Media` header
+because the Rust CORE relay passthrough set is Require/RSeq/Supported only — a
+CORE relay-passthrough gap, independent of the PEM service.
+
 **Behaviour ported alongside these tests** (was dormant before this slice): the
 back-to-back-UA in-dialog relay now does faithful per-dialog CSeq bookkeeping
 (`relay_cseq_delta` + `bump_local_cseq`/`update_remote_cseq`), the PRACK `RAck`
@@ -654,8 +683,14 @@ custom headers, per-fork To-tag).
   unit-covered by the non-failover `basic` case's 200-To-tag==180-To-tag check.
   `crates/b2bua-harness/tests/failover.rs` is HA worker-crash failover (a
   different mechanism), not this.
-- **`promote18xPemTo200` (PEM) + REFER transfer** (`referTransfer`,
-  `TransferRules`, `/call/refer`) — SERVICE_LAYER policy modules; Slices 4–5.
+- **`promote18xPemTo200` (PEM)** — **now ported** (Slice 4): synthetic-200
+  promotion of the first 183+SDP+PEM, promotion-window gating (A UPDATE/INVITE→
+  491, INFO→488), silent confirm on B's real 200, SDP-diff resync re-INVITE
+  toward A, upstream-fork re-seed onto the winning To-tag, B-fails-post-promote
+  and resync-failure teardown BYEs carrying RFC 3326 `Reason`, A-BYE-during-
+  window CANCEL of B. `crates/b2bua/src/rules/promote_pem.rs` + `sdp_diff.rs`.
+- **REFER transfer** (`referTransfer`, `TransferRules`, `/call/refer`) —
+  SERVICE_LAYER policy module; Slice 5.
 - **`prack-forking.ts` per-fork CSeq-independence assertion** — the source
   framework validates that each forked early dialog advances its own CSeq from
   the shared INVITE baseline (caller side). The slim Rust harness keeps one CSeq

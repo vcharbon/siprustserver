@@ -258,6 +258,9 @@ pub struct MessageTransform {
     /// Passthrough headers to suppress on the relayed message (case-insensitive),
     /// e.g. `Require`/`RSeq` when downgrading a reliable 18x to a bare 180.
     pub remove_headers: Vec<&'static str>,
+    /// Headers to stamp on the relayed message with replace semantics (the
+    /// synthetic-200 / resync-reINVITE Allow + Supported, `promote18xPemTo200`).
+    pub add_headers: Vec<(&'static str, String)>,
 }
 
 /// The action vocabulary. The basic-B2BUA subset is exercised now; the trailing
@@ -343,6 +346,18 @@ pub enum RuleAction {
     /// current 1xx to the caller as a bare 180 (no body / Require / RSeq). The
     /// minted tag is the single source the relay path resolves via the tag map.
     RelayFirstBare180 { leg_id: String, b_tag: String },
+    // ── promote18xPemTo200 (SERVICE_LAYER) ──────────────────────────────────
+    /// Originate a re-INVITE on `leg_id` (here always the a-leg) carrying `body`
+    /// as the new offer plus `add_headers` (Allow/Supported), CSeq =
+    /// dialog.localCSeq + 1. Used to resync Alice when bob's final SDP differs
+    /// from the early-media SDP that was promoted into the synthetic 200 OK.
+    SendReinvite {
+        leg_id: String,
+        body: Vec<u8>,
+        add_headers: Vec<(&'static str, String)>,
+    },
+    /// Overwrite the per-call PEM runtime slice (`None` → pre-promotion state).
+    SetPromotePem { state: Option<call::PromotePemState> },
 }
 
 /// The resolved context a rule sees. Built by the executor/router from the

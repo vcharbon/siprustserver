@@ -49,6 +49,7 @@ fn max_duration(ctx: &RuleContext) -> i64 {
 pub fn default_rules() -> Vec<RuleDefinition> {
     let mut rules = core_rules();
     rules.extend(super::relay_first_18x::relay_first_18x_rules());
+    rules.extend(super::promote_pem::promote_pem_rules());
     rules
 }
 
