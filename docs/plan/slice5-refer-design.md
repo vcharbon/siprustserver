@@ -575,12 +575,19 @@ Then port the 6 families one file at a time, one scenario at a time
    (through the *first* re-INVITE C — the scenarios `allowExtra("INVITE")` and
    don't drive the realign), `transfer-c-fail-initial`, `transfer-c-no-answer`,
    no-answer timer. Commit.
-3. **refer-c-realign.rs** (refer-c-realign.ts, 5) — adds `transfer-c-realign-200`
-   (re-INVITE A with C's active answer), `transfer-c-realign-fail`,
-   `transfer-c-realign-timeout`, `transfer-c-glare-reinvite`,
-   `transfer-b-in-cre-are-reject`, the `refer_reinvite_answer` timer + the
-   `isActiveAnswerFor` assertion. Two `.skipFinalSweep()` cases — port with the
-   retransmit toleration + justification. Commit.
+3. **refer-c-realign.rs** (refer-c-realign.ts, 5) — DONE (slice 5b). Adds
+   `transfer-c-realign-200` (re-INVITE A with C's active answer),
+   `transfer-c-realign-fail`, `transfer-c-realign-timeout`,
+   `transfer-c-glare-reinvite`, `transfer-b-in-cre-are-reject`, the
+   `refer_reinvite_answer` timer + the `isActiveAnswerFor` assertion (Rust:
+   byte-equality of the a-realign body to C's active answer + Contact `leg=a`
+   substring — no `classifySdp` port). The Rust ports STOP once the a-realign
+   re-INVITE fires (the a-realign 200 / merge are slice 5c), so the TS post-merge
+   teardown is not driven. The TS `.skipFinalSweep()` exemption applies only to
+   the CTimeout case; the Rust harness has no end-of-scenario sweep, so the
+   toleration is the `receive_tolerating(BYE, [INVITE,CANCEL,OPTIONS])` retransmit
+   drain at the 32s deadline (one advance crosses both the `refer_reinvite_answer`
+   watchdog and the INVITE Timer B). Commit.
 4. **refer-full-transfer.rs** (refer-full-transfer.ts, 5) — adds
    `transfer-a-realign-200` (merge), `transfer-a-realign-fail`,
    `transfer-a-realign-timeout`, `transfer-a-glare-reinvite`. Completes the FSM.

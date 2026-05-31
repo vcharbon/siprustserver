@@ -14,8 +14,12 @@
 //! `no_transfer_active` filter. The phase-gated service rules are SERVICE_LAYER.
 //!
 //! Slice 5a ports the refer-authorizing → c-ringing → (initial C 200/fail/
-//! no-answer) portion. The c-realign / a-realign / merge rules (5b–5d) and the
-//! glare/gating rules (5e) are NOT yet implemented.
+//! no-answer) portion. Slice 5b adds the c-realign phase: `transfer-c-realign-200`
+//! (→ a-realigning + re-INVITE A with C's active answer), `transfer-c-realign-fail`
+//! / `transfer-c-realign-timeout` (rollback), and the realigning gating rules
+//! `transfer-c-glare-reinvite` (491) + `transfer-b-in-cre-are-reject` (481). The
+//! a-realign / merge rules (5c) and `transfer-overall-timeout` are NOT yet
+//! implemented.
 
 use call::{
     CdrEventType, Direction, LegState, TransferPhase, TransferState,
@@ -72,6 +76,11 @@ fn transfer_active(ctx: &RuleContext) -> bool {
 
 fn phase(ctx: &RuleContext) -> Option<TransferPhase> {
     call::helpers::transfer_phase(ctx.call)
+}
+
+/// Both realigning phases (the glare/gating "regime 2", refer-gating.ts:1-16).
+fn is_realigning(p: Option<TransferPhase>) -> bool {
+    matches!(p, Some(TransferPhase::CRealigning) | Some(TransferPhase::ARealigning))
 }
 
 fn state<'a>(ctx: &'a RuleContext<'a>) -> Option<&'a TransferState> {
@@ -567,6 +576,170 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                     RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
                     RuleAction::SetTransfer { state: None },
                 ])
+            },
+        ),
+        // ── transfer-c-realign-200 — C answers the c-realign re-INVITE (200).
+        // Distinguished from `transfer-c-200-initial` by `legState: confirmed`
+        // (the initial INVITE answered trying/early). referTransfer.ts:476-522.
+        svc_rule(
+            "transfer-c-realign-200",
+            &[],
+            Match::response()
+                .method("INVITE")
+                .status_class(2)
+                .direction(Direction::FromB)
+                .leg_states(&[LegState::Confirmed])
+                .filter(|ctx| {
+                    phase(ctx) == Some(TransferPhase::CRealigning)
+                        && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
+                }),
+            |ctx| {
+                let st = state(ctx)?.clone();
+                let resp = ctx.response()?;
+                let c_leg_id = st.c_leg_id.clone()?;
+
+                // Offer A the active SDP C just answered on the c-realign
+                // re-INVITE (sendrecv, C's real port/codec) so A enables its
+                // send path. C's *initial* held answer would leave A inactive →
+                // one-way audio (referTransfer.ts:495-497, the load-bearing note).
+                let c_realign_sdp = resp.body.clone();
+
+                let mut new_state = st.clone();
+                new_state.phase = TransferPhase::ARealigning;
+
+                ok(vec![
+                    RuleAction::AckLeg { leg_id: c_leg_id.clone() },
+                    RuleAction::CancelTimer {
+                        id: timer_id(call::TimerType::ReferReinviteAnswer, Some(&c_leg_id)),
+                    },
+                    RuleAction::ScheduleTimer {
+                        timer_type: call::TimerType::ReferReinviteAnswer,
+                        delay_sec: ctx.config.refer_reinvite_answer_sec,
+                        leg_id: Some("a".to_string()),
+                    },
+                    RuleAction::SendReinvite {
+                        leg_id: "a".to_string(),
+                        body: c_realign_sdp,
+                        add_headers: vec![],
+                    },
+                    RuleAction::SetTransfer { state: Some(new_state) },
+                ])
+            },
+        ),
+        // ── transfer-c-realign-fail — C rejects the c-realign re-INVITE → rollback.
+        // `legState: confirmed` distinguishes this from `transfer-c-fail-initial`.
+        // begin-termination BYEs all three confirmed legs (A, B, C). The slice is
+        // NOT cleared — the call termination path drops it. referTransfer.ts:526-568.
+        svc_rule(
+            "transfer-c-realign-fail",
+            &[],
+            Match::response()
+                .method("INVITE")
+                .direction(Direction::FromB)
+                .leg_states(&[LegState::Confirmed])
+                .filter(|ctx| {
+                    let is_fail = ctx.response().map(|r| r.status >= 300).unwrap_or(false);
+                    is_fail
+                        && phase(ctx) == Some(TransferPhase::CRealigning)
+                        && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
+                }),
+            |ctx| {
+                let st = state(ctx)?.clone();
+                let resp = ctx.response()?;
+                let mut actions = vec![];
+                if let Some(c_leg_id) = st.c_leg_id.clone() {
+                    actions.push(RuleAction::CancelTimer {
+                        id: timer_id(call::TimerType::ReferReinviteAnswer, Some(&c_leg_id)),
+                    });
+                }
+                actions.push(RuleAction::CancelTimer {
+                    id: timer_id(call::TimerType::ReferOverallSafety, None),
+                });
+                if let Some(c_leg_id) = st.c_leg_id.clone() {
+                    actions.push(RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Reject,
+                        leg_id: c_leg_id,
+                        status_code: Some(resp.status as i64),
+                        reason: Some("transfer-rollback-c-realign".to_string()),
+                    });
+                }
+                actions.push(RuleAction::BeginTermination { reason: None });
+                ok(actions)
+            },
+        ),
+        // ── transfer-c-realign-timeout — `refer_reinvite_answer` fired while
+        // c-realigning (C never answered the re-INVITE) → rollback. Shares the
+        // timer type with `transfer-a-realign-timeout` (5c); the phase filters
+        // keep them mutually exclusive. referTransfer.ts:572-598.
+        svc_rule(
+            "transfer-c-realign-timeout",
+            &[],
+            Match::timer()
+                .timer_type(call::TimerType::ReferReinviteAnswer)
+                .filter(|ctx| phase(ctx) == Some(TransferPhase::CRealigning)),
+            |ctx| {
+                let st = state(ctx)?.clone();
+                let mut actions = vec![RuleAction::CancelTimer {
+                    id: timer_id(call::TimerType::ReferOverallSafety, None),
+                }];
+                if let Some(c_leg_id) = st.c_leg_id.clone() {
+                    actions.push(RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Timeout,
+                        leg_id: c_leg_id,
+                        status_code: None,
+                        reason: Some("transfer-rollback-c-realign".to_string()),
+                    });
+                }
+                actions.push(RuleAction::BeginTermination { reason: None });
+                ok(actions)
+            },
+        ),
+        // ── transfer-c-glare-reinvite — C re-INVITEs during realigning → 491.
+        // Beats CORE `reinvite-glare`/`relay-reinvite` by SERVICE_LAYER.
+        // referTransfer.ts:602-616.
+        svc_rule(
+            "transfer-c-glare-reinvite",
+            &[],
+            Match::request()
+                .method("INVITE")
+                .direction(Direction::FromB)
+                .filter(|ctx| {
+                    is_realigning(phase(ctx))
+                        && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
+                }),
+            |_ctx| {
+                ok(vec![RuleAction::Respond {
+                    status: 491,
+                    reason: "Request Pending".to_string(),
+                    body: vec![],
+                    content_type: None,
+                }])
+            },
+        ),
+        // ── transfer-b-in-cre-are-reject — referrer B's non-BYE in-dialog request
+        // during realigning → 481 (B's signalling is "dead" until merge; its BYE
+        // is still allowed through `relay-bye`). referTransfer.ts:741-756.
+        svc_rule(
+            "transfer-b-in-cre-are-reject",
+            &[],
+            Match::request()
+                .direction(Direction::FromB)
+                .filter(|ctx| {
+                    let method_ok = ctx
+                        .request()
+                        .map(|r| !r.method.eq_ignore_ascii_case("BYE"))
+                        .unwrap_or(false);
+                    is_realigning(phase(ctx))
+                        && method_ok
+                        && state(ctx).map(|s| s.referrer_leg_id.as_str()) == Some(ctx.source_leg_id)
+                }),
+            |_ctx| {
+                ok(vec![RuleAction::Respond {
+                    status: 481,
+                    reason: "Call/Transaction Does Not Exist".to_string(),
+                    body: vec![],
+                    content_type: None,
+                }])
             },
         ),
     ]
