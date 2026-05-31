@@ -207,7 +207,18 @@ pub fn default_rules() -> Vec<RuleDefinition> {
         rule(
             "absorb-options-200",
             &["relay-non-invite-200"],
-            Match::response().method("OPTIONS").status_class(2),
+            // Only a B2BUA-originated keepalive OPTIONS is absorbed: it leaves no
+            // pending-relay snapshot on the source dialog. A relayed end-to-end
+            // OPTIONS does leave one (matching the response CSeq) → this declines
+            // and `relay-non-invite-200` forwards the 200 to the peer. Port of
+            // `absorbOptions200Rule`'s filter.
+            Match::response().method("OPTIONS").status_class(2).filter(|ctx| {
+                let cseq = ctx.response().map(|r| r.cseq.seq as i64);
+                match (ctx.source_dialog(), cseq) {
+                    (Some(d), Some(seq)) => call::helpers::find_pending_request(d, seq).is_none(),
+                    _ => true,
+                }
+            }),
             |ctx| {
                 let leg = ctx.source_leg_id.to_string();
                 ok(vec![RuleAction::CancelTimer { id: format!("KeepaliveTimeout:{leg}") }])
@@ -257,8 +268,12 @@ pub fn default_rules() -> Vec<RuleDefinition> {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
         rule("relay-bye", &[], Match::request().method("BYE").call_state(CallModelState::Active), |ctx| {
+            // Pre-mark the BYE-sending leg `bye_received` (RFC 3261 §15.1.2) so the
+            // subsequent begin-termination skips it (no duplicate BYE back to the
+            // sender) and only tears down the peer. Port of `relayByeRule`.
             ok(vec![
                 RuleAction::Respond { status: 200, reason: "OK".into(), body: vec![], content_type: None },
+                RuleAction::TerminateLeg { leg_id: ctx.source_leg_id.to_string(), bye_disposition: Some(ByeDisposition::ByeReceived) },
                 RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: ctx.source_leg_id.to_string(), status_code: None, reason: None },
                 RuleAction::BeginTermination { reason: Some("BYE".into()) },
             ])

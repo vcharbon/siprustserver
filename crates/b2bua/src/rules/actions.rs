@@ -639,43 +639,54 @@ impl<'a> ActionExecutor<'a> {
         fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
     }
 
-    /// Graceful teardown: BYE every confirmed leg (except the event source),
-    /// CANCEL every early b-leg, mark the source done, enter `terminating`, arm
-    /// the safety timer.
-    fn begin_termination(&self, call: &mut Call, fx: &mut HandlerEffects, source_leg_id: &str) {
-        // a-leg.
-        if call.a_leg.state == LegState::Confirmed && call.a_leg.leg_id != source_leg_id {
-            if let Some(e) = self.bye_to_leg_a(call) {
-                fx.outbound.push(e);
+    /// Graceful teardown (port of `executeBeginTermination`). For every leg not
+    /// already resolved — `terminated`, any `byeDisposition` already set (the
+    /// firing rule pre-marked it, e.g. `bye_received`), or `cancelling` (a
+    /// `cancel-leg` CANCEL is already in flight) — issue the right teardown:
+    /// confirmed → BYE + `bye_sent`; trying/early b-leg → CANCEL + `cancelled` +
+    /// terminated; trying/early a-leg → `none` (the rule already sent the SIP
+    /// reply). Then enter `terminating` and arm the safety timer.
+    ///
+    /// `source_leg_id` is intentionally *not* special-cased here: rules that
+    /// consume a BYE/CANCEL pre-mark their source leg's disposition before
+    /// emitting begin-termination, so the skip guard below leaves it untouched.
+    fn begin_termination(&self, call: &mut Call, fx: &mut HandlerEffects, _source_leg_id: &str) {
+        // a-leg ∪ b-legs, in that order (mirrors the TS leg iteration).
+        let legs: Vec<(String, LegState, LegDisposition, Option<ByeDisposition>, bool)> =
+            std::iter::once(&call.a_leg)
+                .chain(call.b_legs.iter())
+                .map(|l| (l.leg_id.clone(), l.state, l.disposition, l.bye_disposition, l.leg_id == call.a_leg.leg_id))
+                .collect();
+        for (id, state, disposition, bye_disposition, is_a) in legs {
+            // Skip legs already handled by the firing rule or already resolved.
+            if state == LegState::Terminated {
+                continue;
             }
-            let a = call.a_leg.leg_id.clone();
-            *call = set_bye_disposition(call.clone(), &a, ByeDisposition::ByeSent);
-        } else if call.a_leg.leg_id == source_leg_id {
-            let a = call.a_leg.leg_id.clone();
-            *call = set_leg_state(call.clone(), &a, LegState::Terminated);
-            *call = set_bye_disposition(call.clone(), &a, ByeDisposition::ByeReceived);
-        }
-        // b-legs.
-        let b_ids: Vec<(String, LegState)> =
-            call.b_legs.iter().map(|l| (l.leg_id.clone(), l.state)).collect();
-        for (id, state) in b_ids {
-            if id == source_leg_id {
-                *call = set_leg_state(call.clone(), &id, LegState::Terminated);
-                *call = set_bye_disposition(call.clone(), &id, ByeDisposition::ByeReceived);
+            if bye_disposition.is_some() {
+                continue;
+            }
+            if disposition == LegDisposition::Cancelling {
                 continue;
             }
             match state {
                 LegState::Confirmed => {
-                    if let Some(e) = self.bye_to_b_leg(call, &id) {
+                    let e = if is_a { self.bye_to_leg_a(call) } else { self.bye_to_b_leg(call, &id) };
+                    if let Some(e) = e {
                         fx.outbound.push(e);
                     }
                     *call = set_bye_disposition(call.clone(), &id, ByeDisposition::ByeSent);
                 }
                 LegState::Trying | LegState::Early => {
-                    if let Some(e) = self.cancel_to_leg(call, &id) {
-                        fx.outbound.push(e);
+                    if is_a {
+                        // a-leg trying/early: the rule already sent the SIP reply.
+                        *call = set_bye_disposition(call.clone(), &id, ByeDisposition::None);
+                    } else {
+                        if let Some(e) = self.cancel_to_leg(call, &id) {
+                            fx.outbound.push(e);
+                        }
+                        *call = set_bye_disposition(call.clone(), &id, ByeDisposition::Cancelled);
+                        *call = set_leg_state(call.clone(), &id, LegState::Terminated);
                     }
-                    *call = set_bye_disposition(call.clone(), &id, ByeDisposition::ByeSent);
                 }
                 LegState::Terminated => {}
             }
