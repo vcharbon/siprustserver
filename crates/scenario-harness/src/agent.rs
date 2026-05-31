@@ -778,6 +778,15 @@ impl InDialogTxn {
     pub async fn expect(&mut self, status: u16) -> SipResponse {
         expect_response(&self.agent, status).await
     }
+
+    /// Like [`expect`](InDialogTxn::expect), but first drains (and 200-OKs) any
+    /// inbound requests whose method is in `tolerate` — the response-side analog
+    /// of [`Agent::receive_tolerating`]. Under a paused clock a keepalive OPTIONS
+    /// retransmit can race the awaited response on the same socket; tolerate it
+    /// rather than relax the assertion (CLAUDE.md retransmit hazard).
+    pub async fn expect_tolerating(&mut self, status: u16, tolerate: &[&str]) -> SipResponse {
+        expect_response_tolerating(&self.agent, status, tolerate).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1067,6 +1076,42 @@ async fn expect_response(agent: &Agent, status: u16) -> SipResponse {
             }
             SipMessage::Request(r) => panic!(
                 "{} expected a {status} response, got a {} request",
+                agent.name, r.method
+            ),
+        }
+    }
+}
+
+/// [`expect_response`] that drains + 200-OKs `tolerate`d inbound requests
+/// (e.g. keepalive OPTIONS retransmits) racing the awaited response.
+async fn expect_response_tolerating(agent: &Agent, status: u16, tolerate: &[&str]) -> SipResponse {
+    loop {
+        match agent.recv().await {
+            SipMessage::Response(r) if r.status == 100 && status != 100 => continue,
+            SipMessage::Response(r) => {
+                assert_eq!(
+                    r.status, status,
+                    "{} expected a {status} response, got {} {}",
+                    agent.name, r.status, r.reason
+                );
+                return r;
+            }
+            SipMessage::Request(r) if tolerate.iter().any(|t| t.eq_ignore_ascii_case(&r.method)) => {
+                let route_set: Vec<String> = get_headers(&r.headers, "record-route")
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                let mut txn = ServerTxn {
+                    agent: agent.clone(),
+                    request: r,
+                    to_tag: None,
+                    route_set,
+                };
+                txn.respond(200, "OK").send().await;
+                continue;
+            }
+            SipMessage::Request(r) => panic!(
+                "{} expected a {status} response (tolerating {tolerate:?}), got a {} request",
                 agent.name, r.method
             ),
         }
