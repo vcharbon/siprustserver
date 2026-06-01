@@ -5,8 +5,12 @@ use std::net::SocketAddr;
 use async_trait::async_trait;
 
 mod recording;
+#[cfg(feature = "real")]
+mod real;
 mod simulated;
 
+#[cfg(feature = "real")]
+pub use real::RealHttpNetwork;
 pub use recording::{CapturedExchange, Direction, ExchangeOutcome, RecordingHttpNetwork};
 pub use simulated::{Fault, SimulatedHttpNetwork};
 

@@ -7,9 +7,15 @@ publish.workspace = true
 description = "Reusable unary HTTP transport seam (request/response, no streaming). Mirror of repl-net's transport: a SimulatedHttpNetwork in-memory fabric (dst-keyed pause/cutoff/error faults + transit delay) for paused-clock tests, a RecordingHttpNetwork decorator, and a feature-gated RealHttpNetwork (hyper + pooled reqwest) for production. Bodies are opaque bytes — JSON/serde lives in the consumer."
 
 [features]
-# The real (hyper + pooled reqwest) transport. Off by default so leaf test
-# crates never compile the HTTP-framework tree; the runner turns it on.
-real = []
+# The real (hyper server + pooled reqwest client) transport. Off by default so
+# leaf test crates never compile the HTTP-framework tree; the runner turns it on.
+real = [
+    "dep:reqwest",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
+    "dep:bytes",
+]
 
 [dependencies]
 thiserror = { workspace = true }
@@ -17,6 +23,16 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 # Recording timestamps come from the injected wall-clock seam.
 sip-clock = { path = "../sip-clock" }
+
+# --- real transport only (feature "real") ---
+# Pooled, keep-alive HTTP client (the b2bua makes many small calls). No TLS —
+# internal cluster http:// only.
+reqwest = { version = "0.12", default-features = false, optional = true }
+# Real HTTP/1.1 server with connection keep-alive.
+hyper = { version = "1", features = ["http1", "server"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+bytes = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

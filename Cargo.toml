@@ -20,6 +20,7 @@ members = [
     "crates/ha-harness",
     "crates/b2bua-runner",
     "crates/sip-proxy-runner",
+    "crates/call-limiter-runner",
     "xtask",
 ]
 

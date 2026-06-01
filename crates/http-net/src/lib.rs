@@ -36,6 +36,8 @@
 
 mod transport;
 
+#[cfg(feature = "real")]
+pub use transport::RealHttpNetwork;
 pub use transport::{
     BindError, CapturedExchange, Direction, ExchangeOutcome, Fault, HttpError, HttpRequest,
     HttpResponse, HttpService, HttpServerHandle, HttpTransport, RecordingHttpNetwork,
