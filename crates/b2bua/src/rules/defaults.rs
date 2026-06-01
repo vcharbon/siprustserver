@@ -224,18 +224,128 @@ fn core_rules() -> Vec<RuleDefinition> {
                     .response()
                     .map(|r| (r.status as i64, r.reason.clone()))
                     .unwrap_or((500, "Server Error".into()));
-                ok(vec![
+                // Tear the failed leg down + record the reject. The relay/terminate
+                // (or failover) is decided next.
+                let mut actions = vec![
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Reject,
-                        leg_id: b,
+                        leg_id: b.clone(),
                         status_code: Some(status),
-                        reason: Some(reason),
+                        reason: Some(reason.clone()),
                     },
-                    // Relay the failure to the caller (no failover decision this
-                    // slice), then tear the whole call down.
-                    RuleAction::RelayToPeer { transform: no_transform() },
-                    RuleAction::TerminateCall,
-                ])
+                    RuleAction::TerminateLeg {
+                        leg_id: b.clone(),
+                        bye_disposition: Some(ByeDisposition::Rejected),
+                    },
+                ];
+                match &ctx.call.callback_context {
+                    // Failover-capable call → ask /call/failure (origin external).
+                    // The result (call-failure-result internal event) drives either
+                    // `failover-create-leg` or `failover-terminate`. We deliberately
+                    // do NOT relay or terminate here: on a reject the caller must not
+                    // see the failure until the backend declines to fail over.
+                    Some(cbctx) => actions.push(RuleAction::FailureAsyncHttp {
+                        request: serde_json::json!({
+                            "callback_context": cbctx,
+                            "origin": "external",
+                            "sip_code": status,
+                            "sip_reason": reason,
+                            "failed_leg_id": b,
+                        }),
+                    }),
+                    // No callback context → relay the failure to the caller and
+                    // tear the whole call down (the pre-failover behaviour).
+                    None => {
+                        actions.push(RuleAction::RelayToPeer { transform: no_transform() });
+                        actions.push(RuleAction::TerminateCall);
+                    }
+                }
+                ok(actions)
+            },
+        ),
+        // ── failover resolution (/call/failure result) ──────────────────────
+        // The async /call/failure round-trip folds its decision back via a
+        // `call-failure-result` internal event. `failover` → cancel the failed
+        // leg's no-answer timer + create a fresh b-leg toward the new
+        // destination (A's INVITE snapshot; the relay_first_18x slice survives so
+        // the new leg's To-tag stays the first 180's). Port of FailureRules.ts
+        // route-failure / no-answer-failover failover branches.
+        rule(
+            "failover-create-leg",
+            &[],
+            Match::internal_event()
+                .topic("call-failure-result")
+                .outcome("failover"),
+            |ctx| {
+                let payload = match ctx.event {
+                    crate::event::CallEvent::InternalEvent { payload, .. } => payload,
+                    _ => return None,
+                };
+                let host = payload
+                    .get("destination")
+                    .and_then(|d| d.get("host"))
+                    .and_then(|v| v.as_str())?
+                    .to_string();
+                let port = payload
+                    .get("destination")
+                    .and_then(|d| d.get("port"))
+                    .and_then(|v| v.as_u64())
+                    .map(|p| p as u16)
+                    .unwrap_or(5060);
+                let new_ruri = payload.get("new_ruri").and_then(|v| v.as_str()).map(str::to_string);
+                let no_answer = payload.get("no_answer_timeout_sec").and_then(|v| v.as_i64());
+                let callback_context = payload.get("callback_context").and_then(|v| v.as_str()).map(str::to_string);
+                let header_updates: Vec<(String, Option<String>)> = payload
+                    .get("update_headers")
+                    .and_then(|v| v.as_object())
+                    .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().map(str::to_string))).collect())
+                    .unwrap_or_default();
+                let failed_leg_id = payload.get("failed_leg_id").and_then(|v| v.as_str()).unwrap_or("");
+
+                let mut actions = Vec::new();
+                // Cancel the failed leg's no-answer timer (a reject can beat it;
+                // for the no-answer trigger the timer already fired — harmless).
+                if !failed_leg_id.is_empty() {
+                    actions.push(RuleAction::CancelTimer { id: format!("NoAnswer:{failed_leg_id}") });
+                }
+                actions.push(RuleAction::CreateLeg {
+                    destination: (host, port),
+                    new_ruri,
+                    no_answer_timeout_sec: no_answer,
+                    callback_context,
+                    // `fromInvite: "snapshot"` — keep A's INVITE body (delayed
+                    // offer ⇒ none); failover is not a held-SDP transfer.
+                    body_override: None,
+                    header_updates,
+                });
+                ok(actions)
+            },
+        ),
+        // `terminate` (or backend error) → relay the original failure to the
+        // caller (response path; the no-answer path carries no status) and tear
+        // the call down.
+        rule(
+            "failover-terminate",
+            &[],
+            Match::internal_event()
+                .topic("call-failure-result")
+                .outcome("terminate"),
+            |ctx| {
+                let payload = match ctx.event {
+                    crate::event::CallEvent::InternalEvent { payload, .. } => payload,
+                    _ => return None,
+                };
+                let mut actions = Vec::new();
+                if let Some(status) = payload.get("status").and_then(|v| v.as_u64()) {
+                    let reason = payload
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Server Internal Error")
+                        .to_string();
+                    actions.push(RuleAction::RelayFailureToALeg { status: status as u16, reason });
+                }
+                actions.push(RuleAction::BeginTermination { reason: Some("failover-declined".into()) });
+                ok(actions)
             },
         ),
         rule(
@@ -375,11 +485,23 @@ fn core_rules() -> Vec<RuleDefinition> {
         // ── timers ──────────────────────────────────────────────────────────
         rule("no-answer", &[], Match::timer().timer_type(TimerType::NoAnswer), |ctx| {
             let leg = ctx.source_leg_id.to_string();
-            ok(vec![
+            let mut actions = vec![
                 RuleAction::AddCdrEvent { event_type: CdrEventType::Timeout, leg_id: leg.clone(), status_code: None, reason: Some("no_answer_timeout".into()) },
-                RuleAction::DestroyLeg { leg_id: leg },
-                RuleAction::BeginTermination { reason: Some("no-answer".into()) },
-            ])
+                RuleAction::DestroyLeg { leg_id: leg.clone() },
+            ];
+            match &ctx.call.callback_context {
+                // Failover-capable → ask /call/failure (origin no_answer_timeout);
+                // the result drives `failover-create-leg` / `failover-terminate`.
+                Some(cbctx) => actions.push(RuleAction::FailureAsyncHttp {
+                    request: serde_json::json!({
+                        "callback_context": cbctx,
+                        "origin": "no_answer_timeout",
+                        "failed_leg_id": leg,
+                    }),
+                }),
+                None => actions.push(RuleAction::BeginTermination { reason: Some("no-answer".into()) }),
+            }
+            ok(actions)
         }),
         rule("max-duration", &[], Match::timer().timer_type(TimerType::GlobalDuration), |ctx| {
             ok(vec![

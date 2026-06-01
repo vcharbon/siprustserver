@@ -297,6 +297,28 @@ impl<'a> ActionExecutor<'a> {
             RuleAction::SetTransfer { state } => {
                 *call = call::helpers::set_transfer(call.clone(), state.clone());
             }
+            RuleAction::FailureAsyncHttp { request } => {
+                fx.fire_and_forget.push(crate::effects::FireAndForgetEffect::FailureAsyncHttp {
+                    call_ref: call.call_ref.clone(),
+                    request: request.clone(),
+                });
+            }
+            RuleAction::RelayFailureToALeg { status, reason } => {
+                let a_tag = self.ensure_a_dialog(call);
+                let a_invite = relay::rebuild_a_leg_invite(call);
+                let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
+                fx.outbound.push(relay::response_to_a_leg(
+                    &a_invite,
+                    *status,
+                    reason,
+                    Some(a_tag),
+                    Some(contact),
+                    vec![],
+                    None,
+                    None,
+                    vec![],
+                ));
+            }
         }
     }
 
@@ -1235,6 +1257,21 @@ fn via_sent_by(via: &str) -> (String, u16) {
 /// request (PRACK/UPDATE) before the a↔b merge carries the B2BUA's a-facing tag
 /// in its To, which the tag map resolves to the right b-leg + callee fork tag.
 fn resolve_peer(call: &Call, ctx: &RuleContext) -> (Option<String>, Option<String>) {
+    // The active peer (post-merge) wins — mirrors the TS `getPeer`-first order.
+    // After a failover the tag map carries a stale (same a-tag → failed b-leg)
+    // mapping, so resolving via the tag map first would route an a-leg in-dialog
+    // request (ACK/BYE) onto the terminated leg. The merge's `active_peer`
+    // points at the live leg, so prefer it.
+    if let Some(p) = &call.active_peer {
+        if p.leg_a == ctx.source_leg_id {
+            return (Some(p.leg_b.clone()), None);
+        }
+        if p.leg_b == ctx.source_leg_id {
+            return (Some(p.leg_a.clone()), None);
+        }
+    }
+    // Pre-merge a-leg in-dialog request (forking PRACK/UPDATE) → resolve the
+    // specific callee early dialog via the tag map.
     if ctx.source_leg_id == call.a_leg.leg_id {
         if let Some(req) = ctx.request() {
             if let Some(tag) = req.to.tag.as_deref() {

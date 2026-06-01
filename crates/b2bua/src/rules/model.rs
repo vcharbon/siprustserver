@@ -395,6 +395,16 @@ pub enum RuleAction {
     /// Overwrite the per-call REFER transfer runtime slice (`None` clears it —
     /// the terminal path; mirrors `SetPromotePem`).
     SetTransfer { state: Option<call::TransferState> },
+    // ── b-leg failover (/call/failure) ───────────────────────────────────────
+    /// Kick the async `/call/failure` decision: push a `FailureAsyncHttp`
+    /// fire-and-forget effect carrying the request JSON. The router interpreter
+    /// calls `decision.call_failure` then re-enters via a `call-failure-result`
+    /// internal event.
+    FailureAsyncHttp { request: serde_json::Value },
+    /// Synthesize a final failure response on the a-leg INVITE server txn
+    /// (the terminate-after-`/call/failure` path — relay the b-leg failure to A
+    /// once the backend declines to fail over). Reuses the a-dialog tag.
+    RelayFailureToALeg { status: u16, reason: String },
 }
 
 /// The resolved context a rule sees. Built by the executor/router from the

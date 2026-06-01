@@ -529,6 +529,67 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
                     let _ = ctx2.reentry_tx.send(ev);
                 });
             }
+            FireAndForgetEffect::FailureAsyncHttp { call_ref, request } => {
+                let ctx2 = ctx.clone();
+                tokio::spawn(async move {
+                    // The seed rule's request JSON carries the failure context
+                    // plus `failed_leg_id` (echoed back so the resolution rule
+                    // can cancel the right no-answer timer / relay the failure).
+                    let req = parse_call_failure_request(&request);
+                    let failed_leg_id = request
+                        .get("failed_leg_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let (outcome, payload) = match ctx2.decision.call_failure(req).await {
+                        Ok(crate::decision::CallFailureResponse::Failover(route)) => {
+                            let mut p = serde_json::Map::new();
+                            p.insert(
+                                "destination".into(),
+                                serde_json::json!({
+                                    "host": route.destination.host,
+                                    "port": route.destination.port,
+                                }),
+                            );
+                            if let Some(v) = route.new_ruri {
+                                p.insert("new_ruri".into(), serde_json::json!(v));
+                            }
+                            if let Some(v) = route.update_headers {
+                                p.insert("update_headers".into(), serde_json::json!(v));
+                            }
+                            if let Some(v) = route.no_answer_timeout_sec {
+                                p.insert("no_answer_timeout_sec".into(), serde_json::json!(v));
+                            }
+                            if let Some(v) = route.callback_context {
+                                p.insert("callback_context".into(), serde_json::json!(v));
+                            }
+                            p.insert("failed_leg_id".into(), serde_json::json!(failed_leg_id));
+                            ("failover", serde_json::Value::Object(p))
+                        }
+                        // Terminate / backend error → relay the original failure
+                        // (response path) + tear the call down. Echo the failure's
+                        // status/reason the seed stashed for the relay.
+                        _ => {
+                            let mut p = serde_json::Map::new();
+                            if let Some(v) = request.get("sip_code") {
+                                p.insert("status".into(), v.clone());
+                            }
+                            if let Some(v) = request.get("sip_reason") {
+                                p.insert("reason".into(), v.clone());
+                            }
+                            p.insert("failed_leg_id".into(), serde_json::json!(failed_leg_id));
+                            ("terminate", serde_json::Value::Object(p))
+                        }
+                    };
+                    let ev = CallEvent::InternalEvent {
+                        call_ref,
+                        topic: "call-failure-result".to_string(),
+                        outcome: outcome.to_string(),
+                        payload,
+                    };
+                    let _ = ctx2.reentry_tx.send(ev);
+                });
+            }
             FireAndForgetEffect::Reenter(ev) => {
                 let _ = ctx.reentry_tx.send(*ev);
             }
@@ -555,6 +616,28 @@ fn parse_call_refer_request(v: &serde_json::Value) -> crate::decision::CallRefer
         refer_to: s("refer_to").unwrap_or_default(),
         referred_by: s("referred_by"),
         sip_headers,
+    }
+}
+
+/// Rebuild a [`CallFailureRequest`] from the JSON the seed rule emitted.
+fn parse_call_failure_request(v: &serde_json::Value) -> crate::decision::CallFailureRequest {
+    crate::decision::CallFailureRequest {
+        callback_context: v
+            .get("callback_context")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
+        failure: crate::decision::FailureInfo {
+            origin: v
+                .get("origin")
+                .and_then(|x| x.as_str())
+                .unwrap_or("external")
+                .to_string(),
+            status_code: v
+                .get("sip_code")
+                .and_then(|x| x.as_u64())
+                .map(|c| c as u16),
+            limiter_id: v.get("limiter_id").and_then(|x| x.as_str()).map(str::to_string),
+        },
     }
 }
 

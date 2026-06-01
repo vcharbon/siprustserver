@@ -70,6 +70,13 @@ pub enum FireAndForgetEffect {
         call_ref: String,
         request: serde_json::Value,
     },
+    /// Kick the async `/call/failure` decision (b-leg failover). Carries the
+    /// request JSON the seed rule built; the router calls `decision.call_failure`
+    /// then re-enters via a `call-failure-result` internal event.
+    FailureAsyncHttp {
+        call_ref: String,
+        request: serde_json::Value,
+    },
     /// Re-enter the handler chain with an internally-generated event.
     Reenter(Box<CallEvent>),
 }

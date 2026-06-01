@@ -605,14 +605,14 @@ scenario-harness in a dedicated `crates/b2bua-harness` test crate.
 | `reinvite.ts` (`crossingReInvite`) | crossing re-INVITEs → glare: alice's re-INVITE is relayed to bob; bob's crossing re-INVITE meets a pending inbound INVITE on his dialog → `reinvite-glare` rejects it 491 Request Pending while alice's completes (200/ACK) | `b2bua-harness/tests/reinvite.rs` | ✅ 1 |
 | `suppress-18x.ts` (`basic`) | `relayFirst18xTo180` strategy `drop-sdp` (wire `true`): first reliable 183 → **bare 180** (no SDP/Require/RSeq), B2BUA-originated PRACK to bob, subsequent 18x suppressed, 200 OK To-tag == first 180's tag; `Supported:100rel` stripped from bob's INVITE | `b2bua-harness/tests/suppress_18x.rs` | ✅ 1 |
 | `suppress-18x.ts` (`disabled`) | no policy → normal 180 relay (regression guard the SERVICE_LAYER path stays off the default flow) | `b2bua-harness/tests/suppress_18x.rs` | ✅ 1 |
-| `suppress-18x.ts` (`failoverNoAnswer`, `failoverReject`) | failover-shaped tag-continuity across a second b-leg | — | ⛔ blocked — see "Un-ported" (no SIP b-leg failover yet) |
+| `suppress-18x.ts` (`failoverNoAnswer`, `failoverReject`) | `/call/failure` b-leg failover with tag-continuity across the leg swap: no-answer/503 on bob1 → CANCEL/terminate + failover to bob2 (new R-URI); the `relay_first_18x` slice survives so bob2's 200 reuses bob1's first-180 To-tag | `b2bua-harness/tests/suppress_18x.rs` | ✅ 2 |
 | `fake-prack.ts` (`basic`) | strategy `fake-prack`: bob reliable 183(100rel,SDP) → bare 180 to alice, B2BUA PRACKs bob + **caches** his SDP, bob's bodyless 200 → alice's 200 carries the cached SDP; `Supported:100rel` **kept** to bob | `b2bua-harness/tests/fake_prack.rs` | ✅ 1 |
 | `fake-prack.ts` (`multiple-18x`) | two reliable 18x, one PRACK each, latest cached SDP wins on the 200 | `b2bua-harness/tests/fake_prack.rs` | ✅ 1 |
 | `fake-prack.ts` (`update-happy`) | bob UPDATE(offer) → B2BUA local 200 with skeleton-fit answer (codec ∩ alice's INVITE) + cache advances | `b2bua-harness/tests/fake_prack.rs` | ✅ 1 |
 | `fake-prack.ts` (`update-codec-mismatch`) | bob UPDATE(opus-only) → no codec overlap → B2BUA local 488; call continues on the original cached SDP | `b2bua-harness/tests/fake_prack.rs` | ✅ 1 |
 | `fake-prack.ts` (`delayed-offer-fallback`) | alice INVITE has no SDP → outbound INVITE strips `Supported:100rel` and the policy self-disables (plain relay) | `b2bua-harness/tests/fake_prack.rs` | ✅ 1 |
 | `fake-prack.ts` (`no-policy-control`) | no policy → full end-to-end PRACK (183/Require:100rel relayed verbatim, alice PRACKs end-to-end) | `b2bua-harness/tests/fake_prack.rs` | ✅ 1 |
-| `fake-prack.ts` (`forking`, `failover`) | failover-on-503 to a second b-leg (loser cache discarded) | — | ⛔ blocked — see "Un-ported" (no SIP b-leg failover yet) |
+| `fake-prack.ts` (`forking`, `failover`) | `/call/failure` failover-on-503: bob1 reliable (183/100rel → bare 180 + PRACK + cached SDP) then 503 → failover to bob2 (unreliable); bob1's per-leg cache discarded with its leg, so alice's 200 carries bob2's own SDP | `b2bua-harness/tests/fake_prack.rs` | ✅ 2 |
 
 #### Slice 4 — `promote18xPemTo200` (early-media 183→synthetic 200)
 
@@ -671,18 +671,23 @@ custom headers, per-fork To-tag).
   owned by the PEM service (Slice 4) — the enum variant is wired through but the
   rule is not implemented here.
 - **The 4 failover-shaped 18x scenarios** (`suppress-18x` `failoverNoAnswer` /
-  `failoverReject`; `fake-prack` `forking` / `failover`) — **BLOCKED on SIP
-  b-leg failover**, which does not exist in the Rust port: `route-failure` /
-  `no-answer` are pure CORE no-failover (relay + `TerminateCall` /
-  begin-termination), and `CallDecisionEngine::call_failure`
-  (`/call/failure` → `Failover(RouteDecision)`) is defined but never invoked
-  (`grep '\.call_failure(' crates/` → 0). These four need a `/call/failure`
-  failover service first (the same deferral Slice 0 recorded for
-  `route-failure`/`no-answer`); they are not a `relayFirst18xTo180` gap. Tag
-  continuity *across failover* (the property they assert) is implemented and
-  unit-covered by the non-failover `basic` case's 200-To-tag==180-To-tag check.
-  `crates/b2bua-harness/tests/failover.rs` is HA worker-crash failover (a
-  different mechanism), not this.
+  `failoverReject`; `fake-prack` `forking` / `failover`) — **now ported** (the
+  `/call/failure` b-leg failover service): `route-failure` / `no-answer` invoke
+  `CallDecisionEngine::call_failure` via the same fire-and-forget + re-entry
+  channel REFER uses (`FailureAsyncHttp` effect → `call-failure-result` internal
+  event → `failover-create-leg` / `failover-terminate` resolution rules). On
+  `Failover` a fresh b-leg is created toward the new destination (A's INVITE
+  snapshot + new R-URI / header / no-answer overrides) with the failed leg's
+  no-answer timer cancelled; the `relay_first_18x` slice is intentionally NOT
+  cleared so the first-180 To-tag survives the leg swap (the property these cases
+  assert). The pre-failover behaviour (relay + tear down) is preserved when no
+  `callback_context` is set. Fix: `resolve_peer` now prefers the merge's
+  `active_peer` over the tag map (matching TS `getPeer`-first ordering) so an
+  a-leg in-dialog request after failover routes onto the live leg, not the stale
+  same-a-tag mapping of the terminated one. `crates/b2bua/src/rules/defaults.rs`
+  (`route-failure`/`no-answer`/`failover-create-leg`/`failover-terminate`) +
+  router `FailureAsyncHttp` wiring. `crates/b2bua-harness/tests/failover.rs` is HA
+  worker-crash failover (a different mechanism), not this.
 - **`promote18xPemTo200` (PEM)** — **now ported** (Slice 4): synthetic-200
   promotion of the first 183+SDP+PEM, promotion-window gating (A UPDATE/INVITE→
   491, INFO→488), silent confirm on B's real 200, SDP-diff resync re-INVITE
@@ -699,9 +704,10 @@ custom headers, per-fork To-tag).
   `prack_forking.rs` does exercise. The loser-fork cancellation + winner-SDP
   caching shape is the `fake-prack` policy's, deferred above.
 - **Real HTTP decision adapter** — the scripted backend stands in.
-- **Failover via `call_failure`** — route-failure relays the failure + tears the
-  call down; the async failover round-trip + `refer-async-http` re-entrant
-  fire-and-forget land with the decision-HTTP/transfer slice.
+- **Failover via `call_failure`** — **now ported**: `route-failure` / `no-answer`
+  call `/call/failure` through the fire-and-forget + re-entry channel and create a
+  failover b-leg on `Failover` (else relay + tear down). See the 4 failover-shaped
+  18x scenarios above.
 - **Real CallLimiter** (row 20) — no-op admit/decrement.
 - **HA replication transport + orphan sweep / `loadOwnedCalls` rehydrate** — the
   `CallStore` seam carries the HA params; the replicating impl is the HA slice.

@@ -175,6 +175,47 @@ impl B2buaSut {
         Self::start(h, name, addr, decision).await
     }
 
+    /// Bind a B2BUA that routes the call to `dest_port` (bob1) with the
+    /// `relayFirst18xTo180` feature active under `strategy` and a `callback_context`
+    /// set (the failover-capable marker), and fails over via `/call/failure` to
+    /// `failover_port` (bob2) with `failover_ruri` as the new Request-URI. Mirrors
+    /// the TS `on_failure: { action: "failover", destination, new_ruri }` instruction.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn route_all_to_with_18x_failover(
+        h: &Harness,
+        name: &str,
+        addr: &str,
+        dest_host: &str,
+        dest_port: u16,
+        failover_port: u16,
+        failover_ruri: &str,
+        strategy: call::features::RelayFirst18xStrategy,
+    ) -> Self {
+        use b2bua::decision::{CallFailureResponse, NewCallResponse};
+        use b2bua::decision::test_adapter::route_to_with_18x;
+        let primary = (dest_host.to_string(), dest_port);
+        let failover = (dest_host.to_string(), failover_port);
+        let failover_ruri = failover_ruri.to_string();
+        let decision = Arc::new(
+            ScriptedDecisionEngine::builder()
+                .fallback(move |_req| {
+                    let mut r = route_to_with_18x(&primary.0, primary.1, strategy);
+                    r.callback_context = Some("failover-test".into());
+                    // The TS relies on the 30 s platform no-answer default the Rust
+                    // default route omits — set it so the no-answer failover fires.
+                    r.no_answer_timeout_sec = Some(30);
+                    NewCallResponse::Route(r)
+                })
+                .on_failure(move |_req| {
+                    let mut r = route_to_with_18x(&failover.0, failover.1, strategy);
+                    r.new_ruri = Some(failover_ruri.clone());
+                    CallFailureResponse::Failover(r)
+                })
+                .build(),
+        );
+        Self::start(h, name, addr, decision).await
+    }
+
     /// Bind a B2BUA that routes every call to `dest` but sends its b-leg
     /// (worker→callee) traffic through the front proxy at `proxy` — the
     /// `alice → proxy → b2bua → proxy → bob` topology.
