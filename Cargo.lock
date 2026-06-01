@@ -266,6 +266,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "call-limiter"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "http-net",
+ "serde",
+ "serde_json",
+ "sip-clock",
+ "tokio",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

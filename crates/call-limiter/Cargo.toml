@@ -1,0 +1,18 @@
+[package]
+name = "call-limiter"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Sliding-window call-limiter: the windowed counter core (port of CallLimiter.memory.ts + the Redis Lua atomics), the wire DTOs for the batched/transactional HTTP API, the HttpService server handler, and its metrics. No b2bua dependency — the client lives in b2bua. Backs a dedicated stateless service shared cluster-wide."
+
+[dependencies]
+http-net = { path = "../http-net" }
+sip-clock = { path = "../sip-clock" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+sip-clock = { path = "../sip-clock", features = ["testkit"] }

@@ -11,6 +11,7 @@ members = [
     "crates/topology",
     "crates/repl-net",
     "crates/http-net",
+    "crates/call-limiter",
     "crates/scenario-harness",
     "crates/media",
     "crates/media-harness",
