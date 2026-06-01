@@ -31,8 +31,8 @@ use std::time::Duration;
 
 use b2bua::cdr::{CdrRecord, InMemoryCdrWriter};
 use b2bua::config::B2buaConfig;
-use b2bua::decision::ScriptedDecisionEngine;
-use b2bua::limiter::NoopLimiter;
+use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
+use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
 use b2bua::repl::{Changelog, ReplicatingCallStore};
 use b2bua::store::{CallStore, PartitionRole};
@@ -134,7 +134,9 @@ pub struct ReplicatedB2buaSut {
     gen: u64,
     cdr: InMemoryCdrWriter,
     metrics: B2buaMetrics,
-    /// The decision engine (routes every call to bob) — rebuilt on reboot.
+    /// The default route destination (kept for reference; the live decision is
+    /// stored in `decision`, which a limiter scenario may override).
+    #[allow(dead_code)]
     dest: (String, u16),
     /// The b-leg outbound proxy (so the worker's bob traffic traverses the proxy).
     outbound_proxy: Option<(String, u16)>,
@@ -146,6 +148,12 @@ pub struct ReplicatedB2buaSut {
     store: Arc<ReplicatingCallStore>,
     /// Handle to the harness so reboot can re-`bind_sut` on the same addr.
     harness: Arc<HarnessHandle>,
+    /// Decision engine (shared across reboots). Default routes every call to
+    /// `dest`; a limiter scenario supplies one carrying `call_limiter` entries.
+    decision: Arc<dyn CallDecisionEngine>,
+    /// Call limiter (shared across reboots). Default `NoopLimiter`; a limiter
+    /// scenario supplies an `HttpCallLimiter` over the shared HTTP fabric.
+    limiter: Arc<dyn CallLimiter>,
 }
 
 /// A shared handle to the `scenario_harness::Harness` so a worker can re-bind its
@@ -291,16 +299,15 @@ impl ReplicatedB2buaSut {
             sip_local_ip: self.sip_addr.ip().to_string(),
             sip_local_port: self.sip_addr.port(),
             b2b_outbound_proxy: self.outbound_proxy.clone(),
+            // Match the SIP harness baseline: 30 s keepalive so the paused-clock
+            // failover/hydration tests advance in 30 s steps (production is 300 s).
+            keepalive_interval_sec: 30,
             ..Default::default()
         };
-        let decision = Arc::new(ScriptedDecisionEngine::route_all_to(
-            self.dest.0.clone(),
-            self.dest.1,
-        ));
         let deps = B2buaDeps {
             config,
-            decision,
-            limiter: Arc::new(NoopLimiter),
+            decision: self.decision.clone(),
+            limiter: self.limiter.clone(),
             cdr: Arc::new(cdr),
             // The legacy `store` slot is unused on the replicating path (the repl
             // store is the drain target); pass a throwaway in-memory store.
@@ -479,6 +486,56 @@ impl FailoverHarness {
         dest: (&str, u16),
         outbound_proxy: (&str, u16),
     ) -> ReplicatedB2buaSut {
+        let decision: Arc<dyn CallDecisionEngine> =
+            Arc::new(ScriptedDecisionEngine::route_all_to(dest.0, dest.1));
+        self.spawn_worker_inner(
+            ordinal,
+            sip_name,
+            sip_bind,
+            peers,
+            dest,
+            outbound_proxy,
+            decision,
+            Arc::new(NoopLimiter),
+        )
+        .await
+    }
+
+    /// Like [`spawn_worker`](Self::spawn_worker) but with a custom decision
+    /// engine (e.g. one returning `call_limiter` entries) and call limiter (e.g.
+    /// an `HttpCallLimiter` over a shared HTTP fabric). The limiter survives
+    /// crash/reboot (it lives outside the worker), so a failed-over call's holds
+    /// are released on the takeover node.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_worker_limited(
+        &mut self,
+        ordinal: &str,
+        sip_name: &str,
+        sip_bind: &str,
+        peers: &[&str],
+        dest: (&str, u16),
+        outbound_proxy: (&str, u16),
+        decision: Arc<dyn CallDecisionEngine>,
+        limiter: Arc<dyn CallLimiter>,
+    ) -> ReplicatedB2buaSut {
+        self.spawn_worker_inner(
+            ordinal, sip_name, sip_bind, peers, dest, outbound_proxy, decision, limiter,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_worker_inner(
+        &mut self,
+        ordinal: &str,
+        sip_name: &str,
+        sip_bind: &str,
+        peers: &[&str],
+        dest: (&str, u16),
+        outbound_proxy: (&str, u16),
+        decision: Arc<dyn CallDecisionEngine>,
+        limiter: Arc<dyn CallLimiter>,
+    ) -> ReplicatedB2buaSut {
         let listen_addr = *self
             .repl_addrs
             .get(ordinal)
@@ -513,6 +570,8 @@ impl FailoverHarness {
             core: None,
             store: Arc::new(ReplicatingCallStore::new(1, self.clock.clone())),
             harness: self.harness.clone(),
+            decision,
+            limiter,
         };
         let (setup, store) = sut.wiring.setup(1, &self.clock);
         sut.store = store;
