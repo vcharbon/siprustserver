@@ -107,11 +107,22 @@ deploy() {
   kubectl -n "$NS" create configmap sipp-scenarios \
     --from-file="$SCENARIOS/" -o yaml --dry-run=client | kubectl apply -f -
 
+  # SIPp stat->Prometheus exporter script, mounted into every UAC job's native
+  # sidecar (manifests/40-sipp-uac-job.yaml). Built here so the reporting path
+  # is wired through the same `deploy` as the rest of the stack.
+  log "building sipp-exporter ConfigMap from vendored exporter"
+  kubectl -n "$NS" create configmap sipp-exporter \
+    --from-file="$SIPP_DIR/exporter/" -o yaml --dry-run=client | kubectl apply -f -
+
   log "deploying sipp-uas + b2bua workers (repl=${REPL_ENABLE}, repl_port=${REPL_PORT})"
   kubectl apply -f manifests/10-sipp-uas.yaml
   # RBAC for the worker's EndpointSlice informer (needed when REPL_ENABLE=1; a
   # harmless ServiceAccount/Role otherwise).
   kubectl apply -f manifests/15-worker-rbac.yaml
+  # Shared call limiter (single replica). Deployed before the workers so its
+  # ClusterIP DNS resolves at worker startup. Inert until a decision returns
+  # `call_limiter` entries, so it is a no-op for the scripted load runner.
+  envsubst < manifests/50-call-limiter.yaml | kubectl apply -f -
   envsubst < manifests/20-worker.yaml | kubectl apply -f -
   kubectl -n "$NS" rollout status deploy/sipp-uas --timeout=120s
   kubectl -n "$NS" rollout status statefulset/b2bua-worker --timeout=120s
@@ -174,6 +185,7 @@ caps() {
   mkdir -p "$RESULTS"
   local ramp=8 sample=$(( secs > 8 ? secs-8 : secs ))
   export CAPS="$cps" MAX_CALLS=$(( cps * (secs+20) )) UAC_JOB_NAME="sipp-uac-${cps}"
+  export ROLE="${ROLE:-load}" MAX_CONCURRENT="${MAX_CONCURRENT:-$(( cps * 600 ))}"
   kubectl -n "$NS" delete job "$UAC_JOB_NAME" --ignore-not-found >/dev/null 2>&1 || true
   log "cap=$cps: launching UAC job (${secs}s), ramp ${ramp}s, sample ${sample}s"
   envsubst < manifests/40-sipp-uac-job.yaml | kubectl apply -f -

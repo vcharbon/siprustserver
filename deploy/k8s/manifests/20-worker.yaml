@@ -51,8 +51,21 @@ spec:
             - { name: B2BUA_LISTEN,  value: "0.0.0.0:5060" }
             - { name: B2BUA_DEST,    value: "sipp-uas.sip-test.svc.cluster.local:5060" }
             - { name: B2BUA_METRICS, value: "0.0.0.0:9091" }
+            # In-dialog OPTIONS keepalive interval (5 min). Must exceed short-call
+            # hold so it never pokes a completing dialog; long-hold scenarios
+            # (uac-long-options) answer it to stay up. Default in code is 300.
+            - { name: B2BUA_KEEPALIVE_SEC, value: "300" }
             # Ordinal = pod name (stable per StatefulSet replica == membership ordinal).
             - { name: B2BUA_ORDINAL, value: "$(POD_NAME)" }
+            # --- call limiter ---
+            # The shared limiter service (50-call-limiter). Inert until a
+            # /call/new decision returns `call_limiter` entries; the scripted
+            # route_all_to backend supplies none, so this is a no-op for the
+            # plain load runner. LIMITER_WINDOW_SECONDS MUST match the service's
+            # window (it sets the refresh cadence).
+            - { name: LIMITER_URL,            value: "call-limiter.sip-test.svc.cluster.local:8080" }
+            - { name: LIMITER_WINDOW_SECONDS, value: "300" }
+            - { name: LIMITER_TIMEOUT_MS,     value: "150" }
             # --- replication (opt-in) ---
             - { name: B2BUA_REPL,           value: "${REPL_ENABLE}" }
             - { name: B2BUA_REPL_LISTEN,    value: "0.0.0.0:${REPL_PORT}" }

@@ -1,0 +1,67 @@
+# Call-limiter service — the dedicated, stateless sliding-window concurrency
+# limiter shared cluster-wide. SINGLE replica (Deployment, not StatefulSet): one
+# authoritative in-memory counter set, no persistence. On restart the empty
+# state is re-filled within ~LIMITER_WINDOW_SECONDS by active calls' refresh
+# timers, and the b2bua fails open during the brief downtime — so this is a SPOF
+# for the limiter function only, never for calls.
+#
+# The b2bua workers reach it at call-limiter:8080 (LIMITER_URL on the worker).
+# Inert until a /call/new decision returns `call_limiter` entries.
+#
+# Image: ${SUT_IMAGE} (default siprustserver:dev), command = call-limiter-runner.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: call-limiter
+  namespace: sip-test
+  labels: { app: call-limiter }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: call-limiter } }
+  strategy: { type: Recreate } # never two authoritative counters at once
+  template:
+    metadata:
+      labels: { app: call-limiter }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      nodeSelector: { tier: app }
+      containers:
+        - name: call-limiter
+          image: ${SUT_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/call-limiter-runner"]
+          env:
+            - { name: LIMITER_LISTEN,           value: "0.0.0.0:8080" }
+            - { name: LIMITER_WINDOW_SECONDS,   value: "300" }
+            - { name: LIMITER_ACTIVE_WINDOWS,   value: "3" }
+            - { name: LIMITER_TTL_SECONDS,      value: "1200" }
+          ports:
+            - { name: http, containerPort: 8080, protocol: TCP }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests: { cpu: "100m", memory: "32Mi" }
+            limits:   { memory: "256Mi" }
+---
+# Stable ClusterIP so the workers reach a single, consistent counter set. The
+# ClusterIP is stable for the Service's lifetime, so the workers' startup DNS
+# resolution stays valid across limiter-pod restarts.
+apiVersion: v1
+kind: Service
+metadata:
+  name: call-limiter
+  namespace: sip-test
+spec:
+  selector: { app: call-limiter }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080, protocol: TCP }
