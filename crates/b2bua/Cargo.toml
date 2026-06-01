@@ -20,7 +20,15 @@ sip-txn = { path = "../sip-txn" }
 sip-clock = { path = "../sip-clock" }
 repl-net = { path = "../repl-net" }
 topology = { path = "../topology" }
+# Limiter client: the transport SEAM only (real impl injected by the runner; sim
+# in tests). Wire DTOs come from call-limiter. No `real` feature here.
+http-net = { path = "../http-net" }
+call-limiter = { path = "../call-limiter" }
 
 [dev-dependencies]
 # Paused-clock lever for timer tests (tokio::time::pause/advance).
 tokio = { workspace = true, features = ["test-util"] }
+# Integration tests bind a real LimiterServer on the simulated HTTP fabric.
+http-net = { path = "../http-net" }
+call-limiter = { path = "../call-limiter" }
+sip-clock = { path = "../sip-clock", features = ["testkit"] }

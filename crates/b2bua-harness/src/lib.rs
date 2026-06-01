@@ -9,7 +9,7 @@ use std::sync::Arc;
 use b2bua::cdr::{CdrRecord, InMemoryCdrWriter};
 use b2bua::config::B2buaConfig;
 use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
-use b2bua::limiter::NoopLimiter;
+use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
 use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaCore, B2buaDeps};
@@ -72,6 +72,34 @@ impl B2buaSut {
         outbound_proxy: Option<(String, u16)>,
         tune: impl FnOnce(&mut B2buaConfig),
     ) -> Self {
+        Self::start_inner(h, name, addr, decision, outbound_proxy, Arc::new(NoopLimiter), tune).await
+    }
+
+    /// Bind a B2BUA with a custom [`CallLimiter`] (e.g. an `HttpCallLimiter` over
+    /// the simulated HTTP fabric serving a real `LimiterServer`). No outbound
+    /// proxy; `tune` may override config (e.g. `limiter_refresh_sec`,
+    /// `self_ordinal` for the cross-worker scenario).
+    pub async fn start_with_limiter(
+        h: &Harness,
+        name: &str,
+        addr: &str,
+        decision: Arc<dyn CallDecisionEngine>,
+        limiter: Arc<dyn CallLimiter>,
+        tune: impl FnOnce(&mut B2buaConfig),
+    ) -> Self {
+        Self::start_inner(h, name, addr, decision, None, limiter, tune).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_inner(
+        h: &Harness,
+        name: &str,
+        addr: &str,
+        decision: Arc<dyn CallDecisionEngine>,
+        outbound_proxy: Option<(String, u16)>,
+        limiter: Arc<dyn CallLimiter>,
+        tune: impl FnOnce(&mut B2buaConfig),
+    ) -> Self {
         let (endpoint, sa) = h.bind_sut(name, addr).await;
         let cdr = InMemoryCdrWriter::new();
         let mut config = B2buaConfig {
@@ -79,13 +107,17 @@ impl B2buaSut {
             sip_local_ip: sa.ip().to_string(),
             sip_local_port: sa.port(),
             b2b_outbound_proxy: outbound_proxy,
+            // Production default is 300 s (5 min); the paused-clock keepalive
+            // tests advance in 30 s steps, so the harness baseline stays at 30 s.
+            // A scenario can still override via `tune`.
+            keepalive_interval_sec: 30,
             ..Default::default()
         };
         tune(&mut config);
         let deps = B2buaDeps {
             config,
             decision,
-            limiter: Arc::new(NoopLimiter),
+            limiter,
             cdr: Arc::new(cdr.clone()),
             store: Arc::new(InMemoryCallStore::new()),
             clock: Clock::test_at(0),

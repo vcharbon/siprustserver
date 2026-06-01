@@ -162,7 +162,7 @@ pub async fn handle_initial_invite(
 
     match decision.new_call(req).await {
         Ok(NewCallResponse::Route(route)) => {
-            apply_route(call, route, &a_invite, limiter, config, id_gen, now_ms).await
+            apply_route(call, route, &a_invite, decision, limiter, config, id_gen, now_ms, 0).await
         }
         Ok(NewCallResponse::Reject(reject)) => {
             reject_call(call, &a_invite, reject.reject_code, reject.reject_reason, id_gen, now_ms)
@@ -173,7 +173,7 @@ pub async fn handle_initial_invite(
     }
 }
 
-fn reject_call(
+pub(crate) fn reject_call(
     mut call: Call,
     a_invite: &SipRequest,
     status: u16,

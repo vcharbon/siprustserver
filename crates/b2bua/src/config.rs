@@ -36,6 +36,19 @@ pub struct B2buaConfig {
     pub refer_reinvite_answer_sec: i64,
     /// Overall REFER safety timer covering the whole transfer FSM, seconds. TS default 120.
     pub refer_overall_safety_sec: i64,
+    /// In-dialog OPTIONS keepalive interval, seconds. The B2BUA arms a keepalive
+    /// timer at dialog confirmation and re-arms it each cycle; on expiry it pokes
+    /// every peered leg with an in-dialog OPTIONS. Production default is **300 s**
+    /// (operator: "in-call OPTIONS every 5 minutes"); a shorter interval (e.g.
+    /// 30 s) breaks long-hold endurance traffic by poking mid-dialog calls whose
+    /// UAC is not expecting it. Overridable per worker via `B2BUA_KEEPALIVE_SEC`.
+    /// The test harness lowers this to 30 s so paused-clock tests stay fast.
+    pub keepalive_interval_sec: i64,
+    /// Limiter-refresh cadence, seconds — how often an admitted call migrates its
+    /// holds to the current window so a long call never ages out of the summed
+    /// lookback. Must match the limiter service's `LIMITER_WINDOW_SECONDS`. TS
+    /// default 300. The test harness lowers this for fast paused-clock tests.
+    pub limiter_refresh_sec: i64,
 }
 
 impl Default for B2buaConfig {
@@ -53,6 +66,8 @@ impl Default for B2buaConfig {
             refer_subscription_expiry_sec: 60,
             refer_reinvite_answer_sec: 32,
             refer_overall_safety_sec: 120,
+            keepalive_interval_sec: 300,
+            limiter_refresh_sec: 300,
         }
     }
 }

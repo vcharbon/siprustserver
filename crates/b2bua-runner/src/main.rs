@@ -21,6 +21,9 @@
 //!   B2BUA_QUEUE     inbound UDP queue depth (packets)  (default 8192)
 //!   B2BUA_ORDINAL   worker ordinal stamped in callRef  (default w0)
 //!   B2BUA_CDR_QUEUE buffered-CDR submit queue depth    (default 1024)
+//!   B2BUA_CONCURRENCY handler concurrency ceiling       (default 8192; safety, not a rate cap)
+//!   B2BUA_CALL_CAP  max concurrent calls before drop    (default 1_000_000)
+//!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min)
 //!
 //! ## HA replication (S11) — opt-in via `B2BUA_REPL=1` (default off = legacy)
 //!   B2BUA_REPL          "1"/"true" enables peer-to-peer call replication
@@ -48,12 +51,14 @@ use async_trait::async_trait;
 use b2bua::cdr::{BufferedCdrWriter, CdrRecord, CdrWriter};
 use b2bua::config::B2buaConfig;
 use b2bua::decision::ScriptedDecisionEngine;
-use b2bua::limiter::NoopLimiter;
+use b2bua::limiter::{CallLimiter, NoopLimiter};
+use b2bua::limiter_http::HttpCallLimiter;
 use b2bua::metrics::B2buaMetrics;
 use b2bua::repl::ReplicatingCallStore;
 use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
 use call::Call;
+use http_net::RealHttpNetwork;
 use repl_net::RealReplicationNetwork;
 use sip_clock::Clock;
 use sip_net::types::BindUdpOpts;
@@ -227,6 +232,22 @@ async fn main() {
     let queue_max: usize = env_or("B2BUA_QUEUE", "8192").parse().expect("B2BUA_QUEUE");
     let cdr_queue: usize = env_or("B2BUA_CDR_QUEUE", "1024").parse().expect("B2BUA_CDR_QUEUE");
     let ordinal = env_or("B2BUA_ORDINAL", "w0");
+    // Dispatch throttle ceilings — handler concurrency + max concurrent calls.
+    // Set deliberately high so they never cap throughput below the offered rate
+    // (they are back-pressure SAFETY limits, not a rate governor); raise via env
+    // if a load test ever approaches them. `cap_drops`/`saturation` metrics flag
+    // if either is actually hit.
+    let concurrency: usize = env_or("B2BUA_CONCURRENCY", "8192").parse().expect("B2BUA_CONCURRENCY");
+    let call_cap: usize = env_or("B2BUA_CALL_CAP", "1000000").parse().expect("B2BUA_CALL_CAP");
+    // In-dialog OPTIONS keepalive interval (seconds). Production default 300 s
+    // (5 min); a shorter poke breaks long-hold endurance traffic.
+    let keepalive_sec: i64 = env_or("B2BUA_KEEPALIVE_SEC", "300").parse().expect("B2BUA_KEEPALIVE_SEC");
+
+    // Call limiter. Unset LIMITER_URL → NoopLimiter (today's non-limiting
+    // behaviour). The refresh cadence MUST match the limiter's window seconds.
+    let limiter_url = env_or("LIMITER_URL", "");
+    let limiter_timeout_ms: u64 = env_or("LIMITER_TIMEOUT_MS", "150").parse().unwrap_or(150);
+    let limiter_refresh_sec: i64 = env_or("LIMITER_WINDOW_SECONDS", "300").parse().unwrap_or(300);
 
     let listen_sa = resolve(&listen);
     let dest_sa = resolve(&dest);
@@ -245,7 +266,37 @@ async fn main() {
         sip_local_ip: local.ip().to_string(),
         sip_local_port: local.port(),
         cdr_buffer_queue_max: cdr_queue,
+        event_dispatch_concurrency: concurrency,
+        per_call_queue_cap: call_cap,
+        keepalive_interval_sec: keepalive_sec,
+        limiter_refresh_sec,
         ..Default::default()
+    };
+
+    // Build the limiter client now that config is settled. A LIMITER_URL whose
+    // host cannot be resolved at boot falls back to NoopLimiter (the worker still
+    // serves calls, unlimited, until restart) rather than crash-looping.
+    let limiter: Arc<dyn CallLimiter> = if limiter_url.is_empty() {
+        Arc::new(NoopLimiter)
+    } else {
+        let hostport = limiter_url
+            .strip_prefix("http://")
+            .unwrap_or(&limiter_url)
+            .trim_end_matches('/');
+        match hostport.to_socket_addrs().ok().and_then(|mut a| a.next()) {
+            Some(addr) => {
+                eprintln!("call-limiter client -> {addr} (timeout {limiter_timeout_ms}ms, refresh {limiter_refresh_sec}s)");
+                Arc::new(HttpCallLimiter::new(
+                    Arc::new(RealHttpNetwork::new()),
+                    addr,
+                    std::time::Duration::from_millis(limiter_timeout_ms),
+                ))
+            }
+            None => {
+                eprintln!("WARNING: LIMITER_URL {limiter_url:?} did not resolve; running unlimited (NoopLimiter)");
+                Arc::new(NoopLimiter)
+            }
+        }
     };
 
     let cdr = Arc::new(BufferedCdrWriter::spawn(Arc::new(NullCdrWriter), cdr_queue));
@@ -306,7 +357,7 @@ async fn main() {
             dest_sa.ip().to_string(),
             dest_sa.port(),
         )),
-        limiter: Arc::new(NoopLimiter),
+        limiter,
         cdr,
         store,
         clock,

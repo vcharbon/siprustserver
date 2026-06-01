@@ -7,7 +7,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::{CallModelState, Direction};
+use call::{Call, CallModelState, Direction, TimerEntry, TimerType};
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::message_helpers::parse_uri_params;
@@ -20,8 +20,8 @@ use crate::config::B2buaConfig;
 use crate::decision::{CallDecisionEngine, CallReferResponse};
 use crate::dispatch::PerCallDispatcher;
 use crate::effects::{
-    BufferedObservabilityEffect, CriticalStateEffect, FireAndForgetEffect, HandlerResult,
-    OutboundBody, OutboundTxnMode, SoftBoundedEffect,
+    BufferedObservabilityEffect, CriticalStateEffect, FireAndForgetEffect, HandlerEffects,
+    HandlerResult, OutboundBody, OutboundTxnMode, SoftBoundedEffect,
 };
 use crate::event::CallEvent;
 use crate::initial_invite::{build_initial_call, handle_initial_invite};
@@ -340,27 +340,62 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
         // backup partition when the primary crashed and the proxy failed this
         // dialog over to us. A genuine orphan (no replica) still rejects.
         let call = match ctx.state.hydrate_from_replica(&call_ref).await {
-            Some(c) => c,
+            Some((c, fresh)) => {
+                // Failover timer re-arm: per-call timers (keepalive, global
+                // duration, …) live in this node's in-memory `TimerService`, NOT
+                // in the replicated call state — so a call freshly materialized
+                // from a backup arrives with no live timers on THIS node. Re-arm
+                // its serialized timer intents (`call.timers`, which IS
+                // replicated) into the local driver, exactly once, on the
+                // hydration that created it. Without this the hydrated call has
+                // no keepalive (a dead peer is never probed) and no duration cap
+                // (never reaped) → `b2bua_active_calls` leaks on the takeover
+                // node — the failover analogue of the steady-state no-BYE leak.
+                // `restore` past-due entries fire immediately (the keepalive then
+                // re-arms itself on the next interval via the `keepalive` rule);
+                // re-arming is idempotent — any subsequent rule-emitted
+                // `ScheduleTimer` for the same id supersedes it via the driver's
+                // epoch bump. Skipped for `fresh == false` (the call was already
+                // resident and its timers are already live) to avoid double-arm.
+                if fresh {
+                    ctx.timers.restore(c.timers.clone(), call_ref.clone()).await;
+                }
+                c
+            }
             None => {
                 maybe_reject_orphan(ctx, &event).await;
                 return;
             }
         };
-        let rule_ctx = RuleContext {
-            call: &call,
-            call_ref: &call_ref,
-            event: &event,
-            source_leg_id: &res.source_leg_id,
-            direction: res.direction,
-            now_ms,
-            config: &ctx.config,
-        };
-        let exec = ActionExecutor {
-            config: &ctx.config,
-            id_gen: &ctx.id_gen,
-            now_ms,
-        };
-        execute_rules(&ctx.rules, &rule_ctx, &exec, default_handler)
+        // The limiter-refresh timer is async (an HTTP call to migrate holds), so
+        // it is handled outside the synchronous rule chain — like initial-INVITE.
+        if matches!(
+            &event,
+            CallEvent::Timer {
+                timer_type: TimerType::LimiterRefresh,
+                ..
+            }
+        ) {
+            let before = call.clone();
+            let res = handle_limiter_refresh(ctx, call, now_ms).await;
+            crate::rules::invariants::enforce(&before, crate::rules::invariants::finalize(res))
+        } else {
+            let rule_ctx = RuleContext {
+                call: &call,
+                call_ref: &call_ref,
+                event: &event,
+                source_leg_id: &res.source_leg_id,
+                direction: res.direction,
+                now_ms,
+                config: &ctx.config,
+            };
+            let exec = ActionExecutor {
+                config: &ctx.config,
+                id_gen: &ctx.id_gen,
+                now_ms,
+            };
+            execute_rules(&ctx.rules, &rule_ctx, &exec, default_handler)
+        }
     };
 
     process_result(ctx, &call_ref, result, now_ms).await;
@@ -368,6 +403,54 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
 
 fn default_handler(ctx: &RuleContext) -> HandlerResult {
     HandlerResult::new(ctx.call.clone())
+}
+
+/// Handle a `LimiterRefresh` timer: migrate every live hold to the current
+/// window (an async `/v1/refresh` call), update the stored windows, and re-arm
+/// the timer while the call is alive. Port of `FrameworkLimiterRefresh.ts`.
+async fn handle_limiter_refresh(ctx: &Arc<RouterCtx>, mut call: Call, now_ms: i64) -> HandlerResult {
+    use crate::limiter::LimiterHold;
+
+    let holds: Vec<LimiterHold> = call
+        .limiter_entries
+        .iter()
+        .filter(|e| e.increment_succeeded != Some(false))
+        .map(|e| LimiterHold {
+            limiter_id: e.limiter_id.clone(),
+            window: e.origin_window,
+        })
+        .collect();
+
+    let mut fx = HandlerEffects::new();
+    if holds.is_empty() {
+        return HandlerResult { call, effects: fx };
+    }
+
+    // All holds migrate to the same current window; adopt it for every live
+    // entry. On a backend failure `refresh` returns the holds unchanged, so the
+    // windows simply stay put and we retry next cycle.
+    let updated = ctx.limiter.refresh(&holds).await;
+    if let Some(new_window) = updated.first().map(|h| h.window) {
+        for e in call.limiter_entries.iter_mut() {
+            if e.increment_succeeded != Some(false) {
+                e.origin_window = new_window;
+            }
+        }
+    }
+
+    if call.state == CallModelState::Active {
+        let entry = TimerEntry {
+            id: format!("{:?}", TimerType::LimiterRefresh),
+            timer_type: TimerType::LimiterRefresh,
+            fire_at: now_ms + ctx.config.limiter_refresh_sec * 1000,
+            leg_id: None,
+        };
+        call.timers =
+            call::helpers::replace_timer_by_id(std::mem::take(&mut call.timers), entry.clone());
+        fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
+    }
+
+    HandlerResult { call, effects: fx }
 }
 
 /// A request for a vanished call → 481 (ACK/responses are silently dropped).
@@ -416,7 +499,9 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
             CriticalStateEffect::ScheduleTimer(entry) => {
                 ctx.timers.schedule(entry.clone(), call_ref.to_string()).await;
             }
-            CriticalStateEffect::CancelTimer { id } => ctx.timers.cancel(id.clone()).await,
+            CriticalStateEffect::CancelTimer { id } => {
+                ctx.timers.cancel(call_ref.to_string(), id.clone()).await
+            }
             CriticalStateEffect::CancelAllTimers => {
                 ctx.timers.cancel_all(call_ref.to_string()).await
             }
@@ -424,8 +509,13 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
             CriticalStateEffect::RemoveCall => {
                 ctx.state.remove(call_ref);
                 ctx.txn.cancel_txns_for_call(call_ref).await;
+                // Poison the per-call dispatch queue; its worker exits and bumps
+                // `removal` exactly once (dispatch.rs). We deliberately do NOT
+                // bump here — removal is counted at the single dispatch-queue
+                // teardown site so creations/removals stay a matched pair (one
+                // per call_ref). Counting here too double-counted every removal
+                // (~2× creations) and made `active_calls` saturate to 0.
                 ctx.dispatcher.enqueue_poison(call_ref);
-                ctx.metrics.bump_removal();
             }
         }
     }
@@ -453,7 +543,12 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
     for eff in &result.effects.soft {
         match eff {
             SoftBoundedEffect::DecrementLimiter { limiter_id, window } => {
-                ctx.limiter.decrement(limiter_id, *window).await
+                ctx.limiter
+                    .release(&[crate::limiter::LimiterHold {
+                        limiter_id: limiter_id.clone(),
+                        window: *window,
+                    }])
+                    .await
             }
         }
     }

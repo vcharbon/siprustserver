@@ -8,22 +8,31 @@ use sip_message::SipRequest;
 use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
+use crate::decision::{CallDecisionEngine, CallFailureRequest, CallFailureResponse, FailureInfo};
 use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
-use crate::limiter::CallLimiter;
+use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry};
 use crate::rules::relay;
 
 use super::schemas::{BodyUpdate, RouteDecision};
 
+/// Bound on chained limiter-reject failovers, so a misconfigured loop
+/// (`/call/failure` keeps returning a limited destination) can't recurse forever.
+const MAX_LIMITER_FAILOVER: u32 = 5;
+
 /// Apply a route decision to `call` (which already carries the a-leg), creating
-/// the first b-leg + its outbound INVITE.
+/// the first b-leg + its outbound INVITE. `depth` tracks chained limiter-reject
+/// failovers (start at 0).
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_route(
     mut call: Call,
     route: RouteDecision,
     a_invite: &SipRequest,
+    decision: &dyn CallDecisionEngine,
     limiter: &dyn CallLimiter,
     config: &B2buaConfig,
     id_gen: &IdGen,
     now_ms: i64,
+    depth: u32,
 ) -> HandlerResult {
     let mut fx = HandlerEffects::new();
 
@@ -35,15 +44,83 @@ pub async fn apply_route(
         call = set_call_ext(call, &service_id, Some(value));
     }
 
-    // Admission control (no-op limiter this slice; the seam is faithful).
-    for entry in &route.call_limiter {
-        let admitted = limiter.check_and_increment(&entry.id, entry.limit).await;
-        call.limiter_entries.push(CallLimiterState {
-            limiter_id: entry.id.clone(),
-            limit: entry.limit,
-            origin_window: now_ms / 1000,
-            increment_succeeded: Some(admitted),
-        });
+    // Admission control: one BATCHED + TRANSACTIONAL admit for every limiter
+    // entry — all increment, or none. The b2bua owns the fail-open policy.
+    if !route.call_limiter.is_empty() {
+        let entries: Vec<LimiterEntry> = route
+            .call_limiter
+            .iter()
+            .map(|e| LimiterEntry {
+                id: e.id.clone(),
+                limit: e.limit,
+            })
+            .collect();
+        match limiter.admit(&entries).await {
+            AdmitOutcome::Admitted { window } => {
+                for e in &route.call_limiter {
+                    call.limiter_entries.push(CallLimiterState {
+                        limiter_id: e.id.clone(),
+                        limit: e.limit,
+                        origin_window: window,
+                        increment_succeeded: Some(true),
+                    });
+                }
+                // Arm the refresh timer so a long call migrates its holds to the
+                // current window before they age out of the summed lookback.
+                let entry = TimerEntry {
+                    id: format!("{:?}", TimerType::LimiterRefresh),
+                    timer_type: TimerType::LimiterRefresh,
+                    fire_at: now_ms + config.limiter_refresh_sec * 1000,
+                    leg_id: None,
+                };
+                call.timers.push(entry.clone());
+                fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
+            }
+            // Fail open: admit, record NO holds (nothing released or refreshed).
+            AdmitOutcome::Unavailable => {}
+            AdmitOutcome::Rejected { limiter_id } => {
+                // Failover via /call/failure when a callback context is set
+                // (bounded), else answer 486 Busy Here and terminate.
+                if call.callback_context.is_some() && depth < MAX_LIMITER_FAILOVER {
+                    let req = CallFailureRequest {
+                        callback_context: call.callback_context.clone(),
+                        failure: FailureInfo {
+                            origin: "call_limiter".to_string(),
+                            status_code: None,
+                            limiter_id: Some(limiter_id),
+                        },
+                    };
+                    match decision.call_failure(req).await {
+                        Ok(CallFailureResponse::Failover(route2)) => {
+                            return Box::pin(apply_route(
+                                call, route2, a_invite, decision, limiter, config, id_gen, now_ms,
+                                depth + 1,
+                            ))
+                            .await;
+                        }
+                        Ok(CallFailureResponse::Terminate) | Err(_) => {
+                            return crate::initial_invite::reject_call(
+                                call,
+                                a_invite,
+                                486,
+                                Some("Busy Here".into()),
+                                id_gen,
+                                now_ms,
+                            );
+                        }
+                    }
+                } else {
+                    return crate::initial_invite::reject_call(
+                        call,
+                        a_invite,
+                        486,
+                        Some("Busy Here".into()),
+                        id_gen,
+                        now_ms,
+                    );
+                }
+            }
+        }
     }
 
     let leg_id = "b-1";
@@ -108,6 +185,35 @@ pub async fn apply_route(
         call.timers.push(entry.clone());
         fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
     }
+
+    // Global-duration backstop, armed at *call creation* (not just at answer).
+    //
+    // A call enters `Active` the moment its a-leg is built (initial_invite), and
+    // `confirm-dialog` is what arms GlobalDuration + Keepalive — so a call whose
+    // b-leg INVITE never reaches a final response (lost 200, a UAS that drops the
+    // INVITE under load, ring-forever) sits `Active` with NEITHER. Its only other
+    // reaper is the NoAnswer ring timer, but that is armed *only* when the route
+    // supplies `no_answer_timeout_sec` (the scripted endurance adapter supplies
+    // `None`). The result: ~0.4% of calls reach `Active` with an empty
+    // `call.timers`, so no timer ever fires and they leak forever — surviving past
+    // even the 1h GlobalDuration cap because it was never armed (observed:
+    // ~1095 ESTABLISHED calls flat for >4h on a never-killed worker).
+    //
+    // Arming GlobalDuration here gives every call the absolute duration cap as a
+    // backstop. `confirm-dialog` (and the promote/18x confirm paths) re-arm the
+    // same `GlobalDuration` id at answer with the same `max_duration_sec`, so an
+    // answered call is unaffected (the re-arm supersedes via the driver's epoch
+    // bump and `replace_timer_by_id`'s id-dedup); a stuck-in-setup call is now
+    // reaped at the cap by the existing `max-duration` rule.
+    let max_duration_sec = route.features.platform.max_duration_sec;
+    let global = TimerEntry {
+        id: format!("{:?}", TimerType::GlobalDuration),
+        timer_type: TimerType::GlobalDuration,
+        fire_at: now_ms + max_duration_sec * 1000,
+        leg_id: None,
+    };
+    call.timers = call::helpers::replace_timer_by_id(std::mem::take(&mut call.timers), global.clone());
+    fx.critical.push(CriticalStateEffect::ScheduleTimer(global));
 
     HandlerResult { call, effects: fx }
 }

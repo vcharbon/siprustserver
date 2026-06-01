@@ -29,3 +29,8 @@ tokio = { workspace = true, features = ["test-util"] }
 # by the B2BUA) advertises; the classifier proves it reached the right peer.
 media = { path = "../media" }
 media-harness = { path = "../media-harness" }
+# Limiter scenarios: a real LimiterServer on the simulated HTTP fabric, reached
+# by the b2bua's HttpCallLimiter.
+http-net = { path = "../http-net" }
+call-limiter = { path = "../call-limiter" }
+serde_json = { workspace = true }
