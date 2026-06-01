@@ -11,6 +11,8 @@ members = [
     "crates/topology",
     "crates/repl-net",
     "crates/scenario-harness",
+    "crates/media",
+    "crates/media-harness",
     "crates/b2bua",
     "crates/b2bua-harness",
     "crates/ha-harness",
@@ -86,3 +88,15 @@ sha1 = "0.10"
 base64 = "0.22"
 subtle = "2"
 arc-swap = "1"
+# Media layer (`crates/media`, slice S-media). `rtp`/`rtcp` are the webrtc-rs
+# wire-codec crates used as the independent framing *witness* against our
+# hand-rolled RFC 3550 encoder (the rtp.js role in the TS port). `rustfft` backs
+# the audio comparator's MFCC signature in the test-only `media-harness`. See
+# docs/plan/lexical-doodling-boot.md.
+rtp = "0.12"
+rtcp = "0.12"
+rustfft = "6"
+# `bytes` is the buffer type `rtp`/`rtcp` marshal to / unmarshal from;
+# `webrtc-util` provides the Marshal/Unmarshal traits they implement.
+bytes = "1"
+webrtc-util = "0.10"

@@ -24,3 +24,8 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# Slice 3b: real RTP media through the signalling-only B2BUA. Media flows
+# peer-to-peer on a separate simulated fabric to the addresses the SDP (relayed
+# by the B2BUA) advertises; the classifier proves it reached the right peer.
+media = { path = "../media" }
+media-harness = { path = "../media-harness" }

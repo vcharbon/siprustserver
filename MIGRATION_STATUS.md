@@ -14,6 +14,7 @@ each maps to a workspace **crate**. Status legend:
 | **Network / UDP** (transport, SignalingNetwork) | `crates/sip-net` *(slice 2)* | `src/sip/{UdpTransport,SignalingNetwork,BufferedUdpEndpoint}.ts` | ✅ `SignalingNetwork` ported — trait (DI seam) + real (tokio `UdpSocket`) + simulated (in-memory fabric) + recording/`scopedAudit` & `paranoidInputs` contract decorators; 22 tests green. `UdpTransport` facade + `BufferedUdpEndpoint` + `ConnectivityGate` **deferred** (Slice 2 §un-ported) |
 | **Test/contract foundation** (Recorder, RunContext, 4 wrappers) | `crates/layer-harness` | `src/test-harness/framework/*` | ✅ Recorder + typed channels + projectors + RunContext/severity + recording helpers + 4-wrapper vocabulary ported (test-only, SIP-agnostic); 5 tests green. Recorder now stamps `at_ms` via an injected `sip-clock` `Clock` (deterministic report timestamps). [ADR-0004](docs/adr/0004-layer-harness-test-foundation.md) |
 | **Scenario harness + reports** (DSL, driver, SVG/txt/HTML) | `crates/scenario-harness` | `src/test-harness/framework/{dsl,interpreter,recorder,message-builder,*-report,svg-sequence-diagram}.ts` | ✅ **fluent dialog-aware DSL** (`Harness`/`Agent`/`invite`/`receive`/`respond`/`ack`/`bye`) auto-generating correct-by-default B2B messages via `sip-message::generators` + tracked `StackDialog` state, **plus** the thin scenarios-as-data DSL as a raw escape hatch; recording-first driver; SVG (clickable in HTML)/global.txt/per-endpoint/HTML renderers; trace **projected from the recording** (`sip-net::to_sip_entries`); virtual-time `advance` + 100 ms fake-net transit delay; UAC/UAS route-set construction from Record-Route + a loose-routing `Proxy` test agent (for the LB/front-proxy slice); 4 e2e tests green (incl. `proxy_record_route`). `or`/`parallel`/media/chaos **deferred**. [ADR-0006](docs/adr/0006-scenario-harness-recording-first.md) |
+| **Media** (RTP/RTCP framing, G.711, SDP O/A, paced transport) | `crates/media` + `crates/media-harness` *(slice S-media)* | `src/media/**`, `src/test-harness/media/audio/**` | ✅ transport-agnostic engine over `SignalingNetwork` (sim + real UDP); hand-rolled RFC 3550 framing **+ webrtc-rs `rtp` witness** cross-checked; G.711 PCMA/PCMU; RFC 3264/3262/5009 offer/answer engine (typed `SdpRule` refusals); paced sender + per-(remote,SSRC) demux + counts-only RTCP. Test-only `media-harness`: deterministic clips + MFCC (`rustfft`) classifier + `negotiate_call`. Slices 0/1/2/3a/3b green (41 tests; 3b drives real RTP through the real B2BUA via relayed SDP). RTCP report-block contents, jitter/loss stats, multiple m-lines, video **deferred** ([slice below](#slice--media-cratesmedia--cratesmedia-harness)) |
 | **Transaction** (RFC 3261 §17 FSMs + retransmit timers) | `crates/sip-txn` *(slice 4)* | `src/sip/TransactionLayer.ts` | ✅ client/server INVITE+non-INVITE FSMs, A/B/E/F/H/J timers, dedup, CANCEL→200+487, ACK absorption, cached-response retransmit, bounded drop-newest event queue; actor owns the map + a single `DelayQueue` ([ADR-0007](docs/adr/0007-transaction-layer-rust-shape.md)); 14 tests green. RNG seam (`IdGen`) ported here |
 | **Dispatch / per-call FIFO** | `crates/b2bua` | `src/sip/{SipRouter,PerCallDispatcher}.ts`, `src/call/CallState.ts` | ✅ per-call queue+worker+global-semaphore dispatcher + router (`routeKey`/`withCall`/`processResult` typed-effect interpreter) + in-memory `CallState` over a replication-aware `CallStore` seam (HA params no-op'd) + B2BUA-local timer `DelayQueue` + decision-engine adapter seam (scripted jssip-emulating test impl) + buffered CDR; alice↔b2bua↔bob basic/failure/reject e2e green ([ADR-0010](docs/adr/0010-b2bua-dispatch-rules-rust-shape.md), [slice below](#slice--b2bua-dispatch--rule-engine-cratesb2bua)) |
 | **CallContext data model** | `crates/call` | `src/call/` (`CallModel`/`timer-helpers`/`codec`) | ✅ data model + codec ported — Call→Leg→Dialog structs + lens/index helpers + `callRef`/index-keys + positional-msgpack `CallBodyCodec`; 24 tests green. Stateful `CallState` now ported in `crates/b2bua` (in-memory; Redis/HA-replication transport still deferred). `TimerService` ported as the B2BUA-local `DelayQueue`. protobuf codec **deferred** ([slice below](#slice--callcontext-data-model-cratescall), [ADR-0008](docs/adr/0008-call-context-data-model.md)) |
@@ -377,6 +378,87 @@ at the transaction-layer seam)
 - **No `propertyTest` / `parity`** — the source `TransactionLayer` has neither
   (those wrap `SignalingNetwork`); the ritual's property/comparison step is N/A
   here.
+
+---
+
+## Slice — Media (`crates/media` + `crates/media-harness`)
+
+**Source release:** sipjsserver @ `fffc4ac69c8aeef26cf48fe73469503145c9732b`.
+Source: `src/media/**` (engine, framing, codec, sdp, rtcp), the two framing
+impls (`ts/` + `native/`), and the test support
+`src/test-harness/media/audio/**` + `tests/media/**`.
+**Scope (confirmed with user):** the full media layer whose primary purpose is
+**verifying RTP/SDP negotiation** — slices 0–3b, including the real-B2BUA
+integration. Plan: [docs/plan/lexical-doodling-boot.md](docs/plan/lexical-doodling-boot.md).
+
+### Decisions
+- **Test-vs-real is the transport seam, not the framing.** The engine is written
+  once over `Arc<dyn SignalingNetwork>` and runs unchanged on the simulated
+  fabric (deterministic, paused clock) and real UDP — exactly like `sip-txn`. The
+  TS project's *two implementations* (`MediaEndpointTs`/`MediaEndpointRtpJs`) are
+  not test/real; they are two **framing** impls that cross-check each other. Rust
+  mirrors this with the `RtpFraming` trait + `HandRolled` (RFC 3550 by hand, the
+  `tsFraming` analog) and `WebRtcRs` (wraps the webrtc-rs `rtp` crate, the
+  `rtp.js` witness).
+- **Behavioural timing on `tokio::time` directly; `Clock` is timestamps only**
+  (per CLAUDE.md). The paced sender / RTCP reporter sleep on `tokio::time`;
+  `sip-clock::Clock` is consulted only for RTCP NTP stamps. The shared transport
+  lock is never held across an `.await`.
+- **Media-timescale advance.** A 20 ms paced loop is finer than the harness's
+  100 ms advance chunks; advancing past many ptime deadlines in one step starves
+  the loop. `media-harness::testkit::advance_media` steps ≤ ptime with a
+  `yield_now` between — the media-timescale version of CLAUDE.md's "drive the
+  protocol between advances."
+- **Structured SDP lives in `media`**, separate from the b2bua-scoped string SDP
+  in `sip-message` (left untouched). The offer/answer engine is hand-rolled (the
+  negotiation policy is the thing under test) with typed per-RFC-MUST refusals.
+
+### Source → Rust (port checklist)
+| Source | Rust module | Status |
+|---|---|---|
+| `media/codec/g711.ts` | `media/codec/g711.rs` | ✅ canonical ITU PCMA/PCMU |
+| `media/rtp/packet.ts` (`RtpFraming` seam + `tsFraming`) | `media/rtp/packet.rs` (`RtpFraming` + `HandRolled`) | ✅ |
+| `media/native/MediaEndpointRtpJs.ts` (`rtpJsFraming`) | `media/rtp/webrtc_framing.rs` (`WebRtcRs`, wraps `rtp` crate) | ✅ witness |
+| `media/rtp/rtcp.ts` | `media/rtp/rtcp.rs` | ✅ SR/RR counts-only + RFC 5761 demux |
+| `media/sdp/{types,parse}.ts` | `media/sdp/mod.rs` | ✅ structured SDP + parse/build |
+| `media/sdp/negotiator.ts` | `media/sdp/negotiator.rs` | ✅ O/A engine + `SdpRule` + RFC 5009 gate |
+| `media/transport.ts` (`mediaEndpointLayer`) | `media/transport.rs` (`MediaEndpoint`/`MediaTransport`/`MediaSession`) | ✅ |
+| `media/ts` + `native` layer wiring | `media::{ts_endpoint, webrtc_endpoint}` | ✅ |
+| `test-harness/media/audio/clips.ts` | `media-harness/audio/clips.rs` | ✅ deterministic formant/ringback synth |
+| `test-harness/media/audio/spectral.ts` | `media-harness/audio/spectral.rs` | ✅ MFCC via `rustfft` |
+| `test-harness/media/audio/classify.ts` | `media-harness/audio/classify.rs` | ✅ verdict + sequence |
+| `tests/media/support-negotiate.ts` | `media-harness/negotiate.rs` | ✅ `negotiate_call` + rewrites |
+
+### Tests ported
+| Source test | Rust home | Status |
+|---|---|---|
+| `audio-comparator.test.ts` (slice 0) | `media-harness/tests/audio_comparator.rs` | ✅ 6 |
+| `rtp-media.test.ts` framing cross-check (slice 1) | `media/tests/rtp_framing.rs` | ✅ 6 (2×2 witness matrix + CSRC + non-v2) |
+| `rtp-media.test.ts` play→record + RTCP (slice 1) | `media/tests/rtp_media.rs` | ✅ 3 (both framing flavors; exact stats) |
+| `rtp-media-live.test.ts` (slice 1 live) | `media/tests/rtp_media_live.rs` | ✅ 1 (real UDP, loss-tolerant) |
+| `sdp-negotiation.test.ts` (slice 2) | `media/tests/sdp_negotiation.rs` | ✅ 13 (per-rule refusals + direction/hold + PEM gate) |
+| `media-e2e.test.ts` (slice 3a) | `media-harness/tests/media_e2e.rs` | ✅ 2 (relay + corrupt-SDP misdirection) |
+| `basic-call-media.test.ts` (slice 3b) | `b2bua-harness/tests/basic_call_media.rs` | ✅ 1 (real RTP through the real B2BUA) |
+| (codec/rtcp unit) | `media/src/**` unit tests | ✅ 10 |
+
+### Un-ported with justification
+- **HTML media-panel reporting** (the slice-3b `Media (RTP)` report table) — the
+  Rust b2bua-harness asserts the `MediaVerdict` directly; the HTML report
+  renderer's media panel is a reporting nicety, deferred with the broader report
+  work.
+- **The declarative scenario-DSL media steps** (`dialog.media.plays`/`hears`) —
+  the Rust harness is imperative (no scenarios-as-data interpreter driving
+  media), so 3b uses the agent API directly. The DSL `plays`/`hears` steps stay
+  on the deferred list noted in the Slice 3 section.
+- **RTCP Sender/Receiver Report *contents*** (report blocks, jitter, cumulative
+  loss, LSR/DLSR) — first-cut scope is counts-only (matches the TS), so SR/RR are
+  well-formed but carry no report blocks; the field-content asserts are deferred.
+- **rtp.js-specific behaviours / multiple codecs beyond G.711, multiple m-lines,
+  video** — the negotiation engine and SDP model are audio/G.711-scoped exactly
+  as the source; extending is a later slice.
+- **`scripts/fetch-media-clips.ts`** (render clips to `.wav` + the CC0-speech
+  upgrade path) — a tooling convenience, not test surface. The deterministic
+  synth is ported; rendering to wav is not needed for the hermetic tests.
 
 ---
 
