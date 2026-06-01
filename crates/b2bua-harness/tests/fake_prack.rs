@@ -7,8 +7,10 @@
 //! the cached SDP into the 200 OK toward alice. Locally answers in-dialog UPDATE
 //! (skeleton-fit SDP from alice's offer, else 488).
 //!
-//! The `forking` / `failover` cases are NOT ported (no SIP b-leg failover yet) —
-//! see docs/plan/slice3-design.md and MIGRATION_STATUS.md.
+//! The `forking` / `failover` cases ride the `/call/failure` b-leg failover path:
+//! bob1 goes reliable (183/100rel + PRACK + cached SDP) then 503s; the B2BUA fails
+//! over to bob2 on the unreliable path. bob1's cache is discarded with its leg, so
+//! alice's 200 carries bob2's own SDP.
 
 use b2bua_harness::B2buaSut;
 use call::features::RelayFirst18xStrategy;
@@ -360,4 +362,76 @@ async fn update_happy() {
     bye.expect(200).await;
 
     let _ = h.finish().await;
+}
+
+/// Shared body for the two failover-on-503 cases (TS `forking` / `failover`):
+/// bob1 goes reliable (183/100rel → bare 180 + B2BUA PRACK + cached SDP) then
+/// 503s; the B2BUA fails over to bob2 (unreliable). bob1's cache dies with its
+/// leg, so alice's 200 carries bob2's own SDP.
+async fn run_fake_prack_failover(scenario: &str, alice_p: u16, bob1_p: u16, bob2_p: u16, b2b_p: u16) {
+    let h = Harness::with_transit_delay(scenario, 0);
+    let alice = h.agent("alice", &format!("127.0.0.1:{alice_p}")).await;
+    let bob1 = h.agent("bob1", &format!("127.0.0.1:{bob1_p}")).await;
+    let bob2 = h.agent("bob2", &format!("127.0.0.1:{bob2_p}")).await;
+    let b2bua = B2buaSut::route_all_to_with_18x_failover(
+        &h,
+        "b2bua",
+        &format!("127.0.0.1:{b2b_p}"),
+        "127.0.0.1",
+        bob1_p,
+        bob2_p,
+        &format!("sip:+1234@127.0.0.1:{bob2_p}"),
+        RelayFirst18xStrategy::FakePrack,
+    )
+    .await;
+
+    let mut call = alice
+        .invite(&bob1)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+
+    // bob1: reliable 183 → bare 180 to alice + B2BUA-originated PRACK.
+    let mut uas1 = bob1.receive("INVITE").await;
+    uas1.respond(183, "Session Progress")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", "1")
+        .with_sdp(ANSWER)
+        .await;
+    call.expect(180).await;
+    let mut prack = bob1.receive("PRACK").await;
+    assert!(rack_matches(&prack.request().headers, 1, "INVITE"), "RAck 1 .. INVITE");
+    prack.respond(200, "OK").await;
+
+    // bob1 rejects → failover to bob2.
+    uas1.respond(503, "Service Unavailable").await;
+
+    // bob2 on the unreliable path: 180 suppressed, 200 with its own SDP.
+    let mut uas2 = bob2.receive("INVITE").await;
+    uas2.respond(180, "Ringing").await;
+    uas2.respond(200, "OK").with_sdp(ANSWER).await;
+
+    // alice's 200 carries bob2's SDP (bob1's cache discarded with its leg).
+    let ok = call.expect(200).await;
+    assert!(!ok.body.is_empty(), "alice 200 carries bob2's SDP");
+
+    let mut dialog = call.ack().await;
+    bob2.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob2.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    let _ = h.finish().await;
+}
+
+#[tokio::test]
+async fn forking() {
+    run_fake_prack_failover("fake-prack-forking", 5750, 5751, 5752, 5753).await;
+}
+
+#[tokio::test]
+async fn failover() {
+    run_fake_prack_failover("fake-prack-failover", 5740, 5741, 5742, 5743).await;
 }
