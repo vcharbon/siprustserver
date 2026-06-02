@@ -156,7 +156,14 @@ ambiently and tempt a worse re-implementation of its timer wheel; only the
   behaviour is monotonic-local and `Instant`s are *not* portable across
   processes/restarts/replicas, replicated events must carry a *remaining
   duration* or an *absolute wall deadline* and the standby rebuilds its monotonic
-  timer locally — never ship a raw `Instant`. Revisit at the failover slice.
+  timer locally — never ship a raw `Instant`. **Resolved at the failover slice:**
+  `TimerEntry.fire_at` ships the *absolute wall deadline* (it is part of the
+  replicated `Call`); on takeover `b2bua::timers::TimerService::restore` rebuilds
+  the local monotonic timer as `(fire_at - now_ms()).max(0)` (past-due → fires
+  immediately). This makes the rearmed deadline depend on cross-node wall-clock
+  agreement (NTP) — the one place `now_ms()` is a behavioural cross-node input;
+  within a single process the same subtraction cancels. See the HA note in
+  `crates/sip-clock/src/lib.rs` and `TimerService::restore`'s rustdoc.
 
 **Tests (done).** `now_ms` advances in lockstep with `tokio::time::advance`;
 monotonic non-decreasing; clones share one timeline; property test "`now_ms ==

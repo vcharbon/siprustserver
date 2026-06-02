@@ -34,13 +34,27 @@
 //!   **and** `now_ms()` together, consistently. No separately-settable
 //!   `TestClock` counter is needed — pause/advance is the one lever.
 //!
-//! # HA note
+//! # HA note — failover timer reconstruction (landed)
 //!
-//! Monotonic `Instant`s are not portable across processes / restarts / replicas.
-//! When failover timer reconstruction lands, replicated events must carry a
-//! *remaining duration* or an *absolute wall deadline* and the standby rebuilds
-//! its monotonic timer locally — never ship a raw `Instant`. See
-//! docs/MIGRATION_PLAN_B2B.md §2.
+//! Monotonic `Instant`s are not portable across processes / restarts / replicas,
+//! so a replicated timer can never ship a raw `Instant`. The failover slice chose
+//! the **absolute-wall-deadline** option: each `call::TimerEntry` carries
+//! `fire_at` as an epoch-ms deadline (`now_ms()` at schedule time + the delay),
+//! which IS replicated as part of the `Call`. On takeover the standby rebuilds its
+//! local monotonic timer from that deadline — see
+//! `b2bua::timers::TimerService::restore`.
+//!
+//! Consequence — **this is the one place `now_ms()` is a *behavioural*,
+//! cross-node input.** Everywhere else it is timestamps only; and even the timer
+//! driver's `fire_at - now_ms()` is *not* load-bearing within a single process,
+//! because `fire_at` was minted from that same `now_ms()` and the two readings
+//! cancel (the delay reduces to the original `delay_ms`). Across a failover they
+//! do not cancel: a `fire_at` minted on the dead node is compared against the live
+//! node's `now_ms()`, so the rearmed deadline is only as accurate as the two
+//! nodes' **wall clocks agree** (keep them NTP-disciplined), plus each node's
+//! monotonic drift from true wall over its uptime. Skew shifts the rearmed
+//! deadline earlier/later by the disagreement; a past-due `fire_at` clamps to a
+//! zero delay and fires immediately. See docs/MIGRATION_PLAN_B2B.md §2.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::Instant;

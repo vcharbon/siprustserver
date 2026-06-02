@@ -90,8 +90,37 @@ impl TimerService {
         let _ = self.cmd_tx.send(TimerCmd::CancelAll { call_ref }).await;
     }
 
-    /// Re-arm persisted timer entries (crash recovery). Past-due entries fire
-    /// immediately.
+    /// Re-arm a hydrated call's persisted timer intents into this node's driver.
+    ///
+    /// Called once, on the fresh failover hydration of a call from the replica
+    /// (`router::run` → `CallState::hydrate_from_replica` with `fresh == true`).
+    /// The live `DelayQueue` is per-node and is NOT replicated, so a call
+    /// materialized from a backup partition arrives with no live timers here;
+    /// without this re-arm its keepalive never probes the peer and its
+    /// duration/no-answer caps never reap it, so `active_calls` leaks on the
+    /// takeover node (the failover analogue of the no-BYE leak).
+    ///
+    /// Each `TimerEntry.fire_at` is an **absolute wall deadline** (epoch ms),
+    /// minted from `now_ms()` on whichever node first scheduled it (and replicated
+    /// as part of the `Call`). The driver rebuilds a local monotonic timer as
+    /// `(fire_at - now_ms()).max(0)`:
+    ///
+    /// - **Past-due** (`fire_at <= now_ms()`) → zero delay → fires on the next
+    ///   driver tick, then routes through the rules exactly like any timer fire
+    ///   (keepalive re-arms its next interval; a duration/no-answer cap reaps the
+    ///   call). Nothing is dropped or recomputed.
+    /// - Re-arm is idempotent: any later rule-emitted `ScheduleTimer` for the same
+    ///   `(call_ref, id)` supersedes the restored entry via the driver's epoch bump.
+    ///
+    /// **Wall-time reliance.** Because `fire_at` came from the *dead* node's clock
+    /// and is compared against *this* node's `now_ms()`, the reconstructed deadline
+    /// is only as accurate as the two nodes' wall clocks agree (keep them NTP-
+    /// disciplined). This is the one place `now_ms()` is a behavioural, cross-node
+    /// input — see the HA note in `sip-clock`'s crate docs. Under the simulated
+    /// clock there is a single process and one paused `tokio::time` timeline, so
+    /// `fire_at` and `now_ms()` ride the *same* `Instant` with zero skew: the
+    /// past-due path is exercised deterministically, but the cross-node skew
+    /// dimension is NOT covered by the harness.
     pub async fn restore(&self, entries: Vec<TimerEntry>, call_ref: String) {
         for entry in entries {
             self.schedule(entry, call_ref.clone()).await;
@@ -125,6 +154,13 @@ async fn driver(
                     let epoch = next_epoch;
                     active.insert(entry.id.clone(), epoch);
                     by_call.entry(call_ref.clone()).or_default().insert(entry.id.clone());
+                    // Rebuild the monotonic delay from the absolute wall deadline.
+                    // Within a process this cancels — the rule minted `fire_at`
+                    // from this same `now_ms()`, so delay == the original delay_ms
+                    // regardless of the clock anchor. Across a failover `restore`,
+                    // `fire_at` came from the *dead* node's clock, so the result
+                    // depends on cross-node wall-clock agreement (see `restore`).
+                    // Past-due (`fire_at <= now`) clamps to 0 → fires next tick.
                     let delay = (entry.fire_at - clock.now_ms()).max(0) as u64;
                     queue.insert(
                         Fired {
