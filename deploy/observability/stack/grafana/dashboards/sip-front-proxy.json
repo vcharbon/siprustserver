@@ -61,11 +61,11 @@
     },
     {
       "id": 6, "type": "timeseries", "title": "Messages / sec by direction:result",
-      "description": "`sip_messages_total` — the Rust proxy emits a single `label` dimension holding `direction:result` (e.g. `inbound:forwarded`, `outbound:responded`, `inbound:dropped`).",
+      "description": "`sip_messages_total` — every SIP MESSAGE the proxy moves (requests + responses, both directions), NOT calls. The Rust proxy emits a single `label` dimension holding `direction:result` (e.g. `inbound:forwarded`, `outbound:responded`, `inbound:dropped`).",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [{ "expr": "sum by (label) (rate(sip_messages_total{pod=~\"$pod\", label!=\"none\"}[1m]))", "refId": "A", "legendFormat": "{{label}}" }],
-      "fieldConfig": { "defaults": { "unit": "cps" } }
+      "fieldConfig": { "defaults": { "unit": "msg/s" } }
     },
     {
       "id": 7, "type": "timeseries", "title": "Routing decisions / sec by kind",
@@ -109,6 +109,37 @@
       "transformations": [
         { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "job": true, "namespace": true, "container": true, "instance": true, "node": true, "app_kubernetes_io_instance": true, "app_kubernetes_io_name": true, "pod_template_hash": true } } }
       ]
+    },
+    {
+      "id": 20, "type": "row", "title": "Calls / requests / responses",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 }, "collapsed": false
+    },
+    {
+      "id": 21, "type": "stat", "title": "Calls / sec (new dialogs)",
+      "description": "`sip_proxy_calls_total` — initial, dialog-creating INVITEs (no To-tag). This is a CALL rate, distinct from the message rate: one call sets up many messages.",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 37 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(rate(sip_proxy_calls_total{pod=~\"$pod\"}[1m]))", "refId": "A" }],
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": { "unit": "calls/s", "decimals": 1, "color": { "mode": "fixed", "fixedColor": "green" } } }
+    },
+    {
+      "id": 22, "type": "timeseries", "title": "Requests / sec by method",
+      "description": "`sip_proxy_requests_total{method}` — every inbound SIP request the proxy handles, split by method (INVITE / ACK / BYE / CANCEL / OPTIONS / …).",
+      "gridPos": { "h": 8, "w": 9, "x": 6, "y": 37 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (method) (rate(sip_proxy_requests_total{pod=~\"$pod\", method!=\"none\"}[1m]))", "refId": "A", "legendFormat": "{{method}}" }],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } } } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 23, "type": "timeseries", "title": "Responses / sec by code + method",
+      "description": "`sip_proxy_responses_total{method,code}` — every inbound SIP response, keyed by its CSeq method and status code (e.g. INVITE 200, INVITE 487, BYE 200, OPTIONS 200).",
+      "gridPos": { "h": 8, "w": 9, "x": 15, "y": 37 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (method, code) (rate(sip_proxy_responses_total{pod=~\"$pod\", method!=\"none\"}[1m]))", "refId": "A", "legendFormat": "{{method}} {{code}}" }],
+      "fieldConfig": { "defaults": { "unit": "cps", "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } } } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
     }
   ]
 }

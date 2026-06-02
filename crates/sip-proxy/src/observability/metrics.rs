@@ -120,6 +120,9 @@ struct HealthGauges {
 #[derive(Default)]
 pub struct ProxyMetrics {
     messages: LabeledCounter,        // keyed "direction:result"
+    requests: LabeledCounter,        // keyed request method (INVITE/ACK/BYE/...)
+    responses: LabeledCounter,       // keyed "cseq_method|status_code"
+    calls: AtomicU64,                // initial (dialog-creating, no To-tag) INVITEs
     routing_decisions: LabeledCounter, // keyed kind
     hmac_failures: LabeledCounter,   // keyed reason
     cancel_lookups: LabeledCounter,  // keyed outcome
@@ -141,6 +144,24 @@ impl ProxyMetrics {
 
     pub fn record_message(&self, direction: Direction, result: MessageResult) {
         self.messages.inc(&format!("{}:{}", direction.as_str(), result.as_str()));
+    }
+
+    /// Count one inbound request by SIP method (uppercased by the caller), for
+    /// `sip_proxy_requests_total{method}`.
+    pub fn record_request(&self, method: &str) {
+        self.requests.inc(method);
+    }
+
+    /// Count one inbound response by its CSeq method + status code, for
+    /// `sip_proxy_responses_total{method,code}`.
+    pub fn record_response(&self, method: &str, code: u16) {
+        self.responses.inc(&format!("{method}|{code}"));
+    }
+
+    /// Count one new call: a dialog-creating INVITE with no To-tag (an initial
+    /// out-of-dialog INVITE), for `sip_proxy_calls_total`.
+    pub fn record_call(&self) {
+        self.calls.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_routing_decision(&self, kind: RoutingDecisionKind) {
@@ -229,7 +250,22 @@ impl ProxyMetrics {
             }
         };
 
+        // Two-label render: key is "method|code" -> {method="..",code=".."}.
+        let labeled2 = |s: &mut String, name: &str, help: &str, (l1, l2): (&str, &str), m: &BTreeMap<String, u64>| {
+            s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n"));
+            if m.is_empty() {
+                s.push_str(&format!("{name}{{{l1}=\"none\",{l2}=\"none\"}} 0\n"));
+            }
+            for (k, v) in m {
+                let (a, b) = k.split_once('|').unwrap_or((k.as_str(), ""));
+                s.push_str(&format!("{name}{{{l1}=\"{a}\",{l2}=\"{b}\"}} {v}\n"));
+            }
+        };
+
         labeled(&mut s, "sip_messages_total", "SIP messages by direction+result.", "counter", "label", &self.messages.snapshot());
+        labeled(&mut s, "sip_proxy_requests_total", "Inbound SIP requests by method.", "counter", "method", &self.requests.snapshot());
+        labeled2(&mut s, "sip_proxy_responses_total", "Inbound SIP responses by CSeq method + status code.", ("method", "code"), &self.responses.snapshot());
+        g(&mut s, "sip_proxy_calls_total", "New calls: initial dialog-creating INVITEs (no To-tag).", "counter", self.calls.load(Ordering::Relaxed));
         labeled(&mut s, "sip_routing_decision_total", "Routing decisions by kind.", "counter", "kind", &self.routing_decisions.snapshot());
         labeled(&mut s, "sip_proxy_hmac_failures_total", "HMAC verify failures by reason.", "counter", "reason", &self.hmac_failures.snapshot());
 
@@ -282,6 +318,22 @@ mod tests {
         assert!(txt.contains("# TYPE sip_routing_duration_seconds histogram"));
         assert!(txt.contains("sip_routing_duration_seconds_count 1"));
         assert!(txt.contains("# TYPE sip_worker_health gauge"));
+    }
+
+    #[test]
+    fn per_method_request_response_and_calls_render() {
+        let m = ProxyMetrics::new();
+        m.record_request("INVITE");
+        m.record_request("BYE");
+        m.record_response("INVITE", 200);
+        m.record_response("INVITE", 487);
+        m.record_call();
+        let txt = m.prometheus_text();
+        assert!(txt.contains("sip_proxy_requests_total{method=\"INVITE\"} 1"));
+        assert!(txt.contains("sip_proxy_requests_total{method=\"BYE\"} 1"));
+        assert!(txt.contains("sip_proxy_responses_total{method=\"INVITE\",code=\"200\"} 1"));
+        assert!(txt.contains("sip_proxy_responses_total{method=\"INVITE\",code=\"487\"} 1"));
+        assert!(txt.contains("sip_proxy_calls_total 1"));
     }
 
     #[test]

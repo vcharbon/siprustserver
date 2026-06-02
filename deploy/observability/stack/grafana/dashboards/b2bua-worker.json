@@ -114,6 +114,79 @@
         { "expr": "sum(b2bua_call_removals_total{pod=~\"$pod\"})", "refId": "B", "legendFormat": "removals total" }
       ],
       "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "id": 20, "type": "row", "title": "Calls / requests / responses",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 }, "collapsed": false
+    },
+    {
+      "id": 21, "type": "timeseries", "title": "Requests / sec by method",
+      "description": "`b2bua_requests_total{method}` — every inbound SIP request the worker processes, by method. Call setups are the INVITE line here; `b2bua_call_creations_total` (top row) is the authoritative per-call rate.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (method) (rate(b2bua_requests_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "{{method}}" }],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } } } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 22, "type": "timeseries", "title": "Responses / sec by code + method",
+      "description": "`b2bua_responses_total{method,code}` — every inbound SIP response the worker handles, keyed by CSeq method + status code (INVITE 200, BYE 200, OPTIONS 200, INVITE 4xx/5xx, …). A rising 5xx share flags upstream trouble.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (method, code) (rate(b2bua_responses_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "{{method}} {{code}}" }],
+      "fieldConfig": { "defaults": { "unit": "cps", "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } } } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 30, "type": "row", "title": "Memory & replication (HA)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 37 }, "collapsed": false
+    },
+    {
+      "id": 31, "type": "timeseries", "title": "Worker memory (working set)",
+      "description": "cAdvisor `container_memory_working_set_bytes` per worker pod — the live RSS-equivalent the OOM-killer watches. A monotonic climb across the 2h run that never plateaus = a memory leak (pair it with the active-calls leak detector).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 38 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"sip-test\", pod=~\"b2bua-worker.*\", pod=~\"$pod\", container!=\"\", container!=\"POD\"})", "refId": "A", "legendFormat": "{{pod}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0, "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 32, "type": "timeseries", "title": "Replication activity / sec",
+      "description": "Peer-to-peer HA changelog flow (`b2bua_repl_*`). `flush_propagated` on a PRIMARY = it is shipping replicas to the backup; `pull_applied` on a BACKUP = replicas arriving; `takeover_resolved`/`takeover_hydrated` = a failed-over in-dialog request found + loaded the replica. All flat-zero in steady state; they spike around a worker kill.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 38 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum(rate(b2bua_repl_flush_propagated_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "flush_propagated (primary→backup)" },
+        { "expr": "sum(rate(b2bua_repl_pull_applied_total{pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "pull_applied (backup←primary)" },
+        { "expr": "sum(rate(b2bua_repl_takeover_resolved_total{pod=~\"$pod\"}[1m]))", "refId": "C", "legendFormat": "takeover_resolved" },
+        { "expr": "sum(rate(b2bua_repl_takeover_hydrated_total{pod=~\"$pod\"}[1m]))", "refId": "D", "legendFormat": "takeover_hydrated" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "cps", "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 33, "type": "stat", "title": "Backup replicas held",
+      "description": "`b2bua_repl_backup_held` gauge — live replicas this fleet is holding in backup partitions for its peers. > 0 means HA is armed: if a primary dies, these are the dialogs that survive on the backup.",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 46 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(b2bua_repl_backup_held{pod=~\"$pod\"})", "refId": "A" }],
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": { "unit": "none", "thresholds": { "mode": "absolute", "steps": [{ "color": "yellow", "value": null }, { "color": "green", "value": 1 }] } } }
+    },
+    {
+      "id": 34, "type": "timeseries", "title": "Replication cumulative (forward progress)",
+      "description": "Monotonic `b2bua_repl_*_total` counters per pod — confirms each worker is making HA forward progress (shipping/applying replicas, resolving takeovers) over the whole run.",
+      "gridPos": { "h": 8, "w": 18, "x": 6, "y": 46 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (pod) (b2bua_repl_flush_propagated_total{pod=~\"$pod\"})", "refId": "A", "legendFormat": "flush_propagated {{pod}}" },
+        { "expr": "sum by (pod) (b2bua_repl_pull_applied_total{pod=~\"$pod\"})", "refId": "B", "legendFormat": "pull_applied {{pod}}" },
+        { "expr": "sum by (pod) (b2bua_repl_takeover_hydrated_total{pod=~\"$pod\"})", "refId": "C", "legendFormat": "takeover_hydrated {{pod}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "custom": { "fillOpacity": 4, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
     }
   ]
 }

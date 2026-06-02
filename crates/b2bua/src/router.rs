@@ -92,6 +92,15 @@ pub async fn run(
 }
 
 async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
+    // Per-method / per-(method,code) data-path counters. Every inbound SIP
+    // message lands here once, so this is the single chokepoint to meter them.
+    if let CallEvent::Sip { message, .. } = &event {
+        match message.as_ref() {
+            SipMessage::Request(req) => ctx.metrics.record_request(&req.method),
+            SipMessage::Response(resp) => ctx.metrics.record_response(&resp.cseq.method, resp.status),
+        }
+    }
+
     // Out-of-dialog OPTIONS keepalive: self-report readiness (S7, ADR-0011 X6).
     // The front proxy probe keys on the status + Reason header text
     // (`sip-proxy::health::probe::classify_503`).

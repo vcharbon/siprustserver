@@ -37,6 +37,11 @@ impl ProxyCore {
         let method = req.method.to_ascii_uppercase();
         let call_id = req.call_id.clone();
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
+        self.metrics.record_request(&method);
+        // A new call = an initial dialog-creating INVITE (no To-tag yet).
+        if is_dialog_creating(&method) && method == "INVITE" && req.to.tag.is_none() {
+            self.metrics.record_call();
+        }
 
         let outcome = self.route_request(&req, &method, src).await;
 

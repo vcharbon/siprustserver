@@ -29,6 +29,7 @@ fn param_str<'a>(via: &'a Via, name: &str) -> Option<&'a str> {
 impl ProxyCore {
     pub(super) async fn handle_response(&self, resp: SipResponse) {
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
+        self.metrics.record_response(&resp.cseq.method.to_ascii_uppercase(), resp.status);
 
         // §16.7.3: need ≥2 Via (ours + the next hop's).
         if resp.via.len() < 2 {

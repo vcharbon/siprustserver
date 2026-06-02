@@ -1,0 +1,1027 @@
+{
+ "uid": "sipp-endurance-chaos",
+ "title": "SIPp Endurance & Chaos",
+ "tags": [
+  "sip",
+  "endurance",
+  "chaos",
+  "sipp"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "refresh": "10s",
+ "time": {
+  "from": "now-2h",
+  "to": "now"
+ },
+ "annotations": {
+  "list": [
+   {
+    "name": "Chaos window",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "vm"
+    },
+    "enable": true,
+    "iconColor": "semi-dark-orange",
+    "expr": "sip_chaos_window == 1",
+    "titleFormat": "chaos: {{type}}",
+    "tagKeys": "type",
+    "step": "10s"
+   }
+  ]
+ },
+ "templating": {
+  "list": []
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "row",
+   "title": "Overview",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   }
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "Concurrent calls (all streams)",
+   "description": "Live established dialogs across long+short+abuse+peak.",
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 0,
+    "y": 1
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum(sipp_current_calls)",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 4000
+       },
+       {
+        "color": "red",
+        "value": 8000
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   }
+  },
+  {
+   "id": 3,
+   "type": "stat",
+   "title": "Call setup rate (created/s)",
+   "description": "Aggregate INVITEs/s created by all UAC streams.",
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 6,
+    "y": 1
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(sipp_calls_created_total[1m]))",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     },
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   }
+  },
+  {
+   "id": 4,
+   "type": "stat",
+   "title": "Success ratio (5m)",
+   "description": "Resolved-call success ratio over 5m.",
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 12,
+    "y": 1
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "100*sum(rate(sipp_successful_calls_total[5m]))/clamp_min(sum(rate(sipp_successful_calls_total[5m]))+sum(rate(sipp_failed_calls_total[5m])),1)",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 90
+       },
+       {
+        "color": "green",
+        "value": 99
+       }
+      ]
+     },
+     "unit": "percent",
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   }
+  },
+  {
+   "id": 5,
+   "type": "stat",
+   "title": "Failed calls (cumulative)",
+   "description": "Total failed calls across all streams.",
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 18,
+    "y": 1
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum(sipp_failed_calls_total)",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 1
+       },
+       {
+        "color": "red",
+        "value": 100
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   }
+  },
+  {
+   "id": 6,
+   "type": "row",
+   "title": "Traffic",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 5
+   }
+  },
+  {
+   "id": 7,
+   "type": "timeseries",
+   "title": "Concurrent calls by stream",
+   "description": "Live dialogs per traffic role.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 6
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum by (role)(sipp_current_calls)",
+     "refId": "A",
+     "legendFormat": "{{role}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 18,
+      "showPoints": "never",
+      "lineWidth": 1,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 8,
+   "type": "timeseries",
+   "title": "Call rate by stream",
+   "description": "SIPp cumulative call rate (cps) per role.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 6
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum by (role)(sipp_call_rate)",
+     "refId": "A",
+     "legendFormat": "{{role}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "lineWidth": 1
+     },
+     "unit": "cps"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 9,
+   "type": "row",
+   "title": "Outcomes",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 14
+   }
+  },
+  {
+   "id": 10,
+   "type": "timeseries",
+   "title": "Successful vs failed (calls/s)",
+   "description": "Per-second resolved call outcomes.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 15
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(sipp_successful_calls_total[1m]))",
+     "refId": "A"
+    },
+    {
+     "expr": "sum(rate(sipp_failed_calls_total[1m]))",
+     "refId": "B"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 11,
+   "type": "timeseries",
+   "title": "Failure causes (calls/s)",
+   "description": "Per-second failures by SIPp failure class.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 15
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum by (cause)(rate(sipp_failed_total[1m]))",
+     "refId": "A",
+     "legendFormat": "{{cause}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 18,
+      "showPoints": "never",
+      "lineWidth": 1,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 12,
+   "type": "table",
+   "title": "Failure causes (cumulative) by stream",
+   "description": "Cumulative count per failure class AND per SIPp stream/endpoint (role + scenario), non-zero only. This attributes each 'unexpected_msg' (and every other cause) to the exact stream that saw it.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 23
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum by (cause, role, scenario)(sipp_failed_total) > 0",
+     "refId": "A",
+     "format": "table",
+     "instant": true
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true
+   }
+  },
+  {
+   "id": 13,
+   "type": "timeseries",
+   "title": "Retransmissions / out-of-call / dead-call (per-s)",
+   "description": "Protocol-health signals.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 23
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(sipp_retransmissions_total[1m]))",
+     "refId": "A"
+    },
+    {
+     "expr": "sum(rate(sipp_out_of_call_msgs_total[1m]))",
+     "refId": "B"
+    },
+    {
+     "expr": "sum(rate(sipp_dead_call_msgs_total[1m]))",
+     "refId": "C"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 14,
+   "type": "row",
+   "title": "Chaos",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 31
+   }
+  },
+  {
+   "id": 15,
+   "type": "timeseries",
+   "title": "Chaos window (active span per type)",
+   "description": "`sip_chaos_window` — 1 for the full real duration of each chaos event, 0 otherwise. The rectangular pulse width = the true event length (matches the orange region annotation). Replaces the old instant-marker smear.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 32
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "max by (type)(sip_chaos_window)",
+     "refId": "A",
+     "legendFormat": "{{type}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 16,
+   "type": "stat",
+   "title": "Last chaos success %",
+   "description": "Per-type success% across the last event window.",
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 12,
+    "y": 32
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sip_chaos_success_pct",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 90
+       },
+       {
+        "color": "green",
+        "value": 99
+       }
+      ]
+     },
+     "unit": "percent",
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   }
+  },
+  {
+   "id": 17,
+   "type": "stat",
+   "title": "Active injected chaos",
+   "description": "abuse (steady) + peak (during burst) currently active.",
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 18,
+    "y": 32
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum(sip_chaos_active)",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   }
+  },
+  {
+   "id": 18,
+   "type": "table",
+   "title": "Chaos events log",
+   "description": "Latest chaos events by type/result.",
+   "gridPos": {
+    "h": 4,
+    "w": 12,
+    "x": 12,
+    "y": 36
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum by (type,result)(sip_chaos_event)",
+     "refId": "A",
+     "format": "table",
+     "instant": true
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true
+   }
+  },
+  {
+   "id": 19,
+   "type": "row",
+   "title": "Infra (SUT pods)",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 40
+   }
+  },
+  {
+   "id": 20,
+   "type": "timeseries",
+   "title": "Worker / proxy restarts",
+   "description": "Container restart counters \u2014 chaos kills show here.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 41
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum by (pod)(kube_pod_container_status_restarts_total{namespace=\"sip-test\"})",
+     "refId": "A",
+     "legendFormat": "{{pod}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 21,
+   "type": "timeseries",
+   "title": "SUT pod CPU (cores)",
+   "description": "cAdvisor CPU per worker/proxy pod.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 41
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum by (pod)(rate(container_cpu_usage_seconds_total{namespace=\"sip-test\",pod=~\"b2bua-worker.*|sip-front-proxy.*\"}[1m]))",
+     "refId": "A",
+     "legendFormat": "{{pod}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 22,
+   "type": "row",
+   "title": "Call-leak / orphan detector",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 48
+   }
+  },
+  {
+   "id": 23,
+   "type": "timeseries",
+   "title": "B2BUA active calls per worker (must fall to ~0 when idle \u2014 leak detector)",
+   "description": "b2bua_active_calls per worker. A flat plateau after traffic stops = the call leak. With the reaper fix it tracks real concurrency and drains.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 49
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum by (pod)(b2bua_active_calls)",
+     "refId": "A",
+     "legendFormat": "{{pod}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 24,
+   "type": "timeseries",
+   "title": "orphan_kill: orphaned dialogs vs un-reaped residual",
+   "description": "Per orphan_kill event: dialogs orphaned by the abrupt UAC kill vs the residual still un-reaped after the wait window. Residual\u22480 = reaper healthy.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 49
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sip_chaos_orphaned",
+     "refId": "A",
+     "legendFormat": ""
+    },
+    {
+     "expr": "sip_chaos_orphan_residual",
+     "refId": "B",
+     "legendFormat": ""
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 25,
+   "type": "row",
+   "title": "Per-stream (SIPp instance) breakdown",
+   "collapsed": false,
+   "gridPos": { "h": 1, "w": 24, "x": 0, "y": 57 }
+  },
+  {
+   "id": 26,
+   "type": "timeseries",
+   "title": "Messages/sec per stream (calls created by role)",
+   "description": "`sipp_calls_created_total` rate split by SIPp instance (role: long / short / abuse / peak / orphan). Each stream counts its own traffic; all roles share this graph.",
+   "gridPos": { "h": 8, "w": 12, "x": 0, "y": 58 },
+   "datasource": { "type": "prometheus", "uid": "vm" },
+   "targets": [
+    { "expr": "sum by (role)(rate(sipp_calls_created_total[1m]))", "refId": "A", "legendFormat": "{{role}}" }
+   ],
+   "fieldConfig": { "defaults": { "unit": "cps", "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } }, "overrides": [] },
+   "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+  },
+  {
+   "id": 27,
+   "type": "timeseries",
+   "title": "Errors/sec per stream (failed calls by role)",
+   "description": "`sipp_failed_calls_total` rate split by SIPp instance (role). Each stream counts its own failures; all roles share this graph so you can see which endpoint is erroring.",
+   "gridPos": { "h": 8, "w": 12, "x": 12, "y": 58 },
+   "datasource": { "type": "prometheus", "uid": "vm" },
+   "targets": [
+    { "expr": "sum by (role)(rate(sipp_failed_calls_total[1m]))", "refId": "A", "legendFormat": "{{role}}" }
+   ],
+   "fieldConfig": { "defaults": { "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } } }, "overrides": [] },
+   "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+  },
+  {
+   "id": 28,
+   "type": "timeseries",
+   "title": "Unexpected messages by endpoint (role + scenario)",
+   "description": "`sipp_failed_total{cause=\"unexpected_msg\"}` rate split by the SIPp instance that received it (role + scenario). This is the answer to 'which endpoint generated the unexpected message'.",
+   "gridPos": { "h": 8, "w": 12, "x": 0, "y": 66 },
+   "datasource": { "type": "prometheus", "uid": "vm" },
+   "targets": [
+    { "expr": "sum by (role, scenario)(rate(sipp_failed_total{cause=\"unexpected_msg\"}[1m]))", "refId": "A", "legendFormat": "{{role}} ({{scenario}})" }
+   ],
+   "fieldConfig": { "defaults": { "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } } }, "overrides": [] },
+   "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+  },
+  {
+   "id": 29,
+   "type": "timeseries",
+   "title": "Failure causes per stream (cause + role)",
+   "description": "`sipp_failed_total` rate by failure class AND SIPp instance (role) — full per-endpoint error breakdown across every cause, not just unexpected_msg.",
+   "gridPos": { "h": 8, "w": 12, "x": 12, "y": 66 },
+   "datasource": { "type": "prometheus", "uid": "vm" },
+   "targets": [
+    { "expr": "sum by (cause, role)(rate(sipp_failed_total[1m]))", "refId": "A", "legendFormat": "{{cause}} · {{role}}" }
+   ],
+   "fieldConfig": { "defaults": { "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } }, "overrides": [] },
+   "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+  }
+ ]
+}
