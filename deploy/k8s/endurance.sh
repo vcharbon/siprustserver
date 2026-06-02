@@ -108,9 +108,14 @@ except Exception:
 # Launch (or replace) a long-lived UAC stream from the shared job manifest.
 launch_stream() {
   local job="$1" scenario="$2" cps="$3" role="$4"
+  # `-l` headroom (MAX_CONCURRENT): sized so the offered rate never throttles on
+  # transient stuck-call backlog. With the SIPp dead-call reaper (-recv_timeout
+  # 600s, manifests/40) the backlog is bounded to ~10 min of leaked calls; 1200s
+  # of full-rate headroom keeps `-l` comfortably above steady concurrency + that
+  # backlog so lost calls do NOT decrease the open rate.
   export UAC_JOB_NAME="$job" SCENARIO="$scenario" CAPS="$cps" ROLE="$role" \
          MAX_CALLS=$(( cps * (DURATION + 600) )) \
-         MAX_CONCURRENT="${MAX_CONCURRENT:-$(( cps * 600 ))}"
+         MAX_CONCURRENT="${MAX_CONCURRENT:-$(( cps * 1200 ))}"
   kubectl -n "$NS" delete job "$job" --ignore-not-found >/dev/null 2>&1 || true
   envsubst < manifests/40-sipp-uac-job.yaml | kubectl apply -f - >/dev/null
 }

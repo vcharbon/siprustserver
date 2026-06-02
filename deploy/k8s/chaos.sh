@@ -69,7 +69,8 @@ wait_ready() {
 # Launch the hold-failover UAC job: CALLS dialogs at CPS, each INVITE/ACK/15s
 # hold/BYE. SIPp exits 0 only if every call succeeded.
 launch_calls() {
-  export UAC_JOB_NAME="$JOB" CAPS="$CPS" MAX_CALLS="$CALLS"
+  export UAC_JOB_NAME="$JOB" CAPS="$CPS" MAX_CALLS="$CALLS" \
+         MAX_CONCURRENT="${MAX_CONCURRENT:-$(( CPS * 600 ))}" ROLE="${ROLE:-failover}"
   kubectl -n "$NS" delete job "$JOB" --ignore-not-found >/dev/null 2>&1 || true
   log "launching $CALLS hold dialogs @ ${CPS}cps (scenario=$SCENARIO)"
   envsubst < manifests/40-sipp-uac-job.yaml | kubectl apply -f -
@@ -81,9 +82,114 @@ launch_calls() {
 # incarnation; the surviving worker serves the backup replica so in-dialog BYEs
 # still terminate cleanly.
 kill_worker() {
-  log "CHAOS: killing $KILL_TARGET mid-hold"
-  kubectl -n "$NS" delete pod "$KILL_TARGET" --grace-period=0 --force >/dev/null 2>&1 || true
+  local grace="${KILL_GRACE:-0}"
+  log "CHAOS: killing $KILL_TARGET mid-hold (grace=${grace}s)"
+  if [ "$grace" -gt 0 ]; then
+    # Graceful: the worker drains (flushes its changelog to the backup +
+    # self-503s via B2BUA_DRAIN_GRACE_MS) so in-dialog BYEs land on a hydrated
+    # replica — models a rolling restart. grace=0 (default) is a true crash.
+    kubectl -n "$NS" delete pod "$KILL_TARGET" --grace-period="$grace" >/dev/null 2>&1 || true
+  else
+    kubectl -n "$NS" delete pod "$KILL_TARGET" --grace-period=0 --force >/dev/null 2>&1 || true
+  fi
   kubectl -n "$NS" get pods -l app=b2bua-worker -o wide || true
+}
+
+# ---------------------------------------------------------------------------
+# Extended chaos primitives (proxy kill, traffic peak, abuse stream) + a VM
+# metric push so every chaos event lands in Grafana. Used standalone and by the
+# endurance orchestrator (endurance.sh).
+# ---------------------------------------------------------------------------
+
+# VictoriaMetrics Prometheus import endpoint (host stack). Each chaos event is
+# pushed as an instant sample so the dashboard can mark + count it.
+VM_IMPORT="${VM_IMPORT:-http://127.0.0.1:8428/api/v1/import/prometheus}"
+push_metric() {
+  # $1 = one or more newline-separated exposition lines.
+  curl -s --max-time 4 -X POST "$VM_IMPORT" --data-binary "$1" >/dev/null 2>&1 || true
+}
+
+# CHAOS: kill the (single-replica) front proxy. New-call setup fails until the
+# Deployment restarts it; established dialogs pinned via Record-Route reconverge.
+kill_proxy() {
+  log "CHAOS: killing primary sip-front-proxy"
+  push_metric 'sip_chaos_event{type="kill_proxy",phase="start"} 1'
+  kubectl -n "$NS" delete pod -l app=sip-front-proxy --grace-period=0 --force >/dev/null 2>&1 || true
+  log "waiting for sip-front-proxy to come back Ready"
+  kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout=90s || true
+  # Fresh proxy pod -> fresh IP, but PROXY_ADVERTISE/PROXY_WORKERS are env-fixed
+  # at deploy; the Service still selects it, so new calls flow once Ready.
+  kubectl -n "$NS" get pods -l app=sip-front-proxy -o wide || true
+  push_metric 'sip_chaos_event{type="kill_proxy",result="pass"} 1'
+}
+
+# CHAOS: a short, sharp ${PEAK_CAPS}cps burst of short calls on top of the
+# baseline — the traffic-peak event. Launches a fire-and-forget UAC job and
+# deletes it after PEAK_SECS.
+PEAK_CAPS="${PEAK_CAPS:-200}"
+PEAK_SECS="${PEAK_SECS:-30}"
+peak() {
+  local job="sipp-uac-peak"
+  log "CHAOS: traffic peak ${PEAK_CAPS}cps for ${PEAK_SECS}s"
+  push_metric "sip_chaos_event{type=\"peak\",phase=\"start\"} 1
+sip_chaos_active{type=\"peak\"} 1"
+  export UAC_JOB_NAME="$job" CAPS="$PEAK_CAPS" \
+         MAX_CALLS=$(( PEAK_CAPS * (PEAK_SECS + 10) )) \
+         MAX_CONCURRENT="${MAX_CONCURRENT:-$(( PEAK_CAPS * 600 ))}" \
+         SCENARIO="uac-endurance-short.xml" ROLE="peak"
+  kubectl -n "$NS" delete job "$job" --ignore-not-found >/dev/null 2>&1 || true
+  envsubst < manifests/40-sipp-uac-job.yaml | kubectl apply -f -
+  sleep "$PEAK_SECS"
+  kubectl -n "$NS" delete job "$job" --ignore-not-found >/dev/null 2>&1 || true
+  push_metric "sip_chaos_event{type=\"peak\",result=\"pass\"} 1
+sip_chaos_active{type=\"peak\"} 0"
+}
+
+# Background ABUSE stream at ${ABUSE_CAPS}cps (default 1). Long-lived job running
+# an abuse archetype (in-dialog OPTIONS flood by default) for the whole window.
+ABUSE_CAPS="${ABUSE_CAPS:-1}"
+ABUSE_SCENARIO="${ABUSE_SCENARIO:-uac-abuse-options-flood.xml}"
+ABUSE_JOB="sipp-uac-abuse"
+abuse_up() {
+  log "ABUSE: starting ${ABUSE_CAPS}cps stream (${ABUSE_SCENARIO})"
+  export UAC_JOB_NAME="$ABUSE_JOB" CAPS="$ABUSE_CAPS" \
+         MAX_CALLS="${ABUSE_MAX_CALLS:-1000000}" \
+         MAX_CONCURRENT="${MAX_CONCURRENT:-10000}" \
+         SCENARIO="$ABUSE_SCENARIO" ROLE="abuse"
+  kubectl -n "$NS" delete job "$ABUSE_JOB" --ignore-not-found >/dev/null 2>&1 || true
+  envsubst < manifests/40-sipp-uac-job.yaml | kubectl apply -f -
+  push_metric 'sip_chaos_active{type="abuse"} 1'
+}
+abuse_down() {
+  log "ABUSE: stopping stream"
+  kubectl -n "$NS" delete job "$ABUSE_JOB" --ignore-not-found >/dev/null 2>&1 || true
+  push_metric 'sip_chaos_active{type="abuse"} 0'
+}
+
+# CHAOS: launch a DEDICATED ${ORPHAN_CAPS}cps stream, let calls establish, then
+# ABRUPTLY kill the UAC mid-call (--grace-period=0, no BYE). Every in-flight
+# dialog is orphaned on the B2BUA — the exact condition that leaked calls
+# forever before the terminating-safety-timeout reaper fix. The worker must reap
+# them via keepalive timeout (in-dialog OPTIONS get no answer) within ~a minute.
+# endurance.sh measures b2bua_active_calls before/after to detect a regression.
+ORPHAN_CAPS="${ORPHAN_CAPS:-50}"
+ORPHAN_BUILD_SECS="${ORPHAN_BUILD_SECS:-20}"
+ORPHAN_JOB="sipp-uac-orphan"
+orphan_kill() {
+  log "CHAOS: orphan_kill — ${ORPHAN_CAPS}cps for ${ORPHAN_BUILD_SECS}s then abrupt UAC kill (no BYE)"
+  push_metric 'sip_chaos_event{type="orphan_kill",phase="start"} 1'
+  export UAC_JOB_NAME="$ORPHAN_JOB" CAPS="$ORPHAN_CAPS" \
+         MAX_CALLS=$(( ORPHAN_CAPS * (ORPHAN_BUILD_SECS + 120) )) \
+         MAX_CONCURRENT="${MAX_CONCURRENT:-$(( ORPHAN_CAPS * 600 ))}" \
+         SCENARIO="uac-endurance-short.xml" ROLE="orphan"
+  kubectl -n "$NS" delete job "$ORPHAN_JOB" --ignore-not-found >/dev/null 2>&1 || true
+  envsubst < manifests/40-sipp-uac-job.yaml | kubectl apply -f - >/dev/null
+  kubectl -n "$NS" wait --for=condition=ready pod -l role=orphan --timeout=40s >/dev/null 2>&1 || true
+  sleep "$ORPHAN_BUILD_SECS"   # let ~ORPHAN_CAPS*ORPHAN_BUILD_SECS dialogs establish
+  log "CHAOS: abruptly killing the orphan UAC mid-call (dialogs orphaned on the B2BUA)"
+  kubectl -n "$NS" delete pod -l role=orphan --grace-period=0 --force >/dev/null 2>&1 || true
+  kubectl -n "$NS" delete job "$ORPHAN_JOB" --grace-period=0 --force --ignore-not-found >/dev/null 2>&1 || true
+  push_metric 'sip_chaos_event{type="orphan_kill",phase="killed"} 1'
 }
 
 # Read the UAC job's SIPp stats and assert the success rate clears the bar.
@@ -212,8 +318,12 @@ case "$cmd" in
   up)        up ;;
   deploy)    deploy; wait_ready ;;
   kill)      kill_worker ;;
+  proxykill) kill_proxy ;;
+  peak)      peak ;;
+  orphankill) orphan_kill ;;
+  abuse)     case "${1:-up}" in up) abuse_up ;; down) abuse_down ;; *) fail "usage: $0 abuse {up|down}" ;; esac ;;
   recover)   wait_brought_back; assert_rehydrated ;;
   assert)    assert_survival ;;
   down)      down ;;
-  *) fail "usage: $0 {failover|bringback|up|deploy|kill|recover|assert|down}" ;;
+  *) fail "usage: $0 {failover|bringback|up|deploy|kill|proxykill|peak|orphankill|abuse {up|down}|recover|assert|down}" ;;
 esac

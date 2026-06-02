@@ -3,6 +3,16 @@
 # Service. Runs scenario ${SCENARIO} (default uac-basic.xml; the chaos suite sets
 # uac-hold-failover.xml so calls sit in a hold long enough to kill a worker
 # mid-dialog). Pinned to tier=load.
+#
+# Reporting: SIPp writes its periodic stat CSV to a shared emptyDir
+# (/stats/stat.csv, -fd 1 = 1s flush); a NATIVE SIDECAR (initContainer with
+# restartPolicy: Always — GA on k8s 1.29+, excluded from Job-completion
+# accounting so `wait --for=condition=complete` still works) runs the stdlib
+# stat->Prometheus exporter from the same sipp:dev image. The pod carries the
+# prometheus.io/scrape annotations so the in-cluster vmagent scrapes it exactly
+# like the proxy/worker pods — i.e. reporting is wired the same way as the rest
+# of the stack at cluster start. ${ROLE} (uac|short|long|abuse|peak) labels the
+# series so the dashboard can split traffic streams.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -14,10 +24,35 @@ spec:
   ttlSecondsAfterFinished: 120
   template:
     metadata:
-      labels: { app: sipp-uac }
+      labels: { app: sipp-uac, role: "${ROLE}" }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9035"
+        prometheus.io/path: "/metrics"
     spec:
       restartPolicy: Never
       nodeSelector: { tier: load }
+      # Native sidecar: starts before the SIPp container, keeps running, and is
+      # ignored for Job completion. Serves /metrics on :9035 off the shared CSV.
+      initContainers:
+        - name: stat-exporter
+          image: sipp:dev
+          imagePullPolicy: IfNotPresent
+          restartPolicy: Always
+          command: ["python3", "/exporter/sipp_stat_exporter.py"]
+          env:
+            - { name: SIPP_STAT_FILE, value: "/stats/stat.csv" }
+            - { name: SIPP_SCENARIO,  value: "${SCENARIO}" }
+            - { name: SIPP_ROLE,      value: "${ROLE}" }
+            - { name: SIPP_JOB,       value: "${UAC_JOB_NAME}" }
+          ports:
+            - { name: metrics, containerPort: 9035, protocol: TCP }
+          volumeMounts:
+            - { name: stats,    mountPath: /stats }
+            - { name: exporter, mountPath: /exporter }
+          resources:
+            requests: { cpu: "25m", memory: "32Mi" }
+            limits:   { memory: "128Mi" }
       containers:
         - name: sipp-uac
           image: sipp:dev
@@ -37,19 +72,51 @@ spec:
             - "${CAPS}"
             - "-rp"
             - "1000"
+            # Explicit simultaneous-call ceiling. SIPp's auto -l defaults to
+            # 3*static_call_duration*rate; OPTIONS-hold scenarios (no <pause>)
+            # estimate ~1s duration and collapse to ~15, throttling the open
+            # rate. Every render site exports MAX_CONCURRENT (envsubst has no
+            # default syntax), so this is always set.
+            - "-l"
+            - "${MAX_CONCURRENT}"
             - "-m"
             - "${MAX_CALLS}"
+            # Dead-call reaper. With no receive timeout a call whose expected
+            # message never arrives (lost response, killed peer, orphaned dialog)
+            # stays open forever, pinning an `-l` simultaneous-call slot; as these
+            # accumulate SIPp hits `-l` and throttles new-call creation, so the
+            # offered rate decays across a long run. `-recv_timeout 600000`
+            # (10 min) aborts any leg that goes silent for >10 min and counts it
+            # as a timeout failure (FailedTimeoutOnRecv -> exporter cause
+            # `timeout_recv`, so it is raised as an issue) and frees the slot.
+            # Per-<recv> `timeout=` in a scenario (e.g. the long-hold's
+            # `timeout="350000"`) overrides this global default where a specific
+            # wait is intended, so healthy long/hold calls are unaffected.
+            - "-recv_timeout"
+            - "600000"
             - "-trace_err"
             - "-trace_stat"
             - "-stf"
-            - "/dev/stdout"
+            - "/stats/stat.csv"
             - "-fd"
-            - "5"
+            - "1"
           env:
             - name: POD_IP
               valueFrom: { fieldRef: { fieldPath: status.podIP } }
+          # Memory request drives spreading across the two tier=load nodes and
+          # prevents a single node being overcommitted; the limit contains a
+          # runaway generator to its own pod (OOMKill + relaunch) instead of
+          # starving the node and evicting sibling streams.
+          resources:
+            requests: { cpu: "250m", memory: "384Mi" }
+            limits:   { memory: "1536Mi" }
           volumeMounts:
             - { name: scenarios, mountPath: /scenarios }
+            - { name: stats,     mountPath: /stats }
       volumes:
         - name: scenarios
           configMap: { name: sipp-scenarios }
+        - name: exporter
+          configMap: { name: sipp-exporter }
+        - name: stats
+          emptyDir: {}
