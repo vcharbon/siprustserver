@@ -223,6 +223,57 @@ pub fn reconcile_to_desired(state: &MembershipState, desired: Vec<Peer>) {
     }
 }
 
+/// Drive a `reconcile` closure from a [`Membership`] source — the single
+/// broadcast-consume loop shared by the proxy worker registry (ADR-0012 D4) and
+/// the b2bua replication supervisor (D1/D2), each supplying its own projection
+/// of the snapshot onto its registry/puller set.
+///
+/// Subscribes BEFORE the initial snapshot (no lost delta — `changes()` has no
+/// backfill), runs `reconcile(snapshot)` once **synchronously** (so the caller's
+/// state is populated before this returns), then spawns a task that re-reconciles
+/// from the **authoritative snapshot** on every wakeup: a delta, a `Lagged`
+/// overflow, or a `period` tick. A `Lagged` (we fell behind a bursty producer and
+/// dropped intermediate deltas) is non-fatal — the next snapshot is current, so we
+/// reconcile and KEEP LOOPING; the old `Err(_) => return` here is exactly what
+/// deafened the supervisor and stranded it on dead peer IPs (ADR-0012 D1). Only a
+/// `Closed` source (membership dropped) stops the loop. Returns the task handle
+/// (abort to stop). `reconcile` must be idempotent — an unchanged set is a no-op.
+pub fn spawn_membership_reconcile<F>(
+    membership: Arc<dyn Membership>,
+    period: std::time::Duration,
+    mut reconcile: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: FnMut(Vec<Peer>) + Send + 'static,
+{
+    // Subscribe BEFORE the snapshot so no delta between snapshot and subscribe is
+    // lost; the initial reconcile runs synchronously so the caller's state is
+    // current the moment this returns.
+    let mut changes = membership.changes();
+    reconcile(membership.snapshot());
+    tokio::spawn(async move {
+        // The periodic belt-and-suspenders reconcile (ADR-0012 D2). `interval`'s
+        // first tick fires immediately — consume it; the synchronous initial
+        // reconcile above already covered the boot snapshot.
+        let mut ticker = tokio::time::interval(period);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        ticker.tick().await;
+        loop {
+            // Every wakeup — a delta, a `Lagged` overflow, or the periodic tick —
+            // takes the same path: reconcile from the authoritative snapshot. Only
+            // `Closed` (source gone) stops us.
+            let proceed = tokio::select! {
+                r = changes.recv() => !matches!(r, Err(broadcast::error::RecvError::Closed)),
+                _ = ticker.tick() => true,
+            };
+            if !proceed {
+                return;
+            }
+            reconcile(membership.snapshot());
+        }
+    })
+}
+
 /// Parse `ordinal@host,ordinal@host,...` into a peer set. An empty/blank string
 /// yields an empty set. Rejects empty entries, missing/edge `@`, empty
 /// ordinals, empty hosts, and duplicate ordinals. **Port-agnostic** — the host

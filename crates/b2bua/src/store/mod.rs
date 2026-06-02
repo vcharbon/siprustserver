@@ -120,9 +120,17 @@ impl CallState {
     /// failover takeover. Returns the hydrated call (or `None` if no replica /
     /// no replicating store / decode failure). Idempotent: a present call is
     /// returned as-is without a store read.
-    pub async fn hydrate_from_replica(&self, call_ref: &str) -> Option<Call> {
+    ///
+    /// Returns `(call, fresh)` where `fresh == true` iff the call was just
+    /// materialized from the backup partition on THIS call (it was not already
+    /// resident in the in-memory map). The router uses `fresh` to decide whether
+    /// to re-arm the call's per-call timers (keepalive / global-duration) into
+    /// this node's in-memory `TimerService` — those timers are runtime fibers,
+    /// not replicated state, so a freshly-hydrated call arrives with no live
+    /// timers and would otherwise never be probed or reaped (the failover leak).
+    pub async fn hydrate_from_replica(&self, call_ref: &str) -> Option<(Call, bool)> {
         if let Some(c) = self.peek(call_ref) {
-            return Some(c);
+            return Some((c, false));
         }
         let repl = self.repl_store.as_ref()?;
         // The call's natural primary (from the encoded ref); on the acting-backup
@@ -138,7 +146,7 @@ impl CallState {
         let mut inner = self.inner.lock().unwrap();
         // Re-check under the lock (a concurrent hydrate may have won the race).
         if let Some(c) = inner.calls.get(call_ref) {
-            return Some(c.clone());
+            return Some((c.clone(), false));
         }
         Self::reindex(&mut inner, &call);
         inner.calls.insert(call_ref.to_string(), call.clone());
@@ -146,7 +154,7 @@ impl CallState {
         // A failed-over in-dialog request just loaded its dialog from a backup
         // replica — the acting-backup takeover actually fired.
         self.metrics.bump_repl_takeover_hydrated();
-        Some(call)
+        Some((call, true))
     }
 
     /// Replace the in-memory call and refresh its routing index.

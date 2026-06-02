@@ -102,12 +102,14 @@ impl ReplWiring {
             clock.clone(),
         ));
         let addr_map = self.addr_map.clone();
-        let addr_resolver: Arc<dyn Fn(&Peer) -> SocketAddr + Send + Sync> =
-            Arc::new(move |peer: &Peer| {
+        // The resolver is now async (ADR-0012 D3); wrap the sim's ordinal→addr map
+        // in the sync-closure adapter.
+        let addr_resolver: b2bua::repl::AddrResolver =
+            Arc::new(b2bua::repl::FnPeerResolver(move |peer: &Peer| {
                 *addr_map
                     .get(&peer.ordinal)
                     .unwrap_or_else(|| panic!("no repl addr for peer {}", peer.ordinal))
-            });
+            }));
         let setup = ReplicationSetup {
             network: self.network.clone(),
             membership,

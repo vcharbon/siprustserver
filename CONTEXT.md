@@ -132,4 +132,11 @@ is current. **Draining** = latched on SIGTERM; terminal.
 **K8sMembership**:
 The real `topology::Membership` source (S11): a kube EndpointSlice informer over
 the headless worker Service. *Ready* endpoints → `Peer{ordinal = pod name, host
-= pod IP}`; written once, consumed by both proxy and b2bua (ADR-0011 X7).
+= pod IP}`; written once, consumed by both proxy and b2bua (ADR-0011 X7 / ADR-0012
+D4). Its delta consumers **self-heal**: a `Lagged` broadcast re-reconciles from
+`snapshot()` (never `return`s) and a periodic snapshot reconcile makes a missed
+delta non-fatal (ADR-0012 D1/D2). The repl puller additionally resolves a
+**stable per-pod DNS name fresh per connect** as defense-in-depth (ADR-0012 D3);
+the proxy reaches workers by the informer-fed Pod IP (ADR-0012 D4). Consistency
+is enforced on *identity + membership source*, not *address representation*
+(ADR-0012 D5).

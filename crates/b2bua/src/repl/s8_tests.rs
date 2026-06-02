@@ -24,7 +24,7 @@ use sip_clock::Clock;
 use topology::{Peer, SimulatedMembership};
 
 use super::{
-    flush_replicated, replication_target, Changelog, PullerConfig, ReplServer,
+    flush_replicated, replication_target, Changelog, FnPeerResolver, PullerConfig, ReplServer,
     ReplicatingCallStore, ReplicationPlan, ReplicationSupervisor,
 };
 use crate::store::{CallStore, PartitionRole, PropagateDirection, PutOpts};
@@ -90,7 +90,7 @@ fn supervisor_for(
     addrs: Vec<(String, SocketAddr)>,
 ) -> ReplicationSupervisor {
     let map: std::collections::HashMap<String, SocketAddr> = addrs.into_iter().collect();
-    let resolve = Arc::new(move |peer: &Peer| *map.get(&peer.ordinal).unwrap());
+    let resolve = Arc::new(FnPeerResolver(move |peer: &Peer| *map.get(&peer.ordinal).unwrap()));
     ReplicationSupervisor::with_config(
         self_ordinal,
         net.clone(),

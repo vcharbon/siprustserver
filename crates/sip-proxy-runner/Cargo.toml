@@ -15,4 +15,15 @@ sip-proxy = { path = "../sip-proxy" }
 sip-net = { path = "../sip-net" }
 sip-txn = { path = "../sip-txn" }
 sip-clock = { path = "../sip-clock" }
+# Cluster membership: the shared topology crate with the kube EndpointSlice
+# informer (ADR-0012 D4) so the proxy discovers workers from k8s — the SAME watch
+# the b2bua replication engine uses (ADR-0011 X7). Static PROXY_WORKERS remains a
+# dev/local fallback.
+topology = { path = "../topology", features = ["kube"] }
+# Default in-cluster kube client for K8sMembership.
+kube = { version = "1", default-features = false, features = ["client", "rustls-tls"] }
+# rustls 0.23 ships no compile-time default CryptoProvider unless a provider
+# feature is enabled; install one before the first TLS handshake (mirrors the
+# b2bua-runner) or the kube client panics.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio = { workspace = true }

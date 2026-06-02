@@ -17,7 +17,11 @@
 //!   PROXY_LISTEN     SIP listen addr                       (default 0.0.0.0:5060)
 //!   PROXY_ADVERTISE  host:port stamped on Via/Record-Route (default: listen, or
 //!                    127.0.0.1 if listen IP is unspecified)
-//!   PROXY_WORKERS    worker pool "id@host:port,..."        (default w0@127.0.0.1:5060)
+//!   PROXY_WORKERS    static worker pool "id@host:port,..." (default empty → k8s
+//!                    EndpointSlice discovery; ADR-0012 D4)
+//!   PROXY_WORKER_SERVICE  headless worker Service to watch  (default b2bua-worker)
+//!   PROXY_WORKER_PORT     SIP port appended to each Pod IP  (default 5060)
+//!   PROXY_NAMESPACE  namespace for k8s discovery            (default $POD_NAMESPACE / sip-test)
 //!   PROXY_METRICS    Prometheus HTTP listen addr           (default 0.0.0.0:9090)
 //!   PROXY_QUEUE      inbound UDP queue depth (packets)      (default 8192)
 //!   PROXY_HMAC_KID   stickiness cookie key id              (default k0)
@@ -27,6 +31,7 @@
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
+use std::time::Duration;
 
 use sip_clock::Clock;
 use sip_net::types::BindUdpOpts;
@@ -34,9 +39,13 @@ use sip_net::{RealSignalingNetwork, SignalingNetwork};
 use sip_proxy::health::{HealthProbe, HealthProbeConfig};
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use sip_proxy::observability::metrics_server::MetricsServer;
+use sip_proxy::observability::metrics_server::ReadinessFn;
 use sip_proxy::observability::ProxyMetrics;
+use sip_proxy::registry::control::WorkerRegistryControl;
+use sip_proxy::registry::membership_reg::MembershipWorkerRegistry;
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
-use sip_proxy::registry::WorkerRegistry;
+use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
+use topology::{K8sMembership, Membership};
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
 use sip_proxy::strategies::{LoadBalancerConfig, LoadBalancerStrategy};
 use sip_proxy::{ProxyAddr, ProxyCoreBuilder, RoutingStrategy};
@@ -57,10 +66,66 @@ fn parse_u64(key: &str, default: u64) -> u64 {
     env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
+/// Build the worker pool registry + its health-write control seam.
+///
+/// `PROXY_WORKERS` (a static `id@host:port,..` list) takes precedence for
+/// dev/local. When empty, the pool is discovered from k8s EndpointSlices via the
+/// shared `topology::K8sMembership` informer (ADR-0012 D4) — the same watch the
+/// b2bua replication engine consumes; the proxy still reaches each worker by its
+/// Pod IP at `PROXY_WORKER_PORT`. If no kube client is available either, falls
+/// back to a single loopback worker so the binary still runs locally.
+async fn build_registry(
+    workers: &str,
+    clock: Clock,
+) -> (Arc<dyn WorkerRegistry>, Arc<dyn WorkerRegistryControl>) {
+    if !workers.trim().is_empty() {
+        let reg = StaticWorkerRegistry::from_string(workers, "PROXY_WORKERS")
+            .unwrap_or_else(|e| panic!("bad PROXY_WORKERS {workers:?}: {e}"));
+        let control = reg.control(clock);
+        eprintln!("sip-proxy-runner worker pool: static PROXY_WORKERS={workers}");
+        return (Arc::new(reg), control);
+    }
+
+    let service = env_or("PROXY_WORKER_SERVICE", "b2bua-worker");
+    let namespace = env::var("PROXY_NAMESPACE")
+        .or_else(|_| env::var("POD_NAMESPACE"))
+        .unwrap_or_else(|_| "sip-test".to_string());
+    let sip_port: u16 = env_or("PROXY_WORKER_PORT", "5060").parse().expect("PROXY_WORKER_PORT");
+
+    // rustls 0.23 ships no default CryptoProvider; install ring once before the
+    // kube client opens its first TLS connection (idempotent — a second call Errs,
+    // which we ignore).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    match kube::Client::try_default().await {
+        Ok(client) => {
+            eprintln!(
+                "sip-proxy-runner worker pool: k8s EndpointSlice informer (svc={service}, ns={namespace}, port={sip_port})"
+            );
+            let membership: Arc<dyn Membership> =
+                Arc::new(K8sMembership::spawn(client, namespace, service));
+            let reg = MembershipWorkerRegistry::spawn(membership, sip_port, clock);
+            let control = reg.control();
+            (Arc::new(reg), control)
+        }
+        Err(e) => {
+            let fallback = "w0@127.0.0.1:5060";
+            eprintln!(
+                "sip-proxy-runner no kube client ({e}) and no PROXY_WORKERS — falling back to {fallback}"
+            );
+            let reg =
+                StaticWorkerRegistry::from_string(fallback, "fallback").expect("fallback pool");
+            let control = reg.control(clock);
+            (Arc::new(reg), control)
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let listen = env_or("PROXY_LISTEN", "0.0.0.0:5060");
-    let workers = env_or("PROXY_WORKERS", "w0@127.0.0.1:5060");
+    // PROXY_WORKERS (static `id@host:port,..`) takes precedence (dev/local). When
+    // empty, the worker pool is discovered from k8s EndpointSlices (ADR-0012 D4).
+    let workers = env_or("PROXY_WORKERS", "");
     let metrics_addr = env_or("PROXY_METRICS", "0.0.0.0:9090");
     let queue_max: usize = env_or("PROXY_QUEUE", "8192").parse().expect("PROXY_QUEUE");
     let hmac_kid = env_or("PROXY_HMAC_KID", "k0");
@@ -101,8 +166,6 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("bind probe socket failed: {e:?}"));
 
-    let static_reg = StaticWorkerRegistry::from_string(&workers, "PROXY_WORKERS")
-        .unwrap_or_else(|e| panic!("bad PROXY_WORKERS {workers:?}: {e}"));
     let hmac = Arc::new(
         StaticHmacKeyProvider::new(HmacKey::new(hmac_kid, hmac_key.into_bytes()), None)
             .unwrap_or_else(|e| panic!("bad PROXY_HMAC_KEY: {e}")),
@@ -112,12 +175,11 @@ async fn main() {
     let clock = Clock::system();
     let id_gen = Arc::new(IdGen::from_entropy());
 
-    // OPTIONS probe → health write-through over the static pool's shared state:
-    // an unanswered worker is demoted (Dead/NotReady/Draining) so in-dialog
-    // requests fail over to the backup. (Was `NoopControl`, which pinned the
-    // pool Alive and defeated failover.)
-    let health_control = static_reg.control(clock.clone());
-    let registry: Arc<dyn WorkerRegistry> = Arc::new(static_reg);
+    // Worker pool + its health-write seam. Static PROXY_WORKERS (dev/local) or the
+    // k8s EndpointSlice informer (ADR-0012 D4). Either way the OPTIONS probe writes
+    // observed health through `health_control` so an unanswered worker is demoted
+    // (Dead/NotReady/Draining) and in-dialog requests fail over to the backup.
+    let (registry, health_control) = build_registry(&workers, clock.clone()).await;
 
     let strategy: Arc<dyn RoutingStrategy> = Arc::new(LoadBalancerStrategy::new(
         registry.clone(),
@@ -143,24 +205,67 @@ async fn main() {
         },
     );
 
-    let core = ProxyCoreBuilder::new(advertised.clone(), strategy, registry)
+    let core = ProxyCoreBuilder::new(advertised.clone(), strategy, registry.clone())
         .clock(clock)
         .id_gen(id_gen)
         .metrics(metrics.clone())
         .build(endpoint);
 
     eprintln!(
-        "sip-proxy-runner pid={} listening UDP {listen_sa} advertise={}:{} workers=[{workers}] (queue={queue_max})",
+        "sip-proxy-runner pid={} listening UDP {listen_sa} advertise={}:{} workers=[{}] (queue={queue_max})",
         std::process::id(),
         advertised.host,
         advertised.port,
+        registry
+            .snapshot()
+            .iter()
+            .map(|w| format!("{}@{}:{}", w.id, w.address.host, w.address.port))
+            .collect::<Vec<_>>()
+            .join(","),
     );
+
+    // Readiness gate (ADR-0012 D4): the proxy is fit to take traffic only with
+    // ≥1 routable (`Alive`) worker. With the k8s EndpointSlice informer the pool
+    // starts empty and fills asynchronously (and stays empty if the watch is
+    // RBAC-forbidden / the Service name is wrong), so gating `/readyz` on this
+    // keeps the k8s Service from forwarding INVITEs into an empty pool — and turns
+    // a misconfigured watch into a loud rollout timeout instead of a silent
+    // black-hole. Mirrors the worker's `/ready`.
+    let ready: ReadinessFn = {
+        let reg = registry.clone();
+        Arc::new(move || reg.snapshot().iter().any(|w| w.health == WorkerHealth::Alive))
+    };
+
+    // Health sampler: publish the worker-health gauges + `sip_proxy_worker_pool_empty`
+    // from the live registry so an empty/all-unprobed pool is observable in
+    // Prometheus (not just via readiness). Cheap snapshot every probe interval.
+    {
+        let reg = registry.clone();
+        let m = metrics.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(2));
+            loop {
+                ticker.tick().await;
+                let (mut alive, mut draining, mut not_ready, mut unknown, mut dead) = (0, 0, 0, 0, 0);
+                for w in reg.snapshot() {
+                    match w.health {
+                        WorkerHealth::Alive => alive += 1,
+                        WorkerHealth::Draining => draining += 1,
+                        WorkerHealth::NotReady => not_ready += 1,
+                        WorkerHealth::Unknown => unknown += 1,
+                        WorkerHealth::Dead => dead += 1,
+                    }
+                }
+                m.set_worker_health_counts(alive, draining, not_ready, unknown, dead);
+            }
+        });
+    }
 
     // Prometheus endpoint. NOTE: `MetricsServer` aborts its listener task on
     // Drop, so the handle must stay live for the whole process lifetime.
-    let _metrics_server = match MetricsServer::start(metrics_sa, metrics).await {
+    let _metrics_server = match MetricsServer::start_with_readiness(metrics_sa, metrics, ready).await {
         Ok(s) => {
-            eprintln!("sip-proxy-runner metrics on http://{}/metrics", s.addr());
+            eprintln!("sip-proxy-runner metrics on http://{}/metrics (readiness /readyz)", s.addr());
             Some(s)
         }
         Err(e) => {

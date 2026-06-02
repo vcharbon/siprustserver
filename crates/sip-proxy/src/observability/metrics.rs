@@ -135,6 +135,12 @@ pub struct ProxyMetrics {
     ack_synthesized: AtomicU64,
     pending_invite_lru_size: AtomicU64,
     health: HealthGauges,
+    /// `1` ⇒ the worker pool has **zero routable (`Alive`) workers** — the proxy
+    /// can serve no new dialog. Set from the registry by the runner's health
+    /// sampler (ADR-0012 D4): an empty/RBAC-forbidden EndpointSlice informer pool
+    /// is otherwise silent (the proxy just black-holes every INVITE). Pairs with
+    /// the `/readyz` gate; alert on `sip_proxy_worker_pool_empty == 1`.
+    worker_pool_empty: AtomicU64,
 }
 
 impl ProxyMetrics {
@@ -205,13 +211,16 @@ impl ProxyMetrics {
         self.pending_invite_lru_size.store(n, Ordering::Relaxed);
     }
 
-    /// Set the worker-health gauges from a fleet count.
+    /// Set the worker-health gauges from a fleet count. Also derives
+    /// `worker_pool_empty` = `1` iff no worker is `Alive` (routable) — the
+    /// routing-fatal condition the `/readyz` gate also keys on.
     pub fn set_worker_health_counts(&self, alive: u64, draining: u64, not_ready: u64, unknown: u64, dead: u64) {
         self.health.alive.store(alive, Ordering::Relaxed);
         self.health.draining.store(draining, Ordering::Relaxed);
         self.health.not_ready.store(not_ready, Ordering::Relaxed);
         self.health.unknown.store(unknown, Ordering::Relaxed);
         self.health.dead.store(dead, Ordering::Relaxed);
+        self.worker_pool_empty.store(u64::from(alive == 0), Ordering::Relaxed);
     }
 
     // --- read helpers (tests) ---
@@ -281,6 +290,7 @@ impl ProxyMetrics {
         g(&mut s, "sip_proxy_record_route_inserted_total", "Record-Route headers inserted.", "counter", self.record_route_inserted.load(Ordering::Relaxed));
         g(&mut s, "sip_proxy_ack_synthesized_total", "Hop-by-hop ACKs synthesized for non-2xx.", "counter", self.ack_synthesized.load(Ordering::Relaxed));
         g(&mut s, "sip_proxy_pending_invite_lru_size", "Pending-INVITE LRU size.", "gauge", self.pending_invite_lru_size.load(Ordering::Relaxed));
+        g(&mut s, "sip_proxy_worker_pool_empty", "1 iff no worker is Alive (routable) — the proxy can serve no new dialog.", "gauge", self.worker_pool_empty.load(Ordering::Relaxed));
 
         s.push_str("# HELP sip_worker_health Worker count by health state.\n# TYPE sip_worker_health gauge\n");
         for (label, val) in [

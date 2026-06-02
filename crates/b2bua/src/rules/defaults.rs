@@ -36,7 +36,12 @@ fn no_transform() -> MessageTransform {
 }
 
 fn keepalive_interval(ctx: &RuleContext) -> i64 {
-    ctx.call.features.as_ref().map(|f| f.platform.keepalive.interval_sec).unwrap_or(30)
+    // The in-dialog OPTIONS keepalive interval is an operator/worker knob
+    // (`B2buaConfig::keepalive_interval_sec`, production default 300 s,
+    // `B2BUA_KEEPALIVE_SEC` override), not a per-call feature: a 30 s poke breaks
+    // long-hold endurance traffic. The per-call `features` keepalive interval is
+    // retained for compatibility but no longer drives the runtime timer.
+    ctx.config.keepalive_interval_sec
 }
 fn max_duration(ctx: &RuleContext) -> i64 {
     ctx.call.features.as_ref().map(|f| f.platform.max_duration_sec).unwrap_or(3600)
@@ -525,9 +530,32 @@ fn core_rules() -> Vec<RuleDefinition> {
                 RuleAction::BeginTermination { reason: Some("keepalive-timeout".into()) },
             ])
         }),
-        rule("terminating-safety-timeout", &[], Match::timer().timer_type(TimerType::TerminatingTimeout).call_state(CallModelState::Terminating), |_| {
-            // Canary: the structural auto-arm means this should not fire. No-op.
-            ok(vec![])
+        rule("terminating-safety-timeout", &[], Match::timer().timer_type(TimerType::TerminatingTimeout).call_state(CallModelState::Terminating), |ctx| {
+            // A BYE we sent went unanswered within TERMINATING_TIMEOUT_MS (a lost
+            // BYE, a dead UAC/UAS, or proxy churn during teardown). The call is
+            // wedged in Terminating with a non-terminal `ByeSent` leg, so
+            // `is_fully_resolved` never passes, `RemoveCall` is never emitted, and
+            // the call — its `active_calls` slot AND its memory — leaks forever
+            // (observed: active_calls pinned flat for hours after all traffic
+            // stopped). Force every still-unresolved leg terminal (mirroring the
+            // `is_fully_resolved` predicate) so the invariant promotes
+            // Terminating→Terminated→RemoveCall and the call is reaped + the
+            // replication delete propagates. If the call already resolved, the
+            // loop yields no actions and this stays the harmless canary it was.
+            let mut actions = Vec::new();
+            for leg in std::iter::once(&ctx.call.a_leg).chain(ctx.call.b_legs.iter()) {
+                let resolved = match leg.bye_disposition {
+                    None => leg.state == LegState::Trying,
+                    Some(b) => b.is_terminal(),
+                };
+                if !resolved {
+                    actions.push(RuleAction::TerminateLeg {
+                        leg_id: leg.leg_id.clone(),
+                        bye_disposition: Some(ByeDisposition::ByeTimeout),
+                    });
+                }
+            }
+            ok(actions)
         }),
     ]
 }

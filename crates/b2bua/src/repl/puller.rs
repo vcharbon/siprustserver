@@ -42,10 +42,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use repl_net::frame::{Frame, Op, PullMode, Watermark};
-use repl_net::transport::ReplicationNetwork;
+use repl_net::transport::{ReplicationConnection, ReplicationNetwork};
 use tokio::sync::watch;
+use topology::Peer;
 
-use super::ReplicatingCallStore;
+use super::{AddrResolver, ReplicatingCallStore};
 use crate::store::{partition_of, CallStore, PartitionRole, PutOpts};
 
 /// Default backoff floor / ceiling (ms). Exposed via [`PullerConfig`] for tests.
@@ -159,12 +160,14 @@ enum SelectOutcome {
 /// cancelled. The watermark + current flag are published on a `watch` channel
 /// the supervisor reads.
 pub struct Puller {
-    /// The peer ordinal this puller replicates from.
-    peer_ordinal: String,
+    /// The peer this puller replicates from (its `ordinal` identity + `host`).
+    peer: Peer,
     /// This node's ordinal (apply-target keyspace resolution).
     self_ordinal: String,
-    /// Peer replication address (re-resolved by the supervisor on AddressChanged).
-    peer_addr: SocketAddr,
+    /// Resolves `peer` to a [`SocketAddr`] **fresh on every connect attempt**
+    /// (ADR-0012 D3) — so a restarted peer's new IP is picked up on reconnect
+    /// without waiting on a membership delta.
+    resolve: AddrResolver,
     network: Arc<dyn ReplicationNetwork>,
     /// Apply target — the local store.
     store: ReplicatingCallStore,
@@ -176,14 +179,15 @@ pub struct Puller {
 }
 
 impl Puller {
-    /// Build a puller for `peer_ordinal` at `peer_addr`, seeded from `start_w`
-    /// (the supervisor's retained watermark — `(0,0)` for a cold/never-seen
-    /// peer). Returns the puller plus a [`watch::Receiver`] the supervisor reads.
+    /// Build a puller for `peer`, resolving its address per-connect via `resolve`
+    /// (ADR-0012 D3), seeded from `start_w` (the supervisor's retained watermark —
+    /// `(0,0)` for a cold/never-seen peer). Returns the puller plus a
+    /// [`watch::Receiver`] the supervisor reads.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        peer_ordinal: impl Into<String>,
+        peer: Peer,
         self_ordinal: impl Into<String>,
-        peer_addr: SocketAddr,
+        resolve: AddrResolver,
         network: Arc<dyn ReplicationNetwork>,
         store: ReplicatingCallStore,
         config: PullerConfig,
@@ -202,9 +206,9 @@ impl Puller {
         });
         (
             Self {
-                peer_ordinal: peer_ordinal.into(),
+                peer,
                 self_ordinal: self_ordinal.into(),
-                peer_addr,
+                resolve,
                 network,
                 store,
                 config,
@@ -215,9 +219,46 @@ impl Puller {
         )
     }
 
+    /// Convenience constructor for a puller that always connects to a **fixed**
+    /// `peer_addr` (a resolver-less caller / tests with a concrete bound socket).
+    /// Wraps `peer_addr` in a constant [`FnPeerResolver`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_at(
+        peer_ordinal: impl Into<String>,
+        self_ordinal: impl Into<String>,
+        peer_addr: SocketAddr,
+        network: Arc<dyn ReplicationNetwork>,
+        store: ReplicatingCallStore,
+        config: PullerConfig,
+        start_w: Watermark,
+        metrics: crate::metrics::B2buaMetrics,
+    ) -> (Self, watch::Receiver<PullerStatus>) {
+        let ordinal = peer_ordinal.into();
+        let resolve: AddrResolver =
+            Arc::new(super::FnPeerResolver(move |_: &Peer| peer_addr));
+        Self::new(
+            Peer::new(ordinal, peer_addr.to_string()),
+            self_ordinal,
+            resolve,
+            network,
+            store,
+            config,
+            start_w,
+            metrics,
+        )
+    }
+
     /// The peer ordinal this puller serves.
     pub fn peer_ordinal(&self) -> &str {
-        &self.peer_ordinal
+        &self.peer.ordinal
+    }
+
+    /// Resolve the peer's address (fresh) and open a connection. `None` if the
+    /// address is unresolvable right now or the connect fails — the caller treats
+    /// either as a failed connect (→ Backoff, then retry/re-resolve).
+    async fn try_connect(&self) -> Option<Box<dyn ReplicationConnection>> {
+        let addr = self.resolve.resolve(&self.peer).await?;
+        self.network.connect(addr).await.ok()
     }
 
     /// Run the FSM until `cancel` flips to `true` (Park / shutdown). `cancel` is
@@ -336,11 +377,12 @@ impl Puller {
         cancel: &mut watch::Receiver<bool>,
         deadline: Option<tokio::time::Instant>,
     ) -> RunOutcome {
-        // ---- Connecting ---- race the hard deadline so a hung connect to an
-        // unreachable/stalled peer still lets the node go bootstrap-complete.
+        // ---- Connecting ---- resolve fresh (D3) + connect, racing the hard
+        // deadline so a hung connect to an unreachable/stalled peer still lets the
+        // node go bootstrap-complete.
         let conn = match deadline {
             Some(at) => tokio::select! {
-                r = self.network.connect(self.peer_addr) => r,
+                c = self.try_connect() => c,
                 _ = tokio::time::sleep_until(at) => {
                     // Hard timer tripped mid-connect: best-effort complete, then
                     // back off + retry (now warm → no further hard timer).
@@ -349,20 +391,20 @@ impl Puller {
                 }
                 _ = cancel.changed() => {
                     if *cancel.borrow() { return RunOutcome::Cancelled; }
-                    self.network.connect(self.peer_addr).await
+                    self.try_connect().await
                 }
             },
             None => tokio::select! {
-                r = self.network.connect(self.peer_addr) => r,
+                c = self.try_connect() => c,
                 _ = cancel.changed() => {
                     if *cancel.borrow() { return RunOutcome::Cancelled; }
-                    self.network.connect(self.peer_addr).await
+                    self.try_connect().await
                 }
             },
         };
         let conn = match conn {
-            Ok(c) => c,
-            Err(_) => return RunOutcome::ConnectFailed,
+            Some(c) => c,
+            None => return RunOutcome::ConnectFailed,
         };
         // Mark the peer reached so readiness no longer treats it as unreachable.
         if !self.status_tx.borrow().ever_connected {

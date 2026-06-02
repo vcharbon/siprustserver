@@ -3,14 +3,16 @@
 # proxies behind a VIP) needs the keepalived/VIP machinery and is out of scope
 # for this thin runner. Pinned to tier=edge like the sipjs proxy.
 #
-# PROXY_WORKERS is injected by run.sh as pod-name id @ IP literal (e.g.
-# b2bua-worker-0@10.244.3.4:5060,b2bua-worker-1@10.244.4.5:5060): the IP because
-# the proxy's send path resolves IP literals only (the k8s watcher registry is a
-# deferred slice, ADR-0009); the pod-name id because it is signed into the
-# w_pri/w_bak cookie that the b2bua echoes into the callRef primary / topology.bak
-# (the replication changelog peer key), which MUST equal each worker's
-# B2BUA_ORDINAL (= POD_NAME = replication membership ordinal) or replicas never
-# reach the backup. See run.sh's PROXY_WORKERS construction.
+# The worker pool is discovered from k8s EndpointSlices via the shared
+# topology::K8sMembership informer (ADR-0012 D4) — the SAME watch the b2bua
+# replication engine uses (ADR-0011 X7). The proxy still sends OPTIONS/SIP to each
+# worker's Pod IP; the informer just keeps that IP list correct automatically on
+# reboot/scale, so there is NO PROXY_WORKERS IP-bake and no proxy redeploy after a
+# worker kill (cf. the deleted run.sh block / chaos.sh refresh). The worker *id*
+# is the EndpointSlice targetRef.name (= pod name = B2BUA_ORDINAL): the proxy signs
+# it into the w_pri/w_bak cookie the b2bua echoes into the callRef primary /
+# topology.bak (the replication changelog peer key), so identity agrees by
+# construction. Needs the 25-proxy-rbac ServiceAccount/RoleBinding for the watch.
 # PROXY_ADVERTISE = the proxy's own pod IP so in-dialog Route/Record-Route is
 # routable cluster-internally and pins back to this single proxy.
 apiVersion: apps/v1
@@ -29,6 +31,7 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9090"
     spec:
+      serviceAccountName: sip-front-proxy
       nodeSelector: { tier: edge }
       terminationGracePeriodSeconds: 30
       containers:
@@ -39,17 +42,30 @@ spec:
           env:
             - name: POD_IP
               valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
             - { name: PROXY_LISTEN,    value: "0.0.0.0:5060" }
             - { name: PROXY_ADVERTISE, value: "$(POD_IP):5060" }
             - { name: PROXY_METRICS,   value: "0.0.0.0:9090" }
-            - { name: PROXY_WORKERS,   value: "${PROXY_WORKERS}" }
+            # Worker pool discovered from k8s (ADR-0012 D4). PROXY_WORKERS left
+            # UNSET → the EndpointSlice informer over the headless worker Service
+            # drives the pool; each worker reached at its Pod IP:PROXY_WORKER_PORT.
+            - { name: PROXY_WORKER_SERVICE, value: "b2bua-worker" }
+            - { name: PROXY_WORKER_PORT,    value: "5060" }
           ports:
             - { name: sip,     containerPort: 5060, protocol: UDP }
             - { name: metrics, containerPort: 9090, protocol: TCP }
+          # Readiness gates on ≥1 routable (Alive) worker (ADR-0012 D4): the
+          # EndpointSlice informer fills the pool asynchronously and the OPTIONS
+          # probe then flips workers Alive, so the proxy reports NotReady until it
+          # can actually route — the Service withholds traffic during a (re)start
+          # window, and an RBAC-forbidden / mis-named worker Service surfaces as a
+          # rollout timeout instead of silently black-holing every INVITE.
           readinessProbe:
-            tcpSocket: { port: 9090 }
+            httpGet: { path: /readyz, port: 9090 }
             initialDelaySeconds: 1
             periodSeconds: 2
+            failureThreshold: 3
           resources:
             requests: { cpu: "500m", memory: "64Mi" }
             limits:   { memory: "512Mi" }

@@ -28,7 +28,7 @@ use sip_message::{SipMessage, SipParser, SipRequest};
 use topology::{Peer, SimulatedMembership};
 
 use super::{
-    Changelog, Puller, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor,
+    Changelog, FnPeerResolver, Puller, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor,
 };
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
@@ -100,7 +100,7 @@ fn supervisor_for(
     addrs: Vec<(String, SocketAddr)>,
 ) -> ReplicationSupervisor {
     let map: std::collections::HashMap<String, SocketAddr> = addrs.into_iter().collect();
-    let resolve = Arc::new(move |peer: &Peer| *map.get(&peer.ordinal).unwrap());
+    let resolve = Arc::new(FnPeerResolver(move |peer: &Peer| *map.get(&peer.ordinal).unwrap()));
     ReplicationSupervisor::with_config(
         self_ordinal,
         net.clone(),
@@ -296,7 +296,7 @@ async fn backup_held_counts_update_first_replica() {
         clock.clone(),
     );
     let metrics = B2buaMetrics::new();
-    let (puller, _status) = Puller::new(
+    let (puller, _status) = Puller::new_at(
         "w0",
         "w1",
         w0.addr,

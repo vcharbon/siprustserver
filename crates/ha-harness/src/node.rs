@@ -18,7 +18,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use b2bua::repl::{
-    flush_replicated, Changelog, PullerConfig, ReplServer, ReplicatingCallStore,
+    flush_replicated, Changelog, FnPeerResolver, PullerConfig, ReplServer, ReplicatingCallStore,
     ReplicationSupervisor,
 };
 use b2bua::store::{CallStore, PartitionRole, PropagateDirection, PutOpts};
@@ -109,11 +109,11 @@ impl HaNode {
 
         // Supervisor: pull every peer. The resolver maps ordinal → repl addr.
         let addr_map = wiring.addr_map.clone();
-        let resolve = Arc::new(move |peer: &Peer| {
+        let resolve = Arc::new(FnPeerResolver(move |peer: &Peer| {
             *addr_map
                 .get(&peer.ordinal)
                 .unwrap_or_else(|| panic!("no addr for peer {}", peer.ordinal))
-        });
+        }));
         let supervisor = ReplicationSupervisor::with_config(
             ordinal,
             wiring.network.clone(),

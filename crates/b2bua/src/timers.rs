@@ -48,7 +48,7 @@ struct Fired {
 
 enum TimerCmd {
     Schedule { entry: TimerEntry, call_ref: String },
-    Cancel { id: String },
+    Cancel { call_ref: String, id: String },
     CancelAll { call_ref: String },
 }
 
@@ -82,8 +82,8 @@ impl TimerService {
         let _ = self.cmd_tx.send(TimerCmd::Schedule { entry, call_ref }).await;
     }
 
-    pub async fn cancel(&self, id: String) {
-        let _ = self.cmd_tx.send(TimerCmd::Cancel { id }).await;
+    pub async fn cancel(&self, call_ref: String, id: String) {
+        let _ = self.cmd_tx.send(TimerCmd::Cancel { call_ref, id }).await;
     }
 
     pub async fn cancel_all(&self, call_ref: String) {
@@ -134,10 +134,19 @@ async fn driver(
     fire_tx: mpsc::UnboundedSender<CallEvent>,
 ) {
     let mut queue: DelayQueue<Fired> = DelayQueue::new();
-    // The live epoch per timer id. An id absent from `active` is cancelled; an
-    // id whose epoch differs from a fired entry's was rescheduled (the old
-    // entry is a tombstone). `by_call` indexes ids for `CancelAll`.
-    let mut active: HashMap<String, u64> = HashMap::new();
+    // The live epoch per timer, keyed by `(call_ref, id)`. The timer service is
+    // a SINGLE shared driver across every call, but timer ids are per-call and
+    // collide across calls (every call's keepalive is `"Keepalive"`, every
+    // keepalive-timeout is `"KeepaliveTimeout:a"`/`":b"`, etc.). Keying `active`
+    // by id alone aliased calls: scheduling call N+1's `"Keepalive"` overwrote
+    // the epoch for call N's, so call N's queued entry became a stale tombstone
+    // and silently never fired — only the most-recently-scheduled call per id
+    // kept its timers, so at scale keepalives stopped firing and dead-peer calls
+    // were never reaped (active_calls grew unbounded). The `(call_ref, id)` key
+    // isolates each call. An entry absent from `active` is cancelled; an entry
+    // whose epoch differs from a fired one's was rescheduled (a tombstone).
+    // `by_call` indexes ids for `CancelAll`.
+    let mut active: HashMap<(String, String), u64> = HashMap::new();
     let mut by_call: HashMap<String, HashSet<String>> = HashMap::new();
     let mut next_epoch: u64 = 0;
 
@@ -152,7 +161,7 @@ async fn driver(
                     // `try_remove`, so no `Key` aliasing is possible.
                     next_epoch += 1;
                     let epoch = next_epoch;
-                    active.insert(entry.id.clone(), epoch);
+                    active.insert((call_ref.clone(), entry.id.clone()), epoch);
                     by_call.entry(call_ref.clone()).or_default().insert(entry.id.clone());
                     // Rebuild the monotonic delay from the absolute wall deadline.
                     // Within a process this cancels — the rule minted `fire_at`
@@ -173,29 +182,31 @@ async fn driver(
                         Duration::from_millis(delay),
                     );
                 }
-                Some(TimerCmd::Cancel { id }) => {
-                    // Logical cancel: forget the live epoch. The queued entry
-                    // stays and drops as a tombstone at its deadline.
-                    active.remove(&id);
-                    for ids in by_call.values_mut() {
+                Some(TimerCmd::Cancel { call_ref, id }) => {
+                    // Logical cancel: forget the live epoch for THIS call's timer.
+                    // The queued entry stays and drops as a tombstone at its
+                    // deadline.
+                    active.remove(&(call_ref.clone(), id.clone()));
+                    if let Some(ids) = by_call.get_mut(&call_ref) {
                         ids.remove(&id);
                     }
                 }
                 Some(TimerCmd::CancelAll { call_ref }) => {
                     if let Some(ids) = by_call.remove(&call_ref) {
                         for id in ids {
-                            active.remove(&id);
+                            active.remove(&(call_ref.clone(), id));
                         }
                     }
                 }
             },
             expired = next_expired(&mut queue), if !queue.is_empty() => {
                 // Deliver only the live generation; a stale epoch (rescheduled)
-                // or a missing id (cancelled) is a tombstone — drop it.
-                if active.get(&expired.id) != Some(&expired.epoch) {
+                // or a missing entry (cancelled) is a tombstone — drop it.
+                let key = (expired.call_ref.clone(), expired.id.clone());
+                if active.get(&key) != Some(&expired.epoch) {
                     continue;
                 }
-                active.remove(&expired.id);
+                active.remove(&key);
                 if let Some(ids) = by_call.get_mut(&expired.call_ref) {
                     ids.remove(&expired.id);
                 }
@@ -266,7 +277,7 @@ mod tests {
                 "c".into(),
             )
             .await;
-        timers.cancel("t1".into()).await;
+        timers.cancel("c".into(), "t1".into()).await;
         tokio::time::advance(Duration::from_millis(2_000)).await;
         // Give the driver a tick to process.
         tokio::task::yield_now().await;
@@ -313,7 +324,7 @@ mod tests {
             )
             .await;
         // 4. ... and cancel the timeout (the aliasing trigger in the old driver).
-        timers.cancel("KeepaliveTimeout:a".into()).await;
+        timers.cancel(cref.clone(), "KeepaliveTimeout:a".into()).await;
 
         // The cancelled timeout must NOT fire; the rescheduled keepalive MUST.
         tokio::time::advance(Duration::from_millis(30_000)).await; // → t=60s
@@ -371,5 +382,93 @@ mod tests {
             }
         }
         assert_eq!(got, N, "every fire delivered — no silent overflow drop");
+    }
+
+    /// Regression for the cross-call timer-id aliasing reap bug. The timer
+    /// service is a single shared driver, but timer ids are per-call and repeat
+    /// across calls (every established call arms a `"Keepalive"` timer). With the
+    /// old id-only `active` map, scheduling a second call's `"Keepalive"` (same
+    /// id, different call_ref) overwrote the first's live epoch, so the first
+    /// call's queued keepalive became a stale tombstone and silently never
+    /// fired — at scale keepalives stopped, dead peers were never probed, and
+    /// `active_calls` grew without bound. Both calls' identically-named timers
+    /// must now fire independently.
+    #[tokio::test(start_paused = true)]
+    async fn colliding_timer_ids_across_calls_both_fire() {
+        let clock = Clock::test_at(0);
+        let (timers, mut fire_rx) = TimerService::spawn(clock);
+
+        // Two distinct calls, IDENTICAL timer id — the production shape.
+        let call_a = "w0|call-a|tag-a".to_string();
+        let call_b = "w0|call-b|tag-b".to_string();
+        for cref in [&call_a, &call_b] {
+            timers
+                .schedule(
+                    TimerEntry {
+                        id: "Keepalive".into(),
+                        timer_type: TimerType::Keepalive,
+                        fire_at: 30_000,
+                        leg_id: None,
+                    },
+                    cref.clone(),
+                )
+                .await;
+        }
+
+        tokio::time::advance(Duration::from_millis(30_000)).await;
+
+        let mut fired: Vec<String> = Vec::new();
+        for _ in 0..2 {
+            match fire_rx.recv().await {
+                Some(CallEvent::Timer { timer_type: TimerType::Keepalive, call_ref, .. }) => {
+                    fired.push(call_ref)
+                }
+                other => panic!("expected a keepalive fire, got {other:?}"),
+            }
+        }
+        fired.sort();
+        assert_eq!(
+            fired,
+            vec![call_a, call_b],
+            "both calls' keepalives fire — no cross-call aliasing tombstone",
+        );
+    }
+
+    /// Cancelling one call's timer must not cancel another call's identically
+    /// named timer. With the old id-only cancel, `cancel("Keepalive")` for call A
+    /// wiped call B's `"Keepalive"` epoch too.
+    #[tokio::test(start_paused = true)]
+    async fn cancel_is_scoped_to_its_call() {
+        let clock = Clock::test_at(0);
+        let (timers, mut fire_rx) = TimerService::spawn(clock);
+        let call_a = "w0|call-a|tag-a".to_string();
+        let call_b = "w0|call-b|tag-b".to_string();
+        for cref in [&call_a, &call_b] {
+            timers
+                .schedule(
+                    TimerEntry {
+                        id: "Keepalive".into(),
+                        timer_type: TimerType::Keepalive,
+                        fire_at: 30_000,
+                        leg_id: None,
+                    },
+                    cref.clone(),
+                )
+                .await;
+        }
+        // Cancel only call A's keepalive.
+        timers.cancel(call_a.clone(), "Keepalive".into()).await;
+
+        tokio::time::advance(Duration::from_millis(30_000)).await;
+
+        // Exactly call B's keepalive must fire.
+        match fire_rx.recv().await {
+            Some(CallEvent::Timer { timer_type: TimerType::Keepalive, call_ref, .. }) => {
+                assert_eq!(call_ref, call_b, "call B's keepalive survives call A's cancel");
+            }
+            other => panic!("expected call B's keepalive, got {other:?}"),
+        }
+        tokio::task::yield_now().await;
+        assert!(fire_rx.try_recv().is_err(), "call A's keepalive stays cancelled");
     }
 }

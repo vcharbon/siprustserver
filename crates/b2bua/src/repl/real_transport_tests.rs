@@ -24,7 +24,7 @@ use sip_clock::Clock;
 use tokio::sync::watch;
 
 use super::{
-    Changelog, Puller, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor,
+    Changelog, FnPeerResolver, Puller, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor,
 };
 use crate::metrics::B2buaMetrics;
 use crate::store::{CallStore, PartitionRole, PropagateDirection, PutOpts};
@@ -98,7 +98,7 @@ fn spawn_puller(
     store: &ReplicatingCallStore,
 ) -> (watch::Sender<bool>, B2buaMetrics) {
     let metrics = B2buaMetrics::new();
-    let (puller, _status) = Puller::new(
+    let (puller, _status) = Puller::new_at(
         peer_ordinal,
         self_ordinal,
         peer_addr,
@@ -303,7 +303,7 @@ async fn bidirectional_supervisor_replication_over_real_tcp() {
             .collect();
     let resolve = {
         let addrs = addrs.clone();
-        Arc::new(move |peer: &Peer| *addrs.get(&peer.ordinal).unwrap())
+        Arc::new(FnPeerResolver(move |peer: &Peer| *addrs.get(&peer.ordinal).unwrap()))
     };
 
     // Each node's supervisor pulls the OTHER (mutual backup). Membership lists

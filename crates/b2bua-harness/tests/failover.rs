@@ -19,6 +19,7 @@ use call::CdrEventType;
 use b2bua_harness::{FailoverHarness, PartitionRole, ReplicatedB2buaSut, WorkerHealth};
 use call::parse_call_ref;
 use scenario_harness::Agent;
+use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -211,6 +212,147 @@ async fn invite_winner_lanes(
     bob: &Agent,
 ) -> (scenario_harness::ServerTxn, usize) {
     (bob.receive("INVITE").await, 0)
+}
+
+// ===========================================================================
+// FAILOVER TIMER RE-ARM — a call hydrated by a takeover must regenerate its
+// per-call timers (keepalive / global-duration) on the new owner. Those timers
+// are runtime fibers in the in-memory `TimerService`, NOT replicated state, so
+// a hydrated call arrives with no live timers; without re-arming on hydration a
+// dead peer is never probed and the call is never reaped → `active_calls` leaks
+// on the takeover node (the failover analogue of the steady-state no-BYE leak).
+//
+// Scenario: establish on b1, replicate to b2, CRASH b1, then drive a non-
+// terminating in-dialog request (a re-INVITE) over to b2 — this hydrates the
+// call onto b2 AND (with the fix) re-arms its keepalive. Bob then goes silent on
+// the next keepalive OPTIONS; after interval+timeout b2 reaps the hydrated call
+// and writes a CDR with a Bye event. The CDR is the proof the timer regenerated.
+// ===========================================================================
+/// The Rust default keepalive interval / per-leg timeout (defaults.rs).
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[tokio::test(start_paused = true)]
+async fn hydrated_call_rearms_keepalive_and_reaps_dead_peer() {
+    let mut fh = FailoverHarness::new("s10b-hydration-timer-rearm", &["b1", "b2"]);
+
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let b1_lane = fh.agent("b1-lane", B1).await;
+    let b2_lane = fh.agent("b2-lane", B2).await;
+    drop((b1_lane, b2_lane));
+
+    let proxy = fh
+        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
+        .await;
+
+    let mut w_b1 = fh
+        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    let mut w_b2 = fh
+        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(w_b1.is_ready() && w_b2.is_ready(), "both workers ready at steady state");
+
+    // ── STEP 1: establish alice ⇄ bob through the proxy on the HRW primary ────
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
+        .expect("b-leg INVITE carries the proxy Record-Route cookie");
+    let (pri_ord, bak_ord) = pri_bak_from_cookie(&rr);
+    let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
+        if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
+    assert_eq!(bak_ord, b2.ordinal(), "cookie w_bak names the backup worker");
+    let primary_ord = b1.ordinal().to_string();
+
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    // Drive establish + replicate-on-flush (primary → backup). The answered call
+    // arms its keepalive + global-duration timers on the PRIMARY, and persists
+    // those timer intents into `call.timers` (which IS replicated to the backup).
+    fh.advance(Duration::from_millis(500)).await;
+    let call_ref = find_backed_up_ref(b2, &primary_ord).await;
+    assert!(
+        b2.get(BAK, &primary_ord, &call_ref).await.is_some(),
+        "backup holds the replicated call (with its serialized timers) after establish",
+    );
+
+    // ── STEP 2: crash the primary; the proxy fails its dialog over to b2 ──────
+    fh.mark(&primary_ord, None, "crash", "primary down");
+    b1.crash();
+    proxy.set_health(&primary_ord, WorkerHealth::Dead);
+    fh.advance(Duration::from_millis(300)).await;
+
+    let hydrated_before = b2.metrics().repl_takeover_hydrated_total();
+    let b2_creations_before = b2.metrics().creations_total();
+
+    // ── STEP 3: NON-terminating in-dialog re-INVITE → takeover-hydrates on b2 ──
+    // A re-INVITE (not a BYE) leaves the call ACTIVE after takeover, so its
+    // re-armed keepalive can run. The backup hydrates the dialog from its replica
+    // and (with the fix) re-arms the keepalive + global-duration timers.
+    let mut reinv = dialog.request(InDialogMethod::Invite, None).await;
+    let mut bob_uas = bob.receive("INVITE").await; // re-INVITE relayed to bob via proxy
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    reinv.expect(200).await;
+    dialog.ack(Some(ANSWER)).await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(500)).await;
+
+    assert!(
+        b2.metrics().repl_takeover_hydrated_total() > hydrated_before,
+        "the re-INVITE hydrated the call onto the acting-backup (takeover fired)",
+    );
+    assert!(
+        b2.metrics().creations_total() > b2_creations_before,
+        "b2 created the call locally to serve the failed-over re-INVITE",
+    );
+
+    // ── STEP 4: keepalive probe — bob goes SILENT on the hydrated call's leg ──
+    // If hydration re-armed the keepalive, b2 now probes both legs with OPTIONS.
+    fh.advance(KEEPALIVE_INTERVAL).await;
+    // alice answers its OPTIONS; bob receives but never answers (dead-peer shape).
+    alice.receive_tolerating("OPTIONS", &["INVITE", "ACK"]).await.respond(200, "OK").await;
+    let _silent = bob.receive_tolerating("OPTIONS", &["INVITE", "ACK"]).await;
+
+    // ── STEP 5: bob's keepalive times out → b2 reaps the hydrated call ────────
+    fh.advance(KEEPALIVE_TIMEOUT).await;
+    // The healthy peer (alice) gets the teardown BYE from b2.
+    alice
+        .receive_tolerating("BYE", &["OPTIONS", "INVITE", "ACK"])
+        .await
+        .respond(200, "OK")
+        .await;
+    fh.advance(Duration::from_millis(500)).await;
+
+    // ── PROOF: b2 wrote a CDR with a Bye (the keepalive-timeout teardown) ─────
+    // Only possible if the keepalive timer was REGENERATED on hydration; without
+    // the fix the hydrated call has no keepalive, nothing fires, no CDR, leak.
+    let mut cdrs = b2.cdr_records();
+    for _ in 0..40 {
+        if cdrs.iter().any(|c| c.events.iter().any(|e| e.event_type == CdrEventType::Bye)) {
+            break;
+        }
+        fh.advance(Duration::from_millis(200)).await;
+        cdrs = b2.cdr_records();
+    }
+    assert!(
+        cdrs.iter().any(|c| c.events.iter().any(|e| e.event_type == CdrEventType::Bye)),
+        "GATE: hydrated call reaped by its REGENERATED keepalive (CDR Bye on b2); \
+         events seen = {:?}",
+        cdrs.iter().flat_map(|c| c.events.iter().map(|e| e.event_type)).collect::<Vec<_>>(),
+    );
+    assert!(
+        b2.metrics().removals_total() >= 1,
+        "the hydrated call was removed on b2 (active_calls did not leak)",
+    );
+
+    drop((w_b1, w_b2, proxy));
+    let _ = fh.repl_report();
 }
 
 // ===========================================================================

@@ -198,7 +198,7 @@ use repl_net::transport::{ReplicationNetwork, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 use topology::{Peer, SimulatedMembership};
 
-use super::{Changelog, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor};
+use super::{Changelog, FnPeerResolver, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor};
 use crate::store::{CallStore, PartitionRole, PropagateDirection, PutOpts};
 
 const PRI: PartitionRole = PartitionRole::Primary;
@@ -272,10 +272,10 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
 
     // Our node A: empty store, supervisor pulling B.
     let a_store = ReplicatingCallStore::new(2, clock.clone());
-    let resolve = Arc::new(move |peer: &Peer| {
+    let resolve = Arc::new(FnPeerResolver(move |peer: &Peer| {
         assert_eq!(peer.ordinal, "B");
         b_addr
-    });
+    }));
     let a_sup = ReplicationSupervisor::with_config(
         "A",
         net.clone(),

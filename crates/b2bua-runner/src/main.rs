@@ -42,7 +42,7 @@
 //! probe fails) so k8s steers new calls away while in-flight calls finish.
 
 use std::env;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -54,7 +54,7 @@ use b2bua::decision::ScriptedDecisionEngine;
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::limiter_http::HttpCallLimiter;
 use b2bua::metrics::B2buaMetrics;
-use b2bua::repl::ReplicatingCallStore;
+use b2bua::repl::{PeerResolver, ReplicatingCallStore};
 use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
 use call::Call;
@@ -111,29 +111,76 @@ fn boot_incarnation() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// **Replication addressing** (deferred S11 decision: port offset vs peer env).
-/// We keep membership port-agnostic (a Pod has one IP, many ports) and reach
-/// every peer's replication server at `peer.host:repl_port`, where `repl_port`
-/// is one cluster-wide config value (`B2BUA_REPL_PORT`). The resolver parses a
-/// bare IP fast (the k8s case — EndpointSlice addresses are Pod IPs) and falls
-/// back to DNS for a named static host. An unresolvable host yields an
-/// unspecified addr the puller simply fails to connect to and retries.
-fn make_addr_resolver(repl_port: u16) -> Arc<dyn Fn(&Peer) -> SocketAddr + Send + Sync> {
-    Arc::new(move |peer: &Peer| {
-        let addr = if let Ok(ip) = peer.host.parse::<IpAddr>() {
-            SocketAddr::new(ip, repl_port)
-        } else {
-            (peer.host.as_str(), repl_port)
-                .to_socket_addrs()
-                .ok()
-                .and_then(|mut it| it.next())
-                .unwrap_or_else(|| SocketAddr::from((Ipv4Addr::UNSPECIFIED, repl_port)))
+/// Where replication peer addresses come from (ADR-0012 D3).
+enum ReplAddressing {
+    /// Static `B2BUA_PEERS`: the host is a bare IP or a user-provided DNS name —
+    /// use it directly (IP fast-path, else resolve the name).
+    Static,
+    /// k8s informer: derive the **stable per-pod FQDN** from the ordinal (=
+    /// StatefulSet pod name) and resolve it FRESH per connect, so a restarted
+    /// peer's new IP is picked up without a membership delta. Falls back to the
+    /// EndpointSlice-supplied host (a Pod IP) if CoreDNS misses, so we are not
+    /// hard-dependent on DNS for liveness.
+    K8sPodDns { service: String, namespace: String },
+}
+
+/// **Replication addressing** (ADR-0012 D3 / deferred S11 decision). Membership is
+/// port-agnostic (a Pod has one IP, many ports); every peer's repl server is at
+/// `<resolved-host>:repl_port`, where `repl_port` is one cluster-wide config value
+/// (`B2BUA_REPL_PORT`). The address is resolved **fresh on every connect attempt**
+/// so a restarted peer self-heals via the puller's own reconnect loop. `None`
+/// (unresolvable right now) → the puller backs off and retries, re-resolving.
+struct ReplResolver {
+    repl_port: u16,
+    addressing: ReplAddressing,
+}
+
+#[async_trait]
+impl PeerResolver for ReplResolver {
+    async fn resolve(&self, peer: &Peer) -> Option<SocketAddr> {
+        let addr = match &self.addressing {
+            ReplAddressing::Static => {
+                if let Ok(ip) = peer.host.parse::<IpAddr>() {
+                    Some(SocketAddr::new(ip, self.repl_port))
+                } else {
+                    tokio::net::lookup_host((peer.host.as_str(), self.repl_port))
+                        .await
+                        .ok()
+                        .and_then(|mut it| it.next())
+                }
+            }
+            ReplAddressing::K8sPodDns { service, namespace } => {
+                // Prefer the stable per-pod DNS name (D3): re-resolving it picks up
+                // a restarted peer's new IP without any membership delta.
+                let fqdn =
+                    format!("{}.{}.{}.svc.cluster.local", peer.ordinal, service, namespace);
+                let by_dns = tokio::net::lookup_host((fqdn.as_str(), self.repl_port))
+                    .await
+                    .ok()
+                    .and_then(|mut it| it.next());
+                // CoreDNS miss / NXDOMAIN-while-not-ready → fall back to the
+                // EndpointSlice host (a Pod IP). Backoff+retry covers transients.
+                by_dns.or_else(|| {
+                    peer.host
+                        .parse::<IpAddr>()
+                        .ok()
+                        .map(|ip| SocketAddr::new(ip, self.repl_port))
+                })
+            }
         };
-        // Fires once per puller (re)spawn — its presence proves a peer was
-        // discovered and a puller is being started toward it.
-        eprintln!("b2bua-runner repl: spawning puller -> peer={} addr={addr}", peer.ordinal);
+        // Fires once per (re)connect attempt — its presence (with a *new* addr)
+        // proves the puller redirected to a restarted peer (handoff §7 / ADR-0012
+        // D3). `None` → unresolvable now; the puller backs off and retries.
+        match addr {
+            Some(a) => eprintln!("b2bua-runner repl: peer={} resolved -> {a}", peer.ordinal),
+            None => eprintln!("b2bua-runner repl: peer={} unresolvable (will retry)", peer.ordinal),
+        }
         addr
-    })
+    }
+}
+
+fn make_addr_resolver(repl_port: u16, addressing: ReplAddressing) -> b2bua::repl::AddrResolver {
+    Arc::new(ReplResolver { repl_port, addressing })
 }
 
 /// Resolve cluster membership for replication. `B2BUA_PEERS` (a static
@@ -142,13 +189,13 @@ fn make_addr_resolver(repl_port: u16) -> Arc<dyn Fn(&Peer) -> SocketAddr + Send 
 /// `None` (→ replication stays off) if neither a static list nor an in-cluster
 /// kube client is available — liveness over completeness, the worker still
 /// serves SIP.
-async fn build_membership() -> Option<Arc<dyn Membership>> {
+async fn build_membership() -> Option<(Arc<dyn Membership>, ReplAddressing)> {
     let peers = env_or("B2BUA_PEERS", "");
     if !peers.trim().is_empty() {
         match StaticMembership::from_string(&peers, "B2BUA_PEERS") {
             Ok(m) => {
                 eprintln!("b2bua-runner replication membership: static B2BUA_PEERS={peers}");
-                return Some(Arc::new(m));
+                return Some((Arc::new(m), ReplAddressing::Static));
             }
             Err(e) => {
                 eprintln!("b2bua-runner B2BUA_PEERS parse error: {e} — replication disabled");
@@ -168,7 +215,10 @@ async fn build_membership() -> Option<Arc<dyn Membership>> {
             eprintln!(
                 "b2bua-runner replication membership: k8s EndpointSlice informer (svc={service}, ns={namespace})"
             );
-            Some(Arc::new(topology::K8sMembership::spawn(client, namespace, service)))
+            // Reach peers by their stable per-pod DNS name (ADR-0012 D3), built from
+            // the ordinal + this Service + namespace.
+            let addressing = ReplAddressing::K8sPodDns { service: service.clone(), namespace: namespace.clone() };
+            Some((Arc::new(topology::K8sMembership::spawn(client, namespace, service)), addressing))
         }
         Err(e) => {
             eprintln!("b2bua-runner no kube client ({e}) and no B2BUA_PEERS — replication disabled");
@@ -306,7 +356,7 @@ async fn main() {
     // --- Replication wiring (opt-in, S11). `None` keeps the legacy path. ---
     let replication = if env_flag("B2BUA_REPL") {
         match build_membership().await {
-            Some(membership) => {
+            Some((membership, addressing)) => {
                 let repl_listen = resolve(&env_or("B2BUA_REPL_LISTEN", "0.0.0.0:9092"));
                 // Cluster-wide repl port peers are reached on; defaults to our
                 // own listen port (homogeneous pool).
@@ -340,7 +390,7 @@ async fn main() {
                     membership,
                     store,
                     listen_addr: repl_listen,
-                    addr_resolver: make_addr_resolver(repl_port),
+                    addr_resolver: make_addr_resolver(repl_port, addressing),
                     incarnation_gen,
                 })
             }

@@ -2495,11 +2495,14 @@ dependencies = [
 name = "sip-proxy-runner"
 version = "0.1.0"
 dependencies = [
+ "kube",
+ "rustls",
  "sip-clock",
  "sip-net",
  "sip-proxy",
  "sip-txn",
  "tokio",
+ "topology",
 ]
 
 [[package]]

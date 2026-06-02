@@ -1,0 +1,28 @@
+# RBAC for the sip-front-proxy's MembershipWorkerRegistry EndpointSlice informer
+# (ADR-0012 D4). The proxy now discovers the worker pool the SAME way the b2bua
+# replication engine does — by watching the EndpointSlices of the headless
+# `b2bua-worker` Service (ADR-0011 X7, one watcher both consumers) — instead of
+# routing over deploy-time-baked Pod IPs. That requires get/list/watch on
+# `endpointslices` in the `discovery.k8s.io` API group, scoped to this namespace
+# (a Role, least privilege). The proxy Deployment runs as this ServiceAccount.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sip-front-proxy
+  namespace: sip-test
+---
+# Reuse the worker's endpointslice-reader Role (same verbs, same resource, same
+# namespace) — bind the proxy SA to it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sip-front-proxy-endpointslice-reader
+  namespace: sip-test
+subjects:
+  - kind: ServiceAccount
+    name: sip-front-proxy
+    namespace: sip-test
+roleRef:
+  kind: Role
+  name: b2bua-endpointslice-reader
+  apiGroup: rbac.authorization.k8s.io

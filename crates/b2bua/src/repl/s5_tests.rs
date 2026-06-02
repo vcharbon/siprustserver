@@ -13,7 +13,7 @@ use repl_net::transport::{Fault, ReplicationNetwork, SimulatedReplicationNetwork
 use sip_clock::Clock;
 use topology::{Membership, Peer, SimulatedMembership};
 
-use super::{Changelog, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor};
+use super::{Changelog, FnPeerResolver, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor};
 use crate::store::{CallStore, PartitionRole, PropagateDirection, PutOpts};
 
 const PRI: PartitionRole = PartitionRole::Primary;
@@ -79,7 +79,7 @@ fn supervisor_for(
     addrs: Vec<(String, SocketAddr)>,
 ) -> ReplicationSupervisor {
     let map: std::collections::HashMap<String, SocketAddr> = addrs.into_iter().collect();
-    let resolve = Arc::new(move |peer: &Peer| *map.get(&peer.ordinal).unwrap());
+    let resolve = Arc::new(FnPeerResolver(move |peer: &Peer| *map.get(&peer.ordinal).unwrap()));
     ReplicationSupervisor::with_config(
         self_ordinal,
         net.clone(),
@@ -524,4 +524,88 @@ async fn cold_reboot_reacquires_full_set() {
         );
     }
     let _ = (a.ordinal, b.ordinal);
+}
+
+// ---------------------------------------------------------------------------
+// REGRESSION (ADR-0012 D1): a LAGGED membership channel must still redirect the
+// puller to a peer's NEW address. Before the fix the supervisor reconcile loop
+// did `Err(_) => return` on `Lagged` and the node went permanently deaf — the
+// puller stayed pinned to the dead pod IP (the endurance-run incident). Here the
+// address-change delta is deliberately DROPPED from the broadcast ring (buried
+// under >256 throwaway deltas), so the only way the puller can redirect is the
+// `Lagged → snapshot reconcile` path.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn lagged_membership_channel_still_redirects_puller_to_new_addr() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+
+    let a1_addr = addr(81);
+    let a2_addr = addr(82);
+    let b_addr = addr(83);
+
+    // A's first life at a1; B pulls it and converges on c1.
+    let a1 = Node::spawn("A", a1_addr, 1, &net, &clock).await;
+    let b = Node::spawn("B", b_addr, 1, &net, &clock).await;
+
+    // A resolver that parses the peer's `host` as a SocketAddr, so a membership
+    // address-change actually MOVES where the puller connects (the fixed
+    // ordinal→addr map of `supervisor_for` cannot express a move; the real
+    // host→addr resolver can, and that is what D3 exercises).
+    let resolve = Arc::new(FnPeerResolver(|peer: &Peer| {
+        peer.host.parse::<SocketAddr>().unwrap()
+    }));
+    let membership =
+        SimulatedMembership::with_clock(vec![Peer::new("A", a1_addr.to_string())], clock.clone());
+    let sup = ReplicationSupervisor::with_config(
+        "B",
+        net.clone(),
+        b.store.clone(),
+        resolve,
+        clock.clone(),
+        fast_backoff(),
+    );
+    sup.start(Arc::new(membership.clone()));
+
+    let c1 = cref("A", "1");
+    a1.store
+        .put_call(PRI, "A", &c1, b"one".to_vec(), &[], 0, 1, &fwd("B"))
+        .await
+        .unwrap();
+    tick(300).await;
+    assert_eq!(
+        b.store.get_call(BAK, "A", &c1).await.unwrap().as_deref(),
+        Some(&b"one"[..]),
+        "B converged on A@a1 before the restart"
+    );
+
+    // A "restarts" at a2 (a higher incarnation gen) holding a fresh call c2.
+    let a2 = Node::spawn("A", a2_addr, 2, &net, &clock).await;
+    let c2 = cref("A", "2");
+    a2.store
+        .put_call(PRI, "A", &c2, b"two".to_vec(), &[], 0, 1, &fwd("B"))
+        .await
+        .unwrap();
+
+    // Emit the CRITICAL delta (A: a1 → a2) FIRST, then bury it under >256 throwaway
+    // deltas — all synchronously, so the supervisor task stays parked and the
+    // broadcast ring (capacity 256) DROPS the address-change. The supervisor can
+    // now only learn the new address by reconciling from the snapshot after it
+    // observes `Lagged`.
+    membership.change_address(Peer::new("A", a2_addr.to_string()));
+    for _ in 0..150 {
+        membership.add(Peer::new("Z", "127.0.0.1:1"));
+        membership.remove("Z");
+    }
+
+    // Wake the supervisor: recv() → Lagged → reconcile_from_snapshot → snapshot
+    // shows A@a2 (host drifted) → puller respawned to a2 → converges on c2.
+    tick(600).await;
+    assert_eq!(
+        b.store.get_call(BAK, "A", &c2).await.unwrap().as_deref(),
+        Some(&b"two"[..]),
+        "after a Lagged delta the puller redirected to A's new address and pulled c2"
+    );
+    let _ = (a1.ordinal, a2.ordinal, b.ordinal);
 }

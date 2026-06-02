@@ -449,11 +449,8 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
 }
 
 fn keepalive_interval(ctx: &RuleContext) -> i64 {
-    ctx.call
-        .features
-        .as_ref()
-        .map(|f| f.platform.keepalive.interval_sec)
-        .unwrap_or(30)
+    // Operator/worker knob — see `defaults::keepalive_interval`.
+    ctx.config.keepalive_interval_sec
 }
 fn max_duration(ctx: &RuleContext) -> i64 {
     ctx.call

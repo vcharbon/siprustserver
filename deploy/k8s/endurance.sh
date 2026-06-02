@@ -50,6 +50,12 @@ ORPHAN_BUILD_SECS="${ORPHAN_BUILD_SECS:-20}"
 ORPHAN_REAP_WAIT="${ORPHAN_REAP_WAIT:-330}"  # must clear the 300s keepalive: orphan A-leg
                                              # OPTIONS goes unanswered at 300s -> reap ~305s
 PASS_THRESHOLD="${PASS_THRESHOLD:-90}"
+CLUSTER_SETTLE="${CLUSTER_SETTLE:-30}"  # seconds to hold UAC streams back AFTER the
+                         # cluster reports Ready, so the front proxy's EndpointSlice
+                         # informer has populated its worker set (workers=[] at boot,
+                         # filled async) before traffic starts. Without it the first
+                         # INVITEs at full rate are rejected mid-discovery -> the
+                         # startup failed-call spike (ADR-0012 D4 informer warm-up).
 SETTLE="${SETTLE:-60}"   # seconds to let an event's effect resolve before measuring
                          # (sized so proxy-kill new-call failures, which only
                          #  resolve ~32s after the ~30s outage, are attributed
@@ -221,12 +227,12 @@ chaos_event() {
       [ "${KILL_MODE:-graceful}" = "crash" ] && KILL_GRACE=0 || KILL_GRACE=10
       KILL_GRACE="$KILL_GRACE" KILL_TARGET="$tgt" WORKER_REPLICAS="$WORKER_REPLICAS" \
         ./chaos.sh kill >>"$RUNLOG" 2>&1 || true
-      # The StatefulSet recreates the pod with a NEW IP; the proxy's PROXY_WORKERS
-      # is IP-literal, so without a registry refresh the proxy can never route to
-      # the recovered worker -> the run goes single-worker. run.sh deploy
-      # re-resolves live pod IPs and redeploys the proxy.
-      kubectl -n "$NS" wait --for=condition=ready "pod/$tgt" --timeout=150s >>"$RUNLOG" 2>&1 || true
-      REPL_ENABLE=1 WORKER_REPLICAS="$WORKER_REPLICAS" OBS_ENABLE=0 ./run.sh deploy >>"$RUNLOG" 2>&1 || true ;;
+      # The StatefulSet recreates the pod with a NEW IP; the proxy discovers
+      # workers from k8s EndpointSlices (ADR-0012 D4) and picks up the new IP on
+      # its own — NO proxy redeploy / PROXY_WORKERS refresh needed. This redeploy
+      # used to be what kept the run from going single-worker after a kill; the
+      # informer now self-heals it. Just wait for the worker to be Ready again.
+      kubectl -n "$NS" wait --for=condition=ready "pod/$tgt" --timeout=150s >>"$RUNLOG" 2>&1 || true ;;
     kill_proxy)
       ./chaos.sh proxykill >>"$RUNLOG" 2>&1 || true ;;
     peak)
@@ -309,6 +315,10 @@ run() {
   # Gate readiness before driving traffic.
   kubectl -n "$NS" wait --for=condition=ready pod -l app=b2bua-worker --timeout=120s >>"$RUNLOG" 2>&1 || true
   kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout=90s >>"$RUNLOG" 2>&1 || true
+  # Hold the UAC streams back so the proxy's worker-discovery informer is warm
+  # before traffic starts (avoids the startup failed-call spike).
+  log "cluster-settle ${CLUSTER_SETTLE}s (let the proxy discover workers) before starting UAC streams"
+  sleep "$CLUSTER_SETTLE"
   start_baseline
 
   local cycle=(orphan_kill kill_worker kill_proxy peak)

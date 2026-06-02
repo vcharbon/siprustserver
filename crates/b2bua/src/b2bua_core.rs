@@ -13,7 +13,7 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::SipParser;
 use sip_net::UdpEndpoint;
 use sip_txn::{IdGen, TransactionConfig, TransactionLayer};
-use topology::{Membership, Peer};
+use topology::Membership;
 
 use crate::cdr::CdrWriter;
 use crate::config::B2buaConfig;
@@ -58,8 +58,9 @@ pub struct B2buaCore {
 ///   [`ReplicatingCallStore`]'s changelog (mirrors `IdGen::seeded`). S10a takes it
 ///   as an explicit input; **S11** derives the real source (e.g. a persisted /
 ///   monotonic boot counter) and feeds it here.
-/// - **`addr_resolver`** — maps a cluster [`Peer`] to its replication
-///   [`SocketAddr`]. S10b's sim harness passes an explicit `ordinal → addr` map;
+/// - **`addr_resolver`** — maps a cluster `Peer` to its replication
+///   [`SocketAddr`], **resolved per connect** (ADR-0012 D3). S10b's sim harness
+///   passes an explicit `ordinal → addr` map (`FnPeerResolver`);
 ///   **S11 (prod)** derives it from `ordinal + host + config`. We deliberately do
 ///   NOT invent an addressing grammar here — the resolver IS the seam.
 pub struct ReplicationSetup {
@@ -74,7 +75,7 @@ pub struct ReplicationSetup {
     /// Local replication listen address (where this node serves its changelog).
     pub listen_addr: SocketAddr,
     /// Resolves a peer to its replication address (the deferred S11 grammar seam).
-    pub addr_resolver: Arc<dyn Fn(&Peer) -> SocketAddr + Send + Sync>,
+    pub addr_resolver: crate::repl::AddrResolver,
     /// Per-boot incarnation seed for the changelog (deferred S11 real source).
     pub incarnation_gen: u64,
 }

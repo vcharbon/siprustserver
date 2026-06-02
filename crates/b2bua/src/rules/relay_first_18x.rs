@@ -313,12 +313,9 @@ fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
         .as_ref()
         .map(|f| f.platform.max_duration_sec)
         .unwrap_or(3600);
-    let keepalive = ctx
-        .call
-        .features
-        .as_ref()
-        .map(|f| f.platform.keepalive.interval_sec)
-        .unwrap_or(30);
+    // Operator/worker knob (`B2buaConfig::keepalive_interval_sec`, production
+    // default 300 s) — not the per-call feature; see `defaults::keepalive_interval`.
+    let keepalive = ctx.config.keepalive_interval_sec;
     vec![
         RuleAction::ConfirmDialog { leg_id: b.clone() },
         RuleAction::Merge {

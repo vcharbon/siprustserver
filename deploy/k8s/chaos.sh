@@ -117,8 +117,10 @@ kill_proxy() {
   kubectl -n "$NS" delete pod -l app=sip-front-proxy --grace-period=0 --force >/dev/null 2>&1 || true
   log "waiting for sip-front-proxy to come back Ready"
   kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout=90s || true
-  # Fresh proxy pod -> fresh IP, but PROXY_ADVERTISE/PROXY_WORKERS are env-fixed
-  # at deploy; the Service still selects it, so new calls flow once Ready.
+  # Fresh proxy pod -> fresh IP. PROXY_ADVERTISE is from the pod's own status.podIP
+  # (downward API) and the worker pool is re-discovered from k8s on boot (ADR-0012
+  # D4), so the restarted proxy self-configures; the Service still selects it, so
+  # new calls flow once Ready.
   kubectl -n "$NS" get pods -l app=sip-front-proxy -o wide || true
   push_metric 'sip_chaos_event{type="kill_proxy",result="pass"} 1'
 }
@@ -293,10 +295,10 @@ bringback() {
   # (2) the killed primary comes back + re-hydrates.
   wait_brought_back
   assert_rehydrated
-  # (3) the recreated pod has a fresh IP → the proxy's static registry is stale;
-  # refresh it (run.sh recomputes PROXY_WORKERS from live pod IPs), then re-gate
-  # readiness before driving traffic again.
-  deploy
+  # (3) the recreated pod has a fresh IP, but the proxy now discovers workers from
+  # k8s EndpointSlices (ADR-0012 D4): the informer picks up the new IP on its own,
+  # so NO proxy redeploy is needed (this used to re-bake PROXY_WORKERS). Just
+  # re-gate readiness before driving traffic again.
   wait_ready
   # (4) batch-2: NEW dialogs on the recovered topology must all succeed.
   JOB="sipp-uac-bringback"

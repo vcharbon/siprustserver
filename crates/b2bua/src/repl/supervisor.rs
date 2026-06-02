@@ -25,19 +25,54 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use async_trait::async_trait;
 use repl_net::frame::Watermark;
 use repl_net::transport::ReplicationNetwork;
 use sip_clock::Clock;
 use tokio::sync::watch;
-use topology::{MemberDelta, Membership, Peer};
+use topology::{Membership, Peer};
 
 use super::puller::{Puller, PullerConfig, PullerStatus};
 use super::ReplicatingCallStore;
 
-/// Resolves a [`Peer`] to its replication [`SocketAddr`] (ordinal+host+config →
-/// repl addr). For sim tests this maps ordinal/host → the peer's repl addr.
-pub type AddrResolver = Arc<dyn Fn(&Peer) -> SocketAddr + Send + Sync>;
+/// Default cadence of the supervisor's belt-and-suspenders snapshot reconcile
+/// (ADR-0012 D2): re-reads membership every 5 s and acts only on drift, so any
+/// missed/lagged delta self-heals. Cheap (a handful of peers); a no-op when the
+/// set is unchanged.
+const DEFAULT_RECONCILE_PERIOD: Duration = Duration::from_secs(5);
+
+/// Resolves a [`Peer`] to its replication [`SocketAddr`], **fresh on every
+/// connect attempt** (ADR-0012 D3). Async so a real impl can DNS-resolve a stable
+/// per-pod name (`tokio::net::lookup_host`) without blocking the runtime; `None`
+/// means "unresolvable right now" — the puller treats it as a failed connect and
+/// backs off, then retries (re-resolving). For sim tests / bare-IP hosts this is
+/// an instant map lookup or parse.
+#[async_trait]
+pub trait PeerResolver: Send + Sync {
+    /// Resolve `peer` to its replication socket address, or `None` if it cannot
+    /// be resolved at this instant.
+    async fn resolve(&self, peer: &Peer) -> Option<SocketAddr>;
+}
+
+/// Shared handle to a [`PeerResolver`].
+pub type AddrResolver = Arc<dyn PeerResolver>;
+
+/// Adapter turning a sync closure (`Fn(&Peer) -> SocketAddr`) into a
+/// [`PeerResolver`] — the sim-test / static-map resolver shape. Always resolves
+/// (never `None`).
+pub struct FnPeerResolver<F>(pub F);
+
+#[async_trait]
+impl<F> PeerResolver for FnPeerResolver<F>
+where
+    F: Fn(&Peer) -> SocketAddr + Send + Sync,
+{
+    async fn resolve(&self, peer: &Peer) -> Option<SocketAddr> {
+        Some((self.0)(peer))
+    }
+}
 
 /// Per-ordinal retained replication state — survives Park/disconnect/re-add.
 struct PeerEntry {
@@ -65,6 +100,11 @@ struct PeerEntry {
     /// An unreachable peer (never connected) that goes bootstrap-complete only by
     /// the hard timer must NOT pin readiness NotReady (Decision 4 — liveness).
     ever_connected: bool,
+    /// The membership `host` the running puller was last spawned for. The drift
+    /// signal for the periodic snapshot reconcile (ADR-0012 D2): a desired peer
+    /// whose host moved (or that is not running) is (re)spawned. `None` until a
+    /// puller has been spawned for this ordinal.
+    host: Option<String>,
 }
 
 impl PeerEntry {
@@ -77,6 +117,7 @@ impl PeerEntry {
             bootstrap_complete: false,
             reset_gen: 0,
             ever_connected: false,
+            host: None,
         }
     }
 
@@ -121,6 +162,8 @@ struct SupervisorInner {
     metrics: crate::metrics::B2buaMetrics,
     #[allow(dead_code)]
     clock: Clock,
+    /// Cadence of the periodic snapshot reconcile (ADR-0012 D2).
+    reconcile_period: Duration,
     /// `ordinal → PeerEntry`.
     peers: Mutex<HashMap<String, PeerEntry>>,
     /// The topology-reconcile loop's handle, retained so [`shutdown`] can abort
@@ -179,54 +222,77 @@ impl ReplicationSupervisor {
                 config,
                 metrics,
                 clock,
+                reconcile_period: DEFAULT_RECONCILE_PERIOD,
                 peers: Mutex::new(HashMap::new()),
                 reconcile: Mutex::new(None),
             }),
         }
     }
 
-    /// Spawn a puller per current peer (excluding self), then spawn the
-    /// topology-reconcile loop. Idempotent-ish: call once after construction.
+    /// Spawn a puller per current peer (excluding self), then keep them in step
+    /// with the membership stream. Idempotent-ish: call once after construction.
+    ///
+    /// Both the boot snapshot and every subsequent wakeup (delta, `Lagged`
+    /// overflow, or periodic tick) flow through one idempotent
+    /// [`reconcile_from_snapshot`](Self::reconcile_from_snapshot) — the shared
+    /// [`topology::spawn_membership_reconcile`] driver owns the subscribe-before-
+    /// snapshot ordering, the 5 s safety-net ticker, and the non-fatal `Lagged`
+    /// handling (ADR-0012 D1/D2), so the proxy's `MembershipWorkerRegistry` and
+    /// this supervisor cannot drift apart on that loop.
     pub fn start(&self, membership: Arc<dyn Membership>) {
-        // Subscribe BEFORE the snapshot so no delta between snapshot and
-        // subscribe is lost (no backfill on `changes()`).
-        let mut changes = membership.changes();
-        for peer in membership.snapshot() {
-            if peer.ordinal != self.inner.self_ordinal {
-                self.spawn_puller(&peer);
-            }
-        }
         let this = self.clone();
-        let handle = tokio::spawn(async move {
-            loop {
-                match changes.recv().await {
-                    Ok(MemberDelta::Added(peer)) => {
-                        if peer.ordinal != this.inner.self_ordinal {
-                            this.spawn_puller(&peer);
-                        }
-                    }
-                    Ok(MemberDelta::AddressChanged(peer)) => {
-                        if peer.ordinal != this.inner.self_ordinal {
-                            // Reconnect to the new addr from the retained W.
-                            this.spawn_puller(&peer);
-                        }
-                    }
-                    Ok(MemberDelta::Removed(ordinal)) => {
-                        this.park(&ordinal);
-                    }
-                    // Lagged/closed: re-sync from a fresh snapshot would go here;
-                    // for S5 sim tests the channel never lags.
-                    Err(_) => return,
-                }
-            }
+        let period = self.inner.reconcile_period;
+        let handle = topology::spawn_membership_reconcile(membership, period, move |snapshot| {
+            this.reconcile_from_snapshot(snapshot);
         });
         *self.inner.reconcile.lock().unwrap() = Some(handle);
+    }
+
+    /// Reconcile the running pullers to a fresh membership `snapshot` (ADR-0012
+    /// D1/D2). Acts only on drift: a desired peer that is **not running** or whose
+    /// **host moved** is (re)spawned (idempotent — `spawn_puller` absorbs + cancels
+    /// any running puller and reseeds from the retained watermark); a **running**
+    /// puller whose ordinal is no longer desired is parked. An unchanged set
+    /// produces no work.
+    fn reconcile_from_snapshot(&self, snapshot: Vec<Peer>) {
+        let desired: Vec<Peer> = snapshot
+            .into_iter()
+            .filter(|p| p.ordinal != self.inner.self_ordinal)
+            .collect();
+
+        // Spawn or redirect: not-running, or the resolved host drifted.
+        for peer in &desired {
+            let needs_spawn = {
+                let peers = self.inner.peers.lock().unwrap();
+                match peers.get(&peer.ordinal) {
+                    Some(e) => e.status_rx.is_none() || e.host.as_deref() != Some(peer.host.as_str()),
+                    None => true,
+                }
+            };
+            if needs_spawn {
+                self.spawn_puller(peer);
+            }
+        }
+
+        // Park: a running puller whose ordinal departed the desired set.
+        let desired_ords: std::collections::HashSet<&str> =
+            desired.iter().map(|p| p.ordinal.as_str()).collect();
+        let to_park: Vec<String> = {
+            let peers = self.inner.peers.lock().unwrap();
+            peers
+                .iter()
+                .filter(|(ord, e)| e.status_rx.is_some() && !desired_ords.contains(ord.as_str()))
+                .map(|(ord, _)| ord.clone())
+                .collect()
+        };
+        for ord in to_park {
+            self.park(&ord);
+        }
     }
 
     /// Spawn (or re-spawn) a puller for `peer`, seeded from its retained W. If a
     /// puller is already running it is cancelled first (its W is absorbed).
     fn spawn_puller(&self, peer: &Peer) {
-        let addr = (self.inner.resolve)(peer);
         let start_w = {
             let mut peers = self.inner.peers.lock().unwrap();
             let entry = peers
@@ -238,13 +304,18 @@ impl ReplicationSupervisor {
                 let _ = tx.send(true);
             }
             entry.status_rx = None;
+            // Record the host we are (re)spawning for — the drift signal D2 reads.
+            entry.host = Some(peer.host.clone());
             entry.watermark
         };
 
+        // The puller resolves its address FRESH per connect attempt (ADR-0012 D3)
+        // via the shared resolver, so a restarted peer's new IP is picked up on
+        // reconnect without a membership delta.
         let (puller, status_rx) = Puller::new(
-            peer.ordinal.clone(),
+            peer.clone(),
             self.inner.self_ordinal.clone(),
-            addr,
+            self.inner.resolve.clone(),
             self.inner.network.clone(),
             self.inner.store.clone(),
             self.inner.config,

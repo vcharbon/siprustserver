@@ -15,6 +15,7 @@ use tokio::sync::broadcast;
 use crate::addr::ProxyAddr;
 
 pub mod control;
+pub mod membership_reg;
 pub mod simulated;
 pub mod static_reg;
 
@@ -118,6 +119,59 @@ impl RegistryState {
         f(&mut next);
         self.entries.store(Arc::new(next));
         let _ = self.tx.send(event);
+    }
+
+    /// Add (or replace) a worker, emitting [`RegistryEvent::Added`]. A re-joined
+    /// ordinal is replaced (the restart path) so the entry starts fresh — health
+    /// and `first_seen_at_ms` come from `entry`. Used by the membership-driven
+    /// registry (ADR-0012 D4); the OPTIONS probe re-classifies health afterwards.
+    pub(crate) fn add_worker(&self, entry: WorkerEntry) {
+        let event = RegistryEvent::Added { entry: entry.clone() };
+        self.mutate(
+            |entries| {
+                entries.retain(|w| w.id != entry.id);
+                entries.push(entry);
+            },
+            event,
+        );
+    }
+
+    /// Remove a worker by id, emitting [`RegistryEvent::Removed`] (no-op if absent
+    /// — no spurious event).
+    pub(crate) fn remove_worker(&self, id: &str) {
+        if self.resolve(id).is_none() {
+            return;
+        }
+        self.mutate(
+            |entries| entries.retain(|w| w.id != id),
+            RegistryEvent::Removed { id: id.to_string() },
+        );
+    }
+
+    /// Change a worker's address, emitting [`RegistryEvent::AddressChanged`]
+    /// (no-op if unknown or unchanged). A genuine address move is treated as a
+    /// **fresh endpoint**: health resets to `Unknown` (the new process is not yet
+    /// probed) and `first_seen_at_ms` is re-stamped from `now_ms` so the LB's
+    /// fresh-pod guard re-arms. Used by the membership-driven registry (D4).
+    pub(crate) fn set_address(&self, id: &str, addr: ProxyAddr, now_ms: u64) {
+        let Some(cur) = self.resolve(id) else {
+            return;
+        };
+        if cur.address == addr {
+            return;
+        }
+        let event =
+            RegistryEvent::AddressChanged { id: id.to_string(), from: cur.address.clone(), to: addr.clone() };
+        self.mutate(
+            |entries| {
+                if let Some(w) = entries.iter_mut().find(|w| w.id == id) {
+                    w.address = addr;
+                    w.health = WorkerHealth::Unknown;
+                    w.first_seen_at_ms = Some(now_ms);
+                }
+            },
+            event,
+        );
     }
 
     /// Annotate a worker's health, emitting `HealthChanged` (no-op if unknown or
