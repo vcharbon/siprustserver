@@ -117,7 +117,7 @@ impl B2buaCore {
                 id_gen: id_gen.clone(),
             },
         );
-        let (timers, timer_rx) = TimerService::spawn(clock.clone());
+        let (timers, timer_rx) = TimerService::spawn_with_metrics(clock.clone(), metrics.clone());
 
         // The store the terminate-writer drains to: the replicating store when
         // wired (so its changelog bumps on flushes carrying a peer), else the

@@ -187,6 +187,35 @@
       ],
       "fieldConfig": { "defaults": { "unit": "none", "custom": { "fillOpacity": 4, "showPoints": "never", "lineWidth": 1 } } },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 40, "type": "row", "title": "Timer queue (CPU-drift detector)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 54 }, "collapsed": false
+    },
+    {
+      "id": 41, "type": "timeseries", "title": "Timer DelayQueue: physical vs live + tombstone backlog",
+      "description": "`b2bua_timer_queue_len` (physical DelayQueue entries) vs `b2bua_timer_live` (schedulable timers); the third line is their difference — the lingering-tombstone backlog. Cancellation is logical, so a cancelled long-interval timer (the per-call 1 h GlobalDuration) keeps its queue slot until its original deadline. Diagnostic signature for the 'looks-like-a-leak-but-isn't' CPU climb: queue_len + backlog rise ~linearly for ~1 h then plateau (~cps × 3600), while live (and active_calls) stay flat. Pair with the container-CPU panel: if CPU tracks THIS curve rather than active_calls, the timer queue is the cause.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 55 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum(b2bua_timer_queue_len{pod=~\"$pod\"})", "refId": "A", "legendFormat": "queue_len (physical)" },
+        { "expr": "sum(b2bua_timer_live{pod=~\"$pod\"})", "refId": "B", "legendFormat": "live (schedulable)" },
+        { "expr": "sum(b2bua_timer_queue_len{pod=~\"$pod\"}) - sum(b2bua_timer_live{pod=~\"$pod\"})", "refId": "C", "legendFormat": "tombstone backlog" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "min": 0, "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 42, "type": "timeseries", "title": "Timer queue size per pod",
+      "description": "`b2bua_timer_queue_len` broken out per worker pod — physical timer entries each driver is holding (live + not-yet-expired tombstones). A pod whose queue climbs without bound is accumulating cancelled long-interval timers; compare against its `b2bua_active_calls` line (flat → tombstone backlog, not a call leak).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 55 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "b2bua_timer_queue_len{pod=~\"$pod\"}", "refId": "A", "legendFormat": "queue_len {{pod}}" },
+        { "expr": "b2bua_active_calls{pod=~\"$pod\"}", "refId": "B", "legendFormat": "active_calls {{pod}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "min": 0, "custom": { "fillOpacity": 4, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
     }
   ]
 }

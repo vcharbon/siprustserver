@@ -26,6 +26,13 @@ struct Inner {
     // cdr
     cdr_written: AtomicU64,
     cdr_dropped: AtomicU64,
+    // timer service (gauges): physical DelayQueue size (live entries + not-yet-
+    // expired tombstones from cancelled/rescheduled timers) vs. the live
+    // schedulable timer count. `queue_len - live` is the lingering-tombstone
+    // backlog — the work that grows with cancelled long-interval timers
+    // (e.g. the per-call 1 h GlobalDuration) even while active_calls is flat.
+    timer_queue_len: AtomicU64,
+    timer_live: AtomicU64,
     // replication (peer-to-peer HA; separate namespace `b2bua_repl_*`). These
     // localise an HA failure to a layer: `flush_propagated` rising on the PRIMARY
     // proves it is attempting to replicate (the proxy cookie stamped
@@ -113,6 +120,21 @@ impl B2buaMetrics {
         self.inner.repl_backup_held.load(Ordering::Relaxed)
     }
 
+    /// Set the timer-service gauges from the driver on each state change.
+    /// `queue_len` is the physical `DelayQueue` size (live entries + not-yet-
+    /// expired tombstones); `live` is the number of schedulable timers. Their
+    /// difference is the lingering-tombstone backlog (see field docs).
+    pub fn set_timer_gauges(&self, queue_len: u64, live: u64) {
+        self.inner.timer_queue_len.store(queue_len, Ordering::Relaxed);
+        self.inner.timer_live.store(live, Ordering::Relaxed);
+    }
+    pub fn timer_queue_len(&self) -> u64 {
+        self.inner.timer_queue_len.load(Ordering::Relaxed)
+    }
+    pub fn timer_live(&self) -> u64 {
+        self.inner.timer_live.load(Ordering::Relaxed)
+    }
+
     /// Render the counter set as Prometheus text-exposition format. Used by the
     /// runner's `/metrics` endpoint so an endurance recorder can scrape worker
     /// application metrics alongside container CPU/memory. The
@@ -160,6 +182,14 @@ impl B2buaMetrics {
         s.push_str(&format!("b2bua_active_calls {active}\n"));
         s.push_str("# HELP b2bua_repl_backup_held replicas currently held in backup partitions for peers\n# TYPE b2bua_repl_backup_held gauge\n");
         s.push_str(&format!("b2bua_repl_backup_held {}\n", self.repl_backup_held()));
+        // Timer-queue gauges: physical DelayQueue size vs. live timers. A
+        // queue_len that climbs while timer_live (and active_calls) stay flat is
+        // the lingering-tombstone backlog of cancelled long-interval timers — the
+        // CPU drift that looks like a leak but isn't one.
+        s.push_str("# HELP b2bua_timer_queue_len physical timer DelayQueue entries, incl. not-yet-expired tombstones from cancelled/rescheduled timers\n# TYPE b2bua_timer_queue_len gauge\n");
+        s.push_str(&format!("b2bua_timer_queue_len {}\n", self.timer_queue_len()));
+        s.push_str("# HELP b2bua_timer_live live (schedulable) timers; b2bua_timer_queue_len minus this is the lingering-tombstone backlog\n# TYPE b2bua_timer_live gauge\n");
+        s.push_str(&format!("b2bua_timer_live {}\n", self.timer_live()));
         s
     }
 }

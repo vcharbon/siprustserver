@@ -8,35 +8,54 @@
 //! router selects on that channel and routes it through the per-call dispatcher
 //! exactly like an inbound message — so timer handling shares the per-call FIFO.
 //!
-//! ## Cancellation is logical (epoch/tombstone), never by `DelayQueue` `Key`
+//! ## Cancellation: epoch correctness **+** physical `Key` removal
 //!
 //! A `DelayQueue` `Key` is a bare slab index with no generation stamp: when an
 //! entry expires or is removed, its slot is freed and the **next insert reuses
-//! it, yielding the same `Key` value**. A side `id → Key` map therefore aliases
-//! the moment any cleanup is missed, and `try_remove(stale_key)` then evicts
-//! whatever *live* timer now occupies that slot — a silent, catastrophic
-//! wrong-timer cancel (this is the bug where a keepalive-timeout cancel killed
-//! the rescheduled keepalive). See `[[test-time clock & timers]]` in CLAUDE.md.
+//! it, yielding the same `Key` value**. A *stale* `id → Key` map therefore
+//! aliases, and `try_remove(stale_key)` then evicts whatever *live* timer now
+//! occupies that slot — a silent, catastrophic wrong-timer cancel (the bug where
+//! a keepalive-timeout cancel killed the rescheduled keepalive). See
+//! `[[test-time clock & timers]]` in CLAUDE.md.
 //!
-//! So we do **not** keep `Key`s and never call `try_remove`. Each scheduled
-//! timer carries a monotonic `epoch`; the live epoch per id lives in `active`.
-//! Cancel/CancelAll are pure map removals; a re-`Schedule` just bumps the epoch.
-//! On expiry a `Fired` is delivered only if its epoch still matches `active`,
-//! else it is a tombstone (superseded/cancelled) and dropped. Correctness rests
-//! on a single invariant — `active[id] == fired.epoch` — with no `Key` to alias.
-//! Cost: a cancelled/rescheduled entry lingers in the queue until its original
-//! deadline, then drops harmlessly. Bounded and short-lived for SIP timers.
+//! The aliasing hazard needs a **stale** key — one held past the moment its
+//! entry left the queue. We never hold one, so we *can* safely keep `Key`s and
+//! physically remove. The driver is a single task (Schedule / Cancel / expiry
+//! never interleave), and `active` is the authoritative record of queue
+//! membership: every entry that expires is removed from `active` in the same
+//! turn it fires, and every Cancel/CancelAll/reschedule removes its entry from
+//! both `active` *and* the queue together. So a `Key` stored in `active` always
+//! points at a still-queued entry — there is no stale-key window for
+//! `try_remove` to alias into.
+//!
+//! Each entry therefore carries both a monotonic `epoch` and its `Key`:
+//!
+//! - **Physical removal (the why):** Cancel/CancelAll/reschedule call
+//!   `try_remove(&key)` so a cancelled timer's slot is reclaimed *immediately*,
+//!   not at its original deadline. Without this, a per-call `GlobalDuration`
+//!   timer (default 1 h) cancelled by a 30 s call's BYE lingered ~3570 s as a
+//!   tombstone; under steady load the queue grew to ≈ `arrival_rate × 3600`
+//!   (~850k entries observed at ~100 cps) and the oversized timing wheel drove a
+//!   monotonic CPU climb that looked like a leak but wasn't. Physical removal
+//!   keeps `queue.len()` ≈ the live timer count. This is the concrete instance
+//!   of the CLAUDE.md rule "all per-call state MUST be released at call end."
+//! - **Epoch (the backstop):** a `Fired` is delivered only if its epoch still
+//!   matches `active`. So even if a removal were ever missed, a superseded or
+//!   cancelled entry that slipped through still drops as a tombstone instead of
+//!   mis-firing. Correctness never depends on the removal having happened —
+//!   `try_remove` only bounds the queue size.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use sip_clock::Clock;
 use tokio::sync::mpsc;
-use tokio_util::time::DelayQueue;
+use tokio_util::time::{delay_queue::Key, DelayQueue};
 
 use call::{TimerEntry, TimerType};
 
 use crate::event::CallEvent;
+use crate::metrics::B2buaMetrics;
 
 struct Fired {
     id: String,
@@ -59,9 +78,20 @@ pub struct TimerService {
 }
 
 impl TimerService {
-    /// Spawn the driver. Returns the handle + the channel of fired timer events
-    /// the router consumes.
+    /// Spawn the driver with no metrics (the gauges are discarded). Tests use
+    /// this; the production worker uses [`spawn_with_metrics`](Self::spawn_with_metrics).
     pub fn spawn(clock: Clock) -> (Self, mpsc::UnboundedReceiver<CallEvent>) {
+        Self::spawn_with_metrics(clock, B2buaMetrics::default())
+    }
+
+    /// Spawn the driver, reporting the live timer-queue gauges
+    /// (`b2bua_timer_queue_len` / `b2bua_timer_live`) into `metrics` on every
+    /// state change. Returns the handle + the channel of fired timer events the
+    /// router consumes.
+    pub fn spawn_with_metrics(
+        clock: Clock,
+        metrics: B2buaMetrics,
+    ) -> (Self, mpsc::UnboundedReceiver<CallEvent>) {
         let (cmd_tx, cmd_rx) = mpsc::channel(1024);
         // The fire channel is UNBOUNDED on purpose: timer fires are already bounded
         // by real time and by the live `DelayQueue` entries (one per scheduled
@@ -74,7 +104,7 @@ impl TimerService {
         // its task with the cmd channel, so blocking on a full fire channel would
         // deadlock against the router draining via cmd.
         let (fire_tx, fire_rx) = mpsc::unbounded_channel();
-        tokio::spawn(driver(clock, cmd_rx, fire_tx));
+        tokio::spawn(driver(clock, cmd_rx, fire_tx, metrics));
         (Self { cmd_tx }, fire_rx)
     }
 
@@ -132,21 +162,29 @@ async fn driver(
     clock: Clock,
     mut cmd_rx: mpsc::Receiver<TimerCmd>,
     fire_tx: mpsc::UnboundedSender<CallEvent>,
+    metrics: B2buaMetrics,
 ) {
     let mut queue: DelayQueue<Fired> = DelayQueue::new();
-    // The live epoch per timer, keyed by `(call_ref, id)`. The timer service is
-    // a SINGLE shared driver across every call, but timer ids are per-call and
-    // collide across calls (every call's keepalive is `"Keepalive"`, every
-    // keepalive-timeout is `"KeepaliveTimeout:a"`/`":b"`, etc.). Keying `active`
-    // by id alone aliased calls: scheduling call N+1's `"Keepalive"` overwrote
-    // the epoch for call N's, so call N's queued entry became a stale tombstone
-    // and silently never fired — only the most-recently-scheduled call per id
-    // kept its timers, so at scale keepalives stopped firing and dead-peer calls
-    // were never reaped (active_calls grew unbounded). The `(call_ref, id)` key
-    // isolates each call. An entry absent from `active` is cancelled; an entry
-    // whose epoch differs from a fired one's was rescheduled (a tombstone).
-    // `by_call` indexes ids for `CancelAll`.
-    let mut active: HashMap<(String, String), u64> = HashMap::new();
+    // The live `(epoch, Key)` per timer, keyed by `(call_ref, id)`. The timer
+    // service is a SINGLE shared driver across every call, but timer ids are
+    // per-call and collide across calls (every call's keepalive is `"Keepalive"`,
+    // every keepalive-timeout is `"KeepaliveTimeout:a"`/`":b"`, etc.). Keying
+    // `active` by id alone aliased calls: scheduling call N+1's `"Keepalive"`
+    // overwrote the entry for call N's, so call N's queued entry was orphaned and
+    // silently never fired — only the most-recently-scheduled call per id kept
+    // its timers, so at scale keepalives stopped firing and dead-peer calls were
+    // never reaped (active_calls grew unbounded). The `(call_ref, id)` key
+    // isolates each call.
+    //
+    // The stored `Key` lets Cancel/CancelAll/reschedule physically `try_remove`
+    // the queue entry instead of leaving it to expire as a tombstone — see the
+    // module docs. The invariant that makes that safe: `active` always mirrors
+    // queue membership (an entry is removed from `active` in the same turn it
+    // fires), so a stored `Key` never points at a reused slot. The `epoch` stays
+    // as a backstop: a `Fired` whose epoch no longer matches `active` is dropped,
+    // so even a missed removal can never mis-fire. `by_call` indexes ids for
+    // `CancelAll`.
+    let mut active: HashMap<(String, String), (u64, Key)> = HashMap::new();
     let mut by_call: HashMap<String, HashSet<String>> = HashMap::new();
     let mut next_epoch: u64 = 0;
 
@@ -156,12 +194,17 @@ async fn driver(
             cmd = cmd_rx.recv() => match cmd {
                 None => break, // all handles dropped
                 Some(TimerCmd::Schedule { entry, call_ref }) => {
-                    // Re-arm = bump the epoch; the previous queue entry (if any)
-                    // becomes a tombstone and is filtered when it expires. No
-                    // `try_remove`, so no `Key` aliasing is possible.
                     next_epoch += 1;
                     let epoch = next_epoch;
-                    active.insert((call_ref.clone(), entry.id.clone()), epoch);
+                    let akey = (call_ref.clone(), entry.id.clone());
+                    // Re-arm: physically drop the previous queue entry for this
+                    // (call_ref, id) so it can't linger. `try_remove` is safe —
+                    // the stored Key is for a still-queued entry (active mirrors
+                    // the queue), so it cannot alias a reused slot. The epoch bump
+                    // still supersedes it logically as a backstop.
+                    if let Some(&(_, old_key)) = active.get(&akey) {
+                        queue.try_remove(&old_key);
+                    }
                     by_call.entry(call_ref.clone()).or_default().insert(entry.id.clone());
                     // Rebuild the monotonic delay from the absolute wall deadline.
                     // Within a process this cancels — the rule minted `fire_at`
@@ -171,7 +214,7 @@ async fn driver(
                     // depends on cross-node wall-clock agreement (see `restore`).
                     // Past-due (`fire_at <= now`) clamps to 0 → fires next tick.
                     let delay = (entry.fire_at - clock.now_ms()).max(0) as u64;
-                    queue.insert(
+                    let key = queue.insert(
                         Fired {
                             id: entry.id,
                             epoch,
@@ -181,45 +224,65 @@ async fn driver(
                         },
                         Duration::from_millis(delay),
                     );
+                    active.insert(akey, (epoch, key));
                 }
                 Some(TimerCmd::Cancel { call_ref, id }) => {
-                    // Logical cancel: forget the live epoch for THIS call's timer.
-                    // The queued entry stays and drops as a tombstone at its
-                    // deadline.
-                    active.remove(&(call_ref.clone(), id.clone()));
+                    // Physical cancel: forget this call's timer AND reclaim its
+                    // queue slot now, so it never lingers as a tombstone.
+                    if let Some((_, key)) = active.remove(&(call_ref.clone(), id.clone())) {
+                        queue.try_remove(&key);
+                    }
                     if let Some(ids) = by_call.get_mut(&call_ref) {
                         ids.remove(&id);
                     }
                 }
                 Some(TimerCmd::CancelAll { call_ref }) => {
+                    // Call teardown: every per-call timer must leave both `active`
+                    // AND the queue (the "all per-call state released at call end"
+                    // guarantee). This is the cancel that frees the long-lived
+                    // GlobalDuration slot a clean BYE would otherwise strand.
                     if let Some(ids) = by_call.remove(&call_ref) {
                         for id in ids {
-                            active.remove(&(call_ref.clone(), id));
+                            if let Some((_, key)) = active.remove(&(call_ref.clone(), id)) {
+                                queue.try_remove(&key);
+                            }
                         }
                     }
                 }
             },
             expired = next_expired(&mut queue), if !queue.is_empty() => {
-                // Deliver only the live generation; a stale epoch (rescheduled)
-                // or a missing entry (cancelled) is a tombstone — drop it.
-                let key = (expired.call_ref.clone(), expired.id.clone());
-                if active.get(&key) != Some(&expired.epoch) {
-                    continue;
+                // Deliver only the live generation. `poll_expired` already removed
+                // this entry from the queue (its `Key`/slot is now freed), so we
+                // only clear `active` — never `try_remove` it. With physical
+                // cancellation a surviving tombstone is rare (a removal missed),
+                // but the epoch backstop still drops it. (Not a `continue`: the
+                // gauge update below must run on every iteration.)
+                let akey = (expired.call_ref.clone(), expired.id.clone());
+                if active.get(&akey).map(|&(e, _)| e) == Some(expired.epoch) {
+                    active.remove(&akey);
+                    if let Some(ids) = by_call.get_mut(&expired.call_ref) {
+                        ids.remove(&expired.id);
+                    }
+                    let event = CallEvent::Timer {
+                        timer_type: expired.timer_type,
+                        call_ref: expired.call_ref,
+                        leg_id: expired.leg_id,
+                    };
+                    // Unbounded: only fails if the router (receiver) is gone — i.e.
+                    // the worker is shutting down — and dropping the fire is fine.
+                    let _ = fire_tx.send(event);
                 }
-                active.remove(&key);
-                if let Some(ids) = by_call.get_mut(&expired.call_ref) {
-                    ids.remove(&expired.id);
-                }
-                let event = CallEvent::Timer {
-                    timer_type: expired.timer_type,
-                    call_ref: expired.call_ref,
-                    leg_id: expired.leg_id,
-                };
-                // Unbounded: only fails if the router (receiver) is gone — i.e. the
-                // worker is shutting down — in which case dropping the fire is fine.
-                let _ = fire_tx.send(event);
             }
         }
+        // Live timer-queue gauges. `queue.len()` is the physical entry count;
+        // `active.len()` is the schedulable timer count. With physical
+        // cancellation the two now track each other — their gap is the
+        // tombstone backlog, which should stay ≈ 0. A gap that *climbs* means a
+        // removal is being missed and entries are lingering again (the old 1 h
+        // GlobalDuration leak); it is the regression alarm for this fix. Updated
+        // every iteration (cheap Relaxed stores); the driver only iterates on a
+        // state change.
+        metrics.set_timer_gauges(queue.len() as u64, active.len() as u64);
     }
 }
 
@@ -335,6 +398,67 @@ mod tests {
         );
         // Nothing else pending (the timeout was a dropped tombstone).
         assert!(fire_rx.try_recv().is_err(), "cancelled timeout must not fire");
+    }
+
+    /// Let the single-task driver drain pending commands and run its end-of-loop
+    /// gauge update. `schedule`/`cancel` only enqueue; yielding hands the runtime
+    /// to the driver task (current-thread under `start_paused`).
+    async fn settle() {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// The fix for the timer-queue tombstone CPU drift: cancelling a timer must
+    /// physically reclaim its `DelayQueue` slot *now*, not leave it to expire at
+    /// its original deadline. Models the real leak — a long `GlobalDuration`
+    /// timer (1 h) armed on a call that tears down seconds later: under the old
+    /// logical-only cancel the slot lingered ~1 h, so at load the queue grew to
+    /// hundreds of thousands of dead entries. `queue_len` must drop to 0 on the
+    /// teardown cancel, well before the 1 h deadline.
+    #[tokio::test(start_paused = true)]
+    async fn cancel_physically_reclaims_the_queue_slot() {
+        let clock = Clock::test_at(0);
+        let metrics = B2buaMetrics::new();
+        let (timers, _fire_rx) = TimerService::spawn_with_metrics(clock, metrics.clone());
+
+        timers
+            .schedule(
+                TimerEntry { id: "GlobalDuration".into(), timer_type: TimerType::GlobalDuration, fire_at: 3_600_000, leg_id: None },
+                "c".into(),
+            )
+            .await;
+        settle().await;
+        assert_eq!(metrics.timer_queue_len(), 1, "armed timer occupies a queue slot");
+        assert_eq!(metrics.timer_live(), 1);
+
+        // Call teardown — the slot must be freed immediately, not at +1 h.
+        timers.cancel_all("c".into()).await;
+        settle().await;
+        assert_eq!(metrics.timer_queue_len(), 0, "CancelAll reclaims the slot — no lingering tombstone");
+        assert_eq!(metrics.timer_live(), 0, "no schedulable timers remain");
+    }
+
+    /// A reschedule must also reclaim the superseded slot, so a periodically
+    /// re-armed timer (the keepalive) keeps `queue_len` flat instead of leaking
+    /// one tombstone per re-arm.
+    #[tokio::test(start_paused = true)]
+    async fn reschedule_does_not_accumulate_tombstones() {
+        let clock = Clock::test_at(0);
+        let metrics = B2buaMetrics::new();
+        let (timers, _fire_rx) = TimerService::spawn_with_metrics(clock, metrics.clone());
+
+        for round in 0..50 {
+            timers
+                .schedule(
+                    TimerEntry { id: "keepalive".into(), timer_type: TimerType::Keepalive, fire_at: 300_000 + round, leg_id: None },
+                    "c".into(),
+                )
+                .await;
+        }
+        settle().await;
+        assert_eq!(metrics.timer_queue_len(), 1, "50 re-arms collapse to one live entry, not 50 tombstones");
+        assert_eq!(metrics.timer_live(), 1);
     }
 
     /// Review regression (#8): a burst of more timers than the old bounded fire

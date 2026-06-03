@@ -31,15 +31,42 @@ Hazards (each has bitten us at least once; some twice across both codebases):
   txn → router → dispatcher → net pipeline, so a response is processed a turn
   late and a timer cancel can land *after* the timer fired. Never reintroduce 0.
 
-- **Timer drivers over `DelayQueue` must cancel logically, never by `Key`.**
+- **Timer drivers over `DelayQueue`: never use a *stale* `Key`; epoch is the
+  correctness backstop; physical removal is mandatory so per-call state is bounded.**
   A `DelayQueue` `Key` is a bare slab index with no generation: a freed slot is
-  reused by the next insert and yields the *same* `Key`, so any stale `id → Key`
-  map aliases and `try_remove` evicts the wrong live timer (silent, catastrophic
-  — it killed the rescheduled keepalive in cycle 2). The B2BUA `timers.rs` driver
-  uses epoch/tombstone cancellation (live epoch per id; stale/absent epochs are
-  dropped at expiry); copy that pattern, don't hand-roll `Key` bookkeeping. If a
-  timer "just doesn't fire," suspect aliasing or a cancel that hit the wrong
-  entry — not the clock. Regression: `timers::tests::reschedule_survives_aliasing_cancel`.
+  reused by the next insert and yields the *same* `Key`, so a *stale* `id → Key`
+  map (one kept past the moment its entry left the queue) aliases and `try_remove`
+  evicts the wrong live timer (silent, catastrophic — it killed the rescheduled
+  keepalive in cycle 2). The B2BUA `timers.rs` driver carries **both** an `epoch`
+  and the `Key` per `(call_ref, id)`:
+  - **Epoch = correctness.** A fired entry is delivered only if its epoch still
+    matches the live map; a superseded/cancelled entry drops as a tombstone.
+    Correctness never depends on a removal having happened.
+  - **Physical `try_remove` on Cancel/CancelAll/reschedule = bounded queue.**
+    This is the **"all per-call state MUST be released at call end"** guarantee
+    applied to timers. Logical-only cancellation is *correct* but leaves the slot
+    until its original deadline; for a long-interval per-call timer (the 1 h
+    `GlobalDuration`, default `max_duration` 3600 s in `rules/defaults.rs`)
+    cancelled by a seconds-long call's BYE, that stranded entry lingers ~1 h.
+    Under steady load the queue grew to ≈ `arrival_rate × 3600` (~850k entries at
+    ~100 cps observed) and the oversized timing wheel drove a monotonic CPU climb
+    that *looked like a call leak but wasn't* (`active_calls` was flat). So
+    `CancelAll` on the `→ terminated` transition must free **every** queue slot
+    the call owns, now — not at its deadline.
+  - **Why `try_remove` is safe here despite the aliasing rule:** the single-task
+    driver keeps `active` in lockstep with queue membership — an entry is removed
+    from `active` in the same turn it fires, and every cancel/reschedule removes
+    it from `active` *and* the queue together — so a stored `Key` never points at
+    a reused slot. The hazard needs a *stale* key; this design never holds one.
+
+  If you hand-roll a driver, copy this shape (epoch + lockstep `Key`), don't keep
+  a loose `id → Key` map. If a timer "just doesn't fire," suspect aliasing or a
+  cancel that hit the wrong entry — not the clock. If CPU/queue size climbs while
+  `active_calls` is flat, suspect a cancel path that forgot to `try_remove` (watch
+  the `b2bua_timer_queue_len` − `b2bua_timer_live` gap). Regressions:
+  `timers::tests::reschedule_survives_aliasing_cancel` (no mis-fire),
+  `cancel_physically_reclaims_the_queue_slot` + `reschedule_does_not_accumulate_tombstones`
+  (bounded queue).
 
 - **Drive the protocol *between* advances.** Advance exactly to the deadline you
   want to trip; let the response / cancel land; then advance again. Advancing
