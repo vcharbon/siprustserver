@@ -14,6 +14,7 @@ mod response;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
@@ -113,6 +114,28 @@ impl ProxyCore {
     /// The recv loop. Runs until the endpoint's queue is closed (the endpoint
     /// is dropped). Parse failures are dropped silently (RFC 3261 §16.3).
     pub async fn run(self) {
+        // Background sweeper for the `(Call-ID|CSeq#)` LRU. `lookup` only evicts
+        // an entry when it is looked up *after* expiry — which an answered (2xx)
+        // call never does (no CANCEL, no proxy-absorbed ACK), so without this
+        // task the map (and `sip_proxy_pending_invite_lru_size`) grows ≈ the
+        // cumulative-INVITE count for the life of the process. Sweeping every
+        // half-TTL physically reclaims expired slots and re-publishes the gauge,
+        // pinning the map at ~1× working set. See [`crate::cancel_lru`].
+        let sweeper = {
+            let lru = self.cancel_lru.clone();
+            let metrics = self.metrics.clone();
+            tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(Duration::from_millis(crate::cancel_lru::DEFAULT_SWEEP_INTERVAL_MS));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tick.tick().await;
+                    lru.sweep_expired();
+                    metrics.set_pending_invite_lru_size(lru.size() as u64);
+                }
+            })
+        };
+
         while let Some(pkt) = self.endpoint.recv().await {
             let Ok(msg) = self.parser.parse(&pkt.raw) else {
                 // Malformed datagram — drop silently.
@@ -123,6 +146,9 @@ impl ProxyCore {
                 SipMessage::Response(resp) => self.handle_response(resp).await,
             }
         }
+
+        // Endpoint closed — stop the sweeper so it doesn't outlive the core.
+        sweeper.abort();
     }
 }
 
@@ -197,5 +223,96 @@ impl ProxyCoreBuilder {
             logger: self.logger.unwrap_or_else(|| Arc::new(NoopLogger)),
             self_gate: self.self_gate.unwrap_or_else(|| Arc::new(AlwaysAdmitGate)),
         })
+    }
+}
+
+#[cfg(test)]
+mod sweeper_tests {
+    use super::*;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+
+    use async_trait::async_trait;
+    use sip_net::{SendError, UdpEndpointCounters, UdpPacket};
+
+    use crate::cancel_lru::{call_id_cseq_key, CancelEntry, DEFAULT_SWEEP_INTERVAL_MS, DEFAULT_TTL_MS};
+    use crate::registry::static_reg::StaticWorkerRegistry;
+    use crate::ForwardAllStrategy;
+
+    /// A `UdpEndpoint` whose `recv` never resolves: the proxy's recv loop parks,
+    /// so the background sweeper is the only task making progress.
+    struct PendingEndpoint;
+
+    #[async_trait]
+    impl UdpEndpoint for PendingEndpoint {
+        async fn send_to(&self, _buf: &[u8], _dst: SocketAddr) -> Result<(), SendError> {
+            Ok(())
+        }
+        async fn recv(&self) -> Option<UdpPacket> {
+            std::future::pending::<Option<UdpPacket>>().await
+        }
+        fn try_recv(&self) -> Option<UdpPacket> {
+            None
+        }
+        fn local_addr(&self) -> SocketAddr {
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 5060))
+        }
+        fn queue_depth(&self) -> usize {
+            0
+        }
+        fn queue_max(&self) -> usize {
+            0
+        }
+        fn counters(&self) -> UdpEndpointCounters {
+            UdpEndpointCounters::default()
+        }
+    }
+
+    /// Regression: a running core's background sweeper physically reclaims an
+    /// expired pending-INVITE entry and re-publishes the gauge to match. Without
+    /// the sweeper the entry would linger for the life of the process (an
+    /// answered call never re-`lookup`s its key, so lazy eviction never fires)
+    /// and `sip_proxy_pending_invite_lru_size` would climb without bound.
+    #[tokio::test(start_paused = true)]
+    async fn run_sweeps_expired_pending_invite_entries() {
+        // Cadence is sub-TTL by construction, else a reclaimed slot would
+        // outlive its usefulness (kept as a compile-time invariant).
+        const _: () = assert!(DEFAULT_SWEEP_INTERVAL_MS <= DEFAULT_TTL_MS);
+
+        let clock = Clock::test_at(0);
+        let lru = Arc::new(CancelBranchLru::with_opts(DEFAULT_TTL_MS, clock.clone()));
+        let metrics = Arc::new(ProxyMetrics::new());
+
+        // Remember one pending INVITE and publish the gauge, as the request path
+        // does on every outbound INVITE.
+        lru.remember(
+            &call_id_cseq_key("call-leaky", 1),
+            CancelEntry { target: ProxyAddr::new("10.0.0.2", 5070), branch: "z9hG4bK-x".into() },
+        );
+        metrics.set_pending_invite_lru_size(lru.size() as u64);
+        assert_eq!(metrics.pending_invite_lru_size(), 1);
+
+        let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new("10.0.0.2", 5070)));
+        let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
+        let core = ProxyCoreBuilder::new(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
+            .clock(clock)
+            .cancel_lru(lru.clone())
+            .metrics(metrics.clone())
+            .build(Box::new(PendingEndpoint));
+        let task = tokio::spawn(core.run());
+
+        // Advance past the 32 s TTL so a sweep tick lands after the entry expires;
+        // the map must drain and the gauge follow it down.
+        for _ in 0..50 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            if lru.size() == 0 {
+                break;
+            }
+        }
+
+        assert_eq!(lru.size(), 0, "sweeper must physically reclaim the expired entry");
+        assert_eq!(metrics.pending_invite_lru_size(), 0, "gauge must follow the reclaimed map down");
+
+        task.abort();
     }
 }

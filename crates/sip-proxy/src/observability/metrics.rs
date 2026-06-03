@@ -242,6 +242,9 @@ impl ProxyMetrics {
     pub fn ack_synthesized_total(&self) -> u64 {
         self.ack_synthesized.load(Ordering::Relaxed)
     }
+    pub fn pending_invite_lru_size(&self) -> u64 {
+        self.pending_invite_lru_size.load(Ordering::Relaxed)
+    }
 
     /// Render Prometheus text exposition (the `/metrics` body).
     pub fn prometheus_text(&self) -> String {
