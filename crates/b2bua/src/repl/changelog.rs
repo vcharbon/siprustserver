@@ -203,6 +203,24 @@ impl Changelog {
         Watermark::new(self.gen, self.inner.lock().unwrap().counter)
     }
 
+    /// The changelog position of `call_ref`'s latest entry in `peer`'s log, or
+    /// `None` if this node has never bumped that ref for that peer. Used by the
+    /// X11 handback (ADR-0011): an acting-backup reads the position of a takeover
+    /// copy's reverse-flush to its primary, then deactivates the copy once the
+    /// primary's pull watermark has reached it (`position_of <= as_of`) — i.e. the
+    /// primary has applied the reverse-flush and now serves the call. This keeps
+    /// the whole ownership decision in ONE monotonic domain (this node's changelog
+    /// counter), never a wall-clock, so it is immune to cross-node clock skew.
+    pub fn position_of(&self, peer: &str, call_ref: &str) -> Option<Watermark> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .peers
+            .get(peer)?
+            .by_ref
+            .get(call_ref)
+            .map(|st| Watermark::new(self.gen, st.counter))
+    }
+
     /// Subscribe to a peer's new-entry notifications (S5's server loop awaits
     /// this). Creates the peer log if absent and increments its subscriber count
     /// so an idle [`reap`](Changelog::reap) cannot drop the log (and orphan the

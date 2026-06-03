@@ -23,7 +23,7 @@ use crate::decision::CallDecisionEngine;
 use crate::dispatch::PerCallDispatcher;
 use crate::limiter::CallLimiter;
 use crate::metrics::B2buaMetrics;
-use crate::repl::{ReplServer, ReplicatingCallStore, ReplicationSupervisor, Readiness};
+use crate::repl::{ReplServer, ReplicatingCallStore, ReplicationSupervisor, Readiness, WatermarkSrc};
 use crate::router::{self, RouterCtx};
 use crate::rules::default_rules;
 use crate::store::{BufferedTerminateWriter, CallState, CallStore};
@@ -167,32 +167,18 @@ impl B2buaCore {
                     .with_replication(setup.store.clone())
                     .with_replicated_ttl_ms(replicated_ttl_ms);
 
-                // X11 `Deactivate` broadcast watch: the go-active task bumps it
-                // with this node's ownership-reassertion wall-clock; every live
-                // `serve_replog` connection pushes `Deactivate{as_of}` to its
-                // backup. `0` = "no reclaim yet" (never pushed).
-                let (deactivate_tx, deactivate_rx) = watch::channel(0i64);
+                // X11 handback trigger (ADR-0011): a monotonic tick the go-active
+                // task bumps once it has bulk-reclaimed (re-bumped to sweep
+                // stragglers). On each tick every `serve_replog` recomputes its
+                // backup's `as_of` and pushes `Deactivate{as_of}`. `0` = "no
+                // reclaim yet". NOT a wall-clock — the value is just a tick.
+                let (handback_tx, handback_rx) = watch::channel(0u64);
 
-                // Serve our changelog to pulling peers. `ReplServer` reads bodies
-                // from the same replicating store (as a `BodySource`).
-                let server = ReplServer::new(
-                    self_ordinal.clone(),
-                    setup.store.changelog().clone(),
-                    setup.store.clone(),
-                )
-                .with_deactivate_watch(deactivate_rx);
-                let network = setup.network.clone();
-                let listen_addr = setup.listen_addr;
-                tasks.push(tokio::spawn(async move {
-                    match network.listen(listen_addr).await {
-                        Ok(listener) => server.run(listener).await,
-                        Err(_) => { /* bind failed — peers simply can't pull us */ }
-                    }
-                }));
-
-                // Start the topology-driven puller supervisor over the membership.
+                // Start the topology-driven puller supervisor over the membership
+                // FIRST, so the server's handback can read its per-peer applied
+                // watermark (how far we've pulled each backup's reverse-flushes).
                 let supervisor = ReplicationSupervisor::new(
-                    self_ordinal,
+                    self_ordinal.clone(),
                     setup.network.clone(),
                     (*setup.store).clone(),
                     setup.addr_resolver.clone(),
@@ -204,24 +190,48 @@ impl B2buaCore {
                 supervisor.set_repl_sink(repl_tx.clone());
                 supervisor.start(setup.membership.clone());
 
+                // The handback `as_of` for a pulling backup is THIS primary's
+                // applied pull watermark for that backup — a monotonic position in
+                // the backup's changelog domain (never a wall-clock, so skew-immune).
+                let watermark_src: WatermarkSrc = {
+                    let sup = supervisor.clone();
+                    Arc::new(move |peer: &str| sup.watermark(peer))
+                };
+
+                // Serve our changelog to pulling peers. `ReplServer` reads bodies
+                // from the same replicating store (as a `BodySource`) and wires the
+                // X11 handback (trigger tick + per-backup watermark lookup).
+                let server = ReplServer::new(
+                    self_ordinal,
+                    setup.store.changelog().clone(),
+                    setup.store.clone(),
+                )
+                .with_handback(handback_rx, watermark_src);
+                let network = setup.network.clone();
+                let listen_addr = setup.listen_addr;
+                tasks.push(tokio::spawn(async move {
+                    match network.listen(listen_addr).await {
+                        Ok(listener) => server.run(listener).await,
+                        Err(_) => { /* bind failed — peers simply can't pull us */ }
+                    }
+                }));
+
                 // Go-active task (ADR-0011 X11): once this node has re-hydrated its
                 // own partition (bootstrap-complete), (1) bulk-reclaim — re-serve
-                // every `pri:` call — and (2) tell our backups to hand back any
-                // takeover copies they hold for us, re-broadcasting for ~5 s to
-                // sweep flip-race stragglers. One-shot per boot; idempotent.
+                // every `pri:` call — then (2) tick the handback trigger so every
+                // serve_replog pushes its backup the current per-peer watermark,
+                // re-ticking for ~5 s to sweep flip-race stragglers (the watermark
+                // advances each tick as we keep pulling). One-shot per boot.
                 {
                     let sup = supervisor.clone();
                     let tx = repl_tx.clone();
-                    let clk = clock.clone();
                     tasks.push(tokio::spawn(async move {
                         while !sup.all_bootstrapped() {
                             tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                         let _ = tx.send(router::ReplCommand::ReclaimAll);
-                        for _ in 0..6 {
-                            // Bump the broadcast watch with our current ownership
-                            // instant; serve_replog pushes it to each backup.
-                            let _ = deactivate_tx.send(clk.now_ms());
+                        for tick in 1..=6u64 {
+                            let _ = handback_tx.send(tick);
                             tokio::time::sleep(Duration::from_millis(1000)).await;
                         }
                     }));

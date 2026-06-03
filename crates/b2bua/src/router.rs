@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::{Call, CallModelState, CdrEvent, CdrEventType, Direction, TimerEntry, TimerType};
+use repl_net::frame::Watermark;
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::message_helpers::parse_uri_params;
@@ -69,8 +70,9 @@ pub enum ReplCommand {
     /// flip-race straggler an acting-backup took over *after* the bulk sweep.
     ReclaimCall(String),
     /// **Handback** — a reclaiming primary told us (its backup) to deactivate
-    /// every takeover copy for `primary` activated at/before `as_of_ms`.
-    Deactivate { primary: String, as_of_ms: i64 },
+    /// every takeover copy for `primary` whose reverse-flush position it has
+    /// pulled past (`<= as_of`, in our changelog domain). See [`ReplServer`].
+    Deactivate { primary: String, as_of: Watermark },
 }
 
 /// How an event resolves to a call + the leg it arrived on.
@@ -127,8 +129,8 @@ async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
                 reclaim_into_live(ctx, call).await;
             }
         }
-        ReplCommand::Deactivate { primary, as_of_ms } => {
-            deactivate_takeovers(ctx, &primary, as_of_ms).await;
+        ReplCommand::Deactivate { primary, as_of } => {
+            deactivate_takeovers(ctx, &primary, as_of).await;
         }
     }
 }
@@ -167,14 +169,15 @@ async fn reclaim_into_live(ctx: &Arc<RouterCtx>, mut call: Call) {
     }
 }
 
-/// Hand back every takeover copy this backup activated at/before `as_of_ms` for
-/// `primary` (ADR-0011 X11 `Deactivate`). Each is a **local-only** teardown —
+/// Hand back every takeover copy for `primary` whose reverse-flush position the
+/// primary has pulled past (`<= as_of`) (ADR-0011 X11 `Deactivate`) — i.e. the
+/// primary provably holds and serves it now. Each is a **local-only** teardown —
 /// drop the live copy + cancel its timers/txns/dispatch — with a `ghost-backup`
 /// CDR end-event (a deactivation, *not* a real hangup) and the handback counter;
 /// it propagates **no** delete (the call lives on at `primary`, which keeps
 /// forward-refreshing this node's backup `Element`).
-async fn deactivate_takeovers(ctx: &Arc<RouterCtx>, primary: &str, as_of_ms: i64) {
-    for call_ref in ctx.state.deactivate_targets(primary, as_of_ms) {
+async fn deactivate_takeovers(ctx: &Arc<RouterCtx>, primary: &str, as_of: Watermark) {
+    for call_ref in ctx.state.deactivate_targets(primary, as_of) {
         let _guard = ctx.state.lock(&call_ref).await;
         let now_ms = ctx.clock.now_ms();
         // Snapshot under the lock *before* tearing down (drop_local removes it),
@@ -480,7 +483,7 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
                     // Stamp this acting-backup takeover copy's activation instant
                     // so a later `Deactivate{as_of}` handback (ADR-0011 X11) can
                     // tell it predates the primary's reclaim.
-                    ctx.state.mark_takeover(&call_ref, now_ms);
+                    ctx.state.mark_takeover(&call_ref);
                     ctx.timers.restore(c.timers.clone(), call_ref.clone()).await;
                 }
                 c

@@ -137,12 +137,11 @@ fn roundtrip_reset_to_bootstrap() {
 
 #[test]
 fn roundtrip_deactivate() {
-    // Typical wall-clock ms, plus the i64 extremes the codec must round-trip.
-    assert_roundtrip(&Frame::Deactivate { as_of_ms: 1_717_000_000_000 });
-    assert_roundtrip(&Frame::Deactivate { as_of_ms: 0 });
-    assert_roundtrip(&Frame::Deactivate { as_of_ms: -1 });
-    assert_roundtrip(&Frame::Deactivate { as_of_ms: i64::MAX });
-    assert_roundtrip(&Frame::Deactivate { as_of_ms: i64::MIN });
+    // The handback watermark (gen, counter), plus the u64 extremes.
+    assert_roundtrip(&Frame::Deactivate { as_of: Watermark::new(0, 0) });
+    assert_roundtrip(&Frame::Deactivate { as_of: Watermark::new(1, 42) });
+    assert_roundtrip(&Frame::Deactivate { as_of: Watermark::new(7, u64::MAX) });
+    assert_roundtrip(&Frame::Deactivate { as_of: Watermark::new(u64::MAX, u64::MAX) });
 }
 
 // --- error paths: no panic, typed error ------------------------------------

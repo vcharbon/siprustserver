@@ -125,10 +125,15 @@ _Avoid_: "reclaim" for the storage-only (re-hydration) step.
 **Activate** / **Deactivate** (takeover-copy lifecycle):
 A backup **activates** a **takeover copy** when it hydrates one to serve a
 failed-over dialog (live map + timers + keepalive OPTIONS). It **deactivates**
-it on a **`Deactivate{since T}`** signal from the reclaiming primary — stops the
-timers (ceases OPTIONS), drops the live copy — reverting to holding the call as a
-pure **Element**. "Deactivate" sheds a *role*; it is deliberately **not**
-"clear"/"destroy" — it neither ends the call nor propagates a delete.
+it on a **`Deactivate{as_of}`** signal from the reclaiming primary — where
+`as_of` is the primary's **pull watermark** for this backup — dropping every
+takeover copy whose reverse-flush position is `<= as_of` (the primary has applied
+it and serves it now): stops the timers (ceases OPTIONS), drops the live copy —
+reverting to holding the call as a pure **Element**. The watermark keeps the
+decision in one monotonic domain (no wall-clock → no cross-node skew), distinct
+from timer rebuild, which stays on NTP wall-clock. "Deactivate" sheds a *role*;
+it is deliberately **not** "clear"/"destroy" — it neither ends the call nor
+propagates a delete.
 
 **Handback**:
 The ownership transfer a **deactivate** completes: the primary **reclaims** the

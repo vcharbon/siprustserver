@@ -54,8 +54,15 @@ PEAK_CAPS="${PEAK_CAPS:-200}"
 PEAK_SECS="${PEAK_SECS:-30}"
 ORPHAN_CAPS="${ORPHAN_CAPS:-50}"
 ORPHAN_BUILD_SECS="${ORPHAN_BUILD_SECS:-20}"
-ORPHAN_REAP_WAIT="${ORPHAN_REAP_WAIT:-330}"  # must clear the 300s keepalive: orphan A-leg
-                                             # OPTIONS goes unanswered at 300s -> reap ~305s
+ORPHAN_REAP_WAIT="${ORPHAN_REAP_WAIT:-420}"  # must clear the FULL orphan-reap chain, not just the
+                                             # 300s keepalive interval. The keepalive is armed AT
+                                             # ANSWER (so a killed dialog has up to 300s until its
+                                             # next fire) -> in-dialog OPTIONS to the dead A-leg ->
+                                             # KeepaliveTimeout +5s -> BYE to dead peer ->
+                                             # TerminatingTimeout safety reaper +32s -> RemoveCall.
+                                             # Zero-load floor = 300+5+32 = 337s; +queue latency at
+                                             # ~9.5k concurrent pushes the active_calls drop to ~420s
+                                             # (330s tripped a FALSE leak at ~100cps in cycle 0).
 PASS_THRESHOLD="${PASS_THRESHOLD:-90}"
 # --- call-limiter exercise (continuous stream + limiter chaos events) ---
 LIMITER_CPS="${LIMITER_CPS:-2}"        # continuous limiter stream rate; 2cps x 30s
@@ -215,7 +222,15 @@ orphan_event() {
   log "orphan_kill: ghost gap spiked to $gpk; waiting ${ORPHAN_REAP_WAIT}s (> 300s keepalive) for reap"
   sleep "$ORPHAN_REAP_WAIT"
   ensure_baseline
-  g1="$(snap_ghost)"; a1="$(snap_active)"
+  # A single instant at the reap edge aliases scrape skew at ~100cps churn (and
+  # can catch the last few orphans still draining). Take the FLOOR of a short
+  # window — the true post-reap residual, robust to a one-scrape blip.
+  g1="$(snap_ghost)"
+  for _ in 1 2 3 4 5; do
+    sleep 12; s="$(snap_ghost)"
+    g1=$(python3 -c "print(min(float('$g1'), float('$s')))")
+  done
+  a1="$(snap_active)"
   close_window orphan_kill
   rise=$(python3 -c "print(round(float('$g1')-float('$g0'),0))")
   # Pass if the ghost gap returned near baseline (orphans reaped within tolerance).

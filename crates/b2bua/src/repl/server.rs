@@ -63,14 +63,28 @@ pub struct ReplServer {
     self_ordinal: String,
     changelog: Changelog,
     source: Arc<dyn BodySource>,
-    /// **`Deactivate` broadcast source** (ADR-0011 X11). When this node goes
-    /// active after a reboot it bumps a watch with its ownership-reassertion
-    /// wall-clock; every live `serve_replog` connection then pushes
-    /// `Deactivate{as_of}` to its pulling backup so it hands back our takeover
-    /// copies. `None` (the sim/test servers) never emits one. The value `0` means
-    /// "no reclaim yet" and is never pushed.
-    deactivate_rx: Option<watch::Receiver<i64>>,
+    /// **X11 handback trigger** (ADR-0011). A monotonic tick the go-active task
+    /// bumps once it has bulk-reclaimed (and re-bumps to sweep stragglers). `0` =
+    /// "no reclaim yet". On each tick (and on a fresh subscribe if the tick is
+    /// already `> 0`), every `serve_replog` connection sends its backup a
+    /// `Deactivate{as_of}` where `as_of` is read from [`watermark_src`]. `None`
+    /// (sim/test servers) never emits a handback.
+    ///
+    /// [`watermark_src`]: Self::watermark_src
+    handback_trigger: Option<watch::Receiver<u64>>,
+    /// **Per-backup handback watermark source** (ADR-0011 X11): maps a caller
+    /// (the pulling backup's ordinal) to this primary's *applied pull watermark*
+    /// for that backup — how far we have pulled its reverse-flushes. That is the
+    /// `as_of` we hand it: the backup drops every takeover copy whose reverse-flush
+    /// position is `<= as_of` (we provably hold + serve it now). Monotonic, in the
+    /// backup's changelog domain → no wall-clock, no skew. `None` on the sim/test
+    /// path. Wired by `B2buaCore` over the puller supervisor's per-peer watermark.
+    watermark_src: Option<WatermarkSrc>,
 }
+
+/// Maps a pulling backup's ordinal → this primary's applied pull watermark for
+/// it (the handback `as_of`). See [`ReplServer::watermark_src`].
+pub type WatermarkSrc = Arc<dyn Fn(&str) -> Watermark + Send + Sync>;
 
 impl ReplServer {
     /// Build a server for `self_ordinal` serving `changelog`, reading bodies
@@ -86,15 +100,22 @@ impl ReplServer {
             self_ordinal: self_ordinal.into(),
             changelog,
             source,
-            deactivate_rx: None,
+            handback_trigger: None,
+            watermark_src: None,
         }
     }
 
-    /// Attach the X11 `Deactivate` broadcast watch (ADR-0011 X11). Builder so the
-    /// existing 3-arg [`new`](Self::new) test callers are unchanged; the live
-    /// `B2buaCore` wires the watch its go-active task bumps.
-    pub fn with_deactivate_watch(mut self, rx: watch::Receiver<i64>) -> Self {
-        self.deactivate_rx = Some(rx);
+    /// Attach the X11 handback (ADR-0011 X11): the go-active `trigger` tick plus
+    /// the per-backup `src` watermark lookup. Builder so the existing 3-arg
+    /// [`new`](Self::new) test callers are unchanged; the live `B2buaCore` wires
+    /// both over its reclaim task and the puller supervisor.
+    pub fn with_handback(
+        mut self,
+        trigger: watch::Receiver<u64>,
+        src: WatermarkSrc,
+    ) -> Self {
+        self.handback_trigger = Some(trigger);
+        self.watermark_src = Some(src);
         self
     }
 
@@ -286,15 +307,14 @@ impl ReplServer {
         // returned guard keeps the peer log reap-immune for this loop's lifetime.
         let sub = self.changelog.subscribe(caller);
 
-        // X11 `Deactivate` broadcast: a clone of the go-active watch (if wired).
-        let mut deact = self.deactivate_rx.clone();
-        // Reconnect backstop — if we already reclaimed (watch > 0), tell this
-        // (re)subscribing backup to hand back our stale takeover copies at once.
-        if let Some(rx) = &deact {
-            let as_of = *rx.borrow();
-            if as_of > 0 && conn.send(Frame::Deactivate { as_of_ms: as_of }).await.is_err() {
-                return;
-            }
+        // X11 handback: a clone of the go-active trigger tick (if wired).
+        let mut trigger = self.handback_trigger.clone();
+        // Reconnect backstop — if we have already reclaimed (tick > 0), tell this
+        // (re)subscribing backup at once to hand back every copy we now serve.
+        if trigger.as_ref().is_some_and(|rx| *rx.borrow() > 0)
+            && self.send_handback(conn, caller).await.is_err()
+        {
+            return;
         }
 
         loop {
@@ -321,40 +341,33 @@ impl ReplServer {
                 return;
             }
 
-            // Park until a new changelog bump, a `Deactivate` broadcast, or the
+            // Park until a new changelog bump, a handback trigger tick, or the
             // connection closes, whichever first.
             tokio::select! {
                 _ = sub.notified() => {}
-                // X11: the node went active / re-sent its handback — push the
-                // current ownership-reassertion instant to this backup. The arm
-                // is INERT (parks forever) in two cases: `deact` is `None` (no
-                // watch wired — the sim/test path), or the watch has CLOSED. The
-                // latter is the trap: the sole `deactivate_tx` (b2bua_core.rs)
-                // is dropped when the go-active task's ~5 s reclaim burst ends,
-                // after which `changed()` resolves `Err` IMMEDIATELY and FOREVER.
-                // Keep polling it and the `select!` never parks — a permanent
-                // ~100 % CPU spin per backup connection (the very regression this
-                // comment guards). So on close we drop `deact` to `None` and fall
-                // through to the `pending` arm next iteration. The last as_of
-                // still persists for the reconnect backstop above (a closed
-                // `watch::Receiver` can still `borrow()`), so no handback is lost.
-                res = async {
-                    match deact.as_mut() {
-                        Some(rx) => rx.changed().await.map(|_| *rx.borrow()).ok(),
-                        None => std::future::pending::<Option<i64>>().await,
+                // X11: the go-active task ticked the handback trigger (it has
+                // reclaimed, or is sweeping stragglers) — recompute THIS backup's
+                // `as_of` from the watermark source and push it. The arm is INERT
+                // (parks forever) in two cases: no trigger wired (sim/test path),
+                // or the trigger has CLOSED. The latter is the trap: the sole
+                // sender (b2bua_core.rs go-active task) is dropped when its ~5 s
+                // reclaim burst ends, after which `changed()` resolves `Err`
+                // IMMEDIATELY and FOREVER — re-polling it would spin the `select!`
+                // at ~100 % CPU per backup connection. So on close we drop
+                // `trigger` to `None` and the arm parks thereafter; the last
+                // handback already went out on the prior tick.
+                ok = async {
+                    match trigger.as_mut() {
+                        Some(rx) => rx.changed().await.is_ok(),
+                        None => std::future::pending::<bool>().await,
                     }
                 } => {
-                    match res {
-                        // A real ownership-reassertion instant — relay it.
-                        Some(as_of) => {
-                            if as_of > 0 && conn.send(Frame::Deactivate { as_of_ms: as_of }).await.is_err() {
-                                return;
-                            }
+                    if ok {
+                        if self.send_handback(conn, caller).await.is_err() {
+                            return;
                         }
-                        // `res` is `None` ONLY via the `Some(rx) => Err` (closed)
-                        // path — the `None`/`pending` arm never resolves. Disable
-                        // the arm so the next loop parks instead of busy-looping.
-                        None => deact = None,
+                    } else {
+                        trigger = None; // closed → disable the arm; next loop parks
                     }
                 }
                 // A peer that cuts the connection wakes recv with None; end.
@@ -367,6 +380,23 @@ impl ReplServer {
                 },
             }
         }
+    }
+
+    /// Send `caller` (a pulling backup) its current X11 handback: a
+    /// `Deactivate{as_of}` where `as_of` is this primary's applied pull watermark
+    /// for that backup ([`watermark_src`](Self::watermark_src)). No-op when no
+    /// source is wired, or when we have pulled nothing from this backup yet
+    /// (`counter == 0` — it holds no reclaimable copies of ours). `Err(())` means
+    /// the connection was cut and the serve loop should end.
+    async fn send_handback(&self, conn: &dyn ReplicationConnection, caller: &str) -> Result<(), ()> {
+        let Some(src) = &self.watermark_src else {
+            return Ok(());
+        };
+        let as_of = src(caller);
+        if as_of.counter == 0 {
+            return Ok(());
+        }
+        conn.send(Frame::Deactivate { as_of }).await.map_err(|_| ())
     }
 
     /// Drain due entries for `caller` above `since`, resolving each callRef's
@@ -451,11 +481,11 @@ mod tests {
         }
     }
 
-    /// Regression (CPU spin): a CLOSED `Deactivate` watch must not busy-loop
-    /// `serve_replog`. The sole `deactivate_tx` (b2bua_core.rs go-active task) is
-    /// dropped when its ~5 s reclaim burst ends; thereafter `changed()` resolves
-    /// `Err` immediately and forever. Before the fix the `select!` re-polled that
-    /// arm every turn and never parked — a permanent ~100 % CPU spin per backup
+    /// Regression (CPU spin): a CLOSED handback trigger must not busy-loop
+    /// `serve_replog`. The sole sender (b2bua_core.rs go-active task) is dropped
+    /// when its ~5 s reclaim burst ends; thereafter `changed()` resolves `Err`
+    /// immediately and forever. Before the fix the `select!` re-polled that arm
+    /// every turn and never parked — a permanent ~100 % CPU spin per backup
     /// connection (2.5–4.7 cores observed in-cluster at 50 cps with *zero* repl
     /// traffic). The fix disables the arm on close. We detect a spin by counting
     /// `Noop` sends: a caught-up `serve_replog` emits one per loop iteration, so a
@@ -466,11 +496,12 @@ mod tests {
         let clock = Clock::test_at(0);
         let store = Arc::new(crate::repl::ReplicatingCallStore::new(0, clock.clone()));
         let changelog = Changelog::new(0, clock);
-        // Close the watch up front — the steady state once the go-active task has
-        // finished its burst and dropped the only sender.
-        let (tx, rx) = watch::channel(0i64);
+        // Close the trigger up front — the steady state once the go-active task
+        // has finished its burst and dropped the only sender.
+        let (tx, rx) = watch::channel(0u64);
         drop(tx);
-        let server = ReplServer::new("self", changelog, store).with_deactivate_watch(rx);
+        let src: WatermarkSrc = Arc::new(|_caller: &str| Watermark::new(0, 0));
+        let server = ReplServer::new("self", changelog, store).with_handback(rx, src);
 
         let sends = Arc::new(AtomicUsize::new(0));
         let conn = IdleConn { sends: sends.clone() };

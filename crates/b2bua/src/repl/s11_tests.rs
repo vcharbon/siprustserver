@@ -19,6 +19,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::{Call, CallBodyCodec, MsgpackCodec};
+use repl_net::frame::{Op, Partition, Watermark};
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
@@ -88,27 +89,34 @@ async fn put(store: &ReplicatingCallStore, role: PartitionRole, primary: &str, c
 // (1) takeover tagging + handback targeting.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn deactivate_targets_filter_by_primary_and_as_of() {
+async fn deactivate_targets_by_primary_and_pull_watermark() {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
-    let state = call_state("w1", repl);
+    let state = call_state("w1", repl.clone());
 
-    // Two takeover copies for different primaries, activated at t=100.
+    // Two takeover copies for different primaries.
     let c0 = build_initial_call(&invite("w0", "w1", "cid-a"), src(), &config_for("w0"), 0);
     let c2 = build_initial_call(&invite("w2", "w1", "cid-b"), src(), &config_for("w2"), 0);
     let (r0, r2) = (c0.call_ref.clone(), c2.call_ref.clone());
     assert!(r0.starts_with("w0|") && r2.starts_with("w2|"));
     state.create(c0);
     state.create(c2);
-    state.mark_takeover(&r0, 100);
-    state.mark_takeover(&r2, 100);
+    state.mark_takeover(&r0);
+    state.mark_takeover(&r2);
 
-    // Scoped to the asking primary, bounded by as_of (activated <= as_of).
-    assert_eq!(state.deactivate_targets("w0", 150), vec![r0.clone()]);
-    assert_eq!(state.deactivate_targets("w2", 150), vec![r2.clone()]);
-    // Activated at 100 > as_of 50 → a later episode, left serving.
-    assert!(state.deactivate_targets("w0", 50).is_empty());
+    // Reverse-flush each takeover copy to its primary → a changelog position the
+    // primary's pull watermark must reach before we hand the copy back.
+    repl.changelog().bump("w0", &r0, Op::Create, Partition::Pri); // counter 1
+    repl.changelog().bump("w2", &r2, Op::Create, Partition::Pri); // counter 2
+
+    // Scoped to the asking primary; selected once its pull watermark has reached
+    // the copy's reverse-flush position (`position_of <= as_of`).
+    assert_eq!(state.deactivate_targets("w0", Watermark::new(1, 1)), vec![r0.clone()]);
+    assert_eq!(state.deactivate_targets("w2", Watermark::new(1, 2)), vec![r2.clone()]);
+    // Pull watermark below the copy's position → the primary hasn't applied our
+    // reverse-flush yet (a later episode); left serving.
+    assert!(state.deactivate_targets("w0", Watermark::new(1, 0)).is_empty());
     // A primary we hold no takeover for.
-    assert!(state.deactivate_targets("w9", i64::MAX).is_empty());
+    assert!(state.deactivate_targets("w9", Watermark::new(1, u64::MAX)).is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -126,13 +134,16 @@ async fn drop_local_sheds_live_copy_but_keeps_backup_element() {
 
     let (_c, fresh) = state.hydrate_from_replica(&r).await.expect("hydrate from bak:w0");
     assert!(fresh, "first hydrate materialises a fresh takeover copy");
-    state.mark_takeover(&r, 100);
+    state.mark_takeover(&r);
     assert!(state.peek(&r).is_some(), "takeover copy is live");
 
     // Handback (local-only).
     assert!(state.drop_local(&r), "dropped a live copy");
     assert!(state.peek(&r).is_none(), "live copy gone from the map");
-    assert!(state.deactivate_targets("w0", i64::MAX).is_empty(), "takeover tag cleared");
+    assert!(
+        state.deactivate_targets("w0", Watermark::new(1, u64::MAX)).is_empty(),
+        "takeover tag cleared"
+    );
     // The crux: NO delete propagated — the backup Element survives so the call
     // lives on at its reclaiming primary.
     assert!(

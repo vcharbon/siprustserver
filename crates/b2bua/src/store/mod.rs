@@ -15,10 +15,11 @@ pub use call_store::{partition_of, CallStore, PartitionRole, PropagateDirection,
 pub use memory::InMemoryCallStore;
 pub use terminate_writer::BufferedTerminateWriter;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use call::{call_index_keys, parse_call_ref, Call, CallBodyCodec, MsgpackCodec};
+use repl_net::frame::Watermark;
 
 use crate::metrics::B2buaMetrics;
 use crate::repl::{ReplicatingCallStore, ReplicationPlan};
@@ -35,12 +36,13 @@ struct Inner {
     indexed: HashMap<String, Vec<String>>,
     /// Per-callRef serialization lock (the second FIFO layer over the dispatcher).
     locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
-    /// **Takeover activation wall-clock** (ms) per acting-backup live copy
-    /// (ADR-0011 X11). Stamped on a fresh failover hydrate; read by the
-    /// `Deactivate{as_of}` handback to decide which copies predate the primary's
-    /// reclaim. Local-only metadata — never serialized/replicated (it is *this*
-    /// node's takeover instant, not call state). Cleared on drop/remove.
-    takeover_at: HashMap<String, i64>,
+    /// **Live acting-backup takeover copies** (ADR-0011 X11): the set of call_refs
+    /// this node currently serves as a takeover after a primary failed over to it.
+    /// Membership only — the `Deactivate{as_of}` handback reads each copy's
+    /// reverse-flush *position* from the changelog (a monotonic value in this
+    /// node's domain), NOT a wall-clock, so the ownership decision is skew-immune.
+    /// Local-only; never serialized/replicated. Cleared on drop/remove.
+    takeover: HashSet<String>,
 }
 
 /// The call store. Clone-cheap (one `Arc`); share across the stack.
@@ -255,7 +257,7 @@ impl CallState {
         }
         inner.calls.remove(call_ref);
         inner.locks.remove(call_ref);
-        inner.takeover_at.remove(call_ref);
+        inner.takeover.remove(call_ref);
         drop(inner);
 
         self.terminate_writer.submit_delete(
@@ -285,39 +287,51 @@ impl CallState {
             }
         }
         inner.locks.remove(call_ref);
-        inner.takeover_at.remove(call_ref);
+        inner.takeover.remove(call_ref);
         present
     }
 
-    /// Stamp `call_ref` as an acting-backup **takeover copy** activated at
-    /// `now_ms` (ADR-0011 X11). The `Deactivate{as_of}` handback compares this
-    /// against the reclaiming primary's ownership instant. Called by the router
-    /// on a fresh failover hydrate. Idempotent per call_ref (re-stamping a copy
-    /// re-armed by a later hydrate keeps the latest activation).
-    pub fn mark_takeover(&self, call_ref: &str, now_ms: i64) {
-        self.inner
-            .lock()
-            .unwrap()
-            .takeover_at
-            .insert(call_ref.to_string(), now_ms);
+    /// Mark `call_ref` as a live acting-backup **takeover copy** (ADR-0011 X11).
+    /// Called by the router on a fresh failover hydrate. The handback later reads
+    /// the copy's reverse-flush *position* from the changelog (not a timestamp),
+    /// so nothing time-valued is recorded here. Idempotent per call_ref.
+    pub fn mark_takeover(&self, call_ref: &str) {
+        self.inner.lock().unwrap().takeover.insert(call_ref.to_string());
     }
 
     /// The live takeover copies for `primary` to **deactivate** on a
     /// `Deactivate{as_of}` (ADR-0011 X11): every still-resident copy this node
-    /// activated at/before `as_of_ms` whose ref names `primary`. A copy activated
-    /// *after* `as_of_ms` belongs to a later failover episode and is left
-    /// serving. The router tears each down via [`drop_local`](Self::drop_local).
-    pub fn deactivate_targets(&self, primary: &str, as_of_ms: i64) -> Vec<String> {
+    /// holds for `primary` whose **reverse-flush position has been reached by the
+    /// primary's pull** (`position_of(primary, ref) <= as_of`). That condition is
+    /// exactly "the primary has applied my reverse-flush of this call and now
+    /// serves it" — so dropping our copy leaves exactly one owner. A copy whose
+    /// position is still `> as_of` (the primary hasn't caught up, e.g. a later
+    /// failover episode) is left serving; a re-broadcast with a higher `as_of`
+    /// sweeps it once the primary catches up. `position_of` is `None` until the
+    /// copy has been reverse-flushed at least once — the primary cannot hold it
+    /// yet, so it is skipped. The whole comparison lives in this node's changelog
+    /// domain → no wall-clock, no skew. Router tears each down via [`drop_local`].
+    pub fn deactivate_targets(&self, primary: &str, as_of: Watermark) -> Vec<String> {
+        let Some(repl) = self.repl_store.as_ref() else {
+            return Vec::new();
+        };
+        let changelog = repl.changelog();
         let inner = self.inner.lock().unwrap();
         inner
-            .takeover_at
+            .takeover
             .iter()
-            .filter(|(_, &at)| at <= as_of_ms)
-            .filter(|(cr, _)| inner.calls.contains_key(*cr))
-            .filter(|(cr, _)| {
+            .filter(|cr| inner.calls.contains_key(*cr))
+            .filter(|cr| {
                 parse_call_ref(cr).map(|p| p.primary == primary).unwrap_or(false)
             })
-            .map(|(cr, _)| cr.clone())
+            .filter(|cr| {
+                // Deactivate iff the primary has pulled past our reverse-flush of
+                // this call (so it provably holds + serves it now).
+                changelog
+                    .position_of(primary, cr)
+                    .is_some_and(|pos| pos <= as_of)
+            })
+            .cloned()
             .collect()
     }
 
@@ -473,7 +487,7 @@ impl CallState {
     /// brief lock). `calls.len()` is the TRUE live call-map size — compare to
     /// `b2bua_active_calls` (creations - removals): a divergence is a store-side
     /// leak the counter pair can't see. The sibling maps (`sip_index`,
-    /// `indexed`, `locks`, `takeover_at`) should track `calls`; one that grows
+    /// `indexed`, `locks`, `takeover`) should track `calls`; one that grows
     /// while it stays flat names the leaking map. Sampled periodically by the
     /// runner — not on the hot path.
     pub fn sample_store_gauges(&self) {
@@ -483,7 +497,7 @@ impl CallState {
             inner.sip_index.len() as u64,
             inner.indexed.len() as u64,
             inner.locks.len() as u64,
-            inner.takeover_at.len() as u64,
+            inner.takeover.len() as u64,
         );
     }
 

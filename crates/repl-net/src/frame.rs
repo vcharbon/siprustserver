@@ -235,19 +235,24 @@ pub enum Frame {
         /// Human-readable cause (for logs/recording).
         reason: String,
     },
-    /// `[5, as_of_ms]`
+    /// `[5, as_of.gen, as_of.counter]`
     ///
     /// Server → client (ADR-0011 X11): the sending primary has **reclaimed**
-    /// ownership of its partition as of wall-clock `as_of_ms`. The receiving
-    /// backup **deactivates** every **takeover copy** it holds for this peer that
-    /// it activated at/before `as_of_ms` — local-only (stop timers → cease
-    /// keepalive OPTIONS, drop the live copy, revert to a pure backup `Element`);
-    /// it propagates **no** delete. Sent once on the primary going-active and
-    /// re-sent for ~5 s to sweep flip-race stragglers; idempotent.
+    /// ownership of its partition and has applied the backup's reverse-flushes up
+    /// to **changelog watermark `as_of`** (the primary's pull position for THIS
+    /// backup, in the backup's own changelog-counter domain). The receiving backup
+    /// **deactivates** every **takeover copy** it holds for this peer whose
+    /// reverse-flush position is `<= as_of` — i.e. the primary has provably applied
+    /// it and now serves the call. Local-only (stop timers → cease keepalive
+    /// OPTIONS, drop the live copy, revert to a pure backup `Element`); propagates
+    /// **no** delete. Because `as_of` is a monotonic position in the backup's own
+    /// domain (never a wall-clock), the decision is immune to cross-node clock
+    /// skew. Re-sent as the primary's watermark advances; idempotent.
     Deactivate {
-        /// Wall-clock (ms) the primary re-asserted ownership at. A takeover copy
-        /// activated at/before this instant predates the reclaim and is dropped.
-        as_of_ms: i64,
+        /// The primary's applied pull watermark for this backup, in the backup's
+        /// changelog-counter domain. A takeover copy whose reverse-flush position
+        /// is `<= as_of` has been reclaimed by the primary and is dropped.
+        as_of: Watermark,
     },
 }
 

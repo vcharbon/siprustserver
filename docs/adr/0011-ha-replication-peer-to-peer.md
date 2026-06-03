@@ -220,21 +220,36 @@ guessed**:
   copy it already reverse-flushes it to the primary (`partition=Pri`); that frame
   *is* "I am serving this." The only addition is a **prompt reverse-flush the
   instant a takeover copy is activated** (don't wait for the next keepalive).
-- **`Deactivate{ since: T }`** — one new server→client frame, pushed down the
-  backup's existing pull connection. The backup **deactivates** (local-only: stop
-  timers → cease OPTIONS, drop the live copy, **revert to a pure `Element`** — *no*
-  delete propagated, the call lives on under the primary) every takeover copy it
-  **activated** at/after `T`, where `T` = the primary's **prior incarnation
-  epoch** (every takeover of one of its calls post-dates that boot; a future
-  episode under a higher incarnation is not swept by this stale `T`). The backup
-  tags each takeover copy with its activation wall-clock to evaluate `since T`.
-  **Cadence:** one `Deactivate` on going-active (covering the whole bulk-reclaimed
-  population) + a handful of re-sends over ~5 s to sweep flip-race stragglers —
-  **bounded regardless of call count**, idempotent.
+- **`Deactivate{ as_of: Watermark }`** — one new server→client frame, pushed down
+  the backup's existing pull connection. `as_of` is the primary's **applied pull
+  watermark for THIS backup** — how far it has pulled this backup's reverse-flush
+  stream, a monotonic position **in the backup's own changelog-counter domain**.
+  The backup **deactivates** (local-only: stop timers → cease OPTIONS, drop the
+  live copy, **revert to a pure `Element`** — *no* delete propagated, the call
+  lives on under the primary) every takeover copy whose **reverse-flush position
+  is `<= as_of`** — exactly the copies the primary has provably applied and now
+  serves. A copy whose position is still `> as_of` (a later episode the primary
+  hasn't caught up to) is left serving; a re-send with a higher `as_of` sweeps it
+  once the primary catches up.
+  - **Why a watermark, not a timestamp.** An earlier sketch tagged each copy with
+    its activation wall-clock and compared `since T`. That compares the backup's
+    clock against the primary's clock — cross-node skew either leaks a ghost
+    (copy not dropped) or tears down a live call from a later episode (copy
+    wrongly dropped). The watermark keeps the **entire** ownership decision in one
+    monotonic domain (the backup's changelog counter, which the backup mints and
+    the primary echoes back as its pull position), so it is **immune to clock
+    skew** and needs no NTP. This is deliberately separate from timer rebuild,
+    which *must* stay on NTP wall-clock (a monotonic clock resets on the pod
+    restart that failover implies; an absolute cross-node deadline cannot).
+  - **Cadence:** one tick on going-active (after the bulk reclaim materialises the
+    population) + a handful of re-ticks over ~5 s; each tick re-reads the live
+    per-backup watermark (which advances as the primary keeps pulling), so the
+    sweep converges. **Bounded regardless of call count**, idempotent.
 - **Relaxed safety:** a straggler the primary has not yet reclaimed when it is
   deactivated opens a few-ms unserved gap — accepted, as the *same* flip-instant
   race X5 already declares covered by SIP retransmission + the proxy's
-  ACK/CANCEL-to-primary rule.
+  ACK/CANCEL-to-primary rule. (The `<= as_of` gate narrows this further: a copy is
+  only dropped once the primary has *applied* its reverse-flush.)
 - **Exclusive ownership:** the primary defers sending OPTIONS for a call until it
   has deactivated the backup's copy, so the two never keepalive one dialog
   concurrently — closing the CSeq-collision window.

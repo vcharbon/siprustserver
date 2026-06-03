@@ -549,15 +549,16 @@ impl Puller {
                     });
                     return RunOutcome::Disconnected;
                 }
-                Some(Frame::Deactivate { as_of_ms }) => {
-                    // X11 handback: our primary (this peer) reclaimed ownership as
-                    // of `as_of_ms`. Tell the router to deactivate every takeover
-                    // copy we hold for it activated at/before then — local-only,
-                    // no delete propagated (it keeps forward-refreshing our backup).
+                Some(Frame::Deactivate { as_of }) => {
+                    // X11 handback: our primary (this peer) has pulled our
+                    // reverse-flushes up to `as_of`. Tell the router to deactivate
+                    // every takeover copy we hold for it whose reverse-flush
+                    // position is `<= as_of` (it serves them now) — local-only, no
+                    // delete propagated (it keeps forward-refreshing our backup).
                     if let Some(tx) = &self.repl_tx {
                         let _ = tx.send(ReplCommand::Deactivate {
                             primary: self.peer.ordinal.clone(),
-                            as_of_ms,
+                            as_of,
                         });
                     }
                 }

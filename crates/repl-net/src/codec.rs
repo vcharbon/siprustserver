@@ -142,10 +142,11 @@ fn write_frame(buf: &mut Vec<u8>, frame: &Frame) {
             encode::write_uint(buf, tag::RESET_TO_BOOTSTRAP).unwrap();
             encode::write_str(buf, reason).unwrap();
         }
-        Frame::Deactivate { as_of_ms } => {
-            encode::write_array_len(buf, 2).unwrap();
+        Frame::Deactivate { as_of } => {
+            encode::write_array_len(buf, 3).unwrap();
             encode::write_uint(buf, tag::DEACTIVATE).unwrap();
-            encode::write_sint(buf, *as_of_ms).unwrap();
+            encode::write_uint(buf, as_of.gen).unwrap();
+            encode::write_uint(buf, as_of.counter).unwrap();
         }
     }
 }
@@ -262,9 +263,12 @@ fn decode_reset(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
 }
 
 fn decode_deactivate(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
-    expect_len(len, 2, "Deactivate")?;
-    let as_of_ms = read_i64(rd, "as_of_ms")?;
-    Ok(Frame::Deactivate { as_of_ms })
+    expect_len(len, 3, "Deactivate")?;
+    let gen = read_u64(rd, "as_of_gen")?;
+    let counter = read_u64(rd, "as_of_counter")?;
+    Ok(Frame::Deactivate {
+        as_of: Watermark::new(gen, counter),
+    })
 }
 
 // --- low-level readers over a `&mut &[u8]` cursor --------------------------
