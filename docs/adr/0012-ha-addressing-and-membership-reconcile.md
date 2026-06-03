@@ -119,11 +119,38 @@ Two health signals stay **separate and must not fight**:
 - **Health/load** (`Alive`/`NotReady`/`Draining`/`Dead` + load bands) ← the
   unchanged OPTIONS `HealthProbe`.
 
-The informer's reconcile is therefore **health-preserving**: it only `Added` /
-`Removed` / `AddressChanged`; it never resets an existing worker's probe-written
-health. A new worker enters `Unknown` (not routable for new dialogs) until its
-first OPTIONS flips it `Alive`; the LB fresh-pod guard (20 s) and drain grace
-(5 s) are unchanged.
+The informer's reconcile is therefore **health-preserving for *unchanged*
+workers**: a worker whose ordinal **and** Pod IP are both unchanged keeps its
+probe-written health untouched (the genuine no-op wakeup the design protects). A
+new worker enters `Unknown` (not routable for new dialogs) until its first OPTIONS
+flips it `Alive`; the LB fresh-pod guard (20 s) and drain grace (5 s) are
+unchanged.
+
+### D4 follow-up — a restarted worker is a *fresh incarnation*, not an unchanged one
+
+The discriminator is **address change, not ordinal identity.** A killed worker
+that recreates under the same StatefulSet ordinal at a **new Pod IP** is a new
+process — whatever health the OPTIONS probe last wrote (typically `Dead`, from the
+kill) is stale and must **not** be preserved. Preserving it black-holes the
+recovered worker forever: the proxy keeps it `Dead`, never re-probes the new
+address, drops it from the routable pool (no new dialogs), and reroutes in-dialog
+traffic to a backup — the cluster silently degrades to single-worker with a
+`max_udp_retrans` failure tail. (Observed live in the endurance+chaos run
+`endurance-20260602-214000`; this is the proxy-side analog of the D1 puller
+restart-reconcile bug.)
+
+So on a `AddressChanged` (or a `Removed`→`Added` across reconciles), the registry
+treats the endpoint as fresh: it **resets health to `Unknown`**, re-stamps
+`first_seen_at_ms` (re-arming the fresh-pod guard), and lets the OPTIONS probe
+re-classify it — `Alive` only once a fresh probe at the new address succeeds. The
+probe loop already fans OPTIONS at **every** worker in the snapshot regardless of
+health, so a reset-to-`Unknown` worker is re-probed on the next tick. The runner's
+health sampler publishes `sip_worker_health{health=...}` from the live registry,
+so a stuck-single-worker pool reads `alive=1` against an expected `2` (alert on
+that, plus `sip_proxy_worker_pool_empty`). Regression:
+`membership_reg::tests::{address_move_resets_health_and_rearms_fresh_pod_guard,
+restart_of_dead_worker_resets_and_reprobes}` (and the converse
+`unchanged_reconcile_preserves_probe_written_health`).
 
 ## Decision D5 — the consistency we enforce is *membership source + identity*, not *address representation*
 
@@ -162,10 +189,11 @@ old baked-IP registry did not: the pool **starts empty and fills asynchronously*
 (`K8sMembership::spawn` returns before the first watch event), and **stays empty**
 if the watch is RBAC-forbidden, the worker Service name is wrong, or no endpoint
 is Ready. The old `StaticWorkerRegistry` started every worker `Alive`, so the
-proxy could route the instant the process bound its socket. With a **single proxy
-and no VIP** (HA-behind-a-VIP is explicitly out of scope for this thin runner),
-that gap is not absorbed by a peer — every INVITE in the window is silently
-black-holed, and a misconfigured watch black-holes **forever**.
+proxy could route the instant the process bound its socket. The proxy now runs HA
+(D7), but a freshly (re)started replica still starts with an empty pool until its
+own informer fills, so the readiness gate below keeps an unready replica out of
+rotation and turns a misconfigured watch into a loud rollout timeout instead of a
+silent black-hole.
 
 So the proxy adopts the worker's contract: a `GET /readyz` that is `200` only
 when the registry holds **≥1 `Alive`** worker, wired to the k8s `readinessProbe`
@@ -177,6 +205,46 @@ runner-side sampler that also finally populates the `sip_worker_health` gauges,
 makes the condition alertable in Prometheus. Liveness (`/healthz`, the process is
 up) stays separate from readiness (`/readyz`, fit to serve) — mirroring the
 worker.
+
+## Decision D7 — front-proxy HA via active/passive keepalived VRRP VIP
+
+The end-state architecture is **fully resilient**: no component is a single point
+of failure. Worker HA is peer-to-peer replication (ADR-0011); this decision closes
+the last gap — the front proxy. It supersedes the earlier "proxy HA is out of
+scope for this thin runner" stance (a deliberate temporary choice).
+
+**Shape (ported from sipjsserver `deploy/helm/sip-front-proxy/`):** two
+anti-affined proxy replicas on the two `tier=edge` nodes, fronted by a **keepalived
+VRRP virtual IP** (`172.20.255.250`, static in the kind `172.20.0.0/16` node
+subnet). Active/passive: the VRRP master owns the VIP and serves all traffic; the
+backup is warm. On master loss the backup claims the VIP in <2 s (3 × 0.5 s
+advert, `nopreempt` so the survivor keeps it). `hostNetwork: true` +
+`shareProcessNamespace` lets the keepalived sidecar answer ARP on the node; an init
+container pins the VIP on `lo` and sets strict-ARP so both pods can `bind(VIP:5060)`
+and only the ARP owner answers.
+
+**Why this needs no proxy code change (the load-bearing fact).** The proxy already
+binds **two** sockets: the forwarding socket (`PROXY_LISTEN`) and a *separate*
+ephemeral OPTIONS health-probe socket (`0.0.0.0:0`). So we set
+`PROXY_LISTEN = PROXY_ADVERTISE = VIP`: the master sources forwarded SIP from the
+VIP (responses return to the VIP owner), while **both** proxies keep health-probing
+workers from their own node IPs — the backup keeps a live worker view and its
+`/readyz` passes, so it is genuinely warm and takes over instantly.
+
+**Why active/passive (not active/active behind a Service).** Advertising the
+**stable VIP** (not the per-pod IP, the old D-era choice) means in-dialog
+Record-Route survives both failover *and* a pod restart — the retransmit tail that
+a pod-IP advertise caused on every `kill_proxy` is gone. The HMAC stickiness cookie
+(ADR-0009 X3) + worker replication (ADR-0011) already make in-dialog routing and
+worker failover correct from either proxy. Active/passive (a single live proxy at a
+time) additionally keeps the per-pod `cancel_lru` (CANCEL / hop-by-hop-ACK
+correlation, ADR-0009 X1) **coherent** — an active/active pair behind a ClusterIP
+would split it and fail to ACK non-2xx finals (e.g. the limiter's 486s), so the VIP
+is the correct full-resilience design, not just the simplest.
+
+The `chaos.sh kill_proxy` event now kills **only the VIP master** (detected by
+which pod carries the VIP on `eth0`) and asserts the normal 90 % success bar —
+failover, not a tolerated outage.
 
 ## Consequences
 

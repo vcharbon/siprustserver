@@ -53,7 +53,15 @@ SCENARIOS="$SIPP_DIR/scenarios"
 REPL_ENABLE="${REPL_ENABLE:-0}"
 REPL_PORT="${REPL_PORT:-9092}"
 SCENARIO="${SCENARIO:-uac-basic.xml}"   # UAC scenario the load sweep drives
-export SUT_IMAGE WORKER_REPLICAS REPL_ENABLE REPL_PORT SCENARIO
+# Front-proxy HA (ADR-0012 D7): the proxy sits behind a keepalived VRRP VIP. SIPp
+# UAC streams target the VIP, not the Service. PROXY_VIP is baked into the proxy
+# manifest literally; PROXY_TARGET (what envsubst stamps into the UAC job) defaults
+# to it. LIMITER_CAP feeds the -key xapi JSON in the UAC job (default 20).
+PROXY_VIP="${PROXY_VIP:-172.20.255.250}"
+PROXY_TARGET="${PROXY_TARGET:-$PROXY_VIP}"
+LIMITER_CAP="${LIMITER_CAP:-20}"
+KEEPALIVED_IMAGE="${KEEPALIVED_IMAGE:-siprustserver-keepalived:dev}"
+export SUT_IMAGE WORKER_REPLICAS REPL_ENABLE REPL_PORT SCENARIO PROXY_VIP PROXY_TARGET LIMITER_CAP
 # Observability: VictoriaMetrics + Grafana host stack + in-cluster vmagent/KSM/
 # node-exporter/fluent-bit. Deployed automatically on `up` so the freshly
 # (re)created cluster always has scraping wired and Grafana dashboards loaded.
@@ -82,9 +90,12 @@ up() {
   docker build -f "$REPO_ROOT/deploy/docker/Dockerfile" -t "$SUT_IMAGE" "$REPO_ROOT"
   log "building sipp:dev from vendored context ($SIPP_DIR)"
   docker build -t sipp:dev "$SIPP_DIR"
+  log "building keepalived sidecar image $KEEPALIVED_IMAGE (proxy VIP, ADR-0012 D7)"
+  docker build -f "$REPO_ROOT/deploy/docker/Dockerfile.keepalived" -t "$KEEPALIVED_IMAGE" "$REPO_ROOT"
   log "loading images into kind"
   kind load docker-image "$SUT_IMAGE" --name "$CLUSTER"
   kind load docker-image sipp:dev --name "$CLUSTER"
+  kind load docker-image "$KEEPALIVED_IMAGE" --name "$CLUSTER"
 
   obs   # bring up / refresh observability against the new cluster
 }

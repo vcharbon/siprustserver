@@ -59,9 +59,18 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ["sipp"]
           args:
-            - "sip-front-proxy.sip-test.svc.cluster.local:5060"
+            # Target the proxy VIP (keepalived HA, ADR-0012 D7). ${PROXY_TARGET}
+            # is exported by run.sh/endurance.sh/chaos.sh (default 172.20.255.250).
+            - "${PROXY_TARGET}:5060"
             - "-sf"
             - "/scenarios/${SCENARIO}"
+            # Inject the X-Api-Call JSON via -key (sipp rejects literal `[...]` in
+            # CDATA). Harmless no-op for scenarios that don't reference [xapi];
+            # only uac-endurance-limiter-cap20.xml does, so only it sends the
+            # call_limiter header. ${LIMITER_CAP} default 20.
+            - "-key"
+            - "xapi"
+            - '{"action":"route","call_limiter":[{"id":"endurance-limiter","limit":${LIMITER_CAP}}]}'
             - "-s"
             - "service"
             - "-i"

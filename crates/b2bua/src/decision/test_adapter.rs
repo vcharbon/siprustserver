@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use std::collections::BTreeMap;
 
 use super::schemas::{
-    default_platform_features, BodyUpdate, NewCallRequest, NewCallResponse, RejectDecision,
-    RouteDecision, SipDestination,
+    default_platform_features, BodyUpdate, CallLimiterEntry, NewCallRequest, NewCallResponse,
+    RejectDecision, RouteDecision, SipDestination,
 };
 use super::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
@@ -51,6 +51,33 @@ impl ScriptedDecisionEngine {
         Self::builder()
             .fallback(move |_req| {
                 NewCallResponse::Route(route_to(&dest.0, dest.1))
+            })
+            .build()
+    }
+
+    /// Like [`route_all_to`](Self::route_all_to) but wires the call limiter so
+    /// the endurance suite can exercise it:
+    ///  - `stress` (e.g. `global-stress:999999`) is attached to EVERY call so the
+    ///    full admit/release/refresh chain runs on all traffic without ever
+    ///    rejecting; pass `None` to disable.
+    ///  - an inbound `X-Api-Call` header carrying a `call_limiter` array is
+    ///    honored and its entries appended, so a dedicated stream can enforce a
+    ///    real cap (e.g. `endurance-limiter:20`). Admit is all-or-none, so a call
+    ///    is rejected only when one of these entries is over its cap.
+    pub fn route_all_to_with_limiter(
+        host: impl Into<String>,
+        port: u16,
+        stress: Option<CallLimiterEntry>,
+    ) -> Self {
+        let dest = (host.into(), port);
+        Self::builder()
+            .fallback(move |req| {
+                let mut r = route_to(&dest.0, dest.1);
+                if let Some(s) = &stress {
+                    r.call_limiter.push(s.clone());
+                }
+                r.call_limiter.extend(limiter_entries_from_api_call(req));
+                NewCallResponse::Route(r)
             })
             .build()
     }
@@ -153,6 +180,35 @@ pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
             reason: Some("Declined".into()),
         }),
     }
+}
+
+/// Parse an inbound `X-Api-Call` JSON header into call-limiter admission
+/// entries — `{"...","call_limiter":[{"id":"x","limit":20}]}`. Absent header,
+/// non-JSON, or a missing/!array `call_limiter` field all yield an empty vec
+/// (no limiting). Entries missing `id`/`limit` are skipped.
+pub fn limiter_entries_from_api_call(req: &NewCallRequest) -> Vec<CallLimiterEntry> {
+    let raw = match req.sip_headers.get("X-Api-Call") {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    let instruction: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    instruction
+        .get("call_limiter")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    Some(CallLimiterEntry {
+                        id: e.get("id")?.as_str()?.to_string(),
+                        limit: e.get("limit")?.as_i64()?,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Build a [`RouteDecision`] to `host:port` with default platform features.
@@ -315,6 +371,73 @@ mod tests {
                 assert_eq!(r.destination.port(), 5070);
                 assert_eq!(r.features.platform.max_duration_sec, 3_600);
             }
+            _ => panic!("expected route"),
+        }
+    }
+
+    fn req_with_header(name: &str, value: &str) -> NewCallRequest {
+        let mut r = req("bob");
+        r.sip_headers.insert(name.into(), value.into());
+        r
+    }
+
+    #[test]
+    fn limiter_entries_from_header_parses_array() {
+        let r = req_with_header(
+            "X-Api-Call",
+            r#"{"action":"route","call_limiter":[{"id":"x","limit":20}]}"#,
+        );
+        let entries = limiter_entries_from_api_call(&r);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "x");
+        assert_eq!(entries[0].limit, 20);
+    }
+
+    #[test]
+    fn limiter_entries_empty_without_header_or_field() {
+        assert!(limiter_entries_from_api_call(&req("bob")).is_empty());
+        // Header present but no call_limiter field → empty.
+        let r = req_with_header("X-Api-Call", r#"{"action":"route"}"#);
+        assert!(limiter_entries_from_api_call(&r).is_empty());
+        // Malformed JSON → empty (fail-open, no limiting).
+        let bad = req_with_header("X-Api-Call", "not json");
+        assert!(limiter_entries_from_api_call(&bad).is_empty());
+    }
+
+    #[tokio::test]
+    async fn route_all_to_with_limiter_stress_and_header() {
+        let stress = CallLimiterEntry { id: "global-stress".into(), limit: 999_999 };
+        let eng = ScriptedDecisionEngine::route_all_to_with_limiter("127.0.0.1", 5070, Some(stress));
+
+        // Header-less call: only the always-on stress entry.
+        match eng.new_call(req("bob")).await.unwrap() {
+            NewCallResponse::Route(r) => {
+                assert_eq!(r.call_limiter.len(), 1);
+                assert_eq!(r.call_limiter[0].id, "global-stress");
+            }
+            _ => panic!("expected route"),
+        }
+
+        // Header-carrying call: stress entry + the header's cap entry.
+        let r = req_with_header(
+            "X-Api-Call",
+            r#"{"action":"route","call_limiter":[{"id":"endurance-limiter","limit":20}]}"#,
+        );
+        match eng.new_call(r).await.unwrap() {
+            NewCallResponse::Route(d) => {
+                let ids: Vec<&str> = d.call_limiter.iter().map(|e| e.id.as_str()).collect();
+                assert_eq!(ids, ["global-stress", "endurance-limiter"]);
+                assert_eq!(d.call_limiter[1].limit, 20);
+            }
+            _ => panic!("expected route"),
+        }
+    }
+
+    #[tokio::test]
+    async fn route_all_to_with_limiter_none_stress_is_header_only() {
+        let eng = ScriptedDecisionEngine::route_all_to_with_limiter("127.0.0.1", 5070, None);
+        match eng.new_call(req("bob")).await.unwrap() {
+            NewCallResponse::Route(r) => assert!(r.call_limiter.is_empty()),
             _ => panic!("expected route"),
         }
     }

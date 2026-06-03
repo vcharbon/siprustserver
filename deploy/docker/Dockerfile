@@ -18,9 +18,11 @@ COPY . .
 RUN cargo build --release -p sip-proxy-runner -p b2bua-runner -p call-limiter-runner
 
 FROM debian:bookworm-slim AS runtime
-# ca-certificates only; the runners need no extra runtime libs beyond glibc.
+# ca-certificates for TLS; iproute2 (`tc`) so the chaos suite can inject netem
+# packet loss on the call-limiter pod (the limiter_netcut event execs `tc` in the
+# pod). Harmless on the proxy/worker; the limiter container also gets NET_ADMIN.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates iproute2 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /src/target/release/sip-proxy-runner    /usr/local/bin/sip-proxy-runner
 COPY --from=builder /src/target/release/b2bua-runner        /usr/local/bin/b2bua-runner

@@ -5,13 +5,20 @@
 # against, and injects one chaos event every CHAOS_INTERVAL, cycling through
 # ALL chaos elements:
 #
-#   baseline (always on) — existing vendored scenarios, used AS-IS:
-#     long  calls  uac-long-options.xml     @ LONG_CPS  (in-dialog OPTIONS-driven
-#                                                        hold -> very high conc.)
-#     short calls  uac-endurance-short.xml  @ SHORT_CPS (30s  hold)
-#     abuse        uac-abuse-options-flood  @ ABUSE_CAPS (default 1cps)
+#   baseline (always on):
+#     long    calls uac-long-options.xml          @ LONG_CPS  (OPTIONS-driven
+#                                                              hold -> very high conc.)
+#     short   calls uac-endurance-short.xml       @ SHORT_CPS (30s hold)
+#     abuse         uac-abuse-options-flood       @ ABUSE_CAPS (default 1cps)
+#     limiter calls uac-endurance-limiter-cap20.xml @ LIMITER_CPS (30s hold, sends
+#                   X-Api-Call cap=20 -> the limiter pins admitted conc. at ~20;
+#                   the over-cap calls get 486, scored apart like abuse). Every
+#                   worker also carries an always-on global-stress:999999 entry, so
+#                   ALL streams traverse the limiter's admit/release/refresh chain.
 #   chaos cycle (every CHAOS_INTERVAL):
-#     kill_worker  ->  kill_proxy  ->  peak(200cps burst)  ->  (repeat)
+#     orphan_kill -> kill_worker -> kill_proxy -> peak -> limiter_kill ->
+#     limiter_netcut -> (repeat). The two limiter events assert the cap
+#     RECONVERGES to ~20 within LIMITER_GRACE (10 min) after the fault.
 #
 # Every SIPp stream reports live via its native-sidecar exporter (scraped by
 # vmagent exactly like cluster start); every chaos event is measured from those
@@ -50,6 +57,21 @@ ORPHAN_BUILD_SECS="${ORPHAN_BUILD_SECS:-20}"
 ORPHAN_REAP_WAIT="${ORPHAN_REAP_WAIT:-330}"  # must clear the 300s keepalive: orphan A-leg
                                              # OPTIONS goes unanswered at 300s -> reap ~305s
 PASS_THRESHOLD="${PASS_THRESHOLD:-90}"
+# --- call-limiter exercise (continuous stream + limiter chaos events) ---
+LIMITER_CPS="${LIMITER_CPS:-2}"        # continuous limiter stream rate; 2cps x 30s
+                                       # hold ≈ 60 offered vs cap 20 → ~40 rejected
+LIMITER_CAP="${LIMITER_CAP:-20}"       # cap stamped into the -key xapi JSON (40-job)
+LIMITER_TARGET="${LIMITER_TARGET:-$LIMITER_CAP}" # the cap the stream pins conc. at
+# Front-proxy HA VIP (ADR-0012 D7): UAC streams target the VIP, not the Service.
+PROXY_VIP="${PROXY_VIP:-172.20.255.250}"
+PROXY_TARGET="${PROXY_TARGET:-$PROXY_VIP}"
+export PROXY_VIP PROXY_TARGET LIMITER_CAP
+LIMITER_TOL="${LIMITER_TOL:-10}"       # allowed band around the cap (±)
+LIMITER_GRACE="${LIMITER_GRACE:-600}"  # post-event divergence window (10 min): after
+                                       # a limiter fault the cap may drift this long
+                                       # (fail-open admits + ~window refill) before it
+                                       # must have reconverged to ≈ LIMITER_TARGET
+NETCUT_SECS="${NETCUT_SECS:-60}"       # limiter_netcut packet-loss duration
 CLUSTER_SETTLE="${CLUSTER_SETTLE:-30}"  # seconds to hold UAC streams back AFTER the
                          # cluster reports Ready, so the front proxy's EndpointSlice
                          # informer has populated its worker set (workers=[] at boot,
@@ -131,7 +153,8 @@ launch_stream() {
 ensure_baseline() {
   local s
   for s in "sipp-uac-long uac-long-options.xml $LONG_CPS long" \
-           "sipp-uac-short uac-endurance-short.xml $SHORT_CPS short"; do
+           "sipp-uac-short uac-endurance-short.xml $SHORT_CPS short" \
+           "sipp-uac-limiter uac-endurance-limiter-cap20.xml $LIMITER_CPS limiter"; do
     set -- $s
     local active
     active="$(kubectl -n "$NS" get job "$1" -o jsonpath='{.status.active}' 2>/dev/null || echo)"
@@ -166,6 +189,12 @@ snap_conc()    { vmq 'sum(sipp_current_calls)'; }
 # + scrape skew); a leak makes the gap rise and stay risen.
 snap_active() { vmq 'sum(b2bua_active_calls)'; }
 snap_ghost()  { vmq 'sum(b2bua_active_calls) - sum(sipp_current_calls)'; }
+# Call-limiter exercise: the dedicated stream's ADMITTED-and-held concurrency,
+# read SIPp-side (rejected 486s never enter hold). A healthy limiter pins this at
+# LIMITER_TARGET. The limiter's own `limiter_current_total` gauge is NOT usable
+# here: every call now carries the global-stress entry, so that gauge aggregates
+# all streams (thousands).
+snap_limiter_conc() { vmq 'sum(sipp_current_calls{role="limiter"})'; }
 
 # orphan_kill measurement: launch a dedicated 50cps stream, abruptly kill the UAC
 # mid-call (no BYE), then assert the B2BUA REAPS the orphaned dialogs. Measured by
@@ -203,6 +232,42 @@ sip_chaos_ghost_gap $g1"
   fi
 }
 
+# limiter_event measurement: the continuous limiter stream pins ADMITTED
+# concurrency at LIMITER_TARGET (the cap). Inject a limiter fault (pod kill, or a
+# netem black-hole that leaves the pod up), allow the 10-min divergence window
+# (the b2bua fails open so the cap is briefly unenforced + the limiter refills
+# over ~window), then assert the stream's admitted concurrency has RECONVERGED to
+# within ±LIMITER_TOL of the cap. Pass iff reconverged — this is the requested
+# "stays ≈ 20, allowed to differ for up to 10 min after critical changes" bar.
+limiter_event() {
+  local type="$1" idx="$2" t0 c0 cmid c1 result
+  t0="$(date +%s)"
+  c0="$(snap_limiter_conc)"
+  log "CHAOS #$idx: $type (limiter-stream concurrent before=$c0, target=$LIMITER_TARGET)"
+  push_metric "sip_chaos_run{type=\"$type\",phase=\"inject\"} 1"
+  open_window "$type"
+  case "$type" in
+    limiter_kill)   ./chaos.sh limiterkill >>"$RUNLOG" 2>&1 || true ;;
+    limiter_netcut) NETCUT_SECS="$NETCUT_SECS" ./chaos.sh limiternetcut >>"$RUNLOG" 2>&1 || true ;;
+  esac
+  cmid="$(snap_limiter_conc)"
+  log "$type: limiter-stream concurrent at/after fault=$cmid; waiting ${LIMITER_GRACE}s for reconvergence"
+  sleep "$LIMITER_GRACE"
+  ensure_baseline
+  c1="$(snap_limiter_conc)"
+  close_window "$type"
+  result=$(python3 -c "print('pass' if abs(float('$c1')-$LIMITER_TARGET) <= $LIMITER_TOL else 'fail')")
+  push_metric "sip_chaos_event{type=\"$type\",result=\"$result\"} 1
+sip_chaos_limiter_conc{type=\"$type\"} $c1"
+  printf '{"ts":%s,"event":%d,"type":"%s","limiter_before":%s,"limiter_mid":%s,"limiter_after":%s,"target":%s,"tol":%s,"result":"%s"}\n' \
+    "$t0" "$idx" "$type" "${c0%.*}" "${cmid%.*}" "${c1%.*}" "$LIMITER_TARGET" "$LIMITER_TOL" "$result" >> "$EVENTS"
+  if [ "$result" = "pass" ]; then
+    ok "CHAOS #$idx $type: limiter reconverged — concurrent $c0 ->(fault $cmid)-> $c1 (target ${LIMITER_TARGET}±${LIMITER_TOL})"
+  else
+    warn "CHAOS #$idx $type: limiter did NOT reconverge — concurrent $c1 outside ${LIMITER_TARGET}±${LIMITER_TOL} after ${LIMITER_GRACE}s — FAILURE"
+  fi
+}
+
 # Record one chaos event: snapshot baseline outcomes, run it, settle, snapshot
 # again, compute the success% of calls that resolved across the window, push a
 # metric + append a JSONL row. Flags result=fail if below PASS_THRESHOLD.
@@ -211,6 +276,11 @@ chaos_event() {
   # orphan_kill has a bespoke measurement (B2BUA active_calls reaping), not the
   # baseline success-rate path the other events share.
   if [ "$type" = "orphan_kill" ]; then orphan_event "$idx"; return; fi
+  # limiter_kill / limiter_netcut assert limiter-cap reconvergence, not baseline
+  # success% (the limiter stream's expected 486s are excluded from that anyway).
+  if [ "$type" = "limiter_kill" ] || [ "$type" = "limiter_netcut" ]; then
+    limiter_event "$type" "$idx"; return
+  fi
   local t0 s0 f0 s1 f1 ds df pct result conc
   t0="$(date +%s)"
   s0="$(snap_success)"; f0="$(snap_failed)"
@@ -245,12 +315,12 @@ chaos_event() {
   ds=$(python3 -c "print(max(0, int(float('$s1'))-int(float('$s0'))))")
   df=$(python3 -c "print(max(0, int(float('$f1'))-int(float('$f0'))))")
   pct=$(python3 -c "t=$ds+$df; print(round(100.0*$ds/t,1) if t else 100.0)")
-  # Per-type pass bar. kill_proxy is a single-replica SPOF by design (proxy HA is
-  # out of scope for this runner) -> a ~30s new-call gap is expected, so its bar
-  # is lenient; established dialogs still survive via Record-Route pinning.
+  # Per-type pass bar. kill_proxy now meets the normal bar: the proxy is HA behind
+  # a keepalived VRRP VIP (ADR-0012 D7), so killing the master fails over to the
+  # warm backup in <2s with the VIP (and thus Record-Route) stable — new + in-
+  # dialog calls keep flowing. No lenient threshold anymore.
   local thr="$PASS_THRESHOLD"
   case "$type" in
-    kill_proxy) thr="${PROXY_THRESHOLD:-60}" ;;
     peak)       thr="${PEAK_THRESHOLD:-90}" ;;
   esac
   # A window where NO baseline calls resolved (ds+df==0) is not a real pass — it
@@ -291,16 +361,17 @@ wireup() {
 }
 
 start_baseline() {
-  log "starting baseline streams: long@${LONG_CPS} short@${SHORT_CPS} abuse@${ABUSE_CAPS}"
-  launch_stream sipp-uac-long  uac-long-options.xml    "$LONG_CPS"  long
-  launch_stream sipp-uac-short uac-endurance-short.xml "$SHORT_CPS" short
+  log "starting baseline streams: long@${LONG_CPS} short@${SHORT_CPS} abuse@${ABUSE_CAPS} limiter@${LIMITER_CPS}(cap ${LIMITER_TARGET})"
+  launch_stream sipp-uac-long    uac-long-options.xml          "$LONG_CPS"    long
+  launch_stream sipp-uac-short   uac-endurance-short.xml       "$SHORT_CPS"   short
+  launch_stream sipp-uac-limiter uac-endurance-limiter-cap20.xml "$LIMITER_CPS" limiter
   ABUSE_CAPS="$ABUSE_CAPS" ./chaos.sh abuse up >>"$RUNLOG" 2>&1 || true
   push_metric "sip_endurance_run{phase=\"start\"} 1"
 }
 
 stop_streams() {
   log "stopping baseline + abuse streams"
-  for j in sipp-uac-long sipp-uac-short sipp-uac-peak sipp-uac-orphan; do
+  for j in sipp-uac-long sipp-uac-short sipp-uac-limiter sipp-uac-peak sipp-uac-orphan; do
     kubectl -n "$NS" delete job "$j" --ignore-not-found >/dev/null 2>&1 || true
   done
   ./chaos.sh abuse down >>"$RUNLOG" 2>&1 || true
@@ -321,7 +392,7 @@ run() {
   sleep "$CLUSTER_SETTLE"
   start_baseline
 
-  local cycle=(orphan_kill kill_worker kill_proxy peak)
+  local cycle=(orphan_kill kill_worker kill_proxy peak limiter_kill limiter_netcut)
   local start now idx=0
   start="$(date +%s)"
   # Let the steady state build before the first event.

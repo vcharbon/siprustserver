@@ -1,0 +1,13 @@
+# Minimal keepalived image for the front-proxy VRRP VIP sidecar (ADR-0012 D7).
+#
+# Built locally (not pulled) because the registry osixia/keepalived tar fails
+# `kind load` with a "content digest not found" import error; a fresh local build
+# produces clean OCI layers that load reliably. Alpine keepalived + iproute2 give
+# `keepalived` (/usr/sbin/keepalived) and `ip` for the VIP-on-lo notify scripts.
+#
+#   docker build -f deploy/docker/Dockerfile.keepalived -t siprustserver-keepalived:dev .
+FROM alpine:3.20
+RUN apk add --no-cache keepalived iproute2
+# keepalived → /usr/sbin/keepalived ; ip → /sbin/ip ; sh → busybox /bin/sh.
+ENTRYPOINT []
+CMD ["/usr/sbin/keepalived", "--dont-fork", "--log-console", "--log-detail", "--use-file=/etc/keepalived/keepalived.conf"]

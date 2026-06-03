@@ -58,14 +58,20 @@ spec:
             # Ordinal = pod name (stable per StatefulSet replica == membership ordinal).
             - { name: B2BUA_ORDINAL, value: "$(POD_NAME)" }
             # --- call limiter ---
-            # The shared limiter service (50-call-limiter). Inert until a
-            # /call/new decision returns `call_limiter` entries; the scripted
-            # route_all_to backend supplies none, so this is a no-op for the
-            # plain load runner. LIMITER_WINDOW_SECONDS MUST match the service's
-            # window (it sets the refresh cadence).
+            # The shared limiter service (50-call-limiter). The scripted decision
+            # backend attaches B2BUA_STRESS_LIMITER (below) to EVERY call, so the
+            # full admit/release/refresh chain is exercised on all traffic; a call
+            # that also carries an X-Api-Call `call_limiter` entry (the endurance
+            # limiter stream) is additionally capped by it. LIMITER_WINDOW_SECONDS
+            # MUST match the service's window (it sets the refresh cadence).
             - { name: LIMITER_URL,            value: "call-limiter.sip-test.svc.cluster.local:8080" }
             - { name: LIMITER_WINDOW_SECONDS, value: "300" }
             - { name: LIMITER_TIMEOUT_MS,     value: "150" }
+            # Always-on high-cap "stress" entry: never rejects (cap 999999) but
+            # makes every call traverse the limiter so the chain is load-tested
+            # end to end. Set ID empty to disable.
+            - { name: B2BUA_STRESS_LIMITER_ID,    value: "global-stress" }
+            - { name: B2BUA_STRESS_LIMITER_LIMIT, value: "999999" }
             # --- replication (opt-in) ---
             - { name: B2BUA_REPL,           value: "${REPL_ENABLE}" }
             - { name: B2BUA_REPL_LISTEN,    value: "0.0.0.0:${REPL_PORT}" }
@@ -88,8 +94,12 @@ spec:
             periodSeconds: 2
             failureThreshold: 2
           resources:
-            requests: { cpu: "250m", memory: "64Mi" }
-            limits:   { memory: "512Mi" }
+            requests: { cpu: "250m", memory: "128Mi" }
+            # Headroom for a fully-ramped 2h profile: long(~6000) + short(~3000)
+            # split across 2 workers ≈ 4500 live dialogs each, plus the per-call
+            # replication changelog. 512Mi OOM-killed under that load (the killed
+            # worker then drops its calls → cascading churn), so give 1Gi.
+            limits:   { memory: "1Gi" }
 ---
 # Headless service: gives each worker stable DNS (b2bua-worker-0.b2bua-worker...)
 # and — crucially for replication — is the Service whose EndpointSlices the

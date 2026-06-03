@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!--
+  Endurance call-limiter stream — INVITE with X-Api-Call call_limiter directive
+  (id=endurance-limiter, cap=20), 200 + 30s hold + BYE. The endurance suite runs
+  this continuously at ~2 cps; offered concurrency (2 cps x 30s ≈ 60) exceeds the
+  cap, so a healthy limiter pins steady-state admitted concurrency at ~20 and
+  rejects the rest with 486.
+
+  Calls that get 200 → ACK / 30s hold / BYE → counted "Successful" by sipp.
+  Calls rejected with 486 → the mandatory recv 200 below goes unmatched → counted
+  "Failed". sipp auto-ACKs the 486 in UAC mode, so no leaking transaction state.
+  Those 486s are EXPECTED (the cap biting) — the suite scores role=limiter apart
+  from the baseline success ratio (like role=abuse).
+
+  The vendored sipp parses any literal `[...]` in CDATA as a keyword reference
+  ("Unsupported keyword"), so the X-Api-Call JSON (a `call_limiter` array) is
+  injected via sipp's `-key xapi '<json>'` CLI flag — a single-pass substitution
+  whose value is NOT re-parsed. `40-sipp-uac-job.yaml` passes that key on every
+  stream; only this scenario references `[xapi]`, so only it sends the header.
+
+  NOTE: every call ALSO carries the worker's always-on `global-stress:999999`
+  entry (B2BUA_STRESS_LIMITER_ID on the worker), so the full admit/release/refresh
+  chain runs on each call; only the `endurance-limiter:20` entry here ever caps.
+-->
+<scenario name="K8s UAC endurance limiter — INVITE / 200 / 30s hold / BYE, cap=20">
+
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: sut <sip:[service]@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Max-Forwards: 70
+      Subject: K8s endurance limiter cap20
+      X-Api-Call: [xapi]
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=user1 53655765 2353687637 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <!-- 200 OK is mandatory: a 486 from a rejected call leaves this recv
+       unmatched and the call is counted as Failed. sipp's UAC mode auto-ACKs
+       the 486 to close the transaction cleanly. -->
+  <recv response="200" rtd="true" rrs="true"/>
+
+  <send>
+    <![CDATA[
+      ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: sut <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <pause milliseconds="30000"/>
+
+  <send retrans="500">
+    <![CDATA[
+      BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: sut <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 2 BYE
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <recv response="200" crlf="true"/>
+
+  <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
+  <CallLengthRepartition value="10, 50, 100, 500, 1000, 5000, 10000, 15000"/>
+</scenario>

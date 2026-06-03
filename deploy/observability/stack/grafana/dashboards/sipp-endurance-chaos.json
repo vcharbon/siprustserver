@@ -149,8 +149,8 @@
   {
    "id": 4,
    "type": "stat",
-   "title": "Success ratio (5m)",
-   "description": "Resolved-call success ratio over 5m.",
+   "title": "Success ratio (5m, excl. abuse+limiter)",
+   "description": "Resolved-call success ratio over 5m for REAL traffic (abuse excluded — the abuse stream is adversarial by design and floors at ~1 unexpected_msg/call; see the abuse-apart panel).",
    "gridPos": {
     "h": 4,
     "w": 6,
@@ -163,7 +163,7 @@
    },
    "targets": [
     {
-     "expr": "100*sum(rate(sipp_successful_calls_total[5m]))/clamp_min(sum(rate(sipp_successful_calls_total[5m]))+sum(rate(sipp_failed_calls_total[5m])),1)",
+     "expr": "100*sum(rate(sipp_successful_calls_total{role!~\"abuse|limiter\"}[5m]))/clamp_min(sum(rate(sipp_successful_calls_total{role!~\"abuse|limiter\"}[5m]))+sum(rate(sipp_failed_calls_total{role!~\"abuse|limiter\"}[5m])),1)",
      "refId": "A"
     }
    ],
@@ -204,8 +204,8 @@
   {
    "id": 5,
    "type": "stat",
-   "title": "Failed calls (cumulative)",
-   "description": "Total failed calls across all streams.",
+   "title": "Failed calls (cumulative, excl. abuse+limiter)",
+   "description": "Total failed calls across REAL streams (abuse excluded — counted apart in the abuse panel).",
    "gridPos": {
     "h": 4,
     "w": 6,
@@ -218,7 +218,7 @@
    },
    "targets": [
     {
-     "expr": "sum(sipp_failed_calls_total)",
+     "expr": "sum(sipp_failed_calls_total{role!~\"abuse|limiter\"})",
      "refId": "A"
     }
    ],
@@ -378,8 +378,8 @@
   {
    "id": 10,
    "type": "timeseries",
-   "title": "Successful vs failed (calls/s)",
-   "description": "Per-second resolved call outcomes.",
+   "title": "Successful vs failed (calls/s, excl. abuse+limiter)",
+   "description": "Per-second resolved call outcomes for REAL traffic (abuse stream excluded — counted apart below).",
    "gridPos": {
     "h": 8,
     "w": 12,
@@ -392,12 +392,14 @@
    },
    "targets": [
     {
-     "expr": "sum(rate(sipp_successful_calls_total[1m]))",
-     "refId": "A"
+     "expr": "sum(rate(sipp_successful_calls_total{role!~\"abuse|limiter\"}[1m]))",
+     "refId": "A",
+     "legendFormat": "successful"
     },
     {
-     "expr": "sum(rate(sipp_failed_calls_total[1m]))",
-     "refId": "B"
+     "expr": "sum(rate(sipp_failed_calls_total{role!~\"abuse|limiter\"}[1m]))",
+     "refId": "B",
+     "legendFormat": "failed"
     }
    ],
    "fieldConfig": {
@@ -427,8 +429,8 @@
   {
    "id": 11,
    "type": "timeseries",
-   "title": "Failure causes (calls/s)",
-   "description": "Per-second failures by SIPp failure class.",
+   "title": "Failure causes (calls/s, excl. abuse+limiter)",
+   "description": "Per-second failures by SIPp failure class for REAL traffic (abuse excluded — its steady ~1/s unexpected_msg is adversarial-by-design and counted apart below).",
    "gridPos": {
     "h": 8,
     "w": 12,
@@ -441,7 +443,7 @@
    },
    "targets": [
     {
-     "expr": "sum by (cause)(rate(sipp_failed_total[1m]))",
+     "expr": "sum by (cause)(rate(sipp_failed_total{role!~\"abuse|limiter\"}[1m]))",
      "refId": "A",
      "legendFormat": "{{cause}}"
     }
@@ -1021,6 +1023,57 @@
     { "expr": "sum by (cause, role)(rate(sipp_failed_total[1m]))", "refId": "A", "legendFormat": "{{cause}} · {{role}}" }
    ],
    "fieldConfig": { "defaults": { "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } }, "overrides": [] },
+   "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+  },
+  {
+   "id": 30,
+   "type": "timeseries",
+   "title": "Abuse stream — counted apart (EXCLUDED from headline)",
+   "description": "The adversarial abuse stream (uac-abuse-options-flood) in isolation: calls/s, failures/s and failure causes. By design it floors at ~1 unexpected_msg per call (the flood's responses don't match the scenario's recv expectations), so it is excluded from the headline success/failure panels and tracked here instead. Real baseline (short/long) carries the headline.",
+   "gridPos": { "h": 8, "w": 24, "x": 0, "y": 74 },
+   "datasource": { "type": "prometheus", "uid": "vm" },
+   "targets": [
+    { "expr": "sum(rate(sipp_calls_created_total{role=\"abuse\"}[1m]))", "refId": "A", "legendFormat": "abuse calls/s" },
+    { "expr": "sum(rate(sipp_failed_calls_total{role=\"abuse\"}[1m]))", "refId": "B", "legendFormat": "abuse failed/s" },
+    { "expr": "sum by (cause)(rate(sipp_failed_total{role=\"abuse\"}[1m]))", "refId": "C", "legendFormat": "abuse {{cause}}/s" }
+   ],
+   "fieldConfig": { "defaults": { "unit": "cps", "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } }, "overrides": [] },
+   "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+  },
+  {
+   "id": 31,
+   "type": "row",
+   "title": "Call limiter",
+   "collapsed": false,
+   "gridPos": { "h": 1, "w": 24, "x": 0, "y": 82 }
+  },
+  {
+   "id": 32,
+   "type": "timeseries",
+   "title": "Call-limiter stream — SIPp concurrent vs cap",
+   "description": "The dedicated limiter stream (uac-endurance-limiter-cap20, role=limiter) admitted-and-held concurrency, shown APART from the other streams. A healthy limiter pins this at the cap (20); the 486-rejected calls never enter hold so this is the clean cap signal the endurance limiter_kill/limiter_netcut events assert reconvergence on (within LIMITER_GRACE). Other calls all carry the global-stress:999999 entry so the limiter chain is stressed on every call, but only this stream is capped.",
+   "gridPos": { "h": 8, "w": 12, "x": 0, "y": 83 },
+   "datasource": { "type": "prometheus", "uid": "vm" },
+   "targets": [
+    { "expr": "sum(sipp_current_calls{role=\"limiter\"})", "refId": "A", "legendFormat": "limiter stream concurrent (admitted)" },
+    { "expr": "vector(20)", "refId": "B", "legendFormat": "cap (20)" }
+   ],
+   "fieldConfig": { "defaults": { "unit": "none", "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1 } }, "overrides": [ { "matcher": { "id": "byName", "options": "cap (20)" }, "properties": [ { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [8, 4] } }, { "id": "custom.fillOpacity", "value": 0 }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] } ] },
+   "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+  },
+  {
+   "id": 33,
+   "type": "timeseries",
+   "title": "Call-limiter — admit vs rejected (per-s)",
+   "description": "Limiter service throughput: admits/s (every call traverses the limiter — global-stress chain stress) vs rejected/s (the cap-20 stream biting). Reject rate should be ~0 except for the limiter stream's over-cap calls; it drops to 0 during limiter_kill/limiter_netcut (b2bua fails open) then resumes.",
+   "gridPos": { "h": 8, "w": 12, "x": 12, "y": 83 },
+   "datasource": { "type": "prometheus", "uid": "vm" },
+   "targets": [
+    { "expr": "rate(limiter_admit_total[1m])", "refId": "A", "legendFormat": "admit/s" },
+    { "expr": "rate(limiter_admitted_total[1m])", "refId": "B", "legendFormat": "admitted/s" },
+    { "expr": "rate(limiter_rejected_total[1m])", "refId": "C", "legendFormat": "rejected/s" }
+   ],
+   "fieldConfig": { "defaults": { "unit": "cps", "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } }, "overrides": [] },
    "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
   }
  ]

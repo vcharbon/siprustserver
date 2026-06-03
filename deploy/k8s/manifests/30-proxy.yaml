@@ -1,20 +1,53 @@
-# SIP front proxy + load balancer. ONE replica: it balances new dialogs across
-# the worker pool with HMAC Record-Route stickiness; proxy-level HA (multiple
-# proxies behind a VIP) needs the keepalived/VIP machinery and is out of scope
-# for this thin runner. Pinned to tier=edge like the sipjs proxy.
+# SIP front proxy + load balancer — HIGH-AVAILABILITY (ADR-0012 D7).
+#
+# TWO anti-affined replicas on the two tier=edge nodes, fronted by a keepalived
+# VRRP virtual IP (172.20.255.250, static in the kind 172.20.0.0/16 node subnet).
+# Active/passive: the VRRP master owns the VIP and serves ALL traffic; the backup
+# is warm (its OPTIONS health probes source from its own node IP — the runner
+# binds a SEPARATE ephemeral probe socket — so it keeps a live worker view and its
+# /readyz passes). On master loss the backup claims the VIP in <2s. Because the
+# proxy advertises the *VIP* (stable across failover AND pod restart) in
+# Record-Route, in-dialog BYE/keepalives never get orphaned the way a per-pod-IP
+# advertise did, and the HMAC stickiness cookie + worker P2P replication
+# (ADR-0011) keep in-dialog routing + worker failover correct from either proxy.
+# Active/passive keeps the per-pod cancel_lru (CANCEL/ACK correlation) coherent.
 #
 # The worker pool is discovered from k8s EndpointSlices via the shared
-# topology::K8sMembership informer (ADR-0012 D4) — the SAME watch the b2bua
-# replication engine uses (ADR-0011 X7). The proxy still sends OPTIONS/SIP to each
-# worker's Pod IP; the informer just keeps that IP list correct automatically on
-# reboot/scale, so there is NO PROXY_WORKERS IP-bake and no proxy redeploy after a
-# worker kill (cf. the deleted run.sh block / chaos.sh refresh). The worker *id*
-# is the EndpointSlice targetRef.name (= pod name = B2BUA_ORDINAL): the proxy signs
-# it into the w_pri/w_bak cookie the b2bua echoes into the callRef primary /
-# topology.bak (the replication changelog peer key), so identity agrees by
-# construction. Needs the 25-proxy-rbac ServiceAccount/RoleBinding for the watch.
-# PROXY_ADVERTISE = the proxy's own pod IP so in-dialog Route/Record-Route is
-# routable cluster-internally and pins back to this single proxy.
+# topology::K8sMembership informer (ADR-0012 D4); the proxy reaches each worker at
+# its Pod IP. Needs the 25-proxy-rbac ServiceAccount/RoleBinding for the watch.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sip-front-proxy-keepalived
+  namespace: sip-test
+  labels: { app: sip-front-proxy }
+data:
+  keepalived.conf: |
+    # Identical on both pods. state BACKUP + nopreempt => the first pod up wins
+    # the VIP and keeps it across peer reboots (no flapping). Multicast VRRP — the
+    # kind Docker bridge floods link-local 224.0.0.18 between the edge nodes.
+    global_defs {
+        router_id sip-front-proxy
+        enable_script_security
+        script_user root
+    }
+    vrrp_instance VI_SIP {
+        state BACKUP
+        interface eth0
+        virtual_router_id 51
+        priority 100
+        advert_int 0.5
+        nopreempt
+        virtual_ipaddress {
+            172.20.255.250
+        }
+        # Keep the VIP on lo at all times so either pod can bind(VIP:5060) and use
+        # it as the outbound source IP for forwarded SIP (source-IP discipline).
+        notify_master "/bin/sh -c 'ip addr add 172.20.255.250/32 dev lo 2>/dev/null || true'"
+        notify_backup "/bin/sh -c 'ip addr add 172.20.255.250/32 dev lo 2>/dev/null || true'"
+        notify_fault  "/bin/sh -c 'ip addr add 172.20.255.250/32 dev lo 2>/dev/null || true'"
+    }
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,8 +55,15 @@ metadata:
   namespace: sip-test
   labels: { app: sip-front-proxy }
 spec:
-  replicas: 1
+  replicas: 2
   selector: { matchLabels: { app: sip-front-proxy } }
+  # maxSurge:0 / maxUnavailable:1 is the only shape compatible with the hard
+  # anti-affinity + 2 edge nodes (no room for a surged 3rd pod). One slot rolls at
+  # a time; the brief VIP gap during the swap is covered by keepalived re-election
+  # + SIP T1/T2 retransmit. A fleet with >=3 edge nodes can use maxSurge:1.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 0, maxUnavailable: 1 }
   template:
     metadata:
       labels: { app: sip-front-proxy }
@@ -34,43 +74,99 @@ spec:
       serviceAccountName: sip-front-proxy
       nodeSelector: { tier: edge }
       terminationGracePeriodSeconds: 30
+      # VIP requires hostNetwork so keepalived can answer ARP on the node's eth0;
+      # the two pods must land on different edge nodes (anti-affinity below).
+      # shareProcessNamespace lets a future keepalived chk_script pgrep the proxy.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      shareProcessNamespace: true
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: { matchLabels: { app: sip-front-proxy } }
+              topologyKey: kubernetes.io/hostname
+      # Pre-bind the VIP on lo + strict-ARP BEFORE the proxy starts, so the
+      # proxy's bind(VIP:5060) succeeds even on the backup (keepalived's notify
+      # scripts only fire after it elects — an EADDRNOTAVAIL race otherwise).
+      initContainers:
+        - name: vip-loopback
+          image: siprustserver-keepalived:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              ip addr add 172.20.255.250/32 dev lo 2>/dev/null || \
+                ip addr show dev lo | grep -q "172.20.255.250/32"
+              # strict-ARP (LVS/DSR fix): with the VIP on lo on BOTH nodes, only
+              # the interface that actually owns the IP should answer ARP, else
+              # both eth0s reply and client traffic flaps. Write /proc/sys directly
+              # (no sysctl binary dependency).
+              echo 1 > /proc/sys/net/ipv4/conf/all/arp_ignore
+              echo 2 > /proc/sys/net/ipv4/conf/all/arp_announce
+              echo 1 > /proc/sys/net/ipv4/conf/lo/arp_ignore
+              echo 2 > /proc/sys/net/ipv4/conf/lo/arp_announce
+              echo "vip-loopback: 172.20.255.250/32 + strict-ARP ready"
+          securityContext:
+            privileged: true
+            capabilities: { add: ["NET_ADMIN"] }
       containers:
         - name: sip-front-proxy
           image: ${SUT_IMAGE}
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/sip-proxy-runner"]
           env:
-            - name: POD_IP
-              valueFrom: { fieldRef: { fieldPath: status.podIP } }
             - name: POD_NAMESPACE
               valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
-            - { name: PROXY_LISTEN,    value: "0.0.0.0:5060" }
-            - { name: PROXY_ADVERTISE, value: "$(POD_IP):5060" }
+            # Bind + advertise the VIP. Listening on the VIP sources forwarded SIP
+            # from the VIP (responses return to the master); the OPTIONS health
+            # probe uses a SEPARATE 0.0.0.0:0 socket so the backup still probes
+            # from its node IP and stays warm.
+            - { name: PROXY_LISTEN,    value: "172.20.255.250:5060" }
+            - { name: PROXY_ADVERTISE, value: "172.20.255.250:5060" }
             - { name: PROXY_METRICS,   value: "0.0.0.0:9090" }
-            # Worker pool discovered from k8s (ADR-0012 D4). PROXY_WORKERS left
-            # UNSET → the EndpointSlice informer over the headless worker Service
-            # drives the pool; each worker reached at its Pod IP:PROXY_WORKER_PORT.
+            # Worker pool discovered from k8s (ADR-0012 D4). PROXY_WORKERS UNSET →
+            # EndpointSlice informer over the headless worker Service.
             - { name: PROXY_WORKER_SERVICE, value: "b2bua-worker" }
             - { name: PROXY_WORKER_PORT,    value: "5060" }
           ports:
             - { name: sip,     containerPort: 5060, protocol: UDP }
             - { name: metrics, containerPort: 9090, protocol: TCP }
-          # Readiness gates on ≥1 routable (Alive) worker (ADR-0012 D4): the
-          # EndpointSlice informer fills the pool asynchronously and the OPTIONS
-          # probe then flips workers Alive, so the proxy reports NotReady until it
-          # can actually route — the Service withholds traffic during a (re)start
-          # window, and an RBAC-forbidden / mis-named worker Service surfaces as a
-          # rollout timeout instead of silently black-holing every INVITE.
+          # Readiness gates on >=1 routable (Alive) worker (ADR-0012 D4). Liveness
+          # is separate (process up) so the warm backup is never killed for having
+          # no traffic. kubelet probes node-IP:9090 (hostNetwork).
           readinessProbe:
             httpGet: { path: /readyz, port: 9090 }
             initialDelaySeconds: 1
             periodSeconds: 2
             failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: 9090 }
+            initialDelaySeconds: 3
+            periodSeconds: 10
           resources:
             requests: { cpu: "500m", memory: "64Mi" }
             limits:   { memory: "512Mi" }
+        # VRRP sidecar — owns the shared VIP. preStop drops the VIP immediately so
+        # the standby promotes before SIGTERM reaches the proxy container.
+        - name: keepalived
+          image: siprustserver-keepalived:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/sbin/keepalived"]
+          args: ["--dont-fork", "--log-console", "--log-detail", "--use-file=/etc/keepalived/keepalived.conf"]
+          securityContext:
+            capabilities: { add: ["NET_ADMIN", "NET_BROADCAST", "NET_RAW"] }
+          lifecycle:
+            preStop:
+              exec: { command: ["/bin/sh", "-c", "pkill keepalived; sleep 1"] }
+          volumeMounts:
+            - { name: keepalived-conf, mountPath: /etc/keepalived, readOnly: true }
+      volumes:
+        - name: keepalived-conf
+          configMap: { name: sip-front-proxy-keepalived }
 ---
-# UDP service the SIPp UAC targets. ClusterIP -> the single proxy pod.
+# Metrics-only Service (SIP now flows through the VIP, not this ClusterIP). Kept
+# so the Prometheus targets + /readyz resolve via the pod annotations.
 apiVersion: v1
 kind: Service
 metadata:
@@ -79,5 +175,4 @@ metadata:
 spec:
   selector: { app: sip-front-proxy }
   ports:
-    - { name: sip,     port: 5060, targetPort: 5060, protocol: UDP }
     - { name: metrics, port: 9090, targetPort: 9090, protocol: TCP }

@@ -7,10 +7,14 @@
 //!   - CDR  : `BufferedCdrWriter` (drop-on-overload) over a discarding sink, so
 //!            an endurance run does not accumulate records in memory.
 //!   - store: `InMemoryCallStore` (the only ported store; HA/Redis deferred).
-//!   - limit: `NoopLimiter` (the real sliding-window limiter is a later slice).
-//!   - route: `ScriptedDecisionEngine::route_all_to(DEST)` (the HTTP call-control
-//!            adapter is a deferred slice; routing all calls to a fixed UAS
-//!            mirrors the k8s `worker -> sipp-uas` topology).
+//!   - limit: `HttpCallLimiter` when `LIMITER_URL` is set, else `NoopLimiter`
+//!            (fail-open). See the `LIMITER_*` env below.
+//!   - route: `ScriptedDecisionEngine::route_all_to_with_limiter(DEST, stress)`
+//!            (the HTTP call-control adapter is a deferred slice; routing all
+//!            calls to a fixed UAS mirrors the k8s `worker -> sipp-uas` topology).
+//!            It attaches an always-on `B2BUA_STRESS_LIMITER` entry to every call
+//!            (full-chain stress) and honors an inbound `X-Api-Call` `call_limiter`
+//!            array so a dedicated stream can enforce a real cap.
 //! It also serves a Prometheus `/metrics` + `/healthz` endpoint so the endurance
 //! recorder can scrape worker application metrics alongside container CPU/mem.
 //!
@@ -24,6 +28,13 @@
 //!   B2BUA_CONCURRENCY handler concurrency ceiling       (default 8192; safety, not a rate cap)
 //!   B2BUA_CALL_CAP  max concurrent calls before drop    (default 1_000_000)
 //!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min)
+//!
+//! ## Call limiter
+//!   LIMITER_URL             shared limiter base URL; unset → NoopLimiter (fail-open)
+//!   LIMITER_WINDOW_SECONDS  refresh cadence; MUST match the service window (default 300)
+//!   LIMITER_TIMEOUT_MS      per-request fail-open budget                     (default 150)
+//!   B2BUA_STRESS_LIMITER_ID always-on limiter id on every call; "" disables  (default global-stress)
+//!   B2BUA_STRESS_LIMITER_LIMIT cap for that entry (never rejects in practice) (default 999999)
 //!
 //! ## HA replication (S11) — opt-in via `B2BUA_REPL=1` (default off = legacy)
 //!   B2BUA_REPL          "1"/"true" enables peer-to-peer call replication
@@ -50,7 +61,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use b2bua::cdr::{BufferedCdrWriter, CdrRecord, CdrWriter};
 use b2bua::config::B2buaConfig;
-use b2bua::decision::ScriptedDecisionEngine;
+use b2bua::decision::{CallLimiterEntry, ScriptedDecisionEngine};
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::limiter_http::HttpCallLimiter;
 use b2bua::metrics::B2buaMetrics;
@@ -92,6 +103,22 @@ fn env_flag(key: &str) -> bool {
         env_or(key, "0").trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+/// Always-on "stress" limiter entry attached to every routed call so the full
+/// admit/release/refresh chain is exercised on all traffic (the endurance suite
+/// drives this). `B2BUA_STRESS_LIMITER_ID` empty disables it; the default cap
+/// (`B2BUA_STRESS_LIMITER_LIMIT`, default 999999) is high enough to never reject.
+fn stress_limiter_from_env() -> Option<CallLimiterEntry> {
+    let id = env_or("B2BUA_STRESS_LIMITER_ID", "global-stress");
+    if id.trim().is_empty() {
+        return None;
+    }
+    let limit = env::var("B2BUA_STRESS_LIMITER_LIMIT")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(999_999);
+    Some(CallLimiterEntry { id, limit })
 }
 
 fn resolve(addr: &str) -> SocketAddr {
@@ -403,9 +430,10 @@ async fn main() {
     let store: Arc<dyn b2bua::store::CallStore> = Arc::new(InMemoryCallStore::new());
     let deps = B2buaDeps {
         config,
-        decision: Arc::new(ScriptedDecisionEngine::route_all_to(
+        decision: Arc::new(ScriptedDecisionEngine::route_all_to_with_limiter(
             dest_sa.ip().to_string(),
             dest_sa.port(),
+            stress_limiter_from_env(),
         )),
         limiter,
         cdr,

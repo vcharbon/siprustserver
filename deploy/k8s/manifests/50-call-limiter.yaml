@@ -33,6 +33,12 @@ spec:
           image: ${SUT_IMAGE}
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/call-limiter-runner"]
+          # NET_ADMIN lets the chaos suite exec `tc qdisc ... netem` inside this
+          # pod to simulate a network interruption to the shared limiter WITHOUT
+          # killing it (the limiter_netcut chaos event). Test-cluster only.
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN"]
           env:
             - { name: LIMITER_LISTEN,           value: "0.0.0.0:8080" }
             - { name: LIMITER_WINDOW_SECONDS,   value: "300" }

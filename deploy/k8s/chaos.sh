@@ -46,6 +46,11 @@ JOB="sipp-uac-failover"
 export REPL_ENABLE=1
 export WORKER_REPLICAS="${WORKER_REPLICAS:-2}"
 export SCENARIO
+# Front-proxy HA VIP (ADR-0012 D7): UAC streams target the VIP, not the Service.
+PROXY_VIP="${PROXY_VIP:-172.20.255.250}"
+PROXY_TARGET="${PROXY_TARGET:-$PROXY_VIP}"
+LIMITER_CAP="${LIMITER_CAP:-20}"
+export PROXY_VIP PROXY_TARGET LIMITER_CAP
 
 log()  { printf '\033[1;36m>> %s\033[0m\n' "$*" >&2; }
 ok()   { printf '\033[1;32mPASS: %s\033[0m\n' "$*" >&2; }
@@ -109,18 +114,34 @@ push_metric() {
   curl -s --max-time 4 -X POST "$VM_IMPORT" --data-binary "$1" >/dev/null 2>&1 || true
 }
 
-# CHAOS: kill the (single-replica) front proxy. New-call setup fails until the
-# Deployment restarts it; established dialogs pinned via Record-Route reconverge.
+# Find the proxy pod that currently OWNS the VIP (the VRRP master): the master
+# carries ${PROXY_VIP} on eth0, the backup only on lo. Echoes the pod name (empty
+# if none found).
+proxy_master_pod() {
+  local p
+  for p in $(kubectl -n "$NS" get pods -l app=sip-front-proxy -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+    if kubectl -n "$NS" exec "$p" -c keepalived -- ip -4 addr show dev eth0 2>/dev/null | grep -q "${PROXY_VIP}/"; then
+      echo "$p"; return 0
+    fi
+  done
+  return 0
+}
+
+# CHAOS: kill the VIP MASTER proxy (ADR-0012 D7 HA). The backup is warm and claims
+# the VIP via VRRP in <2s; because the advertised address is the stable VIP, in-
+# dialog BYE/keepalives and new calls keep flowing through the survivor. The
+# Deployment then restores the killed pod as a fresh backup. Killing ONLY the
+# master (not `-l app=...`, which would take down both replicas) is the real
+# failover test.
 kill_proxy() {
-  log "CHAOS: killing primary sip-front-proxy"
+  local master
+  master="$(proxy_master_pod)"
+  [ -n "$master" ] || master="$(kubectl -n "$NS" get pods -l app=sip-front-proxy -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+  log "CHAOS: killing VIP-master proxy ${master:-<none>} (backup takes over the VIP)"
   push_metric 'sip_chaos_event{type="kill_proxy",phase="start"} 1'
-  kubectl -n "$NS" delete pod -l app=sip-front-proxy --grace-period=0 --force >/dev/null 2>&1 || true
-  log "waiting for sip-front-proxy to come back Ready"
-  kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout=90s || true
-  # Fresh proxy pod -> fresh IP. PROXY_ADVERTISE is from the pod's own status.podIP
-  # (downward API) and the worker pool is re-discovered from k8s on boot (ADR-0012
-  # D4), so the restarted proxy self-configures; the Service still selects it, so
-  # new calls flow once Ready.
+  [ -n "$master" ] && kubectl -n "$NS" delete pod "$master" --grace-period=0 --force >/dev/null 2>&1 || true
+  log "waiting for the proxy Deployment to restore 2 Ready replicas"
+  kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout=120s || true
   kubectl -n "$NS" get pods -l app=sip-front-proxy -o wide || true
   push_metric 'sip_chaos_event{type="kill_proxy",result="pass"} 1'
 }
@@ -192,6 +213,44 @@ orphan_kill() {
   kubectl -n "$NS" delete pod -l role=orphan --grace-period=0 --force >/dev/null 2>&1 || true
   kubectl -n "$NS" delete job "$ORPHAN_JOB" --grace-period=0 --force --ignore-not-found >/dev/null 2>&1 || true
   push_metric 'sip_chaos_event{type="orphan_kill",phase="killed"} 1'
+}
+
+# CHAOS: kill the (single-replica) shared call-limiter. It is a SPOF for the
+# limiter FUNCTION only: while it is down the b2bua fails OPEN (admits with no
+# holds, 150ms budget), so calls keep flowing — the cap simply stops being
+# enforced. The Deployment (strategy: Recreate) brings a fresh, empty pod back;
+# active calls' refresh timers re-populate its counters within ~LIMITER_WINDOW.
+limiter_kill() {
+  log "CHAOS: killing the shared call-limiter pod (b2bua fails open while it's down)"
+  push_metric 'sip_chaos_event{type="limiter_kill",phase="start"} 1'
+  kubectl -n "$NS" delete pod -l app=call-limiter --grace-period=0 --force >/dev/null 2>&1 || true
+  log "waiting for call-limiter to come back Ready"
+  kubectl -n "$NS" rollout status deploy/call-limiter --timeout=90s || true
+  kubectl -n "$NS" get pods -l app=call-limiter -o wide || true
+  push_metric 'sip_chaos_event{type="limiter_kill",result="pass"} 1'
+}
+
+# CHAOS: a NETWORK interruption to the shared call-limiter WITHOUT killing it.
+# `tc netem loss 100%` on the limiter pod's eth0 black-holes all traffic for
+# NETCUT_SECS, so worker->limiter admits/releases/refreshes time out (150ms
+# budget) and the b2bua fails open — same observable effect as a kill but the
+# pod (and its in-memory counters) stay intact, so on restore the counters are
+# still warm. Requires NET_ADMIN + iproute2 (set on 50-call-limiter / image).
+NETCUT_SECS="${NETCUT_SECS:-60}"
+limiter_netcut() {
+  local pod
+  pod="$(kubectl -n "$NS" get pod -l app=call-limiter -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+  if [ -z "$pod" ]; then log "limiter_netcut: no call-limiter pod found"; return; fi
+  log "CHAOS: limiter_netcut — 100% packet loss on $pod eth0 for ${NETCUT_SECS}s (pod stays up)"
+  push_metric 'sip_chaos_event{type="limiter_netcut",phase="start"} 1
+sip_chaos_active{type="limiter_netcut"} 1'
+  kubectl -n "$NS" exec "$pod" -- tc qdisc add dev eth0 root netem loss 100% >/dev/null 2>&1 \
+    || warn "limiter_netcut: tc add failed (NET_ADMIN/iproute2 present?)"
+  sleep "$NETCUT_SECS"
+  kubectl -n "$NS" exec "$pod" -- tc qdisc del dev eth0 root >/dev/null 2>&1 || true
+  log "limiter_netcut: removed netem on $pod (connectivity restored)"
+  push_metric 'sip_chaos_event{type="limiter_netcut",result="pass"} 1
+sip_chaos_active{type="limiter_netcut"} 0'
 }
 
 # Read the UAC job's SIPp stats and assert the success rate clears the bar.
@@ -323,9 +382,11 @@ case "$cmd" in
   proxykill) kill_proxy ;;
   peak)      peak ;;
   orphankill) orphan_kill ;;
+  limiterkill) limiter_kill ;;
+  limiternetcut) limiter_netcut ;;
   abuse)     case "${1:-up}" in up) abuse_up ;; down) abuse_down ;; *) fail "usage: $0 abuse {up|down}" ;; esac ;;
   recover)   wait_brought_back; assert_rehydrated ;;
   assert)    assert_survival ;;
   down)      down ;;
-  *) fail "usage: $0 {failover|bringback|up|deploy|kill|proxykill|peak|orphankill|abuse {up|down}|recover|assert|down}" ;;
+  *) fail "usage: $0 {failover|bringback|up|deploy|kill|proxykill|peak|orphankill|limiterkill|limiternetcut|abuse {up|down}|recover|assert|down}" ;;
 esac

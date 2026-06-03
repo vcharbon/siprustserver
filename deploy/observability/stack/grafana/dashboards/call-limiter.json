@@ -1,0 +1,129 @@
+{
+  "uid": "call-limiter",
+  "title": "Call limiter — shared sliding-window (Rust)",
+  "tags": ["siprustserver", "call-limiter", "limiter"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "annotations": {
+    "list": [
+      {
+        "name": "Limiter chaos window",
+        "datasource": { "type": "prometheus", "uid": "vm" },
+        "enable": true,
+        "iconColor": "semi-dark-red",
+        "expr": "sip_chaos_window{type=~\"limiter_.*\"} == 1",
+        "titleFormat": "chaos: {{type}}",
+        "tagKeys": "type",
+        "step": "10s"
+      }
+    ]
+  },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1, "type": "row", "title": "Overview", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2, "type": "stat", "title": "Concurrent (all limiter ids)",
+      "description": "`limiter_current_total` — sum of live counts across ALL limiter ids. With the worker's always-on global-stress:999999 entry, every call is counted here, so this tracks total concurrency through the limiter (NOT the cap-20 endurance stream alone — that is read SIPp-side on the endurance dashboard).",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "limiter_current_total", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "id": 3, "type": "stat", "title": "Admits / sec",
+      "description": "`rate(limiter_admit_total[1m])` — admit requests received. ≈ the whole suite's call-setup rate, since every call traverses the limiter (full-chain stress).",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "rate(limiter_admit_total[1m])", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 4, "type": "stat", "title": "Rejected / sec",
+      "description": "`rate(limiter_rejected_total[1m])` — admits rejected (≥1 entry over cap). Driven by the cap-20 endurance stream; drops to 0 during limiter_kill/limiter_netcut (b2bua fails open).",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "rate(limiter_rejected_total[1m])", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 5, "type": "stat", "title": "Live keys",
+      "description": "`limiter_live_keys` — live (id, window) keys held. Leak monitor: should stay bounded (≈ number of active limiter ids × active windows).",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "limiter_live_keys", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "id": 6, "type": "row", "title": "Throughput", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Admit / admitted / rejected (per-s)",
+      "description": "admit = all requests; admitted = fully admitted; rejected = ≥1 entry over cap. admit ≈ admitted + rejected. A persistent gap of rejected/s is the cap-20 stream biting.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "rate(limiter_admit_total[1m])", "refId": "A", "legendFormat": "admit/s" },
+        { "expr": "rate(limiter_admitted_total[1m])", "refId": "B", "legendFormat": "admitted/s" },
+        { "expr": "rate(limiter_rejected_total[1m])", "refId": "C", "legendFormat": "rejected/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "cps", "min": 0, "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Release / refresh (per-s)",
+      "description": "release = holds dropped on BYE/terminate; refresh = holds migrated to the current window for long calls (every LIMITER_WINDOW_SECONDS). Both should track admitted/s in steady state — the full chain on every call.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "rate(limiter_release_total[1m])", "refId": "A", "legendFormat": "release/s" },
+        { "expr": "rate(limiter_refresh_total[1m])", "refId": "B", "legendFormat": "refresh/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "cps", "min": 0, "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Reject ratio",
+      "description": "rejected / admit — fraction of admits the cap turned away. Spikes track the cap-20 stream's over-cap pressure; → 0 during a limiter fault (fail-open admits everything with no holds).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "rate(limiter_rejected_total[1m]) / clamp_min(rate(limiter_admit_total[1m]), 1)", "refId": "A", "legendFormat": "reject ratio" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "fillOpacity": 10, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Leak monitor — live keys + auto-cleared/s",
+      "description": "live_keys (gauge) should stay bounded; auto_cleared/s = window keys removed by the TTL sweep (crash-recovery / leaked-hold cleanup). A rising live_keys with no traffic, or a steady auto_cleared/s, signals holds not being released — investigate the b2bua release path.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "limiter_live_keys", "refId": "A", "legendFormat": "live keys" },
+        { "expr": "rate(limiter_auto_cleared_total[1m])", "refId": "B", "legendFormat": "auto-cleared/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "min": 0, "custom": { "fillOpacity": 6, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 11, "type": "row", "title": "Current concurrency", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 }
+    },
+    {
+      "id": 12, "type": "timeseries", "title": "Concurrent (all ids) over time",
+      "description": "`limiter_current_total` over time. During limiter_kill/limiter_netcut this dips (fail-open admits record no holds; existing holds age out via TTL) then refills within ~LIMITER_WINDOW_SECONDS as active calls' refresh timers re-populate the counters.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 23 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "limiter_current_total", "refId": "A", "legendFormat": "current total" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "min": 0, "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }
+    }
+  ]
+}

@@ -91,5 +91,10 @@ so the bucket lands later with no surface change.
 - The harness can now drive any in-process SUT, not just the proxy — useful for
   the B2BUA slice.
 - Deferred (see MIGRATION_STATUS slice 9 "Un-ported"): the registrar/REGISTER
-  path, the real self-gate, the AIMD bucket, the kubernetes registry, and the
-  failover/replication tests.
+  path, the real self-gate, the AIMD bucket, and the failover/replication tests.
+- **HA — ADR-0012 D7.** The proxy is **not** a single point of failure: it runs
+  active/passive behind a keepalived VRRP VIP (two anti-affined edge replicas).
+  The stateless §16 design + the HMAC Record-Route cookie (X3) let either replica
+  serve in-dialog traffic, and advertising the stable VIP keeps Record-Route valid
+  across failover/restart. Any earlier "single proxy / out-of-scope HA" framing is
+  superseded.

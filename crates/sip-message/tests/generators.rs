@@ -479,6 +479,21 @@ fn adds_to_tag_when_status_gt_100_and_request_lacks_one() {
 }
 
 #[test]
+fn mints_fallback_to_tag_when_caller_supplies_none_on_non100() {
+    // Regression: a >100 response to a tag-less request with NO opts.to_tag must
+    // NOT panic with "missing mandatory To-tag" (that crashes the worker handler,
+    // leaks the dialog, and OOMs under load). It mints a deterministic fallback
+    // so a well-formed response is always emitted.
+    let req = make_a_leg_invite();
+    let resp = generate_response(&req, 200, "OK", &GenerateResponseOpts::default());
+    let to = get_header(&resp.headers, "To").expect("To header");
+    assert!(to.contains(";tag=b2bua-fb-"), "expected fallback To-tag, got {to:?}");
+    // Deterministic per Call-ID: a retransmit re-derives the same tag.
+    let resp2 = generate_response(&req, 200, "OK", &GenerateResponseOpts::default());
+    assert_eq!(get_header(&resp2.headers, "To"), Some(to));
+}
+
+#[test]
 fn does_not_add_tag_on_100_trying() {
     let req = make_a_leg_invite();
     let resp = generate_response(

@@ -185,6 +185,18 @@ fn make_response(status: u16, reason: &str, headers: Vec<SipHeader>, body: Vec<u
         .unwrap_or_else(|e| panic!("generators built a malformed response: {}", e.reason))
 }
 
+/// Deterministic fallback To-tag for a non-100 response whose request carried a
+/// tag-less To and whose caller supplied no `to_tag`. Derived from the Call-ID so
+/// it is stable per call (a retransmit re-derives the same tag) and unique across
+/// calls. This only fires on a degenerate path — it exists so the worker emits a
+/// well-formed response instead of panicking. See [`generate_response`].
+fn fallback_to_tag(call_id: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    call_id.hash(&mut hasher);
+    format!("b2bua-fb-{:016x}", hasher.finish())
+}
+
 /// Serialize a [`ViaSpec`] into a Via header value. Custom params are appended
 /// verbatim; an empty value serialises as a flag (RFC 3581 §3).
 fn build_via_value(v: &ViaSpec) -> String {
@@ -626,11 +638,19 @@ pub fn generate_response(
     let call_id = get_header(&incoming_request.headers, "call-id").unwrap_or("");
     let cseq = get_header(&incoming_request.headers, "cseq").unwrap_or("");
 
-    let to = if status > 100
-        && opts.to_tag.is_some()
-        && parse_name_addr(raw_to).tag.is_none()
-    {
-        format!("{};tag={}", raw_to, opts.to_tag.as_ref().unwrap())
+    // A non-100 response MUST carry a To-tag (RFC 3261 §8.2.6.2); hydrate_response
+    // rejects one that doesn't. If the request's To already has a tag (in-dialog)
+    // echo it; otherwise add `opts.to_tag` when the caller supplied one, else a
+    // deterministic fallback derived from the Call-ID. The fallback is a safety
+    // net: a worker must NEVER panic building a response (it kills the handler
+    // task, leaks the dialog, and eventually OOMs) just because some caller path
+    // answered a tag-less request without threading a To-tag through.
+    let to = if status > 100 && parse_name_addr(raw_to).tag.is_none() {
+        let tag = opts
+            .to_tag
+            .clone()
+            .unwrap_or_else(|| fallback_to_tag(call_id));
+        format!("{raw_to};tag={tag}")
     } else {
         raw_to.to_string()
     };
