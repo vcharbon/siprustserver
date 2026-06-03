@@ -7,7 +7,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::{Call, CallModelState, Direction, TimerEntry, TimerType};
+use call::{Call, CallModelState, CdrEvent, CdrEventType, Direction, TimerEntry, TimerType};
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::message_helpers::parse_uri_params;
@@ -56,6 +56,23 @@ pub struct RouterCtx {
     pub reentry_tx: mpsc::UnboundedSender<CallEvent>,
 }
 
+/// Replication-driven commands the puller/supervisor inject into the router loop
+/// (ADR-0011 X11 fail-back). Routed through the same single-threaded `run` loop
+/// as SIP events so reclaim/handback never races the per-call handlers.
+#[derive(Debug, Clone)]
+pub enum ReplCommand {
+    /// **Go-active bulk reclaim** — materialise every `pri:{self}` call into the
+    /// live map + re-arm timers (a rebooted primary re-*serving* its partition,
+    /// not just re-storing it). Fired once the supervisor reports bootstrap-complete.
+    ReclaimAll,
+    /// **Reactive reclaim** of one call a backup just reverse-flushed to us — the
+    /// flip-race straggler an acting-backup took over *after* the bulk sweep.
+    ReclaimCall(String),
+    /// **Handback** — a reclaiming primary told us (its backup) to deactivate
+    /// every takeover copy for `primary` activated at/before `as_of_ms`.
+    Deactivate { primary: String, as_of_ms: i64 },
+}
+
 /// How an event resolves to a call + the leg it arrived on.
 struct Resolution {
     call_ref: Option<String>,
@@ -70,6 +87,7 @@ pub async fn run(
     mut txn_rx: mpsc::Receiver<sip_txn::TransactionEvent>,
     mut timer_rx: mpsc::UnboundedReceiver<CallEvent>,
     mut reentry_rx: mpsc::UnboundedReceiver<CallEvent>,
+    mut repl_rx: mpsc::UnboundedReceiver<ReplCommand>,
 ) {
     loop {
         tokio::select! {
@@ -87,6 +105,98 @@ pub async fn run(
                     on_event(&ctx, ev).await;
                 }
             },
+            cmd = repl_rx.recv() => {
+                if let Some(cmd) = cmd {
+                    on_repl_command(&ctx, cmd).await;
+                }
+            },
+        }
+    }
+}
+
+/// Interpret a replication-driven [`ReplCommand`] (ADR-0011 X11 fail-back).
+async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
+    match cmd {
+        ReplCommand::ReclaimAll => {
+            for call in ctx.state.reclaim_scan().await {
+                reclaim_into_live(ctx, call).await;
+            }
+        }
+        ReplCommand::ReclaimCall(call_ref) => {
+            if let Some(call) = ctx.state.peek_reclaimable(&call_ref).await {
+                reclaim_into_live(ctx, call).await;
+            }
+        }
+        ReplCommand::Deactivate { primary, as_of_ms } => {
+            deactivate_takeovers(ctx, &primary, as_of_ms).await;
+        }
+    }
+}
+
+/// Materialise one reclaimed call into the live map + re-arm its timers — the
+/// active reclaim that makes a rebooted primary re-*serve* (ADR-0011 X11). The
+/// **keepalive** timer is re-armed a *fresh* interval out (not its stale absolute
+/// deadline) so the primary defers its first in-dialog OPTIONS until well past
+/// the `Deactivate` burst — the backup hands its copy back before either node
+/// probes the leg, closing the double-OPTIONS/CSeq-collision window. The
+/// `GlobalDuration` cap and every other timer keep their absolute deadlines.
+async fn reclaim_into_live(ctx: &Arc<RouterCtx>, mut call: Call) {
+    let call_ref = call.call_ref.clone();
+    // Hold the per-call state lock across materialise + timer re-arm, exactly as
+    // `process` and `deactivate_takeovers` do, so a concurrent dispatcher handler
+    // for this call_ref cannot interleave and double-arm (or clobber the deferred
+    // keepalive below).
+    let _guard = ctx.state.lock(&call_ref).await;
+    let now_ms = ctx.clock.now_ms();
+    let interval_ms = ctx.config.keepalive_interval_sec * 1000;
+    // Re-arm the keepalive a *fresh* interval out (not its stale absolute
+    // deadline) so the primary defers its first in-dialog OPTIONS past the
+    // `Deactivate` burst — and write the new deadline back into the call we
+    // store, so a flush before that first keepalive cannot re-replicate a
+    // past-due deadline (which a later hydrate would fire immediately). Every
+    // other timer keeps its absolute deadline.
+    for t in call.timers.iter_mut() {
+        if matches!(t.timer_type, TimerType::Keepalive) {
+            t.fire_at = now_ms + interval_ms;
+        }
+    }
+    let timers = call.timers.clone();
+    if ctx.state.materialize_if_absent(call) {
+        ctx.timers.restore(timers, call_ref).await;
+        ctx.metrics.bump_repl_reclaimed();
+    }
+}
+
+/// Hand back every takeover copy this backup activated at/before `as_of_ms` for
+/// `primary` (ADR-0011 X11 `Deactivate`). Each is a **local-only** teardown —
+/// drop the live copy + cancel its timers/txns/dispatch — with a `ghost-backup`
+/// CDR end-event (a deactivation, *not* a real hangup) and the handback counter;
+/// it propagates **no** delete (the call lives on at `primary`, which keeps
+/// forward-refreshing this node's backup `Element`).
+async fn deactivate_takeovers(ctx: &Arc<RouterCtx>, primary: &str, as_of_ms: i64) {
+    for call_ref in ctx.state.deactivate_targets(primary, as_of_ms) {
+        let _guard = ctx.state.lock(&call_ref).await;
+        let now_ms = ctx.clock.now_ms();
+        // Snapshot under the lock *before* tearing down (drop_local removes it),
+        // but only emit the ghost-backup CDR + bump the handback counter if a
+        // live copy was actually dropped — so the CDR and the metric stay a
+        // matched pair and we never CDR a deactivation that did not happen.
+        let snapshot = ctx.state.peek(&call_ref);
+        if ctx.state.drop_local(&call_ref) {
+            if let Some(mut call) = snapshot {
+                call.cdr_events.push(CdrEvent {
+                    event_type: CdrEventType::Bye,
+                    timestamp: now_ms,
+                    leg_id: call.a_leg.leg_id.clone(),
+                    status_code: None,
+                    reason: Some("ghost-backup".into()),
+                });
+                ctx.cdr.write(&call, now_ms).await;
+            }
+            ctx.timers.cancel_all(call_ref.clone()).await;
+            ctx.txn.cancel_txns_for_call(&call_ref).await;
+            ctx.dispatcher.enqueue_poison(&call_ref);
+            ctx.metrics.bump_repl_handback();
         }
     }
 }
@@ -367,6 +477,10 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
                 // epoch bump. Skipped for `fresh == false` (the call was already
                 // resident and its timers are already live) to avoid double-arm.
                 if fresh {
+                    // Stamp this acting-backup takeover copy's activation instant
+                    // so a later `Deactivate{as_of}` handback (ADR-0011 X11) can
+                    // tell it predates the primary's reclaim.
+                    ctx.state.mark_takeover(&call_ref, now_ms);
                     ctx.timers.restore(c.timers.clone(), call_ref.clone()).await;
                 }
                 c

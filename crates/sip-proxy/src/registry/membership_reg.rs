@@ -206,6 +206,24 @@ mod tests {
     }
 
     #[test]
+    fn restart_of_dead_worker_resets_and_reprobes() {
+        // The live degradation (endurance-20260602-214000): a worker the OPTIONS
+        // probe marked `Dead` (the kill) recreates under the same ordinal at a new
+        // Pod IP. The reconcile must NOT preserve the stale `Dead` — it must reset
+        // to `Unknown` so the probe loop re-probes the new address and can flip it
+        // back `Alive`. Discriminator is the address change, not the ordinal.
+        let state = RegistryState::new(vec![]);
+        reconcile_to_desired(&state, peers(&[("w1", "10.0.0.1")]), 5060, 0);
+        state.set_health("w1", WorkerHealth::Dead, 50); // killed: probe missed its threshold
+        // Same ordinal, recreated at a new Pod IP.
+        reconcile_to_desired(&state, peers(&[("w1", "10.0.0.2")]), 5060, 100);
+        let w1 = state.resolve("w1").unwrap();
+        assert_eq!(w1.address, ProxyAddr::new("10.0.0.2", 5060));
+        assert_eq!(w1.health, WorkerHealth::Unknown, "a stale `Dead` must not survive a restart");
+        assert_eq!(w1.first_seen_at_ms, Some(100), "fresh-pod guard re-armed for the new incarnation");
+    }
+
+    #[test]
     fn dedups_duplicate_ordinals_first_wins() {
         let state = RegistryState::new(vec![]);
         reconcile_to_desired(&state, peers(&[("w0", "10.0.0.1"), ("w0", "10.0.0.2")]), 5060, 0);

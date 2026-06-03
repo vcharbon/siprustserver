@@ -356,6 +356,103 @@ async fn hydrated_call_rearms_keepalive_and_reaps_dead_peer() {
 }
 
 // ===========================================================================
+// X11 RECLAIM/HANDBACK — after a kill→takeover→reboot cycle a call must be
+// served by EXACTLY ONE node. The reborn primary reclaims it (bulk on go-active)
+// AND the backup deactivates its takeover copy (the `Deactivate` handback), so
+// the two never double-serve. Repro for the cluster leak: a cross-node duplicate
+// that is never handed back accumulates as a ghost. Ground-truth on the live
+// in-memory count (not the creations/removals counters, which are under test).
+// ===========================================================================
+#[tokio::test(start_paused = true)]
+async fn reboot_reclaim_hands_back_exactly_one_owner() {
+    let mut fh = FailoverHarness::new("s11-reclaim-handback", &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let b1_lane = fh.agent("b1-lane", B1).await;
+    let b2_lane = fh.agent("b2-lane", B2).await;
+    drop((b1_lane, b2_lane));
+
+    let proxy = fh
+        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
+        .await;
+    let mut w_b1 = fh
+        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    let mut w_b2 = fh
+        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
+
+    // ── establish alice ⇄ bob on the HRW primary ─────────────────────────────
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
+        .expect("b-leg INVITE carries the cookie");
+    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
+        if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
+    let primary_ord = b1.ordinal().to_string();
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(500)).await;
+
+    let call_ref = find_backed_up_ref(b2, &primary_ord).await;
+    assert!(b2.get(BAK, &primary_ord, &call_ref).await.is_some(), "backup holds the replica");
+    assert_eq!(b1.active_calls(), 1, "primary serves the established call");
+    assert_eq!(b2.active_calls(), 0, "backup is a pure replica (not serving)");
+
+    // ── crash primary; fail a NON-terminating re-INVITE over to the backup ────
+    b1.crash();
+    proxy.set_health(&primary_ord, WorkerHealth::Dead);
+    fh.advance(Duration::from_millis(300)).await;
+    let mut reinv = dialog.request(InDialogMethod::Invite, None).await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    reinv.expect(200).await;
+    dialog.ack(Some(ANSWER)).await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert_eq!(b2.active_calls(), 1, "backup took the call over (live takeover copy)");
+
+    // ── reboot the primary → bulk reclaim on go-active + Deactivate broadcast ─
+    b1.reboot().await;
+    proxy.set_health(&primary_ord, WorkerHealth::Alive);
+    for _ in 0..40 {
+        fh.advance(Duration::from_millis(500)).await;
+        if b1.is_ready() {
+            break;
+        }
+    }
+    assert!(b1.is_ready(), "rebooted primary ready after re-hydration");
+    // Drive the go-active task: ReclaimAll + the ~5 s Deactivate broadcast +
+    // b2's puller reconnect (which carries the handback / reconnect backstop).
+    fh.advance(Duration::from_secs(10)).await;
+
+    // ── THE INVARIANT: exactly one node serves the call (no ghost duplicate) ──
+    eprintln!(
+        "post-reclaim: b1.active={} b2.active={} reclaimed={} handback={} hydrated={}",
+        b1.active_calls(),
+        b2.active_calls(),
+        b1.metrics().repl_reclaimed_total(),
+        b2.metrics().repl_handback_total(),
+        b2.metrics().repl_takeover_hydrated_total(),
+    );
+    assert_eq!(
+        b1.active_calls() + b2.active_calls(),
+        1,
+        "EXACTLY ONE node serves the call after reclaim+handback — a duplicate is the ghost leak",
+    );
+    assert_eq!(b1.active_calls(), 1, "the rebooted primary reclaimed + serves it");
+    assert_eq!(b2.active_calls(), 0, "the backup handed its takeover copy back");
+    assert!(b2.metrics().repl_handback_total() >= 1, "the handback (Deactivate) fired on the backup");
+
+    drop((w_b1, w_b2, proxy));
+}
+
+// ===========================================================================
 // MATRIX — fault cases (best-effort; deferrals documented in the report-back)
 // ===========================================================================
 

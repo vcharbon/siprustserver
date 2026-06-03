@@ -1,6 +1,7 @@
 # 0011 — HA replication: peer-to-peer pull, no Redis
 
-**Status:** accepted (2026-05-31)
+**Status:** accepted (2026-05-31); amended 2026-06-03 (X11 — active reclaim +
+`Deactivate` ownership handshake, hardening X5's backup-side fail-back)
 
 **Source:** sipjsserver @ `fffc4ac6`,
 `src/replication/{ReplLogServer,PullerFiber,ReplicationProtocol,ReplicationSupervisor,PeerScanBootstrap,ChannelStream,ChannelIndex,EpochCounter,genCounter,EchoApply,ReadinessController,PullerHttpTransport}.ts`,
@@ -100,6 +101,12 @@ covered by SIP retransmission + the proxy's existing ACK/CANCEL-to-primary rule
 and hard fencing (epoch propagation + per-txn fence checks + a 2-phase drain
 handshake — too much machinery for "ultra early").
 
+**Amended by X11.** X5 specified the *primary* half of fail-back (a rebooting
+primary reclaims) but left the *backup* half implicit — how/when the acting-backup
+releases the live call it took over. Under tier-3 chaos that gap **double-served**
+dialogs (a correctness bug, not merely a leak); X11 hardens it with active reclaim
++ an explicit `Deactivate` handshake.
+
 ## Decision X6 — readiness/OPTIONS gate: re-hydrated + backup-current
 
 A `NotReady → Ready → Draining` state machine (`ReadinessController` /
@@ -176,6 +183,86 @@ clock: crash → failover → reboot → reclaim. (3) **Real chaos** on kind (re
 under `tokio::time::pause`). Every tier is recording-first (ADR-0006): the
 replication exchange renders as a sequence diagram beside the SIP exchange.
 
+## Decision X11 — fail-back, backup half: active reclaim + `Deactivate` handshake
+
+X5 fixed the *primary* half of fail-back but left the *backup* half implicit:
+**how, and when, the acting-backup relinquishes the live call it took over.**
+Tier-3 endurance exposed the gap. Reclaim as built was **passive** — the rebooted
+primary pulled its calls back into `pri:` *storage* (verified by
+`s8_tests::takeover_then_reclaim_keeps_backup_mutation`) but never re-materialised
+them into its live map, so it never re-*served* them; meanwhile the acting-backup's
+**takeover copy** kept serving. Both nodes then kept the *same* dialog alive, each
+sending in-dialog keepalive OPTIONS under its **own** CSeq counter. That is not
+merely a memory leak (`b2bua_active_calls` grew unbounded until the ~1 h
+`GlobalDuration` cap; worst for long-hold streams) — it is a **correctness bug**: a
+strict UAS may answer the lower-CSeq OPTIONS with `500`, which is not a 2xx, so
+`absorb-options-200` does not fire, `KeepaliveTimeout` trips at 5 s, and a
+**healthy call is torn down.** This is the "best-effort flip proves lossy under
+real chaos (tier 3)" trigger X5 deferred to.
+
+**(a) Reclaim is *active*.** A reclaiming primary materialises each `pri:` call
+into the live map and re-arms its timers — it re-*serves*, not merely re-*stores*
+(the **Reclaim** vs **re-hydration** glossary split). Triggered by a **bulk sweep
+on bootstrap-complete** — lazy-on-in-dialog is rejected because a long-hold call
+receives no inbound in-dialog request (the B2BUA *sends* the keepalives), so lazy
+never fires for exactly the calls that leak — **plus** a **reactive per-call
+reclaim** driven by the backup's reverse-replication, which closes the flip-race
+straggler.
+
+**(b) An explicit ownership handshake replaces passive inference.** Inference was
+rejected: `call_gen` cannot tell "the primary reclaimed" from "I keepalived" —
+both bump it, and they **lockstep** (reclaim re-delivers at the *same* `call_gen`,
+so the LWW body-write is skipped); an incarnation stamp survives the lockstep but
+still leaves the double-OPTIONS window open. So ownership transfer is **told, not
+guessed**:
+
+- **Notify = existing reverse-replication.** When the backup serves a takeover
+  copy it already reverse-flushes it to the primary (`partition=Pri`); that frame
+  *is* "I am serving this." The only addition is a **prompt reverse-flush the
+  instant a takeover copy is activated** (don't wait for the next keepalive).
+- **`Deactivate{ since: T }`** — one new server→client frame, pushed down the
+  backup's existing pull connection. The backup **deactivates** (local-only: stop
+  timers → cease OPTIONS, drop the live copy, **revert to a pure `Element`** — *no*
+  delete propagated, the call lives on under the primary) every takeover copy it
+  **activated** at/after `T`, where `T` = the primary's **prior incarnation
+  epoch** (every takeover of one of its calls post-dates that boot; a future
+  episode under a higher incarnation is not swept by this stale `T`). The backup
+  tags each takeover copy with its activation wall-clock to evaluate `since T`.
+  **Cadence:** one `Deactivate` on going-active (covering the whole bulk-reclaimed
+  population) + a handful of re-sends over ~5 s to sweep flip-race stragglers —
+  **bounded regardless of call count**, idempotent.
+- **Relaxed safety:** a straggler the primary has not yet reclaimed when it is
+  deactivated opens a few-ms unserved gap — accepted, as the *same* flip-instant
+  race X5 already declares covered by SIP retransmission + the proxy's
+  ACK/CANCEL-to-primary rule.
+- **Exclusive ownership:** the primary defers sending OPTIONS for a call until it
+  has deactivated the backup's copy, so the two never keepalive one dialog
+  concurrently — closing the CSeq-collision window.
+- **Disconnect backstop:** if the backup is unreachable when `Deactivate` is sent,
+  it is re-sent on reconnect (rides the pull channel); `GlobalDuration` is the
+  ultimate cap. No passive recheck — a disconnected backup is already steered away
+  by the health probe and deactivates the moment it reconnects.
+
+**Memory protection moves onto the keepalive cadence, not `max_duration`.** A
+backup `Element` no longer refreshed by its primary's **forward** flush within
+**1.5× the keepalive interval** self-evicts (the existing lazy-TTL, retuned from
+the 1 h backstop). 1.5× decomposes as 1.0× (normal refresh period) + 0.5× (max
+reboot+rehydrate budget that still lands the next refresh in-window) — so "no
+refresh in 1.5×" is a genuine split-brain/hard-down signal, and the reboot SLO is
+0.5× interval. Consequence: **endurance must run keepalive ≥ 5 min** (prod default
+300 s) so reboot fits the budget and the test stays representative instead of
+manufacturing fake reap artifacts.
+
+**Observability:** a deactivation writes a CDR end-event flagged **`ghost-backup`**
+(distinct from a real call end) + `b2bua_repl_handback_total`. Acceptance after a
+`kill_worker`+reclaim: `ghost-backup` count = duplicates handed back, and the
+`b2bua_active_calls − sipp_current_calls` gap reaps to ~0.
+
+**Still not hard fencing.** No epoch leases, no per-transaction fence checks, no
+2-phase drain (all rejected by X5 as too heavy). This is *one* idempotent
+timestamp-bulk message on the existing channel + reuse of reverse-replication as
+the notify — the minimum that makes ownership exclusive.
+
 ## Deferred (with justification)
 
 - **k8s `Membership` impl + real TCP transport** — tier-3 only; the sim impls
@@ -185,8 +272,11 @@ replication exchange renders as a sequence diagram beside the SIP exchange.
 - **Incarnation-gen real source** (boot wall-clock vs k8s pod start epoch) —
   injectable seam now (test = seed, like `IdGen::seeded`); real source finalised
   with the k8s slice.
-- **Sticky failover / hard fencing** — rejected for now (X5); revisit only if the
-  best-effort flip proves lossy under real chaos (tier 3).
+- **Sticky failover / hard fencing** — rejected (X5). The best-effort flip *did*
+  prove lossy under tier-3 chaos (orphaned takeover copies double-serving the same
+  dialog), so the fail-back was hardened in **X11** with a lightweight
+  ownership-deactivation handshake — still short of full hard fencing (no per-txn
+  fence, no epoch leases, no 2-phase drain).
 
 ## References
 

@@ -23,7 +23,7 @@ pub enum ReplCodecError {
     /// tag's fixed arity.
     #[error("malformed frame array: {0}")]
     MalformedArray(String),
-    /// Element 0 was not one of the five known frame tags.
+    /// Element 0 was not one of the known frame tags.
     #[error("unknown frame tag: {0}")]
     UnknownTag(u64),
     /// An enum-coded byte (mode / op / partition) was out of range.
@@ -142,6 +142,11 @@ fn write_frame(buf: &mut Vec<u8>, frame: &Frame) {
             encode::write_uint(buf, tag::RESET_TO_BOOTSTRAP).unwrap();
             encode::write_str(buf, reason).unwrap();
         }
+        Frame::Deactivate { as_of_ms } => {
+            encode::write_array_len(buf, 2).unwrap();
+            encode::write_uint(buf, tag::DEACTIVATE).unwrap();
+            encode::write_sint(buf, *as_of_ms).unwrap();
+        }
     }
 }
 
@@ -168,6 +173,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Frame, ReplCodecError> {
         tag::DATA => decode_data(&mut rd, len),
         tag::NOOP => decode_noop(&mut rd, len),
         tag::RESET_TO_BOOTSTRAP => decode_reset(&mut rd, len),
+        tag::DEACTIVATE => decode_deactivate(&mut rd, len),
         other => Err(ReplCodecError::UnknownTag(other)),
     }
 }
@@ -253,6 +259,12 @@ fn decode_reset(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
     expect_len(len, 2, "ResetToBootstrap")?;
     let reason = read_str(rd, "reason")?;
     Ok(Frame::ResetToBootstrap { reason })
+}
+
+fn decode_deactivate(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
+    expect_len(len, 2, "Deactivate")?;
+    let as_of_ms = read_i64(rd, "as_of_ms")?;
+    Ok(Frame::Deactivate { as_of_ms })
 }
 
 // --- low-level readers over a `&mut &[u8]` cursor --------------------------

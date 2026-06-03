@@ -6,8 +6,10 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use repl_net::transport::ReplicationNetwork;
+use tokio::sync::watch;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::SipParser;
@@ -47,6 +49,10 @@ pub struct B2buaCore {
     /// loop). [`abort`](Self::abort) aborts them for a simulated crash; ordinary
     /// drop leaves them to die with the endpoint/channels as before.
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// Retained X11 fail-back command sender — keeps the `repl_rx` channel the
+    /// router selects on open even on the legacy path (no supervisor/puller holds
+    /// a clone there), so a closed channel never busy-loops the router.
+    _repl_tx: tokio::sync::mpsc::UnboundedSender<router::ReplCommand>,
 }
 
 /// Optional replication wiring for [`B2buaDeps`]. Supplying `Some(..)` turns a
@@ -135,6 +141,13 @@ impl B2buaCore {
         // Collected so a harness can simulate a crash by aborting them.
         let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
+        // X11 fail-back command channel (puller/go-active → router). Created
+        // unconditionally; `repl_tx` is retained on `Self` so the channel never
+        // closes on the legacy (no-replication) path — otherwise `repl_rx.recv()`
+        // would resolve `None` every poll and busy-loop the router select.
+        let (repl_tx, repl_rx) =
+            tokio::sync::mpsc::unbounded_channel::<router::ReplCommand>();
+
         // Replication wiring (opt-in). When present: serve our changelog, start
         // the puller supervisor, gate readiness on it, and route flushes through
         // the replicating store.
@@ -142,8 +155,23 @@ impl B2buaCore {
         let (readiness, supervisor) = match &replication {
             Some(setup) => {
                 let self_ordinal = config.self_ordinal.clone();
-                // Route flushes/removes for backed-up calls through the policy.
-                state = state.with_replication(setup.store.clone());
+                // Route flushes/removes for backed-up calls through the policy, and
+                // stamp the replicated-body TTL with the operator's **reboot budget**
+                // (ADR-0011 X11): an orphaned backup Element self-evicts after the
+                // budget rather than the 1 h max_duration backstop. The budget is a
+                // config knob in its own right (decoupled from the keepalive, though
+                // `config.validate()` guarantees it outlasts one keepalive refresh
+                // gap so a healthy idle call's backup is never evicted prematurely).
+                let replicated_ttl_ms = config.reboot_budget_sec.saturating_mul(1000);
+                state = state
+                    .with_replication(setup.store.clone())
+                    .with_replicated_ttl_ms(replicated_ttl_ms);
+
+                // X11 `Deactivate` broadcast watch: the go-active task bumps it
+                // with this node's ownership-reassertion wall-clock; every live
+                // `serve_replog` connection pushes `Deactivate{as_of}` to its
+                // backup. `0` = "no reclaim yet" (never pushed).
+                let (deactivate_tx, deactivate_rx) = watch::channel(0i64);
 
                 // Serve our changelog to pulling peers. `ReplServer` reads bodies
                 // from the same replicating store (as a `BodySource`).
@@ -151,7 +179,8 @@ impl B2buaCore {
                     self_ordinal.clone(),
                     setup.store.changelog().clone(),
                     setup.store.clone(),
-                );
+                )
+                .with_deactivate_watch(deactivate_rx);
                 let network = setup.network.clone();
                 let listen_addr = setup.listen_addr;
                 tasks.push(tokio::spawn(async move {
@@ -170,7 +199,33 @@ impl B2buaCore {
                     clock.clone(),
                     metrics.clone(),
                 );
+                // Pullers forward X11 fail-back commands to the router; wire the
+                // sink BEFORE `start` so the initial pullers carry it.
+                supervisor.set_repl_sink(repl_tx.clone());
                 supervisor.start(setup.membership.clone());
+
+                // Go-active task (ADR-0011 X11): once this node has re-hydrated its
+                // own partition (bootstrap-complete), (1) bulk-reclaim — re-serve
+                // every `pri:` call — and (2) tell our backups to hand back any
+                // takeover copies they hold for us, re-broadcasting for ~5 s to
+                // sweep flip-race stragglers. One-shot per boot; idempotent.
+                {
+                    let sup = supervisor.clone();
+                    let tx = repl_tx.clone();
+                    let clk = clock.clone();
+                    tasks.push(tokio::spawn(async move {
+                        while !sup.all_bootstrapped() {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        let _ = tx.send(router::ReplCommand::ReclaimAll);
+                        for _ in 0..6 {
+                            // Bump the broadcast watch with our current ownership
+                            // instant; serve_replog pushes it to each backup.
+                            let _ = deactivate_tx.send(clk.now_ms());
+                            tokio::time::sleep(Duration::from_millis(1000)).await;
+                        }
+                    }));
+                }
 
                 let readiness = Readiness::new(Arc::new(supervisor.clone()));
                 (readiness, Some(supervisor))
@@ -204,7 +259,13 @@ impl B2buaCore {
             reentry_tx,
         });
 
-        tasks.push(tokio::spawn(router::run(ctx.clone(), txn_rx, timer_rx, reentry_rx)));
+        tasks.push(tokio::spawn(router::run(
+            ctx.clone(),
+            txn_rx,
+            timer_rx,
+            reentry_rx,
+            repl_rx,
+        )));
 
         Self {
             ctx,
@@ -214,6 +275,7 @@ impl B2buaCore {
             supervisor,
             repl_store,
             tasks,
+            _repl_tx: repl_tx,
         }
     }
 
@@ -279,5 +341,21 @@ impl B2buaCore {
     /// Active call count (test/observability).
     pub fn active_calls(&self) -> usize {
         self.ctx.state.active_count()
+    }
+
+    /// Sample the store + replication map sizes into the memory-attribution
+    /// gauges (`b2bua_store_*`, `b2bua_repl_meta_*`, `b2bua_repl_changelog_*`).
+    /// Called on a slow cadence by the runner so a RSS climb can be pinned to a
+    /// specific map even when `active_calls` is flat — the lens that would have
+    /// named the leak directly instead of by inference. Cheap: a couple of brief
+    /// locks, off the hot path.
+    pub fn sample_gauges(&self) {
+        self.ctx.state.sample_store_gauges();
+        if let Some(repl) = &self.repl_store {
+            let (meta_total, meta_backup) = repl.meta_counts();
+            let (cl_entries, cl_peers) = repl.changelog().depth();
+            self.metrics
+                .set_repl_store_gauges(meta_total, meta_backup, cl_entries, cl_peers);
+        }
     }
 }

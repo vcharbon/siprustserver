@@ -86,6 +86,12 @@ up() {
   log "creating cluster '$CLUSTER' from shared topology"
   kind create cluster --name "$CLUSTER" --config cluster.yaml --wait 120s
 
+  # Cap each kind node's memory so the cluster can never starve the WSL2 host
+  # (an uncapped node + a parallel cargo build OOM'd the host once). Pod limits
+  # still apply inside; this is the node-container backstop.
+  log "capping kind node memory (host-starvation backstop)"
+  CLUSTER="$CLUSTER" "$REPO_ROOT/deploy/k8s/cap-kind-memory.sh" || true
+
   log "building SUT image $SUT_IMAGE"
   docker build -f "$REPO_ROOT/deploy/docker/Dockerfile" -t "$SUT_IMAGE" "$REPO_ROOT"
   log "building sipp:dev from vendored context ($SIPP_DIR)"

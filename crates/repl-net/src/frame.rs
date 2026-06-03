@@ -1,4 +1,4 @@
-//! The replication frame model — five positional-msgpack messages plus the
+//! The replication frame model — six positional-msgpack messages plus the
 //! small value enums and the [`Watermark`] ordering they ride on.
 //!
 //! Field ORDER on the wire is the contract (ADR-0008 positional-msgpack ethos):
@@ -235,6 +235,20 @@ pub enum Frame {
         /// Human-readable cause (for logs/recording).
         reason: String,
     },
+    /// `[5, as_of_ms]`
+    ///
+    /// Server → client (ADR-0011 X11): the sending primary has **reclaimed**
+    /// ownership of its partition as of wall-clock `as_of_ms`. The receiving
+    /// backup **deactivates** every **takeover copy** it holds for this peer that
+    /// it activated at/before `as_of_ms` — local-only (stop timers → cease
+    /// keepalive OPTIONS, drop the live copy, revert to a pure backup `Element`);
+    /// it propagates **no** delete. Sent once on the primary going-active and
+    /// re-sent for ~5 s to sweep flip-race stragglers; idempotent.
+    Deactivate {
+        /// Wall-clock (ms) the primary re-asserted ownership at. A takeover copy
+        /// activated at/before this instant predates the reclaim and is dropped.
+        as_of_ms: i64,
+    },
 }
 
 /// Integer tags, element 0 of each frame array. Kept in one place so the
@@ -245,4 +259,5 @@ pub(crate) mod tag {
     pub const DATA: u64 = 2;
     pub const NOOP: u64 = 3;
     pub const RESET_TO_BOOTSTRAP: u64 = 4;
+    pub const DEACTIVATE: u64 = 5;
 }

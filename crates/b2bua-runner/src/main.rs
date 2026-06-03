@@ -27,7 +27,8 @@
 //!   B2BUA_CDR_QUEUE buffered-CDR submit queue depth    (default 1024)
 //!   B2BUA_CONCURRENCY handler concurrency ceiling       (default 8192; safety, not a rate cap)
 //!   B2BUA_CALL_CAP  max concurrent calls before drop    (default 1_000_000)
-//!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min)
+//!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min, min 120)
+//!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 450; min 60 and >= keepalive)
 //!
 //! ## Call limiter
 //!   LIMITER_URL             shared limiter base URL; unset → NoopLimiter (fail-open)
@@ -319,6 +320,11 @@ async fn main() {
     // In-dialog OPTIONS keepalive interval (seconds). Production default 300 s
     // (5 min); a shorter poke breaks long-hold endurance traffic.
     let keepalive_sec: i64 = env_or("B2BUA_KEEPALIVE_SEC", "300").parse().expect("B2BUA_KEEPALIVE_SEC");
+    // Replicated-backup TTL ("reboot budget"): how long a backup Element survives
+    // without a refresh from its primary. Decoupled from the keepalive but must
+    // outlast it — enforced by `config.validate()` below.
+    let reboot_budget_sec: i64 =
+        env_or("B2BUA_REBOOT_BUDGET_SEC", "450").parse().expect("B2BUA_REBOOT_BUDGET_SEC");
 
     // Call limiter. Unset LIMITER_URL → NoopLimiter (today's non-limiting
     // behaviour). The refresh cadence MUST match the limiter's window seconds.
@@ -346,9 +352,16 @@ async fn main() {
         event_dispatch_concurrency: concurrency,
         per_call_queue_cap: call_cap,
         keepalive_interval_sec: keepalive_sec,
+        reboot_budget_sec,
         limiter_refresh_sec,
         ..Default::default()
     };
+    // Forbid booting with a config that would silently break HA: too-short a
+    // keepalive, or a reboot budget that cannot outlast a primary reboot / a
+    // keepalive refresh gap (which would self-evict healthy backups).
+    config
+        .validate()
+        .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
 
     // Build the limiter client now that config is settled. A LIMITER_URL whose
     // host cannot be resolved at boot falls back to NoopLimiter (the worker still
@@ -462,6 +475,23 @@ async fn main() {
         tokio::spawn(async move {
             if let Err(e) = serve_metrics(metrics_sa, metrics, ready).await {
                 eprintln!("b2bua-runner metrics server error: {e}");
+            }
+        });
+    }
+
+    // Memory-attribution sampler: push the store + replication map sizes into
+    // their gauges every 5 s so an RSS climb can be pinned to a specific map
+    // even when active_calls is flat (the lens the last leak hunt lacked — see
+    // b2bua_store_calls vs b2bua_active_calls, and b2bua_repl_meta_backup for
+    // un-reaped X11 ghost-backup copies). 5 s is well inside the scrape cadence;
+    // the sample is a couple of brief locks, off the call path.
+    {
+        let core = core.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tick.tick().await;
+                core.sample_gauges();
             }
         });
     }

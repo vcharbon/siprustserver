@@ -54,6 +54,11 @@ spec:
             # In-dialog OPTIONS keepalive interval (5 min). Must exceed short-call
             # hold so it never pokes a completing dialog; long-hold scenarios
             # (uac-long-options) answer it to stay up. Default in code is 300.
+            # LOAD-BEARING for ADR-0011 X11 fail-back: the backup-Element reaper
+            # evicts at 1.5x this interval and tolerates a reboot+rehydrate of only
+            # 0.5x (450s / 150s here). Do NOT lower it for endurance — a shorter
+            # interval shrinks the reboot budget below pod-restart time and
+            # manufactures fake replica-reap / failover-loss artifacts.
             - { name: B2BUA_KEEPALIVE_SEC, value: "300" }
             # Ordinal = pod name (stable per StatefulSet replica == membership ordinal).
             - { name: B2BUA_ORDINAL, value: "$(POD_NAME)" }

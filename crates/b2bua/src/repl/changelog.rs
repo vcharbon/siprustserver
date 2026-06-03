@@ -402,6 +402,18 @@ impl Changelog {
         self.inner.lock().unwrap().peers.remove(peer).is_some()
     }
 
+    /// `(entries, peers)` outbound-buffer depth for the memory-attribution
+    /// gauges: total compacted changelog entries summed across every peer log,
+    /// and the live peer-log count. Compaction keeps one entry per live callRef
+    /// per peer, so `entries` ≈ `peers × distinct-live-refs`; a peer whose
+    /// entries grow without draining (slow/dead subscriber) is an outbound leak
+    /// distinct from the call map. One brief lock; pure read.
+    pub fn depth(&self) -> (u64, u64) {
+        let inner = self.inner.lock().unwrap();
+        let entries: usize = inner.peers.values().map(|p| p.entries.len()).sum();
+        (entries as u64, inner.peers.len() as u64)
+    }
+
     /// Evict expired tombstones and idle peers. Call after advancing the clock
     /// (lazy TTL — deterministic, no background task, no `DelayQueue` aliasing).
     pub fn reap(&self, now_ms: i64) {

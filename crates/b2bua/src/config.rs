@@ -44,6 +44,20 @@ pub struct B2buaConfig {
     /// UAC is not expecting it. Overridable per worker via `B2BUA_KEEPALIVE_SEC`.
     /// The test harness lowers this to 30 s so paused-clock tests stay fast.
     pub keepalive_interval_sec: i64,
+    /// **Reboot budget**, seconds — the TTL stamped on every *replicated* backup
+    /// `Element` (ADR-0011 X11). It is how long a backup copy survives without a
+    /// refresh from its primary, i.e. how long a primary may be down/rebooting
+    /// before its backups give up and self-evict. Decoupled from the OPTIONS
+    /// keepalive (which is leg-liveness, a different concern); default **450 s**.
+    ///
+    /// Correctness coupling — the backup's TTL is *refreshed* only when the
+    /// primary flushes the call, and a quiescent established call is flushed only
+    /// by its keepalive OPTIONS. So this budget MUST outlast one keepalive gap
+    /// (`reboot_budget_sec >= keepalive_interval_sec`) or a healthy-but-idle
+    /// call's backup expires between pokes, silently dropping its failover
+    /// coverage. [`validate`](Self::validate) enforces both this and the absolute
+    /// floors. The non-replicating path ignores this (TTL stays `CALL_TTL_MS`).
+    pub reboot_budget_sec: i64,
     /// Limiter-refresh cadence, seconds — how often an admitted call migrates its
     /// holds to the current window so a long call never ages out of the summed
     /// lookback. Must match the limiter service's `LIMITER_WINDOW_SECONDS`. TS
@@ -67,7 +81,52 @@ impl Default for B2buaConfig {
             refer_reinvite_answer_sec: 32,
             refer_overall_safety_sec: 120,
             keepalive_interval_sec: 300,
+            reboot_budget_sec: 450,
             limiter_refresh_sec: 300,
         }
+    }
+}
+
+impl B2buaConfig {
+    /// Absolute minimum OPTIONS keepalive (s). Below 2 min a mid-dialog OPTIONS
+    /// poke breaks long-hold traffic (see [`keepalive_interval_sec`] doc). A
+    /// **production** floor only — the paused-clock test harness builds configs
+    /// directly and skips [`validate`](Self::validate) to use a faster cadence.
+    pub const MIN_KEEPALIVE_SEC: i64 = 120;
+    /// Absolute minimum reboot budget (s): a backup must survive a primary's
+    /// reboot. The effective floor is usually higher — see [`validate`].
+    pub const MIN_REBOOT_BUDGET_SEC: i64 = 60;
+
+    /// Validate operator-supplied tunables at **boot** (the runner calls this and
+    /// refuses to start on `Err`; unit/sim harnesses construct configs directly
+    /// and skip it). Returns the first violation as a human-readable message.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.keepalive_interval_sec < Self::MIN_KEEPALIVE_SEC {
+            return Err(format!(
+                "keepalive_interval_sec={} < min {} s (2 min): a shorter in-dialog \
+                 OPTIONS cadence breaks long-hold traffic",
+                self.keepalive_interval_sec, Self::MIN_KEEPALIVE_SEC
+            ));
+        }
+        if self.reboot_budget_sec < Self::MIN_REBOOT_BUDGET_SEC {
+            return Err(format!(
+                "reboot_budget_sec={} < min {} s (1 min): a replicated backup must \
+                 survive a primary reboot",
+                self.reboot_budget_sec, Self::MIN_REBOOT_BUDGET_SEC
+            ));
+        }
+        // The backup `Element` TTL is refreshed only on a primary flush, and a
+        // quiescent established call is flushed only by its keepalive OPTIONS. So
+        // the budget must outlast one keepalive gap or an idle call's backup
+        // self-evicts before its next refresh, silently losing failover coverage.
+        if self.reboot_budget_sec < self.keepalive_interval_sec {
+            return Err(format!(
+                "reboot_budget_sec={} < keepalive_interval_sec={}: the backup TTL is \
+                 refreshed each keepalive flush, so the budget must outlast one \
+                 keepalive gap (an idle call is flushed only by its keepalive)",
+                self.reboot_budget_sec, self.keepalive_interval_sec
+            ));
+        }
+        Ok(())
     }
 }

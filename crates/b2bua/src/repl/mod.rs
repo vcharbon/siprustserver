@@ -53,4 +53,7 @@ mod s8_tests;
 mod s10_tests;
 
 #[cfg(test)]
+mod s11_tests;
+
+#[cfg(test)]
 mod real_transport_tests;

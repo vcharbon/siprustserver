@@ -188,6 +188,16 @@ async fn driver(
     let mut by_call: HashMap<String, HashSet<String>> = HashMap::new();
     let mut next_epoch: u64 = 0;
 
+    // The gauges are written at the end of every loop iteration, but the driver
+    // only iterates on a command or an expiry — so under low load with long-lived
+    // timers a slowly-climbing tombstone backlog would be invisible to a scrape
+    // until the next unrelated event. This tick re-publishes them on a fixed
+    // cadence so `queue_len − live` stays a trustworthy regression alarm even at
+    // idle. `Skip` collapses a backlog of missed ticks (e.g. after a long
+    // paused-clock advance) into one, rather than firing a storm.
+    let mut gauge_tick = tokio::time::interval(Duration::from_secs(5));
+    gauge_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
             biased;
@@ -234,6 +244,12 @@ async fn driver(
                     }
                     if let Some(ids) = by_call.get_mut(&call_ref) {
                         ids.remove(&id);
+                        // Don't leave an empty set keyed by a now-timerless call:
+                        // only CancelAll reaps `by_call`, so a call that only ever
+                        // individual-Cancels would strand an empty entry forever.
+                        if ids.is_empty() {
+                            by_call.remove(&call_ref);
+                        }
                     }
                 }
                 Some(TimerCmd::CancelAll { call_ref }) => {
@@ -262,6 +278,9 @@ async fn driver(
                     active.remove(&akey);
                     if let Some(ids) = by_call.get_mut(&expired.call_ref) {
                         ids.remove(&expired.id);
+                        if ids.is_empty() {
+                            by_call.remove(&expired.call_ref);
+                        }
                     }
                     let event = CallEvent::Timer {
                         timer_type: expired.timer_type,
@@ -273,6 +292,9 @@ async fn driver(
                     let _ = fire_tx.send(event);
                 }
             }
+            // Idle heartbeat: wake periodically purely to re-publish the gauges
+            // below (no state change of its own).
+            _ = gauge_tick.tick() => {}
         }
         // Live timer-queue gauges. `queue.len()` is the physical entry count;
         // `active.len()` is the schedulable timer count. With physical

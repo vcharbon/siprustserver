@@ -43,10 +43,11 @@ use std::time::Duration;
 
 use repl_net::frame::{Frame, Op, PullMode, Watermark};
 use repl_net::transport::{ReplicationConnection, ReplicationNetwork};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use topology::Peer;
 
 use super::{AddrResolver, ReplicatingCallStore};
+use crate::router::ReplCommand;
 use crate::store::{partition_of, CallStore, PartitionRole, PutOpts};
 
 /// Default backoff floor / ceiling (ms). Exposed via [`PullerConfig`] for tests.
@@ -176,6 +177,12 @@ pub struct Puller {
     status_tx: watch::Sender<PullerStatus>,
     /// Replication observability (inbound apply counters + backup-held gauge).
     metrics: crate::metrics::B2buaMetrics,
+    /// Sink to the router for X11 fail-back commands: a **reactive reclaim** when
+    /// a backup reverse-flushes one of our calls (`partition=Pri` tail apply), and
+    /// a **handback** when this peer (our primary) pushes a `Deactivate`. `None`
+    /// outside a live `B2buaCore` (the sim/unit puller tests drive the store
+    /// directly), so the existing constructors stay source-compatible.
+    repl_tx: Option<mpsc::UnboundedSender<ReplCommand>>,
 }
 
 impl Puller {
@@ -214,9 +221,18 @@ impl Puller {
                 config,
                 status_tx,
                 metrics,
+                repl_tx: None,
             },
             status_rx,
         )
+    }
+
+    /// Attach the router command sink (ADR-0011 X11 fail-back). Builder so the
+    /// existing [`new`](Self::new)/[`new_at`](Self::new_at) callers (sim + unit
+    /// tests, which assert on the store directly) are unchanged.
+    pub fn with_repl_sink(mut self, tx: mpsc::UnboundedSender<ReplCommand>) -> Self {
+        self.repl_tx = Some(tx);
+        self
     }
 
     /// Convenience constructor for a puller that always connects to a **fixed**
@@ -533,6 +549,18 @@ impl Puller {
                     });
                     return RunOutcome::Disconnected;
                 }
+                Some(Frame::Deactivate { as_of_ms }) => {
+                    // X11 handback: our primary (this peer) reclaimed ownership as
+                    // of `as_of_ms`. Tell the router to deactivate every takeover
+                    // copy we hold for it activated at/before then — local-only,
+                    // no delete propagated (it keeps forward-refreshing our backup).
+                    if let Some(tx) = &self.repl_tx {
+                        let _ = tx.send(ReplCommand::Deactivate {
+                            primary: self.peer.ordinal.clone(),
+                            as_of_ms,
+                        });
+                    }
+                }
                 // PullRequest/Ack are client→server; never expected here. Ignore.
                 Some(_) => {}
                 None => return RunOutcome::Disconnected,
@@ -619,6 +647,18 @@ impl Puller {
             .await;
         // Advance W past the applied entry.
         self.status_tx.send_modify(|s| s.watermark = at);
+        // X11 reactive reclaim: a backup just reverse-flushed one of OUR calls
+        // (`partition=Pri`) — it took the call over while we were down/booting.
+        // Signal the router to re-materialise + re-serve it (the flip-race
+        // straggler the bulk reclaim sweep raced past). Deletes are not reclaimed
+        // (the call ended); the bulk sweep — not this tail path — covers bootstrap.
+        if matches!(partition, repl_net::frame::Partition::Pri)
+            && matches!(op, Op::Create | Op::Update)
+        {
+            if let Some(tx) = &self.repl_tx {
+                let _ = tx.send(ReplCommand::ReclaimCall(call_ref.to_string()));
+            }
+        }
     }
 
     /// Apply a `Data` frame's mutation to the local store under the LWW guard,

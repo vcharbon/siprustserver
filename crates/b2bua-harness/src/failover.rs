@@ -215,13 +215,29 @@ impl ReplicatedB2buaSut {
     /// This worker's metrics (e.g. `creations_total` proves it processed/created
     /// a call locally — the load-bearing "handled on B2" signal after failover).
     pub fn metrics(&self) -> &B2buaMetrics {
-        &self.metrics
+        // Delegate to the LIVE core's metrics. `B2buaCore::spawn` mints its own
+        // `B2buaMetrics` (deps carry none), so the SUT's own `self.metrics` field
+        // is never written by the core — reading it gave a permanent 0 for the
+        // X11 reclaim/handback counters under test. Fall back to the (empty) field
+        // only while crashed.
+        self.core
+            .as_ref()
+            .map(|c| c.metrics())
+            .unwrap_or(&self.metrics)
     }
 
     /// Readiness gate (every reachable peer bootstrapped AND current). Drives the
     /// proxy registry health deterministically (vs. the OPTIONS probe loop).
     pub fn is_ready(&self) -> bool {
         self.core.as_ref().map(|c| c.is_ready()).unwrap_or(false)
+    }
+
+    /// **Ground-truth** live in-memory call count (the actual `inner.calls` map
+    /// size), bypassing the `creations − removals` counters. The X11 reclaim/
+    /// handback accounting is exactly what's under test, so assertions key on this
+    /// rather than the metric. `0` while crashed.
+    pub fn active_calls(&self) -> usize {
+        self.core.as_ref().map(|c| c.active_calls()).unwrap_or(0)
     }
 
     /// Read a replicated body by `(role, primary, call_ref)` from this worker's

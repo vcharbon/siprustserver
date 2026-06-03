@@ -230,6 +230,7 @@ pub fn frame_summary(frame: &Frame) -> String {
         }
         Frame::Noop { at } => format!("Noop at=({},{})", at.gen, at.counter),
         Frame::ResetToBootstrap { reason } => format!("ResetToBootstrap reason={reason}"),
+        Frame::Deactivate { as_of_ms } => format!("Deactivate as_of={as_of_ms}"),
     }
 }
 

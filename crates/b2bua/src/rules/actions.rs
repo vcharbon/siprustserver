@@ -342,7 +342,11 @@ impl<'a> ActionExecutor<'a> {
             Some(i) => i,
             None => return,
         };
-        let dialog = match leg_at(call, idx).dialogs.first() {
+        let dialog = match leg_at(call, idx)
+            .dialogs
+            .iter()
+            .find(|d| !d.sip.remote_tag.is_empty())
+        {
             Some(d) => d.clone(),
             None => return,
         };
@@ -393,7 +397,11 @@ impl<'a> ActionExecutor<'a> {
             Some(i) => i,
             None => return,
         };
-        let dialog = match leg_at(call, idx).dialogs.first() {
+        let dialog = match leg_at(call, idx)
+            .dialogs
+            .iter()
+            .find(|d| !d.sip.remote_tag.is_empty())
+        {
             Some(d) => d.clone(),
             None => return,
         };
@@ -523,6 +531,13 @@ impl<'a> ActionExecutor<'a> {
                 None => return,
             }
         };
+        // A tag-less (mid-confirm / early) target dialog cannot produce a
+        // well-formed in-dialog request — skip rather than panic in `make_request`
+        // and leak the dialog. An X11 takeover/reclaim can surface a replica
+        // dialog captured before its confirming To-tag landed.
+        if target_dialog.sip.remote_tag.is_empty() {
+            return;
+        }
 
         // ── Per-dialog CSeq (§12.2.1.1): outbound = target.localCSeq + delta,
         //    delta = relayCSeqDelta(inbound, sourceDialog.remoteCSeq). ──
@@ -1049,7 +1064,17 @@ impl<'a> ActionExecutor<'a> {
             Some(i) => i,
             None => return,
         };
-        let dialog = match leg_at(call, idx).dialogs.first() {
+        // Probe the CONFIRMED dialog (non-empty remote tag). A leg can hold an
+        // early/forked dialog with no remote tag as its first entry, and a
+        // failover takeover/reclaim (ADR-0011 X11) can materialise a replica
+        // dialog captured mid-confirm; building an in-dialog `To` from an empty
+        // remote tag yields a tag-less header that panics in `make_request` and
+        // leaks the dialog. Skip when no dialog is confirmed (nothing to probe).
+        let dialog = match leg_at(call, idx)
+            .dialogs
+            .iter()
+            .find(|d| !d.sip.remote_tag.is_empty())
+        {
             Some(d) => relay::to_gen_dialog(&d.sip),
             None => return,
         };
@@ -1104,6 +1129,12 @@ impl<'a> ActionExecutor<'a> {
                 None => return,
             }
         };
+        // No confirmed remote tag (an early/mid-confirm dialog, e.g. a takeover
+        // replica captured before its provisional To-tag landed) → skip rather
+        // than build a tag-less in-dialog PRACK and panic in `make_request`.
+        if dialog.sip.remote_tag.is_empty() {
+            return;
+        }
         let t_id = dialog_identity_tag(leg_id, &dialog);
         let outbound_cseq = dialog.sip.local_cseq + 1;
         *call = bump_local_cseq(call.clone(), leg_id, &t_id, 1);

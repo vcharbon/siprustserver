@@ -18,7 +18,7 @@ pub use terminate_writer::BufferedTerminateWriter;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use call::{call_index_keys, Call, CallBodyCodec, MsgpackCodec};
+use call::{call_index_keys, parse_call_ref, Call, CallBodyCodec, MsgpackCodec};
 
 use crate::metrics::B2buaMetrics;
 use crate::repl::{ReplicatingCallStore, ReplicationPlan};
@@ -35,6 +35,12 @@ struct Inner {
     indexed: HashMap<String, Vec<String>>,
     /// Per-callRef serialization lock (the second FIFO layer over the dispatcher).
     locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    /// **Takeover activation wall-clock** (ms) per acting-backup live copy
+    /// (ADR-0011 X11). Stamped on a fresh failover hydrate; read by the
+    /// `Deactivate{as_of}` handback to decide which copies predate the primary's
+    /// reclaim. Local-only metadata — never serialized/replicated (it is *this*
+    /// node's takeover instant, not call state). Cleared on drop/remove.
+    takeover_at: HashMap<String, i64>,
 }
 
 /// The call store. Clone-cheap (one `Arc`); share across the stack.
@@ -52,6 +58,13 @@ pub struct CallState {
     codec: MsgpackCodec,
     self_ordinal: String,
     metrics: B2buaMetrics,
+    /// Body TTL (ms) stamped on every replicated flush (ADR-0011 X11). Default
+    /// [`CALL_TTL_MS`] (1 h); the replicating runner retunes it to **1.5× the
+    /// keepalive interval** so a backup `Element` no longer forward-refreshed by
+    /// its primary self-evicts within minutes (the keepalive cadence is the memory
+    /// bound, not `max_duration`). A healthy call is re-flushed every keepalive,
+    /// well inside the window.
+    replicated_ttl_ms: i64,
 }
 
 impl CallState {
@@ -83,7 +96,19 @@ impl CallState {
             codec: MsgpackCodec::new(),
             self_ordinal: self_ordinal.into(),
             metrics,
+            replicated_ttl_ms: CALL_TTL_MS,
         }
+    }
+
+    /// Retune the replicated-body TTL (ADR-0011 X11). The replicating runner sets
+    /// this to **1.5× the keepalive interval** so an orphaned backup `Element`
+    /// (missed tombstone / primary gone) self-evicts within minutes rather than
+    /// the 1 h backstop. Builder-style; the non-replicating path keeps `CALL_TTL_MS`.
+    pub fn with_replicated_ttl_ms(mut self, ttl_ms: i64) -> Self {
+        if ttl_ms > 0 {
+            self.replicated_ttl_ms = ttl_ms;
+        }
+        self
     }
 
     /// Opt into replication: route the flush/remove of any call that carries a
@@ -230,6 +255,7 @@ impl CallState {
         }
         inner.calls.remove(call_ref);
         inner.locks.remove(call_ref);
+        inner.takeover_at.remove(call_ref);
         drop(inner);
 
         self.terminate_writer.submit_delete(
@@ -239,6 +265,105 @@ impl CallState {
             keys,
             opts,
         );
+    }
+
+    /// **Local-only handback teardown** (ADR-0011 X11): drop a live acting-backup
+    /// **takeover copy** from the in-memory map + routing index + takeover set,
+    /// with **no** store mutation and **no** replication propagation — unlike
+    /// [`remove`](Self::remove), which propagates a delete. The call lives on at
+    /// its reclaiming primary (which is the node now forward-refreshing this
+    /// node's backup `Element`); this node merely sheds the active role. The
+    /// router pairs this with timer / txn / dispatch teardown (it owns those).
+    /// Returns `true` if a live copy was actually dropped (so the caller meters /
+    /// CDRs the handback exactly once).
+    pub fn drop_local(&self, call_ref: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let present = inner.calls.remove(call_ref).is_some();
+        if let Some(keys) = inner.indexed.remove(call_ref) {
+            for k in &keys {
+                inner.sip_index.remove(k);
+            }
+        }
+        inner.locks.remove(call_ref);
+        inner.takeover_at.remove(call_ref);
+        present
+    }
+
+    /// Stamp `call_ref` as an acting-backup **takeover copy** activated at
+    /// `now_ms` (ADR-0011 X11). The `Deactivate{as_of}` handback compares this
+    /// against the reclaiming primary's ownership instant. Called by the router
+    /// on a fresh failover hydrate. Idempotent per call_ref (re-stamping a copy
+    /// re-armed by a later hydrate keeps the latest activation).
+    pub fn mark_takeover(&self, call_ref: &str, now_ms: i64) {
+        self.inner
+            .lock()
+            .unwrap()
+            .takeover_at
+            .insert(call_ref.to_string(), now_ms);
+    }
+
+    /// The live takeover copies for `primary` to **deactivate** on a
+    /// `Deactivate{as_of}` (ADR-0011 X11): every still-resident copy this node
+    /// activated at/before `as_of_ms` whose ref names `primary`. A copy activated
+    /// *after* `as_of_ms` belongs to a later failover episode and is left
+    /// serving. The router tears each down via [`drop_local`](Self::drop_local).
+    pub fn deactivate_targets(&self, primary: &str, as_of_ms: i64) -> Vec<String> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .takeover_at
+            .iter()
+            .filter(|(_, &at)| at <= as_of_ms)
+            .filter(|(cr, _)| inner.calls.contains_key(*cr))
+            .filter(|(cr, _)| {
+                parse_call_ref(cr).map(|p| p.primary == primary).unwrap_or(false)
+            })
+            .map(|(cr, _)| cr.clone())
+            .collect()
+    }
+
+    /// **Active-reclaim bulk read-path** (ADR-0011 X11): scan this node's own
+    /// `pri:{self}` partition from the replicating store and decode every
+    /// reclaimable call. The router materialises each into the live map +
+    /// re-arms its timers when it goes Ready (the bulk reclaim sweep that makes a
+    /// rebooted primary actually re-*serve*, not just re-*store*). Empty when no
+    /// replicating store is wired.
+    pub async fn reclaim_scan(&self) -> Vec<Call> {
+        let Some(repl) = self.repl_store.as_ref() else {
+            return Vec::new();
+        };
+        let bodies = repl
+            .scan_calls(PartitionRole::Primary, &self.self_ordinal)
+            .await
+            .unwrap_or_default();
+        bodies.iter().filter_map(|b| self.codec.decode(b).ok()).collect()
+    }
+
+    /// **Active-reclaim reactive read-path** (ADR-0011 X11): decode a single
+    /// reclaimable call from this node's `pri:{self}` partition — the flip-race
+    /// straggler an acting-backup reverse-flushed *after* the bulk sweep. `None`
+    /// if absent, not primary-role for `self`, or no replicating store.
+    pub async fn peek_reclaimable(&self, call_ref: &str) -> Option<Call> {
+        let repl = self.repl_store.as_ref()?;
+        let (role, primary) = partition_of(&self.self_ordinal, call_ref);
+        if role != PartitionRole::Primary {
+            return None;
+        }
+        let body = repl.get_call(role, &primary, call_ref).await.ok().flatten()?;
+        self.codec.decode(&body).ok()
+    }
+
+    /// Materialise a reclaimed call into the live map + routing index iff it is
+    /// not already resident (ADR-0011 X11). Returns `true` when just inserted —
+    /// the router then re-arms its timers exactly once. Idempotent: a call
+    /// already live (re-served, or never lost) is left untouched.
+    pub fn materialize_if_absent(&self, call: Call) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.calls.contains_key(&call.call_ref) {
+            return false;
+        }
+        Self::reindex(&mut inner, &call);
+        inner.calls.insert(call.call_ref.clone(), call);
+        true
     }
 
     /// Encode + submit the call to the store (replication path; non-blocking).
@@ -278,7 +403,7 @@ impl CallState {
             call.call_ref.clone(),
             body,
             indexes,
-            CALL_TTL_MS,
+            self.replicated_ttl_ms,
             call_gen,
             opts,
         );
@@ -342,6 +467,24 @@ impl CallState {
 
     pub fn active_count(&self) -> usize {
         self.inner.lock().unwrap().calls.len()
+    }
+
+    /// Push the store's map lengths into the memory-attribution gauges (one
+    /// brief lock). `calls.len()` is the TRUE live call-map size — compare to
+    /// `b2bua_active_calls` (creations - removals): a divergence is a store-side
+    /// leak the counter pair can't see. The sibling maps (`sip_index`,
+    /// `indexed`, `locks`, `takeover_at`) should track `calls`; one that grows
+    /// while it stays flat names the leaking map. Sampled periodically by the
+    /// runner — not on the hot path.
+    pub fn sample_store_gauges(&self) {
+        let inner = self.inner.lock().unwrap();
+        self.metrics.set_store_gauges(
+            inner.calls.len() as u64,
+            inner.sip_index.len() as u64,
+            inner.indexed.len() as u64,
+            inner.locks.len() as u64,
+            inner.takeover_at.len() as u64,
+        );
     }
 
     /// Recompute and apply a call's routing index, dropping any stale keys.

@@ -69,7 +69,9 @@ fn frame_strat() -> impl Strategy<Value = Frame> {
 
     let reset = ".*".prop_map(|reason| Frame::ResetToBootstrap { reason });
 
-    prop_oneof![pull, ack, data, noop, reset]
+    let deactivate = any::<i64>().prop_map(|as_of_ms| Frame::Deactivate { as_of_ms });
+
+    prop_oneof![pull, ack, data, noop, reset, deactivate]
 }
 
 proptest! {

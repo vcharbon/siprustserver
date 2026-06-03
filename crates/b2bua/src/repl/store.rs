@@ -142,6 +142,21 @@ impl ReplicatingCallStore {
             .collect()
     }
 
+    /// `(total, backup)` replica-metadata entry counts for the
+    /// memory-attribution gauges: every callRef this node holds a replica body
+    /// for, and the subset living in a **backup** partition (the ghost-backup
+    /// takeover copies the X11 `Deactivate` handback must release). A
+    /// `backup` count that climbs unbounded across failovers means handback
+    /// isn't reaping. One brief lock; no body touched. Includes
+    /// expired-but-not-yet-reaped entries — the reaper, not the gauge, prunes.
+    pub fn meta_counts(&self) -> (u64, u64) {
+        let meta = self.meta.lock().unwrap();
+        let total = meta.len() as u64;
+        let backup =
+            meta.values().filter(|m| m.role == PartitionRole::Backup).count() as u64;
+        (total, backup)
+    }
+
     /// Map propagate direction → the partition tag the frame carries.
     fn partition_for(direction: Option<PropagateDirection>) -> Partition {
         match direction {

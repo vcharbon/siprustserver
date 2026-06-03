@@ -135,6 +135,16 @@ fn roundtrip_reset_to_bootstrap() {
     });
 }
 
+#[test]
+fn roundtrip_deactivate() {
+    // Typical wall-clock ms, plus the i64 extremes the codec must round-trip.
+    assert_roundtrip(&Frame::Deactivate { as_of_ms: 1_717_000_000_000 });
+    assert_roundtrip(&Frame::Deactivate { as_of_ms: 0 });
+    assert_roundtrip(&Frame::Deactivate { as_of_ms: -1 });
+    assert_roundtrip(&Frame::Deactivate { as_of_ms: i64::MAX });
+    assert_roundtrip(&Frame::Deactivate { as_of_ms: i64::MIN });
+}
+
 // --- error paths: no panic, typed error ------------------------------------
 
 #[test]

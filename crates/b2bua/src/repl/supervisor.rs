@@ -31,7 +31,7 @@ use async_trait::async_trait;
 use repl_net::frame::Watermark;
 use repl_net::transport::ReplicationNetwork;
 use sip_clock::Clock;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use topology::{Membership, Peer};
 
 use super::puller::{Puller, PullerConfig, PullerStatus};
@@ -164,6 +164,11 @@ struct SupervisorInner {
     clock: Clock,
     /// Cadence of the periodic snapshot reconcile (ADR-0012 D2).
     reconcile_period: Duration,
+    /// Router command sink handed to every spawned puller (ADR-0011 X11 fail-back).
+    /// `None` until [`set_repl_sink`](ReplicationSupervisor::set_repl_sink) wires it
+    /// (the live `B2buaCore` does, before `start`); the sim/test supervisors leave
+    /// it unset so pullers drive the store only.
+    repl_tx: Mutex<Option<mpsc::UnboundedSender<crate::router::ReplCommand>>>,
     /// `ordinal → PeerEntry`.
     peers: Mutex<HashMap<String, PeerEntry>>,
     /// The topology-reconcile loop's handle, retained so [`shutdown`] can abort
@@ -223,10 +228,18 @@ impl ReplicationSupervisor {
                 metrics,
                 clock,
                 reconcile_period: DEFAULT_RECONCILE_PERIOD,
+                repl_tx: Mutex::new(None),
                 peers: Mutex::new(HashMap::new()),
                 reconcile: Mutex::new(None),
             }),
         }
+    }
+
+    /// Wire the router command sink every puller forwards X11 fail-back commands
+    /// to (reactive reclaim / handback). Call **before** [`start`](Self::start) so
+    /// the initial pullers pick it up; a re-spawned puller reads it too.
+    pub fn set_repl_sink(&self, tx: mpsc::UnboundedSender<crate::router::ReplCommand>) {
+        *self.inner.repl_tx.lock().unwrap() = Some(tx);
     }
 
     /// Spawn a puller per current peer (excluding self), then keep them in step
@@ -322,6 +335,11 @@ impl ReplicationSupervisor {
             start_w,
             self.inner.metrics.clone(),
         );
+        // Forward X11 fail-back commands to the router when a live core wired a sink.
+        let puller = match self.inner.repl_tx.lock().unwrap().clone() {
+            Some(tx) => puller.with_repl_sink(tx),
+            None => puller,
+        };
         let (cancel_tx, cancel_rx) = watch::channel(false);
 
         {

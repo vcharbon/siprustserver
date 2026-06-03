@@ -44,6 +44,34 @@ struct Inner {
     repl_backup_held: AtomicU64, // gauge: replicas currently held as backup
     repl_takeover_resolved: AtomicU64,
     repl_takeover_hydrated: AtomicU64,
+    // X11 fail-back: `reclaimed` = calls a rebooted primary re-materialised into
+    // its live map (active reclaim); `handback` = ghost-backup takeover copies a
+    // backup deactivated on a primary's `Deactivate`. After a kill_worker+reclaim,
+    // `handback` ≈ duplicates released and the active/sipp gap reaps to ~0.
+    repl_reclaimed: AtomicU64,
+    repl_handback: AtomicU64,
+    // Memory-attribution gauges (sampled, not counter-derived). `store_calls` is
+    // the TRUE live call-map length — compare to `active_calls`
+    // (creations-removals); a divergence localises a store-side leak the counter
+    // pair can't see. The sibling maps should track `store_calls`; one that grows
+    // while it stays flat names the leaking map (`locks` + `takeover_at` are the
+    // X11 fail-back suspects: a per-call lock or takeover-instant never released).
+    store_calls: AtomicU64,
+    store_sip_index: AtomicU64,
+    store_indexed: AtomicU64,
+    store_locks: AtomicU64,
+    store_takeover_at: AtomicU64,
+    // Replicating-store sizes: `repl_meta_total` = all replica metadata entries
+    // this node holds; `repl_meta_backup` = the BACKUP-partition subset (the
+    // ghost-backup takeover copies the X11 Deactivate handback must release — if
+    // this climbs unbounded after failovers, handback isn't reaping). The
+    // changelog gauges are the outbound replication buffer depth (entries across
+    // peers + live peer count); a peer whose entries grow without draining
+    // (slow/dead subscriber) is an outbound-side leak distinct from the call map.
+    repl_meta_total: AtomicU64,
+    repl_meta_backup: AtomicU64,
+    repl_changelog_entries: AtomicU64,
+    repl_changelog_peers: AtomicU64,
 }
 
 /// Clone-cheap handle to the B2BUA counter set.
@@ -101,6 +129,8 @@ impl B2buaMetrics {
     counter!(bump_repl_pull_applied, repl_pull_applied_total, repl_pull_applied);
     counter!(bump_repl_takeover_resolved, repl_takeover_resolved_total, repl_takeover_resolved);
     counter!(bump_repl_takeover_hydrated, repl_takeover_hydrated_total, repl_takeover_hydrated);
+    counter!(bump_repl_reclaimed, repl_reclaimed_total, repl_reclaimed);
+    counter!(bump_repl_handback, repl_handback_total, repl_handback);
 
     /// A backup replica was admitted to a backup partition (puller applied a
     /// `Create`). Pairs with [`dec_repl_backup_held`](Self::dec_repl_backup_held)
@@ -135,6 +165,41 @@ impl B2buaMetrics {
         self.inner.timer_live.load(Ordering::Relaxed)
     }
 
+    /// Push the call-store map lengths (memory-attribution gauges). Sampled
+    /// periodically by the runner under the store's own lock. `calls` is the
+    /// true live call-map size; the rest are its sibling indexes + per-call
+    /// state. See the field docs for what a divergence localises.
+    pub fn set_store_gauges(
+        &self,
+        calls: u64,
+        sip_index: u64,
+        indexed: u64,
+        locks: u64,
+        takeover_at: u64,
+    ) {
+        self.inner.store_calls.store(calls, Ordering::Relaxed);
+        self.inner.store_sip_index.store(sip_index, Ordering::Relaxed);
+        self.inner.store_indexed.store(indexed, Ordering::Relaxed);
+        self.inner.store_locks.store(locks, Ordering::Relaxed);
+        self.inner.store_takeover_at.store(takeover_at, Ordering::Relaxed);
+    }
+
+    /// Push the replicating-store sizes (memory-attribution gauges): total +
+    /// backup-partition replica metadata entries, and the outbound changelog
+    /// depth (entries across peers + peer count). See the field docs.
+    pub fn set_repl_store_gauges(
+        &self,
+        meta_total: u64,
+        meta_backup: u64,
+        changelog_entries: u64,
+        changelog_peers: u64,
+    ) {
+        self.inner.repl_meta_total.store(meta_total, Ordering::Relaxed);
+        self.inner.repl_meta_backup.store(meta_backup, Ordering::Relaxed);
+        self.inner.repl_changelog_entries.store(changelog_entries, Ordering::Relaxed);
+        self.inner.repl_changelog_peers.store(changelog_peers, Ordering::Relaxed);
+    }
+
     /// Render the counter set as Prometheus text-exposition format. Used by the
     /// runner's `/metrics` endpoint so an endurance recorder can scrape worker
     /// application metrics alongside container CPU/memory. The
@@ -164,6 +229,8 @@ impl B2buaMetrics {
         counter("b2bua_repl_pull_applied_total", "inbound replica entries applied from a peer's changelog", self.repl_pull_applied_total());
         counter("b2bua_repl_takeover_resolved_total", "in-dialog requests whose callRef was recovered from the replica index (acting-backup)", self.repl_takeover_resolved_total());
         counter("b2bua_repl_takeover_hydrated_total", "calls hydrated from a backup replica to serve a failed-over request", self.repl_takeover_hydrated_total());
+        counter("b2bua_repl_reclaimed_total", "calls a rebooted primary re-materialised into its live map + re-armed (active reclaim, ADR-0011 X11)", self.repl_reclaimed_total());
+        counter("b2bua_repl_handback_total", "ghost-backup takeover copies deactivated on a primary's Deactivate handback (ADR-0011 X11)", self.repl_handback_total());
 
         // Per-method request + per-(method,code) response counters. Drop the
         // `counter` closure's borrow first by ending the block above.
@@ -190,6 +257,23 @@ impl B2buaMetrics {
         s.push_str(&format!("b2bua_timer_queue_len {}\n", self.timer_queue_len()));
         s.push_str("# HELP b2bua_timer_live live (schedulable) timers; b2bua_timer_queue_len minus this is the lingering-tombstone backlog\n# TYPE b2bua_timer_live gauge\n");
         s.push_str(&format!("b2bua_timer_live {}\n", self.timer_live()));
+        // Memory-attribution gauges: per-map sizes so a RSS climb can be pinned
+        // to a specific map even when active_calls is flat. b2bua_store_calls is
+        // the TRUE live call-map length — a gap vs b2bua_active_calls localises a
+        // store-side leak; a sibling map (sip_index/indexed/locks/takeover_at)
+        // outgrowing it names which one.
+        let g = |s: &mut String, name: &str, help: &str, v: u64| {
+            s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n{name} {v}\n"));
+        };
+        g(&mut s, "b2bua_store_calls", "live entries in the call map (true gauge; compare to b2bua_active_calls)", self.inner.store_calls.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_store_sip_index", "SIP routing index keys (callId/tag -> callRef)", self.inner.store_sip_index.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_store_indexed", "per-call owned-index-key sets", self.inner.store_indexed.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_store_locks", "per-callRef serialization locks held (should track store_calls; a gap is a lock leak)", self.inner.store_locks.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_store_takeover_at", "per-call takeover activation instants (X11; should track backup copies, reaped on handback)", self.inner.store_takeover_at.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_repl_meta_total", "replica metadata entries held (all partitions)", self.inner.repl_meta_total.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_repl_meta_backup", "replica metadata entries in BACKUP partitions (ghost-backup copies the X11 handback must release)", self.inner.repl_meta_backup.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_repl_changelog_entries", "outbound changelog entries across all peer logs (replication buffer depth)", self.inner.repl_changelog_entries.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_repl_changelog_peers", "peer logs currently held in the changelog", self.inner.repl_changelog_peers.load(Ordering::Relaxed));
         s
     }
 }
@@ -210,5 +294,31 @@ mod tests {
         assert!(txt.contains("b2bua_requests_total{method=\"BYE\"} 1"));
         assert!(txt.contains("b2bua_responses_total{method=\"INVITE\",code=\"200\"} 1"));
         assert!(txt.contains("b2bua_responses_total{method=\"BYE\",code=\"200\"} 1"));
+    }
+
+    #[test]
+    fn memory_attribution_gauges_render() {
+        let m = B2buaMetrics::new();
+        // Unset → render at 0 (a flat gauge, not a missing series).
+        let zero = m.prometheus_text();
+        assert!(zero.contains("b2bua_store_calls 0"));
+        assert!(zero.contains("b2bua_repl_meta_backup 0"));
+
+        m.set_store_gauges(7, 11, 7, 9, 3);
+        m.set_repl_store_gauges(40, 22, 64, 4);
+        let txt = m.prometheus_text();
+        // A store_locks (9) > store_calls (7) gap is exactly the lock-leak signal.
+        assert!(txt.contains("b2bua_store_calls 7"));
+        assert!(txt.contains("b2bua_store_sip_index 11"));
+        assert!(txt.contains("b2bua_store_indexed 7"));
+        assert!(txt.contains("b2bua_store_locks 9"));
+        assert!(txt.contains("b2bua_store_takeover_at 3"));
+        assert!(txt.contains("b2bua_repl_meta_total 40"));
+        assert!(txt.contains("b2bua_repl_meta_backup 22"));
+        assert!(txt.contains("b2bua_repl_changelog_entries 64"));
+        assert!(txt.contains("b2bua_repl_changelog_peers 4"));
+        // Each gauge series must carry its TYPE line (Prometheus exposition).
+        assert!(txt.contains("# TYPE b2bua_store_calls gauge"));
+        assert!(txt.contains("# TYPE b2bua_repl_meta_backup gauge"));
     }
 }
