@@ -226,10 +226,34 @@ impl B2buaCore {
                     let sup = supervisor.clone();
                     let tx = repl_tx.clone();
                     tasks.push(tokio::spawn(async move {
+                        // First sweep on bootstrap-complete. This is the LIVENESS
+                        // gate: it fires even when a peer only went complete
+                        // best-effort (idle-stall / unreachable), so the node always
+                        // reclaims what it has rather than blocking on a peer that
+                        // may never finish.
                         while !sup.all_bootstrapped() {
                             tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                         let _ = tx.send(router::ReplCommand::ReclaimAll);
+
+                        // COMPLETENESS backstop (X4). `bootstrap_complete` can be
+                        // set best-effort BEFORE a peer's full `bak:{me}` keyset has
+                        // landed (a stalled-then-recovered bootstrap re-streams the
+                        // remainder on a later reconnect). Those late imports land in
+                        // `pri:{self}` AFTER the first sweep, and — because the bulk
+                        // is delivered only by bootstrap, never the changelog — no
+                        // tail apply re-materialises them. So once the puller is
+                        // truly current (caught up past any re-bootstrap), re-run the
+                        // bulk reclaim; `materialize_if_absent` makes it idempotent,
+                        // so a node that was already complete just re-scans once.
+                        // Bounded so a never-current peer cannot pin this task.
+                        let mut waited = 0u32;
+                        while !sup.all_current() && waited < 100 {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            waited += 1;
+                        }
+                        let _ = tx.send(router::ReplCommand::ReclaimAll);
+
                         for tick in 1..=6u64 {
                             let _ = handback_tx.send(tick);
                             tokio::time::sleep(Duration::from_millis(1000)).await;

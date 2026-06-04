@@ -283,11 +283,13 @@ impl Puller {
     /// ## Bootstrap hard timer (X5 / Decision 4)
     /// If the puller starts cold (`bootstrap_complete == false`) it arms a single
     /// absolute deadline `now + bootstrap_hard_timeout_ms`. While bootstrap is
-    /// outstanding, *every* blocking wait — connect, the bootstrap recv loop, and
-    /// the backoff between failed connects — races this deadline. When it fires
-    /// the puller marks **bootstrap-complete (best-effort)** and proceeds to
-    /// `Tailing`/`Backoff` without ever blocking startup. A node whose peers are
-    /// all unreachable still becomes complete once the deadline trips.
+    /// outstanding the **connect** and **backoff** waits race this absolute
+    /// deadline so a node whose peers are all unreachable still goes
+    /// **bootstrap-complete (best-effort)** and serves. The **bootstrap recv loop**
+    /// ([`run_bootstrap`](Self::run_bootstrap)) instead uses a per-frame *idle*
+    /// timer of the same width: a progressing stream — however large — re-arms it
+    /// each frame and re-hydrates the full keyset, and only a real stall (silence
+    /// for the whole window) trips it.
     pub async fn run(self, mut cancel: watch::Receiver<bool>) {
         let mut attempt: u32 = 0;
         // Arm the bootstrap hard deadline iff we start cold. A warm resume is
@@ -465,7 +467,7 @@ impl Puller {
             if conn.send(req).await.is_err() {
                 return RunOutcome::Disconnected;
             }
-            match self.run_bootstrap(conn.as_ref(), cancel, deadline).await {
+            match self.run_bootstrap(conn.as_ref(), cancel).await {
                 BootstrapOutcome::Seeded(_w) => {
                     // Terminal Noop arrived (carrying the scan-start head `_w`) →
                     // bootstrap-complete. We deliberately leave W at (0,0) rather
@@ -477,8 +479,22 @@ impl Puller {
                     self.mark_bootstrap_complete();
                 }
                 BootstrapOutcome::HardTimeout => {
-                    // Best-effort complete; still cold-pull what we can.
+                    // Bootstrap STALLED — the peer went silent for the whole idle
+                    // window (a real fault, NOT merely a big/slow keyset: a
+                    // progressing stream re-arms the idle timer every frame and
+                    // runs to its terminal Noop). Mark complete best-effort for
+                    // READINESS (liveness over completeness, X5) — but do NOT fall
+                    // through to the Replog re-pull on THIS connection. The server
+                    // may still be mid-bootstrap, streaming `Data` frames all
+                    // stamped with the same scan-start head; once they land in the
+                    // steady-state tail the apply-gate (`at <= W`) admits only the
+                    // first and silently drops the rest — the watermark collision
+                    // that capped re-hydration at ~203/3000. Drop the connection
+                    // instead: W is still (0,0), so the reconnect re-bootstraps
+                    // from scratch (idempotent by call_gen) and a recovered peer
+                    // re-hydrates in full.
                     self.mark_bootstrap_complete();
+                    return RunOutcome::Disconnected;
                 }
                 BootstrapOutcome::Cancelled => return RunOutcome::Cancelled,
                 BootstrapOutcome::Disconnected => return RunOutcome::Disconnected,
@@ -572,32 +588,30 @@ impl Puller {
     /// The **Bootstrapping** recv loop. Applies each pre-seed `Data` (partition
     /// `Pri` → import as `pri:{primary}`, LWW-guarded by `call_gen`, NOT
     /// watermark-gated since it is a bulk pre-seed) and returns on the TERMINAL
-    /// `Noop{at}` ([`BootstrapOutcome::Seeded`]). Races the cancel signal and the
-    /// bootstrap hard `deadline` — the latter yields
-    /// [`BootstrapOutcome::HardTimeout`] (best-effort completion).
+    /// `Noop{at}` ([`BootstrapOutcome::Seeded`]). Races the cancel signal and a
+    /// per-frame **idle** timer ([`idle_timer`]) — silence for the whole window
+    /// yields [`BootstrapOutcome::HardTimeout`] (best-effort completion); any
+    /// frame re-arms it, so a large-but-progressing stream never trips it.
     async fn run_bootstrap(
         &self,
         conn: &dyn repl_net::transport::ReplicationConnection,
         cancel: &mut watch::Receiver<bool>,
-        deadline: Option<tokio::time::Instant>,
     ) -> BootstrapOutcome {
+        let idle_ms = self.config.bootstrap_hard_timeout_ms;
         loop {
-            let frame = match deadline {
-                Some(at) => tokio::select! {
-                    f = conn.recv() => f,
-                    _ = tokio::time::sleep_until(at) => return BootstrapOutcome::HardTimeout,
-                    _ = cancel.changed() => {
-                        if *cancel.borrow() { return BootstrapOutcome::Cancelled; }
-                        continue;
-                    }
-                },
-                None => tokio::select! {
-                    f = conn.recv() => f,
-                    _ = cancel.changed() => {
-                        if *cancel.borrow() { return BootstrapOutcome::Cancelled; }
-                        continue;
-                    }
-                },
+            // IDLE deadline, re-armed every iteration — NOT a total-budget timer.
+            // A bootstrap that keeps delivering frames, however large its keyset,
+            // resets this each frame and runs to its terminal Noop, so the whole
+            // partition re-hydrates. It trips only when the peer goes silent for
+            // the entire window (a genuine stall), where best-effort completion
+            // (X5) is the documented contract.
+            let frame = tokio::select! {
+                f = conn.recv() => f,
+                _ = idle_timer(idle_ms) => return BootstrapOutcome::HardTimeout,
+                _ = cancel.changed() => {
+                    if *cancel.borrow() { return BootstrapOutcome::Cancelled; }
+                    continue;
+                }
             };
             match frame {
                 Some(Frame::Data {
@@ -739,15 +753,188 @@ impl Puller {
     }
 }
 
+/// The bootstrap **idle** timer: fires `ms` after it is awaited with no reset.
+/// `ms == 0` disables it (parks forever) so a test/config can opt out of the
+/// stall backstop. Re-created (and thus re-armed) on every `run_bootstrap` loop
+/// iteration, so each received frame resets the idle window.
+async fn idle_timer(ms: u64) {
+    if ms == 0 {
+        std::future::pending::<()>().await
+    } else {
+        tokio::time::sleep(Duration::from_millis(ms)).await
+    }
+}
+
 /// How the [`Bootstrapping`](PullerState::Bootstrapping) phase ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BootstrapOutcome {
     /// Terminal `Noop` arrived; seed W to this watermark and tail.
     Seeded(Watermark),
-    /// The bootstrap hard timer fired — best-effort complete, tail from W.
+    /// The bootstrap idle timer fired (peer silent for the whole window) —
+    /// best-effort complete for readiness, then disconnect + re-bootstrap (the
+    /// connection is abandoned, never tailed, to avoid the watermark collision).
     HardTimeout,
     /// Cancel signal fired (Park / shutdown).
     Cancelled,
     /// Connection cut / reset mid-bootstrap → reconnect (re-bootstrap).
     Disconnected,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::B2buaMetrics;
+    use crate::repl::ReplicatingCallStore;
+    use crate::store::{CallStore, PartitionRole};
+    use async_trait::async_trait;
+    use repl_net::frame::{Frame, Op, Partition, Watermark};
+    use repl_net::transport::{
+        ConnectError, ListenError, ReplicationConnection, ReplicationListener, ReplicationNetwork,
+        SendError,
+    };
+    use sip_clock::Clock;
+    use std::collections::VecDeque;
+    use std::net::SocketAddr;
+    use std::sync::Mutex;
+    use tokio::sync::watch;
+
+    /// A scripted client connection that delivers each pre-arranged bootstrap
+    /// frame after a fixed clock-time `gap`, then parks (a quiet tail). Faithful
+    /// to the real server, EVERY bootstrap `Data` carries the SAME scan-start
+    /// head `at` — the collision the apply-gate used to drop.
+    struct PacedConn {
+        frames: Mutex<VecDeque<Frame>>,
+        gap_ms: u64,
+    }
+
+    #[async_trait]
+    impl ReplicationConnection for PacedConn {
+        async fn send(&self, _frame: Frame) -> Result<(), SendError> {
+            Ok(())
+        }
+        async fn recv(&self) -> Option<Frame> {
+            // Pace delivery in clock time; each delivered frame re-arms the
+            // puller's idle timer (gap < idle ⇒ never a "stall").
+            tokio::time::sleep(Duration::from_millis(self.gap_ms)).await;
+            let next = self.frames.lock().unwrap().pop_front();
+            match next {
+                Some(f) => Some(f),
+                // Script exhausted: the Replog tail is quiet — park forever.
+                None => std::future::pending().await,
+            }
+        }
+        fn peer_addr(&self) -> SocketAddr {
+            "127.0.0.1:9".parse().unwrap()
+        }
+        fn local_addr(&self) -> SocketAddr {
+            "127.0.0.1:8".parse().unwrap()
+        }
+    }
+
+    /// A network whose every `connect` hands back a fresh paced bootstrap script:
+    /// `n` `Data{Pri,Create}` frames (all stamped the same `w_scan`) then the
+    /// terminal `Noop{w_scan}`.
+    struct PacedNet {
+        n: usize,
+        gap_ms: u64,
+        w_scan: Watermark,
+    }
+
+    #[async_trait]
+    impl ReplicationNetwork for PacedNet {
+        async fn connect(
+            &self,
+            _dst: SocketAddr,
+        ) -> Result<Box<dyn ReplicationConnection>, ConnectError> {
+            let mut q = VecDeque::new();
+            for i in 0..self.n {
+                q.push_back(Frame::Data {
+                    at: self.w_scan, // SAME head for every pre-seed frame
+                    op: Op::Create,
+                    partition: Partition::Pri,
+                    call_ref: format!("w1|{i}|t"),
+                    call_gen: 1,
+                    body_ttl_ms: 0,
+                    indexes: Vec::new(),
+                    body: Some(Arc::from(format!("body{i}").into_bytes().into_boxed_slice())),
+                });
+            }
+            q.push_back(Frame::Noop { at: self.w_scan });
+            Ok(Box::new(PacedConn {
+                frames: Mutex::new(q),
+                gap_ms: self.gap_ms,
+            }))
+        }
+        async fn listen(
+            &self,
+            _local: SocketAddr,
+        ) -> Result<Box<dyn ReplicationListener>, ListenError> {
+            unreachable!("the paced net is pull-only")
+        }
+    }
+
+    /// Regression (#1, re-hydration truncation): a bootstrap whose keyset is large
+    /// enough that the TOTAL stream time (`n × gap`) exceeds the timeout window
+    /// must still re-hydrate IN FULL, because the timer is a per-frame *idle*
+    /// timer (each frame re-arms it), not a total budget.
+    ///
+    /// Pre-fix this failed: the absolute deadline fired mid-stream, the puller
+    /// abandoned the bootstrap onto the same connection's Replog tail, and the
+    /// apply-gate (`at <= W`) admitted only the first leftover frame — every other
+    /// pre-seed frame shared the same `w_scan` and was silently dropped (the
+    /// ~203/3000 ceiling). Here `n=10`, `gap=100ms`, `idle=500ms`: each gap is
+    /// well under the window (never a stall) but the stream runs 1000ms — twice
+    /// the old budget — so the old code truncated to ~5 of 10.
+    #[tokio::test(start_paused = true)]
+    async fn large_bootstrap_outlasts_window_but_rehydrates_fully() {
+        let clock = Clock::test_at(0);
+        let n = 10usize;
+        let store = ReplicatingCallStore::new(1, clock.clone());
+        let net: Arc<dyn ReplicationNetwork> = Arc::new(PacedNet {
+            n,
+            gap_ms: 100,
+            w_scan: Watermark::new(1, 100),
+        });
+        let config = PullerConfig {
+            backoff_init_ms: 50,
+            backoff_max_ms: 1_000,
+            bootstrap_hard_timeout_ms: 500, // the idle window
+        };
+        let (puller, status) = Puller::new_at(
+            "w0",
+            "w1",
+            "127.0.0.1:9".parse().unwrap(),
+            net,
+            store.clone(),
+            config,
+            Watermark::new(0, 0),
+            B2buaMetrics::new(),
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        tokio::spawn(async move { puller.run(cancel_rx).await });
+
+        // Drive the paused clock well past the 1000ms stream (+ tail settle).
+        for _ in 0..40 {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
+        }
+
+        // ALL n pre-seed calls landed in pri:{w1} — none lost to a watermark
+        // collision. Pre-fix only ~5 survived.
+        for i in 0..n {
+            let cr = format!("w1|{i}|t");
+            assert!(
+                store
+                    .get_call(PartitionRole::Primary, "w1", &cr)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "call {i} must be re-hydrated into pri:{{w1}} (idle timer must not truncate a progressing bootstrap)",
+            );
+        }
+        assert!(
+            status.borrow().bootstrap_complete,
+            "terminal Noop observed ⇒ bootstrap-complete (not a best-effort timeout)",
+        );
+    }
 }

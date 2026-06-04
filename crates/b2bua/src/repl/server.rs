@@ -210,9 +210,11 @@ impl ReplServer {
     ///    start;
     /// 2. for each batch of `chunk` keys, read each LIVE body under a short lock
     ///    (`read_body` + `read_meta`) and send a `Data{ op: Create, partition:
-    ///    Pri, .. }` — a key whose body vanished mid-scan is sent as a `Delete`
-    ///    (the client drops/ignores it; the real body, if any, re-arrives via the
-    ///    tail). The store/changelog lock is NEVER held across `send().await`;
+    ///    Pri, .. }` — a key whose body vanished between the snapshot and the read
+    ///    (TTL evict / concurrent delete) is **skipped** (the call ended; a
+    ///    synthesised `Delete` could only tear down a live copy on an overlapping
+    ///    re-bootstrap, never resurrect a dead one). The store/changelog lock is
+    ///    NEVER held across `send().await`;
     /// 3. send the TERMINAL `Noop{ at: W }` (carries the scan-start head; the
     ///    client uses it only as the bootstrap-terminal marker — it then re-pulls
     ///    `Replog` from `(0,0)` cold for the full changelog, so this W is not the
@@ -258,18 +260,16 @@ impl ReplServer {
                         indexes: meta.indexes,
                         body: Some(body),
                     },
-                    // Body vanished mid-scan (TTL evict / delete): tell the client
-                    // to drop it rather than leak a phantom pri:{caller} entry.
-                    _ => Frame::Data {
-                        at: w,
-                        op: Op::Delete,
-                        partition: Partition::Pri,
-                        call_ref: key.clone(),
-                        call_gen: 0,
-                        body_ttl_ms: 0,
-                        indexes: Vec::new(),
-                        body: None,
-                    },
+                    // Body vanished between the keyset snapshot and this read (TTL
+                    // evict / concurrent delete) — the call genuinely ended. SKIP
+                    // it; do NOT synthesise a `Pri` Delete. On the reclaiming node
+                    // a Delete is a no-op when cold (nothing to remove) but an
+                    // active teardown if a re-bootstrap overlaps a copy another
+                    // path already reclaimed — i.e. it can only delete a live call,
+                    // never resurrect a dead one. A genuinely-live call is never
+                    // unreadable (a non-expired body always reads), so skipping
+                    // loses nothing real.
+                    _ => continue,
                 };
                 conn.send(frame).await.map_err(|_| ())?;
             }
