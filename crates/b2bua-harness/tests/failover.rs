@@ -453,6 +453,156 @@ async fn reboot_reclaim_hands_back_exactly_one_owner() {
 }
 
 // ===========================================================================
+// X11 EAGER TAKEOVER OF A QUIESCENT DIALOG — the long-call `kill_worker` loss.
+//
+// A long-hold call parked in the B2BUA OPTIONS-keepalive loop sends NOTHING, so
+// the *reactive* takeover (`hydrate_from_replica`, which only fires on an inbound
+// in-dialog request) never triggers. Its keepalive timer dies with the primary
+// and is re-armed on no live node, so ~one interval later the UAC's mandatory
+// keepalive OPTIONS never arrives → the dialog is torn down as failed. In the
+// cluster this lost ~100% of quiescent long calls on every kill_worker, masked in
+// the aggregate by short-call volume.
+//
+// The fix: on the peer-`Removed` membership delta the survivor's supervisor emits
+// an EAGER `TakeOverPeer`, materialising the dead peer's whole `bak:` partition
+// and re-arming each call's ORIGINAL keepalive deadline — so the survivor probes
+// the dialog on schedule with NO inbound traffic. This test drives takeover with
+// the clock alone (zero UAC requests) and asserts: (1) the survivor eagerly takes
+// the call over, (2) it emits the next keepalive OPTIONS on schedule with the
+// correct dialog identity, keeping the call alive, and (3) the rebooted primary
+// reclaims it and the survivor hands its copy back EXACTLY once (no double-serve,
+// no leak). The X11 handback can only fire because the eager takeover did an
+// explicit reverse-flush (a quiescent call mutates nothing) — without it the call
+// would be double-served forever (the [[repl-reclaim-leak-x11]] regression).
+// ===========================================================================
+#[tokio::test(start_paused = true)]
+async fn eager_takeover_keeps_quiescent_dialog_alive_and_hands_back_once() {
+    let mut fh = FailoverHarness::new("s11-eager-quiescent-takeover", &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let b1_lane = fh.agent("b1-lane", B1).await;
+    let b2_lane = fh.agent("b2-lane", B2).await;
+    drop((b1_lane, b2_lane));
+
+    let proxy = fh
+        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
+        .await;
+    let mut w_b1 = fh
+        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    let mut w_b2 = fh
+        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
+
+    // ── establish alice ⇄ bob on the HRW primary; this is the LONG/quiescent
+    //    call — it arms a keepalive on the primary and then sends nothing more. ──
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
+        .expect("b-leg INVITE carries the proxy Record-Route cookie");
+    let (pri_ord, bak_ord) = pri_bak_from_cookie(&rr);
+    // The b-leg Call-ID — the dialog identity the survivor's keepalive must probe.
+    let b_leg_call_id = sip_message::message_helpers::get_header(&uas.request().headers, "call-id")
+        .expect("b-leg INVITE carries a Call-ID")
+        .to_string();
+    let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
+        if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
+    assert_eq!(bak_ord, b2.ordinal(), "cookie w_bak names the backup worker");
+    let primary_ord = b1.ordinal().to_string();
+    let backup_ord = b2.ordinal().to_string();
+
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let _dialog = call.ack().await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(500)).await;
+
+    let call_ref = find_backed_up_ref(b2, &primary_ord).await;
+    assert!(b2.get(BAK, &primary_ord, &call_ref).await.is_some(), "backup holds the replica");
+    assert_eq!(b1.active_calls(), 1, "primary serves the established call");
+    assert_eq!(b2.active_calls(), 0, "backup is a pure replica (not serving)");
+
+    // ── crash the primary; k8s drops its endpoint from the survivor's view ─────
+    // (`crash()` alone never touches the survivor's membership — simulate the
+    // endpoint removal explicitly, the signal the supervisor turns into takeover.)
+    b1.crash();
+    proxy.set_health(&primary_ord, WorkerHealth::Dead);
+    b2.simulate_peer_removed(&primary_ord);
+
+    // ── EAGER TAKEOVER fires from the membership delta — NO UAC traffic at all ─
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(
+        b2.metrics().repl_eager_takeover_total() >= 1,
+        "survivor eagerly took the dead peer's partition over (metric); got {}",
+        b2.metrics().repl_eager_takeover_total(),
+    );
+    assert_eq!(
+        b2.active_calls(),
+        1,
+        "survivor materialised the quiescent call into its live map with zero inbound traffic",
+    );
+
+    // ── KEEPALIVE ON SCHEDULE — advance to the original deadline; the survivor
+    //    (the call's sole keeper) probes BOTH legs. Answer both → call stays up. ─
+    fh.advance(KEEPALIVE_INTERVAL).await;
+    alice.receive_tolerating("OPTIONS", &["INVITE", "ACK"]).await.respond(200, "OK").await;
+    let mut bob_opts = bob.receive_tolerating("OPTIONS", &["INVITE", "ACK"]).await;
+    assert_eq!(
+        sip_message::message_helpers::get_header(&bob_opts.request().headers, "call-id"),
+        Some(b_leg_call_id.as_str()),
+        "the survivor's keepalive probes the SAME b-leg dialog it took over (correct identity)",
+    );
+    bob_opts.respond(200, "OK").await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert_eq!(
+        b2.active_calls(),
+        1,
+        "the answered keepalive kept the quiescent call alive on the survivor (not reaped)",
+    );
+
+    // ── reboot the primary → it reclaims + the survivor hands back EXACTLY once ─
+    b1.reboot().await;
+    proxy.set_health(&primary_ord, WorkerHealth::Alive);
+    // k8s re-publishes the restarted pod's endpoint → survivor's puller reconnects
+    // (it carries the X11 Deactivate handback). A restart is Removed-then-Added.
+    b2.simulate_peer_added(&primary_ord);
+    for _ in 0..40 {
+        fh.advance(Duration::from_millis(500)).await;
+        if b1.is_ready() {
+            break;
+        }
+    }
+    assert!(b1.is_ready(), "rebooted primary ready after re-hydration");
+    // Drive go-active: ReclaimAll bulk sweep + the ~5 s Deactivate handback burst.
+    fh.advance(Duration::from_secs(10)).await;
+
+    eprintln!(
+        "post-reclaim (eager): pri={primary_ord} bak={backup_ord} \
+         b1.active={} b2.active={} eager={} reclaimed={} handback={}",
+        b1.active_calls(),
+        b2.active_calls(),
+        b2.metrics().repl_eager_takeover_total(),
+        b1.metrics().repl_reclaimed_total(),
+        b2.metrics().repl_handback_total(),
+    );
+    assert_eq!(
+        b1.active_calls() + b2.active_calls(),
+        1,
+        "EXACTLY ONE node serves the call after reclaim+handback — a duplicate is the ghost leak",
+    );
+    assert_eq!(b1.active_calls(), 1, "the rebooted primary reclaimed + serves the call");
+    assert_eq!(b2.active_calls(), 0, "the survivor handed its eager takeover copy back");
+    assert!(
+        b2.metrics().repl_handback_total() >= 1,
+        "the X11 handback fired on the survivor (its eager reverse-flush gave the primary an as_of)",
+    );
+
+    drop((w_b1, w_b2, proxy));
+}
+
+// ===========================================================================
 // ACTING-BACKUP TERMINATE — when the acting-backup terminates a taken-over call
 // (an in-dialog BYE), two things must hold:
 //   (1) its LOCAL backup context is fully released (live copy + per-call lock +

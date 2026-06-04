@@ -90,17 +90,25 @@ struct ReplWiring {
 
 impl ReplWiring {
     /// Build the `ReplicationSetup` for a (re)spawn at incarnation `gen` over a
-    /// fresh empty [`ReplicatingCallStore`].
-    fn setup(&self, gen: u64, clock: &Clock) -> (ReplicationSetup, Arc<ReplicatingCallStore>) {
+    /// fresh empty [`ReplicatingCallStore`]. Also returns the concrete
+    /// [`SimulatedMembership`] handle so a scenario can drive membership deltas
+    /// (e.g. remove a killed peer, the way k8s drops a dead pod's endpoint — the
+    /// signal the survivor's supervisor turns into an eager takeover).
+    fn setup(
+        &self,
+        gen: u64,
+        clock: &Clock,
+    ) -> (ReplicationSetup, Arc<ReplicatingCallStore>, Arc<SimulatedMembership>) {
         let changelog = Changelog::new(gen, clock.clone()).with_ttls(self.ttls.0, self.ttls.1);
         let store = Arc::new(ReplicatingCallStore::with_changelog(
             changelog,
             clock.clone(),
         ));
-        let membership: Arc<dyn topology::Membership> = Arc::new(SimulatedMembership::with_clock(
+        let sim_membership = Arc::new(SimulatedMembership::with_clock(
             self.peers.clone(),
             clock.clone(),
         ));
+        let membership: Arc<dyn topology::Membership> = sim_membership.clone();
         let addr_map = self.addr_map.clone();
         // The resolver is now async (ADR-0012 D3); wrap the sim's ordinal→addr map
         // in the sync-closure adapter.
@@ -118,7 +126,7 @@ impl ReplWiring {
             addr_resolver,
             incarnation_gen: gen,
         };
-        (setup, store)
+        (setup, store, sim_membership)
     }
 }
 
@@ -148,6 +156,10 @@ pub struct ReplicatedB2buaSut {
     core: Option<B2buaCore>,
     /// The repl store the live core uses (mirrors `core.repl_store()`).
     store: Arc<ReplicatingCallStore>,
+    /// This node's concrete membership handle, so a scenario can inject deltas
+    /// (e.g. [`simulate_peer_removed`](Self::simulate_peer_removed)). Replaced on
+    /// each (re)spawn — a survivor that never reboots keeps its initial handle.
+    membership: Arc<SimulatedMembership>,
     /// Handle to the harness so reboot can re-`bind_sut` on the same addr.
     harness: Arc<HarnessHandle>,
     /// Decision engine (shared across reboots). Default routes every call to
@@ -300,6 +312,29 @@ impl ReplicatedB2buaSut {
         self.store = Arc::new(ReplicatingCallStore::new(self.gen, self.clock.clone()));
     }
 
+    /// Drive a `MemberDelta::Removed` for `ordinal` into THIS node's membership —
+    /// the simulation of k8s dropping a killed pod's endpoint from the survivor's
+    /// view. The node's supervisor reconciles it to a Park + an eager
+    /// `TakeOverPeer` (ADR-0011 X11): the survivor materialises the dead peer's
+    /// `bak:{ordinal}` partition so a quiescent failed-over dialog stays alive.
+    /// (`crash()` alone aborts the dead node's own tasks but never touches a
+    /// survivor's membership, so a takeover test must call this on the survivor.)
+    pub fn simulate_peer_removed(&self, ordinal: &str) {
+        self.membership.remove(ordinal);
+    }
+
+    /// Drive a `MemberDelta::Added` for `ordinal` into THIS node's membership —
+    /// the simulation of k8s re-publishing a restarted pod's endpoint. The
+    /// survivor's supervisor re-spawns its puller to the peer (seeded from the
+    /// retained watermark), which is how the rebooted primary's X11 `Deactivate`
+    /// handback reaches this node. A statefulset restart is observed as
+    /// Removed-then-Added; pair this with a prior
+    /// [`simulate_peer_removed`](Self::simulate_peer_removed). Host == ordinal,
+    /// matching the harness's `Peer::new(p, p)` convention.
+    pub fn simulate_peer_added(&self, ordinal: &str) {
+        self.membership.add(Peer::new(ordinal, ordinal));
+    }
+
     /// REBOOT: same ordinal + same repl listen addr, a fresh SIP endpoint, an
     /// EMPTY store at a NEW higher incarnation gen, a fresh server + supervisor →
     /// it re-bootstraps + resubscribes from its peers (the S6 reboot path). After
@@ -311,8 +346,9 @@ impl ReplicatedB2buaSut {
             core.abort();
         }
         self.gen += 1;
-        let (setup, store) = self.wiring.setup(self.gen, &self.clock);
+        let (setup, store, membership) = self.wiring.setup(self.gen, &self.clock);
         self.store = store;
+        self.membership = membership;
         self.core = Some(self.spawn_core(Some(setup)).await);
     }
 
@@ -596,12 +632,15 @@ impl FailoverHarness {
             clock: self.clock.clone(),
             core: None,
             store: Arc::new(ReplicatingCallStore::new(1, self.clock.clone())),
+            // Placeholder; replaced by the real handle setup() builds, just below.
+            membership: Arc::new(SimulatedMembership::with_clock(vec![], self.clock.clone())),
             harness: self.harness.clone(),
             decision,
             limiter,
         };
-        let (setup, store) = sut.wiring.setup(1, &self.clock);
+        let (setup, store, membership) = sut.wiring.setup(1, &self.clock);
         sut.store = store;
+        sut.membership = membership;
         let core = sut.spawn_core(Some(setup)).await;
         sut.metrics = core.metrics().clone();
         sut.core = Some(core);

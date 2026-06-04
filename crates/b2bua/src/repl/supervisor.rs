@@ -300,6 +300,18 @@ impl ReplicationSupervisor {
         };
         for ord in to_park {
             self.park(&ord);
+            // EAGER TAKEOVER (ADR-0011 X11): a peer that genuinely departed the
+            // desired set is dead (a k8s pod kill is observed as Removed — a
+            // restart is Removed-then-Added; an in-place move is AddressChanged and
+            // never lands here). Tell the router to materialise that peer's
+            // `bak:{ord}` partition NOW, so a quiescent failed-over dialog keeps its
+            // keepalive running on this survivor instead of being lost ~one interval
+            // later. Emitted ONLY from this reconcile path — never from `park()`
+            // itself, which `shutdown()` also calls on a node aborting its OWN
+            // pullers (where eager takeover would be wrong, and `repl_tx` is gone).
+            if let Some(tx) = self.inner.repl_tx.lock().unwrap().as_ref() {
+                let _ = tx.send(crate::router::ReplCommand::TakeOverPeer { primary: ord });
+            }
         }
     }
 

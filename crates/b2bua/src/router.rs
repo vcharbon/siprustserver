@@ -73,6 +73,12 @@ pub enum ReplCommand {
     /// every takeover copy for `primary` whose reverse-flush position it has
     /// pulled past (`<= as_of`, in our changelog domain). See [`ReplServer`].
     Deactivate { primary: String, as_of: Watermark },
+    /// **Eager takeover** — the supervisor observed `primary` leave membership
+    /// (`MemberDelta::Removed`). Materialise its entire `bak:{primary}` partition
+    /// into the live map NOW (don't wait for an inbound in-dialog request), so a
+    /// quiescent failed-over dialog keeps its keepalive running on the survivor.
+    /// See [`take_over_peer`].
+    TakeOverPeer { primary: String },
 }
 
 /// How an event resolves to a call + the leg it arrived on.
@@ -131,6 +137,60 @@ async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
         }
         ReplCommand::Deactivate { primary, as_of } => {
             deactivate_takeovers(ctx, &primary, as_of).await;
+        }
+        ReplCommand::TakeOverPeer { primary } => {
+            take_over_peer(ctx, &primary).await;
+        }
+    }
+}
+
+/// **Eager death-triggered takeover** (ADR-0011 X11): materialise every call in
+/// the dead `primary`'s `bak:{primary}` partition into the live map and re-arm its
+/// timers — the survivor's response to a `MemberDelta::Removed` for `primary`.
+///
+/// This closes the **quiescent long-hold** loss: a call parked in the B2BUA
+/// OPTIONS-keepalive loop sends nothing, so the reactive
+/// [`hydrate_from_replica`](crate::store::CallState::hydrate_from_replica) — which
+/// only fires on an inbound in-dialog request — never triggers. Its keepalive
+/// timer dies with the primary and is re-armed on no live node, so ~one interval
+/// later the UAC's mandatory keepalive OPTIONS never arrives and the dialog is
+/// torn down as failed. Taking the partition over eagerly on the death signal
+/// keeps the survivor probing it.
+///
+/// Per call (each under the per-call lock, like [`reclaim_into_live`]):
+/// 1. `mark_takeover` — record it as an acting-backup copy so the X11
+///    `Deactivate` handback can later resolve double-ownership.
+/// 2. `materialize_if_absent` — insert into the live map iff not already resident
+///    (idempotent: a call the reactive path already hydrated is left untouched).
+/// 3. **Restore the call's ORIGINAL timer deadlines** (`call.timers`, which IS
+///    replicated). Unlike [`reclaim_into_live`] — which *defers* the keepalive a
+///    fresh interval so a rebooting primary doesn't double-probe during the
+///    handback window — the survivor is the call's SOLE keeper here and MUST probe
+///    on the original schedule: a past-due keepalive fires immediately (then
+///    re-arms on the next interval), and if the primary never reboots the call
+///    still stays alive. Deferring would re-open the very gap this fixes (and lose
+///    the call outright on permanent node loss). The rebooting primary's reclaim
+///    keeps deferring, so during the brief double-ownership window only the
+///    survivor probes — no CSeq collision.
+/// 4. `flush` — a **reverse** flush (the call_ref names the dead primary, so
+///    `store_target` resolves the acting-backup Reverse plan) that bumps this
+///    node's changelog position for `primary`. Without it `position_of` stays
+///    `None` and the X11 handback can never fire (`deactivate_targets` skips it)
+///    → permanent double-serve. A quiescent call mutates nothing, so this explicit
+///    flush is the ONLY thing that establishes the handback `as_of`.
+async fn take_over_peer(ctx: &Arc<RouterCtx>, primary: &str) {
+    for call in ctx.state.reclaim_backup_scan(primary).await {
+        let call_ref = call.call_ref.clone();
+        let _guard = ctx.state.lock(&call_ref).await;
+        let timers = call.timers.clone();
+        // `materialize_if_absent` is the gate: a call the reactive path already
+        // hydrated is left untouched (it is already marked + flushed + timed).
+        if ctx.state.materialize_if_absent(call.clone()) {
+            ctx.state.mark_takeover(&call_ref);
+            ctx.timers.restore(timers, call_ref.clone()).await;
+            // Reverse-flush so the rebooting primary can later hand this copy back.
+            ctx.state.flush(&call);
+            ctx.metrics.bump_repl_eager_takeover();
         }
     }
 }

@@ -479,11 +479,23 @@ pub fn generate_in_dialog_request(
     let (request_uri, route_values) = route_for_in_dialog(&remote_target, &dialog.route_set);
     let via = opts.via.as_ref().expect("ViaSpec required");
 
+    // RFC 3261 §12.2.1.1: the To header carries the remote tag — but a dialog
+    // taken over mid-confirm (a failover hydrate of a replica copy whose 200-OK
+    // had not yet established the remote tag) can have an EMPTY `remote_tag`.
+    // Emitting `;tag=` (empty value) builds a malformed header that
+    // `hydrate_request` rejects → panic ("Empty To tag parameter"). Skip the tag
+    // when absent so the request is at least well-formed (the degenerate dialog is
+    // handled elsewhere); a present tag is emitted as before.
+    let to_value = if dialog.remote_tag.is_empty() {
+        wrap_uri(&dialog.remote_uri)
+    } else {
+        format!("{};tag={}", wrap_uri(&dialog.remote_uri), dialog.remote_tag)
+    };
     let mut headers: Vec<SipHeader> = vec![
         h("Via", build_via_value(via)),
         h("Max-Forwards", "70"),
         h("From", format!("{};tag={}", wrap_uri(&dialog.local_uri), dialog.local_tag)),
-        h("To", format!("{};tag={}", wrap_uri(&dialog.remote_uri), dialog.remote_tag)),
+        h("To", to_value),
         h("Call-ID", dialog.call_id.clone()),
         h("CSeq", format!("{} {}", next_cseq, method.as_str())),
     ];

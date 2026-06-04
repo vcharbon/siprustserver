@@ -374,6 +374,29 @@ impl CallState {
         bodies.iter().filter_map(|b| self.codec.decode(b).ok()).collect()
     }
 
+    /// **Eager-takeover bulk read-path** (ADR-0011 X11): scan the `bak:{primary}`
+    /// partition — every call this node holds as a *backup* for `primary` — and
+    /// decode each. The mirror of [`reclaim_scan`](Self::reclaim_scan) for the
+    /// acting-backup side: where `reclaim_scan` re-serves a rebooted primary's OWN
+    /// partition, this materialises a *dead peer's* partition into the survivor's
+    /// live map when the supervisor observes that peer leave membership
+    /// (`MemberDelta::Removed`). It is what reclaims a **quiescent** failed-over
+    /// dialog: a long-hold call in the OPTIONS-keepalive loop sends nothing, so the
+    /// reactive [`hydrate_from_replica`](Self::hydrate_from_replica) (which only
+    /// fires on an inbound in-dialog request) never triggers, and the call would be
+    /// lost ~300 s later when its keepalive — re-armed on no live node — fails to
+    /// probe its UAC. Empty when no replicating store is wired.
+    pub async fn reclaim_backup_scan(&self, primary: &str) -> Vec<Call> {
+        let Some(repl) = self.repl_store.as_ref() else {
+            return Vec::new();
+        };
+        let bodies = repl
+            .scan_calls(PartitionRole::Backup, primary)
+            .await
+            .unwrap_or_default();
+        bodies.iter().filter_map(|b| self.codec.decode(b).ok()).collect()
+    }
+
     /// **Active-reclaim reactive read-path** (ADR-0011 X11): decode a single
     /// reclaimable call from this node's `pri:{self}` partition — the flip-race
     /// straggler an acting-backup reverse-flushed *after* the bulk sweep. `None`

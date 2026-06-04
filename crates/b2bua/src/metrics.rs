@@ -50,6 +50,14 @@ struct Inner {
     // `handback` ≈ duplicates released and the active/sipp gap reaps to ~0.
     repl_reclaimed: AtomicU64,
     repl_handback: AtomicU64,
+    // X11 EAGER takeover: a survivor materialising a dead peer's `bak:` partition
+    // into its live map on the peer-`Removed` membership delta — the death-driven
+    // analogue of `takeover_hydrated` (which is request-driven). This is what keeps
+    // a QUIESCENT long-hold dialog alive after its primary is killed: nothing
+    // inbound ever arrives to trigger the lazy hydrate, so the survivor must reclaim
+    // it eagerly. Pairs with `handback` (the rebooted primary later reclaims + the
+    // survivor hands its eager copy back → exactly one owner).
+    repl_eager_takeover: AtomicU64,
     // Memory-attribution gauges (sampled, not counter-derived). `store_calls` is
     // the TRUE live call-map length — compare to `active_calls`
     // (creations-removals); a divergence localises a store-side leak the counter
@@ -131,6 +139,7 @@ impl B2buaMetrics {
     counter!(bump_repl_takeover_hydrated, repl_takeover_hydrated_total, repl_takeover_hydrated);
     counter!(bump_repl_reclaimed, repl_reclaimed_total, repl_reclaimed);
     counter!(bump_repl_handback, repl_handback_total, repl_handback);
+    counter!(bump_repl_eager_takeover, repl_eager_takeover_total, repl_eager_takeover);
 
     /// A backup replica was admitted to a backup partition (puller applied a
     /// `Create`). Pairs with [`dec_repl_backup_held`](Self::dec_repl_backup_held)
@@ -231,6 +240,7 @@ impl B2buaMetrics {
         counter("b2bua_repl_takeover_hydrated_total", "calls hydrated from a backup replica to serve a failed-over request", self.repl_takeover_hydrated_total());
         counter("b2bua_repl_reclaimed_total", "calls a rebooted primary re-materialised into its live map + re-armed (active reclaim, ADR-0011 X11)", self.repl_reclaimed_total());
         counter("b2bua_repl_handback_total", "ghost-backup takeover copies deactivated on a primary's Deactivate handback (ADR-0011 X11)", self.repl_handback_total());
+        counter("b2bua_repl_eager_takeover_total", "calls a survivor eagerly materialised from a dead peer's backup partition on a peer-Removed delta (X11 — keeps quiescent dialogs alive)", self.repl_eager_takeover_total());
 
         // Per-method request + per-(method,code) response counters. Drop the
         // `counter` closure's borrow first by ending the block above.
