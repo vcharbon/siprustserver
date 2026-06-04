@@ -388,6 +388,97 @@ async fn bidirectional_supervisor_replication_over_real_tcp() {
 }
 
 // ---------------------------------------------------------------------------
+// THROUGHPUT floor (real TCP + real clock): a cold node must be able to
+// re-hydrate (synchronise) its backup partition at MORE THAN 5 000 contexts per
+// second. This is the perf counterpart to the correctness fix for the
+// ~203/3000 truncation: there we proved a large bootstrap completes IN FULL
+// regardless of how long it takes (the per-frame idle timer); here we prove it
+// also completes FAST ENOUGH over a real socket on a real clock. `start_paused`
+// cannot measure this — real `TcpStream` readiness ignores the fake clock — so
+// this rides loopback TCP and wall time, mirroring the cluster path.
+//
+// Shape = the reboot-reclaim bulk: the primary pre-holds a large static
+// `bak:{w1}` keyset (peer:None ⇒ NOT in the changelog, so the bootstrap scan is
+// the SOLE delivery path), then a cold w1 bootstraps the whole set. We assert
+// (a) every context lands (completeness at scale) and (b) the sustained sync
+// rate clears the 5 000 ctx/s floor.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn bootstrap_synchronises_above_5k_contexts_per_second_over_real_tcp() {
+    const N: usize = 5_000;
+    let clock = Clock::test_at(0);
+    let net = RealReplicationNetwork::new();
+
+    // w0 holds N static backup bodies for w1 (the bulk a rebooted w1 reclaims).
+    let (w0, w0_addr) = spawn_primary("w0", &net, &clock).await;
+    let body = vec![0xABu8; 256]; // a representative ~256-byte call context
+    for i in 0..N {
+        let call_ref = format!("w1|sync-{i}|tag");
+        w0.put_call(
+            BAK,
+            "w1",
+            &call_ref,
+            body.clone(),
+            &[format!("idx-{i}")],
+            300_000,
+            1,
+            &PutOpts::default(), // static backup body, NOT in the changelog
+        )
+        .await
+        .unwrap();
+    }
+
+    // Cold w1 bootstraps the full set; time from connect to last context landed.
+    let w1 = ReplicatingCallStore::with_changelog(
+        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
+        clock.clone(),
+    );
+    let started = tokio::time::Instant::now();
+    let (_cancel, metrics) = spawn_puller("w1", "w0", w0_addr, &net, &w1);
+
+    // Poll until all N have re-hydrated into pri:w1, capturing wall time. The
+    // 30s ceiling is a correctness backstop only (so a real regression fails
+    // instead of hanging); the throughput assertion below is the perf gate.
+    let deadline = started + Duration::from_secs(30);
+    loop {
+        if w1.scan_call_refs(PRI, "w1").len() >= N {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "only {}/{N} contexts re-hydrated within 30s",
+                w1.scan_call_refs(PRI, "w1").len()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let elapsed = started.elapsed();
+
+    // (a) Completeness: every context present, none lost to a watermark
+    //     collision or a truncated stream.
+    assert_eq!(
+        w1.scan_call_refs(PRI, "w1").len(),
+        N,
+        "all {N} contexts re-hydrated into pri:w1"
+    );
+    assert!(
+        metrics.repl_pull_applied_total() >= N as u64,
+        "every context counted as applied ({} < {N})",
+        metrics.repl_pull_applied_total(),
+    );
+
+    // (b) Throughput floor: > 5 000 contexts/second sustained over real TCP.
+    //     (Conservative — `elapsed` includes the poll-sleep slack, understating
+    //     the true rate.)
+    let rate = N as f64 / elapsed.as_secs_f64();
+    assert!(
+        rate > 5_000.0,
+        "bootstrap sync throughput {rate:.0} ctx/s is below the 5 000 ctx/s floor \
+         ({N} contexts in {elapsed:?})",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Identity-key invariant (the cluster's *actual* `repl_pull_applied = 0`):
 // the server drains a peer's changelog keyed by the PULLER's `caller` ordinal,
 // which the changelog was bumped under as `opts.peer` (= the proxy cookie's
