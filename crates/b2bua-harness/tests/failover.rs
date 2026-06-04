@@ -453,6 +453,135 @@ async fn reboot_reclaim_hands_back_exactly_one_owner() {
 }
 
 // ===========================================================================
+// ACTING-BACKUP TERMINATE — when the acting-backup terminates a taken-over call
+// (an in-dialog BYE), two things must hold:
+//   (1) its LOCAL backup context is fully released (live copy + per-call lock +
+//       the bak:{primary} replica body/meta) — no ghost left behind; and
+//   (2) the termination reaches the original primary as a DELETE (Reverse →
+//       Partition::Pri Op::Delete), NOT a stale create — and the local bak body
+//       is gone, so a later reboot of that primary neither bootstrap-replays nor
+//       reclaims the dead dialog. (User concern: "when acting as backup, if the
+//       call terminates, the backup context is properly removed and we don't send
+//       back to the primary an expired call context.")
+// This is the BYE-termination twin of `reboot_reclaim_hands_back_exactly_one_owner`
+// (which fails a NON-terminating re-INVITE over): there the primary reclaims the
+// LIVE call; here it must reclaim NOTHING.
+// ===========================================================================
+#[tokio::test(start_paused = true)]
+async fn acting_backup_terminate_leaves_no_expired_context_for_reclaim() {
+    let mut fh = FailoverHarness::new("s11-backup-terminate-no-resurrect", &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let b1_lane = fh.agent("b1-lane", B1).await;
+    let b2_lane = fh.agent("b2-lane", B2).await;
+    drop((b1_lane, b2_lane));
+
+    let proxy = fh
+        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
+        .await;
+    let mut w_b1 = fh
+        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    let mut w_b2 = fh
+        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
+
+    // ── establish alice ⇄ bob on the HRW primary, replicate to the backup ─────
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
+        .expect("b-leg INVITE carries the cookie");
+    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
+        if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
+    let primary_ord = b1.ordinal().to_string();
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(500)).await;
+
+    let call_ref = find_backed_up_ref(b2, &primary_ord).await;
+    assert!(b2.get(BAK, &primary_ord, &call_ref).await.is_some(), "backup holds the replica");
+
+    // ── crash the primary; the proxy fails the in-dialog BYE over to the backup,
+    //    which TAKES OVER and TERMINATES the call (the acting-backup teardown). ──
+    b1.crash();
+    proxy.set_health(&primary_ord, WorkerHealth::Dead);
+    fh.advance(Duration::from_millis(300)).await;
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await; // b2 relays the BYE to bob
+    bye.expect(200).await;
+    fh.advance(Duration::from_millis(500)).await;
+
+    // Let the buffered reverse-delete drain (the bak body is removed off the hot path).
+    for _ in 0..40 {
+        if b2.get(BAK, &primary_ord, &call_ref).await.is_none() {
+            break;
+        }
+        fh.advance(Duration::from_millis(100)).await;
+    }
+
+    // ── INVARIANT 1: the acting-backup released ALL of the takeover context ────
+    assert_eq!(b2.active_calls(), 0, "acting-backup dropped the live takeover copy on terminate");
+    assert_eq!(b2.lock_count(), 0, "acting-backup released the per-call lock on terminate");
+    assert!(
+        b2.get(BAK, &primary_ord, &call_ref).await.is_none(),
+        "acting-backup deleted its bak:{primary_ord} body on terminate (no stale replica)",
+    );
+    assert!(
+        !b2.scan_backed_up(&primary_ord).contains(&call_ref),
+        "terminated call left the backup keyset — bootstrap cannot replay it to the primary",
+    );
+
+    // ── reboot the primary → it re-hydrates from the backup + bulk-reclaims ────
+    b1.reboot().await;
+    proxy.set_health(&primary_ord, WorkerHealth::Alive);
+    for _ in 0..40 {
+        fh.advance(Duration::from_millis(500)).await;
+        if b1.is_ready() {
+            break;
+        }
+    }
+    assert!(b1.is_ready(), "rebooted primary ready after re-hydration");
+    // Drive the go-active task: ReclaimAll bulk sweep + the straggler/handback burst.
+    fh.advance(Duration::from_secs(10)).await;
+
+    // ── INVARIANT 2: the primary did NOT resurrect the terminated dialog ───────
+    eprintln!(
+        "post-reboot: b1.active={} b1.reclaimed={} pri:{primary_ord}={:?} gen={:?}",
+        b1.active_calls(),
+        b1.metrics().repl_reclaimed_total(),
+        b1.scan_primary(&primary_ord),
+        b1.call_gen(PartitionRole::Primary, &primary_ord, &call_ref),
+    );
+    assert_eq!(
+        b1.active_calls(),
+        0,
+        "primary must NOT reclaim the terminated call into its live map (a resurrection = a ghost)",
+    );
+    assert!(
+        !b1.scan_primary(&primary_ord).contains(&call_ref),
+        "terminated call is absent from pri:{primary_ord} — the Reverse DELETE propagated, not a stale create",
+    );
+    assert!(
+        b1.call_gen(PartitionRole::Primary, &primary_ord, &call_ref).is_none(),
+        "no expired call_gen lingered in pri:{primary_ord} for the terminated call",
+    );
+    assert_eq!(
+        b1.metrics().repl_reclaimed_total(),
+        0,
+        "primary reclaimed NOTHING — its only call had already terminated on the backup",
+    );
+    assert_eq!(b2.active_calls(), 0, "backup holds nothing after the handback window");
+
+    drop((w_b1, w_b2, proxy));
+}
+
+// ===========================================================================
 // MATRIX — fault cases (best-effort; deferrals documented in the report-back)
 // ===========================================================================
 

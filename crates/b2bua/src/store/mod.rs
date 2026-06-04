@@ -291,6 +291,28 @@ impl CallState {
         present
     }
 
+    /// Release the ephemeral per-call state an **orphan-reject** created — the
+    /// 481 path for an in-dialog request that resolved to `call_ref` but hydrated
+    /// **no** live call (a failed-over BYE for a dialog that was never reclaimed,
+    /// or a late in-dialog request after teardown). [`process`] acquired the
+    /// per-call [`lock`](Self::lock) — and the router spun up a per-call dispatch
+    /// queue (one `bump_creation`) — yet there is nothing to [`remove`](Self::remove):
+    /// the call was never in the map. Drop the lone artifact this leaves behind —
+    /// the `locks`-map entry — with **no** store mutation (unlike `remove`, which
+    /// would reverse-propagate a *spurious delete* for a call we never held).
+    ///
+    /// Paired with the router poisoning the dispatch queue (so the worker exits and
+    /// `removals` balances `creations`), this is what stops an **orphan storm** —
+    /// the thousands of failed-over BYEs that hit a rebooted worker — from leaking
+    /// the `locks` map and the `active_calls` (creations−removals) count. Without
+    /// it each orphan stranded one lock entry + one idle worker task + one unmatched
+    /// creation permanently (the ~3150-per-worker ratchet the leak-detector caught).
+    ///
+    /// [`process`]: crate::router
+    pub fn discard_orphan(&self, call_ref: &str) {
+        self.inner.lock().unwrap().locks.remove(call_ref);
+    }
+
     /// Mark `call_ref` as a live acting-backup **takeover copy** (ADR-0011 X11).
     /// Called by the router on a fresh failover hydrate. The handback later reads
     /// the copy's reverse-flush *position* from the changelog (not a timestamp),
@@ -481,6 +503,14 @@ impl CallState {
 
     pub fn active_count(&self) -> usize {
         self.inner.lock().unwrap().calls.len()
+    }
+
+    /// The number of live per-call serialization locks. Should track
+    /// [`active_count`](Self::active_count); a gap is a **lock leak** — the
+    /// orphan-reject path that forgot to [`discard_orphan`](Self::discard_orphan)
+    /// (the `b2bua_store_locks` − `b2bua_store_calls` gap). Test/observability.
+    pub fn lock_count(&self) -> usize {
+        self.inner.lock().unwrap().locks.len()
     }
 
     /// Push the store's map lengths into the memory-attribution gauges (one

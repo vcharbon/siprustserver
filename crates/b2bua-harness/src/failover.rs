@@ -240,6 +240,15 @@ impl ReplicatedB2buaSut {
         self.core.as_ref().map(|c| c.active_calls()).unwrap_or(0)
     }
 
+    /// Live per-call serialization-lock count (`inner.locks.len()`). Should track
+    /// [`active_calls`](Self::active_calls); a residue after a call ends is the
+    /// orphan-reject lock leak — an in-dialog request that 481'd on the acting
+    /// backup / rebooted primary without releasing its per-call state. `0` while
+    /// crashed.
+    pub fn lock_count(&self) -> usize {
+        self.core.as_ref().map(|c| c.lock_count()).unwrap_or(0)
+    }
+
     /// Read a replicated body by `(role, primary, call_ref)` from this worker's
     /// repl store (introspection — assert a replica landed / was reclaimed).
     pub async fn get(

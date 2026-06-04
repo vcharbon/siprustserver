@@ -490,6 +490,24 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
             }
             None => {
                 maybe_reject_orphan(ctx, &event).await;
+                // ORPHAN TEARDOWN (leak fix). This event was dispatched into a
+                // per-call queue — one `bump_creation` (→ `b2bua_active_calls`) —
+                // and `process` took the per-call lock above, but it resolved to
+                // NO live call. Nothing will ever emit `RemoveCall`, and a per-call
+                // dispatch worker exits ONLY on poison (its sender lives in the
+                // queue map, so the channel never closes on its own). So the queue,
+                // its idle task, the unmatched creation, and the lock entry would
+                // ALL leak permanently — ~1 per orphan, which a mass-orphan failover
+                // (thousands of in-dialog BYEs hitting a rebooted worker whose calls
+                // were never reclaimed) turns into a multi-thousand `active_calls` +
+                // `store_locks` ratchet that never drains. Release the lock entry
+                // (no store mutation — `remove` would reverse-propagate a spurious
+                // delete) and poison the queue so the worker exits and `removals`
+                // balances `creations`. Drop our guard first so the poisoned worker
+                // never contends on this call_ref's (now removed) lock.
+                drop(_guard);
+                ctx.state.discard_orphan(&call_ref);
+                ctx.dispatcher.enqueue_poison(&call_ref);
                 return;
             }
         };

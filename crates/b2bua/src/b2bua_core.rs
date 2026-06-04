@@ -353,6 +353,12 @@ impl B2buaCore {
         self.ctx.state.active_count()
     }
 
+    /// Live per-call serialization-lock count (test/observability). Should track
+    /// [`active_calls`](Self::active_calls); a gap is the orphan-reject lock leak.
+    pub fn lock_count(&self) -> usize {
+        self.ctx.state.lock_count()
+    }
+
     /// Sample the store + replication map sizes into the memory-attribution
     /// gauges (`b2bua_store_*`, `b2bua_repl_meta_*`, `b2bua_repl_changelog_*`).
     /// Called on a slow cadence by the runner so a RSS climb can be pinned to a

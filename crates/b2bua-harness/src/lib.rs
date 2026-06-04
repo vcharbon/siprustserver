@@ -278,4 +278,19 @@ impl B2buaSut {
     pub fn metrics(&self) -> &B2buaMetrics {
         &self.metrics
     }
+
+    /// Ground-truth live call-map size (`inner.calls.len()`). An orphan-reject
+    /// (481) does NOT inflate this — it never inserts a call — so it is the wrong
+    /// lens for the orphan leak; use [`lock_count`](Self::lock_count) +
+    /// `metrics().creations_total()/removals_total()` for that.
+    pub fn active_calls(&self) -> usize {
+        self._core.active_calls()
+    }
+
+    /// Live per-call serialization-lock count. Should return to 0 once traffic
+    /// drains; a residue is the orphan-reject lock leak (one stranded lock per
+    /// in-dialog request that 481'd without tearing its per-call state down).
+    pub fn lock_count(&self) -> usize {
+        self._core.lock_count()
+    }
 }
