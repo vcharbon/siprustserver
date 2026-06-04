@@ -19,7 +19,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use repl_net::frame::Watermark;
-use repl_net::transport::{RealReplicationNetwork, ReplicationNetwork};
+use repl_net::transport::{
+    RealReplicationNetwork, ReplicationConnection, ReplicationListener, ReplicationNetwork,
+};
 use sip_clock::Clock;
 use tokio::sync::watch;
 
@@ -524,5 +526,391 @@ async fn mismatched_ordinal_silently_delivers_nothing() {
     assert!(
         backup.get_call(BAK, "w0", &call_ref).await.unwrap().is_none(),
         "backup holds no replica under an id mismatch"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// THROUGHPUT BENCH (manual; `--ignored`). Measures bootstrap re-hydration
+// ctx/s over real TCP, on a MULTI-THREAD runtime, with and without a concurrent
+// live-write storm on the SERVER — the only setup that exercises the real
+// bottleneck (finding #6: the single `meta` Mutex shared by serve_bootstrap's
+// per-body reads and live put_call/delete_call). On a current-thread runtime a
+// std Mutex is never contended (one task at a time, no lock held across await),
+// so the plain CI test cannot represent #6 — this bench is the representative
+// measurement that justifies (or refutes) a perf fix. Writers forward to a
+// dummy "w2" so they load w0's locks WITHOUT polluting w1's pri: count.
+//
+// Run: `cargo test -p b2bua --release repl::real_transport_tests::bench -- --ignored --nocapture`
+// ---------------------------------------------------------------------------
+async fn measure_bootstrap(
+    net: &RealReplicationNetwork,
+    clock: &Clock,
+    n: usize,
+    writers: usize,
+) -> (Duration, u64, u64) {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    let (w0, w0_addr) = spawn_primary("w0", net, clock).await;
+    let body = vec![0xABu8; 256];
+    for i in 0..n {
+        let cr = format!("w1|sync-{i}|tag");
+        w0.put_call(BAK, "w1", &cr, body.clone(), &[], 300_000, 1, &PutOpts::default())
+            .await
+            .unwrap();
+    }
+    let w1 = ReplicatingCallStore::with_changelog(
+        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
+        clock.clone(),
+    );
+
+    // Concurrent live-write storm on w0 (forwarded to a dummy peer so it never
+    // reaches w1) — pure contention on w0's meta/inner locks during the scan.
+    let stop = Arc::new(AtomicBool::new(false));
+    let writes = Arc::new(AtomicU64::new(0));
+    let mut handles = Vec::new();
+    for w in 0..writers {
+        let (w0, stop, writes) = (w0.clone(), stop.clone(), writes.clone());
+        handles.push(tokio::spawn(async move {
+            let live = vec![0xCDu8; 256];
+            let mut j = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                let cr = format!("w0|live-{w}-{j}|tag");
+                let _ = w0
+                    .put_call(PRI, "w0", &cr, live.clone(), &[], 300_000, 1, &forward_to("w2"))
+                    .await;
+                j += 1;
+                writes.fetch_add(1, Ordering::Relaxed);
+                if j % 64 == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }
+        }));
+    }
+
+    let started = tokio::time::Instant::now();
+    let (_cancel, metrics) = spawn_puller("w1", "w0", w0_addr, net, &w1);
+    let deadline = started + Duration::from_secs(120);
+    loop {
+        if w1.scan_call_refs(PRI, "w1").len() >= n {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("bench timed out: {}/{n}", w1.scan_call_refs(PRI, "w1").len());
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let elapsed = started.elapsed();
+    stop.store(true, Ordering::Relaxed);
+    for h in handles {
+        let _ = h.await;
+    }
+    (elapsed, metrics.repl_pull_applied_total(), writes.load(Ordering::Relaxed))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn bench_bootstrap_throughput_under_live_write_contention() {
+    const N: usize = 20_000;
+    const WRITERS: usize = 3;
+    let clock = Clock::test_at(0);
+    let net = RealReplicationNetwork::new();
+
+    let (e0, a0, _) = measure_bootstrap(&net, &clock, N, 0).await;
+    let (ec, ac, wc) = measure_bootstrap(&net, &clock, N, WRITERS).await;
+
+    let r0 = N as f64 / e0.as_secs_f64();
+    let rc = N as f64 / ec.as_secs_f64();
+    eprintln!("\n=== bootstrap re-hydration throughput (N={N}, real TCP, multi_thread) ===");
+    eprintln!("  no contention      : {r0:>9.0} ctx/s   ({N} in {e0:?}, applied={a0})");
+    eprintln!("  contention x{WRITERS}      : {rc:>9.0} ctx/s   ({N} in {ec:?}, applied={ac})");
+    eprintln!("  server absorbed {wc} concurrent live writes during the contended run");
+    eprintln!("  slowdown factor    : {:.2}x\n", r0 / rc);
+}
+
+// ---------------------------------------------------------------------------
+// LATENCY-INJECTING wrapper: adds a fixed per-`send` cost to model a real
+// network / a CPU-loaded send path (loopback's per-send cost is ~0, which hides
+// finding #4 — sequential one-await-send-per-body with no pipelining). Wraps
+// BOTH ends so serve_bootstrap's server-side sends pay the cost.
+// ---------------------------------------------------------------------------
+struct LatentNet {
+    inner: Arc<dyn ReplicationNetwork>,
+    send_cost: Duration,
+}
+struct LatentListener {
+    inner: Box<dyn repl_net::transport::ReplicationListener>,
+    send_cost: Duration,
+}
+struct LatentConn {
+    inner: Box<dyn ReplicationConnection>,
+    send_cost: Duration,
+}
+
+#[async_trait::async_trait]
+impl ReplicationNetwork for LatentNet {
+    async fn connect(
+        &self,
+        dst: SocketAddr,
+    ) -> Result<Box<dyn ReplicationConnection>, repl_net::transport::ConnectError> {
+        let inner = self.inner.connect(dst).await?;
+        Ok(Box::new(LatentConn { inner, send_cost: self.send_cost }))
+    }
+    async fn listen(
+        &self,
+        local: SocketAddr,
+    ) -> Result<Box<dyn repl_net::transport::ReplicationListener>, repl_net::transport::ListenError>
+    {
+        let inner = self.inner.listen(local).await?;
+        Ok(Box::new(LatentListener { inner, send_cost: self.send_cost }))
+    }
+}
+#[async_trait::async_trait]
+impl repl_net::transport::ReplicationListener for LatentListener {
+    async fn accept(&self) -> Option<Box<dyn ReplicationConnection>> {
+        let inner = self.inner.accept().await?;
+        Some(Box::new(LatentConn { inner, send_cost: self.send_cost }))
+    }
+    fn local_addr(&self) -> SocketAddr {
+        self.inner.local_addr()
+    }
+}
+#[async_trait::async_trait]
+impl ReplicationConnection for LatentConn {
+    async fn send(&self, frame: repl_net::Frame) -> Result<(), repl_net::transport::SendError> {
+        tokio::time::sleep(self.send_cost).await;
+        self.inner.send(frame).await
+    }
+    async fn send_batch(
+        &self,
+        frames: Vec<repl_net::Frame>,
+    ) -> Result<(), repl_net::transport::SendError> {
+        // One coalesced write/flush ⇒ one network round, regardless of how many
+        // frames it carries (the whole point of the batch).
+        tokio::time::sleep(self.send_cost).await;
+        self.inner.send_batch(frames).await
+    }
+    async fn recv(&self) -> Option<repl_net::Frame> {
+        self.inner.recv().await
+    }
+    fn peer_addr(&self) -> SocketAddr {
+        self.inner.peer_addr()
+    }
+    fn local_addr(&self) -> SocketAddr {
+        self.inner.local_addr()
+    }
+}
+
+/// Measure a cold bootstrap of `n` bodies over a transport with a fixed
+/// per-send cost. Returns wall time.
+async fn measure_bootstrap_latent(
+    base: &RealReplicationNetwork,
+    clock: &Clock,
+    n: usize,
+    send_cost: Duration,
+) -> Duration {
+    let net = LatentNet {
+        inner: Arc::new(base.clone()),
+        send_cost,
+    };
+    let changelog = Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000);
+    let w0 = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
+    let listener = net.listen(loopback()).await.unwrap();
+    let w0_addr = listener.local_addr();
+    tokio::spawn(ReplServer::new("w0", changelog, Arc::new(w0.clone())).run(listener));
+    let body = vec![0xABu8; 256];
+    for i in 0..n {
+        let cr = format!("w1|sync-{i}|tag");
+        w0.put_call(BAK, "w1", &cr, body.clone(), &[], 300_000, 1, &PutOpts::default())
+            .await
+            .unwrap();
+    }
+    let w1 = ReplicatingCallStore::with_changelog(
+        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
+        clock.clone(),
+    );
+    let metrics = B2buaMetrics::new();
+    let (puller, _status) = Puller::new_at(
+        "w0",
+        "w1",
+        w0_addr,
+        Arc::new(net) as Arc<dyn ReplicationNetwork>,
+        w1.clone(),
+        fast_config(),
+        Watermark::new(0, 0),
+        metrics,
+    );
+    let (_cancel, cancel_rx) = watch::channel(false);
+    tokio::spawn(async move { puller.run(cancel_rx).await });
+
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_secs(120);
+    loop {
+        if w1.scan_call_refs(PRI, "w1").len() >= n {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("latent bench timed out: {}/{n}", w1.scan_call_refs(PRI, "w1").len());
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    started.elapsed()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn bench_bootstrap_throughput_vs_send_latency() {
+    const N: usize = 3_000; // the production keyset size
+    let clock = Clock::test_at(0);
+    let base = RealReplicationNetwork::new();
+    eprintln!("\n=== bootstrap re-hydration vs per-send cost (N={N}, real TCP) ===");
+    for us in [0u64, 50, 100, 200, 500, 1000] {
+        let cost = Duration::from_micros(us);
+        let e = measure_bootstrap_latent(&base, &clock, N, cost).await;
+        let rate = N as f64 / e.as_secs_f64();
+        eprintln!("  send_cost {us:>4}us : {rate:>9.0} ctx/s   ({N} in {e:?})");
+    }
+    eprintln!();
+}
+
+// ---------------------------------------------------------------------------
+// ROUND-COUNTING wrapper: tallies network rounds (each `send` / `send_batch` =
+// one write+flush = one round). Lets a CI test assert the STRUCTURAL property
+// the latency bench proved necessary — a bootstrap of N bodies costs
+// O(N/chunk) rounds, not O(N) — deterministically, with no wall-clock.
+// ---------------------------------------------------------------------------
+struct CountingNet {
+    inner: Arc<dyn ReplicationNetwork>,
+    rounds: Arc<std::sync::atomic::AtomicU64>,
+}
+struct CountingListener {
+    inner: Box<dyn ReplicationListener>,
+    rounds: Arc<std::sync::atomic::AtomicU64>,
+}
+struct CountingConn {
+    inner: Box<dyn ReplicationConnection>,
+    rounds: Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[async_trait::async_trait]
+impl ReplicationNetwork for CountingNet {
+    async fn connect(
+        &self,
+        dst: SocketAddr,
+    ) -> Result<Box<dyn ReplicationConnection>, repl_net::transport::ConnectError> {
+        let inner = self.inner.connect(dst).await?;
+        Ok(Box::new(CountingConn { inner, rounds: self.rounds.clone() }))
+    }
+    async fn listen(
+        &self,
+        local: SocketAddr,
+    ) -> Result<Box<dyn ReplicationListener>, repl_net::transport::ListenError> {
+        let inner = self.inner.listen(local).await?;
+        Ok(Box::new(CountingListener { inner, rounds: self.rounds.clone() }))
+    }
+}
+#[async_trait::async_trait]
+impl ReplicationListener for CountingListener {
+    async fn accept(&self) -> Option<Box<dyn ReplicationConnection>> {
+        let inner = self.inner.accept().await?;
+        Some(Box::new(CountingConn { inner, rounds: self.rounds.clone() }))
+    }
+    fn local_addr(&self) -> SocketAddr {
+        self.inner.local_addr()
+    }
+}
+#[async_trait::async_trait]
+impl ReplicationConnection for CountingConn {
+    async fn send(&self, frame: repl_net::Frame) -> Result<(), repl_net::transport::SendError> {
+        self.rounds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.send(frame).await
+    }
+    async fn send_batch(
+        &self,
+        frames: Vec<repl_net::Frame>,
+    ) -> Result<(), repl_net::transport::SendError> {
+        self.rounds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.send_batch(frames).await
+    }
+    async fn recv(&self) -> Option<repl_net::Frame> {
+        self.inner.recv().await
+    }
+    fn peer_addr(&self) -> SocketAddr {
+        self.inner.peer_addr()
+    }
+    fn local_addr(&self) -> SocketAddr {
+        self.inner.local_addr()
+    }
+}
+
+// Representative CI gate for finding #4 (deterministic, no wall-clock). The
+// latency bench proves a per-frame flush collapses bootstrap to ~1/send_cost on
+// any real link; batching is what keeps it above the 5k ctx/s floor. This pins
+// the structural property that guarantees it: a cold bootstrap of N bodies must
+// coalesce into O(N/chunk) network rounds, NOT O(N). Pre-fix (one send+flush
+// per body) the server alone emitted N rounds; with batching it emits
+// ~ceil(N/chunk) + the handful of control frames. Asserting a tight round
+// budget fails loudly if anyone reverts to per-frame sends.
+#[tokio::test]
+async fn bootstrap_coalesces_into_few_network_rounds() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    const N: usize = 2_000;
+    let clock = Clock::test_at(0);
+    let rounds = Arc::new(AtomicU64::new(0));
+    let net = CountingNet {
+        inner: Arc::new(RealReplicationNetwork::new()),
+        rounds: rounds.clone(),
+    };
+
+    // Primary w0 holds N static bak:w1 bodies; serve over the counting net.
+    let changelog = Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000);
+    let w0 = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
+    let listener = net.listen(loopback()).await.unwrap();
+    let w0_addr = listener.local_addr();
+    tokio::spawn(ReplServer::new("w0", changelog, Arc::new(w0.clone())).run(listener));
+    let body = vec![0xABu8; 256];
+    for i in 0..N {
+        let cr = format!("w1|sync-{i}|tag");
+        w0.put_call(BAK, "w1", &cr, body.clone(), &[], 300_000, 1, &PutOpts::default())
+            .await
+            .unwrap();
+    }
+
+    // Cold w1 bootstraps over the counting net.
+    let w1 = ReplicatingCallStore::with_changelog(
+        Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
+        clock.clone(),
+    );
+    let (puller, _status) = Puller::new_at(
+        "w0",
+        "w1",
+        w0_addr,
+        Arc::new(net) as Arc<dyn ReplicationNetwork>,
+        w1.clone(),
+        fast_config(),
+        Watermark::new(0, 0),
+        B2buaMetrics::new(),
+    );
+    let (_cancel, cancel_rx) = watch::channel(false);
+    tokio::spawn(async move { puller.run(cancel_rx).await });
+
+    // Wait for full re-hydration.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if w1.scan_call_refs(PRI, "w1").len() >= N {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "bootstrap did not complete");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // CHUNK is 128 ⇒ ceil(2000/128) = 16 batched body-rounds, plus the terminal
+    // Noop, the two PullRequests, and the steady-state Noop(s): ~20 total. Budget
+    // 64 leaves generous headroom for control frames yet is ~30x below the 2000
+    // a per-frame-flush regression would emit.
+    let total = rounds.load(Ordering::Relaxed);
+    assert!(
+        total < 64,
+        "bootstrap of {N} bodies used {total} network rounds — expected O(N/chunk) (~20); \
+         a per-frame send+flush regression would use ~{N}. Batching is not in effect.",
     );
 }

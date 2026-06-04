@@ -242,15 +242,21 @@ impl ReplServer {
         };
 
         // (2) stream bodies in batches; each body read is a short, lock-dropping
-        // call (no lock held across the send).
+        // call (no lock held across the send). We read a whole `chunk` of bodies
+        // then push them in ONE `send_batch` — a single write + flush per chunk
+        // rather than per body. The per-frame flush was the bootstrap throughput
+        // wall on any non-loopback link (each tiny body became its own
+        // write+flush syscall / TCP segment, fully serialised on the write lock);
+        // batching amortises it ~`chunk`-fold. The wire is unchanged.
         for group in keys.chunks(batch) {
+            let mut frames = Vec::with_capacity(group.len());
             for key in group {
                 let body = self
                     .source
                     .read_body(PartitionRole::Backup, caller, key)
                     .await;
-                let frame = match (body, self.source.read_meta(key)) {
-                    (Some(body), Some(meta)) => Frame::Data {
+                match (body, self.source.read_meta(key)) {
+                    (Some(body), Some(meta)) => frames.push(Frame::Data {
                         at: w,
                         op: Op::Create,
                         partition: Partition::Pri,
@@ -259,7 +265,7 @@ impl ReplServer {
                         body_ttl_ms: meta.body_ttl_ms,
                         indexes: meta.indexes,
                         body: Some(body),
-                    },
+                    }),
                     // Body vanished between the keyset snapshot and this read (TTL
                     // evict / concurrent delete) — the call genuinely ended. SKIP
                     // it; do NOT synthesise a `Pri` Delete. On the reclaiming node
@@ -270,9 +276,9 @@ impl ReplServer {
                     // unreadable (a non-expired body always reads), so skipping
                     // loses nothing real.
                     _ => continue,
-                };
-                conn.send(frame).await.map_err(|_| ())?;
+                }
             }
+            conn.send_batch(frames).await.map_err(|_| ())?;
         }
 
         // (3) TERMINAL marker — end of bootstrap; carries W (scan-start head) so

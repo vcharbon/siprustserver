@@ -139,6 +139,25 @@ impl ReplicationConnection for RealConnection {
         Ok(())
     }
 
+    async fn send_batch(&self, frames: Vec<Frame>) -> Result<(), SendError> {
+        if frames.is_empty() {
+            return Ok(());
+        }
+        // Encode every frame (each with its own length prefix) into ONE buffer,
+        // then a SINGLE write + flush — so a 128-body bootstrap chunk costs one
+        // syscall / one flush / one write-lock acquisition instead of 128. The
+        // bytes on the wire are byte-for-byte identical to sending them
+        // individually, so the receiver's framed `recv` is unchanged.
+        let mut buf = Vec::new();
+        for frame in &frames {
+            buf.extend_from_slice(&frame_with_len_prefix(&encode_frame(frame)));
+        }
+        let mut w = self.write.lock().await;
+        w.write_all(&buf).await.map_err(|e| classify_write(&e))?;
+        w.flush().await.map_err(|e| classify_write(&e))?;
+        Ok(())
+    }
+
     async fn recv(&self) -> Option<Frame> {
         let mut rs = self.read.lock().await;
         loop {

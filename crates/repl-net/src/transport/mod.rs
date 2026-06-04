@@ -123,6 +123,23 @@ pub trait ReplicationConnection: Send + Sync {
     /// `Err(SendError::Closed)` once the connection is cut.
     async fn send(&self, frame: Frame) -> Result<(), SendError>;
 
+    /// Send several frames as ONE unit: encode them all, then a single write +
+    /// flush. The **wire is unchanged** — each frame keeps its own length
+    /// prefix, so any receiver decodes the batch exactly as it would the same
+    /// frames sent one-by-one; this only amortises the per-frame write/flush
+    /// syscall (and, on a real socket, the per-segment network overhead and the
+    /// serialised write-lock acquisition) across the whole batch. The default
+    /// loops [`send`](Self::send) (correct, unoptimised); the real TCP transport
+    /// overrides it to coalesce. Used by the bulk bootstrap scan, where
+    /// hundreds–thousands of small bodies stream back-to-back and a per-frame
+    /// flush collapses throughput on any non-loopback link.
+    async fn send_batch(&self, frames: Vec<Frame>) -> Result<(), SendError> {
+        for frame in frames {
+            self.send(frame).await?;
+        }
+        Ok(())
+    }
+
     /// Await the next inbound frame. `None` on a clean close / cut.
     async fn recv(&self) -> Option<Frame>;
 
