@@ -19,6 +19,7 @@ enum TerminateOp {
         indexes: Vec<String>,
         ttl_ms: i64,
         call_gen: i64,
+        call_bgen: i64,
         opts: PutOpts,
     },
     Delete {
@@ -55,6 +56,7 @@ impl BufferedTerminateWriter {
         indexes: Vec<String>,
         ttl_ms: i64,
         call_gen: i64,
+        call_bgen: i64,
         opts: PutOpts,
     ) {
         let _ = self.tx.try_send(TerminateOp::Put {
@@ -65,6 +67,7 @@ impl BufferedTerminateWriter {
             indexes,
             ttl_ms,
             call_gen,
+            call_bgen,
             opts,
         });
     }
@@ -98,10 +101,14 @@ async fn drain(store: Arc<dyn CallStore>, mut rx: mpsc::Receiver<TerminateOp>) {
                 indexes,
                 ttl_ms,
                 call_gen,
+                call_bgen,
                 opts,
             } => {
                 let _ = store
-                    .put_call(role, &primary, &call_ref, body, &indexes, ttl_ms, call_gen, &opts)
+                    .put_call(
+                        role, &primary, &call_ref, body, &indexes, ttl_ms, call_gen, call_bgen,
+                        &opts,
+                    )
                     .await;
             }
             TerminateOp::Delete {

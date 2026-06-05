@@ -571,11 +571,25 @@ pub fn generate_ack_for_2xx(
     let (request_uri, route_values) = route_for_in_dialog(&remote_target, &dialog.route_set);
     let via = opts.via.as_ref().expect("ViaSpec required");
 
+    // RFC 3261 §12.2.1.1: the To header carries the remote tag — but a dialog
+    // taken over mid-confirm (a reactive failover hydrate of a replica copy whose
+    // relayed 2xx had not yet established the remote tag) can have an EMPTY
+    // `remote_tag`. Emitting `;tag=` (empty value) builds a malformed header that
+    // `hydrate_request` rejects → panic ("Empty To tag parameter"). Skip the tag
+    // when absent so the ACK is at least well-formed (mirrors the request
+    // generator at the top of this file; reachable via reactive mid-confirm
+    // takeover → relayed-2xx ACK in `rules::relay`).
+    let to_value = if dialog.remote_tag.is_empty() {
+        wrap_uri(&dialog.remote_uri)
+    } else {
+        format!("{};tag={}", wrap_uri(&dialog.remote_uri), dialog.remote_tag)
+    };
+
     let mut headers: Vec<SipHeader> = vec![
         h("Via", build_via_value(via)),
         h("Max-Forwards", "70"),
         h("From", format!("{};tag={}", wrap_uri(&dialog.local_uri), dialog.local_tag)),
-        h("To", format!("{};tag={}", wrap_uri(&dialog.remote_uri), dialog.remote_tag)),
+        h("To", to_value),
         h("Call-ID", dialog.call_id.clone()),
         h("CSeq", format!("{invite_cseq} ACK")),
     ];

@@ -142,7 +142,7 @@ async fn reboot_recovery_reclaims_pri_partition() {
     for (i, body) in bodies.iter().enumerate() {
         let c = cref("A", &i.to_string());
         a.store
-            .put_call(PRI, "A", &c, body.as_bytes().to_vec(), &[], 0, 1, &fwd("B"))
+            .put_call(PRI, "A", &c, body.as_bytes().to_vec(), &[], 0, 1, 0, &fwd("B"))
             .await
             .unwrap();
     }
@@ -182,7 +182,9 @@ async fn reboot_recovery_reclaims_pri_partition() {
     // The tail keeps A current: B reverse-mutates a call → A picks it up.
     let c0 = cref("A", "0");
     b.store
-        .put_call(BAK, "A", &c0, b"tail-updated".to_vec(), &[], 0, 9, &rev("A"))
+        // Reverse/takeover mutation bumps the BACKUP counter b (p stays at A's
+        // branch point 1): (1,0) → (1,1). p_in==sp & b_in>sb ⇒ A applies.
+        .put_call(BAK, "A", &c0, b"tail-updated".to_vec(), &[], 0, 1, 1, &rev("A"))
         .await
         .unwrap();
     tick(200).await;
@@ -216,14 +218,15 @@ async fn concurrent_mutation_during_scan_keeps_newest() {
     // A forward-replicates 1 call (call_gen 1) to B.
     let c = cref("A", "0");
     a.store
-        .put_call(PRI, "A", &c, b"v1".to_vec(), &[], 0, 1, &fwd("B"))
+        .put_call(PRI, "A", &c, b"v1".to_vec(), &[], 0, 1, 0, &fwd("B"))
         .await
         .unwrap();
     tick(100).await;
 
     // A reboots empty; bootstrap from B begins. BEFORE the tail catches up,
-    // B (acting-backup) reverse-mutates the call with a HIGHER call_gen (2),
-    // which bumps changelog-for-A (partition=Pri).
+    // B (acting-backup) reverse-mutates the call bumping the BACKUP counter b
+    // (p stays at A's branch point 1): (1,0) → (1,1), which bumps changelog-for-A
+    // (partition=Pri).
     let a2_store = ReplicatingCallStore::new(2, clock.clone());
     let a2_sup = supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)]);
     a2_sup.start(Arc::new(SimulatedMembership::with_clock(
@@ -232,18 +235,19 @@ async fn concurrent_mutation_during_scan_keeps_newest() {
     )));
     // Let bootstrap exchange begin / complete the pre-seed.
     tick(50).await;
-    // Concurrent reverse mutation on B with a higher call_gen.
+    // Concurrent reverse mutation on B at (1,1).
     b.store
-        .put_call(BAK, "A", &c, b"v2-newer".to_vec(), &[], 0, 2, &rev("A"))
+        .put_call(BAK, "A", &c, b"v2-newer".to_vec(), &[], 0, 1, 1, &rev("A"))
         .await
         .unwrap();
     tick(300).await;
 
-    // A converges on the NEWEST body (v2), not the older bootstrap copy.
+    // A converges on the NEWEST body (v2), not the older bootstrap copy — the
+    // (p,b) reverse rule (p unchanged, b advanced) plus tail re-delivery.
     assert_eq!(
         a2_store.get_call(PRI, "A", &c).await.unwrap().as_deref(),
         Some(&b"v2-newer"[..]),
-        "A ends with the newest body; LWW by call_gen, tail re-delivers"
+        "A ends with the newest body; (p,b) reverse rule, tail re-delivers"
     );
 }
 
@@ -268,7 +272,7 @@ async fn terminal_handoff_switches_to_replog_same_connection() {
     tick(50).await;
     let c0 = cref("A", "0");
     a.store
-        .put_call(PRI, "A", &c0, b"seed".to_vec(), &[], 0, 1, &fwd("B"))
+        .put_call(PRI, "A", &c0, b"seed".to_vec(), &[], 0, 1, 0, &fwd("B"))
         .await
         .unwrap();
     tick(100).await;
@@ -288,7 +292,7 @@ async fn terminal_handoff_switches_to_replog_same_connection() {
     // same connection switched to Replog(since=W), the tail must deliver it.
     let c1 = cref("A", "1");
     b.store
-        .put_call(BAK, "A", &c1, b"post-scan".to_vec(), &[], 0, 1, &rev("A"))
+        .put_call(BAK, "A", &c1, b"post-scan".to_vec(), &[], 0, 1, 0, &rev("A"))
         .await
         .unwrap();
     tick(200).await;
@@ -421,7 +425,7 @@ async fn lazy_batch_scan_interleaved_with_put_converges() {
     for i in 0..n {
         let c = cref("A", &i.to_string());
         a.store
-            .put_call(PRI, "A", &c, format!("b{i}").into_bytes(), &[], 0, 1, &fwd("B"))
+            .put_call(PRI, "A", &c, format!("b{i}").into_bytes(), &[], 0, 1, 0, &fwd("B"))
             .await
             .unwrap();
     }
@@ -438,7 +442,8 @@ async fn lazy_batch_scan_interleaved_with_put_converges() {
     tick(50).await;
     let extra = cref("A", "0");
     b.store
-        .put_call(BAK, "A", &extra, b"concurrent".to_vec(), &[], 0, 5, &rev("A"))
+        // Reverse/takeover bumps b (p stays at the branch point 1): (1,0) → (1,1).
+        .put_call(BAK, "A", &extra, b"concurrent".to_vec(), &[], 0, 1, 1, &rev("A"))
         .await
         .unwrap();
     tick(600).await;
@@ -489,7 +494,7 @@ async fn empty_bak_partition_immediate_terminal_noop() {
     // Tails normally afterward: B reverse-mutates one of A's calls → A picks up.
     let c = cref("A", "7");
     b.store
-        .put_call(BAK, "A", &c, b"later".to_vec(), &[], 0, 1, &rev("A"))
+        .put_call(BAK, "A", &c, b"later".to_vec(), &[], 0, 1, 0, &rev("A"))
         .await
         .unwrap();
     tick(200).await;
@@ -571,7 +576,7 @@ async fn cold_start_bootstraps_after_hard_timeout_reconnect() {
     let b_changelog = Changelog::new(1, clock.clone());
     let b_store = ReplicatingCallStore::with_changelog(b_changelog.clone(), clock.clone());
     b_store
-        .put_call(BAK, "A", &ca, b"v1".to_vec(), &[], 0, 1, &PutOpts::default())
+        .put_call(BAK, "A", &ca, b"v1".to_vec(), &[], 0, 1, 0, &PutOpts::default())
         .await
         .unwrap();
     let b_listener = net.listen(b_addr).await.unwrap();

@@ -44,11 +44,11 @@ fn addr(n: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 9800 + n))
 }
 
-/// Forward (primary→backup) put options targeting `peer`.
-fn fwd(peer: &str) -> PutOpts {
+/// Reverse (acting-backup→primary) put options targeting `peer` (the primary).
+fn rev(peer: &str) -> PutOpts {
     PutOpts {
         peer: Some(peer.to_string()),
-        direction: Some(PropagateDirection::Forward),
+        direction: Some(PropagateDirection::Reverse),
     }
 }
 
@@ -163,7 +163,8 @@ async fn takeover_then_reclaim_keeps_backup_mutation() {
         b"v1-from-A".to_vec(),
         &[],
         0,
-        1,
+        1, // p = 1 (primary create)
+        0, // b = 0 (no takeover yet)
         &resolver_to("B"),
     )
     .await
@@ -187,9 +188,10 @@ async fn takeover_then_reclaim_keeps_backup_mutation() {
     // A CRASHES: stop its supervisor's relevance (we just won't reboot the old
     // store; B is now acting-backup for the failed-over dialog).
 
-    // B takes over and MUTATES the call at call_gen=2 through the WRITE policy.
-    // B does NOT own "A|.." → policy picks (A, Reverse) → store bak:A, propagate
-    // Reverse → changelog-for-A bumps partition=Pri.
+    // B takes over and MUTATES the call through the WRITE policy. B does NOT own
+    // "A|.." → policy picks (A, Reverse) → store bak:A, propagate Reverse →
+    // changelog-for-A bumps partition=Pri. Under ADR-0014 B bumps only its OWN
+    // counter: `(p,b)` goes 1,0 → 1,1 (p stays at A's branch point 1).
     let plan_b = flush_replicated(
         &b.store,
         "B",
@@ -197,7 +199,8 @@ async fn takeover_then_reclaim_keeps_backup_mutation() {
         b"v2-takeover-by-B".to_vec(),
         &[],
         0,
-        2,
+        1, // p = 1 (A's branch point, untouched by B)
+        1, // b = 1 (B's first takeover mutation)
         &resolver_to("A"),
     )
     .await
@@ -224,70 +227,82 @@ async fn takeover_then_reclaim_keeps_backup_mutation() {
     assert_eq!(
         a2_store.get_call(PRI, "A", &c).await.unwrap().as_deref(),
         Some(&b"v2-takeover-by-B"[..]),
-        "rebooted A reclaims the acting-backup's call_gen=2 mutation (LWW), not the stale gen=1"
+        "rebooted A reclaims the acting-backup's (1,1) mutation, not the stale (1,0)"
     );
     assert_eq!(
-        a2_store.current_call_gen(PRI, "A", &c),
-        Some(2),
-        "reclaimed at call_gen=2"
+        a2_store.current_cv(PRI, "A", &c),
+        Some((1, 1)),
+        "reclaimed at version vector (p=1, b=1)"
     );
     assert!(a2_sup.bootstrap_complete("B"), "A bootstrap-complete from B");
 }
 
 // ---------------------------------------------------------------------------
-// callGen LWW ordering: a higher gen, then a stale lower gen for the same ref
-// (out-of-order / reconnect replay) — the higher gen survives; the lower never
-// overwrites; equal-gen re-delivery is a no-op.
+// (p,b) REVERSE ordering (ADR-0014): the primary applies a backup reverse-flush
+// iff it has not itself moved past the backup's branch point (`p_in == p_cur`)
+// AND the backup genuinely advanced (`b_in > b_cur`). A higher `b` wins; a stale
+// lower `b` never overwrites; an equal `(p,b)` re-delivery is a no-op. (This is
+// the meaningful LWW now: a FORWARD primary→backup update always applies — the
+// follower defers to authority — with the watermark apply-gate handling order.)
 // ---------------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]
-async fn callgen_lww_ordering_high_wins_low_and_equal_noop() {
+async fn reverse_pb_high_b_wins_low_and_equal_noop() {
     let clock = Clock::test_at(0);
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let a = Node::spawn("A", addr(11), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(12), 1, &net, &clock).await;
-    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)]);
-    b_sup.start(one_peer("A", &clock));
+    // A pulls B so A APPLIES B's reverse-flushes (partition=Pri for A's own ref).
+    let a_sup = supervisor_for("A", &a.store, &net, &clock, vec![("B".into(), b.addr)]);
+    a_sup.start(one_peer("B", &clock));
     tick(50).await;
 
     let c = cref("A", "1");
 
-    // A pushes call_gen=3 (the eventual winner).
+    // A holds its own pre-crash copy at (p=1, b=0).
     a.store
-        .put_call(PRI, "A", &c, b"gen3".to_vec(), &[], 0, 3, &fwd("B"))
+        .put_call(PRI, "A", &c, b"a-v1".to_vec(), &[], 0, 1, 0, &PutOpts::default())
+        .await
+        .unwrap();
+
+    // B (acting-backup) reverse-flushes a genuine advance (1,2) — b jumped past
+    // A's stored b=0 with p unchanged → A applies it.
+    b.store
+        .put_call(BAK, "A", &c, b"b2".to_vec(), &[], 0, 1, 2, &rev("A"))
         .await
         .unwrap();
     tick(100).await;
     assert_eq!(
-        b.store.get_call(BAK, "A", &c).await.unwrap().as_deref(),
-        Some(&b"gen3"[..]),
-        "B holds gen3"
+        a.store.get_call(PRI, "A", &c).await.unwrap().as_deref(),
+        Some(&b"b2"[..]),
+        "A applies the backup's genuine advance (1,2)"
     );
 
-    // A pushes a STALE call_gen=2 for the same ref (e.g. out-of-order replay).
-    // The changelog bumps but B's LWW apply-gate skips the body write.
-    a.store
-        .put_call(PRI, "A", &c, b"gen2-stale".to_vec(), &[], 0, 2, &fwd("B"))
+    // B reverse-flushes a STALE lower b (1,1): `b_in=1 > b_cur=2` is false → A
+    // keeps its own (1,2). (Changelog still bumps; the (p,b) rule rejects it.)
+    b.store
+        .put_call(BAK, "A", &c, b"b1-stale".to_vec(), &[], 0, 1, 1, &rev("A"))
         .await
         .unwrap();
     tick(100).await;
     assert_eq!(
-        b.store.get_call(BAK, "A", &c).await.unwrap().as_deref(),
-        Some(&b"gen3"[..]),
-        "lower call_gen=2 must NOT overwrite the higher gen3"
+        a.store.get_call(PRI, "A", &c).await.unwrap().as_deref(),
+        Some(&b"b2"[..]),
+        "a stale lower b must NOT overwrite the higher (1,2)"
     );
 
-    // Equal-gen (3) re-delivery is a no-op: same body, no regression.
-    a.store
-        .put_call(PRI, "A", &c, b"gen3-again".to_vec(), &[], 0, 3, &fwd("B"))
+    // Equal (1,2) re-delivery is a no-op: `b_in > b_cur` is false.
+    b.store
+        .put_call(BAK, "A", &c, b"b2-again".to_vec(), &[], 0, 1, 2, &rev("A"))
         .await
         .unwrap();
     tick(100).await;
     assert_eq!(
-        b.store.get_call(BAK, "A", &c).await.unwrap().as_deref(),
-        Some(&b"gen3"[..]),
-        "equal call_gen re-delivery is a no-op (body write skipped)"
+        a.store.get_call(PRI, "A", &c).await.unwrap().as_deref(),
+        Some(&b"b2"[..]),
+        "equal (1,2) re-delivery is a no-op"
     );
+    assert_eq!(a.store.current_cv(PRI, "A", &c), Some((1, 2)));
 }
 
 // ---------------------------------------------------------------------------
@@ -309,16 +324,16 @@ async fn reverse_while_primary_unreachable_reclaimed_on_reconnect() {
     tick(50).await;
 
     let c = cref("A", "1");
-    // A forward-replicates call_gen=1.
-    flush_replicated(&a.store, "A", &c, b"v1".to_vec(), &[], 0, 1, &resolver_to("B"))
+    // A forward-replicates (p=1, b=0).
+    flush_replicated(&a.store, "A", &c, b"v1".to_vec(), &[], 0, 1, 0, &resolver_to("B"))
         .await
         .unwrap();
     tick(100).await;
 
     // A is DOWN (its reclaiming incarnation has not started pulling yet). While A
-    // is unreachable, B (acting-backup) takes over: mutate call_gen=2 via the
+    // is unreachable, B (acting-backup) takes over: mutate to (p=1, b=1) via the
     // policy → Reverse → changelog-for-A partition=Pri.
-    flush_replicated(&b.store, "B", &c, b"v2-while-A-down".to_vec(), &[], 0, 2, &resolver_to("A"))
+    flush_replicated(&b.store, "B", &c, b"v2-while-A-down".to_vec(), &[], 0, 1, 1, &resolver_to("A"))
         .await
         .unwrap();
     tick(100).await;
@@ -339,7 +354,7 @@ async fn reverse_while_primary_unreachable_reclaimed_on_reconnect() {
     // the retained-W tail must still deliver the newest body.
     net.apply_fault(Fault::Partition { a: b.addr, b: a.addr });
     tick(50).await;
-    flush_replicated(&b.store, "B", &c, b"v3-during-cut".to_vec(), &[], 0, 3, &resolver_to("A"))
+    flush_replicated(&b.store, "B", &c, b"v3-during-cut".to_vec(), &[], 0, 1, 2, &resolver_to("A"))
         .await
         .unwrap();
     tick(50).await;
@@ -376,10 +391,10 @@ async fn bidirectional_coexistence_converges_independently() {
     let call_x = cref("A", "X"); // A's call → forward to B.
     let call_y = cref("B", "Y"); // B's call → forward to A.
 
-    flush_replicated(&a.store, "A", &call_x, b"x1".to_vec(), &[], 0, 1, &resolver_to("B"))
+    flush_replicated(&a.store, "A", &call_x, b"x1".to_vec(), &[], 0, 1, 0, &resolver_to("B"))
         .await
         .unwrap();
-    flush_replicated(&b.store, "B", &call_y, b"y1".to_vec(), &[], 0, 1, &resolver_to("A"))
+    flush_replicated(&b.store, "B", &call_y, b"y1".to_vec(), &[], 0, 1, 0, &resolver_to("A"))
         .await
         .unwrap();
     tick(150).await;
@@ -397,8 +412,8 @@ async fn bidirectional_coexistence_converges_independently() {
     );
 
     // Now B "crashes" for callY: A takes over callY via the acting-backup policy
-    // (A does NOT own "B|.." → Reverse → propagate to B). call_gen=2.
-    let plan = flush_replicated(&a.store, "A", &call_y, b"y2-takeover".to_vec(), &[], 0, 2, &resolver_to("B"))
+    // (A does NOT own "B|.." → Reverse → propagate to B). A bumps only b: (1,0)→(1,1).
+    let plan = flush_replicated(&a.store, "A", &call_y, b"y2-takeover".to_vec(), &[], 0, 1, 1, &resolver_to("B"))
         .await
         .unwrap();
     assert_eq!(plan.role, PartitionRole::Backup);
@@ -418,7 +433,7 @@ async fn bidirectional_coexistence_converges_independently() {
         Some(&b"y2-takeover"[..]),
         "callY takeover reverse-propagated to B's pri:B"
     );
-    assert_eq!(b.store.current_call_gen(PRI, "B", &call_y), Some(2));
+    assert_eq!(b.store.current_cv(PRI, "B", &call_y), Some((1, 1)));
 }
 
 // ---------------------------------------------------------------------------
@@ -437,17 +452,17 @@ async fn convergence_after_takeover_and_reboot_highest_gen() {
     tick(50).await;
 
     let c = cref("A", "1");
-    flush_replicated(&a.store, "A", &c, b"g1".to_vec(), &[], 0, 1, &resolver_to("B"))
+    flush_replicated(&a.store, "A", &c, b"g1".to_vec(), &[], 0, 1, 0, &resolver_to("B"))
         .await
         .unwrap();
     tick(100).await;
 
-    // B takes over twice (gen2 then gen3), reverse-propagating each.
-    flush_replicated(&b.store, "B", &c, b"g2".to_vec(), &[], 0, 2, &resolver_to("A"))
+    // B takes over twice, bumping only its own counter b: (1,0)→(1,1)→(1,2).
+    flush_replicated(&b.store, "B", &c, b"g2".to_vec(), &[], 0, 1, 1, &resolver_to("A"))
         .await
         .unwrap();
     tick(50).await;
-    flush_replicated(&b.store, "B", &c, b"g3".to_vec(), &[], 0, 3, &resolver_to("A"))
+    flush_replicated(&b.store, "B", &c, b"g3".to_vec(), &[], 0, 1, 2, &resolver_to("A"))
         .await
         .unwrap();
     tick(100).await;
@@ -461,11 +476,11 @@ async fn convergence_after_takeover_and_reboot_highest_gen() {
     // Convergence invariant: both nodes agree on the body at the highest gen (3).
     let a_body = a2_store.get_call(PRI, "A", &c).await.unwrap();
     let b_body = b.store.get_call(BAK, "A", &c).await.unwrap();
-    assert_eq!(a_body.as_deref(), Some(&b"g3"[..]), "A converged at gen3");
-    assert_eq!(b_body.as_deref(), Some(&b"g3"[..]), "B holds gen3");
+    assert_eq!(a_body.as_deref(), Some(&b"g3"[..]), "A converged at (1,2)/g3");
+    assert_eq!(b_body.as_deref(), Some(&b"g3"[..]), "B holds (1,2)/g3");
     assert_eq!(a_body, b_body, "A and B agree on the call body");
-    assert_eq!(a2_store.current_call_gen(PRI, "A", &c), Some(3));
-    assert_eq!(b.store.current_call_gen(BAK, "A", &c), Some(3));
+    assert_eq!(a2_store.current_cv(PRI, "A", &c), Some((1, 2)));
+    assert_eq!(b.store.current_cv(BAK, "A", &c), Some((1, 2)));
     assert!(a2_sup.bootstrap_complete("B"));
 }
 

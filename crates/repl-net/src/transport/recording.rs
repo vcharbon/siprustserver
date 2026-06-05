@@ -259,6 +259,7 @@ mod tests {
             partition: crate::Partition::Bak,
             call_ref: "p|c1|t".into(),
             call_gen: 1,
+            call_bgen: 0,
             body_ttl_ms: 5000,
             indexes: vec!["i".into()],
             body: Some(StdArc::from(&b"body"[..])),

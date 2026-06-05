@@ -44,20 +44,14 @@ struct Inner {
     repl_backup_held: AtomicU64, // gauge: replicas currently held as backup
     repl_takeover_resolved: AtomicU64,
     repl_takeover_hydrated: AtomicU64,
-    // X11 fail-back: `reclaimed` = calls a rebooted primary re-materialised into
-    // its live map (active reclaim); `handback` = ghost-backup takeover copies a
-    // backup deactivated on a primary's `Deactivate`. After a kill_worker+reclaim,
-    // `handback` ≈ duplicates released and the active/sipp gap reaps to ~0.
+    // Fail-back (ADR-0011 X11 / ADR-0014): `reclaimed` = calls a rebooted primary
+    // re-materialised into its live map (active reclaim); `self_release` = acting-
+    // backup takeover copies the backup *self-released* once the transaction(s) it
+    // served reached a terminal state (ADR-0014 — replaces the `Deactivate`
+    // handback). After a kill_worker+reclaim, `self_release` ≈ takeover copies shed
+    // and the active/sipp gap reaps to ~0.
     repl_reclaimed: AtomicU64,
-    repl_handback: AtomicU64,
-    // X11 EAGER takeover: a survivor materialising a dead peer's `bak:` partition
-    // into its live map on the peer-`Removed` membership delta — the death-driven
-    // analogue of `takeover_hydrated` (which is request-driven). This is what keeps
-    // a QUIESCENT long-hold dialog alive after its primary is killed: nothing
-    // inbound ever arrives to trigger the lazy hydrate, so the survivor must reclaim
-    // it eagerly. Pairs with `handback` (the rebooted primary later reclaims + the
-    // survivor hands its eager copy back → exactly one owner).
-    repl_eager_takeover: AtomicU64,
+    repl_self_release: AtomicU64,
     // Memory-attribution gauges (sampled, not counter-derived). `store_calls` is
     // the TRUE live call-map length — compare to `active_calls`
     // (creations-removals); a divergence localises a store-side leak the counter
@@ -71,8 +65,9 @@ struct Inner {
     store_takeover_at: AtomicU64,
     // Replicating-store sizes: `repl_meta_total` = all replica metadata entries
     // this node holds; `repl_meta_backup` = the BACKUP-partition subset (the
-    // ghost-backup takeover copies the X11 Deactivate handback must release — if
-    // this climbs unbounded after failovers, handback isn't reaping). The
+    // replicas this node holds for its peers; a backup self-releases its *live*
+    // takeover copy on transaction completion but KEEPS the replica until its
+    // primary deletes it, so this tracks resident backup bodies, ADR-0014). The
     // changelog gauges are the outbound replication buffer depth (entries across
     // peers + live peer count); a peer whose entries grow without draining
     // (slow/dead subscriber) is an outbound-side leak distinct from the call map.
@@ -138,8 +133,7 @@ impl B2buaMetrics {
     counter!(bump_repl_takeover_resolved, repl_takeover_resolved_total, repl_takeover_resolved);
     counter!(bump_repl_takeover_hydrated, repl_takeover_hydrated_total, repl_takeover_hydrated);
     counter!(bump_repl_reclaimed, repl_reclaimed_total, repl_reclaimed);
-    counter!(bump_repl_handback, repl_handback_total, repl_handback);
-    counter!(bump_repl_eager_takeover, repl_eager_takeover_total, repl_eager_takeover);
+    counter!(bump_repl_self_release, repl_self_release_total, repl_self_release);
 
     /// A backup replica was admitted to a backup partition (puller applied a
     /// `Create`). Pairs with [`dec_repl_backup_held`](Self::dec_repl_backup_held)
@@ -239,8 +233,7 @@ impl B2buaMetrics {
         counter("b2bua_repl_takeover_resolved_total", "in-dialog requests whose callRef was recovered from the replica index (acting-backup)", self.repl_takeover_resolved_total());
         counter("b2bua_repl_takeover_hydrated_total", "calls hydrated from a backup replica to serve a failed-over request", self.repl_takeover_hydrated_total());
         counter("b2bua_repl_reclaimed_total", "calls a rebooted primary re-materialised into its live map + re-armed (active reclaim, ADR-0011 X11)", self.repl_reclaimed_total());
-        counter("b2bua_repl_handback_total", "ghost-backup takeover copies deactivated on a primary's Deactivate handback (ADR-0011 X11)", self.repl_handback_total());
-        counter("b2bua_repl_eager_takeover_total", "calls a survivor eagerly materialised from a dead peer's backup partition on a peer-Removed delta (X11 — keeps quiescent dialogs alive)", self.repl_eager_takeover_total());
+        counter("b2bua_repl_self_release_total", "acting-backup takeover copies self-released once their served transaction(s) reached a terminal state (ADR-0014, replaces the Deactivate handback)", self.repl_self_release_total());
 
         // Per-method request + per-(method,code) response counters. Drop the
         // `counter` closure's borrow first by ending the block above.
@@ -279,9 +272,9 @@ impl B2buaMetrics {
         g(&mut s, "b2bua_store_sip_index", "SIP routing index keys (callId/tag -> callRef)", self.inner.store_sip_index.load(Ordering::Relaxed));
         g(&mut s, "b2bua_store_indexed", "per-call owned-index-key sets", self.inner.store_indexed.load(Ordering::Relaxed));
         g(&mut s, "b2bua_store_locks", "per-callRef serialization locks held (should track store_calls; a gap is a lock leak)", self.inner.store_locks.load(Ordering::Relaxed));
-        g(&mut s, "b2bua_store_takeover_at", "per-call takeover activation instants (X11; should track backup copies, reaped on handback)", self.inner.store_takeover_at.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_store_takeover_at", "live acting-backup takeover copies (ADR-0014; self-released on the served transaction's terminal state)", self.inner.store_takeover_at.load(Ordering::Relaxed));
         g(&mut s, "b2bua_repl_meta_total", "replica metadata entries held (all partitions)", self.inner.repl_meta_total.load(Ordering::Relaxed));
-        g(&mut s, "b2bua_repl_meta_backup", "replica metadata entries in BACKUP partitions (ghost-backup copies the X11 handback must release)", self.inner.repl_meta_backup.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_repl_meta_backup", "replica metadata entries in BACKUP partitions (resident backup bodies this node holds for peers; ADR-0014)", self.inner.repl_meta_backup.load(Ordering::Relaxed));
         g(&mut s, "b2bua_repl_changelog_entries", "outbound changelog entries across all peer logs (replication buffer depth)", self.inner.repl_changelog_entries.load(Ordering::Relaxed));
         g(&mut s, "b2bua_repl_changelog_peers", "peer logs currently held in the changelog", self.inner.repl_changelog_peers.load(Ordering::Relaxed));
         s

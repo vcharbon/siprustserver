@@ -125,6 +125,28 @@ impl ReplicatingCallStore {
         self.meta.lock().unwrap().get(call_ref).map(|m| m.meta.call_gen)
     }
 
+    /// The full `(p,b)` version vector stored for a callRef, or `None` if absent
+    /// / expired. The S5 puller reads this to drive the ADR-0014 asymmetric apply
+    /// rule (a reverse-flush applies iff `p_in == p_cur && b_in > b_cur`; a
+    /// forward update applies always; deletes apply unconditionally). The
+    /// single-counter [`current_call_gen`](Self::current_call_gen) is retained for
+    /// callers that only care about the primary counter.
+    pub fn current_cv(
+        &self,
+        _role: PartitionRole,
+        _primary: &str,
+        call_ref: &str,
+    ) -> Option<(i64, i64)> {
+        if self.is_expired(call_ref) {
+            return None;
+        }
+        self.meta
+            .lock()
+            .unwrap()
+            .get(call_ref)
+            .map(|m| (m.meta.call_gen, m.meta.call_bgen))
+    }
+
     /// Snapshot the LIVE callRef KEYS stored in `(role, primary)` under a BRIEF
     /// lock (Decision 3 / X4). Bootstrap uses this to copy the `bak:{primary}`
     /// keyset, drop the lock, then read each body lazily per batch — so a
@@ -144,11 +166,13 @@ impl ReplicatingCallStore {
 
     /// `(total, backup)` replica-metadata entry counts for the
     /// memory-attribution gauges: every callRef this node holds a replica body
-    /// for, and the subset living in a **backup** partition (the ghost-backup
-    /// takeover copies the X11 `Deactivate` handback must release). A
-    /// `backup` count that climbs unbounded across failovers means handback
-    /// isn't reaping. One brief lock; no body touched. Includes
-    /// expired-but-not-yet-reaped entries — the reaper, not the gauge, prunes.
+    /// for, and the subset living in a **backup** partition (the resident backup
+    /// bodies this node holds for its peers; a backup self-releases its *live*
+    /// takeover copy on transaction completion but keeps the replica until its
+    /// primary deletes it, ADR-0014). A `backup` count that climbs unbounded
+    /// across failovers means deletes are not propagating / the reaper is behind.
+    /// One brief lock; no body touched. Includes expired-but-not-yet-reaped
+    /// entries — the reaper, not the gauge, prunes.
     pub fn meta_counts(&self) -> (u64, u64) {
         let meta = self.meta.lock().unwrap();
         let total = meta.len() as u64;
@@ -238,11 +262,12 @@ impl CallStore for ReplicatingCallStore {
         indexes: &[String],
         ttl_ms: i64,
         call_gen: i64,
+        call_bgen: i64,
         opts: &PutOpts,
     ) -> Result<(), StoreError> {
         // Store body (Arc wrapped once inside) + indexes.
         self.inner
-            .put_call(role, primary, call_ref, body, indexes, ttl_ms, call_gen, opts)
+            .put_call(role, primary, call_ref, body, indexes, ttl_ms, call_gen, call_bgen, opts)
             .await?;
 
         let now = self.clock.now_ms();
@@ -258,6 +283,7 @@ impl CallStore for ReplicatingCallStore {
                 CallMeta {
                     meta: RefMeta {
                         call_gen,
+                        call_bgen,
                         body_ttl_ms: ttl_ms,
                         indexes: indexes.to_vec(),
                     },
@@ -296,6 +322,7 @@ impl CallStore for ReplicatingCallStore {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn refresh_call(
         &self,
         _role: PartitionRole,
@@ -304,13 +331,15 @@ impl CallStore for ReplicatingCallStore {
         indexes: &[String],
         ttl_ms: i64,
         call_gen: i64,
+        call_bgen: i64,
     ) -> Result<(), StoreError> {
-        // Unlike the in-memory no-op, honour the ttl/call_gen now: bump the
+        // Unlike the in-memory no-op, honour the ttl/(p,b) now: bump the
         // body's absolute expiry and refresh the drained metadata.
         let now = self.clock.now_ms();
         let mut meta = self.meta.lock().unwrap();
         if let Some(m) = meta.get_mut(call_ref) {
             m.meta.call_gen = call_gen;
+            m.meta.call_bgen = call_bgen;
             m.meta.body_ttl_ms = ttl_ms;
             if !indexes.is_empty() {
                 m.meta.indexes = indexes.to_vec();

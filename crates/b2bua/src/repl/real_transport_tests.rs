@@ -146,6 +146,7 @@ async fn tail_delivers_post_connect_mutation_over_real_tcp() {
         &["idx-a".to_string()],
         30_000,
         1,
+        0,
         &forward_to("w1"),
     )
     .await
@@ -206,6 +207,7 @@ async fn tail_streams_successive_updates_over_real_tcp() {
             &[],
             30_000,
             gen,
+            0,
             &forward_to("w1"),
         )
         .await
@@ -253,6 +255,7 @@ async fn bootstrap_preseed_delivers_over_real_tcp() {
         &[],
         30_000,
         7,
+        0,
         &PutOpts::default(), // static backup body, NOT in the changelog
     )
     .await
@@ -353,11 +356,11 @@ async fn bidirectional_supervisor_replication_over_real_tcp() {
             (&w1, "w1", "w0")
         };
         let call_ref = format!("{primary}|burst-{i}|tag");
-        src.put_call(PRI, primary, &call_ref, format!("body-{i}-v1").into_bytes(), &[], 30_000, 1, &forward_to(peer))
+        src.put_call(PRI, primary, &call_ref, format!("body-{i}-v1").into_bytes(), &[], 30_000, 1, 0, &forward_to(peer))
             .await
             .unwrap();
         // In-dialog re-INVITE/UPDATE — second authoritative mutation (gen 2).
-        src.put_call(PRI, primary, &call_ref, format!("body-{i}-v2").into_bytes(), &[], 30_000, 2, &forward_to(peer))
+        src.put_call(PRI, primary, &call_ref, format!("body-{i}-v2").into_bytes(), &[], 30_000, 2, 0, &forward_to(peer))
             .await
             .unwrap();
     }
@@ -424,6 +427,7 @@ async fn bootstrap_synchronises_above_5k_contexts_per_second_over_real_tcp() {
             &[format!("idx-{i}")],
             300_000,
             1,
+            0,
             &PutOpts::default(), // static backup body, NOT in the changelog
         )
         .await
@@ -510,7 +514,7 @@ async fn mismatched_ordinal_silently_delivers_nothing() {
 
     // Bump the changelog under the WRONG peer id ("w1" != the puller's caller).
     let call_ref = "w0|orphaned|tag".to_string();
-    w0.put_call(PRI, "w0", &call_ref, b"body".to_vec(), &[], 30_000, 1, &forward_to("w1"))
+    w0.put_call(PRI, "w0", &call_ref, b"body".to_vec(), &[], 30_000, 1, 0, &forward_to("w1"))
         .await
         .unwrap();
 
@@ -554,7 +558,7 @@ async fn measure_bootstrap(
     let body = vec![0xABu8; 256];
     for i in 0..n {
         let cr = format!("w1|sync-{i}|tag");
-        w0.put_call(BAK, "w1", &cr, body.clone(), &[], 300_000, 1, &PutOpts::default())
+        w0.put_call(BAK, "w1", &cr, body.clone(), &[], 300_000, 1, 0, &PutOpts::default())
             .await
             .unwrap();
     }
@@ -576,7 +580,7 @@ async fn measure_bootstrap(
             while !stop.load(Ordering::Relaxed) {
                 let cr = format!("w0|live-{w}-{j}|tag");
                 let _ = w0
-                    .put_call(PRI, "w0", &cr, live.clone(), &[], 300_000, 1, &forward_to("w2"))
+                    .put_call(PRI, "w0", &cr, live.clone(), &[], 300_000, 1, 0, &forward_to("w2"))
                     .await;
                 j += 1;
                 writes.fetch_add(1, Ordering::Relaxed);
@@ -720,7 +724,7 @@ async fn measure_bootstrap_latent(
     let body = vec![0xABu8; 256];
     for i in 0..n {
         let cr = format!("w1|sync-{i}|tag");
-        w0.put_call(BAK, "w1", &cr, body.clone(), &[], 300_000, 1, &PutOpts::default())
+        w0.put_call(BAK, "w1", &cr, body.clone(), &[], 300_000, 1, 0, &PutOpts::default())
             .await
             .unwrap();
     }
@@ -870,7 +874,7 @@ async fn bootstrap_coalesces_into_few_network_rounds() {
     let body = vec![0xABu8; 256];
     for i in 0..N {
         let cr = format!("w1|sync-{i}|tag");
-        w0.put_call(BAK, "w1", &cr, body.clone(), &[], 300_000, 1, &PutOpts::default())
+        w0.put_call(BAK, "w1", &cr, body.clone(), &[], 300_000, 1, 0, &PutOpts::default())
             .await
             .unwrap();
     }

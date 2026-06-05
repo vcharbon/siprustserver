@@ -267,7 +267,7 @@ pub fn frame_summary(frame: &Frame) -> String {
         Frame::Ack { caller, up_to } => {
             format!("Ack caller={caller} up_to=({},{})", up_to.gen, up_to.counter)
         }
-        Frame::Data { at, op, partition, call_ref, call_gen, body, .. } => {
+        Frame::Data { at, op, partition, call_ref, call_gen, call_bgen, body, .. } => {
             let o = match op {
                 Op::Create => "Create",
                 Op::Update => "Update",
@@ -279,13 +279,12 @@ pub fn frame_summary(frame: &Frame) -> String {
             };
             let blen = body.as_ref().map(|b| b.len()).unwrap_or(0);
             format!(
-                "Data[{o}/{p}] {call_ref} gen={call_gen} at=({},{}) body={blen}B",
+                "Data[{o}/{p}] {call_ref} cv=({call_gen},{call_bgen}) at=({},{}) body={blen}B",
                 at.gen, at.counter
             )
         }
         Frame::Noop { at } => format!("Noop at=({},{})", at.gen, at.counter),
         Frame::ResetToBootstrap { reason } => format!("ResetToBootstrap reason={reason}"),
-        Frame::Deactivate { as_of } => format!("Deactivate as_of=({},{})", as_of.gen, as_of.counter),
     }
 }
 

@@ -75,6 +75,7 @@ pub trait CallStore: Send + Sync {
         indexes: &[String],
         ttl_ms: i64,
         call_gen: i64,
+        call_bgen: i64,
         opts: &PutOpts,
     ) -> Result<(), StoreError>;
 
@@ -87,6 +88,7 @@ pub trait CallStore: Send + Sync {
         opts: &PutOpts,
     ) -> Result<(), StoreError>;
 
+    #[allow(clippy::too_many_arguments)]
     async fn refresh_call(
         &self,
         role: PartitionRole,
@@ -95,6 +97,7 @@ pub trait CallStore: Send + Sync {
         indexes: &[String],
         ttl_ms: i64,
         call_gen: i64,
+        call_bgen: i64,
     ) -> Result<(), StoreError>;
 
     /// Resolve a SIP routing index key (`leg:callId|tag`) to a `callRef`.

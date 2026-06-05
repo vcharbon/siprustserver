@@ -16,7 +16,7 @@
 
   Two exit paths still apply:
     - keepalive timeout (B2BUA torn down, chaos, network failure) →
-      `recv timeout="350000" ontimeout="end_hold"` jumps to BYE.
+      `recv timeout="420000" ontimeout="end_hold"` jumps to BYE.
     - hold cap reached → counter loop falls through to BYE.
 
   Earlier revisions used a flat `<pause milliseconds="1200000"/>` and
@@ -32,10 +32,14 @@
   the response carries the dialog tags + CSeq from the request.
 
   The recv timeout is sized for the env-driven default
-  `KEEPALIVE_INTERVAL_SEC=300s` (src/config/AppConfig.ts) — 350 s
-  gives 50 s headroom for jitter / proxy queueing. The embedded layer
-  default is 900 s; if a deployment uses the embedded layer with that
-  larger interval, raise this timeout accordingly.
+  `KEEPALIVE_INTERVAL_SEC=300s` (src/config/AppConfig.ts) — 420 s
+  gives 120 s headroom. Under the reactive-only takeover model
+  (ADR-0014) a quiescent long-call on a rebooting worker is recovered
+  solely by the primary's bootstrap-rehydrate → ReclaimAll → smoothed
+  keepalive replay; the worst-positioned quiescent call survives iff
+  `reboot + smoothing_drain ≤ 120 s`. The embedded layer default is
+  900 s; if a deployment uses the embedded layer with that larger
+  interval, raise this timeout accordingly.
 
   RFC 3261 conformance:
     §11      In-dialog OPTIONS may be sent by either party; UAS

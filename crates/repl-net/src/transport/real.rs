@@ -249,6 +249,7 @@ mod tests {
             partition: crate::Partition::Pri,
             call_ref: "primary|callXYZ|fromTag".into(),
             call_gen: 42,
+            call_bgen: 0,
             body_ttl_ms: 30_000,
             indexes: vec!["a".into(), "b".into()],
             body: Some(StdArc::from(&b"the-encoded-call-body-bytes"[..])),

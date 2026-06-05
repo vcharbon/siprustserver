@@ -105,11 +105,12 @@ fn write_frame(buf: &mut Vec<u8>, frame: &Frame) {
             partition,
             call_ref,
             call_gen,
+            call_bgen,
             body_ttl_ms,
             indexes,
             body,
         } => {
-            encode::write_array_len(buf, 10).unwrap();
+            encode::write_array_len(buf, 11).unwrap();
             encode::write_uint(buf, tag::DATA).unwrap();
             encode::write_uint(buf, at.gen).unwrap();
             encode::write_uint(buf, at.counter).unwrap();
@@ -117,6 +118,7 @@ fn write_frame(buf: &mut Vec<u8>, frame: &Frame) {
             encode::write_uint(buf, partition.as_u8() as u64).unwrap();
             encode::write_str(buf, call_ref).unwrap();
             encode::write_sint(buf, *call_gen).unwrap();
+            encode::write_sint(buf, *call_bgen).unwrap();
             encode::write_sint(buf, *body_ttl_ms).unwrap();
             encode::write_array_len(buf, indexes.len() as u32).unwrap();
             for idx in indexes {
@@ -141,12 +143,6 @@ fn write_frame(buf: &mut Vec<u8>, frame: &Frame) {
             encode::write_array_len(buf, 2).unwrap();
             encode::write_uint(buf, tag::RESET_TO_BOOTSTRAP).unwrap();
             encode::write_str(buf, reason).unwrap();
-        }
-        Frame::Deactivate { as_of } => {
-            encode::write_array_len(buf, 3).unwrap();
-            encode::write_uint(buf, tag::DEACTIVATE).unwrap();
-            encode::write_uint(buf, as_of.gen).unwrap();
-            encode::write_uint(buf, as_of.counter).unwrap();
         }
     }
 }
@@ -174,7 +170,6 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Frame, ReplCodecError> {
         tag::DATA => decode_data(&mut rd, len),
         tag::NOOP => decode_noop(&mut rd, len),
         tag::RESET_TO_BOOTSTRAP => decode_reset(&mut rd, len),
-        tag::DEACTIVATE => decode_deactivate(&mut rd, len),
         other => Err(ReplCodecError::UnknownTag(other)),
     }
 }
@@ -217,13 +212,14 @@ fn decode_ack(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
 }
 
 fn decode_data(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
-    expect_len(len, 10, "Data")?;
+    expect_len(len, 11, "Data")?;
     let gen = read_u64(rd, "gen")?;
     let counter = read_u64(rd, "counter")?;
     let op = Op::from_u8(read_u8(rd, "op")?)?;
     let partition = Partition::from_u8(read_u8(rd, "partition")?)?;
     let call_ref = read_str(rd, "call_ref")?;
     let call_gen = read_i64(rd, "call_gen")?;
+    let call_bgen = read_i64(rd, "call_bgen")?;
     let body_ttl_ms = read_i64(rd, "body_ttl_ms")?;
     let idx_len = read_array_len(rd, "indexes")?;
     // Clamp the pre-allocation to the bytes still in the buffer: every msgpack
@@ -241,6 +237,7 @@ fn decode_data(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
         partition,
         call_ref,
         call_gen,
+        call_bgen,
         body_ttl_ms,
         indexes,
         body,
@@ -260,15 +257,6 @@ fn decode_reset(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
     expect_len(len, 2, "ResetToBootstrap")?;
     let reason = read_str(rd, "reason")?;
     Ok(Frame::ResetToBootstrap { reason })
-}
-
-fn decode_deactivate(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
-    expect_len(len, 3, "Deactivate")?;
-    let gen = read_u64(rd, "as_of_gen")?;
-    let counter = read_u64(rd, "as_of_counter")?;
-    Ok(Frame::Deactivate {
-        as_of: Watermark::new(gen, counter),
-    })
 }
 
 // --- low-level readers over a `&mut &[u8]` cursor --------------------------

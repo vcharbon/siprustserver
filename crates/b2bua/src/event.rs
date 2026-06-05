@@ -39,6 +39,10 @@ pub enum CallEvent {
         outcome: String,
         payload: serde_json::Value,
     },
+    /// The transaction layer reports the last transaction for a *watched* call has
+    /// cleared (ADR-0014). The router uses it to self-release an acting-backup
+    /// takeover copy whose served transaction(s) are done.
+    CallQuiesced { call_ref: String },
 }
 
 impl CallEvent {
@@ -60,6 +64,7 @@ impl CallEvent {
                 leg_id,
                 method,
             },
+            TransactionEvent::CallQuiesced { call_ref } => CallEvent::CallQuiesced { call_ref },
         }
     }
 
@@ -71,6 +76,7 @@ impl CallEvent {
             CallEvent::Cancelled { .. } => "cancelled",
             CallEvent::Timeout { .. } => "timeout",
             CallEvent::InternalEvent { .. } => "internal-event",
+            CallEvent::CallQuiesced { .. } => "call-quiesced",
         }
     }
 }

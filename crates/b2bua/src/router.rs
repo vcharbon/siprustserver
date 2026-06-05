@@ -7,8 +7,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::{Call, CallModelState, CdrEvent, CdrEventType, Direction, TimerEntry, TimerType};
-use repl_net::frame::Watermark;
+use call::{Call, CallModelState, Direction, TimerEntry, TimerType};
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::message_helpers::parse_uri_params;
@@ -58,27 +57,20 @@ pub struct RouterCtx {
 }
 
 /// Replication-driven commands the puller/supervisor inject into the router loop
-/// (ADR-0011 X11 fail-back). Routed through the same single-threaded `run` loop
-/// as SIP events so reclaim/handback never races the per-call handlers.
+/// (ADR-0011 X11 / ADR-0014 fail-back). Routed through the same single-threaded
+/// `run` loop as SIP events so reclaim never races the per-call handlers.
 #[derive(Debug, Clone)]
 pub enum ReplCommand {
     /// **Go-active bulk reclaim** — materialise every `pri:{self}` call into the
     /// live map + re-arm timers (a rebooted primary re-*serving* its partition,
     /// not just re-storing it). Fired once the supervisor reports bootstrap-complete.
+    /// Keepalive timers are *smoothed* (oldest-overdue first; see
+    /// [`reclaim_all`]) so a freshly-rehydrated node is not flooded by a burst of
+    /// past-due OPTIONS.
     ReclaimAll,
     /// **Reactive reclaim** of one call a backup just reverse-flushed to us — the
     /// flip-race straggler an acting-backup took over *after* the bulk sweep.
     ReclaimCall(String),
-    /// **Handback** — a reclaiming primary told us (its backup) to deactivate
-    /// every takeover copy for `primary` whose reverse-flush position it has
-    /// pulled past (`<= as_of`, in our changelog domain). See [`ReplServer`].
-    Deactivate { primary: String, as_of: Watermark },
-    /// **Eager takeover** — the supervisor observed `primary` leave membership
-    /// (`MemberDelta::Removed`). Materialise its entire `bak:{primary}` partition
-    /// into the live map NOW (don't wait for an inbound in-dialog request), so a
-    /// quiescent failed-over dialog keeps its keepalive running on the survivor.
-    /// See [`take_over_peer`].
-    TakeOverPeer { primary: String },
 }
 
 /// How an event resolves to a call + the leg it arrived on.
@@ -122,104 +114,81 @@ pub async fn run(
     }
 }
 
-/// Interpret a replication-driven [`ReplCommand`] (ADR-0011 X11 fail-back).
+/// Interpret a replication-driven [`ReplCommand`] (ADR-0011 X11 / ADR-0014).
 async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
     match cmd {
-        ReplCommand::ReclaimAll => {
-            for call in ctx.state.reclaim_scan().await {
-                reclaim_into_live(ctx, call).await;
-            }
-        }
+        ReplCommand::ReclaimAll => reclaim_all(ctx).await,
         ReplCommand::ReclaimCall(call_ref) => {
             if let Some(call) = ctx.state.peek_reclaimable(&call_ref).await {
-                reclaim_into_live(ctx, call).await;
+                // A single reactive straggler: re-serve it on its ORIGINAL
+                // schedule (a past-due keepalive fires immediately). The batch
+                // smoothing below is only for the bulk reboot sweep.
+                reclaim_into_live(ctx, call, None).await;
             }
         }
-        ReplCommand::Deactivate { primary, as_of } => {
-            deactivate_takeovers(ctx, &primary, as_of).await;
-        }
-        ReplCommand::TakeOverPeer { primary } => {
-            take_over_peer(ctx, &primary).await;
-        }
     }
 }
 
-/// **Eager death-triggered takeover** (ADR-0011 X11): materialise every call in
-/// the dead `primary`'s `bak:{primary}` partition into the live map and re-arm its
-/// timers — the survivor's response to a `MemberDelta::Removed` for `primary`.
+/// **Go-active bulk reclaim** (ADR-0011 X11): re-materialise every `pri:{self}`
+/// call into the live map + re-arm its timers — what makes a rebooted primary
+/// re-*serve* its partition, not just re-*store* it.
 ///
-/// This closes the **quiescent long-hold** loss: a call parked in the B2BUA
-/// OPTIONS-keepalive loop sends nothing, so the reactive
-/// [`hydrate_from_replica`](crate::store::CallState::hydrate_from_replica) — which
-/// only fires on an inbound in-dialog request — never triggers. Its keepalive
-/// timer dies with the primary and is re-armed on no live node, so ~one interval
-/// later the UAC's mandatory keepalive OPTIONS never arrives and the dialog is
-/// torn down as failed. Taking the partition over eagerly on the death signal
-/// keeps the survivor probing it.
-///
-/// Per call (each under the per-call lock, like [`reclaim_into_live`]):
-/// 1. `mark_takeover` — record it as an acting-backup copy so the X11
-///    `Deactivate` handback can later resolve double-ownership.
-/// 2. `materialize_if_absent` — insert into the live map iff not already resident
-///    (idempotent: a call the reactive path already hydrated is left untouched).
-/// 3. **Restore the call's ORIGINAL timer deadlines** (`call.timers`, which IS
-///    replicated). Unlike [`reclaim_into_live`] — which *defers* the keepalive a
-///    fresh interval so a rebooting primary doesn't double-probe during the
-///    handback window — the survivor is the call's SOLE keeper here and MUST probe
-///    on the original schedule: a past-due keepalive fires immediately (then
-///    re-arms on the next interval), and if the primary never reboots the call
-///    still stays alive. Deferring would re-open the very gap this fixes (and lose
-///    the call outright on permanent node loss). The rebooting primary's reclaim
-///    keeps deferring, so during the brief double-ownership window only the
-///    survivor probes — no CSeq collision.
-/// 4. `flush` — a **reverse** flush (the call_ref names the dead primary, so
-///    `store_target` resolves the acting-backup Reverse plan) that bumps this
-///    node's changelog position for `primary`. Without it `position_of` stays
-///    `None` and the X11 handback can never fire (`deactivate_targets` skips it)
-///    → permanent double-serve. A quiescent call mutates nothing, so this explicit
-///    flush is the ONLY thing that establishes the handback `as_of`.
-async fn take_over_peer(ctx: &Arc<RouterCtx>, primary: &str) {
-    for call in ctx.state.reclaim_backup_scan(primary).await {
-        let call_ref = call.call_ref.clone();
-        let _guard = ctx.state.lock(&call_ref).await;
-        let timers = call.timers.clone();
-        // `materialize_if_absent` is the gate: a call the reactive path already
-        // hydrated is left untouched (it is already marked + flushed + timed).
-        if ctx.state.materialize_if_absent(call.clone()) {
-            ctx.state.mark_takeover(&call_ref);
-            ctx.timers.restore(timers, call_ref.clone()).await;
-            // Reverse-flush so the rebooting primary can later hand this copy back.
-            ctx.state.flush(&call);
-            ctx.metrics.bump_repl_eager_takeover();
-        }
+/// **Keepalive smoothing (ADR-0014, performance-only).** Many keepalive timers in
+/// a just-rehydrated partition are past-due; firing them all at once floods the
+/// node with a synchronized OPTIONS burst. So we stagger the past-due keepalives
+/// oldest-first: with `L = now - fire_at` the overdue gap and `L_max` the largest
+/// over the batch, a keepalive's new `fire_at` is `now + (L_max - L)/speedup`, so
+/// the most-overdue (most at-risk of a UAC keepalive timeout) fires first and the
+/// backlog drains over `L_max/speedup`, bounded to `speedup`× the normal cadence
+/// (optionally capped by `max_catchup_window_sec`). After the burst each call
+/// re-arms `+interval`, naturally re-spreading load. This is **load management
+/// only** — `(p,b)` reconciliation makes any incidental keepalive overlap
+/// non-corrupting, so there is no settle/handback floor. `fire_at` is pre-computed
+/// here, in the reclaim handler — never inside the timer driver (CLAUDE.md).
+async fn reclaim_all(ctx: &Arc<RouterCtx>) {
+    let now_ms = ctx.clock.now_ms();
+    let calls = ctx.state.reclaim_scan().await;
+    // L_max = the largest past-due keepalive gap across the whole partition.
+    let l_max = calls
+        .iter()
+        .flat_map(|c| c.timers.iter())
+        .filter(|t| matches!(t.timer_type, TimerType::Keepalive))
+        .map(|t| (now_ms - t.fire_at).max(0))
+        .max()
+        .unwrap_or(0);
+    for call in calls {
+        reclaim_into_live(ctx, call, Some((now_ms, l_max))).await;
     }
 }
 
-/// Materialise one reclaimed call into the live map + re-arm its timers — the
-/// active reclaim that makes a rebooted primary re-*serve* (ADR-0011 X11). The
-/// **keepalive** timer is re-armed a *fresh* interval out (not its stale absolute
-/// deadline) so the primary defers its first in-dialog OPTIONS until well past
-/// the `Deactivate` burst — the backup hands its copy back before either node
-/// probes the leg, closing the double-OPTIONS/CSeq-collision window. The
-/// `GlobalDuration` cap and every other timer keep their absolute deadlines.
-async fn reclaim_into_live(ctx: &Arc<RouterCtx>, mut call: Call) {
+/// Materialise one reclaimed call into the live map + re-arm its timers (ADR-0011
+/// X11). `smoothing = Some((now_ms, l_max))` staggers a **past-due** keepalive per
+/// the oldest-first batch schedule (the bulk reboot sweep, [`reclaim_all`]);
+/// `None` fires a past-due keepalive immediately (a single reactive straggler).
+/// A future-dated keepalive and every non-keepalive timer keep their absolute
+/// deadline either way.
+async fn reclaim_into_live(ctx: &Arc<RouterCtx>, mut call: Call, smoothing: Option<(i64, i64)>) {
     let call_ref = call.call_ref.clone();
     // Hold the per-call state lock across materialise + timer re-arm, exactly as
-    // `process` and `deactivate_takeovers` do, so a concurrent dispatcher handler
-    // for this call_ref cannot interleave and double-arm (or clobber the deferred
-    // keepalive below).
+    // `process` does, so a concurrent dispatcher handler for this call_ref cannot
+    // interleave and double-arm.
     let _guard = ctx.state.lock(&call_ref).await;
-    let now_ms = ctx.clock.now_ms();
-    let interval_ms = ctx.config.keepalive_interval_sec * 1000;
-    // Re-arm the keepalive a *fresh* interval out (not its stale absolute
-    // deadline) so the primary defers its first in-dialog OPTIONS past the
-    // `Deactivate` burst — and write the new deadline back into the call we
-    // store, so a flush before that first keepalive cannot re-replicate a
-    // past-due deadline (which a later hydrate would fire immediately). Every
-    // other timer keeps its absolute deadline.
-    for t in call.timers.iter_mut() {
-        if matches!(t.timer_type, TimerType::Keepalive) {
-            t.fire_at = now_ms + interval_ms;
+    if let Some((now_ms, l_max)) = smoothing {
+        let speedup = ctx.config.keepalive_catchup_speedup.max(1);
+        let cap_ms = ctx.config.max_catchup_window_sec.map(|s| s * 1000);
+        for t in call.timers.iter_mut() {
+            if matches!(t.timer_type, TimerType::Keepalive) {
+                let l = now_ms - t.fire_at;
+                if l > 0 {
+                    // Oldest-first: largest `l` → smallest offset (fires first).
+                    let mut offset = (l_max - l) / speedup;
+                    if let Some(cap) = cap_ms {
+                        offset = offset.min(cap);
+                    }
+                    t.fire_at = now_ms + offset;
+                }
+                // else (future-dated) — leave the absolute deadline.
+            }
         }
     }
     let timers = call.timers.clone();
@@ -229,38 +198,19 @@ async fn reclaim_into_live(ctx: &Arc<RouterCtx>, mut call: Call) {
     }
 }
 
-/// Hand back every takeover copy for `primary` whose reverse-flush position the
-/// primary has pulled past (`<= as_of`) (ADR-0011 X11 `Deactivate`) — i.e. the
-/// primary provably holds and serves it now. Each is a **local-only** teardown —
-/// drop the live copy + cancel its timers/txns/dispatch — with a `ghost-backup`
-/// CDR end-event (a deactivation, *not* a real hangup) and the handback counter;
-/// it propagates **no** delete (the call lives on at `primary`, which keeps
-/// forward-refreshing this node's backup `Element`).
-async fn deactivate_takeovers(ctx: &Arc<RouterCtx>, primary: &str, as_of: Watermark) {
-    for call_ref in ctx.state.deactivate_targets(primary, as_of) {
-        let _guard = ctx.state.lock(&call_ref).await;
-        let now_ms = ctx.clock.now_ms();
-        // Snapshot under the lock *before* tearing down (drop_local removes it),
-        // but only emit the ghost-backup CDR + bump the handback counter if a
-        // live copy was actually dropped — so the CDR and the metric stay a
-        // matched pair and we never CDR a deactivation that did not happen.
-        let snapshot = ctx.state.peek(&call_ref);
-        if ctx.state.drop_local(&call_ref) {
-            if let Some(mut call) = snapshot {
-                call.cdr_events.push(CdrEvent {
-                    event_type: CdrEventType::Bye,
-                    timestamp: now_ms,
-                    leg_id: call.a_leg.leg_id.clone(),
-                    status_code: None,
-                    reason: Some("ghost-backup".into()),
-                });
-                ctx.cdr.write(&call, now_ms).await;
-            }
-            ctx.timers.cancel_all(call_ref.clone()).await;
-            ctx.txn.cancel_txns_for_call(&call_ref).await;
-            ctx.dispatcher.enqueue_poison(&call_ref);
-            ctx.metrics.bump_repl_handback();
-        }
+/// **Acting-backup self-release** (ADR-0014): shed a reactive takeover copy once
+/// the transaction(s) the backup served for it have all reached a terminal state.
+/// Local-only — drop the live copy + cancel its timers/txns/dispatch — propagating
+/// **no** delete: the `bak:{primary}` replica and the reverse-flushed deltas
+/// remain, so the call lives on at its reclaiming primary (which keeps
+/// forward-refreshing this node's backup `Element`). Replaces the X11 `Deactivate`
+/// watermark handback. The caller has already dropped the per-call lock guard.
+async fn self_release(ctx: &Arc<RouterCtx>, call_ref: &str) {
+    if ctx.state.drop_local(call_ref) {
+        ctx.timers.cancel_all(call_ref.to_string()).await;
+        ctx.txn.cancel_txns_for_call(call_ref).await;
+        ctx.dispatcher.enqueue_poison(call_ref);
+        ctx.metrics.bump_repl_self_release();
     }
 }
 
@@ -272,6 +222,26 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
             SipMessage::Request(req) => ctx.metrics.record_request(&req.method),
             SipMessage::Response(resp) => ctx.metrics.record_response(&resp.cseq.method, resp.status),
         }
+    }
+
+    // ADR-0014 acting-backup self-release. The txn layer reports the last
+    // transaction we served for a takeover copy has cleared; shed the live copy
+    // (the `bak:` replica + reverse-flushed deltas remain). The per-call lock
+    // serializes this against any in-flight handler for the call; we re-check under
+    // it because a fresh in-dialog request could have re-armed a transaction (a
+    // second takeover during a sustained partition) since the notice was emitted.
+    if let CallEvent::CallQuiesced { call_ref } = &event {
+        let call_ref = call_ref.clone();
+        if ctx.state.is_takeover(&call_ref) {
+            let guard = ctx.state.lock(&call_ref).await;
+            let release = ctx.state.is_takeover(&call_ref)
+                && ctx.txn.active_txn_count_for_call(&call_ref).await == 0;
+            drop(guard);
+            if release {
+                self_release(ctx, &call_ref).await;
+            }
+        }
+        return;
     }
 
     // Out-of-dialog OPTIONS keepalive: self-report readiness (S7, ADR-0011 X6).
@@ -467,6 +437,8 @@ fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
             direction: Direction::FromA,
             initial_invite: false,
         },
+        // Handled (and returned) in `on_event` before `resolve` is ever called.
+        CallEvent::CallQuiesced { .. } => unreachable!("CallQuiesced is handled before resolve"),
     }
 }
 
@@ -540,11 +512,14 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
                 // epoch bump. Skipped for `fresh == false` (the call was already
                 // resident and its timers are already live) to avoid double-arm.
                 if fresh {
-                    // Stamp this acting-backup takeover copy's activation instant
-                    // so a later `Deactivate{as_of}` handback (ADR-0011 X11) can
-                    // tell it predates the primary's reclaim.
+                    // Mark this as a live acting-backup takeover copy (ADR-0014)
+                    // and ARM the self-release notice: the txn layer will send a
+                    // `CallQuiesced` once the transaction(s) we serve for this call
+                    // all reach a terminal state, at which point the router sheds
+                    // the live copy (keeping the `bak:` replica).
                     ctx.state.mark_takeover(&call_ref);
                     ctx.timers.restore(c.timers.clone(), call_ref.clone()).await;
+                    ctx.txn.watch_self_release(&call_ref).await;
                 }
                 c
             }

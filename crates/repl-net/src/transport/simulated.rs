@@ -794,6 +794,7 @@ mod tests {
             partition: crate::Partition::Bak,
             call_ref: format!("p|call{counter}|tag"),
             call_gen: 7,
+            call_bgen: 0,
             body_ttl_ms: 1000,
             indexes: vec!["idx".into()],
             body: Some(StdArc::from(body)),

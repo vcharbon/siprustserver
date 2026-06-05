@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use repl_net::transport::ReplicationNetwork;
-use tokio::sync::watch;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::SipParser;
@@ -23,7 +22,7 @@ use crate::decision::CallDecisionEngine;
 use crate::dispatch::PerCallDispatcher;
 use crate::limiter::CallLimiter;
 use crate::metrics::B2buaMetrics;
-use crate::repl::{ReplServer, ReplicatingCallStore, ReplicationSupervisor, Readiness, WatermarkSrc};
+use crate::repl::{ReplServer, ReplicatingCallStore, ReplicationSupervisor, Readiness};
 use crate::router::{self, RouterCtx};
 use crate::rules::default_rules;
 use crate::store::{BufferedTerminateWriter, CallState, CallStore};
@@ -167,16 +166,7 @@ impl B2buaCore {
                     .with_replication(setup.store.clone())
                     .with_replicated_ttl_ms(replicated_ttl_ms);
 
-                // X11 handback trigger (ADR-0011): a monotonic tick the go-active
-                // task bumps once it has bulk-reclaimed (re-bumped to sweep
-                // stragglers). On each tick every `serve_replog` recomputes its
-                // backup's `as_of` and pushes `Deactivate{as_of}`. `0` = "no
-                // reclaim yet". NOT a wall-clock — the value is just a tick.
-                let (handback_tx, handback_rx) = watch::channel(0u64);
-
-                // Start the topology-driven puller supervisor over the membership
-                // FIRST, so the server's handback can read its per-peer applied
-                // watermark (how far we've pulled each backup's reverse-flushes).
+                // Start the topology-driven puller supervisor over the membership.
                 let supervisor = ReplicationSupervisor::new(
                     self_ordinal.clone(),
                     setup.network.clone(),
@@ -190,23 +180,16 @@ impl B2buaCore {
                 supervisor.set_repl_sink(repl_tx.clone());
                 supervisor.start(setup.membership.clone());
 
-                // The handback `as_of` for a pulling backup is THIS primary's
-                // applied pull watermark for that backup — a monotonic position in
-                // the backup's changelog domain (never a wall-clock, so skew-immune).
-                let watermark_src: WatermarkSrc = {
-                    let sup = supervisor.clone();
-                    Arc::new(move |peer: &str| sup.watermark(peer))
-                };
-
                 // Serve our changelog to pulling peers. `ReplServer` reads bodies
-                // from the same replicating store (as a `BodySource`) and wires the
-                // X11 handback (trigger tick + per-backup watermark lookup).
+                // from the same replicating store (as a `BodySource`). No handback
+                // signal rides the wire under ADR-0014 — a backup self-releases its
+                // takeover copies on transaction completion, and reconciliation is
+                // the `(p,b)` version vector — so the server just streams changelog.
                 let server = ReplServer::new(
                     self_ordinal,
                     setup.store.changelog().clone(),
                     setup.store.clone(),
-                )
-                .with_handback(handback_rx, watermark_src);
+                );
                 let network = setup.network.clone();
                 let listen_addr = setup.listen_addr;
                 tasks.push(tokio::spawn(async move {
@@ -216,12 +199,12 @@ impl B2buaCore {
                     }
                 }));
 
-                // Go-active task (ADR-0011 X11): once this node has re-hydrated its
-                // own partition (bootstrap-complete), (1) bulk-reclaim — re-serve
-                // every `pri:` call — then (2) tick the handback trigger so every
-                // serve_replog pushes its backup the current per-peer watermark,
-                // re-ticking for ~5 s to sweep flip-race stragglers (the watermark
-                // advances each tick as we keep pulling). One-shot per boot.
+                // Go-active task (ADR-0011 X11 / ADR-0014): once this node has
+                // re-hydrated its own partition (bootstrap-complete), bulk-reclaim —
+                // re-serve every `pri:` call, with the keepalive backlog smoothed
+                // (ADR-0014 §4) — then re-run once truly current to sweep flip-race
+                // stragglers. There is **no** handback burst: a backup self-releases
+                // its takeover copies on transaction completion. One-shot per boot.
                 {
                     let sup = supervisor.clone();
                     let tx = repl_tx.clone();
@@ -253,11 +236,6 @@ impl B2buaCore {
                             waited += 1;
                         }
                         let _ = tx.send(router::ReplCommand::ReclaimAll);
-
-                        for tick in 1..=6u64 {
-                            let _ = handback_tx.send(tick);
-                            tokio::time::sleep(Duration::from_millis(1000)).await;
-                        }
                     }));
                 }
 
@@ -375,6 +353,14 @@ impl B2buaCore {
     /// Active call count (test/observability).
     pub fn active_calls(&self) -> usize {
         self.ctx.state.active_count()
+    }
+
+    /// Does this worker currently **serve** `call_ref` (hold it live in its call
+    /// map — i.e. it would emit the call's keepalive and answer in-dialog traffic)?
+    /// The cluster-level invariant the failover tests assert is "exactly one node
+    /// serves a given call". Test/observability.
+    pub fn serves(&self, call_ref: &str) -> bool {
+        self.ctx.state.peek(call_ref).is_some()
     }
 
     /// Live per-call serialization-lock count (test/observability). Should track

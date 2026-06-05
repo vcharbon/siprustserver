@@ -318,11 +318,11 @@ async fn backup_held_counts_update_first_replica() {
         direction: Some(PropagateDirection::Forward),
     };
     w0.store
-        .put_call(PartitionRole::Primary, "w0", &call_ref, b"v1".to_vec(), &[], 30_000, 1, &fwd)
+        .put_call(PartitionRole::Primary, "w0", &call_ref, b"v1".to_vec(), &[], 30_000, 1, 0, &fwd)
         .await
         .unwrap();
     w0.store
-        .put_call(PartitionRole::Primary, "w0", &call_ref, b"v2".to_vec(), &[], 30_000, 2, &fwd)
+        .put_call(PartitionRole::Primary, "w0", &call_ref, b"v2".to_vec(), &[], 30_000, 2, 0, &fwd)
         .await
         .unwrap();
     tick(150).await;

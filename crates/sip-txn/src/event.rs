@@ -31,6 +31,14 @@ pub enum TransactionEvent {
         /// SIP method of the timed-out transaction (INVITE / BYE / …).
         method: Option<String>,
     },
+    /// **The last transaction for a *watched* call reached a terminal state** —
+    /// every transaction attributed to `call_ref` has left the map (final response
+    /// + ACK→Timer H for an INVITE, Timer J for a non-INVITE, or Timer B/F on
+    /// failure). Emitted only for call_refs the consumer registered via
+    /// [`watch_self_release`](crate::TransactionLayer::watch_self_release); the
+    /// B2BUA's acting-backup self-release (ADR-0014) keys on it to shed its live
+    /// takeover copy without polling.
+    CallQuiesced { call_ref: String },
 }
 
 /// Reason class for an event shed when the bounded output queue is full.
@@ -43,6 +51,7 @@ pub enum EventQueueDropReason {
     Response,
     Cancelled,
     Timeout,
+    CallQuiesced,
 }
 
 impl EventQueueDropReason {
@@ -50,6 +59,7 @@ impl EventQueueDropReason {
         match event {
             TransactionEvent::Cancelled { .. } => Self::Cancelled,
             TransactionEvent::Timeout { .. } => Self::Timeout,
+            TransactionEvent::CallQuiesced { .. } => Self::CallQuiesced,
             TransactionEvent::Message { message, .. } => match message.as_ref() {
                 SipMessage::Response(_) => Self::Response,
                 SipMessage::Request(r) if r.method == "INVITE" => Self::RequestInvite,
@@ -58,12 +68,13 @@ impl EventQueueDropReason {
         }
     }
 
-    pub(crate) const ALL: [EventQueueDropReason; 5] = [
+    pub(crate) const ALL: [EventQueueDropReason; 6] = [
         Self::RequestInvite,
         Self::RequestOther,
         Self::Response,
         Self::Cancelled,
         Self::Timeout,
+        Self::CallQuiesced,
     ];
 
     pub(crate) const fn index(self) -> usize {
@@ -73,6 +84,7 @@ impl EventQueueDropReason {
             Self::Response => 2,
             Self::Cancelled => 3,
             Self::Timeout => 4,
+            Self::CallQuiesced => 5,
         }
     }
 }

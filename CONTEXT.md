@@ -131,52 +131,53 @@ The steady-state tail a node opens against each peer (`PullRequest(Replog,
 since=W)`) to keep its backups current. Same stream as re-hydration; bootstrap
 is just its bulk prefix.
 
-**Takeover copy** (acting-backup live copy):
-The live, in-memory call a backup materialises into its own call map when the
-proxy fails a dialog over to it — distinct from the serialised backup
-**Element** (the `bak:{primary}` stored body). The copy serves the dialog and
-owns the runtime timers; the Element is just bytes + a TTL.
+**Takeover copy** (acting-backup live copy) — *reactive only* (ADR-0014):
+The live, in-memory call a backup materialises into its own call map **when the
+proxy reroutes an in-dialog request to it** (`hydrate_from_replica`) — distinct
+from the serialised backup **Element** (the `bak:{primary}` stored body). There is
+**no** eager/membership-driven takeover: a quiescent failed-over dialog is not
+made live on a survivor; it is recovered by the rebooting primary's **reclaim**.
+The copy serves the dialog and owns the runtime timers; the Element is just bytes
++ a TTL.
 _Avoid_: using "Element"/"replica" for the live copy, or "takeover copy" for the
-stored body.
+stored body; "eager takeover" (removed).
 
-**Reclaim** (active):
-A returning primary *re-serving* its calls — materialising each back into the
-live map, re-arming its timers, and re-flushing under the new **incarnation-gen**
-— not merely pulling the bodies into `pri:` storage. The storage-only step is
-**re-hydration**; reclaim is re-hydration *plus* re-serving.
+**Reclaim** (active) — the sole quiescent-recovery path (ADR-0014):
+A returning primary *re-serving* its calls — materialising each back into the live
+map, re-arming its timers (keepalive backlog **smoothed**, oldest-first; see
+ADR-0014 §4), and re-flushing under the new **incarnation-gen** — not merely
+pulling the bodies into `pri:` storage. The storage-only step is **re-hydration**;
+reclaim is re-hydration *plus* re-serving.
 _Avoid_: "reclaim" for the storage-only (re-hydration) step.
 
-**Activate** / **Deactivate** (takeover-copy lifecycle):
-A backup **activates** a **takeover copy** when it hydrates one to serve a
-failed-over dialog (live map + timers + keepalive OPTIONS). It **deactivates**
-it on a **`Deactivate{as_of}`** signal from the reclaiming primary — where
-`as_of` is the primary's **pull watermark** for this backup — dropping every
-takeover copy whose reverse-flush position is `<= as_of` (the primary has applied
-it and serves it now): stops the timers (ceases OPTIONS), drops the live copy —
-reverting to holding the call as a pure **Element**. The watermark keeps the
-decision in one monotonic domain (no wall-clock → no cross-node skew), distinct
-from timer rebuild, which stays on NTP wall-clock. "Deactivate" sheds a *role*;
-it is deliberately **not** "clear"/"destroy" — it neither ends the call nor
-propagates a delete.
+**Self-release** (acting-backup takeover-copy lifecycle) — replaces Activate/Deactivate (ADR-0014):
+A backup holds a **takeover copy** only *while actively serving* the rerouted
+request(s). When the **last transaction** for that call reaches a terminal state
+(2xx INVITE → Timer H after the ACK; non-INVITE → Timer J; failed leg → Timer B/F)
+the txn layer emits `CallQuiesced` and the backup **self-releases**: it
+`drop_local`s the live copy and stops its timers, reverting to a pure **Element**.
+**Local-only** — no delete propagates; the `bak:` replica + reverse-flushed deltas
+survive, so the call lives on at its reclaiming primary. There is **no** watermark
+handshake and **no** time-based settle; correctness rests on `(p,b)` causality.
+_Avoid_: "Deactivate"/"handback" (the removed watermark handshake); "ghost backup".
 
-**Handback**:
-The ownership transfer a **deactivate** completes: the primary **reclaims** the
-call and the backup **deactivates** its **takeover copy**, so exactly one node
-owns (and keepalives) the dialog — closing the double-OPTIONS window. Always
-**local-only**: no delete propagates, the primary's **Element** survives.
-_Avoid_: "handback" for a real call teardown (that *destroys* the context and
-propagates a delete).
-
-**Ghost backup**:
-A **takeover copy** that outlived its primary's **reclaim** — a duplicate that
-double-serves the dialog (both nodes keepalive the same leg) and leaks memory
-until **handback** evicts it. A handback eviction writes a CDR end-event flagged
-`ghost-backup`, distinct from a real call end.
+**Version vector `(p, b)`** (per-context reconciliation) — replaces LWW-by-`gen` (ADR-0014):
+Each call carries `(p, b)` = `(primary_counter, backup_counter)` =
+`CallTopology.{gen, bak_gen}`. **Each node bumps only its own** counter on a local
+mutation, so the *other* counter on a propagated update is the **branch point**.
+Merge is direction-aware: **Forward** (primary→backup) and **Bootstrap** apply
+unless the stored vector dominates (follower defers to authority); **Reverse**
+(backup→primary) applies iff `p_in == p_cur && b_in > b_cur` (untouched-by-primary
+since the backup branched, genuinely newer backup mutation); **deletes** apply
+unconditionally both ways. Closes the latent equal-`gen` divergence the single
+counter suffered.
+_Avoid_: "call_gen LWW"/"highest gen wins" (the reverse path is now the meaningful
+guard; forward is monotone-authority).
 
 **Informal aliases** (do not use in code or test names):
-Conversational shorthands map onto the canonical terms above — "switch to
-backup" / "go to backup" = **takeover** (+ **activate**); "switchback" / "back to
-nominal" = **reclaim** + **handback**; "nominal" / "the nominal node" =
+Conversational shorthands map onto the canonical terms above — "switch to backup"
+/ "go to backup" = **(reactive) takeover**; "switchback" / "back to nominal" =
+**reclaim** (+ backup **self-release**); "nominal" / "the nominal node" =
 **primary**. The failover DSL and test names use the canonical terms only.
 
 **Transparent failover** vs **Disruptive failover**:
@@ -202,9 +203,11 @@ safe-points — no bespoke failover test per callflow.
 
 **Incarnation-gen** vs **callGen** (the two-generations trap):
 *Incarnation-gen* (`gen`) = per-worker-restart epoch, the high word of the
-watermark — in prod it is **boot wall-clock seconds** (monotonic across pod
-restarts, so `(new_gen, 0) > (old_gen, *)`). *callGen* (`CallTopology.gen`) =
-content version of one call, the LWW tiebreak. Never conflate them.
+**watermark** — in prod it is **boot wall-clock seconds** (monotonic across pod
+restarts, so `(new_gen, 0) > (old_gen, *)`). *callGen* (`CallTopology.gen`) = the
+**primary counter `p`** of a call's `(p,b)` **version vector** (ADR-0014; `b` =
+`CallTopology.bak_gen`), the per-context reconciliation key. Never conflate the
+incarnation-gen (per node, in the watermark) with the call's `(p,b)` (per call).
 
 **Watermark** `(gen, counter)`:
 A puller's per-peer cursor; it applies a `Data` frame iff `(gen, counter) >

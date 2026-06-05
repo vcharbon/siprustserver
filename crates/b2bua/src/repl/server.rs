@@ -43,7 +43,6 @@ use std::sync::Arc;
 
 use repl_net::frame::{Frame, Op, Partition, PullMode, Watermark};
 use repl_net::transport::{ReplicationConnection, ReplicationListener};
-use tokio::sync::watch;
 
 use super::changelog::{BodySource, Changelog};
 use crate::store::{partition_of, PartitionRole};
@@ -63,28 +62,7 @@ pub struct ReplServer {
     self_ordinal: String,
     changelog: Changelog,
     source: Arc<dyn BodySource>,
-    /// **X11 handback trigger** (ADR-0011). A monotonic tick the go-active task
-    /// bumps once it has bulk-reclaimed (and re-bumps to sweep stragglers). `0` =
-    /// "no reclaim yet". On each tick (and on a fresh subscribe if the tick is
-    /// already `> 0`), every `serve_replog` connection sends its backup a
-    /// `Deactivate{as_of}` where `as_of` is read from [`watermark_src`]. `None`
-    /// (sim/test servers) never emits a handback.
-    ///
-    /// [`watermark_src`]: Self::watermark_src
-    handback_trigger: Option<watch::Receiver<u64>>,
-    /// **Per-backup handback watermark source** (ADR-0011 X11): maps a caller
-    /// (the pulling backup's ordinal) to this primary's *applied pull watermark*
-    /// for that backup — how far we have pulled its reverse-flushes. That is the
-    /// `as_of` we hand it: the backup drops every takeover copy whose reverse-flush
-    /// position is `<= as_of` (we provably hold + serve it now). Monotonic, in the
-    /// backup's changelog domain → no wall-clock, no skew. `None` on the sim/test
-    /// path. Wired by `B2buaCore` over the puller supervisor's per-peer watermark.
-    watermark_src: Option<WatermarkSrc>,
 }
-
-/// Maps a pulling backup's ordinal → this primary's applied pull watermark for
-/// it (the handback `as_of`). See [`ReplServer::watermark_src`].
-pub type WatermarkSrc = Arc<dyn Fn(&str) -> Watermark + Send + Sync>;
 
 impl ReplServer {
     /// Build a server for `self_ordinal` serving `changelog`, reading bodies
@@ -100,23 +78,7 @@ impl ReplServer {
             self_ordinal: self_ordinal.into(),
             changelog,
             source,
-            handback_trigger: None,
-            watermark_src: None,
         }
-    }
-
-    /// Attach the X11 handback (ADR-0011 X11): the go-active `trigger` tick plus
-    /// the per-backup `src` watermark lookup. Builder so the existing 3-arg
-    /// [`new`](Self::new) test callers are unchanged; the live `B2buaCore` wires
-    /// both over its reclaim task and the puller supervisor.
-    pub fn with_handback(
-        mut self,
-        trigger: watch::Receiver<u64>,
-        src: WatermarkSrc,
-    ) -> Self {
-        self.handback_trigger = Some(trigger);
-        self.watermark_src = Some(src);
-        self
     }
 
     /// Accept connections forever, serving each on a per-connection task. Returns
@@ -129,8 +91,8 @@ impl ReplServer {
     /// serve task**, cutting their connections so each peer's `recv` returns
     /// `None` and it reconnects to the rebooted node. A detached serve task would
     /// outlive the crash, hold its connection open, and the peer would never see
-    /// the cut — so it would never reconnect to the new incarnation and the X11
-    /// `Deactivate` handback (and all fresh replication) would never reach it.
+    /// the cut — so it would never reconnect to the new incarnation and fresh
+    /// replication (the rebooted primary's forward refreshes) would never reach it.
     pub async fn run(self, listener: Box<dyn ReplicationListener>) {
         let mut serves = tokio::task::JoinSet::new();
         loop {
@@ -262,6 +224,7 @@ impl ReplServer {
                         partition: Partition::Pri,
                         call_ref: key.clone(),
                         call_gen: meta.call_gen,
+                        call_bgen: meta.call_bgen,
                         body_ttl_ms: meta.body_ttl_ms,
                         indexes: meta.indexes,
                         body: Some(body),
@@ -313,16 +276,6 @@ impl ReplServer {
         // returned guard keeps the peer log reap-immune for this loop's lifetime.
         let sub = self.changelog.subscribe(caller);
 
-        // X11 handback: a clone of the go-active trigger tick (if wired).
-        let mut trigger = self.handback_trigger.clone();
-        // Reconnect backstop — if we have already reclaimed (tick > 0), tell this
-        // (re)subscribing backup at once to hand back every copy we now serve.
-        if trigger.as_ref().is_some_and(|rx| *rx.borrow() > 0)
-            && self.send_handback(conn, caller).await.is_err()
-        {
-            return;
-        }
-
         loop {
             // Drain everything strictly above `w`, send ascending.
             let frames = self.drain(caller, w).await;
@@ -347,35 +300,9 @@ impl ReplServer {
                 return;
             }
 
-            // Park until a new changelog bump, a handback trigger tick, or the
-            // connection closes, whichever first.
+            // Park until a new changelog bump or the connection closes.
             tokio::select! {
                 _ = sub.notified() => {}
-                // X11: the go-active task ticked the handback trigger (it has
-                // reclaimed, or is sweeping stragglers) — recompute THIS backup's
-                // `as_of` from the watermark source and push it. The arm is INERT
-                // (parks forever) in two cases: no trigger wired (sim/test path),
-                // or the trigger has CLOSED. The latter is the trap: the sole
-                // sender (b2bua_core.rs go-active task) is dropped when its ~5 s
-                // reclaim burst ends, after which `changed()` resolves `Err`
-                // IMMEDIATELY and FOREVER — re-polling it would spin the `select!`
-                // at ~100 % CPU per backup connection. So on close we drop
-                // `trigger` to `None` and the arm parks thereafter; the last
-                // handback already went out on the prior tick.
-                ok = async {
-                    match trigger.as_mut() {
-                        Some(rx) => rx.changed().await.is_ok(),
-                        None => std::future::pending::<bool>().await,
-                    }
-                } => {
-                    if ok {
-                        if self.send_handback(conn, caller).await.is_err() {
-                            return;
-                        }
-                    } else {
-                        trigger = None; // closed → disable the arm; next loop parks
-                    }
-                }
                 // A peer that cuts the connection wakes recv with None; end.
                 msg = conn.recv() => match msg {
                     // Inbound Ack mid-stream: retention-trim hint. No-op stub.
@@ -386,23 +313,6 @@ impl ReplServer {
                 },
             }
         }
-    }
-
-    /// Send `caller` (a pulling backup) its current X11 handback: a
-    /// `Deactivate{as_of}` where `as_of` is this primary's applied pull watermark
-    /// for that backup ([`watermark_src`](Self::watermark_src)). No-op when no
-    /// source is wired, or when we have pulled nothing from this backup yet
-    /// (`counter == 0` — it holds no reclaimable copies of ours). `Err(())` means
-    /// the connection was cut and the serve loop should end.
-    async fn send_handback(&self, conn: &dyn ReplicationConnection, caller: &str) -> Result<(), ()> {
-        let Some(src) = &self.watermark_src else {
-            return Ok(());
-        };
-        let as_of = src(caller);
-        if as_of.counter == 0 {
-            return Ok(());
-        }
-        conn.send(Frame::Deactivate { as_of }).await.map_err(|_| ())
     }
 
     /// Drain due entries for `caller` above `since`, resolving each callRef's
@@ -451,83 +361,3 @@ impl ReplServer {
 /// `(role, primary)` keyspace key the server groups due callRefs by.
 type Group = (crate::store::PartitionRole, String);
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use async_trait::async_trait;
-    use repl_net::transport::SendError;
-    use sip_clock::Clock;
-    use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// An idle, *live* backup connection: `send` records each frame (and yields,
-    /// faithful to a real socket write, so a spinning loop still interleaves with
-    /// the test driver); `recv` parks forever (a quiet, connected backup). With
-    /// this connection the ONLY thing that can drive `serve_replog`'s loop is the
-    /// `Deactivate` watch arm — so the `send` count is a direct spin detector.
-    struct IdleConn {
-        sends: Arc<AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl ReplicationConnection for IdleConn {
-        async fn send(&self, _frame: Frame) -> Result<(), SendError> {
-            self.sends.fetch_add(1, Ordering::Relaxed);
-            tokio::task::yield_now().await;
-            Ok(())
-        }
-        async fn recv(&self) -> Option<Frame> {
-            std::future::pending().await
-        }
-        fn peer_addr(&self) -> SocketAddr {
-            "127.0.0.1:9".parse().unwrap()
-        }
-        fn local_addr(&self) -> SocketAddr {
-            "127.0.0.1:8".parse().unwrap()
-        }
-    }
-
-    /// Regression (CPU spin): a CLOSED handback trigger must not busy-loop
-    /// `serve_replog`. The sole sender (b2bua_core.rs go-active task) is dropped
-    /// when its ~5 s reclaim burst ends; thereafter `changed()` resolves `Err`
-    /// immediately and forever. Before the fix the `select!` re-polled that arm
-    /// every turn and never parked — a permanent ~100 % CPU spin per backup
-    /// connection (2.5–4.7 cores observed in-cluster at 50 cps with *zero* repl
-    /// traffic). The fix disables the arm on close. We detect a spin by counting
-    /// `Noop` sends: a caught-up `serve_replog` emits one per loop iteration, so a
-    /// parked loop sends ~1–2 then goes quiet while a spin sends one per turn,
-    /// unboundedly.
-    #[tokio::test]
-    async fn closed_deactivate_watch_does_not_spin_serve_replog() {
-        let clock = Clock::test_at(0);
-        let store = Arc::new(crate::repl::ReplicatingCallStore::new(0, clock.clone()));
-        let changelog = Changelog::new(0, clock);
-        // Close the trigger up front — the steady state once the go-active task
-        // has finished its burst and dropped the only sender.
-        let (tx, rx) = watch::channel(0u64);
-        drop(tx);
-        let src: WatermarkSrc = Arc::new(|_caller: &str| Watermark::new(0, 0));
-        let server = ReplServer::new("self", changelog, store).with_handback(rx, src);
-
-        let sends = Arc::new(AtomicUsize::new(0));
-        let conn = IdleConn { sends: sends.clone() };
-        let task = tokio::spawn(async move {
-            server
-                .serve_replog(&conn, "peer", Watermark { gen: 0, counter: 0 })
-                .await;
-        });
-
-        // Yield generously so a spinning loop has ample turns to reveal itself.
-        for _ in 0..1000 {
-            tokio::task::yield_now().await;
-        }
-        let n = sends.load(Ordering::Relaxed);
-        task.abort();
-
-        assert!(
-            n <= 8,
-            "serve_replog spun on a closed Deactivate watch: {n} Noop sends over \
-             1000 scheduler turns (a parked loop sends ~1–2; a spin sends hundreds)"
-        );
-    }
-}

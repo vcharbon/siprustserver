@@ -34,8 +34,8 @@ async fn write_converges_put_update_delete() {
 
     let c1 = cref("A", "1");
     let c2 = cref("A", "2");
-    cl.put("A", &c1, b"v1".to_vec(), 1, &backup_is("B")).await;
-    cl.put("A", &c2, b"w1".to_vec(), 1, &backup_is("B")).await;
+    cl.put("A", &c1, b"v1".to_vec(), 1, 0, &backup_is("B")).await;
+    cl.put("A", &c2, b"w1".to_vec(), 1, 0, &backup_is("B")).await;
     cl.advance(ms(200)).await;
 
     assert_eq!(
@@ -50,7 +50,7 @@ async fn write_converges_put_update_delete() {
     );
 
     // Update c1 (higher gen) + delete c2.
-    cl.put("A", &c1, b"v2".to_vec(), 2, &backup_is("B")).await;
+    cl.put("A", &c1, b"v2".to_vec(), 2, 0, &backup_is("B")).await;
     cl.delete("A", &c2, &backup_is("B")).await;
     cl.advance(ms(200)).await;
 
@@ -79,7 +79,7 @@ async fn crash_then_reboot_rehydrates() {
     let bodies = ["b0", "b1", "b2"];
     for (i, body) in bodies.iter().enumerate() {
         let c = cref("A", &i.to_string());
-        cl.put("A", &c, body.as_bytes().to_vec(), 1, &backup_is("B"))
+        cl.put("A", &c, body.as_bytes().to_vec(), 1, 0, &backup_is("B"))
             .await;
     }
     cl.advance(ms(200)).await;
@@ -122,7 +122,7 @@ async fn partition_then_heal_converges() {
     cl.advance(ms(100)).await;
 
     let c = cref("A", "1");
-    cl.put("A", &c, b"before".to_vec(), 1, &backup_is("B")).await;
+    cl.put("A", &c, b"before".to_vec(), 1, 0, &backup_is("B")).await;
     cl.advance(ms(200)).await;
     assert_eq!(
         cl.node("B").get(BAK, "A", &c).await.as_deref(),
@@ -132,9 +132,9 @@ async fn partition_then_heal_converges() {
     // Partition A<->B, mutate during the cut.
     cl.partition("A", "B");
     cl.advance(ms(100)).await;
-    cl.put("A", &c, b"during".to_vec(), 2, &backup_is("B")).await;
+    cl.put("A", &c, b"during".to_vec(), 2, 0, &backup_is("B")).await;
     let c3 = cref("A", "3");
-    cl.put("A", &c3, b"new-during".to_vec(), 1, &backup_is("B"))
+    cl.put("A", &c3, b"new-during".to_vec(), 1, 0, &backup_is("B"))
         .await;
     cl.advance(ms(100)).await;
 
@@ -165,7 +165,7 @@ async fn takeover_then_reclaim_highest_gen() {
 
     let c = cref("A", "1");
     // A (primary) creates gen1, forward-replicates to B.
-    cl.put("A", &c, b"g1".to_vec(), 1, &backup_is("B")).await;
+    cl.put("A", &c, b"g1".to_vec(), 1, 0, &backup_is("B")).await;
     cl.advance(ms(200)).await;
     assert_eq!(
         cl.node("B").get(BAK, "A", &c).await.as_deref(),
@@ -175,9 +175,9 @@ async fn takeover_then_reclaim_highest_gen() {
     // A crashes. B (acting-backup) takes over: mutate the call via the policy
     // (B does NOT own "A|.." → Reverse). Two takeovers, gen2 then gen3.
     cl.crash("A");
-    cl.put("B", &c, b"g2".to_vec(), 2, &backup_is("A")).await;
+    cl.put("B", &c, b"g2".to_vec(), 2, 0, &backup_is("A")).await;
     cl.advance(ms(100)).await;
-    cl.put("B", &c, b"g3".to_vec(), 3, &backup_is("A")).await;
+    cl.put("B", &c, b"g3".to_vec(), 3, 0, &backup_is("A")).await;
     cl.advance(ms(100)).await;
 
     // A reboots empty under a higher gen → reclaims the highest gen (3).
@@ -207,7 +207,7 @@ async fn dead_peer_auto_clean_then_rebootstrap() {
     cl.advance(ms(100)).await;
 
     let c = cref("A", "1");
-    cl.put("A", &c, b"v1".to_vec(), 1, &backup_is("B")).await;
+    cl.put("A", &c, b"v1".to_vec(), 1, 0, &backup_is("B")).await;
     cl.advance(ms(200)).await;
     assert_eq!(
         cl.node("B").get(BAK, "A", &c).await.as_deref(),
@@ -226,7 +226,7 @@ async fn dead_peer_auto_clean_then_rebootstrap() {
     // put re-bumps B's propagate log) and B converges on the live set.
     cl.reboot("B").await;
     cl.advance(ms(200)).await;
-    cl.put("A", &c, b"v2".to_vec(), 2, &backup_is("B")).await;
+    cl.put("A", &c, b"v2".to_vec(), 2, 0, &backup_is("B")).await;
     cl.advance(secs(1)).await;
     assert_eq!(
         cl.node("B").get(BAK, "A", &c).await.as_deref(),
@@ -248,7 +248,7 @@ async fn watermark_survives_remove_readd() {
 
     for i in 0..3 {
         let c = cref("A", &i.to_string());
-        cl.put("A", &c, format!("b{i}").into_bytes(), 1, &backup_is("B"))
+        cl.put("A", &c, format!("b{i}").into_bytes(), 1, 0, &backup_is("B"))
             .await;
     }
     cl.advance(ms(200)).await;
@@ -267,7 +267,7 @@ async fn watermark_survives_remove_readd() {
     // While parked, A adds two more.
     for i in 3..5 {
         let c = cref("A", &i.to_string());
-        cl.put("A", &c, format!("b{i}").into_bytes(), 1, &backup_is("B"))
+        cl.put("A", &c, format!("b{i}").into_bytes(), 1, 0, &backup_is("B"))
             .await;
     }
 

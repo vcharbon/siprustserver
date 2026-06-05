@@ -13,7 +13,7 @@
 //! - start / topology-add → `Connecting` (`network.connect`).
 //! - connect ok, cold-start/reset → `Bootstrapping`:
 //!   `PullRequest(Bootstrap, since=(0,0))` → apply the lazy-batch `Data(Pri)`
-//!   pre-seed (import as `pri:{me}`, LWW by `call_gen`, NOT watermark-gated) →
+//!   pre-seed (import as `pri:{me}`, `(p,b)` bootstrap rule, NOT watermark-gated) →
 //!   on the terminal `Noop` mark **bootstrap-complete** → re-pull
 //!   `PullRequest(Replog, since=(0,0))` on the SAME connection. The Replog
 //!   re-pull is intentionally **cold** so the compacted changelog delivers the
@@ -23,8 +23,8 @@
 //! - connect ok, self has state (`W > (0,0)`) → `Tailing`,
 //!   `PullRequest(Replog, since=retained W)`.
 //! - connect fails → `Backoff{attempt++}`.
-//! - `Tailing` `Data{at}`: apply iff `at > W` (apply-gate); LWW on `call_gen`;
-//!   then `W = at`.
+//! - `Tailing` `Data{at}`: apply iff `at > W` (apply-gate); then the ADR-0014
+//!   direction-aware `(p,b)` merge rule (see `apply_to_store`); then `W = at`.
 //! - `Tailing` `Noop{at}`: `ever_current = true` (sticky); advance `W` if `at`
 //!   greater.
 //! - `Tailing` `ResetToBootstrap` → `Bootstrapping` (discard W; re-pull — S5
@@ -57,10 +57,25 @@ const DEFAULT_BACKOFF_MAX_MS: u64 = 30_000;
 /// waits for the terminal `Noop` before declaring bootstrap-complete best-effort
 /// (X5 / Decision 4 — liveness over completeness).
 const DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS: u64 = 10_000;
-/// Protocol version stamped on the `PullRequest`.
-const PROTO_VER: u16 = 1;
+/// Protocol version stamped on the `PullRequest`. **v2** (ADR-0014): the
+/// `Frame::Data` wire layout carries the `(p,b)` version vector — `call_bgen`
+/// was added after `call_gen` — so a v2 node cannot interpret a v1 peer's frames
+/// (and vice-versa). Bumped from 1; pre-production, so no compat shim.
+const PROTO_VER: u16 = 2;
 /// Server batch-size hint on the `PullRequest`.
 const CHUNK: u32 = 128;
+
+/// How an inbound `Data` frame is reconciled into the local store
+/// ([`Puller::apply_to_store`]). The bootstrap pre-seed (recovering our own
+/// partition) takes the replica as-is; the steady-state tail applies the
+/// direction-aware `(p,b)` merge rule.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ApplyMode {
+    /// Bulk bootstrap pre-seed — recovery, not a merge.
+    Bootstrap,
+    /// Steady-state tail delivery — apply the ADR-0014 `(p,b)` rule.
+    Steady,
+}
 
 /// Backoff knobs for a puller (tests inject short values).
 #[derive(Clone, Copy, Debug)]
@@ -177,11 +192,11 @@ pub struct Puller {
     status_tx: watch::Sender<PullerStatus>,
     /// Replication observability (inbound apply counters + backup-held gauge).
     metrics: crate::metrics::B2buaMetrics,
-    /// Sink to the router for X11 fail-back commands: a **reactive reclaim** when
-    /// a backup reverse-flushes one of our calls (`partition=Pri` tail apply), and
-    /// a **handback** when this peer (our primary) pushes a `Deactivate`. `None`
-    /// outside a live `B2buaCore` (the sim/unit puller tests drive the store
-    /// directly), so the existing constructors stay source-compatible.
+    /// Sink to the router for fail-back commands (ADR-0011 X11 / ADR-0014): a
+    /// **reactive reclaim** when a backup reverse-flushes one of our calls
+    /// (`partition=Pri` tail apply). `None` outside a live `B2buaCore` (the sim/unit
+    /// puller tests drive the store directly), so the existing constructors stay
+    /// source-compatible.
     repl_tx: Option<mpsc::UnboundedSender<ReplCommand>>,
 }
 
@@ -445,7 +460,7 @@ impl Puller {
             // ---- Bootstrapping ---- request the lazy-batch pre-seed; the server
             // streams Data(Pri) (the static `bak:{me}` calls the peer holds but
             // never mutated — NOT in the changelog) then a TERMINAL Noop(W). We
-            // apply the pre-seed directly (NOT watermark-gated, LWW by call_gen),
+            // apply the pre-seed directly (NOT watermark-gated; `(p,b)` bootstrap rule),
             // then re-pull `Replog` from `(0,0)` on this SAME connection.
             //
             // The re-pull is **cold** (`since.gen < server.gen`) on purpose: the
@@ -534,12 +549,14 @@ impl Puller {
                     partition,
                     call_ref,
                     call_gen,
+                    call_bgen,
                     body_ttl_ms,
                     indexes,
                     body,
                 }) => {
                     self.apply_data(
-                        at, op, partition, &call_ref, call_gen, body_ttl_ms, &indexes, body,
+                        at, op, partition, &call_ref, call_gen, call_bgen, body_ttl_ms, &indexes,
+                        body,
                     )
                     .await;
                 }
@@ -565,19 +582,6 @@ impl Puller {
                     });
                     return RunOutcome::Disconnected;
                 }
-                Some(Frame::Deactivate { as_of }) => {
-                    // X11 handback: our primary (this peer) has pulled our
-                    // reverse-flushes up to `as_of`. Tell the router to deactivate
-                    // every takeover copy we hold for it whose reverse-flush
-                    // position is `<= as_of` (it serves them now) — local-only, no
-                    // delete propagated (it keeps forward-refreshing our backup).
-                    if let Some(tx) = &self.repl_tx {
-                        let _ = tx.send(ReplCommand::Deactivate {
-                            primary: self.peer.ordinal.clone(),
-                            as_of,
-                        });
-                    }
-                }
                 // PullRequest/Ack are client→server; never expected here. Ignore.
                 Some(_) => {}
                 None => return RunOutcome::Disconnected,
@@ -586,7 +590,7 @@ impl Puller {
     }
 
     /// The **Bootstrapping** recv loop. Applies each pre-seed `Data` (partition
-    /// `Pri` → import as `pri:{primary}`, LWW-guarded by `call_gen`, NOT
+    /// `Pri` → import as `pri:{primary}`, under the `(p,b)` bootstrap rule, NOT
     /// watermark-gated since it is a bulk pre-seed) and returns on the TERMINAL
     /// `Noop{at}` ([`BootstrapOutcome::Seeded`]). Races the cancel signal and a
     /// per-frame **idle** timer ([`idle_timer`]) — silence for the whole window
@@ -619,14 +623,19 @@ impl Puller {
                     partition,
                     call_ref,
                     call_gen,
+                    call_bgen,
                     body_ttl_ms,
                     indexes,
                     body,
                     ..
                 }) => {
-                    // Pre-seed: apply directly (no watermark gate), LWW by call_gen.
+                    // Pre-seed: a node recovering its OWN partition — take the
+                    // replica's `(p,b)` as-is (recovery, not a merge). No
+                    // watermark gate; `ApplyMode::Bootstrap` only guards against
+                    // clobbering a strictly-newer concurrent local copy.
                     self.apply_to_store(
-                        op, partition, &call_ref, call_gen, body_ttl_ms, &indexes, body,
+                        op, partition, &call_ref, call_gen, call_bgen, body_ttl_ms, &indexes, body,
+                        ApplyMode::Bootstrap,
                     )
                     .await;
                 }
@@ -640,7 +649,7 @@ impl Puller {
         }
     }
 
-    /// Apply one `Data` frame under the apply-gate + LWW rules, then advance W
+    /// Apply one `Data` frame under the apply-gate + `(p,b)` merge rule, then advance W
     /// (the steady-state tail path).
     #[allow(clippy::too_many_arguments)]
     async fn apply_data(
@@ -650,6 +659,7 @@ impl Puller {
         partition: repl_net::frame::Partition,
         call_ref: &str,
         call_gen: i64,
+        call_bgen: i64,
         body_ttl_ms: i64,
         indexes: &[String],
         body: Option<Arc<[u8]>>,
@@ -658,8 +668,13 @@ impl Puller {
         if at <= self.status_tx.borrow().watermark {
             return;
         }
-        self.apply_to_store(op, partition, call_ref, call_gen, body_ttl_ms, indexes, body)
-            .await;
+        // Steady-state tail: a genuine cross-node update — apply under the
+        // ADR-0014 direction-aware `(p,b)` rule (`partition` resolves direction).
+        self.apply_to_store(
+            op, partition, call_ref, call_gen, call_bgen, body_ttl_ms, indexes, body,
+            ApplyMode::Steady,
+        )
+        .await;
         // Advance W past the applied entry.
         self.status_tx.send_modify(|s| s.watermark = at);
         // X11 reactive reclaim: a backup just reverse-flushed one of OUR calls
@@ -676,15 +691,32 @@ impl Puller {
         }
     }
 
-    /// Apply a `Data` frame's mutation to the local store under the LWW guard,
-    /// **without** touching the watermark. Shared by the tail apply-gate path
-    /// ([`apply_data`](Self::apply_data)) and the bootstrap pre-seed path
-    /// ([`run_bootstrap`](Self::run_bootstrap)).
+    /// Apply a `Data` frame's mutation to the local store under the **ADR-0014
+    /// `(p,b)` version-vector rule**, **without** touching the watermark. Shared
+    /// by the tail apply-gate path ([`apply_data`](Self::apply_data)) and the
+    /// bootstrap pre-seed path ([`run_bootstrap`](Self::run_bootstrap)).
     ///
-    /// `partition=Bak` → store as `bak:{primary}`; `partition=Pri` → store as
-    /// `pri:{primary}` (the reclaim/reverse keyspace — bootstrap imports land
-    /// here). LWW: a stored `call_gen >= the frame's` skips the body write so a
-    /// concurrent newer mutation is not clobbered by an older bootstrap copy.
+    /// `partition=Bak` → store as `bak:{primary}` (a **Forward** primary→backup
+    /// update); `partition=Pri` → store as `pri:{primary}` (a **Reverse**
+    /// backup→primary reverse-flush, or a bootstrap import).
+    ///
+    /// Apply decision (`(call_gen, call_bgen)` = incoming `(p,b)`; `(sp, sb)` =
+    /// stored):
+    /// - **Delete** → apply unconditionally (delete-wins, both directions).
+    /// - **Forward** (`role == Backup`) Create/Update → apply **always** (the
+    ///   follower defers to the authority).
+    /// - **Reverse** (`role == Primary`) Create/Update → apply iff the primary
+    ///   has **not** itself mutated past the backup's branch point and the backup
+    ///   genuinely advanced: `p_in == sp && b_in > sb` (or no local copy yet →
+    ///   accept; the reactive reclaim materialises it). Else keep our own.
+    /// - **Bootstrap** (recovering our own partition) → take the replica as-is,
+    ///   skipping only a strictly-dominated copy so a concurrent newer reclaim is
+    ///   not clobbered.
+    ///
+    /// (Tombstone-suppress — never resurrect a locally-deleted call — is deferred:
+    /// it needs a reaped tombstone set; deletes already win, so the remaining gap
+    /// is only a late reverse-create racing a delete, which the watermark + reap
+    /// bound.)
     #[allow(clippy::too_many_arguments)]
     async fn apply_to_store(
         &self,
@@ -692,9 +724,11 @@ impl Puller {
         partition: repl_net::frame::Partition,
         call_ref: &str,
         call_gen: i64,
+        call_bgen: i64,
         body_ttl_ms: i64,
         indexes: &[String],
         body: Option<Arc<[u8]>>,
+        mode: ApplyMode,
     ) {
         let primary = partition_of(&self.self_ordinal, call_ref).1;
         let role = match partition {
@@ -704,9 +738,34 @@ impl Puller {
 
         match op {
             Op::Create | Op::Update => {
-                let stored = self.store.current_call_gen(role, &primary, call_ref);
-                let skip = matches!(stored, Some(g) if g >= call_gen);
-                if !skip {
+                let stored = self.store.current_cv(role, &primary, call_ref);
+                // Stored `(sp,sb)` DOMINATES incoming `(p,b)` ⇒ skip (idempotent /
+                // reordered re-delivery). Used by the Forward + Bootstrap paths:
+                // both defer to the sending authority but must not regress to a
+                // strictly-older frame (steady-state ordering is the watermark's
+                // job; this is the belt-and-suspenders against reorder/replay and
+                // the bootstrap-vs-concurrent-reclaim race).
+                let dominated =
+                    |sp: i64, sb: i64| sp >= call_gen && sb >= call_bgen;
+                let apply = match (mode, role) {
+                    // Bootstrap (recovering our own partition) + Forward
+                    // (primary → backup): authority's body, monotone by `(p,b)`.
+                    (ApplyMode::Bootstrap, _) | (ApplyMode::Steady, PartitionRole::Backup) => {
+                        match stored {
+                            Some((sp, sb)) => !dominated(sp, sb),
+                            None => true,
+                        }
+                    }
+                    // Reverse (backup → primary): accept iff untouched-by-us since
+                    // the backup branched (`p_in == sp`) AND a genuinely newer
+                    // backup mutation (`b_in > sb`); no local copy → accept (the
+                    // reactive reclaim materialises it). Else keep our own.
+                    (ApplyMode::Steady, PartitionRole::Primary) => match stored {
+                        Some((sp, sb)) => call_gen == sp && call_bgen > sb,
+                        None => true,
+                    },
+                };
+                if apply {
                     let body = body.map(|b| b.to_vec()).unwrap_or_default();
                     let _ = self
                         .store
@@ -718,6 +777,7 @@ impl Puller {
                             indexes,
                             body_ttl_ms,
                             call_gen,
+                            call_bgen,
                             // Apply locally only — do NOT re-propagate (peer:None).
                             &PutOpts::default(),
                         )
@@ -854,6 +914,7 @@ mod tests {
                     partition: Partition::Pri,
                     call_ref: format!("w1|{i}|t"),
                     call_gen: 1,
+                    call_bgen: 0,
                     body_ttl_ms: 0,
                     indexes: Vec::new(),
                     body: Some(Arc::from(format!("body{i}").into_bytes().into_boxed_slice())),

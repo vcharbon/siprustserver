@@ -155,6 +155,7 @@ impl HaNode {
         call_ref: &str,
         body: Vec<u8>,
         call_gen: i64,
+        call_bgen: i64,
         backup_resolver: &dyn Fn(&str) -> Option<String>,
     ) {
         flush_replicated(
@@ -165,6 +166,7 @@ impl HaNode {
             &[],
             0,
             call_gen,
+            call_bgen,
             backup_resolver,
         )
         .await

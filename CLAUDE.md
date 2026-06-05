@@ -77,3 +77,18 @@ Hazards (each has bitten us at least once; some twice across both codebases):
   `Harness::finish()`, so the recorded SIP trace is lost; debug with temporary
   `eprintln!` in `sip-net::simulated::deliver` and the timer driver until a
   panic-time dump exists.
+
+- **HA reconciliation is `(p,b)`-causal — no time-based settle/handback anywhere**
+  (ADR-0014). A partition can route a dialog to the backup at any time, for any
+  duration, so correctness must NOT depend on a timer/settle window. The merge is
+  the per-context `(primary, backup)` version vector; the acting-backup
+  **self-releases** a takeover copy on the served transaction's terminal state
+  (a `CallQuiesced` push from the txn layer), never on a clock. Do not reintroduce
+  a `Deactivate`/watermark handback or a "wait N seconds then drop" rule.
+
+- **Keepalive catch-up smoothing lives in the reclaim handler, never in the timer
+  driver** (ADR-0014 §4). On reboot, `router::reclaim_all` pre-computes staggered
+  absolute `fire_at` for past-due keepalives (oldest-first, bounded to
+  `keepalive_catchup_speedup`× cadence) so a rehydrated node is not flooded. This
+  is **performance only** — it has no correctness role and no timing assumption.
+  Keep the epoch/`Key` driver in `timers.rs` untouched; never move smoothing into it.

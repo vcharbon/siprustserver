@@ -4,6 +4,23 @@
 19 transparent cells + 5 oracle teeth tests green (the keepalive cell landed
 2026-06-05; see the keepalive amendment).
 
+**Amendment (2026-06-05) — reactive-only takeover ([ADR-0014](0014-reactive-only-takeover-version-vector.md)).**
+Eager takeover and the `Deactivate` handback were removed. Anywhere the amendments
+below say "eager `TakeOverPeer`" / "eager-takeover keepalive" / "three interleaving
+timers", read **reactive takeover + reboot reclaim**: a failed-over dialog is taken
+over only when the proxy reroutes its in-dialog traffic to a survivor, and a
+quiescent dialog is recovered by the rebooting primary's (smoothed) reclaim. The
+acting-backup then **self-releases** its takeover copy on transaction completion
+(no handback burst). The harness now asserts in cluster vocabulary (`serves` /
+`is_synchronized_backup` / `memory_clean` / `assert_single_owner` /
+`assert_call_fully_released`), not HA internals. Renamed cells:
+`hydrated_call_rearms_keepalive_and_reaps_dead_peer` →
+`hydrated_takeover_copy_self_releases_without_leaking`;
+`cseq_stays_in_order_across_eager_takeover_and_reclaim` →
+`cseq_stays_in_order_across_failover_and_reclaim`; added
+`quiescent_long_call_survives_kill_reboot_reclaim`; removed
+`eager_takeover_keeps_quiescent_dialog_alive_and_hands_back_once`.
+
 **Amendment (2026-06-04, during build):** `Early` state / `CANCEL` are
 reclassified from the transparent matrix to **v2-disruptive**. By the same
 quiescence rule that excludes re-negotiating/terminating-in-flight, an early

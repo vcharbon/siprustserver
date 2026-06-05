@@ -299,6 +299,74 @@ impl ReplicatedB2buaSut {
         self.store.scan_call_refs(PartitionRole::Primary, primary)
     }
 
+    // ── High-level HA concepts (ADR-0014) ───────────────────────────────────────
+    // Failover tests assert on these, NOT on low-level constructs (partition
+    // bodies, per-call locks, repl counters). The vocabulary is the cluster's:
+    // who *serves* a call, whether a backup is *synchronized* (holds a current
+    // replica it could take over from), and whether a node's *memory is clean*
+    // (no per-call state left behind).
+
+    /// Does this node currently **serve** `call_ref` — hold it live, so it would
+    /// emit the call's keepalive and answer in-dialog traffic? The cluster
+    /// invariant is "exactly one node serves a given call" (see
+    /// [`assert_single_owner`](crate::assert_single_owner)). `false` while crashed.
+    pub fn serves(&self, call_ref: &str) -> bool {
+        self.core.as_ref().map(|c| c.serves(call_ref)).unwrap_or(false)
+    }
+
+    /// Is this node **synchronized** as the backup for `call_ref` — does it hold a
+    /// current replica it could take the call over from? (The primary is encoded in
+    /// `call_ref`; this reads the `bak:{primary}` partition.) The behavioural twin
+    /// is "the owner answers 200 on a probe OPTIONS" (drive a keepalive); this is
+    /// the at-rest "the backup could take over" check.
+    pub async fn is_synchronized_backup(&self, call_ref: &str) -> bool {
+        match call::parse_call_ref(call_ref) {
+            Some(p) => self
+                .store
+                .get_call(PartitionRole::Backup, &p.primary, call_ref)
+                .await
+                .ok()
+                .flatten()
+                .is_some(),
+            None => false,
+        }
+    }
+
+    /// Has this node **cleaned up all per-call memory** — no live calls and no
+    /// per-call serialization locks left behind? The high-level "no leak" check
+    /// (replaces poking `active_calls()`/`lock_count()` directly). `true` while
+    /// crashed (an empty node holds nothing).
+    pub fn memory_clean(&self) -> bool {
+        self.active_calls() == 0 && self.lock_count() == 0
+    }
+
+    /// Does this node hold **any trace** of `call_ref` — live (serving) or as a
+    /// replica body in either partition? Used to assert a terminated call left
+    /// nothing behind anywhere (so a later reboot cannot resurrect it).
+    pub async fn holds_any_trace(&self, call_ref: &str) -> bool {
+        if self.serves(call_ref) {
+            return true;
+        }
+        match call::parse_call_ref(call_ref) {
+            Some(p) => {
+                for role in [PartitionRole::Primary, PartitionRole::Backup] {
+                    if self
+                        .store
+                        .get_call(role, &p.primary, call_ref)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some()
+                    {
+                        return true;
+                    }
+                }
+                false
+            }
+            None => false,
+        }
+    }
+
     /// CRASH: abort the core's tasks + park its pullers, then drop it and replace
     /// the store with a fresh empty one (memory wiped). The node is inert until
     /// [`reboot`](Self::reboot). Closing the core's tasks closes its repl
@@ -314,11 +382,10 @@ impl ReplicatedB2buaSut {
 
     /// Drive a `MemberDelta::Removed` for `ordinal` into THIS node's membership —
     /// the simulation of k8s dropping a killed pod's endpoint from the survivor's
-    /// view. The node's supervisor reconciles it to a Park + an eager
-    /// `TakeOverPeer` (ADR-0011 X11): the survivor materialises the dead peer's
-    /// `bak:{ordinal}` partition so a quiescent failed-over dialog stays alive.
-    /// (`crash()` alone aborts the dead node's own tasks but never touches a
-    /// survivor's membership, so a takeover test must call this on the survivor.)
+    /// view. The node's supervisor reconciles it to a Park. Under reactive-only
+    /// takeover (ADR-0014) this no longer drives an eager takeover (removed); the
+    /// survivor takes a dialog over only when the proxy reroutes its in-dialog
+    /// traffic. Kept so the survivor's membership view stays honest across a kill.
     pub fn simulate_peer_removed(&self, ordinal: &str) {
         self.membership.remove(ordinal);
     }
@@ -326,9 +393,8 @@ impl ReplicatedB2buaSut {
     /// Drive a `MemberDelta::Added` for `ordinal` into THIS node's membership —
     /// the simulation of k8s re-publishing a restarted pod's endpoint. The
     /// survivor's supervisor re-spawns its puller to the peer (seeded from the
-    /// retained watermark), which is how the rebooted primary's X11 `Deactivate`
-    /// handback reaches this node. A statefulset restart is observed as
-    /// Removed-then-Added; pair this with a prior
+    /// retained watermark) → fresh forward replication. A statefulset restart is
+    /// observed as Removed-then-Added; pair this with a prior
     /// [`simulate_peer_removed`](Self::simulate_peer_removed). Host == ordinal,
     /// matching the harness's `Peer::new(p, p)` convention.
     pub fn simulate_peer_added(&self, ordinal: &str) {
@@ -484,6 +550,12 @@ impl FailoverHarness {
             "S10b goal-2 simulated failover: alice → proxy → 2 replicating b2buas \
              over the SIM SIP + SIM repl fabrics under one fake clock.",
         );
+        // The generic scenario-Harness CSeq gate is UNSCOPED (audits every bind,
+        // including the internal cluster workers). A transparent failover splits
+        // one dialog's CSeq stream across workers, which that gate misreads as a
+        // skip. `FailoverHarness` runs its own endpoint-scoped audit on Drop
+        // (`rfc_audit_findings`), so disarm the redundant unscoped one here.
+        harness.disarm_cseq_gate();
         // ONE shared global recording-order sequencer for ALL THREE planes. It IS
         // the SIP layer-harness `EventSequencer` (the same counter that stamps
         // every recorded SIP message's `seq`); we thread it into the repl capture
@@ -813,7 +885,29 @@ impl FailoverHarness {
     /// and the automatic Drop-time enforcement so the SAME rule set runs on every
     /// FailoverHarness-based test with no per-test opt-in.
     fn rfc_audit_findings(&self) -> Vec<(String, String)> {
-        let events = self.harness.recording().channel().snapshot();
+        // RFC 3261 conformance is only observable from OUTSIDE the proxy/LB — at
+        // the real UAs (alice/bob). A *transparent* failover legitimately splits
+        // ONE logical dialog across several cluster workers: alice's in-dialog
+        // CSeq stream 1→2→3 can land 1 on the primary, 2 on the backup (takeover),
+        // 3 on the reclaimed primary. Auditing per **worker** bind then reports a
+        // phantom "CSeq 3 skips ahead of CSeq 1" on the worker that happened to
+        // serve 1 and 3 — even though alice SENT 1,2,3 contiguously and bob
+        // RECEIVED 1,2,3 contiguously on its leg. No real UA ever sees that gap.
+        //
+        // So scope the audit to the dialog as observed at the endpoints, not at
+        // the internal cluster nodes: drop the worker binds. Equivalent to
+        // regrouping per dialog independent of which worker handled each request —
+        // the surviving streams (alice, bob, and the proxy, which forwards EVERY
+        // request and so sees the whole 1,2,3 sequence) are each CSeq-monotonic.
+        // The endpoint/proxy binds still catch a genuine same-leg CSeq collision
+        // (e.g. a keepalive OPTIONS and a later BYE reusing one CSeq toward bob).
+        let worker_binds: std::collections::HashSet<String> =
+            self.worker_sip_addrs.values().map(|a| a.to_string()).collect();
+        let snapshot = self.harness.recording().channel().snapshot();
+        let events: Vec<_> = snapshot
+            .into_iter()
+            .filter(|s| !worker_binds.contains(s.event.bind_key()))
+            .collect();
         let mut findings = Vec::new();
         for rule in sip_net::rfc_cross_message_rules() {
             findings.extend(rule.check(&events));

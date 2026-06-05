@@ -49,19 +49,23 @@ fn frame_strat() -> impl Strategy<Value = Frame> {
         ".*",
         any::<i64>(),
         any::<i64>(),
+        any::<i64>(),
         proptest::collection::vec(".*", 0..5),
         proptest::option::of(proptest::collection::vec(any::<u8>(), 0..256)),
     )
         .prop_map(
-            |(at, op, partition, call_ref, call_gen, body_ttl_ms, indexes, body)| Frame::Data {
-                at,
-                op,
-                partition,
-                call_ref,
-                call_gen,
-                body_ttl_ms,
-                indexes,
-                body: body.map(|b| Arc::from(b.as_slice())),
+            |(at, op, partition, call_ref, call_gen, call_bgen, body_ttl_ms, indexes, body)| {
+                Frame::Data {
+                    at,
+                    op,
+                    partition,
+                    call_ref,
+                    call_gen,
+                    call_bgen,
+                    body_ttl_ms,
+                    indexes,
+                    body: body.map(|b| Arc::from(b.as_slice())),
+                }
             },
         );
 
@@ -69,9 +73,7 @@ fn frame_strat() -> impl Strategy<Value = Frame> {
 
     let reset = ".*".prop_map(|reason| Frame::ResetToBootstrap { reason });
 
-    let deactivate = watermark_strat().prop_map(|as_of| Frame::Deactivate { as_of });
-
-    prop_oneof![pull, ack, data, noop, reset, deactivate]
+    prop_oneof![pull, ack, data, noop, reset]
 }
 
 proptest! {

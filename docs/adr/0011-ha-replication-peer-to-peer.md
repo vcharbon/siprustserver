@@ -1,7 +1,12 @@
 # 0011 — HA replication: peer-to-peer pull, no Redis
 
 **Status:** accepted (2026-05-31); amended 2026-06-03 (X11 — active reclaim +
-`Deactivate` ownership handshake, hardening X5's backup-side fail-back)
+`Deactivate` ownership handshake, hardening X5's backup-side fail-back);
+**amended 2026-06-05 by [ADR-0014](0014-reactive-only-takeover-version-vector.md)** —
+the *eager* takeover and the `Deactivate` watermark handshake are **removed**;
+reactive takeover is **kept**; the acting-backup now **self-releases** a takeover
+copy on transaction completion; reconciliation is the `(p,b)` version vector (not
+LWW-by-`gen`). Read the X11 section below as superseded on those three points.
 
 **Source:** sipjsserver @ `fffc4ac6`,
 `src/replication/{ReplLogServer,PullerFiber,ReplicationProtocol,ReplicationSupervisor,PeerScanBootstrap,ChannelStream,ChannelIndex,EpochCounter,genCounter,EchoApply,ReadinessController,PullerHttpTransport}.ts`,
@@ -184,6 +189,14 @@ under `tokio::time::pause`). Every tier is recording-first (ADR-0006): the
 replication exchange renders as a sequence diagram beside the SIP exchange.
 
 ## Decision X11 — fail-back, backup half: active reclaim + `Deactivate` handshake
+
+> **Amended by [ADR-0014](0014-reactive-only-takeover-version-vector.md) (2026-06-05).**
+> The *eager* (membership-driven) takeover and the `Deactivate` watermark handshake
+> described below were **removed** (they were the endurance stale-CSeq storm source).
+> Reactive takeover and active reclaim are **kept**; the acting-backup now
+> **self-releases** its takeover copy when the served transaction reaches a terminal
+> state, and reconciliation is the `(p,b)` version vector. The text below is retained
+> for history.
 
 X5 fixed the *primary* half of fail-back but left the *backup* half implicit:
 **how, and when, the acting-backup relinquishes the live call it took over.**

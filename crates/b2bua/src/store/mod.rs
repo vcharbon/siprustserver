@@ -18,8 +18,7 @@ pub use terminate_writer::BufferedTerminateWriter;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use call::{call_index_keys, parse_call_ref, Call, CallBodyCodec, MsgpackCodec};
-use repl_net::frame::Watermark;
+use call::{call_index_keys, Call, CallBodyCodec, MsgpackCodec};
 
 use crate::metrics::B2buaMetrics;
 use crate::repl::{ReplicatingCallStore, ReplicationPlan};
@@ -36,12 +35,15 @@ struct Inner {
     indexed: HashMap<String, Vec<String>>,
     /// Per-callRef serialization lock (the second FIFO layer over the dispatcher).
     locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
-    /// **Live acting-backup takeover copies** (ADR-0011 X11): the set of call_refs
-    /// this node currently serves as a takeover after a primary failed over to it.
-    /// Membership only — the `Deactivate{as_of}` handback reads each copy's
-    /// reverse-flush *position* from the changelog (a monotonic value in this
-    /// node's domain), NOT a wall-clock, so the ownership decision is skew-immune.
-    /// Local-only; never serialized/replicated. Cleared on drop/remove.
+    /// **Live acting-backup takeover copies** (ADR-0011 X11 / ADR-0014): the set
+    /// of call_refs this node currently serves as a *reactive* takeover after a
+    /// primary failed over to it. Membership only — the router reads it
+    /// ([`is_takeover`](CallState::is_takeover)) to drive **self-release**: once the
+    /// transaction(s) the backup served for a marked call reach a terminal state,
+    /// the backup [`drop_local`](CallState::drop_local)s the live copy (the `bak:`
+    /// replica + reverse-flushed deltas remain). No wall-clock, no watermark
+    /// handshake. Local-only; never serialized/replicated. Cleared on
+    /// drop_local/remove.
     takeover: HashSet<String>,
 }
 
@@ -186,19 +188,28 @@ impl CallState {
 
     /// Replace the in-memory call and refresh its routing index.
     ///
-    /// **callGen bump rule (resolves the plan's deferred S10 decision):** each
-    /// authoritative mutation of a call increments that call's
-    /// `CallTopology.gen` (monotonic per call) — this is the central, single
-    /// bump-point. A brand-new call enters at `gen = 1` (stamped at INVITE time in
-    /// [`crate::initial_invite`]); every `update` here represents a handler that
-    /// just mutated the call, so it out-gens the prior value. Because a takeover
-    /// mutation by an acting-backup is therefore *necessarily* higher than the
-    /// pre-crash gen, it WINS the replication LWW gate when the rebooting primary
-    /// reclaims (see [`crate::repl::replication`]'s `call_gen` rule). The bump is
+    /// **Version-vector bump rule (ADR-0014):** each authoritative mutation of a
+    /// call increments **the local node's own** counter of that call's `(p,b)`
+    /// version vector (`CallTopology.{gen, bak_gen}`) — the central, single
+    /// bump-point. Which counter depends on the role this node plays for the
+    /// call (resolved by [`partition_of`]):
+    /// - **Primary** (the ref's encoded ordinal is ours) → bump `gen` (`p`).
+    /// - **Acting-backup** (the ref names a crashed peer we took over) → bump
+    ///   `bak_gen` (`b`).
+    ///
+    /// Because each node bumps only its own counter, the *other* counter carried
+    /// on a propagated update is, by construction, the branch point — which is
+    /// what lets the asymmetric apply rule (see [`crate::repl::puller`]) resolve
+    /// concurrent primary+backup mutations without the latent equal-gen
+    /// divergence the old single counter suffered. A brand-new call enters at
+    /// `(1,0)` (stamped at INVITE time in [`crate::initial_invite`]). The bump is
     /// a no-op for non-proxied calls that carry no `topology`.
     pub fn update(&self, mut call: Call) {
         if let Some(t) = call.topology.as_mut() {
-            t.gen += 1;
+            match partition_of(&self.self_ordinal, &call.call_ref).0 {
+                PartitionRole::Primary => t.gen += 1,
+                PartitionRole::Backup => t.bak_gen += 1,
+            }
         }
         let mut inner = self.inner.lock().unwrap();
         Self::reindex(&mut inner, &call);
@@ -313,48 +324,20 @@ impl CallState {
         self.inner.lock().unwrap().locks.remove(call_ref);
     }
 
-    /// Mark `call_ref` as a live acting-backup **takeover copy** (ADR-0011 X11).
-    /// Called by the router on a fresh failover hydrate. The handback later reads
-    /// the copy's reverse-flush *position* from the changelog (not a timestamp),
-    /// so nothing time-valued is recorded here. Idempotent per call_ref.
+    /// Mark `call_ref` as a live acting-backup **takeover copy** (ADR-0011 X11 /
+    /// ADR-0014). Called by the router on a fresh failover hydrate. The router
+    /// later reads it via [`is_takeover`](Self::is_takeover) to drive self-release
+    /// once the served transaction(s) finish. Idempotent per call_ref.
     pub fn mark_takeover(&self, call_ref: &str) {
         self.inner.lock().unwrap().takeover.insert(call_ref.to_string());
     }
 
-    /// The live takeover copies for `primary` to **deactivate** on a
-    /// `Deactivate{as_of}` (ADR-0011 X11): every still-resident copy this node
-    /// holds for `primary` whose **reverse-flush position has been reached by the
-    /// primary's pull** (`position_of(primary, ref) <= as_of`). That condition is
-    /// exactly "the primary has applied my reverse-flush of this call and now
-    /// serves it" — so dropping our copy leaves exactly one owner. A copy whose
-    /// position is still `> as_of` (the primary hasn't caught up, e.g. a later
-    /// failover episode) is left serving; a re-broadcast with a higher `as_of`
-    /// sweeps it once the primary catches up. `position_of` is `None` until the
-    /// copy has been reverse-flushed at least once — the primary cannot hold it
-    /// yet, so it is skipped. The whole comparison lives in this node's changelog
-    /// domain → no wall-clock, no skew. Router tears each down via [`drop_local`].
-    pub fn deactivate_targets(&self, primary: &str, as_of: Watermark) -> Vec<String> {
-        let Some(repl) = self.repl_store.as_ref() else {
-            return Vec::new();
-        };
-        let changelog = repl.changelog();
-        let inner = self.inner.lock().unwrap();
-        inner
-            .takeover
-            .iter()
-            .filter(|cr| inner.calls.contains_key(*cr))
-            .filter(|cr| {
-                parse_call_ref(cr).map(|p| p.primary == primary).unwrap_or(false)
-            })
-            .filter(|cr| {
-                // Deactivate iff the primary has pulled past our reverse-flush of
-                // this call (so it provably holds + serves it now).
-                changelog
-                    .position_of(primary, cr)
-                    .is_some_and(|pos| pos <= as_of)
-            })
-            .cloned()
-            .collect()
+    /// Is `call_ref` a live acting-backup **takeover copy** (ADR-0014)? The router
+    /// reads it after serving an event for the call: when true and the served
+    /// transaction(s) have all cleared, it self-releases the live copy via
+    /// [`drop_local`](Self::drop_local).
+    pub fn is_takeover(&self, call_ref: &str) -> bool {
+        self.inner.lock().unwrap().takeover.contains(call_ref)
     }
 
     /// **Active-reclaim bulk read-path** (ADR-0011 X11): scan this node's own
@@ -369,29 +352,6 @@ impl CallState {
         };
         let bodies = repl
             .scan_calls(PartitionRole::Primary, &self.self_ordinal)
-            .await
-            .unwrap_or_default();
-        bodies.iter().filter_map(|b| self.codec.decode(b).ok()).collect()
-    }
-
-    /// **Eager-takeover bulk read-path** (ADR-0011 X11): scan the `bak:{primary}`
-    /// partition — every call this node holds as a *backup* for `primary` — and
-    /// decode each. The mirror of [`reclaim_scan`](Self::reclaim_scan) for the
-    /// acting-backup side: where `reclaim_scan` re-serves a rebooted primary's OWN
-    /// partition, this materialises a *dead peer's* partition into the survivor's
-    /// live map when the supervisor observes that peer leave membership
-    /// (`MemberDelta::Removed`). It is what reclaims a **quiescent** failed-over
-    /// dialog: a long-hold call in the OPTIONS-keepalive loop sends nothing, so the
-    /// reactive [`hydrate_from_replica`](Self::hydrate_from_replica) (which only
-    /// fires on an inbound in-dialog request) never triggers, and the call would be
-    /// lost ~300 s later when its keepalive — re-armed on no live node — fails to
-    /// probe its UAC. Empty when no replicating store is wired.
-    pub async fn reclaim_backup_scan(&self, primary: &str) -> Vec<Call> {
-        let Some(repl) = self.repl_store.as_ref() else {
-            return Vec::new();
-        };
-        let bodies = repl
-            .scan_calls(PartitionRole::Backup, primary)
             .await
             .unwrap_or_default();
         bodies.iter().filter_map(|b| self.codec.decode(b).ok()).collect()
@@ -436,9 +396,10 @@ impl CallState {
     pub fn flush(&self, call: &Call) {
         let body = self.codec.encode(call);
         let indexes = call_index_keys(call);
-        // The authoritative gen lives on the in-memory call (bumped by `update`);
-        // the passed `call` may be a pre-bump clone, so prefer the stored gen.
-        let call_gen = self
+        // The authoritative `(p,b)` lives on the in-memory call (bumped by
+        // `update`); the passed `call` may be a pre-bump clone, so prefer the
+        // stored topology.
+        let (call_gen, call_bgen) = self
             .inner
             .lock()
             .unwrap()
@@ -446,8 +407,8 @@ impl CallState {
             .get(&call.call_ref)
             .and_then(|c| c.topology.as_ref())
             .or(call.topology.as_ref())
-            .map(|t| t.gen)
-            .unwrap_or(0);
+            .map(|t| (t.gen, t.bak_gen))
+            .unwrap_or((0, 0));
         let (role, primary, opts) = self.store_target(&call.call_ref);
         // Observability: a propagating flush is one whose call carries a backup
         // peer (topology.bak from the proxy cookie). Rising on the PRIMARY proves
@@ -464,6 +425,7 @@ impl CallState {
             indexes,
             self.replicated_ttl_ms,
             call_gen,
+            call_bgen,
             opts,
         );
     }

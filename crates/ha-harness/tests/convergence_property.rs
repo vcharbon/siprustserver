@@ -64,7 +64,7 @@ async fn run_sequence(seed: u64) {
                 let g = gen_of.entry(c.clone()).or_insert(0);
                 *g += 1;
                 let body = format!("A{k}@g{}", *g).into_bytes();
-                cl.put("A", &c, body.clone(), *g, &backup_is("B")).await;
+                cl.put("A", &c, body.clone(), *g, 0, &backup_is("B")).await;
                 latest.insert(c, (*g, Some(body)));
             }
             // put/update B-owned call (forward B→A).
@@ -74,7 +74,7 @@ async fn run_sequence(seed: u64) {
                 let g = gen_of.entry(c.clone()).or_insert(0);
                 *g += 1;
                 let body = format!("B{k}@g{}", *g).into_bytes();
-                cl.put("B", &c, body.clone(), *g, &backup_is("A")).await;
+                cl.put("B", &c, body.clone(), *g, 0, &backup_is("A")).await;
                 latest.insert(c, (*g, Some(body)));
             }
             // delete an A-owned call.

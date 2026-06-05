@@ -221,6 +221,7 @@ pub fn representative_call() -> Call {
             pri: "worker-0".into(),
             bak: "worker-1".into(),
             gen: 3,
+            bak_gen: 0,
         }),
         emergency: Some(true),
         features: Some(FeatureActivations {
@@ -633,8 +634,8 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
         proptest::option::of(any::<bool>()),
         proptest::option::of(any::<i64>()),
         proptest::option::of(
-            (arb_tag(), arb_tag(), any::<i64>())
-                .prop_map(|(pri, bak, gen)| CallTopology { pri, bak, gen }),
+            (arb_tag(), arb_tag(), any::<i64>(), any::<i64>())
+                .prop_map(|(pri, bak, gen, bak_gen)| CallTopology { pri, bak, gen, bak_gen }),
         ),
     );
     let tail = (

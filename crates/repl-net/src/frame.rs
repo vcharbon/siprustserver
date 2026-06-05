@@ -196,7 +196,7 @@ pub enum Frame {
         /// Highest watermark the client has applied.
         up_to: Watermark,
     },
-    /// `[2, gen, counter, op, partition, call_ref, call_gen, body_ttl_ms, indexes, body]`
+    /// `[2, gen, counter, op, partition, call_ref, call_gen, call_bgen, body_ttl_ms, indexes, body]`
     ///
     /// Server → client: one changelog entry. `body` is opaque msgpack `bin`
     /// (the `Arc<[u8]>` read straight from the store) or `nil` for
@@ -210,8 +210,14 @@ pub enum Frame {
         partition: Partition,
         /// `{primary}|{callId}|{fromTag}` ownership key.
         call_ref: String,
-        /// Content version (LWW); `i64`, may be negative on the wire.
+        /// **Primary** counter `p` of the per-context version vector `(p,b)`
+        /// (ADR-0014). Bumped only by the call's primary on a local mutation;
+        /// the value a backup echoes back is its branch point. `i64`, may be
+        /// negative on the wire. (Was the single LWW `call_gen`.)
         call_gen: i64,
+        /// **Backup** counter `b` of the version vector `(p,b)` (ADR-0014).
+        /// Bumped only by an acting-backup on a takeover mutation. `i64`.
+        call_bgen: i64,
         /// Body TTL in ms; `i64`, may be negative on the wire.
         body_ttl_ms: i64,
         /// Index keys for this call.
@@ -235,25 +241,11 @@ pub enum Frame {
         /// Human-readable cause (for logs/recording).
         reason: String,
     },
-    /// `[5, as_of.gen, as_of.counter]`
-    ///
-    /// Server → client (ADR-0011 X11): the sending primary has **reclaimed**
-    /// ownership of its partition and has applied the backup's reverse-flushes up
-    /// to **changelog watermark `as_of`** (the primary's pull position for THIS
-    /// backup, in the backup's own changelog-counter domain). The receiving backup
-    /// **deactivates** every **takeover copy** it holds for this peer whose
-    /// reverse-flush position is `<= as_of` — i.e. the primary has provably applied
-    /// it and now serves the call. Local-only (stop timers → cease keepalive
-    /// OPTIONS, drop the live copy, revert to a pure backup `Element`); propagates
-    /// **no** delete. Because `as_of` is a monotonic position in the backup's own
-    /// domain (never a wall-clock), the decision is immune to cross-node clock
-    /// skew. Re-sent as the primary's watermark advances; idempotent.
-    Deactivate {
-        /// The primary's applied pull watermark for this backup, in the backup's
-        /// changelog-counter domain. A takeover copy whose reverse-flush position
-        /// is `<= as_of` has been reclaimed by the primary and is dropped.
-        as_of: Watermark,
-    },
+    // NB (ADR-0014): tag 5 (`Deactivate` — the watermark-handback handshake) was
+    // removed. Reconciliation is now the `(p,b)` version vector and the backup
+    // self-releases a takeover copy on transaction completion, so no handback
+    // signal rides the wire. Tag 5 is retired (not reused) to keep the wire
+    // self-documenting; the proto version bump (X9 → ADR-0014 v2) covers it.
 }
 
 /// Integer tags, element 0 of each frame array. Kept in one place so the
@@ -264,5 +256,5 @@ pub(crate) mod tag {
     pub const DATA: u64 = 2;
     pub const NOOP: u64 = 3;
     pub const RESET_TO_BOOTSTRAP: u64 = 4;
-    pub const DEACTIVATE: u64 = 5;
+    // tag 5 (DEACTIVATE) retired — see the note on `Frame` (ADR-0014).
 }

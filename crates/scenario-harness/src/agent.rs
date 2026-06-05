@@ -157,6 +157,19 @@ impl Harness {
         self
     }
 
+    /// Disarm the Drop-time RFC 3261 CSeq hard gate. For multi-SUT harnesses
+    /// (e.g. the failover matrix) that wrap this `Harness` and run their OWN,
+    /// **bind-scoped** CSeq audit at their layer-close: the generic gate here is
+    /// unscoped — it audits every recorded bind, including the internal cluster
+    /// workers, where a *transparent* failover legitimately splits one logical
+    /// dialog's CSeq stream across nodes (CSeq 1 → primary, 2 → backup-takeover,
+    /// 3 → reclaimed primary) and so reports a phantom "skip" no real UA sees.
+    /// The wrapping harness substitutes the correct endpoint-scoped check, so it
+    /// disarms this one to avoid a redundant, unscoped double-gate.
+    pub fn disarm_cseq_gate(&self) {
+        self.cseq_gate.disarm();
+    }
+
     /// Declare and bind a named UA at `addr` (e.g. `"127.0.0.1:5060"`).
     pub async fn agent(&self, name: impl Into<String>, addr: &str) -> Agent {
         let name = name.into();

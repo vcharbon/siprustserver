@@ -61,6 +61,7 @@ fn roundtrip_data_body_some_multi_index() {
         partition: Partition::Bak,
         call_ref: "pri1|callid|fromtag".into(),
         call_gen: 17,
+        call_bgen: 5,
         body_ttl_ms: 30_000,
         indexes: vec!["idx:a".into(), "idx:b".into(), "idx:c".into()],
         body: Some(Arc::from(&b"\x00\x01\x02encoded-call\xff"[..])),
@@ -69,13 +70,14 @@ fn roundtrip_data_body_some_multi_index() {
 
 #[test]
 fn roundtrip_data_body_none_delete_negatives() {
-    // delete → body None; negative call_gen / body_ttl_ms (i64 on the wire).
+    // delete → body None; negative call_gen / call_bgen / body_ttl_ms (i64 wire).
     assert_roundtrip(&Frame::Data {
         at: Watermark::new(0, 0),
         op: Op::Delete,
         partition: Partition::Pri,
         call_ref: String::new(),
         call_gen: -1,
+        call_bgen: -7,
         body_ttl_ms: i64::MIN,
         indexes: vec![],
         body: None,
@@ -91,6 +93,7 @@ fn roundtrip_data_empty_body_is_some_not_none() {
         partition: Partition::Pri,
         call_ref: "x".into(),
         call_gen: 0,
+        call_bgen: 0,
         body_ttl_ms: 0,
         indexes: vec!["only".into()],
         body: Some(Arc::from(&[][..])),
@@ -112,6 +115,7 @@ fn roundtrip_data_large_body() {
         partition: Partition::Bak,
         call_ref: "big".into(),
         call_gen: i64::MAX,
+        call_bgen: i64::MIN,
         body_ttl_ms: i64::MAX,
         indexes: vec![String::new()], // empty-string index
         body: Some(Arc::from(big.as_slice())),
@@ -133,15 +137,6 @@ fn roundtrip_reset_to_bootstrap() {
     assert_roundtrip(&Frame::ResetToBootstrap {
         reason: String::new(),
     });
-}
-
-#[test]
-fn roundtrip_deactivate() {
-    // The handback watermark (gen, counter), plus the u64 extremes.
-    assert_roundtrip(&Frame::Deactivate { as_of: Watermark::new(0, 0) });
-    assert_roundtrip(&Frame::Deactivate { as_of: Watermark::new(1, 42) });
-    assert_roundtrip(&Frame::Deactivate { as_of: Watermark::new(7, u64::MAX) });
-    assert_roundtrip(&Frame::Deactivate { as_of: Watermark::new(u64::MAX, u64::MAX) });
 }
 
 // --- error paths: no panic, typed error ------------------------------------
@@ -184,14 +179,15 @@ fn err_unknown_enum_discriminant_mode() {
 fn err_unknown_enum_discriminant_op() {
     // Data with op = 5.
     let mut bytes = Vec::new();
-    rmp::encode::write_array_len(&mut bytes, 10).unwrap();
+    rmp::encode::write_array_len(&mut bytes, 11).unwrap();
     rmp::encode::write_uint(&mut bytes, 2).unwrap(); // tag Data
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // gen
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // counter
     rmp::encode::write_uint(&mut bytes, 5).unwrap(); // op = 5 (invalid)
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // partition
     rmp::encode::write_str(&mut bytes, "r").unwrap(); // call_ref
-    rmp::encode::write_sint(&mut bytes, 0).unwrap(); // call_gen
+    rmp::encode::write_sint(&mut bytes, 0).unwrap(); // call_gen (p)
+    rmp::encode::write_sint(&mut bytes, 0).unwrap(); // call_bgen (b)
     rmp::encode::write_sint(&mut bytes, 0).unwrap(); // body_ttl_ms
     rmp::encode::write_array_len(&mut bytes, 0).unwrap(); // indexes
     rmp::encode::write_nil(&mut bytes).unwrap(); // body
@@ -361,14 +357,15 @@ fn watermark_gen_is_high_word() {
 #[test]
 fn err_data_inflated_indexes_count_is_typed_error_not_oom() {
     let mut b = Vec::new();
-    rmp::encode::write_array_len(&mut b, 10).unwrap(); // DATA arity
+    rmp::encode::write_array_len(&mut b, 11).unwrap(); // DATA arity
     rmp::encode::write_uint(&mut b, 2).unwrap(); // tag Data
     rmp::encode::write_uint(&mut b, 0).unwrap(); // gen
     rmp::encode::write_uint(&mut b, 0).unwrap(); // counter
     rmp::encode::write_uint(&mut b, 1).unwrap(); // op (Update)
     rmp::encode::write_uint(&mut b, 0).unwrap(); // partition (Pri)
     rmp::encode::write_str(&mut b, "r").unwrap(); // call_ref
-    rmp::encode::write_sint(&mut b, 0).unwrap(); // call_gen
+    rmp::encode::write_sint(&mut b, 0).unwrap(); // call_gen (p)
+    rmp::encode::write_sint(&mut b, 0).unwrap(); // call_bgen (b)
     rmp::encode::write_sint(&mut b, 0).unwrap(); // body_ttl_ms
     b.push(0xdd); // msgpack array32 marker
     b.extend_from_slice(&u32::MAX.to_be_bytes()); // hostile element count, no elements

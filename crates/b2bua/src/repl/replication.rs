@@ -19,14 +19,15 @@
 //! [`ReplicatingCallStore`]: super::store::ReplicatingCallStore
 //! [`Changelog`]: super::changelog::Changelog
 //!
-//! ## callGen bump rule (resolves the plan's deferred decision)
-//! **Each authoritative mutation of a call increments that call's
-//! `CallTopology.gen` (monotonic per call).** `call_gen` is the LWW content
-//! version: because a takeover mutation by the acting-backup is *authoritative*,
-//! it necessarily increments past the pre-crash gen and therefore WINS LWW when
-//! the rebooting primary reclaims (S5's `apply_to_store` keeps the higher gen).
-//! Conversely an idempotent re-delivery carries the *same* gen and is a no-op
-//! (the apply-gate skips the body write when the local `call_gen >= frame`'s).
+//! ## `(p,b)` version-vector bump rule (ADR-0014)
+//! **Each authoritative mutation increments the *local node's own* counter** of the
+//! call's `(p, b)` = `CallTopology.{gen, bak_gen}`: a primary bumps `p`, an
+//! acting-backup bumps `b`. Because each node touches only its own counter, the
+//! other counter on a propagated update is the **branch point**, which lets the
+//! direction-aware merge (`apply_to_store`) resolve concurrent primary+backup
+//! mutations: Forward/Bootstrap defer to the authority unless dominated; Reverse
+//! applies iff `p_in == p_cur && b_in > b_cur`; deletes win both ways. (Was a
+//! single `call_gen` LWW — see ADR-0014 §5.2 for the divergence that closed.)
 //!
 //! The actual `topology.gen += 1` increment is wired in the b2bua dispatch /
 //! `CallState` mutation path — **S10 wiring point**. At this layer the tests
@@ -127,8 +128,8 @@ impl ReplicationPlan {
 ///
 /// This is the reusable seam **S10 calls from `CallState::flush`** (today that
 /// flush still uses `PutOpts::default()` — no propagation; S10 swaps it for this).
-/// The caller supplies the body / indexes / ttl / `call_gen` (the LWW content
-/// version, = `CallTopology.gen`); this routes them.
+/// The caller supplies the body / indexes / ttl / `call_gen` (the primary counter
+/// `p` of the `(p,b)` version vector, = `CallTopology.gen`); this routes them.
 #[allow(clippy::too_many_arguments)]
 pub async fn flush_replicated(
     store: &dyn CallStore,
@@ -138,6 +139,7 @@ pub async fn flush_replicated(
     indexes: &[String],
     ttl_ms: i64,
     call_gen: i64,
+    call_bgen: i64,
     backup_resolver: &dyn Fn(&str) -> Option<String>,
 ) -> Result<ReplicationPlan, StoreError> {
     let plan = ReplicationPlan::resolve(self_ordinal, call_ref, backup_resolver);
@@ -151,6 +153,7 @@ pub async fn flush_replicated(
             indexes,
             ttl_ms,
             call_gen,
+            call_bgen,
             &opts,
         )
         .await?;

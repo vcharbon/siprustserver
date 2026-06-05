@@ -319,12 +319,20 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
     fh.advance(Duration::from_millis(500)).await;
 
     // ── Universal teardown sweep (a few simulated seconds after the end) ──────
-    // Let CDR flush + soft releases (limiter) + reverse-deletes drain.
+    // Let CDR flush + soft releases (limiter) + reverse-deletes drain, AND let any
+    // acting-backup takeover copy self-release (ADR-0014). Self-release follows the
+    // served transaction's terminal state — Timer H/J absorb the final ACK /
+    // retransmits (~32 s) — so the settle budget must outlast it (instant under the
+    // paused clock). Wait for both the limiter to drain AND both nodes to go clean.
     let mut limiter_total = store.stats().current_total;
-    for _ in 0..40 {
+    for _ in 0..250 {
         fh.advance(Duration::from_millis(200)).await;
         limiter_total = store.stats().current_total;
-        if limiter_total == 0 {
+        let nodes_clean = primary.active_calls() == 0
+            && primary.lock_count() == 0
+            && backup.active_calls() == 0
+            && backup.lock_count() == 0;
+        if limiter_total == 0 && nodes_clean {
             break;
         }
     }
@@ -368,11 +376,12 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
 /// clean baseline and does nothing). Kill = abrupt crash; Drain = a grace window
 /// then the pod terminates. In both the proxy then routes the dialog to the
 /// backup AND the dead pod's endpoint is dropped from the survivor's membership
-/// (`simulate_peer_removed`) — the COMPLETE k8s death signal: a real kill removes
-/// the StatefulSet endpoint, which the survivor's supervisor turns into an eager
-/// `TakeOverPeer`. Without it the harness only modelled proxy reroute (reactive
-/// takeover) and never exercised the eager-takeover path that serves quiescent
-/// long calls. The reboot re-adds the endpoint ([`reboot_and_reclaim`]).
+/// (`simulate_peer_removed`) — the COMPLETE k8s death signal (a real kill removes
+/// the StatefulSet endpoint). Under reactive-only takeover (ADR-0014) the survivor
+/// takes the dialog over when the proxy reroutes its in-dialog traffic
+/// (`hydrate_from_replica`); the membership delta no longer drives an eager
+/// takeover (removed with ADR-0014), it just keeps the survivor's view honest. The
+/// reboot re-adds the endpoint ([`reboot_and_reclaim`]).
 async fn inject_failover(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,
@@ -410,7 +419,8 @@ async fn inject_failover(
 }
 
 /// Reboot the primary EMPTY at a higher gen, mark it alive, drive re-hydration to
-/// ready, then drive the go-active reclaim + handback window.
+/// ready, then drive the go-active reclaim. (No handback window under ADR-0014 —
+/// the backup self-releases its takeover copies on transaction completion.)
 async fn reboot_and_reclaim(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,
@@ -424,8 +434,8 @@ async fn reboot_and_reclaim(
     proxy.set_health(primary_ord, WorkerHealth::Alive);
     // k8s re-publishes the restarted pod's endpoint (a StatefulSet restart is
     // observed as Removed-then-Added) → the survivor re-spawns its puller to the
-    // peer, the channel the X11 `Deactivate` handback rides back on. Pairs with
-    // the `simulate_peer_removed` the kill drove in `inject_failover`.
+    // peer (fresh forward replication). Pairs with the `simulate_peer_removed` the
+    // kill drove in `inject_failover`.
     backup.simulate_peer_added(primary_ord);
     for _ in 0..40 {
         fh.advance(Duration::from_millis(500)).await;
@@ -434,7 +444,7 @@ async fn reboot_and_reclaim(
         }
     }
     assert!(primary.is_ready(), "rebooted primary {primary_ord} became ready");
-    // ReclaimAll + the ~5 s Deactivate handback broadcast + puller reconnect.
+    // ReclaimAll (smoothed) + puller reconnect window.
     fh.advance(Duration::from_secs(10)).await;
 }
 

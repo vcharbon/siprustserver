@@ -40,6 +40,41 @@ pub async fn assert_cell_transparent(cell: Cell) {
     oracle::assert_transparent(&name, &baseline, &variant);
 }
 
+/// **High-level cluster invariant**: across `nodes`, **exactly one** serves
+/// `call_ref` (it is owned by precisely one worker — no ghost duplicate from a
+/// failed self-release/handback, and no loss). The anti-leak invariant the
+/// reclaim + self-release path must hold. Reads the cluster's vocabulary
+/// ([`ReplicatedB2buaSut::serves`]), not partition bodies or repl counters.
+pub fn assert_single_owner(nodes: &[&ReplicatedB2buaSut], call_ref: &str) {
+    let owners: Vec<&str> = nodes.iter().filter(|n| n.serves(call_ref)).map(|n| n.ordinal()).collect();
+    assert_eq!(
+        owners.len(),
+        1,
+        "exactly one node must serve {call_ref}; owners = {owners:?} (0 = lost, >1 = ghost duplicate)",
+    );
+}
+
+/// **High-level cluster invariant**: a terminated call left **no trace anywhere** —
+/// no node serves it and no node holds a replica body for it, so a later reboot
+/// cannot resurrect it and no per-call memory leaked. Reads
+/// [`ReplicatedB2buaSut::holds_any_trace`] + [`ReplicatedB2buaSut::memory_clean`].
+pub async fn assert_call_fully_released(nodes: &[&ReplicatedB2buaSut], call_ref: &str) {
+    for n in nodes {
+        assert!(
+            !n.holds_any_trace(call_ref).await,
+            "node {} still holds a trace of terminated call {call_ref} (live or replica)",
+            n.ordinal(),
+        );
+        assert!(
+            n.memory_clean(),
+            "node {} did not clean up per-call memory ({} live, {} locks)",
+            n.ordinal(),
+            n.active_calls(),
+            n.lock_count(),
+        );
+    }
+}
+
 /// Expand a table of `(state, event, fault, recovery, seed)` rows into one named
 /// `#[tokio::test]` per cell (ADR-0013). Each test runs the differential
 /// transparency check + the universal teardown sweep.

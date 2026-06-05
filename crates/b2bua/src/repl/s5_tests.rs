@@ -146,7 +146,7 @@ async fn vertical_skeleton_put_on_a_appears_on_b() {
     // A (primary) puts a call destined for B (backup).
     let call_ref = cref("A", "1");
     a.store
-        .put_call(PRI, "A", &call_ref, b"body-A1".to_vec(), &[], 0, 1, &fwd("B"))
+        .put_call(PRI, "A", &call_ref, b"body-A1".to_vec(), &[], 0, 1, 0, &fwd("B"))
         .await
         .unwrap();
 
@@ -184,11 +184,11 @@ async fn convergence_update_and_delete() {
     let c1 = cref("A", "1");
     let c2 = cref("A", "2");
     a.store
-        .put_call(PRI, "A", &c1, b"v1".to_vec(), &[], 0, 1, &fwd("B"))
+        .put_call(PRI, "A", &c1, b"v1".to_vec(), &[], 0, 1, 0, &fwd("B"))
         .await
         .unwrap();
     a.store
-        .put_call(PRI, "A", &c2, b"w1".to_vec(), &[], 0, 1, &fwd("B"))
+        .put_call(PRI, "A", &c2, b"w1".to_vec(), &[], 0, 1, 0, &fwd("B"))
         .await
         .unwrap();
     tick(50).await;
@@ -196,7 +196,7 @@ async fn convergence_update_and_delete() {
 
     // Update c1 (higher call_gen) + delete c2.
     a.store
-        .put_call(PRI, "A", &c1, b"v2".to_vec(), &[], 0, 2, &fwd("B"))
+        .put_call(PRI, "A", &c1, b"v2".to_vec(), &[], 0, 2, 0, &fwd("B"))
         .await
         .unwrap();
     a.store
@@ -277,7 +277,7 @@ async fn watermark_retention_pulls_only_deltas() {
     for i in 0..3 {
         let c = cref("A", &i.to_string());
         a.store
-            .put_call(PRI, "A", &c, format!("b{i}").into_bytes(), &[], 0, 1, &fwd("B"))
+            .put_call(PRI, "A", &c, format!("b{i}").into_bytes(), &[], 0, 1, 0, &fwd("B"))
             .await
             .unwrap();
     }
@@ -291,7 +291,7 @@ async fn watermark_retention_pulls_only_deltas() {
     for i in 3..5 {
         let c = cref("A", &i.to_string());
         a.store
-            .put_call(PRI, "A", &c, format!("b{i}").into_bytes(), &[], 0, 1, &fwd("B"))
+            .put_call(PRI, "A", &c, format!("b{i}").into_bytes(), &[], 0, 1, 0, &fwd("B"))
             .await
             .unwrap();
     }
@@ -346,7 +346,7 @@ async fn backoff_then_reconnect_converges() {
     let a = Node::spawn("A", a_addr, 1, &net, &clock).await;
     let c = cref("A", "1");
     a.store
-        .put_call(PRI, "A", &c, b"late".to_vec(), &[], 0, 1, &fwd("B"))
+        .put_call(PRI, "A", &c, b"late".to_vec(), &[], 0, 1, 0, &fwd("B"))
         .await
         .unwrap();
 
@@ -383,7 +383,7 @@ async fn topology_add_remove_readd() {
     tick(50).await;
     let c1 = cref("A", "1");
     a.store
-        .put_call(PRI, "A", &c1, b"x1".to_vec(), &[], 0, 1, &fwd("B"))
+        .put_call(PRI, "A", &c1, b"x1".to_vec(), &[], 0, 1, 0, &fwd("B"))
         .await
         .unwrap();
     tick(50).await;
@@ -404,7 +404,7 @@ async fn topology_add_remove_readd() {
     // While parked, A adds another call.
     let c2 = cref("A", "2");
     a.store
-        .put_call(PRI, "A", &c2, b"x2".to_vec(), &[], 0, 1, &fwd("B"))
+        .put_call(PRI, "A", &c2, b"x2".to_vec(), &[], 0, 1, 0, &fwd("B"))
         .await
         .unwrap();
 
@@ -440,7 +440,7 @@ async fn lww_idempotence_and_no_regression() {
     let c = cref("A", "1");
     // gen 5 body.
     a.store
-        .put_call(PRI, "A", &c, b"high".to_vec(), &[], 0, 5, &fwd("B"))
+        .put_call(PRI, "A", &c, b"high".to_vec(), &[], 0, 5, 0, &fwd("B"))
         .await
         .unwrap();
     tick(50).await;
@@ -467,7 +467,7 @@ async fn lww_idempotence_and_no_regression() {
     // store directly with a lower gen is not the path; instead push from A with
     // a LOWER gen — the changelog bumps but B's LWW skips the body write.
     a.store
-        .put_call(PRI, "A", &c, b"stale".to_vec(), &[], 0, 3, &fwd("B"))
+        .put_call(PRI, "A", &c, b"stale".to_vec(), &[], 0, 3, 0, &fwd("B"))
         .await
         .unwrap();
     tick(100).await;
@@ -499,7 +499,7 @@ async fn cold_reboot_reacquires_full_set() {
     for i in 0..3 {
         let c = cref("A", &i.to_string());
         a.store
-            .put_call(PRI, "A", &c, format!("b{i}").into_bytes(), &[], 0, 1, &fwd("B"))
+            .put_call(PRI, "A", &c, format!("b{i}").into_bytes(), &[], 0, 1, 0, &fwd("B"))
             .await
             .unwrap();
     }
@@ -570,7 +570,7 @@ async fn lagged_membership_channel_still_redirects_puller_to_new_addr() {
 
     let c1 = cref("A", "1");
     a1.store
-        .put_call(PRI, "A", &c1, b"one".to_vec(), &[], 0, 1, &fwd("B"))
+        .put_call(PRI, "A", &c1, b"one".to_vec(), &[], 0, 1, 0, &fwd("B"))
         .await
         .unwrap();
     tick(300).await;
@@ -584,7 +584,7 @@ async fn lagged_membership_channel_still_redirects_puller_to_new_addr() {
     let a2 = Node::spawn("A", a2_addr, 2, &net, &clock).await;
     let c2 = cref("A", "2");
     a2.store
-        .put_call(PRI, "A", &c2, b"two".to_vec(), &[], 0, 1, &fwd("B"))
+        .put_call(PRI, "A", &c2, b"two".to_vec(), &[], 0, 1, 0, &fwd("B"))
         .await
         .unwrap();
 

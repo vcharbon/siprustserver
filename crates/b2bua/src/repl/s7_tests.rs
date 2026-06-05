@@ -266,7 +266,7 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
     // Seed B with A's call in bak:A (what A will reclaim on bootstrap).
     let c = cref("A", "0");
     b_store
-        .put_call(PartitionRole::Backup, "A", &c, b"body0".to_vec(), &[], 0, 1, &fwd("A"))
+        .put_call(PartitionRole::Backup, "A", &c, b"body0".to_vec(), &[], 0, 1, 0, &fwd("A"))
         .await
         .unwrap();
 

@@ -28,7 +28,7 @@
 //!   B2BUA_CONCURRENCY handler concurrency ceiling       (default 8192; safety, not a rate cap)
 //!   B2BUA_CALL_CAP  max concurrent calls before drop    (default 1_000_000)
 //!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min, min 120)
-//!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 450; min 60 and >= keepalive)
+//!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 600; min 60 and >= keepalive)
 //!
 //! ## Call limiter
 //!   LIMITER_URL             shared limiter base URL; unset → NoopLimiter (fail-open)
@@ -324,7 +324,7 @@ async fn main() {
     // without a refresh from its primary. Decoupled from the keepalive but must
     // outlast it — enforced by `config.validate()` below.
     let reboot_budget_sec: i64 =
-        env_or("B2BUA_REBOOT_BUDGET_SEC", "450").parse().expect("B2BUA_REBOOT_BUDGET_SEC");
+        env_or("B2BUA_REBOOT_BUDGET_SEC", "600").parse().expect("B2BUA_REBOOT_BUDGET_SEC");
 
     // Call limiter. Unset LIMITER_URL → NoopLimiter (today's non-limiting
     // behaviour). The refresh cadence MUST match the limiter's window seconds.

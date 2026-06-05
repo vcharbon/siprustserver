@@ -36,7 +36,7 @@ async fn unreachable_peer_does_not_block_other_peer() {
 
     // B forward-replicates a call to A (B's backup is A in this slice's mesh).
     let c = cref("B", "1");
-    cl.put("B", &c, b"served".to_vec(), 1, &backup_is("A")).await;
+    cl.put("B", &c, b"served".to_vec(), 1, 0, &backup_is("A")).await;
     cl.advance(secs(1)).await;
 
     // A keeps serving B's stream despite the unreachable C: it backs up B.
@@ -60,7 +60,7 @@ async fn unreachable_peer_does_not_block_other_peer() {
     // And A keeps making forward progress for B even after C is declared
     // best-effort complete: a second mutation still converges.
     let c2 = cref("B", "2");
-    cl.put("B", &c2, b"served-2".to_vec(), 1, &backup_is("A")).await;
+    cl.put("B", &c2, b"served-2".to_vec(), 1, 0, &backup_is("A")).await;
     cl.advance(secs(1)).await;
     assert_eq!(
         cl.node("A").get(BAK, "B", &c2).await.as_deref(),
@@ -84,7 +84,7 @@ async fn buffer_full_drop_then_reconnect_converges() {
     // Seed a converged call so we have steady-state, then cut B's link to force a
     // reconnect cycle and prove convergence holds across a subscriber drop.
     let c0 = cref("A", "0");
-    cl.put("A", &c0, b"seed".to_vec(), 1, &backup_is("B")).await;
+    cl.put("A", &c0, b"seed".to_vec(), 1, 0, &backup_is("B")).await;
     cl.advance(ms(300)).await;
     assert_eq!(
         cl.node("B").get(BAK, "A", &c0).await.as_deref(),
@@ -98,7 +98,7 @@ async fn buffer_full_drop_then_reconnect_converges() {
     cl.advance(ms(200)).await;
     for i in 1..4 {
         let c = cref("A", &i.to_string());
-        cl.put("A", &c, format!("b{i}").into_bytes(), 1, &backup_is("B"))
+        cl.put("A", &c, format!("b{i}").into_bytes(), 1, 0, &backup_is("B"))
             .await;
     }
     cl.reconnect("A", "B");
@@ -130,7 +130,7 @@ async fn report_projects_readable_replication_exchange() {
     cl.advance(ms(200)).await;
 
     let c = cref("A", "1");
-    cl.put("A", &c, b"v1".to_vec(), 1, &backup_is("B")).await;
+    cl.put("A", &c, b"v1".to_vec(), 1, 0, &backup_is("B")).await;
     cl.advance(ms(300)).await;
     cl.partition("A", "B");
     cl.advance(ms(100)).await;

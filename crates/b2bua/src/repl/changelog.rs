@@ -47,8 +47,11 @@ pub const DEFAULT_DEAD_PEER_TTL_MS: i64 = 300_000;
 /// [`ReplicatingCallStore`]: super::store::ReplicatingCallStore
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RefMeta {
-    /// Content version (LWW); persisted so the drained frame carries it.
+    /// Primary counter `p` of the `(p,b)` version vector (was the single LWW
+    /// `call_gen`); persisted so the drained frame carries it.
     pub call_gen: i64,
+    /// Backup counter `b` of the `(p,b)` version vector (ADR-0014).
+    pub call_bgen: i64,
     /// Body TTL in ms (the store `ttl`).
     pub body_ttl_ms: i64,
     /// Index keys for this call.
@@ -204,13 +207,11 @@ impl Changelog {
     }
 
     /// The changelog position of `call_ref`'s latest entry in `peer`'s log, or
-    /// `None` if this node has never bumped that ref for that peer. Used by the
-    /// X11 handback (ADR-0011): an acting-backup reads the position of a takeover
-    /// copy's reverse-flush to its primary, then deactivates the copy once the
-    /// primary's pull watermark has reached it (`position_of <= as_of`) — i.e. the
-    /// primary has applied the reverse-flush and now serves the call. This keeps
-    /// the whole ownership decision in ONE monotonic domain (this node's changelog
-    /// counter), never a wall-clock, so it is immune to cross-node clock skew.
+    /// `None` if this node has never bumped that ref for that peer — a monotonic
+    /// position in this node's own changelog-counter domain (never a wall-clock).
+    /// (General accessor; the X11 `Deactivate` watermark handshake that once used it
+    /// was removed in ADR-0014 — reconciliation is now the `(p,b)` version vector
+    /// and the backup self-releases on transaction completion.)
     pub fn position_of(&self, peer: &str, call_ref: &str) -> Option<Watermark> {
         let inner = self.inner.lock().unwrap();
         inner
@@ -362,6 +363,7 @@ impl Changelog {
                     partition,
                     call_ref,
                     call_gen: 0,
+                    call_bgen: 0,
                     body_ttl_ms: 0,
                     indexes: Vec::new(),
                     body: None,
@@ -377,6 +379,7 @@ impl Changelog {
                     partition,
                     call_ref,
                     call_gen: meta.call_gen,
+                    call_bgen: meta.call_bgen,
                     body_ttl_ms: meta.body_ttl_ms,
                     indexes: meta.indexes,
                     body: Some(body),
@@ -388,6 +391,7 @@ impl Changelog {
                     partition,
                     call_ref,
                     call_gen: 0,
+                    call_bgen: 0,
                     body_ttl_ms: 0,
                     indexes: Vec::new(),
                     body: None,

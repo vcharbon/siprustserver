@@ -36,7 +36,7 @@ async fn put(
     opts: &PutOpts,
 ) {
     store
-        .put_call(PRI, SELF, call_ref, body.to_vec(), &[], ttl_ms, call_gen, opts)
+        .put_call(PRI, SELF, call_ref, body.to_vec(), &[], ttl_ms, call_gen, 0, opts)
         .await
         .unwrap();
 }
@@ -414,7 +414,7 @@ async fn nonpositive_ttl_replica_self_evicts_via_backstop() {
 
     // Apply-path replica (peer:None, ttl 0) — the shape a puller stores.
     store
-        .put_call(BAK, "A", "c1", b"v1".to_vec(), &[], 0, 1, &PutOpts::default())
+        .put_call(BAK, "A", "c1", b"v1".to_vec(), &[], 0, 1, 0, &PutOpts::default())
         .await
         .unwrap();
     assert!(store.get_call(BAK, "A", "c1").await.unwrap().is_some());

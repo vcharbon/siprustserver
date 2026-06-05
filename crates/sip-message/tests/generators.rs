@@ -403,6 +403,23 @@ fn reads_cseq_from_invite_handle_not_dialog() {
 }
 
 #[test]
+fn ack_for_2xx_empty_remote_tag_yields_tagless_to_no_panic() {
+    // Fix B (ADR-0014): a dialog taken over mid-confirm by a reactive failover
+    // (the relayed 2xx had not yet established the remote tag) has an EMPTY
+    // remote_tag. The ACK must emit a tag-LESS To rather than a malformed
+    // `;tag=` (which `hydrate_request` rejects → "Empty To tag parameter" panic).
+    let d = StackDialog { remote_tag: String::new(), ..dialog() };
+    let ack = generate_ack_for_2xx(
+        Some(&invite_handle()),
+        &d,
+        &GenerateAckFor2xxOpts { via: Some(via()), ..Default::default() },
+    );
+    let to = get_header(&ack.headers, "To").expect("ACK has a To header");
+    assert!(!to.contains("tag="), "empty remote_tag → tag-less To, got {to:?}");
+    assert!(!to.contains(";tag="), "no malformed empty ;tag= that hydrate_request rejects");
+}
+
+#[test]
 fn ack_request_uri_is_remote_target_routes_from_route_set() {
     let d = StackDialog {
         remote_target: "sip:bob-contact@192.0.2.99:5060".to_string(),

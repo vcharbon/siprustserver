@@ -18,7 +18,7 @@ pub(crate) struct MetricsInner {
     pub outbound_message_bytes_total: AtomicU64,
     pub outbound_messages_total: AtomicU64,
     /// Per-reason drop counters, indexed by [`EventQueueDropReason::index`].
-    pub event_queue_drops: [AtomicU64; 5],
+    pub event_queue_drops: [AtomicU64; 6],
     pub txn_cancelled_on_call_evict: AtomicU64,
 }
 

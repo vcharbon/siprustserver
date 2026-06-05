@@ -211,29 +211,16 @@ async fn invite_winner_lanes(
 }
 
 // ===========================================================================
-// FAILOVER TIMER RE-ARM — a call hydrated by a takeover must regenerate its
-// per-call timers (keepalive / global-duration) on the new owner. Those timers
-// are runtime fibers in the in-memory `TimerService`, NOT replicated state, so
-// a hydrated call arrives with no live timers; without re-arming on hydration a
-// dead peer is never probed and the call is never reaped → `active_calls` leaks
-// on the takeover node (the failover analogue of the steady-state no-BYE leak).
-//
-// Scenario: establish on b1, replicate to b2, CRASH b1, then drive a non-
-// terminating in-dialog request (a re-INVITE) over to b2 — this hydrates the
-// call onto b2 AND (with the fix) re-arms its keepalive. Bob then goes silent on
-// the next keepalive OPTIONS; after interval+timeout b2 reaps the hydrated call
-// and writes a CDR with a Bye event. The CDR is the proof the timer regenerated.
-// ===========================================================================
-/// The PRODUCTION keepalive interval / per-leg dead-peer timeout — the harness
-/// now runs every worker at the real 300 s cadence (defaults.rs / config.rs;
-/// the harness sets `keepalive_interval_sec: 300`). The dead-peer reap is a
-/// fixed 5 s after the unanswered OPTIONS (`defaults.rs` keepalive rule).
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(300);
-const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
-
+// A reactive takeover copy must not LEAK on the acting-backup. Under ADR-0014 the
+// no-leak guarantee is self-release: once the failed-over re-INVITE it took over
+// has been served (its transaction reaches a terminal state), the acting-backup
+// sheds the live copy — memory clean again — while keeping the replica (the call
+// is not lost, just no longer actively held here). (Pre-ADR-0014 the copy instead
+// lingered and was reaped by its re-armed keepalive; that mechanism was removed
+// with eager takeover. The external invariant — no leak — is unchanged.)
 #[tokio::test(start_paused = true)]
-async fn hydrated_call_rearms_keepalive_and_reaps_dead_peer() {
-    let mut fh = FailoverHarness::new("s10b-hydration-timer-rearm", &["b1", "b2"]);
+async fn hydrated_takeover_copy_self_releases_without_leaking() {
+    let mut fh = FailoverHarness::new("s10b-hydration-self-release", &["b1", "b2"]);
 
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -310,44 +297,32 @@ async fn hydrated_call_rearms_keepalive_and_reaps_dead_peer() {
         b2.metrics().creations_total() > b2_creations_before,
         "b2 created the call locally to serve the failed-over re-INVITE",
     );
+    assert!(b2.serves(&call_ref), "b2 holds the live takeover copy while serving the re-INVITE");
 
-    // ── STEP 4: keepalive probe — bob goes SILENT on the hydrated call's leg ──
-    // If hydration re-armed the keepalive, b2 now probes both legs with OPTIONS.
-    fh.advance(KEEPALIVE_INTERVAL).await;
-    // alice answers its OPTIONS; bob receives but never answers (dead-peer shape).
-    alice.receive_tolerating("OPTIONS", &["INVITE", "ACK"]).await.respond(200, "OK").await;
-    let _silent = bob.receive_tolerating("OPTIONS", &["INVITE", "ACK"]).await;
-
-    // ── STEP 5: bob's keepalive times out → b2 reaps the hydrated call ────────
-    fh.advance(KEEPALIVE_TIMEOUT).await;
-    // The healthy peer (alice) gets the teardown BYE from b2.
-    alice
-        .receive_tolerating("BYE", &["OPTIONS", "INVITE", "ACK"])
-        .await
-        .respond(200, "OK")
-        .await;
-    fh.advance(Duration::from_millis(500)).await;
-
-    // ── PROOF: b2 wrote a CDR with a Bye (the keepalive-timeout teardown) ─────
-    // Only possible if the keepalive timer was REGENERATED on hydration; without
-    // the fix the hydrated call has no keepalive, nothing fires, no CDR, leak.
-    let mut cdrs = b2.cdr_records();
-    for _ in 0..40 {
-        if cdrs.iter().any(|c| c.events.iter().any(|e| e.event_type == CdrEventType::Bye)) {
+    // ── STEP 4: SELF-RELEASE — once the served re-INVITE transaction reaches its
+    //    terminal state (Timer H absorbs 2xx-ACK retransmits, ~32 s), the
+    //    acting-backup sheds the live copy. No leak; the replica is kept. ──────────
+    for _ in 0..80 {
+        fh.advance(Duration::from_millis(500)).await;
+        if b2.memory_clean() {
             break;
         }
-        fh.advance(Duration::from_millis(200)).await;
-        cdrs = b2.cdr_records();
     }
+
+    // ── PROOF: the takeover copy did NOT leak — b2's memory is clean (no live
+    //    call, no per-call lock), yet it stays synchronized (the replica remains,
+    //    so the call is recoverable by reclaim, not lost). ───────────────────────-
     assert!(
-        cdrs.iter().any(|c| c.events.iter().any(|e| e.event_type == CdrEventType::Bye)),
-        "GATE: hydrated call reaped by its REGENERATED keepalive (CDR Bye on b2); \
-         events seen = {:?}",
-        cdrs.iter().flat_map(|c| c.events.iter().map(|e| e.event_type)).collect::<Vec<_>>(),
+        b2.memory_clean(),
+        "GATE: hydrated takeover copy self-released (no active_calls / lock leak)",
     );
     assert!(
         b2.metrics().removals_total() >= 1,
-        "the hydrated call was removed on b2 (active_calls did not leak)",
+        "the hydrated call was removed on b2 (creations balanced by removals)",
+    );
+    assert!(
+        b2.is_synchronized_backup(&call_ref).await,
+        "the self-release kept the replica — the call is not lost",
     );
 
     drop((w_b1, w_b2, proxy));
@@ -575,16 +550,19 @@ async fn keepalive_as_options_increments_dialog_cseq() {
 }
 
 // ===========================================================================
-// X11 RECLAIM/HANDBACK — after a kill→takeover→reboot cycle a call must be
-// served by EXACTLY ONE node. The reborn primary reclaims it (bulk on go-active)
-// AND the backup deactivates its takeover copy (the `Deactivate` handback), so
-// the two never double-serve. Repro for the cluster leak: a cross-node duplicate
-// that is never handed back accumulates as a ghost. Ground-truth on the live
-// in-memory count (not the creations/removals counters, which are under test).
+// RECLAIM + SELF-RELEASE (ADR-0014) — after a kill→reactive-takeover→reboot cycle
+// a call must be served by EXACTLY ONE node. The backup that reactively took the
+// dialog over (serving a failed-over re-INVITE) **self-releases** its live copy as
+// soon as that transaction completes — keeping only the `bak:` replica + the
+// reverse-flushed deltas. The reborn primary then bootstrap-rehydrates and
+// bulk-reclaims, so the two never double-serve. Repro for the cluster leak: a
+// cross-node duplicate that is never released accumulates as a ghost. Asserts on
+// the cluster's high-level vocabulary (who *serves* the call, is the backup
+// *synchronized*, is *memory clean*) — not on partition bodies or repl counters.
 // ===========================================================================
 #[tokio::test(start_paused = true)]
-async fn reboot_reclaim_hands_back_exactly_one_owner() {
-    let mut fh = FailoverHarness::new("s11-reclaim-handback", &["b1", "b2"]);
+async fn reboot_reclaim_exactly_one_owner_after_self_release() {
+    let mut fh = FailoverHarness::new("s11-reclaim-self-release", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let b1_lane = fh.agent("b1-lane", B1).await;
@@ -619,9 +597,9 @@ async fn reboot_reclaim_hands_back_exactly_one_owner() {
     fh.advance(Duration::from_millis(500)).await;
 
     let call_ref = find_backed_up_ref(b2, &primary_ord).await;
-    assert!(b2.get(BAK, &primary_ord, &call_ref).await.is_some(), "backup holds the replica");
-    assert_eq!(b1.active_calls(), 1, "primary serves the established call");
-    assert_eq!(b2.active_calls(), 0, "backup is a pure replica (not serving)");
+    assert!(b1.serves(&call_ref), "primary serves the established call");
+    assert!(b2.is_synchronized_backup(&call_ref).await, "backup is synchronized (holds the replica)");
+    assert!(!b2.serves(&call_ref), "backup is a pure replica (not serving)");
 
     // ── crash primary; fail a NON-terminating re-INVITE over to the backup ────
     b1.crash();
@@ -630,13 +608,28 @@ async fn reboot_reclaim_hands_back_exactly_one_owner() {
     let mut reinv = dialog.request(InDialogMethod::Invite, None).await;
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
-    reinv.expect(200).await;
+    reinv.expect(200).await; // ← external: the failed-over re-INVITE succeeds
     dialog.ack(Some(ANSWER)).await;
     bob.receive("ACK").await;
-    fh.advance(Duration::from_millis(500)).await;
-    assert_eq!(b2.active_calls(), 1, "backup took the call over (live takeover copy)");
 
-    // ── reboot the primary → bulk reclaim on go-active + Deactivate broadcast ─
+    // ── Once it has served that re-INVITE, the acting-backup releases its live
+    //    copy (its memory is clean again) but stays SYNCHRONIZED — it keeps the
+    //    replica, so nothing is lost. The release follows the served INVITE server
+    //    transaction's terminal state (Timer H absorbs 2xx-ACK retransmits, ~32 s),
+    //    so give it that window. ───────────────────────────────────────────────────
+    for _ in 0..80 {
+        fh.advance(Duration::from_millis(500)).await;
+        if b2.memory_clean() {
+            break;
+        }
+    }
+    assert!(b2.memory_clean(), "acting-backup released the takeover copy after serving the re-INVITE");
+    assert!(
+        b2.is_synchronized_backup(&call_ref).await,
+        "the release kept the replica (the call is not lost)",
+    );
+
+    // ── reboot the primary → bootstrap-rehydrate + bulk reclaim on go-active ──
     b1.reboot().await;
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
     for _ in 0..40 {
@@ -646,57 +639,30 @@ async fn reboot_reclaim_hands_back_exactly_one_owner() {
         }
     }
     assert!(b1.is_ready(), "rebooted primary ready after re-hydration");
-    // Drive the go-active task: ReclaimAll + the ~5 s Deactivate broadcast +
-    // b2's puller reconnect (which carries the handback / reconnect backstop).
-    fh.advance(Duration::from_secs(10)).await;
+    fh.advance(Duration::from_secs(10)).await; // ReclaimAll (smoothed) + puller reconnect
 
-    // ── THE INVARIANT: exactly one node serves the call (no ghost duplicate) ──
-    eprintln!(
-        "post-reclaim: b1.active={} b2.active={} reclaimed={} handback={} hydrated={}",
-        b1.active_calls(),
-        b2.active_calls(),
-        b1.metrics().repl_reclaimed_total(),
-        b2.metrics().repl_handback_total(),
-        b2.metrics().repl_takeover_hydrated_total(),
-    );
-    assert_eq!(
-        b1.active_calls() + b2.active_calls(),
-        1,
-        "EXACTLY ONE node serves the call after reclaim+handback — a duplicate is the ghost leak",
-    );
-    assert_eq!(b1.active_calls(), 1, "the rebooted primary reclaimed + serves it");
-    assert_eq!(b2.active_calls(), 0, "the backup handed its takeover copy back");
-    assert!(b2.metrics().repl_handback_total() >= 1, "the handback (Deactivate) fired on the backup");
+    // ── THE INVARIANT: exactly one node serves the call (no ghost, no loss) ───
+    failover_harness::assert_single_owner(&[&*b1, &*b2], &call_ref);
+    assert!(b1.serves(&call_ref), "the rebooted primary reclaimed + serves it");
+    assert!(b2.memory_clean(), "the backup holds no live copy");
 
     drop((w_b1, w_b2, proxy));
 }
 
 // ===========================================================================
-// X11 EAGER TAKEOVER OF A QUIESCENT DIALOG — the long-call `kill_worker` loss.
-//
-// A long-hold call parked in the B2BUA OPTIONS-keepalive loop sends NOTHING, so
-// the *reactive* takeover (`hydrate_from_replica`, which only fires on an inbound
-// in-dialog request) never triggers. Its keepalive timer dies with the primary
-// and is re-armed on no live node, so ~one interval later the UAC's mandatory
-// keepalive OPTIONS never arrives → the dialog is torn down as failed. In the
-// cluster this lost ~100% of quiescent long calls on every kill_worker, masked in
-// the aggregate by short-call volume.
-//
-// The fix: on the peer-`Removed` membership delta the survivor's supervisor emits
-// an EAGER `TakeOverPeer`, materialising the dead peer's whole `bak:` partition
-// and re-arming each call's ORIGINAL keepalive deadline — so the survivor probes
-// the dialog on schedule with NO inbound traffic. This test drives takeover with
-// the clock alone (zero UAC requests) and asserts: (1) the survivor eagerly takes
-// the call over, (2) it emits the next keepalive OPTIONS on schedule with the
-// correct dialog identity, keeping the call alive, and (3) the rebooted primary
-// reclaims it and the survivor hands its copy back EXACTLY once (no double-serve,
-// no leak). The X11 handback can only fire because the eager takeover did an
-// explicit reverse-flush (a quiescent call mutates nothing) — without it the call
-// would be double-served forever (the [[repl-reclaim-leak-x11]] regression).
+// QUIESCENT LONG CALL SURVIVES kill→reboot→reclaim (ADR-0014). The external
+// invariant: a long-hold call that is idle across the failover (no in-dialog
+// traffic) is NOT lost — it is dormant during the outage and recovered by the
+// rebooted primary's reclaim, after which the call is healthy again (its owner
+// answers the keepalive probe). This is the recovery path that REPLACES eager
+// takeover for quiescent dialogs (eager takeover was removed; a quiescent call on
+// a node that *never* reboots dies after the keepalive slack — the ADR-0014 §13
+// trade). Asserted in cluster vocabulary: synchronized → dormant → single owner →
+// answers the probe → clean teardown.
 // ===========================================================================
 #[tokio::test(start_paused = true)]
-async fn eager_takeover_keeps_quiescent_dialog_alive_and_hands_back_once() {
-    let mut fh = FailoverHarness::new("s11-eager-quiescent-takeover", &["b1", "b2"]);
+async fn quiescent_long_call_survives_kill_reboot_reclaim() {
+    let mut fh = FailoverHarness::new("s11-quiescent-survives-reclaim", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let b1_lane = fh.agent("b1-lane", B1).await;
@@ -715,77 +681,38 @@ async fn eager_takeover_keeps_quiescent_dialog_alive_and_hands_back_once() {
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
 
-    // ── establish alice ⇄ bob on the HRW primary; this is the LONG/quiescent
-    //    call — it arms a keepalive on the primary and then sends nothing more. ──
+    // ── establish a LONG/quiescent call — armed keepalive, then nothing more ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
     let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("b-leg INVITE carries the proxy Record-Route cookie");
-    let (pri_ord, bak_ord) = pri_bak_from_cookie(&rr);
-    // The b-leg Call-ID — the dialog identity the survivor's keepalive must probe.
-    let b_leg_call_id = sip_message::message_helpers::get_header(&uas.request().headers, "call-id")
-        .expect("b-leg INVITE carries a Call-ID")
-        .to_string();
+        .expect("b-leg INVITE carries the cookie");
+    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
     let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
         if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
-    assert_eq!(bak_ord, b2.ordinal(), "cookie w_bak names the backup worker");
     let primary_ord = b1.ordinal().to_string();
-    let backup_ord = b2.ordinal().to_string();
-
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
-    let _dialog = call.ack().await;
+    let mut dialog = call.ack().await;
     bob.receive("ACK").await;
     fh.advance(Duration::from_millis(500)).await;
 
     let call_ref = find_backed_up_ref(b2, &primary_ord).await;
-    assert!(b2.get(BAK, &primary_ord, &call_ref).await.is_some(), "backup holds the replica");
-    assert_eq!(b1.active_calls(), 1, "primary serves the established call");
-    assert_eq!(b2.active_calls(), 0, "backup is a pure replica (not serving)");
+    assert!(b1.serves(&call_ref), "primary serves the established call");
+    assert!(b2.is_synchronized_backup(&call_ref).await, "backup synchronized (holds the replica)");
 
-    // ── crash the primary; k8s drops its endpoint from the survivor's view ─────
-    // (`crash()` alone never touches the survivor's membership — simulate the
-    // endpoint removal explicitly, the signal the supervisor turns into takeover.)
+    // ── crash the primary; the call is QUIESCENT (no traffic). Under reactive-only
+    //    takeover nobody serves it during the outage — but it is NOT lost: the
+    //    backup stays synchronized, so reclaim can recover it. ─────────────────────
     b1.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     b2.simulate_peer_removed(&primary_ord);
+    fh.advance(Duration::from_secs(5)).await;
+    assert!(!b2.serves(&call_ref), "a quiescent call is NOT eagerly taken over (dormant)");
+    assert!(b2.is_synchronized_backup(&call_ref).await, "the replica survives the outage (not lost)");
 
-    // ── EAGER TAKEOVER fires from the membership delta — NO UAC traffic at all ─
-    fh.advance(Duration::from_millis(500)).await;
-    assert!(
-        b2.metrics().repl_eager_takeover_total() >= 1,
-        "survivor eagerly took the dead peer's partition over (metric); got {}",
-        b2.metrics().repl_eager_takeover_total(),
-    );
-    assert_eq!(
-        b2.active_calls(),
-        1,
-        "survivor materialised the quiescent call into its live map with zero inbound traffic",
-    );
-
-    // ── KEEPALIVE ON SCHEDULE — advance to the original deadline; the survivor
-    //    (the call's sole keeper) probes BOTH legs. Answer both → call stays up. ─
-    fh.advance(KEEPALIVE_INTERVAL).await;
-    alice.receive_tolerating("OPTIONS", &["INVITE", "ACK"]).await.respond(200, "OK").await;
-    let mut bob_opts = bob.receive_tolerating("OPTIONS", &["INVITE", "ACK"]).await;
-    assert_eq!(
-        sip_message::message_helpers::get_header(&bob_opts.request().headers, "call-id"),
-        Some(b_leg_call_id.as_str()),
-        "the survivor's keepalive probes the SAME b-leg dialog it took over (correct identity)",
-    );
-    bob_opts.respond(200, "OK").await;
-    fh.advance(Duration::from_millis(500)).await;
-    assert_eq!(
-        b2.active_calls(),
-        1,
-        "the answered keepalive kept the quiescent call alive on the survivor (not reaped)",
-    );
-
-    // ── reboot the primary → it reclaims + the survivor hands back EXACTLY once ─
+    // ── reboot the primary → it reclaims the dormant call ───────────────────────
     b1.reboot().await;
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
-    // k8s re-publishes the restarted pod's endpoint → survivor's puller reconnects
-    // (it carries the X11 Deactivate handback). A restart is Removed-then-Added.
     b2.simulate_peer_added(&primary_ord);
     for _ in 0..40 {
         fh.advance(Duration::from_millis(500)).await;
@@ -794,29 +721,21 @@ async fn eager_takeover_keeps_quiescent_dialog_alive_and_hands_back_once() {
         }
     }
     assert!(b1.is_ready(), "rebooted primary ready after re-hydration");
-    // Drive go-active: ReclaimAll bulk sweep + the ~5 s Deactivate handback burst.
-    fh.advance(Duration::from_secs(10)).await;
+    fh.advance(Duration::from_secs(10)).await; // ReclaimAll (smoothed)
 
-    eprintln!(
-        "post-reclaim (eager): pri={primary_ord} bak={backup_ord} \
-         b1.active={} b2.active={} eager={} reclaimed={} handback={}",
-        b1.active_calls(),
-        b2.active_calls(),
-        b2.metrics().repl_eager_takeover_total(),
-        b1.metrics().repl_reclaimed_total(),
-        b2.metrics().repl_handback_total(),
-    );
-    assert_eq!(
-        b1.active_calls() + b2.active_calls(),
-        1,
-        "EXACTLY ONE node serves the call after reclaim+handback — a duplicate is the ghost leak",
-    );
-    assert_eq!(b1.active_calls(), 1, "the rebooted primary reclaimed + serves the call");
-    assert_eq!(b2.active_calls(), 0, "the survivor handed its eager takeover copy back");
-    assert!(
-        b2.metrics().repl_handback_total() >= 1,
-        "the X11 handback fired on the survivor (its eager reverse-flush gave the primary an as_of)",
-    );
+    // ── recovered: exactly one owner, and it ANSWERS the keepalive probe (the
+    //    behavioural "synchronized owner" check — 200 OK on both legs). ──────────-
+    failover_harness::assert_single_owner(&[&*b1, &*b2], &call_ref);
+    assert!(b1.serves(&call_ref), "the rebooted primary reclaimed the quiescent call");
+    let tol = ["INVITE", "ACK", "OPTIONS"];
+    service_keepalive_both_legs(&mut fh, &alice, &bob, &tol).await;
+
+    // ── clean teardown — the recovered call is fully usable end-to-end ──────────-
+    let mut bye = dialog.bye().await;
+    bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    bye.expect_tolerating(200, &["OPTIONS"]).await;
+    fh.advance(Duration::from_secs(1)).await;
+    failover_harness::assert_call_fully_released(&[&*b1, &*b2], &call_ref).await;
 
     drop((w_b1, w_b2, proxy));
 }
@@ -825,23 +744,22 @@ async fn eager_takeover_keeps_quiescent_dialog_alive_and_hands_back_once() {
 // CSeq PRESERVED ACROSS THE COMPLETE FAILOVER — representativeness + the RFC guard.
 //
 // The endurance `unexpected_msg` long-call loss (handoff Fix A; memory
-// [[repl-takeover-longcall-loss]]) is a CSeq-ordering failure: a takeover that
-// probes a dialog with a CSeq the callee has already passed. This test makes the
+// [[repl-takeover-longcall-loss]]) is a CSeq-ordering failure: a reclaim/probe that
+// relays a dialog with a CSeq the callee has already passed. This test makes the
 // scenario representative of that path — a long call with in-dialog CSeq CHURN
-// (not the trivial quiescent dialog) carried through the COMPLETE k8s failover:
-// kill → endpoint removed → eager takeover → reboot → reclaim → handback, with
-// the AS keepalive probing on BOTH the survivor and the reclaimed primary — and
-// asserts (via the recorded-trace RFC 3261 §12.2.2 audit, the same "post-run all
-// clean" check every cell now runs) that the b-leg CSeq the callee observes never
-// regresses across any of it. It passes today: under the simulated repl fabric
-// the backup replica stays current, so every probe is in order. It is the guard
-// that turns red if a takeover/reclaim ever re-probes from a stale CSeq snapshot.
-// (The genuine production *race* — the last flush dying with the primary — is not
-// yet reproducible here; the sim fabric keeps the replica current. See the
-// framework note in ADR-0013.)
+// (so the b-leg CSeq the callee tracks is well past 1) carried through the COMPLETE
+// k8s failover: churn → kill → dormant outage → reboot → reclaim → the reclaimed
+// primary's keepalive probes both legs — and asserts (via the recorded-trace RFC
+// 3261 §12.2.2 audit, the "post-run all clean" check every cell now runs) that the
+// b-leg CSeq the callee observes never regresses across any of it. It passes
+// because the simulated repl fabric keeps the backup replica current, so the
+// reclaimed primary resumes from the correct next CSeq. It is the guard that turns
+// red if a reclaim ever re-probes from a stale CSeq snapshot. (The genuine
+// production *race* — the last flush dying with the primary — is not yet
+// reproducible here; the sim fabric keeps the replica current. See ADR-0013.)
 // ===========================================================================
 #[tokio::test(start_paused = true)]
-async fn cseq_stays_in_order_across_eager_takeover_and_reclaim() {
+async fn cseq_stays_in_order_across_failover_and_reclaim() {
     let mut fh = FailoverHarness::new("s11-cseq-across-failover", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -886,19 +804,17 @@ async fn cseq_stays_in_order_across_eager_takeover_and_reclaim() {
         fh.advance(Duration::from_millis(300)).await;
     }
 
-    // ── COMPLETE kill: crash + proxy-dead + k8s endpoint removed → eager takeover ─
+    let call_ref = find_backed_up_ref(b2, &primary_ord).await;
+
+    // ── kill the primary; the call goes dormant across the outage (reactive-only:
+    //    no node serves it, but the replica survives). ────────────────────────────
     b1.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     b2.simulate_peer_removed(&primary_ord);
-    fh.advance(Duration::from_millis(500)).await;
-    assert_eq!(b2.active_calls(), 1, "survivor eagerly took the call over after the kill");
+    fh.advance(Duration::from_secs(5)).await;
+    assert!(b2.is_synchronized_backup(&call_ref).await, "replica survives the outage (call not lost)");
 
-    // ── the survivor's keepalive probes both legs — must continue the CSeq order ─
-    let tol = ["INVITE", "ACK", "INFO", "OPTIONS"];
-    service_keepalive_both_legs(&mut fh, &alice, &bob, &tol).await;
-    assert_eq!(b2.active_calls(), 1, "answered keepalive kept the call alive on the survivor");
-
-    // ── reboot → reclaim → handback; survivor re-publishes the endpoint ─────────-
+    // ── reboot → reclaim; survivor re-publishes the endpoint ────────────────────-
     b1.reboot().await;
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
     b2.simulate_peer_added(&primary_ord);
@@ -909,10 +825,12 @@ async fn cseq_stays_in_order_across_eager_takeover_and_reclaim() {
         }
     }
     assert!(b1.is_ready(), "rebooted primary ready after re-hydration");
-    fh.advance(Duration::from_secs(10)).await; // ReclaimAll + Deactivate handback
-    assert_eq!(b1.active_calls() + b2.active_calls(), 1, "exactly one owner after handback");
+    fh.advance(Duration::from_secs(10)).await; // ReclaimAll (smoothed)
+    failover_harness::assert_single_owner(&[&*b1, &*b2], &call_ref);
 
-    // ── the reclaimed primary's keepalive must ALSO continue the CSeq order ──────
+    // ── the reclaimed primary's keepalive must CONTINUE the b-leg CSeq order
+    //    (resume from the next CSeq, never regress to a stale snapshot). ──────────-
+    let tol = ["INVITE", "ACK", "INFO", "OPTIONS"];
     service_keepalive_both_legs(&mut fh, &alice, &bob, &tol).await;
 
     // ── teardown ─────────────────────────────────────────────────────────────-
@@ -921,12 +839,11 @@ async fn cseq_stays_in_order_across_eager_takeover_and_reclaim() {
     bye.expect_tolerating(200, &["OPTIONS", "INFO"]).await;
     fh.advance(Duration::from_secs(1)).await;
 
-    // NOTE: no inline `assert_sip_rfc_clean` here — this test's focus is call
-    // survival/handback across the complete failover (exactly-one-owner above).
-    // The RFC in-dialog-CSeq audit still runs as the mandatory `FailoverHarness::drop`
-    // hard gate over the recorded trace, and passes (the keepalive CSeq +
-    // proxy-retransmit-branch fixes keep it clean); see
-    // `keepalive_as_options_increments_dialog_cseq` for the focused regression.
+    // NOTE: no inline `assert_sip_rfc_clean` here — this test's focus is CSeq
+    // survival across the complete failover. The RFC in-dialog-CSeq audit still
+    // runs as the mandatory `FailoverHarness::drop` hard gate over the recorded
+    // trace, and passes; see `keepalive_as_options_increments_dialog_cseq` for the
+    // focused regression.
 
     drop((w_b1, w_b2, proxy));
 }
@@ -969,9 +886,10 @@ async fn service_keepalive_both_legs(
 //       reclaims the dead dialog. (User concern: "when acting as backup, if the
 //       call terminates, the backup context is properly removed and we don't send
 //       back to the primary an expired call context.")
-// This is the BYE-termination twin of `reboot_reclaim_hands_back_exactly_one_owner`
+// This is the BYE-termination twin of `reboot_reclaim_exactly_one_owner_after_self_release`
 // (which fails a NON-terminating re-INVITE over): there the primary reclaims the
-// LIVE call; here it must reclaim NOTHING.
+// LIVE call; here it must reclaim NOTHING (the BYE took the `RemoveCall` path,
+// which propagated a Reverse DELETE — not a self-release that keeps the replica).
 // ===========================================================================
 #[tokio::test(start_paused = true)]
 async fn acting_backup_terminate_leaves_no_expired_context_for_reclaim() {
@@ -1010,7 +928,7 @@ async fn acting_backup_terminate_leaves_no_expired_context_for_reclaim() {
     fh.advance(Duration::from_millis(500)).await;
 
     let call_ref = find_backed_up_ref(b2, &primary_ord).await;
-    assert!(b2.get(BAK, &primary_ord, &call_ref).await.is_some(), "backup holds the replica");
+    assert!(b2.is_synchronized_backup(&call_ref).await, "backup synchronized (holds the replica)");
 
     // ── crash the primary; the proxy fails the in-dialog BYE over to the backup,
     //    which TAKES OVER and TERMINATES the call (the acting-backup teardown). ──
@@ -1020,28 +938,22 @@ async fn acting_backup_terminate_leaves_no_expired_context_for_reclaim() {
 
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await; // b2 relays the BYE to bob
-    bye.expect(200).await;
+    bye.expect(200).await; // ← external: the failed-over BYE completes
     fh.advance(Duration::from_millis(500)).await;
 
-    // Let the buffered reverse-delete drain (the bak body is removed off the hot path).
+    // Let the buffered reverse-delete drain off the hot path.
     for _ in 0..40 {
-        if b2.get(BAK, &primary_ord, &call_ref).await.is_none() {
+        if !b2.holds_any_trace(&call_ref).await {
             break;
         }
         fh.advance(Duration::from_millis(100)).await;
     }
 
-    // ── INVARIANT 1: the acting-backup released ALL of the takeover context ────
-    assert_eq!(b2.active_calls(), 0, "acting-backup dropped the live takeover copy on terminate");
-    assert_eq!(b2.lock_count(), 0, "acting-backup released the per-call lock on terminate");
-    assert!(
-        b2.get(BAK, &primary_ord, &call_ref).await.is_none(),
-        "acting-backup deleted its bak:{primary_ord} body on terminate (no stale replica)",
-    );
-    assert!(
-        !b2.scan_backed_up(&primary_ord).contains(&call_ref),
-        "terminated call left the backup keyset — bootstrap cannot replay it to the primary",
-    );
+    // ── INVARIANT 1: the terminated call left NO trace on the acting-backup — no
+    //    live copy, no per-call lock, no replica body. (So bootstrap cannot replay
+    //    it, and nothing leaked.) ─────────────────────────────────────────────────
+    assert!(!b2.holds_any_trace(&call_ref).await, "acting-backup left no trace of the terminated call");
+    assert!(b2.memory_clean(), "acting-backup released all per-call memory on terminate");
 
     // ── reboot the primary → it re-hydrates from the backup + bulk-reclaims ────
     b1.reboot().await;
@@ -1053,36 +965,11 @@ async fn acting_backup_terminate_leaves_no_expired_context_for_reclaim() {
         }
     }
     assert!(b1.is_ready(), "rebooted primary ready after re-hydration");
-    // Drive the go-active task: ReclaimAll bulk sweep + the straggler/handback burst.
-    fh.advance(Duration::from_secs(10)).await;
+    fh.advance(Duration::from_secs(10)).await; // ReclaimAll (smoothed) + straggler sweep
 
-    // ── INVARIANT 2: the primary did NOT resurrect the terminated dialog ───────
-    eprintln!(
-        "post-reboot: b1.active={} b1.reclaimed={} pri:{primary_ord}={:?} gen={:?}",
-        b1.active_calls(),
-        b1.metrics().repl_reclaimed_total(),
-        b1.scan_primary(&primary_ord),
-        b1.call_gen(PartitionRole::Primary, &primary_ord, &call_ref),
-    );
-    assert_eq!(
-        b1.active_calls(),
-        0,
-        "primary must NOT reclaim the terminated call into its live map (a resurrection = a ghost)",
-    );
-    assert!(
-        !b1.scan_primary(&primary_ord).contains(&call_ref),
-        "terminated call is absent from pri:{primary_ord} — the Reverse DELETE propagated, not a stale create",
-    );
-    assert!(
-        b1.call_gen(PartitionRole::Primary, &primary_ord, &call_ref).is_none(),
-        "no expired call_gen lingered in pri:{primary_ord} for the terminated call",
-    );
-    assert_eq!(
-        b1.metrics().repl_reclaimed_total(),
-        0,
-        "primary reclaimed NOTHING — its only call had already terminated on the backup",
-    );
-    assert_eq!(b2.active_calls(), 0, "backup holds nothing after the handback window");
+    // ── INVARIANT 2: the primary did NOT resurrect the terminated dialog — the
+    //    call is fully released cluster-wide (no owner, no replica anywhere). ──────
+    failover_harness::assert_call_fully_released(&[&*b1, &*b2], &call_ref).await;
 
     drop((w_b1, w_b2, proxy));
 }

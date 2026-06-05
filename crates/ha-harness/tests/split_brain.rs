@@ -62,7 +62,7 @@ async fn long_split_brain_delete_restored_without_reboot() {
     cl.advance(ms(100)).await;
 
     let gone = cref("A", "gone");
-    cl.put("A", &gone, b"g1".to_vec(), 1, &backup_is("B")).await;
+    cl.put("A", &gone, b"g1".to_vec(), 1, 0, &backup_is("B")).await;
     cl.advance(ms(200)).await;
     assert_eq!(cl.node("B").get(BAK, "A", &gone).await.as_deref(), Some(&b"g1"[..]));
     let w_before = cl.node("B").watermark("A");
@@ -95,7 +95,7 @@ async fn long_split_brain_delete_restored_without_reboot() {
     );
     // B is not stuck below the reaped tail: a brand-new post-cutover write lands.
     let fresh = cref("A", "fresh");
-    cl.put("A", &fresh, b"f1".to_vec(), 1, &backup_is("B")).await;
+    cl.put("A", &fresh, b"f1".to_vec(), 1, 0, &backup_is("B")).await;
     cl.advance(secs(1)).await;
     assert_eq!(
         cl.node("B").get(BAK, "A", &fresh).await.as_deref(),

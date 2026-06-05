@@ -361,12 +361,26 @@ pub enum CallModelState {
 // ── HA topology hint ────────────────────────────────────────────────────────
 
 /// Persisted topology hint: the worker pair stamped at INVITE time plus a
-/// monotonic generation (newest `gen` wins on partition-heal conflict).
+/// per-context **version vector** `(gen, bak_gen)` = `(p, b)` (ADR-0014).
+///
+/// `gen` (`p`) is the **primary** counter — bumped only by the call's primary on
+/// a local mutation. `bak_gen` (`b`) is the **backup** counter — bumped only by
+/// an acting-backup on a takeover mutation. Each node bumps only its own role's
+/// counter, so the *other* node's counter in an incoming update is, by
+/// construction, the branch point. This replaces the old single-counter
+/// "highest gen wins" LWW, which could not disambiguate concurrent
+/// primary+backup mutations (the latent equal-gen divergence). See the apply
+/// rule in `b2bua::repl::puller`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallTopology {
     pub pri: String,
     pub bak: String,
+    /// Primary counter `p` of the `(p,b)` version vector.
     pub gen: i64,
+    /// Backup counter `b` of the `(p,b)` version vector. `#[serde(default)]` so
+    /// a body serialised before the split still deserialises (`b = 0`).
+    #[serde(default)]
+    pub bak_gen: i64,
 }
 
 // ── Active peering (INAP-style split/merge) ─────────────────────────────────

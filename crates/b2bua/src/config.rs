@@ -48,7 +48,12 @@ pub struct B2buaConfig {
     /// `Element` (ADR-0011 X11). It is how long a backup copy survives without a
     /// refresh from its primary, i.e. how long a primary may be down/rebooting
     /// before its backups give up and self-evict. Decoupled from the OPTIONS
-    /// keepalive (which is leg-liveness, a different concern); default **450 s**.
+    /// keepalive (which is leg-liveness, a different concern); default **600 s**.
+    ///
+    /// Under reactive-only takeover (ADR-0014) reclaim is the sole
+    /// quiescent-recovery path, so this TTL must comfortably outlast the
+    /// keepalive interval plus the 120 s reboot+rehydrate+smoothed-drain slack
+    /// (§3 of the reactive-takeover plan): `600 ≥ 300 + 120` with margin.
     ///
     /// Correctness coupling — the backup's TTL is *refreshed* only when the
     /// primary flushes the call, and a quiescent established call is flushed only
@@ -63,6 +68,21 @@ pub struct B2buaConfig {
     /// lookback. Must match the limiter service's `LIMITER_WINDOW_SECONDS`. TS
     /// default 300. The test harness lowers this for fast paused-clock tests.
     pub limiter_refresh_sec: i64,
+    /// **Keepalive catch-up speed-up** (ADR-0014, performance-only). On reboot a
+    /// primary's `ReclaimAll` re-materialises its whole `pri:{self}` partition;
+    /// many keepalive timers are past-due. Firing them all at once floods a
+    /// freshly-rehydrated node, so the reclaim handler *smooths* the backlog: the
+    /// oldest-overdue keepalive fires first and the rest are staggered to drain
+    /// over `L_max / speedup` (bounded to `speedup`× the normal cadence), where
+    /// `L_max` is the largest overdue gap. This is pure load management with **no**
+    /// correctness role (`(p,b)` reconciliation makes any incidental keepalive
+    /// overlap non-corrupting), so it carries no timing assumption. Default **10**.
+    /// `<= 1` disables smoothing (every past-due keepalive fires immediately).
+    pub keepalive_catchup_speedup: i64,
+    /// Optional cap (seconds) on the keepalive catch-up drain window for a
+    /// pathological `L_max` (a very long reboot). `None` = no cap (drain over the
+    /// full `L_max / speedup`). See [`keepalive_catchup_speedup`](Self::keepalive_catchup_speedup).
+    pub max_catchup_window_sec: Option<i64>,
 }
 
 impl Default for B2buaConfig {
@@ -81,8 +101,10 @@ impl Default for B2buaConfig {
             refer_reinvite_answer_sec: 32,
             refer_overall_safety_sec: 120,
             keepalive_interval_sec: 300,
-            reboot_budget_sec: 450,
+            reboot_budget_sec: 600,
             limiter_refresh_sec: 300,
+            keepalive_catchup_speedup: 10,
+            max_catchup_window_sec: None,
         }
     }
 }

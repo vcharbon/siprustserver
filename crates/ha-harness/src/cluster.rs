@@ -193,11 +193,12 @@ impl HaCluster {
         call_ref: &str,
         body: Vec<u8>,
         call_gen: i64,
+        call_bgen: i64,
         backup_resolver: &dyn Fn(&str) -> Option<String>,
     ) {
-        self.mark(ordinal, None, "put", &format!("{call_ref} gen={call_gen}"));
+        self.mark(ordinal, None, "put", &format!("{call_ref} cv=({call_gen},{call_bgen})"));
         self.node(ordinal)
-            .put(call_ref, body, call_gen, backup_resolver)
+            .put(call_ref, body, call_gen, call_bgen, backup_resolver)
             .await;
     }
 

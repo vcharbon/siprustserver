@@ -18,7 +18,7 @@
 //! ADR-0005 single-writer seam, preserved without a per-call dispatcher (which
 //! is a B2BUA-only concern; this layer is shared with the proxy).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -148,6 +148,26 @@ enum Command {
         call_ref: String,
         reply: oneshot::Sender<()>,
     },
+    /// Count the transactions (any role/state) still resident in the map for
+    /// `call_ref`. The B2BUA's acting-backup **self-release** (ADR-0014) polls
+    /// this after serving a takeover event: when it reaches **0** the backup's
+    /// served transaction(s) have fully cleaned up (final response + ACK for an
+    /// INVITE, Timer J/H for a non-INVITE, or Timer B/F on failure), so the
+    /// acting-backup may shed its live takeover copy. "Resident in the map" — not
+    /// merely `is_active()` — is deliberate: an INVITE server txn lingers in
+    /// `Completed` until its ACK, and shedding before the ACK would strand the
+    /// ACK relay.
+    ActiveTxnCount {
+        call_ref: String,
+        reply: oneshot::Sender<usize>,
+    },
+    /// Register `call_ref` for a one-shot [`TransactionEvent::CallQuiesced`] when
+    /// its last transaction clears (ADR-0014 self-release). If it already has no
+    /// transactions, `CallQuiesced` is emitted at once.
+    WatchSelfRelease {
+        call_ref: String,
+        reply: oneshot::Sender<()>,
+    },
 }
 
 /// Handle to the running transaction layer. Clone-cheap; every method funnels
@@ -183,6 +203,7 @@ impl TransactionLayer {
             events_tx,
             metrics: metrics_inner,
             id_gen: config.id_gen,
+            self_release_watch: HashSet::new(),
         };
 
         tokio::spawn(run(owner, endpoint, cmd_rx));
@@ -253,6 +274,36 @@ impl TransactionLayer {
             .expect("transaction layer owner task dropped");
         rx.await.expect("transaction layer owner task dropped");
     }
+
+    /// How many transactions for `call_ref` are still resident in the map (any
+    /// role/state). The acting-backup self-release (ADR-0014) reads it as a
+    /// defensive re-check — see [`Command::ActiveTxnCount`].
+    pub async fn active_txn_count_for_call(&self, call_ref: &str) -> usize {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::ActiveTxnCount {
+                call_ref: call_ref.to_string(),
+                reply,
+            })
+            .await
+            .expect("transaction layer owner task dropped");
+        rx.await.expect("transaction layer owner task dropped")
+    }
+
+    /// Ask to be notified (via [`TransactionEvent::CallQuiesced`]) when the last
+    /// transaction for `call_ref` clears — the push signal the B2BUA acting-backup
+    /// self-release (ADR-0014) arms when it takes a dialog over. Idempotent.
+    pub async fn watch_self_release(&self, call_ref: &str) {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::WatchSelfRelease {
+                call_ref: call_ref.to_string(),
+                reply,
+            })
+            .await
+            .expect("transaction layer owner task dropped");
+        rx.await.expect("transaction layer owner task dropped");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +317,12 @@ struct Owner {
     events_tx: mpsc::Sender<TransactionEvent>,
     metrics: Arc<MetricsInner>,
     id_gen: Arc<IdGen>,
+    /// call_refs the consumer asked to be told about when their **last**
+    /// transaction clears (ADR-0014 acting-backup self-release). On the
+    /// last-`delete_txn` for a watched call we emit
+    /// [`TransactionEvent::CallQuiesced`] and drop the watch. Bounded — one entry
+    /// per live takeover copy, removed when it fires.
+    self_release_watch: HashSet<String>,
 }
 
 /// The next expired timer. Only ever awaited while `q` is non-empty — an empty
@@ -319,6 +376,17 @@ impl Owner {
                 self.cancel_timer(t.timeout_key);
                 self.cancel_timer(t.cleanup_key);
                 self.sync_active();
+                // ADR-0014 self-release: if this was the LAST transaction for a
+                // watched call, notify the consumer so it can shed its acting-backup
+                // takeover copy. (For a 2xx INVITE the server txn lingers in
+                // `Completed` until Timer H — the ACK reuses a different branch — so
+                // this naturally fires at Timer H, after the ACK was relayed.)
+                if let Some(cr) = t.call_ref {
+                    if self.self_release_watch.contains(&cr) && !self.has_txns_for(&cr) {
+                        self.self_release_watch.remove(&cr);
+                        self.emit(TransactionEvent::CallQuiesced { call_ref: cr });
+                    }
+                }
                 true
             }
             None => false,
@@ -498,7 +566,32 @@ impl Owner {
                 self.do_cancel_txns_for_call(&call_ref);
                 let _ = reply.send(());
             }
+            Command::ActiveTxnCount { call_ref, reply } => {
+                let n = self
+                    .txns
+                    .values()
+                    .filter(|t| t.call_ref.as_deref() == Some(call_ref.as_str()))
+                    .count();
+                let _ = reply.send(n);
+            }
+            Command::WatchSelfRelease { call_ref, reply } => {
+                // If the call already has no transactions, fire at once; else arm
+                // the watch so the last `delete_txn` emits CallQuiesced.
+                if self.has_txns_for(&call_ref) {
+                    self.self_release_watch.insert(call_ref);
+                } else {
+                    self.emit(TransactionEvent::CallQuiesced { call_ref });
+                }
+                let _ = reply.send(());
+            }
         }
+    }
+
+    /// Any transaction (any role/state) still attributed to `call_ref`?
+    fn has_txns_for(&self, call_ref: &str) -> bool {
+        self.txns
+            .values()
+            .any(|t| t.call_ref.as_deref() == Some(call_ref))
     }
 
     async fn do_send_request(
@@ -737,6 +830,15 @@ impl Owner {
         };
         let is_invite = matches!(kind, TxnKind::Invite);
 
+        // Attribute the server txn to its call so the B2BUA's acting-backup
+        // self-release (ADR-0014) can count "transactions still serving this
+        // call". An in-dialog request the proxy routes to the B2BUA carries the
+        // `callRef` in its Request-URI (the dialog remote target = the B2BUA
+        // Contact, which stamps it) — the same key the router resolves on. An
+        // out-of-dialog request (initial INVITE / OPTIONS keepalive) has no
+        // `callRef` param yet → `None`, as before.
+        let call_ref = extract_ruri_call_ref(&req);
+
         let txn = Transaction {
             branch: branch.clone(),
             role: TxnRole::Server,
@@ -747,7 +849,7 @@ impl Owner {
             original_request: Some(req.clone()),
             last_response: None,
             last_response_status: None,
-            call_ref: None,
+            call_ref,
             leg_id: None,
             state: TxnState::Trying,
             destination: None,
@@ -950,6 +1052,17 @@ fn extract_via_custom_params(req: &SipRequest) -> (Option<String>, Option<String
         _ => None,
     };
     (read("cr"), read("lg"))
+}
+
+/// Extract + URL-decode the Request-URI `callRef` param (percent-encoded by the
+/// B2BUA's `build_call_contact`). `parse_uri_params` lower-cases param names per
+/// RFC 3261 §19.1.1, so the key is `callref`. `None` for an out-of-dialog request
+/// (no param). Used to attribute a server transaction to its call (ADR-0014
+/// self-release counting).
+fn extract_ruri_call_ref(req: &SipRequest) -> Option<String> {
+    sip_message::message_helpers::parse_uri_params(&req.uri)
+        .get("callref")
+        .map(|v| percent_decode(v))
 }
 
 fn percent_decode(s: &str) -> String {

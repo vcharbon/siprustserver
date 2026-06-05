@@ -57,7 +57,9 @@ fn topology_from_cookie(invite: &SipRequest, self_ordinal: &str) -> Option<CallT
         .cloned()
         .unwrap_or_else(|| self_ordinal.to_string());
     let bak = params.get("w_bak").cloned().unwrap_or_default();
-    Some(CallTopology { pri, bak, gen: 1 })
+    // Brand-new call: primary counter p = 1 (the primary "created" it), backup
+    // counter b = 0 (no takeover yet). See `CallTopology` / ADR-0014.
+    Some(CallTopology { pri, bak, gen: 1, bak_gen: 0 })
 }
 
 /// Build the initial [`Call`] (a-leg only) from an inbound INVITE. Pure.
