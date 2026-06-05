@@ -451,7 +451,7 @@ async fn main() {
         limiter,
         cdr,
         store,
-        clock,
+        clock: clock.clone(),
         id_gen: Arc::new(IdGen::from_entropy()),
         replication,
     };
@@ -487,11 +487,24 @@ async fn main() {
     // the sample is a couple of brief locks, off the call path.
     {
         let core = core.clone();
+        let clock = clock.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
                 tick.tick().await;
                 core.sample_gauges();
+                // Physically reclaim expired backup-replica bodies + changelog
+                // delete-tombstones. `reap` is correct but was never DRIVEN in
+                // production (only the test harness called it), so the changelog
+                // and bak: held-set grew unbounded under steady create/terminate
+                // churn (repl_changelog_entries / repl_backup_held climb at the
+                // terminate rate while active_calls is flat) -> monotonic RSS+CPU
+                // -> eventual OOM. Same lesson as the timer wheel: logical/lazy
+                // cleanup is bounded only by OOM; physical reclamation MUST be
+                // actively ticked.
+                if let Some(repl) = core.repl_store() {
+                    repl.reap(clock.now_ms()).await;
+                }
             }
         });
     }

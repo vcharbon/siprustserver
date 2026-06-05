@@ -36,6 +36,7 @@
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -84,6 +85,11 @@ pub struct Harness {
     /// Dumps the recorded trace to stderr if the scenario task unwinds before
     /// [`finish`](Harness::finish) renders a report. `finish` disarms it.
     dump: PanicDump,
+    /// MANDATORY HARD GATE: fails the test on Drop if the recorded trace violates
+    /// the RFC 3261 in-dialog CSeq rule — the backstop for a harness dropped
+    /// WITHOUT [`finish`](Harness::finish) (which enforces the same gate inline).
+    /// `finish` disarms it (it has already run the gate itself).
+    cseq_gate: CseqGate,
 }
 
 impl Harness {
@@ -106,11 +112,19 @@ impl Harness {
         let transit_delay_ms = transit_delay_ms.max(1);
         let recorder = Recorder::with_clock(TransportKind::Fake, Clock::test_at(0));
         let sim = Arc::new(SimulatedSignalingNetwork::new(transit_delay_ms));
+        // Install the built-in RFC 3261 wire-invariant rules (CSeq in-dialog
+        // ordering, …) by default so every harness run gets the same post-run
+        // "all clean" check the live SIPp endpoints apply — a stale-CSeq probe a
+        // test UA would silently answer is caught at layer close.
+        let audit_opts = ScopedAuditOptions {
+            cross_message_rules: sip_net::rfc_cross_message_rules(),
+            ..Default::default()
+        };
         let wrapped = with_all_contracts(
             sim,
             recorder.clone(),
             RunContext::TestWithRecorder,
-            ScopedAuditOptions::default(),
+            audit_opts,
             true,
         );
         let name = scenario_name.into();
@@ -118,6 +132,11 @@ impl Harness {
             name: name.clone(),
             channel: wrapped.recording.channel(),
             recorder: recorder.clone(),
+            armed: Cell::new(true),
+        };
+        let cseq_gate = CseqGate {
+            name: name.clone(),
+            channel: wrapped.recording.channel(),
             armed: Cell::new(true),
         };
         Self {
@@ -128,6 +147,7 @@ impl Harness {
             name,
             description: None,
             dump,
+            cseq_gate,
         }
     }
 
@@ -195,17 +215,76 @@ impl Harness {
         sip_clock::testkit::advance_in_100ms_chunks(d).await;
     }
 
+    /// The recording decorator handle — lets a caller read the raw signaling
+    /// event channel (`recording().channel().snapshot()`) to run an audit rule
+    /// directly over the trace WITHOUT consuming the harness or invoking the
+    /// structural layer-close checks. Used by long-lived multi-SUT harnesses
+    /// (e.g. the failover matrix) that assert the RFC CSeq check mid-life.
+    pub fn recording(&self) -> sip_net::RecordingSignalingNetwork {
+        self.recording.clone()
+    }
+
     /// Close the recording layer and return the [`RunReport`] (trace projected
     /// from the recording). Failures in the fluent flow panic in-line, so a
     /// returned report is by construction a passing run.
+    ///
+    /// MANDATORY HARD GATE: before returning, the recorded trace is checked against
+    /// the RFC 3261 in-dialog CSeq rule(s); ANY finding `panic!`s, failing the
+    /// test. This is the SIP-plane analogue of the universal "all clean" sweep,
+    /// applied to EVERY harness run with no per-test opt-in. Only the cseq
+    /// cross-message rules gate here — NOT the structural `close()` anomalies
+    /// (inFlightImbalance / queueLeak), which legitimately occur in timeout / reap
+    /// / stall fixtures and must not fail those tests.
     pub async fn finish(self) -> RunReport {
         // A returned report is by construction a passing run, so the post-mortem
-        // dump is no longer wanted: disarm it before tearing the session down.
+        // dump is no longer wanted: disarm it before tearing the session down. The
+        // Drop-time cseq backstop is likewise disarmed — `finish` runs the SAME
+        // gate inline just below, so the Drop guard would only double-check.
         self.dump.disarm();
+        self.cseq_gate.disarm();
         let events = self.recording.channel().snapshot();
+        // Hard gate on the RFC CSeq rule(s) BEFORE the structural close: a CSeq
+        // violation must fail the test (a real UA would reject these). Skip if the
+        // test is already unwinding so we never double-panic. The structural
+        // close() anomalies are intentionally NOT gated.
+        let cseq_findings = rfc_cseq_findings(&events);
+        if !cseq_findings.is_empty() && !std::thread::panicking() {
+            panic!("{}", render_cseq_panic(&self.name, &cseq_findings));
+        }
         let audit = self.recording.close().await;
         RunReport::from_recording(self.name, self.description, self.recorder, events, audit)
     }
+}
+
+/// The RFC 3261 cross-message (in-dialog CSeq) findings over a recorded trace —
+/// the `(lane, detail)` pairs the hard gate fails on. ONLY the cross-message
+/// rules run here (the structural layer-close anomalies are deliberately not
+/// consulted), so timeout / reap / stall fixtures that legitimately leave an
+/// in-flight imbalance are not gated. Shared by `Harness::finish` and the
+/// `Harness` Drop guard so the SAME rule set runs on every run with no per-test
+/// opt-in. Empty ⇒ clean.
+fn rfc_cseq_findings(
+    events: &[layer_harness::Stamped<SignalingNetworkEvent>],
+) -> Vec<(String, String)> {
+    let mut findings = Vec::new();
+    for rule in sip_net::rfc_cross_message_rules() {
+        findings.extend(rule.check(events));
+    }
+    findings
+}
+
+/// Format the hard-gate panic message listing every RFC CSeq violation.
+fn render_cseq_panic(name: &str, findings: &[(String, String)]) -> String {
+    format!(
+        "[{name}] SIP RFC 3261 audit violation(s) on the recorded trace — a real \
+         UA would have rejected these, so this test MUST fail (RFC check is a \
+         mandatory hard gate):\n{}",
+        findings
+            .iter()
+            .map(|(lane, detail)| format!("  • [{lane}] {detail}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +370,46 @@ impl Drop for PanicDump {
         // the process. Swallow any failure (e.g. a poisoned mutex on snapshot).
         if let Ok(text) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.render())) {
             eprint!("{text}");
+        }
+    }
+}
+
+/// RAII backstop for the RFC 3261 CSeq hard gate when a [`Harness`] is dropped
+/// WITHOUT [`Harness::finish`]. `finish` runs the gate inline and disarms this;
+/// a harness left to drop (or whose scenario forgot to `finish`) still gets the
+/// same mandatory check. On Drop, if still armed and the test is not already
+/// unwinding, it computes the cross-message (cseq) findings over the recorded
+/// channel and `panic!`s on any — failing the test. Only the cseq rules run here
+/// (the structural layer-close anomalies are NOT consulted), so timeout / reap /
+/// stall fixtures are not gated. The `!std::thread::panicking()` guard prevents
+/// a double-panic when the test is already failing.
+struct CseqGate {
+    name: String,
+    channel: Channel<SignalingNetworkEvent>,
+    armed: Cell<bool>,
+}
+
+impl CseqGate {
+    fn disarm(&self) {
+        self.armed.set(false);
+    }
+}
+
+impl Drop for CseqGate {
+    fn drop(&mut self) {
+        if !self.armed.get() || std::thread::panicking() {
+            return;
+        }
+        // Reading the snapshot + running the rule is panic-free in practice, but
+        // guard it so a render fault can never turn into a double-panic abort.
+        let findings = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rfc_cseq_findings(&self.channel.snapshot())
+        })) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        if !findings.is_empty() {
+            panic!("{}", render_cseq_panic(&self.name, &findings));
         }
     }
 }
@@ -402,6 +521,55 @@ impl Agent {
                 self.name, r.status, r.reason
             ),
         }
+    }
+
+    /// Non-blocking variant of [`receive_tolerating`](Agent::receive_tolerating):
+    /// drain (and 200-OK) any *currently queued* `tolerate` requests, and return
+    /// `Some(txn)` for the first queued `method` request — or `None` if the queue
+    /// is empty (no datagram pending) *without* waiting. Lets a caller poll-advance
+    /// the paused clock toward an unknown timer deadline in sub-reap steps: advance
+    /// a little, drain, and stop the instant the awaited request appears (CLAUDE.md:
+    /// drive between advances; never blow past the deadline + its reap in one step).
+    /// Panics only on a *queued* request that is neither `method` nor tolerated.
+    pub async fn try_receive_tolerating(
+        &self,
+        method: &str,
+        tolerate: &[&str],
+    ) -> Option<ServerTxn> {
+        while let Some(pkt) = self.ep.try_recv() {
+            let msg = CustomParser::new()
+                .parse(&pkt.raw)
+                .unwrap_or_else(|e| panic!("{} received an unparseable datagram: {e}", self.name));
+            let r = match msg {
+                SipMessage::Request(r) => r,
+                SipMessage::Response(r) => panic!(
+                    "{} expected a {method} request, got a {} {} response",
+                    self.name, r.status, r.reason
+                ),
+            };
+            let route_set: Vec<String> = get_headers(&r.headers, "record-route")
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let mut txn = ServerTxn {
+                agent: self.clone(),
+                request: r,
+                to_tag: None,
+                route_set,
+            };
+            if txn.request.method.eq_ignore_ascii_case(method) {
+                return Some(txn);
+            }
+            if tolerate.iter().any(|t| t.eq_ignore_ascii_case(&txn.request.method)) {
+                txn.respond(200, "OK").send().await;
+                continue;
+            }
+            panic!(
+                "{} expected a {method} request (tolerating {tolerate:?}), got {}",
+                self.name, txn.request.method
+            );
+        }
+        None
     }
 
     /// Like [`receive`](Agent::receive), but first drains (and 200-OKs) any
@@ -587,6 +755,7 @@ impl<'a> Invite<'a> {
             fallback_addr: peer.addr,
             original_invite: invite,
             dialog,
+            fork_cseq: HashMap::new(),
         }
     }
 }
@@ -599,6 +768,15 @@ pub struct ClientInvite {
     fallback_addr: SocketAddr,
     original_invite: SipRequest,
     dialog: StackDialog,
+    /// Per-forked-early-dialog CSeq (keyed by the fork's To-tag), for the
+    /// delayed-offer forking case (RFC 3261 §12.1.2 / §12.2.1.1): one INVITE
+    /// creates several early dialogs that each carry an INDEPENDENT CSeq space
+    /// seeded from the INVITE's CSeq, so both forks' first PRACKs are
+    /// `INVITE_CSeq + 1`. Without this the single shared counter makes each fork's
+    /// PRACK (and the later BYE) non-contiguous within its dialog — which the
+    /// per-dialog RFC 3261 §12.2.1.1 audit (correctly) rejects. Empty until a
+    /// `with_to_tag` request fork is addressed.
+    fork_cseq: HashMap<String, u32>,
 }
 
 impl ClientInvite {
@@ -632,6 +810,7 @@ impl ClientInvite {
     /// dialog state, so the later BYE numbers correctly.
     pub fn send_request(&mut self, method: InDialogMethod) -> InDialogRequest<'_> {
         InDialogRequest::new(self.agent.clone(), &mut self.dialog, self.fallback_addr, method)
+            .with_fork_cseq(&mut self.fork_cseq)
     }
 
     /// Generate and send the ACK for the 2xx (CSeq reused from the INVITE per
@@ -655,10 +834,18 @@ impl ClientInvite {
         let ack = generate_ack_for_2xx(Some(&handle), &self.dialog, &opts);
         let dst = next_hop(&self.dialog, self.fallback_addr);
         self.agent.send(&SipMessage::Request(ack), dst).await;
+        // If this dialog confirmed to a fork that carried its own PRACK sequence,
+        // continue from THAT fork's CSeq so the post-confirm BYE/re-INVITE is
+        // contiguous within the winning dialog (RFC 3261 §12.2.1.1), not a reuse
+        // of a CSeq the fork already spent.
+        let mut confirmed = self.dialog.clone();
+        if let Some(&fork) = self.fork_cseq.get(&confirmed.remote_tag) {
+            confirmed.local_cseq = confirmed.local_cseq.max(fork);
+        }
         Dialog {
             agent: self.agent.clone(),
             fallback_addr: dst,
-            dialog: self.dialog.clone(),
+            dialog: confirmed,
         }
     }
 }
@@ -738,6 +925,10 @@ pub struct InDialogRequest<'a> {
     rack: Option<String>,
     extra_headers: Vec<SipHeader>,
     to_tag: Option<String>,
+    /// Per-fork CSeq map (see [`ClientInvite::fork_cseq`]). Present only on the
+    /// early-dialog path; when a `with_to_tag` fork is addressed the CSeq comes
+    /// from this independent per-fork sequence, not the shared dialog counter.
+    fork_cseq: Option<&'a mut HashMap<String, u32>>,
 }
 
 impl<'a> InDialogRequest<'a> {
@@ -751,7 +942,15 @@ impl<'a> InDialogRequest<'a> {
             rack: None,
             extra_headers: vec![],
             to_tag: None,
+            fork_cseq: None,
         }
+    }
+
+    /// Wire in the originating [`ClientInvite`]'s per-fork CSeq map so a
+    /// `with_to_tag` request uses that fork's independent sequence.
+    fn with_fork_cseq(mut self, map: &'a mut HashMap<String, u32>) -> Self {
+        self.fork_cseq = Some(map);
+        self
     }
 
     /// Address this request to a specific early dialog by overriding the remote
@@ -786,7 +985,7 @@ impl<'a> InDialogRequest<'a> {
     }
 
     /// Generate and send the request; returns its client transaction.
-    pub async fn send(self) -> InDialogTxn {
+    pub async fn send(mut self) -> InDialogTxn {
         let opts = GenerateInDialogRequestOpts {
             via: Some(self.agent.via()),
             contact: Some(self.agent.contact()),
@@ -796,14 +995,34 @@ impl<'a> InDialogRequest<'a> {
             ..Default::default()
         };
         // Per-fork addressing: generate against a dialog view with the chosen
-        // remote tag, but persist the CSeq advance back to the shared dialog.
+        // remote tag. For a forked early dialog (a `with_to_tag` other than the
+        // shared dialog's own tag) the CSeq rides that fork's OWN sequence
+        // (seeded from the INVITE's CSeq), not the shared counter — RFC 3261
+        // §12.2.1.1: each early dialog increments independently.
         let mut view = self.dialog.clone();
-        if let Some(t) = &self.to_tag {
+        let mut opts = opts;
+        // On the early-dialog path EVERY explicit `with_to_tag` addresses a
+        // distinct forked early dialog (RFC 3262 §5), so it rides that fork's OWN
+        // CSeq sequence (seeded from the INVITE's CSeq) — NOT the shared counter,
+        // which a sibling fork's PRACK must not perturb.
+        let forked = self.to_tag.is_some() && self.fork_cseq.is_some();
+        if let (Some(tag), Some(map)) = (self.to_tag.as_ref(), self.fork_cseq.as_deref_mut()) {
+            view.remote_tag = tag.clone();
+            // Seed from the INVITE's CSeq (the dialog's current local_cseq) the
+            // first time this fork is addressed, then advance by one per request.
+            let entry = map.entry(tag.clone()).or_insert(self.dialog.local_cseq);
+            *entry += 1;
+            opts.cseq = Some(*entry);
+        } else if let Some(t) = &self.to_tag {
             view.remote_tag = t.clone();
         }
         let res = generate_in_dialog_request(self.method, &view, &opts);
-        let next_cseq = res.dialog.local_cseq;
-        self.dialog.local_cseq = next_cseq;
+        // Advance the SHARED dialog counter only for a non-forked request (a
+        // forked request advanced its own per-fork entry above and must leave the
+        // shared sequence untouched).
+        if !forked {
+            self.dialog.local_cseq = res.dialog.local_cseq;
+        }
         let dst = next_hop(self.dialog, self.fallback);
         self.agent.send(&SipMessage::Request(res.request), dst).await;
         InDialogTxn {

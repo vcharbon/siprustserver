@@ -151,11 +151,9 @@ dependencies = [
  "b2bua",
  "call",
  "call-limiter",
- "ha-harness",
  "http-net",
  "media",
  "media-harness",
- "repl-net",
  "scenario-harness",
  "serde_json",
  "sip-clock",
@@ -164,7 +162,6 @@ dependencies = [
  "sip-proxy",
  "sip-txn",
  "tokio",
- "topology",
 ]
 
 [[package]]
@@ -622,6 +619,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "failover-harness"
+version = "0.1.0"
+dependencies = [
+ "b2bua",
+ "call",
+ "call-limiter",
+ "ha-harness",
+ "http-net",
+ "layer-harness",
+ "repl-net",
+ "scenario-harness",
+ "seq-report",
+ "serde_json",
+ "sip-clock",
+ "sip-message",
+ "sip-net",
+ "sip-proxy",
+ "sip-txn",
+ "tokio",
+ "topology",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -807,6 +827,7 @@ dependencies = [
  "b2bua",
  "call",
  "repl-net",
+ "seq-report",
  "sip-clock",
  "tokio",
  "topology",
@@ -2241,6 +2262,7 @@ name = "scenario-harness"
 version = "0.1.0"
 dependencies = [
  "layer-harness",
+ "seq-report",
  "sip-clock",
  "sip-message",
  "sip-net",
@@ -2312,6 +2334,10 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+
+[[package]]
+name = "seq-report"
+version = "0.1.0"
 
 [[package]]
 name = "serde"

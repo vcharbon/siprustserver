@@ -13,6 +13,7 @@
 //! rules / severity ledger.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -41,6 +42,15 @@ pub enum Direction {
 pub struct CapturedFrame {
     /// Recording timestamp (ms) from the injected `Clock`.
     pub at_ms: i64,
+    /// Global recording-order sequence drawn from the shared capture sequencer
+    /// at the instant the frame was recorded. `0` when no shared sequencer was
+    /// supplied (a standalone repl recording). When the failover harness threads
+    /// the SIP recorder's sequencer in, this orders the frame against SIP
+    /// messages and lifecycle markers in TRUE append order — `at_ms` is then only
+    /// a display label, never the cross-source sort key (so a reboot marker
+    /// appended just before the bootstrap pull it triggers sorts first even
+    /// though both land on the same millisecond under the paused clock).
+    pub seq: u64,
     /// Local endpoint of the connection that observed the frame.
     pub from: SocketAddr,
     /// Remote endpoint of that connection.
@@ -54,6 +64,13 @@ pub struct CapturedFrame {
 /// Shared capture sink — every wrapped connection appends here.
 type Sink = Arc<Mutex<Vec<CapturedFrame>>>;
 
+/// A shared global recording-order sequence source. The failover harness passes
+/// an adapter over the SIP layer-harness `EventSequencer` so frames, SIP
+/// messages, and lifecycle markers all draw from ONE counter and interleave in
+/// true append order; a standalone repl recording leaves it `None` (frames get
+/// `seq = 0` and fall back to capture-append ordering).
+pub type CaptureSeq = Arc<dyn Fn() -> u64 + Send + Sync>;
+
 /// Records every frame that flows through the wrapped network. Clone shares the
 /// same capture sink, so a clone kept for `captured()` sees all connections'
 /// frames.
@@ -62,21 +79,46 @@ pub struct RecordingReplicationNetwork {
     inner: Arc<dyn ReplicationNetwork>,
     clock: Clock,
     sink: Sink,
+    /// Shared global recording-order sequence source (see [`CaptureSeq`]).
+    seq: Option<CaptureSeq>,
 }
 
 impl RecordingReplicationNetwork {
-    /// Wrap `inner`, stamping captures with `clock`.
+    /// Wrap `inner`, stamping captures with `clock`. No shared sequence source:
+    /// captured frames carry `seq = 0` and order purely by append.
     pub fn new(inner: Arc<dyn ReplicationNetwork>, clock: Clock) -> Self {
         Self {
             inner,
             clock,
             sink: Arc::new(Mutex::new(Vec::new())),
+            seq: None,
+        }
+    }
+
+    /// Wrap `inner`, stamping each captured frame with `clock` AND a global
+    /// recording-order `seq` drawn from `seq` at the moment of capture. Use this
+    /// to interleave repl frames with another plane's events (SIP / lifecycle)
+    /// in true append order off ONE shared counter.
+    pub fn with_seq(inner: Arc<dyn ReplicationNetwork>, clock: Clock, seq: CaptureSeq) -> Self {
+        Self {
+            inner,
+            clock,
+            sink: Arc::new(Mutex::new(Vec::new())),
+            seq: Some(seq),
         }
     }
 
     /// Snapshot of every captured frame so far (in append order).
     pub fn captured(&self) -> Vec<CapturedFrame> {
         self.sink.lock().unwrap().clone()
+    }
+
+    /// A `CaptureSeq` backed by a fresh local atomic — for tests/standalone repl
+    /// recordings that want a self-consistent capture order without a shared SIP
+    /// sequencer. Starts at 1 (matching the layer-harness `EventSequencer`).
+    pub fn local_seq() -> CaptureSeq {
+        let ctr = Arc::new(AtomicU64::new(0));
+        Arc::new(move || ctr.fetch_add(1, Ordering::Relaxed) + 1)
     }
 }
 
@@ -91,6 +133,7 @@ impl ReplicationNetwork for RecordingReplicationNetwork {
             inner: conn,
             clock: self.clock.clone(),
             sink: self.sink.clone(),
+            seq: self.seq.clone(),
         }))
     }
 
@@ -103,6 +146,7 @@ impl ReplicationNetwork for RecordingReplicationNetwork {
             inner: listener,
             clock: self.clock.clone(),
             sink: self.sink.clone(),
+            seq: self.seq.clone(),
         }))
     }
 }
@@ -111,6 +155,7 @@ struct RecordingListener {
     inner: Box<dyn ReplicationListener>,
     clock: Clock,
     sink: Sink,
+    seq: Option<CaptureSeq>,
 }
 
 #[async_trait]
@@ -121,6 +166,7 @@ impl ReplicationListener for RecordingListener {
             inner: conn,
             clock: self.clock.clone(),
             sink: self.sink.clone(),
+            seq: self.seq.clone(),
         }))
     }
 
@@ -133,12 +179,18 @@ struct RecordingConnection {
     inner: Box<dyn ReplicationConnection>,
     clock: Clock,
     sink: Sink,
+    seq: Option<CaptureSeq>,
 }
 
 impl RecordingConnection {
     fn capture(&self, dir: Direction, frame: &Frame) {
-        self.sink.lock().unwrap().push(CapturedFrame {
+        // Draw the global recording-order seq INSIDE the sink lock so the `seq`
+        // and the append position are consistent under concurrent connections.
+        let mut sink = self.sink.lock().unwrap();
+        let seq = self.seq.as_ref().map(|s| s()).unwrap_or(0);
+        sink.push(CapturedFrame {
             at_ms: self.clock.now_ms(),
+            seq,
             from: self.inner.local_addr(),
             to: self.inner.peer_addr(),
             dir,

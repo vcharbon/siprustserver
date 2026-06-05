@@ -17,14 +17,9 @@ use scenario_harness::Harness;
 use sip_clock::Clock;
 use sip_txn::IdGen;
 
-mod failover;
-
-pub use failover::{FailoverHarness, ProxySut, ReplicatedB2buaSut};
-
-// Re-export the engine value types the failover tests touch so a consumer needs
-// only this crate (+ scenario-harness) for the canonical scenario.
-pub use b2bua::store::PartitionRole;
-pub use sip_proxy::registry::WorkerHealth;
+// The multi-node HA failover harness (FailoverHarness / ReplicatedB2buaSut /
+// ProxySut) moved to the dedicated `failover-harness` crate (ADR-0013 §0). This
+// crate is the single-SUT b2bua harness.
 
 /// A running B2BUA bound on the harness fabric. Keep it alive for the duration
 /// of the scenario (drop tears the worker tasks down with the endpoint).

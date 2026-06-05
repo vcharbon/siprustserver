@@ -363,6 +363,11 @@ impl HaCluster {
     fn mark(&mut self, node: &str, peer: Option<&str>, kind: &str, detail: &str) {
         self.markers.push(Marker {
             at_ms: self.clock.now_ms(),
+            // Standalone ha-harness cluster: no shared SIP sequencer, so the
+            // marker's global seq is unused (the repl-only renderer orders by a
+            // local append counter). The unified failover combiner is the only
+            // consumer of `seq`, and it supplies a real sequencer.
+            seq: 0,
             node: node.to_string(),
             peer: peer.map(|p| p.to_string()),
             kind: kind.to_string(),

@@ -1,106 +1,31 @@
-//! Self-contained HTML report — a minimal port of `html-report.ts`. Embeds the
-//! SVG sequence diagram and lists every exchange with its full wire text in a
-//! `<details>` block. No JavaScript: the click-to-inspect interactivity of the
-//! source is reduced to native `<details>` panels so the artifact stays a
-//! single static file with zero dependencies.
+//! Self-contained HTML report for a SIP scenario — now a thin projector onto the
+//! SHARED [`seq_report`] renderer (the unification described in `seq-report`'s
+//! crate docs). The SIP recording becomes a single-plane [`seq_report::SeqDoc`]
+//! and `seq_report::render_html` draws the sequence diagram + per-message
+//! expandable wire text + legend, exactly the same machinery the failover
+//! harness uses for its three-plane view.
+//!
+//! The previous bespoke SVG-embedding HTML lived here; the standalone SVG
+//! artifact is still produced by [`super::svg`] (a different output format, kept
+//! as-is). This file is now purely the SIP→`SeqDoc` adaptor for HTML output.
 
 use layer_harness::RecordedScenario;
+use seq_report::Anomaly;
 use sip_net::RecordedSipEntry;
 
-use super::svg;
-use super::wire::{facets, format_relative, wire_text};
+use super::project::sip_doc;
 
-fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-/// Render the whole report as one HTML document string.
+/// Render the whole report as one HTML document string via the shared renderer.
+/// `extra_anomalies` carries the RFC 3261 CSeq hard-gate findings (if any), so a
+/// trace that violates the rule renders the FAIL badge + lists the violation.
 pub fn render(
     scenario_name: &str,
     description: Option<&str>,
     entries: &[RecordedSipEntry],
     scenario: &RecordedScenario,
     passed: bool,
+    extra_anomalies: &[Anomaly],
 ) -> String {
-    let diagram = svg::render(entries, &scenario.lanes, scenario.transport_kind);
-    let base_ts = entries.iter().map(|e| e.sent_ms as i64).min().unwrap_or(0);
-    let status = if passed { "PASS" } else { "FAIL" };
-    let status_color = if passed { "#059669" } else { "#dc2626" };
-
-    let mut rows = String::new();
-    for (i, entry) in entries.iter().enumerate() {
-        let f = facets(&entry.raw);
-        let rcvd = entry.received_ms.unwrap_or(entry.sent_ms) as i64 - base_ts;
-        let badge = if entry.delivered { "" } else { " ⚠ UNDELIVERED" };
-        // `id` + `data-trace-index` let the SVG arrow (same index) target this
-        // panel — clicking the arrow opens and flashes it.
-        rows.push_str(&format!(
-            "<details id=\"msg-{i}\" data-trace-index=\"{i}\"><summary><code>{} → {}</code> &nbsp; <b>{}</b> &nbsp; <span class=\"ts\">{}</span>{}</summary><pre>{}</pre></details>\n",
-            entry.from,
-            entry.to,
-            escape_html(&f.label),
-            format_relative(rcvd),
-            badge,
-            escape_html(&wire_text(&entry.raw)),
-        ));
-    }
-
-    let desc = description
-        .map(|d| format!("<p class=\"desc\">{}</p>", escape_html(d)))
-        .unwrap_or_default();
-
-    let anomaly_count = scenario.anomalies.len();
-
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
-<title>SIP Exchange Report — {name}</title>
-<style>
-  body {{ font-family: system-ui, sans-serif; margin: 2rem; color: #111827; }}
-  h1 {{ font-size: 1.25rem; }}
-  .status {{ font-weight: bold; color: {status_color}; }}
-  .desc {{ color: #4b5563; }}
-  .diagram {{ overflow-x: auto; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px; }}
-  details {{ border-bottom: 1px solid #e5e7eb; padding: 4px 0; scroll-margin-top: 1rem; }}
-  summary {{ cursor: pointer; }}
-  .ts {{ color: #6b7280; font-family: monospace; }}
-  pre {{ background: #f9fafb; padding: 8px; overflow-x: auto; border-radius: 4px; }}
-  .trace-arrow:hover line {{ stroke-width: 3; }}
-  @keyframes flash {{ from {{ background: #fde68a; }} to {{ background: transparent; }} }}
-  details.flash {{ animation: flash 1.2s ease-out; }}
-  .hint {{ color: #6b7280; font-size: 0.85rem; }}
-</style></head>
-<body>
-  <h1>SIP Exchange Report: {name}</h1>
-  <p>Status: <span class="status">{status}</span> &middot; {anomaly_count} anomalies recorded</p>
-  {desc}
-  <p class="hint">Tip: click any arrow in the diagram to jump to that message.</p>
-  <div class="diagram">{diagram}</div>
-  <h2>Exchanges</h2>
-  {rows}
-  <script>
-  (function () {{
-    function reveal(idx) {{
-      var el = document.getElementById('msg-' + idx);
-      if (!el) return;
-      el.open = true;
-      el.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
-      el.classList.remove('flash');
-      // force reflow so the animation re-triggers on repeat clicks
-      void el.offsetWidth;
-      el.classList.add('flash');
-    }}
-    var arrows = document.querySelectorAll('.diagram .trace-arrow');
-    arrows.forEach(function (g) {{
-      g.addEventListener('click', function () {{
-        reveal(g.getAttribute('data-trace-index'));
-      }});
-    }});
-  }})();
-  </script>
-</body></html>"#,
-        name = escape_html(scenario_name),
-    )
+    let doc = sip_doc(scenario_name, description, entries, scenario, passed, extra_anomalies);
+    seq_report::render_html(&doc)
 }

@@ -1,0 +1,35 @@
+[package]
+name = "failover-harness"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Test-only harness for multi-node HA failover: composes the proxy SUT (real LoadBalancer), two replicating b2bua workers over the simulated repl fabric, alice/bob UAs, and a shared fake clock. Hosts the FailoverHarness engine, the CallScenario/safe-point DSL, and the transparent-failover test matrix (ADR-0013). Carries no production code."
+
+[dependencies]
+b2bua = { path = "../b2bua" }
+call = { path = "../call" }
+sip-message = { path = "../sip-message" }
+sip-net = { path = "../sip-net" }
+sip-txn = { path = "../sip-txn" }
+sip-clock = { path = "../sip-clock", features = ["testkit"] }
+scenario-harness = { path = "../scenario-harness" }
+layer-harness = { path = "../layer-harness" }
+sip-proxy = { path = "../sip-proxy" }
+repl-net = { path = "../repl-net" }
+topology = { path = "../topology" }
+ha-harness = { path = "../ha-harness" }
+seq-report = { path = "../seq-report" }
+# Promoted to normal deps (vs dev-deps in b2bua-harness): the DSL wires the
+# genuine limiter stack (HttpCallLimiter + LimiterServer + WindowStore) over the
+# SIMULATED HTTP fabric on the fake clock in library code, so every matrix cell
+# runs with real limiter logic (not a NoopLimiter/mock; no socket, no wall-clock)
+# (ADR-0013 §0) — the reason this is a dedicated crate rather than a
+# b2bua-harness module.
+call-limiter = { path = "../call-limiter" }
+http-net = { path = "../http-net" }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+serde_json = { workspace = true }

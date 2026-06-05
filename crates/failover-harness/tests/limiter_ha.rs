@@ -12,7 +12,7 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallDecisionEngine, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
-use b2bua_harness::{FailoverHarness, ReplicatedB2buaSut, WorkerHealth};
+use failover_harness::{FailoverHarness, ReplicatedB2buaSut, WorkerHealth};
 use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use sip_clock::Clock;
@@ -144,5 +144,7 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
     );
     assert!(released, "the takeover node released the limiter hold on BYE");
 
-    let _ = fh.report().await;
+    // The unified seq-report (HTML + global.txt + replication.mmd) is emitted by
+    // `FailoverHarness`'s write-on-Drop fallback into
+    // `target/seq-reports/limiter-ha-takeover/` — no explicit call needed.
 }

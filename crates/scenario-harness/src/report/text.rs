@@ -1,6 +1,14 @@
-//! Text report writer — port of `text-report.ts`. Produces a global view (all
-//! exchanges) and one per-endpoint view filtered to a single agent's wire
-//! address, each with full wire text per message. Lane identity is `(ip,port)`;
+//! Text report writer — port of `text-report.ts`.
+//!
+//! The **global** view (`<name>.global.txt`) is now produced by the SHARED
+//! [`seq_report`] renderer over a single-plane [`seq_report::SeqDoc`] (the
+//! unification described in `seq-report`'s crate docs), so it is the same
+//! timeline format the failover harness uses for its three-plane view.
+//!
+//! The **per-endpoint** views (`<net>/<agent>.txt`, one per agent filtered to
+//! that agent's wire address) keep the historic per-message wire dump here —
+//! they are a SIP-specific, single-actor cut with no analogue in the neutral
+//! model, so they stay native to scenario-harness. Lane identity is `(ip,port)`;
 //! names are decorations resolved from the lane registry.
 
 use std::collections::BTreeMap;
@@ -8,6 +16,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use layer_harness::{Lane, RecordedScenario, TransportKind};
+use seq_report::Anomaly;
 use sip_net::RecordedSipEntry;
 
 use super::wire::{facets, format_clock, wire_text};
@@ -113,16 +122,18 @@ pub fn render(
     entries: &[RecordedSipEntry],
     scenario: &RecordedScenario,
     passed: bool,
+    extra_anomalies: &[Anomaly],
 ) -> TextReports {
     let names = name_by_addr(&scenario.lanes);
     let base_ts = entries.iter().map(|e| e.sent_ms as i64).min().unwrap_or(0);
     let mut files = BTreeMap::new();
 
-    // Global view.
-    let all: Vec<&RecordedSipEntry> = entries.iter().collect();
-    let header = render_header(scenario_name, "Global (all endpoints)", scenario.transport_kind, passed, description);
-    let body = render_entries(&all, base_ts, &names);
-    files.insert(format!("{scenario_name}.global.txt"), format!("{header}{body}"));
+    // Global view — the SHARED unified renderer over a single-plane SeqDoc.
+    let doc = super::project::sip_doc(scenario_name, description, entries, scenario, passed, extra_anomalies);
+    files.insert(
+        format!("{scenario_name}.global.txt"),
+        seq_report::render_global_txt(&doc),
+    );
 
     // Per-endpoint views — one per lane that sent or received a message.
     for lane in &scenario.lanes {

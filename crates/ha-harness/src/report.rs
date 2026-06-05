@@ -26,6 +26,14 @@ use repl_net::{Frame, Op, Partition, PullMode};
 pub struct Marker {
     /// Recording timestamp (ms) from the injected `Clock`.
     pub at_ms: i64,
+    /// Global recording-order sequence drawn from the shared capture sequencer
+    /// at the instant the marker was appended (crash/reboot/partition/heal/…).
+    /// `0` for a standalone repl recording with no shared sequencer. When the
+    /// failover harness threads the SIP recorder's sequencer in, this orders the
+    /// marker against SIP messages and replication frames in TRUE append order,
+    /// so a reboot marker appended just before the bootstrap pull it triggers
+    /// sorts first even though both share the same millisecond.
+    pub seq: u64,
     /// The node ordinal this event concerns (the actor / `from` lane).
     pub node: String,
     /// Optional second ordinal (e.g. the partition peer) for two-node events.
@@ -129,39 +137,86 @@ impl ReplReport {
         rows
     }
 
-    /// Render a readable TEXT sequence diagram of the replication exchange.
-    /// Lanes are node ordinals; each row is `t=<ms> FROM -> TO  <frame-summary>`
-    /// or a centred `=== marker ===` band.
-    pub fn render_text(&self) -> String {
-        let mut out = String::new();
-        out.push_str("Replication exchange (recording-first; ADR-0006)\n");
-        out.push_str(&format!("nodes: {}\n", self.node_lanes().join(", ")));
-        out.push_str(&format!(
-            "frames: {}  markers: {}\n",
-            self.frames.len(),
-            self.markers.len()
-        ));
-        out.push_str(&"-".repeat(72));
-        out.push('\n');
-        for row in self.timeline() {
+    /// Project this recording into a neutral [`seq_report::SeqDoc`] — the
+    /// replication-only view of the SHARED unified renderer (see `seq-report`'s
+    /// crate docs). Lanes are the node ordinals; replication frames are `Repl`
+    /// rows; crash/reboot/partition/put/delete markers are `Lifecycle` bands.
+    ///
+    /// Only `Sent` frames become rows (a `Sent`/`Received` pair is the same
+    /// logical message; `Sent` carries the originating lane), matching the
+    /// historic timeline so the diagram reads as one arrow per message.
+    pub fn to_seq_doc(&self) -> seq_report::SeqDoc {
+        use seq_report::{Lane, LaneKind, RowKind, SeqRow};
+
+        let lane_map = self.lane_map();
+        let lanes: Vec<Lane> = self
+            .node_lanes()
+            .into_iter()
+            .map(|ord| Lane::new(ord.clone(), ord, LaneKind::Node))
+            .collect();
+
+        // The renderer sorts by the global `seq` (recording order). This
+        // standalone repl-only view has no shared SIP sequencer, so we assign
+        // `seq` ourselves over the merged frame+marker timeline — using the same
+        // stable `at_ms`-ordered interleave [`timeline`](Self::timeline) builds —
+        // so a marker injected just before a frame at the same ms still reads
+        // first. (Frames and markers must NOT be assigned seq in two separate
+        // blocks: that would group all frames before all markers regardless of
+        // time once the renderer sorts by seq.)
+        let mut rows: Vec<SeqRow> = Vec::new();
+        for (seq, row) in self.timeline().into_iter().enumerate() {
+            let seq = seq as u64 + 1;
             match row {
                 TimelineRow::Frame(f) => {
-                    let from = self.lane(f.from);
-                    let to = self.lane(f.to);
-                    out.push_str(&format!(
-                        "t={:>6} {:>4} -> {:<4}  {}\n",
-                        f.at_ms,
+                    let from =
+                        lane_map.get(&f.from).cloned().unwrap_or_else(|| f.from.to_string());
+                    let to = lane_map.get(&f.to).cloned().unwrap_or_else(|| f.to.to_string());
+                    rows.push(SeqRow {
+                        at_ms: f.at_ms,
+                        seq,
                         from,
-                        to,
-                        frame_summary(&f.frame),
-                    ));
+                        to: Some(to),
+                        label: frame_summary(&f.frame),
+                        detail: None,
+                        kind: RowKind::Repl { delivered: true },
+                    });
                 }
                 TimelineRow::Marker(m) => {
-                    out.push_str(&format!("t={:>6} === {} ===\n", m.at_ms, marker_label(m)));
+                    rows.push(SeqRow {
+                        at_ms: m.at_ms,
+                        seq,
+                        from: m.node.clone(),
+                        to: None,
+                        label: marker_label(m),
+                        detail: (!m.detail.is_empty()).then(|| m.detail.clone()),
+                        kind: RowKind::Lifecycle,
+                    });
                 }
             }
         }
-        out
+
+        seq_report::SeqDoc {
+            title: "Replication exchange (recording-first; ADR-0006)".to_string(),
+            description: None,
+            passed: true,
+            lanes,
+            rows,
+            anomalies: Vec::new(),
+        }
+    }
+
+    /// Render a readable TEXT sequence diagram of the replication exchange via
+    /// the SHARED unified renderer (over [`to_seq_doc`](Self::to_seq_doc)). Each
+    /// frame is a `FROM -> TO  <frame-summary>` line; each marker a centred
+    /// `=== marker ===` band.
+    pub fn render_text(&self) -> String {
+        seq_report::render_global_txt(&self.to_seq_doc())
+    }
+
+    /// Render the replication exchange as a self-contained HTML sequence diagram
+    /// via the SHARED unified renderer (cheap — same `SeqDoc` as the text view).
+    pub fn render_html(&self) -> String {
+        seq_report::render_html(&self.to_seq_doc())
     }
 
     /// Render a mermaid `sequenceDiagram` (the bonus): participants = node

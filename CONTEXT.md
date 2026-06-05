@@ -90,6 +90,30 @@ store. "Which elements do I back up" is not a separate retrieval: it *is* the
 contents of each peer's per-peer changelog (HRW 2nd-best backup, full mesh).
 _Avoid_: "shard", "partition key" (the partition is just pri/bak).
 
+**Failure domain** (informally **zone**):
+The blast radius a **primary** and its **backup** must be split across so one
+failure cannot take both. Expressed by a single configurable k8s topology key:
+**`topology.kubernetes.io/zone`** by default (a rack, motivated by LAN/partition
+isolation — *not* power/cooling), overridable to **`kubernetes.io/hostname`** so
+the mechanism is exercisable on the kind endurance cluster (which has no zone
+label). Read off each **`EndpointSlice`** endpoint's native `zone` / `nodeName`
+field by the one `K8sMembership` informer — no extra RBAC, no node-get. Carried
+as `Peer.failure_domain` → `WorkerEntry`.
+_Avoid_: "zone" unqualified in code (overloaded with cloud AZ); "rack"/"node" as
+fixed terms (the key is configurable — the domain is whatever the key names).
+
+**Distinct-zone backup**:
+The invariant that a call's **backup** sits in a different **failure domain**
+than its **primary**. Enforced in **one place only** — the proxy's `w_bak`
+selection (`encode_stickiness`), filtering HRW-2nd-best candidates to a foreign
+domain; the b2bua never recomputes it (it echoes `w_bak` onto `topology.bak`),
+so the stored **Element** lands in the chosen domain by construction. Frozen at
+INVITE for the call's life. **Degraded fallback:** when no alive foreign-domain
+worker exists, fall back to a same-domain backup (survives the common pod
+crash/restart, not a domain partition) and emit a degraded-backup metric.
+_Avoid_: re-deriving the constraint in the b2bua or repl layer (single picker =
+the proxy).
+
 **Forward replication** vs **Reverse replication**:
 *Forward* = a primary pushing its own calls to the peer that backs them up
 (`partition=bak` on the wire). *Reverse* = a rebooted primary reclaiming calls
@@ -148,6 +172,33 @@ A **takeover copy** that outlived its primary's **reclaim** — a duplicate that
 double-serves the dialog (both nodes keepalive the same leg) and leaks memory
 until **handback** evicts it. A handback eviction writes a CDR end-event flagged
 `ghost-backup`, distinct from a real call end.
+
+**Informal aliases** (do not use in code or test names):
+Conversational shorthands map onto the canonical terms above — "switch to
+backup" / "go to backup" = **takeover** (+ **activate**); "switchback" / "back to
+nominal" = **reclaim** + **handback**; "nominal" / "the nominal node" =
+**primary**. The failover DSL and test names use the canonical terms only.
+
+**Transparent failover** vs **Disruptive failover**:
+A failover (crash / drain / reboot+reclaim) injected at a **safe-point** — a
+point where the call's replicated state is quiescent (the last mutation has
+settled to the backup) — is **transparent**: the externally observable SIP
+exchange (what each UA sees) and the final CDR disposition are identical to a
+no-failover baseline; tags/CSeq stay correct. A failover injected mid-replication
+(a message not yet propagated) or under a **partition** is **disruptive**: it has
+visible external impact and is asserted against bespoke expectations, never the
+transparency oracle. The failover test matrix covers transparent cases first
+(one uniform oracle, easy to multiply); disruptive cases are a separate, smaller
+set with per-case expectations.
+
+**Safe-point** (failover safe-point):
+A point in a call scenario, declared by the scenario author, where replicated
+state is quiescent so an injected crash/recovery is expected to be a
+**transparent failover**. A callflow is a step list with safe-points between
+steps; the failover-matrix driver auto-injects `(kill | drain)` ×
+`(stay-dead | reboot-no-traffic | reboot-after-takeover)` at each safe-point and
+asserts transparency. New callflows get failover coverage by declaring their
+safe-points — no bespoke failover test per callflow.
 
 **Incarnation-gen** vs **callGen** (the two-generations trap):
 *Incarnation-gen* (`gen`) = per-worker-restart epoch, the high word of the

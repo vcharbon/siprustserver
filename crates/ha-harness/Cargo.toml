@@ -9,6 +9,7 @@ description = "Goal-1 pure-HA-framework test harness (ADR-0011 X10 / plan Decisi
 [dependencies]
 b2bua = { path = "../b2bua" }
 repl-net = { path = "../repl-net" }
+seq-report = { path = "../seq-report" }
 topology = { path = "../topology" }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
 call = { path = "../call" }

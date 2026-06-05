@@ -362,9 +362,15 @@ impl ReplicatedB2buaSut {
             sip_local_ip: self.sip_addr.ip().to_string(),
             sip_local_port: self.sip_addr.port(),
             b2b_outbound_proxy: self.outbound_proxy.clone(),
-            // Match the SIP harness baseline: 30 s keepalive so the paused-clock
-            // failover/hydration tests advance in 30 s steps (production is 300 s).
-            keepalive_interval_sec: 30,
+            // PRODUCTION timers, globally (ADR-0013 keepalive amendment). The
+            // keepalive cells must be representative — a long quiescent call is
+            // flushed (and its backup TTL refreshed) only by its in-dialog OPTIONS,
+            // so the dead-peer/limiter-refresh/backup-TTL cadence only matches
+            // production at the real 300 s interval. Under a `start_paused` clock
+            // advancing 300 s costs nothing in wall-time, so every cell pays the
+            // full interval. `reboot_budget_sec` (default 450 s) ≥ 300 s keeps the
+            // backup TTL alive across one keepalive gap (config.rs validate).
+            keepalive_interval_sec: 300,
             ..Default::default()
         };
         let deps = B2buaDeps {
@@ -428,14 +434,33 @@ impl Drop for ProxySut {
 /// alice/bob, and the shared clock into one fake-clock orchestration.
 pub struct FailoverHarness {
     clock: Clock,
+    /// The scenario name passed to [`new`](Self::new) — also the write-on-Drop
+    /// artifact subdir (sanitized).
+    name: String,
+    /// Armed write-on-Drop flag (mirrors `scenario-harness`'s `PanicDump`). When
+    /// still armed at Drop the harness renders the unified report into
+    /// `target/seq-reports/<sanitized name>/report.{html,global.txt,replication.mmd}`.
+    /// Every explicit-report path (`run_cell`, `report`, `write_report`,
+    /// `write_unified_report`) disarms it so we never double-write. A `Cell` (not
+    /// atomic) is enough — the whole harness lives on one current-thread test task.
+    report_on_drop: std::cell::Cell<bool>,
     /// Recording decorator over the repl sim fabric (the repl capture sink).
     repl_recording: RecordingReplicationNetwork,
     /// The underlying repl sim fabric — fault controls go here directly.
     repl_sim: Arc<SimulatedReplicationNetwork>,
     /// `ordinal → repl addr` (stable across reboots), for fault/lane mapping.
     repl_addrs: HashMap<String, SocketAddr>,
+    /// `ordinal → SIP wire addr` (stable across reboots), so the unified report's
+    /// combiner can collapse a worker's SIP + repl + lifecycle rows onto one
+    /// column. Populated as each worker is spawned.
+    worker_sip_addrs: HashMap<String, SocketAddr>,
     /// Injected timeline markers (crash/reboot/failover/partition/…).
     markers: Vec<Marker>,
+    /// The ONE shared global recording-order sequencer (the SIP recorder's
+    /// `EventSequencer`). Markers are stamped from it at the instant of
+    /// `mark()`/`partition()`/`heal()`/crash/reboot so they interleave with SIP
+    /// messages and repl frames in true append order (Issue 1).
+    event_seq: Arc<layer_harness::EventSequencer>,
     /// The SIP harness handle (shared so workers can re-bind on reboot).
     harness: Arc<HarnessHandle>,
 }
@@ -459,11 +484,26 @@ impl FailoverHarness {
             "S10b goal-2 simulated failover: alice → proxy → 2 replicating b2buas \
              over the SIM SIP + SIM repl fabrics under one fake clock.",
         );
-        // Repl plane: a recording-wrapped 1 ms sim fabric sharing the clock.
+        // ONE shared global recording-order sequencer for ALL THREE planes. It IS
+        // the SIP layer-harness `EventSequencer` (the same counter that stamps
+        // every recorded SIP message's `seq`); we thread it into the repl capture
+        // sink and into the lifecycle/chaos markers so the unified combiner can
+        // render strictly in TRUE append order. `at_ms` then serves only as the
+        // displayed time label — never the cross-source tiebreaker — so a reboot
+        // marker appended just before the bootstrap pull it triggers sorts first
+        // even though both land on the same paused-clock millisecond (Issue 1).
+        let event_seq = harness.recording().recorder().sequencer();
+        let capture_seq: repl_net::transport::CaptureSeq = {
+            let s = event_seq.clone();
+            Arc::new(move || s.next())
+        };
+        // Repl plane: a recording-wrapped 1 ms sim fabric sharing the clock AND
+        // the global sequencer.
         let repl_sim = Arc::new(SimulatedReplicationNetwork::with_delay(1));
-        let repl_recording = RecordingReplicationNetwork::new(
+        let repl_recording = RecordingReplicationNetwork::with_seq(
             repl_sim.clone() as Arc<dyn ReplicationNetwork>,
             clock.clone(),
+            capture_seq,
         );
         let repl_addrs: HashMap<String, SocketAddr> = worker_ordinals
             .iter()
@@ -472,10 +512,14 @@ impl FailoverHarness {
             .collect();
         Self {
             clock,
+            name: name.to_string(),
+            report_on_drop: std::cell::Cell::new(true),
             repl_recording,
             repl_sim,
             repl_addrs,
+            worker_sip_addrs: HashMap::new(),
             markers: Vec::new(),
+            event_seq,
             harness: Arc::new(HarnessHandle::new(harness)),
         }
     }
@@ -604,6 +648,7 @@ impl FailoverHarness {
             .get(ordinal)
             .unwrap_or_else(|| panic!("worker {ordinal} was not declared in FailoverHarness::new"));
         let sip_addr: SocketAddr = sip_bind.parse().expect("sip addr");
+        self.worker_sip_addrs.insert(ordinal.to_string(), sip_addr);
 
         // The full addr-resolver map (covers this node + every peer) is known up
         // front from the declared cluster — no post-spawn linking needed.
@@ -649,10 +694,16 @@ impl FailoverHarness {
 
     // -- markers / fabric controls ----------------------------------------
 
-    /// Inject a timeline marker stamped with the current clock.
+    /// Inject a timeline marker stamped with the current clock AND the next
+    /// global recording-order sequence — so this lifecycle/chaos transition
+    /// interleaves with SIP messages and repl frames in TRUE append order. Called
+    /// at the instant the transition occurs (crash/reboot/drain/failover/
+    /// partition/heal/cut) in the runner, so e.g. the reboot marker naturally
+    /// precedes the bootstrap pull it triggers (Issue 1).
     pub fn mark(&mut self, node: &str, peer: Option<&str>, kind: &str, detail: &str) {
         self.markers.push(Marker {
             at_ms: self.clock.now_ms(),
+            seq: self.event_seq.next(),
             node: node.to_string(),
             peer: peer.map(|p| p.to_string()),
             kind: kind.to_string(),
@@ -692,7 +743,83 @@ impl FailoverHarness {
         settle().await;
     }
 
+    /// **Fine-grained pump toward an unknown timer deadline.** Advances the
+    /// paused clock in `step` increments (each a full settle/advance/settle pump
+    /// across both planes), running the async `ready` probe *after every step*
+    /// and returning `true` the instant it is satisfied — `false` if `max` total
+    /// elapses first.
+    ///
+    /// Use this instead of a fixed [`advance`](Self::advance) whenever the
+    /// deadline you need to react at is **not computable in advance** — e.g. a
+    /// keepalive the reclaim re-armed a fresh interval out from an unknown
+    /// reclaim instant. A fixed advance there either undershoots (the message has
+    /// not been emitted yet, so a `receive` would block/auto-advance) or
+    /// overshoots (it sails past the deadline *and* the deadline's own reap, e.g.
+    /// the 5 s dead-peer timeout, tearing the call down before the test can
+    /// answer — the CLAUDE.md keepalive hazard). The pump lets the test stop the
+    /// instant the awaited message is queued and answer it inside its window. Pick
+    /// `step` smaller than the tightest reaction window (e.g. ≤ 2 s for the 5 s
+    /// reap). `ready` is run once *before* the first advance so an already-pending
+    /// message costs no extra time; it typically drains the UA endpoints with
+    /// [`Agent::try_receive_tolerating`](scenario_harness::Agent::try_receive_tolerating).
+    pub async fn pump_until(
+        &self,
+        step: Duration,
+        max: Duration,
+        mut ready: impl AsyncFnMut() -> bool,
+    ) -> bool {
+        if ready().await {
+            return true;
+        }
+        let mut elapsed = Duration::ZERO;
+        while elapsed < max {
+            self.advance(step).await;
+            elapsed += step;
+            if ready().await {
+                return true;
+            }
+        }
+        false
+    }
+
     // -- report ------------------------------------------------------------
+
+    /// Run the built-in RFC 3261 signaling audit (CSeq in-dialog ordering, …)
+    /// over the recorded SIP trace and panic on any violation — the SIP-plane
+    /// analogue of the universal teardown sweep's "all clean" check, applied to
+    /// EVERY cell once the scenario has fully run. Reads the recording channel
+    /// directly (no layer-close structural checks, no consume), so it can run
+    /// mid-life on the long-lived multi-SUT harness. Catches a takeover that
+    /// probes a dialog with a stale CSeq — a regression a real UAC rejects as
+    /// `unexpected_msg` but a test UA answers silently.
+    pub fn assert_sip_rfc_clean(&self, cell: &str) {
+        let findings = self.rfc_audit_findings();
+        assert!(
+            findings.is_empty(),
+            "[{cell}] SIP RFC audit violation(s) on the recorded trace \
+             (a real UA would have rejected these):\n{}",
+            findings
+                .iter()
+                .map(|(lane, detail)| format!("  • [{lane}] {detail}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+
+    /// The raw RFC 3261 cross-message audit findings over the recorded SIP trace
+    /// (the `(lane, detail)` pairs `assert_sip_rfc_clean` panics on). Reads the
+    /// recording channel snapshot NON-consuming, so it is safe to call mid-run AND
+    /// from `Drop`. Empty ⇒ clean. Shared by the explicit `assert_sip_rfc_clean`
+    /// and the automatic Drop-time enforcement so the SAME rule set runs on every
+    /// FailoverHarness-based test with no per-test opt-in.
+    fn rfc_audit_findings(&self) -> Vec<(String, String)> {
+        let events = self.harness.recording().channel().snapshot();
+        let mut findings = Vec::new();
+        for rule in sip_net::rfc_cross_message_rules() {
+            findings.extend(rule.check(&events));
+        }
+        findings
+    }
 
     /// Snapshot the replication recording (captured frames + markers + lanes).
     pub fn repl_report(&self) -> ReplReport {
@@ -708,42 +835,262 @@ impl FailoverHarness {
         }
     }
 
-    /// Render the COMBINED report: the SIP exchange (scenario-harness text
-    /// renderer) AND the replication exchange (the S9 ha-harness renderer)
-    /// together, with crash/reboot/failover markers, into one string. Consumes
-    /// the SIP harness to close the recording (call last).
-    pub async fn report(self) -> String {
-        let repl = self.repl_report();
-        let repl_text = repl.render_text();
-        let repl_mmd = repl.render_mermaid();
-
-        // Close the SIP recording → projected SIP entries.
-        let run = self.harness.close_for_report().await;
-        let sip_text = render_sip_text(&run);
-
-        let mut out = String::new();
-        out.push_str("══════════════════════════════════════════════════════════════════════\n");
-        out.push_str("  S10b GOAL-2 SIMULATED FAILOVER — combined SIP + replication report\n");
-        out.push_str("══════════════════════════════════════════════════════════════════════\n\n");
-        out.push_str("── SIP plane (alice / proxy / b2bua / bob) ───────────────────────────\n");
-        out.push_str(&sip_text);
-        out.push('\n');
-        out.push_str("── Replication plane (changelog pull / data / bootstrap) ─────────────\n");
-        out.push_str(&repl_text);
-        out.push_str("\n── Replication plane (mermaid sequenceDiagram) ───────────────────────\n");
-        out.push_str(&repl_mmd);
-        out
+    /// The worker axes (ordinal ↔ SIP addr ↔ repl addr) for the unified report's
+    /// combiner, in declaration order so the columns read `b1, b2`.
+    fn worker_axes(&self) -> Vec<crate::combine::WorkerAxis> {
+        // Declaration order is the repl-addr port order (9400, 9401, …).
+        let mut by_ord: Vec<(&String, &SocketAddr)> = self.repl_addrs.iter().collect();
+        by_ord.sort_by_key(|(_, addr)| addr.port());
+        by_ord
+            .into_iter()
+            .filter_map(|(ord, repl_addr)| {
+                self.worker_sip_addrs.get(ord).map(|sip_addr| crate::combine::WorkerAxis {
+                    ordinal: ord.clone(),
+                    sip_addr: *sip_addr,
+                    repl_addr: *repl_addr,
+                })
+            })
+            .collect()
     }
 
-    /// Render the combined report and write it under `dir` as
-    /// `failover.txt` (combined) + `replication.mmd` (the repl mermaid).
-    /// Returns the written paths. Consumes the harness.
-    pub async fn write_report(self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    /// Build the ONE unified [`seq_report::SeqDoc`] for this run — the SIP plane,
+    /// the lifecycle markers, and the replication frames interleaved on the
+    /// shared `alice, proxy, b1, b2, bob` lane axis (see [`crate::combine`]).
+    ///
+    /// Reads the recordings NON-consuming (the SIP channel snapshot + the
+    /// recorder snapshot + the repl capture), so it can run mid-life on the
+    /// long-lived multi-SUT harness without finishing the SIP harness.
+    pub fn unified_doc(&self, title: &str, passed: bool) -> seq_report::SeqDoc {
+        let recording = self.harness.recording();
+        let entries = sip_net::to_sip_entries(&recording.channel().snapshot());
+        let scenario = recording.recorder().snapshot();
+        let repl = self.repl_report();
+        let mut doc = crate::combine::combine_doc(
+            title,
+            Some(
+                "Unified failover timeline: SIP signaling, lifecycle events \
+                 (crash/reboot/failover/partition), and replication frames on one \
+                 time-ordered axis (alice / proxy / b1 / b2 / bob).",
+            ),
+            passed,
+            &entries,
+            &scenario,
+            &repl,
+            &self.worker_axes(),
+        );
+        // RFC 3261 status MUST be reflected in the report: a trace that violates
+        // the in-dialog CSeq rule can NEVER show PASS. Fold the findings into the
+        // doc anomalies and force passed=false so the rendered report.html /
+        // global.txt show FAIL and list the violation(s).
+        let findings = self.rfc_audit_findings();
+        if !findings.is_empty() {
+            doc.passed = false;
+            for (lane, detail) in findings {
+                doc.anomalies.push(seq_report::Anomaly {
+                    check: "rfc3261.cseqInDialogOrder".to_string(),
+                    detail,
+                    lane: Some(lane),
+                });
+            }
+        }
+        doc
+    }
+
+    /// Render the unified report (HTML + global.txt) and write it under `dir` as
+    /// `<stem>.html` + `<stem>.global.txt`, plus the replication mermaid as
+    /// `<stem>.replication.mmd` (kept as an extra eyeball aid). Reads the
+    /// recordings NON-consuming — safe to call mid-run. ALWAYS writes (no env
+    /// gating); creates `dir` if absent. Returns the written paths.
+    pub fn write_unified_report(
+        &self,
+        dir: &Path,
+        stem: &str,
+        title: &str,
+        passed: bool,
+    ) -> std::io::Result<Vec<PathBuf>> {
+        // This run has its own artifacts now — don't also write the Drop fallback.
+        self.disarm_report_on_drop();
         std::fs::create_dir_all(dir)?;
-        let combined = self.report().await;
-        let txt = dir.join("failover.txt");
-        std::fs::write(&txt, &combined)?;
-        Ok(vec![txt])
+        let doc = self.unified_doc(title, passed);
+        let mut written = Vec::new();
+
+        let html = dir.join(format!("{stem}.html"));
+        std::fs::write(&html, seq_report::render_html(&doc))?;
+        written.push(html);
+
+        let txt = dir.join(format!("{stem}.global.txt"));
+        std::fs::write(&txt, seq_report::render_global_txt(&doc))?;
+        written.push(txt);
+
+        let mmd = dir.join(format!("{stem}.replication.mmd"));
+        std::fs::write(&mmd, self.repl_report().render_mermaid())?;
+        written.push(mmd);
+
+        Ok(written)
+    }
+
+    /// Render the COMBINED unified report as the `global.txt` string: the SIP
+    /// exchange, the lifecycle markers, AND the replication exchange interleaved
+    /// on one time-ordered axis (see [`unified_doc`](Self::unified_doc)).
+    /// Consumes the harness (parity with the historic signature; call last). The
+    /// non-consuming [`unified_doc`](Self::unified_doc) /
+    /// [`write_unified_report`](Self::write_unified_report) are preferred for the
+    /// always-write artifacts.
+    pub async fn report(self) -> String {
+        // Consuming + explicit: the caller drove the report itself, so suppress
+        // the Drop fallback (this `self` is about to drop).
+        self.disarm_report_on_drop();
+        let doc = self.unified_doc("S10b goal-2 simulated failover", true);
+        seq_report::render_global_txt(&doc)
+    }
+
+    /// Disarm the write-on-Drop fallback (an explicit report path has run / will
+    /// run, or a caller — e.g. `run_cell` — writes its own baseline/variant
+    /// artifacts). Idempotent.
+    pub fn disarm_report_on_drop(&self) {
+        self.report_on_drop.set(false);
+    }
+
+    /// The fixed `target/seq-reports/` artifact root for the write-on-Drop
+    /// fallback. `CARGO_MANIFEST_DIR` points at `<workspace>/crates/failover-harness`;
+    /// the workspace `target/` is two levels up. `CARGO_TARGET_DIR` overrides it if
+    /// set (e.g. a custom target dir in CI). Mirrors `runner::seq_reports_dir`.
+    fn seq_reports_dir() -> PathBuf {
+        if let Ok(t) = std::env::var("CARGO_TARGET_DIR") {
+            return PathBuf::from(t).join("seq-reports");
+        }
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/seq-reports")
+    }
+
+    /// Sanitize a scenario name into a single filesystem path segment: keep
+    /// `[A-Za-z0-9._-]`, fold everything else to `-`, collapse runs, and fall
+    /// back to `report` if the result is empty.
+    fn sanitize_name(name: &str) -> String {
+        let mut out = String::with_capacity(name.len());
+        let mut last_dash = false;
+        for c in name.chars() {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                out.push(c);
+                last_dash = false;
+            } else if !last_dash {
+                out.push('-');
+                last_dash = true;
+            }
+        }
+        let trimmed = out.trim_matches('-').to_string();
+        if trimmed.is_empty() {
+            "report".to_string()
+        } else {
+            trimmed
+        }
+    }
+
+    /// SYNC, infallible, panic-free best-effort render of the unified report into
+    /// `target/seq-reports/<sanitized name>/report.{html,global.txt,replication.mmd}`.
+    /// Used only by [`Drop`] for tests that never called an explicit report path —
+    /// so even a panicking/failing test drops its callflow. Skips silently if the
+    /// inner harness has already been consumed (the `Mutex<Option<Harness>>` is
+    /// empty) or on any IO error. Does NOT touch the async SIP `finish()`/`close()`
+    /// path: every read here (channel snapshot, recorder snapshot, repl capture)
+    /// is synchronous.
+    fn write_report_on_drop(&self) {
+        // If the harness was consumed (taken out of the inner Mutex), there is
+        // nothing to read — skip. `recording()` would panic otherwise.
+        if self
+            .harness
+            .inner
+            .lock()
+            .map(|g| g.is_none())
+            .unwrap_or(true)
+        {
+            return;
+        }
+        let dir = Self::seq_reports_dir().join(Self::sanitize_name(&self.name));
+        // unified_doc + render + write are all sync; swallow any IO error.
+        let _ = (|| -> std::io::Result<()> {
+            std::fs::create_dir_all(&dir)?;
+            let doc = self.unified_doc(&self.name, true);
+            std::fs::write(dir.join("report.html"), seq_report::render_html(&doc))?;
+            std::fs::write(
+                dir.join("report.global.txt"),
+                seq_report::render_global_txt(&doc),
+            )?;
+            std::fs::write(
+                dir.join("report.replication.mmd"),
+                self.repl_report().render_mermaid(),
+            )?;
+            Ok(())
+        })();
+    }
+
+    /// Render the unified report and write it under `dir` as `failover.html` +
+    /// `failover.global.txt` + `failover.replication.mmd`. Returns the written
+    /// paths. Consumes the harness.
+    pub async fn write_report(self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+        self.write_unified_report(dir, "failover", "S10b goal-2 simulated failover", true)
+    }
+}
+
+impl Drop for FailoverHarness {
+    /// **Write-on-Drop report fallback** (when still armed): a test that never
+    /// called an explicit report path still drops the unified
+    /// `report.{html,global.txt,replication.mmd}` (the callflow — including on
+    /// panic/failure) under `target/seq-reports/<name>/`. Disarmed paths skip.
+    /// Infallible + panic-free: errors are swallowed and a render panic is caught
+    /// under `catch_unwind` so Drop never double-panics.
+    ///
+    /// RFC 3261 audit enforcement is a MANDATORY HARD GATE here: after the
+    /// best-effort artifact write (so a failing test still drops its callflow under
+    /// `target/seq-reports/<name>/`), the recorded trace's RFC CSeq findings are
+    /// computed and — if any exist and the test is not already unwinding — Drop
+    /// `panic!`s, failing the test. This is automatic (no per-test opt-in), so
+    /// EVERY FailoverHarness-based test whose trace violates the in-dialog CSeq
+    /// rule fails. The `!std::thread::panicking()` guard prevents a double-panic
+    /// when the test is already failing (e.g. an explicit `assert_sip_rfc_clean`
+    /// fired first, or any other assertion). Skips entirely if the inner harness
+    /// was consumed (nothing to read).
+    fn drop(&mut self) {
+        // Best-effort artifact write FIRST, so even a failing cell leaves its
+        // callflow under target/seq-reports/<name>/. Disarmed paths skip. The
+        // write itself sets passed=false + lists the RFC findings when the trace
+        // violates the rule (see write_report_on_drop / unified_doc).
+        if self.report_on_drop.get() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.write_report_on_drop()
+            }));
+        }
+
+        // If the harness was consumed there is nothing to audit — skip (mirrors
+        // the write-on-Drop guard).
+        if self
+            .harness
+            .inner
+            .lock()
+            .map(|g| g.is_none())
+            .unwrap_or(true)
+        {
+            return;
+        }
+
+        // Hard gate: a CSeq violation on the recorded trace MUST fail the test.
+        // Never double-panic while already unwinding.
+        if std::thread::panicking() {
+            return;
+        }
+        let findings = self.rfc_audit_findings();
+        if !findings.is_empty() {
+            panic!(
+                "[{}] SIP RFC 3261 audit violation(s) on the recorded trace — a real \
+                 UA would have rejected these, so this test MUST fail (RFC check is a \
+                 mandatory hard gate):\n{}",
+                self.name,
+                findings
+                    .iter()
+                    .map(|(lane, detail)| format!("  • [{lane}] {detail}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
     }
 }
 
@@ -761,41 +1108,12 @@ impl HarnessHandle {
         a
     }
 
-    /// Close the SIP recording and return the projected report (for rendering).
-    /// Takes the harness out of the shared handle and consumes it. The caller
-    /// must have dropped the SUTs first (so no further `bind_sut` races this).
-    async fn close_for_report(&self) -> scenario_harness::RunReport {
-        let h = self
-            .inner
-            .lock()
-            .unwrap()
-            .take()
-            .expect("close_for_report: harness already taken/finished");
-        h.finish().await
+    /// The recording decorator handle — clones it out under a brief lock so a
+    /// caller can read its append-only signaling channel + recorder snapshot
+    /// (for the RFC audit AND the unified report) without taking or consuming
+    /// the harness.
+    fn recording(&self) -> sip_net::RecordingSignalingNetwork {
+        let g = self.inner.lock().unwrap();
+        g.as_ref().expect("harness taken (already finished?)").recording()
     }
-}
-
-/// Render a compact SIP sequence from the projected run report (one line per
-/// delivered message: `t=<ms> from → to  METHOD/STATUS`). Reuses the report's
-/// own entries (recording-first); no interpreter state.
-fn render_sip_text(run: &scenario_harness::RunReport) -> String {
-    let entries = run.entries();
-    let base = entries.iter().map(|e| e.sent_ms as i64).min().unwrap_or(0);
-    let mut out = String::new();
-    out.push_str(&format!("messages: {}\n", entries.len()));
-    out.push_str(&"-".repeat(70));
-    out.push('\n');
-    for e in entries {
-        let label = scenario_harness::report::wire::facets(&e.raw).label;
-        let undelivered = if e.delivered { "" } else { "  [UNDELIVERED]" };
-        out.push_str(&format!(
-            "t={:>6} {} -> {}  {}{}\n",
-            e.sent_ms as i64 - base,
-            e.from,
-            e.to,
-            label,
-            undelivered,
-        ));
-    }
-    out
 }

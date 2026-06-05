@@ -141,6 +141,25 @@ async fn full_dialog_auto_generated() {
     assert!(global.contains("CSeq: 1 ACK"));
     assert!(global.contains("CSeq: 2 BYE"));
 
+    // The HTML is produced by the SHARED unified renderer (seq-report): a legend
+    // naming the planes, a two-pane layout (a scrollable inline-SVG diagram on
+    // the left, a FIXED Message-Detail panel on the right), diagram messages as
+    // clickable `<g class="seq-msg" data-idx="N">` groups, and per-message wire
+    // text in HIDDEN `#evt-N` payload blocks the click `<script>` copies into the
+    // `.detail-body`. Assert the interactive markup meaningfully.
     let html = std::fs::read_to_string(out.join("alice-calls-bob.html")).unwrap();
-    assert!(html.contains("addEventListener('click'"), "clickable SVG handler present");
+    assert!(html.contains("class=\"legend\""), "legend present");
+    assert!(html.contains("class=\"detail-panel\""), "fixed detail panel present");
+    assert!(html.contains("class=\"detail-body\""), "scrollable detail body present");
+    assert!(html.contains("<svg"), "inline sequence diagram present");
+    assert!(html.contains("alice"), "alice lane captioned");
+    assert!(html.contains("class=\"seq-msg seq-sip\""), "SIP messages are .seq-msg groups");
+    assert!(html.contains("data-idx=\"0\""), "first message keyed data-idx=0");
+    assert!(html.contains("id=\"evt-0\""), "matching #evt-0 payload block present");
+    assert!(
+        html.contains("querySelectorAll('.seq-msg')")
+            && html.contains("querySelector('.detail-body').innerHTML"),
+        ".seq-msg → .detail-body click wiring present"
+    );
+    assert!(html.contains("INVITE sip:bob@127.0.0.1:5070 SIP/2.0"), "wire text embedded");
 }

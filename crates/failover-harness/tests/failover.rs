@@ -16,7 +16,7 @@
 use std::time::Duration;
 
 use call::CdrEventType;
-use b2bua_harness::{FailoverHarness, PartitionRole, ReplicatedB2buaSut, WorkerHealth};
+use failover_harness::{FailoverHarness, PartitionRole, ReplicatedB2buaSut, WorkerHealth};
 use call::parse_call_ref;
 use scenario_harness::Agent;
 use sip_message::generators::InDialogMethod;
@@ -193,14 +193,10 @@ async fn canonical_failover() {
     fh.advance(Duration::from_millis(300)).await;
 
     // ── combined report (recording-first; SIP + replication together) ────────
-    drop((w_b1, w_b2, proxy)); // drop SUTs so the HarnessHandle is single-owned.
-    let out = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("s10b-canonical");
-    let _ = std::fs::remove_dir_all(&out);
-    let written = fh.write_report(&out).await.unwrap();
-    eprintln!("\ns10b combined failover report:");
-    for p in &written {
-        eprintln!("  {}", p.display());
-    }
+    // Emitted by `FailoverHarness`'s write-on-Drop fallback into
+    // `target/seq-reports/s10b-canonical-failover/report.{html,global.txt,replication.mmd}`
+    // (the SUTs drop here, but the Drop report reads the recordings non-consuming).
+    drop((w_b1, w_b2, proxy));
 }
 
 /// Receive the b-leg INVITE on bob, racing whichever worker created it; returns
@@ -228,8 +224,11 @@ async fn invite_winner_lanes(
 // the next keepalive OPTIONS; after interval+timeout b2 reaps the hydrated call
 // and writes a CDR with a Bye event. The CDR is the proof the timer regenerated.
 // ===========================================================================
-/// The Rust default keepalive interval / per-leg timeout (defaults.rs).
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// The PRODUCTION keepalive interval / per-leg dead-peer timeout — the harness
+/// now runs every worker at the real 300 s cadence (defaults.rs / config.rs;
+/// the harness sets `keepalive_interval_sec: 300`). The dead-peer reap is a
+/// fixed 5 s after the unanswered OPTIONS (`defaults.rs` keepalive rule).
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(300);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[tokio::test(start_paused = true)]
@@ -350,6 +349,226 @@ async fn hydrated_call_rearms_keepalive_and_reaps_dead_peer() {
         b2.metrics().removals_total() >= 1,
         "the hydrated call was removed on b2 (active_calls did not leak)",
     );
+
+    drop((w_b1, w_b2, proxy));
+    let _ = fh.repl_report();
+}
+
+// ===========================================================================
+// SUCCESSFUL LONG CALL — the AS generates its own in-dialog OPTIONS keepalive.
+//
+// The happy-path FOUNDATION for the keepalive failover matrix (ADR-0013): NO
+// fault at all. A quiescent established call is parked on its primary; at the
+// PRODUCTION 300 s interval the AS pokes BOTH peered legs with an in-dialog
+// OPTIONS; both answer 200, which (1) cancels each leg's 5 s dead-peer reap and
+// (2) flushes the call (refreshing the backup `Element` TTL). The keepalive
+// re-arms, so a SECOND interval probes again — proving the call survives an
+// arbitrarily long hold driven by the AS's own timers, not by UAC traffic.
+// Then a normal caller BYE tears it down cleanly (CDR written, no residue).
+//
+// This is the cell the keepalive matrix builds on: get the AS-generated OPTIONS
+// loop right at production cadence with zero failover BEFORE injecting one.
+// ===========================================================================
+#[tokio::test(start_paused = true)]
+async fn successful_long_call_with_as_generated_options() {
+    let mut fh = FailoverHarness::new("s10b-long-call-as-keepalive", &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let b1_lane = fh.agent("b1-lane", B1).await;
+    let b2_lane = fh.agent("b2-lane", B2).await;
+    drop((b1_lane, b2_lane));
+
+    let proxy = fh
+        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
+        .await;
+    let mut w_b1 = fh
+        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    let mut w_b2 = fh
+        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
+
+    // ── establish alice ⇄ bob on the HRW primary; this is the quiescent long call.
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
+        .expect("b-leg INVITE carries the proxy Record-Route cookie");
+    let b_leg_call_id = sip_message::message_helpers::get_header(&uas.request().headers, "call-id")
+        .expect("b-leg INVITE carries a Call-ID")
+        .to_string();
+    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let (b1, _b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
+        if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
+
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(500)).await; // confirm + replicate
+    assert_eq!(b1.active_calls(), 1, "primary serves the established call");
+
+    // ── TWO keepalive cycles at the PRODUCTION interval — the AS pokes both legs;
+    //    both answer within the 5 s reap, so the quiescent call stays up. ─────────
+    let tol = ["INVITE", "ACK"];
+    for cycle in 1..=2 {
+        // Pump toward the keepalive deadline in sub-reap (2 s) steps and stop the
+        // instant BOTH legs' OPTIONS are queued — answer them inside their 5 s
+        // dead-peer window (CLAUDE.md: drive the protocol BETWEEN advances, never
+        // overshoot a deadline + its reap).
+        let mut a_txn = None;
+        let mut b_txn = None;
+        let serviced = fh
+            .pump_until(Duration::from_secs(2), Duration::from_secs(340), async || {
+                if a_txn.is_none() {
+                    a_txn = alice.try_receive_tolerating("OPTIONS", &tol).await;
+                }
+                if b_txn.is_none() {
+                    b_txn = bob.try_receive_tolerating("OPTIONS", &tol).await;
+                }
+                a_txn.is_some() && b_txn.is_some()
+            })
+            .await;
+        assert!(serviced, "cycle {cycle}: the AS keepalive OPTIONS reached both legs");
+
+        let mut bob_opts = b_txn.take().unwrap();
+        assert_eq!(
+            sip_message::message_helpers::get_header(&bob_opts.request().headers, "call-id"),
+            Some(b_leg_call_id.as_str()),
+            "cycle {cycle}: the AS keepalive probes the SAME b-leg dialog it owns",
+        );
+        a_txn.take().unwrap().respond(200, "OK").await;
+        bob_opts.respond(200, "OK").await;
+        fh.advance(Duration::from_millis(300)).await;
+
+        assert_eq!(
+            b1.active_calls(),
+            1,
+            "cycle {cycle}: the answered keepalive kept the long call alive (not reaped)",
+        );
+        assert!(
+            b1.cdr_records().iter().all(|c| c.events.is_empty()
+                || !c.events.iter().any(|e| e.event_type == CdrEventType::Bye)),
+            "cycle {cycle}: a healthy keepalive must NOT write a Bye CDR",
+        );
+    }
+
+    // ── normal caller BYE — clean teardown after the long hold. ─────────────────
+    let mut bye = dialog.bye().await;
+    bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    bye.expect_tolerating(200, &["OPTIONS"]).await;
+    fh.advance(Duration::from_millis(500)).await;
+
+    // Let the CDR flush + the call be reaped.
+    for _ in 0..20 {
+        if b1.active_calls() == 0 && !b1.cdr_records().is_empty() {
+            break;
+        }
+        fh.advance(Duration::from_millis(200)).await;
+    }
+    assert_eq!(b1.active_calls(), 0, "the long call was torn down on BYE (no leak)");
+    assert_eq!(b1.lock_count(), 0, "no per-call lock leaked after teardown");
+    assert!(
+        b1.cdr_records().iter().any(|c| c.events.iter().any(|e| e.event_type == CdrEventType::Bye)),
+        "a CDR with the terminating Bye was written for the long call",
+    );
+
+    drop((w_b1, w_b2, proxy));
+    let _ = fh.repl_report();
+}
+
+// ===========================================================================
+// KEEPALIVE CSeq MONOTONICITY — positive regression for the in-dialog
+// keepalive CSeq bug (was RED-on-purpose until the bug was fixed; see git log).
+//
+// The bug: the AS-generated keepalive OPTIONS never incremented the dialog
+// CSeq, so on the b-leg the trace was INVITE CSeq 1 → OPTIONS CSeq 2 → BYE
+// CSeq 2 — the OPTIONS and the subsequent BYE COLLIDED on CSeq 2, which a real
+// UAS rejects as out-of-order (`unexpected_msg` / 500). A second, related fault
+// surfaced once that was fixed: the proxy minted a fresh downstream top-Via
+// branch on every retransmit, so a keepalive OPTIONS that retransmits before
+// its 200 lands reached the callee as several distinct CSeq-N transactions.
+//
+// Both are now fixed — `send_request_to_leg` advances the per-leg CSeq, and the
+// proxy reuses the downstream branch for retransmissions. This test pins that:
+// establish a long call, drive ONE AS keepalive OPTIONS cycle on both legs,
+// then a terminating BYE, and assert the recorded trace is RFC-clean — the
+// `CSeqInDialogOrderRule` gate flags ANY non-increasing in-dialog CSeq, so a
+// clean trace IS the proof that OPTIONS and the later BYE no longer collide.
+// (The same gate also runs automatically on `FailoverHarness::drop`.)
+// ===========================================================================
+#[tokio::test(start_paused = true)]
+async fn keepalive_as_options_increments_dialog_cseq() {
+    let mut fh = FailoverHarness::new("s10b-keepalive-cseq-reuse-demo", &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let b1_lane = fh.agent("b1-lane", B1).await;
+    let b2_lane = fh.agent("b2-lane", B2).await;
+    drop((b1_lane, b2_lane));
+
+    let proxy = fh
+        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
+        .await;
+    let mut w_b1 = fh
+        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    let mut w_b2 = fh
+        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
+
+    // ── establish alice ⇄ bob on the HRW primary; the quiescent long call. ──────
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
+        .expect("b-leg INVITE carries the proxy Record-Route cookie");
+    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let (b1, _b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
+        if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
+
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(500)).await; // confirm + replicate
+    assert_eq!(b1.active_calls(), 1, "primary serves the established call");
+
+    // ── ONE AS keepalive OPTIONS cycle at the PRODUCTION interval — the AS pokes
+    //    both legs; both answer within the 5 s reap, so the call stays up. The
+    //    OPTIONS advances the per-leg dialog CSeq past the INVITE's. ──────────────
+    let tol = ["INVITE", "ACK"];
+    let mut a_txn = None;
+    let mut b_txn = None;
+    let serviced = fh
+        .pump_until(Duration::from_secs(2), Duration::from_secs(340), async || {
+            if a_txn.is_none() {
+                a_txn = alice.try_receive_tolerating("OPTIONS", &tol).await;
+            }
+            if b_txn.is_none() {
+                b_txn = bob.try_receive_tolerating("OPTIONS", &tol).await;
+            }
+            a_txn.is_some() && b_txn.is_some()
+        })
+        .await;
+    assert!(serviced, "the AS keepalive OPTIONS reached both legs");
+    a_txn.take().unwrap().respond(200, "OK").await;
+    b_txn.take().unwrap().respond(200, "OK").await;
+    fh.advance(Duration::from_millis(300)).await;
+    assert_eq!(b1.active_calls(), 1, "the answered keepalive kept the long call alive");
+
+    // ── normal caller BYE — clean teardown after the long hold. The BYE takes the
+    //    NEXT b-leg CSeq, strictly above the keepalive OPTIONS (no collision). ────
+    let mut bye = dialog.bye().await;
+    bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    bye.expect_tolerating(200, &["OPTIONS"]).await;
+    fh.advance(Duration::from_secs(1)).await;
+
+    // ── THE REGRESSION ASSERTION — the recorded b-leg trace is now
+    // INVITE CSeq 1 → OPTIONS CSeq 2 → BYE CSeq 3 (strictly increasing); the RFC
+    // audit finds no in-dialog CSeq reuse a real UAS would reject.
+    fh.assert_sip_rfc_clean("keepalive_as_options_increments_dialog_cseq");
 
     drop((w_b1, w_b2, proxy));
     let _ = fh.repl_report();
@@ -600,6 +819,143 @@ async fn eager_takeover_keeps_quiescent_dialog_alive_and_hands_back_once() {
     );
 
     drop((w_b1, w_b2, proxy));
+}
+
+// ===========================================================================
+// CSeq PRESERVED ACROSS THE COMPLETE FAILOVER — representativeness + the RFC guard.
+//
+// The endurance `unexpected_msg` long-call loss (handoff Fix A; memory
+// [[repl-takeover-longcall-loss]]) is a CSeq-ordering failure: a takeover that
+// probes a dialog with a CSeq the callee has already passed. This test makes the
+// scenario representative of that path — a long call with in-dialog CSeq CHURN
+// (not the trivial quiescent dialog) carried through the COMPLETE k8s failover:
+// kill → endpoint removed → eager takeover → reboot → reclaim → handback, with
+// the AS keepalive probing on BOTH the survivor and the reclaimed primary — and
+// asserts (via the recorded-trace RFC 3261 §12.2.2 audit, the same "post-run all
+// clean" check every cell now runs) that the b-leg CSeq the callee observes never
+// regresses across any of it. It passes today: under the simulated repl fabric
+// the backup replica stays current, so every probe is in order. It is the guard
+// that turns red if a takeover/reclaim ever re-probes from a stale CSeq snapshot.
+// (The genuine production *race* — the last flush dying with the primary — is not
+// yet reproducible here; the sim fabric keeps the replica current. See the
+// framework note in ADR-0013.)
+// ===========================================================================
+#[tokio::test(start_paused = true)]
+async fn cseq_stays_in_order_across_eager_takeover_and_reclaim() {
+    let mut fh = FailoverHarness::new("s11-cseq-across-failover", &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let b1_lane = fh.agent("b1-lane", B1).await;
+    let b2_lane = fh.agent("b2-lane", B2).await;
+    drop((b1_lane, b2_lane));
+
+    let proxy = fh
+        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
+        .await;
+    let mut w_b1 = fh
+        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    let mut w_b2 = fh
+        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
+
+    // ── establish + replicate ───────────────────────────────────────────────────
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
+        .expect("b-leg INVITE carries the proxy cookie");
+    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
+        if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
+    let primary_ord = b1.ordinal().to_string();
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(500)).await;
+    let _ = find_backed_up_ref(b2, &primary_ord).await;
+
+    // ── in-dialog CSeq CHURN before the failover (the "not quiescent" condition):
+    //    two relayed INFOs bump the b-leg CSeq the callee tracks. ─────────────────
+    for _ in 0..2 {
+        let mut info = dialog.request(InDialogMethod::Info, None).await;
+        bob.receive("INFO").await.respond(200, "OK").await;
+        info.expect(200).await;
+        fh.advance(Duration::from_millis(300)).await;
+    }
+
+    // ── COMPLETE kill: crash + proxy-dead + k8s endpoint removed → eager takeover ─
+    b1.crash();
+    proxy.set_health(&primary_ord, WorkerHealth::Dead);
+    b2.simulate_peer_removed(&primary_ord);
+    fh.advance(Duration::from_millis(500)).await;
+    assert_eq!(b2.active_calls(), 1, "survivor eagerly took the call over after the kill");
+
+    // ── the survivor's keepalive probes both legs — must continue the CSeq order ─
+    let tol = ["INVITE", "ACK", "INFO", "OPTIONS"];
+    service_keepalive_both_legs(&mut fh, &alice, &bob, &tol).await;
+    assert_eq!(b2.active_calls(), 1, "answered keepalive kept the call alive on the survivor");
+
+    // ── reboot → reclaim → handback; survivor re-publishes the endpoint ─────────-
+    b1.reboot().await;
+    proxy.set_health(&primary_ord, WorkerHealth::Alive);
+    b2.simulate_peer_added(&primary_ord);
+    for _ in 0..40 {
+        fh.advance(Duration::from_millis(500)).await;
+        if b1.is_ready() {
+            break;
+        }
+    }
+    assert!(b1.is_ready(), "rebooted primary ready after re-hydration");
+    fh.advance(Duration::from_secs(10)).await; // ReclaimAll + Deactivate handback
+    assert_eq!(b1.active_calls() + b2.active_calls(), 1, "exactly one owner after handback");
+
+    // ── the reclaimed primary's keepalive must ALSO continue the CSeq order ──────
+    service_keepalive_both_legs(&mut fh, &alice, &bob, &tol).await;
+
+    // ── teardown ─────────────────────────────────────────────────────────────-
+    let mut bye = dialog.bye().await;
+    bob.receive_tolerating("BYE", &["OPTIONS", "INFO"]).await.respond(200, "OK").await;
+    bye.expect_tolerating(200, &["OPTIONS", "INFO"]).await;
+    fh.advance(Duration::from_secs(1)).await;
+
+    // NOTE: no inline `assert_sip_rfc_clean` here — this test's focus is call
+    // survival/handback across the complete failover (exactly-one-owner above).
+    // The RFC in-dialog-CSeq audit still runs as the mandatory `FailoverHarness::drop`
+    // hard gate over the recorded trace, and passes (the keepalive CSeq +
+    // proxy-retransmit-branch fixes keep it clean); see
+    // `keepalive_as_options_increments_dialog_cseq` for the focused regression.
+
+    drop((w_b1, w_b2, proxy));
+}
+
+/// Pump to the next keepalive deadline and answer the AS-generated OPTIONS on both
+/// legs inside their 5 s dead-peer window (the proven sub-reap pump cadence).
+async fn service_keepalive_both_legs(
+    fh: &mut FailoverHarness,
+    alice: &Agent,
+    bob: &Agent,
+    tol: &[&str],
+) {
+    let mut a_txn = None;
+    let mut b_txn = None;
+    let got = fh
+        .pump_until(Duration::from_secs(2), Duration::from_secs(340), async || {
+            if a_txn.is_none() {
+                a_txn = alice.try_receive_tolerating("OPTIONS", tol).await;
+            }
+            if b_txn.is_none() {
+                b_txn = bob.try_receive_tolerating("OPTIONS", tol).await;
+            }
+            a_txn.is_some() && b_txn.is_some()
+        })
+        .await;
+    assert!(got, "the AS keepalive OPTIONS reached both legs within an interval");
+    a_txn.take().unwrap().respond(200, "OK").await;
+    b_txn.take().unwrap().respond(200, "OK").await;
+    fh.advance(Duration::from_millis(300)).await;
 }
 
 // ===========================================================================
@@ -1024,16 +1380,22 @@ async fn combined_report_carries_sip_and_replication() {
     drop((w_b1, w_b2, proxy));
     let combined = fh.report().await;
 
-    // BOTH planes present in the one artifact.
-    assert!(combined.contains("SIP plane"), "combined report has a SIP section");
-    assert!(combined.contains("Replication plane"), "combined report has a replication section");
+    // ALL THREE planes present in the ONE unified timeline (the shared
+    // seq-report global.txt): SIP rows tagged `[SIP ]`, replication rows tagged
+    // `[REPL]`, and the lifecycle crash marker as a band. Assert on actual rows
+    // (the `->` arrow form), not just the legend.
+    assert!(combined.contains("[SIP ]") && combined.contains("[SIP ]"), "unified report has SIP rows");
+    assert!(combined.contains("[REPL]") && combined.contains("-> b1"), "unified report has replication rows");
     assert!(combined.contains("INVITE"), "SIP exchange shows the INVITE");
     assert!(combined.contains("BYE"), "SIP exchange shows the BYE");
     assert!(
         combined.contains("PullRequest") || combined.contains("Data") || combined.contains("Noop"),
         "replication exchange shows a repl frame",
     );
-    assert!(combined.contains("crash"), "report shows the crash marker");
+    assert!(combined.contains("=== crash"), "report shows the crash lifecycle band");
+    // The crux: the three planes share ONE time-ordered axis — the b1 column
+    // carries SIP, repl, AND lifecycle. Assert the b1 column header is present.
+    assert!(combined.contains("b1"), "the b1 column collapses SIP + repl + lifecycle");
 
     // Quote a snippet to stderr for the slice report-back.
     eprintln!("\n──── combined report snippet ────\n{}", &combined[..combined.len().min(1400)]);

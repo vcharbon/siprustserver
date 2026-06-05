@@ -150,6 +150,8 @@ pub fn find_b_leg_by_call_id<'a>(call: &'a Call, call_id: &str) -> Option<&'a Le
 // ── CSeq helpers ─────────────────────────────────────────────────────────────
 
 /// Bump a dialog's local CSeq by `delta` (CSeq is dialog-scoped — §12.2.1.1).
+/// Each dialog (including each forked early dialog, keyed by its own remote tag)
+/// owns an independent sequence, so a sibling fork's CSeq never constrains this one.
 pub fn bump_local_cseq(call: Call, leg_id: &str, identity_tag: &str, delta: i64) -> Call {
     update_dialog(call, leg_id, identity_tag, |d| d.sip.local_cseq += delta)
 }

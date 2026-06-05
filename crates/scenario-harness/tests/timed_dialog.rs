@@ -89,6 +89,8 @@ async fn slow_answer_then_long_call() {
         out.join("timed-call.global.txt")
     })
     .unwrap();
+    // The unified global view carries the transit (sent → rcvd) on each message
+    // that crossed with a delay, plus the relative send stamps.
     assert!(global.contains("sent T+") && global.contains("→ rcvd T+"), "transit delay shown");
     assert!(global.contains("T+10."), "200 OK stamped ~T+10s");
     assert!(global.contains("T+30."), "BYE stamped ~T+30s");

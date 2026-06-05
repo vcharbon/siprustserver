@@ -36,7 +36,7 @@ use async_trait::async_trait;
 use crate::Frame;
 
 pub use real::RealReplicationNetwork;
-pub use recording::{CapturedFrame, Direction, RecordingReplicationNetwork};
+pub use recording::{CaptureSeq, CapturedFrame, Direction, RecordingReplicationNetwork};
 pub use simulated::{Fault, SimulatedReplicationNetwork};
 
 /// Failure opening an outbound connection.

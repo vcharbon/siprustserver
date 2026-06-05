@@ -1075,19 +1075,31 @@ impl<'a> ActionExecutor<'a> {
             .iter()
             .find(|d| !d.sip.remote_tag.is_empty())
         {
-            Some(d) => relay::to_gen_dialog(&d.sip),
+            Some(d) => d.clone(),
             None => return,
         };
+        // Advance + persist the dialog CSeq by exactly one (§12.2.1.1), exactly as
+        // every other in-dialog originator here (send_with_body / send_reinvite /
+        // send_prack_to_leg). Without this the in-dialog keepalive OPTIONS
+        // re-derives the same CSeq every cycle and the later relayed BYE collides
+        // on it — an RFC 3261 violation a real UAS rejects (endurance
+        // long-call-loss class).
+        let t_id = dialog_identity_tag(leg_id, &dialog);
+        let outbound_cseq = dialog.sip.local_cseq + 1;
+        *call = bump_local_cseq(call.clone(), leg_id, &t_id, 1);
+
         let branch = self.id_gen.new_branch();
+        let gen_dialog = relay::to_gen_dialog(&dialog.sip);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, branch)),
             contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id)),
+            cseq: Some(outbound_cseq as u32),
             ..Default::default()
         };
-        let res = generators::generate_in_dialog_request(m, &dialog, &opts);
-        let dest = relay::dest_of(&relay::strip_uri(&dialog.remote_target));
+        let res = generators::generate_in_dialog_request(m, &gen_dialog, &opts);
+        let dest = relay::dest_of(&relay::strip_uri(&gen_dialog.remote_target));
         let (out_req, dest) =
-            relay::apply_b_leg_egress(self.config, leg_id, &dialog.route_set, res.request, dest);
+            relay::apply_b_leg_egress(self.config, leg_id, &gen_dialog.route_set, res.request, dest);
         let kind = if m == InDialogMethod::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
         fx.outbound.push(OutboundSipEffect {
             body: OutboundBody::Request(out_req),
@@ -1136,6 +1148,10 @@ impl<'a> ActionExecutor<'a> {
             return;
         }
         let t_id = dialog_identity_tag(leg_id, &dialog);
+        // Per-dialog CSeq (§12.2.1.1): each forked early dialog has its OWN
+        // sequence, so its first PRACK is the INVITE CSeq + 1 independent of the
+        // other forks — two forks' PRACKs at the same CSeq is correct (distinct
+        // dialogs, distinct To-tags), not a collision.
         let outbound_cseq = dialog.sip.local_cseq + 1;
         *call = bump_local_cseq(call.clone(), leg_id, &t_id, 1);
 
@@ -1192,6 +1208,9 @@ impl<'a> ActionExecutor<'a> {
                 }]
             })
             .unwrap_or_default();
+        // Per-dialog CSeq (§12.2.1.1): `generate_in_dialog_request` defaults to
+        // this dialog's `local_cseq + 1`, the next sequence number within THIS
+        // dialog (a forked sibling's CSeq is irrelevant — distinct dialog).
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, call_ref, leg_id, branch)),
             extra_headers,

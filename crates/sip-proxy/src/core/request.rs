@@ -8,7 +8,7 @@
 use std::net::SocketAddr;
 
 use sip_message::generators::{generate_response, GenerateResponseOpts};
-use sip_message::message_helpers::{is_emergency_request, parse_sip_uri};
+use sip_message::message_helpers::{is_emergency_request, parse_sip_uri, parse_via_params};
 use sip_message::types::SipHeader;
 use sip_message::{serialize, SipMessage, SipRequest};
 
@@ -29,6 +29,30 @@ use super::{is_dialog_creating, ProxyCore};
 struct RouteOutcome {
     decision: RoutingDecisionKind,
     target: Option<ProxyAddr>,
+}
+
+/// The `branch=` token of the TOP (first) `Via` header of an inbound request —
+/// the immediate upstream's client-transaction id (RFC 3261 §8.1.1.7: globally
+/// unique per transaction thanks to the `z9hG4bK` magic cookie). A
+/// retransmission reuses this exact token, so it is the correlator the proxy
+/// keys retransmission branch-reuse on.
+fn top_via_branch(req: &SipRequest) -> Option<String> {
+    let top = first_header_value(&req.headers, "via")?;
+    parse_via_params(top).branch.filter(|b| !b.is_empty())
+}
+
+/// Namespaced key for the retransmission branch memo (reuses the `CancelBranchLru`
+/// store). A genuine retransmission repeats the *same* request: identical Call-ID,
+/// upstream branch, method AND CSeq number (RFC 3261 §17.2.3 keys a server
+/// transaction on branch + sent-by + method; the CSeq number pins it further).
+/// All four are required because the simulated fabric's per-worker `IdGen` resets
+/// on a failover restart, so a *different* request relayed by the backup can reuse
+/// a branch token the crashed primary already spent — keying on the branch alone
+/// would then mis-merge two distinct transactions onto one downstream branch (and
+/// the on-wire CSeq audit would skip the second as a phantom retransmit). The
+/// `rtx|` prefix keeps it disjoint from `call_id_cseq_key` (`{call_id}|{cseq}`).
+fn retransmit_key(call_id: &str, incoming_branch: &str, method: &str, cseq: u32) -> String {
+    format!("rtx|{call_id}|{incoming_branch}|{method}|{cseq}")
 }
 
 impl ProxyCore {
@@ -219,10 +243,44 @@ impl ProxyCore {
             self.metrics.record_route_inserted();
         }
 
+        // ── §16.6 / §17.2.3 retransmission branch reuse ─────────────────────
+        // Forward a *retransmission* with the SAME outbound top-Via branch the
+        // original forward used, so the downstream transaction layer (and the
+        // on-wire RFC 3261 §12.2.2 in-dialog-CSeq audit) correlate it to the
+        // existing transaction instead of seeing a fresh transaction at the same
+        // CSeq. Keyed on the full (Call-ID, upstream branch, method, CSeq) so a
+        // genuine retransmit reuses the branch but a *different* request that
+        // merely collides on the branch (a backup's reset `IdGen` after failover)
+        // does not. Without this, a keepalive OPTIONS that retransmits before its
+        // 200 lands reaches the callee as several distinct CSeq-N transactions and
+        // the audit (correctly) rejects the 2nd as a CSeq reuse. CANCEL already
+        // resolves its branch from the INVITE LRU above.
+        let incoming_branch = top_via_branch(req);
+        let rtx_key = incoming_branch
+            .as_ref()
+            .map(|b| retransmit_key(&req.call_id, b, &method, req.cseq.seq));
+        if method != "CANCEL" && reuse_branch.is_none() {
+            if let Some(k) = &rtx_key {
+                if let Some(found) = self.cancel_lru.lookup(k) {
+                    reuse_branch = Some(found.branch);
+                }
+            }
+        }
+
         let our_branch = reuse_branch.unwrap_or_else(|| self.id_gen.new_branch());
         let via_value =
             format!("SIP/2.0/UDP {}:{};branch={};rport", self.advertised.host, self.advertised.port, our_branch);
         prepend_header(&mut headers, "Via", &via_value);
+
+        // Remember the outbound branch so a retransmit of THIS request reuses it.
+        if method != "CANCEL" {
+            if let Some(k) = &rtx_key {
+                self.cancel_lru.remember(
+                    k,
+                    CancelEntry { target: target.clone(), branch: our_branch.clone() },
+                );
+            }
+        }
 
         if method == "INVITE" {
             let key = call_id_cseq_key(&req.call_id, req.cseq.seq);

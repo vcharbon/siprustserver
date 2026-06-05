@@ -19,7 +19,7 @@
 //! projects back into exactly the six delivered wire entries in order, (3) the
 //! CSeq numbering/method is carried faithfully end to end (1 INVITE → 1 ACK →
 //! 2 BYE; responses echo their request's CSeq), and (4) the renderers produce
-//! the SVG / global.txt / per-endpoint / clickable HTML from that recording.
+//! the SVG / global.txt / per-endpoint / unified-renderer HTML from that recording.
 
 use std::path::PathBuf;
 
@@ -250,9 +250,30 @@ async fn alice_calls_bob_full_dialog() {
     assert!(bob_txt.contains("bob (endpoint, network=ext)"));
     assert!(alice_txt.contains("INVITE") && alice_txt.contains("BYE"));
 
-    // HTML: embeds the diagram and wires the click-to-reveal handler.
+    // HTML: produced by the SHARED unified renderer (seq-report) — a two-pane
+    // layout (a scrollable inline-SVG diagram on the left, a FIXED Message-Detail
+    // panel on the right), a plane legend, and per-message wire text in HIDDEN
+    // payload blocks. Each diagram message is a clickable `<g class="seq-msg"
+    // data-idx="N">` whose `#evt-N` payload the click `<script>` copies into the
+    // `.detail-body`. Assert that interactive markup meaningfully.
     let html = std::fs::read_to_string(out.join("alice-calls-bob.html")).unwrap();
-    assert!(html.contains("<svg"), "html did not embed the svg");
-    assert!(html.contains("addEventListener('click'"), "html missing click handler");
-    assert!(html.contains(r#"id="msg-0""#), "html missing message panel ids");
+    assert!(html.contains("<svg"), "html did not embed the sequence diagram");
+    assert!(html.contains("class=\"legend\""), "html missing plane legend");
+    assert!(html.contains("class=\"detail-panel\""), "html missing fixed detail panel");
+    assert!(html.contains("class=\"detail-body\""), "html missing scrollable detail body");
+    // The diagram's messages are clickable `.seq-msg` groups; the first one
+    // carries data-idx="0" and its payload lives in the hidden #evt-0 block.
+    assert!(html.contains("class=\"seq-msg seq-sip\""), "html missing SIP .seq-msg groups");
+    assert!(html.contains("data-idx=\"0\""), "first message not keyed data-idx=0");
+    assert!(html.contains("id=\"evt-0\""), "html missing #evt-0 payload block");
+    // The click handler wires `.seq-msg` clicks into the `.detail-body`.
+    assert!(
+        html.contains("querySelectorAll('.seq-msg')")
+            && html.contains("querySelector('.detail-body').innerHTML"),
+        "html missing .seq-msg → .detail-body click wiring"
+    );
+    assert!(
+        html.contains("INVITE sip:bob@127.0.0.1:5070 SIP/2.0"),
+        "html missing wire text"
+    );
 }
