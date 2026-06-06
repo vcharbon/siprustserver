@@ -719,7 +719,7 @@ impl Puller {
                 apply
             }
             Op::Delete => {
-                let had = self.store.current_call_gen(role, &primary, call_ref).is_some();
+                let had = self.store.current_cv(role, &primary, call_ref).is_some();
                 let _ = self
                     .store
                     .delete_call(role, &primary, call_ref, indexes, &PutOpts::default())

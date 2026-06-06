@@ -276,9 +276,10 @@ impl ReplicatedB2buaSut {
             .map(|b| b.to_vec())
     }
 
-    /// The content version (`call_gen`) currently stored for a ref, or `None`.
+    /// The primary version counter (`p`) currently stored for a ref, or `None`
+    /// — projected from the `(p,b)` version vector ([`current_cv`]).
     pub fn call_gen(&self, role: PartitionRole, primary: &str, call_ref: &str) -> Option<i64> {
-        self.store.current_call_gen(role, primary, call_ref)
+        self.store.current_cv(role, primary, call_ref).map(|(p, _)| p)
     }
 
     /// The live callRef KEYS this worker holds in `bak:{primary}` (the replicated

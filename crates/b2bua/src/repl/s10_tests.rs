@@ -205,9 +205,9 @@ async fn replicating_callstate_flush_lands_on_peer() {
     let decoded = MsgpackCodec::new().decode(got.as_deref().unwrap()).unwrap();
     assert_eq!(decoded.call_ref, call_ref, "replicated body round-trips to the same call");
     assert_eq!(
-        w1.store.current_call_gen(BAK, "w0", &call_ref),
-        Some(1),
-        "replicated at the gen=1 baseline"
+        w1.store.current_cv(BAK, "w0", &call_ref),
+        Some((1, 0)),
+        "replicated at the (p,b)=(1,0) baseline"
     );
 }
 

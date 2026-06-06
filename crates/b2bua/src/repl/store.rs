@@ -111,25 +111,13 @@ impl ReplicatingCallStore {
         &self.changelog
     }
 
-    /// The primary counter (`p`) currently stored for a callRef, or `None` if the
-    /// ref is absent / expired. Thin projection of [`current_cv`](Self::current_cv)
-    /// for callers that only need the primary counter (and presence). The
-    /// `(role, primary)` args are accepted for a uniform seam with the other store
-    /// methods; the per-ref metadata is keyed by callRef alone, so they are not
-    /// needed to look the version up.
-    pub fn current_call_gen(
-        &self,
-        role: PartitionRole,
-        primary: &str,
-        call_ref: &str,
-    ) -> Option<i64> {
-        self.current_cv(role, primary, call_ref).map(|(p, _)| p)
-    }
-
     /// The full `(p,b)` version vector stored for a callRef, or `None` if absent
     /// / expired. The S5 puller reads this to drive the ADR-0014 asymmetric apply
     /// rule (a reverse-flush applies iff `p_in == p_cur && b_in > b_cur`; a
-    /// forward update applies always; deletes apply unconditionally).
+    /// forward update applies always; deletes apply unconditionally) and as the
+    /// presence probe on the Delete path. The `(role, primary)` args are accepted
+    /// for a uniform seam with the other store methods; the per-ref metadata is
+    /// keyed by callRef alone, so they are not needed to look the version up.
     pub fn current_cv(
         &self,
         _role: PartitionRole,

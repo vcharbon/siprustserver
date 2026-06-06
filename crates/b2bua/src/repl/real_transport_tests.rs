@@ -174,9 +174,9 @@ async fn tail_delivers_post_connect_mutation_over_real_tcp() {
     );
     assert_eq!(metrics.repl_backup_held(), 1, "one backup replica held");
     assert_eq!(
-        w1.current_call_gen(BAK, "w0", &call_ref),
-        Some(1),
-        "replicated at the gen=1 baseline"
+        w1.current_cv(BAK, "w0", &call_ref),
+        Some((1, 0)),
+        "replicated at the (p,b)=(1,0) baseline"
     );
     let body = w1.get_call(BAK, "w0", &call_ref).await.unwrap().unwrap();
     assert_eq!(&body[..], b"the-call-body", "body round-trips over TCP");
@@ -221,7 +221,7 @@ async fn tail_streams_successive_updates_over_real_tcp() {
     eventually("backup reaches the latest gen", || {
         let w1 = w1.clone();
         let call_ref = call_ref.clone();
-        async move { w1.current_call_gen(BAK, "w0", &call_ref) == Some(4) }
+        async move { w1.current_cv(BAK, "w0", &call_ref) == Some((4, 0)) }
     })
     .await;
 
@@ -378,7 +378,7 @@ async fn bidirectional_supervisor_replication_over_real_tcp() {
             for i in 0..6 {
                 let (holder, primary) = if i % 2 == 0 { (&w1, "w0") } else { (&w0, "w1") };
                 let call_ref = format!("{primary}|burst-{i}|tag");
-                if holder.current_call_gen(BAK, primary, &call_ref) != Some(2) {
+                if holder.current_cv(BAK, primary, &call_ref) != Some((2, 0)) {
                     return false;
                 }
             }
