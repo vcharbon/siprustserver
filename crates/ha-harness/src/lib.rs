@@ -41,7 +41,7 @@ pub use report::{frame_summary, Marker, ReplReport};
 // crate for ordinary scenarios.
 pub use b2bua::store::{PartitionRole, PropagateDirection};
 pub use repl_net::transport::{CapturedFrame, Direction};
-pub use repl_net::{Frame, Op, Partition, PullMode, Watermark};
+pub use repl_net::{Frame, Op, Partition, Watermark};
 pub use topology::Peer;
 
 /// Build a callRef whose encoded primary is `primary` (so `partition_of` / the

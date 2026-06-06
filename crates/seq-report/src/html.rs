@@ -42,6 +42,36 @@ const BOTTOM_PAD: i64 = 30;
 const SIP_COLOR: &str = "#2563eb"; // blue
 const REPL_COLOR: &str = "#9333ea"; // purple
 const BAND_COLOR: &str = "#b91c1c"; // red
+const LOST_COLOR: &str = "#dc2626"; // red — the "✗ lost in transit" cross
+
+/// Categorical palette for per-socket coloring of replication arrows. Each
+/// distinct connection (ephemeral socket) gets a stable hue so two flows to the
+/// same node — and a node's pre-crash vs post-reboot sockets — read as visibly
+/// different arrows even though they collapse onto one node lane. Index 0 is the
+/// historic repl purple so single-socket diagrams look unchanged. Hues are
+/// chosen legible against white and distinct from the SIP blue.
+const CONN_PALETTE: &[&str] = &[
+    "#9333ea", // purple
+    "#0891b2", // cyan
+    "#ca8a04", // amber
+    "#16a34a", // green
+    "#db2777", // pink
+    "#7c3aed", // violet
+    "#0d9488", // teal
+    "#ea580c", // orange
+];
+
+/// Deterministically map a connection/socket tag (e.g. `:40007`) to a palette
+/// INDEX. A plain byte-sum — NOT a hashing RNG — so the same socket gets the
+/// same color across runs, processes, and the two renderers.
+fn conn_palette_index(conn: &str) -> usize {
+    conn.bytes().map(|b| b as usize).sum::<usize>() % CONN_PALETTE.len()
+}
+
+/// The palette color for a connection/socket tag.
+fn conn_color(conn: &str) -> &'static str {
+    CONN_PALETTE[conn_palette_index(conn)]
+}
 
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -142,8 +172,9 @@ pub fn render_html(doc: &SeqDoc) -> String {
     {desc}
     <div class="legend">
       <span><i class="swatch" style="border-top-color:{SIP_COLOR}"></i>SIP</span>
-      <span><i class="swatch" style="border-top-color:{REPL_COLOR};border-top-style:dashed"></i>Replication</span>
+      <span><i class="swatch" style="border-top-color:{REPL_COLOR};border-top-style:dashed"></i>Replication (dashed; hue = per-socket connection)</span>
       <span><i class="swatch" style="border-top-color:{BAND_COLOR}"></i>Lifecycle (crash / reboot / failover / partition)</span>
+      <span style="color:{LOST_COLOR}">✗ lost — frame emitted into a dead / superseded socket; the stub stops short of the lane (never reached the live node)</span>
     </div>
   </header>
   <div class="main">
@@ -187,13 +218,18 @@ fn render_svg(
     s.push_str(&format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" font-family=\"system-ui, sans-serif\" font-size=\"12\">\n"
     ));
-    // Arrowhead markers, one per message plane colour.
+    // Arrowhead markers: one for SIP, plus one per per-socket palette color so a
+    // colored repl arrow gets a matching colored arrowhead (`ah-conn-{i}`).
+    s.push_str("<defs>");
     s.push_str(&format!(
-        "<defs>\
-<marker id=\"ah-sip\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"3\" orient=\"auto\"><path d=\"M0,0 L7,3 L0,6 Z\" fill=\"{SIP_COLOR}\"/></marker>\
-<marker id=\"ah-repl\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"3\" orient=\"auto\"><path d=\"M0,0 L7,3 L0,6 Z\" fill=\"{REPL_COLOR}\"/></marker>\
-</defs>\n"
+        "<marker id=\"ah-sip\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"3\" orient=\"auto\"><path d=\"M0,0 L7,3 L0,6 Z\" fill=\"{SIP_COLOR}\"/></marker>"
     ));
+    for (i, c) in CONN_PALETTE.iter().enumerate() {
+        s.push_str(&format!(
+            "<marker id=\"ah-conn-{i}\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"3\" orient=\"auto\"><path d=\"M0,0 L7,3 L0,6 Z\" fill=\"{c}\"/></marker>"
+        ));
+    }
+    s.push_str("</defs>\n");
 
     // Lifelines + column heads.
     let life_bottom = height - BOTTOM_PAD / 2;
@@ -234,16 +270,27 @@ fn render_svg(
                 ));
             }
             RowKind::Sip { delivered } | RowKind::Repl { delivered } => {
-                let (color, marker, dash) = match row.kind {
-                    RowKind::Sip { .. } => (SIP_COLOR, "ah-sip", ""),
-                    RowKind::Repl { .. } => (REPL_COLOR, "ah-repl", " stroke-dasharray=\"5 3\""),
-                    RowKind::Lifecycle => unreachable!(),
+                let is_repl = matches!(row.kind, RowKind::Repl { .. });
+                // Per-socket color for repl arrows (so two flows to the same node,
+                // and a node's pre-crash vs post-reboot sockets, read as distinct
+                // arrows); SIP stays blue. A repl row with no `conn` falls back to
+                // the historic repl purple (palette index 0).
+                let color = if is_repl {
+                    row.conn.as_deref().map(conn_color).unwrap_or(REPL_COLOR)
+                } else {
+                    SIP_COLOR
                 };
-                let plane_class = match row.kind {
-                    RowKind::Sip { .. } => "seq-sip",
-                    RowKind::Repl { .. } => "seq-repl",
-                    RowKind::Lifecycle => unreachable!(),
+                let marker = if is_repl {
+                    format!("ah-conn-{}", row.conn.as_deref().map(conn_palette_index).unwrap_or(0))
+                } else {
+                    "ah-sip".to_string()
                 };
+                let dash = if is_repl { " stroke-dasharray=\"5 3\"" } else { "" };
+                let plane_class = if is_repl { "seq-repl" } else { "seq-sip" };
+                // The socket tag rendered inline so distinct connections are
+                // nameable, not just colored (e.g. `:40007` vs the live `:40011`).
+                let sock = row.conn.as_deref().map(|c| format!(" {c}")).unwrap_or_default();
+
                 let fi = lane_idx.get(row.from.as_str()).copied().unwrap_or(0);
                 let ti = row
                     .to
@@ -251,7 +298,7 @@ fn render_svg(
                     .and_then(|t| lane_idx.get(t).copied())
                     .unwrap_or(fi);
                 let (x1, x2) = (lane_x(fi), lane_x(ti));
-                let opacity = if delivered { "1" } else { "0.4" };
+                let opacity = if delivered { "1" } else { "0.5" };
                 // Each message is a clickable `<g class="seq-msg" data-idx="{ord}">`
                 // whose payload lives in the hidden `#evt-{ord}` block. A trailing
                 // transparent full-row `<rect>` makes the whole row clickable.
@@ -261,22 +308,42 @@ fn render_svg(
                 if x1 == x2 {
                     // Self-message: a small loop tag at the lane.
                     s.push_str(&format!(
-                        "<text x=\"{}\" y=\"{}\" fill=\"{color}\" opacity=\"{opacity}\">{} {}</text>\n",
+                        "<text x=\"{}\" y=\"{}\" fill=\"{color}\" opacity=\"{opacity}\">{}{sock} {}</text>\n",
                         x1 + 6,
                         y,
                         escape(&row.label),
-                        if delivered { "" } else { "⚠" },
+                        if delivered { "" } else { "✗" },
                     ));
-                } else {
+                } else if delivered {
                     s.push_str(&format!(
                         "<line x1=\"{x1}\" y1=\"{y}\" x2=\"{x2}\" y2=\"{y}\" stroke=\"{color}\" stroke-width=\"1.5\" opacity=\"{opacity}\" marker-end=\"url(#{marker})\"{dash}/>\n"
                     ));
                     let mid = (x1 + x2) / 2;
-                    let und = if delivered { "" } else { " ⚠" };
                     s.push_str(&format!(
-                        "<text x=\"{mid}\" y=\"{}\" text-anchor=\"middle\" fill=\"{color}\" opacity=\"{opacity}\">{}{und}</text>\n",
+                        "<text x=\"{mid}\" y=\"{}\" text-anchor=\"middle\" fill=\"{color}\" opacity=\"{opacity}\">{}{sock}</text>\n",
                         y - 4,
                         escape(&row.label),
+                    ));
+                } else {
+                    // LOST: the frame was emitted into a dead / superseded socket
+                    // and never arrived. Draw a stub that visibly STOPS SHORT of
+                    // the target lane (no arrowhead touching it) and cap it with a
+                    // red ✗ — so the eye sees it never reached the live node on
+                    // that lane; the socket tag + its color name the dead conn.
+                    let xstub = x1 + (x2 - x1) * 65 / 100;
+                    s.push_str(&format!(
+                        "<line x1=\"{x1}\" y1=\"{y}\" x2=\"{xstub}\" y2=\"{y}\" stroke=\"{color}\" stroke-width=\"1.5\" opacity=\"0.5\"{dash}/>\n"
+                    ));
+                    let mid = (x1 + xstub) / 2;
+                    s.push_str(&format!(
+                        "<text x=\"{mid}\" y=\"{}\" text-anchor=\"middle\" fill=\"{color}\" opacity=\"0.8\">{}{sock} ✗ lost</text>\n",
+                        y - 4,
+                        escape(&row.label),
+                    ));
+                    // The bold red ✗ at the severed end.
+                    s.push_str(&format!(
+                        "<text x=\"{xstub}\" y=\"{}\" text-anchor=\"middle\" fill=\"{LOST_COLOR}\" font-size=\"15\" font-weight=\"bold\">✗</text>\n",
+                        y + 5,
                     ));
                 }
                 // The timestamp in the left gutter.
@@ -330,13 +397,30 @@ fn render_payloads(doc: &SeqDoc, rows: &[&SeqRow], base: i64) -> String {
                     .as_deref()
                     .map(|t| lane_caption(doc, t))
                     .unwrap_or_else(|| "?".into());
-                let badge = if delivered { "" } else { " ⚠ UNDELIVERED" };
+                // A colored socket chip so the connection is identifiable in the
+                // detail panel too (same hue as its arrow).
+                let conn_chip = row
+                    .conn
+                    .as_deref()
+                    .map(|c| {
+                        format!(
+                            " &nbsp; <code style=\"color:{}\">conn {}</code>",
+                            conn_color(c),
+                            escape(c)
+                        )
+                    })
+                    .unwrap_or_default();
+                let badge = match (delivered, row.conn.as_deref()) {
+                    (true, _) => String::new(),
+                    (false, Some(c)) => format!(" ✗ LOST IN TRANSIT (defunct conn {})", escape(c)),
+                    (false, None) => " ✗ LOST IN TRANSIT".to_string(),
+                };
                 let body = match row.detail.as_deref().filter(|d| !d.trim().is_empty()) {
                     Some(d) => format!("<pre>{}</pre>", escape(d)),
                     None => "<div class=\"detail-placeholder\">No payload recorded for this message</div>".to_string(),
                 };
                 out.push_str(&format!(
-                    "<div class=\"payload {class}\" id=\"evt-{ord}\" hidden><div class=\"payload-head\"><code>{from} → {to}</code> &nbsp; <b>[{plane}] {}</b> &nbsp; <span class=\"ts\">{}</span>{badge}</div>{body}</div>\n",
+                    "<div class=\"payload {class}\" id=\"evt-{ord}\" hidden><div class=\"payload-head\"><code>{from} → {to}</code>{conn_chip} &nbsp; <b>[{plane}] {}</b> &nbsp; <span class=\"ts\">{}</span>{badge}</div>{body}</div>\n",
                     escape(&row.label),
                     escape(&ts),
                 ));

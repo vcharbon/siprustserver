@@ -116,9 +116,12 @@ spec:
           # prevents a single node being overcommitted; the limit contains a
           # runaway generator to its own pod (OOMKill + relaunch) instead of
           # starving the node and evicting sibling streams.
+          # Generous CPU: SIPp's timer wheel is CPU-bound (a slip aborts the run with
+          # exit 255) and the short stream drives 100cps. Reserve a guaranteed core and
+          # allow a wide burst — the 24-core load nodes have ample headroom.
           resources:
-            requests: { cpu: "250m", memory: "384Mi" }
-            limits:   { memory: "1536Mi" }
+            requests: { cpu: "2", memory: "384Mi" }
+            limits:   { cpu: "8", memory: "1536Mi" }
           volumeMounts:
             - { name: scenarios, mountPath: /scenarios }
             - { name: stats,     mountPath: /stats }

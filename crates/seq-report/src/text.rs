@@ -92,9 +92,13 @@ fn render_row(out: &mut String, row: &SeqRow, base: i64, doc: &SeqDoc) {
                 .as_deref()
                 .map(|t| lane_label(doc, t))
                 .unwrap_or_else(|| "?".into());
-            let undelivered = if delivered { "" } else { "  [UNDELIVERED]" };
+            // The socket tag disambiguates which connection a repl frame rode —
+            // so a frame "lost to b2" is legible as a different (defunct) socket
+            // than the live one collapsed on the same lane.
+            let conn = row.conn.as_deref().map(|c| format!(" {c}")).unwrap_or_default();
+            let undelivered = if delivered { "" } else { "  ✗ [LOST IN TRANSIT]" };
             out.push_str(&format!(
-                "[{ts}] [{plane}] {from} -> {to}  {}{undelivered}\n",
+                "[{ts}] [{plane}] {from} -> {to}  {}{conn}{undelivered}\n",
                 row.label,
             ));
             if let Some(detail) = row.detail.as_deref().filter(|d| !d.trim().is_empty()) {

@@ -1,47 +1,76 @@
-//! [`Puller`] — the per-peer replication **client FSM** (migration slice S5).
+//! [`Puller`] — the per-`(peer, flow)` replication **client FSM** (ADR-0014
+//! §Stream topology).
 //!
-//! One `Puller` drives the client side for ONE peer ordinal: it opens a
-//! connection, issues a single `PullRequest`, and applies the long-lived stream
-//! of `Data` / `Noop` the server pushes, reconnecting with exponential backoff
-//! across cuts. The watermark `W` it resumes from is **owned by the supervisor**
-//! (retained per-ordinal across Park/disconnect/re-add), passed in at each run.
+//! One `Puller` drives the client side for ONE peer ordinal on ONE **flow**
+//! (`partition`): it opens a single-flow connection, issues a single
+//! [`Frame::PullRequest`], and applies the long-lived stream of `Data` / `Noop`
+//! the server pushes, reconnecting with exponential backoff across cuts. The
+//! supervisor runs **two** pullers per peer — a **Reclaim** flow (`partition =
+//! Pri`, arms timers / reclaims) and a **Backup** flow (`partition = Bak`, no
+//! timers, metrics-only). The watermark `W` each resumes from is **owned by the
+//! supervisor** (retained per `(ordinal, flow)` across Park/disconnect/re-add)
+//! and passed in at construction.
 //!
-//! ## FSM (the plan's table)
+//! ## One stream, scan-then-tail (no second request)
+//! The server treats a `PullRequest{ partition, since }` as the whole contract:
+//! - `since == (0,0)` (cold) ⇒ it store-scans the flow's keyspace, streaming each
+//!   live body as `Data` **all stamped `at = W = head@scan-start`**, then tails
+//!   from `W` on the SAME socket. The **first catch-up `Noop`** ends the
+//!   bootstrap — there is no terminal bootstrap `Noop` and no second request.
+//! - `since > (0,0)` (warm) ⇒ it tails directly from `since`.
+//!
+//! ## No client-side apply-gate — `(p,b)` is the only idempotency
+//! The puller applies **every** `Data` under the ADR-0014 `(p,b)` version-vector
+//! rule; a re-delivered/stale frame is rejected by dominance, not by a watermark
+//! compare. Dropping the old `at <= W → skip` gate is what fixes the
+//! bootstrap-frame collision (every bootstrap frame shares `at = W`, so the gate
+//! used to admit only the first and silently drop the rest — the ~203/3000
+//! re-hydration cliff).
+//!
+//! ## Watermark advances only on `Noop` and post-bootstrap tail `Data.at`
+//! `W` is a pure **changelog position**, never the `(p,b)` vector. It advances on
+//! a `Noop(head)` and on a post-bootstrap tail `Data.at` — **never** on a
+//! bootstrap frame (they share `at = W`; advancing mid-scan then disconnecting
+//! would skip the un-sent remainder). The per-run `bootstrapped` flag flips on
+//! the first `Noop`; before it, frames apply ungated and do not move `W`.
+//!
+//! ## `ApplyMode = f(flow, bootstrapped)`
+//! - **Backup** flow (`Bak`) — always *apply-unless-dominated* (a Forward
+//!   primary→backup update is the same rule as a bootstrap import).
+//! - **Reclaim** flow (`Pri`) — *apply-unless-dominated* before the first `Noop`
+//!   (bulk bootstrap recovery), then the *Reverse* rule after (`p_in == sp &&
+//!   b_in > sb`: a backup reverse-flushed one of our calls).
+//!
+//! ## FSM
 //! ```text
-//! States: Parked · Connecting · Bootstrapping · Tailing{ever_current} · Backoff{attempt}
+//! Connecting → (send PullRequest) → Streaming{bootstrapped} → Backoff → Connecting
 //! ```
-//! - start / topology-add → `Connecting` (`network.connect`).
-//! - connect ok, cold-start/reset → `Bootstrapping`:
-//!   `PullRequest(Bootstrap, since=(0,0))` → apply the lazy-batch `Data(Pri)`
-//!   pre-seed (import as `pri:{me}`, `(p,b)` bootstrap rule, NOT watermark-gated) →
-//!   on the terminal `Noop` mark **bootstrap-complete** → re-pull
-//!   `PullRequest(Replog, since=(0,0))` on the SAME connection. The Replog
-//!   re-pull is intentionally **cold** so the compacted changelog delivers the
-//!   full mutated set across both partitions (the static `bak:{me}` pre-seed +
-//!   the cold changelog walk together re-hydrate the node); its trailing
-//!   `Noop(head)` advances `W`.
-//! - connect ok, self has state (`W > (0,0)`) → `Tailing`,
-//!   `PullRequest(Replog, since=retained W)`.
-//! - connect fails → `Backoff{attempt++}`.
-//! - `Tailing` `Data{at}`: apply iff `at > W` (apply-gate); then the ADR-0014
-//!   direction-aware `(p,b)` merge rule (see `apply_to_store`); then `W = at`.
-//! - `Tailing` `Noop{at}`: `ever_current = true` (sticky); advance `W` if `at`
-//!   greater.
-//! - `Tailing` `ResetToBootstrap` → `Bootstrapping` (discard W; re-pull — S5
-//!   re-pulls from `(0,0)`).
+//! - connect ok → send one `PullRequest{ partition, since = retained W }`.
+//! - `Data{at}` → apply under `(p,b)`; if `bootstrapped`, `W = at` (+ Reclaim
+//!   straggler [`ReclaimCall`](ReplCommand::ReclaimCall)).
+//! - `Noop{at}` → `current = true` (sticky); first one marks bootstrap-complete,
+//!   flips `bootstrapped`, and (Reclaim flow) fires the bulk
+//!   [`ReclaimAll`](ReplCommand::ReclaimAll); advance `W` if greater.
+//! - `ResetToBootstrap` → discard `W`, clear bootstrap-complete, bump
+//!   `reset_gen`, disconnect (reconnect re-bootstraps from `(0,0)`).
 //! - recv `None` / send `Err` → `Backoff` (RETAIN W).
-//! - `Backoff`: `sleep(min(init·2^attempt, max))` + a select on the cancel
-//!   signal → `Connecting`. A plain `sleep`+`select`, **not** a `DelayQueue`
-//!   (CLAUDE.md aliasing hazard).
+//! - `Backoff`: `sleep(min(init·2^attempt, max))` + a select on cancel (a plain
+//!   `sleep`+`select`, **not** a `DelayQueue` — CLAUDE.md aliasing hazard).
 //!
-//! A cold puller (after reboot/crash, empty store) converges by pulling from
-//! `(0,0)`: the compacted changelog delivers the full live set.
+//! ## Bootstrap hard timer (X5 / Decision 4 — liveness over completeness)
+//! A cold puller arms one absolute deadline `now + bootstrap_hard_timeout_ms`.
+//! While bootstrap is outstanding the connect wait **and** the first-`Noop` wait
+//! race it; if it fires the puller goes **bootstrap-complete (best-effort)** so
+//! the node boots and serves even when a peer is unreachable or pathologically
+//! slow. Unlike the old design it does **not** abandon the connection — there is
+//! no apply-gate collision to avoid, so it keeps streaming on the same socket and
+//! the real first `Noop` (when it arrives) completes the bootstrap for real.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use repl_net::frame::{Frame, Op, PullMode, Watermark};
+use repl_net::frame::{Frame, Op, Partition, Watermark};
 use repl_net::transport::{ReplicationConnection, ReplicationNetwork};
 use tokio::sync::{mpsc, watch};
 use topology::Peer;
@@ -54,27 +83,29 @@ use crate::store::{partition_of, CallStore, PartitionRole, PutOpts};
 const DEFAULT_BACKOFF_INIT_MS: u64 = 100;
 const DEFAULT_BACKOFF_MAX_MS: u64 = 30_000;
 /// Default bootstrap hard-timeout (ms): the upper bound on how long the puller
-/// waits for the terminal `Noop` before declaring bootstrap-complete best-effort
-/// (X5 / Decision 4 — liveness over completeness).
+/// waits — for a reachable connection AND for the first catch-up `Noop` — before
+/// declaring bootstrap-complete best-effort (X5 / Decision 4 — liveness over
+/// completeness). The connection is NOT dropped on expiry; it keeps streaming.
 const DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS: u64 = 10_000;
-/// Protocol version stamped on the `PullRequest`. **v2** (ADR-0014): the
-/// `Frame::Data` wire layout carries the `(p,b)` version vector — `call_bgen`
-/// was added after `call_gen` — so a v2 node cannot interpret a v1 peer's frames
-/// (and vice-versa). Bumped from 1; pre-production, so no compat shim.
-const PROTO_VER: u16 = 2;
-/// Server batch-size hint on the `PullRequest`.
-const CHUNK: u32 = 128;
+/// Protocol version stamped on the `PullRequest`. **v3** (ADR-0014 stream split):
+/// the wire message set was trimmed to the four-frame `{PullRequest, Data, Noop,
+/// ResetToBootstrap}` form, `PullRequest` lost its `mode`/`chunk` fields (one
+/// socket = one flow, scan-then-tail), and `Op` collapsed to `{Put, Delete}`. A
+/// v3 node cannot interpret a v2 peer's frames — pre-production, so no compat shim.
+const PROTO_VER: u16 = 3;
 
 /// How an inbound `Data` frame is reconciled into the local store
-/// ([`Puller::apply_to_store`]). The bootstrap pre-seed (recovering our own
-/// partition) takes the replica as-is; the steady-state tail applies the
-/// direction-aware `(p,b)` merge rule.
+/// ([`Puller::apply_to_store`]). Selected per frame from `(flow, bootstrapped)`:
+/// the bulk pre-seed (recovering our own partition) and a Forward primary→backup
+/// update both take the replica unless dominated; the Reclaim-flow steady tail
+/// applies the direction-aware Reverse rule.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ApplyMode {
-    /// Bulk bootstrap pre-seed — recovery, not a merge.
-    Bootstrap,
-    /// Steady-state tail delivery — apply the ADR-0014 `(p,b)` rule.
-    Steady,
+    /// Apply-unless-dominated — bootstrap recovery or a Forward primary→backup
+    /// update (the follower defers to the authority).
+    ForwardOrBootstrap,
+    /// Reclaim-flow steady tail — apply the ADR-0014 Reverse `(p,b)` rule.
+    Reverse,
 }
 
 /// Backoff knobs for a puller (tests inject short values).
@@ -84,10 +115,12 @@ pub struct PullerConfig {
     pub backoff_init_ms: u64,
     /// Backoff ceiling in ms.
     pub backoff_max_ms: u64,
-    /// Bootstrap hard-timeout in ms (X5): if the terminal `Noop` does not arrive
-    /// within this budget — peer slow / stalled / unreachable — the puller stops
-    /// waiting on bootstrap and marks **bootstrap-complete (best-effort)**,
-    /// proceeding to `Tailing`/`Backoff`. The node boots and serves regardless.
+    /// Bootstrap **liveness** deadline in ms (X5): the budget for reaching a peer
+    /// AND for the first catch-up `Noop`. On expiry the puller marks **bootstrap-
+    /// complete (best-effort)** so the node boots and serves regardless of an
+    /// unreachable or pathologically-slow peer — WITHOUT dropping the connection,
+    /// which keeps streaming until the real `Noop` arrives. Kept short — it gates
+    /// readiness, never correctness (the `(p,b)` merge admits late frames).
     pub bootstrap_hard_timeout_ms: u64,
 }
 
@@ -101,40 +134,21 @@ impl Default for PullerConfig {
     }
 }
 
-/// The puller's FSM state. `Parked` is owned by the supervisor (it simply does
-/// not run a puller); the running puller cycles
-/// `Connecting → {Bootstrapping|Tailing} → Backoff → Connecting`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PullerState {
-    /// Interrupted by topology `Removed`; not running (W retained by supervisor).
-    Parked,
-    /// Opening a connection to the peer.
-    Connecting,
-    /// Cold-start/reset re-hydration: request `PullMode::Bootstrap`, apply the
-    /// lazy-batch `Data(Pri)` pre-seed (import as `pri:{me}`), seed `W` from the
-    /// terminal `Noop`, then re-pull `Replog(since=W)` on the same connection.
-    /// Bounded by the hard timer (X5) — best-effort complete on expiry.
-    Bootstrapping,
-    /// Steady-state tail. `ever_current` is the sticky current flag.
-    Tailing { ever_current: bool },
-    /// Backing off before the next connect attempt.
-    Backoff { attempt: u32 },
-}
-
-/// Shared, observable per-peer puller status. The supervisor reads `current`
-/// for readiness (`is_current` / `all_current`) and the retained `watermark`.
+/// Shared, observable per-`(peer, flow)` puller status. The supervisor reads
+/// `current` for readiness (scoped to the **Reclaim** flow) and the retained
+/// `watermark`.
 #[derive(Clone, Copy, Debug)]
 pub struct PullerStatus {
     /// Sticky current flag — set on the first `Noop`, never cleared.
     pub current: bool,
-    /// The retained watermark (advances on apply/Noop). The supervisor owns the
-    /// authoritative copy keyed by ordinal; the puller publishes its progress
-    /// here so a Park/re-add resumes from it.
+    /// The retained watermark (advances on Noop / post-bootstrap tail). The
+    /// supervisor owns the authoritative copy keyed by `(ordinal, flow)`; the
+    /// puller publishes its progress here so a Park/re-add resumes from it.
     pub watermark: Watermark,
-    /// Sticky **bootstrap-complete** flag (X5 / Decision 4). Set when the
-    /// terminal bootstrap `Noop` arrives OR the bootstrap hard timer fires
-    /// (best-effort) OR the puller resumes warm (`W > (0,0)` — no bootstrap
-    /// needed). Cleared only by a `ResetToBootstrap`. S7 readiness consumes this.
+    /// Sticky **bootstrap-complete** flag (X5 / Decision 4). Set when the first
+    /// catch-up `Noop` arrives OR the bootstrap hard timer fires (best-effort) OR
+    /// the puller resumes warm (`W > (0,0)` — no bootstrap needed). Cleared only
+    /// by a `ResetToBootstrap`. S7 readiness consumes this.
     pub bootstrap_complete: bool,
     /// Monotonic reset generation: bumped each time the server pushes
     /// `ResetToBootstrap` (watermark forced back to `(0,0)`). Lets the supervisor
@@ -172,14 +186,17 @@ enum SelectOutcome {
     Cancelled,
 }
 
-/// Drives the client side for ONE peer. Cheap to construct; `run` loops until
-/// cancelled. The watermark + current flag are published on a `watch` channel
-/// the supervisor reads.
+/// Drives the client side for ONE `(peer, flow)`. Cheap to construct; `run` loops
+/// until cancelled. The watermark + current flag are published on a `watch`
+/// channel the supervisor reads.
 pub struct Puller {
     /// The peer this puller replicates from (its `ordinal` identity + `host`).
     peer: Peer,
     /// This node's ordinal (apply-target keyspace resolution).
     self_ordinal: String,
+    /// The **flow** this puller serves: `Pri` = Reclaim (arm timers / reclaim),
+    /// `Bak` = Backup (no timers, metrics-only).
+    partition: Partition,
     /// Resolves `peer` to a [`SocketAddr`] **fresh on every connect attempt**
     /// (ADR-0012 D3) — so a restarted peer's new IP is picked up on reconnect
     /// without waiting on a membership delta.
@@ -194,21 +211,22 @@ pub struct Puller {
     metrics: crate::metrics::B2buaMetrics,
     /// Sink to the router for fail-back commands (ADR-0011 X11 / ADR-0014): a
     /// **reactive reclaim** when a backup reverse-flushes one of our calls
-    /// (`partition=Pri` tail apply). `None` outside a live `B2buaCore` (the sim/unit
-    /// puller tests drive the store directly), so the existing constructors stay
-    /// source-compatible.
+    /// (Reclaim-flow tail `Put`) and the bulk reclaim on bootstrap completion.
+    /// `None` outside a live `B2buaCore` (the sim/unit puller tests drive the
+    /// store directly), so the existing constructors stay source-compatible.
     repl_tx: Option<mpsc::UnboundedSender<ReplCommand>>,
 }
 
 impl Puller {
-    /// Build a puller for `peer`, resolving its address per-connect via `resolve`
-    /// (ADR-0012 D3), seeded from `start_w` (the supervisor's retained watermark —
-    /// `(0,0)` for a cold/never-seen peer). Returns the puller plus a
-    /// [`watch::Receiver`] the supervisor reads.
+    /// Build a puller for `peer` on `partition` (the flow), resolving its address
+    /// per-connect via `resolve` (ADR-0012 D3), seeded from `start_w` (the
+    /// supervisor's retained watermark — `(0,0)` for a cold/never-seen peer).
+    /// Returns the puller plus a [`watch::Receiver`] the supervisor reads.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         peer: Peer,
         self_ordinal: impl Into<String>,
+        partition: Partition,
         resolve: AddrResolver,
         network: Arc<dyn ReplicationNetwork>,
         store: ReplicatingCallStore,
@@ -230,6 +248,7 @@ impl Puller {
             Self {
                 peer,
                 self_ordinal: self_ordinal.into(),
+                partition,
                 resolve,
                 network,
                 store,
@@ -257,6 +276,7 @@ impl Puller {
     pub fn new_at(
         peer_ordinal: impl Into<String>,
         self_ordinal: impl Into<String>,
+        partition: Partition,
         peer_addr: SocketAddr,
         network: Arc<dyn ReplicationNetwork>,
         store: ReplicatingCallStore,
@@ -270,6 +290,7 @@ impl Puller {
         Self::new(
             Peer::new(ordinal, peer_addr.to_string()),
             self_ordinal,
+            partition,
             resolve,
             network,
             store,
@@ -284,6 +305,12 @@ impl Puller {
         &self.peer.ordinal
     }
 
+    /// Whether this is the **Reclaim** flow (`partition = Pri`) — the only flow
+    /// that arms timers and signals reclaim to the router.
+    fn is_reclaim(&self) -> bool {
+        self.partition == Partition::Pri
+    }
+
     /// Resolve the peer's address (fresh) and open a connection. `None` if the
     /// address is unresolvable right now or the connect fails — the caller treats
     /// either as a failed connect (→ Backoff, then retry/re-resolve).
@@ -294,17 +321,6 @@ impl Puller {
 
     /// Run the FSM until `cancel` flips to `true` (Park / shutdown). `cancel` is
     /// a `watch` so the supervisor can interrupt a parked-out puller atomically.
-    ///
-    /// ## Bootstrap hard timer (X5 / Decision 4)
-    /// If the puller starts cold (`bootstrap_complete == false`) it arms a single
-    /// absolute deadline `now + bootstrap_hard_timeout_ms`. While bootstrap is
-    /// outstanding the **connect** and **backoff** waits race this absolute
-    /// deadline so a node whose peers are all unreachable still goes
-    /// **bootstrap-complete (best-effort)** and serves. The **bootstrap recv loop**
-    /// ([`run_bootstrap`](Self::run_bootstrap)) instead uses a per-frame *idle*
-    /// timer of the same width: a progressing stream — however large — re-arms it
-    /// each frame and re-hydrates the full keyset, and only a real stall (silence
-    /// for the whole window) trips it.
     pub async fn run(self, mut cancel: watch::Receiver<bool>) {
         let mut attempt: u32 = 0;
         // Arm the bootstrap hard deadline iff we start cold. A warm resume is
@@ -323,8 +339,7 @@ impl Puller {
             if *cancel.borrow() {
                 return;
             }
-            // ---- Connecting / Bootstrapping / Tailing ----
-            match self.run_once(&mut cancel, deadline).await {
+            match self.run_once(&mut cancel, &mut deadline).await {
                 RunOutcome::Cancelled => return,
                 RunOutcome::ConnectFailed | RunOutcome::Disconnected => {
                     // ---- Backoff{attempt} ---- retain W (status already holds it).
@@ -356,10 +371,21 @@ impl Puller {
         }
     }
 
-    /// Mark this puller **bootstrap-complete** (sticky). Called on the terminal
-    /// bootstrap `Noop` and on the hard-timer firing (best-effort).
+    /// Mark this puller **bootstrap-complete** (sticky). Called on the first
+    /// catch-up `Noop` and on the hard-timer firing (best-effort).
     fn mark_bootstrap_complete(&self) {
         self.status_tx.send_modify(|s| s.bootstrap_complete = true);
+    }
+
+    /// Signal the router to **bulk-reclaim** every `pri:{self}` body — materialise
+    /// each into the live serving map + re-arm its timers, with the keepalive
+    /// backlog smoothed (ADR-0014 §4). Fired by the **Reclaim** flow on bootstrap
+    /// completion (first `Noop` or best-effort hard-timer). Idempotent
+    /// (`materialize_if_absent`), so a partial pass plus a later one self-heal.
+    fn signal_reclaim_all(&self) {
+        if let Some(tx) = &self.repl_tx {
+            let _ = tx.send(ReplCommand::ReclaimAll);
+        }
     }
 
     /// Race `fut` against the cancel signal and (optionally) the bootstrap hard
@@ -399,27 +425,28 @@ impl Puller {
         scaled.min(self.config.backoff_max_ms)
     }
 
-    /// One connect-and-tail cycle. On a cold start it runs the **Bootstrapping**
-    /// phase first (apply the pre-seed `Data(Pri)`, seed `W` from the terminal
-    /// `Noop`, then re-pull `Replog` on the SAME connection) before falling into
-    /// the steady-state tail. `deadline` is the bootstrap hard timer (X5): while
-    /// bootstrap is outstanding the recv loop races it, marking complete + tailing
-    /// best-effort if it fires.
+    /// One connect-and-stream cycle: connect (racing the hard deadline), send the
+    /// single `PullRequest{ partition, since = retained W }`, then apply the
+    /// scan-then-tail stream until the socket cuts. `deadline` is the bootstrap
+    /// hard timer (X5); while bootstrap is outstanding the connect wait and the
+    /// first-`Noop` wait race it, marking complete best-effort if it fires (the
+    /// connection keeps streaming regardless — `*deadline` is set `None`).
     async fn run_once(
         &self,
         cancel: &mut watch::Receiver<bool>,
-        deadline: Option<tokio::time::Instant>,
+        deadline: &mut Option<tokio::time::Instant>,
     ) -> RunOutcome {
         // ---- Connecting ---- resolve fresh (D3) + connect, racing the hard
         // deadline so a hung connect to an unreachable/stalled peer still lets the
         // node go bootstrap-complete.
-        let conn = match deadline {
+        let conn = match *deadline {
             Some(at) => tokio::select! {
                 c = self.try_connect() => c,
                 _ = tokio::time::sleep_until(at) => {
-                    // Hard timer tripped mid-connect: best-effort complete, then
-                    // back off + retry (now warm → no further hard timer).
+                    // Hard timer tripped mid-connect: best-effort complete for
+                    // readiness, then back off + retry (now warm → no hard timer).
                     self.mark_bootstrap_complete();
+                    *deadline = None;
                     return RunOutcome::ConnectFailed;
                 }
                 _ = cancel.changed() => {
@@ -444,103 +471,65 @@ impl Puller {
             self.status_tx.send_modify(|s| s.ever_connected = true);
         }
 
-        // Decide cold-start (Bootstrapping) vs. resume (Tailing) from retained W.
-        // Cold iff we have never advanced past `(0,0)` — i.e. never received a
-        // terminal `Noop` or any tail data from this peer. We deliberately do NOT
-        // also gate on `bootstrap_complete`: the bootstrap hard timer may set it
-        // for an unreachable peer WITHOUT a real pre-seed (W still `(0,0)`), and
-        // suppressing the bootstrap on the eventual real connect would skip the
-        // static `bak:{me}` keyset scan (which the cold-Replog walk does not
-        // cover) and silently leave the node missing those backups. Re-running
-        // bootstrap when already current is at worst a redundant, idempotent pass.
-        let w = self.status_tx.borrow().watermark;
-        let cold = w == Watermark::new(0, 0);
-
-        let since = if cold {
-            // ---- Bootstrapping ---- request the lazy-batch pre-seed; the server
-            // streams Data(Pri) (the static `bak:{me}` calls the peer holds but
-            // never mutated — NOT in the changelog) then a TERMINAL Noop(W). We
-            // apply the pre-seed directly (NOT watermark-gated; `(p,b)` bootstrap rule),
-            // then re-pull `Replog` from `(0,0)` on this SAME connection.
-            //
-            // The re-pull is **cold** (`since.gen < server.gen`) on purpose: the
-            // compacted changelog-for-me delivers the full mutated set across
-            // BOTH partitions (`bak` = the peer's calls I back up; `pri` = my
-            // calls it reverse-mutated). Bootstrap + cold-Replog are the one
-            // re-hydration stream (X4). We must NOT seed W to the Noop head first
-            // — that would gate the cold pull's `at <= head` entries out; instead
-            // the cold pull applies from `W=(0,0)` and its trailing `Noop(head)`
-            // advances W. Overlap between the pre-seed and the cold pull is
-            // idempotent by call_gen.
-            let req = Frame::PullRequest {
-                proto_ver: PROTO_VER,
-                caller: self.self_ordinal.clone(),
-                mode: PullMode::Bootstrap,
-                since: Watermark::new(0, 0),
-                chunk: CHUNK,
-            };
-            if conn.send(req).await.is_err() {
-                return RunOutcome::Disconnected;
-            }
-            match self.run_bootstrap(conn.as_ref(), cancel).await {
-                BootstrapOutcome::Seeded(_w) => {
-                    // Terminal Noop arrived (carrying the scan-start head `_w`) →
-                    // bootstrap-complete. We deliberately leave W at (0,0) rather
-                    // than seeding it to `_w`: the follow-up Replog pull must be
-                    // **cold** (`since.gen < server.gen`) to re-deliver the full
-                    // compacted set (both partitions). Seeding W=`_w` would gate
-                    // out the cold pull's `at <= _w` entries. The cold pull's
-                    // trailing Noop(head) advances W; overlap is idempotent.
-                    self.mark_bootstrap_complete();
-                }
-                BootstrapOutcome::HardTimeout => {
-                    // Bootstrap STALLED — the peer went silent for the whole idle
-                    // window (a real fault, NOT merely a big/slow keyset: a
-                    // progressing stream re-arms the idle timer every frame and
-                    // runs to its terminal Noop). Mark complete best-effort for
-                    // READINESS (liveness over completeness, X5) — but do NOT fall
-                    // through to the Replog re-pull on THIS connection. The server
-                    // may still be mid-bootstrap, streaming `Data` frames all
-                    // stamped with the same scan-start head; once they land in the
-                    // steady-state tail the apply-gate (`at <= W`) admits only the
-                    // first and silently drops the rest — the watermark collision
-                    // that capped re-hydration at ~203/3000. Drop the connection
-                    // instead: W is still (0,0), so the reconnect re-bootstraps
-                    // from scratch (idempotent by call_gen) and a recovered peer
-                    // re-hydrates in full.
-                    self.mark_bootstrap_complete();
-                    return RunOutcome::Disconnected;
-                }
-                BootstrapOutcome::Cancelled => return RunOutcome::Cancelled,
-                BootstrapOutcome::Disconnected => return RunOutcome::Disconnected,
-            }
-            // Cold Replog re-pull from (0,0) on the same connection.
-            Watermark::new(0, 0)
-        } else {
-            // ---- Tailing (resume from retained W) ----
-            self.status_tx.borrow().watermark
-        };
-
-        // Open (or re-open, after bootstrap) the steady-state Replog tail.
+        // One PullRequest opens this flow's stream from the retained W. `since ==
+        // (0,0)` ⇒ the server store-scans this flow's keyspace (every frame
+        // stamped `at = W = head@scan-start`) then tails from W on this SAME
+        // socket; `since > (0,0)` ⇒ it tails directly. There is no second request.
+        let since = self.status_tx.borrow().watermark;
         let req = Frame::PullRequest {
             proto_ver: PROTO_VER,
             caller: self.self_ordinal.clone(),
-            mode: PullMode::Replog,
+            partition: self.partition,
             since,
-            chunk: CHUNK,
         };
         if conn.send(req).await.is_err() {
             return RunOutcome::Disconnected;
         }
 
-        // ---- Tailing loop ---- apply Data, set current on Noop, until cut.
+        // A warm resume (W > (0,0)) tails directly — already past bootstrap, so
+        // advance W and apply the Reverse rule from the first frame. A cold pull
+        // starts pre-bootstrap: apply ungated, hold W until the first Noop.
+        let mut bootstrapped = since != Watermark::new(0, 0);
+        // Bodies imported during the pre-`Noop` bootstrap phase — the
+        // re-hydration diagnostic (Reclaim flow only): a pass that re-stalls at
+        // the same value across reconnects would signal truncation (now
+        // structurally impossible, but the gauge keeps proving it).
+        let mut applied_in_bootstrap = 0u64;
+
         loop {
-            let frame = tokio::select! {
-                f = conn.recv() => f,
-                _ = cancel.changed() => {
-                    if *cancel.borrow() { return RunOutcome::Cancelled; }
-                    continue;
-                }
+            // While bootstrap is outstanding, race the first frame against the
+            // hard deadline; once complete (or warm), race cancel only.
+            let arm = if bootstrapped { None } else { *deadline };
+            let frame = match arm {
+                Some(at) => tokio::select! {
+                    f = conn.recv() => f,
+                    _ = tokio::time::sleep_until(at) => {
+                        // First Noop is taking too long. Mark complete best-effort
+                        // for READINESS, materialise whatever partial pre-seed has
+                        // arrived (Reclaim flow), then KEEP streaming on the same
+                        // socket — the real Noop will complete it for real. No
+                        // apply-gate collision exists to force a disconnect now.
+                        self.mark_bootstrap_complete();
+                        *deadline = None;
+                        if self.is_reclaim() {
+                            self.metrics.bump_repl_bootstrap_stalled();
+                            self.metrics.set_repl_bootstrap_last_applied(applied_in_bootstrap);
+                            self.signal_reclaim_all();
+                        }
+                        continue;
+                    }
+                    _ = cancel.changed() => {
+                        if *cancel.borrow() { return RunOutcome::Cancelled; }
+                        continue;
+                    }
+                },
+                None => tokio::select! {
+                    f = conn.recv() => f,
+                    _ = cancel.changed() => {
+                        if *cancel.borrow() { return RunOutcome::Cancelled; }
+                        continue;
+                    }
+                },
             };
             match frame {
                 Some(Frame::Data {
@@ -554,27 +543,68 @@ impl Puller {
                     indexes,
                     body,
                 }) => {
-                    self.apply_data(
-                        at, op, partition, &call_ref, call_gen, call_bgen, body_ttl_ms, &indexes,
-                        body,
-                    )
-                    .await;
+                    // Apply under the `(p,b)` rule for this flow + phase. No
+                    // watermark gate — `(p,b)` dominance is the only idempotency.
+                    let mode = if self.is_reclaim() && bootstrapped {
+                        ApplyMode::Reverse
+                    } else {
+                        ApplyMode::ForwardOrBootstrap
+                    };
+                    let applied = self
+                        .apply_to_store(
+                            op, partition, &call_ref, call_gen, call_bgen, body_ttl_ms,
+                            &indexes, body, mode,
+                        )
+                        .await;
+                    if !bootstrapped {
+                        applied_in_bootstrap += 1;
+                    }
+                    // Pre-bootstrap frames share `at = W`; only the post-bootstrap
+                    // tail advances W (and signals the per-call reclaim straggler).
+                    if bootstrapped {
+                        self.status_tx.send_modify(|s| s.watermark = at);
+                        // Reclaim straggler: a backup reverse-flushed one of OUR
+                        // calls after the bulk sweep — re-materialise + re-serve it.
+                        // Only when the reverse-flush ACTUALLY applied: a Put the
+                        // `(p,b)` gate dropped as dominated left the store untouched,
+                        // so re-serving from it would be a spurious reclaim of a
+                        // stale body (idempotent, but wasted work).
+                        if self.is_reclaim() && op == Op::Put && applied {
+                            if let Some(tx) = &self.repl_tx {
+                                let _ = tx.send(ReplCommand::ReclaimCall(call_ref.clone()));
+                            }
+                        }
+                    }
                 }
                 Some(Frame::Noop { at }) => {
-                    // Sticky current; advance W if greater.
+                    let first = !bootstrapped;
                     self.status_tx.send_modify(|s| {
                         s.current = true;
                         if at > s.watermark {
                             s.watermark = at;
                         }
                     });
+                    if first {
+                        // First catch-up Noop ends the bootstrap: from here the
+                        // tail advances W and (Reclaim) applies the Reverse rule.
+                        bootstrapped = true;
+                        self.mark_bootstrap_complete();
+                        *deadline = None;
+                        // Reclaim flow: bulk-materialise everything the bootstrap
+                        // scan imported into the live serving map (smoothed).
+                        if self.is_reclaim() {
+                            self.metrics.bump_repl_bootstrap_seeded();
+                            self.metrics.set_repl_bootstrap_last_applied(applied_in_bootstrap);
+                            self.signal_reclaim_all();
+                        }
+                    }
                 }
                 Some(Frame::ResetToBootstrap { .. }) => {
-                    // → Bootstrapping: the server says our `since` fell off the
-                    // compacted tail. Discard W AND clear bootstrap-complete so
-                    // the next connect re-runs the full lazy-batch pre-seed. Bump
-                    // `reset_gen` so the supervisor pulls its retained watermark
-                    // DOWN too (a respawn must not resume from the now-invalid W).
+                    // The server says our `since` fell off the compacted tail.
+                    // Discard W AND clear bootstrap-complete so the next connect
+                    // re-runs the full scan-then-tail. Bump `reset_gen` so the
+                    // supervisor pulls its retained watermark DOWN too (a respawn
+                    // must not resume from the now-invalid W).
                     self.status_tx.send_modify(|s| {
                         s.watermark = Watermark::new(0, 0);
                         s.bootstrap_complete = false;
@@ -582,146 +612,44 @@ impl Puller {
                     });
                     return RunOutcome::Disconnected;
                 }
-                // PullRequest/Ack are client→server; never expected here. Ignore.
+                // PullRequest is client→server; never expected here. Ignore.
                 Some(_) => {}
                 None => return RunOutcome::Disconnected,
             }
         }
     }
 
-    /// The **Bootstrapping** recv loop. Applies each pre-seed `Data` (partition
-    /// `Pri` → import as `pri:{primary}`, under the `(p,b)` bootstrap rule, NOT
-    /// watermark-gated since it is a bulk pre-seed) and returns on the TERMINAL
-    /// `Noop{at}` ([`BootstrapOutcome::Seeded`]). Races the cancel signal and a
-    /// per-frame **idle** timer ([`idle_timer`]) — silence for the whole window
-    /// yields [`BootstrapOutcome::HardTimeout`] (best-effort completion); any
-    /// frame re-arms it, so a large-but-progressing stream never trips it.
-    async fn run_bootstrap(
-        &self,
-        conn: &dyn repl_net::transport::ReplicationConnection,
-        cancel: &mut watch::Receiver<bool>,
-    ) -> BootstrapOutcome {
-        let idle_ms = self.config.bootstrap_hard_timeout_ms;
-        loop {
-            // IDLE deadline, re-armed every iteration — NOT a total-budget timer.
-            // A bootstrap that keeps delivering frames, however large its keyset,
-            // resets this each frame and runs to its terminal Noop, so the whole
-            // partition re-hydrates. It trips only when the peer goes silent for
-            // the entire window (a genuine stall), where best-effort completion
-            // (X5) is the documented contract.
-            let frame = tokio::select! {
-                f = conn.recv() => f,
-                _ = idle_timer(idle_ms) => return BootstrapOutcome::HardTimeout,
-                _ = cancel.changed() => {
-                    if *cancel.borrow() { return BootstrapOutcome::Cancelled; }
-                    continue;
-                }
-            };
-            match frame {
-                Some(Frame::Data {
-                    op,
-                    partition,
-                    call_ref,
-                    call_gen,
-                    call_bgen,
-                    body_ttl_ms,
-                    indexes,
-                    body,
-                    ..
-                }) => {
-                    // Pre-seed: a node recovering its OWN partition — take the
-                    // replica's `(p,b)` as-is (recovery, not a merge). No
-                    // watermark gate; `ApplyMode::Bootstrap` only guards against
-                    // clobbering a strictly-newer concurrent local copy.
-                    self.apply_to_store(
-                        op, partition, &call_ref, call_gen, call_bgen, body_ttl_ms, &indexes, body,
-                        ApplyMode::Bootstrap,
-                    )
-                    .await;
-                }
-                // TERMINAL: end of bootstrap; `at` is the scan-start head → seed W.
-                Some(Frame::Noop { at }) => return BootstrapOutcome::Seeded(at),
-                // A reset mid-bootstrap: bail to reconnect (will re-bootstrap).
-                Some(Frame::ResetToBootstrap { .. }) => return BootstrapOutcome::Disconnected,
-                Some(_) => {}
-                None => return BootstrapOutcome::Disconnected,
-            }
-        }
-    }
-
-    /// Apply one `Data` frame under the apply-gate + `(p,b)` merge rule, then advance W
-    /// (the steady-state tail path).
-    #[allow(clippy::too_many_arguments)]
-    async fn apply_data(
-        &self,
-        at: Watermark,
-        op: Op,
-        partition: repl_net::frame::Partition,
-        call_ref: &str,
-        call_gen: i64,
-        call_bgen: i64,
-        body_ttl_ms: i64,
-        indexes: &[String],
-        body: Option<Arc<[u8]>>,
-    ) {
-        // ---- apply-gate ---- only entries strictly above W mutate.
-        if at <= self.status_tx.borrow().watermark {
-            return;
-        }
-        // Steady-state tail: a genuine cross-node update — apply under the
-        // ADR-0014 direction-aware `(p,b)` rule (`partition` resolves direction).
-        self.apply_to_store(
-            op, partition, call_ref, call_gen, call_bgen, body_ttl_ms, indexes, body,
-            ApplyMode::Steady,
-        )
-        .await;
-        // Advance W past the applied entry.
-        self.status_tx.send_modify(|s| s.watermark = at);
-        // X11 reactive reclaim: a backup just reverse-flushed one of OUR calls
-        // (`partition=Pri`) — it took the call over while we were down/booting.
-        // Signal the router to re-materialise + re-serve it (the flip-race
-        // straggler the bulk reclaim sweep raced past). Deletes are not reclaimed
-        // (the call ended); the bulk sweep — not this tail path — covers bootstrap.
-        if matches!(partition, repl_net::frame::Partition::Pri)
-            && matches!(op, Op::Create | Op::Update)
-        {
-            if let Some(tx) = &self.repl_tx {
-                let _ = tx.send(ReplCommand::ReclaimCall(call_ref.to_string()));
-            }
-        }
-    }
-
     /// Apply a `Data` frame's mutation to the local store under the **ADR-0014
-    /// `(p,b)` version-vector rule**, **without** touching the watermark. Shared
-    /// by the tail apply-gate path ([`apply_data`](Self::apply_data)) and the
-    /// bootstrap pre-seed path ([`run_bootstrap`](Self::run_bootstrap)).
+    /// `(p,b)` version-vector rule**, **without** touching the watermark.
     ///
-    /// `partition=Bak` → store as `bak:{primary}` (a **Forward** primary→backup
-    /// update); `partition=Pri` → store as `pri:{primary}` (a **Reverse**
+    /// `partition = Bak` → store as `bak:{primary}` (a **Forward** primary→backup
+    /// update); `partition = Pri` → store as `pri:{primary}` (a **Reverse**
     /// backup→primary reverse-flush, or a bootstrap import).
     ///
     /// Apply decision (`(call_gen, call_bgen)` = incoming `(p,b)`; `(sp, sb)` =
     /// stored):
     /// - **Delete** → apply unconditionally (delete-wins, both directions).
-    /// - **Forward** (`role == Backup`) Create/Update → apply **always** (the
-    ///   follower defers to the authority).
-    /// - **Reverse** (`role == Primary`) Create/Update → apply iff the primary
-    ///   has **not** itself mutated past the backup's branch point and the backup
-    ///   genuinely advanced: `p_in == sp && b_in > sb` (or no local copy yet →
-    ///   accept; the reactive reclaim materialises it). Else keep our own.
-    /// - **Bootstrap** (recovering our own partition) → take the replica as-is,
-    ///   skipping only a strictly-dominated copy so a concurrent newer reclaim is
-    ///   not clobbered.
+    /// - [`ForwardOrBootstrap`](ApplyMode::ForwardOrBootstrap) `Put` → apply
+    ///   unless the stored `(sp, sb)` strictly dominates (the follower / bootstrap
+    ///   recovery defers to the authority but won't regress to a stale re-delivery).
+    /// - [`Reverse`](ApplyMode::Reverse) `Put` → apply iff the primary has **not**
+    ///   itself mutated past the backup's branch point and the backup genuinely
+    ///   advanced: `p_in == sp && b_in > sb` (or no local copy yet → accept; the
+    ///   reactive reclaim materialises it). Else keep our own.
     ///
     /// (Tombstone-suppress — never resurrect a locally-deleted call — is deferred:
     /// it needs a reaped tombstone set; deletes already win, so the remaining gap
     /// is only a late reverse-create racing a delete, which the watermark + reap
     /// bound.)
+    /// Returns whether the mutation actually changed the store: a `Put` the
+    /// `(p,b)` gate dropped as dominated returns `false`; an applied `Put` and any
+    /// `Delete` (delete-wins) return `true`. The reclaim tail uses this to suppress
+    /// a spurious `ReclaimCall` on a dropped reverse-flush.
     #[allow(clippy::too_many_arguments)]
     async fn apply_to_store(
         &self,
         op: Op,
-        partition: repl_net::frame::Partition,
+        partition: Partition,
         call_ref: &str,
         call_gen: i64,
         call_bgen: i64,
@@ -729,38 +657,34 @@ impl Puller {
         indexes: &[String],
         body: Option<Arc<[u8]>>,
         mode: ApplyMode,
-    ) {
+    ) -> bool {
         let primary = partition_of(&self.self_ordinal, call_ref).1;
         let role = match partition {
-            repl_net::frame::Partition::Bak => PartitionRole::Backup,
-            repl_net::frame::Partition::Pri => PartitionRole::Primary,
+            Partition::Bak => PartitionRole::Backup,
+            Partition::Pri => PartitionRole::Primary,
         };
 
         match op {
-            Op::Create | Op::Update => {
+            Op::Put => {
                 let stored = self.store.current_cv(role, &primary, call_ref);
                 // Stored `(sp,sb)` DOMINATES incoming `(p,b)` ⇒ skip (idempotent /
-                // reordered re-delivery). Used by the Forward + Bootstrap paths:
-                // both defer to the sending authority but must not regress to a
-                // strictly-older frame (steady-state ordering is the watermark's
-                // job; this is the belt-and-suspenders against reorder/replay and
-                // the bootstrap-vs-concurrent-reclaim race).
+                // reordered re-delivery). The dominance gate is now the ONLY
+                // idempotency (no watermark apply-gate): it is what makes every
+                // bootstrap frame — all sharing `at = W` — safe to apply.
                 let dominated =
                     |sp: i64, sb: i64| sp >= call_gen && sb >= call_bgen;
-                let apply = match (mode, role) {
-                    // Bootstrap (recovering our own partition) + Forward
-                    // (primary → backup): authority's body, monotone by `(p,b)`.
-                    (ApplyMode::Bootstrap, _) | (ApplyMode::Steady, PartitionRole::Backup) => {
-                        match stored {
-                            Some((sp, sb)) => !dominated(sp, sb),
-                            None => true,
-                        }
-                    }
+                let apply = match mode {
+                    // Bootstrap recovery / Forward primary→backup: authority's
+                    // body, monotone by `(p,b)`.
+                    ApplyMode::ForwardOrBootstrap => match stored {
+                        Some((sp, sb)) => !dominated(sp, sb),
+                        None => true,
+                    },
                     // Reverse (backup → primary): accept iff untouched-by-us since
                     // the backup branched (`p_in == sp`) AND a genuinely newer
                     // backup mutation (`b_in > sb`); no local copy → accept (the
                     // reactive reclaim materialises it). Else keep our own.
-                    (ApplyMode::Steady, PartitionRole::Primary) => match stored {
+                    ApplyMode::Reverse => match stored {
                         Some((sp, sb)) => call_gen == sp && call_bgen > sb,
                         None => true,
                     },
@@ -783,21 +707,16 @@ impl Puller {
                         )
                         .await;
                     // Inbound replica admitted. `pull_applied` is the proof the
-                    // changelog→puller delivery path actually works; `backup_held`
-                    // tracks the live replica count — it grows whenever a ref NOT
+                    // changelog→puller delivery path works; `backup_held` tracks
+                    // the live replica count — it grows whenever a ref NOT
                     // previously held (`stored.is_none()`) lands in a backup
-                    // partition. We must NOT gate this on `op == Create`: the
-                    // changelog COMPACTS, so a call created then updated before the
-                    // backup drains collapses to a single `Op::Update` entry (and
-                    // the steady-state tail likewise delivers the latest state as
-                    // `Update`). Keying on the op undercounted every replica whose
-                    // first delivery was an Update — the live cluster's
-                    // `repl_backup_held = 0` despite `flush_propagated = 62`.
+                    // partition.
                     self.metrics.bump_repl_pull_applied();
                     if role == PartitionRole::Backup && stored.is_none() {
                         self.metrics.inc_repl_backup_held();
                     }
                 }
+                apply
             }
             Op::Delete => {
                 let had = self.store.current_call_gen(role, &primary, call_ref).is_some();
@@ -808,36 +727,10 @@ impl Puller {
                 if role == PartitionRole::Backup && had {
                     self.metrics.dec_repl_backup_held();
                 }
+                true
             }
         }
     }
-}
-
-/// The bootstrap **idle** timer: fires `ms` after it is awaited with no reset.
-/// `ms == 0` disables it (parks forever) so a test/config can opt out of the
-/// stall backstop. Re-created (and thus re-armed) on every `run_bootstrap` loop
-/// iteration, so each received frame resets the idle window.
-async fn idle_timer(ms: u64) {
-    if ms == 0 {
-        std::future::pending::<()>().await
-    } else {
-        tokio::time::sleep(Duration::from_millis(ms)).await
-    }
-}
-
-/// How the [`Bootstrapping`](PullerState::Bootstrapping) phase ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BootstrapOutcome {
-    /// Terminal `Noop` arrived; seed W to this watermark and tail.
-    Seeded(Watermark),
-    /// The bootstrap idle timer fired (peer silent for the whole window) —
-    /// best-effort complete for readiness, then disconnect + re-bootstrap (the
-    /// connection is abandoned, never tailed, to avoid the watermark collision).
-    HardTimeout,
-    /// Cancel signal fired (Park / shutdown).
-    Cancelled,
-    /// Connection cut / reset mid-bootstrap → reconnect (re-bootstrap).
-    Disconnected,
 }
 
 #[cfg(test)]
@@ -861,7 +754,7 @@ mod tests {
     /// A scripted client connection that delivers each pre-arranged bootstrap
     /// frame after a fixed clock-time `gap`, then parks (a quiet tail). Faithful
     /// to the real server, EVERY bootstrap `Data` carries the SAME scan-start
-    /// head `at` — the collision the apply-gate used to drop.
+    /// head `at` — the collision the old apply-gate used to drop.
     struct PacedConn {
         frames: Mutex<VecDeque<Frame>>,
         gap_ms: u64,
@@ -873,13 +766,11 @@ mod tests {
             Ok(())
         }
         async fn recv(&self) -> Option<Frame> {
-            // Pace delivery in clock time; each delivered frame re-arms the
-            // puller's idle timer (gap < idle ⇒ never a "stall").
             tokio::time::sleep(Duration::from_millis(self.gap_ms)).await;
             let next = self.frames.lock().unwrap().pop_front();
             match next {
                 Some(f) => Some(f),
-                // Script exhausted: the Replog tail is quiet — park forever.
+                // Script exhausted: the tail is quiet — park forever.
                 None => std::future::pending().await,
             }
         }
@@ -892,8 +783,8 @@ mod tests {
     }
 
     /// A network whose every `connect` hands back a fresh paced bootstrap script:
-    /// `n` `Data{Pri,Create}` frames (all stamped the same `w_scan`) then the
-    /// terminal `Noop{w_scan}`.
+    /// `n` `Data{Pri,Put}` frames (all stamped the same `w_scan`) then the
+    /// first catch-up `Noop{w_scan}`.
     struct PacedNet {
         n: usize,
         gap_ms: u64,
@@ -910,7 +801,7 @@ mod tests {
             for i in 0..self.n {
                 q.push_back(Frame::Data {
                     at: self.w_scan, // SAME head for every pre-seed frame
-                    op: Op::Create,
+                    op: Op::Put,
                     partition: Partition::Pri,
                     call_ref: format!("w1|{i}|t"),
                     call_gen: 1,
@@ -934,20 +825,14 @@ mod tests {
         }
     }
 
-    /// Regression (#1, re-hydration truncation): a bootstrap whose keyset is large
-    /// enough that the TOTAL stream time (`n × gap`) exceeds the timeout window
-    /// must still re-hydrate IN FULL, because the timer is a per-frame *idle*
-    /// timer (each frame re-arms it), not a total budget.
-    ///
-    /// Pre-fix this failed: the absolute deadline fired mid-stream, the puller
-    /// abandoned the bootstrap onto the same connection's Replog tail, and the
-    /// apply-gate (`at <= W`) admitted only the first leftover frame — every other
-    /// pre-seed frame shared the same `w_scan` and was silently dropped (the
-    /// ~203/3000 ceiling). Here `n=10`, `gap=100ms`, `idle=500ms`: each gap is
-    /// well under the window (never a stall) but the stream runs 1000ms — twice
-    /// the old budget — so the old code truncated to ~5 of 10.
+    /// Regression (#1, re-hydration truncation): a bootstrap whose `n` frames all
+    /// share `at = W` must re-hydrate IN FULL. Pre-fix the client-side apply-gate
+    /// (`at <= W → skip`) admitted only the first and dropped the rest (the
+    /// ~203/3000 ceiling); now there is no gate — `(p,b)` dominance is the only
+    /// idempotency, so every frame applies. The whole stream also outlasts the
+    /// hard-timeout window, which (new model) no longer abandons the connection.
     #[tokio::test(start_paused = true)]
-    async fn large_bootstrap_outlasts_window_but_rehydrates_fully() {
+    async fn bootstrap_frames_sharing_watermark_all_rehydrate() {
         let clock = Clock::test_at(0);
         let n = 10usize;
         let store = ReplicatingCallStore::new(1, clock.clone());
@@ -959,11 +844,12 @@ mod tests {
         let config = PullerConfig {
             backoff_init_ms: 50,
             backoff_max_ms: 1_000,
-            bootstrap_hard_timeout_ms: 500, // the idle window
+            bootstrap_hard_timeout_ms: 500, // stream runs 1000ms > this, on purpose
         };
         let (puller, status) = Puller::new_at(
             "w0",
             "w1",
+            Partition::Pri,
             "127.0.0.1:9".parse().unwrap(),
             net,
             store.clone(),
@@ -980,8 +866,8 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        // ALL n pre-seed calls landed in pri:{w1} — none lost to a watermark
-        // collision. Pre-fix only ~5 survived.
+        // ALL n pre-seed calls landed in pri:{w1} — none lost to an apply-gate
+        // collision. Pre-fix only the first survived.
         for i in 0..n {
             let cr = format!("w1|{i}|t");
             assert!(
@@ -990,12 +876,12 @@ mod tests {
                     .await
                     .unwrap()
                     .is_some(),
-                "call {i} must be re-hydrated into pri:{{w1}} (idle timer must not truncate a progressing bootstrap)",
+                "call {i} must be re-hydrated into pri:{{w1}} (no client-side apply-gate to drop it)",
             );
         }
         assert!(
             status.borrow().bootstrap_complete,
-            "terminal Noop observed ⇒ bootstrap-complete (not a best-effort timeout)",
+            "first catch-up Noop observed ⇒ bootstrap-complete",
         );
     }
 }

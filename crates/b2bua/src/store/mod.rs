@@ -11,7 +11,9 @@ mod call_store;
 mod memory;
 mod terminate_writer;
 
-pub use call_store::{partition_of, CallStore, PartitionRole, PropagateDirection, PutOpts, StoreError};
+pub use call_store::{
+    partition_of, role_of, CallStore, PartitionRole, PropagateDirection, PutOpts, StoreError,
+};
 pub use memory::InMemoryCallStore;
 pub use terminate_writer::BufferedTerminateWriter;
 
@@ -206,7 +208,7 @@ impl CallState {
     /// a no-op for non-proxied calls that carry no `topology`.
     pub fn update(&self, mut call: Call) {
         if let Some(t) = call.topology.as_mut() {
-            match partition_of(&self.self_ordinal, &call.call_ref).0 {
+            match role_of(&self.self_ordinal, &call.call_ref) {
                 PartitionRole::Primary => t.gen += 1,
                 PartitionRole::Backup => t.bak_gen += 1,
             }
@@ -280,15 +282,15 @@ impl CallState {
         );
     }
 
-    /// **Local-only handback teardown** (ADR-0011 X11): drop a live acting-backup
+    /// **Local-only self-release teardown** (ADR-0014): drop a live acting-backup
     /// **takeover copy** from the in-memory map + routing index + takeover set,
     /// with **no** store mutation and **no** replication propagation — unlike
     /// [`remove`](Self::remove), which propagates a delete. The call lives on at
     /// its reclaiming primary (which is the node now forward-refreshing this
-    /// node's backup `Element`); this node merely sheds the active role. The
-    /// router pairs this with timer / txn / dispatch teardown (it owns those).
-    /// Returns `true` if a live copy was actually dropped (so the caller meters /
-    /// CDRs the handback exactly once).
+    /// node's backup `Element`); this node merely sheds the active role once the
+    /// transaction(s) it served reached a terminal state. The router pairs this
+    /// with timer / txn / dispatch teardown (it owns those). Returns `true` if a
+    /// live copy was actually dropped (so the caller meters the self-release once).
     pub fn drop_local(&self, call_ref: &str) -> bool {
         let mut inner = self.inner.lock().unwrap();
         let present = inner.calls.remove(call_ref).is_some();
@@ -375,13 +377,31 @@ impl CallState {
     /// not already resident (ADR-0011 X11). Returns `true` when just inserted —
     /// the router then re-arms its timers exactly once. Idempotent: a call
     /// already live (re-served, or never lost) is left untouched.
+    ///
+    /// On insert it also re-establishes the replica's denormalised backup from the
+    /// call's authoritative `topology.bak` (ADR-0014 #4): the reboot-reclaim
+    /// hydration imports the body via the peerless `PutOpts::default()`, leaving
+    /// `CallMeta.backup == None` and the call invisible to its backup's bootstrap
+    /// scan until the next keepalive re-flush — re-establishing it here closes that
+    /// un-backed-up window the instant the call is re-served.
     pub fn materialize_if_absent(&self, call: Call) -> bool {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.calls.contains_key(&call.call_ref) {
-            return false;
+        let backup = call
+            .topology
+            .as_ref()
+            .map(|t| t.bak.clone())
+            .filter(|b| !b.is_empty());
+        let call_ref = call.call_ref.clone();
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.calls.contains_key(&call.call_ref) {
+                return false;
+            }
+            Self::reindex(&mut inner, &call);
+            inner.calls.insert(call.call_ref.clone(), call);
         }
-        Self::reindex(&mut inner, &call);
-        inner.calls.insert(call.call_ref.clone(), call);
+        if let (Some(repl), Some(backup)) = (self.repl_store.as_ref(), backup) {
+            repl.reestablish_backup(&call_ref, &backup);
+        }
         true
     }
 

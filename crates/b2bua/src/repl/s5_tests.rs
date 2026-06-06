@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use repl_net::frame::Watermark;
+use repl_net::frame::{Partition, Watermark};
 use repl_net::transport::{Fault, ReplicationNetwork, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 use topology::{Membership, Peer, SimulatedMembership};
@@ -282,7 +282,10 @@ async fn watermark_retention_pulls_only_deltas() {
             .unwrap();
     }
     tick(50).await;
-    let w_after_3 = sup.watermark("A");
+    // The data B holds for A rides the **Backup** flow (B backs up A's Forward-
+    // flushed calls); its watermark is the one that tracks these deltas (the
+    // Reclaim flow's cursor is over A's empty `bak:{B}` keyspace).
+    let w_after_3 = sup.flow_watermark("A", Partition::Bak);
     assert_eq!(w_after_3, Watermark::new(1, 3), "B tailed 3 entries");
 
     // Cut, then add 2 more while disconnected.
@@ -309,7 +312,7 @@ async fn watermark_retention_pulls_only_deltas() {
             "call {i} converged on B"
         );
     }
-    assert_eq!(sup.watermark("A"), Watermark::new(1, 5), "W at head after deltas");
+    assert_eq!(sup.flow_watermark("A", Partition::Bak), Watermark::new(1, 5), "W at head after deltas");
     let _ = (a.ordinal, b.ordinal);
 }
 
@@ -392,14 +395,16 @@ async fn topology_add_remove_readd() {
         b.store.get_call(BAK, "A", &c1).await.unwrap().as_deref(),
         Some(&b"x1"[..])
     );
-    let w_before_remove = sup.watermark("A");
+    // The backup data B holds for A rides the Backup flow; its watermark tracks
+    // these deltas (Reclaim is over A's empty `bak:{B}`).
+    let w_before_remove = sup.flow_watermark("A", Partition::Bak);
     assert_eq!(w_before_remove, Watermark::new(1, 1));
 
     // Remove A → puller parks; W retained.
     membership.remove("A");
     tick(50).await;
     assert!(!sup.is_running("A"), "puller parked on Removed");
-    assert_eq!(sup.watermark("A"), w_before_remove, "W retained across Park");
+    assert_eq!(sup.flow_watermark("A", Partition::Bak), w_before_remove, "W retained across Park");
 
     // While parked, A adds another call.
     let c2 = cref("A", "2");

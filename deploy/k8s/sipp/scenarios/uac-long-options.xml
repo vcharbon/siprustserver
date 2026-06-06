@@ -107,7 +107,7 @@
        sets `hold_done` truthy once we've replied to 4 OPTIONS, and
        the `nop test=...` branches to `end_hold` instead of looping. -->
   <label id="hold_loop"/>
-  <recv request="OPTIONS" crlf="true" timeout="350000" ontimeout="end_hold"/>
+  <recv request="OPTIONS" crlf="true" timeout="420000" ontimeout="end_hold"/>
   <send>
     <![CDATA[
       SIP/2.0 200 OK

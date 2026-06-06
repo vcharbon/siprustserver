@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 use repl_net::transport::{CapturedFrame, Direction};
-use repl_net::{Frame, Op, Partition, PullMode};
+use repl_net::{Frame, Op, Partition};
 
 /// A non-frame timeline event injected by the harness (crash / reboot /
 /// partition / heal / put / delete), stamped with the recording clock.
@@ -171,6 +171,9 @@ impl ReplReport {
                     let from =
                         lane_map.get(&f.from).cloned().unwrap_or_else(|| f.from.to_string());
                     let to = lane_map.get(&f.to).cloned().unwrap_or_else(|| f.to.to_string());
+                    // The ephemeral (puller) endpoint — the one that is NOT a
+                    // fixed listen lane — identifies the connection; color by it.
+                    let ephemeral = if self.lanes.contains_key(&f.from) { f.to } else { f.from };
                     rows.push(SeqRow {
                         at_ms: f.at_ms,
                         seq,
@@ -178,6 +181,7 @@ impl ReplReport {
                         to: Some(to),
                         label: frame_summary(&f.frame),
                         detail: None,
+                        conn: Some(format!(":{}", ephemeral.port())),
                         kind: RowKind::Repl { delivered: true },
                     });
                 }
@@ -189,6 +193,7 @@ impl ReplReport {
                         to: None,
                         label: marker_label(m),
                         detail: (!m.detail.is_empty()).then(|| m.detail.clone()),
+                        conn: None,
                         kind: RowKind::Lifecycle,
                     });
                 }
@@ -254,23 +259,21 @@ impl ReplReport {
 /// A compact one-line summary of a replication frame for the diagram.
 pub fn frame_summary(frame: &Frame) -> String {
     match frame {
-        Frame::PullRequest { mode, since, chunk, caller, .. } => {
-            let m = match mode {
-                PullMode::Replog => "Replog",
-                PullMode::Bootstrap => "Bootstrap",
+        Frame::PullRequest { partition, since, caller, .. } => {
+            // The flow the socket opens: Reclaim (Pri) vs Backup (Bak). `since ==
+            // (0,0)` ⇒ scan-then-tail bootstrap, else a warm tail.
+            let p = match partition {
+                Partition::Pri => "Reclaim",
+                Partition::Bak => "Backup",
             };
             format!(
-                "PullRequest[{m}] caller={caller} since=({},{}) chunk={chunk}",
+                "PullRequest[{p}] caller={caller} since=({},{})",
                 since.gen, since.counter
             )
         }
-        Frame::Ack { caller, up_to } => {
-            format!("Ack caller={caller} up_to=({},{})", up_to.gen, up_to.counter)
-        }
         Frame::Data { at, op, partition, call_ref, call_gen, call_bgen, body, .. } => {
             let o = match op {
-                Op::Create => "Create",
-                Op::Update => "Update",
+                Op::Put => "Put",
                 Op::Delete => "Delete",
             };
             let p = match partition {

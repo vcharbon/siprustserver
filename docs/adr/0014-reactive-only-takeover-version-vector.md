@@ -4,7 +4,11 @@
 **Amends:** ADR-0011 Decision X11 — removes the *eager* (membership-driven) takeover
 and the *`Deactivate` watermark handshake*; **keeps** reactive takeover; **replaces**
 LWW-by-`gen` reconciliation with a per-context `(primary, backup)` version vector.
+**Also amends ADR-0011 X4/X9** — the re-hydration "single pull stream" and the
+`Bootstrap`/`Replog` two-request handshake are **replaced** by two independent
+single-flow sockets (§Stream topology below) with a trimmed wire message set.
 **Plan of record:** [docs/plan/passive-backup-reclaim-strategy.md](../plan/passive-backup-reclaim-strategy.md).
+**Implementation task list:** [docs/plan/0014-rehydration-simplification-tasks.md](../plan/0014-rehydration-simplification-tasks.md).
 
 ---
 
@@ -71,6 +75,100 @@ primary+backup mutations (a latent equal-`gen` divergence).
 
 6. **Take slack.** UAC `recv OPTIONS` timeout 350 s → 420 s (300 s keepalive +
    120 s for kill+restart+rehydrate+smoothed-drain); `reboot_budget_sec` 450 → 600.
+
+## Stream topology — two flows, two sockets (amends ADR-0011 X4)
+
+The single per-peer connection that multiplexed both partitions behind one
+watermark (and the `Bootstrap`→`Replog` two-request dance on it) is gone. It
+straddled the two directions behind one cursor — the source of the cold-Replog
+watermark collision that capped re-hydration at ~203/3000 — and conflated the
+*global* changelog position with the *per-call* `(p,b)`. From a node N's view:
+
+7. **Two streams, two sockets, distinct watermarks.** Each peer pair runs two
+   single-flow sockets to distinct endpoints (no multiplexing):
+
+   | Stream | N pulls | wire `partition` | store | timers | N's `(p,b)` role |
+   |---|---|---|---|---|---|
+   | **Reclaim** | calls **N is primary** for, a peer backed up | `Pri` | `pri:{N}` | **arm** | **primary** |
+   | **Backup**  | calls a **peer is primary** for, N backs up | `Bak` | `bak:{peer}` | **none** | **backup** |
+
+   Both are **permanent**: Reclaim `= bootstrap(reclaim my calls) → tail(catch a
+   post-partition reverse-flush a live-but-partitioned primary missed)`; Backup
+   `= bootstrap(load the peer's calls I back up) → tail(forward updates)`. Same
+   FSM shape, parameterised only by `{store partition, arm-timers?, role}`; one
+   shared reconnect/recovery path on a cut.
+
+8. **One changelog, two partition-filtered cursors; watermark ⟂ `(p,b)`.** A node
+   keeps **one** changelog (one `(gen,counter)` space). Each flow holds its own
+   cursor, advanced only by frames of its partition. The watermark is **purely**
+   a changelog position — never read from or written to a call's `(p,b)`. Each
+   flow's `bootstrap` is a **store scan** (mandatory: a created-then-quiescent
+   call's changelog entry compacts away, so only the scan is a complete snapshot),
+   capturing `W = head at scan-start`, then the partition-filtered tail.
+
+9. **Inbound apply is changelog-silent (loopback prevention).** Applying a received
+   `Data` frame mutates the store but **never appends to the local changelog**.
+   Only a **locally-originated** mutation (N processing a call it serves — as
+   primary, or as acting-backup during a takeover) appends. A change N received as
+   a backup therefore has no local changelog entry and can never be re-served to
+   the peer that sent it. The puller's *cursor* still advances (its job, private);
+   the *changelog* does not. (`put_call(peer:None)` must honour this — invariant +
+   test.)
+
+10. **Unified server send loop** (both flows, parameterised by `(partition,caller)`):
+    a **pure `sleep` poll** (the `Notify`/subscriber/`Subscription` machinery is
+    **deleted** — one mechanism, less state; ≤100ms latency, tunable lower). Each
+    tick drains its sub-log range `(since,..]` taking **`limit+1` (=501)**: while
+    `>500` pending, stream `Data` back-to-back to fill the TCP buffer (no Noop, no
+    sleep — each `Data` carries its own `at`, so the cursor rides the data); at
+    `≤500`, flush the remainder and sleep. A **`Noop` is emitted only on the catch-up
+    edge** (drained to head — the *first* such Noop sets the puller's sticky
+    `current` flag = "mostly caught up") **and on a ~20s idle floor** (liveness). A
+    trickle needs no Noop.
+
+    The drain is cheap by design (it runs ~10 Hz × peers × 2 flows): the per-peer
+    changelog splits into **per-partition compacted sub-logs** (one
+    `counter→callRef` BTreeMap + `by_ref` + `retained_floor` each), so a flow drains
+    only its partition with **no cross-partition filtering** and the old
+    `(role,primary)`-regroup/`retain` dance is gone. `Op` is **`{Put, Delete}`**
+    (Create/Update merged → idempotent `Put`); `bump` does an `O(log L)` move (drop
+    old counter, insert at the max) that bounds the log to the live set; apply is
+    idempotent under the `(p,b)` gate. `needs_reset` is per-`(peer,partition)`.
+
+11. **Readiness = Reclaim-first-Noop only.** `Ready` ⇔ every **Reclaim** stream to a
+    *reachable* peer hit its first Noop (hard-timer bounded — a dead peer cannot hang
+    readiness). **Backup** streams are opened only *after* `Ready`, are
+    fire-and-forget, and **never gate** readiness (observable via the store + a
+    received-non-Noop-frame counter, not a readiness sub-state). A cold node with no
+    calls reaches `Ready` at once (empty scan → immediate terminal Noop). The
+    **server** side is independent of local readiness: a NotReady node still answers
+    peers' pulls — it simply has nothing to hand over until it processes calls.
+
+12. **Wire message set (trimmed).** Pre-production, so tags renumber freely + proto
+    version bumps. Frames:
+
+    | Frame | Dir | Fields | Role |
+    |---|---|---|---|
+    | **PullRequest** | C→S | `proto_ver, caller, partition, since` | Open one flow. Bootstrap is **implicit** when `since==(0,0)`; else tail. |
+    | **Data** | S→C | `at, op, partition, call_ref, p, b, body_ttl_ms, indexes, body?` | One mutation. `op∈{Put,Delete}` — **Create and Update are merged into one idempotent `Put`** (carries a body); `Delete` carries none (delete-wins). |
+    | **Noop** | S→C | `at` | Catch-up edge (first ⇒ ready) + 20s idle keepalive. |
+    | **ResetToBootstrap** | S→C | `reason` | `since` fell below the compacted tail → re-bootstrap from `(0,0)`. |
+
+    **Removed:** `Ack` (was a no-op retention hint — retention now bounded by
+    time/size, a too-slow puller re-bootstraps via `ResetToBootstrap`); the
+    `PullMode` enum + the `Bootstrap`/`Replog` two-request handshake (collapsed into
+    the `since==(0,0)` rule); `Deactivate`/tag 5 (already retired — ensure no
+    vestige). **Every removed message and its dead handler/branch MUST be gone from
+    the codebase when the plan completes** (task list, §Removals).
+
+### Keepalive smoothing under the two-stream model
+
+Smoothing (§4) is **lifecycle-wide**, not bootstrap-special-cased: whenever timers
+are re-created for past-due keepalives, stagger them oldest-first. The Reclaim
+*bootstrap* is merely the largest instance (the whole `pri:{N}` partition at once);
+a single Reclaim *tail* straggler arms immediately (one call is not a flood). It
+remains **performance-only** — `(p,b)` makes any incidental keepalive overlap
+non-corrupting, so there is no correctness dependence and no settle/handback floor.
 
 ## Self-release mechanism (implementation)
 

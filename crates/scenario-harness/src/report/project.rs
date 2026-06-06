@@ -121,6 +121,7 @@ fn project_entry(e: &RecordedSipEntry, base: i64) -> SeqRow {
         to: Some(e.to.to_string()),
         label: facets(&e.raw).label,
         detail: Some(detail),
+        conn: None,
         kind: RowKind::Sip {
             delivered: e.delivered,
         },

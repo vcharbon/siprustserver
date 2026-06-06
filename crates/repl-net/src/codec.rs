@@ -13,7 +13,7 @@ use rmp::decode::{self, NumValueReadError, ValueReadError};
 use rmp::encode;
 use rmp::Marker;
 
-use crate::frame::{tag, Frame, Op, Partition, PullMode, UnknownDiscriminant, Watermark};
+use crate::frame::{tag, Frame, Op, Partition, UnknownDiscriminant, Watermark};
 
 /// Failure decoding a single replication frame. Every malformed input lands
 /// here as a typed error — the decoder never panics.
@@ -79,25 +79,16 @@ fn write_frame(buf: &mut Vec<u8>, frame: &Frame) {
         Frame::PullRequest {
             proto_ver,
             caller,
-            mode,
+            partition,
             since,
-            chunk,
         } => {
-            encode::write_array_len(buf, 7).unwrap();
+            encode::write_array_len(buf, 6).unwrap();
             encode::write_uint(buf, tag::PULL_REQUEST).unwrap();
             encode::write_uint(buf, *proto_ver as u64).unwrap();
             encode::write_str(buf, caller).unwrap();
-            encode::write_uint(buf, mode.as_u8() as u64).unwrap();
+            encode::write_uint(buf, partition.as_u8() as u64).unwrap();
             encode::write_uint(buf, since.gen).unwrap();
             encode::write_uint(buf, since.counter).unwrap();
-            encode::write_uint(buf, *chunk as u64).unwrap();
-        }
-        Frame::Ack { caller, up_to } => {
-            encode::write_array_len(buf, 4).unwrap();
-            encode::write_uint(buf, tag::ACK).unwrap();
-            encode::write_str(buf, caller).unwrap();
-            encode::write_uint(buf, up_to.gen).unwrap();
-            encode::write_uint(buf, up_to.counter).unwrap();
         }
         Frame::Data {
             at,
@@ -166,7 +157,6 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Frame, ReplCodecError> {
     let tag = read_u64(&mut rd, "tag")?;
     match tag {
         tag::PULL_REQUEST => decode_pull_request(&mut rd, len),
-        tag::ACK => decode_ack(&mut rd, len),
         tag::DATA => decode_data(&mut rd, len),
         tag::NOOP => decode_noop(&mut rd, len),
         tag::RESET_TO_BOOTSTRAP => decode_reset(&mut rd, len),
@@ -184,30 +174,17 @@ fn expect_len(got: u32, want: u32, frame: &'static str) -> Result<(), ReplCodecE
 }
 
 fn decode_pull_request(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
-    expect_len(len, 7, "PullRequest")?;
+    expect_len(len, 6, "PullRequest")?;
     let proto_ver = read_u16(rd, "proto_ver")?;
     let caller = read_str(rd, "caller")?;
-    let mode = PullMode::from_u8(read_u8(rd, "mode")?)?;
+    let partition = Partition::from_u8(read_u8(rd, "partition")?)?;
     let since_gen = read_u64(rd, "since_gen")?;
     let since_counter = read_u64(rd, "since_counter")?;
-    let chunk = read_u32(rd, "chunk")?;
     Ok(Frame::PullRequest {
         proto_ver,
         caller,
-        mode,
+        partition,
         since: Watermark::new(since_gen, since_counter),
-        chunk,
-    })
-}
-
-fn decode_ack(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
-    expect_len(len, 4, "Ack")?;
-    let caller = read_str(rd, "caller")?;
-    let gen = read_u64(rd, "up_to_gen")?;
-    let counter = read_u64(rd, "up_to_counter")?;
-    Ok(Frame::Ack {
-        caller,
-        up_to: Watermark::new(gen, counter),
     })
 }
 
@@ -298,10 +275,6 @@ fn read_array_len(rd: &mut &[u8], at: &'static str) -> Result<u32, ReplCodecErro
 }
 
 fn read_u64(rd: &mut &[u8], at: &'static str) -> Result<u64, ReplCodecError> {
-    decode::read_int(rd).map_err(|e| map_nvre(e, at))
-}
-
-fn read_u32(rd: &mut &[u8], at: &'static str) -> Result<u32, ReplCodecError> {
     decode::read_int(rd).map_err(|e| map_nvre(e, at))
 }
 

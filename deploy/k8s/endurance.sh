@@ -190,6 +190,15 @@ ensure_baseline() {
 snap_success() { vmq 'sum(sipp_successful_calls_total{role=~"long|short"})'; }
 snap_failed()  { vmq 'sum(sipp_failed_calls_total{role=~"long|short"})'; }
 snap_conc()    { vmq 'sum(sipp_current_calls)'; }
+# Role-scoped variants. A reboot must be judged on LONG-hold survival SEPARATELY
+# from short-call success: long dialogs (OPTIONS-keepalive holds) span the reboot,
+# so their loss is the true HA signal, whereas short calls (30s hold) churn so
+# fast at 100cps that their success% drowns long-call loss out of any blended
+# figure (a reboot can lose ~100% of a worker's long dialogs yet still score
+# ~95% blended). See reboot_event.
+snap_failed_role()  { vmq "sum(sipp_failed_calls_total{role=\"$1\"})"; }
+snap_success_role() { vmq "sum(sipp_successful_calls_total{role=\"$1\"})"; }
+snap_created_role() { vmq "sum(sipp_calls_created_total{role=\"$1\"})"; }
 # B2BUA-side live dialog count + the GHOST GAP (calls the B2BUA still holds that
 # SIPp has already abandoned). The gap cancels baseline level/ramp, so it is the
 # robust leak signal: a healthy system keeps b2bua_active ≈ sipp_current (gap ~0
@@ -283,6 +292,118 @@ sip_chaos_limiter_conc{type=\"$type\"} $c1"
   fi
 }
 
+# reboot_event = the ADR-0014 verification. A b2bua worker REBOOT (kill → the
+# StatefulSet recreates the same pod → it reclaims its primary partition + the
+# backup self-releases its takeover copy on the served txn's terminal state) must
+# satisfy THREE invariants, judged SEPARATELY (long ≠ short), or it FAILS:
+#
+#   (1) SHORT SURVIVAL — short calls (30s hold, 100cps) keep resolving across the
+#       window: short success% must clear the bar. Short calls rarely span the
+#       reboot, so this mostly proves new-call admission + fast in-dialog flow.
+#   (2) LONG SURVIVAL  — the one that matters for HA: long OPTIONS-keepalive holds
+#       SPAN the reboot, so their end-of-hold in-dialog BYE lands AFTER the
+#       takeover/reclaim. long loss% = long failed / long created in-window must
+#       stay under LONG_LOSS_TOL. This is gated APART from short because at 100cps
+#       short success drowns out long loss in any blend (a reboot can lose ~100%
+#       of a worker's long dialogs and still score ~95% blended — the blind spot
+#       that masked the repl-takeover-longcall-loss regression). The observed
+#       failure: the BYE gets `481 Call/Transaction Does Not Exist` (dialog gone on
+#       the B2BUA after the reboot) → SIPp unexpected_msg.
+#   (3) NO LEAK — the GHOST GAP (b2bua_active − sipp_current) must return near
+#       baseline after reclaim settles. A gap that stays RISEN is the double-serve
+#       leak ADR-0014 killed (backup kept a live takeover copy the reclaimed primary
+#       also serves, or eager-takeover re-stormed). Same signal orphan_kill uses.
+#
+# Modes alternate graceful (rolling-restart drain: flush changelog to backup) and
+# crash (hard kill: cold reactive takeover + reclaim) so both reclaim paths run.
+REBOOT_GHOST_TOL="${REBOOT_GHOST_TOL:-300}"   # allowed ghost-gap rise (scrape skew
+                                              # + in-flight churn during reclaim at
+                                              # ~100cps short + ~1750 long-hold conc.)
+REBOOT_SETTLE="${REBOOT_SETTLE:-180}"         # post-Ready reclaim/self-release window
+LONG_LOSS_TOL="${LONG_LOSS_TOL:-5}"           # max % of long calls created in-window
+                                              # allowed to fail (transparent failover
+                                              # ⇒ ~0; the regression loses ~100% of a
+                                              # rebooted worker's long share)
+reboot_event() {
+  local idx="$1" t0 s0 f0 g0 a0 mode tgt s s1 f1 g1 a1 ds df pct rise res_pct res_leak result conc
+  local sf0 ss0 lf0 lc0 sf1 ss1 lf1 lc1 sds sdf spct ldf ldc lloss res_short res_long
+  t0="$(date +%s)"
+  s0="$(snap_success)"; f0="$(snap_failed)"; g0="$(snap_ghost)"; a0="$(snap_active)"
+  ss0="$(snap_success_role short)"; sf0="$(snap_failed_role short)"
+  lf0="$(snap_failed_role long)";   lc0="$(snap_created_role long)"
+  if [ "${REBOOT_MODE:-alternate}" = "alternate" ]; then
+    [ $(( idx % 2 )) -eq 0 ] && mode=graceful || mode=crash
+  else
+    mode="$REBOOT_MODE"
+  fi
+  [ "$mode" = "crash" ] && local grace=0 || local grace=10
+  tgt="b2bua-worker-$(( idx % WORKER_REPLICAS ))"
+  log "CHAOS #$idx: kill_worker REBOOT $tgt mode=$mode (success=$s0 failed=$f0 ghost=$g0 active=$a0)"
+  push_metric "sip_chaos_run{type=\"kill_worker\",phase=\"inject\"} 1"
+  open_window kill_worker
+  KILL_GRACE="$grace" KILL_TARGET="$tgt" WORKER_REPLICAS="$WORKER_REPLICAS" \
+    ./chaos.sh kill >>"$RUNLOG" 2>&1 || true
+  # The StatefulSet recreates the pod (same name, NEW IP); the proxy rediscovers it
+  # via the EndpointSlice informer (ADR-0012 D4) — no proxy redeploy. The /ready
+  # probe only flips once the fresh worker has reclaimed its primary partition, so
+  # "Ready again" is the reclaim gate.
+  kubectl -n "$NS" wait --for=condition=ready "pod/$tgt" --timeout=180s >>"$RUNLOG" 2>&1 || true
+  log "kill_worker: $tgt rebooted (Ready); settling ${REBOOT_SETTLE}s for reclaim + backup self-release"
+  sleep "$REBOOT_SETTLE"
+  ensure_baseline
+  # Ghost-gap FLOOR over a short window — robust to a one-scrape blip at ~100cps
+  # churn (a single instant aliases scrape skew, like orphan_event).
+  g1="$(snap_ghost)"
+  for _ in 1 2 3 4 5; do sleep 12; s="$(snap_ghost)"; g1=$(python3 -c "print(min(float('$g1'),float('$s')))"); done
+  s1="$(snap_success)"; f1="$(snap_failed)"; a1="$(snap_active)"; conc="$(snap_conc)"
+  ss1="$(snap_success_role short)"; sf1="$(snap_failed_role short)"
+  lf1="$(snap_failed_role long)";   lc1="$(snap_created_role long)"
+  close_window kill_worker
+  ds=$(python3 -c "print(max(0,int(float('$s1'))-int(float('$s0'))))")
+  df=$(python3 -c "print(max(0,int(float('$f1'))-int(float('$f0'))))")
+  pct=$(python3 -c "t=$ds+$df; print(round(100.0*$ds/t,1) if t else 100.0)")
+  rise=$(python3 -c "print(round(float('$g1')-float('$g0'),0))")
+  # SHORT survival% (counters can RESET if ensure_baseline relaunched the stream
+  # mid-window → a negative delta; clamp to 0 so a relaunch reads as n/a, not a
+  # bogus pass). LONG loss% = long-failed-delta / long-created-delta in-window.
+  sds=$(python3 -c "print(max(0,int(float('$ss1'))-int(float('$ss0'))))")
+  sdf=$(python3 -c "print(max(0,int(float('$sf1'))-int(float('$sf0'))))")
+  spct=$(python3 -c "t=$sds+$sdf; print(round(100.0*$sds/t,1) if t else 100.0)")
+  ldf=$(python3 -c "print(max(0,int(float('$lf1'))-int(float('$lf0'))))")
+  ldc=$(python3 -c "print(max(0,int(float('$lc1'))-int(float('$lc0'))))")
+  lloss=$(python3 -c "print(round(100.0*$ldf/$ldc,1) if $ldc else 0.0)")
+  local thr="${KILL_WORKER_THRESHOLD:-$PASS_THRESHOLD}"
+  res_short=$(python3 -c "print('pass' if float('$spct')>=$thr else 'fail')")
+  res_long=$(python3 -c "print('pass' if float('$lloss')<=$LONG_LOSS_TOL else 'fail')")
+  res_leak=$(python3 -c "print('pass' if float('$rise')<=$REBOOT_GHOST_TOL else 'fail')")
+  res_pct="$res_short"   # kept for the legacy sip_chaos_success_pct series
+  # Overall pass requires ALL THREE: short survival, long survival, no leak.
+  if [ "$(( ds + df ))" -eq 0 ]; then
+    result="n/a"                       # baseline streams were down — not a real pass
+  elif [ "$res_short" = pass ] && [ "$res_long" = pass ] && [ "$res_leak" = pass ]; then
+    result="pass"
+  else
+    result="fail"
+  fi
+  push_metric "sip_chaos_event{type=\"kill_worker\",result=\"$result\"} 1
+sip_chaos_success_pct{type=\"kill_worker\"} $pct
+sip_chaos_short_survival_pct{type=\"kill_worker\"} $spct
+sip_chaos_long_loss_pct{type=\"kill_worker\"} $lloss
+sip_chaos_long_failed{type=\"kill_worker\"} $ldf
+sip_chaos_long_created{type=\"kill_worker\"} $ldc
+sip_chaos_resolved{type=\"kill_worker\",outcome=\"success\"} $ds
+sip_chaos_resolved{type=\"kill_worker\",outcome=\"failed\"} $df
+sip_chaos_ghost_rise{type=\"kill_worker\"} $rise
+sip_chaos_ghost_gap{type=\"kill_worker\"} $g1"
+  printf '{"ts":%s,"event":%d,"type":"kill_worker","mode":"%s","short_survival_pct":%s,"short_ok":%d,"short_fail":%d,"long_loss_pct":%s,"long_failed":%d,"long_created":%d,"blended_success_pct":%s,"ghost_before":%s,"ghost_after":%s,"ghost_rise":%s,"active_after":%s,"concurrent":%s,"short_result":"%s","long_result":"%s","leak":"%s","result":"%s"}\n' \
+    "$t0" "$idx" "$mode" "$spct" "$sds" "$sdf" "$lloss" "$ldf" "$ldc" "$pct" "${g0%.*}" "${g1%.*}" "${rise%.*}" "${a1%.*}" "${conc%.*}" "$res_short" "$res_long" "$res_leak" "$result" >> "$EVENTS"
+  case "$result" in
+    pass) ok   "CHAOS #$idx kill_worker($mode): short ${spct}% + long-loss ${lloss}%(tol ${LONG_LOSS_TOL}) + NO leak (ghost rise ${rise}) — PASS" ;;
+    n/a)  warn "CHAOS #$idx kill_worker($mode): no baseline calls resolved (streams down?) — n/a" ;;
+    *)    warn "CHAOS #$idx kill_worker($mode): FAILURE — short ${spct}%/${thr}% ($res_short); LONG-LOSS ${lloss}% > ${LONG_LOSS_TOL}% ($res_long, ${ldf}/${ldc} long calls); leak ghost rise ${rise} ($res_leak)" ;;
+  esac
+}
+
 # Record one chaos event: snapshot baseline outcomes, run it, settle, snapshot
 # again, compute the success% of calls that resolved across the window, push a
 # metric + append a JSONL row. Flags result=fail if below PASS_THRESHOLD.
@@ -296,6 +417,9 @@ chaos_event() {
   if [ "$type" = "limiter_kill" ] || [ "$type" = "limiter_netcut" ]; then
     limiter_event "$type" "$idx"; return
   fi
+  # kill_worker = a b2bua REBOOT: asserts the ADR-0014 invariants (survival +
+  # no double-serve leak), not just baseline success% — see reboot_event.
+  if [ "$type" = "kill_worker" ]; then reboot_event "$idx"; return; fi
   local t0 s0 f0 s1 f1 ds df pct result conc
   t0="$(date +%s)"
   s0="$(snap_success)"; f0="$(snap_failed)"
@@ -305,19 +429,6 @@ chaos_event() {
 
   local tgt
   case "$type" in
-    kill_worker)
-      tgt="b2bua-worker-$(( idx % WORKER_REPLICAS ))"
-      # Graceful kill so the worker flushes its changelog to the backup before
-      # exit (in-dialog BYEs survive). KILL_MODE=crash forces a hard kill.
-      [ "${KILL_MODE:-graceful}" = "crash" ] && KILL_GRACE=0 || KILL_GRACE=10
-      KILL_GRACE="$KILL_GRACE" KILL_TARGET="$tgt" WORKER_REPLICAS="$WORKER_REPLICAS" \
-        ./chaos.sh kill >>"$RUNLOG" 2>&1 || true
-      # The StatefulSet recreates the pod with a NEW IP; the proxy discovers
-      # workers from k8s EndpointSlices (ADR-0012 D4) and picks up the new IP on
-      # its own — NO proxy redeploy / PROXY_WORKERS refresh needed. This redeploy
-      # used to be what kept the run from going single-worker after a kill; the
-      # informer now self-heals it. Just wait for the worker to be Ready again.
-      kubectl -n "$NS" wait --for=condition=ready "pod/$tgt" --timeout=150s >>"$RUNLOG" 2>&1 || true ;;
     kill_proxy)
       ./chaos.sh proxykill >>"$RUNLOG" 2>&1 || true ;;
     peak)
@@ -365,11 +476,37 @@ sip_chaos_resolved{type=\"$type\",outcome=\"failed\"} $df"
 
 wireup() {
   mkdir -p "$RUN_DIR"
-  log "wireup: rebuilding sipp:dev (with python3 exporter) + loading into kind"
-  docker build -t sipp:dev "$SIPP_DIR" >>"$RUNLOG" 2>&1
-  kind load docker-image sipp:dev --name "$CLUSTER" >>"$RUNLOG" 2>&1
+  local SUT_IMAGE="${SUT_IMAGE:-siprustserver:dev}"
+  local KEEPALIVED_IMAGE="${KEEPALIVED_IMAGE:-siprustserver-keepalived:dev}"
+  # Rebuild the SUT (b2bua worker + front-proxy) image from CURRENT source. The
+  # previous wireup rebuilt ONLY sipp:dev, so on an existing cluster the b2bua
+  # binary was never refreshed — a 14h-old worker pod kept running and the
+  # uncommitted ADR-0014 repl changes were silently NOT under test (the whole
+  # point of the run). Build the SAME three images `run.sh up` builds so wireup
+  # deploys exactly what a fresh cluster start would. (SKIP_BUILD=1 to reuse.)
+  if [ "${SKIP_BUILD:-0}" != "1" ]; then
+    log "wireup: building SUT image $SUT_IMAGE (current source) + keepalived + sipp:dev"
+    docker build -f "$REPO_ROOT/deploy/docker/Dockerfile" -t "$SUT_IMAGE" "$REPO_ROOT" >>"$RUNLOG" 2>&1
+    docker build -f "$REPO_ROOT/deploy/docker/Dockerfile.keepalived" -t "$KEEPALIVED_IMAGE" "$REPO_ROOT" >>"$RUNLOG" 2>&1
+    docker build -t sipp:dev "$SIPP_DIR" >>"$RUNLOG" 2>&1
+    log "wireup: loading images into kind"
+    kind load docker-image "$SUT_IMAGE" --name "$CLUSTER" >>"$RUNLOG" 2>&1
+    kind load docker-image "$KEEPALIVED_IMAGE" --name "$CLUSTER" >>"$RUNLOG" 2>&1
+    kind load docker-image sipp:dev --name "$CLUSTER" >>"$RUNLOG" 2>&1
+  fi
   log "wireup: deploy stack (repl on, ${WORKER_REPLICAS} workers) — same path as cluster start"
   REPL_ENABLE=1 WORKER_REPLICAS="$WORKER_REPLICAS" OBS_ENABLE="${OBS_ENABLE:-1}" ./run.sh deploy >>"$RUNLOG" 2>&1
+  # imagePullPolicy=IfNotPresent + an unchanged image tag means `kubectl apply`
+  # will NOT restart pods onto the freshly-loaded image. Force a rollout so the
+  # new binary actually runs, then wait Ready before driving any traffic — else
+  # we'd repeat the stale-binary trap above.
+  if [ "${SKIP_BUILD:-0}" != "1" ]; then
+    log "wireup: rolling workers/proxy/uas onto the freshly-built image"
+    kubectl -n "$NS" rollout restart statefulset/b2bua-worker deploy/sip-front-proxy deploy/sipp-uas >>"$RUNLOG" 2>&1 || true
+    kubectl -n "$NS" rollout status statefulset/b2bua-worker --timeout=300s >>"$RUNLOG" 2>&1 || true
+    kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout=180s >>"$RUNLOG" 2>&1 || true
+    kubectl -n "$NS" rollout status deploy/sipp-uas --timeout=180s >>"$RUNLOG" 2>&1 || true
+  fi
   log "wireup: (re)load observability dashboards/scrape"
   [ -x "$OBS_DIR/install.sh" ] && "$OBS_DIR/install.sh" --apply >>"$RUNLOG" 2>&1 || true
   ok "wireup complete"
@@ -407,7 +544,16 @@ run() {
   sleep "$CLUSTER_SETTLE"
   start_baseline
 
-  local cycle=(orphan_kill kill_worker kill_proxy peak limiter_kill limiter_netcut)
+  local cycle
+  if [ "${REBOOT_FOCUS:-0}" = "1" ]; then
+    # Reboot-focused run: every chaos event is a b2bua worker reboot (modes
+    # alternate graceful/crash inside reboot_event), to hammer the ADR-0014
+    # takeover/reclaim/self-release path.
+    cycle=(kill_worker)
+    log "REBOOT_FOCUS=1 — chaos cycle is b2bua worker reboot only (graceful/crash alternating)"
+  else
+    cycle=(orphan_kill kill_worker kill_proxy peak limiter_kill limiter_netcut)
+  fi
   local start now idx=0
   start="$(date +%s)"
   # Let the steady state build before the first event.

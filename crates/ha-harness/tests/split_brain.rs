@@ -25,7 +25,7 @@
 
 use std::time::Duration;
 
-use ha_harness::{backup_is, cref, HaCluster, PartitionRole, Peer, Watermark};
+use ha_harness::{backup_is, cref, HaCluster, Partition, PartitionRole, Peer, Watermark};
 
 const BAK: PartitionRole = PartitionRole::Backup;
 
@@ -65,7 +65,7 @@ async fn long_split_brain_delete_restored_without_reboot() {
     cl.put("A", &gone, b"g1".to_vec(), 1, 0, &backup_is("B")).await;
     cl.advance(ms(200)).await;
     assert_eq!(cl.node("B").get(BAK, "A", &gone).await.as_deref(), Some(&b"g1"[..]));
-    let w_before = cl.node("B").watermark("A");
+    let w_before = cl.node("B").flow_watermark("A", Partition::Bak);
     assert_eq!(w_before, Watermark::new(1, 1), "B tailed the call");
 
     // --- sever B's view of A (park puller, retain store + W); delete on A ---
@@ -78,7 +78,7 @@ async fn long_split_brain_delete_restored_without_reboot() {
     cl.advance(secs(40)).await;
     cl.node("A").reap(cl.now_ms()).await;
     assert_eq!(
-        cl.node("B").watermark("A"),
+        cl.node("B").flow_watermark("A", Partition::Bak),
         w_before,
         "B's watermark is retained across the cutover (no reboot)"
     );
@@ -106,7 +106,7 @@ async fn long_split_brain_delete_restored_without_reboot() {
     // The watermark re-advanced (reset to (0,0) on ResetToBootstrap, then climbed
     // back via the re-bootstrap + tail — proof it did not stay stuck at w_before).
     assert!(
-        cl.node("B").watermark("A") > w_before,
+        cl.node("B").flow_watermark("A", Partition::Bak) > w_before,
         "watermark un-stuck: reset then re-advanced past the old floor"
     );
 }

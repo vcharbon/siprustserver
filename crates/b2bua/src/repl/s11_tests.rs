@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 use call::{Call, CallBodyCodec, MsgpackCodec};
 use sip_clock::Clock;
+use sip_message::generators::{generate_response, GenerateResponseOpts};
+use sip_message::message_helpers::get_header;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
 
@@ -58,6 +60,27 @@ fn invite(pri: &str, bak: &str, cid: &str) -> SipRequest {
          Call-ID: {cid}@10.0.0.9\r\n\
          CSeq: 1 INVITE\r\n\
          Contact: <sip:alice@10.0.0.9:5060>\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+        SipMessage::Request(r) => r,
+        _ => panic!("expected a request"),
+    }
+}
+
+/// The end-of-hold in-dialog BYE the UAC sends after its keepalive hold — the
+/// request that resolves to the same `callRef` as [`invite`] (same Call-ID +
+/// alice tag) and, on the rebooted primary, gets the 481. `CSeq: 2 BYE` mirrors
+/// the endurance `-trace_err` log (the BYE is the 2nd request of the dialog).
+fn bye(cid: &str) -> SipRequest {
+    let raw = format!(
+        "BYE sip:bob@example.com SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-bye-{cid}\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:alice@example.com>;tag=alicetag\r\n\
+         To: <sip:bob@example.com>;tag=bobtag\r\n\
+         Call-ID: {cid}@10.0.0.9\r\n\
+         CSeq: 2 BYE\r\n\
          Content-Length: 0\r\n\r\n"
     );
     match CustomParser::new().parse(raw.as_bytes()).unwrap() {
@@ -165,5 +188,171 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
     assert!(
         state.peek_reclaimable("w5|other|t").await.is_none(),
         "a ref whose primary isn't us is not reclaimable here"
+    );
+}
+
+// ===========================================================================
+// REPRODUCTION — the endurance "long-hold dialogs die on B2BUA reboot" defect
+// (study `deploy/k8s/results/endurance-20260605-165318/long-call-failure-study.html`).
+//
+// The two tests below recreate, at this exact seam, the decision that produces
+// the `481 Call/Transaction Does Not Exist` on the end-of-hold BYE. They split
+// the failure into its TWO underlying conditions so we can reason about the fix
+// separately — because the recommended fix only addresses ONE of them.
+//
+// Causal chain (verified in the study, store/mod.rs:160 + router.rs:496,636):
+//   reboot → reclaim incomplete → BYE routed back to the (Ready) primary →
+//   hydrate_from_replica sees a PRIMARY-role miss → returns None (store/mod.rs:170)
+//   → process() falls into maybe_reject_orphan (router.rs:527,636) → 481.
+// ===========================================================================
+
+/// CASE A — the body WAS pulled into `pri:{self}` but never materialised (the
+/// flip-race straggler: the one-shot `reclaim_all` already swept before the
+/// import landed, and only a backup reverse-flush `ReclaimCall` — never an
+/// arriving in-dialog request — re-materialises a post-sweep straggler). The
+/// call is fully present on THIS node, yet the BYE still 481s.
+///
+/// This is the case the recommended fix (wire `peek_reclaimable` into the
+/// primary-role branch) would actually recover — see the closing assertion.
+#[tokio::test]
+async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
+    let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
+    // The rebooted node is the call's OWN primary (w0).
+    let state = call_state("w0", repl.clone());
+
+    // A long-hold call w0 owns. After reboot its body is present in pri:w0 (the
+    // bootstrap delivered it) but it was NOT materialised into the live map.
+    let call = build_initial_call(&invite("w0", "w1", "cid-long"), src(), &config_for("w0"), 0);
+    let r = call.call_ref.clone();
+    assert!(r.starts_with("w0|"), "call_ref encodes w0 as the primary");
+    put(&repl, PRI, "w0", &call).await; // pri:w0 body present …
+    assert!(state.peek(&r).is_none(), "… but the live map MISSES it (un-reclaimed)");
+
+    // The end-of-hold BYE arrives. The router resolves it through exactly this
+    // call — `process()` (router.rs:496) on an in-dialog request.
+    let resolved = state.hydrate_from_replica(&r).await;
+    assert!(
+        resolved.is_none(),
+        "REPRO: a primary-role miss returns None (store/mod.rs:170) → \
+         maybe_reject_orphan → 481 on the BYE — the endurance long-call loss"
+    );
+
+    // Render the LITERAL response the UAC receives — exactly what
+    // `maybe_reject_orphan` (router.rs:640) emits when the resolve above is None.
+    // This is the message in the endurance `/uac-long-options_1_errors.log`.
+    let the_481 = generate_response(
+        &bye("cid-long"),
+        481,
+        "Call/Transaction Does Not Exist",
+        &GenerateResponseOpts::default(),
+    );
+    eprintln!(
+        "\n──── actual message the UAC receives for its end-of-hold BYE ────\n\
+         SIP/2.0 {} {}\n  CSeq: {} {}\n  Call-ID: {}\n\
+         ────────────────────────────────────────────────────────────────\n",
+        the_481.status,
+        the_481.reason,
+        the_481.cseq.seq,
+        the_481.cseq.method,
+        get_header(&the_481.headers, "call-id").unwrap_or(""),
+    );
+    assert_eq!(the_481.status, 481, "the UAC gets 481, not the 200 it expects");
+
+    // The body IS locally present and reclaimable: the resolve path simply
+    // refuses to look. `peek_reclaimable` (today reachable ONLY via a backup's
+    // reverse-flush ReclaimCall push, router.rs:121 — never from an arriving
+    // request) WOULD recover it. This is what the recommended fix wires in.
+    assert_eq!(
+        state.peek_reclaimable(&r).await.map(|c| c.call_ref),
+        Some(r.clone()),
+        "the call sits fully reclaimable in pri:w0 on THIS node"
+    );
+}
+
+/// CASE B — the body was NEVER pulled into `pri:{self}` (the bootstrap pull
+/// itself truncated: the study's `repl_reclaimed_total = 392` of ~2350, the
+/// dominant production case). The call's only surviving copy is `bak:w0` on the
+/// PEER. The same 481 results — but here the recommended local-read fix would
+/// ALSO return None, so it does NOT recover this population.
+///
+/// This is the crux for the fix discussion: a fix that only reads the local
+/// `pri:{self}` partition is blind to a call the truncated bootstrap never
+/// imported. Recovering it needs an on-demand PULL from the peer's `bak:{self}`
+/// (the same source bootstrap uses), or a bootstrap that does not truncate.
+#[tokio::test]
+async fn reboot_primary_481s_bye_when_pri_body_was_never_pulled() {
+    let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
+    let state = call_state("w0", repl.clone());
+
+    // Build the ref the same way, but seed NOTHING into this node's pri:w0 (the
+    // truncated bootstrap never imported it). It lives only in bak:w0 on w1.
+    let call = build_initial_call(&invite("w0", "w1", "cid-long2"), src(), &config_for("w0"), 0);
+    let r = call.call_ref.clone();
+    assert!(state.peek(&r).is_none(), "not live (never reclaimed)");
+
+    let resolved = state.hydrate_from_replica(&r).await;
+    assert!(resolved.is_none(), "REPRO: same 481 on the BYE");
+
+    // CRUX: pri:w0 is EMPTY on this node, so the recommended fix (read local
+    // pri:{self} on a primary-role miss) would ALSO return None → still 481.
+    assert!(
+        state.peek_reclaimable(&r).await.is_none(),
+        "the recommended local-read fix is BLIND to this population: the body \
+         was never imported into pri:w0 — it survives only as bak:w0 on the peer"
+    );
+}
+
+// ===========================================================================
+// #4 REPRODUCTION — the Backup-flow bootstrap silently OMITS a reclaimed call.
+//
+// The server side of a peer's `PullRequest[Backup] caller=w1 since=(0,0)` answers
+// from `scan_refs_backed_by`, which filters `pri:{self}` on the DENORMALISED
+// `CallMeta.backup`. That field is captured ONLY on a Forward flush
+// (`direction == Forward ⇒ opts.peer` IS the backup); the reboot-reclaim
+// hydration path imports the body through the *peerless* `PutOpts::default()`
+// (`apply_to_store`, puller.rs), so a just-reclaimed call lands `backup == None`
+// and is INVISIBLE to w1's bootstrap until the call's next keepalive
+// forward-flush. In that window the reclaimed call runs UN-BACKED-UP — a second
+// primary crash loses it. The reclaim materialisation must re-establish `backup`
+// from the authoritative `topology.bak` (the same value the proxy `w_bak` cookie
+// carries), so a peer re-pulling what it must back up receives the call at once.
+// ===========================================================================
+#[tokio::test]
+async fn reclaimed_call_is_visible_to_backup_bootstrap() {
+    use super::changelog::BodySource;
+
+    let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
+    let state = call_state("w0", repl.clone());
+
+    // A call w0 owns, backed up by w1 (topology.bak = w1, from the w_bak cookie).
+    let call = build_initial_call(&invite("w0", "w1", "cid-bak"), src(), &config_for("w0"), 0);
+    let r = call.call_ref.clone();
+    assert_eq!(
+        call.topology.as_ref().map(|t| t.bak.as_str()),
+        Some("w1"),
+        "the w_bak cookie names w1 as this call's backup"
+    );
+
+    // Reboot-reclaim hydration: the puller imports the pri:w0 body via the
+    // peerless `PutOpts::default()` path, so `CallMeta.backup` lands None.
+    put(&repl, PRI, "w0", &call).await;
+    assert!(
+        repl.scan_refs_backed_by("w0", "w1").is_empty(),
+        "pre-materialise: the peerless hydration left backup=None → invisible"
+    );
+
+    // Materialise the reclaimed call into the live serving map (what `reclaim_all`
+    // / the reactive `ReclaimCall` do on reboot) — this must re-establish the
+    // denormalised backup from `topology.bak`.
+    let scanned = state.reclaim_scan().await;
+    assert_eq!(scanned.len(), 1);
+    assert!(state.materialize_if_absent(scanned[0].clone()), "first materialise inserts");
+
+    // The reclaimed call is now visible to w1's Backup-flow bootstrap — a peer
+    // re-pulling what it must back up receives it immediately, not one keepalive late.
+    assert_eq!(
+        repl.scan_refs_backed_by("w0", "w1"),
+        vec![r.clone()],
+        "#4: a reclaimed pri:{{self}} call MUST be visible to its backup's bootstrap"
     );
 }

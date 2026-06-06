@@ -25,7 +25,8 @@ pub mod helpers;
 pub mod model;
 
 pub use callref::{
-    call_index_keys, call_index_keys_from_unknown, derive_call_ref, parse_call_ref, ParsedCallRef,
+    call_index_keys, call_index_keys_from_unknown, call_ref_primary, derive_call_ref, parse_call_ref,
+    ParsedCallRef,
 };
 pub use codec::{CallBodyCodec, CallDecodeError, MsgpackCodec};
 pub use model::{

@@ -50,8 +50,20 @@ impl ProxyCore {
         let mut port = param_str(next, "rport").and_then(|s| s.parse().ok()).unwrap_or(next.port.unwrap_or(5060));
 
         // ── Reverse-path failover ───────────────────────────────────────────
+        // A response is the reply to an in-flight transaction the next-Via worker
+        // is *waiting on* (e.g. the 200 to its own in-dialog keepalive OPTIONS).
+        // Only reverse-fail it over to the cookie's `w_bak` when that worker is
+        // **confirmed Dead** — NOT when it is merely `Unknown` (a freshly-rebooted
+        // pod the health probe has not re-confirmed yet), `NotReady`, or `Draining`:
+        // those are still up and own the transaction, so their response must reach
+        // them. Failing a booting worker's keepalive-200 over to `w_bak` (which holds
+        // no matching `KeepaliveTimeout`) let the worker's 5 s timeout fire and BYE
+        // every call it had just reclaimed — the long-call-on-reboot teardown. A
+        // draining worker also legitimately finishes in-flight calls, so it keeps its
+        // responses too. (Request-path routing-around a non-Alive worker is separate;
+        // that lives in the strategy's `decode_stickiness`.)
         if let Some(dest) = self.registry.lookup_by_address(&ProxyAddr::new(host.clone(), port)) {
-            if dest.health != WorkerHealth::Alive {
+            if dest.health == WorkerHealth::Dead {
                 match self.find_own_record_route_params(&resp) {
                     Some(params) => match self.strategy.decode_stickiness(&params, &SipMessage::Response(resp.clone())).await {
                         DecodeResult::ForwardBackup { target, .. } => {

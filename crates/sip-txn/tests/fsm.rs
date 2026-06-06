@@ -231,3 +231,70 @@ async fn duplicate_request_retransmits_cached_response() {
         "duplicate request must not surface a second time"
     );
 }
+
+// ── #9: call_ref → txn-count index (acting-backup self-release gate) ─────────
+
+/// An inbound in-dialog request whose Request-URI carries the `callref` param the
+/// B2BUA's Contact stamps — the key the txn layer attributes the server txn to
+/// (ADR-0014 self-release counting). `extract_ruri_call_ref` percent-decodes it,
+/// so a plain value round-trips unchanged.
+fn inbound_with_callref(method: &str, branch: &str, call_id: &str, call_ref: &str) -> Vec<u8> {
+    format!(
+        "{method} sip:b2bua@127.0.0.1:5070;callref={call_ref} SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 10.0.0.1:5555;branch={branch}\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:caller@10.0.0.1:5555>;tag=caller-tag\r\n\
+         To: <sip:b2bua@127.0.0.1:5070>;tag=dlg-tag\r\n\
+         Call-ID: {call_id}\r\n\
+         CSeq: 1 {method}\r\n\
+         Content-Length: 0\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+fn drained_quiesced(stack: &mut Stack, call_ref: &str) -> bool {
+    stack.drain_events().iter().any(|e| {
+        matches!(e, TransactionEvent::CallQuiesced { call_ref: cr } if cr == call_ref)
+    })
+}
+
+/// The `call_ref → txn-count` index stays in lockstep with the `txns` map, so the
+/// acting-backup self-release gate is EXACT: two concurrent in-dialog txns for one
+/// call count as 2, and the armed watch fires `CallQuiesced` only once BOTH clear
+/// — never after just the first. This is the txn-layer guarantee the B2BUA leans
+/// on to avoid shedding a takeover copy while a transaction is still in flight.
+#[tokio::test(start_paused = true)]
+async fn self_release_fires_only_after_the_last_call_txn_clears() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let cr = "w0z-cid|caller-tag";
+
+    // Two in-dialog requests for the SAME call, distinct branches → 2 server txns.
+    stack.inject(&inbound_with_callref("OPTIONS", "z9hG4bK-r1", "cid-sr", cr)).await;
+    stack.inject(&inbound_with_callref("OPTIONS", "z9hG4bK-r2", "cid-sr", cr)).await;
+    elapse_ms(60).await;
+    let _ = stack.drain_events();
+    assert_eq!(stack.txn.active_txn_count_for_call(cr).await, 2, "both txns counted");
+    assert_eq!(
+        stack.txn.active_txn_count_for_call("w0z-other|t").await,
+        0,
+        "a different call_ref is isolated in the index"
+    );
+
+    // Arm the watch while txns are live → NO immediate CallQuiesced.
+    stack.txn.watch_self_release(cr).await;
+    assert!(!drained_quiesced(&mut stack, cr), "must not fire while txns are in flight");
+
+    // Clear the FIRST txn (200 → non-INVITE server Timer J eviction). Count → 1.
+    let r1 = parse_response(&response_bytes(200, "OK", "OPTIONS", "z9hG4bK-r1", "cid-sr", true));
+    stack.txn.send_response(r1, addr(PEER)).await;
+    elapse_ms(33_000).await; // past TIMER_J (64*T1 = 32 s)
+    assert_eq!(stack.txn.active_txn_count_for_call(cr).await, 1, "one txn cleared");
+    assert!(!drained_quiesced(&mut stack, cr), "one txn still live → no self-release");
+
+    // Clear the SECOND: the last `delete_txn` for the call fires CallQuiesced.
+    let r2 = parse_response(&response_bytes(200, "OK", "OPTIONS", "z9hG4bK-r2", "cid-sr", true));
+    stack.txn.send_response(r2, addr(PEER)).await;
+    elapse_ms(33_000).await;
+    assert_eq!(stack.txn.active_txn_count_for_call(cr).await, 0, "index drained to 0");
+    assert!(drained_quiesced(&mut stack, cr), "last txn cleared → CallQuiesced");
+}

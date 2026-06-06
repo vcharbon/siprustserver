@@ -156,6 +156,15 @@ fn via_sent_by(via_entry: &str) -> Option<&str> {
     via_entry.split_whitespace().nth(1).and_then(|s| s.split(';').next()).map(str::trim)
 }
 
+/// The sent-by of a Via entry as a [`ProxyAddr`] (the worker-identity key the
+/// registry is addressed by). Used by the request path to recognise a
+/// worker-originated in-dialog request from the message itself — SNAT-immune,
+/// unlike the UDP source address (a worker→VIP packet is masqueraded to the
+/// node IP behind keepalived).
+pub fn via_sent_by_addr(via_entry: &str) -> Option<ProxyAddr> {
+    via_sent_by(via_entry).and_then(ProxyAddr::parse)
+}
+
 /// True if a Via entry's sent-by is the proxy's advertised address.
 pub fn via_entry_is_self(via_entry: &str, advertised: &ProxyAddr) -> bool {
     via_sent_by(via_entry)

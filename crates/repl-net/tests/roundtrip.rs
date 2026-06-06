@@ -9,7 +9,7 @@ use repl_net::codec::ReplCodecError;
 use repl_net::framing::ReplFramingError;
 use repl_net::{
     decode_frame, encode_frame, frame_with_len_prefix, try_read_framed, Frame, Op, Partition,
-    PullMode, Watermark, MAX_FRAME_LEN,
+    Watermark, MAX_FRAME_LEN,
 };
 
 fn assert_roundtrip(f: &Frame) {
@@ -24,32 +24,23 @@ fn assert_roundtrip(f: &Frame) {
 // --- round-trip: every variant + edge cases --------------------------------
 
 #[test]
-fn roundtrip_pull_request_replog() {
+fn roundtrip_pull_request_backup_tail() {
     assert_roundtrip(&Frame::PullRequest {
         proto_ver: 1,
         caller: "worker-3".into(),
-        mode: PullMode::Replog,
+        partition: Partition::Bak,
         since: Watermark::new(7, 42),
-        chunk: 128,
     });
 }
 
 #[test]
-fn roundtrip_pull_request_bootstrap_empty_caller() {
+fn roundtrip_pull_request_reclaim_bootstrap_empty_caller() {
+    // `since == (0,0)` is the implicit bootstrap-then-tail request.
     assert_roundtrip(&Frame::PullRequest {
         proto_ver: u16::MAX,
         caller: String::new(),
-        mode: PullMode::Bootstrap,
+        partition: Partition::Pri,
         since: Watermark::new(0, 0),
-        chunk: u32::MAX,
-    });
-}
-
-#[test]
-fn roundtrip_ack_large_watermark() {
-    assert_roundtrip(&Frame::Ack {
-        caller: "w".into(),
-        up_to: Watermark::new(u64::MAX, u64::MAX),
     });
 }
 
@@ -57,7 +48,7 @@ fn roundtrip_ack_large_watermark() {
 fn roundtrip_data_body_some_multi_index() {
     assert_roundtrip(&Frame::Data {
         at: Watermark::new(3, 9),
-        op: Op::Create,
+        op: Op::Put,
         partition: Partition::Bak,
         call_ref: "pri1|callid|fromtag".into(),
         call_gen: 17,
@@ -89,7 +80,7 @@ fn roundtrip_data_empty_body_is_some_not_none() {
     // An empty bin must round-trip as Some(empty), distinct from None.
     let f = Frame::Data {
         at: Watermark::new(1, 1),
-        op: Op::Update,
+        op: Op::Put,
         partition: Partition::Pri,
         call_ref: "x".into(),
         call_gen: 0,
@@ -111,7 +102,7 @@ fn roundtrip_data_large_body() {
     let big: Vec<u8> = (0..50_000u32).map(|i| i as u8).collect();
     assert_roundtrip(&Frame::Data {
         at: Watermark::new(u64::MAX, 0),
-        op: Op::Update,
+        op: Op::Put,
         partition: Partition::Bak,
         call_ref: "big".into(),
         call_gen: i64::MAX,
@@ -143,7 +134,7 @@ fn roundtrip_reset_to_bootstrap() {
 
 #[test]
 fn err_unknown_tag() {
-    // [9, ...] — tag 9 is not one of the five.
+    // [9, ...] — tag 9 is not one of the four.
     let mut bytes = Vec::new();
     rmp::encode::write_array_len(&mut bytes, 2).unwrap();
     rmp::encode::write_uint(&mut bytes, 9).unwrap();
@@ -155,23 +146,22 @@ fn err_unknown_tag() {
 }
 
 #[test]
-fn err_unknown_enum_discriminant_mode() {
-    // PullRequest with mode = 7.
+fn err_unknown_enum_discriminant_partition() {
+    // PullRequest with partition = 7.
     let mut bytes = Vec::new();
-    rmp::encode::write_array_len(&mut bytes, 7).unwrap();
+    rmp::encode::write_array_len(&mut bytes, 6).unwrap();
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // tag PullRequest
     rmp::encode::write_uint(&mut bytes, 1).unwrap(); // proto_ver
     rmp::encode::write_str(&mut bytes, "w").unwrap(); // caller
-    rmp::encode::write_uint(&mut bytes, 7).unwrap(); // mode = 7 (invalid)
+    rmp::encode::write_uint(&mut bytes, 7).unwrap(); // partition = 7 (invalid)
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // since_gen
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // since_counter
-    rmp::encode::write_uint(&mut bytes, 1).unwrap(); // chunk
     match decode_frame(&bytes) {
         Err(ReplCodecError::UnknownDiscriminant {
-            field: "PullMode",
+            field: "Partition",
             value: 7,
         }) => {}
-        other => panic!("expected UnknownDiscriminant PullMode 7, got {other:?}"),
+        other => panic!("expected UnknownDiscriminant Partition 7, got {other:?}"),
     }
 }
 
@@ -180,7 +170,7 @@ fn err_unknown_enum_discriminant_op() {
     // Data with op = 5.
     let mut bytes = Vec::new();
     rmp::encode::write_array_len(&mut bytes, 11).unwrap();
-    rmp::encode::write_uint(&mut bytes, 2).unwrap(); // tag Data
+    rmp::encode::write_uint(&mut bytes, 1).unwrap(); // tag Data
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // gen
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // counter
     rmp::encode::write_uint(&mut bytes, 5).unwrap(); // op = 5 (invalid)
@@ -205,7 +195,7 @@ fn err_wrong_array_length() {
     // Noop must be len 3; give it 2.
     let mut bytes = Vec::new();
     rmp::encode::write_array_len(&mut bytes, 2).unwrap();
-    rmp::encode::write_uint(&mut bytes, 3).unwrap(); // tag Noop
+    rmp::encode::write_uint(&mut bytes, 2).unwrap(); // tag Noop
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // gen only
     match decode_frame(&bytes) {
         Err(ReplCodecError::MalformedArray(_)) => {}
@@ -215,10 +205,17 @@ fn err_wrong_array_length() {
 
 #[test]
 fn err_truncated_payload() {
-    // Valid Ack header but cut off mid-frame.
-    let full = encode_frame(&Frame::Ack {
-        caller: "worker".into(),
-        up_to: Watermark::new(9, 9),
+    // Valid Data header but cut off mid-frame.
+    let full = encode_frame(&Frame::Data {
+        at: Watermark::new(9, 9),
+        op: Op::Put,
+        partition: Partition::Bak,
+        call_ref: "worker".into(),
+        call_gen: 1,
+        call_bgen: 0,
+        body_ttl_ms: 0,
+        indexes: vec![],
+        body: Some(Arc::from(&b"abc"[..])),
     });
     let truncated = &full[..full.len() - 1];
     match decode_frame(truncated) {
@@ -292,9 +289,11 @@ fn framing_two_concatenated_pop_in_order() {
 
 #[test]
 fn framing_partial_then_completes() {
-    let payload = encode_frame(&Frame::Ack {
+    let payload = encode_frame(&Frame::PullRequest {
+        proto_ver: 3,
         caller: "abc".into(),
-        up_to: Watermark::new(2, 2),
+        partition: Partition::Pri,
+        since: Watermark::new(2, 2),
     });
     let wire = frame_with_len_prefix(&payload);
 
@@ -358,10 +357,10 @@ fn watermark_gen_is_high_word() {
 fn err_data_inflated_indexes_count_is_typed_error_not_oom() {
     let mut b = Vec::new();
     rmp::encode::write_array_len(&mut b, 11).unwrap(); // DATA arity
-    rmp::encode::write_uint(&mut b, 2).unwrap(); // tag Data
+    rmp::encode::write_uint(&mut b, 1).unwrap(); // tag Data
     rmp::encode::write_uint(&mut b, 0).unwrap(); // gen
     rmp::encode::write_uint(&mut b, 0).unwrap(); // counter
-    rmp::encode::write_uint(&mut b, 1).unwrap(); // op (Update)
+    rmp::encode::write_uint(&mut b, 0).unwrap(); // op (Put)
     rmp::encode::write_uint(&mut b, 0).unwrap(); // partition (Pri)
     rmp::encode::write_str(&mut b, "r").unwrap(); // call_ref
     rmp::encode::write_sint(&mut b, 0).unwrap(); // call_gen (p)

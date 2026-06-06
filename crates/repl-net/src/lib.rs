@@ -9,10 +9,12 @@
 //! reliable, ordered, message-granular framed stream (Decision X2).
 //!
 //! ## What is here
-//! - [`Frame`] — the five positional-msgpack replication messages
-//!   ([`Frame::PullRequest`], [`Frame::Ack`], [`Frame::Data`], [`Frame::Noop`],
-//!   [`Frame::ResetToBootstrap`]) plus the [`PullMode`] / [`Op`] /
-//!   [`Partition`] value enums and the [`Watermark`] ordering.
+//! - [`Frame`] — the four positional-msgpack replication messages
+//!   ([`Frame::PullRequest`], [`Frame::Data`], [`Frame::Noop`],
+//!   [`Frame::ResetToBootstrap`]) plus the [`Op`] / [`Partition`] value enums and
+//!   the [`Watermark`] ordering. The two flows (**Reclaim** = `partition=Pri`,
+//!   **Backup** = `partition=Bak`) run on two single-flow sockets and share this
+//!   one frame set (ADR-0014 §Stream topology).
 //! - [`encode_frame`] / [`decode_frame`] — exact positional-msgpack codec for a
 //!   single frame (`[tag, ...]` array; field order is the contract, ADR-0008).
 //! - [`frame_with_len_prefix`] / [`try_read_framed`] — the 4-byte BE
@@ -38,7 +40,7 @@ pub mod framing;
 pub mod transport;
 
 pub use codec::{decode_frame, encode_frame, ReplCodecError};
-pub use frame::{Frame, Op, Partition, PullMode, UnknownDiscriminant, Watermark};
+pub use frame::{Frame, Op, Partition, UnknownDiscriminant, Watermark};
 pub use framing::{frame_with_len_prefix, try_read_framed, ReplFramingError, MAX_FRAME_LEN};
 pub use transport::{
     CapturedFrame, ConnectError, Direction, Fault, ListenError, RealReplicationNetwork,

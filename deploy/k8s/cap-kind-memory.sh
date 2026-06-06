@@ -18,8 +18,14 @@
 set -euo pipefail
 
 CLUSTER="${CLUSTER:-sip-e2e}"
-TOTAL_CAP_MB="${TOTAL_CAP_MB:-9216}"   # 9 GiB whole-cluster hard ceiling
+TOTAL_CAP_MB="${TOTAL_CAP_MB:-12288}"  # 12 GiB whole-cluster hard ceiling (host safety;
+                                       # WSL2 host is ~20 GiB so this leaves margin)
 CP_CAP_MB="${CP_CAP_MB:-2048}"         # control-plane reservation (etcd/apiserver)
+WORKER_CAP_MB="${WORKER_CAP_MB:-1536}" # per worker-NODE cap (1.5 GiB) — headroom for the
+                                       # load nodes (UAS 2-replica + co-located UAC
+                                       # generators + b2bua keepalive traffic). This is the
+                                       # kind-NODE docker cgroup ceiling; pod-level limits
+                                       # still apply inside.
 
 # -a: cap stopped nodes too (their config applies on next start).
 mapfile -t nodes < <(docker ps -a --filter "name=${CLUSTER}" --format '{{.Names}}')
@@ -34,12 +40,14 @@ for c in "${nodes[@]}"; do
 done
 
 cp_total=$(( ${#cps[@]} * CP_CAP_MB ))
-worker_budget=$(( TOTAL_CAP_MB - cp_total ))
-[ "$worker_budget" -lt 0 ] && {
-  echo "control-plane reservation (${cp_total}m) exceeds TOTAL_CAP_MB (${TOTAL_CAP_MB}m)"; exit 1; }
-# Floor the per-worker share so the sum never rounds up over budget.
-worker_cap=0
-[ "${#workers[@]}" -gt 0 ] && worker_cap=$(( worker_budget / ${#workers[@]} ))
+# Cap each worker node at WORKER_CAP_MB directly (a predictable per-node target, not an
+# even split of a leftover budget) so the load nodes get a stable 1.5 GiB regardless of
+# node count. Guard the WSL2 host: refuse if the resulting whole-cluster ceiling would
+# exceed TOTAL_CAP_MB (raise TOTAL_CAP_MB, or lower WORKER_CAP_MB, to proceed).
+worker_cap="$WORKER_CAP_MB"
+projected=$(( cp_total + worker_cap * ${#workers[@]} ))
+[ "$projected" -gt "$TOTAL_CAP_MB" ] && {
+  echo "projected cluster cap ${projected}m exceeds TOTAL_CAP_MB ${TOTAL_CAP_MB}m — raise TOTAL_CAP_MB or lower WORKER_CAP_MB"; exit 1; }
 
 cap_node() {  # name capMB
   docker update --memory "${2}m" --memory-swap "${2}m" "$1" >/dev/null

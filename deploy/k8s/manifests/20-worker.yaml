@@ -48,7 +48,16 @@ spec:
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - name: POD_NAMESPACE
               valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            # Pod IP via the downward API: the routable address peers (callee /
+            # proxy) must reach us on. The bind addr is 0.0.0.0 (all interfaces),
+            # which is NOT routable — without this the B2BUA stamps 0.0.0.0 into
+            # its Via/Contact/b-leg Call-ID, every response goes nowhere, and the
+            # worker retransmits then CANCELs into a storm. B2BUA_ADVERTISE pins
+            # the SIP identity to this IP (port from B2BUA_LISTEN, 5060).
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
             - { name: B2BUA_LISTEN,  value: "0.0.0.0:5060" }
+            - { name: B2BUA_ADVERTISE, value: "$(POD_IP)" }
             - { name: B2BUA_DEST,    value: "sipp-uas.sip-test.svc.cluster.local:5060" }
             - { name: B2BUA_METRICS, value: "0.0.0.0:9091" }
             # In-dialog OPTIONS keepalive interval (5 min). Must exceed short-call

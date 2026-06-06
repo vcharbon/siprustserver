@@ -252,14 +252,17 @@ async fn watermark_survives_remove_readd() {
             .await;
     }
     cl.advance(ms(200)).await;
-    let w_after_3 = cl.node("B").watermark("A");
+    // The replica data B holds for A rides the **Backup** flow (B backs up A's
+    // Forward-flushed calls); its watermark tracks these deltas (the Reclaim
+    // cursor is over A's empty `bak:{B}`).
+    let w_after_3 = cl.node("B").flow_watermark("A", ha_harness::Partition::Bak);
     assert_eq!(w_after_3, ha_harness::Watermark::new(1, 3), "B tailed 3");
 
     // Remove A from B's membership → puller parks, W retained.
     cl.node("B").remove_peer("A");
     cl.advance(ms(100)).await;
     assert_eq!(
-        cl.node("B").watermark("A"),
+        cl.node("B").flow_watermark("A", ha_harness::Partition::Bak),
         w_after_3,
         "W retained across Park"
     );
@@ -283,7 +286,7 @@ async fn watermark_survives_remove_readd() {
         );
     }
     assert_eq!(
-        cl.node("B").watermark("A"),
+        cl.node("B").flow_watermark("A", ha_harness::Partition::Bak),
         ha_harness::Watermark::new(1, 5),
         "W advanced to head via deltas"
     );

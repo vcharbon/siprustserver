@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use call::parse_call_ref;
+use call::{call_ref_primary, parse_call_ref};
 
 /// Which partition a call body lives in: this worker is the natural primary, or
 /// it is holding a backup replica for a peer.
@@ -119,5 +119,18 @@ pub fn partition_of(self_ordinal: &str, call_ref: &str) -> (PartitionRole, Strin
         Some(p) if p.primary == self_ordinal => (PartitionRole::Primary, p.primary),
         Some(p) => (PartitionRole::Backup, p.primary),
         None => (PartitionRole::Primary, self_ordinal.to_string()),
+    }
+}
+
+/// The partition role for a `callRef` **without allocating** the primary ordinal
+/// — the role-only projection of [`partition_of`] for hot-path callers (e.g. the
+/// per-mutation `(p,b)` bump in `CallState::update`) that only need "are we the
+/// primary?". Classifies a malformed/legacy ref as `Primary` (`pri:self`), matching
+/// [`partition_of`].
+pub fn role_of(self_ordinal: &str, call_ref: &str) -> PartitionRole {
+    match call_ref_primary(call_ref) {
+        Some(primary) if primary == self_ordinal => PartitionRole::Primary,
+        Some(_) => PartitionRole::Backup,
+        None => PartitionRole::Primary,
     }
 }

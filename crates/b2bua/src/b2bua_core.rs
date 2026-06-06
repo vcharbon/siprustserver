@@ -6,7 +6,6 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use repl_net::transport::ReplicationNetwork;
 use sip_clock::Clock;
@@ -199,45 +198,15 @@ impl B2buaCore {
                     }
                 }));
 
-                // Go-active task (ADR-0011 X11 / ADR-0014): once this node has
-                // re-hydrated its own partition (bootstrap-complete), bulk-reclaim —
-                // re-serve every `pri:` call, with the keepalive backlog smoothed
-                // (ADR-0014 §4) — then re-run once truly current to sweep flip-race
-                // stragglers. There is **no** handback burst: a backup self-releases
-                // its takeover copies on transaction completion. One-shot per boot.
-                {
-                    let sup = supervisor.clone();
-                    let tx = repl_tx.clone();
-                    tasks.push(tokio::spawn(async move {
-                        // First sweep on bootstrap-complete. This is the LIVENESS
-                        // gate: it fires even when a peer only went complete
-                        // best-effort (idle-stall / unreachable), so the node always
-                        // reclaims what it has rather than blocking on a peer that
-                        // may never finish.
-                        while !sup.all_bootstrapped() {
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
-                        let _ = tx.send(router::ReplCommand::ReclaimAll);
-
-                        // COMPLETENESS backstop (X4). `bootstrap_complete` can be
-                        // set best-effort BEFORE a peer's full `bak:{me}` keyset has
-                        // landed (a stalled-then-recovered bootstrap re-streams the
-                        // remainder on a later reconnect). Those late imports land in
-                        // `pri:{self}` AFTER the first sweep, and — because the bulk
-                        // is delivered only by bootstrap, never the changelog — no
-                        // tail apply re-materialises them. So once the puller is
-                        // truly current (caught up past any re-bootstrap), re-run the
-                        // bulk reclaim; `materialize_if_absent` makes it idempotent,
-                        // so a node that was already complete just re-scans once.
-                        // Bounded so a never-current peer cannot pin this task.
-                        let mut waited = 0u32;
-                        while !sup.all_current() && waited < 100 {
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            waited += 1;
-                        }
-                        let _ = tx.send(router::ReplCommand::ReclaimAll);
-                    }));
-                }
+                // Context rebuild is **puller-driven and continuous** (ADR-0014):
+                // each bootstrap pass signals `ReclaimAll` itself (puller.rs
+                // `signal_reclaim_all`) the instant it has imported bodies, and the
+                // steady-state tail materialises later reverse-flush stragglers per
+                // call. The old one-shot, readiness-gated, 10 s-bounded go-active
+                // sweep is GONE: it stranded every call that landed after its cliff
+                // (the endurance long-call-on-reboot 481). The reactive-only model
+                // needs no go-active handshake — a rebooting node just rebuilds from
+                // what it has pulled and keeps pulling.
 
                 let readiness = Readiness::new(Arc::new(supervisor.clone()));
                 (readiness, Some(supervisor))

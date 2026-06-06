@@ -226,9 +226,17 @@ impl HaNode {
         self.supervisor.all_bootstrapped() && self.supervisor.all_current()
     }
 
-    /// The retained watermark for `peer` (introspection).
+    /// The retained **Reclaim**-flow watermark for `peer` (introspection — the
+    /// readiness cursor over the peer's `bak:{self}` keyspace).
     pub fn watermark(&self, peer: &str) -> repl_net::Watermark {
         self.supervisor.watermark(peer)
+    }
+
+    /// The retained watermark for a specific `(peer, flow)` (introspection). The
+    /// **Backup** flow (`Partition::Bak`) is the cursor that tracks the replica
+    /// data this node holds for `peer`; the Reclaim accessors do not expose it.
+    pub fn flow_watermark(&self, peer: &str, partition: repl_net::Partition) -> repl_net::Watermark {
+        self.supervisor.flow_watermark(peer, partition)
     }
 
     /// Reap expired bodies + changelog tombstones/idle peers after a clock

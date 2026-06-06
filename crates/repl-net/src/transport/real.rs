@@ -245,7 +245,7 @@ mod tests {
         };
         let data = Frame::Data {
             at: crate::Watermark::new(3, 10),
-            op: crate::Op::Update,
+            op: crate::Op::Put,
             partition: crate::Partition::Pri,
             call_ref: "primary|callXYZ|fromTag".into(),
             call_gen: 42,

@@ -150,7 +150,7 @@
    "id": 4,
    "type": "stat",
    "title": "Success ratio (5m, excl. abuse+limiter)",
-   "description": "Resolved-call success ratio over 5m for REAL traffic (abuse excluded — the abuse stream is adversarial by design and floors at ~1 unexpected_msg/call; see the abuse-apart panel).",
+   "description": "Resolved-call success ratio over 5m for REAL traffic (abuse excluded \u2014 the abuse stream is adversarial by design and floors at ~1 unexpected_msg/call; see the abuse-apart panel).",
    "gridPos": {
     "h": 4,
     "w": 6,
@@ -205,7 +205,7 @@
    "id": 5,
    "type": "stat",
    "title": "Failed calls (cumulative, excl. abuse+limiter)",
-   "description": "Total failed calls across REAL streams (abuse excluded — counted apart in the abuse panel).",
+   "description": "Total failed calls across REAL streams (abuse excluded \u2014 counted apart in the abuse panel).",
    "gridPos": {
     "h": 4,
     "w": 6,
@@ -379,7 +379,7 @@
    "id": 10,
    "type": "timeseries",
    "title": "Successful vs failed (calls/s, excl. abuse+limiter)",
-   "description": "Per-second resolved call outcomes for REAL traffic (abuse stream excluded — counted apart below).",
+   "description": "Per-second resolved call outcomes for REAL traffic (abuse stream excluded \u2014 counted apart below).",
    "gridPos": {
     "h": 8,
     "w": 12,
@@ -430,7 +430,7 @@
    "id": 11,
    "type": "timeseries",
    "title": "Failure causes (calls/s, excl. abuse+limiter)",
-   "description": "Per-second failures by SIPp failure class for REAL traffic (abuse excluded — its steady ~1/s unexpected_msg is adversarial-by-design and counted apart below).",
+   "description": "Per-second failures by SIPp failure class for REAL traffic (abuse excluded \u2014 its steady ~1/s unexpected_msg is adversarial-by-design and counted apart below).",
    "gridPos": {
     "h": 8,
     "w": 12,
@@ -576,7 +576,7 @@
    "id": 15,
    "type": "timeseries",
    "title": "Chaos window (active span per type)",
-   "description": "`sip_chaos_window` — 1 for the full real duration of each chaos event, 0 otherwise. The rectangular pulse width = the true event length (matches the orange region annotation). Replaces the old instant-marker smear.",
+   "description": "`sip_chaos_window` \u2014 1 for the full real duration of each chaos event, 0 otherwise. The rectangular pulse width = the true event length (matches the orange region annotation). Replaces the old instant-marker smear.",
    "gridPos": {
     "h": 8,
     "w": 12,
@@ -967,114 +967,801 @@
    }
   },
   {
+   "id": 34,
+   "type": "timeseries",
+   "title": "Ghost gap = b2bua_active \u2212 sipp_current (double-serve leak detector, ADR-0014)",
+   "description": "The robust HA leak signal: a healthy cluster keeps b2bua_active \u2248 sipp_current (gap ~0 + scrape skew). A gap that RISES and STAYS risen after a worker reboot = a double-served takeover copy the reclaimed primary now also serves (self-release failed) or an eager-takeover storm \u2014 the exact regression ADR-0014 (commit 12ae92f) must not reintroduce. Threshold line = REBOOT_GHOST_TOL (300).",
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 57
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum(b2bua_active_calls) - sum(sipp_current_calls)",
+     "refId": "A",
+     "legendFormat": "ghost gap (live)"
+    },
+    {
+     "expr": "sum(b2bua_active_calls)",
+     "refId": "B",
+     "legendFormat": "b2bua active"
+    },
+    {
+     "expr": "sum(sipp_current_calls)",
+     "refId": "C",
+     "legendFormat": "sipp current"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 6,
+      "showPoints": "never",
+      "lineWidth": 1
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 300
+       }
+      ]
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "ghost gap (live)"
+      },
+      "properties": [
+       {
+        "id": "custom.lineWidth",
+        "value": 2
+       },
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "orange"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
    "id": 25,
    "type": "row",
    "title": "Per-stream (SIPp instance) breakdown",
    "collapsed": false,
-   "gridPos": { "h": 1, "w": 24, "x": 0, "y": 57 }
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 65
+   }
   },
   {
    "id": 26,
    "type": "timeseries",
    "title": "Messages/sec per stream (calls created by role)",
    "description": "`sipp_calls_created_total` rate split by SIPp instance (role: long / short / abuse / peak / orphan). Each stream counts its own traffic; all roles share this graph.",
-   "gridPos": { "h": 8, "w": 12, "x": 0, "y": 58 },
-   "datasource": { "type": "prometheus", "uid": "vm" },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 66
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
    "targets": [
-    { "expr": "sum by (role)(rate(sipp_calls_created_total[1m]))", "refId": "A", "legendFormat": "{{role}}" }
+    {
+     "expr": "sum by (role)(rate(sipp_calls_created_total[1m]))",
+     "refId": "A",
+     "legendFormat": "{{role}}"
+    }
    ],
-   "fieldConfig": { "defaults": { "unit": "cps", "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } }, "overrides": [] },
-   "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+   "fieldConfig": {
+    "defaults": {
+     "unit": "cps",
+     "custom": {
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
   },
   {
    "id": 27,
    "type": "timeseries",
    "title": "Errors/sec per stream (failed calls by role)",
    "description": "`sipp_failed_calls_total` rate split by SIPp instance (role). Each stream counts its own failures; all roles share this graph so you can see which endpoint is erroring.",
-   "gridPos": { "h": 8, "w": 12, "x": 12, "y": 58 },
-   "datasource": { "type": "prometheus", "uid": "vm" },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 66
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
    "targets": [
-    { "expr": "sum by (role)(rate(sipp_failed_calls_total[1m]))", "refId": "A", "legendFormat": "{{role}}" }
+    {
+     "expr": "sum by (role)(rate(sipp_failed_calls_total[1m]))",
+     "refId": "A",
+     "legendFormat": "{{role}}"
+    }
    ],
-   "fieldConfig": { "defaults": { "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } } }, "overrides": [] },
-   "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "lineWidth": 1,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
   },
   {
    "id": 28,
    "type": "timeseries",
    "title": "Unexpected messages by endpoint (role + scenario)",
    "description": "`sipp_failed_total{cause=\"unexpected_msg\"}` rate split by the SIPp instance that received it (role + scenario). This is the answer to 'which endpoint generated the unexpected message'.",
-   "gridPos": { "h": 8, "w": 12, "x": 0, "y": 66 },
-   "datasource": { "type": "prometheus", "uid": "vm" },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 74
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
    "targets": [
-    { "expr": "sum by (role, scenario)(rate(sipp_failed_total{cause=\"unexpected_msg\"}[1m]))", "refId": "A", "legendFormat": "{{role}} ({{scenario}})" }
+    {
+     "expr": "sum by (role, scenario)(rate(sipp_failed_total{cause=\"unexpected_msg\"}[1m]))",
+     "refId": "A",
+     "legendFormat": "{{role}} ({{scenario}})"
+    }
    ],
-   "fieldConfig": { "defaults": { "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } } }, "overrides": [] },
-   "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "lineWidth": 1,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
   },
   {
    "id": 29,
    "type": "timeseries",
    "title": "Failure causes per stream (cause + role)",
-   "description": "`sipp_failed_total` rate by failure class AND SIPp instance (role) — full per-endpoint error breakdown across every cause, not just unexpected_msg.",
-   "gridPos": { "h": 8, "w": 12, "x": 12, "y": 66 },
-   "datasource": { "type": "prometheus", "uid": "vm" },
+   "description": "`sipp_failed_total` rate by failure class AND SIPp instance (role) \u2014 full per-endpoint error breakdown across every cause, not just unexpected_msg.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 74
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
    "targets": [
-    { "expr": "sum by (cause, role)(rate(sipp_failed_total[1m]))", "refId": "A", "legendFormat": "{{cause}} · {{role}}" }
+    {
+     "expr": "sum by (cause, role)(rate(sipp_failed_total[1m]))",
+     "refId": "A",
+     "legendFormat": "{{cause}} \u00b7 {{role}}"
+    }
    ],
-   "fieldConfig": { "defaults": { "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } }, "overrides": [] },
-   "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
   },
   {
    "id": 30,
    "type": "timeseries",
-   "title": "Abuse stream — counted apart (EXCLUDED from headline)",
+   "title": "Abuse stream \u2014 counted apart (EXCLUDED from headline)",
    "description": "The adversarial abuse stream (uac-abuse-options-flood) in isolation: calls/s, failures/s and failure causes. By design it floors at ~1 unexpected_msg per call (the flood's responses don't match the scenario's recv expectations), so it is excluded from the headline success/failure panels and tracked here instead. Real baseline (short/long) carries the headline.",
-   "gridPos": { "h": 8, "w": 24, "x": 0, "y": 74 },
-   "datasource": { "type": "prometheus", "uid": "vm" },
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 82
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
    "targets": [
-    { "expr": "sum(rate(sipp_calls_created_total{role=\"abuse\"}[1m]))", "refId": "A", "legendFormat": "abuse calls/s" },
-    { "expr": "sum(rate(sipp_failed_calls_total{role=\"abuse\"}[1m]))", "refId": "B", "legendFormat": "abuse failed/s" },
-    { "expr": "sum by (cause)(rate(sipp_failed_total{role=\"abuse\"}[1m]))", "refId": "C", "legendFormat": "abuse {{cause}}/s" }
+    {
+     "expr": "sum(rate(sipp_calls_created_total{role=\"abuse\"}[1m]))",
+     "refId": "A",
+     "legendFormat": "abuse calls/s"
+    },
+    {
+     "expr": "sum(rate(sipp_failed_calls_total{role=\"abuse\"}[1m]))",
+     "refId": "B",
+     "legendFormat": "abuse failed/s"
+    },
+    {
+     "expr": "sum by (cause)(rate(sipp_failed_total{role=\"abuse\"}[1m]))",
+     "refId": "C",
+     "legendFormat": "abuse {{cause}}/s"
+    }
    ],
-   "fieldConfig": { "defaults": { "unit": "cps", "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } }, "overrides": [] },
-   "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+   "fieldConfig": {
+    "defaults": {
+     "unit": "cps",
+     "custom": {
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
   },
   {
    "id": 31,
    "type": "row",
    "title": "Call limiter",
    "collapsed": false,
-   "gridPos": { "h": 1, "w": 24, "x": 0, "y": 82 }
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 90
+   }
   },
   {
    "id": 32,
    "type": "timeseries",
-   "title": "Call-limiter stream — SIPp concurrent vs cap",
+   "title": "Call-limiter stream \u2014 SIPp concurrent vs cap",
    "description": "The dedicated limiter stream (uac-endurance-limiter-cap20, role=limiter) admitted-and-held concurrency, shown APART from the other streams. A healthy limiter pins this at the cap (20); the 486-rejected calls never enter hold so this is the clean cap signal the endurance limiter_kill/limiter_netcut events assert reconvergence on (within LIMITER_GRACE). Other calls all carry the global-stress:999999 entry so the limiter chain is stressed on every call, but only this stream is capped.",
-   "gridPos": { "h": 8, "w": 12, "x": 0, "y": 83 },
-   "datasource": { "type": "prometheus", "uid": "vm" },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 91
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
    "targets": [
-    { "expr": "sum(sipp_current_calls{role=\"limiter\"})", "refId": "A", "legendFormat": "limiter stream concurrent (admitted)" },
-    { "expr": "vector(20)", "refId": "B", "legendFormat": "cap (20)" }
+    {
+     "expr": "sum(sipp_current_calls{role=\"limiter\"})",
+     "refId": "A",
+     "legendFormat": "limiter stream concurrent (admitted)"
+    },
+    {
+     "expr": "vector(20)",
+     "refId": "B",
+     "legendFormat": "cap (20)"
+    }
    ],
-   "fieldConfig": { "defaults": { "unit": "none", "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1 } }, "overrides": [ { "matcher": { "id": "byName", "options": "cap (20)" }, "properties": [ { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [8, 4] } }, { "id": "custom.fillOpacity", "value": 0 }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] } ] },
-   "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "custom": {
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "cap (20)"
+      },
+      "properties": [
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          8,
+          4
+         ]
+        }
+       },
+       {
+        "id": "custom.fillOpacity",
+        "value": 0
+       },
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
   },
   {
    "id": 33,
    "type": "timeseries",
-   "title": "Call-limiter — admit vs rejected (per-s)",
-   "description": "Limiter service throughput: admits/s (every call traverses the limiter — global-stress chain stress) vs rejected/s (the cap-20 stream biting). Reject rate should be ~0 except for the limiter stream's over-cap calls; it drops to 0 during limiter_kill/limiter_netcut (b2bua fails open) then resumes.",
-   "gridPos": { "h": 8, "w": 12, "x": 12, "y": 83 },
-   "datasource": { "type": "prometheus", "uid": "vm" },
+   "title": "Call-limiter \u2014 admit vs rejected (per-s)",
+   "description": "Limiter service throughput: admits/s (every call traverses the limiter \u2014 global-stress chain stress) vs rejected/s (the cap-20 stream biting). Reject rate should be ~0 except for the limiter stream's over-cap calls; it drops to 0 during limiter_kill/limiter_netcut (b2bua fails open) then resumes.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 91
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
    "targets": [
-    { "expr": "rate(limiter_admit_total[1m])", "refId": "A", "legendFormat": "admit/s" },
-    { "expr": "rate(limiter_admitted_total[1m])", "refId": "B", "legendFormat": "admitted/s" },
-    { "expr": "rate(limiter_rejected_total[1m])", "refId": "C", "legendFormat": "rejected/s" }
+    {
+     "expr": "rate(limiter_admit_total[1m])",
+     "refId": "A",
+     "legendFormat": "admit/s"
+    },
+    {
+     "expr": "rate(limiter_admitted_total[1m])",
+     "refId": "B",
+     "legendFormat": "admitted/s"
+    },
+    {
+     "expr": "rate(limiter_rejected_total[1m])",
+     "refId": "C",
+     "legendFormat": "rejected/s"
+    }
    ],
-   "fieldConfig": { "defaults": { "unit": "cps", "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } }, "overrides": [] },
-   "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+   "fieldConfig": {
+    "defaults": {
+     "unit": "cps",
+     "custom": {
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "lineWidth": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 35,
+   "type": "row",
+   "title": "HA Recovery / Re-hydration (continuous reclaim + ADR-0014)",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 100
+   }
+  },
+  {
+   "id": 36,
+   "type": "timeseries",
+   "title": "Re-hydration: bootstrap outcome (passes/min)",
+   "description": "A rebooting primary pulls its partition back from the backup. SEEDED = a pass reached the terminal Noop (full keyset streamed). STALLED = a pass tripped the (now 2-min) idle window \u2014 the stream went silent mid-rehydration. Persistent STALLED = a peer-side stall truncating the stream, not the materialisation.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 101
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum by (pod)(rate(b2bua_repl_bootstrap_seeded_total[5m]))*60",
+     "refId": "A",
+     "legendFormat": "seeded/min {{pod}}"
+    },
+    {
+     "expr": "sum by (pod)(rate(b2bua_repl_bootstrap_stalled_total[5m]))*60",
+     "refId": "B",
+     "legendFormat": "STALLED/min {{pod}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 6,
+      "showPoints": "never",
+      "lineWidth": 2
+     },
+     "color": {
+      "mode": "palette-classic"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 37,
+   "type": "timeseries",
+   "title": "Re-hydration: bodies imported per bootstrap pass (last_applied)",
+   "description": "Bodies the MOST RECENT bootstrap pass imported, per worker. After a kill, this should jump to ~the worker's held partition size. If successive STALLED passes re-pin last_applied at the SAME value, the stream is truncating (peer-side stall) \u2014 the failure class behind the long-call-on-reboot 481.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 101
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "max by (pod)(b2bua_repl_bootstrap_last_applied)",
+     "refId": "A",
+     "legendFormat": "last_applied {{pod}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 6,
+      "showPoints": "never",
+      "lineWidth": 2
+     },
+     "color": {
+      "mode": "palette-classic"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 38,
+   "type": "timeseries",
+   "title": "Reclaim: calls re-materialised into the serving map",
+   "description": "b2bua_repl_reclaimed_total = calls the rebooted primary materialised into its LIVE serving map + re-armed timers (now puller-driven & continuous, not a one-shot 10s-bounded sweep). After a kill this should climb to ~the reclaimed worker's pre-kill long+short concurrency. A flat/short climb = incomplete rebuild (the stranding bug).",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 109
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum by (pod)(rate(b2bua_repl_reclaimed_total[1m]))*60",
+     "refId": "A",
+     "legendFormat": "reclaimed/min {{pod}}"
+    },
+    {
+     "expr": "sum(b2bua_repl_reclaimed_total)",
+     "refId": "B",
+     "legendFormat": "reclaimed cumulative (all)"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 6,
+      "showPoints": "never",
+      "lineWidth": 2
+     },
+     "color": {
+      "mode": "palette-classic"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 39,
+   "type": "timeseries",
+   "title": "Reactive takeover vs self-release (rate/min)",
+   "description": "ADR-0014 reactive-only takeover: the backup hydrates a dialog on demand when the proxy reroutes (takeover_hydrated) and self-releases the copy once the served txn terminates (self_release). Balanced rates \u21d2 no double-serve buildup.",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 109
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sum by (pod)(rate(b2bua_repl_takeover_hydrated_total[5m]))*60",
+     "refId": "A",
+     "legendFormat": "takeover_hydrated/min {{pod}}"
+    },
+    {
+     "expr": "sum by (pod)(rate(b2bua_repl_self_release_total[5m]))*60",
+     "refId": "B",
+     "legendFormat": "self_release/min {{pod}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 6,
+      "showPoints": "never",
+      "lineWidth": 2
+     },
+     "color": {
+      "mode": "palette-classic"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 40,
+   "type": "timeseries",
+   "title": "Reboot verdict \u2014 long-call survival (the HA signal)",
+   "description": "Per kill_worker event: long_loss_pct = long BYE-481 failures / long calls created in-window. The fix target: transparent failover \u21d2 ~0%. long_failed/long_created shown for context. A spike here is the long-call-on-reboot regression (sipp unexpected_msg = 481 on the end-of-hold BYE).",
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 117
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "vm"
+   },
+   "targets": [
+    {
+     "expr": "sip_chaos_long_loss_pct{type=\"kill_worker\"}",
+     "refId": "A",
+     "legendFormat": "long-loss % (per event)"
+    },
+    {
+     "expr": "sip_chaos_long_failed{type=\"kill_worker\"}",
+     "refId": "B",
+     "legendFormat": "long failed (per event)"
+    },
+    {
+     "expr": "sip_chaos_long_created{type=\"kill_worker\"}",
+     "refId": "C",
+     "legendFormat": "long created (per event)"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 6,
+      "showPoints": "never",
+      "lineWidth": 2
+     },
+     "color": {
+      "mode": "palette-classic"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 5
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "last",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
   }
  ]
 }

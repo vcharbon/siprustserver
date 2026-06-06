@@ -15,7 +15,7 @@ use sip_message::{serialize, SipMessage, SipRequest};
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::{call_id_cseq_key, CancelEntry};
 use crate::headers::{
-    build_record_route_value, first_header_value, populate_received_rport_on_top_via, prepend_header,
+    build_record_route_value, first_header_value, populate_received_rport_on_top_via, prepend_header, via_sent_by_addr,
     remove_first_header, upsert_header,
 };
 use crate::observability::logger::RoutingDecisionLog;
@@ -56,6 +56,18 @@ fn retransmit_key(call_id: &str, incoming_branch: &str, method: &str, cseq: u32)
 }
 
 impl ProxyCore {
+    /// True if the request's top Via sent-by is one of our registered workers —
+    /// i.e. the request was originated *by* a worker (e.g. a B2BUA in-dialog
+    /// keepalive OPTIONS toward the far endpoint). SNAT-immune: the worker's
+    /// advertised identity rides the message, unlike the UDP source which the VIP
+    /// masquerades. Used as the worker-outbound discriminator on the request path.
+    fn top_via_is_worker(&self, req: &SipRequest) -> bool {
+        first_header_value(&req.headers, "via")
+            .and_then(via_sent_by_addr)
+            .map(|a| self.registry.lookup_by_address(&a).is_some())
+            .unwrap_or(false)
+    }
+
     pub(super) async fn handle_request(&self, req: SipRequest, src: SocketAddr) {
         let start_ms = self.now_ms();
         let method = req.method.to_ascii_uppercase();
@@ -119,8 +131,27 @@ impl ProxyCore {
                 }
             }
         }
-        // Source-based worker-outbound override — break the in-dialog loop.
-        if !is_worker_outbound && self.registry.lookup_by_address(&ProxyAddr::from(src)).is_some() {
+        // Worker-outbound override — break the in-dialog loop. A worker-originated
+        // in-dialog request (e.g. the B2BUA's A-leg keepalive OPTIONS toward the
+        // UAC) carries our own Record-Route cookie but no `;outbound` param, so the
+        // checks above leave it classified as `decode_forward`; left there, the
+        // cookie's `w_pri` decode bounces the request straight back to a worker and
+        // the real downstream endpoint (the UAC) never sees it — its keepalive
+        // times out and the dialog is torn down (the steady-state long-call-loss
+        // class).
+        //
+        // Detect the worker origin from a SNAT-immune signal. The UDP source
+        // `src` is NOT reliable: behind the keepalived VIP a worker→proxy packet
+        // is masqueraded to the *node* IP (and often an ephemeral port), so
+        // `lookup_by_address(src)` misses every time. The worker's own advertised
+        // identity rides the message instead — the top Via sent-by — which the
+        // registry keys exactly (this is the same Via-based lookup the response
+        // path already trusts in `core/response.rs`). Keep the `src` check as a
+        // fast path for the un-NAT'd (test / pod-direct) case.
+        if !is_worker_outbound
+            && (self.registry.lookup_by_address(&ProxyAddr::from(src)).is_some()
+                || self.top_via_is_worker(req))
+        {
             is_worker_outbound = true;
             stripped_route_params = None;
         }
@@ -336,5 +367,132 @@ fn decision_label(kind: RoutingDecisionKind) -> &'static str {
         RoutingDecisionKind::WorkerOutbound => "worker_outbound",
         RoutingDecisionKind::Cancel => "cancel",
         RoutingDecisionKind::Reject => "reject",
+    }
+}
+
+#[cfg(test)]
+mod worker_outbound_tests {
+    use std::sync::Arc;
+
+    use sip_clock::Clock;
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+    use sip_net::types::BindUdpOpts;
+    use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
+
+    use crate::addr::ProxyAddr;
+    use crate::core::ProxyCoreBuilder;
+    use crate::observability::metrics::RoutingDecisionKind;
+    use crate::registry::static_reg::StaticWorkerRegistry;
+    use crate::registry::{WorkerEntry, WorkerRegistry};
+    use crate::strategies::forward_all::ForwardAllStrategy;
+    use crate::{ProxyMetrics, RoutingStrategy};
+
+    // Worker w1 lives at its POD ip:5060 (what the registry holds and the worker
+    // stamps as its Via sent-by). The downstream UAC the keepalive targets.
+    const W1_POD: &str = "10.244.5.8";
+    const UAC: &str = "10.244.7.13";
+    const PROXY_VIP: &str = "172.20.255.250";
+
+    async fn core(reg: Arc<dyn WorkerRegistry>) -> crate::core::ProxyCore {
+        let net = SimulatedSignalingNetwork::new(1);
+        let ep = net.bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64)).await.unwrap();
+        let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1_POD, 5060)));
+        ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
+            .clock(Clock::test_at(0))
+            .metrics(Arc::new(ProxyMetrics::new()))
+            .build(ep)
+    }
+
+    // A B2BUA A-leg keepalive OPTIONS toward the UAC: top Via = the originating
+    // worker, our own cookie Route (`target=worker`, no `;outbound`), R-URI = the
+    // UAC. This is exactly the on-wire shape captured in the endurance repro.
+    fn keepalive_options() -> SipMessage {
+        let raw = format!(
+            "OPTIONS sip:sipp@{UAC}:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {W1_POD}:5060;branch=z9hG4bKkeepalive;lg=a;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:service@{PROXY_VIP}:5060>;tag=svc\r\n\
+To: <sip:sipp@{UAC}:5060>;tag=uactag\r\n\
+Call-ID: longcall-1@{UAC}\r\n\
+CSeq: 2 OPTIONS\r\n\
+Contact: <sip:b2bua@{W1_POD}:5060;leg=a>\r\n\
+Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
+Content-Length: 0\r\n\r\n"
+        );
+        CustomParser::default().parse(raw.as_bytes()).unwrap()
+    }
+
+    // Regression for the steady-state long-call-loss class: behind the keepalived
+    // VIP a worker→proxy packet is SNAT'd to the NODE ip:ephemeral-port, so the
+    // proxy's UDP source is NOT a registered worker. The worker-outbound
+    // classification must therefore key off the SNAT-immune top Via sent-by, not
+    // the socket source — otherwise the cookie's `target=worker` decode bounces
+    // the keepalive straight back to a worker and the UAC never sees it (350s
+    // recv-timeout → BYE → 481).
+    #[tokio::test]
+    async fn snat_masqueraded_worker_keepalive_routes_to_downstream_not_back_to_worker() {
+        let reg: Arc<dyn WorkerRegistry> =
+            Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060))]));
+        let core = core(reg).await;
+
+        // SNAT'd source: the kind NODE ip + an ephemeral port — NOT in the registry.
+        let snat_src = "172.20.0.11:63522".parse().unwrap();
+        let SipMessage::Request(req) = keepalive_options() else { unreachable!() };
+        let outcome = core.route_request(&req, "OPTIONS", snat_src).await;
+
+        assert_eq!(
+            outcome.decision,
+            RoutingDecisionKind::WorkerOutbound,
+            "a worker-originated keepalive must be worker-outbound even when SNAT hides the source"
+        );
+        assert_eq!(
+            outcome.target,
+            Some(ProxyAddr::new(UAC, 5060)),
+            "the keepalive must reach the UAC (R-URI), not bounce back to a worker via the cookie"
+        );
+    }
+
+    // The un-NAT'd fast path still works: source IS the registered worker.
+    #[tokio::test]
+    async fn pod_direct_worker_source_is_still_worker_outbound() {
+        let reg: Arc<dyn WorkerRegistry> =
+            Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060))]));
+        let core = core(reg).await;
+
+        let pod_src = format!("{W1_POD}:5060").parse().unwrap();
+        let SipMessage::Request(req) = keepalive_options() else { unreachable!() };
+        let outcome = core.route_request(&req, "OPTIONS", pod_src).await;
+
+        assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
+        assert_eq!(outcome.target, Some(ProxyAddr::new(UAC, 5060)));
+    }
+
+    // A genuine EXTERNAL in-dialog request (top Via = a non-worker UAC) must NOT
+    // be misclassified as worker-outbound — it follows the cookie back to its
+    // worker as before.
+    #[tokio::test]
+    async fn external_in_dialog_request_is_not_worker_outbound() {
+        let reg: Arc<dyn WorkerRegistry> =
+            Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060))]));
+        let core = core(reg).await;
+
+        // Same cookie Route, but the top Via sent-by is the UAC (not a worker).
+        let raw = format!(
+            "BYE sip:b2bua@{W1_POD}:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKext;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:sipp@{UAC}:5060>;tag=uactag\r\n\
+To: <sip:service@{PROXY_VIP}:5060>;tag=svc\r\n\
+Call-ID: longcall-1@{UAC}\r\n\
+CSeq: 2 BYE\r\n\
+Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
+Content-Length: 0\r\n\r\n"
+        );
+        let SipMessage::Request(req) = CustomParser::default().parse(raw.as_bytes()).unwrap() else { unreachable!() };
+        let outcome = core.route_request(&req, "BYE", format!("{UAC}:5060").parse().unwrap()).await;
+
+        assert_eq!(outcome.decision, RoutingDecisionKind::DecodeForward);
+        assert_eq!(outcome.target, Some(ProxyAddr::new(W1_POD, 5060)));
     }
 }

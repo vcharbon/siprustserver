@@ -48,6 +48,11 @@ struct CallMeta {
     /// Where the body lives in the backing keyspace (so `reap` can delete it).
     role: PartitionRole,
     primary: String,
+    /// The call's **backup** ordinal (`topology.bak`), captured from the forward
+    /// flush (`direction == Forward` ⇒ `opts.peer` IS the backup). Lets the
+    /// **Backup**-flow bootstrap scan `pri:{self}` filtered to a given backup
+    /// (ADR-0014 Option B). `None` for replicas we hold for others (`bak:` side).
+    backup: Option<String>,
     /// Absolute body-expiry deadline (lazy TTL); `None` when `ttl_ms <= 0`.
     expiry_at_ms: Option<i64>,
 }
@@ -106,31 +111,25 @@ impl ReplicatingCallStore {
         &self.changelog
     }
 
-    /// The content version (`call_gen`) currently stored for a callRef, or
-    /// `None` if the ref is absent. The S5 puller reads this to drive its LWW
-    /// apply-gate: a delivered frame whose `call_gen` is `<=` the stored one is
-    /// a stale/idempotent re-delivery — the body write is skipped (but the
-    /// watermark still advances). The `(role, primary)` args are accepted for a
-    /// uniform seam with the other store methods; the per-ref metadata is keyed
-    /// by callRef alone, so they are not needed to look the version up.
+    /// The primary counter (`p`) currently stored for a callRef, or `None` if the
+    /// ref is absent / expired. Thin projection of [`current_cv`](Self::current_cv)
+    /// for callers that only need the primary counter (and presence). The
+    /// `(role, primary)` args are accepted for a uniform seam with the other store
+    /// methods; the per-ref metadata is keyed by callRef alone, so they are not
+    /// needed to look the version up.
     pub fn current_call_gen(
         &self,
-        _role: PartitionRole,
-        _primary: &str,
+        role: PartitionRole,
+        primary: &str,
         call_ref: &str,
     ) -> Option<i64> {
-        if self.is_expired(call_ref) {
-            return None;
-        }
-        self.meta.lock().unwrap().get(call_ref).map(|m| m.meta.call_gen)
+        self.current_cv(role, primary, call_ref).map(|(p, _)| p)
     }
 
     /// The full `(p,b)` version vector stored for a callRef, or `None` if absent
     /// / expired. The S5 puller reads this to drive the ADR-0014 asymmetric apply
     /// rule (a reverse-flush applies iff `p_in == p_cur && b_in > b_cur`; a
-    /// forward update applies always; deletes apply unconditionally). The
-    /// single-counter [`current_call_gen`](Self::current_call_gen) is retained for
-    /// callers that only care about the primary counter.
+    /// forward update applies always; deletes apply unconditionally).
     pub fn current_cv(
         &self,
         _role: PartitionRole,
@@ -162,6 +161,21 @@ impl ReplicatingCallStore {
             .filter(|(_, m)| !matches!(m.expiry_at_ms, Some(e) if now >= e))
             .map(|(k, _)| k.clone())
             .collect()
+    }
+
+    /// Re-establish the denormalised `CallMeta.backup` for a `pri:{self}` call
+    /// from the authoritative `topology.bak` (ADR-0014 #4). `backup` is normally
+    /// captured on the Forward flush, but the **reboot-reclaim** hydration path
+    /// imports the body through the peerless `PutOpts::default()`, leaving it
+    /// `None` — which makes the call invisible to the **Backup**-flow bootstrap
+    /// scan ([`scan_refs_backed_by`](BodySource::scan_refs_backed_by)) until the
+    /// next keepalive re-flush. The reclaim materialisation calls this the moment
+    /// it re-serves the call, closing that un-backed-up window. No-op if we hold
+    /// no meta entry for the ref yet. Pure metadata; no body / changelog touched.
+    pub fn reestablish_backup(&self, call_ref: &str, backup: &str) {
+        if let Some(m) = self.meta.lock().unwrap().get_mut(call_ref) {
+            m.backup = Some(backup.to_string());
+        }
     }
 
     /// `(total, backup)` replica-metadata entry counts for the
@@ -278,6 +292,12 @@ impl CallStore for ReplicatingCallStore {
         // Update per-ref metadata atomically (single critical section).
         {
             let mut meta = self.meta.lock().unwrap();
+            // Capture/preserve the backup ordinal: a Forward flush carries it as
+            // `opts.peer`; any other write keeps whatever we already knew.
+            let backup = match (opts.direction, &opts.peer) {
+                (Some(PropagateDirection::Forward), Some(p)) => Some(p.clone()),
+                _ => meta.get(call_ref).and_then(|m| m.backup.clone()),
+            };
             meta.insert(
                 call_ref.to_string(),
                 CallMeta {
@@ -289,6 +309,7 @@ impl CallStore for ReplicatingCallStore {
                     },
                     role,
                     primary: primary.to_string(),
+                    backup,
                     expiry_at_ms,
                 },
             );
@@ -297,7 +318,7 @@ impl CallStore for ReplicatingCallStore {
         // HA path only: non-blocking changelog bump for the pulling peer.
         if let Some(peer) = &opts.peer {
             let partition = Self::partition_for(opts.direction);
-            self.changelog.bump(peer, call_ref, Op::Update, partition);
+            self.changelog.bump(peer, call_ref, Op::Put, partition);
         }
         Ok(())
     }
@@ -381,5 +402,19 @@ impl BodySource for ReplicatingCallStore {
 
     fn scan_refs(&self, role: PartitionRole, primary: &str) -> Vec<String> {
         self.scan_call_refs(role, primary)
+    }
+
+    /// Live `pri:{primary}` refs whose captured `backup == backup` — the
+    /// **Backup**-flow bootstrap snapshot (ADR-0014 Option B). Expired-but-not-
+    /// yet-reaped refs are filtered out (the body would read `None` anyway).
+    fn scan_refs_backed_by(&self, primary: &str, backup: &str) -> Vec<String> {
+        let now = self.clock.now_ms();
+        let meta = self.meta.lock().unwrap();
+        meta.iter()
+            .filter(|(_, m)| m.role == PartitionRole::Primary && m.primary == primary)
+            .filter(|(_, m)| m.backup.as_deref() == Some(backup))
+            .filter(|(_, m)| !matches!(m.expiry_at_ms, Some(e) if now >= e))
+            .map(|(k, _)| k.clone())
+            .collect()
     }
 }

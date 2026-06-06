@@ -20,6 +20,10 @@
 //!
 //! Config via env (all optional):
 //!   B2BUA_LISTEN    SIP/signaling listen addr        (default 0.0.0.0:5060)
+//!   B2BUA_ADVERTISE SIP host[:port] stamped on Via/Contact/b-leg Call-ID
+//!                   (default: bound IP, or loopback if bind is 0.0.0.0).
+//!                   In k8s inject the pod IP via downward API `status.podIP`,
+//!                   else peers route responses to 0.0.0.0 (a storm).
 //!   B2BUA_DEST      downstream UAS host:port          (default 127.0.0.1:5070)
 //!   B2BUA_METRICS   Prometheus HTTP listen addr       (default 0.0.0.0:9091)
 //!   B2BUA_QUEUE     inbound UDP queue depth (packets)  (default 8192)
@@ -54,7 +58,7 @@
 //! probe fails) so k8s steers new calls away while in-flight calls finish.
 
 use std::env;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -344,10 +348,42 @@ async fn main() {
         .unwrap_or_else(|e| panic!("bind {listen_sa} failed: {e:?}"));
     let local = endpoint.local_addr();
 
+    // Advertised SIP host:port stamped on every outbound Via / Contact / b-leg
+    // Call-ID (see `b2bua::stack_identity`). It MUST be an address the callee /
+    // proxy can route a response back to — the *bind* address is `0.0.0.0` (bind
+    // on all interfaces), which is NOT routable: a peer's 200 OK to a Via/Contact
+    // of `0.0.0.0` goes nowhere, the B2BUA never sees the answer, and it
+    // retransmits the INVITE then CANCELs → a retransmission storm that floods
+    // the UAS. Mirror the proxy's `PROXY_ADVERTISE` pattern: take `B2BUA_ADVERTISE`
+    // (`host[:port]`) verbatim when set (k8s injects the pod IP via the downward
+    // API `status.podIP`); otherwise fall back to the bound address, coercing an
+    // unspecified `0.0.0.0` to loopback so the literal is at least routable.
+    let (advertise_ip, advertise_port) = match env::var("B2BUA_ADVERTISE") {
+        Ok(s) => {
+            let s = s.trim();
+            match s.rsplit_once(':').and_then(|(h, p)| p.parse::<u16>().ok().map(|p| (h, p))) {
+                Some((h, p)) => (h.to_string(), p),
+                // No `:port` (or unparseable port) → host-only; use the listen port.
+                None => (s.to_string(), local.port()),
+            }
+        }
+        Err(_) => {
+            let ip = if local.ip().is_unspecified() {
+                IpAddr::V4(Ipv4Addr::LOCALHOST)
+            } else {
+                local.ip()
+            };
+            (ip.to_string(), local.port())
+        }
+    };
+    eprintln!(
+        "b2bua-runner advertised SIP identity = {advertise_ip}:{advertise_port} (bind {local})"
+    );
+
     let config = B2buaConfig {
         self_ordinal: ordinal.clone(),
-        sip_local_ip: local.ip().to_string(),
-        sip_local_port: local.port(),
+        sip_local_ip: advertise_ip,
+        sip_local_port: advertise_port,
         cdr_buffer_queue_max: cdr_queue,
         event_dispatch_concurrency: concurrency,
         per_call_queue_cap: call_cap,

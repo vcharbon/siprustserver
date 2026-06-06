@@ -1,5 +1,10 @@
 //! S4 storage-layer tests: changelog mutation/compaction/tombstone/TTL/auto-clean
 //! + the `ReplicatingCallStore`'s peer/direction mapping and live-body drain.
+//!
+//! Under ADR-0014 the changelog is split into per-partition sub-logs (`Pri` =
+//! Reclaim, `Bak` = Backup); a Forward put bumps `Bak`, a Reverse put bumps
+//! `Pri`. `drain_since`/`peer_len`/`needs_reset` all take the partition, and the
+//! poll server drains a bounded batch (here `NO_LIMIT` = "drain everything").
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +17,10 @@ use crate::store::{CallStore, PartitionRole, PropagateDirection, PutOpts};
 
 const PRI: PartitionRole = PartitionRole::Primary;
 const SELF: &str = "w0";
+/// Forward puts land in the `Bak` sub-log (primary → backup).
+const BAK_P: Partition = Partition::Bak;
+/// "Drain everything" — the bounded poll batch never truncates these unit cases.
+const NO_LIMIT: usize = usize::MAX;
 
 fn fwd(peer: &str) -> PutOpts {
     PutOpts {
@@ -52,14 +61,14 @@ async fn mutation_creates_entry_and_drains_live_body() {
     let store = ReplicatingCallStore::new(7, Clock::test_at(0));
     put(&store, "c1", b"v1", 0, 1, &fwd("A")).await;
 
-    // changelog-for-A: one entry.
-    assert_eq!(store.changelog().peer_len("A"), 1);
+    // changelog-for-A (Bak sub-log): one entry.
+    assert_eq!(store.changelog().peer_len("A", BAK_P), 1);
     // head advanced from (7,0).
     assert_eq!(store.changelog().head(), Watermark::new(7, 1));
 
     let frames = store
         .changelog()
-        .drain_since("A", Watermark::new(7, 0), &store, PRI, SELF)
+        .drain_since("A", BAK_P, Watermark::new(7, 0), NO_LIMIT, &store, PRI, SELF)
         .await;
     match one_data(frames) {
         Frame::Data {
@@ -70,7 +79,7 @@ async fn mutation_creates_entry_and_drains_live_body() {
             body,
             ..
         } => {
-            assert_eq!(op, Op::Create);
+            assert_eq!(op, Op::Put);
             assert_eq!(partition, Partition::Bak); // Forward → Bak
             assert_eq!(call_ref, "c1");
             assert_eq!(call_gen, 1);
@@ -88,17 +97,18 @@ async fn update_compacts_and_moves_counter_forward() {
     put(&store, "c1", b"v2", 0, 2, &fwd("A")).await;
 
     // Compaction: still exactly one entry; counter moved to 2.
-    assert_eq!(store.changelog().peer_len("A"), 1);
+    assert_eq!(store.changelog().peer_len("A", BAK_P), 1);
     assert_eq!(store.changelog().head(), Watermark::new(1, 2));
 
-    // Drain from the OLD watermark yields the latest body only, op=Update.
+    // Drain from the OLD watermark yields the latest body only, op=Put
+    // (Create/Update merged — ADR-0014).
     let frames = store
         .changelog()
-        .drain_since("A", after_first, &store, PRI, SELF)
+        .drain_since("A", BAK_P, after_first, NO_LIMIT, &store, PRI, SELF)
         .await;
     match one_data(frames) {
         Frame::Data { op, body, call_gen, .. } => {
-            assert_eq!(op, Op::Update);
+            assert_eq!(op, Op::Put);
             assert_eq!(call_gen, 2);
             assert_eq!(body.as_deref(), Some(&b"v2"[..]));
         }
@@ -116,11 +126,11 @@ async fn compaction_under_churn_keeps_live_set_size() {
         put(&store, "Y", format!("y{i}").as_bytes(), 0, i, &fwd("A")).await;
     }
     // 8 bumps, 2 live refs → exactly 2 entries.
-    assert_eq!(store.changelog().peer_len("A"), 2);
+    assert_eq!(store.changelog().peer_len("A", BAK_P), 2);
 
     let frames = store
         .changelog()
-        .drain_since("A", Watermark::new(1, 0), &store, PRI, SELF)
+        .drain_since("A", BAK_P, Watermark::new(1, 0), NO_LIMIT, &store, PRI, SELF)
         .await;
     assert_eq!(frames.len(), 2);
     // Latest bodies, ascending by counter (Y was bumped last → higher counter).
@@ -147,10 +157,10 @@ async fn delete_emits_tombstone_then_reaped() {
         .unwrap();
 
     // Tombstone present + drained as Delete with no body.
-    assert_eq!(store.changelog().peer_len("A"), 1);
+    assert_eq!(store.changelog().peer_len("A", BAK_P), 1);
     let frames = store
         .changelog()
-        .drain_since("A", Watermark::new(1, 0), &store, PRI, SELF)
+        .drain_since("A", BAK_P, Watermark::new(1, 0), NO_LIMIT, &store, PRI, SELF)
         .await;
     match one_data(frames) {
         Frame::Data { op, body, .. } => {
@@ -163,7 +173,7 @@ async fn delete_emits_tombstone_then_reaped() {
     // Advance past tombstone TTL + reap → gone.
     tokio::time::advance(Duration::from_millis(1_001)).await;
     store.changelog().reap(clock.now_ms());
-    assert_eq!(store.changelog().peer_len("A"), 0);
+    assert_eq!(store.changelog().peer_len("A", BAK_P), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -175,7 +185,7 @@ async fn live_body_read_at_send_time() {
     // Drain from genesis → must reflect v2 (read from store, not snapshotted).
     let frames = store
         .changelog()
-        .drain_since("A", Watermark::new(1, 0), &store, PRI, SELF)
+        .drain_since("A", BAK_P, Watermark::new(1, 0), NO_LIMIT, &store, PRI, SELF)
         .await;
     match one_data(frames) {
         Frame::Data { body, .. } => assert_eq!(body.as_deref(), Some(&b"v2"[..])),
@@ -193,7 +203,7 @@ async fn lock_discipline_concurrent_rewrite_is_consistent() {
         tokio::spawn(async move {
             store
                 .changelog()
-                .drain_since("A", Watermark::new(1, 0), &*store, PRI, SELF)
+                .drain_since("A", BAK_P, Watermark::new(1, 0), NO_LIMIT, &*store, PRI, SELF)
                 .await
         })
     };
@@ -250,7 +260,7 @@ async fn dead_peer_auto_clean_via_drop_and_idle() {
     put(&store, "c2", b"w1", 0, 1, &fwd("A")).await;
     let frames = store
         .changelog()
-        .drain_since("A", Watermark::new(1, 0), &store, PRI, SELF)
+        .drain_since("A", BAK_P, Watermark::new(1, 0), NO_LIMIT, &store, PRI, SELF)
         .await;
     assert_eq!(frames.len(), 1);
 
@@ -270,7 +280,7 @@ async fn reboot_incarnation_drains_all_for_lower_gen_watermark() {
 
     let frames = store
         .changelog()
-        .drain_since("A", Watermark::new(1, u64::MAX), &store, PRI, SELF)
+        .drain_since("A", BAK_P, Watermark::new(1, u64::MAX), NO_LIMIT, &store, PRI, SELF)
         .await;
     // since.gen (1) < self.gen (2) → ALL live entries returned.
     assert_eq!(frames.len(), 2);
@@ -288,16 +298,16 @@ async fn multi_peer_changelogs_are_independent() {
     put(&store, "c1", b"v1", 0, 1, &fwd("A")).await;
     put(&store, "c2", b"v2", 0, 1, &fwd("B")).await;
 
-    assert_eq!(store.changelog().peer_len("A"), 1);
-    assert_eq!(store.changelog().peer_len("B"), 1);
+    assert_eq!(store.changelog().peer_len("A", BAK_P), 1);
+    assert_eq!(store.changelog().peer_len("B", BAK_P), 1);
 
     let a = store
         .changelog()
-        .drain_since("A", Watermark::new(1, 0), &store, PRI, SELF)
+        .drain_since("A", BAK_P, Watermark::new(1, 0), NO_LIMIT, &store, PRI, SELF)
         .await;
     let b = store
         .changelog()
-        .drain_since("B", Watermark::new(1, 0), &store, PRI, SELF)
+        .drain_since("B", BAK_P, Watermark::new(1, 0), NO_LIMIT, &store, PRI, SELF)
         .await;
     let cr = |f: &Frame| match f {
         Frame::Data { call_ref, .. } => call_ref.clone(),
@@ -311,9 +321,10 @@ async fn multi_peer_changelogs_are_independent() {
 async fn reverse_direction_maps_to_pri_partition() {
     let store = ReplicatingCallStore::new(1, Clock::test_at(0));
     put(&store, "c1", b"v1", 0, 1, &rev("A")).await;
+    // Reverse → Pri sub-log.
     let frames = store
         .changelog()
-        .drain_since("A", Watermark::new(1, 0), &store, PRI, SELF)
+        .drain_since("A", Partition::Pri, Watermark::new(1, 0), NO_LIMIT, &store, PRI, SELF)
         .await;
     match one_data(frames) {
         Frame::Data { partition, .. } => assert_eq!(partition, Partition::Pri),
@@ -333,13 +344,13 @@ async fn no_peer_stores_body_without_bump() {
 
 // ---------------------------------------------------------------------------
 // Review regressions: retention floor + ResetToBootstrap trigger (#1), TTL
-// backstop for `ttl<=0` replicas (#2), subscriber-aware reap (#7).
+// backstop for `ttl<=0` replicas (#2), serve-guard-aware reap (#7).
 // ---------------------------------------------------------------------------
 
 const BAK: PartitionRole = PartitionRole::Backup;
 
-/// A reaped delete-tombstone raises the per-peer retention floor, so a warm
-/// puller whose `since` is below it is told to re-bootstrap (`needs_reset`),
+/// A reaped delete-tombstone raises the per-(peer,partition) retention floor, so a
+/// warm puller whose `since` is below it is told to re-bootstrap (`needs_reset`),
 /// while one at/above the floor — or on a cold (lower-gen) pull — is not.
 #[tokio::test(start_paused = true)]
 async fn needs_reset_after_tombstone_reap_raises_floor() {
@@ -347,62 +358,51 @@ async fn needs_reset_after_tombstone_reap_raises_floor() {
     let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 60_000);
     let store = ReplicatingCallStore::with_changelog(cl.clone(), clock.clone());
 
-    put(&store, "c1", b"v1", 0, 1, &fwd("A")).await; // counter 1
+    put(&store, "c1", b"v1", 0, 1, &fwd("A")).await; // counter 1 (Bak)
     store.delete_call(PRI, SELF, "c1", &[], &fwd("A")).await.unwrap(); // counter 2 (tombstone)
 
     // Before the reap: a puller that saw up to counter 1 is NOT told to reset
     // (the tombstone at counter 2 is still live and would be re-delivered).
-    assert!(!cl.needs_reset("A", Watermark::new(1, 1)), "tombstone still live → no reset");
+    assert!(!cl.needs_reset("A", BAK_P, Watermark::new(1, 1)), "tombstone still live → no reset");
 
     // Advance past the tombstone TTL and reap: the delete at counter 2 is gone,
     // the floor rises to 2.
     tokio::time::advance(Duration::from_millis(1_001)).await;
     cl.reap(clock.now_ms());
 
-    assert!(cl.needs_reset("A", Watermark::new(1, 1)), "since below reaped tail → reset");
-    assert!(!cl.needs_reset("A", Watermark::new(1, 2)), "since AT the floor → no reset");
-    assert!(!cl.needs_reset("A", Watermark::new(0, 1)), "lower gen is a cold pull → no reset");
-    assert!(!cl.needs_reset("Z", Watermark::new(1, 1)), "unknown peer → no reset");
+    assert!(cl.needs_reset("A", BAK_P, Watermark::new(1, 1)), "since below reaped tail → reset");
+    assert!(!cl.needs_reset("A", BAK_P, Watermark::new(1, 2)), "since AT the floor → no reset");
+    assert!(!cl.needs_reset("A", BAK_P, Watermark::new(0, 1)), "lower gen is a cold pull → no reset");
+    assert!(!cl.needs_reset("Z", BAK_P, Watermark::new(1, 1)), "unknown peer → no reset");
 }
 
-/// A peer log with a live `serve_replog` subscription is NOT reaped while idle
-/// past the dead-peer TTL (so a parked server never holds an orphaned Notify);
-/// once the subscription drops, the next reap evicts it.
+/// A peer log with an active serve task (a held [`ServeGuard`]) is NOT reaped
+/// while idle past the dead-peer TTL (so a parked poll-server never loses the log
+/// it is draining out from under itself); once the guard drops, the next reap
+/// evicts the now-unserved log.
+///
+/// [`ServeGuard`]: super::changelog::ServeGuard
 #[tokio::test(start_paused = true)]
-async fn subscribed_peer_log_survives_reap_until_unsubscribed() {
+async fn served_peer_log_survives_reap_until_guard_dropped() {
     let clock = Clock::test_at(0);
     let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 2_000); // dead-peer TTL 2s
     let _store = ReplicatingCallStore::with_changelog(cl.clone(), clock.clone());
 
-    let sub = cl.subscribe("A");
+    let guard = cl.serving("A");
     assert!(cl.has_peer("A"));
 
-    // Idle well past the dead-peer TTL, then reap: the subscribed log survives.
+    // Idle well past the dead-peer TTL, then reap: the served log survives.
     tokio::time::advance(Duration::from_millis(3_000)).await;
     cl.reap(clock.now_ms());
-    assert!(cl.has_peer("A"), "subscribed peer log must survive an idle reap");
+    assert!(cl.has_peer("A"), "a served peer log must survive an idle reap");
 
-    // Park a real waiter on the subscription (as serve_replog does), then bump:
-    // it must wake — proving the post-reap Notify was NOT orphaned/recreated.
-    let waiter = tokio::spawn(async move {
-        sub.notified().await;
-        sub // hand the guard back so we can drop it after the wake
-    });
-    for _ in 0..16 {
-        tokio::task::yield_now().await; // let the waiter park on the Notify
-    }
-    cl.bump("A", "c1", Op::Create, Partition::Bak);
-    let sub = tokio::time::timeout(Duration::from_millis(50), waiter)
-        .await
-        .expect("a bump after reap wakes the parked subscriber (Notify not orphaned)")
-        .unwrap();
-
-    // Drop the subscription → once idle past the dead-peer TTL again, reap evicts
-    // the now-unsubscribed log (the bump above refreshed its last-active stamp).
-    drop(sub);
+    // A bump refreshes the last-active stamp; drop the guard, idle past the TTL
+    // again, and reap → the now-unserved log is evicted.
+    cl.bump("A", "c1", Op::Put, Partition::Bak);
+    drop(guard);
     tokio::time::advance(Duration::from_millis(3_000)).await;
     cl.reap(clock.now_ms());
-    assert!(!cl.has_peer("A"), "unsubscribed idle log is reaped");
+    assert!(!cl.has_peer("A"), "an unserved idle log is reaped");
 }
 
 /// A replica stored with `ttl_ms <= 0` self-evicts via the backstop TTL (so a

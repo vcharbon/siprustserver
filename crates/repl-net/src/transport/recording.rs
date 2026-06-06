@@ -249,13 +249,12 @@ mod tests {
         let req = Frame::PullRequest {
             proto_ver: 1,
             caller: "node-A".into(),
-            mode: crate::PullMode::Replog,
+            partition: crate::Partition::Bak,
             since: crate::Watermark::new(1, 0),
-            chunk: 128,
         };
         let data = Frame::Data {
             at: crate::Watermark::new(1, 1),
-            op: crate::Op::Create,
+            op: crate::Op::Put,
             partition: crate::Partition::Bak,
             call_ref: "p|c1|t".into(),
             call_gen: 1,

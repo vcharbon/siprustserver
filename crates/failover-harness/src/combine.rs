@@ -112,6 +112,7 @@ pub fn combine_doc(
             to: Some(sip_col(e.to)),
             label: facets(&e.raw).label,
             detail: Some(detail),
+            conn: None,
             kind: RowKind::Sip {
                 delivered: e.delivered,
             },
@@ -119,8 +120,13 @@ pub fn combine_doc(
     }
 
     // Replication plane (only `Sent` frames — one logical message per arrow).
+    // A frame is `delivered` iff the peer's recorder captured the matching
+    // `Received` (see [`delivered_sent`]); a frame the sender emitted into a dead
+    // or cut connection (e.g. a survivor still streaming a reclaim response to a
+    // just-crashed peer) has no `Received` twin and renders as LOST (a cross).
     let repl_lane_map = repl_lane_map(repl, &repl_addr_col);
-    for f in &repl.frames {
+    let delivered_sent = delivered_sent(&repl.frames);
+    for (i, f) in repl.frames.iter().enumerate() {
         if f.dir != Direction::Sent {
             continue;
         }
@@ -139,7 +145,10 @@ pub fn combine_doc(
             to: Some(to),
             label: frame_summary(&f.frame),
             detail: None,
-            kind: RowKind::Repl { delivered: true },
+            conn: Some(conn_label(f, &repl_addr_col)),
+            kind: RowKind::Repl {
+                delivered: delivered_sent.contains(&i),
+            },
         });
     }
 
@@ -158,6 +167,7 @@ pub fn combine_doc(
             to: None,
             label: marker_label(m),
             detail,
+            conn: None,
             kind: RowKind::Lifecycle,
         });
     }
@@ -180,6 +190,74 @@ pub fn combine_doc(
         rows,
         anomalies,
     }
+}
+
+/// Which `Sent` frames actually reached the peer — the set of indices into
+/// `frames` of every `Sent` capture that has a matching `Received` twin.
+///
+/// A `Sent` is captured on the sender's `send()` (before the wire moves it); the
+/// peer's `recv()` captures the `Received` only if the byte actually arrived. So
+/// a `Sent` with no `Received` twin was **lost in transit** — the classic case
+/// is a survivor still streaming a reclaim response down a connection whose far
+/// end just crashed (the frame is faithfully recorded as *attempted*, never
+/// applied). The two captures sit at opposite endpoints, so a `Sent (from=A,
+/// to=B)` is twinned by a `Received (from=B, to=A)` (orientation swapped, since
+/// each side records its own local addr as `from`), same `Frame`, captured at or
+/// after the send.
+///
+/// Pairing is 1:1 and duplicate-safe: the SAME `(A→B, frame)` may be sent twice
+/// (e.g. dropped pre-reboot, then re-sent and delivered). We walk `Received` in
+/// time order and claim, for each, the most-recent unconsumed matching `Sent` at
+/// or before it — so a later delivery can never "rescue" an earlier dropped send.
+fn delivered_sent(frames: &[repl_net::transport::CapturedFrame]) -> std::collections::HashSet<usize> {
+    let sent: Vec<(usize, &repl_net::transport::CapturedFrame)> = frames
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.dir == Direction::Sent)
+        .collect();
+    let mut received: Vec<&repl_net::transport::CapturedFrame> =
+        frames.iter().filter(|f| f.dir == Direction::Received).collect();
+    received.sort_by_key(|f| f.at_ms);
+
+    let mut consumed = vec![false; sent.len()];
+    let mut delivered = std::collections::HashSet::new();
+    for r in received {
+        // The most-recent unconsumed Sent twin at or before this receipt.
+        let mut best: Option<usize> = None;
+        for (pos, (_, s)) in sent.iter().enumerate() {
+            if consumed[pos]
+                || s.frame != r.frame
+                || s.from != r.to
+                || s.to != r.from
+                || s.at_ms > r.at_ms
+            {
+                continue;
+            }
+            if best.is_none_or(|b| s.at_ms >= sent[b].1.at_ms) {
+                best = Some(pos);
+            }
+        }
+        if let Some(pos) = best {
+            consumed[pos] = true;
+            delivered.insert(sent[pos].0);
+        }
+    }
+    delivered
+}
+
+/// The disambiguating socket identity of the connection a repl frame rode — the
+/// ephemeral (puller) endpoint, i.e. the one that is NOT a worker's fixed repl
+/// listen address. Two flows to the same node use two distinct ephemeral
+/// sockets, and a node that crashes + reconnects gets a fresh one; rendering
+/// each `conn` in its own color makes a frame "lost to b2" legible as riding a
+/// DIFFERENT (defunct) socket than the live connection collapsed on that lane.
+fn conn_label(
+    f: &repl_net::transport::CapturedFrame,
+    repl_addr_col: &BTreeMap<SocketAddr, String>,
+) -> String {
+    // The listen end is in `repl_addr_col`; the other end is the ephemeral one.
+    let ephemeral = if repl_addr_col.contains_key(&f.from) { f.to } else { f.from };
+    format!(":{}", ephemeral.port())
 }
 
 /// Build the columns in the canonical `alice, proxy, b1, b2, bob` order: the
@@ -215,8 +293,8 @@ fn build_lanes(
         }
     }
     // Stable deterministic order within each group.
-    uas.sort_by(|a, b| a.0.cmp(&b.0));
-    suts.sort_by(|a, b| a.0.cmp(&b.0));
+    uas.sort_by_key(|a| a.0);
+    suts.sort_by_key(|a| a.0);
 
     let label = |name: &str, id: &str| -> String {
         if name.is_empty() {
@@ -291,5 +369,80 @@ fn marker_label(m: &ha_harness::Marker) -> String {
         Some(peer) => format!("{} {}<->{}", m.kind, m.node, peer),
         None if !m.detail.is_empty() => format!("{} {} {}", m.kind, m.node, m.detail),
         None => format!("{} {}", m.kind, m.node),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use repl_net::transport::CapturedFrame;
+    use repl_net::{Frame, Watermark};
+
+    fn addr(port: u16) -> SocketAddr {
+        format!("127.0.0.1:{port}").parse().unwrap()
+    }
+
+    /// Capture a frame `a → b` at `at_ms`. `dir` records on whichever endpoint
+    /// observed it: a `Sent` records on the sender (`from=a`), a `Received` on the
+    /// receiver — and because each side records its OWN local addr as `from`, a
+    /// receipt of `a → b` is captured with `from=b, to=a` (orientation swapped),
+    /// exactly as the real recorder does. The helper takes the LOGICAL direction
+    /// (`a` is always the sender) and swaps for `Received` so tests read naturally.
+    fn cap(at_ms: i64, a: u16, b: u16, dir: Direction, frame: Frame) -> CapturedFrame {
+        let (from, to) = match dir {
+            Direction::Sent => (addr(a), addr(b)),
+            Direction::Received => (addr(b), addr(a)),
+        };
+        CapturedFrame { at_ms, seq: 0, from, to, dir, frame }
+    }
+
+    fn noop() -> Frame {
+        Frame::Noop { at: Watermark::new(1, 2) }
+    }
+
+    #[test]
+    fn sent_with_a_received_twin_is_delivered_without_one_is_lost() {
+        // b1(9401) sends two identical Noops to b2(9402): the first is delivered
+        // (b2 recv'd it), the second is lost (b2 had crashed — no recv twin).
+        let frames = vec![
+            cap(100, 9401, 9402, Direction::Sent, noop()),
+            cap(101, 9401, 9402, Direction::Received, noop()), // twin of the first
+            cap(700, 9401, 9402, Direction::Sent, noop()),     // no twin → lost
+        ];
+        let delivered = delivered_sent(&frames);
+        assert!(delivered.contains(&0), "first send had a recv twin");
+        assert!(!delivered.contains(&2), "second send was lost (no recv twin)");
+    }
+
+    #[test]
+    fn a_later_redelivery_does_not_rescue_an_earlier_dropped_send() {
+        // The crux of the kill report: the SAME (b1→b2, frame) is sent at t=170
+        // (lost, peer dead) then re-sent at t=230 after reboot (delivered). The
+        // single receipt at t=231 must pair with the t=230 send — NOT retroactively
+        // mark the t=170 drop as delivered.
+        let frames = vec![
+            cap(170, 9401, 9402, Direction::Sent, noop()),     // dropped (peer dead)
+            cap(230, 9401, 9402, Direction::Sent, noop()),     // re-sent post-reboot
+            cap(231, 9401, 9402, Direction::Received, noop()), // pairs with t=230
+        ];
+        let delivered = delivered_sent(&frames);
+        assert!(!delivered.contains(&0), "the t=170 drop stays lost");
+        assert!(delivered.contains(&1), "the t=230 re-send was delivered");
+    }
+
+    #[test]
+    fn group_loss_count_equals_sent_minus_received() {
+        // Six identical Noops sent, four received → exactly two marked lost
+        // (which two among identical frames is immaterial; the COUNT is the claim).
+        let mut frames = Vec::new();
+        for i in 0..6 {
+            frames.push(cap(100 + i * 10, 9401, 9402, Direction::Sent, noop()));
+        }
+        for i in 0..4 {
+            frames.push(cap(105 + i * 10, 9401, 9402, Direction::Received, noop()));
+        }
+        let delivered = delivered_sent(&frames);
+        let lost = (0..6).filter(|i| !delivered.contains(i)).count();
+        assert_eq!(lost, 2, "6 sent − 4 received = 2 lost");
     }
 }

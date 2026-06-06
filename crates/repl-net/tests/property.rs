@@ -5,18 +5,14 @@ use std::sync::Arc;
 
 use proptest::prelude::*;
 
-use repl_net::{decode_frame, encode_frame, Frame, Op, Partition, PullMode, Watermark};
+use repl_net::{decode_frame, encode_frame, Frame, Op, Partition, Watermark};
 
 fn watermark_strat() -> impl Strategy<Value = Watermark> {
     (any::<u64>(), any::<u64>()).prop_map(|(g, c)| Watermark::new(g, c))
 }
 
-fn pull_mode_strat() -> impl Strategy<Value = PullMode> {
-    prop_oneof![Just(PullMode::Replog), Just(PullMode::Bootstrap)]
-}
-
 fn op_strat() -> impl Strategy<Value = Op> {
-    prop_oneof![Just(Op::Create), Just(Op::Update), Just(Op::Delete)]
+    prop_oneof![Just(Op::Put), Just(Op::Delete)]
 }
 
 fn partition_strat() -> impl Strategy<Value = Partition> {
@@ -24,23 +20,13 @@ fn partition_strat() -> impl Strategy<Value = Partition> {
 }
 
 fn frame_strat() -> impl Strategy<Value = Frame> {
-    let pull = (
-        any::<u16>(),
-        ".*",
-        pull_mode_strat(),
-        watermark_strat(),
-        any::<u32>(),
-    )
-        .prop_map(|(proto_ver, caller, mode, since, chunk)| Frame::PullRequest {
+    let pull = (any::<u16>(), ".*", partition_strat(), watermark_strat())
+        .prop_map(|(proto_ver, caller, partition, since)| Frame::PullRequest {
             proto_ver,
             caller,
-            mode,
+            partition,
             since,
-            chunk,
         });
-
-    let ack = (".*", watermark_strat())
-        .prop_map(|(caller, up_to)| Frame::Ack { caller, up_to });
 
     let data = (
         watermark_strat(),
@@ -73,7 +59,7 @@ fn frame_strat() -> impl Strategy<Value = Frame> {
 
     let reset = ".*".prop_map(|reason| Frame::ResetToBootstrap { reason });
 
-    prop_oneof![pull, ack, data, noop, reset]
+    prop_oneof![pull, data, noop, reset]
 }
 
 proptest! {

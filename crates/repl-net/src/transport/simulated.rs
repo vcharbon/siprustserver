@@ -790,7 +790,7 @@ mod tests {
     fn data_frame(counter: u64, body: &[u8]) -> Frame {
         Frame::Data {
             at: crate::Watermark::new(1, counter),
-            op: crate::Op::Update,
+            op: crate::Op::Put,
             partition: crate::Partition::Bak,
             call_ref: format!("p|call{counter}|tag"),
             call_gen: 7,

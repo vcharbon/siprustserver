@@ -27,7 +27,7 @@ mod supervisor;
 pub use changelog::{
     BodySource, Changelog, RefMeta, DEFAULT_DEAD_PEER_TTL_MS, DEFAULT_TOMBSTONE_TTL_MS,
 };
-pub use puller::{Puller, PullerConfig, PullerState, PullerStatus};
+pub use puller::{Puller, PullerConfig, PullerStatus};
 pub use readiness::{Readiness, ReadinessSource, ReadinessState};
 pub use replication::{flush_replicated, replication_target, ReplicationPlan};
 pub use server::ReplServer;

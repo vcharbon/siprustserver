@@ -61,7 +61,7 @@ pub struct RouterCtx {
 /// `run` loop as SIP events so reclaim never races the per-call handlers.
 #[derive(Debug, Clone)]
 pub enum ReplCommand {
-    /// **Go-active bulk reclaim** — materialise every `pri:{self}` call into the
+    /// **Bulk reclaim** — materialise every `pri:{self}` call into the
     /// live map + re-arm timers (a rebooted primary re-*serving* its partition,
     /// not just re-storing it). Fired once the supervisor reports bootstrap-complete.
     /// Keepalive timers are *smoothed* (oldest-overdue first; see
@@ -129,7 +129,7 @@ async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
     }
 }
 
-/// **Go-active bulk reclaim** (ADR-0011 X11): re-materialise every `pri:{self}`
+/// **Bulk reclaim** (ADR-0014): re-materialise every `pri:{self}`
 /// call into the live map + re-arm its timers — what makes a rebooted primary
 /// re-*serve* its partition, not just re-*store* it.
 ///
@@ -259,14 +259,16 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
 
     let mut res = resolve(ctx, &event);
     if res.call_ref.is_none() {
-        // Acting-backup takeover fallback (production resolution path). A real
-        // UAC routes in-dialog requests through the proxy (stickiness cookie in
-        // the Route header, no `callref` request-URI param), so a pure backup —
-        // which never primary-served the call — can key the dialog neither from
-        // the message nor from its empty in-memory `sip_index`. Recover the
-        // callRef from the replica store's SIP index (the puller imported it)
-        // before declaring the event unroutable. Without this the failed-over
-        // BYE is silently dropped and the dialog never terminates on the backup.
+        // Acting-backup takeover BACKSTOP. The normal in-dialog key is the R-URI
+        // `callref` param the B2BUA Contact stamps and the proxy preserves under
+        // loose routing — so `resolve` (above) already keys the dialog from it,
+        // and sip-txn `extract_ruri_call_ref` attributes the server txn by the
+        // SAME key (the self-release count gate, ADR-0014). This branch only fires
+        // when that param is absent AND our in-memory `sip_index` is empty — a
+        // pure backup that never primary-served the call. Re-key the dialog from
+        // the replica store's SIP index (the puller imported it) before declaring
+        // the event unroutable, so a failed-over in-dialog request is not silently
+        // dropped and the dialog can still terminate on the backup.
         res.call_ref = replica_takeover_call_ref(ctx, &event).await;
     }
     let call_ref = match res.call_ref.clone() {

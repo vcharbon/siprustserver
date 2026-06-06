@@ -98,11 +98,13 @@ fn spawn_puller(
     peer_addr: SocketAddr,
     net: &RealReplicationNetwork,
     store: &ReplicatingCallStore,
+    partition: repl_net::frame::Partition,
 ) -> (watch::Sender<bool>, B2buaMetrics) {
     let metrics = B2buaMetrics::new();
     let (puller, _status) = Puller::new_at(
         peer_ordinal,
         self_ordinal,
+        partition,
         peer_addr,
         Arc::new(net.clone()) as Arc<dyn ReplicationNetwork>,
         store.clone(),
@@ -132,7 +134,8 @@ async fn tail_delivers_post_connect_mutation_over_real_tcp() {
         Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
         clock.clone(),
     );
-    let (_cancel, metrics) = spawn_puller("w1", "w0", w0_addr, &net, &w1);
+    let (_cancel, metrics) =
+        spawn_puller("w1", "w0", w0_addr, &net, &w1, repl_net::frame::Partition::Bak);
 
     // A call is established on the primary AFTER the puller connected (the store
     // was empty at bootstrap time — the tail must carry it). The flush stores
@@ -194,7 +197,8 @@ async fn tail_streams_successive_updates_over_real_tcp() {
         Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
         clock.clone(),
     );
-    let (_cancel, metrics) = spawn_puller("w1", "w0", w0_addr, &net, &w1);
+    let (_cancel, metrics) =
+        spawn_puller("w1", "w0", w0_addr, &net, &w1, repl_net::frame::Partition::Bak);
 
     let call_ref = "w0|call-updates|tag".to_string();
     for gen in 1..=4i64 {
@@ -265,7 +269,8 @@ async fn bootstrap_preseed_delivers_over_real_tcp() {
         Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
         clock.clone(),
     );
-    let (_cancel, metrics) = spawn_puller("w1", "w0", w0_addr, &net, &w1);
+    let (_cancel, metrics) =
+        spawn_puller("w1", "w0", w0_addr, &net, &w1, repl_net::frame::Partition::Pri);
 
     // The bootstrap pre-seed imports it into w1's pri:w1 (its own reclaimed call).
     eventually("backup reclaims the pre-seeded call", || {
@@ -440,7 +445,8 @@ async fn bootstrap_synchronises_above_5k_contexts_per_second_over_real_tcp() {
         clock.clone(),
     );
     let started = tokio::time::Instant::now();
-    let (_cancel, metrics) = spawn_puller("w1", "w0", w0_addr, &net, &w1);
+    let (_cancel, metrics) =
+        spawn_puller("w1", "w0", w0_addr, &net, &w1, repl_net::frame::Partition::Pri);
 
     // Poll until all N have re-hydrated into pri:w1, capturing wall time. The
     // 30s ceiling is a correctness backstop only (so a real regression fails
@@ -509,8 +515,14 @@ async fn mismatched_ordinal_silently_delivers_nothing() {
         Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000),
         clock.clone(),
     );
-    let (_cancel, metrics) =
-        spawn_puller("b2bua-worker-1", "w0", w0_addr, &net, &backup);
+    let (_cancel, metrics) = spawn_puller(
+        "b2bua-worker-1",
+        "w0",
+        w0_addr,
+        &net,
+        &backup,
+        repl_net::frame::Partition::Bak,
+    );
 
     // Bump the changelog under the WRONG peer id ("w1" != the puller's caller).
     let call_ref = "w0|orphaned|tag".to_string();
@@ -592,7 +604,8 @@ async fn measure_bootstrap(
     }
 
     let started = tokio::time::Instant::now();
-    let (_cancel, metrics) = spawn_puller("w1", "w0", w0_addr, net, &w1);
+    let (_cancel, metrics) =
+        spawn_puller("w1", "w0", w0_addr, net, &w1, repl_net::frame::Partition::Pri);
     let deadline = started + Duration::from_secs(120);
     loop {
         if w1.scan_call_refs(PRI, "w1").len() >= n {
@@ -736,6 +749,7 @@ async fn measure_bootstrap_latent(
     let (puller, _status) = Puller::new_at(
         "w0",
         "w1",
+        repl_net::frame::Partition::Pri,
         w0_addr,
         Arc::new(net) as Arc<dyn ReplicationNetwork>,
         w1.clone(),
@@ -887,6 +901,7 @@ async fn bootstrap_coalesces_into_few_network_rounds() {
     let (puller, _status) = Puller::new_at(
         "w0",
         "w1",
+        repl_net::frame::Partition::Pri,
         w0_addr,
         Arc::new(net) as Arc<dyn ReplicationNetwork>,
         w1.clone(),
@@ -908,7 +923,7 @@ async fn bootstrap_coalesces_into_few_network_rounds() {
     }
 
     // CHUNK is 128 ⇒ ceil(2000/128) = 16 batched body-rounds, plus the terminal
-    // Noop, the two PullRequests, and the steady-state Noop(s): ~20 total. Budget
+    // Noop, the single PullRequest, and the steady-state Noop(s): ~20 total. Budget
     // 64 leaves generous headroom for control frames yet is ~30x below the 2000
     // a per-frame-flush regression would emit.
     let total = rounds.load(Ordering::Relaxed);

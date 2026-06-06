@@ -108,28 +108,47 @@ than its **primary**. Enforced in **one place only** — the proxy's `w_bak`
 selection (`encode_stickiness`), filtering HRW-2nd-best candidates to a foreign
 domain; the b2bua never recomputes it (it echoes `w_bak` onto `topology.bak`),
 so the stored **Element** lands in the chosen domain by construction. Frozen at
-INVITE for the call's life. **Degraded fallback:** when no alive foreign-domain
-worker exists, fall back to a same-domain backup (survives the common pod
-crash/restart, not a domain partition) and emit a degraded-backup metric.
+INVITE for the call's life — **safe** because workers are zone-pinned (one
+StatefulSet per zone, hard `nodeAffinity`), so a rebooted primary always returns
+to its own domain and can never drift into its backup's. **Degraded fallback:**
+when no alive foreign-domain worker exists, fall back to a same-domain backup
+(survives the common pod crash/restart, not a domain partition) and emit a
+degraded-backup metric. With ≥3 zones this fallback only triggers if every other
+domain is dead. A periodic b2bua self-scan (own zone vs `topology.bak`'s zone)
+re-emits the metric as a safety net.
 _Avoid_: re-deriving the constraint in the b2bua or repl layer (single picker =
 the proxy).
 
-**Forward replication** vs **Reverse replication**:
-*Forward* = a primary pushing its own calls to the peer that backs them up
-(`partition=bak` on the wire). *Reverse* = a rebooted primary reclaiming calls
-its backup mutated while it was down (`partition=pri`). Both ride the **same**
-pull stream — `partition` tags which is which.
+**Reclaim stream** vs **Backup stream** (the two pull flows, from a node N's view):
+*Reclaim* = N pulls the partition where **N is primary** — its own calls that a peer
+backed up while N was down — and re-serves them (`partition=pri` on the wire; stored
+`pri:{N}`; **timers armed**; N is **primary** for `(p,b)`). *Backup* = N pulls the
+partition where the **peer is primary and N is its backup** (`partition=bak`; stored
+`bak:{peer}`; **no timers**; N is **backup** for `(p,b)`). They run on **two separate
+sockets** to distinct endpoints (no multiplexing), each with its **own watermark**, but
+share one frame set and one keepalive mechanism. Direction synonyms (used in ADR-0014
+prose): Reclaim = *Reverse* (backup→primary), Backup = *Forward* (primary→backup).
+_Avoid_: "they ride the same pull stream" (was true pre-simplification; now two sockets);
+"Forward/Reverse" as the primary names in new code (prefer Reclaim/Backup stream).
 
-**Re-hydration** (bootstrap):
-A booting primary's bulk pre-seed: it scans a backup's `bak:{primary}` callRef
-keys (brief lock), streams the bodies in ~128 batches, captures `W = changelog
-head at scan start`, seeds its watermark to `W`, and keeps tailing. Correctness
-is bootstrap + conservative watermark + tail, *not* snapshot consistency.
+**Bootstrap phase** (of either stream):
+The bulk store-scan prefix every flow runs on a cold connect: it scans the peer's
+keyspace for its partition (`bak:{caller}` for **Reclaim**-serve, `pri:{self}`
+filtered to the caller's backups for **Backup**-serve), streams the bodies in
+batches, captures `W = changelog head at scan start`, then hands off to the tail.
+The scan is mandatory (not a cold changelog pull): a created-then-quiescent call's
+changelog entry compacts away, so only the store scan is a complete snapshot.
+Correctness is bootstrap + conservative watermark + tail, *not* snapshot consistency.
+
+**Re-hydration**:
+The **Reclaim** stream's bootstrap phase specifically — a booting primary bulk
+pre-seeding its **own** calls (`pri:{self}`) from the peers that backed them up,
+then re-serving them (smoothed). Gates **readiness** (first Noop).
 
 **Backup re-subscription**:
-The steady-state tail a node opens against each peer (`PullRequest(Replog,
-since=W)`) to keep its backups current. Same stream as re-hydration; bootstrap
-is just its bulk prefix.
+The **Backup** stream (bootstrap + tail) a node opens against each peer *after*
+`Ready` to keep the calls it backs up current. Distinct socket, distinct
+watermark from Reclaim; never gates readiness (metrics-only).
 
 **Takeover copy** (acting-backup live copy) — *reactive only* (ADR-0014):
 The live, in-memory call a backup materialises into its own call map **when the
@@ -210,20 +229,28 @@ restarts, so `(new_gen, 0) > (old_gen, *)`). *callGen* (`CallTopology.gen`) = th
 incarnation-gen (per node, in the watermark) with the call's `(p,b)` (per call).
 
 **Watermark** `(gen, counter)`:
-A puller's per-peer cursor; it applies a `Data` frame iff `(gen, counter) >
-watermark`, then advances. Retained per ordinal across disconnects so a
+A puller's cursor, **one per `(peer, flow)`** — the **Reclaim** and **Backup**
+streams to the same peer carry **distinct** watermarks. It is a position in that
+peer's single changelog (a `Data` frame applies iff `(gen, counter) > watermark`,
+then advances), filtered to the flow's partition. It is **purely** a changelog
+position — never read from or written to a call's `(p,b)` version vector (the
+two-generations trap). Retained per `(ordinal, flow)` across disconnects so a
 returning peer resumes rather than re-bootstraps.
 
 **Current flag** (`everCaughtUp`):
-Set the instant the head `Noop` arrives on a peer's tail — "I have drained this
-peer's backlog." **Sticky** across reconnects; a transient TCP blip does not
-revert a node to NotReady.
+Set the instant the **first `Noop`** arrives on a stream — the server emits it on
+the **catch-up edge** (backlog drained below one batch / to head), so it means "I
+have drained this flow's backlog." **Sticky** across reconnects; a transient TCP
+blip does not revert a node to NotReady. Tracked **per flow**: the **Reclaim**
+stream's current flag gates readiness; the **Backup** stream's is **metrics-only**.
 
 **Readiness states** (`NotReady → Ready → Draining`):
 Self-reported via OPTIONS (`200` / `503 not-ready` / `503 draining`) and, in
-k8s, via the `/ready` HTTP probe. **Ready** = re-hydration done for all
-*reachable* peers (best-effort, hard-timer bounded) **and** every forward pull
-is current. **Draining** = latched on SIGTERM; terminal.
+k8s, via the `/ready` HTTP probe. **Ready** = every **Reclaim** stream to a
+*reachable* peer has hit its first `Noop` (best-effort, hard-timer bounded so a
+dead/slow peer cannot hang readiness). **Backup** streams are opened only *after*
+`Ready` and **never gate it** (fire-and-forget; observable via the store + metrics,
+not a readiness sub-state). **Draining** = latched on SIGTERM; terminal.
 
 **K8sMembership**:
 The real `topology::Membership` source (S11): a kube EndpointSlice informer over

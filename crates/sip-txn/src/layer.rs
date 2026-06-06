@@ -198,6 +198,7 @@ impl TransactionLayer {
 
         let owner = Owner {
             txns: HashMap::new(),
+            txn_counts: HashMap::new(),
             timers: DelayQueue::new(),
             parser,
             events_tx,
@@ -323,6 +324,15 @@ struct Owner {
     /// [`TransactionEvent::CallQuiesced`] and drop the watch. Bounded — one entry
     /// per live takeover copy, removed when it fires.
     self_release_watch: HashSet<String>,
+    /// `call_ref → live-txn count`, kept in **lockstep** with `txns` (every
+    /// `set_txn`/`delete_txn` updates both; an entry is dropped at count 0). Makes
+    /// the acting-backup self-release machinery — `has_txns_for`,
+    /// `active_txn_count_for_call`, and the last-`delete_txn` check — O(1) instead
+    /// of an O(total_txns) scan of the branch-keyed map, which on a backup serving
+    /// many failed-over dialogs ran per teardown under endurance load. Same
+    /// single-writer discipline CLAUDE.md prescribes for the timer driver's
+    /// `active`/queue lockstep: never let this drift from `txns`.
+    txn_counts: HashMap<String, usize>,
 }
 
 /// The next expired timer. Only ever awaited while `q` is non-empty — an empty
@@ -365,8 +375,35 @@ impl Owner {
     // ── map bookkeeping (keeps the active-txn gauge == map size) ────────────
 
     fn set_txn(&mut self, txn: Transaction) {
-        self.txns.insert(txn.branch.clone(), txn);
+        let new_call_ref = txn.call_ref.clone();
+        // A re-insert of the same branch (rare) must not double-count: drop the
+        // displaced txn's contribution before adding the new one.
+        if let Some(old) = self.txns.insert(txn.branch.clone(), txn) {
+            self.untrack_call_ref(&old.call_ref);
+        }
+        self.track_call_ref(&new_call_ref);
         self.sync_active();
+    }
+
+    /// `call_ref → txn-count` increment, in lockstep with a `txns` insert. A txn
+    /// with no `call_ref` (out-of-dialog initial INVITE / OPTIONS) is not counted.
+    fn track_call_ref(&mut self, call_ref: &Option<String>) {
+        if let Some(cr) = call_ref {
+            *self.txn_counts.entry(cr.clone()).or_insert(0) += 1;
+        }
+    }
+
+    /// `call_ref → txn-count` decrement, in lockstep with a `txns` remove; the
+    /// entry is dropped at 0 so `has_txns_for` is a plain `contains_key`.
+    fn untrack_call_ref(&mut self, call_ref: &Option<String>) {
+        if let Some(cr) = call_ref {
+            if let Some(n) = self.txn_counts.get_mut(cr) {
+                *n -= 1;
+                if *n == 0 {
+                    self.txn_counts.remove(cr);
+                }
+            }
+        }
     }
 
     fn delete_txn(&mut self, branch: &str) -> bool {
@@ -375,6 +412,7 @@ impl Owner {
                 self.cancel_timer(t.retransmit_key);
                 self.cancel_timer(t.timeout_key);
                 self.cancel_timer(t.cleanup_key);
+                self.untrack_call_ref(&t.call_ref);
                 self.sync_active();
                 // ADR-0014 self-release: if this was the LAST transaction for a
                 // watched call, notify the consumer so it can shed its acting-backup
@@ -567,11 +605,7 @@ impl Owner {
                 let _ = reply.send(());
             }
             Command::ActiveTxnCount { call_ref, reply } => {
-                let n = self
-                    .txns
-                    .values()
-                    .filter(|t| t.call_ref.as_deref() == Some(call_ref.as_str()))
-                    .count();
+                let n = self.txn_counts.get(call_ref.as_str()).copied().unwrap_or(0);
                 let _ = reply.send(n);
             }
             Command::WatchSelfRelease { call_ref, reply } => {
@@ -587,11 +621,10 @@ impl Owner {
         }
     }
 
-    /// Any transaction (any role/state) still attributed to `call_ref`?
+    /// Any transaction (any role/state) still attributed to `call_ref`? O(1) via
+    /// the lockstep `txn_counts` index (a 0-count call_ref has no entry).
     fn has_txns_for(&self, call_ref: &str) -> bool {
-        self.txns
-            .values()
-            .any(|t| t.call_ref.as_deref() == Some(call_ref))
+        self.txn_counts.contains_key(call_ref)
     }
 
     async fn do_send_request(

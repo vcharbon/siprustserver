@@ -274,13 +274,14 @@ fn gen(state: &CallState, call_ref: &str) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
-// (4) `repl_backup_held` must count a replica whose FIRST delivery is an
-// `Op::Update`, not just `Op::Create`. The changelog COMPACTS: a call created
-// then updated before the backup drains collapses to a single `Op::Update`
-// entry (and the steady-state tail likewise pushes the latest state as
-// `Update`). Keying the gauge on `op == Create` undercounted every such replica
-// — the live cluster's `repl_backup_held = 0` despite the body being held. This
-// is a pure apply-path logic bug, reproducible in-memory (no real socket).
+// (4) `repl_backup_held` must count a replica delivered as a compacted
+// `Op::Put`, not only a fresh first-create. The changelog COMPACTS: a call
+// created then updated before the backup drains collapses to a single `Op::Put`
+// entry carrying the latest state (and the steady-state tail likewise pushes the
+// latest state as a `Put`). Keying the gauge on a "create-only" op undercounted
+// every such replica — the live cluster's `repl_backup_held = 0` despite the
+// body being held. This is a pure apply-path logic bug, reproducible in-memory
+// (no real socket).
 // ---------------------------------------------------------------------------
 #[tokio::test(start_paused = true)]
 async fn backup_held_counts_update_first_replica() {
@@ -299,6 +300,7 @@ async fn backup_held_counts_update_first_replica() {
     let (puller, _status) = Puller::new_at(
         "w0",
         "w1",
+        repl_net::frame::Partition::Bak,
         w0.addr,
         net.clone() as Arc<dyn ReplicationNetwork>,
         w1.clone(),
@@ -311,7 +313,7 @@ async fn backup_held_counts_update_first_replica() {
     tick(50).await;
 
     // Create THEN update the same callRef before the puller drains: the changelog
-    // compacts to one entry with effective op = Update (the Create slot is moved).
+    // compacts to a single Put entry carrying the latest (gen=2) state.
     let call_ref = "w0|compacted|tag".to_string();
     let fwd = PutOpts {
         peer: Some("w1".into()),
@@ -328,17 +330,17 @@ async fn backup_held_counts_update_first_replica() {
     tick(150).await;
 
     assert_eq!(
-        w0.store.changelog().peer_len("w1"),
+        w0.store.changelog().peer_len("w1", repl_net::frame::Partition::Bak),
         1,
-        "changelog compacted create+update to a single entry"
+        "changelog compacted create+update to a single Put entry"
     );
     assert!(
         w1.get_call(BAK, "w0", &call_ref).await.unwrap().is_some(),
-        "the compacted (Update) replica was delivered + stored"
+        "the compacted (Put) replica was delivered + stored"
     );
     assert_eq!(
         metrics.repl_backup_held(),
         1,
-        "an Update-first replica still grows the backup-held gauge",
+        "a compacted-Put replica still grows the backup-held gauge",
     );
 }

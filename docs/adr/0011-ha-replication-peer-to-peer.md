@@ -77,6 +77,15 @@ a caught-up one gets only deltas.
 
 ## Decision X4 — re-hydration: snapshot-keys + lazy scan + conservative watermark + tail
 
+> **Superseded in part by [ADR-0014](0014-reactive-only-takeover-version-vector.md)
+> §Stream topology.** The "**Re-hydration and backup-re-subscription are the same
+> pull stream**" claim below is **no longer true**: the two flows now run on **two
+> separate single-flow sockets** with **distinct watermarks** (one changelog, two
+> partition-filtered cursors), and the `Bootstrap`/`Replog` two-request handshake
+> is collapsed into a `since==(0,0)` rule. The scan + conservative-watermark + tail
+> *mechanism* of each individual flow is unchanged. The `Ack` frame and `PullMode`
+> enum named in X9 are removed.
+
 On boot a primary re-hydrates its owned calls by scanning a backup's
 `bak:{primary}` partition (`PeerScanBootstrap`). The server copies just the
 callRef **keys** under a brief lock, releases, then streams bodies in ~128

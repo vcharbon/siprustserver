@@ -1,12 +1,13 @@
-//! The replication frame model — six positional-msgpack messages plus the
+//! The replication frame model — four positional-msgpack messages plus the
 //! small value enums and the [`Watermark`] ordering they ride on.
 //!
 //! Field ORDER on the wire is the contract (ADR-0008 positional-msgpack ethos):
 //! each frame serialises as a msgpack ARRAY whose element 0 is an integer tag.
 //! The Rust types below group some flat wire elements behind a [`Watermark`] for
 //! ergonomics, but the codec ([`crate::codec`]) flattens them back to the exact
-//! array layout documented in ADR-0011 X9 / the migration plan. See those for
-//! the authoritative spec.
+//! array layout. The two replication flows (**Reclaim** = `partition=Pri`,
+//! **Backup** = `partition=Bak`) run on two separate single-flow sockets and
+//! share this one frame set (ADR-0014 §Stream topology).
 
 use std::sync::Arc;
 
@@ -21,48 +22,17 @@ pub struct UnknownDiscriminant {
     pub value: u8,
 }
 
-/// Which stream a [`Frame::PullRequest`] opens.
-///
-/// `Replog` (0) tails the compacted changelog from a watermark; `Bootstrap` (1)
-/// re-hydrates the full owned set (the `since_*` watermark is ignored).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PullMode {
-    /// mode 0 — tail the changelog from `since`.
-    Replog,
-    /// mode 1 — full re-hydration scan; `since` ignored.
-    Bootstrap,
-}
-
-impl PullMode {
-    /// Wire byte for this mode.
-    pub fn as_u8(self) -> u8 {
-        match self {
-            PullMode::Replog => 0,
-            PullMode::Bootstrap => 1,
-        }
-    }
-
-    /// Decode a wire byte; rejects unknown discriminants.
-    pub fn from_u8(v: u8) -> Result<Self, UnknownDiscriminant> {
-        match v {
-            0 => Ok(PullMode::Replog),
-            1 => Ok(PullMode::Bootstrap),
-            other => Err(UnknownDiscriminant {
-                field: "PullMode",
-                value: other,
-            }),
-        }
-    }
-}
-
 /// The mutation a [`Frame::Data`] carries.
+///
+/// **Create and Update are merged into one idempotent `Put`** (ADR-0014): the
+/// compacted changelog delivers latest-per-call state, so the puller applies a
+/// `Put` as insert-or-overwrite under the `(p,b)` gate and a re-delivery is a
+/// no-op by version-vector dominance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
-    /// op 0 — first appearance of a call.
-    Create,
-    /// op 1 — content version bump.
-    Update,
-    /// op 2 — removal; `body` is nil.
+    /// op 0 — upsert (create or content bump); carries a body.
+    Put,
+    /// op 1 — removal; `body` is nil.
     Delete,
 }
 
@@ -70,18 +40,16 @@ impl Op {
     /// Wire byte for this op.
     pub fn as_u8(self) -> u8 {
         match self {
-            Op::Create => 0,
-            Op::Update => 1,
-            Op::Delete => 2,
+            Op::Put => 0,
+            Op::Delete => 1,
         }
     }
 
     /// Decode a wire byte; rejects unknown discriminants.
     pub fn from_u8(v: u8) -> Result<Self, UnknownDiscriminant> {
         match v {
-            0 => Ok(Op::Create),
-            1 => Ok(Op::Update),
-            2 => Ok(Op::Delete),
+            0 => Ok(Op::Put),
+            1 => Ok(Op::Delete),
             other => Err(UnknownDiscriminant {
                 field: "Op",
                 value: other,
@@ -90,16 +58,18 @@ impl Op {
     }
 }
 
-/// Which partition a [`Frame::Data`] entry belongs to.
+/// Which partition a [`Frame::Data`] entry belongs to — and which **flow** a
+/// [`Frame::PullRequest`] opens.
 ///
-/// `Pri` (0) = the primary reclaiming calls a backup touched; `Bak` (1) = a
-/// peer's own calls this node backs up. Derivable from `call_ref`, carried
-/// explicitly for cheap dispatch.
+/// `Pri` (0) = the **Reclaim** flow: a primary reclaiming its own calls a backup
+/// touched. `Bak` (1) = the **Backup** flow: a peer's own calls this node backs
+/// up. Derivable from `call_ref`, carried explicitly for cheap dispatch and to
+/// select the flow on a `PullRequest`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Partition {
-    /// partition 0 — primary (reclaim).
+    /// partition 0 — primary (Reclaim flow).
     Pri,
-    /// partition 1 — backup.
+    /// partition 1 — backup (Backup flow).
     Bak,
 }
 
@@ -132,10 +102,12 @@ impl Partition {
 /// per-incarnation changelog index. The lexicographic order is load-bearing:
 /// the reboot-incarnation rule depends on `(new_gen, 0) > (old_gen, *)`, so a
 /// rebooted worker's counter-0 frames always beat anything from a prior
-/// incarnation and the apply-gate accepts them without a manual reset (ADR-0011
-/// X9). On the wire the two words are always two flat array elements
-/// (`since_gen`/`since_counter`, `gen`/`counter`, `up_to_gen`/`up_to_counter`);
-/// the struct is purely a Rust-side grouping.
+/// incarnation and the apply-gate accepts them without a manual reset. On the
+/// wire the two words are always two flat array elements (`since_gen`/
+/// `since_counter`, `gen`/`counter`); the struct is purely a Rust-side grouping.
+///
+/// A watermark is **purely a changelog position** — never read from or written
+/// to a call's `(p,b)` version vector (the two-generations trap, ADR-0014).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Watermark {
     /// Incarnation — the high word of the ordering.
@@ -170,33 +142,22 @@ impl Ord for Watermark {
 /// whose element 0 is the integer tag in the doc-comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
-    /// `[0, proto_ver, caller, mode, since_gen, since_counter, chunk]`
+    /// `[0, proto_ver, caller, partition, since_gen, since_counter]`
     ///
-    /// Client → server: opens a subscription (`Replog`) or a re-hydration scan
-    /// (`Bootstrap`). `since` is ignored for `Bootstrap`.
+    /// Client → server: opens **one flow's** stream (`partition` selects Reclaim
+    /// vs Backup). The server does a store-scan **bootstrap then tail** when
+    /// `since == (0,0)`, else tails from `since`.
     PullRequest {
         /// Protocol version.
         proto_ver: u16,
         /// The pulling node's identifier.
         caller: String,
-        /// Replog tail vs. Bootstrap re-hydrate.
-        mode: PullMode,
-        /// Watermark to resume from (ignored when `mode == Bootstrap`).
+        /// Which flow: `Pri` = Reclaim, `Bak` = Backup.
+        partition: Partition,
+        /// Watermark to resume from; `(0,0)` ⇒ bootstrap-then-tail.
         since: Watermark,
-        /// Server batch size hint.
-        chunk: u32,
     },
-    /// `[1, caller, up_to_gen, up_to_counter]`
-    ///
-    /// Client → server: optional retention-trim hint — the client has durably
-    /// applied everything up to `up_to`.
-    Ack {
-        /// The acking node's identifier.
-        caller: String,
-        /// Highest watermark the client has applied.
-        up_to: Watermark,
-    },
-    /// `[2, gen, counter, op, partition, call_ref, call_gen, call_bgen, body_ttl_ms, indexes, body]`
+    /// `[1, gen, counter, op, partition, call_ref, call_gen, call_bgen, body_ttl_ms, indexes, body]`
     ///
     /// Server → client: one changelog entry. `body` is opaque msgpack `bin`
     /// (the `Arc<[u8]>` read straight from the store) or `nil` for
@@ -204,16 +165,16 @@ pub enum Frame {
     Data {
         /// Position of this entry.
         at: Watermark,
-        /// create / update / delete.
+        /// put / delete.
         op: Op,
-        /// pri (reclaim) / bak (back-up).
+        /// pri (Reclaim) / bak (Backup).
         partition: Partition,
         /// `{primary}|{callId}|{fromTag}` ownership key.
         call_ref: String,
         /// **Primary** counter `p` of the per-context version vector `(p,b)`
         /// (ADR-0014). Bumped only by the call's primary on a local mutation;
         /// the value a backup echoes back is its branch point. `i64`, may be
-        /// negative on the wire. (Was the single LWW `call_gen`.)
+        /// negative on the wire.
         call_gen: i64,
         /// **Backup** counter `b` of the version vector `(p,b)` (ADR-0014).
         /// Bumped only by an acting-backup on a takeover mutation. `i64`.
@@ -225,36 +186,33 @@ pub enum Frame {
         /// Opaque encoded call body, or `None` for delete/expired.
         body: Option<Arc<[u8]>>,
     },
-    /// `[3, gen, counter]`
+    /// `[2, gen, counter]`
     ///
-    /// Server → client: caught-up marker / bootstrap terminal (head). Sets the
-    /// puller's sticky `current` flag.
+    /// Server → client: caught-up marker. Emitted on the **catch-up edge**
+    /// (backlog drained to head) and on the ~20s idle keepalive floor. The
+    /// **first** one after (re)connect sets the puller's sticky `current` flag.
     Noop {
         /// The head position.
         at: Watermark,
     },
-    /// `[4, reason]`
+    /// `[3, reason]`
     ///
     /// Server → client: the client's `since` fell off the compacted tail —
-    /// discard the watermark and re-pull in Bootstrap mode.
+    /// discard the watermark and re-pull from `(0,0)`.
     ResetToBootstrap {
         /// Human-readable cause (for logs/recording).
         reason: String,
     },
-    // NB (ADR-0014): tag 5 (`Deactivate` — the watermark-handback handshake) was
-    // removed. Reconciliation is now the `(p,b)` version vector and the backup
-    // self-releases a takeover copy on transaction completion, so no handback
-    // signal rides the wire. Tag 5 is retired (not reused) to keep the wire
-    // self-documenting; the proto version bump (X9 → ADR-0014 v2) covers it.
 }
 
 /// Integer tags, element 0 of each frame array. Kept in one place so the
 /// encoder and decoder cannot drift.
+///
+/// Renumbered densely under ADR-0014 (the proto version bump covers it): the
+/// removed `Ack` (was 1) and the long-retired `Deactivate` (was 5) are gone.
 pub(crate) mod tag {
     pub const PULL_REQUEST: u64 = 0;
-    pub const ACK: u64 = 1;
-    pub const DATA: u64 = 2;
-    pub const NOOP: u64 = 3;
-    pub const RESET_TO_BOOTSTRAP: u64 = 4;
-    // tag 5 (DEACTIVATE) retired — see the note on `Frame` (ADR-0014).
+    pub const DATA: u64 = 1;
+    pub const NOOP: u64 = 2;
+    pub const RESET_TO_BOOTSTRAP: u64 = 3;
 }

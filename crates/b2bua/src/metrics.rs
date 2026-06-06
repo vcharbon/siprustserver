@@ -52,6 +52,20 @@ struct Inner {
     // and the active/sipp gap reaps to ~0.
     repl_reclaimed: AtomicU64,
     repl_self_release: AtomicU64,
+    // Re-hydration diagnostics (long-call-on-reboot study, 2026-06-05). How a
+    // rebooted primary's bootstrap passes terminate: `seeded` = a pass reached
+    // the first catch-up `Noop` (the peer streamed the full `bak:{me}` keyset);
+    // `stalled` = a pass hit the bootstrap hard deadline before that Noop arrived
+    // (marked complete best-effort, partial pre-seed materialised, then KEEPS
+    // streaming on the same socket — not a disconnect). `last_applied` (gauge) =
+    // bodies the MOST RECENT pass imported. The decisive signal: if `stalled`
+    // climbs and `last_applied` keeps re-stalling at the SAME value across passes,
+    // the STREAM is truncating (a peer-side stall), not just the materialisation —
+    // and a longer hard deadline alone would not help. If `seeded` bumps and
+    // `repl_reclaimed_total` ≈ the held count, re-hydration is whole.
+    repl_bootstrap_seeded: AtomicU64,
+    repl_bootstrap_stalled: AtomicU64,
+    repl_bootstrap_last_applied: AtomicU64,
     // Memory-attribution gauges (sampled, not counter-derived). `store_calls` is
     // the TRUE live call-map length — compare to `active_calls`
     // (creations-removals); a divergence localises a store-side leak the counter
@@ -134,6 +148,16 @@ impl B2buaMetrics {
     counter!(bump_repl_takeover_hydrated, repl_takeover_hydrated_total, repl_takeover_hydrated);
     counter!(bump_repl_reclaimed, repl_reclaimed_total, repl_reclaimed);
     counter!(bump_repl_self_release, repl_self_release_total, repl_self_release);
+    counter!(bump_repl_bootstrap_seeded, repl_bootstrap_seeded_total, repl_bootstrap_seeded);
+    counter!(bump_repl_bootstrap_stalled, repl_bootstrap_stalled_total, repl_bootstrap_stalled);
+
+    /// Record how many bodies the most recent bootstrap pass imported (gauge).
+    pub fn set_repl_bootstrap_last_applied(&self, n: u64) {
+        self.inner.repl_bootstrap_last_applied.store(n, Ordering::Relaxed);
+    }
+    pub fn repl_bootstrap_last_applied(&self) -> u64 {
+        self.inner.repl_bootstrap_last_applied.load(Ordering::Relaxed)
+    }
 
     /// A backup replica was admitted to a backup partition (puller applied a
     /// `Create`). Pairs with [`dec_repl_backup_held`](Self::dec_repl_backup_held)
@@ -234,6 +258,8 @@ impl B2buaMetrics {
         counter("b2bua_repl_takeover_hydrated_total", "calls hydrated from a backup replica to serve a failed-over request", self.repl_takeover_hydrated_total());
         counter("b2bua_repl_reclaimed_total", "calls a rebooted primary re-materialised into its live map + re-armed (active reclaim, ADR-0011 X11)", self.repl_reclaimed_total());
         counter("b2bua_repl_self_release_total", "acting-backup takeover copies self-released once their served transaction(s) reached a terminal state (ADR-0014, replaces the Deactivate handback)", self.repl_self_release_total());
+        counter("b2bua_repl_bootstrap_seeded_total", "rebooted-primary bootstrap passes that reached the first catch-up Noop (peer streamed the full bak:{me} keyset)", self.repl_bootstrap_seeded_total());
+        counter("b2bua_repl_bootstrap_stalled_total", "rebooted-primary bootstrap passes that hit the bootstrap hard deadline before the first Noop (best-effort completion; keeps streaming on the same socket)", self.repl_bootstrap_stalled_total());
 
         // Per-method request + per-(method,code) response counters. Drop the
         // `counter` closure's borrow first by ending the block above.
@@ -277,6 +303,7 @@ impl B2buaMetrics {
         g(&mut s, "b2bua_repl_meta_backup", "replica metadata entries in BACKUP partitions (resident backup bodies this node holds for peers; ADR-0014)", self.inner.repl_meta_backup.load(Ordering::Relaxed));
         g(&mut s, "b2bua_repl_changelog_entries", "outbound changelog entries across all peer logs (replication buffer depth)", self.inner.repl_changelog_entries.load(Ordering::Relaxed));
         g(&mut s, "b2bua_repl_changelog_peers", "peer logs currently held in the changelog", self.inner.repl_changelog_peers.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_repl_bootstrap_last_applied", "bodies the most recent bootstrap pass imported (re-stalling at the same value across passes ⇒ the stream is truncating, not the materialisation)", self.repl_bootstrap_last_applied());
         s
     }
 }

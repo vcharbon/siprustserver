@@ -122,6 +122,13 @@ pub struct SeqRow {
     pub label: String,
     /// Optional expandable detail (e.g. the full wire text for a SIP message).
     pub detail: Option<String>,
+    /// Optional connection/socket identity for a message row (e.g. the ephemeral
+    /// replication socket `:40007`). Rows that share a `conn` are drawn in the
+    /// same color, so distinct sockets are visually separable on a collapsed node
+    /// lane: a reader can see that a frame "lost to b2" actually rode a DIFFERENT
+    /// (now-defunct) socket than the live one. `None` rows use the plane's
+    /// default color.
+    pub conn: Option<String>,
     /// Which plane this row belongs to.
     pub kind: RowKind,
 }
@@ -230,6 +237,7 @@ mod tests {
                     to: Some("b2".into()),
                     label: "Data[Create/bak] x".into(),
                     detail: None,
+                    conn: None,
                     kind: RowKind::Repl { delivered: true },
                 },
                 SeqRow {
@@ -239,6 +247,7 @@ mod tests {
                     to: Some("b1".into()),
                     label: "INVITE sip:bob".into(),
                     detail: Some("INVITE sip:bob SIP/2.0\r\n".into()),
+                    conn: None,
                     kind: RowKind::Sip { delivered: true },
                 },
                 SeqRow {
@@ -248,6 +257,7 @@ mod tests {
                     to: None,
                     label: "crash b1".into(),
                     detail: None,
+                    conn: None,
                     kind: RowKind::Lifecycle,
                 },
             ],
@@ -278,6 +288,7 @@ mod tests {
                     to: Some("b1".into()),
                     label: "PullRequest[Bootstrap] caller=b2".into(),
                     detail: None,
+                    conn: None,
                     kind: RowKind::Repl { delivered: true },
                 },
                 SeqRow {
@@ -287,6 +298,7 @@ mod tests {
                     to: None,
                     label: "reboot b2 restart empty, higher gen".into(),
                     detail: None,
+                    conn: None,
                     kind: RowKind::Lifecycle,
                 },
             ],
@@ -344,7 +356,9 @@ mod tests {
         assert!(html.contains("crash b1"), "lifecycle band label");
         // The legend names all three planes.
         assert!(html.contains("class=\"legend\""));
-        assert!(html.contains(">SIP<") && html.contains(">Replication<"));
+        // (The Replication legend entry now carries a per-socket-color note, so
+        // match its prefix rather than an exact `>Replication<`.)
+        assert!(html.contains(">SIP<") && html.contains(">Replication"));
         assert!(html.contains("Lifecycle"));
     }
 
