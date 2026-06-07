@@ -123,6 +123,17 @@ pub async fn apply_route(
         }
     }
 
+    // Announcement / deferred-routing services (ADR-0016 slice 8): when the
+    // decision attaches a `service_ext` slice that defers routing (it set
+    // `call.ext[<id>].defer_routing == true`), the normal destination leg is NOT
+    // created here — the service's `init` owns leg creation (e.g. an unadopted
+    // media leg toward an MRF, dialing the real destination later). The
+    // GlobalDuration backstop below still arms for the call.
+    if defers_routing(&call) {
+        arm_global_duration(&mut call, &mut fx, route.features.platform.max_duration_sec, now_ms);
+        return HandlerResult { call, effects: fx };
+    }
+
     let leg_id = "b-1";
     let dest = (route.destination.host.clone(), route.destination.port());
     let no_answer = route
@@ -206,7 +217,14 @@ pub async fn apply_route(
     // answered call is unaffected (the re-arm supersedes via the driver's epoch
     // bump and `replace_timer_by_id`'s id-dedup); a stuck-in-setup call is now
     // reaped at the cap by the existing `max-duration` rule.
-    let max_duration_sec = route.features.platform.max_duration_sec;
+    arm_global_duration(&mut call, &mut fx, route.features.platform.max_duration_sec, now_ms);
+
+    HandlerResult { call, effects: fx }
+}
+
+/// Arm the GlobalDuration absolute-cap backstop on the call (idempotent by id).
+/// Factored out so the deferred-routing path arms it too.
+fn arm_global_duration(call: &mut Call, fx: &mut HandlerEffects, max_duration_sec: i64, now_ms: i64) {
     let global = TimerEntry {
         id: format!("{:?}", TimerType::GlobalDuration),
         timer_type: TimerType::GlobalDuration,
@@ -215,8 +233,16 @@ pub async fn apply_route(
     };
     call.timers = call::helpers::replace_timer_by_id(std::mem::take(&mut call.timers), global.clone());
     fx.critical.push(CriticalStateEffect::ScheduleTimer(global));
+}
 
-    HandlerResult { call, effects: fx }
+/// Whether any service-ext slice asks the framework to defer normal destination
+/// routing (its `defer_routing` flag is `true`), so the owning service's `init`
+/// creates the legs instead (ADR-0016 slice 8). Generic — no service is named here.
+fn defers_routing(call: &Call) -> bool {
+    call.ext.as_ref().is_some_and(|ext| {
+        ext.values()
+            .any(|v| v.get("defer_routing").and_then(|d| d.as_bool()) == Some(true))
+    })
 }
 
 /// Forward alice's `Supported` onto the b-leg INVITE with strategy-aware

@@ -11,7 +11,12 @@ use b2bua::rules::ServiceDef;
 /// slice 8) are appended here. The doc generator prepends the framework
 /// `global-call` machine itself.
 pub fn compose_services() -> Vec<ServiceDef> {
-    vec![b2bua::rules::transfer_service_def()]
+    vec![
+        b2bua::rules::transfer_service_def(),
+        // The out-of-tree announcement service (ADR-0016 slice 8) — depends only
+        // on `b2bua-sdk`, injected here as a separate-crate integrator.
+        announcement::service(),
+    ]
 }
 
 /// The committed state-machine diagrams (ADR-0016): `(machine_id, markdown)`

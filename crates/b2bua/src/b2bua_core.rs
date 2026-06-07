@@ -98,8 +98,23 @@ pub struct B2buaDeps {
 }
 
 impl B2buaCore {
-    /// Build over an already-bound endpoint and spawn the router loop.
+    /// Build over an already-bound endpoint and spawn the router loop with no
+    /// callflow services registered (the composed rule list is exactly
+    /// `default_rules()` — behaviour-preserving).
     pub fn spawn(endpoint: Box<dyn UdpEndpoint>, deps: B2buaDeps) -> Self {
+        Self::spawn_with_services(endpoint, deps, Vec::new())
+    }
+
+    /// Like [`spawn`](Self::spawn) but registers `services` (ADR-0016): each
+    /// service's state-gated rules are composed above the core defaults and its
+    /// `init` runs at call setup. Out-of-tree services (e.g. `announcement`) are
+    /// injected here by the host process / harness, keeping `b2bua` free of any
+    /// dependency on them.
+    pub fn spawn_with_services(
+        endpoint: Box<dyn UdpEndpoint>,
+        deps: B2buaDeps,
+        services: Vec<ServiceDef>,
+    ) -> Self {
         let B2buaDeps {
             config,
             decision,
@@ -224,10 +239,12 @@ impl B2buaCore {
         );
 
         let (reentry_tx, reentry_rx) = tokio::sync::mpsc::unbounded_channel();
-        // No callflow service is retrofitted onto the framework yet (slices
-        // 7/8), so the registry is empty and the composed rule list equals
-        // `default_rules()` exactly — behaviour-preserving (ADR-0016).
-        let services: Vec<ServiceDef> = Vec::new();
+        // Compose the registered services' state-gated rules above the core
+        // defaults (ADR-0016). With an empty `services` this is exactly
+        // `default_rules()` — behaviour-preserving. Note: in-tree `transfer` rides
+        // `default_rules()` directly (its cursor is a projection), so it is not in
+        // this list; `services` here is for `init`-seeded services (e.g. the
+        // out-of-tree `announcement` capstone).
         let rules = compose_rules(&services, default_rules());
         let ctx = Arc::new(RouterCtx {
             config,

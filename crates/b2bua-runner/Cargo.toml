@@ -12,6 +12,9 @@ path = "src/main.rs"
 
 [dependencies]
 b2bua = { path = "../b2bua" }
+# Out-of-tree callflow service (ADR-0016 slice 8) — composed into the production
+# service registry (`compose_services`) so its diagram is generated alongside.
+announcement = { path = "../announcement" }
 call = { path = "../call" }
 # Real HTTP transport for the call-limiter client (LIMITER_URL).
 http-net = { path = "../http-net", features = ["real"] }

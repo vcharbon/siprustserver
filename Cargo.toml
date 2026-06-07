@@ -17,6 +17,7 @@ members = [
     "crates/media",
     "crates/media-harness",
     "crates/b2bua-sdk",
+    "crates/announcement",
     "crates/b2bua",
     "crates/b2bua-harness",
     "crates/ha-harness",

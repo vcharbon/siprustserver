@@ -67,7 +67,21 @@ impl B2buaSut {
         outbound_proxy: Option<(String, u16)>,
         tune: impl FnOnce(&mut B2buaConfig),
     ) -> Self {
-        Self::start_inner(h, name, addr, decision, outbound_proxy, Arc::new(NoopLimiter), tune).await
+        Self::start_inner(h, name, addr, decision, outbound_proxy, Arc::new(NoopLimiter), Vec::new(), tune).await
+    }
+
+    /// Bind a B2BUA with a set of registered callflow services (ADR-0016): each
+    /// service's `init` runs at setup and its state-gated rules compose above the
+    /// core defaults. Used by the out-of-tree `announcement` capstone (slice 8) —
+    /// the service is injected here, so `b2bua` never depends on it.
+    pub async fn start_with_services(
+        h: &Harness,
+        name: &str,
+        addr: &str,
+        decision: Arc<dyn CallDecisionEngine>,
+        services: Vec<b2bua::rules::ServiceDef>,
+    ) -> Self {
+        Self::start_inner(h, name, addr, decision, None, Arc::new(NoopLimiter), services, |_| {}).await
     }
 
     /// Bind a B2BUA with a custom [`CallLimiter`] (e.g. an `HttpCallLimiter` over
@@ -82,7 +96,7 @@ impl B2buaSut {
         limiter: Arc<dyn CallLimiter>,
         tune: impl FnOnce(&mut B2buaConfig),
     ) -> Self {
-        Self::start_inner(h, name, addr, decision, None, limiter, tune).await
+        Self::start_inner(h, name, addr, decision, None, limiter, Vec::new(), tune).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -93,6 +107,7 @@ impl B2buaSut {
         decision: Arc<dyn CallDecisionEngine>,
         outbound_proxy: Option<(String, u16)>,
         limiter: Arc<dyn CallLimiter>,
+        services: Vec<b2bua::rules::ServiceDef>,
         tune: impl FnOnce(&mut B2buaConfig),
     ) -> Self {
         let (endpoint, sa) = h.bind_sut(name, addr).await;
@@ -123,7 +138,7 @@ impl B2buaSut {
             id_gen: Arc::new(IdGen::seeded(0xB2B0)),
             replication: None,
         };
-        let core = B2buaCore::spawn(endpoint, deps);
+        let core = B2buaCore::spawn_with_services(endpoint, deps, services);
         let metrics = core.metrics().clone();
         Self {
             addr: sa,

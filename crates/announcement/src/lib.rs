@@ -1,0 +1,251 @@
+//! # announcement — an out-of-tree callflow service (ADR-0016 slice 8 capstone)
+//!
+//! An early-media **MRF announcement** service, built against the public Rule
+//! SDK ([`b2bua_sdk`]) **alone** — it has no dependency on `b2bua`. It proves the
+//! out-of-crate integrator seam: a separate crate can author a full per-call
+//! state machine, park an unadopted media leg, broker early media, drive an
+//! MSCML control channel, and hand off to the framework's normal bridge.
+//!
+//! ## Flow (`OfferingMrf → Announcing → Bridging`)
+//!
+//! When the routing decision requests an announcement (its
+//! `service_ext["announcement"]` lands on `call.ext`, and `apply_route` defers
+//! the normal destination routing), the service:
+//!
+//! 1. **init** seeds the cursor at `OfferingMrf` and launches an unadopted
+//!    `media` leg toward the MRF (in parallel with setup).
+//! 2. **@OfferingMrf**, on the media leg's `200 OK`: brokers the MRF's SDP onto
+//!    the caller as an unreliable `183` (early media), opens the MSCML control
+//!    channel with an INFO `<play>`, and advances to `Announcing`.
+//! 3. **@Announcing**, on the MRF's INFO MSCML `<response>` success: BYEs the
+//!    media leg, dials the real destination (an adopted leg), and advances to
+//!    `Bridging`.
+//! 4. **@Bridging** the destination leg is a normal adopted leg, so the
+//!    framework's core `confirm-dialog` rule answers the caller with the
+//!    destination's SDP and bridges the two — no announcement rule needed; the
+//!    cursor rests at `Bridging` (the machine is dormant from here).
+//!
+//! A media-leg failure/timeout while offering or announcing terminates the call
+//! (the one-hop service→global command, `BeginTermination`).
+
+use b2bua_sdk::rules::{Call, Match, RuleAction, RuleContext, RuleHandleResult};
+use b2bua_sdk::{define_service, sm_rule};
+use call::{CdrEventType, Direction, LegState};
+use serde::Deserialize;
+
+pub mod mscml;
+
+/// The ext key this service stores its data under (== the service/machine id).
+pub const EXT_KEY: &str = "announcement";
+
+/// The announcement service's per-call data, carried in `call.ext["announcement"]`
+/// (seeded from the routing decision's `service_ext`). Replication-safe: it is a
+/// plain JSON object on the already-replicated `ext` map.
+#[derive(Debug, Clone, Deserialize)]
+struct AnnData {
+    /// The clip to play (opaque id / URI handed to the MRF in the MSCML `<play>`).
+    clip_id: String,
+    /// The media server to offer the announcement.
+    mrf_host: String,
+    mrf_port: u16,
+    /// The real destination to dial once the clip finishes.
+    dest_host: String,
+    dest_port: u16,
+}
+
+fn ann_data(call: &Call) -> Option<AnnData> {
+    let v = call.ext.as_ref()?.get(EXT_KEY)?.clone();
+    serde_json::from_value(v).ok()
+}
+
+/// The parked media leg toward the MRF (the single unadopted `media`-kind leg
+/// that is not yet torn down).
+fn media_leg_id(call: &Call) -> Option<String> {
+    call.b_legs
+        .iter()
+        .find(|l| call::helpers::leg_kind(l) == call::LegKind::Media && l.state != LegState::Terminated)
+        .map(|l| l.leg_id.clone())
+}
+
+fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
+    Some(RuleHandleResult::new(actions))
+}
+
+// ── handlers ─────────────────────────────────────────────────────────────────
+
+/// @OfferingMrf — the MRF answered the media leg. Broker its SDP onto the caller
+/// as a 183 early-media, ACK the media dialog, open the MSCML control channel,
+/// and advance to `Announcing`.
+fn on_media_answer(ctx: &RuleContext) -> Option<RuleHandleResult> {
+    let data = ann_data(ctx.call)?;
+    let media = media_leg_id(ctx.call)?;
+    let resp = ctx.response()?;
+    let mrf_sdp = resp.body.clone();
+    ok(vec![
+        // Establish the media dialog so the MSCML INFO can ride it.
+        RuleAction::ConfirmDialog { leg_id: media.clone() },
+        RuleAction::AckLeg { leg_id: media.clone() },
+        // Early media: the MRF's SDP onto the caller as an unreliable 183.
+        RuleAction::SendProvisionalToLeg {
+            leg_id: "a".to_string(),
+            status: 183,
+            reason: "Session Progress".to_string(),
+            body: mrf_sdp,
+            content_type: None,
+            to_tag: None,
+            p_early_media: Some("sendrecv".to_string()),
+        },
+        // Open the MSCML control channel: play the clip.
+        RuleAction::SendRequestToLeg {
+            leg_id: media,
+            method: "INFO".to_string(),
+            body: mscml::build_play(&data.clip_id),
+            content_type: Some(mscml::CONTENT_TYPE.to_string()),
+        },
+        RuleAction::SetState {
+            machine: MACHINE,
+            to: State::Announcing.label(),
+        },
+    ])
+}
+
+/// @Announcing — the MRF reports the clip finished (MSCML `<response>` success).
+/// Answer the INFO, BYE the media leg, dial the real destination, advance to
+/// `Bridging` (where the framework's core bridge takes over).
+fn on_mscml_done(ctx: &RuleContext) -> Option<RuleHandleResult> {
+    let data = ann_data(ctx.call)?;
+    let media = media_leg_id(ctx.call)?;
+    ok(vec![
+        // Answer the MRF's in-dialog INFO (the B2BUA is its UAS).
+        RuleAction::Respond {
+            status: 200,
+            reason: "OK".to_string(),
+            body: vec![],
+            content_type: None,
+        },
+        // Tear down the media leg (it is Confirmed → DestroyLeg BYEs it).
+        RuleAction::DestroyLeg { leg_id: media },
+        // Dial the real destination as a normal adopted leg; core `confirm-dialog`
+        // will answer the caller with its SDP and bridge on its 200.
+        RuleAction::CreateLeg {
+            destination: (data.dest_host.clone(), data.dest_port),
+            new_ruri: Some(format!("sip:{}:{}", data.dest_host, data.dest_port)),
+            no_answer_timeout_sec: None,
+            callback_context: None,
+            body_override: None,
+            header_updates: vec![],
+            kind: None,
+        },
+        RuleAction::SetState {
+            machine: MACHINE,
+            to: State::Bridging.label(),
+        },
+    ])
+}
+
+/// @OfferingMrf/@Announcing — the media leg failed (MRF rejected/timed out).
+/// Terminate the call cleanly (the one-hop service → global command).
+fn on_media_failure(ctx: &RuleContext) -> Option<RuleHandleResult> {
+    let media = media_leg_id(ctx.call)?;
+    let resp = ctx.response()?;
+    let status = resp.status;
+    let reason = resp.reason.clone();
+    ok(vec![
+        RuleAction::AddCdrEvent {
+            event_type: CdrEventType::Reject,
+            leg_id: media,
+            status_code: Some(status as i64),
+            reason: Some("announcement-mrf-failure".to_string()),
+        },
+        // The caller's INVITE is still unanswered (early media only) — answer it
+        // with the MRF's failure before tearing the call down (begin-termination
+        // assumes the firing rule already replied to a Trying/Early a-leg).
+        RuleAction::RelayFailureToALeg { status, reason },
+        RuleAction::BeginTermination {
+            reason: Some("announcement-mrf-failure".to_string()),
+        },
+    ])
+}
+
+/// Is the event a response on the parked media leg? (the rule filter — the media
+/// leg is the unadopted `media`-kind leg).
+fn on_media_leg(ctx: &RuleContext) -> bool {
+    media_leg_id(ctx.call).as_deref() == Some(ctx.source_leg_id)
+}
+
+// ── the service machine ──────────────────────────────────────────────────────
+
+define_service! {
+    id: "announcement",
+    machine: MACHINE,
+    states: State { OfferingMrf, Announcing, Bridging },
+    // Activate iff the routing decision requested an announcement; seed the
+    // cursor and launch the unadopted media leg toward the MRF.
+    init: |call: &Call| {
+        let data = ann_data(call)?;
+        Some(
+            b2bua_sdk::rules::ServiceSeed::new(State::OfferingMrf.label()).with_actions(vec![
+                RuleAction::CreateLeg {
+                    destination: (data.mrf_host.clone(), data.mrf_port),
+                    new_ruri: Some(format!("sip:mrf@{}:{}", data.mrf_host, data.mrf_port)),
+                    no_answer_timeout_sec: None,
+                    callback_context: None,
+                    body_override: None,
+                    header_updates: vec![],
+                    kind: Some(call::LegKind::Media),
+                },
+            ]),
+        )
+    },
+    rules: [
+        // The MRF answered the media leg → 183 early media + MSCML <play>.
+        sm_rule! {
+            id: "announcement-media-answer",
+            machine: MACHINE,
+            active: [ State::OfferingMrf ],
+            transitions: [ State::OfferingMrf => State::Announcing ],
+            matcher: Match::response()
+                .method("INVITE")
+                .status_class(2)
+                .direction(Direction::FromB)
+                .leg_states(&[LegState::Trying, LegState::Early])
+                .filter(on_media_leg),
+            handle: on_media_answer,
+        },
+        // The MRF's MSCML <response> success → BYE media, dial destination.
+        sm_rule! {
+            id: "announcement-mscml-done",
+            machine: MACHINE,
+            active: [ State::Announcing ],
+            transitions: [ State::Announcing => State::Bridging ],
+            matcher: Match::request()
+                .method("INFO")
+                .direction(Direction::FromB)
+                .filter(|ctx| {
+                    on_media_leg(ctx)
+                        && ctx.request().is_some_and(|r| mscml::is_success_response(&r.body))
+                }),
+            handle: on_mscml_done,
+        },
+        // The media leg failed while offering/announcing → terminate the call.
+        sm_rule! {
+            id: "announcement-media-failure",
+            machine: MACHINE,
+            active: [ State::OfferingMrf, State::Announcing ],
+            transitions: [],
+            matcher: Match::response()
+                .method("INVITE")
+                .direction(Direction::FromB)
+                .filter(|ctx| {
+                    on_media_leg(ctx) && ctx.response().is_some_and(|r| r.status >= 300)
+                }),
+            handle: on_media_failure,
+        },
+    ],
+}
+
+/// The service descriptor the host process registers (in `b2bua-runner`'s
+/// `compose_services()` / the harness) — the only public entry point.
+pub fn service() -> b2bua_sdk::rules::ServiceDef {
+    service_def()
+}

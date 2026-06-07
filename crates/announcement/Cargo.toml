@@ -1,0 +1,14 @@
+[package]
+name = "announcement"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Out-of-tree callflow service (ADR-0016 slice 8 capstone): an early-media MRF announcement service built against the public Rule SDK alone. Plays a clip to the caller via a parked media leg (183 early media + MSCML INFO), then dials the real destination and bridges. Depends ONLY on b2bua-sdk (+ call/sip-message) — it has no path to b2bua internals."
+
+[dependencies]
+b2bua-sdk = { path = "../b2bua-sdk" }
+call = { path = "../call" }
+sip-message = { path = "../sip-message" }
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -35,3 +35,6 @@ serde_json = { workspace = true }
 # `failover-harness` crate (ADR-0013 §0), so this is the only remaining proxy
 # user and it is test-only.
 sip-proxy = { path = "../sip-proxy" }
+# Slice 8 capstone: the out-of-tree `announcement` callflow service, injected
+# into the SUT via `B2buaSut::start_with_services` for the early-media e2e.
+announcement = { path = "../announcement" }
