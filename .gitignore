@@ -18,3 +18,4 @@ sipp-*.csv
 
 # Vendored reference source snapshot (not part of the build)
 /portsource
+.worktrees/
