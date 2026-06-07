@@ -23,7 +23,7 @@ use crate::limiter::CallLimiter;
 use crate::metrics::B2buaMetrics;
 use crate::repl::{ReplServer, ReplicatingCallStore, ReplicationSupervisor, Readiness};
 use crate::router::{self, RouterCtx};
-use crate::rules::default_rules;
+use crate::rules::{compose_rules, default_rules, ServiceDef};
 use crate::store::{BufferedTerminateWriter, CallState, CallStore};
 use crate::timers::TimerService;
 
@@ -224,6 +224,11 @@ impl B2buaCore {
         );
 
         let (reentry_tx, reentry_rx) = tokio::sync::mpsc::unbounded_channel();
+        // No callflow service is retrofitted onto the framework yet (slices
+        // 7/8), so the registry is empty and the composed rule list equals
+        // `default_rules()` exactly — behaviour-preserving (ADR-0016).
+        let services: Vec<ServiceDef> = Vec::new();
+        let rules = compose_rules(&services, default_rules());
         let ctx = Arc::new(RouterCtx {
             config,
             state,
@@ -235,7 +240,8 @@ impl B2buaCore {
             cdr: cdr.clone(),
             id_gen,
             clock,
-            rules: Arc::new(default_rules()),
+            rules: Arc::new(rules),
+            services: Arc::new(services),
             metrics: metrics.clone(),
             readiness: readiness.clone(),
             reentry_tx,

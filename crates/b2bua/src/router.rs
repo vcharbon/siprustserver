@@ -28,7 +28,7 @@ use crate::initial_invite::{build_initial_call, handle_initial_invite};
 use crate::limiter::CallLimiter;
 use crate::metrics::B2buaMetrics;
 use crate::repl::{Readiness, ReadinessState};
-use crate::rules::{execute_rules, ActionExecutor, RuleContext, RuleDefinition};
+use crate::rules::{execute_rules, ActionExecutor, RuleContext, RuleDefinition, ServiceDef};
 use crate::store::CallState;
 use crate::timers::TimerService;
 
@@ -44,7 +44,13 @@ pub struct RouterCtx {
     pub cdr: Arc<dyn CdrWriter>,
     pub id_gen: Arc<IdGen>,
     pub clock: Clock,
+    /// The composed engine rule list — `flatten(services.rules) ++ core_rules()`
+    /// (ADR-0016). Equal to `default_rules()` while no service is registered.
     pub rules: Arc<Vec<RuleDefinition>>,
+    /// Registered callflow services (ADR-0016). Their `init` hooks run at call
+    /// setup; their rules are already flattened into `rules`. Empty until a
+    /// service is retrofitted (slices 7/8).
+    pub services: Arc<Vec<ServiceDef>>,
     pub metrics: B2buaMetrics,
     /// Self-reported readiness driving the OPTIONS health responder (S7). The
     /// default/legacy path uses [`Readiness::always_ready`] → always 200.
@@ -536,7 +542,7 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
             crate::rules::invariants::enforce(&call, crate::rules::invariants::finalize(rejected))
         } else {
             let result =
-                handle_initial_invite(call.clone(), ctx.decision.as_ref(), ctx.limiter.as_ref(), &ctx.config, &ctx.id_gen, now_ms).await;
+                handle_initial_invite(call.clone(), ctx.decision.as_ref(), ctx.limiter.as_ref(), &ctx.config, &ctx.id_gen, &ctx.services, now_ms).await;
             crate::rules::invariants::enforce(&call, crate::rules::invariants::finalize(result))
         }
     } else {

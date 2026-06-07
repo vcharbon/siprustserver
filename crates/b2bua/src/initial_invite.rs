@@ -12,15 +12,16 @@ use call::{
     LegDisposition, LegKind, LegState, RemoteInfo,
 };
 use sip_message::message_helpers::{get_header, get_headers, parse_uri_params};
-use sip_message::SipRequest;
+use sip_message::{SipMessage, SipRequest};
 use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
 use crate::decision::apply_route::apply_route;
 use crate::decision::{CallDecisionEngine, NewCallRequest, NewCallResponse};
 use crate::effects::{HandlerEffects, HandlerResult};
+use crate::event::CallEvent;
 use crate::limiter::CallLimiter;
-use crate::rules::relay;
+use crate::rules::{relay, seed_services, ActionExecutor, ServiceDef};
 
 /// Headers sent as top-level decision-request fields (excluded from `sip_headers`).
 const STANDARD_HEADERS: &[&str] = &[
@@ -158,6 +159,7 @@ pub async fn handle_initial_invite(
     limiter: &dyn CallLimiter,
     config: &B2buaConfig,
     id_gen: &IdGen,
+    services: &[ServiceDef],
     now_ms: i64,
 ) -> HandlerResult {
     let a_invite = relay::rebuild_a_leg_invite(&call);
@@ -165,7 +167,17 @@ pub async fn handle_initial_invite(
 
     match decision.new_call(req).await {
         Ok(NewCallResponse::Route(route)) => {
-            apply_route(call, route, &a_invite, decision, limiter, config, id_gen, now_ms, 0).await
+            // The route built the Call; now run each service's `init` (ADR-0016
+            // X8) — the source's `call-routed` re-entry point — folding any seed
+            // (cursor + data + initial actions) through the normal executor.
+            // A dormant service (`init` → `None`) and the empty-service list
+            // (production today) both leave the result untouched.
+            let result =
+                apply_route(call, route, &a_invite, decision, limiter, config, id_gen, now_ms, 0)
+                    .await;
+            let exec = ActionExecutor { config, id_gen, now_ms };
+            let setup_event = setup_event(&result.call, &a_invite);
+            seed_services(result, services, &exec, &setup_event, "a", call::Direction::FromA)
         }
         Ok(NewCallResponse::Reject(reject)) => {
             reject_call(call, &a_invite, reject.reject_code, reject.reject_reason, id_gen, now_ms)
@@ -173,6 +185,20 @@ pub async fn handle_initial_invite(
         Err(_unavailable) => {
             reject_call(call, &a_invite, 503, Some("Service Unavailable".into()), id_gen, now_ms)
         }
+    }
+}
+
+/// Synthesize the setup `CallEvent` services' init actions resolve against (the
+/// original a-leg INVITE on the a-leg). The `src` is the caller's address from
+/// the a-leg, defaulting to `0.0.0.0:0` if it is not an `ip:port` (init actions
+/// resolve legs from the call, not the event source).
+fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
+    let src: SocketAddr = format!("{}:{}", call.a_leg.source.address, call.a_leg.source.port)
+        .parse()
+        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
+    CallEvent::Sip {
+        message: Box::new(SipMessage::Request(a_invite.clone())),
+        src,
     }
 }
 

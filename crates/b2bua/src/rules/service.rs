@@ -1,0 +1,223 @@
+//! Callflow-service framework (ADR-0016) — the declarative authoring macros
+//! ([`define_service!`] / [`sm_rule!`]), the registry types ([`ServiceDef`] /
+//! [`ServiceSeed`]), and the composition + init-seeding helpers.
+//!
+//! A **service** is a per-call state machine: a [`MachineId`] (== the service
+//! id), a set of state-gated rules ([`sm_rule!`]), and an `init` hook (X8) run
+//! once at call setup that may seed the machine's initial cursor, install its
+//! data backing, and fire an initial action batch. Everything a service does
+//! rides the normal [`RuleAction`]/effects pipeline — there is no privileged
+//! back-door that writes call state outside the executor.
+
+use call::{Call, MachineId, StateLabel};
+
+use crate::effects::HandlerResult;
+use crate::event::CallEvent;
+
+use super::actions::ActionExecutor;
+use super::model::{RuleAction, RuleContext, RuleDefinition};
+
+/// What a service's `init` returns to seed its machine at call setup (ADR-0016
+/// X8). All three parts are folded through the normal executor/effects pipeline
+/// by [`seed_services`]:
+/// - `initial_state` — the cursor written to `sm_cursors[service_id]`;
+/// - `data_write` — a one-shot mutation installing the service's data backing
+///   (a typed slice in-tree, or `ext[id]` for an out-of-crate integrator);
+/// - `actions` — an initial [`RuleAction`] batch (e.g. the announcement service's
+///   `CreateLeg{kind:media}` toward the MRF, launched in parallel with routing).
+pub struct ServiceSeed {
+    pub initial_state: StateLabel,
+    pub data_write: Box<dyn FnOnce(&mut Call)>,
+    pub actions: Vec<RuleAction>,
+}
+
+impl ServiceSeed {
+    /// A seed that only sets the initial cursor (no data backing, no actions).
+    pub fn new(initial_state: StateLabel) -> Self {
+        Self {
+            initial_state,
+            data_write: Box::new(|_| {}),
+            actions: Vec::new(),
+        }
+    }
+    /// Install the service's data backing (typed slice or `ext[id]`).
+    pub fn with_data(mut self, f: impl FnOnce(&mut Call) + 'static) -> Self {
+        self.data_write = Box::new(f);
+        self
+    }
+    /// Fire an initial action batch through the executor at setup.
+    pub fn with_actions(mut self, actions: Vec<RuleAction>) -> Self {
+        self.actions = actions;
+        self
+    }
+}
+
+/// A registered callflow service: its id (== its [`MachineId`]), the setup
+/// `init` hook (returns `None` to stay dormant — a vanilla call pays nothing),
+/// and a factory for its state-gated rules.
+pub struct ServiceDef {
+    pub id: &'static str,
+    pub init: fn(&Call) -> Option<ServiceSeed>,
+    pub rules: fn() -> Vec<RuleDefinition>,
+}
+
+/// The engine's rule list: every service's state-gated rules (SERVICE_LAYER,
+/// ranked above core) followed by the `core` defaults. With an empty service
+/// list this is exactly `core` — composition is behaviour-preserving.
+pub fn compose_rules(services: &[ServiceDef], core: Vec<RuleDefinition>) -> Vec<RuleDefinition> {
+    let mut rules = Vec::new();
+    for def in services {
+        rules.extend((def.rules)());
+    }
+    rules.extend(core);
+    rules
+}
+
+/// Run every service's `init` once at call setup and fold the returned seeds —
+/// cursor + data backing + initial actions — through the normal executor/effects
+/// pipeline (ADR-0016 X8). The cursor is keyed by the service id (== machine
+/// id). A dormant service (`init` → `None`) is skipped. With an empty service
+/// list this returns `result` unchanged.
+pub fn seed_services(
+    mut result: HandlerResult,
+    services: &[ServiceDef],
+    exec: &ActionExecutor,
+    setup_event: &CallEvent,
+    source_leg_id: &str,
+    direction: call::Direction,
+) -> HandlerResult {
+    for def in services {
+        let Some(seed) = (def.init)(&result.call) else {
+            continue;
+        };
+        // 1) seed the cursor (the service id is its machine id),
+        result
+            .call
+            .sm_cursors
+            .insert(MachineId::new(def.id), seed.initial_state);
+        // 2) install the data backing,
+        (seed.data_write)(&mut result.call);
+        // 3) fold the initial actions through the executor (no back-door write).
+        if !seed.actions.is_empty() {
+            let sub = {
+                let ctx = RuleContext {
+                    call: &result.call,
+                    call_ref: &result.call.call_ref,
+                    event: setup_event,
+                    source_leg_id,
+                    direction,
+                    now_ms: exec.now_ms,
+                    config: exec.config,
+                };
+                exec.execute(&seed.actions, &ctx)
+            };
+            result.call = sub.call;
+            result.effects.extend(sub.effects);
+        }
+    }
+    result
+}
+
+/// Declare a callflow service (ADR-0016 X5): its machine id, its state enum, the
+/// `init` hook, and its state-gated rules. Expands to — in the invoking module —
+/// a `MachineId` const, the `Copy` state enum with a `const fn label()`, and the
+/// `rules()` / `init()` / `service_def()` functions the registry composes.
+///
+/// ```ignore
+/// define_service! {
+///     id: "stub",
+///     machine: STUB_MACHINE,
+///     states: StubState { S0, S1 },
+///     init: |call: &Call| { /* -> Option<ServiceSeed> */ },
+///     rules: [ advance_rule() ],
+/// }
+/// ```
+#[macro_export]
+macro_rules! define_service {
+    (
+        id: $id:literal,
+        machine: $machine:ident,
+        states: $state_enum:ident { $($variant:ident),+ $(,)? },
+        init: $init:expr,
+        rules: [ $($rule:expr),* $(,)? ] $(,)?
+    ) => {
+        /// Machine id for this service (== service id).
+        pub const $machine: $crate::rules::MachineId = $crate::rules::MachineId::new($id);
+
+        /// The service's declared states (ADR-0016). The compiler rejects any
+        /// rule that references a non-existent variant.
+        #[derive(::core::clone::Clone, ::core::marker::Copy, ::core::fmt::Debug,
+                 ::core::cmp::PartialEq, ::core::cmp::Eq)]
+        pub enum $state_enum { $($variant),+ }
+
+        impl $state_enum {
+            /// The wire label for this state (variant name).
+            pub const fn label(self) -> $crate::rules::StateLabel {
+                $crate::rules::StateLabel::new(match self {
+                    $(Self::$variant => ::core::stringify!($variant)),+
+                })
+            }
+        }
+
+        /// This service's state-gated rules.
+        pub fn rules() -> ::std::vec::Vec<$crate::rules::RuleDefinition> {
+            ::std::vec![ $($rule),* ]
+        }
+
+        /// The setup `init` hook (X8): seed the machine, or `None` to stay dormant.
+        pub fn init(call: &$crate::rules::Call) -> ::core::option::Option<$crate::rules::ServiceSeed> {
+            let f: fn(&$crate::rules::Call) -> ::core::option::Option<$crate::rules::ServiceSeed> = $init;
+            f(call)
+        }
+
+        /// The registry descriptor composed into the engine.
+        pub fn service_def() -> $crate::rules::ServiceDef {
+            $crate::rules::ServiceDef { id: $id, init, rules }
+        }
+    };
+}
+
+/// Declare one state-gated rule of a service (ADR-0016 X5). `active` and
+/// `transitions` take state-enum values (e.g. `StubState::S0`); the macro lifts
+/// them into the `&'static [StateLabel]` declaration columns the engine and the
+/// doc generator read. The `transitions` list is the `(from, to)` edges the
+/// handle may cause via `SetState` (checked by the executor).
+///
+/// ```ignore
+/// sm_rule! {
+///     id: "stub-advance",
+///     machine: STUB_MACHINE,
+///     active: [ StubState::S0 ],
+///     transitions: [ StubState::S0 => StubState::S1 ],
+///     matcher: Match::request().method("INFO"),
+///     handle: |_ctx| { /* -> Option<RuleHandleResult> */ },
+/// }
+/// ```
+#[macro_export]
+macro_rules! sm_rule {
+    (
+        id: $id:literal,
+        machine: $machine:expr,
+        active: [ $($act:expr),+ $(,)? ],
+        transitions: [ $($from:expr => $to:expr),* $(,)? ],
+        matcher: $matcher:expr,
+        handle: $handle:expr $(,)?
+    ) => {{
+        // `const` items (not inline `&[..]`) so the slices are `'static` despite
+        // `StateLabel` carrying a `Cow` (which `needs_drop`, blocking implicit
+        // promotion in a fn body).
+        const __ACTIVE: &[$crate::rules::StateLabel] = &[ $($act.label()),+ ];
+        const __TRANS: &[($crate::rules::StateLabel, $crate::rules::StateLabel)] =
+            &[ $(($from.label(), $to.label())),* ];
+        $crate::rules::RuleDefinition {
+            id: $id,
+            layer: $crate::rules::SERVICE_LAYER,
+            overrides: &[],
+            matcher: $matcher,
+            handle: $handle,
+            machine: ::core::option::Option::Some($machine),
+            active_states: __ACTIVE,
+            transitions: __TRANS,
+        }
+    }};
+}
