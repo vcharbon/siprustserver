@@ -8,32 +8,44 @@
 use std::collections::BTreeSet;
 
 use super::invariants::GLOBAL_CALL_MACHINE;
+use super::model::{Effect, Match, MatchKind, RuleDefinition, StatusMatch};
 use super::service::ServiceDef;
 
+/// A labelled transition edge (ADR-0016 X9). The `label` reads
+/// `<input message> ⇒ <output side effects>` — the matcher summary that *triggers*
+/// the rule, then the rule's declared tracked effects (leg messages / lifecycle
+/// commands / guard timers). Empty for the framework `global-call` lifecycle edges.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Edge {
+    pub from: String,
+    pub to: String,
+    pub label: String,
+}
+
 /// A machine's transition graph: a deterministic (sorted, deduped) set of state
-/// labels and `(from, to)` edges.
+/// labels and labelled edges.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineGraph {
     pub id: String,
     pub states: Vec<String>,
-    pub edges: Vec<(String, String)>,
+    pub edges: Vec<Edge>,
 }
 
 fn graph_from(
     id: &str,
     states: impl IntoIterator<Item = String>,
-    edges: impl IntoIterator<Item = (String, String)>,
+    edges: Vec<Edge>,
 ) -> MachineGraph {
     let mut state_set: BTreeSet<String> = states.into_iter().collect();
-    let edge_set: BTreeSet<(String, String)> = edges.into_iter().collect();
-    for (a, b) in &edge_set {
-        state_set.insert(a.clone());
-        state_set.insert(b.clone());
+    for e in &edges {
+        state_set.insert(e.from.clone());
+        state_set.insert(e.to.clone());
     }
     // The terminal sentinel `[*]` (ADR-0016 X9 deactivation) is Mermaid's built-in
     // sink — it appears only as an edge target (`S --> [*]`), never as a declared
     // state node.
     state_set.remove(call::StateLabel::terminal().as_str());
+    let edge_set: BTreeSet<Edge> = edges.into_iter().collect();
     MachineGraph {
         id: id.to_string(),
         states: state_set.into_iter().collect(),
@@ -41,23 +53,83 @@ fn graph_from(
     }
 }
 
+/// Summarise a rule's matcher as the **input** half of an edge label — the SIP
+/// message / timer / internal event that triggers the rule.
+fn summarize_matcher(m: &Match) -> String {
+    let dir = match m.direction {
+        Some(call::Direction::FromA) => " (A)",
+        Some(call::Direction::FromB) => " (B)",
+        None => "",
+    };
+    let methods = m.methods.as_ref().map(|v| v.join("/"));
+    match m.kind {
+        MatchKind::Request => format!("{}{dir}", methods.unwrap_or_else(|| "request".into())),
+        MatchKind::Response => {
+            let status = match m.status {
+                StatusMatch::Any => String::new(),
+                StatusMatch::Code(c) => format!(" {c}"),
+                StatusMatch::Class(c) => format!(" {c}xx"),
+            };
+            format!("{}{status}{dir}", methods.unwrap_or_else(|| "response".into()))
+        }
+        MatchKind::Timer => {
+            let ts = m
+                .timer_types
+                .as_ref()
+                .map(|v| v.iter().map(|t| format!("{t:?}")).collect::<Vec<_>>().join("/"))
+                .unwrap_or_default();
+            format!("timer {ts}")
+        }
+        MatchKind::Timeout => format!("timeout {}", methods.unwrap_or_default()),
+        MatchKind::Cancelled => "CANCEL".into(),
+        MatchKind::InternalEvent => match (m.topic, m.outcome) {
+            (Some(t), Some(o)) => format!("{t}/{o}"),
+            (Some(t), None) => t.to_string(),
+            _ => "event".into(),
+        },
+    }
+}
+
+/// Summarise a rule's declared effects as the **output** half of an edge label —
+/// the tracked side effects (each effect's free label), joined.
+fn summarize_effects(effects: &[Effect]) -> String {
+    effects.iter().map(Effect::label).collect::<Vec<_>>().join(" · ")
+}
+
+/// The full `<input> ⇒ <output>` edge label for a rule.
+fn edge_label(r: &RuleDefinition) -> String {
+    let input = summarize_matcher(&r.matcher);
+    let output = summarize_effects(r.effects);
+    if output.is_empty() {
+        input
+    } else {
+        format!("{input} ⇒ {output}")
+    }
+}
+
 /// The framework global call machine — projected from `CallModelState`
-/// (ADR-0016 X2), so its edges are the lifecycle, not rule-declared.
+/// (ADR-0016 X2), so its edges are the lifecycle, not rule-declared (unlabelled).
 pub fn global_call_graph() -> MachineGraph {
+    let edges = [
+        ("Active", "Terminating"),
+        ("Active", "Terminated"),
+        ("Terminating", "Terminated"),
+    ]
+    .into_iter()
+    .map(|(a, b)| Edge { from: a.into(), to: b.into(), label: String::new() })
+    .collect();
     graph_from(
         GLOBAL_CALL_MACHINE.as_str(),
         ["Active", "Terminating", "Terminated"].into_iter().map(str::to_string),
-        [
-            ("Active", "Terminating"),
-            ("Active", "Terminated"),
-            ("Terminating", "Terminated"),
-        ]
-        .into_iter()
-        .map(|(a, b)| (a.to_string(), b.to_string())),
+        edges,
     )
 }
 
-/// Derive a service machine's graph from its rules' declaration columns.
+/// Derive a service machine's graph from its rules. A rule with a transition
+/// yields a labelled edge per `(from, to)`; a rule with **no** transition is an
+/// in-state handler (a guard / response / timeout that fires without moving the
+/// cursor) and yields a labelled **self-loop** on each of its active states — so
+/// the diagram shows the looping in-state behaviour, not just the moves.
 pub fn service_graph(def: &ServiceDef) -> MachineGraph {
     let rules = (def.rules)();
     let mut states = Vec::new();
@@ -69,10 +141,17 @@ pub fn service_graph(def: &ServiceDef) -> MachineGraph {
         for s in r.active_states {
             states.push(s.as_str().to_string());
         }
-        for (from, to) in r.transitions {
-            states.push(from.as_str().to_string());
-            states.push(to.as_str().to_string());
-            edges.push((from.as_str().to_string(), to.as_str().to_string()));
+        let label = edge_label(r);
+        if r.transitions.is_empty() {
+            for s in r.active_states {
+                edges.push(Edge { from: s.as_str().into(), to: s.as_str().into(), label: label.clone() });
+            }
+        } else {
+            for (from, to) in r.transitions {
+                states.push(from.as_str().to_string());
+                states.push(to.as_str().to_string());
+                edges.push(Edge { from: from.as_str().into(), to: to.as_str().into(), label: label.clone() });
+            }
         }
     }
     graph_from(def.id, states, edges)
@@ -90,8 +169,12 @@ pub fn render_mermaid(g: &MachineGraph) -> String {
     for s in &g.states {
         out.push_str(&format!("    {s}\n"));
     }
-    for (from, to) in &g.edges {
-        out.push_str(&format!("    {from} --> {to}\n"));
+    for e in &g.edges {
+        if e.label.is_empty() {
+            out.push_str(&format!("    {} --> {}\n", e.from, e.to));
+        } else {
+            out.push_str(&format!("    {} --> {} : {}\n", e.from, e.to, e.label));
+        }
     }
     out.push_str("```\n");
     out
@@ -180,10 +263,15 @@ mod tests {
         let g = global_call_graph();
         assert_eq!(g.id, "global-call");
         assert_eq!(g.states, vec!["Active", "Terminated", "Terminating"]);
-        assert!(g.edges.contains(&("Active".into(), "Terminating".into())));
+        assert!(g.edges.contains(&Edge {
+            from: "Active".into(),
+            to: "Terminating".into(),
+            label: String::new(),
+        }));
         let md = render_mermaid(&g);
         assert_well_formed_mermaid(&md, "global-call");
-        assert!(md.contains("Active --> Terminating"));
+        // Lifecycle edges are unlabelled (no trailing " : ...").
+        assert!(md.contains("Active --> Terminating\n"));
     }
 
     #[test]
@@ -191,10 +279,14 @@ mod tests {
         let g = service_graph(&stub_def());
         assert_eq!(g.id, "stub");
         assert_eq!(g.states, vec!["S0", "S1"]);
-        assert_eq!(g.edges, vec![("S0".to_string(), "S1".to_string())]);
+        // The edge is labelled with the matcher summary (no effects declared).
+        assert_eq!(
+            g.edges,
+            vec![Edge { from: "S0".into(), to: "S1".into(), label: "INFO".into() }]
+        );
         let md = render_mermaid(&g);
         assert_well_formed_mermaid(&md, "stub");
-        assert!(md.contains("S0 --> S1"));
+        assert!(md.contains("S0 --> S1 : INFO"));
     }
 
     #[test]

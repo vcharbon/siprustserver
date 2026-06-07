@@ -386,6 +386,18 @@ pub enum Effect {
 }
 
 impl Effect {
+    /// The free, unenforced diagram label every variant carries.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Effect::Originate { label, .. }
+            | Effect::Relay { label }
+            | Effect::Respond { label, .. }
+            | Effect::Provisional { label, .. }
+            | Effect::LifecycleCommand { label }
+            | Effect::GuardTimer { label, .. } => label,
+        }
+    }
+
     /// The category this declared effect contributes to the drift-check.
     pub fn kind(&self) -> EffectKind {
         match self {

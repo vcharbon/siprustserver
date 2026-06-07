@@ -9,10 +9,31 @@ stateDiagram-v2
     CRealigning
     CRinging
     ReferAuthorizing
-    ARealigning --> [*]
-    CRealigning --> ARealigning
-    CRinging --> CRealigning
-    CRinging --> [*]
-    ReferAuthorizing --> CRinging
-    ReferAuthorizing --> [*]
+    ARealigning --> ARealigning : INVITE (A) ⇒ 491 → A (glare during realign)
+    ARealigning --> ARealigning : INVITE (A) ⇒ cancel A re-INVITE watchdog + overall · terminate (a-realign rollback — BYE A/B/C)
+    ARealigning --> ARealigning : INVITE (B) ⇒ 491 → C (glare during realign)
+    ARealigning --> ARealigning : REFER (B) ⇒ 491 → B (second REFER pending)
+    ARealigning --> ARealigning : request (B) ⇒ 481 → B (referrer signalling dead until merge)
+    ARealigning --> ARealigning : timer ReferOverallSafety ⇒ cancel subscription-expiry + both re-INVITE watchdogs · terminate (overall-safety watchdog rollback)
+    ARealigning --> ARealigning : timer ReferReinviteAnswer ⇒ cancel overall-safety · terminate (a-realign timeout rollback)
+    ARealigning --> [*] : INVITE 2xx (A) ⇒ ACK → A (a-realign answered) · cancel A re-INVITE watchdog + overall · merge A↔C (transfer complete)
+    CRealigning --> ARealigning : INVITE 2xx (B) ⇒ ACK → C (c-realign answered) · re-INVITE → A (a-realign, C's active SDP) · cancel C / arm A re-INVITE watchdog
+    CRealigning --> CRealigning : INVITE (A) ⇒ 491 → A (glare during realign)
+    CRealigning --> CRealigning : INVITE (B) ⇒ 491 → C (glare during realign)
+    CRealigning --> CRealigning : INVITE (B) ⇒ cancel re-INVITE watchdog + overall · terminate (c-realign rollback — BYE A/B/C)
+    CRealigning --> CRealigning : REFER (B) ⇒ 491 → B (second REFER pending)
+    CRealigning --> CRealigning : request (B) ⇒ 481 → B (referrer signalling dead until merge)
+    CRealigning --> CRealigning : timer ReferOverallSafety ⇒ cancel subscription-expiry + both re-INVITE watchdogs · terminate (overall-safety watchdog rollback)
+    CRealigning --> CRealigning : timer ReferReinviteAnswer ⇒ cancel overall-safety · terminate (c-realign timeout rollback)
+    CRinging --> CRealigning : INVITE 2xx (B) ⇒ ACK → C (answer initial INVITE) · NOTIFY terminated → referrer · re-INVITE → C (c-realign, A's SDP) · arm c-realign re-INVITE watchdog · cancel subscription-expiry · cancel C no-answer
+    CRinging --> CRinging : INVITE 1xx (B) ⇒ NOTIFY active (C progress) → referrer
+    CRinging --> CRinging : REFER (B) ⇒ 491 → B (second REFER pending)
+    CRinging --> CRinging : timer ReferOverallSafety ⇒ cancel subscription-expiry + both re-INVITE watchdogs · terminate (overall-safety watchdog rollback)
+    CRinging --> [*] : INVITE (B) ⇒ NOTIFY terminated (C failed) → referrer · BYE → C (terminate failed leg) · cancel subscription-expiry + overall + C no-answer
+    CRinging --> [*] : timer NoAnswer ⇒ NOTIFY terminated;timeout → referrer · BYE → C (no answer) · cancel subscription-expiry + overall
+    ReferAuthorizing --> CRinging : refer-http-result/allow ⇒ INVITE → C (transfer target)
+    ReferAuthorizing --> ReferAuthorizing : REFER (B) ⇒ 491 → B (second REFER pending)
+    ReferAuthorizing --> ReferAuthorizing : timer ReferOverallSafety ⇒ cancel subscription-expiry + both re-INVITE watchdogs · terminate (overall-safety watchdog rollback)
+    ReferAuthorizing --> [*] : refer-http-result ⇒ NOTIFY terminated → referrer · cancel subscription-expiry · cancel overall-safety
+    ReferAuthorizing --> [*] : timer ReferSubscriptionExpiry ⇒ NOTIFY terminated;timeout → referrer · cancel overall-safety
 ```
