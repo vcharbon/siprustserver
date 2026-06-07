@@ -146,8 +146,11 @@ async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
 /// non-corrupting, so there is no settle/handback floor. `fire_at` is pre-computed
 /// here, in the reclaim handler — never inside the timer driver (CLAUDE.md).
 async fn reclaim_all(ctx: &Arc<RouterCtx>) {
-    let now_ms = ctx.clock.now_ms();
+    let start_ms = ctx.clock.now_ms();
+    let now_ms = start_ms;
+    let active_before = ctx.state.active_count() as u64;
     let calls = ctx.state.reclaim_scan().await;
+    let scanned = calls.len() as u64;
     // L_max = the largest past-due keepalive gap across the whole partition.
     let l_max = calls
         .iter()
@@ -156,9 +159,24 @@ async fn reclaim_all(ctx: &Arc<RouterCtx>) {
         .map(|t| (now_ms - t.fire_at).max(0))
         .max()
         .unwrap_or(0);
+    let mut materialized = 0u64;
     for call in calls {
-        reclaim_into_live(ctx, call, Some((now_ms, l_max))).await;
+        if reclaim_into_live(ctx, call, Some((now_ms, l_max))).await {
+            materialized += 1;
+        }
     }
+    // Per-reboot completeness telemetry (long-call-on-reboot study, 2026-06-06).
+    // The gauges expose the pass's denominator/numerator; the structured stderr
+    // line (visible in `kubectl logs`) records the per-pass triple that previously
+    // had to be reconstructed from cumulative counters + active_calls deltas.
+    ctx.metrics.set_repl_reclaim_pass(scanned, materialized);
+    let active_after = ctx.state.active_count() as u64;
+    let duration_ms = ctx.clock.now_ms() - start_ms;
+    eprintln!(
+        "b2bua-runner reboot reclaim: active_before={active_before} scanned={scanned} \
+         materialized={materialized} active_after={active_after} l_max_ms={l_max} \
+         duration_ms={duration_ms}"
+    );
 }
 
 /// Materialise one reclaimed call into the live map + re-arm its timers (ADR-0011
@@ -167,7 +185,14 @@ async fn reclaim_all(ctx: &Arc<RouterCtx>) {
 /// `None` fires a past-due keepalive immediately (a single reactive straggler).
 /// A future-dated keepalive and every non-keepalive timer keep their absolute
 /// deadline either way.
-async fn reclaim_into_live(ctx: &Arc<RouterCtx>, mut call: Call, smoothing: Option<(i64, i64)>) {
+/// Returns `true` iff this call was freshly materialised into the live map (the
+/// caller meters per-pass reclaim completeness); `false` if it was already
+/// resident (idempotent re-pass).
+async fn reclaim_into_live(
+    ctx: &Arc<RouterCtx>,
+    mut call: Call,
+    smoothing: Option<(i64, i64)>,
+) -> bool {
     let call_ref = call.call_ref.clone();
     // Hold the per-call state lock across materialise + timer re-arm, exactly as
     // `process` does, so a concurrent dispatcher handler for this call_ref cannot
@@ -195,6 +220,9 @@ async fn reclaim_into_live(ctx: &Arc<RouterCtx>, mut call: Call, smoothing: Opti
     if ctx.state.materialize_if_absent(call) {
         ctx.timers.restore(timers, call_ref).await;
         ctx.metrics.bump_repl_reclaimed();
+        true
+    } else {
+        false
     }
 }
 
@@ -487,9 +515,30 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
         };
         let call = build_initial_call(&req, src, &ctx.config, now_ms);
         ctx.state.create(call.clone());
-        let result =
-            handle_initial_invite(call.clone(), ctx.decision.as_ref(), ctx.limiter.as_ref(), &ctx.config, &ctx.id_gen, now_ms).await;
-        crate::rules::invariants::enforce(&call, crate::rules::invariants::finalize(result))
+        // RFC 3261 §8.1.1.3: a dialog-forming INVITE MUST carry a From tag. The
+        // caller's From tag IS the a-leg dialog's remote tag, so admitting a
+        // tag-less INVITE would seed an un-probeable a-leg dialog (its in-dialog
+        // keepalive OPTIONS could never be built — see `send_request_to_leg`),
+        // producing the "OPTIONS to called, not calling" asymmetry that also
+        // round-trips through HA hydration. Reject malformed at ingest instead.
+        // Created-then-rejected mirrors the decision-reject path below so the
+        // Terminated invariant reaps the call + propagates the delete.
+        if call.a_leg.from_tag.is_empty() {
+            let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call);
+            let rejected = crate::initial_invite::reject_call(
+                call.clone(),
+                &a_invite,
+                400,
+                Some("Bad Request - missing From tag".into()),
+                &ctx.id_gen,
+                now_ms,
+            );
+            crate::rules::invariants::enforce(&call, crate::rules::invariants::finalize(rejected))
+        } else {
+            let result =
+                handle_initial_invite(call.clone(), ctx.decision.as_ref(), ctx.limiter.as_ref(), &ctx.config, &ctx.id_gen, now_ms).await;
+            crate::rules::invariants::enforce(&call, crate::rules::invariants::finalize(result))
+        }
     } else {
         // In-dialog: peek the in-memory map, falling back to the acting-backup
         // takeover read-path (S10b) — hydrate the call from the replica store's
@@ -706,6 +755,12 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
             Ok(d) => d,
             Err(_) => continue,
         };
+        // Meter outbound requests we originate/relay (the in-dialog keepalive
+        // OPTIONS lands here) — pairs with inbound responses_total{OPTIONS,200} to
+        // isolate the keepalive round-trip (sent vs answered) on the b2bua itself.
+        if let OutboundBody::Request(req) = &eff.body {
+            ctx.metrics.record_request_out(&req.method);
+        }
         match (&eff.body, &eff.mode) {
             (OutboundBody::Response(resp), _) => ctx.txn.send_response(resp.clone(), dest).await,
             (OutboundBody::Request(req), OutboundTxnMode::NewClient(kind)) => {

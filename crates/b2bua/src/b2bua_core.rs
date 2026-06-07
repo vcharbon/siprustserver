@@ -188,7 +188,8 @@ impl B2buaCore {
                     self_ordinal,
                     setup.store.changelog().clone(),
                     setup.store.clone(),
-                );
+                )
+                .with_metrics(metrics.clone());
                 let network = setup.network.clone();
                 let listen_addr = setup.listen_addr;
                 tasks.push(tokio::spawn(async move {

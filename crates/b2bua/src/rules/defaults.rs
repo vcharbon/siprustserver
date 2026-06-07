@@ -43,6 +43,13 @@ fn keepalive_interval(ctx: &RuleContext) -> i64 {
     // retained for compatibility but no longer drives the runtime timer.
     ctx.config.keepalive_interval_sec
 }
+fn keepalive_timeout(ctx: &RuleContext) -> i64 {
+    // Grace for the in-dialog OPTIONS 200 before the leg is declared dead and the
+    // call is torn down. Operator knob (`B2BUA_KEEPALIVE_TIMEOUT_SEC`, default
+    // 32 s) — a hard-coded 5 s was too tight across a reboot, BYE-ing healthy
+    // reclaimed dialogs whose keepalive round-trip was still settling.
+    ctx.config.keepalive_timeout_sec
+}
 fn max_duration(ctx: &RuleContext) -> i64 {
     ctx.call.features.as_ref().map(|f| f.platform.max_duration_sec).unwrap_or(3600)
 }
@@ -518,7 +525,7 @@ fn core_rules() -> Vec<RuleDefinition> {
             let mut actions = Vec::new();
             for leg_id in call::helpers::all_peered_legs(ctx.call) {
                 actions.push(RuleAction::SendRequestToLeg { leg_id: leg_id.clone(), method: "OPTIONS".into() });
-                actions.push(RuleAction::ScheduleTimer { timer_type: TimerType::KeepaliveTimeout, delay_sec: 5, leg_id: Some(leg_id) });
+                actions.push(RuleAction::ScheduleTimer { timer_type: TimerType::KeepaliveTimeout, delay_sec: keepalive_timeout(ctx), leg_id: Some(leg_id) });
             }
             actions.push(RuleAction::ScheduleTimer { timer_type: TimerType::Keepalive, delay_sec: keepalive_interval(ctx), leg_id: None });
             ok(actions)

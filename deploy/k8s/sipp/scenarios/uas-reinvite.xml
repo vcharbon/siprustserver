@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!--
+  Callee that ORIGINATES re-INVITEs. Answers the INVITE, then sends two in-dialog
+  re-INVITEs (at +60s/+120s) toward the caller (relayed by the B2BUA onto the
+  a-leg), then BYEs. Mirror of uac-reinvite.xml. Pair with uac-answer-reinvite.xml
+  on the caller side. Proves callee-originated in-dialog re-INVITE relay across
+  failover (the b2bua bob_reinvite path, under load + reboot).
+
+  UAS-originated in-dialog request: From = this UAS (local tag SIPpTag01), To =
+  the caller (its URI + tag captured from the INVITE), R-URI/wire via the captured
+  caller Contact + [routes] (route set from rrs on the INVITE). CSeq is this
+  side's OWN sequence (1,2 for the two re-INVITEs; the b2bua translates per leg).
+-->
+<scenario name="K8s UAS reINVITE — answer INVITE, originate 2 re-INVITEs, BYE">
+  <recv request="INVITE" crlf="true" rrs="true">
+    <action>
+      <!-- Capture the caller's dialog URI (From), remote target (Contact), and
+           the caller's From-tag (the dialog REMOTE tag from this UAS's view).
+           [peer_tag_param] does NOT populate for a UAS that ORIGINATES an
+           in-dialog request, so the remote tag must be captured explicitly and
+           placed in the To of every UAS-originated request — without it the
+           re-INVITE is not a valid in-dialog request and the B2BUA cannot match
+           it to the established b-leg dialog. -->
+      <ereg regexp="[Ff]rom:[^&lt;]*&lt;([^&gt;]+)&gt;" search_in="msg" assign_to="junk1,caller_uri"/>
+      <ereg regexp="[Cc]ontact:[^&lt;]*&lt;([^&gt;]+)&gt;" search_in="msg" assign_to="junk2,caller_contact"/>
+      <ereg regexp=";tag=([^;&gt;[:space:]]+)" search_in="hdr" header="From:" assign_to="junk3,caller_tag"/>
+    </action>
+  </recv>
+  <!-- SIPp assigns the full match to the first var of each ereg; mark the unused
+       full-match vars referenced so SIPp does not abort on "referenced 1 times". -->
+  <Reference variables="junk1,junk2,junk3"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 100 Trying
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+    ]]>
+  </send>
+  <send>
+    <![CDATA[
+      SIP/2.0 180 Ringing
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:];tag=[pid]SIPpTag01[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <pause milliseconds="2000"/>
+  <send retrans="500">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:];tag=[pid]SIPpTag01[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=user1 53655765 2353687637 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+  <recv request="ACK" rtd="true" crlf="true"/>
+
+  <!-- ===== UAS-originated re-INVITE #1 at +60s ===== -->
+  <pause milliseconds="60000"/>
+  <send retrans="500">
+    <![CDATA[
+      INVITE [$caller_contact] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: <sip:[service]@[local_ip]:[local_port]>;tag=[pid]SIPpTag01[call_number]
+      To: <[$caller_uri]>;tag=[$caller_tag]
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Max-Forwards: 70
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=user1 53655765 2353687638 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="200" rtd="true" crlf="true"/>
+  <send>
+    <![CDATA[
+      ACK [$caller_contact] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: <sip:[service]@[local_ip]:[local_port]>;tag=[pid]SIPpTag01[call_number]
+      To: <[$caller_uri]>;tag=[$caller_tag]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <!-- ===== UAS-originated re-INVITE #2 at +120s ===== -->
+  <pause milliseconds="60000"/>
+  <send retrans="500">
+    <![CDATA[
+      INVITE [$caller_contact] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: <sip:[service]@[local_ip]:[local_port]>;tag=[pid]SIPpTag01[call_number]
+      To: <[$caller_uri]>;tag=[$caller_tag]
+      Call-ID: [call_id]
+      CSeq: 2 INVITE
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Max-Forwards: 70
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=user1 53655765 2353687639 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="200" rtd="true" crlf="true"/>
+  <send>
+    <![CDATA[
+      ACK [$caller_contact] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: <sip:[service]@[local_ip]:[local_port]>;tag=[pid]SIPpTag01[call_number]
+      To: <[$caller_uri]>;tag=[$caller_tag]
+      Call-ID: [call_id]
+      CSeq: 2 ACK
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <!-- ===== UAS-driven teardown ===== -->
+  <send retrans="500">
+    <![CDATA[
+      BYE [$caller_contact] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: <sip:[service]@[local_ip]:[local_port]>;tag=[pid]SIPpTag01[call_number]
+      To: <[$caller_uri]>;tag=[$caller_tag]
+      Call-ID: [call_id]
+      CSeq: 3 BYE
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+  <recv response="200" crlf="true"/>
+
+  <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
+  <CallLengthRepartition value="10, 50, 100, 500, 1000, 5000, 10000"/>
+</scenario>

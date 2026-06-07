@@ -25,6 +25,12 @@
 //!                   In k8s inject the pod IP via downward API `status.podIP`,
 //!                   else peers route responses to 0.0.0.0 (a storm).
 //!   B2BUA_DEST      downstream UAS host:port          (default 127.0.0.1:5070)
+//!   B2BUA_OUTBOUND_PROXY  front-proxy host:port every b-leg (worker→callee)
+//!                   request is forced through (preloaded `Route ;lr;outbound`).
+//!                   REQUIRED in the k8s cluster: a peer's internal pod IP is not
+//!                   routable peer-to-peer in a real deployment, so ALL outbound
+//!                   SIP must traverse the LB proxy — never go pod-direct. Unset →
+//!                   b-leg goes straight to the callee (local/dev only). (unset)
 //!   B2BUA_METRICS   Prometheus HTTP listen addr       (default 0.0.0.0:9091)
 //!   B2BUA_QUEUE     inbound UDP queue depth (packets)  (default 8192)
 //!   B2BUA_ORDINAL   worker ordinal stamped in callRef  (default w0)
@@ -324,6 +330,12 @@ async fn main() {
     // In-dialog OPTIONS keepalive interval (seconds). Production default 300 s
     // (5 min); a shorter poke breaks long-hold endurance traffic.
     let keepalive_sec: i64 = env_or("B2BUA_KEEPALIVE_SEC", "300").parse().expect("B2BUA_KEEPALIVE_SEC");
+    // In-dialog OPTIONS keepalive-timeout grace (seconds): wait for the OPTIONS 200
+    // before declaring the leg dead and BYE-ing. Default 32 s (was a hard 5 s) so a
+    // reclaimed dialog's keepalive can round-trip across the post-reboot recovery
+    // window (smoothed reclaim burst + proxy re-discovering the new pod IP).
+    let keepalive_timeout_sec: i64 =
+        env_or("B2BUA_KEEPALIVE_TIMEOUT_SEC", "32").parse().expect("B2BUA_KEEPALIVE_TIMEOUT_SEC");
     // Replicated-backup TTL ("reboot budget"): how long a backup Element survives
     // without a refresh from its primary. Decoupled from the keepalive but must
     // outlast it — enforced by `config.validate()` below.
@@ -380,14 +392,45 @@ async fn main() {
         "b2bua-runner advertised SIP identity = {advertise_ip}:{advertise_port} (bind {local})"
     );
 
+    // Front-proxy egress. Every b-leg (worker→callee) request is sent to this
+    // `host:port` with a preloaded `Route: <sip:host:port;lr;outbound>` so the
+    // proxy classifies it worker-outbound, strips the Route, forwards to the
+    // callee, and record-routes itself into the b-leg — keeping in-dialog
+    // BYE/OPTIONS/re-INVITE on the proxy path too. REQUIRED in the cluster: a
+    // peer's internal pod IP is NOT routable peer-to-peer, so all SIP MUST go
+    // through the LB proxy, never pod-direct. Unset → b-leg goes straight to the
+    // callee (local/dev only). Format `host:port`; a bad value is fatal (a
+    // silent fallback to pod-direct is exactly the endurance bug this prevents).
+    let b2b_outbound_proxy: Option<(String, u16)> = match env::var("B2BUA_OUTBOUND_PROXY") {
+        Ok(s) if !s.trim().is_empty() => {
+            let s = s.trim();
+            let (h, p) = s
+                .rsplit_once(':')
+                .and_then(|(h, p)| p.parse::<u16>().ok().map(|p| (h.to_string(), p)))
+                .unwrap_or_else(|| panic!("B2BUA_OUTBOUND_PROXY must be host:port, got {s:?}"));
+            eprintln!(
+                "b2bua-runner b-leg egress forced through front proxy {h}:{p} (all worker→callee SIP traverses the LB)"
+            );
+            Some((h, p))
+        }
+        _ => {
+            eprintln!(
+                "b2bua-runner B2BUA_OUTBOUND_PROXY unset — b-leg goes pod-direct (local/dev only; NOT for the cluster)"
+            );
+            None
+        }
+    };
+
     let config = B2buaConfig {
         self_ordinal: ordinal.clone(),
         sip_local_ip: advertise_ip,
         sip_local_port: advertise_port,
+        b2b_outbound_proxy,
         cdr_buffer_queue_max: cdr_queue,
         event_dispatch_concurrency: concurrency,
         per_call_queue_cap: call_cap,
         keepalive_interval_sec: keepalive_sec,
+        keepalive_timeout_sec,
         reboot_budget_sec,
         limiter_refresh_sec,
         ..Default::default()

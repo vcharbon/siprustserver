@@ -144,7 +144,7 @@ async fn canonical_failover() {
 
     // ── STEP 4: reboot B1 EMPTY at a higher gen → re-hydrate from B2 ─────────
     let old_gen = b1.gen();
-    b1.reboot().await;
+    let b1_addr = b1.reboot().await; // reboots on a NEW pod IP
     fh.mark(&primary_ord, None, "reboot", &format!("gen={}", b1.gen()));
     assert!(b1.gen() > old_gen, "reboot bumps the incarnation gen");
 
@@ -158,7 +158,9 @@ async fn canonical_failover() {
     // ── GATE 4: B1 is_ready() after re-hydration ─────────────────────────────
     assert!(b1.is_ready(), "GATE 4: rebooted B1 became ready after re-hydrating from B2");
 
-    // Mark B1 alive+ready in the proxy registry (deterministic, off is_ready()).
+    // The proxy re-learns the rebooted pod's NEW address (k8s EndpointSlice path)
+    // then marks it alive+ready (deterministic, off is_ready()).
+    proxy.set_address(&primary_ord, b1_addr);
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
     fh.mark(&primary_ord, None, "recovered", "alive+ready");
 
@@ -630,7 +632,8 @@ async fn reboot_reclaim_exactly_one_owner_after_self_release() {
     );
 
     // ── reboot the primary → bootstrap-rehydrate + bulk reclaim on go-active ──
-    b1.reboot().await;
+    let b1_addr = b1.reboot().await; // NEW pod IP
+    proxy.set_address(&primary_ord, b1_addr); // proxy re-learns it (k8s EndpointSlice)
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
     for _ in 0..40 {
         fh.advance(Duration::from_millis(500)).await;
@@ -711,7 +714,8 @@ async fn quiescent_long_call_survives_kill_reboot_reclaim() {
     assert!(b2.is_synchronized_backup(&call_ref).await, "the replica survives the outage (not lost)");
 
     // ── reboot the primary → it reclaims the dormant call ───────────────────────
-    b1.reboot().await;
+    let b1_addr = b1.reboot().await; // NEW pod IP
+    proxy.set_address(&primary_ord, b1_addr); // proxy re-learns it (k8s EndpointSlice)
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
     b2.simulate_peer_added(&primary_ord);
     for _ in 0..40 {
@@ -815,7 +819,8 @@ async fn cseq_stays_in_order_across_failover_and_reclaim() {
     assert!(b2.is_synchronized_backup(&call_ref).await, "replica survives the outage (call not lost)");
 
     // ── reboot → reclaim; survivor re-publishes the endpoint ────────────────────-
-    b1.reboot().await;
+    let b1_addr = b1.reboot().await; // NEW pod IP
+    proxy.set_address(&primary_ord, b1_addr); // proxy re-learns it (k8s EndpointSlice)
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
     b2.simulate_peer_added(&primary_ord);
     for _ in 0..40 {
@@ -956,7 +961,8 @@ async fn acting_backup_terminate_leaves_no_expired_context_for_reclaim() {
     assert!(b2.memory_clean(), "acting-backup released all per-call memory on terminate");
 
     // ── reboot the primary → it re-hydrates from the backup + bulk-reclaims ────
-    b1.reboot().await;
+    let b1_addr = b1.reboot().await; // NEW pod IP
+    proxy.set_address(&primary_ord, b1_addr); // proxy re-learns it (k8s EndpointSlice)
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
     for _ in 0..40 {
         fh.advance(Duration::from_millis(500)).await;

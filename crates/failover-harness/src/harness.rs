@@ -44,7 +44,9 @@ use repl_net::transport::{
 };
 use scenario_harness::{Agent, Harness};
 use sip_clock::Clock;
+use sip_proxy::health::{HealthProbe, HealthProbeConfig};
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
+use sip_proxy::registry::control::SimulatedControl;
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
 use sip_proxy::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
@@ -136,9 +138,14 @@ impl ReplWiring {
 /// server/supervisor, same ordinal + same repl listen addr).
 pub struct ReplicatedB2buaSut {
     ordinal: String,
+    /// The LIVE incarnation's SIP wire addr. A reboot moves this to a fresh
+    /// address (new pod IP) — see [`reboot`](Self::reboot) / [`reboot_sip_addr`].
     sip_addr: SocketAddr,
-    /// The SIP endpoint factory — re-binding on reboot needs a fresh endpoint on
-    /// the same address, so we keep the harness handle + name.
+    /// The gen-1 SIP addr, kept stable so each incarnation's reboot address is a
+    /// deterministic function of `(base, gen)` rather than compounding.
+    sip_base_addr: SocketAddr,
+    /// The SIP endpoint factory — re-binding on reboot needs a fresh endpoint, so
+    /// we keep the harness handle + name. `sip_bind` tracks the live addr.
     sip_name: String,
     sip_bind: String,
     gen: u64,
@@ -402,21 +409,65 @@ impl ReplicatedB2buaSut {
         self.membership.add(Peer::new(ordinal, ordinal));
     }
 
-    /// REBOOT: same ordinal + same repl listen addr, a fresh SIP endpoint, an
+    /// The SIP address a reboot at the current `gen` binds on. Models a new pod
+    /// IP: same port, a gen-stamped HOST (`127.0.<gen>.1`) so the reborn worker
+    /// shares NO network endpoint with the dead incarnation — in-flight SIP toward
+    /// the old IP is undeliverable, and the proxy must re-learn the address (via
+    /// `registry.set_address`, the real k8s-EndpointSlice path) before in-dialog
+    /// traffic routes to it again. Deterministic in `(base_port, gen)`.
+    fn reboot_sip_addr(&self) -> SocketAddr {
+        let octet = u8::try_from(self.gen).expect("gen fits a host octet (< 256 reboots)");
+        SocketAddr::from(([127, 0, octet, 1], self.sip_base_addr.port()))
+    }
+
+    /// REBOOT: same ordinal + same repl listen addr, a fresh SIP endpoint on a
+    /// NEW address (new pod IP — [`reboot_sip_addr`](Self::reboot_sip_addr)), an
     /// EMPTY store at a NEW higher incarnation gen, a fresh server + supervisor →
-    /// it re-bootstraps + resubscribes from its peers (the S6 reboot path). After
-    /// driving the clock its [`is_ready`](Self::is_ready) flips true once
-    /// re-hydration completes.
-    pub async fn reboot(&mut self) {
-        // Defensive: ensure any prior core is gone.
+    /// it re-bootstraps + resubscribes from its peers (the S6 reboot path).
+    /// Returns the new SIP address so the caller re-learns it into the proxy
+    /// registry (and the report). After driving the clock its
+    /// [`is_ready`](Self::is_ready) flips true once re-hydration completes.
+    ///
+    /// PRISTINE GUARANTEE (endurance invariant): aborting the prior core drops its
+    /// `TimerService` (every per-call timer dies) and its SIP endpoint; the store
+    /// is replaced with a fresh empty one. This method then HARD-ASSERTS the
+    /// reborn node holds nothing — no live calls, no per-call locks — BEFORE any
+    /// reclaim re-hydrates it. If a future change ever lets call context or a timer
+    /// survive the wipe, this trips here at reboot, not three hours into endurance.
+    pub async fn reboot(&mut self) -> SocketAddr {
+        // Defensive: ensure any prior core is gone. Abort drops its TimerService +
+        // SIP endpoint; the `store` swap below frees the prior store/changelog.
         if let Some(mut core) = self.core.take() {
             core.abort();
         }
         self.gen += 1;
+        // New pod IP: rebind on a fresh address so there is no network continuity
+        // with the dead incarnation. Update both the typed addr and the bind str
+        // BEFORE `spawn_core` (which reads `sip_addr` for the worker's own config
+        // and `sip_bind` for `bind_sut`).
+        let new_addr = self.reboot_sip_addr();
+        self.sip_addr = new_addr;
+        self.sip_bind = new_addr.to_string();
         let (setup, store, membership) = self.wiring.setup(self.gen, &self.clock);
         self.store = store;
         self.membership = membership;
         self.core = Some(self.spawn_core(Some(setup)).await);
+
+        // Pristine BEFORE reclaim: no settle/advance has run since spawn, so the
+        // supervisor's bootstrap pull has not materialised anything yet.
+        assert_eq!(
+            self.active_calls(),
+            0,
+            "rebooted {} must come up with zero live calls (pristine restart invariant)",
+            self.ordinal,
+        );
+        assert_eq!(
+            self.lock_count(),
+            0,
+            "rebooted {} must come up with zero per-call locks (pristine restart invariant)",
+            self.ordinal,
+        );
+        new_addr
     }
 
     /// (Re)bind the SIP endpoint and spawn a fresh `B2buaCore` over it with the
@@ -467,6 +518,13 @@ pub struct ProxySut {
     registry: SimulatedWorkerRegistry,
     metrics: Arc<ProxyMetrics>,
     task: JoinHandle<()>,
+    /// The real OPTIONS health-probe loop (ADR-0012). `Some` when the proxy was
+    /// stood up via [`FailoverHarness::spawn_proxy_with_health_probe`]: health is
+    /// then driven by actual probe replies (200→Alive, 503 not-ready→NotReady)
+    /// instead of `set_health`, so a rebooted worker's Unknown→NotReady→Alive
+    /// lifecycle — the state the response-path reverse-failover branches on — is
+    /// exercised for real. Aborted on drop.
+    probe_task: Option<JoinHandle<()>>,
 }
 
 impl ProxySut {
@@ -484,11 +542,33 @@ impl ProxySut {
     pub fn set_health(&self, ordinal: &str, health: WorkerHealth) {
         self.registry.set_health(ordinal, health);
     }
+
+    /// Re-learn a worker's address — the proxy's k8s-EndpointSlice path. On reboot
+    /// a pod returns at a NEW IP, and in-dialog routing only follows it once the
+    /// registry resolves the worker ordinal (carried in the signed Record-Route
+    /// cookie) to the new address. Without this, a cookie-routed in-dialog request
+    /// — e.g. the 200 coming back for the rebooted worker's own keepalive OPTIONS —
+    /// would target the dead address and be lost.
+    pub fn set_address(&self, ordinal: &str, addr: SocketAddr) {
+        self.registry
+            .set_address(ordinal, ProxyAddr::new(addr.ip().to_string(), addr.port()));
+    }
+
+    /// The proxy's CURRENT health view of a worker (as the registry holds it).
+    /// When a health probe is running this reflects real probe replies; callers
+    /// poll it to wait for a rebooted worker to be re-confirmed `Alive` by the
+    /// probe (rather than asserting it via `set_health`).
+    pub fn health(&self, ordinal: &str) -> Option<WorkerHealth> {
+        self.registry.resolve(ordinal).map(|w| w.health)
+    }
 }
 
 impl Drop for ProxySut {
     fn drop(&mut self) {
         self.task.abort();
+        if let Some(p) = self.probe_task.take() {
+            p.abort();
+        }
     }
 }
 
@@ -517,10 +597,17 @@ pub struct FailoverHarness {
     repl_sim: Arc<SimulatedReplicationNetwork>,
     /// `ordinal → repl addr` (stable across reboots), for fault/lane mapping.
     repl_addrs: HashMap<String, SocketAddr>,
-    /// `ordinal → SIP wire addr` (stable across reboots), so the unified report's
-    /// combiner can collapse a worker's SIP + repl + lifecycle rows onto one
-    /// column. Populated as each worker is spawned.
+    /// `ordinal → LATEST SIP wire addr`, so the unified report's combiner can
+    /// collapse a worker's SIP + repl + lifecycle rows onto one column. A reboot
+    /// re-binds the worker on a NEW address (new pod IP), so this is updated on
+    /// reboot to the live incarnation's addr.
     worker_sip_addrs: HashMap<String, SocketAddr>,
+    /// EVERY worker SIP addr ever bound, across all incarnations. The
+    /// endpoint-scoped RFC CSeq audit excludes worker binds (a transparent
+    /// failover splits one dialog's CSeq stream across workers, which the audit
+    /// would misread as a skip); after a reboot moves a worker to a new addr its
+    /// PRE-reboot bind must stay excluded too, so accumulate rather than replace.
+    all_worker_sip_addrs: Vec<SocketAddr>,
     /// Injected timeline markers (crash/reboot/failover/partition/…).
     markers: Vec<Marker>,
     /// The ONE shared global recording-order sequencer (the SIP recorder's
@@ -591,6 +678,7 @@ impl FailoverHarness {
             repl_sim,
             repl_addrs,
             worker_sip_addrs: HashMap::new(),
+            all_worker_sip_addrs: Vec::new(),
             markers: Vec::new(),
             event_seq,
             harness: Arc::new(HarnessHandle::new(harness)),
@@ -617,6 +705,33 @@ impl FailoverHarness {
     /// keys off Call-ID + the alive set; the scenario marks a worker dead/alive
     /// via [`ProxySut::set_health`].
     pub async fn spawn_proxy(&self, addr: &str, workers: &[(&str, SocketAddr)]) -> ProxySut {
+        self.spawn_proxy_inner(addr, workers, None).await
+    }
+
+    /// Like [`spawn_proxy`](Self::spawn_proxy) but with the REAL OPTIONS health
+    /// probe running on `probe_addr` (ADR-0012). Health is then driven by actual
+    /// probe replies from the workers — `200`→`Alive`, `503` with Reason
+    /// `not-ready`→`NotReady` — NOT by `set_health`. This makes the harness
+    /// faithful to the production active/passive LB proxy: a freshly-rebooted
+    /// worker is observed `Unknown`→`NotReady`→`Alive` as its replication drains,
+    /// so the reclaimed call's first keepalive-200 round-trips while the worker is
+    /// genuinely non-`Alive` — exercising the response-path reverse-failover guard
+    /// (`core/response.rs`) the code ties to the long-call-on-reboot teardown.
+    pub async fn spawn_proxy_with_health_probe(
+        &self,
+        addr: &str,
+        probe_addr: &str,
+        workers: &[(&str, SocketAddr)],
+    ) -> ProxySut {
+        self.spawn_proxy_inner(addr, workers, Some(probe_addr)).await
+    }
+
+    async fn spawn_proxy_inner(
+        &self,
+        addr: &str,
+        workers: &[(&str, SocketAddr)],
+        probe_addr: Option<&str>,
+    ) -> ProxySut {
         let entries: Vec<WorkerEntry> = workers
             .iter()
             .map(|(id, sa)| WorkerEntry::alive(*id, ProxyAddr::new(sa.ip().to_string(), sa.port())))
@@ -629,7 +744,7 @@ impl FailoverHarness {
         let strategy: Arc<dyn RoutingStrategy> = Arc::new(LoadBalancerStrategy::new(
             registry_dyn.clone(),
             hmac,
-            observer,
+            observer.clone(),
             Arc::new(ProxyMetrics::new()),
             self.clock.clone(),
             LoadBalancerConfig::default(),
@@ -637,17 +752,39 @@ impl FailoverHarness {
 
         let (ep, sock) = self.harness.bind_sut("proxy", addr).await;
         let metrics = Arc::new(ProxyMetrics::new());
-        let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry_dyn)
+        let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry_dyn.clone())
             .clock(self.clock.clone())
             .id_gen(Arc::new(IdGen::seeded(0xC0FFEE)))
             .metrics(metrics.clone())
             .build(ep);
         let task = tokio::spawn(core.run());
+
+        // Optional REAL health probe: its own bound endpoint on the fabric, the
+        // registry's control seam, production-cadence config (1 s / 1.5 s, both
+        // multiples of the 100 ms advance chunk so no paused-clock reply race).
+        let probe_task = if let Some(paddr) = probe_addr {
+            let (probe_ep, _psock) = self.harness.bind_sut("proxy-probe", paddr).await;
+            let control = Arc::new(SimulatedControl::new(registry.clone()));
+            let probe = HealthProbe::new(
+                probe_ep,
+                registry_dyn,
+                control,
+                observer,
+                self.clock.clone(),
+                Arc::new(IdGen::seeded(0x9809BE)),
+                HealthProbeConfig::default(),
+            );
+            Some(tokio::spawn(probe.run()))
+        } else {
+            None
+        };
+
         ProxySut {
             addr: sock,
             registry,
             metrics,
             task,
+            probe_task,
         }
     }
 
@@ -722,6 +859,7 @@ impl FailoverHarness {
             .unwrap_or_else(|| panic!("worker {ordinal} was not declared in FailoverHarness::new"));
         let sip_addr: SocketAddr = sip_bind.parse().expect("sip addr");
         self.worker_sip_addrs.insert(ordinal.to_string(), sip_addr);
+        self.all_worker_sip_addrs.push(sip_addr);
 
         // The full addr-resolver map (covers this node + every peer) is known up
         // front from the declared cluster — no post-spawn linking needed.
@@ -739,6 +877,7 @@ impl FailoverHarness {
         let mut sut = ReplicatedB2buaSut {
             ordinal: ordinal.to_string(),
             sip_addr,
+            sip_base_addr: sip_addr,
             sip_name: sip_name.to_string(),
             sip_bind: sip_bind.to_string(),
             gen: 1,
@@ -903,7 +1042,7 @@ impl FailoverHarness {
         // The endpoint/proxy binds still catch a genuine same-leg CSeq collision
         // (e.g. a keepalive OPTIONS and a later BYE reusing one CSeq toward bob).
         let worker_binds: std::collections::HashSet<String> =
-            self.worker_sip_addrs.values().map(|a| a.to_string()).collect();
+            self.all_worker_sip_addrs.iter().map(|a| a.to_string()).collect();
         let snapshot = self.harness.recording().channel().snapshot();
         let events: Vec<_> = snapshot
             .into_iter()
@@ -914,6 +1053,17 @@ impl FailoverHarness {
             findings.extend(rule.check(&events));
         }
         findings
+    }
+
+    /// Record a rebooted worker's NEW SIP address. Updates the report's
+    /// latest-addr map (so the unified report's column tracks the live
+    /// incarnation) AND accumulates it into the CSeq-audit exclusion set — the
+    /// PRE-reboot incarnation's bind must stay excluded too, else the
+    /// endpoint-scoped audit would mistake the worker's internal per-leg CSeq
+    /// stream (split across incarnations) for an endpoint skip.
+    pub(crate) fn note_worker_rebound(&mut self, ordinal: &str, new_addr: SocketAddr) {
+        self.worker_sip_addrs.insert(ordinal.to_string(), new_addr);
+        self.all_worker_sip_addrs.push(new_addr);
     }
 
     /// Snapshot the replication recording (captured frames + markers + lanes).

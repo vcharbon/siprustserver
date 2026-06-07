@@ -4,20 +4,21 @@
   Long-call UAC for endurance: INVITE → 200 → ACK → OPTIONS-driven hold → BYE.
 
   After ACK the scenario loops on in-dialog OPTIONS from the B2BUA's
-  keepaliveRule (TimerRules), replying 200 OK to each. The loop is
-  capped at HOLD_KEEPALIVES iterations (default 4 ≈ 20 min at the
-  300 s keepalive interval) so every call eventually terminates from
-  the UAC side, matching the hard-cap guarantee in
-  `uac-endurance-short.xml` (`<pause milliseconds="30000"/>`). Without
-  this cap, sipp's CurrentCall grows linearly for the lifetime of the
-  run because the B2BUA happily keeps sending keepalives forever and
-  the UAC has no other reason to send BYE — endurance-5h runs were
-  reaching ~2700 concurrent long-calls instead of the intended ~480.
+  keepaliveRule (TimerRules), replying 200 OK to EACH one for the life
+  of the call — there is no per-call OPTIONS cap (see the loop comment
+  below for why the former 4-iteration cap was removed: it produced a
+  false ~130% long-call loss on every worker reboot by leaving the recv
+  while the reclaim keepalive-replay burst was still arriving). The call
+  terminates ONLY when keepalives stop (genuine teardown), which is the
+  intended reboot-survival semantics. CurrentCall growth is bounded
+  operationally by the job's `-l MAX_CONCURRENT` ceiling + `-recv_timeout`
+  dead-call reaper (manifests/40-sipp-uac-job.yaml), not by an OPTIONS
+  count — size those (and the offered LONG_CPS) for the target steady
+  concurrency.
 
-  Two exit paths still apply:
+  The single exit path:
     - keepalive timeout (B2BUA torn down, chaos, network failure) →
       `recv timeout="420000" ontimeout="end_hold"` jumps to BYE.
-    - hold cap reached → counter loop falls through to BYE.
 
   Earlier revisions used a flat `<pause milliseconds="1200000"/>` and
   relied on sipp's "default `pingreply` behavior" to auto-200 in-dialog
@@ -93,19 +94,29 @@
     ]]>
   </send>
 
-  <!-- OPTIONS-driven hold: reply to each keepalive then loop back. The
-       recv is MANDATORY (no optional=true) — sipp rejects an
-       `optional=true recv` immediately followed by a `<send>`. With
-       `ontimeout` set, mandatory recv jumps to the labeled step
-       instead of aborting on timeout — so when keepalives stop
-       arriving for `timeout` ms (B2BUA terminated the call, chaos
-       event, network failure) we exit to the BYE phase.
+  <!-- OPTIONS-driven hold: reply 200 to EVERY keepalive, forever, then
+       loop back. The recv is MANDATORY (no optional=true) — sipp rejects
+       an `optional=true recv` immediately followed by a `<send>`. With
+       `ontimeout` set, mandatory recv jumps to the labeled step instead
+       of aborting on timeout — so the call ends ONLY when keepalives stop
+       arriving for `timeout` ms (B2BUA terminated the call, chaos event,
+       network failure) → exit to the BYE phase.
 
-       The loop is capped at 4 iterations so calls eventually
-       terminate even when keepalives keep flowing — see the header
-       comment. `hold_count` is incremented after each reply; `test`
-       sets `hold_done` truthy once we've replied to 4 OPTIONS, and
-       the `nop test=...` branches to `end_hold` instead of looping. -->
+       There is deliberately NO per-call OPTIONS cap. An earlier revision
+       capped the loop at 4 iterations (UAC sends its own BYE after ~20 min)
+       to bound sipp's CurrentCall growth, but that cap CORRUPTED the
+       reboot-survival measurement: once a call passed its 4th OPTIONS it
+       left this recv, so the rebooted worker's smoothed keepalive-replay
+       burst (router::reclaim_all) landed OPTIONS on a UAC no longer parked
+       here → sipp scored them OutOfCallMsgs and aborted the call with
+       `unexpected_msg`, which read as a (false) ~130% long-call loss across
+       every reboot even though the server's reclaim was 100% complete and
+       correctly routed. A real UAC answers in-dialog OPTIONS for the life
+       of the call, so this models reality AND removes the artifact: a
+       reclaimed dialog's replayed OPTIONS always lands on a parked recv and
+       is answered. CurrentCall growth is bounded operationally by the job's
+       `-l MAX_CONCURRENT` ceiling + `-recv_timeout` dead-call reaper
+       (manifests/40-sipp-uac-job.yaml), not by a per-call message count. -->
   <label id="hold_loop"/>
   <recv request="OPTIONS" crlf="true" timeout="420000" ontimeout="end_hold"/>
   <send>
@@ -120,12 +131,7 @@
       Contact: sip:sipp@[local_ip]:[local_port]
       Content-Length: 0
     ]]>
-    <action>
-      <add assign_to="hold_count" value="1"/>
-      <test assign_to="hold_done" variable="hold_count" compare="greater_than_equal" value="4"/>
-    </action>
   </send>
-  <nop test="hold_done" next="end_hold"/>
   <nop next="hold_loop"/>
 
   <label id="end_hold"/>

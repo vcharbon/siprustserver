@@ -252,6 +252,45 @@ dead/slow peer cannot hang readiness). **Backup** streams are opened only *after
 `Ready` and **never gate it** (fire-and-forget; observable via the store + metrics,
 not a readiness sub-state). **Draining** = latched on SIGTERM; terminal.
 
+## Call state-machine services (Rust shape)
+
+The Rust formalisation of the source's **callflow service** + **phase machine**
+(both defined in [portsource/sipjsserver/CONTEXT.md](./portsource/sipjsserver/CONTEXT.md),
+carried over unchanged) into explicit, doc-generated per-call state machines.
+See [ADR-0016](./docs/adr/0016-callflow-service-state-machines.md).
+
+**Machine** (state machine):
+A named, single-cursor **per-call** state selector. A rule declares the machine
+it belongs to, the states it is active in, and the transitions it may cause; the
+rule is a candidate for the engine only while its machine sits in one of those
+states. A machine selects *which rules are live* — it is a guard over the
+existing layer-ranked first-match engine, **not** a separate dispatcher.
+_Avoid_: "phase machine" in Rust code (the source's name for the same idea —
+keep it for prose / the TS source); "FSM" unqualified.
+
+**Global call machine**:
+The always-on machine present on every call (= the existing `CallModelState`
+`Active → Terminating → Terminated`, enriched only if a service needs finer
+call-lifecycle states). Its published inbound interface is the call-lifecycle
+subset of the action union (`BeginTermination`/`TerminateCall`/`Merge`/`Split`/…) —
+a **service machine** influences the call by *emitting* one of those, never by
+mutating call state directly (one hop, service → global).
+_Avoid_: "main SM" / "core machine" (collides with `CORE_LAYER`).
+
+**Service machine**:
+The one machine a callflow **service** owns; its graph is exactly the service's
+own rules. Leg SIP lifecycle (`LegState`) and `active_peer` are **data the rules
+peek at**, not a machine — there is no wired per-leg machine tier.
+
+**Machine cursor** (`sm_cursors`):
+The current-state *label* of a machine. The single home for machine state, one
+entry per machine per call — uniform across in-tree and out-of-crate services, so
+the engine, the doc generator, observability, and HA all read it the same way.
+The service's typed slice (in-tree) or opaque `ext` (integrator) holds the
+associated *data* only, never the label.
+_Avoid_: storing the state label in the service's data slice as well (the
+mirror/slice divergence the single home exists to prevent).
+
 **K8sMembership**:
 The real `topology::Membership` source (S11): a kube EndpointSlice informer over
 the headless worker Service. *Ready* endpoints → `Peer{ordinal = pod name, host

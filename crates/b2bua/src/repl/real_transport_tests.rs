@@ -32,6 +32,27 @@ use crate::metrics::B2buaMetrics;
 use crate::store::{CallStore, PartitionRole, PropagateDirection, PutOpts};
 use topology::{Peer, SimulatedMembership};
 
+// Extra wiring for the end-to-end MATERIALISATION gate: a full `B2buaCore`
+// reclaimer (router + reclaim pipeline) over a real SIP endpoint + real repl TCP,
+// reclaiming VALID encoded `Call` bodies. The stream gates above stop at "body
+// landed in the store"; this reaches "call live + routable + keepalive re-armed".
+use std::collections::HashMap;
+
+use call::{CallBodyCodec, MsgpackCodec, TimerEntry, TimerType};
+use sip_message::parser::custom::CustomParser;
+use sip_message::{SipMessage, SipParser, SipRequest};
+use sip_net::{BindUdpOpts, RealSignalingNetwork, SignalingNetwork};
+use sip_txn::IdGen;
+use topology::Membership;
+
+use crate::cdr::InMemoryCdrWriter;
+use crate::config::B2buaConfig;
+use crate::decision::ScriptedDecisionEngine;
+use crate::initial_invite::build_initial_call;
+use crate::limiter::NoopLimiter;
+use crate::store::InMemoryCallStore;
+use crate::{B2buaCore, B2buaDeps, ReplicationSetup};
+
 const BAK: PartitionRole = PartitionRole::Backup;
 const PRI: PartitionRole = PartitionRole::Primary;
 
@@ -53,6 +74,124 @@ fn forward_to(peer: &str) -> PutOpts {
         peer: Some(peer.to_string()),
         direction: Some(PropagateDirection::Forward),
     }
+}
+
+// ── Materialisation-gate helpers ────────────────────────────────────────────
+// The stream gates seed garbage `0xAB` bodies — fine, because they only assert
+// the body LANDED. The materialisation gate must reclaim them into LIVE calls,
+// and `reclaim_scan` decodes every body and silently drops the undecodable ones
+// (`store/mod.rs`). So this gate seeds VALID `Call` encodings.
+
+fn src() -> SocketAddr {
+    SocketAddr::from(([10, 0, 0, 9], 5060))
+}
+
+fn config_for(ordinal: &str) -> B2buaConfig {
+    B2buaConfig {
+        self_ordinal: ordinal.into(),
+        ..Default::default()
+    }
+}
+
+/// A proxied INVITE carrying the `w_pri`/`w_bak` cookie, keyed by Call-ID so each
+/// call gets a distinct `callRef` (`{pri}|{cid}@…|alicetag`). Mirrors the
+/// `s11_tests` builder so the bodies are byte-identical to a real proxied call.
+fn invite(pri: &str, bak: &str, cid: &str) -> SipRequest {
+    let raw = format!(
+        "INVITE sip:bob@example.com SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-{cid}\r\n\
+         Record-Route: <sip:10.0.0.1:5060;v=3;w_pri={pri};w_bak={bak};e=0;kid=k1;sig=abc;lr>\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:alice@example.com>;tag=alicetag\r\n\
+         To: <sip:bob@example.com>\r\n\
+         Call-ID: {cid}@10.0.0.9\r\n\
+         CSeq: 1 INVITE\r\n\
+         Contact: <sip:alice@10.0.0.9:5060>\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+        SipMessage::Request(r) => r,
+        _ => panic!("expected a request"),
+    }
+}
+
+/// A valid encoded reclaim body: a real `Call` (`{primary}` primary, `{backup}`
+/// backup) carrying a **future-dated** keepalive so the reclaim sweep does real
+/// timer-restore work per call without the timer firing (and tearing the call
+/// down) mid-measurement. Returns `(call_ref, encoded body)`.
+fn reclaim_body(primary: &str, backup: &str, cid: &str, clock: &Clock) -> (String, Vec<u8>) {
+    let mut call = build_initial_call(&invite(primary, backup, cid), src(), &config_for(primary), 0);
+    call.timers.push(TimerEntry {
+        id: format!("keepalive-{cid}"),
+        timer_type: TimerType::Keepalive,
+        // +5 min: restored into the DelayQueue but never fires during the test.
+        fire_at: clock.now_ms() + 300_000,
+        leg_id: None,
+    });
+    let body = MsgpackCodec::new().encode(&call);
+    (call.call_ref.clone(), body)
+}
+
+/// Spawn a FULL rebooting `B2buaCore` reclaimer (`self_ordinal`, incarnation 2)
+/// on a real SIP UDP endpoint, replicating over `repl_net`, pulling its single
+/// peer (`peer_ordinal` @ `peer_addr`). Returns the core + its repl store handle.
+/// Its supervisor bootstraps the peer and signals the REAL `router::reclaim_all`
+/// — so a `serves()` true means the call went all the way through materialise +
+/// timer re-arm, not just store-landing.
+async fn spawn_reclaimer_core(
+    self_ordinal: &str,
+    peer_ordinal: &str,
+    peer_addr: SocketAddr,
+    repl_net: &RealReplicationNetwork,
+    clock: &Clock,
+) -> (B2buaCore, Arc<ReplicatingCallStore>) {
+    let sip_net = RealSignalingNetwork::new();
+    let endpoint = sip_net
+        .bind_udp(BindUdpOpts::new(loopback(), 256))
+        .await
+        .expect("bind sip udp");
+    let sip_port = endpoint.local_addr().port();
+
+    // Fresh empty store at a higher incarnation gen (the rebooted node).
+    let store = Arc::new(ReplicatingCallStore::with_changelog(
+        Changelog::new(2, clock.clone()).with_ttls(30_000, 300_000),
+        clock.clone(),
+    ));
+    let addr_map: HashMap<String, SocketAddr> =
+        [(peer_ordinal.to_string(), peer_addr)].into_iter().collect();
+    let addr_resolver: crate::repl::AddrResolver =
+        Arc::new(FnPeerResolver(move |p: &Peer| *addr_map.get(&p.ordinal).expect("peer addr")));
+    let membership: Arc<dyn Membership> = Arc::new(SimulatedMembership::with_clock(
+        vec![Peer::new(peer_ordinal, peer_ordinal)],
+        clock.clone(),
+    ));
+    let setup = ReplicationSetup {
+        network: Arc::new(repl_net.clone()),
+        membership,
+        store: store.clone(),
+        listen_addr: loopback(), // ephemeral — nobody pulls this node
+        addr_resolver,
+        incarnation_gen: 2,
+    };
+    let config = B2buaConfig {
+        self_ordinal: self_ordinal.into(),
+        sip_local_ip: "127.0.0.1".into(),
+        sip_local_port: sip_port,
+        keepalive_interval_sec: 300,
+        reboot_budget_sec: 600,
+        ..Default::default()
+    };
+    let deps = B2buaDeps {
+        config,
+        decision: Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 9)),
+        limiter: Arc::new(NoopLimiter),
+        cdr: Arc::new(InMemoryCdrWriter::new()),
+        store: Arc::new(InMemoryCallStore::new()), // throwaway legacy slot
+        clock: clock.clone(),
+        id_gen: Arc::new(IdGen::seeded(0xB2B1)),
+        replication: Some(setup),
+    };
+    (B2buaCore::spawn(endpoint, deps), store)
 }
 
 /// Poll `f` until it returns `true` or the real-time budget elapses. Yields a
@@ -169,10 +308,10 @@ async fn tail_delivers_post_connect_mutation_over_real_tcp() {
     .await;
 
     assert!(
-        metrics.repl_pull_applied_total() >= 1,
+        metrics.repl_applied_sum() >= 1,
         "puller applied the replicated entry"
     );
-    assert_eq!(metrics.repl_backup_held(), 1, "one backup replica held");
+    assert_eq!(metrics.repl_backup_replicas(), 1, "one backup replica held");
     assert_eq!(
         w1.current_cv(BAK, "w0", &call_ref),
         Some((1, 0)),
@@ -228,11 +367,11 @@ async fn tail_streams_successive_updates_over_real_tcp() {
     let body = w1.get_call(BAK, "w0", &call_ref).await.unwrap().unwrap();
     assert_eq!(&body[..], b"body-v4", "latest update body served");
     assert!(
-        metrics.repl_pull_applied_total() >= 1,
+        metrics.repl_applied_sum() >= 1,
         "at least one apply recorded"
     );
     // Compaction: only one live replica for the ref despite four mutations.
-    assert_eq!(metrics.repl_backup_held(), 1, "compacted to one live replica");
+    assert_eq!(metrics.repl_backup_replicas(), 1, "compacted to one live replica");
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +422,7 @@ async fn bootstrap_preseed_delivers_over_real_tcp() {
     let body = w1.get_call(PRI, "w1", &call_ref).await.unwrap().unwrap();
     assert_eq!(&body[..], b"reclaim-body", "pre-seed body round-trips");
     assert!(
-        metrics.repl_pull_applied_total() >= 1,
+        metrics.repl_applied_sum() >= 1,
         "bootstrap pre-seed counted as applied"
     );
 }
@@ -474,9 +613,9 @@ async fn bootstrap_synchronises_above_5k_contexts_per_second_over_real_tcp() {
         "all {N} contexts re-hydrated into pri:w1"
     );
     assert!(
-        metrics.repl_pull_applied_total() >= N as u64,
+        metrics.repl_applied_sum() >= N as u64,
         "every context counted as applied ({} < {N})",
-        metrics.repl_pull_applied_total(),
+        metrics.repl_applied_sum(),
     );
 
     // (b) Throughput floor: > 5 000 contexts/second sustained over real TCP.
@@ -487,6 +626,127 @@ async fn bootstrap_synchronises_above_5k_contexts_per_second_over_real_tcp() {
         rate > 5_000.0,
         "bootstrap sync throughput {rate:.0} ctx/s is below the 5 000 ctx/s floor \
          ({N} contexts in {elapsed:?})",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// MATERIALISATION gate (real `reclaim_all`, end-to-end, under serving load).
+//
+// The stream gates above stop one stage too early: they assert the body LANDED
+// in the store (`scan_call_refs` / `repl_pull_applied`). A call only becomes
+// LIVE + routable + keepalive-armed after the SECOND stage —
+// `ReclaimAll → reclaim_into_live → materialize_if_absent + timers.restore`
+// (`router.rs`), which a bare `ReplicatingCallStore` can't reach. That second
+// stage is exactly what was slow on the live cluster (`repl_reclaimed_total`
+// trickled 203→433 over 15 min at ~30% CPU — wait-bound, not compute-bound), so
+// a throughput gate that finishes at store-landing can never see it.
+//
+// This gate runs a FULL rebooting `B2buaCore` (router + reclaim pipeline) over
+// real repl TCP, reclaiming VALID `Call` bodies, and finishes only when the node
+// `serves()` every one — measuring the stage the stream gates skip. It runs on
+// `multi_thread` with a live-write storm contending the reclaimer's store Mutex
+// (finding #6 applied to the reclaim side) so the materialise pipeline is timed
+// under the load a real reboot reclaims under.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reclaim_materialises_into_live_map_under_serving_load() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const N: usize = 3_000; // the production keyset size
+    let clock = Clock::test_at(0);
+    let net = RealReplicationNetwork::new();
+
+    // w0: a bare peer holding N of w1's calls as static `bak:w1` replicas — valid
+    // encoded `Call` bodies (peer:None ⇒ not in the changelog, so the bootstrap
+    // scan is the SOLE delivery path: the reboot-reclaim bulk).
+    let (w0, w0_addr) = spawn_primary("w0", &net, &clock).await;
+    let mut refs = Vec::with_capacity(N);
+    for i in 0..N {
+        let (call_ref, body) = reclaim_body("w1", "w0", &format!("cid-{i}"), &clock);
+        w0.put_call(BAK, "w1", &call_ref, body, &[format!("idx-{i}")], 300_000, 1, 0, &PutOpts::default())
+            .await
+            .unwrap();
+        refs.push(call_ref);
+    }
+
+    // w1: a FULL rebooting B2buaCore reclaimer pointed at w0. Start the clock the
+    // instant it comes up — the measured interval is connect → bootstrap → the
+    // real reclaim_all materialising every call.
+    let started = tokio::time::Instant::now();
+    let (w1, w1_store) = spawn_reclaimer_core("w1", "w0", w0_addr, &net, &clock).await;
+
+    // Concurrent serving load: hammer w1's store with backup forward-flushes while
+    // it reclaims. These hit the SAME inner Mutex as `reclaim_scan` + the bootstrap
+    // applies (finding #6) but land in `bak:w9` — NOT scanned by reclaim (which
+    // scans `pri:w1`), so they pressure the lock without polluting the count.
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut writers = Vec::new();
+    for w in 0..3usize {
+        let (store, stop) = (w1_store.clone(), stop.clone());
+        writers.push(tokio::spawn(async move {
+            let live = vec![0xCDu8; 256];
+            let mut j = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                let cr = format!("w9|bakload-{w}-{j}|t");
+                let _ = store
+                    .put_call(BAK, "w9", &cr, live.clone(), &[], 300_000, 1, 0, &PutOpts::default())
+                    .await;
+                j += 1;
+                if j % 64 == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }
+        }));
+    }
+
+    // Finish line = SERVES (materialised + routable + keepalive re-armed) every
+    // reclaimed call. A reactive-trickle / truncation regression never gets here
+    // (no inbound traffic drives the stragglers) ⇒ the 30s backstop fails loudly.
+    let deadline = started + Duration::from_secs(30);
+    loop {
+        if refs.iter().all(|r| w1.serves(r)) {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let served = refs.iter().filter(|r| w1.serves(r)).count();
+            panic!(
+                "only {served}/{N} reclaimed calls reached the LIVE serving map within 30s \
+                 (reclaimed_total={}, active={}) — store-landing is not enough",
+                w1.metrics().repl_reclaimed_total(),
+                w1.active_calls(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let elapsed = started.elapsed();
+    stop.store(true, Ordering::Relaxed);
+    for h in writers {
+        let _ = h.await;
+    }
+
+    // (a) Completeness — the live-cluster failure was `scanned ≫ materialised`
+    //     (203/3000). Assert the REAL bulk sweep materialised every call: ground
+    //     truth live count == N, and the cumulative fresh-materialise counter == N
+    //     (idempotent re-passes add nothing, so this stays exact).
+    assert_eq!(w1.active_calls(), N, "every reclaimed call is live in the serving map");
+    assert_eq!(
+        w1.metrics().repl_reclaimed_total(),
+        N as u64,
+        "the bulk reclaim_all materialised all {N} (no reactive trickle, no truncation)",
+    );
+
+    // (b) Materialisation throughput floor under serving load — comfortably met
+    //     over loopback; its job is to fail if the materialise stage regresses to
+    //     a slow drip the 30s backstop would otherwise mask.
+    let rate = N as f64 / elapsed.as_secs_f64();
+    eprintln!(
+        "\n=== reclaim materialisation (N={N}, real TCP, multi_thread, under serving load) ===\n  \
+         connect→bootstrap→serves-all: {rate:>9.0} calls/s ({N} in {elapsed:?})\n",
+    );
+    assert!(
+        rate > 1_000.0,
+        "reclaim materialisation {rate:.0} calls/s under serving load is below the \
+         1 000 calls/s floor ({N} in {elapsed:?})",
     );
 }
 
@@ -535,7 +795,7 @@ async fn mismatched_ordinal_silently_delivers_nothing() {
     // an absence, so there is no positive event to await.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
-        metrics.repl_pull_applied_total(),
+        metrics.repl_applied_sum(),
         0,
         "mismatched changelog peer-key vs puller caller delivers nothing (silent)"
     );
@@ -621,13 +881,24 @@ async fn measure_bootstrap(
     for h in handles {
         let _ = h.await;
     }
-    (elapsed, metrics.repl_pull_applied_total(), writes.load(Ordering::Relaxed))
+    (elapsed, metrics.repl_applied_sum(), writes.load(Ordering::Relaxed))
 }
 
+// ---------------------------------------------------------------------------
+// STREAM gate UNDER CONCURRENT SERVING LOAD (the promoted contention bench).
+// `bootstrap_synchronises_above_5k_…` measures a cold node in ISOLATION. A real
+// rebooted worker re-hydrates WHILE serving ~100 cps of new traffic, and
+// `serve_bootstrap`'s per-body reads share the server's single `meta` Mutex with
+// live `put_call`/`delete_call` (finding #6). On a current-thread runtime a std
+// Mutex is never contended (one task at a time), so a plain CI test cannot
+// represent #6 — this rides `multi_thread` + a live-write storm, and GATES that
+// the contended bootstrap still lands every context AND clears the same 5 000
+// ctx/s floor (measured #6 cost is ~4x, leaving ~14x of headroom). Writers
+// forward to a dummy "w2" so they load w0's locks WITHOUT polluting w1's pri:.
+// ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore]
-async fn bench_bootstrap_throughput_under_live_write_contention() {
-    const N: usize = 20_000;
+async fn bootstrap_throughput_survives_live_write_contention() {
+    const N: usize = 5_000;
     const WRITERS: usize = 3;
     let clock = Clock::test_at(0);
     let net = RealReplicationNetwork::new();
@@ -642,6 +913,24 @@ async fn bench_bootstrap_throughput_under_live_write_contention() {
     eprintln!("  contention x{WRITERS}      : {rc:>9.0} ctx/s   ({N} in {ec:?}, applied={ac})");
     eprintln!("  server absorbed {wc} concurrent live writes during the contended run");
     eprintln!("  slowdown factor    : {:.2}x\n", r0 / rc);
+
+    // (a) Completeness is the primary signal: contention must not TRUNCATE the
+    //     stream (every context still applies, both runs).
+    assert!(a0 >= N as u64, "uncontended run applied all {N} ({a0})");
+    assert!(
+        ac >= N as u64,
+        "contended run lost contexts — applied {ac}/{N} under a live-write storm",
+    );
+    assert!(wc > 0, "the contended run must actually exert write pressure");
+
+    // (b) Throughput floor UNDER load: the same 5 000 ctx/s bar the isolated
+    //     gate holds. A per-frame-flush regression (memory: ~1 000 ctx/s) or a
+    //     lock held across the socket would breach it; ~14x headroom otherwise.
+    assert!(
+        rc > 5_000.0,
+        "contended bootstrap {rc:.0} ctx/s is below the 5 000 ctx/s floor \
+         ({N} in {ec:?}) — serving load collapsed re-hydration",
+    );
 }
 
 // ---------------------------------------------------------------------------

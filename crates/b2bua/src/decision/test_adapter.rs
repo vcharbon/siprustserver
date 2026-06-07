@@ -73,6 +73,18 @@ impl ScriptedDecisionEngine {
         Self::builder()
             .fallback(move |req| {
                 let mut r = route_to(&dest.0, dest.1);
+                // Rewrite the b-leg Request-URI to the real callee. Without this,
+                // the b-leg R-URI defaults to the a-leg's (relay.rs build_b_leg),
+                // which behind an LB front proxy is the proxy's OWN VIP (the UAC
+                // dialed the VIP). That is harmless when the b-leg goes pod-direct
+                // (the wire destination, not the R-URI, picks the hop), but FATAL
+                // when the b-leg is forced through the proxy (b2b_outbound_proxy):
+                // the proxy forwards a worker-outbound request to its R-URI, so a
+                // VIP R-URI bounces straight back to a worker, which re-INVITEs a
+                // fresh b-leg (Max-Forwards reset to 70 each time, so never 483) →
+                // an unbounded call-creation loop that OOMs the worker. The R-URI
+                // MUST name the actual downstream callee.
+                r.new_ruri = Some(format!("sip:{}:{}", dest.0, dest.1));
                 if let Some(s) = &stress {
                     r.call_limiter.push(s.clone());
                 }

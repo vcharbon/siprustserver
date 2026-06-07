@@ -356,3 +356,103 @@ async fn reclaimed_call_is_visible_to_backup_bootstrap() {
         "#4: a reclaimed pri:{{self}} call MUST be visible to its backup's bootstrap"
     );
 }
+
+// ---------------------------------------------------------------------------
+// (5) CONCURRENCY (unit, no SIP): a bulk reclaim runs WHILE create/update/delete
+// churn hammers the SAME `CallState` on a multi-thread runtime. This drives the
+// state-level mutations the router makes — reclaim's `reclaim_scan → lock →
+// materialize_if_absent` (the core of `reclaim_into_live`) racing live
+// `create`/`update`/`remove`, each under the per-call `lock` the dispatcher
+// serialises on in production — under TRUE parallelism. It is the unit-level
+// answer to "is reclaim safe against concurrent call lifecycle?" without standing
+// up the SIP plane. Churn refs are DISJOINT from the reclaim targets (and live-map
+// only — `create` doesn't write the `pri:` store the scan reads), so the oracle is
+// deterministic: every target ends up served, no churn residue, no lock leak.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn churn_during_reclaim_keeps_state_consistent() {
+    const TARGETS: usize = 500;
+    const WRITERS: usize = 3;
+    const PER_WRITER: usize = 400;
+
+    let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
+    let state = call_state("w0", repl.clone());
+
+    // Seed N reclaim targets into pri:w0 (the partition `reclaim_scan` reads).
+    let mut targets = Vec::with_capacity(TARGETS);
+    for i in 0..TARGETS {
+        let call = build_initial_call(&invite("w0", "w1", &format!("rec-{i}")), src(), &config_for("w0"), 0);
+        put(&repl, PRI, "w0", &call).await;
+        targets.push(call.call_ref.clone());
+    }
+
+    let started = std::time::Instant::now();
+    // Reclaim task: the state-level core of `router::reclaim_all` — scan pri:w0,
+    // then per-call lock + materialise each into the live serving map.
+    let reclaim = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            for call in state.reclaim_scan().await {
+                let cr = call.call_ref.clone();
+                let _g = state.lock(&cr).await;
+                state.materialize_if_absent(call);
+            }
+        })
+    };
+
+    // Churn tasks: full create → update → delete lifecycle on DISJOINT refs, each
+    // under the per-call lock (as `router::process` holds it across a handler).
+    let mut churn = Vec::with_capacity(WRITERS);
+    for w in 0..WRITERS {
+        let state = state.clone();
+        churn.push(tokio::spawn(async move {
+            for j in 0..PER_WRITER {
+                let call = build_initial_call(
+                    &invite("w0", "w1", &format!("churn-{w}-{j}")),
+                    src(),
+                    &config_for("w0"),
+                    0,
+                );
+                let cr = call.call_ref.clone();
+                let _g = state.lock(&cr).await;
+                state.create(call.clone());
+                state.update(call);
+                state.remove(&cr);
+            }
+        }));
+    }
+
+    reclaim.await.unwrap();
+    for c in churn {
+        c.await.unwrap();
+    }
+    let elapsed = started.elapsed();
+    let churn_ops = (WRITERS * PER_WRITER * 3) as f64; // create+update+remove each
+    eprintln!(
+        "\n=== reclaim + concurrent churn (multi_thread) ===\n  \
+         reclaim: {:>8.0} calls/s ({TARGETS} materialised)\n  \
+         churn:   {:>8.0} ops/s   ({} create/update/delete ops)\n  \
+         wall:    {elapsed:?}\n",
+        TARGETS as f64 / elapsed.as_secs_f64(),
+        churn_ops / elapsed.as_secs_f64(),
+        churn_ops as u64,
+    );
+
+    // Invariants — must hold regardless of interleaving:
+    // 1. Every reclaim target materialised into the live serving map.
+    let served = targets.iter().filter(|r| state.peek(r).is_some()).count();
+    assert_eq!(served, TARGETS, "all {TARGETS} reclaim targets materialised under churn");
+    // 2. No churn residue / no resurrection: only the targets remain live.
+    assert_eq!(
+        state.active_count(),
+        TARGETS,
+        "only the {TARGETS} reclaim targets remain live (churn fully created+deleted)",
+    );
+    // 3. No per-call lock leak: the locks map tracks the live set (the orphan-leak
+    //    invariant — a residue here is the ratchet the leak-detector caught).
+    assert_eq!(
+        state.lock_count(),
+        state.active_count(),
+        "no per-call lock leak after concurrent churn + reclaim",
+    );
+}

@@ -106,6 +106,10 @@ impl B2buaSut {
             // tests advance in 30 s steps, so the harness baseline stays at 30 s.
             // A scenario can still override via `tune`.
             keepalive_interval_sec: 30,
+            // Production default is now 32 s; the paused-clock keepalive-timeout
+            // tests advance a fixed 5 s after the probe, so the harness pins the
+            // old 5 s grace to keep those steps valid (a scenario can `tune` it).
+            keepalive_timeout_sec: 5,
             ..Default::default()
         };
         tune(&mut config);

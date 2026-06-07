@@ -495,4 +495,48 @@ Content-Length: 0\r\n\r\n"
         assert_eq!(outcome.decision, RoutingDecisionKind::DecodeForward);
         assert_eq!(outcome.target, Some(ProxyAddr::new(W1_POD, 5060)));
     }
+
+    // Reboot case (the reclaimed-long-call-loss root cause): a worker that has
+    // just respawned onto a NEW pod IP the EndpointSlice informer has not yet
+    // learned sends its keepalive with the `;outbound` marker the b2bua egress
+    // now stamps (relay::apply_b_leg_egress). Neither the SNAT'd source nor the
+    // top Via (the new IP) is a registered worker, so the registry-based
+    // discriminators MISS — only the `;outbound` param can classify it. It must
+    // still be worker-outbound and reach the UAC, not bounce back to a worker via
+    // the stale cookie `target=`.
+    #[tokio::test]
+    async fn rebooted_worker_keepalive_with_outbound_marker_routes_to_uac() {
+        let reg: Arc<dyn WorkerRegistry> =
+            Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060))]));
+        let core = core(reg).await;
+
+        let new_pod_ip = "10.244.9.99"; // rebooted worker's new IP — NOT in registry
+        let raw = format!(
+            "OPTIONS sip:sipp@{UAC}:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {new_pod_ip}:5060;branch=z9hG4bKreboot;lg=a;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:service@{PROXY_VIP}:5060>;tag=svc\r\n\
+To: <sip:sipp@{UAC}:5060>;tag=uactag\r\n\
+Call-ID: longcall-2@{UAC}\r\n\
+CSeq: 3 OPTIONS\r\n\
+Contact: <sip:b2bua@{new_pod_ip}:5060;leg=a>\r\n\
+Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr;outbound>\r\n\
+Content-Length: 0\r\n\r\n"
+        );
+        let SipMessage::Request(req) = CustomParser::default().parse(raw.as_bytes()).unwrap() else { unreachable!() };
+        // SNAT'd source (node IP) — also not a registered worker.
+        let snat_src = "172.20.0.12:51000".parse().unwrap();
+        let outcome = core.route_request(&req, "OPTIONS", snat_src).await;
+
+        assert_eq!(
+            outcome.decision,
+            RoutingDecisionKind::WorkerOutbound,
+            "a rebooted worker's keepalive must be worker-outbound via the ;outbound marker even when its new IP is absent from the registry"
+        );
+        assert_eq!(
+            outcome.target,
+            Some(ProxyAddr::new(UAC, 5060)),
+            "the keepalive must reach the UAC (R-URI), not bounce back to a worker via the stale cookie target="
+        );
+    }
 }

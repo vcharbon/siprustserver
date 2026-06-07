@@ -154,12 +154,12 @@
     },
     {
       "id": 32, "type": "timeseries", "title": "Replication activity / sec",
-      "description": "Peer-to-peer HA changelog flow (`b2bua_repl_*`). `flush_propagated` on a PRIMARY = it is shipping replicas to the backup; `pull_applied` on a BACKUP = replicas arriving; `takeover_resolved`/`takeover_hydrated` = a failed-over in-dialog request found + loaded the replica. All flat-zero in steady state; they spike around a worker kill.",
+      "description": "Peer-to-peer HA replication flow (`b2bua_repl_*`). `flush_propagated` on a PRIMARY = it is shipping replicas to the backup; `applied{flow,op}` = inbound replica ops landing per stream (flow=recovery is a rebooted primary pulling its own partition back, flow=backup is steady forward replication; op=create|update|delete); `takeover_*` = a failed-over in-dialog request found + loaded the replica. A worker reboot shows as a sharp recovery/create spike.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 38 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
         { "expr": "sum(rate(b2bua_repl_flush_propagated_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "flush_propagated (primary→backup)" },
-        { "expr": "sum(rate(b2bua_repl_pull_applied_total{pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "pull_applied (backup←primary)" },
+        { "expr": "sum by (flow,op) (rate(b2bua_repl_applied_total{pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "applied {{flow}}/{{op}}" },
         { "expr": "sum(rate(b2bua_repl_takeover_resolved_total{pod=~\"$pod\"}[1m]))", "refId": "C", "legendFormat": "takeover_resolved" },
         { "expr": "sum(rate(b2bua_repl_takeover_hydrated_total{pod=~\"$pod\"}[1m]))", "refId": "D", "legendFormat": "takeover_hydrated" }
       ],
@@ -168,34 +168,46 @@
     },
     {
       "id": 33, "type": "stat", "title": "Backup replicas held",
-      "description": "`b2bua_repl_backup_held` gauge — live replicas this fleet is holding in backup partitions for its peers. > 0 means HA is armed: if a primary dies, these are the dialogs that survive on the backup.",
+      "description": "`b2bua_repl_meta_backup` gauge (sampled from the store — the ACCURATE resident backup count, unlike the retired `repl_backup_held` counter which never saw TTL eviction). Live replicas this fleet holds in backup partitions for its peers; > 0 means HA is armed.",
       "gridPos": { "h": 8, "w": 6, "x": 0, "y": 46 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "sum(b2bua_repl_backup_held{pod=~\"$pod\"})", "refId": "A" }],
+      "targets": [{ "expr": "sum(b2bua_repl_meta_backup{pod=~\"$pod\"})", "refId": "A" }],
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
       "fieldConfig": { "defaults": { "unit": "none", "thresholds": { "mode": "absolute", "steps": [{ "color": "yellow", "value": null }, { "color": "green", "value": 1 }] } } }
     },
     {
       "id": 34, "type": "timeseries", "title": "Replication cumulative (forward progress)",
-      "description": "Monotonic `b2bua_repl_*_total` counters per pod — confirms each worker is making HA forward progress (shipping/applying replicas, resolving takeovers) over the whole run.",
+      "description": "Monotonic replication ops applied per pod+stream+op (`b2bua_repl_applied_total{flow,op}`). A worker reboot's bulk reclaim shows as a sharp STEP in recovery/create for that pod (the bump the old aggregate `pull_applied` hid). backup/create = steady forward replication; */delete = teardown propagation.",
       "gridPos": { "h": 8, "w": 18, "x": 6, "y": 46 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
         { "expr": "sum by (pod) (b2bua_repl_flush_propagated_total{pod=~\"$pod\"})", "refId": "A", "legendFormat": "flush_propagated {{pod}}" },
-        { "expr": "sum by (pod) (b2bua_repl_pull_applied_total{pod=~\"$pod\"})", "refId": "B", "legendFormat": "pull_applied {{pod}}" },
+        { "expr": "sum by (pod,flow,op) (b2bua_repl_applied_total{pod=~\"$pod\"})", "refId": "B", "legendFormat": "applied {{pod}} {{flow}}/{{op}}" },
         { "expr": "sum by (pod) (b2bua_repl_takeover_hydrated_total{pod=~\"$pod\"})", "refId": "C", "legendFormat": "takeover_hydrated {{pod}}" }
       ],
       "fieldConfig": { "defaults": { "unit": "none", "custom": { "fillOpacity": 4, "showPoints": "never", "lineWidth": 1 } } },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
     },
     {
+      "id": 35, "type": "timeseries", "title": "Keepalive OPTIONS round-trip (sent vs answered) + timeout BYEs",
+      "description": "The reclaimed-dialog teardown localizer. `OPTIONS sent` = `b2bua_requests_out_total{method=OPTIONS}` (the in-dialog keepalive the worker originates); `OPTIONS 200 recv` = `b2bua_responses_total{method=OPTIONS,code=200}` (the answer coming back). In steady state the two track 1:1. A reboot that opens a SENT≫ANSWERED gap means the reclaimed keepalive round-trip is failing — the worker then BYEs those dialogs when the `keepalive_timeout_sec` grace expires (watch the long-call `unexpected_msg` rise on the endurance dashboard). Pair with the proxy's worker_outbound OPTIONS to split forward (proxy→UAC) vs return (UAC→worker) leg.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 54 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (pod) (rate(b2bua_requests_out_total{method=\"OPTIONS\",pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "OPTIONS sent {{pod}}" },
+        { "expr": "sum by (pod) (rate(b2bua_responses_total{method=\"OPTIONS\",code=\"200\",pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "OPTIONS 200 recv {{pod}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "cps", "custom": { "fillOpacity": 6, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
       "id": 40, "type": "row", "title": "Timer queue (CPU-drift detector)",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 54 }, "collapsed": false
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 62 }, "collapsed": false
     },
     {
       "id": 41, "type": "timeseries", "title": "Timer DelayQueue: physical vs live + tombstone backlog",
       "description": "`b2bua_timer_queue_len` (physical DelayQueue entries) vs `b2bua_timer_live` (schedulable timers); the third line is their difference — the lingering-tombstone backlog. Cancellation is logical, so a cancelled long-interval timer (the per-call 1 h GlobalDuration) keeps its queue slot until its original deadline. Diagnostic signature for the 'looks-like-a-leak-but-isn't' CPU climb: queue_len + backlog rise ~linearly for ~1 h then plateau (~cps × 3600), while live (and active_calls) stay flat. Pair with the container-CPU panel: if CPU tracks THIS curve rather than active_calls, the timer queue is the cause.",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 55 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 63 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
         { "expr": "sum(b2bua_timer_queue_len{pod=~\"$pod\"})", "refId": "A", "legendFormat": "queue_len (physical)" },
@@ -208,7 +220,7 @@
     {
       "id": 42, "type": "timeseries", "title": "Timer queue size per pod",
       "description": "`b2bua_timer_queue_len` broken out per worker pod — physical timer entries each driver is holding (live + not-yet-expired tombstones). A pod whose queue climbs without bound is accumulating cancelled long-interval timers; compare against its `b2bua_active_calls` line (flat → tombstone backlog, not a call leak).",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 55 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 63 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
         { "expr": "b2bua_timer_queue_len{pod=~\"$pod\"}", "refId": "A", "legendFormat": "queue_len {{pod}}" },

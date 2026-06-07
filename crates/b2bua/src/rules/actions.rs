@@ -1076,7 +1076,37 @@ impl<'a> ActionExecutor<'a> {
             .find(|d| !d.sip.remote_tag.is_empty())
         {
             Some(d) => d.clone(),
-            None => return,
+            None => {
+                // An EARLY/forked or mid-confirm leg legitimately has no confirmed
+                // dialog yet — skip quietly. But a CONFIRMED (established) leg whose
+                // dialog carries no remote tag is a broken invariant that should be
+                // UNREACHABLE: an established dialog ALWAYS knows its peer's tag
+                // (b-leg ← callee 2xx To-tag; a-leg ← caller INVITE From-tag, stored
+                // in the call context and hydrated verbatim), and a tag-less INVITE
+                // is now rejected with 400 at ingest (router::process), so the a-leg
+                // remote tag can never be seeded empty. If we still land here the
+                // dialog became tag-less by some OTHER path (a takeover/reclaim
+                // replica captured mid-confirm, a tag dropped on a state mutation),
+                // which silently drops every in-dialog request to this leg — the
+                // keepalive OPTIONS never fires for it, so we poke the peer but not
+                // this side ("OPTIONS to called, not calling"). Never swallow it.
+                let leg = leg_at(call, idx);
+                if leg.state == LegState::Confirmed {
+                    eprintln!(
+                        "B2BUA INVARIANT VIOLATION: call_ref={} leg={} is Confirmed but has \
+                         no dialog with a remote tag ({} dialog(s), all tag-less) — cannot \
+                         originate in-dialog {} (keepalive will never fire for this leg). \
+                         A tag-less INVITE is rejected at ingest, so an established dialog \
+                         must never reach this state; the call context preserves the empty \
+                         tag across hydration, leaving this leg permanently un-probeable.",
+                        call.call_ref,
+                        leg_id,
+                        leg.dialogs.len(),
+                        method,
+                    );
+                }
+                return;
+            }
         };
         // Advance + persist the dialog CSeq by exactly one (§12.2.1.1), exactly as
         // every other in-dialog originator here (send_with_body / send_reinvite /

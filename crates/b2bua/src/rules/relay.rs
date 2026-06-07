@@ -13,7 +13,7 @@ use sip_message::generators::{
     self, ContactSpec, GenerateAckFor2xxOpts, GenerateOutOfDialogRequestOpts, GenerateResponseOpts,
     OutOfDialogMethod, ViaSpec,
 };
-use sip_message::message_helpers::get_header;
+use sip_message::message_helpers::{get_header, parse_uri_params};
 use sip_message::{hydrate_request, SipHeader as MsgHeader, SipMessage, SipRequest};
 use sip_txn::{IdGen, TxnKind};
 
@@ -114,6 +114,21 @@ pub fn dest_of(uri_host_port: &str) -> (String, u16) {
 /// `route_set` is the source dialog's route set in dialog order. For the a-leg
 /// the natural route set (from the inbound INVITE's Record-Route) carries the
 /// routing; `b2b_outbound_proxy` is a b-leg concept and is not applied there.
+/// Append `;outbound` to the top `Route` header's URI params (idempotent). The
+/// front proxy strips a top Route matching its own advertised host and, seeing
+/// `;outbound`, forwards to the Request-URI instead of decoding the stickiness
+/// cookie — the SNAT- and registry-independent worker-outbound discriminator.
+fn mark_top_route_outbound(req: &mut SipRequest) {
+    if let Some(h) = req.headers.iter_mut().find(|h| h.name.eq_ignore_ascii_case("route")) {
+        if !parse_uri_params(&h.value).contains_key("outbound") {
+            match h.value.rfind('>') {
+                Some(close) => h.value.insert_str(close, ";outbound"),
+                None => h.value.push_str(";outbound"),
+            }
+        }
+    }
+}
+
 pub fn apply_b_leg_egress(
     config: &B2buaConfig,
     leg_id: &str,
@@ -128,6 +143,19 @@ pub fn apply_b_leg_egress(
             // unwrap to the bare URI before reducing to host:port.
             let uri = generators::strip_route_uri_to_request_uri(first);
             let dest = dest_of(&strip_uri(&uri));
+            // Mark this worker-originated in-dialog request worker-outbound (same
+            // `;outbound` signal as the empty-route-set b-leg fallback below). The
+            // top Route is our own front-proxy Record-Route cookie; without the
+            // marker the proxy must infer "from a worker" from the SNAT-masqueraded
+            // source or the top Via via its registry — both MISS for a worker that
+            // has just rebooted onto a NEW pod IP the EndpointSlice informer has not
+            // yet learned, so the cookie's `target=<old-worker>` decode bounces the
+            // request back to a worker and the far endpoint never sees it. For the
+            // a-leg keepalive OPTIONS that is the steady-state long-call-loss class:
+            // no 200 → keepalive timeout → BYE → reclaimed dialog torn down. The
+            // `;outbound` param is registry- and IP-independent, so it survives the
+            // reboot. (CLAUDE.md/ADR-0014: no timer/settle dependency.)
+            mark_top_route_outbound(&mut req);
             return (req, dest);
         }
         // Strict routing is handled by the generator's R-URI rewrite; the wire
@@ -396,4 +424,76 @@ pub fn strip_uri(uri: &str) -> String {
     let no_scheme = uri.strip_prefix("sips:").or_else(|| uri.strip_prefix("sip:")).unwrap_or(uri);
     let host_part = no_scheme.rsplit('@').next().unwrap_or(no_scheme);
     host_part.split([';', '?', '>']).next().unwrap_or(host_part).trim().to_string()
+}
+
+#[cfg(test)]
+mod egress_tests {
+    use super::*;
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::SipParser;
+
+    fn parse(raw: &str) -> SipRequest {
+        match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+            SipMessage::Request(r) => r,
+            _ => panic!("expected request"),
+        }
+    }
+
+    fn in_dialog_options(route: &str) -> SipRequest {
+        parse(&format!(
+            "OPTIONS sip:sipp@10.244.2.7:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.244.1.5:5060;branch=z9hG4bKa;lg=a\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:svc@10.0.0.9:5060>;tag=svc\r\n\
+To: <sip:sipp@10.244.2.7:5060>;tag=uac\r\n\
+Call-ID: c1@x\r\n\
+CSeq: 2 OPTIONS\r\n\
+Route: {route}\r\n\
+Content-Length: 0\r\n\r\n"
+        ))
+    }
+
+    // A worker-originated in-dialog request whose route set loose-routes back
+    // through our front proxy (the proxy's Record-Route cookie) must leave egress
+    // marked `;outbound` — the registry/IP-independent worker-outbound signal the
+    // proxy classifies on. This is the reclaimed-long-call-loss fix: without it a
+    // worker rebooted onto a new pod IP has its keepalive OPTIONS decoded by the
+    // cookie and bounced back to a worker instead of reaching the UAC.
+    #[test]
+    fn worker_in_dialog_loose_route_is_marked_outbound() {
+        let route = "<sip:10.0.0.9:5060;target=10.244.1.5:5060;lr>";
+        let (out, dest) = apply_b_leg_egress(
+            &B2buaConfig::default(),
+            "a",
+            &[route.to_string()],
+            in_dialog_options(route),
+            ("10.244.2.7".to_string(), 5060),
+        );
+        let top_route = get_header(&out.headers, "route").expect("route header");
+        assert!(
+            parse_uri_params(top_route).contains_key("outbound"),
+            "worker in-dialog loose-route request must be marked ;outbound, got {top_route}"
+        );
+        // Loose route → wire destination is the proxy (top route); R-URI unchanged.
+        assert_eq!(dest, ("10.0.0.9".to_string(), 5060));
+    }
+
+    // Idempotent: a route that already carries `;outbound` is not double-stamped.
+    #[test]
+    fn outbound_marking_is_idempotent() {
+        let route = "<sip:10.0.0.9:5060;lr;outbound>";
+        let (out, _dest) = apply_b_leg_egress(
+            &B2buaConfig::default(),
+            "a",
+            &[route.to_string()],
+            in_dialog_options(route),
+            ("10.244.2.7".to_string(), 5060),
+        );
+        let top_route = get_header(&out.headers, "route").expect("route header");
+        assert_eq!(
+            top_route.matches("outbound").count(),
+            1,
+            "must not double-stamp the outbound param: {top_route}"
+        );
+    }
 }

@@ -311,6 +311,13 @@ impl Puller {
         self.partition == Partition::Pri
     }
 
+    /// Stream-kind label for `b2bua_repl_applied_total{flow,…}`: `recovery` = the
+    /// Pri/Reclaim flow (our own calls pulled back from a peer's backup), `backup`
+    /// = the Bak flow (a peer's calls we hold as backup).
+    fn flow_label(&self) -> &'static str {
+        if self.is_reclaim() { "recovery" } else { "backup" }
+    }
+
     /// Resolve the peer's address (fresh) and open a connection. `None` if the
     /// address is unresolvable right now or the connect fails — the caller treats
     /// either as a failed connect (→ Backoff, then retry/re-resolve).
@@ -706,27 +713,22 @@ impl Puller {
                             &PutOpts::default(),
                         )
                         .await;
-                    // Inbound replica admitted. `pull_applied` is the proof the
-                    // changelog→puller delivery path works; `backup_held` tracks
-                    // the live replica count — it grows whenever a ref NOT
-                    // previously held (`stored.is_none()`) lands in a backup
-                    // partition.
-                    self.metrics.bump_repl_pull_applied();
-                    if role == PartitionRole::Backup && stored.is_none() {
-                        self.metrics.inc_repl_backup_held();
-                    }
+                    // Inbound replica admitted — record the op per stream+endpoint:
+                    // a brand-new ref (`stored.is_none()`) is a create, an existing
+                    // one an update. The `recovery`/`create` step is the rebooted
+                    // primary's bulk reclaim made visible; `backup`/`create` is
+                    // steady forward replication landing.
+                    let op = if stored.is_none() { "create" } else { "update" };
+                    self.metrics.record_repl_applied(self.flow_label(), self.peer_ordinal(), op);
                 }
                 apply
             }
             Op::Delete => {
-                let had = self.store.current_cv(role, &primary, call_ref).is_some();
                 let _ = self
                     .store
                     .delete_call(role, &primary, call_ref, indexes, &PutOpts::default())
                     .await;
-                if role == PartitionRole::Backup && had {
-                    self.metrics.dec_repl_backup_held();
-                }
+                self.metrics.record_repl_applied(self.flow_label(), self.peer_ordinal(), "delete");
                 true
             }
         }

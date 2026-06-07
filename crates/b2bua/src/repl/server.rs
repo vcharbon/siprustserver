@@ -63,6 +63,10 @@ pub struct ReplServer {
     self_ordinal: String,
     changelog: Changelog,
     source: Arc<dyn BodySource>,
+    /// Serve-side observability (the per-stream `Noop`-sent liveness counter).
+    /// `None` for the sim/unit-test constructors (which assert on the store
+    /// directly); the live `B2buaCore` wires it via [`with_metrics`](Self::with_metrics).
+    metrics: Option<crate::metrics::B2buaMetrics>,
 }
 
 impl ReplServer {
@@ -79,7 +83,15 @@ impl ReplServer {
             self_ordinal: self_ordinal.into(),
             changelog,
             source,
+            metrics: None,
         }
+    }
+
+    /// Attach the metrics handle so the serve loop records `repl_noops_sent`
+    /// (builder, so the existing [`new`](Self::new) test callers are unchanged).
+    pub fn with_metrics(mut self, metrics: crate::metrics::B2buaMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Accept connections forever, serving each on a per-connection task. Returns
@@ -144,6 +156,11 @@ impl ReplServer {
         // Keep this peer's changelog reap-immune while we serve it.
         let _guard = self.changelog.serving(caller);
         let (role, primary) = self.keyspace(partition, caller);
+        // Stream-kind label for the per-(flow, peer) Noop-sent liveness counter.
+        let flow = match partition {
+            Partition::Pri => "reclaim",
+            Partition::Bak => "backup",
+        };
 
         // A warm puller that fell below the compacted tail must re-bootstrap.
         if self.changelog.needs_reset(caller, partition, since) {
@@ -207,6 +224,9 @@ impl ReplServer {
                 if conn.send(Frame::Noop { at: head }).await.is_err() {
                     return;
                 }
+                if let Some(m) = &self.metrics {
+                    m.record_repl_noop_sent(flow, caller);
+                }
                 ever_caught_up = true;
                 streamed_full_batch = false;
                 idle_cycles = 0;
@@ -215,6 +235,9 @@ impl ReplServer {
                 if idle_cycles >= IDLE_NOOP_CYCLES {
                     if conn.send(Frame::Noop { at: head }).await.is_err() {
                         return;
+                    }
+                    if let Some(m) = &self.metrics {
+                        m.record_repl_noop_sent(flow, caller);
                     }
                     idle_cycles = 0;
                 }

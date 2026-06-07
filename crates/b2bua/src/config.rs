@@ -44,6 +44,18 @@ pub struct B2buaConfig {
     /// UAC is not expecting it. Overridable per worker via `B2BUA_KEEPALIVE_SEC`.
     /// The test harness lowers this to 30 s so paused-clock tests stay fast.
     pub keepalive_interval_sec: i64,
+    /// **Keepalive-timeout grace**, seconds — how long the B2BUA waits for the
+    /// in-dialog OPTIONS `200` before declaring the leg dead and tearing the call
+    /// down (`keepalive-timeout` rule → BYE). Production default **32 s** (was a
+    /// hard-coded 5 s). The 5 s value was unsound across a worker reboot: a
+    /// reclaimed dialog re-arms its keepalive and fires OPTIONS into a path still
+    /// settling (smoothed reclaim burst draining over `L_max/speedup`, the proxy
+    /// EndpointSlice re-discovering the rebooted worker's new pod IP), so the
+    /// round-trip can momentarily exceed 5 s and the worker BYEs thousands of
+    /// healthy reclaimed long-hold calls. A generous grace rides that recovery
+    /// window out; it must stay well under `keepalive_interval_sec` so two
+    /// keepalives never overlap. Overridable via `B2BUA_KEEPALIVE_TIMEOUT_SEC`.
+    pub keepalive_timeout_sec: i64,
     /// **Reboot budget**, seconds — the TTL stamped on every *replicated* backup
     /// `Element` (ADR-0011 X11). It is how long a backup copy survives without a
     /// refresh from its primary, i.e. how long a primary may be down/rebooting
@@ -101,6 +113,7 @@ impl Default for B2buaConfig {
             refer_reinvite_answer_sec: 32,
             refer_overall_safety_sec: 120,
             keepalive_interval_sec: 300,
+            keepalive_timeout_sec: 32,
             reboot_budget_sec: 600,
             limiter_refresh_sec: 300,
             keepalive_catchup_speedup: 10,

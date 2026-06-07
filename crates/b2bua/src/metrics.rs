@@ -10,8 +10,17 @@ use std::sync::{Arc, Mutex};
 struct Inner {
     // per-method request + per-(method,code) response counters (data-path
     // visibility: which SIP methods/response codes the worker is moving).
-    requests: Mutex<BTreeMap<String, u64>>,   // keyed method
-    responses: Mutex<BTreeMap<String, u64>>,  // keyed "cseq_method|status_code"
+    requests: Mutex<BTreeMap<String, u64>>,   // keyed method (INBOUND)
+    requests_out: Mutex<BTreeMap<String, u64>>, // keyed method (OUTBOUND — originated/relayed)
+    responses: Mutex<BTreeMap<String, u64>>,  // keyed "cseq_method|status_code" (INBOUND)
+    // Replication serve-side liveness: per `(flow, peer)` count of catch-up/idle
+    // `Noop`s this node SENT as a server (keyed "flow|peer"). A `Noop` means "I am
+    // caught up — I have sent you everything in this flow's keyspace" (ADR-0014
+    // §Stream topology). It MUST climb continuously (the ~20s idle floor) on every
+    // healthy stream — from the backup-holder's point of view, proof it has flushed
+    // all the peer's reclaimable/backed-up calls. A flatlined series names a stuck
+    // serve loop / dead subscriber the body-count gauges can't see.
+    repl_noops_sent: Mutex<BTreeMap<String, u64>>,
     // dispatcher
     queue_drops: AtomicU64,
     cap_drops: AtomicU64,
@@ -36,12 +45,23 @@ struct Inner {
     // replication (peer-to-peer HA; separate namespace `b2bua_repl_*`). These
     // localise an HA failure to a layer: `flush_propagated` rising on the PRIMARY
     // proves it is attempting to replicate (the proxy cookie stamped
-    // `topology.bak`); `pull_applied` rising + `backup_held` > 0 on the BACKUP
-    // proves the replica actually arrived; `takeover_resolved`/`hydrated` prove a
-    // failed-over in-dialog request found + loaded the replica on the backup.
+    // `topology.bak`); the per-stream `applied` breakdown (below) proves the
+    // replica actually arrived; `takeover_resolved`/`hydrated` prove a failed-over
+    // in-dialog request found + loaded the replica on the backup. The TRUE resident
+    // backup count is the sampled `repl_meta_backup` gauge (not a counter-derived
+    // estimate). The old `repl_pull_applied` aggregate + the `repl_backup_held`
+    // gauge were removed: the former is superseded by the labelled `applied`
+    // breakdown, the latter double-counted (inc/dec only on apply, never on TTL
+    // eviction) and is replaced by `repl_meta_backup`.
     repl_flush_propagated: AtomicU64,
-    repl_pull_applied: AtomicU64,
-    repl_backup_held: AtomicU64, // gauge: replicas currently held as backup
+    // Inbound replication ops applied, per `(flow, peer, op)` (keyed
+    // "flow|peer|op"): `flow` = recovery (Pri/reclaim — our own calls pulled back
+    // from a peer's backup) | backup (Bak — a peer's calls we hold as backup);
+    // `peer` = the endpoint streamed from; `op` = create | update | delete. This is
+    // the REAL per-stream replication signal: a reboot's bulk reclaim shows as a
+    // sharp step in `recovery`/`create` for that peer (the "huge fast bump" the
+    // aggregate counter hid).
+    repl_applied: Mutex<BTreeMap<String, u64>>,
     repl_takeover_resolved: AtomicU64,
     repl_takeover_hydrated: AtomicU64,
     // Fail-back (ADR-0011 X11 / ADR-0014): `reclaimed` = calls a rebooted primary
@@ -66,6 +86,18 @@ struct Inner {
     repl_bootstrap_seeded: AtomicU64,
     repl_bootstrap_stalled: AtomicU64,
     repl_bootstrap_last_applied: AtomicU64,
+    // Reboot-reclaim completeness (long-call-on-reboot study, 2026-06-06). Per the
+    // MOST RECENT bulk reclaim pass (`router::reclaim_all`): `scanned` = bodies
+    // found in `pri:{self}` (the denominator — everything the bootstrap import made
+    // reclaimable on this node) and `materialized` = how many of those this pass
+    // freshly inserted into the live serving map + re-armed timers. The per-reboot
+    // chain localises exactly where a rebooted primary's quiescent dialogs are
+    // lost: `(peer) repl_meta_backup` → `repl_bootstrap_last_applied` →
+    // `repl_reclaim_scanned` → `repl_reclaim_materialized`. `scanned ≪ peer
+    // meta_backup` ⇒ a bootstrap-import / forward-replication gap; `materialized ≪
+    // scanned` (cumulatively, via `repl_reclaimed_total`) ⇒ a materialise gap.
+    repl_reclaim_scanned: AtomicU64,
+    repl_reclaim_materialized: AtomicU64,
     // Memory-attribution gauges (sampled, not counter-derived). `store_calls` is
     // the TRUE live call-map length — compare to `active_calls`
     // (creations-removals); a divergence localises a store-side leak the counter
@@ -129,9 +161,32 @@ impl B2buaMetrics {
     counter!(bump_cdr_written, cdr_written_total, cdr_written);
     counter!(bump_cdr_dropped, cdr_dropped_total, cdr_dropped);
 
+    /// Count one catch-up/idle `Noop` SENT on a serve-side stream, for
+    /// `b2bua_repl_noops_sent_total{flow,peer}` (ADR-0014). `flow` is the stream
+    /// kind (`reclaim` = `Pri`, `backup` = `Bak`); `peer` is the pulling caller.
+    /// Climbs continuously on a healthy stream (the ~20s idle floor) — the
+    /// backup-holder's "I have sent you everything in this flow" liveness sign.
+    pub fn record_repl_noop_sent(&self, flow: &str, peer: &str) {
+        *self
+            .inner
+            .repl_noops_sent
+            .lock()
+            .unwrap()
+            .entry(format!("{flow}|{peer}"))
+            .or_insert(0) += 1;
+    }
+
     /// Count one inbound request by SIP method, for `b2bua_requests_total{method}`.
     pub fn record_request(&self, method: &str) {
         *self.inner.requests.lock().unwrap().entry(method.to_ascii_uppercase()).or_insert(0) += 1;
+    }
+
+    /// Count one OUTBOUND request this worker originated/relayed, for
+    /// `b2bua_requests_out_total{method}`. The in-dialog keepalive OPTIONS lands
+    /// here; pairing OPTIONS-out with the inbound `responses_total{OPTIONS,200}`
+    /// isolates the keepalive round-trip (sent vs answered) on the b2bua itself.
+    pub fn record_request_out(&self, method: &str) {
+        *self.inner.requests_out.lock().unwrap().entry(method.to_ascii_uppercase()).or_insert(0) += 1;
     }
 
     /// Count one inbound response by its CSeq method + status code, for
@@ -143,7 +198,6 @@ impl B2buaMetrics {
 
     // --- replication ---
     counter!(bump_repl_flush_propagated, repl_flush_propagated_total, repl_flush_propagated);
-    counter!(bump_repl_pull_applied, repl_pull_applied_total, repl_pull_applied);
     counter!(bump_repl_takeover_resolved, repl_takeover_resolved_total, repl_takeover_resolved);
     counter!(bump_repl_takeover_hydrated, repl_takeover_hydrated_total, repl_takeover_hydrated);
     counter!(bump_repl_reclaimed, repl_reclaimed_total, repl_reclaimed);
@@ -159,22 +213,58 @@ impl B2buaMetrics {
         self.inner.repl_bootstrap_last_applied.load(Ordering::Relaxed)
     }
 
-    /// A backup replica was admitted to a backup partition (puller applied a
-    /// `Create`). Pairs with [`dec_repl_backup_held`](Self::dec_repl_backup_held)
-    /// to track the live replica count this node holds for its peers.
-    pub fn inc_repl_backup_held(&self) {
-        self.inner.repl_backup_held.fetch_add(1, Ordering::Relaxed);
+    /// Record the most recent bulk-reclaim pass's `(scanned, materialized)` — the
+    /// reboot-reclaim completeness denominator/numerator (gauges). `scanned` is the
+    /// `pri:{self}` partition size the pass swept; `materialized` is how many it
+    /// freshly re-served. Overwritten each pass; the cumulative materialised total
+    /// is `repl_reclaimed_total`.
+    pub fn set_repl_reclaim_pass(&self, scanned: u64, materialized: u64) {
+        self.inner.repl_reclaim_scanned.store(scanned, Ordering::Relaxed);
+        self.inner.repl_reclaim_materialized.store(materialized, Ordering::Relaxed);
     }
-    /// A backup replica left a backup partition (puller applied a `Delete`).
-    pub fn dec_repl_backup_held(&self) {
-        // Saturating: a Delete with no prior Create (cold) must not underflow.
-        let _ = self
+    pub fn repl_reclaim_scanned(&self) -> u64 {
+        self.inner.repl_reclaim_scanned.load(Ordering::Relaxed)
+    }
+    pub fn repl_reclaim_materialized(&self) -> u64 {
+        self.inner.repl_reclaim_materialized.load(Ordering::Relaxed)
+    }
+
+    /// Record one inbound replication op applied, for
+    /// `b2bua_repl_applied_total{flow,peer,op}`. `flow` = `recovery` (Pri/reclaim)
+    /// | `backup` (Bak); `op` = `create` | `update` | `delete`. The real per-stream
+    /// replication signal (a reboot's bulk reclaim shows as a `recovery`/`create`
+    /// step for that peer).
+    pub fn record_repl_applied(&self, flow: &str, peer: &str, op: &str) {
+        *self
             .inner
-            .repl_backup_held
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
+            .repl_applied
+            .lock()
+            .unwrap()
+            .entry(format!("{flow}|{peer}|{op}"))
+            .or_insert(0) += 1;
     }
-    pub fn repl_backup_held(&self) -> u64 {
-        self.inner.repl_backup_held.load(Ordering::Relaxed)
+    /// Sum of all applied replication ops (test/observability convenience —
+    /// replaces the retired `repl_pull_applied_total` aggregate).
+    pub fn repl_applied_sum(&self) -> u64 {
+        self.inner.repl_applied.lock().unwrap().values().sum()
+    }
+    /// Backup replicas this node currently holds, derived from the `backup`-flow
+    /// op counts (creates − deletes). Test/observability convenience replacing the
+    /// retired `repl_backup_held` gauge; production reads the accurate sampled
+    /// `repl_meta_backup` (this derivation, like the old gauge, does not see TTL
+    /// eviction — fine for the unit tests that never evict).
+    pub fn repl_backup_replicas(&self) -> u64 {
+        let m = self.inner.repl_applied.lock().unwrap();
+        let get = |op: &str| {
+            m.iter()
+                .filter(|(k, _)| {
+                    let mut p = k.split('|');
+                    p.next() == Some("backup") && p.nth(1) == Some(op)
+                })
+                .map(|(_, v)| *v)
+                .sum::<u64>()
+        };
+        get("create").saturating_sub(get("delete"))
     }
 
     /// Set the timer-service gauges from the driver on each state change.
@@ -253,7 +343,6 @@ impl B2buaMetrics {
         // ── replication (peer-to-peer HA) — own namespace, distinct from the
         // data-path counters above so an HA failure can be localised by layer. ──
         counter("b2bua_repl_flush_propagated_total", "primary flushes that propagated to a backup peer (topology.bak set)", self.repl_flush_propagated_total());
-        counter("b2bua_repl_pull_applied_total", "inbound replica entries applied from a peer's changelog", self.repl_pull_applied_total());
         counter("b2bua_repl_takeover_resolved_total", "in-dialog requests whose callRef was recovered from the replica index (acting-backup)", self.repl_takeover_resolved_total());
         counter("b2bua_repl_takeover_hydrated_total", "calls hydrated from a backup replica to serve a failed-over request", self.repl_takeover_hydrated_total());
         counter("b2bua_repl_reclaimed_total", "calls a rebooted primary re-materialised into its live map + re-armed (active reclaim, ADR-0011 X11)", self.repl_reclaimed_total());
@@ -272,12 +361,29 @@ impl B2buaMetrics {
             let (method, code) = k.split_once('|').unwrap_or((k.as_str(), ""));
             s.push_str(&format!("b2bua_responses_total{{method=\"{method}\",code=\"{code}\"}} {v}\n"));
         }
+        s.push_str("# HELP b2bua_requests_out_total outbound SIP requests this worker ORIGINATED/relayed by method (e.g. the in-dialog keepalive OPTIONS); pair with b2bua_responses_total{method=\"OPTIONS\",code=\"200\"} to see the keepalive round-trip\n# TYPE b2bua_requests_out_total counter\n");
+        for (method, v) in self.inner.requests_out.lock().unwrap().iter() {
+            s.push_str(&format!("b2bua_requests_out_total{{method=\"{method}\"}} {v}\n"));
+        }
+        s.push_str("# HELP b2bua_repl_applied_total inbound replication ops applied per stream+endpoint+op (flow=recovery|backup, peer=endpoint, op=create|update|delete); a reboot's bulk reclaim shows as a recovery/create step\n# TYPE b2bua_repl_applied_total counter\n");
+        for (k, v) in self.inner.repl_applied.lock().unwrap().iter() {
+            let mut p = k.splitn(3, '|');
+            let flow = p.next().unwrap_or("");
+            let peer = p.next().unwrap_or("");
+            let op = p.next().unwrap_or("");
+            s.push_str(&format!("b2bua_repl_applied_total{{flow=\"{flow}\",peer=\"{peer}\",op=\"{op}\"}} {v}\n"));
+        }
+        s.push_str("# HELP b2bua_repl_noops_sent_total catch-up/idle Noops sent per serve-side stream (flow=reclaim|backup, peer=caller); climbs continuously on a healthy stream — the backup-holder's 'sent everything in this flow' liveness sign (ADR-0014)\n# TYPE b2bua_repl_noops_sent_total counter\n");
+        for (k, v) in self.inner.repl_noops_sent.lock().unwrap().iter() {
+            let (flow, peer) = k.split_once('|').unwrap_or((k.as_str(), ""));
+            s.push_str(&format!("b2bua_repl_noops_sent_total{{flow=\"{flow}\",peer=\"{peer}\"}} {v}\n"));
+        }
 
         // Gauges last (direct writes — they end the `counter` closure's borrow).
         s.push_str("# HELP b2bua_active_calls live calls this worker is serving (creations - removals; now a true gauge since the two are paired)\n# TYPE b2bua_active_calls gauge\n");
         s.push_str(&format!("b2bua_active_calls {active}\n"));
-        s.push_str("# HELP b2bua_repl_backup_held replicas currently held in backup partitions for peers\n# TYPE b2bua_repl_backup_held gauge\n");
-        s.push_str(&format!("b2bua_repl_backup_held {}\n", self.repl_backup_held()));
+        // (b2bua_repl_backup_held removed — the accurate resident backup count is
+        // the sampled b2bua_repl_meta_backup gauge below.)
         // Timer-queue gauges: physical DelayQueue size vs. live timers. A
         // queue_len that climbs while timer_live (and active_calls) stay flat is
         // the lingering-tombstone backlog of cancelled long-interval timers — the
@@ -304,6 +410,8 @@ impl B2buaMetrics {
         g(&mut s, "b2bua_repl_changelog_entries", "outbound changelog entries across all peer logs (replication buffer depth)", self.inner.repl_changelog_entries.load(Ordering::Relaxed));
         g(&mut s, "b2bua_repl_changelog_peers", "peer logs currently held in the changelog", self.inner.repl_changelog_peers.load(Ordering::Relaxed));
         g(&mut s, "b2bua_repl_bootstrap_last_applied", "bodies the most recent bootstrap pass imported (re-stalling at the same value across passes ⇒ the stream is truncating, not the materialisation)", self.repl_bootstrap_last_applied());
+        g(&mut s, "b2bua_repl_reclaim_scanned", "bodies the most recent bulk reclaim pass found in pri:{self} (denominator: everything bootstrap import made reclaimable; ≪ peer repl_meta_backup ⇒ a bootstrap-import/forward-replication gap)", self.repl_reclaim_scanned());
+        g(&mut s, "b2bua_repl_reclaim_materialized", "bodies the most recent bulk reclaim pass freshly re-served into the live map (cumulative total is repl_reclaimed_total; ≪ scanned cumulatively ⇒ a materialise gap)", self.repl_reclaim_materialized());
         s
     }
 }

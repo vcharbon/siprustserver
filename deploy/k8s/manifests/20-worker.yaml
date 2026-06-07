@@ -59,6 +59,20 @@ spec:
             - { name: B2BUA_LISTEN,  value: "0.0.0.0:5060" }
             - { name: B2BUA_ADVERTISE, value: "$(POD_IP)" }
             - { name: B2BUA_DEST,    value: "sipp-uas.sip-test.svc.cluster.local:5060" }
+            # ALL worker→callee (b-leg) SIP MUST traverse the front proxy. In a
+            # real cluster a peer's internal pod IP is not routable peer-to-peer,
+            # so every B2BUA-originated request — initial b-leg INVITE, in-dialog
+            # BYE / keepalive OPTIONS / re-INVITE — is sent to the proxy VIP with a
+            # preloaded Route ;lr;outbound. The proxy strips that Route, classifies
+            # the flow worker-outbound (registry-/IP-independent, so it survives a
+            # worker reboot onto a new pod IP), forwards to the callee, and
+            # record-routes itself into the b-leg so subsequent in-dialog requests
+            # stay on the proxy path. Without this the b-leg goes pod-direct and
+            # bypasses the LB — the endurance long-call-loss class (post-reboot
+            # b-leg keepalives to a pod IP get no 200 → keepalive-timeout → BYE).
+            # The VIP is the keepalived VRRP address (ADR-0012 D7), stable across
+            # proxy failover and pod restart.
+            - { name: B2BUA_OUTBOUND_PROXY, value: "${PROXY_VIP}:5060" }
             - { name: B2BUA_METRICS, value: "0.0.0.0:9091" }
             # In-dialog OPTIONS keepalive interval (5 min). Must exceed short-call
             # hold so it never pokes a completing dialog; long-hold scenarios
@@ -69,6 +83,13 @@ spec:
             # interval shrinks the reboot budget below pod-restart time and
             # manufactures fake replica-reap / failover-loss artifacts.
             - { name: B2BUA_KEEPALIVE_SEC, value: "300" }
+            # Keepalive-timeout grace: how long to wait for the in-dialog OPTIONS
+            # 200 before declaring the leg dead and BYE-ing. Was a hard 5 s, which
+            # tore down healthy RECLAIMED dialogs across a reboot (their re-armed
+            # keepalive OPTIONS round-trip into a still-settling path: smoothed
+            # reclaim burst + proxy re-discovering the new pod IP). 45 s rides that
+            # recovery window out; stays well under the 300 s keepalive interval.
+            - { name: B2BUA_KEEPALIVE_TIMEOUT_SEC, value: "45" }
             # Ordinal = pod name (stable per StatefulSet replica == membership ordinal).
             - { name: B2BUA_ORDINAL, value: "$(POD_NAME)" }
             # --- call limiter ---

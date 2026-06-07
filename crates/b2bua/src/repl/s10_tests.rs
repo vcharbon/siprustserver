@@ -339,7 +339,7 @@ async fn backup_held_counts_update_first_replica() {
         "the compacted (Put) replica was delivered + stored"
     );
     assert_eq!(
-        metrics.repl_backup_held(),
+        metrics.repl_backup_replicas(),
         1,
         "a compacted-Put replica still grows the backup-held gauge",
     );

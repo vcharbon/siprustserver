@@ -41,6 +41,7 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
 const PROXY: &str = "127.0.0.1:5080";
+const PROBE: &str = "127.0.0.1:5099";
 const B1: &str = "127.0.0.1:5091";
 const B2: &str = "127.0.0.1:5092";
 const LIMITER_ADDR: &str = "10.0.0.1:8080";
@@ -143,7 +144,11 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
 
     let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
+        .spawn_proxy_with_health_probe(
+            PROXY,
+            PROBE,
+            &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())],
+        )
         .await;
     let mut w_b1 = fh
         .spawn_worker_limited(
@@ -428,22 +433,38 @@ async fn reboot_and_reclaim(
     primary_ord: &str,
     proxy: &crate::ProxySut,
 ) {
-    // "restart b2b" — the rebooted pod re-joins empty at a higher gen.
-    fh.mark(primary_ord, None, "reboot", "restart empty, higher gen");
-    primary.reboot().await;
-    proxy.set_health(primary_ord, WorkerHealth::Alive);
+    // "restart b2b" — the rebooted pod re-joins EMPTY at a higher gen and a NEW
+    // SIP address (new pod IP). `reboot` hard-asserts the node is pristine.
+    fh.mark(primary_ord, None, "reboot", "restart empty, higher gen, new pod IP");
+    let new_addr = primary.reboot().await;
+    // The proxy re-learns the rebooted pod's NEW address (the k8s-EndpointSlice
+    // path) so cookie-routed in-dialog traffic follows it; record it for the
+    // report + the CSeq-audit exclusion. NOTE: we do NOT `set_health(Alive)` — the
+    // REAL health probe drives it. The rebooted worker answers 503 not-ready while
+    // its replication drains, so the proxy observes Unknown→NotReady→Alive exactly
+    // as in production. This is what makes the reclaimed call's keepalive-200
+    // round-trip while the worker is non-Alive (the response-path guard under test).
+    fh.note_worker_rebound(primary_ord, new_addr);
+    proxy.set_address(primary_ord, new_addr);
     // k8s re-publishes the restarted pod's endpoint (a StatefulSet restart is
     // observed as Removed-then-Added) → the survivor re-spawns its puller to the
     // peer (fresh forward replication). Pairs with the `simulate_peer_removed` the
     // kill drove in `inject_failover`.
     backup.simulate_peer_added(primary_ord);
-    for _ in 0..40 {
+    // Drive until the worker is ready AND the proxy's health probe has re-confirmed
+    // it Alive (so routing for the rest of the call resolves to the live pod).
+    for _ in 0..120 {
         fh.advance(Duration::from_millis(500)).await;
-        if primary.is_ready() {
+        if primary.is_ready() && proxy.health(primary_ord) == Some(WorkerHealth::Alive) {
             break;
         }
     }
     assert!(primary.is_ready(), "rebooted primary {primary_ord} became ready");
+    assert_eq!(
+        proxy.health(primary_ord),
+        Some(WorkerHealth::Alive),
+        "the health probe re-confirmed rebooted {primary_ord} Alive on its new pod IP",
+    );
     // ReclaimAll (smoothed) + puller reconnect window.
     fh.advance(Duration::from_secs(10)).await;
 }

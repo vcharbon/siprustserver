@@ -8,6 +8,13 @@
 #   baseline (always on):
 #     long    calls uac-long-options.xml          @ LONG_CPS  (OPTIONS-driven
 #                                                              hold -> very high conc.)
+#     reinvite calls uac-reinvite.xml             @ REINVITE_CPS (=LONG_CPS; INVITE
+#                                                  + two in-dialog re-INVITEs at
+#                                                  +60s/+120s -> proves the in-dialog
+#                                                  re-INVITE transaction survives a
+#                                                  reboot, incl. the split where one
+#                                                  re-INVITE lands on the backup and
+#                                                  the next on the reclaimed nominal)
 #     short   calls uac-endurance-short.xml       @ SHORT_CPS (30s hold)
 #     abuse         uac-abuse-options-flood       @ ABUSE_CAPS (default 1cps)
 #     limiter calls uac-endurance-limiter-cap20.xml @ LIMITER_CPS (30s hold, sends
@@ -31,7 +38,7 @@
 #   ./endurance.sh stop       # stop baseline + abuse streams (leave cluster up)
 #
 # Env knobs (defaults shown):
-#   DURATION=7200 CHAOS_INTERVAL=900 LONG_CPS=5 SHORT_CPS=100 ABUSE_CAPS=1
+#   DURATION=7200 CHAOS_INTERVAL=900 LONG_CPS=5 REINVITE_CPS=5 SHORT_CPS=100 ABUSE_CAPS=1
 #   PEAK_CAPS=200 PEAK_SECS=30 WORKER_REPLICAS=2 PASS_THRESHOLD=90
 #   SMOKE=1 -> DURATION=600 CHAOS_INTERVAL=180
 set -euo pipefail
@@ -48,6 +55,7 @@ VM_IMPORT="$VM/api/v1/import/prometheus"
 
 WORKER_REPLICAS="${WORKER_REPLICAS:-2}"
 LONG_CPS="${LONG_CPS:-5}"
+REINVITE_CPS="${REINVITE_CPS:-$LONG_CPS}"  # in-dialog re-INVITE stream, same volume as long
 SHORT_CPS="${SHORT_CPS:-100}"
 ABUSE_CAPS="${ABUSE_CAPS:-1}"
 PEAK_CAPS="${PEAK_CAPS:-200}"
@@ -160,6 +168,7 @@ launch_stream() {
 ensure_baseline() {
   local s
   for s in "sipp-uac-long uac-long-options.xml $LONG_CPS long" \
+           "sipp-uac-reinvite uac-reinvite.xml $REINVITE_CPS reinvite" \
            "sipp-uac-short uac-endurance-short.xml $SHORT_CPS short" \
            "sipp-uac-limiter uac-endurance-limiter-cap20.xml $LIMITER_CPS limiter"; do
     set -- $s
@@ -513,9 +522,10 @@ wireup() {
 }
 
 start_baseline() {
-  log "starting baseline streams: long@${LONG_CPS} short@${SHORT_CPS} abuse@${ABUSE_CAPS} limiter@${LIMITER_CPS}(cap ${LIMITER_TARGET})"
-  launch_stream sipp-uac-long    uac-long-options.xml          "$LONG_CPS"    long
-  launch_stream sipp-uac-short   uac-endurance-short.xml       "$SHORT_CPS"   short
+  log "starting baseline streams: long@${LONG_CPS} reinvite@${REINVITE_CPS} short@${SHORT_CPS} abuse@${ABUSE_CAPS} limiter@${LIMITER_CPS}(cap ${LIMITER_TARGET})"
+  launch_stream sipp-uac-long     uac-long-options.xml          "$LONG_CPS"     long
+  launch_stream sipp-uac-reinvite uac-reinvite.xml              "$REINVITE_CPS" reinvite
+  launch_stream sipp-uac-short    uac-endurance-short.xml       "$SHORT_CPS"    short
   launch_stream sipp-uac-limiter uac-endurance-limiter-cap20.xml "$LIMITER_CPS" limiter
   ABUSE_CAPS="$ABUSE_CAPS" ./chaos.sh abuse up >>"$RUNLOG" 2>&1 || true
   push_metric "sip_endurance_run{phase=\"start\"} 1"
@@ -523,7 +533,7 @@ start_baseline() {
 
 stop_streams() {
   log "stopping baseline + abuse streams"
-  for j in sipp-uac-long sipp-uac-short sipp-uac-limiter sipp-uac-peak sipp-uac-orphan; do
+  for j in sipp-uac-long sipp-uac-reinvite sipp-uac-short sipp-uac-limiter sipp-uac-peak sipp-uac-orphan; do
     kubectl -n "$NS" delete job "$j" --ignore-not-found >/dev/null 2>&1 || true
   done
   ./chaos.sh abuse down >>"$RUNLOG" 2>&1 || true
