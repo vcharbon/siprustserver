@@ -206,12 +206,20 @@ pub fn build_b_leg(
     };
     // `(name, Some(v))` sets, `(name, None)` removes. Removals never apply to
     // structural headers (the generator owns those); only extra sets ride here.
-    let extra_headers: Vec<MsgHeader> = header_updates
+    let mut extra_headers: Vec<MsgHeader> = header_updates
         .iter()
         .filter_map(|(n, v)| {
             v.as_ref().map(|val| MsgHeader { name: n.clone(), value: val.clone() })
         })
         .collect();
+    // Advertise accepted methods on the originated b-leg INVITE so the callee can
+    // negotiate UPDATE/PRACK/etc. (RFC 3261 §20.5, RFC 3311 §5). `Supported` is
+    // managed separately by `apply_supported_for_18x` (it forwards alice's value);
+    // don't clobber a caller-supplied Allow from `header_updates`.
+    if !extra_headers.iter().any(|h| h.name.eq_ignore_ascii_case("Allow")) {
+        extra_headers
+            .push(MsgHeader { name: "Allow".to_string(), value: generators::B2BUA_ALLOW.to_string() });
+    }
 
     let opts = GenerateOutOfDialogRequestOpts {
         request_uri: request_uri.clone(),

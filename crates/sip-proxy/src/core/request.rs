@@ -275,7 +275,12 @@ impl ProxyCore {
         populate_received_rport_on_top_via(&mut headers, &src_ip, src.port());
         upsert_header(&mut headers, "Max-Forwards", &mf_next.to_string());
 
-        if is_dialog_creating(method) {
+        // Record-Route only on the INITIAL dialog-creating request (no To-tag). A
+        // mid-dialog re-INVITE / target-refresh (To-tag present) reuses the route
+        // set already fixed at dialog creation (RFC 3261 §12.2), so re-inserting RR
+        // is inert bloat and never alters the established route set.
+        let is_initial_dialog_req = req.to.tag.as_deref().map(|t| t.is_empty()).unwrap_or(true);
+        if is_dialog_creating(method) && is_initial_dialog_req {
             // Double record-route so in-dialog DIRECTION is intrinsic to the
             // proxy's own Record-Route — no worker-stamped `;outbound`. We insert
             // two RRs:

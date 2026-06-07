@@ -596,8 +596,18 @@ pub fn generate_in_dialog_request(
         }
     }
     if method == InDialogMethod::Invite {
-        headers.push(h("Allow", B2BUA_ALLOW));
-        headers.push(h("Supported", B2BUA_SUPPORTED));
+        // Advertise capabilities — but do NOT duplicate a header the caller already
+        // carries through `extra_headers` (e.g. a transparently-relayed re-INVITE
+        // whose inbound Allow/Supported are passed through verbatim). Emitting it
+        // twice is a malformed-adjacent header (values merge per RFC 3261 §7.3.1).
+        let carried =
+            |name: &str| opts.extra_headers.iter().any(|hdr| hdr.name.eq_ignore_ascii_case(name));
+        if !carried("Allow") {
+            headers.push(h("Allow", B2BUA_ALLOW));
+        }
+        if !carried("Supported") {
+            headers.push(h("Supported", B2BUA_SUPPORTED));
+        }
     }
 
     headers.extend(opts.extra_headers.iter().cloned());
@@ -769,10 +779,14 @@ pub fn generate_response(
         headers.push(h("Via", value));
     }
 
-    // Echo Record-Route verbatim (RFC 3261 §16.6).
-    for hdr in &incoming_request.headers {
-        if hdr.name.eq_ignore_ascii_case("record-route") {
-            headers.push(h("Record-Route", hdr.value.clone()));
+    // Echo Record-Route verbatim (RFC 3261 §16.6) — but NOT on a 100 Trying: a
+    // 100 establishes no dialog, so its Record-Route is inert (the UAC ignores it)
+    // and merely bloats the provisional. Dialog-establishing 18x/2xx still carry it.
+    if status != 100 {
+        for hdr in &incoming_request.headers {
+            if hdr.name.eq_ignore_ascii_case("record-route") {
+                headers.push(h("Record-Route", hdr.value.clone()));
+            }
         }
     }
 

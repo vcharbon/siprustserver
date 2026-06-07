@@ -345,7 +345,17 @@ pub(crate) fn build_options_health_response(
     };
 
     let (status, reason, extra_headers): (u16, &str, Vec<SipHeader>) = match readiness.state() {
-        ReadinessState::Ready => (200, "OK", Vec::new()),
+        ReadinessState::Ready => (
+            200,
+            "OK",
+            // RFC 3261 §11.2: an OPTIONS 200 SHOULD advertise capabilities so the
+            // querier learns method/extension/body support, not just liveness.
+            vec![
+                hdr("Allow", sip_message::generators::B2BUA_ALLOW),
+                hdr("Accept", "application/sdp"),
+                hdr("Supported", sip_message::generators::B2BUA_SUPPORTED),
+            ],
+        ),
         ReadinessState::NotReady => (
             503,
             "Service Unavailable",
