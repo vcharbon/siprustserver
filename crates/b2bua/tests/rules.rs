@@ -405,6 +405,63 @@ Content-Length: 0\r\n\r\n";
     assert_eq!(d.remote_target, "sip:bob@10.0.0.2:5070");
 }
 
+// Regression for the cluster double-record-route reboot-loss: the front proxy's
+// two Record-Route halves (cookie + `;outbound`) arrive on the wire COMBINED in a
+// single Record-Route header (RFC 3261 §7.3.1). The §12.1.2 reversal must operate
+// on individual route URIs, not header lines — otherwise reversing one combined
+// value is a no-op and leaves the cookie on top, so the worker→callee keepalive
+// carries the cookie first and the proxy bounces it back to a worker after a
+// reboot (no `;outbound` rescue). The b-leg route set MUST end up `;outbound`
+// first so direction is intrinsic to the proxy's own Record-Route.
+#[test]
+fn confirm_dialog_splits_combined_record_route_and_puts_outbound_first() {
+    let mut call = test_call();
+    call = call::helpers::add_b_leg(call, b_leg_pending());
+
+    // Worker-outbound b-leg INVITE → the proxy inserts [cookie, outbound]; the 2xx
+    // echoes them comma-COMBINED in one header. §12.1.2 reverse of the individual
+    // URIs → [outbound, cookie].
+    let raw = "SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKb\r\n\
+From: <sip:svc@10.0.0.9:5060>;tag=svc\r\n\
+To: <sip:bob@10.0.0.2:5070>;tag=bobtag\r\n\
+Call-ID: bcid@x\r\n\
+CSeq: 1 INVITE\r\n\
+Record-Route: <sip:10.0.0.9:5060;e=0;kid=k0;sig=ABC;v=3;w_bak=w1;w_pri=w0;lr>, <sip:10.0.0.9:5060;outbound;lr>\r\n\
+Contact: <sip:bob@10.0.0.2:5070>\r\n\
+Content-Length: 0\r\n\r\n";
+    let resp = match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+        SipMessage::Response(r) => r,
+        _ => panic!("expected a response"),
+    };
+    let event = CallEvent::Sip {
+        message: Box::new(SipMessage::Response(resp)),
+        src: "10.0.0.2:5070".parse().unwrap(),
+    };
+    let config = B2buaConfig::default();
+    let ctx = RuleContext {
+        call: &call,
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "b-1",
+        direction: Direction::FromB,
+        now_ms: 0,
+        config: &config,
+    };
+    let id_gen = IdGen::seeded(1);
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+
+    let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &ctx);
+    let rs = &result.call.b_legs[0].dialogs[0].sip.route_set;
+    assert_eq!(rs.len(), 2, "combined header must be split into 2 individual routes: {rs:?}");
+    assert!(
+        rs[0].contains("outbound"),
+        "the proxy's `;outbound` half MUST be on top of the worker's b-leg route set (got {:?})",
+        rs[0]
+    );
+    assert!(rs[1].contains("w_pri="), "the cookie half is second (got {:?})", rs[1]);
+}
+
 #[test]
 fn confirm_dialog_without_record_route_leaves_route_set_empty() {
     // No Record-Route on the 2xx (single-hop, no record-routing proxy) → the
