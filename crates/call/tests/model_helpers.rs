@@ -205,3 +205,18 @@ fn timer_replace_by_id() {
     );
     assert_eq!(appended.len(), n + 1);
 }
+
+#[test]
+fn dump_cursors_renders_sorted_or_dash() {
+    // No active machine → a dash, not an empty string.
+    let mut call = representative_call();
+    call.sm_cursors.clear();
+    assert_eq!(dump_cursors(&call), "-");
+
+    // Multiple machines render in MachineId order, `machine=state` joined by space.
+    call.sm_cursors
+        .insert(MachineId::new("transfer"), StateLabel::new("CRinging"));
+    call.sm_cursors
+        .insert(MachineId::new("global-call"), StateLabel::new("Active"));
+    assert_eq!(dump_cursors(&call), "global-call=Active transfer=CRinging");
+}

@@ -17,7 +17,7 @@ pub use call_store::{
 pub use memory::InMemoryCallStore;
 pub use terminate_writer::BufferedTerminateWriter;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use call::{call_index_keys, Call, CallBodyCodec, MsgpackCodec};
@@ -534,6 +534,19 @@ impl CallState {
             inner.locks.len() as u64,
             inner.takeover.len() as u64,
         );
+        // State-machine cursor census (ADR-0016 slice 9): how many live calls
+        // rest at each (machine,state) cursor. Computed under the same brief lock
+        // so the distribution is consistent with the call-map size above, then
+        // pushed to the `b2bua_sm_cursors` gauge.
+        let mut census: BTreeMap<(String, String), u64> = BTreeMap::new();
+        for call in inner.calls.values() {
+            for (machine, state) in &call.sm_cursors {
+                *census
+                    .entry((machine.as_str().to_string(), state.as_str().to_string()))
+                    .or_insert(0) += 1;
+            }
+        }
+        self.metrics.set_sm_cursor_census(census);
     }
 
     /// Recompute and apply a call's routing index, dropping any stale keys.

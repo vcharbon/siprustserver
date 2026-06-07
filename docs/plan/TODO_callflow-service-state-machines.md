@@ -274,12 +274,36 @@ the change a pure refactor; do not alter transfer semantics here.
 
 ---
 
-## Slice 9 — Observability (optional)
+## Slice 9 — Observability (optional) — **DONE (gauge + dump aid)**
 
 Surface `sm_cursors` in CDR events / structured logs / a gauge, and a
 "dump-all-cursors" debug aid, so a live call's machine positions are reviewable
 (and useful for HA reconciliation debugging). Can be folded into earlier slices
 if cheap.
+
+**Landed:**
+- **`b2bua_sm_cursors{machine,state}` gauge** — the live distribution of every
+  call's machine positions (`global-call` always; `transfer`/`announcement` while
+  active). Sampled from the call map in `Store::sample_store_gauges` (the existing
+  slow gauge cadence — off the hot path) and rendered by `B2buaMetrics::
+  prometheus_text` via `set_sm_cursor_census` (overwrite semantics, so a drained
+  cursor disappears). A stuck/never-reconciled service shows as a census that
+  lingers while `active_calls` is quiet. Test: `metrics::tests::
+  sm_cursor_census_renders_and_overwrites`.
+- **`call::helpers::dump_cursors(&Call) -> String`** — the "dump-all-cursors"
+  debug aid: a compact, deterministic `global-call=Active transfer=CRinging`
+  line (`-` when no machine is active). Read-only. Test:
+  `dump_cursors_renders_sorted_or_dash`.
+
+**Deliberately deferred:**
+- **CDR-record `sm_cursors` field** — the CDR event schema crosses the concurrent
+  CDR-on-RabbitMQ work's serialization contract (its consumer deserializes
+  `CdrRecord`); folding a cursor field in mid-flight risks churn. Add it once that
+  work lands, as a `#[serde(default, skip_serializing_if)]` field on `CdrRecord`.
+- **Per-transition structured log** — the engine is intentionally side-effect-free
+  on the rule path (metrics + effects only; no `tracing`). `dump_cursors` gives the
+  runner everything it needs to log a snapshot at any boundary it chooses, without
+  putting an `eprintln!` on the per-`SetState` path.
 
 ---
 

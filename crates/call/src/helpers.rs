@@ -531,6 +531,27 @@ pub fn make_dialog_from_incoming(
     }
 }
 
+// ── State-machine cursor debug aid (ADR-0016 slice 9) ───────────────────────
+
+/// Render a call's live state-machine cursors as one compact, deterministic
+/// line — e.g. `global-call=Active transfer=CRinging`. Machines are emitted in
+/// [`MachineId`](crate::model::MachineId) order (the `BTreeMap` is already
+/// sorted), so the output is stable for logs/snapshots, and an empty map (no
+/// active machine) renders as `-`. Read-only: the `SetState` action and the
+/// finalize projections remain the only writers of `sm_cursors`. The
+/// "dump-all-cursors" half of slice 9's observability (the live distribution is
+/// the `b2bua_sm_cursors` gauge).
+pub fn dump_cursors(call: &Call) -> String {
+    if call.sm_cursors.is_empty() {
+        return "-".to_string();
+    }
+    call.sm_cursors
+        .iter()
+        .map(|(machine, state)| format!("{}={}", machine.as_str(), state.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 // ── Timer-list helper (port of timer-helpers.ts) ────────────────────────────
 
 /// Replace any existing entry with the same id, then append the new one. Panics

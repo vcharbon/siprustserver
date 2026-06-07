@@ -121,6 +121,15 @@ struct Inner {
     repl_meta_backup: AtomicU64,
     repl_changelog_entries: AtomicU64,
     repl_changelog_peers: AtomicU64,
+    // State-machine cursor census (ADR-0016 slice 9), keyed "machine|state": the
+    // number of LIVE calls resting at each machine cursor, sampled from the call
+    // map alongside the store gauges (not on the hot path). Renders as
+    // `b2bua_sm_cursors{machine,state}` — the live distribution of every call's
+    // machine positions (`global-call` always; `transfer`/`announcement` while a
+    // service is active). A service that won't drain (stuck announcement, a
+    // backup-partition dialog never reconciled) shows here as a cursor census
+    // that lingers while `active_calls` is otherwise quiet.
+    sm_cursors: Mutex<BTreeMap<String, u64>>,
 }
 
 /// Clone-cheap handle to the B2BUA counter set.
@@ -317,6 +326,19 @@ impl B2buaMetrics {
         self.inner.repl_changelog_peers.store(changelog_peers, Ordering::Relaxed);
     }
 
+    /// Replace the state-machine cursor census (ADR-0016 slice 9) wholesale —
+    /// `census` maps `(machine, state)` to the count of live calls resting there,
+    /// sampled from the call map under the store lock on the slow gauge cadence.
+    /// Overwriting (rather than incrementing) means a cursor that drained to zero
+    /// disappears from the next scrape instead of sticking at its last value.
+    pub fn set_sm_cursor_census(&self, census: BTreeMap<(String, String), u64>) {
+        let mut map = self.inner.sm_cursors.lock().unwrap();
+        map.clear();
+        for ((machine, state), n) in census {
+            map.insert(format!("{machine}|{state}"), n);
+        }
+    }
+
     /// Render the counter set as Prometheus text-exposition format. Used by the
     /// runner's `/metrics` endpoint so an endurance recorder can scrape worker
     /// application metrics alongside container CPU/memory. The
@@ -412,6 +434,15 @@ impl B2buaMetrics {
         g(&mut s, "b2bua_repl_bootstrap_last_applied", "bodies the most recent bootstrap pass imported (re-stalling at the same value across passes ⇒ the stream is truncating, not the materialisation)", self.repl_bootstrap_last_applied());
         g(&mut s, "b2bua_repl_reclaim_scanned", "bodies the most recent bulk reclaim pass found in pri:{self} (denominator: everything bootstrap import made reclaimable; ≪ peer repl_meta_backup ⇒ a bootstrap-import/forward-replication gap)", self.repl_reclaim_scanned());
         g(&mut s, "b2bua_repl_reclaim_materialized", "bodies the most recent bulk reclaim pass freshly re-served into the live map (cumulative total is repl_reclaimed_total; ≪ scanned cumulatively ⇒ a materialise gap)", self.repl_reclaim_materialized());
+        // State-machine cursor census (ADR-0016 slice 9): live calls per
+        // (machine,state). global-call is always present (Active/Terminating);
+        // transfer/announcement appear only while a service is active — a labelled
+        // gauge, so a drained cursor simply stops being emitted.
+        s.push_str("# HELP b2bua_sm_cursors live calls resting at each state-machine cursor (machine=global-call|transfer|announcement|…, state=label); the live distribution of every call's machine positions (ADR-0016)\n# TYPE b2bua_sm_cursors gauge\n");
+        for (k, v) in self.inner.sm_cursors.lock().unwrap().iter() {
+            let (machine, state) = k.split_once('|').unwrap_or((k.as_str(), ""));
+            s.push_str(&format!("b2bua_sm_cursors{{machine=\"{machine}\",state=\"{state}\"}} {v}\n"));
+        }
         s
     }
 }
@@ -458,5 +489,31 @@ mod tests {
         // Each gauge series must carry its TYPE line (Prometheus exposition).
         assert!(txt.contains("# TYPE b2bua_store_calls gauge"));
         assert!(txt.contains("# TYPE b2bua_repl_meta_backup gauge"));
+    }
+
+    #[test]
+    fn sm_cursor_census_renders_and_overwrites() {
+        let m = B2buaMetrics::new();
+        // Unset → the gauge family is declared but emits no series.
+        let zero = m.prometheus_text();
+        assert!(zero.contains("# TYPE b2bua_sm_cursors gauge"));
+        assert!(!zero.contains("b2bua_sm_cursors{"));
+
+        let mut census = BTreeMap::new();
+        census.insert(("global-call".to_string(), "Active".to_string()), 5);
+        census.insert(("transfer".to_string(), "CRinging".to_string()), 2);
+        m.set_sm_cursor_census(census);
+        let txt = m.prometheus_text();
+        assert!(txt.contains("b2bua_sm_cursors{machine=\"global-call\",state=\"Active\"} 5"));
+        assert!(txt.contains("b2bua_sm_cursors{machine=\"transfer\",state=\"CRinging\"} 2"));
+
+        // A fresh census OVERWRITES: a cursor that drained to zero disappears
+        // rather than sticking at its last value (gauge, not counter).
+        let mut next = BTreeMap::new();
+        next.insert(("global-call".to_string(), "Active".to_string()), 3);
+        m.set_sm_cursor_census(next);
+        let txt = m.prometheus_text();
+        assert!(txt.contains("b2bua_sm_cursors{machine=\"global-call\",state=\"Active\"} 3"));
+        assert!(!txt.contains("machine=\"transfer\""));
     }
 }
