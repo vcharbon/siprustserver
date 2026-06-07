@@ -7,17 +7,39 @@
 use std::collections::HashSet;
 
 use call::helpers::is_fully_resolved;
-use call::{Call, CallModelState};
+use call::{Call, CallModelState, MachineId, StateLabel};
 
 use crate::effects::{
     BufferedObservabilityEffect, CriticalStateEffect, HandlerResult, SoftBoundedEffect,
 };
 
-/// Promote `terminating → terminated` when all legs are resolved.
+/// The always-on global call machine (ADR-0016 X2). Its cursor is a uniform,
+/// read-only **projection** of the authoritative `CallModelState` — the engine,
+/// the doc generator, observability, and HA reconciliation read every machine's
+/// position through `sm_cursors` regardless of crate. The `state` field stays the
+/// single source of truth (this is the one cursor `SetState` does not write).
+pub const GLOBAL_CALL_MACHINE: MachineId = MachineId::new("global-call");
+
+fn global_call_label(state: CallModelState) -> StateLabel {
+    match state {
+        CallModelState::Active => StateLabel::new("Active"),
+        CallModelState::Terminating => StateLabel::new("Terminating"),
+        CallModelState::Terminated => StateLabel::new("Terminated"),
+    }
+}
+
+/// Promote `terminating → terminated` when all legs are resolved, then project
+/// the (possibly promoted) `CallModelState` into the `global-call` cursor. This
+/// is the single finalize point, so the global machine is observable uniformly
+/// without touching the authoritative `state` field or the termination logic.
 pub fn finalize(mut result: HandlerResult) -> HandlerResult {
     if result.call.state == CallModelState::Terminating && is_fully_resolved(&result.call) {
         result.call.state = CallModelState::Terminated;
     }
+    result
+        .call
+        .sm_cursors
+        .insert(GLOBAL_CALL_MACHINE, global_call_label(result.call.state));
     result
 }
 

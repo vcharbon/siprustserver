@@ -124,6 +124,38 @@ fn invariants_append_cleanup_on_terminated() {
     );
 }
 
+// ── ADR-0016 slice 2: global call machine projection ────────────────────────
+
+#[test]
+fn global_call_cursor_projects_lifecycle_states() {
+    let cursor = |r: &HandlerResult| {
+        r.call
+            .sm_cursors
+            .get(&invariants::GLOBAL_CALL_MACHINE)
+            .map(StateLabel::as_str)
+            .map(str::to_string)
+    };
+    let mut call = test_call();
+
+    // Active call → "Active".
+    let r = invariants::finalize(HandlerResult::new(call.clone()));
+    assert_eq!(cursor(&r).as_deref(), Some("Active"));
+
+    // Terminating with a still-confirmed a-leg (unresolved → no promotion)
+    // → "Terminating".
+    call.state = CallModelState::Terminating;
+    call.a_leg.state = LegState::Confirmed;
+    call.a_leg.bye_disposition = None;
+    let r = invariants::finalize(HandlerResult::new(call.clone()));
+    assert_eq!(r.call.state, CallModelState::Terminating, "not promoted while unresolved");
+    assert_eq!(cursor(&r).as_deref(), Some("Terminating"));
+
+    // Terminated → "Terminated".
+    call.state = CallModelState::Terminated;
+    let r = invariants::finalize(HandlerResult::new(call.clone()));
+    assert_eq!(cursor(&r).as_deref(), Some("Terminated"));
+}
+
 // ── ADR-0016 slice 1: machine-gated selection + SetState + transition check ──
 
 const TEST_MACHINE: &str = "test-machine";
