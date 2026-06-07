@@ -24,7 +24,7 @@
 mod common;
 
 use call::CdrEventType;
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
 use sip_message::message_helpers::get_header;
 use sip_message::parser::custom::CustomParser;
@@ -93,13 +93,7 @@ async fn alice_calls_bob_through_proxy_and_b2bua() {
     bye.expect(200).await;
 
     // Let the worker drain teardown + CDR.
-    for _ in 0..50 {
-        if b2bua.cdr_records().len() == 1 {
-            break;
-        }
-        tokio::task::yield_now().await;
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    settle_until(|| b2bua.cdr_records().len() == 1).await;
 
     // ── CDR assertions (call really established + tore down) ─────────────────
     let cdrs = b2bua.cdr_records();

@@ -38,6 +38,9 @@ pub use supervisor::{AddrResolver, FnPeerResolver, PeerResolver, ReplicationSupe
 mod tests;
 
 #[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
 mod s5_tests;
 
 #[cfg(test)]

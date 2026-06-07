@@ -18,18 +18,15 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use call::{Call, MsgpackCodec, CallBodyCodec};
 use repl_net::transport::{ReplicationNetwork, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
-use topology::{Peer, SimulatedMembership};
 
-use super::{
-    Changelog, FnPeerResolver, Puller, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor,
-};
+use super::test_support::{fast_config, one_peer, supervisor_for, tick, Node};
+use super::{Changelog, Puller, ReplicatingCallStore};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::metrics::B2buaMetrics;
@@ -38,85 +35,6 @@ use crate::store::{
 };
 
 const BAK: PartitionRole = PartitionRole::Backup;
-
-fn fast_config() -> PullerConfig {
-    PullerConfig {
-        backoff_init_ms: 100,
-        backoff_max_ms: 1_000,
-        bootstrap_hard_timeout_ms: 2_000,
-    }
-}
-
-async fn settle() {
-    for _ in 0..64 {
-        tokio::task::yield_now().await;
-    }
-}
-
-/// Drive the paused clock in 100 ms chunks (CLAUDE.md: advance between protocol
-/// steps; settle yields so spawned tasks make progress at each step).
-async fn tick(ms: u64) {
-    let chunks = ms.div_ceil(100).max(1);
-    for _ in 0..chunks {
-        settle().await;
-        tokio::time::advance(Duration::from_millis(100)).await;
-        settle().await;
-    }
-    tokio::time::advance(Duration::from_millis(100)).await;
-    settle().await;
-}
-
-/// A replicating node: its store + changelog + a ReplServer running in the bg.
-struct Node {
-    store: Arc<ReplicatingCallStore>,
-    addr: SocketAddr,
-}
-
-impl Node {
-    async fn spawn(
-        ordinal: &str,
-        addr: SocketAddr,
-        gen: u64,
-        net: &Arc<SimulatedReplicationNetwork>,
-        clock: &Clock,
-    ) -> Self {
-        let changelog = Changelog::new(gen, clock.clone()).with_ttls(30_000, 300_000);
-        let store = Arc::new(ReplicatingCallStore::with_changelog(
-            changelog.clone(),
-            clock.clone(),
-        ));
-        let listener = net.listen(addr).await.unwrap();
-        let server = ReplServer::new(ordinal, changelog, store.clone());
-        tokio::spawn(server.run(listener));
-        Self { store, addr }
-    }
-}
-
-fn supervisor_for(
-    self_ordinal: &str,
-    store: &ReplicatingCallStore,
-    net: &Arc<SimulatedReplicationNetwork>,
-    clock: &Clock,
-    addrs: Vec<(String, SocketAddr)>,
-) -> ReplicationSupervisor {
-    let map: std::collections::HashMap<String, SocketAddr> = addrs.into_iter().collect();
-    let resolve = Arc::new(FnPeerResolver(move |peer: &Peer| *map.get(&peer.ordinal).unwrap()));
-    ReplicationSupervisor::with_config(
-        self_ordinal,
-        net.clone(),
-        store.clone(),
-        resolve,
-        clock.clone(),
-        fast_config(),
-    )
-}
-
-fn one_peer(ordinal: &str, clock: &Clock) -> Arc<SimulatedMembership> {
-    Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new(ordinal, ordinal)],
-        clock.clone(),
-    ))
-}
 
 /// Build a `B2buaConfig` for a worker `ordinal` (only `self_ordinal` matters here).
 fn config_for(ordinal: &str) -> B2buaConfig {
@@ -170,18 +88,18 @@ async fn replicating_callstate_flush_lands_on_peer() {
     let w1 = Node::spawn("w1", SocketAddr::from(([127, 0, 0, 1], 9902)), 1, &net, &clock).await;
 
     // w1 backs up w0: w1's supervisor pulls w0.
-    let w1_sup = supervisor_for("w1", &w1.store, &net, &clock, vec![("w0".into(), w0.addr)]);
+    let w1_sup = supervisor_for("w1", &w1.store, &net, &clock, vec![("w0".into(), w0.addr)], fast_config());
     w1_sup.start(one_peer("w0", &clock));
     tick(50).await;
 
     // The b2bua call path: a CallState over w0's store, draining to that store so
-    // the changelog bumps on the flush (exactly how B2buaCore wires it).
-    let writer = BufferedTerminateWriter::spawn(
-        (w0.store.clone()) as Arc<dyn CallStore>,
-        1024,
-    );
-    let state = CallState::new(w0.store.clone() as Arc<dyn CallStore>, writer, "w0", B2buaMetrics::new())
-        .with_replication(w0.store.clone());
+    // the changelog bumps on the flush (exactly how B2buaCore wires it). `w0.store`
+    // is bare and clone-cheap (shares inner state); wrap once so the writer, the
+    // CallState, and the replication handle share one Arc over that same state.
+    let store: Arc<ReplicatingCallStore> = Arc::new(w0.store.clone());
+    let writer = BufferedTerminateWriter::spawn(store.clone() as Arc<dyn CallStore>, 1024);
+    let state = CallState::new(store.clone() as Arc<dyn CallStore>, writer, "w0", B2buaMetrics::new())
+        .with_replication(store.clone());
 
     // Build a call from an INVITE carrying the w_pri=w0;w_bak=w1 cookie. The
     // callRef encodes primary w0, so the write-side policy routes it Forward → w1.

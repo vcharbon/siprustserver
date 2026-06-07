@@ -319,17 +319,7 @@ impl HaCluster {
     /// proven settle/advance/settle discipline (CLAUDE.md). Drive the protocol
     /// BETWEEN advances: advance to the deadline, then assert.
     pub async fn advance(&self, dur: Duration) {
-        let ms = dur.as_millis() as u64;
-        let chunks = ms.div_ceil(100).max(1);
-        for _ in 0..chunks {
-            settle().await;
-            tokio::time::advance(Duration::from_millis(100)).await;
-            settle().await;
-        }
-        // Trailing pass so frames produced during the last settle (e.g. a
-        // just-woken server drain) get their transit timer tripped + delivered.
-        tokio::time::advance(Duration::from_millis(100)).await;
-        settle().await;
+        sip_clock::testkit::pump(dur).await;
     }
 
     // -- report ------------------------------------------------------------
@@ -377,11 +367,3 @@ impl HaCluster {
     }
 }
 
-/// Let the whole spawned pipeline hop forward. One yield only advances one task
-/// hop and the pipeline is several hops deep, so settle generously (matches the
-/// b2bua repl tests' `settle`).
-async fn settle() {
-    for _ in 0..64 {
-        tokio::task::yield_now().await;
-    }
-}

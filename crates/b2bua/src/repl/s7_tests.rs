@@ -192,58 +192,19 @@ fn emitted_reason_aligns_with_proxy_classify_503() {
 // ── Supervisor-fed transition (real ReplicationSupervisor, paused runtime) ──
 
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use repl_net::transport::{ReplicationNetwork, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 use topology::{Peer, SimulatedMembership};
 
-use super::{Changelog, FnPeerResolver, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor};
-use crate::store::{CallStore, PartitionRole, PropagateDirection, PutOpts};
+use super::test_support::{cref, fast_config, fwd, tick};
+use super::{Changelog, FnPeerResolver, ReplServer, ReplicatingCallStore, ReplicationSupervisor};
+use crate::store::{CallStore, PartitionRole};
 
 const PRI: PartitionRole = PartitionRole::Primary;
 
-fn fast_config() -> PullerConfig {
-    PullerConfig {
-        backoff_init_ms: 100,
-        backoff_max_ms: 1_000,
-        bootstrap_hard_timeout_ms: 2_000,
-    }
-}
-
 fn addr(n: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 9700 + n))
-}
-
-/// Forward (primary→backup) put options targeting `peer`.
-fn fwd(peer: &str) -> PutOpts {
-    PutOpts {
-        peer: Some(peer.to_string()),
-        direction: Some(PropagateDirection::Forward),
-    }
-}
-
-fn cref(primary: &str, id: &str) -> String {
-    format!("{primary}|{id}|t{id}")
-}
-
-async fn settle() {
-    for _ in 0..64 {
-        tokio::task::yield_now().await;
-    }
-}
-
-/// Advance ~`ms` in 100 ms chunks, settling between (fake-clock hazard: drive
-/// the protocol BETWEEN advances). Mirror of `s6_tests::tick`.
-async fn tick(ms: u64) {
-    let chunks = ms.div_ceil(100).max(1);
-    for _ in 0..chunks {
-        settle().await;
-        tokio::time::advance(Duration::from_millis(100)).await;
-        settle().await;
-    }
-    tokio::time::advance(Duration::from_millis(100)).await;
-    settle().await;
 }
 
 /// A `Readiness` over a real [`ReplicationSupervisor`] reports NotReady until

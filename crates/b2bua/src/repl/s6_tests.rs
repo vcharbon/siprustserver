@@ -7,112 +7,21 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use repl_net::frame::Watermark;
 use repl_net::transport::{Fault, ReplicationNetwork, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 use topology::{Peer, SimulatedMembership};
 
-use super::{Changelog, FnPeerResolver, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor};
-use crate::store::{CallStore, PartitionRole, PropagateDirection, PutOpts};
+use super::test_support::{cref, fast_config, fwd, rev, supervisor_for, tick, Node};
+use super::{Changelog, ReplServer, ReplicatingCallStore};
+use crate::store::{CallStore, PartitionRole, PutOpts};
 
 const PRI: PartitionRole = PartitionRole::Primary;
 const BAK: PartitionRole = PartitionRole::Backup;
 
-/// Short backoff + short bootstrap hard timeout so a couple of advances trip
-/// the relevant deadline deterministically.
-fn fast_config() -> PullerConfig {
-    PullerConfig {
-        backoff_init_ms: 100,
-        backoff_max_ms: 1_000,
-        bootstrap_hard_timeout_ms: 2_000,
-    }
-}
-
 fn addr(n: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 9600 + n))
-}
-
-/// Forward (primary→backup) put options targeting `peer`.
-fn fwd(peer: &str) -> PutOpts {
-    PutOpts {
-        peer: Some(peer.to_string()),
-        direction: Some(PropagateDirection::Forward),
-    }
-}
-
-/// Reverse (acting-backup→reclaiming-primary) put options targeting `peer`.
-fn rev(peer: &str) -> PutOpts {
-    PutOpts {
-        peer: Some(peer.to_string()),
-        direction: Some(PropagateDirection::Reverse),
-    }
-}
-
-/// A node = its store + changelog + listen address; the server runs in the bg.
-struct Node {
-    store: ReplicatingCallStore,
-    addr: SocketAddr,
-}
-
-impl Node {
-    async fn spawn(
-        ordinal: &str,
-        addr: SocketAddr,
-        gen: u64,
-        net: &Arc<SimulatedReplicationNetwork>,
-        clock: &Clock,
-    ) -> Self {
-        let changelog = Changelog::new(gen, clock.clone()).with_ttls(30_000, 300_000);
-        let store = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
-        let listener = net.listen(addr).await.unwrap();
-        let server = ReplServer::new(ordinal, changelog, Arc::new(store.clone()));
-        tokio::spawn(server.run(listener));
-        Self { store, addr }
-    }
-}
-
-/// Wire a supervisor to pull from a set of peers.
-fn supervisor_for(
-    self_ordinal: &str,
-    store: &ReplicatingCallStore,
-    net: &Arc<SimulatedReplicationNetwork>,
-    clock: &Clock,
-    addrs: Vec<(String, SocketAddr)>,
-) -> ReplicationSupervisor {
-    let map: std::collections::HashMap<String, SocketAddr> = addrs.into_iter().collect();
-    let resolve = Arc::new(FnPeerResolver(move |peer: &Peer| *map.get(&peer.ordinal).unwrap()));
-    ReplicationSupervisor::with_config(
-        self_ordinal,
-        net.clone(),
-        store.clone(),
-        resolve,
-        clock.clone(),
-        fast_config(),
-    )
-}
-
-async fn settle() {
-    for _ in 0..64 {
-        tokio::task::yield_now().await;
-    }
-}
-
-async fn tick(ms: u64) {
-    let chunks = ms.div_ceil(100).max(1);
-    for _ in 0..chunks {
-        settle().await;
-        tokio::time::advance(Duration::from_millis(100)).await;
-        settle().await;
-    }
-    tokio::time::advance(Duration::from_millis(100)).await;
-    settle().await;
-}
-
-/// callRef whose encoded primary is `primary` (so partition_of routes it).
-fn cref(primary: &str, id: &str) -> String {
-    format!("{primary}|{id}|t{id}")
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +40,7 @@ async fn reboot_recovery_reclaims_pri_partition() {
     let b = Node::spawn("B", addr(2), 1, &net, &clock).await;
 
     // B pulls A (so it holds A's calls in bak:A).
-    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)]);
+    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
     b_sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("A", "A")],
         clock.clone(),
@@ -160,7 +69,7 @@ async fn reboot_recovery_reclaims_pri_partition() {
     // Simulate A reboot: brand-new EMPTY store under a HIGHER incarnation gen,
     // cold. A now bootstraps from B (pulling B's bak:A partition as pri:A).
     let a2_store = ReplicatingCallStore::new(2, clock.clone());
-    let a2_sup = supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)]);
+    let a2_sup = supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
     a2_sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("B", "B")],
         clock.clone(),
@@ -208,7 +117,7 @@ async fn concurrent_mutation_during_scan_keeps_newest() {
     let a = Node::spawn("A", addr(11), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(12), 1, &net, &clock).await;
 
-    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)]);
+    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
     b_sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("A", "A")],
         clock.clone(),
@@ -228,7 +137,7 @@ async fn concurrent_mutation_during_scan_keeps_newest() {
     // (p stays at A's branch point 1): (1,0) → (1,1), which bumps changelog-for-A
     // (partition=Pri).
     let a2_store = ReplicatingCallStore::new(2, clock.clone());
-    let a2_sup = supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)]);
+    let a2_sup = supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
     a2_sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("B", "B")],
         clock.clone(),
@@ -264,7 +173,7 @@ async fn terminal_handoff_switches_to_replog_same_connection() {
     let b = Node::spawn("B", addr(22), 1, &net, &clock).await;
 
     // B holds one of A's calls in bak:A.
-    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)]);
+    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
     b_sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("A", "A")],
         clock.clone(),
@@ -279,7 +188,7 @@ async fn terminal_handoff_switches_to_replog_same_connection() {
 
     // A reboots empty; bootstrap then tail (single connection).
     let a2_store = ReplicatingCallStore::new(2, clock.clone());
-    let a2_sup = supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)]);
+    let a2_sup = supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
     a2_sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("B", "B")],
         clock.clone(),
@@ -332,7 +241,7 @@ async fn hard_timer_unreachable_peer_boots_anyway() {
     // Cut A→B so connect is blocked.
     net.apply_fault(Fault::Partition { a: a_addr, b: b_addr });
 
-    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)]);
+    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)], fast_config());
     a_sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("B", "B")],
         clock.clone(),
@@ -382,7 +291,7 @@ async fn hard_timer_stalled_bootstrap_completes_best_effort() {
     });
 
     let a_store = ReplicatingCallStore::new(1, clock.clone());
-    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)]);
+    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)], fast_config());
     a_sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("B", "B")],
         clock.clone(),
@@ -413,7 +322,7 @@ async fn lazy_batch_scan_interleaved_with_put_converges() {
     let a = Node::spawn("A", addr(51), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(52), 1, &net, &clock).await;
 
-    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)]);
+    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
     b_sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("A", "A")],
         clock.clone(),
@@ -433,7 +342,7 @@ async fn lazy_batch_scan_interleaved_with_put_converges() {
 
     // A reboots empty; bootstrap streams 200 keys across multiple batches.
     let a2_store = ReplicatingCallStore::new(2, clock.clone());
-    let a2_sup = supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)]);
+    let a2_sup = supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
     a2_sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("B", "B")],
         clock.clone(),
@@ -478,7 +387,7 @@ async fn empty_bak_partition_immediate_terminal_noop() {
 
     // A cold-boots and bootstraps from B, which holds nothing in bak:A.
     let a_store = ReplicatingCallStore::new(1, clock.clone());
-    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b.addr)]);
+    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
     a_sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("B", "B")],
         clock.clone(),
@@ -521,7 +430,7 @@ async fn readiness_not_pinned_by_unreachable_peer() {
     let b_addr = addr(61); // B never listens → every connect is refused.
 
     let a_store = ReplicatingCallStore::new(1, clock.clone());
-    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)]);
+    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)], fast_config());
     a_sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("B", "B")],
         clock.clone(),
@@ -559,7 +468,7 @@ async fn cold_start_bootstraps_after_hard_timeout_reconnect() {
     // A is cold and pulls B; B is NOT listening yet → A's connect is refused and
     // the bootstrap hard timer trips (complete best-effort, W still (0,0)).
     let a_store = ReplicatingCallStore::new(1, clock.clone());
-    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)]);
+    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)], fast_config());
     a_sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("B", "B")],
         clock.clone(),

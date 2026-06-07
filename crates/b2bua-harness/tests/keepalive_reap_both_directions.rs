@@ -22,7 +22,7 @@
 
 use std::time::Duration;
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use call::CdrEventType;
 use scenario_harness::Harness;
 
@@ -31,16 +31,6 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Poll the in-memory CDR sink (writing is async on the teardown path).
-async fn await_cdrs(b2bua: &B2buaSut, want: usize) {
-    for _ in 0..200 {
-        if b2bua.cdr_records().len() >= want {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-}
 
 /// Caller (A leg) goes silent on its keepalive OPTIONS → the call is torn down
 /// and a CDR with a teardown (Bye) event is written.
@@ -69,7 +59,7 @@ async fn caller_silent_keepalive_reaps_with_cdr() {
     h.advance(KEEPALIVE_TIMEOUT).await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
-    await_cdrs(&b2bua, 1).await;
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "one CDR for the reaped call");
     let kinds: Vec<CdrEventType> = cdrs[0].events.iter().map(|e| e.event_type).collect();
@@ -109,7 +99,7 @@ async fn callee_silent_keepalive_reaps_with_cdr() {
     h.advance(KEEPALIVE_TIMEOUT).await;
     alice.receive("BYE").await.respond(200, "OK").await;
 
-    await_cdrs(&b2bua, 1).await;
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "one CDR for the reaped call");
     let kinds: Vec<CdrEventType> = cdrs[0].events.iter().map(|e| e.event_type).collect();
@@ -174,18 +164,15 @@ async fn two_calls_both_reap_despite_shared_timer_ids() {
     bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     bob.receive_tolerating("BYE", &["OPTIONS", "BYE"]).await.respond(200, "OK").await;
 
-    await_cdrs(&b2bua, 2).await;
+    settle_until(|| b2bua.cdr_records().len() >= 2).await;
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 2, "BOTH calls produce a CDR (neither leaked)");
     for cdr in &cdrs {
         let kinds: Vec<CdrEventType> = cdr.events.iter().map(|e| e.event_type).collect();
         assert!(kinds.contains(&CdrEventType::Bye), "each CDR has a Bye event: {kinds:?}");
     }
-    assert_eq!(
-        b2bua.metrics().removals_total(),
-        b2bua.metrics().creations_total(),
-        "removals == creations: no orphaned established call leaked",
-    );
+    // No orphaned established call leaked.
+    b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
 }

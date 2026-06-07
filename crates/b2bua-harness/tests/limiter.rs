@@ -16,7 +16,7 @@ use b2bua::decision::{
 };
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{establish_call, settle_until, B2buaSut};
 use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
 use http_net::{Fault, HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::Harness;
@@ -68,22 +68,6 @@ fn route_with_limiter(host: &str, port: u16, id: &str, limit: i64) -> Arc<dyn Ca
     )
 }
 
-/// Establish a call (INVITE → 200 → ACK) and return the dialog so the caller can
-/// BYE it.
-async fn establish(
-    alice: &scenario_harness::Agent,
-    bob: &scenario_harness::Agent,
-    b2bua_addr: SocketAddr,
-) -> scenario_harness::Dialog {
-    let mut call = alice.invite(bob).with_sdp(OFFER).through(b2bua_addr).send().await;
-    let mut uas = bob.receive("INVITE").await;
-    uas.respond(200, "OK").with_sdp(ANSWER).await;
-    call.expect(200).await;
-    let dialog = call.ack().await;
-    bob.receive("ACK").await;
-    dialog
-}
-
 #[tokio::test]
 async fn rejected_call_gets_486_and_no_second_increment() {
     let h = Harness::with_transit_delay("limiter-486", 0);
@@ -98,7 +82,7 @@ async fn rejected_call_gets_486_and_no_second_increment() {
             .await;
 
     // First call admitted + answered.
-    let _dialog1 = establish(&alice, &bob, b2bua.addr).await;
+    let _dialog1 = establish_call(&alice, &bob, b2bua.addr).await;
     assert_eq!(store.stats().current_total, 1, "first call incremented");
 
     // Second concurrent call: trunk-A at cap 1 → 486 Busy Here.
@@ -126,22 +110,19 @@ async fn release_on_bye_frees_the_slot() {
             .await;
 
     // Establish then hang up call 1.
-    let mut dialog1 = establish(&alice, &bob, b2bua.addr).await;
+    let mut dialog1 = establish_call(&alice, &bob, b2bua.addr).await;
     assert_eq!(store.stats().current_total, 1);
     let mut bye = dialog1.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
     // The release must drain the counter back to 0.
-    let mut ok = false;
-    for _ in 0..100 {
-        if store.stats().current_total == 0 {
-            ok = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    assert!(ok, "BYE must release the limiter hold");
+    settle_until(|| store.stats().current_total == 0).await;
+    assert_eq!(
+        store.stats().current_total,
+        0,
+        "BYE must release the limiter hold"
+    );
 
     // The freed slot admits a fresh call (bob sees its INVITE, not a 486).
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -204,7 +185,7 @@ async fn shared_counting_across_two_workers() {
     .await;
 
     // Call through w0 fills the shared cap of 1.
-    let _d = establish(&alice, &bob, w0.addr).await;
+    let _d = establish_call(&alice, &bob, w0.addr).await;
 
     // Call through w1 sees the SAME counter → rejected 486.
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(w1.addr).send().await;
@@ -243,7 +224,7 @@ async fn failover_on_reject_routes_to_backup() {
             .await;
 
     // Call 1 fills the cap on the primary.
-    let _d = establish(&alice, &bob, b2bua.addr).await;
+    let _d = establish_call(&alice, &bob, b2bua.addr).await;
 
     // Call 2 is rejected by the limiter, but callback_context → /call/failure →
     // failover to bob2: bob2 (not bob) receives the INVITE, no 486 to carol.

@@ -13,11 +13,8 @@
 
 use std::time::Duration;
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{establish_call, B2buaSut};
 use scenario_harness::Harness;
-
-const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
-const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 
 /// The Rust default keepalive interval (`KeepaliveActivation.interval_sec`).
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -30,14 +27,7 @@ async fn keepalive_options_to_both_legs_two_cycles() {
     let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5084", "127.0.0.1", 5074).await;
 
     // ── Call setup ───────────────────────────────────────────────────────────
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
-    let mut uas = bob.receive("INVITE").await;
-    uas.respond(180, "Ringing").await;
-    call.expect(180).await;
-    uas.respond(200, "OK").with_sdp(ANSWER).await;
-    call.expect(200).await;
-    let mut dialog = call.ack().await;
-    bob.receive("ACK").await;
+    let mut dialog = establish_call(&alice, &bob, b2bua.addr).await;
 
     // ── First keepalive cycle ────────────────────────────────────────────────
     h.advance(KEEPALIVE_INTERVAL).await;

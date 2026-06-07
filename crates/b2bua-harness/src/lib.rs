@@ -13,13 +13,65 @@ use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
 use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaCore, B2buaDeps};
-use scenario_harness::Harness;
+use scenario_harness::{Agent, Dialog, Harness};
 use sip_clock::Clock;
 use sip_txn::IdGen;
 
 // The multi-node HA failover harness (FailoverHarness / ReplicatedB2buaSut /
 // ProxySut) moved to the dedicated `failover-harness` crate (ADR-0013 §0). This
 // crate is the single-SUT b2bua harness.
+
+/// Poll `cond` until it holds, yielding so spawned teardown / CDR-writer tasks
+/// drain. The single home for the "wait for the async teardown to land" loop
+/// every e2e test used to hand-roll.
+///
+/// Works under both wall-clock (`#[tokio::test]`) and `start_paused` tests:
+/// under a paused runtime the `sleep` auto-advances virtual time, so the
+/// awaited spawned tasks still get to run. Bounded (200 × 5 ms) so a real
+/// regression — `cond` never holds — falls through to the test's assertions
+/// instead of hanging.
+///
+/// For tests that must *advance the clock to trip a timer* (not merely drain
+/// already-due tasks), advance with `Harness::advance` first, then settle here.
+pub async fn settle_until(cond: impl Fn() -> bool) {
+    for _ in 0..200 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+/// Canonical minimal SDP offer used by [`establish_call`]. A single audio
+/// `m=` line — enough for the B2BUA to relay; tests that don't probe media
+/// don't care about its contents.
+pub const OFFER_SDP: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+/// Canonical minimal SDP answer used by [`establish_call`]. See [`OFFER_SDP`].
+pub const ANSWER_SDP: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
+
+/// Establish a confirmed dialog through the B2BUA and return alice's `Dialog`
+/// so the caller can drive the in-dialog phase (BYE, re-INVITE, keepalive, …).
+///
+/// Runs the canonical happy-path handshake — alice INVITEs (with [`OFFER_SDP`])
+/// through `b2bua_addr`; bob rings (180) then answers (200 with [`ANSWER_SDP`]);
+/// the ACK is relayed end-to-end — the ~8 lines every "set the call up, then
+/// test the interesting part" test used to re-type.
+///
+/// Opt-in: a test that asserts on the intermediate 18x, on the relayed SDP
+/// bodies, or that injects a non-2xx final response should keep driving the
+/// handshake by hand — this fixture is for tests whose subject is what happens
+/// *after* the call is up.
+pub async fn establish_call(alice: &Agent, bob: &Agent, b2bua_addr: SocketAddr) -> Dialog {
+    let mut call = alice.invite(bob).with_sdp(OFFER_SDP).through(b2bua_addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
+    call.expect(200).await;
+    let dialog = call.ack().await;
+    bob.receive("ACK").await;
+    dialog
+}
 
 /// A running B2BUA bound on the harness fabric. Keep it alive for the duration
 /// of the scenario (drop tears the worker tasks down with the endpoint).
@@ -306,5 +358,44 @@ impl B2buaSut {
     /// in-dialog request that 481'd without tearing its per-call state down).
     pub fn lock_count(&self) -> usize {
         self._core.lock_count()
+    }
+
+    /// The named "no leak" oracle: every call created has been reaped and no
+    /// per-call state survives. Asserts the three invariants the reap tests
+    /// used to spell out by hand:
+    ///   1. `creations_total() == removals_total()` — every call's lifecycle
+    ///      closed (the `active_calls` lens misses orphan-reject leaks, which
+    ///      never insert a call; the paired counters + `lock_count` catch them).
+    ///   2. `active_calls() == 0` — no live call left in the map.
+    ///   3. `lock_count() == 0` — no stranded per-call serialization lock.
+    ///
+    /// A new leak dimension (e.g. the `b2bua_timer_queue_len − b2bua_timer_live`
+    /// tombstone gap from the CLAUDE.md timer hazard) is added here once and is
+    /// then checked by every reap test — the locality this oracle exists for.
+    ///
+    /// Call it *after* the teardown has drained (see [`settle_until`]).
+    #[track_caller]
+    pub fn assert_fully_reaped(&self) {
+        let (creations, removals) = (
+            self.metrics.creations_total(),
+            self.metrics.removals_total(),
+        );
+        assert_eq!(
+            creations, removals,
+            "call leak: creations ({creations}) != removals ({removals}) — a call \
+             was created but never reaped"
+        );
+        assert_eq!(
+            self.active_calls(),
+            0,
+            "call leak: {} live call(s) left in the map",
+            self.active_calls()
+        );
+        assert_eq!(
+            self.lock_count(),
+            0,
+            "lock leak: {} stranded per-call serialization lock(s)",
+            self.lock_count()
+        );
     }
 }

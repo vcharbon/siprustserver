@@ -63,14 +63,6 @@ use topology::{Peer, SimulatedMembership};
 /// reachable in a test budget.
 const DEFAULT_TTLS: (i64, i64) = (60_000, 600_000);
 
-/// Let the whole cross-plane spawned pipeline hop forward. One yield only
-/// advances one task hop and the pipeline is many hops deep across both planes,
-/// so settle generously (matches the b2bua repl / ha-harness `settle`).
-async fn settle() {
-    for _ in 0..96 {
-        tokio::task::yield_now().await;
-    }
-}
 
 // ===========================================================================
 // ReplicatedB2buaSut — a replicating B2BUA worker on the failover fabric
@@ -949,16 +941,7 @@ impl FailoverHarness {
     /// pipelines with the proven settle/advance/settle discipline (CLAUDE.md).
     /// Drive the protocol BETWEEN advances: advance to the deadline, then assert.
     pub async fn advance(&self, dur: Duration) {
-        let ms = dur.as_millis() as u64;
-        let chunks = ms.div_ceil(100).max(1);
-        for _ in 0..chunks {
-            settle().await;
-            tokio::time::advance(Duration::from_millis(100)).await;
-            settle().await;
-        }
-        // Trailing pass so frames/messages staged in the last chunk also land.
-        tokio::time::advance(Duration::from_millis(100)).await;
-        settle().await;
+        sip_clock::testkit::pump(dur).await;
     }
 
     /// **Fine-grained pump toward an unknown timer deadline.** Advances the

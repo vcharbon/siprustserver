@@ -136,6 +136,50 @@ pub mod testkit {
     pub async fn advance_in_100ms_chunks(total: Duration) {
         advance_in_chunks(total, Duration::from_millis(100)).await;
     }
+
+    /// Generous settle count, sized for the deepest test pipeline (the failover
+    /// harness drives the SIP *and* replication planes together — notify →
+    /// server drain → send → transit-delivery actor → puller recv → store apply
+    /// → status publish, several task hops). One `yield_now` advances exactly
+    /// one hop, so we yield generously. A single constant here replaces the
+    /// per-crate 64-vs-96 drift the copied `settle()` helpers had accumulated.
+    const SETTLE_YIELDS: usize = 96;
+
+    /// Let every spawned task in the sim pipeline hop forward without advancing
+    /// time. One `yield_now` only advances one task hop and the pipeline is many
+    /// hops deep, so this yields [`SETTLE_YIELDS`] times. The single home for the
+    /// "settle generously" idiom the repl slice tests and the ha / failover
+    /// harnesses each used to re-implement.
+    pub async fn settle() {
+        for _ in 0..SETTLE_YIELDS {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Advance paused tokio time by `total`, driving the deep sim pipeline with
+    /// the settle/advance/settle discipline (see the CLAUDE.md fake-clock
+    /// hazards): [`settle`] so staged frames are produced, advance one 100 ms
+    /// chunk, settle so they are delivered + applied before the next chunk. A
+    /// trailing advance+settle trips the transit timer for frames produced
+    /// during the final settle (e.g. a just-woken server drain).
+    ///
+    /// This is the shared body behind every harness `advance()` and the repl
+    /// slice tests' `tick()`. Prefer it over [`advance_in_chunks`] (which only
+    /// moves time, with no settling) for anything that drives spawned actors.
+    ///
+    /// Note the trailing chunk: `pump(d)` advances `ceil(d/100ms) + 1` chunks of
+    /// virtual time — behaviour preserved verbatim from the helpers it replaces.
+    pub async fn pump(total: Duration) {
+        let chunks = (total.as_millis() as u64).div_ceil(100).max(1);
+        for _ in 0..chunks {
+            settle().await;
+            tokio::time::advance(Duration::from_millis(100)).await;
+            settle().await;
+        }
+        // Trailing pass so frames produced during the last settle also land.
+        tokio::time::advance(Duration::from_millis(100)).await;
+        settle().await;
+    }
 }
 
 #[cfg(test)]

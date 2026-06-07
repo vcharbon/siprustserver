@@ -38,7 +38,7 @@ use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
     CallReferRequest, CallReferResponse, NewCallRequest, NewCallResponse, ScriptedDecisionEngine,
 };
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -132,23 +132,9 @@ async fn cancel_during_slow_decision_tears_down_cleanly() {
     // queue — finish() only gates the RFC CSeq rules, not structural in-flight,
     // so that is fine here.)
     h.advance(Duration::from_secs(1)).await;
-    for _ in 0..50 {
-        if b2bua.metrics().removals_total() == b2bua.metrics().creations_total() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    let m = b2bua.metrics();
-    assert_eq!(
-        m.removals_total(),
-        m.creations_total(),
-        "a CANCEL racing a slow decision must still reap the call (active_calls -> 0); \
-         got creations={} removals={}",
-        m.creations_total(),
-        m.removals_total(),
-    );
-    assert_eq!(b2bua.active_calls(), 0, "no live call left");
-    assert_eq!(b2bua.lock_count(), 0, "no stranded per-call lock");
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    // A CANCEL racing a slow decision must still reap the call.
+    b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
 }

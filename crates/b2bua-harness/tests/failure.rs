@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use b2bua::decision::test_adapter::reject;
 use b2bua::decision::ScriptedDecisionEngine;
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use call::CdrEventType;
 use scenario_harness::Harness;
 
@@ -22,12 +22,7 @@ async fn b_leg_busy_is_relayed_and_call_terminates() {
     bob.receive("INVITE").await.respond(486, "Busy Here").await;
     call.expect(486).await; // the 486 is relayed back to alice
 
-    for _ in 0..50 {
-        if !b2bua.cdr_records().is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "one CDR for the rejected call");
     let kinds: Vec<CdrEventType> = cdrs[0].events.iter().map(|e| e.event_type).collect();
@@ -51,12 +46,7 @@ async fn decision_reject_answers_caller_directly() {
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     call.expect(403).await; // rejected without ever contacting bob
 
-    for _ in 0..50 {
-        if !b2bua.cdr_records().is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1);
     assert!(cdrs[0].b_legs.is_empty(), "no b-leg created on reject");

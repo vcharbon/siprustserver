@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -75,21 +75,9 @@ async fn setup_stalled_call_is_reaped_by_global_duration() {
     // GlobalDuration fires at the cap → `max-duration` rule begins termination
     // (CANCEL the early b-leg) → the call resolves to Terminated and is reaped.
     h.advance(MAX_DURATION + Duration::from_secs(1)).await;
-    for _ in 0..50 {
-        if b2bua.metrics().removals_total() == b2bua.metrics().creations_total() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    let m = b2bua.metrics();
-    assert_eq!(
-        m.removals_total(),
-        m.creations_total(),
-        "a setup-stalled call must be reaped by the GlobalDuration cap (active_calls -> 0); \
-         got creations={} removals={}",
-        m.creations_total(),
-        m.removals_total(),
-    );
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    // A setup-stalled call must be reaped by the GlobalDuration cap.
+    b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
 }

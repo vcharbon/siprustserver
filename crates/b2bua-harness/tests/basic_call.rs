@@ -3,7 +3,7 @@
 //! tears down and that exactly one CDR (with answer + bye) is produced.
 
 use call::CdrEventType;
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -40,13 +40,7 @@ async fn alice_calls_bob_through_b2bua() {
     bye.expect(200).await;
 
     // Give the worker tasks a moment to drain the final teardown + CDR.
-    for _ in 0..50 {
-        if b2bua.cdr_records().len() == 1 {
-            break;
-        }
-        tokio::task::yield_now().await;
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    settle_until(|| b2bua.cdr_records().len() == 1).await;
 
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "exactly one CDR per call");

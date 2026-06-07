@@ -6,15 +6,15 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use repl_net::frame::{Partition, Watermark};
 use repl_net::transport::{Fault, ReplicationNetwork, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 use topology::{Membership, Peer, SimulatedMembership};
 
+use super::test_support::{cref, fwd, supervisor_for, tick, Node};
 use super::{Changelog, FnPeerResolver, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor};
-use crate::store::{CallStore, PartitionRole, PropagateDirection, PutOpts};
+use crate::store::{CallStore, PartitionRole};
 
 const PRI: PartitionRole = PartitionRole::Primary;
 const BAK: PartitionRole = PartitionRole::Backup;
@@ -32,96 +32,6 @@ fn addr(n: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 9000 + n))
 }
 
-/// Forward (primary→backup) put options targeting `peer`.
-fn fwd(peer: &str) -> PutOpts {
-    PutOpts {
-        peer: Some(peer.to_string()),
-        direction: Some(PropagateDirection::Forward),
-    }
-}
-
-/// A node = its store + changelog + listen address; the server runs in the bg.
-struct Node {
-    ordinal: String,
-    store: ReplicatingCallStore,
-    addr: SocketAddr,
-}
-
-impl Node {
-    /// Build a node on `net` with incarnation `gen` and short changelog TTLs.
-    async fn spawn(
-        ordinal: &str,
-        addr: SocketAddr,
-        gen: u64,
-        net: &Arc<SimulatedReplicationNetwork>,
-        clock: &Clock,
-    ) -> Self {
-        let changelog = Changelog::new(gen, clock.clone()).with_ttls(30_000, 300_000);
-        let store = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
-        let listener = net.listen(addr).await.unwrap();
-        let server = ReplServer::new(ordinal, changelog, Arc::new(store.clone()));
-        tokio::spawn(server.run(listener));
-        Self {
-            ordinal: ordinal.to_string(),
-            store,
-            addr,
-        }
-    }
-}
-
-/// Wire B's supervisor to pull from a set of peers. The resolver maps each
-/// peer's `host` (which we set to the `addr` string) back to a `SocketAddr`.
-fn supervisor_for(
-    self_ordinal: &str,
-    store: &ReplicatingCallStore,
-    net: &Arc<SimulatedReplicationNetwork>,
-    clock: &Clock,
-    addrs: Vec<(String, SocketAddr)>,
-) -> ReplicationSupervisor {
-    let map: std::collections::HashMap<String, SocketAddr> = addrs.into_iter().collect();
-    let resolve = Arc::new(FnPeerResolver(move |peer: &Peer| *map.get(&peer.ordinal).unwrap()));
-    ReplicationSupervisor::with_config(
-        self_ordinal,
-        net.clone(),
-        store.clone(),
-        resolve,
-        clock.clone(),
-        fast_backoff(),
-    )
-}
-
-/// Let the whole spawned pipeline (notify → server drain → send → wire
-/// delivery actor staging → puller recv → store apply → status publish) hop
-/// forward. One yield only advances one task hop and the pipeline is several
-/// hops deep, so settle generously.
-async fn settle() {
-    for _ in 0..64 {
-        tokio::task::yield_now().await;
-    }
-}
-
-/// Advance the paused clock by `ms` in 100ms chunks, settling around each
-/// advance so frames staged at one chunk are delivered + applied before the
-/// next. The transit-deadline timer needs the chunk that follows the staging,
-/// hence the trailing settle/advance pass so the LAST chunk's sends also land.
-async fn tick(ms: u64) {
-    let chunks = ms.div_ceil(100).max(1);
-    for _ in 0..chunks {
-        settle().await;
-        tokio::time::advance(Duration::from_millis(100)).await;
-        settle().await;
-    }
-    // A final pass so frames produced during the last settle (e.g. a just-woken
-    // server drain) get their transit timer tripped and delivered too.
-    tokio::time::advance(Duration::from_millis(100)).await;
-    settle().await;
-}
-
-/// callRef whose encoded primary is `primary` (so partition_of routes it).
-fn cref(primary: &str, id: &str) -> String {
-    format!("{primary}|{id}|t{id}")
-}
-
 // ---------------------------------------------------------------------------
 // VERTICAL SKELETON — the gate.
 // ---------------------------------------------------------------------------
@@ -135,7 +45,7 @@ async fn vertical_skeleton_put_on_a_appears_on_b() {
     let b = Node::spawn("B", addr(2), 1, &net, &clock).await;
 
     // B pulls A.
-    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)]);
+    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
     let membership: Arc<dyn Membership> =
         Arc::new(SimulatedMembership::with_clock(vec![Peer::new("A", "A")], clock.clone()));
     sup.start(membership);
@@ -160,8 +70,6 @@ async fn vertical_skeleton_put_on_a_appears_on_b() {
         Some(&b"body-A1"[..]),
         "B must hold the backup body A pushed"
     );
-    let _ = a.ordinal;
-    let _ = b.ordinal;
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +82,7 @@ async fn convergence_update_and_delete() {
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let a = Node::spawn("A", addr(11), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(12), 1, &net, &clock).await;
-    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)]);
+    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
     sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("A", "A")],
         clock.clone(),
@@ -214,7 +122,6 @@ async fn convergence_update_and_delete() {
         b.store.get_call(BAK, "A", &c2).await.unwrap().is_none(),
         "delete removes c2 on B"
     );
-    let _ = (a.ordinal, b.ordinal);
 }
 
 // ---------------------------------------------------------------------------
@@ -227,7 +134,7 @@ async fn current_flag_sticky_across_reconnect() {
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let a = Node::spawn("A", addr(21), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(22), 1, &net, &clock).await;
-    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)]);
+    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
     sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("A", "A")],
         clock.clone(),
@@ -254,7 +161,6 @@ async fn current_flag_sticky_across_reconnect() {
     });
     tick(300).await;
     assert!(sup.is_current("A"), "still current after reconnect");
-    let _ = (a.ordinal, b.ordinal);
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +173,7 @@ async fn watermark_retention_pulls_only_deltas() {
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let a = Node::spawn("A", addr(31), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(32), 1, &net, &clock).await;
-    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)]);
+    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
     sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("A", "A")],
         clock.clone(),
@@ -313,7 +219,6 @@ async fn watermark_retention_pulls_only_deltas() {
         );
     }
     assert_eq!(sup.flow_watermark("A", Partition::Bak), Watermark::new(1, 5), "W at head after deltas");
-    let _ = (a.ordinal, b.ordinal);
 }
 
 // ---------------------------------------------------------------------------
@@ -333,7 +238,7 @@ async fn backoff_then_reconnect_converges() {
     let b_listener = net.listen(b_addr).await.unwrap();
     tokio::spawn(ReplServer::new("B", Changelog::new(1, clock.clone()), Arc::new(b_store.clone())).run(b_listener));
 
-    let sup = supervisor_for("B", &b_store, &net, &clock, vec![("A".into(), a_addr)]);
+    let sup = supervisor_for("B", &b_store, &net, &clock, vec![("A".into(), a_addr)], fast_backoff());
     sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("A", "A")],
         clock.clone(),
@@ -360,7 +265,6 @@ async fn backoff_then_reconnect_converges() {
         Some(&b"late"[..]),
         "B converges once A comes up after backoff"
     );
-    let _ = a.ordinal;
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +280,7 @@ async fn topology_add_remove_readd() {
 
     // Start with A absent in membership; B has no puller.
     let membership = SimulatedMembership::with_clock(vec![], clock.clone());
-    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)]);
+    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
     sup.start(Arc::new(membership.clone()));
     tick(50).await;
     assert!(!sup.is_running("A"), "no puller before A is added");
@@ -422,7 +326,6 @@ async fn topology_add_remove_readd() {
         Some(&b"x2"[..]),
         "B re-acquires the new delta after re-add"
     );
-    let _ = (a.ordinal, b.ordinal);
 }
 
 // ---------------------------------------------------------------------------
@@ -435,7 +338,7 @@ async fn lww_idempotence_and_no_regression() {
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let a = Node::spawn("A", addr(61), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(62), 1, &net, &clock).await;
-    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)]);
+    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
     sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("A", "A")],
         clock.clone(),
@@ -481,7 +384,6 @@ async fn lww_idempotence_and_no_regression() {
         Some(&b"high"[..]),
         "lower call_gen must not overwrite the higher one on B"
     );
-    let _ = (a.ordinal, b.ordinal);
 }
 
 // ---------------------------------------------------------------------------
@@ -494,7 +396,7 @@ async fn cold_reboot_reacquires_full_set() {
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let a = Node::spawn("A", addr(71), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(72), 1, &net, &clock).await;
-    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)]);
+    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
     sup.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("A", "A")],
         clock.clone(),
@@ -512,7 +414,7 @@ async fn cold_reboot_reacquires_full_set() {
 
     // Simulate B reboot: brand-new empty store + supervisor pulling from (0,0).
     let b2_store = ReplicatingCallStore::new(1, clock.clone());
-    let sup2 = supervisor_for("B", &b2_store, &net, &clock, vec![("A".into(), a.addr)]);
+    let sup2 = supervisor_for("B", &b2_store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
     sup2.start(Arc::new(SimulatedMembership::with_clock(
         vec![Peer::new("A", "A")],
         clock.clone(),
@@ -528,7 +430,6 @@ async fn cold_reboot_reacquires_full_set() {
             "cold puller re-acquires call {i}"
         );
     }
-    let _ = (a.ordinal, b.ordinal);
 }
 
 // ---------------------------------------------------------------------------
@@ -612,5 +513,4 @@ async fn lagged_membership_channel_still_redirects_puller_to_new_addr() {
         Some(&b"two"[..]),
         "after a Lagged delta the puller redirected to A's new address and pulled c2"
     );
-    let _ = (a1.ordinal, a2.ordinal, b.ordinal);
 }

@@ -102,15 +102,7 @@ async fn orphan_in_dialog_481_does_not_leak_dispatch_state() {
     // ── THE INVARIANT: drained ⇒ per-call accounting back to ZERO. Pre-fix this
     //    fails — `removals` stays at N while `creations` is 2N, and `lock_count`
     //    sits at N (one stranded lock per orphan callRef).
-    let creations = b2bua.metrics().creations_total();
-    let removals = b2bua.metrics().removals_total();
-    assert_eq!(
-        creations, removals,
-        "active_calls leaked: {} orphan dispatch queue(s) never released",
-        creations - removals,
-    );
-    assert_eq!(b2bua.lock_count(), 0, "store_locks leaked: orphan per-call lock(s) never released");
-    assert_eq!(b2bua.active_calls(), 0, "no live calls remain");
+    b2bua.assert_fully_reaped();
 }
 
 /// Spin the paused clock in small steps until `cond` holds — the dispatcher's
