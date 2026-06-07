@@ -94,7 +94,8 @@ pub fn build_initial_call(
         pending_invite_txn: None,
         ext: None,
         kind: Some(LegKind::A),
-        adopted: Some(false),
+        // Derived from kind (the a-leg is always adopted); see `is_adopted`.
+        adopted: None,
     };
     let topology = topology_from_cookie(invite, &config.self_ordinal);
     let a_leg_invite = ALegInviteSnapshot {

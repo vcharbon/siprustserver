@@ -136,6 +136,7 @@ impl<'a> ActionExecutor<'a> {
                 callback_context,
                 body_override,
                 header_updates,
+                kind,
             } => {
                 let n = call.b_legs.len() + 1;
                 let leg_id = format!("b-{n}");
@@ -151,6 +152,7 @@ impl<'a> ActionExecutor<'a> {
                     self.id_gen,
                     body_override.as_deref(),
                     header_updates,
+                    *kind,
                 );
                 if let Some(ctx_str) = callback_context {
                     call.callback_context = Some(ctx_str.clone());
@@ -226,8 +228,34 @@ impl<'a> ActionExecutor<'a> {
                 // rule's declared edges.
                 call.sm_cursors.insert(machine.clone(), to.clone());
             }
-            RuleAction::SendRequestToLeg { leg_id, method } => {
-                self.send_request_to_leg(call, fx, leg_id, method);
+            RuleAction::SendRequestToLeg {
+                leg_id,
+                method,
+                body,
+                content_type,
+            } => {
+                self.send_request_to_leg(call, fx, leg_id, method, body, content_type.as_deref());
+            }
+            RuleAction::SendProvisionalToLeg {
+                leg_id,
+                status,
+                reason,
+                body,
+                content_type,
+                to_tag,
+                p_early_media,
+            } => {
+                self.send_provisional_to_leg(
+                    call,
+                    fx,
+                    leg_id,
+                    *status,
+                    reason,
+                    body,
+                    content_type.as_deref(),
+                    to_tag.as_deref(),
+                    p_early_media.as_deref(),
+                );
             }
             RuleAction::SendPrackToLeg {
                 leg_id,
@@ -1077,7 +1105,16 @@ impl<'a> ActionExecutor<'a> {
         *call = set_leg_state(call.clone(), leg_id, LegState::Terminated);
     }
 
-    fn send_request_to_leg(&self, call: &mut Call, fx: &mut HandlerEffects, leg_id: &str, method: &str) {
+    #[allow(clippy::too_many_arguments)]
+    fn send_request_to_leg(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        method: &str,
+        body: &[u8],
+        content_type: Option<&str>,
+    ) {
         let m = match in_dialog_method(method) {
             Some(m) => m,
             None => return,
@@ -1140,12 +1177,20 @@ impl<'a> ActionExecutor<'a> {
         let outbound_cseq = dialog.sip.local_cseq + 1;
         *call = bump_local_cseq(call.clone(), leg_id, &t_id, 1);
 
+        // Opaque body carrier (MSCML INFO rides here): default the content type
+        // to `application/sdp` when a body is present and none was given (port of
+        // the source's `contentType ?? (body ? "application/sdp")`).
+        let content_type = content_type
+            .map(str::to_string)
+            .or_else(|| (!body.is_empty()).then(|| "application/sdp".to_string()));
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&dialog.sip);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, branch)),
             contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id)),
             cseq: Some(outbound_cseq as u32),
+            body: body.to_vec(),
+            content_type,
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(m, &gen_dialog, &opts);
@@ -1160,6 +1205,60 @@ impl<'a> ActionExecutor<'a> {
             label: format!("{method} → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
         });
+    }
+
+    /// Broker an unadopted leg's SDP onto the a-leg as an unreliable provisional
+    /// (RFC 3262 §3 early media). Port of `executeSendProvisionalToLeg`. Only the
+    /// a-leg has a stored UAS INVITE to answer; a non-a target or a non-1xx status
+    /// is skipped. `to_tag` set ⇒ ephemeral forked early dialog (verbatim, not
+    /// persisted); absent ⇒ the B2BUA's own early identity (reuse/mint+persist).
+    #[allow(clippy::too_many_arguments)]
+    fn send_provisional_to_leg(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        status: u16,
+        reason: &str,
+        body: &[u8],
+        content_type: Option<&str>,
+        to_tag: Option<&str>,
+        p_early_media: Option<&str>,
+    ) {
+        if !(100..200).contains(&status) || leg_id != call.a_leg.leg_id {
+            return;
+        }
+        // `to_tag` provided → an ephemeral forked early dialog, used verbatim and
+        // NOT persisted onto the a-dialog. Absent → the B2BUA's own early identity:
+        // reuse the existing a-dialog tag or mint and persist one.
+        let to_tag = match to_tag {
+            Some(t) => t.to_string(),
+            None => self.ensure_a_dialog(call),
+        };
+        // SDP early-media body defaults to application/sdp (mirrors the request path).
+        let content_type = content_type
+            .map(str::to_string)
+            .or_else(|| (!body.is_empty()).then(|| "application/sdp".to_string()));
+        let a_invite = relay::rebuild_a_leg_invite(call);
+        let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
+        let mut extra_headers = Vec::new();
+        if let Some(pem) = p_early_media {
+            extra_headers.push(sip_message::SipHeader {
+                name: "P-Early-Media".to_string(),
+                value: pem.to_string(),
+            });
+        }
+        fx.outbound.push(relay::response_to_a_leg(
+            &a_invite,
+            status,
+            reason,
+            Some(to_tag),
+            Some(contact),
+            body.to_vec(),
+            content_type,
+            None,
+            extra_headers,
+        ));
     }
 
     /// Originate a PRACK toward the b-leg early dialog (selected by callee tag)
@@ -1380,6 +1479,19 @@ fn resolve_peer(call: &Call, ctx: &RuleContext) -> (Option<String>, Option<Strin
                 if let Some(m) = call::helpers::find_by_a_tag(call, tag) {
                     return (Some(m.b_leg_id.clone()), Some(m.b_tag.clone()));
                 }
+            }
+        }
+    }
+    // Implicit relay-to-peer fallback is gated on leg adoption (ADR-0014): an
+    // unadopted leg (a parked `media` leg, an un-realigned `transfer-target`) is
+    // owned by its service rule and must never be mis-routed to A by the generic
+    // relay. Explicit peering (active_peer / tag map, handled above) still wins —
+    // this only suppresses the implicit `→ a` fallback, matching the source gate
+    // `peerLegId === undefined && legId !== "a" && isAdopted(sourceLeg)`.
+    if ctx.source_leg_id != call.a_leg.leg_id {
+        if let Some(leg) = ctx.source_leg() {
+            if !call::helpers::is_adopted(leg) {
+                return (None, None);
             }
         }
     }

@@ -194,6 +194,10 @@ pub fn build_b_leg(
     // the C INVITE. The basic-B2BUA path passes `(None, &[])`.
     body_override: Option<&[u8]>,
     header_updates: &[(String, Option<String>)],
+    // Leg role (ADR-0014/0016). `None` ⇒ [`LegKind::Destination`]. `adopted` is
+    // left `None` so it derives from the kind (`is_adopted`): a `media` leg is
+    // unadopted and thus gated out of the generic relay-to-peer fallback.
+    kind: Option<call::LegKind>,
 ) -> (Leg, OutboundSipEffect) {
     let branch = id_gen.new_branch();
     let from_tag = id_gen.new_tag();
@@ -292,8 +296,10 @@ pub fn build_b_leg(
         // fall back to the leg's (RFC 3261 §13.2.2.4 / RFC 3262 §7.2).
         pending_invite_txn: leg_invite_handle,
         ext: None,
-        kind: Some(call::LegKind::Destination),
-        adopted: Some(false),
+        kind: Some(kind.unwrap_or(call::LegKind::Destination)),
+        // Derive adoption from the kind (don't pin it): Destination ⇒ adopted,
+        // Media ⇒ unadopted. See `call::helpers::is_adopted`.
+        adopted: None,
     };
 
     let effect = OutboundSipEffect {

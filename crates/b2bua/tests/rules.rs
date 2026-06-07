@@ -347,7 +347,7 @@ fn b_leg_pending() -> Leg {
         pending_invite_txn: None,
         ext: None,
         kind: Some(LegKind::Destination),
-        adopted: Some(false),
+        adopted: None,
     }
 }
 
@@ -448,4 +448,273 @@ Content-Length: 0\r\n\r\n";
         result.call.b_legs[0].dialogs[0].sip.route_set.is_empty(),
         "no Record-Route on the 2xx → b-leg route set stays empty"
     );
+}
+
+// ── Slice 5: media/INFO primitives + leg-kind relay gate (ADR-0016) ──────────
+//
+// Ports `tests/b2bua/leg-kind-gate.test.ts` (source pin
+// fffc4ac6 — see MIGRATION_STATUS.md): an unadopted `media` leg is gated out of
+// the generic relay-to-peer `→ a` fallback, while an adopted leg still relays;
+// `send-provisional-to-leg` brokers a 183 early-media onto the a-leg; and
+// `send-request-to-leg` carries an opaque MSCML INFO body to a named leg.
+mod media_primitives {
+    use super::*;
+    use b2bua::effects::OutboundBody;
+    use b2bua::rules::MessageTransform;
+    use sip_message::message_helpers::get_header;
+    use sip_message::SipHeader;
+
+    /// A confirmed b-leg of the given role; its single dialog carries the callee
+    /// tag so in-dialog originators have a confirmed dialog to ride.
+    fn confirmed_b_leg(leg_id: &str, kind: LegKind) -> Leg {
+        let mut leg = super::b_leg_pending();
+        leg.leg_id = leg_id.into();
+        leg.state = LegState::Confirmed;
+        leg.kind = Some(kind);
+        leg.adopted = None; // derive adoption from the kind
+        leg.dialogs[0].sip.remote_tag = "bobtag".into();
+        leg.dialogs[0].ext.remote_cseq = Some(1);
+        leg
+    }
+
+    /// Give the a-leg a confirmed dialog so a relayed in-dialog request toward A
+    /// has a target dialog to ride.
+    fn give_a_leg_dialog(call: &mut call::Call) {
+        call.a_leg.state = LegState::Confirmed;
+        call.a_leg.dialogs = vec![Dialog {
+            sip: StackDialog {
+                call_id: call.a_leg.call_id.clone(),
+                local_tag: "a-svc".into(),
+                remote_tag: call.a_leg.from_tag.clone(),
+                local_uri: "sip:svc@10.0.0.9".into(),
+                remote_uri: "sip:alice@host".into(),
+                remote_target: "sip:alice@127.0.0.1:5060".into(),
+                local_cseq: 1,
+                route_set: vec![],
+            },
+            ext: B2buaDialogExt {
+                remote_cseq: Some(1),
+                inbound_pending_requests: vec![],
+                ack_branch: None,
+                pending_invite_txn: None,
+                cached_sdp: None,
+            },
+        }];
+    }
+
+    /// An in-dialog INFO request (carries a To-tag) with a DTMF payload.
+    fn in_dialog_info() -> SipRequest {
+        let mut info = super::invite();
+        info.method = "INFO".into();
+        info.to.tag = Some("svc".into());
+        info.cseq.seq = 2;
+        info.cseq.method = "INFO".into();
+        info.body = b"Signal=5\r\nDuration=160\r\n".to_vec();
+        info.headers.push(SipHeader {
+            name: "Content-Type".into(),
+            value: "application/dtmf-relay".into(),
+        });
+        info
+    }
+
+    fn exec_on<'a>(
+        call: &'a call::Call,
+        event: &'a CallEvent,
+        source_leg_id: &'a str,
+        config: &'a B2buaConfig,
+        id_gen: &'a IdGen,
+        actions: &[RuleAction],
+    ) -> HandlerResult {
+        let exec = ActionExecutor { config, id_gen, now_ms: 0 };
+        let ctx = RuleContext {
+            call,
+            call_ref: &call.call_ref,
+            event,
+            source_leg_id,
+            direction: Direction::FromB,
+            now_ms: 0,
+            config,
+        };
+        exec.execute(actions, &ctx)
+    }
+
+    // Port of leg-kind-gate test 1: relay-to-peer from an unadopted media leg
+    // produces ZERO outbound — it must NOT fall back to A.
+    #[test]
+    fn relay_to_peer_is_gated_for_unadopted_media_leg() {
+        let mut call = test_call();
+        give_a_leg_dialog(&mut call);
+        call = call::helpers::add_b_leg(call, confirmed_b_leg("b-1", LegKind::Media));
+        let event = CallEvent::Sip {
+            message: Box::new(SipMessage::Request(in_dialog_info())),
+            src: "10.0.0.2:5070".parse().unwrap(),
+        };
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        let result = exec_on(
+            &call,
+            &event,
+            "b-1",
+            &config,
+            &id_gen,
+            &[RuleAction::RelayToPeer { transform: MessageTransform::default() }],
+        );
+        assert!(
+            result.effects.outbound.is_empty(),
+            "an unadopted media leg's relay-to-peer must not be mis-routed to A"
+        );
+    }
+
+    // Port of leg-kind-gate test 2: an adopted (destination) leg still falls back
+    // to A — the gate only suppresses unadopted legs.
+    #[test]
+    fn relay_to_peer_falls_back_to_a_for_adopted_destination_leg() {
+        let mut call = test_call();
+        give_a_leg_dialog(&mut call);
+        call = call::helpers::add_b_leg(call, confirmed_b_leg("b-1", LegKind::Destination));
+        let event = CallEvent::Sip {
+            message: Box::new(SipMessage::Request(in_dialog_info())),
+            src: "10.0.0.2:5070".parse().unwrap(),
+        };
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        let result = exec_on(
+            &call,
+            &event,
+            "b-1",
+            &config,
+            &id_gen,
+            &[RuleAction::RelayToPeer { transform: MessageTransform::default() }],
+        );
+        assert_eq!(result.effects.outbound.len(), 1, "adopted leg relays to its peer");
+        assert_eq!(
+            result.effects.outbound[0].leg_id.as_deref(),
+            Some("a"),
+            "the relay falls back to the a-leg"
+        );
+    }
+
+    // INFO with an opaque MSCML body is emitted verbatim to the named leg with
+    // the given content type (the MSCML control channel toward an MRF).
+    #[test]
+    fn send_request_to_leg_emits_info_with_mscml_body() {
+        let mut call = test_call();
+        call = call::helpers::add_b_leg(call, confirmed_b_leg("b-1", LegKind::Media));
+        let event = CallEvent::Sip {
+            message: Box::new(SipMessage::Request(in_dialog_info())),
+            src: "10.0.0.2:5070".parse().unwrap(),
+        };
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        let mscml = b"<MediaServerControl><request><play/></request></MediaServerControl>".to_vec();
+        let result = exec_on(
+            &call,
+            &event,
+            "b-1",
+            &config,
+            &id_gen,
+            &[RuleAction::SendRequestToLeg {
+                leg_id: "b-1".into(),
+                method: "INFO".into(),
+                body: mscml.clone(),
+                content_type: Some("application/mediaservercontrol+xml".into()),
+            }],
+        );
+        assert_eq!(result.effects.outbound.len(), 1);
+        let eff = &result.effects.outbound[0];
+        assert_eq!(eff.leg_id.as_deref(), Some("b-1"));
+        match &eff.body {
+            OutboundBody::Request(r) => {
+                assert_eq!(r.method, "INFO");
+                assert_eq!(r.body, mscml, "MSCML body passes through opaquely");
+                assert_eq!(
+                    get_header(&r.headers, "content-type"),
+                    Some("application/mediaservercontrol+xml")
+                );
+            }
+            _ => panic!("expected an outbound request"),
+        }
+    }
+
+    // 183 brokers an unadopted leg's SDP onto the a-leg as unreliable early media
+    // (RFC 3262 §3 / RFC 5009 P-Early-Media), minting the B2BUA's a-facing tag.
+    #[test]
+    fn send_provisional_to_leg_brokers_183_sdp_to_a() {
+        let call = test_call();
+        let event = CallEvent::Sip {
+            message: Box::new(SipMessage::Request(in_dialog_info())),
+            src: "10.0.0.2:5070".parse().unwrap(),
+        };
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        let sdp = b"v=0\r\no=mrf 1 1 IN IP4 10.0.0.50\r\n".to_vec();
+        let result = exec_on(
+            &call,
+            &event,
+            "b-1",
+            &config,
+            &id_gen,
+            &[RuleAction::SendProvisionalToLeg {
+                leg_id: "a".into(),
+                status: 183,
+                reason: "Session Progress".into(),
+                body: sdp.clone(),
+                content_type: None,
+                to_tag: None,
+                p_early_media: Some("sendrecv".into()),
+            }],
+        );
+        assert_eq!(result.effects.outbound.len(), 1);
+        let eff = &result.effects.outbound[0];
+        assert_eq!(eff.leg_id.as_deref(), Some("a"));
+        match &eff.body {
+            OutboundBody::Response(r) => {
+                assert_eq!(r.status, 183);
+                assert_eq!(r.body, sdp, "the MRF SDP is brokered onto A");
+                assert!(r.to.tag.is_some(), "183 carries a B2BUA-minted early to-tag");
+                assert_eq!(
+                    get_header(&r.headers, "content-type"),
+                    Some("application/sdp"),
+                    "an SDP body defaults to application/sdp"
+                );
+                assert_eq!(get_header(&r.headers, "p-early-media"), Some("sendrecv"));
+            }
+            _ => panic!("expected an outbound response"),
+        }
+        // The minted tag is persisted on the a-dialog for reuse on later 1xx.
+        assert!(
+            result.call.a_leg.dialogs.first().is_some_and(|d| !d.sip.local_tag.is_empty()),
+            "the a-facing early tag is persisted"
+        );
+    }
+
+    // A non-1xx status (or a non-a target) is rejected — no UAS transaction to
+    // answer (port of leg-kind-gate test 5/6).
+    #[test]
+    fn send_provisional_rejects_non_provisional_status() {
+        let call = test_call();
+        let event = CallEvent::Sip {
+            message: Box::new(SipMessage::Request(in_dialog_info())),
+            src: "10.0.0.2:5070".parse().unwrap(),
+        };
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        let result = exec_on(
+            &call,
+            &event,
+            "a",
+            &config,
+            &id_gen,
+            &[RuleAction::SendProvisionalToLeg {
+                leg_id: "a".into(),
+                status: 200,
+                reason: "OK".into(),
+                body: vec![],
+                content_type: None,
+                to_tag: None,
+                p_early_media: None,
+            }],
+        );
+        assert!(result.effects.outbound.is_empty(), "a non-1xx provisional is rejected");
+    }
 }

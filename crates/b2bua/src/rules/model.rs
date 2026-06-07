@@ -4,8 +4,8 @@
 //! ext narrowing and rule composition are deferred with their consumers.
 
 use call::{
-    Call, CallModelState, CdrEventType, Dialog, Direction, Leg, LegDisposition, LegState, MachineId,
-    StateLabel, TimerType,
+    Call, CallModelState, CdrEventType, Dialog, Direction, Leg, LegDisposition, LegKind, LegState,
+    MachineId, StateLabel, TimerType,
 };
 use sip_message::{SipRequest, SipResponse};
 
@@ -351,6 +351,11 @@ pub enum RuleAction {
         /// Header overrides applied to the C INVITE (`update_headers` from the
         /// /call/refer allow). `(name, Some(value))` sets, `(name, None)` removes.
         header_updates: Vec<(String, Option<String>)>,
+        /// Leg role (ADR-0014/0016). `None` defaults to [`LegKind::Destination`];
+        /// a service parks an unadopted media leg via `Some(LegKind::Media)`. The
+        /// leg's `adopted` flag derives from this kind (`is_adopted`), so a media
+        /// leg is gated out of the generic relay-to-peer fallback.
+        kind: Option<LegKind>,
     },
     DestroyLeg { leg_id: String },
     CancelLeg { leg_id: String },
@@ -379,7 +384,33 @@ pub enum RuleAction {
     /// `(from, to)` edge against the emitting rule's declared `transitions` is
     /// checked in the executor (debug panic / release log-and-proceed).
     SetState { machine: MachineId, to: StateLabel },
-    SendRequestToLeg { leg_id: String, method: String },
+    /// Originate an in-dialog request toward a leg's confirmed dialog. Method is
+    /// restricted to the body-bearing/keepalive subset (OPTIONS / INFO / UPDATE /
+    /// MESSAGE — plus BYE/INVITE/PRACK/NOTIFY for internal callers). `body` is an
+    /// **opaque** payload (MSCML rides here as `application/mediaservercontrol+xml`);
+    /// `content_type` defaults to `application/sdp` when a body is present and no
+    /// type is given.
+    SendRequestToLeg {
+        leg_id: String,
+        method: String,
+        body: Vec<u8>,
+        content_type: Option<String>,
+    },
+    /// Broker an unadopted leg's SDP onto the a-leg as an **unreliable** `1xx`
+    /// (RFC 3262 §3 early media — no `Require: 100rel`/`RSeq`). Only the a-leg has
+    /// a stored UAS INVITE to answer; other targets are skipped. `to_tag` set ⇒ an
+    /// ephemeral forked early dialog (used verbatim, not persisted); absent ⇒ the
+    /// B2BUA's own early identity (reuse or mint+persist the a-dialog tag).
+    /// `p_early_media` stamps the RFC 5009 `P-Early-Media` header when set.
+    SendProvisionalToLeg {
+        leg_id: String,
+        status: u16,
+        reason: String,
+        body: Vec<u8>,
+        content_type: Option<String>,
+        to_tag: Option<String>,
+        p_early_media: Option<String>,
+    },
     // ── relayFirst18xTo180 (SERVICE_LAYER) ──────────────────────────────────
     /// Originate a PRACK toward `leg_id`'s early dialog (selected by `b_tag`),
     /// acknowledging the reliable 1xx with RAck `<rseq> <invite_cseq> INVITE`

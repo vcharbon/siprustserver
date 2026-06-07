@@ -399,6 +399,7 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                         callback_context,
                         body_override,
                         header_updates,
+                        kind: None,
                     },
                     RuleAction::SetTransfer { state: Some(new_state) },
                 ])

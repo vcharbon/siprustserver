@@ -323,6 +323,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                     // offer ⇒ none); failover is not a held-SDP transfer.
                     body_override: None,
                     header_updates,
+                    kind: None,
                 });
                 ok(actions)
             },
@@ -518,7 +519,7 @@ fn core_rules() -> Vec<RuleDefinition> {
         rule("keepalive", &[], Match::timer().timer_type(TimerType::Keepalive).call_state(CallModelState::Active), |ctx| {
             let mut actions = Vec::new();
             for leg_id in call::helpers::all_peered_legs(ctx.call) {
-                actions.push(RuleAction::SendRequestToLeg { leg_id: leg_id.clone(), method: "OPTIONS".into() });
+                actions.push(RuleAction::SendRequestToLeg { leg_id: leg_id.clone(), method: "OPTIONS".into(), body: vec![], content_type: None });
                 actions.push(RuleAction::ScheduleTimer { timer_type: TimerType::KeepaliveTimeout, delay_sec: keepalive_timeout(ctx), leg_id: Some(leg_id) });
             }
             actions.push(RuleAction::ScheduleTimer { timer_type: TimerType::Keepalive, delay_sec: keepalive_interval(ctx), leg_id: None });
