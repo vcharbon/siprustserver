@@ -155,6 +155,7 @@ mod tests {
             machine: Some(MachineId::new("stub")),
             active_states: &STUB_ACTIVE,
             transitions: &STUB_TRANS,
+            effects: &[],
         }]
     }
     fn stub_init(_: &call::Call) -> Option<ServiceSeed> {

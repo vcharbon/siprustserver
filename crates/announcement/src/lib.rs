@@ -28,7 +28,7 @@
 //! A media-leg failure/timeout while offering or announcing terminates the call
 //! (the one-hop service→global command, `BeginTermination`).
 
-use b2bua_sdk::rules::{Call, Match, RuleAction, RuleContext, RuleHandleResult};
+use b2bua_sdk::rules::{Call, Effect, Match, Method, RuleAction, RuleContext, RuleHandleResult};
 use b2bua_sdk::{define_service, sm_rule};
 use call::{CdrEventType, Direction, LegState};
 use serde::Deserialize;
@@ -204,6 +204,11 @@ define_service! {
             machine: MACHINE,
             active: [ State::OfferingMrf ],
             transitions: [ State::OfferingMrf => State::Announcing ],
+            effects: [
+                Effect::Originate { method: Method::Ack, label: "ACK → media (confirm early dialog)" },
+                Effect::Provisional { status: 183, label: "early media (MRF SDP) → A" },
+                Effect::Originate { method: Method::Info, label: "MSCML <play> → media" },
+            ],
             matcher: Match::response()
                 .method("INVITE")
                 .status_class(2)
@@ -218,6 +223,11 @@ define_service! {
             machine: MACHINE,
             active: [ State::Announcing ],
             transitions: [ State::Announcing => State::Bridging ],
+            effects: [
+                Effect::Respond { status: 200, label: "200 OK → media (answer MSCML INFO)" },
+                Effect::Originate { method: Method::Bye, label: "BYE → media leg" },
+                Effect::Originate { method: Method::Invite, label: "INVITE → destination" },
+            ],
             matcher: Match::request()
                 .method("INFO")
                 .direction(Direction::FromB)
@@ -233,6 +243,10 @@ define_service! {
             machine: MACHINE,
             active: [ State::OfferingMrf, State::Announcing ],
             transitions: [],
+            effects: [
+                Effect::Relay { label: "MRF failure → A" },
+                Effect::LifecycleCommand { label: "terminate (MRF failure)" },
+            ],
             matcher: Match::response()
                 .method("INVITE")
                 .direction(Direction::FromB)

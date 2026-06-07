@@ -32,9 +32,10 @@ pub mod service;
 /// imports (`use b2bua_sdk::rules::*`).
 pub mod rules {
     pub use crate::model::{
-        Match, MatchKind, MessageTransform, RuleAction, RuleContext, RuleDefinition,
-        RuleHandleResult, StatusMatch, CORE_LAYER, SERVICE_LAYER,
+        Effect, EffectKind, Match, MatchKind, MessageTransform, RuleAction, RuleContext,
+        RuleDefinition, RuleHandleResult, StatusMatch, CORE_LAYER, SERVICE_LAYER,
     };
+    pub use sip_message::Method;
     pub use crate::service::{ServiceDef, ServiceSeed};
     pub use call::{Call, MachineId, StateLabel};
 }

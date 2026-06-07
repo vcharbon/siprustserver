@@ -7,7 +7,8 @@
 //! out-of-tree boundary check (the `announcement` crate).
 
 use b2bua_sdk::rules::{
-    Match, MachineId, RuleContext, RuleDefinition, RuleHandleResult, StateLabel, SERVICE_LAYER,
+    Effect, EffectKind, Match, MachineId, Method, RuleContext, RuleDefinition, RuleHandleResult,
+    StateLabel, SERVICE_LAYER,
 };
 use b2bua_sdk::{define_service, sm_rule};
 
@@ -31,6 +32,7 @@ mod stub {
                 machine: STUB_MACHINE,
                 active: [ StubState::S0 ],
                 transitions: [ StubState::S0 => StubState::S1 ],
+                effects: [ Effect::Originate { method: Method::Info, label: "INFO → leg" } ],
                 matcher: Match::request().method("INFO"),
                 handle: advance,
             },
@@ -55,6 +57,9 @@ fn sm_rule_populates_the_machine_columns() {
     assert_eq!(r.machine, Some(MachineId::new("stub")));
     assert_eq!(r.active_states, &[StateLabel::new("S0")]);
     assert_eq!(r.transitions, &[(StateLabel::new("S0"), StateLabel::new("S1"))]);
+    // The effects surface is authored + introspected through the SDK alone.
+    assert_eq!(r.effects.len(), 1);
+    assert_eq!(r.effects[0].kind(), EffectKind::LegMessage);
 }
 
 #[test]

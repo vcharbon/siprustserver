@@ -9,8 +9,8 @@ use b2bua::effects::{BufferedObservabilityEffect, CriticalStateEffect, HandlerRe
 use b2bua::event::CallEvent;
 use b2bua::initial_invite::build_initial_call;
 use b2bua::rules::{
-    default_rules, execute_rules, invariants, pick_ranked, ActionExecutor, Match, RuleAction,
-    RuleContext, RuleDefinition, RuleHandleResult, SERVICE_LAYER,
+    default_rules, execute_rules, invariants, pick_ranked, ActionExecutor, Effect, Match,
+    RuleAction, RuleContext, RuleDefinition, RuleHandleResult, SERVICE_LAYER,
 };
 use call::{
     B2buaDialogExt, CallModelState, Dialog, Direction, Leg, LegDisposition, LegKind, LegState,
@@ -183,6 +183,31 @@ fn handle_to_s2_undeclared(_: &RuleContext) -> Option<RuleHandleResult> {
     }]))
 }
 
+/// Emits a tracked `LegMessage` side effect (a final response to a leg).
+fn handle_emits_leg_message(_: &RuleContext) -> Option<RuleHandleResult> {
+    Some(RuleHandleResult::new(vec![RuleAction::Respond {
+        status: 200,
+        reason: "OK".to_string(),
+        body: vec![],
+        content_type: None,
+    }]))
+}
+
+/// One declared `LegMessage` effect (ADR-0016 X9 — the rule may respond to a leg).
+static SM_EFFECTS_LEG_MESSAGE: [Effect; 1] =
+    [Effect::Respond { status: 200, label: "200 → leg" }];
+
+/// Like [`sm_rule`] but with a non-empty declared `effects` list.
+fn sm_rule_with_effects(
+    handle: fn(&RuleContext) -> Option<RuleHandleResult>,
+    effects: &'static [Effect],
+) -> RuleDefinition {
+    RuleDefinition {
+        effects,
+        ..sm_rule(handle)
+    }
+}
+
 fn sm_rule(handle: fn(&RuleContext) -> Option<RuleHandleResult>) -> RuleDefinition {
     RuleDefinition {
         id: "test-sm-rule",
@@ -193,6 +218,7 @@ fn sm_rule(handle: fn(&RuleContext) -> Option<RuleHandleResult>) -> RuleDefiniti
         machine: Some(MachineId::new(TEST_MACHINE)),
         active_states: &SM_ACTIVE_S0,
         transitions: &SM_TRANSITIONS,
+        effects: &[],
     }
 }
 
@@ -294,6 +320,42 @@ fn undeclared_transition_trips_debug_assert() {
     let rules = vec![sm_rule(handle_to_s2_undeclared)];
 
     let ctx = ctx_for(&call, &event, &config);
+    let _ = execute_rules(&rules, &ctx, &exec, |c: &RuleContext| HandlerResult::new(c.call.clone()));
+}
+
+/// A tracked side effect the handler emits but the rule did not declare trips the
+/// debug drift-check (ADR-0016 X9), the effect analogue of the transition check.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "undeclared")]
+fn undeclared_effect_trips_debug_assert() {
+    let mut call = test_call();
+    call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S0"));
+    let event = info_event();
+    let config = B2buaConfig::default();
+    let id_gen = IdGen::seeded(1);
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    // `sm_rule` declares `effects: &[]`, but the handler emits a `LegMessage`.
+    let rules = vec![sm_rule(handle_emits_leg_message)];
+
+    let ctx = ctx_for(&call, &event, &config);
+    let _ = execute_rules(&rules, &ctx, &exec, |c: &RuleContext| HandlerResult::new(c.call.clone()));
+}
+
+/// Declaring the matching `LegMessage` effect satisfies the drift-check — the
+/// same emit no longer trips it (the by-category `emitted ⊆ declared` contract).
+#[test]
+fn declared_effect_passes_the_drift_check() {
+    let mut call = test_call();
+    call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S0"));
+    let event = info_event();
+    let config = B2buaConfig::default();
+    let id_gen = IdGen::seeded(1);
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let rules = vec![sm_rule_with_effects(handle_emits_leg_message, &SM_EFFECTS_LEG_MESSAGE)];
+
+    let ctx = ctx_for(&call, &event, &config);
+    // Must not panic: the emitted Respond is a declared LegMessage.
     let _ = execute_rules(&rules, &ctx, &exec, |c: &RuleContext| HandlerResult::new(c.call.clone()));
 }
 

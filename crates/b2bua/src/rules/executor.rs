@@ -11,7 +11,7 @@ use crate::effects::HandlerResult;
 
 use super::actions::ActionExecutor;
 use super::invariants;
-use super::model::{RuleContext, RuleDefinition};
+use super::model::{EffectKind, RuleAction, RuleContext, RuleDefinition};
 
 /// A machine-bound rule (ADR-0016 X1) is a candidate only when its owner
 /// machine's cursor is one of its `active_states`. A machine-less core rule is
@@ -61,6 +61,7 @@ pub fn execute_rules(
     for rule in pick_ranked(rules, ctx) {
         if let Some(outcome) = (rule.handle)(ctx) {
             let before = ctx.call.clone();
+            check_declared_effects(rule, &outcome.actions);
             let result = exec.execute(&outcome.actions, ctx);
             check_declared_transition(rule, &before.sm_cursors, &result.call.sm_cursors);
             let result = invariants::finalize(result);
@@ -111,6 +112,38 @@ fn check_declared_transition(
                 from.map(call::StateLabel::as_str),
                 to.map(call::StateLabel::as_str),
             );
+        }
+    }
+}
+
+/// Assert every **tracked** side effect a machine-bound rule emits was declared
+/// in its `effects` (ADR-0016 X9). The check is **by category** ([`EffectKind`]),
+/// so a handler targeting a dynamically-named leg still satisfies a `LegMessage`
+/// declaration; cursor moves (`SetState`/`ClearState`) and bookkeeping are
+/// auto-allowed (`EffectKind::is_tracked` is false). Core (machine-less) rules
+/// declare no effects and are not checked. Debug builds panic (a test failure);
+/// release builds log and proceed — an authoring gap must never panic a live
+/// worker. Mirrors [`check_declared_transition`].
+fn check_declared_effects(rule: &RuleDefinition, emitted: &[RuleAction]) {
+    if rule.machine.is_none() {
+        return;
+    }
+    let declared: HashSet<EffectKind> = rule.effects.iter().map(|e| e.kind()).collect();
+    for action in emitted {
+        let kind = action.effect_kind();
+        if kind.is_tracked() && !declared.contains(&kind) {
+            if cfg!(debug_assertions) {
+                panic!(
+                    "rule '{}' emitted an undeclared {:?} side effect \
+                     (declare it in the rule's `effects`)",
+                    rule.id, kind,
+                );
+            } else {
+                eprintln!(
+                    "WARN: rule '{}' emitted an undeclared {:?} side effect",
+                    rule.id, kind,
+                );
+            }
         }
     }
 }

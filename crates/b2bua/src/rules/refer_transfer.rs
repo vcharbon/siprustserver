@@ -31,9 +31,10 @@ use call::{
 };
 use sip_message::message_helpers::get_header;
 use sip_message::sipfrag::sipfrag_from_status;
+use sip_message::Method;
 
 use super::model::{
-    Match, RuleAction, RuleContext, RuleDefinition, CORE_LAYER,
+    Effect, Match, RuleAction, RuleContext, RuleDefinition, CORE_LAYER,
 };
 
 // Subscription-State fragments (RFC 3265 §3.2.4).
@@ -289,6 +290,9 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::ReferAuthorizing, Phase::CRinging, Phase::CRealigning, Phase::ARealigning ],
             transitions: [],
+            effects: [
+                Effect::Respond { status: 491, label: "491 → B (second REFER pending)" },
+            ],
             matcher: Match::request()
                 .method("REFER")
                 .direction(Direction::FromB),
@@ -307,6 +311,11 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::ReferAuthorizing ],
             transitions: [],
+            effects: [
+                Effect::Originate { method: Method::Notify, label: "NOTIFY terminated → referrer" },
+                Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry" },
+                Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall-safety" },
+            ],
             matcher: Match::internal_event()
                 .topic("refer-http-result")
                 .filter(|ctx| {
@@ -334,6 +343,9 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::ReferAuthorizing ],
             transitions: [ Phase::ReferAuthorizing => Phase::CRinging ],
+            effects: [
+                Effect::Originate { method: Method::Invite, label: "INVITE → C (transfer target)" },
+            ],
             matcher: Match::internal_event()
                 .topic("refer-http-result")
                 .outcome("allow"),
@@ -411,6 +423,10 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::ReferAuthorizing ],
             transitions: [],
+            effects: [
+                Effect::Originate { method: Method::Notify, label: "NOTIFY terminated;timeout → referrer" },
+                Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall-safety" },
+            ],
             matcher: Match::timer()
                 .timer_type(call::TimerType::ReferSubscriptionExpiry),
             handle: |ctx| {
@@ -429,6 +445,9 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::CRinging ],
             transitions: [],
+            effects: [
+                Effect::Originate { method: Method::Notify, label: "NOTIFY active (C progress) → referrer" },
+            ],
             matcher: Match::response()
                 .method("INVITE")
                 .status_class(1)
@@ -458,6 +477,14 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::CRinging ],
             transitions: [ Phase::CRinging => Phase::CRealigning ],
+            effects: [
+                Effect::Originate { method: Method::Ack, label: "ACK → C (answer initial INVITE)" },
+                Effect::Originate { method: Method::Notify, label: "NOTIFY terminated → referrer" },
+                Effect::Originate { method: Method::Invite, label: "re-INVITE → C (c-realign, A's SDP)" },
+                Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "arm c-realign re-INVITE watchdog" },
+                Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry" },
+                Effect::GuardTimer { timer: call::TimerType::NoAnswer, label: "cancel C no-answer" },
+            ],
             matcher: Match::response()
                 .method("INVITE")
                 .status_class(2)
@@ -518,6 +545,11 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::CRinging ],
             transitions: [],
+            effects: [
+                Effect::Originate { method: Method::Notify, label: "NOTIFY terminated (C failed) → referrer" },
+                Effect::Originate { method: Method::Bye, label: "BYE → C (terminate failed leg)" },
+                Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry + overall + C no-answer" },
+            ],
             matcher: Match::response()
                 .method("INVITE")
                 .direction(Direction::FromB)
@@ -559,6 +591,11 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::CRinging ],
             transitions: [],
+            effects: [
+                Effect::Originate { method: Method::Notify, label: "NOTIFY terminated;timeout → referrer" },
+                Effect::Originate { method: Method::Bye, label: "BYE → C (no answer)" },
+                Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry + overall" },
+            ],
             matcher: Match::timer()
                 .timer_type(call::TimerType::NoAnswer)
                 .filter(|ctx| {
@@ -596,6 +633,11 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::CRealigning ],
             transitions: [ Phase::CRealigning => Phase::ARealigning ],
+            effects: [
+                Effect::Originate { method: Method::Ack, label: "ACK → C (c-realign answered)" },
+                Effect::Originate { method: Method::Invite, label: "re-INVITE → A (a-realign, C's active SDP)" },
+                Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "cancel C / arm A re-INVITE watchdog" },
+            ],
             matcher: Match::response()
                 .method("INVITE")
                 .status_class(2)
@@ -646,6 +688,10 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::CRealigning ],
             transitions: [],
+            effects: [
+                Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel re-INVITE watchdog + overall" },
+                Effect::LifecycleCommand { label: "terminate (c-realign rollback — BYE A/B/C)" },
+            ],
             matcher: Match::response()
                 .method("INVITE")
                 .direction(Direction::FromB)
@@ -688,6 +734,10 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::CRealigning ],
             transitions: [],
+            effects: [
+                Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall-safety" },
+                Effect::LifecycleCommand { label: "terminate (c-realign timeout rollback)" },
+            ],
             matcher: Match::timer()
                 .timer_type(call::TimerType::ReferReinviteAnswer),
             handle: |ctx| {
@@ -715,6 +765,9 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::CRealigning, Phase::ARealigning ],
             transitions: [],
+            effects: [
+                Effect::Respond { status: 491, label: "491 → C (glare during realign)" },
+            ],
             matcher: Match::request()
                 .method("INVITE")
                 .direction(Direction::FromB)
@@ -741,6 +794,11 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::ARealigning ],
             transitions: [],
+            effects: [
+                Effect::Originate { method: Method::Ack, label: "ACK → A (a-realign answered)" },
+                Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "cancel A re-INVITE watchdog + overall" },
+                Effect::LifecycleCommand { label: "merge A↔C (transfer complete)" },
+            ],
             matcher: Match::response()
                 .method("INVITE")
                 .status_class(2)
@@ -779,6 +837,10 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::ARealigning ],
             transitions: [],
+            effects: [
+                Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "cancel A re-INVITE watchdog + overall" },
+                Effect::LifecycleCommand { label: "terminate (a-realign rollback — BYE A/B/C)" },
+            ],
             matcher: Match::response()
                 .method("INVITE")
                 .direction(Direction::FromA)
@@ -814,6 +876,10 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::ARealigning ],
             transitions: [],
+            effects: [
+                Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall-safety" },
+                Effect::LifecycleCommand { label: "terminate (a-realign timeout rollback)" },
+            ],
             matcher: Match::timer()
                 .timer_type(call::TimerType::ReferReinviteAnswer)
                 .filter(|ctx| {
@@ -845,6 +911,9 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::CRealigning, Phase::ARealigning ],
             transitions: [],
+            effects: [
+                Effect::Respond { status: 491, label: "491 → A (glare during realign)" },
+            ],
             matcher: Match::request()
                 .method("INVITE")
                 .direction(Direction::FromA),
@@ -866,6 +935,10 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::ReferAuthorizing, Phase::CRinging, Phase::CRealigning, Phase::ARealigning ],
             transitions: [],
+            effects: [
+                Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry + both re-INVITE watchdogs" },
+                Effect::LifecycleCommand { label: "terminate (overall-safety watchdog rollback)" },
+            ],
             matcher: Match::timer()
                 .timer_type(call::TimerType::ReferOverallSafety),
             handle: |ctx| {
@@ -899,6 +972,9 @@ define_service! {
             machine: TRANSFER_MACHINE,
             active: [ Phase::CRealigning, Phase::ARealigning ],
             transitions: [],
+            effects: [
+                Effect::Respond { status: 481, label: "481 → B (referrer signalling dead until merge)" },
+            ],
             matcher: Match::request()
                 .direction(Direction::FromB)
                 .filter(|ctx| {

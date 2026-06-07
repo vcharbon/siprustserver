@@ -141,15 +141,17 @@ macro_rules! sm_rule {
         machine: $machine:expr,
         active: [ $($act:expr),+ $(,)? ],
         transitions: [ $($from:expr => $to:expr),* $(,)? ],
+        effects: [ $($effect:expr),* $(,)? ],
         matcher: $matcher:expr,
         handle: $handle:expr $(,)?
     ) => {{
         // `const` items (not inline `&[..]`) so the slices are `'static` despite
-        // `StateLabel` carrying a `Cow` (which `needs_drop`, blocking implicit
-        // promotion in a fn body).
+        // `StateLabel` / `Effect` carrying a `Cow` / `Method(String)` (which
+        // `needs_drop`, blocking implicit promotion in a fn body).
         const __ACTIVE: &[$crate::rules::StateLabel] = &[ $($act.label()),+ ];
         const __TRANS: &[($crate::rules::StateLabel, $crate::rules::StateLabel)] =
             &[ $(($from.label(), $to.label())),* ];
+        const __EFFECTS: &[$crate::rules::Effect] = &[ $($effect),* ];
         $crate::rules::RuleDefinition {
             id: $id,
             layer: $crate::rules::SERVICE_LAYER,
@@ -159,6 +161,7 @@ macro_rules! sm_rule {
             machine: ::core::option::Option::Some($machine),
             active_states: __ACTIVE,
             transitions: __TRANS,
+            effects: __EFFECTS,
         }
     }};
 }

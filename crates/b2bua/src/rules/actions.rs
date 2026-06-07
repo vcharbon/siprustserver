@@ -229,6 +229,12 @@ impl<'a> ActionExecutor<'a> {
                 // rule's declared edges.
                 call.sm_cursors.insert(machine.clone(), to.clone());
             }
+            RuleAction::ClearState { machine } => {
+                // Machine deactivation (ADR-0016 X9): remove the cursor, returning
+                // the machine to dormant — the declarative inverse of `SetState`,
+                // realising the transition to the terminal `[*]`. Idempotent.
+                call.sm_cursors.remove(machine);
+            }
             RuleAction::SendRequestToLeg {
                 leg_id,
                 method,

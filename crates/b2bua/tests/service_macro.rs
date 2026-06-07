@@ -52,6 +52,8 @@ mod stub {
             machine: STUB_MACHINE,
             active: [ StubState::S0 ],
             transitions: [ StubState::S0 => StubState::S1 ],
+            // Pure transition: SetState is a cursor move, not a tracked effect.
+            effects: [],
             matcher: Match::request().method("INFO"),
             handle: |_ctx: &RuleContext| {
                 Some(RuleHandleResult::new(vec![RuleAction::SetState {
