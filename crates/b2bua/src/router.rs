@@ -441,9 +441,31 @@ fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
             }
         },
         CallEvent::Cancelled { call_id, from_tag } => {
-            let call_ref = ctx.state.resolve_from_sip_key_sync(call_id, from_tag);
+            // A CANCEL races the very INVITE it cancels. The initial-INVITE body
+            // `create()`s (and indexes) the call on the per-call FIFO *worker*,
+            // asynchronously — whereas this `resolve` runs in the run loop the
+            // instant the txn layer emits `Cancelled`. So the `sip_index` may not
+            // be populated yet, and a sync index miss would drop the CANCEL as
+            // unroutable, leaking the b-leg the (still-parked) decision is about
+            // to build. DERIVE the callRef the same way the INVITE did
+            // (`derive_call_ref(self, callId, fromTag)`) when the index misses, so
+            // the CANCEL resolves to the SAME call regardless of create() timing;
+            // FIFO ordering then guarantees `handle-cancel` runs after the INVITE
+            // body has built the call + b-leg. Deriving with `self_ordinal` is
+            // correct here because a CANCEL only targets a brand-new INVITE this
+            // node is primary-serving (build_initial_call used the same ordinal);
+            // ACK/BYE cannot hit this path — they require an established dialog, so
+            // the call (and its index) already exist. A genuinely orphan CANCEL
+            // (no INVITE ever) resolves to a callRef with no live call and is
+            // reaped cleanly via the orphan path in `process`.
+            let call_ref = ctx
+                .state
+                .resolve_from_sip_key_sync(call_id, from_tag)
+                .unwrap_or_else(|| {
+                    call::derive_call_ref(&ctx.config.self_ordinal, call_id, from_tag)
+                });
             Resolution {
-                call_ref,
+                call_ref: Some(call_ref),
                 source_leg_id: "a".into(),
                 direction: Direction::FromA,
                 initial_invite: false,

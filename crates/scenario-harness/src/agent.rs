@@ -45,7 +45,8 @@ use std::time::Duration;
 use layer_harness::{Channel, NetworkTag, Recorder, RunContext, TransportKind};
 use sip_clock::Clock;
 use sip_message::generators::{
-    generate_ack_for_2xx, generate_in_dialog_request, generate_out_of_dialog_request,
+    generate_ack_for_2xx, generate_cancel, generate_in_dialog_request,
+    generate_out_of_dialog_request,
     generate_response, strip_route_uri_to_request_uri, ContactSpec, GenerateAckFor2xxOpts,
     GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts, GenerateResponseOpts,
     InDialogMethod, InviteClientTransactionHandle, OutOfDialogMethod, SipTransport, StackDialog,
@@ -766,6 +767,7 @@ impl<'a> Invite<'a> {
         ClientInvite {
             agent: caller.clone(),
             fallback_addr: peer.addr,
+            wire_dst,
             original_invite: invite,
             dialog,
             fork_cseq: HashMap::new(),
@@ -779,6 +781,10 @@ pub struct ClientInvite {
     /// Where to send the ACK if no Contact was learned (shouldn't happen for a
     /// well-behaved 2xx, but keeps the harness robust).
     fallback_addr: SocketAddr,
+    /// The wire destination the INVITE was actually sent to (the proxy/B2BUA when
+    /// [`Invite::through`] was used, else the peer). A CANCEL for a still-pending
+    /// INVITE must follow the SAME path (RFC 3261 §9.1), so it is retained here.
+    wire_dst: SocketAddr,
     original_invite: SipRequest,
     dialog: StackDialog,
     /// Per-forked-early-dialog CSeq (keyed by the fork's To-tag), for the
@@ -815,6 +821,24 @@ impl ClientInvite {
             }
         }
         resp
+    }
+
+    /// Send a CANCEL for this still-pending INVITE (RFC 3261 §9.1). The CANCEL
+    /// reuses the INVITE's Request-URI / Call-ID / From / To / topmost Via branch
+    /// and the INVITE's CSeq *number* with method `CANCEL`, and is sent to the
+    /// SAME wire destination the INVITE took (the proxy / B2BUA when
+    /// [`Invite::through`] was used). Returns a client transaction so the caller
+    /// can `expect` the `200 OK` to the CANCEL; the matching `487 Request
+    /// Terminated` for the INVITE arrives on this same UA and is consumed via
+    /// [`ClientInvite::expect`].
+    pub async fn cancel(&self) -> InDialogTxn {
+        let cancel = generate_cancel(&InviteClientTransactionHandle {
+            original_invite: self.original_invite.clone(),
+        });
+        self.agent.send(&SipMessage::Request(cancel), self.wire_dst).await;
+        InDialogTxn {
+            agent: self.agent.clone(),
+        }
     }
 
     /// Begin an in-dialog request on the *early* dialog (before the final 2xx /
