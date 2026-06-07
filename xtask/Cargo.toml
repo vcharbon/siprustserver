@@ -7,3 +7,7 @@ publish.workspace = true
 description = "Workspace automation tasks (e.g. ABNF corpus regeneration)."
 
 [dependencies]
+# State-machine doc generation reads the composed service registry from the
+# runner (so it sees separate-crate services) and renders via b2bua's docgen.
+b2bua = { path = "../crates/b2bua" }
+b2bua-runner = { path = "../crates/b2bua-runner" }

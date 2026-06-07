@@ -1,10 +1,14 @@
 //! Workspace automation. Run via `cargo run -p xtask -- <task>`.
 //!
 //! Tasks:
-//!   abnf-regen [N]   Regenerate the frozen ABNF corpus from the vendored
-//!                    grammars using `abnfgen` (external binary; install per
-//!                    crates/sip-message/tests/abnf/README.md). N samples per
-//!                    target, default 1000. Writes tests/abnf/corpus/<t>.txt.
+//!   abnf-regen [N]      Regenerate the frozen ABNF corpus from the vendored
+//!                       grammars using `abnfgen` (external binary; install per
+//!                       crates/sip-message/tests/abnf/README.md). N samples per
+//!                       target, default 1000. Writes tests/abnf/corpus/<t>.txt.
+//!   state-machine-docs  Regenerate the committed callflow state-machine diagrams
+//!                       (ADR-0016) under docs/sm/<machine>.md from the composed
+//!                       service registry. A CI test asserts the committed files
+//!                       match this output (drift fails CI).
 //!
 //! The corpus is committed so CI is deterministic and needs no external
 //! binary at test time; this task is the opt-in refresh path. See
@@ -42,11 +46,41 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("state-machine-docs") => match state_machine_docs() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("state-machine-docs failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
         other => {
-            eprintln!("unknown task: {other:?}\nusage: cargo run -p xtask -- abnf-regen [N]");
+            eprintln!(
+                "unknown task: {other:?}\nusage: cargo run -p xtask -- \
+                 (abnf-regen [N] | state-machine-docs)"
+            );
             ExitCode::FAILURE
         }
     }
+}
+
+/// Workspace-root `docs/sm` directory (relative to this xtask crate).
+fn sm_docs_dir() -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.pop(); // workspace root
+    p.push("docs/sm");
+    p
+}
+
+/// Regenerate `docs/sm/<machine>.md` from the composed service registry.
+fn state_machine_docs() -> Result<(), String> {
+    let dir = sm_docs_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("create docs/sm dir: {e}"))?;
+    for (machine, markdown) in b2bua_runner::state_machine_docs() {
+        let path = dir.join(format!("{machine}.md"));
+        fs::write(&path, &markdown).map_err(|e| format!("write {}: {e}", path.display()))?;
+        eprintln!("state-machine-docs: {machine:<16} -> {}", path.display());
+    }
+    Ok(())
 }
 
 /// `crates/sip-message/tests/abnf` relative to this xtask crate.
