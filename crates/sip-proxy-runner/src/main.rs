@@ -42,7 +42,7 @@ use sip_proxy::observability::metrics_server::MetricsServer;
 use sip_proxy::observability::metrics_server::ReadinessFn;
 use sip_proxy::observability::ProxyMetrics;
 use sip_proxy::registry::control::WorkerRegistryControl;
-use sip_proxy::registry::membership_reg::MembershipWorkerRegistry;
+use sip_proxy::registry::composed::ComposedWorkerRegistry;
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
 use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
 use topology::{K8sMembership, Membership};
@@ -81,7 +81,7 @@ async fn build_registry(
     if !workers.trim().is_empty() {
         let reg = StaticWorkerRegistry::from_string(workers, "PROXY_WORKERS")
             .unwrap_or_else(|e| panic!("bad PROXY_WORKERS {workers:?}: {e}"));
-        let control = reg.control(clock);
+        let control = reg.control();
         eprintln!("sip-proxy-runner worker pool: static PROXY_WORKERS={workers}");
         return (Arc::new(reg), control);
     }
@@ -103,7 +103,7 @@ async fn build_registry(
             );
             let membership: Arc<dyn Membership> =
                 Arc::new(K8sMembership::spawn(client, namespace, service));
-            let reg = MembershipWorkerRegistry::spawn(membership, sip_port, clock);
+            let reg = ComposedWorkerRegistry::spawn(membership, sip_port, clock);
             let control = reg.control();
             (Arc::new(reg), control)
         }
@@ -114,7 +114,7 @@ async fn build_registry(
             );
             let reg =
                 StaticWorkerRegistry::from_string(fallback, "fallback").expect("fallback pool");
-            let control = reg.control(clock);
+            let control = reg.control();
             (Arc::new(reg), control)
         }
     }

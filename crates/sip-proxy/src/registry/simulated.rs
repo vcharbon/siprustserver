@@ -1,58 +1,36 @@
-//! Simulated worker registry — port of `registry/simulated.ts`. Drives worker
-//! membership + health from a test: it is both a [`WorkerRegistry`] (read seam)
-//! and a control handle (`add`/`remove`/`set_health`/`set_address`). Mutations
-//! emit [`RegistryEvent`]s; an `alive → draining` transition stamps
-//! `draining_since` from the injected [`Clock`].
+//! Simulated worker registry — drives worker membership + health from a test. It
+//! is both a [`WorkerRegistry`] (read seam) and a control handle
+//! (`add`/`remove`/`set_health`/`set_address`).
 //!
-//! **Membership identity (ordinal + host) is sourced from the `topology` crate**
-//! (S1b): the peer set is backed by a [`topology::SimulatedMembership`] sharing
-//! the SAME injected [`Clock`]. `add`/`remove`/`set_address` drive that
-//! membership for the *identity* (who-is-in-the-cluster + host); a topology
-//! `changes()` subscription is then drained synchronously to reconcile the
-//! proxy's richer [`WorkerEntry`] view (port + health + timing stamps) and to
-//! emit the proxy-level [`RegistryEvent`]s. Health and draining are proxy-layer
-//! concerns emitted by this layer directly, never by topology.
+//! Like every registry it is a thin wrapper over the shared [`WorkerSet`]: the
+//! identity (ordinal + host) is a [`topology::SimulatedMembership`] sharing the
+//! injected [`Clock`]; the per-worker port + health are annotation presets. Each
+//! mutator drives the membership and/or the overlay, then **recomposes eagerly**,
+//! so the public seam stays synchronous (tests assert right after a mutation, no
+//! `.await`). Because the recompose reads the authoritative membership snapshot,
+//! it is inherently lag-immune — there is no delta replay to overflow.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use sip_clock::Clock;
-use tokio::sync::broadcast;
-use tokio::sync::broadcast::error::TryRecvError;
-use topology::{MemberDelta, Membership, Peer, SimulatedMembership};
+use topology::{Peer, SimulatedMembership};
 
 use crate::addr::ProxyAddr;
 
-use super::{RegistryEvent, RegistryState, WorkerEntry, WorkerHealth, WorkerRegistry};
+use super::projection::WorkerSet;
+use super::{WorkerEntry, WorkerHealth, WorkerRegistry};
 
-/// Per-ordinal proxy annotations the topology membership does NOT carry (port +
-/// the intended health/timing for an in-flight `add`). Stashed so the
-/// reconciler can stamp them onto the `WorkerEntry` when it observes the
-/// corresponding topology delta.
-#[derive(Default)]
-struct Pending {
-    /// Full entry intended by an in-flight `add` (carries port/health/timing).
-    add: HashMap<String, WorkerEntry>,
-    /// New port for an in-flight host change (topology is port-agnostic).
-    port: HashMap<String, u16>,
-}
+/// Fallback port for a worker with no per-worker `port_override`. Unused in
+/// practice — every simulated worker is added with an explicit port.
+const DEFAULT_PORT: u16 = 5060;
 
-/// A registry whose membership/health is driven imperatively by a test. Cheap
-/// to clone — clones share the same underlying state + event channel.
+/// A registry whose membership/health is driven imperatively by a test. Cheap to
+/// clone — clones share the same underlying state (the `Arc<WorkerSet>` and the
+/// shared `SimulatedMembership`).
 #[derive(Clone)]
 pub struct SimulatedWorkerRegistry {
-    /// Port-and-health-annotated materialisation read on the hot path (the
-    /// outward seam — unchanged shape/semantics).
-    state: Arc<RegistryState>,
-    /// Membership identity source of truth (ordinal + host, port-agnostic),
-    /// clock-injected with the SAME `Clock` as this registry.
+    set: Arc<WorkerSet>,
     membership: SimulatedMembership,
-    /// Topology delta subscription, drained synchronously after each membership
-    /// mutation to reconcile `state`. Shared across clones so concurrent drivers
-    /// reconcile the one shared `state`.
-    deltas: Arc<Mutex<broadcast::Receiver<MemberDelta>>>,
-    /// Proxy annotations awaiting the reconcile of their topology delta.
-    pending: Arc<Mutex<Pending>>,
     clock: Clock,
     /// When set, stamp `first_seen_at_ms` from the clock on every `add` whose
     /// entry doesn't already carry one (the source's `autoStampFirstSeenAtMs`).
@@ -71,21 +49,14 @@ impl SimulatedWorkerRegistry {
     }
 
     fn build(initial: Vec<WorkerEntry>, clock: Clock, auto_first_seen: bool) -> Self {
-        // Seed the topology membership identity (ordinal + host) from the initial
-        // entries; the proxy's `RegistryState` keeps the full port/health view.
-        // The initial set is wired straight in (no deltas emitted for the seed —
-        // `changes()` has no backfill), matching the prior constructor.
         let peers = initial.iter().map(|e| Peer::new(e.id.clone(), e.address.host.clone())).collect();
         let membership = SimulatedMembership::with_clock(peers, clock.clone());
-        let deltas = membership.changes();
-        Self {
-            state: Arc::new(RegistryState::new(initial)),
-            membership,
-            deltas: Arc::new(Mutex::new(deltas)),
-            pending: Arc::new(Mutex::new(Pending::default())),
-            clock,
-            auto_first_seen,
+        let set = Arc::new(WorkerSet::new(Arc::new(membership.clone()), DEFAULT_PORT, clock.clone()));
+        for e in &initial {
+            set.preset(&e.id, e.address.host.clone(), e.address.port, e.health, e.draining_since, e.first_seen_at_ms);
         }
+        set.recompose();
+        Self { set, membership, clock, auto_first_seen }
     }
 
     /// Stamp `first_seen_at_ms` from the clock on every `add` (fresh-pod guard).
@@ -98,238 +69,81 @@ impl SimulatedWorkerRegistry {
         self.clock.now_ms().max(0) as u64
     }
 
-    /// Drain every pending topology delta and reconcile it into the proxy's
-    /// annotated `state`, emitting the matching `RegistryEvent`. Runs
-    /// synchronously right after the membership mutation that produced the
-    /// delta, so the public seam stays synchronous (tests `try_recv` right
-    /// after a mutation, with no `.await`).
-    fn reconcile(&self) {
-        loop {
-            let delta = {
-                let mut rx = self.deltas.lock().unwrap();
-                match rx.try_recv() {
-                    Ok(d) => d,
-                    // Empty (drained) / Closed (sender gone) → stop draining.
-                    Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
-                    // Lagged: the broadcast channel overflowed and DROPPED deltas.
-                    // Delta replay can no longer converge, so reconcile the whole
-                    // `state` against a fresh membership snapshot by diff (lag-
-                    // immune), then keep draining whatever arrived after the lag.
-                    Err(TryRecvError::Lagged(_)) => {
-                        drop(rx);
-                        self.resync_from_snapshot();
-                        continue;
-                    }
-                }
-            };
-            match delta {
-                MemberDelta::Added(peer) => {
-                    // Materialise the proxy entry from the intended `add`
-                    // annotations (port/health/timing), with the host owned by
-                    // membership. Skip if we cannot determine a real port rather
-                    // than route to a dead port-0 entry.
-                    let Some(entry) = self.materialise_added(&peer) else {
-                        continue;
-                    };
-                    let event = RegistryEvent::Added { entry: entry.clone() };
-                    self.state.mutate(
-                        |entries| {
-                            entries.retain(|w| w.id != entry.id);
-                            entries.push(entry);
-                        },
-                        event,
-                    );
-                }
-                MemberDelta::Removed(ordinal) => {
-                    self.state.mutate(
-                        |entries| entries.retain(|w| w.id != ordinal),
-                        RegistryEvent::Removed { id: ordinal.clone() },
-                    );
-                }
-                MemberDelta::AddressChanged(peer) => {
-                    let Some(cur) = self.state.resolve(&peer.ordinal) else {
-                        continue;
-                    };
-                    // Membership owns the host; pick up a co-changed port if the
-                    // proxy stashed one, else keep the existing port.
-                    let port = self.pending.lock().unwrap().port.remove(&peer.ordinal).unwrap_or(cur.address.port);
-                    let new_addr = ProxyAddr::new(peer.host, port);
-                    let event = RegistryEvent::AddressChanged {
-                        id: peer.ordinal.clone(),
-                        from: cur.address,
-                        to: new_addr.clone(),
-                    };
-                    self.state.mutate(
-                        |entries| {
-                            if let Some(w) = entries.iter_mut().find(|w| w.id == peer.ordinal) {
-                                w.address = new_addr;
-                            }
-                        },
-                        event,
-                    );
-                }
-            }
-        }
-    }
-
-    /// Build the proxy [`WorkerEntry`] for an `Added`/present `peer`. Prefers the
-    /// in-flight `add()` stash (carries the real port/health/timing); else
-    /// preserves an existing entry's address (host updated to membership's);
-    /// returns `None` when neither is available — a foreign ordinal with no known
-    /// port, which is skipped rather than materialised onto a dead port-0 entry.
-    fn materialise_added(&self, peer: &Peer) -> Option<WorkerEntry> {
-        if let Some(mut e) = self.pending.lock().unwrap().add.remove(&peer.ordinal) {
-            e.address.host = peer.host.clone();
-            return Some(e);
-        }
-        if let Some(mut cur) = self.state.resolve(&peer.ordinal) {
-            cur.address.host = peer.host.clone();
-            return Some(cur);
-        }
-        None
-    }
-
-    /// Full reconcile of the proxy `state` against the authoritative membership
-    /// snapshot, by diff. Used after a broadcast `Lagged` (dropped deltas), where
-    /// replaying the remaining deltas can no longer converge. Depends only on
-    /// current state — never on the lost delta history — so it is lag-immune.
-    fn resync_from_snapshot(&self) {
-        let desired = self.membership.snapshot();
-        let desired_ords: HashSet<String> =
-            desired.iter().map(|p| p.ordinal.clone()).collect();
-
-        // Removals: a current worker whose ordinal is no longer in membership.
-        for w in self.state.snapshot() {
-            if !desired_ords.contains(&w.id) {
-                let id = w.id.clone();
-                self.state.mutate(
-                    |entries| entries.retain(|e| e.id != id),
-                    RegistryEvent::Removed { id: id.clone() },
-                );
-            }
-        }
-
-        // Adds + host changes.
-        for peer in desired {
-            match self.state.resolve(&peer.ordinal) {
-                None => {
-                    let Some(entry) = self.materialise_added(&peer) else {
-                        continue;
-                    };
-                    let event = RegistryEvent::Added { entry: entry.clone() };
-                    self.state.mutate(
-                        |entries| {
-                            entries.retain(|w| w.id != entry.id);
-                            entries.push(entry);
-                        },
-                        event,
-                    );
-                }
-                Some(cur) if cur.address.host != peer.host => {
-                    let port = self
-                        .pending
-                        .lock()
-                        .unwrap()
-                        .port
-                        .remove(&peer.ordinal)
-                        .unwrap_or(cur.address.port);
-                    let new_addr = ProxyAddr::new(peer.host.clone(), port);
-                    let event = RegistryEvent::AddressChanged {
-                        id: peer.ordinal.clone(),
-                        from: cur.address,
-                        to: new_addr.clone(),
-                    };
-                    self.state.mutate(
-                        |entries| {
-                            if let Some(w) =
-                                entries.iter_mut().find(|w| w.id == peer.ordinal)
-                            {
-                                w.address = new_addr;
-                            }
-                        },
-                        event,
-                    );
-                }
-                Some(_) => {}
-            }
-        }
-    }
-
-    /// Add (or replace) a worker, emitting `Added`. Membership identity flows
-    /// through the topology layer; this stamps the proxy's port/health/timing.
+    /// Add (or replace) a worker. Identity (ordinal + host) flows through the
+    /// topology membership; the proxy's port/health/timing are seeded as an
+    /// annotation preset, then the eager recompose materialises the entry.
     pub fn add(&self, mut entry: WorkerEntry) {
         if self.auto_first_seen && entry.first_seen_at_ms.is_none() {
             entry.first_seen_at_ms = Some(self.now_ms());
         }
-        self.pending.lock().unwrap().add.insert(entry.id.clone(), entry.clone());
-        // Drive topology identity (ordinal + host); reconcile stamps the rest.
+        self.set.preset(
+            &entry.id,
+            entry.address.host.clone(),
+            entry.address.port,
+            entry.health,
+            entry.draining_since,
+            entry.first_seen_at_ms,
+        );
         self.membership.add(Peer::new(entry.id.clone(), entry.address.host.clone()));
-        self.reconcile();
+        self.set.recompose();
     }
 
-    /// Remove a worker, emitting `Removed` (no-op if absent).
+    /// Remove a worker (no-op if absent). Membership prunes the ordinal; the
+    /// recompose drops its annotation.
     pub fn remove(&self, id: &str) {
-        if self.state.resolve(id).is_none() {
+        if self.set.resolve(id).is_none() {
             return;
         }
         self.membership.remove(id);
-        self.reconcile();
+        self.set.recompose();
     }
 
-    /// Set a worker's health, emitting `HealthChanged` (no-op if unknown or
-    /// unchanged). Entering `Draining` stamps `draining_since` from the clock.
-    ///
-    /// Health is a **proxy-layer** concern (not membership), so it is applied
-    /// directly to `state` and does not flow through topology.
+    /// Set a worker's health (no-op if unknown or unchanged). Entering `Draining`
+    /// stamps `draining_since` from the clock. Health is a proxy-layer concern
+    /// (annotation overlay), never membership.
     pub fn set_health(&self, id: &str, health: WorkerHealth) {
-        self.state.set_health(id, health, self.now_ms());
+        self.set.set_health(id, health);
     }
 
-    /// Change a worker's address, emitting `AddressChanged` (no-op if unknown or
-    /// unchanged). The host is membership identity (driven through topology); the
-    /// port is the proxy's transport annotation.
+    /// Change a worker's address (no-op if unknown or unchanged). The host is
+    /// membership identity (driven through topology, preserving health); the port
+    /// is the proxy's per-worker annotation.
     pub fn set_address(&self, id: &str, address: ProxyAddr) {
-        let Some(cur) = self.state.resolve(id) else {
+        let Some(cur) = self.set.resolve(id) else {
             return;
         };
         if cur.address == address {
             return;
         }
         if cur.address.host != address.host {
-            // Host change is membership identity → drive topology; stash the
-            // (possibly co-changed) port so reconcile stamps it.
-            self.pending.lock().unwrap().port.insert(id.to_string(), address.port);
+            // Host change is membership identity. Re-seed the annotation at the new
+            // host (carrying the current health/timing + new port) so the recompose
+            // preserves it rather than resetting to a fresh endpoint.
+            self.set.preset(id, address.host.clone(), address.port, cur.health, cur.draining_since, cur.first_seen_at_ms);
             self.membership.change_address(Peer::new(id.to_string(), address.host.clone()));
-            self.reconcile();
+            self.set.recompose();
         } else {
-            // Pure port change (same host): topology is port-agnostic, so this is
-            // a proxy-only annotation; apply it directly and emit the event.
-            let event =
-                RegistryEvent::AddressChanged { id: id.to_string(), from: cur.address, to: address.clone() };
-            self.state.mutate(
-                |entries| {
-                    if let Some(w) = entries.iter_mut().find(|w| w.id == id) {
-                        w.address = address;
-                    }
-                },
-                event,
-            );
+            // Pure port change (same host): a proxy-only annotation.
+            self.set.set_port_override(id, address.port);
+            self.set.recompose();
         }
+    }
+
+    /// The cluster membership identity backing this registry (test introspection).
+    pub fn membership(&self) -> &SimulatedMembership {
+        &self.membership
     }
 }
 
 impl WorkerRegistry for SimulatedWorkerRegistry {
     fn snapshot(&self) -> Vec<WorkerEntry> {
-        self.state.snapshot()
+        self.set.snapshot()
     }
     fn resolve(&self, id: &str) -> Option<WorkerEntry> {
-        self.state.resolve(id)
+        self.set.resolve(id)
     }
     fn lookup_by_address(&self, addr: &ProxyAddr) -> Option<WorkerEntry> {
-        self.state.lookup_by_address(addr)
-    }
-    fn changes(&self) -> broadcast::Receiver<RegistryEvent> {
-        self.state.changes()
+        self.set.lookup_by_address(addr)
     }
 }
 
@@ -337,30 +151,26 @@ impl WorkerRegistry for SimulatedWorkerRegistry {
 mod tests {
     use super::*;
 
-    // Paused tokio time so the injected `Clock::test_at` has *zero* real elapsed
+    // Paused tokio time so the injected `Clock::test_at` has zero real elapsed
     // between construction and the `now_ms()` stamp — the `draining_since` /
-    // `first_seen_at_ms` exact-equality assertions are then deterministic (a
-    // plain `#[test]` rides real wall-clock and flakes when the stamp crosses a
-    // 1 ms boundary; CLAUDE.md: tests use `start_paused`).
+    // `first_seen_at_ms` exact-equality assertions are then deterministic.
     #[tokio::test(start_paused = true)]
-    async fn add_remove_set_health_emit_events() {
+    async fn add_set_health_remove_update_state() {
         let reg = SimulatedWorkerRegistry::with_clock(vec![], Clock::test_at(1_000));
-        let mut rx = reg.changes();
         reg.add(WorkerEntry::alive("b2b-1", ProxyAddr::new("10.0.0.2", 5070)));
-        assert!(matches!(rx.try_recv().unwrap(), RegistryEvent::Added { .. }));
+        assert_eq!(reg.resolve("b2b-1").unwrap().address, ProxyAddr::new("10.0.0.2", 5070));
+        assert_eq!(reg.resolve("b2b-1").unwrap().health, WorkerHealth::Alive);
 
         reg.set_health("b2b-1", WorkerHealth::Draining);
-        let ev = rx.try_recv().unwrap();
-        assert!(matches!(ev, RegistryEvent::HealthChanged { to: WorkerHealth::Draining, .. }));
-        // draining_since stamped from the clock.
+        let w = reg.resolve("b2b-1").unwrap();
+        assert_eq!(w.health, WorkerHealth::Draining);
+        assert_eq!(w.draining_since, Some(1_000), "draining_since stamped from the clock");
+
+        // Idempotent: setting the same health leaves draining_since stamp intact.
+        reg.set_health("b2b-1", WorkerHealth::Draining);
         assert_eq!(reg.resolve("b2b-1").unwrap().draining_since, Some(1_000));
 
-        // Idempotent: setting the same health emits nothing.
-        reg.set_health("b2b-1", WorkerHealth::Draining);
-        assert!(rx.try_recv().is_err());
-
         reg.remove("b2b-1");
-        assert!(matches!(rx.try_recv().unwrap(), RegistryEvent::Removed { .. }));
         assert!(reg.snapshot().is_empty());
     }
 
@@ -375,35 +185,28 @@ mod tests {
     fn set_address_host_change_flows_through_topology() {
         let reg = SimulatedWorkerRegistry::with_clock(vec![], Clock::test_at(0));
         reg.add(WorkerEntry::alive("w", ProxyAddr::new("10.0.0.1", 5070)));
-        let mut rx = reg.changes();
-        // Host change: identity flows through topology, port preserved.
+        // Host change: identity flows through topology, port preserved, health kept.
         reg.set_address("w", ProxyAddr::new("10.0.0.9", 5070));
-        let ev = rx.try_recv().unwrap();
-        assert!(matches!(ev, RegistryEvent::AddressChanged { .. }));
         assert_eq!(reg.resolve("w").unwrap().address, ProxyAddr::new("10.0.0.9", 5070));
-        // topology membership host is the source of truth.
-        assert_eq!(reg.membership.resolve("w").unwrap().host, "10.0.0.9");
+        assert_eq!(reg.resolve("w").unwrap().health, WorkerHealth::Alive);
+        assert_eq!(reg.membership().resolve("w").unwrap().host, "10.0.0.9");
     }
 
     #[test]
     fn set_address_port_only_change_is_proxy_local() {
         let reg = SimulatedWorkerRegistry::with_clock(vec![], Clock::test_at(0));
         reg.add(WorkerEntry::alive("w", ProxyAddr::new("10.0.0.1", 5070)));
-        let mut rx = reg.changes();
         reg.set_address("w", ProxyAddr::new("10.0.0.1", 5080));
-        assert!(matches!(rx.try_recv().unwrap(), RegistryEvent::AddressChanged { .. }));
         assert_eq!(reg.resolve("w").unwrap().address, ProxyAddr::new("10.0.0.1", 5080));
         // topology host unchanged (port is port-agnostic to membership).
-        assert_eq!(reg.membership.resolve("w").unwrap().host, "10.0.0.1");
+        assert_eq!(reg.membership().resolve("w").unwrap().host, "10.0.0.1");
     }
 
-    /// Review regression (#6): when the topology delta broadcast overflows (more
-    /// than its 256-deep capacity of membership mutations before a reconcile),
-    /// `try_recv` returns `Lagged` and delta replay can no longer converge. The
-    /// reconciler must fall back to a full snapshot diff — not silently `break`
-    /// and leave the proxy routing to a stale peer set forever.
+    /// The snapshot-based recompose is inherently lag-immune: there is no delta
+    /// channel to overflow (the old `Lagged` resync hazard is gone). Driving many
+    /// membership changes then a real removal still converges to the current set.
     #[test]
-    fn lagged_delta_channel_resyncs_from_snapshot() {
+    fn bulk_membership_changes_converge() {
         let reg = SimulatedWorkerRegistry::with_clock(
             vec![
                 WorkerEntry::alive("keep", ProxyAddr::new("10.0.0.1", 5070)),
@@ -412,31 +215,12 @@ mod tests {
             Clock::test_at(0),
         );
         assert!(reg.resolve("keep").is_some() && reg.resolve("drop").is_some());
-
-        // Overflow the 256-deep delta channel WITHOUT reconciling: drive the
-        // membership identity directly (these emit deltas but do not reconcile),
-        // then make a real change — remove "drop".
         for i in 0..300 {
-            reg.membership.add(Peer::new(format!("ghost{i}"), "h"));
+            reg.add(WorkerEntry::alive(format!("ghost{i}"), ProxyAddr::new("10.9.9.9", 5070)));
         }
-        reg.membership.remove("drop");
-
-        // A single reconcile now sees `Lagged` first; it must resync to the
-        // current membership snapshot rather than break on the error.
-        reg.reconcile();
-
-        assert!(
-            reg.resolve("drop").is_none(),
-            "Lagged resync converged: the removed worker is dropped from the proxy view"
-        );
-        assert!(
-            reg.resolve("keep").is_some(),
-            "Lagged resync kept the surviving worker (no spurious removal)"
-        );
-        // Survivor's real port is intact — never materialised onto a dead port-0.
-        assert_eq!(
-            reg.resolve("keep").unwrap().address,
-            ProxyAddr::new("10.0.0.1", 5070)
-        );
+        reg.remove("drop");
+        assert!(reg.resolve("drop").is_none(), "removed worker is dropped from the proxy view");
+        assert!(reg.resolve("keep").is_some(), "surviving worker kept (no spurious removal)");
+        assert_eq!(reg.resolve("keep").unwrap().address, ProxyAddr::new("10.0.0.1", 5070));
     }
 }

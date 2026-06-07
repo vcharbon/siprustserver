@@ -7,15 +7,11 @@
 //! write. `changes()` is a `tokio::sync::broadcast` of deltas (no backfill —
 //! subscribers `snapshot` first).
 
-use std::sync::Arc;
-
-use arc_swap::ArcSwap;
-use tokio::sync::broadcast;
-
 use crate::addr::ProxyAddr;
 
+pub mod composed;
 pub mod control;
-pub mod membership_reg;
+pub mod projection;
 pub mod simulated;
 pub mod static_reg;
 
@@ -59,17 +55,13 @@ impl WorkerEntry {
     }
 }
 
-/// Tagged delta emitted on observable state change (port of `RegistryEvent`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RegistryEvent {
-    Added { entry: WorkerEntry },
-    Removed { id: WorkerId },
-    HealthChanged { id: WorkerId, from: WorkerHealth, to: WorkerHealth },
-    AddressChanged { id: WorkerId, from: ProxyAddr, to: ProxyAddr },
-}
-
 /// The read seam consumers (LB, health probe) depend on. All reads are sync +
 /// lock-free per the D4 non-blocking invariant.
+///
+/// There is no delta/`changes()` subscription: the worker set is a projection of
+/// `topology::Membership` ⊕ health, and consumers read the projection directly.
+/// (The old `RegistryEvent` broadcast had no consumer outside the registries' own
+/// tests; membership deltas, where needed, are observed via `topology::Membership`.)
 pub trait WorkerRegistry: Send + Sync {
     /// Snapshot the current worker set.
     fn snapshot(&self) -> Vec<WorkerEntry>;
@@ -78,123 +70,4 @@ pub trait WorkerRegistry: Send + Sync {
     /// Reverse-lookup the worker bound at `addr` (`None` for any non-worker
     /// source — Alice, Bob, an external SBC).
     fn lookup_by_address(&self, addr: &ProxyAddr) -> Option<WorkerEntry>;
-    /// Subscribe to deltas from this point on (no backfill).
-    fn changes(&self) -> broadcast::Receiver<RegistryEvent>;
-}
-
-/// Shared lock-free state backing both the read seam and the mutators. The
-/// static + simulated registries are thin wrappers over this.
-pub(crate) struct RegistryState {
-    entries: ArcSwap<Vec<WorkerEntry>>,
-    tx: broadcast::Sender<RegistryEvent>,
-}
-
-impl RegistryState {
-    pub(crate) fn new(initial: Vec<WorkerEntry>) -> Self {
-        let (tx, _rx) = broadcast::channel(256);
-        Self { entries: ArcSwap::from_pointee(initial), tx }
-    }
-
-    pub(crate) fn snapshot(&self) -> Vec<WorkerEntry> {
-        self.entries.load().as_ref().clone()
-    }
-
-    pub(crate) fn resolve(&self, id: &str) -> Option<WorkerEntry> {
-        self.entries.load().iter().find(|w| w.id == id).cloned()
-    }
-
-    pub(crate) fn lookup_by_address(&self, addr: &ProxyAddr) -> Option<WorkerEntry> {
-        self.entries.load().iter().find(|w| &w.address == addr).cloned()
-    }
-
-    pub(crate) fn changes(&self) -> broadcast::Receiver<RegistryEvent> {
-        self.tx.subscribe()
-    }
-
-    /// Replace the set with `f(current)` and emit `event` (best-effort — a
-    /// dropped event when there are no subscribers is fine, `changes` has no
-    /// backfill).
-    pub(crate) fn mutate(&self, f: impl FnOnce(&mut Vec<WorkerEntry>), event: RegistryEvent) {
-        let mut next = self.snapshot();
-        f(&mut next);
-        self.entries.store(Arc::new(next));
-        let _ = self.tx.send(event);
-    }
-
-    /// Add (or replace) a worker, emitting [`RegistryEvent::Added`]. A re-joined
-    /// ordinal is replaced (the restart path) so the entry starts fresh — health
-    /// and `first_seen_at_ms` come from `entry`. Used by the membership-driven
-    /// registry (ADR-0012 D4); the OPTIONS probe re-classifies health afterwards.
-    pub(crate) fn add_worker(&self, entry: WorkerEntry) {
-        let event = RegistryEvent::Added { entry: entry.clone() };
-        self.mutate(
-            |entries| {
-                entries.retain(|w| w.id != entry.id);
-                entries.push(entry);
-            },
-            event,
-        );
-    }
-
-    /// Remove a worker by id, emitting [`RegistryEvent::Removed`] (no-op if absent
-    /// — no spurious event).
-    pub(crate) fn remove_worker(&self, id: &str) {
-        if self.resolve(id).is_none() {
-            return;
-        }
-        self.mutate(
-            |entries| entries.retain(|w| w.id != id),
-            RegistryEvent::Removed { id: id.to_string() },
-        );
-    }
-
-    /// Change a worker's address, emitting [`RegistryEvent::AddressChanged`]
-    /// (no-op if unknown or unchanged). A genuine address move is treated as a
-    /// **fresh endpoint**: health resets to `Unknown` (the new process is not yet
-    /// probed) and `first_seen_at_ms` is re-stamped from `now_ms` so the LB's
-    /// fresh-pod guard re-arms. Used by the membership-driven registry (D4).
-    pub(crate) fn set_address(&self, id: &str, addr: ProxyAddr, now_ms: u64) {
-        let Some(cur) = self.resolve(id) else {
-            return;
-        };
-        if cur.address == addr {
-            return;
-        }
-        let event =
-            RegistryEvent::AddressChanged { id: id.to_string(), from: cur.address.clone(), to: addr.clone() };
-        self.mutate(
-            |entries| {
-                if let Some(w) = entries.iter_mut().find(|w| w.id == id) {
-                    w.address = addr;
-                    w.health = WorkerHealth::Unknown;
-                    w.first_seen_at_ms = Some(now_ms);
-                }
-            },
-            event,
-        );
-    }
-
-    /// Annotate a worker's health, emitting `HealthChanged` (no-op if unknown or
-    /// unchanged). Entering `Draining` stamps `draining_since` from `now_ms`.
-    /// The canonical health write shared by every registry + control adapter.
-    pub(crate) fn set_health(&self, id: &str, health: WorkerHealth, now_ms: u64) {
-        let Some(cur) = self.resolve(id) else {
-            return;
-        };
-        if cur.health == health {
-            return;
-        }
-        let event = RegistryEvent::HealthChanged { id: id.to_string(), from: cur.health, to: health };
-        self.mutate(
-            |entries| {
-                if let Some(w) = entries.iter_mut().find(|w| w.id == id) {
-                    w.health = health;
-                    if health == WorkerHealth::Draining && w.draining_since.is_none() {
-                        w.draining_since = Some(now_ms);
-                    }
-                }
-            },
-            event,
-        );
-    }
 }

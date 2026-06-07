@@ -9,13 +9,15 @@
 //! - **No transport port.** A `Peer` is `ordinal@host`, not `ordinal@host:port`.
 //!   Membership is about identity + reachability address; *which* port carries
 //!   SIP vs. the replication stream is a consumer concern layered on top.
-//! - **No health.** [`MemberDelta`] is the membership-only subset of the proxy's
-//!   `RegistryEvent` — `Added | Removed | AddressChanged`, with **no**
-//!   `HealthChanged`. Health is a proxy-layer classification (probe-driven) that
-//!   sits *above* membership; modelling it here would leak that concern into the
-//!   b2bua replication path that has no notion of OPTIONS health.
+//! - **No health.** [`MemberDelta`] is membership-only — `Added | Removed |
+//!   AddressChanged`, with **no** health transition. Health is a proxy-layer
+//!   classification (OPTIONS-probe-driven) that the proxy composes *over*
+//!   membership (its `WorkerSet` annotation overlay); modelling it here would leak
+//!   that concern into the b2bua replication path that has no notion of OPTIONS
+//!   health.
 //!
-//! The backing [`MembershipState`] mirrors the proxy's `RegistryState`: an
+//! The backing [`MembershipState`] is the proxy's worker-set source of truth (the
+//! proxy's `WorkerSet` composes a `WorkerEntry` view as membership ⊕ health): an
 //! [`arc_swap::ArcSwap`] snapshot read on the hot path + a
 //! [`tokio::sync::broadcast`] of deltas (no backfill — subscribers `snapshot`
 //! first). Snapshots are kept **sorted by ordinal** so every consumer sees a
@@ -59,9 +61,8 @@ impl Peer {
     }
 }
 
-/// Tagged membership delta emitted on observable change. The membership-only
-/// subset of the proxy's `RegistryEvent`: **no** `HealthChanged` (health is a
-/// proxy-layer concern layered on top).
+/// Tagged membership delta emitted on observable change. Membership-only: **no**
+/// health transition (health is a proxy-layer concern composed on top).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MemberDelta {
     /// A peer joined (or a removed ordinal re-joined).
@@ -91,8 +92,8 @@ pub struct MembershipParseError {
 }
 
 /// Shared lock-free state backing both the read seam and the mutators. The
-/// static + simulated memberships are thin wrappers over this. Mirrors the
-/// proxy's `RegistryState`.
+/// static + simulated memberships are thin wrappers over this; the proxy's
+/// `WorkerSet` composes its `WorkerEntry` view directly over a `Membership`.
 pub struct MembershipState {
     peers: ArcSwap<Vec<Peer>>,
     tx: broadcast::Sender<MemberDelta>,
@@ -124,7 +125,7 @@ impl MembershipState {
 
     /// Replace the set with `f(current)` (re-sorted by ordinal afterwards) and
     /// emit `delta` (best-effort — a dropped delta with no subscribers is fine,
-    /// `changes` has no backfill). Mirrors `RegistryState::mutate`.
+    /// `changes` has no backfill).
     pub fn mutate(&self, f: impl FnOnce(&mut Vec<Peer>), delta: MemberDelta) {
         let mut next = self.snapshot();
         f(&mut next);
