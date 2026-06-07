@@ -220,6 +220,12 @@ impl<'a> ActionExecutor<'a> {
             RuleAction::DeactivateRule { rule_id } => {
                 *call = deactivate_rule(call.clone(), rule_id);
             }
+            RuleAction::SetState { machine, to } => {
+                // The sole writer of `sm_cursors` (ADR-0016 X4). Transition
+                // legality is enforced by the executor against the winning
+                // rule's declared edges.
+                call.sm_cursors.insert(machine.clone(), to.clone());
+            }
             RuleAction::SendRequestToLeg { leg_id, method } => {
                 self.send_request_to_leg(call, fx, leg_id, method);
             }

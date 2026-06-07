@@ -374,6 +374,11 @@ pub enum RuleAction {
         reason: Option<String>,
     },
     DeactivateRule { rule_id: String },
+    /// Move a machine's cursor (ADR-0016 X4): write `call.sm_cursors[machine] =
+    /// to`. The sole writer of the cursor map. The legality of the resulting
+    /// `(from, to)` edge against the emitting rule's declared `transitions` is
+    /// checked in the executor (debug panic / release log-and-proceed).
+    SetState { machine: MachineId, to: StateLabel },
     SendRequestToLeg { leg_id: String, method: String },
     // ── relayFirst18xTo180 (SERVICE_LAYER) ──────────────────────────────────
     /// Originate a PRACK toward `leg_id`'s early dialog (selected by `b_tag`),
