@@ -35,11 +35,12 @@
 //! before — the auto-generation only changes *who writes the bytes*.
 
 use std::cell::Cell;
+use std::collections::hash_map::RandomState;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use layer_harness::{Channel, NetworkTag, Recorder, RunContext, TransportKind};
@@ -71,6 +72,79 @@ struct Ids(AtomicU64);
 impl Ids {
     fn next(&self) -> u64 {
         self.0.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+/// How a simulated UA, acting as UAS, echoes multiple Record-Route header rows
+/// back in its response: as separate `Record-Route:` lines, or folded into a
+/// single comma-separated list. RFC 3261 §7.3.1 permits the combined form, and
+/// real UAs (SIPp, many phones) emit it — so the b-leg 200 OK can carry the front
+/// proxy's *double*-record-route halves comma-combined in ONE header, which the
+/// B2BUA must split before the §12.1.2 route-set reverse (the long-call-loss
+/// class — see `b2bua/src/rules/actions.rs`). The harness picks this per-UA at
+/// bind time so a run exercises both wire forms.
+///
+/// NOTE: this only has an observable effect when a response echoes ≥ 2
+/// Record-Route headers, which in practice means the *real* double-record-routing
+/// `sip-proxy` (failover-harness). The harness's own loose-routing [`Proxy`]
+/// inserts a single `;lr` Record-Route, so folding is a no-op there and the
+/// deterministic report bytes of peer-to-peer scenarios are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordRouteFold {
+    /// One `Record-Route:` line per route (the strict, current behaviour).
+    Separate,
+    /// All Record-Route rows folded into one comma-separated header (§7.3.1).
+    Combined,
+}
+
+/// Process-wide random seed for the per-UA fold coin flip, drawn ONCE per launch
+/// (so the two halves vary run-to-run) but shared by every UA (so a given name's
+/// choice is stable within the run and reproducible from the logged line).
+fn rr_fold_seed() -> &'static RandomState {
+    static SEED: OnceLock<RandomState> = OnceLock::new();
+    SEED.get_or_init(RandomState::new)
+}
+
+/// Decide a UA's Record-Route fold mode. `HARNESS_RR_FOLD=separate|combined`
+/// pins it (for deterministic / repro runs); otherwise it is a per-UA coin flip
+/// keyed on the UA name and the per-launch [`rr_fold_seed`].
+fn decide_rr_fold(name: &str) -> RecordRouteFold {
+    match std::env::var("HARNESS_RR_FOLD").ok().as_deref() {
+        Some("separate") => RecordRouteFold::Separate,
+        Some("combined") => RecordRouteFold::Combined,
+        _ => {
+            use std::hash::{BuildHasher, Hasher};
+            let mut h = rr_fold_seed().build_hasher();
+            h.write(name.as_bytes());
+            if h.finish() & 1 == 0 {
+                RecordRouteFold::Separate
+            } else {
+                RecordRouteFold::Combined
+            }
+        }
+    }
+}
+
+/// Fold every Record-Route header in `headers` into a single comma-separated
+/// header at the position of the first (RFC 3261 §7.3.1). No-op for < 2 rows.
+fn fold_record_routes(headers: &mut Vec<SipHeader>) {
+    let idxs: Vec<usize> = headers
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| h.name.eq_ignore_ascii_case("record-route"))
+        .map(|(i, _)| i)
+        .collect();
+    if idxs.len() < 2 {
+        return;
+    }
+    let combined = idxs
+        .iter()
+        .map(|&i| headers[i].value.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+    headers[idxs[0]].value = combined;
+    for &i in idxs[1..].iter().rev() {
+        headers.remove(i);
     }
 }
 
@@ -181,12 +255,18 @@ impl Harness {
             .bind_udp(BindUdpOpts::new(addr, 64))
             .await
             .unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
+        let rr_fold = decide_rr_fold(&name);
+        eprintln!(
+            "[harness] UA {name}: Record-Route fold = {rr_fold:?} \
+             (set HARNESS_RR_FOLD=separate|combined to pin)"
+        );
         Agent {
             name: name.clone(),
             addr,
             uri: format!("sip:{name}@{}", addr.ip()),
             ep: Arc::from(ep),
             ids: self.ids.clone(),
+            rr_fold,
         }
     }
 
@@ -442,6 +522,9 @@ pub struct Agent {
     uri: String,
     ep: Arc<dyn UdpEndpoint>,
     ids: Arc<Ids>,
+    /// How this UA echoes multiple Record-Route rows when it acts as UAS
+    /// ([`RecordRouteFold`]). Chosen per-UA at bind time.
+    rr_fold: RecordRouteFold,
 }
 
 impl Agent {
@@ -1215,7 +1298,14 @@ impl<'a> Respond<'a> {
             extra_headers: self.extra_headers.clone(),
             incoming_source: None,
         };
-        let resp = generate_response(&txn.request, self.status, &self.reason, &opts);
+        let mut resp = generate_response(&txn.request, self.status, &self.reason, &opts);
+        // Real UAs may fold multiple echoed Record-Route rows into one comma-
+        // separated header (RFC 3261 §7.3.1); reproduce that wire form for UAs the
+        // harness picked `Combined` for, so the B2BUA's split-before-§12.1.2-reverse
+        // path is exercised on the b-leg route-set capture (see `RecordRouteFold`).
+        if txn.agent.rr_fold == RecordRouteFold::Combined {
+            fold_record_routes(&mut resp.headers);
+        }
         // Responses are routed by Via, not Route (RFC 3261 §18.2.2): send to the
         // request's topmost Via sent-by. With a proxy in the path that Via is
         // the proxy's, so the response correctly traverses it back.

@@ -3,13 +3,27 @@
 # and the shared uas-basic.xml scenario (mounted from the sipp-scenarios CM that
 # run.sh builds out of the symlinked scenarios dir). Pinned to tier=load so the
 # load generators sit off the proxy/worker nodes, mirroring the sipjs topology.
+# StatefulSet (was a Deployment) so each replica gets a STABLE, PREDICTABLE DNS
+# name over the headless Service: `sipp-uas-0.sipp-uas.sip-test.svc.cluster.local`
+# … `sipp-uas-<N-1>.…`. The UAC injects one of these per call (round-robined from a
+# static CSV via SIPp `-inf`) as the b-leg callee in `X-Api-Call.destination`; the
+# LB resolves that single-A name to the one pod and forwards it. Distinct per-pod
+# names (not the multi-A Service name) guarantee a call never splits across pods:
+# every retransmit of an INVITE resolves to the SAME pod. A Deployment's pod names
+# are random hashes (not addressable per-pod), so it cannot provide this.
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: sipp-uas
   namespace: sip-test
   labels: { app: sipp-uas }
 spec:
+  # Governing headless Service (must match the Service name below) — drives the
+  # per-pod DNS records `sipp-uas-N.sipp-uas.sip-test.svc.cluster.local`.
+  serviceName: sipp-uas
+  # Bring pods up in parallel (default is one-at-a-time, slow for N replicas); the
+  # UAS pods are independent, so ordered startup buys nothing.
+  podManagementPolicy: Parallel
   # Scaled out 1 -> 2 (one per tier=load node) after the single replica self-
   # terminated with exit 255 at ~5760 concurrent calls. PROVEN ROOT CAUSE (from
   # the crashed pod's `kubectl logs --previous`): a SIPp v3.7.7 INTERNAL timer-
@@ -114,12 +128,32 @@ spec:
         - name: scenarios
           configMap: { name: sipp-scenarios }
 ---
+# HEADLESS Service (clusterIP: None) — NO kube-proxy ClusterIP DNAT/SNAT.
+# Previously this was a normal ClusterIP Service and the worker's B2BUA_DEST
+# pointed at the ClusterIP, so the INITIAL b-leg INVITE was load-balanced by
+# kube-proxy: DNAT (ClusterIP → a random pod) + SNAT (masquerade to the proxy's
+# node IP, because the proxy is hostNetwork). Bob therefore saw the initial INVITE
+# from a NODE IP via NAT, not from the LB VIP.
+#
+# Now: the UAC injects this Service's DNS name (`sipp-uas.sip-test.svc.cluster.local`)
+# as the b-leg callee via the `X-Api-Call.destination` header; the b2bua resolves
+# the headless name to the set of pod IPs and round-robins across them
+# (decision/apply_route.rs `resolve_callee_host`), so the b-leg INVITE is sent
+# pod-direct and the front proxy forwards it from the VIP — ZERO NAT. A headless
+# Service publishes pod IPs as A records and creates no DNAT/SNAT iptables rules,
+# so any residual use of a (now non-existent) ClusterIP fails loudly.
+# Requirement: the UAS pods are started once and NOT restarted during a load run,
+# so the resolved A-set is stable (the b2bua caches it for the process lifetime).
 apiVersion: v1
 kind: Service
 metadata:
   name: sipp-uas
   namespace: sip-test
 spec:
+  clusterIP: None
+  # Publish pods in DNS as soon as they exist (don't wait for Ready) so the A-set
+  # is complete early; UAS pods are long-lived for the run.
+  publishNotReadyAddresses: true
   selector: { app: sipp-uas }
   ports:
     - { port: 5060, targetPort: 5060, protocol: UDP }

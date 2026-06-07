@@ -500,6 +500,7 @@ impl ReplicatedB2buaSut {
             clock: self.clock.clone(),
             id_gen: Arc::new(IdGen::seeded(0xB2B0 + self.gen)),
             replication,
+            metrics: b2bua::metrics::B2buaMetrics::new(),
         };
         B2buaCore::spawn(endpoint, deps)
     }

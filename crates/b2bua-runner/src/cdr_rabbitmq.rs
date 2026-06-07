@@ -21,11 +21,9 @@
 //! connection is established lazily on first write and re-established after any
 //! error.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use b2bua::cdr::{build_record, CdrRecord, CdrWriter};
+use b2bua::metrics::B2buaMetrics;
 use call::Call;
 use lapin::{
     options::{BasicPublishOptions, QueueDeclareOptions},
@@ -44,21 +42,21 @@ pub struct RabbitMqCdrWriter {
     /// connection's IO task stays alive (dropping `Connection` closes it).
     /// `None` until the first successful connect or after a publish error.
     chan: Mutex<Option<(Connection, Channel)>>,
-    published: Arc<AtomicU64>,
-    dropped: Arc<AtomicU64>,
+    /// Shared b2bua registry: publish success bumps `cdr_written_total`, every
+    /// failure path (serialize/connect/publish) bumps `cdr_dropped_total`.
+    metrics: B2buaMetrics,
 }
 
 impl RabbitMqCdrWriter {
     /// `url` is an AMQP URI (`amqp://user:pass@host:5672/vhost`); `queue` is the
     /// destination queue name; `max_len` bounds the broker queue (0 = unbounded).
-    pub fn new(url: String, queue: String, max_len: i64) -> Self {
+    pub fn new(url: String, queue: String, max_len: i64, metrics: B2buaMetrics) -> Self {
         Self {
             url,
             queue,
             max_len,
             chan: Mutex::new(None),
-            published: Arc::new(AtomicU64::new(0)),
-            dropped: Arc::new(AtomicU64::new(0)),
+            metrics,
         }
     }
 
@@ -103,7 +101,7 @@ impl CdrWriter for RabbitMqCdrWriter {
             Err(e) => {
                 // A record that won't serialize is a bug, not a transient fault;
                 // count it as dropped and move on (never poison the drainer).
-                self.dropped.fetch_add(1, Ordering::Relaxed);
+                self.metrics.bump_cdr_dropped();
                 eprintln!("cdr-rabbitmq: serialize failed for {}: {e}", record.call_ref);
                 return;
             }
@@ -114,7 +112,7 @@ impl CdrWriter for RabbitMqCdrWriter {
             match self.connect().await {
                 Ok(c) => *guard = Some(c),
                 Err(e) => {
-                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.bump_cdr_dropped();
                     eprintln!("cdr-rabbitmq: connect to {} failed: {e}", self.url);
                     return;
                 }
@@ -135,10 +133,10 @@ impl CdrWriter for RabbitMqCdrWriter {
             .await
         {
             Ok(_confirm) => {
-                self.published.fetch_add(1, Ordering::Relaxed);
+                self.metrics.bump_cdr_written();
             }
             Err(e) => {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
+                self.metrics.bump_cdr_dropped();
                 eprintln!("cdr-rabbitmq: publish failed: {e}; will reconnect");
                 // Drop the channel/connection so the next write reconnects.
                 *guard = None;

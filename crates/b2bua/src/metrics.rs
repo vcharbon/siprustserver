@@ -360,8 +360,8 @@ impl B2buaMetrics {
         counter("b2bua_force_purge_total", "calls force-purged (loop guard)", self.force_purge_total());
         counter("b2bua_fast_reject_terminating_total", "requests fast-rejected on a terminating call", self.fast_reject_terminating_total());
         counter("b2bua_unroutable_dropped_total", "messages dropped: no route resolved", self.unroutable_dropped_total());
-        counter("b2bua_cdr_written_total", "CDRs written", self.cdr_written_total());
-        counter("b2bua_cdr_dropped_total", "CDRs dropped on buffer overflow", self.cdr_dropped_total());
+        counter("b2bua_cdr_written_total", "CDRs successfully written to the sink", self.cdr_written_total());
+        counter("b2bua_cdr_dropped_total", "CDRs dropped (submit-queue overflow or sink failure)", self.cdr_dropped_total());
         // ── replication (peer-to-peer HA) — own namespace, distinct from the
         // data-path counters above so an HA failure can be localised by layer. ──
         counter("b2bua_repl_flush_propagated_total", "primary flushes that propagated to a backup peer (topology.bak set)", self.repl_flush_propagated_total());

@@ -71,6 +71,17 @@ spec:
             - "-key"
             - "xapi"
             - '{"action":"route","call_limiter":[{"id":"endurance-limiter","limit":${LIMITER_CAP}}]}'
+            # Per-call b-leg callee injection: each call's INVITE carries
+            # `X-Api-Call: {"destination":{"host":"[field0]",...}}` (see the UAC
+            # scenarios), and SIPp round-robins [field0] across the sipp-uas pod
+            # FQDNs in this CSV (SEQUENTIAL). The b2bua passes the chosen name to the
+            # LB, which resolves it to the one pod and forwards — pod-direct from the
+            # VIP, NO kube-proxy ClusterIP NAT, and a call never splits across pods.
+            # Scenarios that don't reference [field0] (e.g. the limiter stream)
+            # ignore the file and fall back to B2BUA_DEST. The CSV is STATIC
+            # (StatefulSet pod ordinals are deterministic) — no boot-time rewrite.
+            - "-inf"
+            - "/scenarios/uas-targets.csv"
             - "-s"
             - "service"
             - "-i"

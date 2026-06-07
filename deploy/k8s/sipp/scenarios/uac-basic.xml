@@ -9,6 +9,7 @@
       To: sut <sip:[service]@[remote_ip]:[remote_port]>
       Call-ID: [call_id]
       CSeq: 1 INVITE
+      X-Api-Call: {"destination":{"host":"[field0]","port":5060}}
       Contact: sip:sipp@[local_ip]:[local_port]
       Max-Forwards: 70
       Subject: K8s tier UAC

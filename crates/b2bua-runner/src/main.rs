@@ -141,6 +141,17 @@ fn resolve(addr: &str) -> SocketAddr {
         .unwrap_or_else(|| panic!("no address resolved from {addr:?}"))
 }
 
+/// Split a `host:port` into its parts WITHOUT DNS resolution (the host may be a
+/// service name resolved per-call downstream). Port defaults to 5060 if absent or
+/// unparseable. Used for the b-leg callee (`B2BUA_DEST`) — see the call site for
+/// why it must stay unresolved.
+fn split_host_port(s: &str) -> (String, u16) {
+    match s.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(5060)),
+        None => (s.to_string(), 5060),
+    }
+}
+
 /// **Incarnation gen** (deferred S11 decision: boot wall-clock vs pod epoch).
 /// We pick **boot wall-clock seconds**: it is monotonic across pod restarts (the
 /// clock only moves forward), so a rebooted worker always serves under a higher
@@ -277,9 +288,39 @@ async fn build_membership() -> Option<(Arc<dyn Membership>, ReplAddressing)> {
 ///                       this so the proxy's EndpointSlice view respects
 ///                       `NotReady`/`Draining` (ADR-0011 X6), matching the
 ///                       worker's own OPTIONS self-report.
+/// Prometheus text for the sip-txn backpressure signals that `B2buaMetrics`
+/// omits: events-channel depth/capacity, per-reason drop counters, and active
+/// transactions. The `reason="response"` drop series is the keepalive-response
+/// shedding that tears down established dialogs under a new-call burst — invisible
+/// until this was exported.
+fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
+    use sip_txn::EventQueueDropReason;
+    let mut s = String::new();
+    s.push_str("# HELP b2bua_txn_active_transactions In-flight client+server transactions.\n");
+    s.push_str("# TYPE b2bua_txn_active_transactions gauge\n");
+    s.push_str(&format!("b2bua_txn_active_transactions {}\n", m.active_transactions()));
+    s.push_str("# HELP b2bua_txn_event_queue_depth Inbound->app events channel current depth.\n");
+    s.push_str("# TYPE b2bua_txn_event_queue_depth gauge\n");
+    s.push_str(&format!("b2bua_txn_event_queue_depth {}\n", m.event_queue_depth()));
+    s.push_str("# HELP b2bua_txn_event_queue_capacity Inbound->app events channel capacity.\n");
+    s.push_str("# TYPE b2bua_txn_event_queue_capacity gauge\n");
+    s.push_str(&format!("b2bua_txn_event_queue_capacity {}\n", m.event_queue_capacity()));
+    s.push_str("# HELP b2bua_txn_event_queue_drops_total Events shed when the inbound->app channel was full, by class.\n");
+    s.push_str("# TYPE b2bua_txn_event_queue_drops_total counter\n");
+    for r in EventQueueDropReason::ALL {
+        s.push_str(&format!(
+            "b2bua_txn_event_queue_drops_total{{reason=\"{}\"}} {}\n",
+            r.label(),
+            m.event_queue_drops(r)
+        ));
+    }
+    s
+}
+
 async fn serve_metrics(
     addr: SocketAddr,
     metrics: B2buaMetrics,
+    txn_metrics: sip_txn::TransactionMetrics,
     ready: Arc<dyn Fn() -> bool + Send + Sync>,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
@@ -287,13 +328,16 @@ async fn serve_metrics(
     loop {
         let (mut stream, _) = listener.accept().await?;
         let metrics = metrics.clone();
+        let txn_metrics = txn_metrics.clone();
         let ready = ready.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 1024];
             let n = stream.read(&mut buf).await.unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]);
             let (status, body) = if req.starts_with("GET /metrics") {
-                ("200 OK", metrics.prometheus_text())
+                let mut text = metrics.prometheus_text();
+                text.push_str(&txn_metrics_text(&txn_metrics));
+                ("200 OK", text)
             } else if req.starts_with("GET /healthz") {
                 ("200 OK", "ok\n".to_string())
             } else if req.starts_with("GET /ready") {
@@ -351,7 +395,14 @@ async fn main() {
     let limiter_refresh_sec: i64 = env_or("LIMITER_WINDOW_SECONDS", "300").parse().unwrap_or(300);
 
     let listen_sa = resolve(&listen);
-    let dest_sa = resolve(&dest);
+    // The b-leg callee (`B2BUA_DEST`) is passed to the decision engine as an
+    // UNRESOLVED host:port. A DNS name is resolved PER CALL — and round-robined
+    // across a headless Service's pod set — in b2bua's `apply_route`, so the b-leg
+    // goes pod-direct from the LB VIP with no kube-proxy ClusterIP NAT. Resolving
+    // once here would instead pin every call to a single startup-resolved pod (and
+    // could fail the worker's boot if the callee Service has no endpoints yet). An
+    // IP literal passes straight through the resolver unchanged.
+    let (dest_host, dest_port) = split_host_port(&dest);
     let metrics_sa = resolve(&metrics_addr);
 
     // Real, non-recording transport: a plain tokio UDP socket.
@@ -474,6 +525,12 @@ async fn main() {
     // discard (endurance default unless wired). Either way it sits behind the
     // `BufferedCdrWriter` bounded queue (drop-on-overload at `cdr_queue` depth),
     // so the in-process max buffer is identical regardless of sink.
+    // Build the shared metrics registry HERE (before the CDR writers) and inject
+    // the same handle into the core via `deps.metrics`, so the writers — built
+    // before the core spawns — record into the registry the core exports at
+    // `/metrics`. Without this the CDR writers minted private atomics that were
+    // never scraped, leaving `b2bua_cdr_written_total` dead at 0.
+    let metrics = B2buaMetrics::new();
     let cdr_inner: Arc<dyn CdrWriter> = match env::var("B2BUA_CDR_RABBITMQ_URL") {
         Ok(url) if !url.trim().is_empty() => {
             let queue = env_or("B2BUA_CDR_RABBITMQ_QUEUE", "cdr");
@@ -483,11 +540,16 @@ async fn main() {
             eprintln!(
                 "b2bua-runner CDR sink: RabbitMQ queue={queue:?} max_len={max_len} (buffer={cdr_queue})"
             );
-            Arc::new(cdr_rabbitmq::RabbitMqCdrWriter::new(url, queue, max_len))
+            Arc::new(cdr_rabbitmq::RabbitMqCdrWriter::new(
+                url,
+                queue,
+                max_len,
+                metrics.clone(),
+            ))
         }
         _ => Arc::new(NullCdrWriter),
     };
-    let cdr = Arc::new(BufferedCdrWriter::spawn(cdr_inner, cdr_queue));
+    let cdr = Arc::new(BufferedCdrWriter::spawn(cdr_inner, cdr_queue, metrics.clone()));
 
     let clock = Clock::system();
 
@@ -542,8 +604,8 @@ async fn main() {
     let deps = B2buaDeps {
         config,
         decision: Arc::new(ScriptedDecisionEngine::route_all_to_with_limiter(
-            dest_sa.ip().to_string(),
-            dest_sa.port(),
+            dest_host.clone(),
+            dest_port,
             stress_limiter_from_env(),
         )),
         limiter,
@@ -552,13 +614,14 @@ async fn main() {
         clock: clock.clone(),
         id_gen: Arc::new(IdGen::from_entropy()),
         replication,
+        metrics: metrics.clone(),
     };
 
     let core = Arc::new(B2buaCore::spawn(endpoint, deps));
-    let metrics = core.metrics().clone();
+    // `metrics` already holds the same handle the core exports (injected via deps).
 
     eprintln!(
-        "b2bua-runner pid={} listening UDP {local} -> routing all calls to {dest_sa} (ordinal={ordinal}, queue={queue_max}, cdr_queue={cdr_queue})",
+        "b2bua-runner pid={} listening UDP {local} -> routing all calls to {dest_host}:{dest_port} (resolved per-call; ordinal={ordinal}, queue={queue_max}, cdr_queue={cdr_queue})",
         std::process::id()
     );
 
@@ -567,11 +630,12 @@ async fn main() {
     let draining = Arc::new(AtomicBool::new(false));
     {
         let core = core.clone();
+        let txn_metrics = core.txn_metrics().clone();
         let draining = draining.clone();
         let ready: Arc<dyn Fn() -> bool + Send + Sync> =
             Arc::new(move || core.is_ready() && !draining.load(Ordering::Relaxed));
         tokio::spawn(async move {
-            if let Err(e) = serve_metrics(metrics_sa, metrics, ready).await {
+            if let Err(e) = serve_metrics(metrics_sa, metrics, txn_metrics, ready).await {
                 eprintln!("b2bua-runner metrics server error: {e}");
             }
         });

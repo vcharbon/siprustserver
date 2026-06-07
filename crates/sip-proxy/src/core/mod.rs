@@ -36,6 +36,43 @@ fn is_dialog_creating(method: &str) -> bool {
     method == "INVITE" || method == "SUBSCRIBE"
 }
 
+/// Resolve a [`ProxyAddr`] to a real socket address for forwarding. An IP-literal
+/// host is parsed directly (the fast path: workers come from the registry as IP
+/// literals, and the simulated harness fabric addresses everything by IP). A DNS
+/// NAME — e.g. a `sipp-uas` pod FQDN carried in a worker-outbound b-leg
+/// Request-URI — is resolved via the system resolver and cached for the process
+/// lifetime, so the LB (not the B2BUA) owns next-hop name resolution.
+///
+/// A per-pod name is single-A, so it resolves to ONE pod consistently: retransmits
+/// of an INVITE never split a call across pods, and in-dialog requests (addressed
+/// to the pinned pod Contact, an IP literal) take the fast path. The cache needs no
+/// TTL because callee pods are launched once and not restarted during a run; this
+/// also keeps the resolver out of any fake-clock path (the harness only ever
+/// forwards to IP literals, so it is never invoked under a paused clock).
+/// Returns `None` if a name can't be resolved (the datagram is dropped).
+async fn resolve_proxy_addr(target: &ProxyAddr) -> Option<SocketAddr> {
+    // IP-literal fast path (also the only path the simulated harness ever takes).
+    if let Some(dst) = target.to_socket_addr() {
+        return Some(dst);
+    }
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex;
+
+    static CACHE: OnceLock<Mutex<HashMap<String, SocketAddr>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = target.to_string();
+    if let Some(addr) = cache.lock().await.get(&key).copied() {
+        return Some(addr);
+    }
+    let addr = tokio::net::lookup_host((target.host.as_str(), target.port))
+        .await
+        .ok()?
+        .next()?;
+    cache.lock().await.insert(key, addr);
+    Some(addr)
+}
+
 /// The dependency bundle for a [`ProxyCore`] (avoids a 10-argument constructor).
 pub struct ProxyCoreParts {
     pub endpoint: Box<dyn UdpEndpoint>,
@@ -97,11 +134,11 @@ impl ProxyCore {
         self.clock.now_ms().max(0) as u64
     }
 
-    /// Send raw bytes to a [`ProxyAddr`] target (resolving to a socket addr).
-    /// A target whose host isn't an IP literal is dropped (logged via metrics
-    /// elsewhere) — the simulated fabric + tests always address by IP literal.
+    /// Send raw bytes to a [`ProxyAddr`] target, resolving it to a socket addr.
+    /// An IP-literal host is used directly; a DNS name is resolved (and cached) via
+    /// [`resolve_proxy_addr`]. A name that fails to resolve is dropped.
     async fn send_to(&self, bytes: &[u8], target: &ProxyAddr) {
-        if let Some(dst) = target.to_socket_addr() {
+        if let Some(dst) = resolve_proxy_addr(target).await {
             let _ = self.endpoint.send_to(bytes, dst).await;
         }
     }

@@ -95,9 +95,14 @@ spec:
             # 200 before declaring the leg dead and BYE-ing. Was a hard 5 s, which
             # tore down healthy RECLAIMED dialogs across a reboot (their re-armed
             # keepalive OPTIONS round-trip into a still-settling path: smoothed
-            # reclaim burst + proxy re-discovering the new pod IP). 45 s rides that
-            # recovery window out; stays well under the 300 s keepalive interval.
-            - { name: B2BUA_KEEPALIVE_TIMEOUT_SEC, value: "45" }
+            # reclaim burst + proxy re-discovering the new pod IP). 45 s rode that
+            # window out, but a 200cps NEW-INVITE peak fills the txn events channel
+            # and sheds in-dialog OPTIONS-200 keepalive responses (drop-newest), so
+            # established long dialogs missed their round-trip and were torn down
+            # within 45 s. 120 s gives the dialog enough slack to ride out a burst's
+            # response-shedding (paired with the enlarged events channel); still well
+            # under the 300 s keepalive interval.
+            - { name: B2BUA_KEEPALIVE_TIMEOUT_SEC, value: "120" }
             # Ordinal = pod name (stable per StatefulSet replica == membership ordinal).
             - { name: B2BUA_ORDINAL, value: "$(POD_NAME)" }
             # --- call limiter ---

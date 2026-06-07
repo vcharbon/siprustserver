@@ -68,7 +68,7 @@ impl EventQueueDropReason {
         }
     }
 
-    pub(crate) const ALL: [EventQueueDropReason; 6] = [
+    pub const ALL: [EventQueueDropReason; 6] = [
         Self::RequestInvite,
         Self::RequestOther,
         Self::Response,
@@ -76,6 +76,18 @@ impl EventQueueDropReason {
         Self::Timeout,
         Self::CallQuiesced,
     ];
+
+    /// Stable metric-label for this reason (`reason="..."`).
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::RequestInvite => "request_invite",
+            Self::RequestOther => "request_other",
+            Self::Response => "response",
+            Self::Cancelled => "cancelled",
+            Self::Timeout => "timeout",
+            Self::CallQuiesced => "call_quiesced",
+        }
+    }
 
     pub(crate) const fn index(self) -> usize {
         match self {

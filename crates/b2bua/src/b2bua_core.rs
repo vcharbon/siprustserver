@@ -95,6 +95,10 @@ pub struct B2buaDeps {
     pub id_gen: Arc<IdGen>,
     /// Opt-in replication. `None` → today's non-replicating behaviour verbatim.
     pub replication: Option<ReplicationSetup>,
+    /// Shared metrics handle. The host builds this so components it constructs
+    /// *before* spawn (notably the CDR writers) record into the SAME registry the
+    /// core exports at `/metrics`. Pass `B2buaMetrics::new()` if you don't scrape it.
+    pub metrics: B2buaMetrics,
 }
 
 impl B2buaCore {
@@ -124,15 +128,21 @@ impl B2buaCore {
             clock,
             id_gen,
             replication,
+            metrics,
         } = deps;
-        let metrics = B2buaMetrics::new();
 
         let parser: Arc<dyn SipParser + Send + Sync> = Arc::new(CustomParser::new());
         let (txn, txn_rx) = TransactionLayer::spawn(
             endpoint,
             parser,
             TransactionConfig {
-                udp_queue_max: 256,
+                // Sizes the bounded inbound→app events channel at `max(64, x*4)`.
+                // At 256 (→1024) a new-INVITE burst (e.g. a 200cps peak) fills the
+                // channel and drop-newest sheds in-dialog OPTIONS-200 keepalive
+                // responses for ESTABLISHED dialogs → KeepaliveTimeout BYEs healthy
+                // long calls. 1024 (→4096) gives the channel headroom to absorb the
+                // burst so in-dialog traffic is not starved.
+                udp_queue_max: 1024,
                 id_gen: id_gen.clone(),
             },
         );
@@ -337,6 +347,15 @@ impl B2buaCore {
 
     pub fn metrics(&self) -> &B2buaMetrics {
         &self.metrics
+    }
+
+    /// The transaction layer's metrics handle (events-channel depth/capacity,
+    /// per-reason drop counters, active transactions). Exposed so the host can
+    /// render the txn-level backpressure signals the `B2buaMetrics` set omits —
+    /// notably `event_queue_drops{reason="response"}`, the keepalive-response
+    /// shedding that silently tears down established dialogs under a new-call burst.
+    pub fn txn_metrics(&self) -> &sip_txn::TransactionMetrics {
+        self.ctx.txn.metrics()
     }
 
     pub fn cdr(&self) -> &Arc<dyn CdrWriter> {

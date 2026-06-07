@@ -135,6 +135,10 @@ async fn reroutes_to_second_destination_on_failure() {
         .eq_ignore_ascii_case("to")
         && h.value.contains("+1@carol")));
     carol_uas.respond(503, "Service Unavailable").await;
+    // Absorb the b2bua's ACK for the 503 (RFC 3261 §17.1.1.3 — the failed INVITE
+    // client txn ACKs its non-2xx). Real carol's txn layer eats it silently; here
+    // the simulated UAS must drain it or it lingers as a queue-leak artifact.
+    carol.receive("ACK").await;
 
     // Second destination receives the rerouted INVITE and answers.
     let mut bob_uas = bob.receive("INVITE").await;

@@ -12,23 +12,29 @@ use tokio::sync::mpsc;
 use call::Call;
 
 use super::{CdrRecord, CdrWriter};
+use crate::metrics::B2buaMetrics;
 
 #[derive(Clone)]
 pub struct BufferedCdrWriter {
     inner: Arc<dyn CdrWriter>,
     tx: Option<mpsc::Sender<(Call, i64)>>,
     dropped: Arc<AtomicU64>,
+    /// Shared b2bua registry: a submit-queue overflow bumps `cdr_dropped_total`
+    /// (alongside the local `dropped` counter kept for `dropped_total()`).
+    metrics: B2buaMetrics,
 }
 
 impl BufferedCdrWriter {
     /// Wrap `inner` with a bounded submit queue + drainer. `queue_max == 0`
-    /// disables buffering (passthrough).
-    pub fn spawn(inner: Arc<dyn CdrWriter>, queue_max: usize) -> Self {
+    /// disables buffering (passthrough). `metrics` is the shared registry the core
+    /// exports; overflow drops are recorded into `cdr_dropped_total`.
+    pub fn spawn(inner: Arc<dyn CdrWriter>, queue_max: usize, metrics: B2buaMetrics) -> Self {
         if queue_max == 0 {
             return Self {
                 inner,
                 tx: None,
                 dropped: Arc::new(AtomicU64::new(0)),
+                metrics,
             };
         }
         let (tx, mut rx) = mpsc::channel::<(Call, i64)>(queue_max);
@@ -42,6 +48,7 @@ impl BufferedCdrWriter {
             inner,
             tx: Some(tx),
             dropped: Arc::new(AtomicU64::new(0)),
+            metrics,
         }
     }
 
@@ -58,6 +65,7 @@ impl CdrWriter for BufferedCdrWriter {
             Some(tx) => {
                 if tx.try_send((call.clone(), terminated_at)).is_err() {
                     self.dropped.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.bump_cdr_dropped();
                 }
             }
         }

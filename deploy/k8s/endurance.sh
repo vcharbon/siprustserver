@@ -62,15 +62,18 @@ PEAK_CAPS="${PEAK_CAPS:-200}"
 PEAK_SECS="${PEAK_SECS:-30}"
 ORPHAN_CAPS="${ORPHAN_CAPS:-50}"
 ORPHAN_BUILD_SECS="${ORPHAN_BUILD_SECS:-20}"
-ORPHAN_REAP_WAIT="${ORPHAN_REAP_WAIT:-420}"  # must clear the FULL orphan-reap chain, not just the
+ORPHAN_REAP_WAIT="${ORPHAN_REAP_WAIT:-540}"  # must clear the FULL orphan-reap chain, not just the
                                              # 300s keepalive interval. The keepalive is armed AT
                                              # ANSWER (so a killed dialog has up to 300s until its
                                              # next fire) -> in-dialog OPTIONS to the dead A-leg ->
-                                             # KeepaliveTimeout +5s -> BYE to dead peer ->
-                                             # TerminatingTimeout safety reaper +32s -> RemoveCall.
-                                             # Zero-load floor = 300+5+32 = 337s; +queue latency at
-                                             # ~9.5k concurrent pushes the active_calls drop to ~420s
-                                             # (330s tripped a FALSE leak at ~100cps in cycle 0).
+                                             # KeepaliveTimeout (B2BUA_KEEPALIVE_TIMEOUT_SEC, now 120s)
+                                             # -> BYE to dead peer -> TerminatingTimeout safety reaper
+                                             # +32s -> RemoveCall. Zero-load floor = 300+120+32 = 452s
+                                             # (was 337s at the old 45s timeout); +queue latency at
+                                             # ~9.5k concurrent pushes the active_calls drop higher, so
+                                             # 540s (was 420s) keeps margin. Bumped in lockstep with the
+                                             # keepalive-timeout 45->120 fix for the peak keepalive-shed
+                                             # cascade — a 420s wait would FALSE-fail orphan_kill now.
 PASS_THRESHOLD="${PASS_THRESHOLD:-90}"
 # --- call-limiter exercise (continuous stream + limiter chaos events) ---
 LIMITER_CPS="${LIMITER_CPS:-2}"        # continuous limiter stream rate; 2cps x 30s
@@ -153,12 +156,16 @@ launch_stream() {
   local job="$1" scenario="$2" cps="$3" role="$4"
   # `-l` headroom (MAX_CONCURRENT): sized so the offered rate never throttles on
   # transient stuck-call backlog. With the SIPp dead-call reaper (-recv_timeout
-  # 600s, manifests/40) the backlog is bounded to ~10 min of leaked calls; 1200s
-  # of full-rate headroom keeps `-l` comfortably above steady concurrency + that
-  # backlog so lost calls do NOT decrease the open rate.
+  # 600s, manifests/40) the backlog is bounded to ~10 min of leaked calls; the
+  # headroom keeps `-l` comfortably above steady concurrency + that backlog so
+  # lost calls do NOT decrease the open rate. Sized at 1800× (was 1200×): at 1200×
+  # the long stream's steady ~5700 conc. sat right against its 6000 `-l` ceiling,
+  # so a one-time teardown (e.g. a chaos peak) wedged the stream at the wall and
+  # turned it into a self-sustaining failed/s climb (every over-`-l` attempt = a
+  # failed call). 1800× decouples the failure accounting from the ceiling.
   export UAC_JOB_NAME="$job" SCENARIO="$scenario" CAPS="$cps" ROLE="$role" \
          MAX_CALLS=$(( cps * (DURATION + 600) )) \
-         MAX_CONCURRENT="${MAX_CONCURRENT:-$(( cps * 1200 ))}"
+         MAX_CONCURRENT="${MAX_CONCURRENT:-$(( cps * 1800 ))}"
   kubectl -n "$NS" delete job "$job" --ignore-not-found >/dev/null 2>&1 || true
   envsubst < manifests/40-sipp-uac-job.yaml | kubectl apply -f - >/dev/null
 }
@@ -445,8 +452,14 @@ chaos_event() {
   # no double-serve leak), not just baseline success% — see reboot_event.
   if [ "$type" = "kill_worker" ]; then reboot_event "$idx"; return; fi
   local t0 s0 f0 s1 f1 ds df pct result conc
+  local lf0 lc0 lconc0 lf1 lc1 ldf ldc ldenom lloss res_blend res_long
   t0="$(date +%s)"
   s0="$(snap_success)"; f0="$(snap_failed)"
+  # AT-RISK long population: long calls FAILED/CREATED/HELD at inject. A new-call
+  # burst (peak) must not tear down ESTABLISHED long dialogs — measured APART from
+  # the blended success% (short@100cps drowns long loss out of any blend, the same
+  # blind spot reboot_event guards). See the long-loss gate below.
+  lf0="$(snap_failed_role long)"; lc0="$(snap_created_role long)"; lconc0="$(snap_conc_role long)"
   log "CHAOS #$idx: $type (baseline success=$s0 failed=$f0)"
   push_metric "sip_chaos_run{type=\"$type\",phase=\"inject\"} 1"
   open_window "$type"
@@ -462,9 +475,17 @@ chaos_event() {
   sleep "$SETTLE"
   ensure_baseline
   s1="$(snap_success)"; f1="$(snap_failed)"; conc="$(snap_conc)"
+  lf1="$(snap_failed_role long)"; lc1="$(snap_created_role long)"
   ds=$(python3 -c "print(max(0, int(float('$s1'))-int(float('$s0'))))")
   df=$(python3 -c "print(max(0, int(float('$f1'))-int(float('$f0'))))")
   pct=$(python3 -c "t=$ds+$df; print(round(100.0*$ds/t,1) if t else 100.0)")
+  # LONG loss% = long-failed-delta / at-risk denominator (max of held-at-inject,
+  # created-delta, floor) — the same AT-RISK shape reboot_event uses so a stream
+  # sitting at its `-l` ceiling (created-delta ~0) still gets a real denominator.
+  ldf=$(python3 -c "print(max(0,int(float('$lf1'))-int(float('$lf0'))))")
+  ldc=$(python3 -c "print(max(0,int(float('$lc1'))-int(float('$lc0'))))")
+  ldenom=$(python3 -c "print(max(int(float('$lconc0')), $ldc, ${LONG_LOSS_DENOM_FLOOR:-100}))")
+  lloss=$(python3 -c "print(round(100.0*$ldf/$ldenom,1) if $ldenom else 0.0)")
   # Per-type pass bar. kill_proxy now meets the normal bar: the proxy is HA behind
   # a keepalived VRRP VIP (ADR-0012 D7), so killing the master fails over to the
   # warm backup in <2s with the VIP (and thus Record-Route) stable — new + in-
@@ -475,26 +496,36 @@ chaos_event() {
   esac
   # A window where NO baseline calls resolved (ds+df==0) is not a real pass — it
   # means the baseline streams were down/relaunching. Report it honestly as n/a
-  # rather than a vacuous 100%.
+  # rather than a vacuous 100%. Otherwise pass requires BOTH the blended success%
+  # bar AND long-dialog survival (long-loss ≤ LONG_LOSS_TOL): a peak that absorbs
+  # new calls but tears down established long holds (the txn-channel keepalive-
+  # shed cascade) must FAIL, not hide behind a short-dominated blend.
+  res_blend=$(python3 -c "print('pass' if float('$pct')>=$thr else 'fail')")
+  res_long=$(python3 -c "print('pass' if float('$lloss')<=$LONG_LOSS_TOL else 'fail')")
   if [ "$(( ds + df ))" -eq 0 ]; then
     result="n/a"
+  elif [ "$res_blend" = pass ] && [ "$res_long" = pass ]; then
+    result="pass"
   else
-    result=$(python3 -c "print('pass' if float('$pct')>=$thr else 'fail')")
+    result="fail"
   fi
 
   close_window "$type"
   push_metric "sip_chaos_event{type=\"$type\",result=\"$result\"} 1
 sip_chaos_success_pct{type=\"$type\"} $pct
+sip_chaos_long_loss_pct{type=\"$type\"} $lloss
+sip_chaos_long_failed{type=\"$type\"} $ldf
+sip_chaos_long_at_risk{type=\"$type\"} $ldenom
 sip_chaos_resolved{type=\"$type\",outcome=\"success\"} $ds
 sip_chaos_resolved{type=\"$type\",outcome=\"failed\"} $df"
 
-  printf '{"ts":%s,"event":%d,"type":"%s","success_delta":%d,"failed_delta":%d,"success_pct":%s,"concurrent":%s,"result":"%s"}\n' \
-    "$t0" "$idx" "$type" "$ds" "$df" "$pct" "${conc%.*}" "$result" >> "$EVENTS"
+  printf '{"ts":%s,"event":%d,"type":"%s","success_delta":%d,"failed_delta":%d,"success_pct":%s,"long_loss_pct":%s,"long_failed":%d,"long_at_risk":%d,"concurrent":%s,"blend_result":"%s","long_result":"%s","result":"%s"}\n' \
+    "$t0" "$idx" "$type" "$ds" "$df" "$pct" "$lloss" "$ldf" "$ldenom" "${conc%.*}" "$res_blend" "$res_long" "$result" >> "$EVENTS"
 
   case "$result" in
-    pass) ok   "CHAOS #$idx $type: ${pct}% resolved OK (thr ${thr}%, Δok=$ds Δfail=$df)" ;;
+    pass) ok   "CHAOS #$idx $type: ${pct}% resolved OK + long-loss ${lloss}%(tol ${LONG_LOSS_TOL}) (thr ${thr}%, Δok=$ds Δfail=$df)" ;;
     n/a)  warn "CHAOS #$idx $type: no baseline calls resolved in window (streams down?) — n/a" ;;
-    *)    warn "CHAOS #$idx $type: ${pct}% < ${thr}% (Δok=$ds Δfail=$df) — FAILURE" ;;
+    *)    warn "CHAOS #$idx $type: FAILURE — blended ${pct}%/${thr}% ($res_blend); LONG-LOSS ${lloss}% > ${LONG_LOSS_TOL}% ($res_long, ${ldf}/${ldenom} long) (Δok=$ds Δfail=$df)" ;;
   esac
 }
 
@@ -530,10 +561,10 @@ wireup() {
   # we'd repeat the stale-binary trap above.
   if [ "${SKIP_BUILD:-0}" != "1" ]; then
     log "wireup: rolling workers/proxy/uas onto the freshly-built image"
-    kubectl -n "$NS" rollout restart statefulset/b2bua-worker deploy/sip-front-proxy deploy/sipp-uas deploy/cdr-consumer >>"$RUNLOG" 2>&1 || true
+    kubectl -n "$NS" rollout restart statefulset/b2bua-worker deploy/sip-front-proxy statefulset/sipp-uas deploy/cdr-consumer >>"$RUNLOG" 2>&1 || true
     kubectl -n "$NS" rollout status statefulset/b2bua-worker --timeout=300s >>"$RUNLOG" 2>&1 || true
     kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout=180s >>"$RUNLOG" 2>&1 || true
-    kubectl -n "$NS" rollout status deploy/sipp-uas --timeout=180s >>"$RUNLOG" 2>&1 || true
+    kubectl -n "$NS" rollout status statefulset/sipp-uas --timeout=180s >>"$RUNLOG" 2>&1 || true
     kubectl -n "$NS" rollout status deploy/cdr-consumer --timeout=180s >>"$RUNLOG" 2>&1 || true
   fi
   log "wireup: (re)load observability dashboards/scrape"

@@ -190,6 +190,7 @@ async fn spawn_reclaimer_core(
         clock: clock.clone(),
         id_gen: Arc::new(IdGen::seeded(0xB2B1)),
         replication: Some(setup),
+        metrics: crate::metrics::B2buaMetrics::new(),
     };
     (B2buaCore::spawn(endpoint, deps), store)
 }

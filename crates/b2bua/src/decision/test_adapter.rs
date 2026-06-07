@@ -73,7 +73,35 @@ impl ScriptedDecisionEngine {
         let dest = (host.into(), port);
         Self::builder()
             .fallback(move |req| {
-                let mut r = route_to(&dest.0, dest.1);
+                // ADR-0017 plan-reroute (the plan-reroute.html model): when the
+                // caller supplies a multi-route `routes` list, walk it — the first
+                // route now, the remainder failed-over to by `failure_from_context`
+                // (wired via `.on_failure` below). Each route carries its own
+                // `destination` + identity/`new_ruri`, so a register front-proxy can
+                // resolve a different AOR per attempt (bob1 503 → bob2). The single-
+                // destination + DEST-fallback path below is unchanged for plan-less
+                // and `{destination}`-only traffic (the sipp/endurance streams).
+                if api_call_has_routes(req) {
+                    let mut resp = new_call_from_plan(req);
+                    if let NewCallResponse::Route(r) = &mut resp {
+                        if let Some(s) = &stress {
+                            r.call_limiter.push(s.clone());
+                        }
+                        r.call_limiter.extend(limiter_entries_from_api_call(req));
+                    }
+                    return resp;
+                }
+                // The UAC may pin the b-leg callee via `X-Api-Call.destination`
+                // (e.g. a specific `sipp-uas` pod, addressed by its stable headless
+                // DNS name); absent that, fall back to the configured `B2BUA_DEST`.
+                // This is the test control channel that lets the UAC distribute
+                // calls across the callee pods itself, so Bob is reached pod-direct
+                // from the LB VIP with NO kube-proxy ClusterIP NAT. A DNS name here
+                // is resolved to an IP downstream in `apply_route` (the proxy and
+                // transport only accept numeric next-hops).
+                let (dh, dp) =
+                    route_dest_from_api_call(req).unwrap_or_else(|| (dest.0.clone(), dest.1));
+                let mut r = route_to(&dh, dp);
                 // Rewrite the b-leg Request-URI to the real callee. Without this,
                 // the b-leg R-URI defaults to the a-leg's (relay.rs build_b_leg),
                 // which behind an LB front proxy is the proxy's OWN VIP (the UAC
@@ -85,13 +113,26 @@ impl ScriptedDecisionEngine {
                 // fresh b-leg (Max-Forwards reset to 70 each time, so never 483) →
                 // an unbounded call-creation loop that OOMs the worker. The R-URI
                 // MUST name the actual downstream callee.
-                r.new_ruri = Some(format!("sip:{}:{}", dest.0, dest.1));
+                //
+                // The host:port above is non-negotiable (the anti-loop invariant),
+                // but the caller MAY set the R-URI *userpart* via
+                // `X-Api-Call.destination.user` so a downstream registrar front-
+                // proxy can resolve the AOR from the R-URI (e.g. `sip:bob@<core>`
+                // → registrar lookup "bob"). Userpart only — host:port stays the
+                // validated wire destination — so the invariant still holds.
+                r.new_ruri = Some(match route_user_from_api_call(req) {
+                    Some(user) => format!("sip:{user}@{dh}:{dp}"),
+                    None => format!("sip:{dh}:{dp}"),
+                });
                 if let Some(s) = &stress {
                     r.call_limiter.push(s.clone());
                 }
                 r.call_limiter.extend(limiter_entries_from_api_call(req));
                 NewCallResponse::Route(r)
             })
+            // Reroute/failover walker (no-op unless a `routes` plan set a
+            // callback_context above; otherwise returns Relay = the prior default).
+            .on_failure(failure_from_context)
             .build()
     }
 
@@ -136,6 +177,14 @@ impl ScriptedDecisionEngine {
 fn parse_api_call_plan(req: &NewCallRequest) -> Option<serde_json::Value> {
     let raw = req.sip_headers.get("X-Api-Call")?;
     serde_json::from_str(raw).ok()
+}
+
+/// True when `X-Api-Call` carries a multi-route plan (a `routes` array) — the
+/// ADR-0017 reroute/failover shape, as opposed to a single `{destination}`.
+fn api_call_has_routes(req: &NewCallRequest) -> bool {
+    parse_api_call_plan(req)
+        .and_then(|v| v.get("routes").map(|r| r.is_array()))
+        .unwrap_or(false)
 }
 
 /// `{name: value | null}` → [`SipHeaderUpdates`] (`null` = remove).
@@ -388,6 +437,52 @@ pub fn limiter_entries_from_api_call(req: &NewCallRequest) -> Vec<CallLimiterEnt
         .unwrap_or_default()
 }
 
+/// Parse an inbound `X-Api-Call` JSON header's `destination` object into a b-leg
+/// target `(host, port)` — `{"destination":{"host":"…","port":5060}}`. This is
+/// how a test UAC pins which callee (e.g. a specific headless-StatefulSet
+/// `sipp-uas` pod, by its stable cluster-DNS name) the b-leg INVITE is sent to,
+/// so call distribution is driven by the UAC rather than by kube-proxy ClusterIP
+/// DNAT — Bob is then reached pod-direct from the LB VIP with no NAT. `host` may
+/// be a DNS name; it is resolved to an IP literal in [`super::apply_route`]
+/// before it reaches the wire. Absent header / non-JSON / missing or empty
+/// `destination.host` → `None` (caller falls back to the configured `B2BUA_DEST`).
+/// `port` defaults to 5060 when omitted.
+pub fn route_dest_from_api_call(req: &NewCallRequest) -> Option<(String, u16)> {
+    let raw = req.sip_headers.get("X-Api-Call")?;
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let dest = v.get("destination")?;
+    let host = dest.get("host")?.as_str()?.trim().to_string();
+    if host.is_empty() {
+        return None;
+    }
+    let port = dest
+        .get("port")
+        .and_then(|p| p.as_u64())
+        .map(|p| p as u16)
+        .unwrap_or(5060);
+    Some((host, port))
+}
+
+/// Optional b-leg R-URI **userpart** from `X-Api-Call.destination.user`.
+///
+/// Lets a caller set ONLY the userpart of the b-leg Request-URI; the host:port
+/// stays the validated `destination` (see [`route_dest_from_api_call`]). This is
+/// how a downstream registrar front-proxy is given the AOR to resolve — it keys
+/// its registered-contact lookup on the R-URI userpart, so the b-leg must read
+/// `sip:<user>@<core-host>:<core-port>` (not the bare `sip:<core>` the LB emits
+/// by default, which carries no AOR and is rejected). Absent / non-JSON / empty
+/// → `None` (caller keeps the userless R-URI).
+pub fn route_user_from_api_call(req: &NewCallRequest) -> Option<String> {
+    let raw = req.sip_headers.get("X-Api-Call")?;
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let user = v.get("destination")?.get("user")?.as_str()?.trim().to_string();
+    if user.is_empty() {
+        None
+    } else {
+        Some(user)
+    }
+}
+
 /// Build a [`RouteDecision`] to `host:port` with default platform features.
 pub fn route_to(host: &str, port: u16) -> RouteDecision {
     RouteDecision {
@@ -618,6 +713,112 @@ mod tests {
         match eng.new_call(req("bob")).await.unwrap() {
             NewCallResponse::Route(r) => assert!(r.call_limiter.is_empty()),
             _ => panic!("expected route"),
+        }
+    }
+
+    #[test]
+    fn route_dest_from_api_call_parses_destination() {
+        let r = req_with_header(
+            "X-Api-Call",
+            r#"{"destination":{"host":"sipp-uas-2.sipp-uas.sip-test.svc.cluster.local","port":5060}}"#,
+        );
+        assert_eq!(
+            route_dest_from_api_call(&r),
+            Some(("sipp-uas-2.sipp-uas.sip-test.svc.cluster.local".to_string(), 5060))
+        );
+        // Port defaults to 5060 when omitted.
+        let r = req_with_header("X-Api-Call", r#"{"destination":{"host":"10.0.0.9"}}"#);
+        assert_eq!(route_dest_from_api_call(&r), Some(("10.0.0.9".to_string(), 5060)));
+        // Absent header / no destination / empty host / bad JSON → None (fallback).
+        assert_eq!(route_dest_from_api_call(&req("bob")), None);
+        assert_eq!(route_dest_from_api_call(&req_with_header("X-Api-Call", r#"{"action":"route"}"#)), None);
+        assert_eq!(route_dest_from_api_call(&req_with_header("X-Api-Call", r#"{"destination":{"host":""}}"#)), None);
+        assert_eq!(route_dest_from_api_call(&req_with_header("X-Api-Call", "not json")), None);
+    }
+
+    #[tokio::test]
+    async fn route_all_to_with_limiter_honors_header_destination() {
+        let eng = ScriptedDecisionEngine::route_all_to_with_limiter("127.0.0.1", 5070, None);
+
+        // Header-directed callee overrides the configured DEST for dest + R-URI.
+        let r = req_with_header(
+            "X-Api-Call",
+            r#"{"destination":{"host":"10.244.6.8","port":5060}}"#,
+        );
+        match eng.new_call(r).await.unwrap() {
+            NewCallResponse::Route(d) => {
+                assert_eq!(d.destination.host, "10.244.6.8");
+                assert_eq!(d.destination.port(), 5060);
+                assert_eq!(d.new_ruri.as_deref(), Some("sip:10.244.6.8:5060"));
+            }
+            _ => panic!("expected route"),
+        }
+
+        // `destination.user` sets the R-URI userpart (host:port unchanged) so a
+        // downstream registrar front-proxy can resolve the AOR. This is the shape
+        // the portsource register E2E sends (sip:bob@<core>).
+        let r = req_with_header(
+            "X-Api-Call",
+            r#"{"destination":{"host":"172.20.0.1","port":25081,"user":"bob"}}"#,
+        );
+        match eng.new_call(r).await.unwrap() {
+            NewCallResponse::Route(d) => {
+                assert_eq!(d.destination.host, "172.20.0.1");
+                assert_eq!(d.destination.port(), 25081);
+                assert_eq!(d.new_ruri.as_deref(), Some("sip:bob@172.20.0.1:25081"));
+            }
+            _ => panic!("expected route"),
+        }
+        // Empty / absent user → userless R-URI (unchanged behaviour).
+        assert_eq!(route_user_from_api_call(&req_with_header(
+            "X-Api-Call", r#"{"destination":{"host":"10.0.0.9","user":""}}"#)), None);
+        assert_eq!(route_user_from_api_call(&req_with_header(
+            "X-Api-Call", r#"{"destination":{"host":"10.0.0.9"}}"#)), None);
+
+        // No destination in the header → fall back to the configured DEST.
+        match eng.new_call(req("bob")).await.unwrap() {
+            NewCallResponse::Route(d) => {
+                assert_eq!(d.destination.host, "127.0.0.1");
+                assert_eq!(d.new_ruri.as_deref(), Some("sip:127.0.0.1:5070"));
+            }
+            _ => panic!("expected route"),
+        }
+    }
+
+    #[tokio::test]
+    async fn route_all_to_with_limiter_walks_routes_plan_with_stress() {
+        // ADR-0017 plan-reroute (plan-reroute.html) on the CLUSTER engine: a
+        // `routes` list fails over per route, each carrying its own `new_ruri`
+        // userpart so a register front-proxy resolves bob1 → bob2. The `stress`
+        // limiter is still appended to every leg.
+        let stress = CallLimiterEntry { id: "global-stress".into(), limit: 999_999 };
+        let eng = ScriptedDecisionEngine::route_all_to_with_limiter("127.0.0.1", 5070, Some(stress));
+        let plan = serde_json::json!({
+            "action": "route",
+            "routes": [
+                {"destination": {"host": "172.20.0.1", "port": 25081}, "new_ruri": "sip:bob1@172.20.0.1:25081"},
+                {"destination": {"host": "172.20.0.1", "port": 25081}, "new_ruri": "sip:bob2@172.20.0.1:25081"}
+            ]
+        });
+        let ctx = match eng.new_call(plan_req(plan)).await.unwrap() {
+            NewCallResponse::Route(r) => {
+                assert_eq!(r.new_ruri.as_deref(), Some("sip:bob1@172.20.0.1:25081"));
+                assert!(r.call_limiter.iter().any(|e| e.id == "global-stress"));
+                r.callback_context.expect("remainder context")
+            }
+            _ => panic!("expected route #1 (bob1)"),
+        };
+        // b-leg 503 → walk to route #2 (bob2).
+        match eng.call_failure(failure_req(Some(&ctx))).await.unwrap() {
+            CallTreatment::Route(r) => {
+                assert_eq!(r.new_ruri.as_deref(), Some("sip:bob2@172.20.0.1:25081"));
+            }
+            _ => panic!("expected route #2 (bob2)"),
+        }
+        // Plan-less call still falls back to DEST (no 404, no regression).
+        match eng.new_call(req("bob")).await.unwrap() {
+            NewCallResponse::Route(d) => assert_eq!(d.destination.host, "127.0.0.1"),
+            _ => panic!("expected DEST fallback"),
         }
     }
 

@@ -159,7 +159,7 @@ deploy() {
   kubectl -n "$NS" rollout status deploy/rabbitmq --timeout=120s || true
   envsubst < manifests/56-cdr-consumer.yaml | kubectl apply -f -
   envsubst < manifests/20-worker.yaml | kubectl apply -f -
-  kubectl -n "$NS" rollout status deploy/sipp-uas --timeout=120s
+  kubectl -n "$NS" rollout status statefulset/sipp-uas --timeout=120s
   kubectl -n "$NS" rollout status statefulset/b2bua-worker --timeout=120s
   kubectl -n "$NS" rollout status deploy/cdr-consumer --timeout=120s || true
 
