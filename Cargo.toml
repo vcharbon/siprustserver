@@ -25,6 +25,7 @@ members = [
     "crates/b2bua-runner",
     "crates/sip-proxy-runner",
     "crates/call-limiter-runner",
+    "crates/cdr-consumer-runner",
     "xtask",
 ]
 
@@ -107,3 +108,13 @@ rustfft = "6"
 # `webrtc-util` provides the Marshal/Unmarshal traits they implement.
 bytes = "1"
 webrtc-util = "0.10"
+# CDR-on-RabbitMQ sink (b2bua-runner) + the dedicated CDR metrics consumer
+# (cdr-consumer-runner). `lapin` is the async AMQP 0-9-1 client; it is runtime-
+# agnostic, so the two `*-trait` shims bind its executor/reactor to the same
+# tokio runtime everything else runs on (no second async runtime). Producer-side
+# the existing `BufferedCdrWriter` bounded queue is preserved in front of the
+# sink (drop-on-overload), and the broker queue is additionally bounded with
+# `x-max-length` + drop-head overflow — the "max buffer" guarantee end to end.
+lapin = "2"
+tokio-executor-trait = "2"
+tokio-reactor-trait = "1"

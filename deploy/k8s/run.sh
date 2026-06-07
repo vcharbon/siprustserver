@@ -61,7 +61,11 @@ PROXY_VIP="${PROXY_VIP:-172.20.255.250}"
 PROXY_TARGET="${PROXY_TARGET:-$PROXY_VIP}"
 LIMITER_CAP="${LIMITER_CAP:-20}"
 KEEPALIVED_IMAGE="${KEEPALIVED_IMAGE:-siprustserver-keepalived:dev}"
-export SUT_IMAGE WORKER_REPLICAS REPL_ENABLE REPL_PORT SCENARIO PROXY_VIP PROXY_TARGET LIMITER_CAP
+# CDR transport: RabbitMQ broker (55-rabbitmq) + cdr-consumer (56-cdr-consumer).
+# The broker is a public image pulled + side-loaded into kind so the run is
+# offline-capable like every other image.
+RABBITMQ_IMAGE="${RABBITMQ_IMAGE:-rabbitmq:3.13-management}"
+export SUT_IMAGE WORKER_REPLICAS REPL_ENABLE REPL_PORT SCENARIO PROXY_VIP PROXY_TARGET LIMITER_CAP RABBITMQ_IMAGE
 # Observability: VictoriaMetrics + Grafana host stack + in-cluster vmagent/KSM/
 # node-exporter/fluent-bit. Deployed automatically on `up` so the freshly
 # (re)created cluster always has scraping wired and Grafana dashboards loaded.
@@ -98,10 +102,13 @@ up() {
   docker build -t sipp:dev "$SIPP_DIR"
   log "building keepalived sidecar image $KEEPALIVED_IMAGE (proxy VIP, ADR-0012 D7)"
   docker build -f "$REPO_ROOT/deploy/docker/Dockerfile.keepalived" -t "$KEEPALIVED_IMAGE" "$REPO_ROOT"
+  log "pulling RabbitMQ image $RABBITMQ_IMAGE (CDR transport)"
+  docker image inspect "$RABBITMQ_IMAGE" >/dev/null 2>&1 || docker pull "$RABBITMQ_IMAGE"
   log "loading images into kind"
   kind load docker-image "$SUT_IMAGE" --name "$CLUSTER"
   kind load docker-image sipp:dev --name "$CLUSTER"
   kind load docker-image "$KEEPALIVED_IMAGE" --name "$CLUSTER"
+  kind load docker-image "$RABBITMQ_IMAGE" --name "$CLUSTER"
 
   obs   # bring up / refresh observability against the new cluster
 }
@@ -140,9 +147,21 @@ deploy() {
   # ClusterIP DNS resolves at worker startup. Inert until a decision returns
   # `call_limiter` entries, so it is a no-op for the scripted load runner.
   envsubst < manifests/50-call-limiter.yaml | kubectl apply -f -
+  # CDR transport: RabbitMQ broker + the dedicated CDR metrics consumer. Broker
+  # first (before the workers) so its ClusterIP DNS resolves at worker startup;
+  # workers fail-open (drop CDRs) if it is briefly unavailable.
+  log "deploying RabbitMQ (CDR transport) + cdr-consumer"
+  envsubst < manifests/55-rabbitmq.yaml | kubectl apply -f -
+  # CDR infra is best-effort telemetry, NOT on the call path: the workers
+  # fail-open (drop CDRs) if the broker is slow/absent. So wait for it, but never
+  # let an unhealthy broker/consumer abort the run (these gates are `|| true`,
+  # unlike the call-path worker/proxy/uas gates below).
+  kubectl -n "$NS" rollout status deploy/rabbitmq --timeout=120s || true
+  envsubst < manifests/56-cdr-consumer.yaml | kubectl apply -f -
   envsubst < manifests/20-worker.yaml | kubectl apply -f -
   kubectl -n "$NS" rollout status deploy/sipp-uas --timeout=120s
   kubectl -n "$NS" rollout status statefulset/b2bua-worker --timeout=120s
+  kubectl -n "$NS" rollout status deploy/cdr-consumer --timeout=120s || true
 
   # The proxy now discovers the worker pool from k8s EndpointSlices (ADR-0012 D4)
   # — the SAME informer the b2bua replication engine uses (ADR-0011 X7) — so the

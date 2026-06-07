@@ -208,6 +208,11 @@ snap_conc()    { vmq 'sum(sipp_current_calls)'; }
 snap_failed_role()  { vmq "sum(sipp_failed_calls_total{role=\"$1\"})"; }
 snap_success_role() { vmq "sum(sipp_successful_calls_total{role=\"$1\"})"; }
 snap_created_role() { vmq "sum(sipp_calls_created_total{role=\"$1\"})"; }
+# Role-scoped live concurrency (held dialogs right now). Used to size the AT-RISK
+# long population at kill time: when the long stream sits at its `-l` ceiling,
+# created_delta over the reboot window collapses to ~0, so created can't be the
+# loss denominator — the dialogs HELD across the reboot are what's at risk.
+snap_conc_role() { vmq "sum(sipp_current_calls{role=\"$1\"})"; }
 # B2BUA-side live dialog count + the GHOST GAP (calls the B2BUA still holds that
 # SIPp has already abandoned). The gap cancels baseline level/ramp, so it is the
 # robust leak signal: a healthy system keeps b2bua_active ≈ sipp_current (gap ~0
@@ -335,11 +340,12 @@ LONG_LOSS_TOL="${LONG_LOSS_TOL:-5}"           # max % of long calls created in-w
                                               # rebooted worker's long share)
 reboot_event() {
   local idx="$1" t0 s0 f0 g0 a0 mode tgt s s1 f1 g1 a1 ds df pct rise res_pct res_leak result conc
-  local sf0 ss0 lf0 lc0 sf1 ss1 lf1 lc1 sds sdf spct ldf ldc lloss res_short res_long
+  local sf0 ss0 lf0 lc0 sf1 ss1 lf1 lc1 sds sdf spct ldf ldc ldenom lconc0 lloss res_short res_long
   t0="$(date +%s)"
   s0="$(snap_success)"; f0="$(snap_failed)"; g0="$(snap_ghost)"; a0="$(snap_active)"
   ss0="$(snap_success_role short)"; sf0="$(snap_failed_role short)"
   lf0="$(snap_failed_role long)";   lc0="$(snap_created_role long)"
+  lconc0="$(snap_conc_role long)"   # AT-RISK held long dialogs at the kill instant
   if [ "${REBOOT_MODE:-alternate}" = "alternate" ]; then
     [ $(( idx % 2 )) -eq 0 ] && mode=graceful || mode=crash
   else
@@ -380,7 +386,15 @@ reboot_event() {
   spct=$(python3 -c "t=$sds+$sdf; print(round(100.0*$sds/t,1) if t else 100.0)")
   ldf=$(python3 -c "print(max(0,int(float('$lf1'))-int(float('$lf0'))))")
   ldc=$(python3 -c "print(max(0,int(float('$lc1'))-int(float('$lc0'))))")
-  lloss=$(python3 -c "print(round(100.0*$ldf/$ldc,1) if $ldc else 0.0)")
+  # AT-RISK denominator: long dialogs HELD at the kill instant ($lconc0). When the
+  # long stream is at its `-l` ceiling (the steady state for 19-min holds at 5cps,
+  # MAX_CONCURRENT=6000), in-window created ($ldc) collapses to ~0 and would make
+  # loss% degenerate to ~100% even with near-perfect failover. Use max(held-at-kill,
+  # created-delta) so a non-saturated high-churn window still counts newly-created
+  # calls; floor at LONG_LOSS_DENOM_FLOOR to avoid div-by-tiny. A genuine mass
+  # teardown still fails (long_failed climbs into the hundreds vs the ~6000 base).
+  ldenom=$(python3 -c "print(max(int(float('$lconc0')), $ldc, ${LONG_LOSS_DENOM_FLOOR:-100}))")
+  lloss=$(python3 -c "print(round(100.0*$ldf/$ldenom,1) if $ldenom else 0.0)")
   local thr="${KILL_WORKER_THRESHOLD:-$PASS_THRESHOLD}"
   res_short=$(python3 -c "print('pass' if float('$spct')>=$thr else 'fail')")
   res_long=$(python3 -c "print('pass' if float('$lloss')<=$LONG_LOSS_TOL else 'fail')")
@@ -400,12 +414,13 @@ sip_chaos_short_survival_pct{type=\"kill_worker\"} $spct
 sip_chaos_long_loss_pct{type=\"kill_worker\"} $lloss
 sip_chaos_long_failed{type=\"kill_worker\"} $ldf
 sip_chaos_long_created{type=\"kill_worker\"} $ldc
+sip_chaos_long_at_risk{type=\"kill_worker\"} $ldenom
 sip_chaos_resolved{type=\"kill_worker\",outcome=\"success\"} $ds
 sip_chaos_resolved{type=\"kill_worker\",outcome=\"failed\"} $df
 sip_chaos_ghost_rise{type=\"kill_worker\"} $rise
 sip_chaos_ghost_gap{type=\"kill_worker\"} $g1"
-  printf '{"ts":%s,"event":%d,"type":"kill_worker","mode":"%s","short_survival_pct":%s,"short_ok":%d,"short_fail":%d,"long_loss_pct":%s,"long_failed":%d,"long_created":%d,"blended_success_pct":%s,"ghost_before":%s,"ghost_after":%s,"ghost_rise":%s,"active_after":%s,"concurrent":%s,"short_result":"%s","long_result":"%s","leak":"%s","result":"%s"}\n' \
-    "$t0" "$idx" "$mode" "$spct" "$sds" "$sdf" "$lloss" "$ldf" "$ldc" "$pct" "${g0%.*}" "${g1%.*}" "${rise%.*}" "${a1%.*}" "${conc%.*}" "$res_short" "$res_long" "$res_leak" "$result" >> "$EVENTS"
+  printf '{"ts":%s,"event":%d,"type":"kill_worker","mode":"%s","short_survival_pct":%s,"short_ok":%d,"short_fail":%d,"long_loss_pct":%s,"long_failed":%d,"long_created":%d,"long_at_risk":%d,"blended_success_pct":%s,"ghost_before":%s,"ghost_after":%s,"ghost_rise":%s,"active_after":%s,"concurrent":%s,"short_result":"%s","long_result":"%s","leak":"%s","result":"%s"}\n' \
+    "$t0" "$idx" "$mode" "$spct" "$sds" "$sdf" "$lloss" "$ldf" "$ldc" "$ldenom" "$pct" "${g0%.*}" "${g1%.*}" "${rise%.*}" "${a1%.*}" "${conc%.*}" "$res_short" "$res_long" "$res_leak" "$result" >> "$EVENTS"
   case "$result" in
     pass) ok   "CHAOS #$idx kill_worker($mode): short ${spct}% + long-loss ${lloss}%(tol ${LONG_LOSS_TOL}) + NO leak (ghost rise ${rise}) — PASS" ;;
     n/a)  warn "CHAOS #$idx kill_worker($mode): no baseline calls resolved (streams down?) — n/a" ;;
@@ -487,6 +502,7 @@ wireup() {
   mkdir -p "$RUN_DIR"
   local SUT_IMAGE="${SUT_IMAGE:-siprustserver:dev}"
   local KEEPALIVED_IMAGE="${KEEPALIVED_IMAGE:-siprustserver-keepalived:dev}"
+  local RABBITMQ_IMAGE="${RABBITMQ_IMAGE:-rabbitmq:3.13-management}"
   # Rebuild the SUT (b2bua worker + front-proxy) image from CURRENT source. The
   # previous wireup rebuilt ONLY sipp:dev, so on an existing cluster the b2bua
   # binary was never refreshed — a 14h-old worker pod kept running and the
@@ -498,10 +514,13 @@ wireup() {
     docker build -f "$REPO_ROOT/deploy/docker/Dockerfile" -t "$SUT_IMAGE" "$REPO_ROOT" >>"$RUNLOG" 2>&1
     docker build -f "$REPO_ROOT/deploy/docker/Dockerfile.keepalived" -t "$KEEPALIVED_IMAGE" "$REPO_ROOT" >>"$RUNLOG" 2>&1
     docker build -t sipp:dev "$SIPP_DIR" >>"$RUNLOG" 2>&1
+    log "wireup: pulling RabbitMQ image $RABBITMQ_IMAGE (CDR transport)"
+    docker image inspect "$RABBITMQ_IMAGE" >/dev/null 2>&1 || docker pull "$RABBITMQ_IMAGE" >>"$RUNLOG" 2>&1
     log "wireup: loading images into kind"
     kind load docker-image "$SUT_IMAGE" --name "$CLUSTER" >>"$RUNLOG" 2>&1
     kind load docker-image "$KEEPALIVED_IMAGE" --name "$CLUSTER" >>"$RUNLOG" 2>&1
     kind load docker-image sipp:dev --name "$CLUSTER" >>"$RUNLOG" 2>&1
+    kind load docker-image "$RABBITMQ_IMAGE" --name "$CLUSTER" >>"$RUNLOG" 2>&1
   fi
   log "wireup: deploy stack (repl on, ${WORKER_REPLICAS} workers) — same path as cluster start"
   REPL_ENABLE=1 WORKER_REPLICAS="$WORKER_REPLICAS" OBS_ENABLE="${OBS_ENABLE:-1}" ./run.sh deploy >>"$RUNLOG" 2>&1
@@ -511,10 +530,11 @@ wireup() {
   # we'd repeat the stale-binary trap above.
   if [ "${SKIP_BUILD:-0}" != "1" ]; then
     log "wireup: rolling workers/proxy/uas onto the freshly-built image"
-    kubectl -n "$NS" rollout restart statefulset/b2bua-worker deploy/sip-front-proxy deploy/sipp-uas >>"$RUNLOG" 2>&1 || true
+    kubectl -n "$NS" rollout restart statefulset/b2bua-worker deploy/sip-front-proxy deploy/sipp-uas deploy/cdr-consumer >>"$RUNLOG" 2>&1 || true
     kubectl -n "$NS" rollout status statefulset/b2bua-worker --timeout=300s >>"$RUNLOG" 2>&1 || true
     kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout=180s >>"$RUNLOG" 2>&1 || true
     kubectl -n "$NS" rollout status deploy/sipp-uas --timeout=180s >>"$RUNLOG" 2>&1 || true
+    kubectl -n "$NS" rollout status deploy/cdr-consumer --timeout=180s >>"$RUNLOG" 2>&1 || true
   fi
   log "wireup: (re)load observability dashboards/scrape"
   [ -x "$OBS_DIR/install.sh" ] && "$OBS_DIR/install.sh" --apply >>"$RUNLOG" 2>&1 || true

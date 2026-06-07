@@ -74,6 +74,14 @@ spec:
             # proxy failover and pod restart.
             - { name: B2BUA_OUTBOUND_PROXY, value: "${PROXY_VIP}:5060" }
             - { name: B2BUA_METRICS, value: "0.0.0.0:9091" }
+            # --- CDR sink: publish one JSON CDR per terminated call to RabbitMQ
+            # (55-rabbitmq). Sits behind the in-process BufferedCdrWriter
+            # (B2BUA_CDR_QUEUE drop-on-overload, unchanged); the broker queue is
+            # additionally bounded by B2BUA_CDR_RABBITMQ_MAX_LEN (drop-head), which
+            # MUST match the consumer's CDR_QUEUE_MAX_LEN (56-cdr-consumer).
+            - { name: B2BUA_CDR_RABBITMQ_URL,     value: "amqp://guest:guest@rabbitmq.sip-test.svc.cluster.local:5672/%2f" }
+            - { name: B2BUA_CDR_RABBITMQ_QUEUE,   value: "cdr" }
+            - { name: B2BUA_CDR_RABBITMQ_MAX_LEN, value: "100000" }
             # In-dialog OPTIONS keepalive interval (5 min). Must exceed short-call
             # hold so it never pokes a completing dialog; long-hold scenarios
             # (uac-long-options) answer it to stay up. Default in code is 300.

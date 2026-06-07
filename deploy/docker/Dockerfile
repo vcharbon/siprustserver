@@ -4,6 +4,7 @@
 #   - sip-proxy-runner     (front proxy + load balancer)
 #   - b2bua-runner         (B2BUA worker)
 #   - call-limiter-runner  (shared sliding-window call limiter)
+#   - cdr-consumer-runner  (drains the RabbitMQ CDR queue -> Prometheus metrics)
 #
 # Build context is the repo root:
 #   docker build -f deploy/docker/Dockerfile -t siprustserver:dev .
@@ -15,7 +16,7 @@ FROM rust:1-slim-bookworm AS builder
 WORKDIR /src
 # Copy the whole workspace (cheap on loopback; .dockerignore drops target/).
 COPY . .
-RUN cargo build --release -p sip-proxy-runner -p b2bua-runner -p call-limiter-runner
+RUN cargo build --release -p sip-proxy-runner -p b2bua-runner -p call-limiter-runner -p cdr-consumer-runner
 
 FROM debian:bookworm-slim AS runtime
 # ca-certificates for TLS; iproute2 (`tc`) so the chaos suite can inject netem
@@ -27,6 +28,7 @@ RUN apt-get update \
 COPY --from=builder /src/target/release/sip-proxy-runner    /usr/local/bin/sip-proxy-runner
 COPY --from=builder /src/target/release/b2bua-runner        /usr/local/bin/b2bua-runner
 COPY --from=builder /src/target/release/call-limiter-runner /usr/local/bin/call-limiter-runner
+COPY --from=builder /src/target/release/cdr-consumer-runner  /usr/local/bin/cdr-consumer-runner
 # Default to the worker; manifests override `command` for the proxy.
 ENTRYPOINT []
 CMD ["/usr/local/bin/b2bua-runner"]

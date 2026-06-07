@@ -90,6 +90,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use topology::{Membership, Peer, StaticMembership};
 
+mod cdr_rabbitmq;
+
 /// A CDR sink that discards every record. Production B2BUA writes CDRs to an
 /// external store; that adapter is a deferred slice, and for load/endurance we
 /// must not accumulate records in process memory. Wrapped by `BufferedCdrWriter`
@@ -468,7 +470,24 @@ async fn main() {
         }
     };
 
-    let cdr = Arc::new(BufferedCdrWriter::spawn(Arc::new(NullCdrWriter), cdr_queue));
+    // CDR sink: publish to RabbitMQ when `B2BUA_CDR_RABBITMQ_URL` is set, else
+    // discard (endurance default unless wired). Either way it sits behind the
+    // `BufferedCdrWriter` bounded queue (drop-on-overload at `cdr_queue` depth),
+    // so the in-process max buffer is identical regardless of sink.
+    let cdr_inner: Arc<dyn CdrWriter> = match env::var("B2BUA_CDR_RABBITMQ_URL") {
+        Ok(url) if !url.trim().is_empty() => {
+            let queue = env_or("B2BUA_CDR_RABBITMQ_QUEUE", "cdr");
+            let max_len: i64 = env_or("B2BUA_CDR_RABBITMQ_MAX_LEN", "100000")
+                .parse()
+                .expect("B2BUA_CDR_RABBITMQ_MAX_LEN");
+            eprintln!(
+                "b2bua-runner CDR sink: RabbitMQ queue={queue:?} max_len={max_len} (buffer={cdr_queue})"
+            );
+            Arc::new(cdr_rabbitmq::RabbitMqCdrWriter::new(url, queue, max_len))
+        }
+        _ => Arc::new(NullCdrWriter),
+    };
+    let cdr = Arc::new(BufferedCdrWriter::spawn(cdr_inner, cdr_queue));
 
     let clock = Clock::system();
 

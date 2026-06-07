@@ -1,0 +1,24 @@
+[package]
+name = "cdr-consumer-runner"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Dedicated CDR consumer: drains the RabbitMQ CDR queue and exposes Prometheus metrics (total CDR count + summed call duration derived from each record's created_at/terminated_at). No SIP, no persistence — telemetry only."
+
+[[bin]]
+name = "cdr-consumer-runner"
+path = "src/main.rs"
+
+[dependencies]
+# Same AMQP client + tokio-runtime shims the b2bua-runner sink publishes with.
+lapin = { workspace = true }
+tokio-executor-trait = { workspace = true }
+tokio-reactor-trait = { workspace = true }
+tokio = { workspace = true }
+# Only created_at/terminated_at are needed off each CDR; a tiny Deserialize view
+# ignores the rest of the record (serde_json skips unknown fields by default),
+# so the consumer is decoupled from the full b2bua CdrRecord type.
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures-util = "0.3"

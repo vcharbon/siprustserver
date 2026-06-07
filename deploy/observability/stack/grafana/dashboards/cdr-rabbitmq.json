@@ -1,0 +1,122 @@
+{
+  "uid": "cdr-rabbitmq",
+  "title": "CDR over RabbitMQ — consumer + broker (Rust)",
+  "tags": ["siprustserver", "cdr", "rabbitmq"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "annotations": {
+    "list": [
+      {
+        "name": "Chaos window",
+        "datasource": { "type": "prometheus", "uid": "vm" },
+        "enable": true,
+        "iconColor": "semi-dark-red",
+        "expr": "sip_chaos_window == 1",
+        "titleFormat": "chaos: {{type}}",
+        "tagKeys": "type",
+        "step": "10s"
+      }
+    ]
+  },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1, "type": "row", "title": "CDR consumer (overview)", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2, "type": "stat", "title": "Total CDRs",
+      "description": "`cdr_consumed_total` — total number of CDRs the dedicated consumer has read off the RabbitMQ `cdr` queue. One CDR per terminated call. Resets to 0 when the consumer pod restarts.",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(cdr_consumed_total)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "id": 3, "type": "stat", "title": "Total call duration",
+      "description": "`cdr_call_duration_ms_total` — summed call duration across all consumed CDRs, computed by the consumer from each record's call context as (terminated_at − created_at). Resets on consumer restart.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(cdr_call_duration_ms_total)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "ms" } }
+    },
+    {
+      "id": 4, "type": "stat", "title": "CDRs / sec",
+      "description": "`rate(cdr_consumed_total[1m])` — CDR ingest rate ≈ the suite's call-completion rate (one CDR per terminated call).",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(rate(cdr_consumed_total[1m]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 5, "type": "stat", "title": "Mean call duration",
+      "description": "`increase(cdr_call_duration_ms_total[5m]) / increase(cdr_consumed_total[5m])` — mean duration of calls that completed in the last 5m. Rate-based so it survives consumer restarts.",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(increase(cdr_call_duration_ms_total[5m])) / clamp_min(sum(increase(cdr_consumed_total[5m])), 1)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "ms" } }
+    },
+    {
+      "id": 6, "type": "row", "title": "Throughput", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "CDRs consumed (per-s)",
+      "description": "`rate(cdr_consumed_total[1m])` vs `rate(cdr_parse_errors_total[1m])`. Parse errors should be flat at 0; any rise means malformed CDR payloads on the queue.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum(rate(cdr_consumed_total[1m]))", "refId": "A", "legendFormat": "consumed/s" },
+        { "expr": "sum(rate(cdr_parse_errors_total[1m]))", "refId": "B", "legendFormat": "parse-errors/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "cps", "min": 0, "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Call-seconds ingested (per-s)",
+      "description": "`rate(cdr_call_duration_ms_total[1m]) / 1000` — billed call-time arriving per wall-clock second. Equals mean-concurrency of completing calls in steady state.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum(rate(cdr_call_duration_ms_total[1m])) / 1000", "refId": "A", "legendFormat": "call-seconds/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 9, "type": "row", "title": "RabbitMQ broker", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }
+    },
+    {
+      "id": 10, "type": "stat", "title": "Queue depth (ready)",
+      "description": "`rabbitmq_queue_messages_ready` — CDRs sitting in the broker not yet consumed. Should hover near 0; a sustained climb means the consumer is falling behind (broker bounded by x-max-length=drop-head). From the rabbitmq_prometheus plugin on :15692.",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(rabbitmq_queue_messages_ready)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "Broker publish / deliver (per-s)",
+      "description": "RabbitMQ global message rates from the rabbitmq_prometheus plugin: received = published by workers, delivered+acked = drained by the consumer. They should track each other in steady state.",
+      "gridPos": { "h": 8, "w": 12, "x": 6, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum(rate(rabbitmq_global_messages_received_total[1m]))", "refId": "A", "legendFormat": "received/s" },
+        { "expr": "sum(rate(rabbitmq_global_messages_delivered_total[1m]))", "refId": "B", "legendFormat": "delivered/s" },
+        { "expr": "sum(rate(rabbitmq_global_messages_acknowledged_total[1m]))", "refId": "C", "legendFormat": "acked/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "cps", "min": 0, "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 12, "type": "stat", "title": "Parse errors (total)",
+      "description": "`cdr_parse_errors_total` — CDR payloads the consumer could not decode. Should stay 0.",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(cdr_parse_errors_total)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "none", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } }
+    }
+  ]
+}

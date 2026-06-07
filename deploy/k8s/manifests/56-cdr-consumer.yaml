@@ -1,0 +1,58 @@
+# CDR consumer — drains the RabbitMQ `cdr` queue and exposes two Prometheus
+# counters scraped into Grafana (cdr-rabbitmq dashboard):
+#   - cdr_consumed_total          total number of CDRs
+#   - cdr_call_duration_ms_total  summed call duration (terminated_at - created_at)
+#
+# SINGLE replica: the counters are per-process (reset on restart, handled by
+# rate()/increase() in Grafana). Stateless, no persistence. Reuses ${SUT_IMAGE}
+# (the cdr-consumer-runner binary lives in the same image as the other runners),
+# command = cdr-consumer-runner.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cdr-consumer
+  namespace: sip-test
+  labels: { app: cdr-consumer }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: cdr-consumer } }
+  template:
+    metadata:
+      labels: { app: cdr-consumer }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9093"
+        prometheus.io/path: "/metrics"
+    spec:
+      nodeSelector: { tier: app }
+      containers:
+        - name: cdr-consumer
+          image: ${SUT_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/cdr-consumer-runner"]
+          env:
+            - { name: CDR_AMQP_URL,       value: "amqp://guest:guest@rabbitmq.sip-test.svc.cluster.local:5672/%2f" }
+            - { name: CDR_QUEUE,          value: "cdr" }
+            # MUST match the producer's B2BUA_CDR_RABBITMQ_MAX_LEN (20-worker.yaml)
+            # so the two queue declarations agree argument-for-argument.
+            - { name: CDR_QUEUE_MAX_LEN,  value: "100000" }
+            - { name: CDR_METRICS_LISTEN, value: "0.0.0.0:9093" }
+          ports:
+            - { name: metrics, containerPort: 9093, protocol: TCP }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 9093 }
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          resources:
+            requests: { cpu: "50m", memory: "32Mi" }
+            limits:   { memory: "128Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cdr-consumer
+  namespace: sip-test
+spec:
+  selector: { app: cdr-consumer }
+  ports:
+    - { name: metrics, port: 9093, targetPort: 9093, protocol: TCP }

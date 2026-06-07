@@ -35,3 +35,9 @@ kube = { version = "1", default-features = false, features = ["client", "rustls-
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio = { workspace = true }
 async-trait = { workspace = true }
+# CDR-on-RabbitMQ sink (cdr_rabbitmq.rs). lapin is runtime-agnostic; the two
+# trait shims bind it to the running tokio runtime. serde_json encodes the CDR.
+lapin = { workspace = true }
+tokio-executor-trait = { workspace = true }
+tokio-reactor-trait = { workspace = true }
+serde_json = { workspace = true }

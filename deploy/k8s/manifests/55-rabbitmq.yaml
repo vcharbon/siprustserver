@@ -1,0 +1,70 @@
+# RabbitMQ broker — the CDR transport. The b2bua workers publish one JSON CDR
+# per terminated call to the `cdr` queue (B2BUA_CDR_RABBITMQ_URL); the dedicated
+# cdr-consumer (56-cdr-consumer.yaml) drains it into Prometheus metrics.
+#
+# SINGLE replica (Deployment, Recreate): one broker, no clustering, no PVC — this
+# is a test/endurance dependency, not durable storage. The `cdr` queue is bounded
+# broker-side via x-max-length (drop-head) by BOTH producer and consumer
+# declarations, so a stalled/absent consumer can never grow the broker without
+# bound (the end-to-end "max buffer" guarantee). On a broker restart the queue is
+# empty again; CDRs are best-effort telemetry, never on the call path.
+#
+# The -management image ships the rabbitmq_prometheus plugin enabled, exposing
+# Prometheus metrics on :15692 (scraped via the pod annotations below) and the
+# management UI on :15672. Image: ${RABBITMQ_IMAGE} (default rabbitmq:3.13-management).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: sip-test
+  labels: { app: rabbitmq }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: rabbitmq } }
+  strategy: { type: Recreate } # one broker at a time; no split queues
+  template:
+    metadata:
+      labels: { app: rabbitmq }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "15692"
+        prometheus.io/path: "/metrics"
+    spec:
+      nodeSelector: { tier: app }
+      containers:
+        - name: rabbitmq
+          image: ${RABBITMQ_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: RABBITMQ_DEFAULT_USER, value: "guest" }
+            - { name: RABBITMQ_DEFAULT_PASS, value: "guest" }
+          ports:
+            - { name: amqp,    containerPort: 5672,  protocol: TCP }
+            - { name: metrics, containerPort: 15692, protocol: TCP }
+            - { name: mgmt,    containerPort: 15672, protocol: TCP }
+          readinessProbe:
+            tcpSocket: { port: 5672 }
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            exec: { command: ["rabbitmq-diagnostics", "-q", "ping"] }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 15
+          resources:
+            requests: { cpu: "200m", memory: "256Mi" }
+            limits:   { memory: "1Gi" }
+---
+# Stable ClusterIP so the workers + consumer resolve a single broker at startup.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: sip-test
+spec:
+  selector: { app: rabbitmq }
+  ports:
+    - { name: amqp,    port: 5672,  targetPort: 5672,  protocol: TCP }
+    - { name: metrics, port: 15692, targetPort: 15692, protocol: TCP }
+    - { name: mgmt,    port: 15672, targetPort: 15672, protocol: TCP }
