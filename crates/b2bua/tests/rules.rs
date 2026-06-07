@@ -167,6 +167,16 @@ const TEST_MACHINE: &str = "test-machine";
 static SM_ACTIVE_S0: [StateLabel; 1] = [StateLabel::new("S0")];
 static SM_TRANSITIONS: [(StateLabel, StateLabel); 1] =
     [(StateLabel::new("S0"), StateLabel::new("S1"))];
+/// A declared terminal edge: S0 deactivates the machine (ADR-0016 X9).
+static SM_TRANSITIONS_TERMINAL: [(StateLabel, StateLabel); 1] =
+    [(StateLabel::new("S0"), StateLabel::terminal())];
+
+/// Deactivates the machine (removes the cursor) via `ClearState`.
+fn handle_clears_state(_: &RuleContext) -> Option<RuleHandleResult> {
+    Some(RuleHandleResult::new(vec![RuleAction::ClearState {
+        machine: MachineId::new(TEST_MACHINE),
+    }]))
+}
 
 fn handle_to_s1(_: &RuleContext) -> Option<RuleHandleResult> {
     Some(RuleHandleResult::new(vec![RuleAction::SetState {
@@ -204,6 +214,17 @@ fn sm_rule_with_effects(
 ) -> RuleDefinition {
     RuleDefinition {
         effects,
+        ..sm_rule(handle)
+    }
+}
+
+/// Like [`sm_rule`] but with a custom declared `transitions` list.
+fn sm_rule_with_transitions(
+    handle: fn(&RuleContext) -> Option<RuleHandleResult>,
+    transitions: &'static [(StateLabel, StateLabel)],
+) -> RuleDefinition {
+    RuleDefinition {
+        transitions,
         ..sm_rule(handle)
     }
 }
@@ -356,6 +377,42 @@ fn declared_effect_passes_the_drift_check() {
 
     let ctx = ctx_for(&call, &event, &config);
     // Must not panic: the emitted Respond is a declared LegMessage.
+    let _ = execute_rules(&rules, &ctx, &exec, |c: &RuleContext| HandlerResult::new(c.call.clone()));
+}
+
+/// `ClearState` (machine deactivation) removes the cursor, and with a declared
+/// `S0 => terminal` edge the transition drift-check accepts it (ADR-0016 X9).
+#[test]
+fn declared_terminal_clear_state_deactivates_machine() {
+    let mut call = test_call();
+    call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S0"));
+    let event = info_event();
+    let config = B2buaConfig::default();
+    let id_gen = IdGen::seeded(1);
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let rules = vec![sm_rule_with_transitions(handle_clears_state, &SM_TRANSITIONS_TERMINAL)];
+
+    let ctx = ctx_for(&call, &event, &config);
+    let r = execute_rules(&rules, &ctx, &exec, |c: &RuleContext| HandlerResult::new(c.call.clone()));
+    // The machine is deactivated: its cursor is gone.
+    assert!(!r.call.sm_cursors.contains_key(&MachineId::new(TEST_MACHINE)));
+}
+
+/// A `ClearState` whose `S0 => terminal` edge is **not** declared trips the
+/// transition drift-check (only `S0 => S1` is in `SM_TRANSITIONS`).
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "undeclared transition")]
+fn undeclared_terminal_clear_state_trips_debug_assert() {
+    let mut call = test_call();
+    call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S0"));
+    let event = info_event();
+    let config = B2buaConfig::default();
+    let id_gen = IdGen::seeded(1);
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let rules = vec![sm_rule(handle_clears_state)]; // transitions: S0 => S1 only
+
+    let ctx = ctx_for(&call, &event, &config);
     let _ = execute_rules(&rules, &ctx, &exec, |c: &RuleContext| HandlerResult::new(c.call.clone()));
 }
 

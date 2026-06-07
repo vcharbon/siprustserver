@@ -6,7 +6,7 @@
 //! state machine, park an unadopted media leg, broker early media, drive an
 //! MSCML control channel, and hand off to the framework's normal bridge.
 //!
-//! ## Flow (`OfferingMrf → Announcing → Bridging`)
+//! ## Flow (`OfferingMrf → Announcing → [*]`)
 //!
 //! When the routing decision requests an announcement (its
 //! `service_ext["announcement"]` lands on `call.ext`, and `apply_route` defers
@@ -18,17 +18,18 @@
 //!    the caller as an unreliable `183` (early media), opens the MSCML control
 //!    channel with an INFO `<play>`, and advances to `Announcing`.
 //! 3. **@Announcing**, on the MRF's INFO MSCML `<response>` success: BYEs the
-//!    media leg, dials the real destination (an adopted leg), and advances to
-//!    `Bridging`.
-//! 4. **@Bridging** the destination leg is a normal adopted leg, so the
-//!    framework's core `confirm-dialog` rule answers the caller with the
-//!    destination's SDP and bridges the two — no announcement rule needed; the
-//!    cursor rests at `Bridging` (the machine is dormant from here).
+//!    media leg, dials the real destination (an adopted leg), and **deactivates**
+//!    the machine (ADR-0016 X9 — the terminal `[*]`). The destination is now a
+//!    normal adopted leg, so the framework's core `confirm-dialog` rule answers
+//!    the caller with its SDP and bridges the two — no announcement rule needed,
+//!    and no dead cursor lingers on the bridged call.
 //!
 //! A media-leg failure/timeout while offering or announcing terminates the call
 //! (the one-hop service→global command, `BeginTermination`).
 
-use b2bua_sdk::rules::{Call, Effect, Match, Method, RuleAction, RuleContext, RuleHandleResult};
+use b2bua_sdk::rules::{
+    Call, Effect, Match, Method, RuleAction, RuleContext, RuleHandleResult, Terminal,
+};
 use b2bua_sdk::{define_service, sm_rule};
 use call::{CdrEventType, Direction, LegState};
 use serde::Deserialize;
@@ -136,10 +137,10 @@ fn on_mscml_done(ctx: &RuleContext) -> Option<RuleHandleResult> {
             header_updates: vec![],
             kind: None,
         },
-        RuleAction::SetState {
-            machine: MACHINE,
-            to: State::Bridging.label(),
-        },
+        // The announcement is done: hand off to the destination leg + core bridge
+        // and **deactivate** the machine (ADR-0016 X9) rather than lingering at a
+        // dead `Bridging` cursor — the destination is now a normal adopted leg.
+        RuleAction::ClearState { machine: MACHINE },
     ])
 }
 
@@ -178,7 +179,7 @@ fn on_media_leg(ctx: &RuleContext) -> bool {
 define_service! {
     id: "announcement",
     machine: MACHINE,
-    states: State { OfferingMrf, Announcing, Bridging },
+    states: State { OfferingMrf, Announcing },
     // Activate iff the routing decision requested an announcement; seed the
     // cursor and launch the unadopted media leg toward the MRF.
     init: |call: &Call| {
@@ -222,7 +223,7 @@ define_service! {
             id: "announcement-mscml-done",
             machine: MACHINE,
             active: [ State::Announcing ],
-            transitions: [ State::Announcing => State::Bridging ],
+            transitions: [ State::Announcing => Terminal ],
             effects: [
                 Effect::Respond { status: 200, label: "200 OK → media (answer MSCML INFO)" },
                 Effect::Originate { method: Method::Bye, label: "BYE → media leg" },

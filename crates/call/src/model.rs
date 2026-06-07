@@ -65,6 +65,17 @@ impl StateLabel {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+    /// The **terminal** sentinel (ADR-0016 X9 machine deactivation) — a declared
+    /// transition `S => terminal` means a rule deactivates the machine from `S`
+    /// (removing its cursor). Rendered as Mermaid's `[*]` sink; never a real
+    /// cursor value (a deactivated machine has *no* cursor).
+    pub const fn terminal() -> Self {
+        StateLabel(Cow::Borrowed("[*]"))
+    }
+    /// Is this the [`terminal`](Self::terminal) sentinel?
+    pub fn is_terminal(&self) -> bool {
+        self.0 == "[*]"
+    }
 }
 
 // ── INVITE client transaction handle (in-memory; opaque) ────────────────────

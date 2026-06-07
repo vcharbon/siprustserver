@@ -15,6 +15,22 @@ use call::{Call, StateLabel};
 
 use crate::model::{RuleAction, RuleDefinition};
 
+/// The terminal-state marker for a `sm_rule!` transition (ADR-0016 X9). Writing
+/// `transitions: [ State::Bridging => Terminal ]` declares that the rule
+/// **deactivates** the machine from `Bridging` (its handler emits
+/// [`RuleAction::ClearState`](crate::model::RuleAction::ClearState), removing the
+/// cursor). It carries the [`StateLabel::terminal`] sentinel, rendered as
+/// Mermaid's `[*]` sink. A unit value with a `const label()` so it drops straight
+/// into the macro's transition column beside the state-enum variants.
+#[derive(Clone, Copy, Debug)]
+pub struct Terminal;
+
+impl Terminal {
+    pub const fn label(self) -> StateLabel {
+        StateLabel::terminal()
+    }
+}
+
 /// What a service's `init` returns to seed its machine at call setup (ADR-0016
 /// X8). All three parts are folded through the normal executor/effects pipeline
 /// by the engine's `seed_services`:

@@ -36,6 +36,7 @@ use sip_message::Method;
 use super::model::{
     Effect, Match, RuleAction, RuleContext, RuleDefinition, CORE_LAYER,
 };
+use super::Terminal;
 
 // Subscription-State fragments (RFC 3265 §3.2.4).
 const SUB_STATE_ACTIVE_60: &str = "active;expires=60";
@@ -310,7 +311,7 @@ define_service! {
             id: "transfer-http-reject",
             machine: TRANSFER_MACHINE,
             active: [ Phase::ReferAuthorizing ],
-            transitions: [],
+            transitions: [ Phase::ReferAuthorizing => Terminal ],
             effects: [
                 Effect::Originate { method: Method::Notify, label: "NOTIFY terminated → referrer" },
                 Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry" },
@@ -422,7 +423,7 @@ define_service! {
             id: "transfer-http-timeout",
             machine: TRANSFER_MACHINE,
             active: [ Phase::ReferAuthorizing ],
-            transitions: [],
+            transitions: [ Phase::ReferAuthorizing => Terminal ],
             effects: [
                 Effect::Originate { method: Method::Notify, label: "NOTIFY terminated;timeout → referrer" },
                 Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall-safety" },
@@ -544,7 +545,7 @@ define_service! {
             id: "transfer-c-fail-initial",
             machine: TRANSFER_MACHINE,
             active: [ Phase::CRinging ],
-            transitions: [],
+            transitions: [ Phase::CRinging => Terminal ],
             effects: [
                 Effect::Originate { method: Method::Notify, label: "NOTIFY terminated (C failed) → referrer" },
                 Effect::Originate { method: Method::Bye, label: "BYE → C (terminate failed leg)" },
@@ -590,7 +591,7 @@ define_service! {
             id: "transfer-c-no-answer",
             machine: TRANSFER_MACHINE,
             active: [ Phase::CRinging ],
-            transitions: [],
+            transitions: [ Phase::CRinging => Terminal ],
             effects: [
                 Effect::Originate { method: Method::Notify, label: "NOTIFY terminated;timeout → referrer" },
                 Effect::Originate { method: Method::Bye, label: "BYE → C (no answer)" },
@@ -793,7 +794,7 @@ define_service! {
             id: "transfer-a-realign-200",
             machine: TRANSFER_MACHINE,
             active: [ Phase::ARealigning ],
-            transitions: [],
+            transitions: [ Phase::ARealigning => Terminal ],
             effects: [
                 Effect::Originate { method: Method::Ack, label: "ACK → A (a-realign answered)" },
                 Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "cancel A re-INVITE watchdog + overall" },

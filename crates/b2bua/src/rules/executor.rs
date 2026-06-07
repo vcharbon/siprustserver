@@ -89,9 +89,15 @@ fn check_declared_transition(
         return; // no move (or the rule SetState'd to the same label).
     }
     // A machine-bound rule only fires from a seeded cursor (the `machine_active`
-    // gate), so `from` is always present here.
+    // gate), so `from` is always present here. A removed cursor (`to` absent) is
+    // machine **deactivation** (`ClearState`) — legal iff the rule declared a
+    // transition to the `terminal` sentinel from `f` (ADR-0016 X9).
     let declared = match (from, to) {
         (Some(f), Some(t)) => rule.transitions.iter().any(|(df, dt)| df == f && dt == t),
+        (Some(f), None) => rule
+            .transitions
+            .iter()
+            .any(|(df, dt)| df == f && dt.is_terminal()),
         _ => false,
     };
     if !declared {

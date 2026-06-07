@@ -9,7 +9,10 @@ stateDiagram-v2
     CRealigning
     CRinging
     ReferAuthorizing
+    ARealigning --> [*]
     CRealigning --> ARealigning
     CRinging --> CRealigning
+    CRinging --> [*]
     ReferAuthorizing --> CRinging
+    ReferAuthorizing --> [*]
 ```

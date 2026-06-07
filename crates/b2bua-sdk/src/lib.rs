@@ -36,7 +36,7 @@ pub mod rules {
         RuleDefinition, RuleHandleResult, StatusMatch, CORE_LAYER, SERVICE_LAYER,
     };
     pub use sip_message::Method;
-    pub use crate::service::{ServiceDef, ServiceSeed};
+    pub use crate::service::{ServiceDef, ServiceSeed, Terminal};
     pub use call::{Call, MachineId, StateLabel};
 }
 

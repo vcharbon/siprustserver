@@ -23,7 +23,7 @@ pub use refer_transfer::{transfer_rules, transfer_seed_rules, transfer_service_d
 pub use relay_first_18x::relay_first_18x_rules;
 pub use executor::{execute_rules, pick_ranked};
 pub use docgen::{check_registry, render_registry, MachineGraph};
-pub use service::{compose_rules, seed_services, ServiceDef, ServiceSeed};
+pub use service::{compose_rules, seed_services, ServiceDef, ServiceSeed, Terminal};
 pub use model::{
     Effect, EffectKind, Match, MatchKind, MessageTransform, RuleAction, RuleContext,
     RuleDefinition, RuleHandleResult, StatusMatch, CORE_LAYER, SERVICE_LAYER,

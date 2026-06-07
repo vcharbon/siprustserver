@@ -30,6 +30,10 @@ fn graph_from(
         state_set.insert(a.clone());
         state_set.insert(b.clone());
     }
+    // The terminal sentinel `[*]` (ADR-0016 X9 deactivation) is Mermaid's built-in
+    // sink — it appears only as an edge target (`S --> [*]`), never as a declared
+    // state node.
+    state_set.remove(call::StateLabel::terminal().as_str());
     MachineGraph {
         id: id.to_string(),
         states: state_set.into_iter().collect(),

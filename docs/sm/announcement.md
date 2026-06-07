@@ -6,8 +6,7 @@
 ```mermaid
 stateDiagram-v2
     Announcing
-    Bridging
     OfferingMrf
-    Announcing --> Bridging
+    Announcing --> [*]
     OfferingMrf --> Announcing
 ```

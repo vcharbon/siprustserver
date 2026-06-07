@@ -20,7 +20,7 @@ use super::model::RuleContext;
 // Re-export the authoring registry types so `crate::rules::{ServiceDef,
 // ServiceSeed}` and the macros' `$crate::rules::…` references resolve identically
 // whether the rule was authored in-tree or out-of-crate.
-pub use b2bua_sdk::service::{ServiceDef, ServiceSeed};
+pub use b2bua_sdk::service::{ServiceDef, ServiceSeed, Terminal};
 use b2bua_sdk::model::RuleDefinition;
 
 /// The engine's rule list: every service's state-gated rules (SERVICE_LAYER,
