@@ -875,6 +875,19 @@ impl<'a> ActionExecutor<'a> {
         let remote_target = get_header(&resp.headers, "contact")
             .map(unwrap_angle)
             .unwrap_or_default();
+        // §12.1.2: the b-leg is a UAC dialog, so its route set is the
+        // dialog-creating 2xx's Record-Route headers in *reverse* order (the
+        // a-leg/UAS path keeps the INVITE's Record-Route forward). Without this
+        // the b-leg route set stays empty and every worker→callee in-dialog
+        // request (keepalive OPTIONS, BYE, re-INVITE) falls back to the
+        // synthetic `b2b_outbound_proxy` Route in `relay::apply_b_leg_egress`,
+        // dropping the proxy's signed Record-Route cookie from the trace.
+        let route_set: Vec<String> =
+            sip_message::message_helpers::get_headers(&resp.headers, "record-route")
+                .iter()
+                .rev()
+                .map(|s| s.to_string())
+                .collect();
         if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
             if let Some(d) = leg.dialogs.first_mut() {
                 if !remote_tag.is_empty() {
@@ -882,6 +895,9 @@ impl<'a> ActionExecutor<'a> {
                 }
                 if !remote_target.is_empty() {
                     d.sip.remote_target = remote_target;
+                }
+                if !route_set.is_empty() {
+                    d.sip.route_set = route_set;
                 }
                 d.ext.remote_cseq = Some(resp.cseq.seq as i64);
             }

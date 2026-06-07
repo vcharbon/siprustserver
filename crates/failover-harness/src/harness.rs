@@ -480,15 +480,21 @@ impl ReplicatedB2buaSut {
             sip_local_ip: self.sip_addr.ip().to_string(),
             sip_local_port: self.sip_addr.port(),
             b2b_outbound_proxy: self.outbound_proxy.clone(),
-            // PRODUCTION timers, globally (ADR-0013 keepalive amendment). The
-            // keepalive cells must be representative — a long quiescent call is
+            // EXACT production (kind) timers — `deploy/k8s/manifests/20-worker.yaml`.
+            // The keepalive cells must be representative: a long quiescent call is
             // flushed (and its backup TTL refreshed) only by its in-dialog OPTIONS,
             // so the dead-peer/limiter-refresh/backup-TTL cadence only matches
             // production at the real 300 s interval. Under a `start_paused` clock
             // advancing 300 s costs nothing in wall-time, so every cell pays the
-            // full interval. `reboot_budget_sec` (default 450 s) ≥ 300 s keeps the
-            // backup TTL alive across one keepalive gap (config.rs validate).
+            // full interval. `reboot_budget_sec` (600 s) ≥ `keepalive_interval_sec`
+            // (300 s) keeps the backup TTL alive across one keepalive gap
+            // (config.rs validate). `keepalive_timeout_sec` (45 s, B2BUA_KEEPALIVE_
+            // TIMEOUT_SEC) is the reboot-recovery grace before a reclaimed dialog's
+            // re-armed OPTIONS is declared dead — the code default (32 s) is NOT the
+            // cluster value, so set it explicitly here for parity.
             keepalive_interval_sec: 300,
+            keepalive_timeout_sec: 45,
+            reboot_budget_sec: 600,
             ..Default::default()
         };
         let deps = B2buaDeps {
