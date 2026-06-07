@@ -25,14 +25,15 @@
 //! rollback). A BYE from A while a-realigning rides the CORE `relay-bye` path,
 //! whose begin-termination BYEs the orphaned B + C — no dedicated rule needed.
 
+use b2bua_sdk::{define_service, sm_rule};
 use call::{
-    CdrEventType, Direction, LegState, TransferPhase, TransferState,
+    Call, CdrEventType, Direction, LegState, StateLabel, TransferPhase, TransferState,
 };
 use sip_message::message_helpers::get_header;
 use sip_message::sipfrag::sipfrag_from_status;
 
 use super::model::{
-    Match, RuleAction, RuleContext, RuleDefinition, CORE_LAYER, SERVICE_LAYER,
+    Match, RuleAction, RuleContext, RuleDefinition, CORE_LAYER,
 };
 
 // Subscription-State fragments (RFC 3265 §3.2.4).
@@ -54,15 +55,6 @@ fn core_rule(
     RuleDefinition::core(id, CORE_LAYER, overrides, matcher, handle)
 }
 
-fn svc_rule(
-    id: &'static str,
-    overrides: &'static [&'static str],
-    matcher: Match,
-    handle: fn(&RuleContext) -> Option<super::model::RuleHandleResult>,
-) -> RuleDefinition {
-    RuleDefinition::core(id, SERVICE_LAYER, overrides, matcher, handle)
-}
-
 // ── Timer-id minting (must match `ActionExecutor::schedule`) ─────────────────
 // `schedule` builds `format!("{:?}", t)` (no leg) / `format!("{:?}:{}", t, leg)`.
 // Mint cancel ids from the same recipe so they can never drift (CLAUDE.md timer-
@@ -76,15 +68,6 @@ fn timer_id(t: call::TimerType, leg: Option<&str>) -> String {
 
 fn transfer_active(ctx: &RuleContext) -> bool {
     call::helpers::transfer_active(ctx.call)
-}
-
-fn phase(ctx: &RuleContext) -> Option<TransferPhase> {
-    call::helpers::transfer_phase(ctx.call)
-}
-
-/// Both realigning phases (the glare/gating "regime 2", refer-gating.ts:1-16).
-fn is_realigning(p: Option<TransferPhase>) -> bool {
-    matches!(p, Some(TransferPhase::CRealigning) | Some(TransferPhase::ARealigning))
 }
 
 fn state<'a>(ctx: &'a RuleContext<'a>) -> Option<&'a TransferState> {
@@ -282,19 +265,34 @@ fn state_dialog_id(ctx: &RuleContext, leg_id: &str) -> String {
     format!("{call_id};to-tag={to_tag};from-tag={from_tag}")
 }
 
-/// The phase-gated SERVICE_LAYER transfer rules. Dormant unless `Call.transfer`
-/// is `Some`; SERVICE_LAYER ranks them above the CORE relay rules they displace.
-pub fn transfer_rules() -> Vec<RuleDefinition> {
-    vec![
+// The `transfer` callflow service (ADR-0016): `TransferPhase` is the declared
+// machine, its cursor a read-only *projection* of the authoritative
+// `Call.transfer.phase` (see `project_cursor`, mirroring the `global-call`
+// projection). Each rule is gated by `active_states` instead of a `phase(ctx)`
+// match-column; the `transitions` it declares are the diagram edges (the cursor
+// is moved by the projection in `finalize`, so they are documentation, never
+// enforced — like `global-call`). The handlers are unchanged: they still write
+// `Call.transfer.phase` via `SetTransfer`, which the projection mirrors.
+//
+// `init` stays dormant (`None`): transfer is triggered by an in-dialog REFER
+// mid-call (the machine-less seed rules in `transfer_seed_rules`), not at INVITE
+// setup. The cursor first appears when the seed installs the slice.
+define_service! {
+    id: "transfer",
+    machine: TRANSFER_MACHINE,
+    states: Phase { ReferAuthorizing, CRinging, CRealigning, ARealigning },
+    init: |_call| None,
+    rules: [
         // ── transfer-reject-second-refer — a second REFER while active → 491.
-        svc_rule(
-            "transfer-reject-second-refer",
-            &[],
-            Match::request()
+        sm_rule! {
+            id: "transfer-reject-second-refer",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::ReferAuthorizing, Phase::CRinging, Phase::CRealigning, Phase::ARealigning ],
+            transitions: [],
+            matcher: Match::request()
                 .method("REFER")
-                .direction(Direction::FromB)
-                .filter(transfer_active),
-            |_ctx| {
+                .direction(Direction::FromB),
+            handle: |_ctx| {
                 ok(vec![RuleAction::Respond {
                     status: 491,
                     reason: "Request Pending".to_string(),
@@ -302,22 +300,23 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                     content_type: None,
                 }])
             },
-        ),
+        },
         // ── transfer-http-reject / -error — /call/refer denied.
-        svc_rule(
-            "transfer-http-reject",
-            &[],
-            Match::internal_event()
+        sm_rule! {
+            id: "transfer-http-reject",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::ReferAuthorizing ],
+            transitions: [],
+            matcher: Match::internal_event()
                 .topic("refer-http-result")
                 .filter(|ctx| {
-                    let outcome_ok = matches!(
+                    matches!(
                         ctx.event,
                         crate::event::CallEvent::InternalEvent { outcome, .. }
                             if outcome == "reject" || outcome == "error"
-                    );
-                    outcome_ok && phase(ctx) == Some(TransferPhase::ReferAuthorizing)
+                    )
                 }),
-            |ctx| {
+            handle: |ctx| {
                 let st = state(ctx)?;
                 let leg = st.referrer_leg_id.clone();
                 let (code, reason) = reject_code_reason(ctx);
@@ -328,16 +327,17 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                     RuleAction::SetTransfer { state: None },
                 ])
             },
-        ),
+        },
         // ── transfer-http-allow — /call/refer authorized → create C leg.
-        svc_rule(
-            "transfer-http-allow",
-            &[],
-            Match::internal_event()
+        sm_rule! {
+            id: "transfer-http-allow",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::ReferAuthorizing ],
+            transitions: [ Phase::ReferAuthorizing => Phase::CRinging ],
+            matcher: Match::internal_event()
                 .topic("refer-http-result")
-                .outcome("allow")
-                .filter(|ctx| phase(ctx) == Some(TransferPhase::ReferAuthorizing)),
-            |ctx| {
+                .outcome("allow"),
+            handle: |ctx| {
                 let st = state(ctx)?.clone();
                 let payload = match ctx.event {
                     crate::event::CallEvent::InternalEvent { payload, .. } => payload,
@@ -404,15 +404,16 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                     RuleAction::SetTransfer { state: Some(new_state) },
                 ])
             },
-        ),
+        },
         // ── transfer-http-timeout — subscription-expiry fired (HTTP hung).
-        svc_rule(
-            "transfer-http-timeout",
-            &[],
-            Match::timer()
-                .timer_type(call::TimerType::ReferSubscriptionExpiry)
-                .filter(|ctx| phase(ctx) == Some(TransferPhase::ReferAuthorizing)),
-            |ctx| {
+        sm_rule! {
+            id: "transfer-http-timeout",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::ReferAuthorizing ],
+            transitions: [],
+            matcher: Match::timer()
+                .timer_type(call::TimerType::ReferSubscriptionExpiry),
+            handle: |ctx| {
                 let st = state(ctx)?;
                 let leg = st.referrer_leg_id.clone();
                 ok(vec![
@@ -421,20 +422,21 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                     RuleAction::SetTransfer { state: None },
                 ])
             },
-        ),
+        },
         // ── transfer-c-1xx-to-notify — C 1xx → NOTIFY active (deduped).
-        svc_rule(
-            "transfer-c-1xx-to-notify",
-            &[],
-            Match::response()
+        sm_rule! {
+            id: "transfer-c-1xx-to-notify",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::CRinging ],
+            transitions: [],
+            matcher: Match::response()
                 .method("INVITE")
                 .status_class(1)
                 .direction(Direction::FromB)
                 .filter(|ctx| {
-                    phase(ctx) == Some(TransferPhase::CRinging)
-                        && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
+                    state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
                 }),
-            |ctx| {
+            handle: |ctx| {
                 let st = state(ctx)?.clone();
                 let resp = ctx.response()?;
                 // Dedupe identical repeats against the *last* status only.
@@ -449,21 +451,22 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                     RuleAction::SetTransfer { state: Some(new_state) },
                 ])
             },
-        ),
+        },
         // ── transfer-c-200-initial — C answers its initial INVITE.
-        svc_rule(
-            "transfer-c-200-initial",
-            &[],
-            Match::response()
+        sm_rule! {
+            id: "transfer-c-200-initial",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::CRinging ],
+            transitions: [ Phase::CRinging => Phase::CRealigning ],
+            matcher: Match::response()
                 .method("INVITE")
                 .status_class(2)
                 .direction(Direction::FromB)
                 .leg_states(&[LegState::Trying, LegState::Early])
                 .filter(|ctx| {
-                    phase(ctx) == Some(TransferPhase::CRinging)
-                        && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
+                    state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
                 }),
-            |ctx| {
+            handle: |ctx| {
                 let st = state(ctx)?.clone();
                 let resp = ctx.response()?;
                 let c_leg_id = st.c_leg_id.clone()?;
@@ -508,22 +511,23 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                     RuleAction::SetTransfer { state: Some(new_state) },
                 ])
             },
-        ),
+        },
         // ── transfer-c-fail-initial — C's initial INVITE 3xx–6xx.
-        svc_rule(
-            "transfer-c-fail-initial",
-            &[],
-            Match::response()
+        sm_rule! {
+            id: "transfer-c-fail-initial",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::CRinging ],
+            transitions: [],
+            matcher: Match::response()
                 .method("INVITE")
                 .direction(Direction::FromB)
                 .leg_states(&[LegState::Trying, LegState::Early])
                 .filter(|ctx| {
                     let is_fail = ctx.response().map(|r| r.status >= 300).unwrap_or(false);
                     is_fail
-                        && phase(ctx) == Some(TransferPhase::CRinging)
                         && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
                 }),
-            |ctx| {
+            handle: |ctx| {
                 let st = state(ctx)?.clone();
                 let resp = ctx.response()?;
                 let leg = st.referrer_leg_id.clone();
@@ -548,23 +552,24 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                 actions.push(RuleAction::SetTransfer { state: None });
                 ok(actions)
             },
-        ),
+        },
         // ── transfer-c-no-answer — C no-answer timer (beats CORE no-answer).
-        svc_rule(
-            "transfer-c-no-answer",
-            &[],
-            Match::timer()
+        sm_rule! {
+            id: "transfer-c-no-answer",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::CRinging ],
+            transitions: [],
+            matcher: Match::timer()
                 .timer_type(call::TimerType::NoAnswer)
                 .filter(|ctx| {
                     let timer_leg = match ctx.event {
                         crate::event::CallEvent::Timer { leg_id, .. } => leg_id.as_deref(),
                         _ => None,
                     };
-                    phase(ctx) == Some(TransferPhase::CRinging)
-                        && state(ctx).and_then(|s| s.c_leg_id.as_deref()).is_some()
+                    state(ctx).and_then(|s| s.c_leg_id.as_deref()).is_some()
                         && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == timer_leg
                 }),
-            |ctx| {
+            handle: |ctx| {
                 let st = state(ctx)?.clone();
                 let leg = st.referrer_leg_id.clone();
                 let c_leg_id = st.c_leg_id.clone()?;
@@ -582,23 +587,24 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                     RuleAction::SetTransfer { state: None },
                 ])
             },
-        ),
+        },
         // ── transfer-c-realign-200 — C answers the c-realign re-INVITE (200).
         // Distinguished from `transfer-c-200-initial` by `legState: confirmed`
         // (the initial INVITE answered trying/early). referTransfer.ts:476-522.
-        svc_rule(
-            "transfer-c-realign-200",
-            &[],
-            Match::response()
+        sm_rule! {
+            id: "transfer-c-realign-200",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::CRealigning ],
+            transitions: [ Phase::CRealigning => Phase::ARealigning ],
+            matcher: Match::response()
                 .method("INVITE")
                 .status_class(2)
                 .direction(Direction::FromB)
                 .leg_states(&[LegState::Confirmed])
                 .filter(|ctx| {
-                    phase(ctx) == Some(TransferPhase::CRealigning)
-                        && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
+                    state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
                 }),
-            |ctx| {
+            handle: |ctx| {
                 let st = state(ctx)?.clone();
                 let resp = ctx.response()?;
                 let c_leg_id = st.c_leg_id.clone()?;
@@ -630,25 +636,26 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                     RuleAction::SetTransfer { state: Some(new_state) },
                 ])
             },
-        ),
+        },
         // ── transfer-c-realign-fail — C rejects the c-realign re-INVITE → rollback.
         // `legState: confirmed` distinguishes this from `transfer-c-fail-initial`.
         // begin-termination BYEs all three confirmed legs (A, B, C). The slice is
         // NOT cleared — the call termination path drops it. referTransfer.ts:526-568.
-        svc_rule(
-            "transfer-c-realign-fail",
-            &[],
-            Match::response()
+        sm_rule! {
+            id: "transfer-c-realign-fail",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::CRealigning ],
+            transitions: [],
+            matcher: Match::response()
                 .method("INVITE")
                 .direction(Direction::FromB)
                 .leg_states(&[LegState::Confirmed])
                 .filter(|ctx| {
                     let is_fail = ctx.response().map(|r| r.status >= 300).unwrap_or(false);
                     is_fail
-                        && phase(ctx) == Some(TransferPhase::CRealigning)
                         && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
                 }),
-            |ctx| {
+            handle: |ctx| {
                 let st = state(ctx)?.clone();
                 let resp = ctx.response()?;
                 let mut actions = vec![];
@@ -671,18 +678,19 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                 actions.push(RuleAction::BeginTermination { reason: None });
                 ok(actions)
             },
-        ),
+        },
         // ── transfer-c-realign-timeout — `refer_reinvite_answer` fired while
         // c-realigning (C never answered the re-INVITE) → rollback. Shares the
-        // timer type with `transfer-a-realign-timeout` (5c); the phase filters
-        // keep them mutually exclusive. referTransfer.ts:572-598.
-        svc_rule(
-            "transfer-c-realign-timeout",
-            &[],
-            Match::timer()
-                .timer_type(call::TimerType::ReferReinviteAnswer)
-                .filter(|ctx| phase(ctx) == Some(TransferPhase::CRealigning)),
-            |ctx| {
+        // timer type with `transfer-a-realign-timeout` (5c); the active-state gate
+        // keeps them mutually exclusive. referTransfer.ts:572-598.
+        sm_rule! {
+            id: "transfer-c-realign-timeout",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::CRealigning ],
+            transitions: [],
+            matcher: Match::timer()
+                .timer_type(call::TimerType::ReferReinviteAnswer),
+            handle: |ctx| {
                 let st = state(ctx)?.clone();
                 let mut actions = vec![RuleAction::CancelTimer {
                     id: timer_id(call::TimerType::ReferOverallSafety, None),
@@ -698,21 +706,22 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                 actions.push(RuleAction::BeginTermination { reason: None });
                 ok(actions)
             },
-        ),
+        },
         // ── transfer-c-glare-reinvite — C re-INVITEs during realigning → 491.
         // Beats CORE `reinvite-glare`/`relay-reinvite` by SERVICE_LAYER.
         // referTransfer.ts:602-616.
-        svc_rule(
-            "transfer-c-glare-reinvite",
-            &[],
-            Match::request()
+        sm_rule! {
+            id: "transfer-c-glare-reinvite",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::CRealigning, Phase::ARealigning ],
+            transitions: [],
+            matcher: Match::request()
                 .method("INVITE")
                 .direction(Direction::FromB)
                 .filter(|ctx| {
-                    is_realigning(phase(ctx))
-                        && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
+                    state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
                 }),
-            |_ctx| {
+            handle: |_ctx| {
                 ok(vec![RuleAction::Respond {
                     status: 491,
                     reason: "Request Pending".to_string(),
@@ -720,24 +729,24 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                     content_type: None,
                 }])
             },
-        ),
+        },
         // ── transfer-a-realign-200 — A answers the a-realign re-INVITE (200) →
         // merge(a, c). The transfer is complete: ACK A, cancel A's
         // `refer_reinvite_answer` + the overall-safety timer, `merge(a, cLegId)`
         // (A↔C now bridged), CDR answer "transfer-completed", and clear the slice.
         // B is left an orphan confirmed leg — a subsequent A BYE → begin-termination
         // BYEs both B and C. referTransfer.ts:620-654.
-        svc_rule(
-            "transfer-a-realign-200",
-            &[],
-            Match::response()
+        sm_rule! {
+            id: "transfer-a-realign-200",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::ARealigning ],
+            transitions: [],
+            matcher: Match::response()
                 .method("INVITE")
                 .status_class(2)
                 .direction(Direction::FromA)
-                .filter(|ctx| {
-                    phase(ctx) == Some(TransferPhase::ARealigning) && ctx.source_leg_id == "a"
-                }),
-            |ctx| {
+                .filter(|ctx| ctx.source_leg_id == "a"),
+            handle: |ctx| {
                 let st = state(ctx)?.clone();
                 let c_leg_id = st.c_leg_id.clone()?;
                 ok(vec![
@@ -761,23 +770,23 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                     RuleAction::SetTransfer { state: None },
                 ])
             },
-        ),
+        },
         // ── transfer-a-realign-fail — A rejects the a-realign re-INVITE → rollback.
         // begin-termination BYEs all three confirmed legs (A, B, C); the slice is
         // dropped as the call terminates. referTransfer.ts:658-690.
-        svc_rule(
-            "transfer-a-realign-fail",
-            &[],
-            Match::response()
+        sm_rule! {
+            id: "transfer-a-realign-fail",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::ARealigning ],
+            transitions: [],
+            matcher: Match::response()
                 .method("INVITE")
                 .direction(Direction::FromA)
                 .filter(|ctx| {
                     let is_fail = ctx.response().map(|r| r.status >= 300).unwrap_or(false);
-                    is_fail
-                        && phase(ctx) == Some(TransferPhase::ARealigning)
-                        && ctx.source_leg_id == "a"
+                    is_fail && ctx.source_leg_id == "a"
                 }),
-            |ctx| {
+            handle: |ctx| {
                 let resp = ctx.response()?;
                 ok(vec![
                     RuleAction::CancelTimer {
@@ -795,24 +804,26 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                     RuleAction::BeginTermination { reason: None },
                 ])
             },
-        ),
+        },
         // ── transfer-a-realign-timeout — `refer_reinvite_answer` fired while
         // a-realigning (A never answered) → rollback. Shares the timer type with
-        // `transfer-c-realign-timeout`; the phase filter + the fired timer's
+        // `transfer-c-realign-timeout`; the active-state gate + the fired timer's
         // leg=="a" keep them mutually exclusive. referTransfer.ts:694-720.
-        svc_rule(
-            "transfer-a-realign-timeout",
-            &[],
-            Match::timer()
+        sm_rule! {
+            id: "transfer-a-realign-timeout",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::ARealigning ],
+            transitions: [],
+            matcher: Match::timer()
                 .timer_type(call::TimerType::ReferReinviteAnswer)
                 .filter(|ctx| {
                     let timer_leg = match ctx.event {
                         crate::event::CallEvent::Timer { leg_id, .. } => leg_id.as_deref(),
                         _ => None,
                     };
-                    phase(ctx) == Some(TransferPhase::ARealigning) && timer_leg == Some("a")
+                    timer_leg == Some("a")
                 }),
-            |_ctx| {
+            handle: |_ctx| {
                 ok(vec![
                     RuleAction::CancelTimer {
                         id: timer_id(call::TimerType::ReferOverallSafety, None),
@@ -826,17 +837,18 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                     RuleAction::BeginTermination { reason: None },
                 ])
             },
-        ),
+        },
         // ── transfer-a-glare-reinvite — A re-INVITEs during realigning → 491.
         // Beats CORE `relay-reinvite` by SERVICE_LAYER. referTransfer.ts:724-737.
-        svc_rule(
-            "transfer-a-glare-reinvite",
-            &[],
-            Match::request()
+        sm_rule! {
+            id: "transfer-a-glare-reinvite",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::CRealigning, Phase::ARealigning ],
+            transitions: [],
+            matcher: Match::request()
                 .method("INVITE")
-                .direction(Direction::FromA)
-                .filter(|ctx| is_realigning(phase(ctx))),
-            |_ctx| {
+                .direction(Direction::FromA),
+            handle: |_ctx| {
                 ok(vec![RuleAction::Respond {
                     status: 491,
                     reason: "Request Pending".to_string(),
@@ -844,18 +856,19 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                     content_type: None,
                 }])
             },
-        ),
+        },
         // ── transfer-overall-timeout — the overall-safety watchdog fired in any
         // of the four phases → rollback. Cancel the sub-expiry + both possible
         // `refer_reinvite_answer` ids (C's and A's), CDR timeout, begin-termination.
         // referTransfer.ts:760-794.
-        svc_rule(
-            "transfer-overall-timeout",
-            &[],
-            Match::timer()
-                .timer_type(call::TimerType::ReferOverallSafety)
-                .filter(|ctx| transfer_active(ctx)),
-            |ctx| {
+        sm_rule! {
+            id: "transfer-overall-timeout",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::ReferAuthorizing, Phase::CRinging, Phase::CRealigning, Phase::ARealigning ],
+            transitions: [],
+            matcher: Match::timer()
+                .timer_type(call::TimerType::ReferOverallSafety),
+            handle: |ctx| {
                 let st = state(ctx)?.clone();
                 let mut actions = vec![RuleAction::CancelTimer {
                     id: timer_id(call::TimerType::ReferSubscriptionExpiry, None),
@@ -877,25 +890,26 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                 actions.push(RuleAction::BeginTermination { reason: None });
                 ok(actions)
             },
-        ),
+        },
         // ── transfer-b-in-cre-are-reject — referrer B's non-BYE in-dialog request
         // during realigning → 481 (B's signalling is "dead" until merge; its BYE
         // is still allowed through `relay-bye`). referTransfer.ts:741-756.
-        svc_rule(
-            "transfer-b-in-cre-are-reject",
-            &[],
-            Match::request()
+        sm_rule! {
+            id: "transfer-b-in-cre-are-reject",
+            machine: TRANSFER_MACHINE,
+            active: [ Phase::CRealigning, Phase::ARealigning ],
+            transitions: [],
+            matcher: Match::request()
                 .direction(Direction::FromB)
                 .filter(|ctx| {
                     let method_ok = ctx
                         .request()
                         .map(|r| !r.method.eq_ignore_ascii_case("BYE"))
                         .unwrap_or(false);
-                    is_realigning(phase(ctx))
-                        && method_ok
+                    method_ok
                         && state(ctx).map(|s| s.referrer_leg_id.as_str()) == Some(ctx.source_leg_id)
                 }),
-            |_ctx| {
+            handle: |_ctx| {
                 ok(vec![RuleAction::Respond {
                     status: 481,
                     reason: "Call/Transaction Does Not Exist".to_string(),
@@ -903,6 +917,46 @@ pub fn transfer_rules() -> Vec<RuleDefinition> {
                     content_type: None,
                 }])
             },
-        ),
-    ]
+        },
+    ],
+}
+
+/// The machine-gated service rules, kept under the pre-retrofit name for
+/// `default_rules()` (the engine runs them via the flat rule list; the
+/// `define_service!`-generated `rules()` is the source).
+pub fn transfer_rules() -> Vec<RuleDefinition> {
+    rules()
+}
+
+/// The `transfer` service descriptor — registered in the doc-generator registry
+/// (`b2bua-runner::compose_services`) so `docs/sm/transfer.md` is generated from
+/// the same declared `active_states`/`transitions` the engine gates on.
+pub fn transfer_service_def() -> crate::rules::ServiceDef {
+    service_def()
+}
+
+/// Project the authoritative `Call.transfer.phase` into the `transfer` machine
+/// cursor (ADR-0016), mirroring the `global-call` projection: the cursor is a
+/// read-only view the machine-gated rules select on, while `Call.transfer` stays
+/// the single source of truth. Called from `invariants::finalize`. Clearing the
+/// slice removes the cursor, deactivating the machine (so post-transfer relay is
+/// no longer intercepted by the glare/realign rules).
+pub fn project_cursor(call: &mut Call) {
+    match call.transfer.as_ref().map(|t| t.phase) {
+        Some(p) => {
+            call.sm_cursors.insert(TRANSFER_MACHINE, phase_label(p));
+        }
+        None => {
+            call.sm_cursors.remove(&TRANSFER_MACHINE);
+        }
+    }
+}
+
+fn phase_label(p: TransferPhase) -> StateLabel {
+    match p {
+        TransferPhase::ReferAuthorizing => Phase::ReferAuthorizing.label(),
+        TransferPhase::CRinging => Phase::CRinging.label(),
+        TransferPhase::CRealigning => Phase::CRealigning.label(),
+        TransferPhase::ARealigning => Phase::ARealigning.label(),
+    }
 }

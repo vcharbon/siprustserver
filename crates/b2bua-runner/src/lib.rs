@@ -11,7 +11,7 @@ use b2bua::rules::ServiceDef;
 /// slice 8) are appended here. The doc generator prepends the framework
 /// `global-call` machine itself.
 pub fn compose_services() -> Vec<ServiceDef> {
-    Vec::new()
+    vec![b2bua::rules::transfer_service_def()]
 }
 
 /// The committed state-machine diagrams (ADR-0016): `(machine_id, markdown)`

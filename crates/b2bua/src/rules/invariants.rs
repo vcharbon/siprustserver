@@ -40,6 +40,10 @@ pub fn finalize(mut result: HandlerResult) -> HandlerResult {
         .call
         .sm_cursors
         .insert(GLOBAL_CALL_MACHINE, global_call_label(result.call.state));
+    // Project the authoritative `Call.transfer.phase` into the `transfer` machine
+    // cursor (ADR-0016 slice 7) the same way — a read-only view the transfer
+    // service rules gate on; clearing the slice removes the cursor.
+    super::refer_transfer::project_cursor(&mut result.call);
     result
 }
 

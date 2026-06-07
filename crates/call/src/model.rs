@@ -525,8 +525,10 @@ pub struct Call {
     pub sm_cursors: BTreeMap<MachineId, StateLabel>,
 }
 
-/// REFER blind-transfer phase — gates which transfer service rules can match
-/// (each rule's `filter` reads `transfer_phase`). Port of the TS
+/// REFER blind-transfer phase — the authoritative state of the `transfer`
+/// callflow machine (ADR-0016 slice 7). It is projected into the per-call
+/// `transfer` machine cursor (`refer_transfer::project_cursor`), and each
+/// transfer rule is gated by that cursor via its `active_states`. Port of the TS
 /// `TransferPhase` literal union (`referTransfer.ts:38-47`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
