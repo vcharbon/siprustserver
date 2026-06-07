@@ -18,6 +18,7 @@ use sip_message::generators::{
     InDialogMethod, InviteClientTransactionHandle,
 };
 use sip_message::message_helpers::get_header;
+use sip_message::parser::custom::structured_headers::split_top_level_commas;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 use sip_txn::{IdGen, TxnKind};
@@ -904,18 +905,26 @@ impl<'a> ActionExecutor<'a> {
             .map(unwrap_angle)
             .unwrap_or_default();
         // §12.1.2: the b-leg is a UAC dialog, so its route set is the
-        // dialog-creating 2xx's Record-Route headers in *reverse* order (the
-        // a-leg/UAS path keeps the INVITE's Record-Route forward). Without this
-        // the b-leg route set stays empty and every worker→callee in-dialog
-        // request (keepalive OPTIONS, BYE, re-INVITE) falls back to the
-        // synthetic `b2b_outbound_proxy` Route in `relay::apply_b_leg_egress`,
-        // dropping the proxy's signed Record-Route cookie from the trace.
-        let route_set: Vec<String> =
+        // dialog-creating 2xx's Record-Route values in *reverse* order (the
+        // a-leg/UAS path keeps the INVITE's Record-Route forward). We must reverse
+        // *individual route URIs*, not header lines: the front proxy double-record-
+        // routes (a `;outbound` half + a cookie half), and on the wire those two
+        // arrive comma-combined in a single Record-Route header (RFC 3261 §7.3.1).
+        // Reversing per-header would be a no-op on that single value and leave the
+        // cookie on top — so the worker→callee keepalive carries the cookie first,
+        // the proxy decodes it (`w_pri`) and bounces the request back to a worker
+        // after a reboot onto a new pod IP the registry has not yet learned (the
+        // long-call-loss class). Split top-level commas first so the proxy's own
+        // `;outbound` half lands on top and direction is intrinsic to its
+        // Record-Route — no `;outbound` worker-stamp and no Via/registry rescue.
+        let mut route_set: Vec<String> =
             sip_message::message_helpers::get_headers(&resp.headers, "record-route")
                 .iter()
-                .rev()
-                .map(|s| s.to_string())
+                .flat_map(|h| split_top_level_commas(h))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
                 .collect();
+        route_set.reverse();
         if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
             if let Some(d) = leg.dialogs.first_mut() {
                 if !remote_tag.is_empty() {
@@ -959,10 +968,17 @@ impl<'a> ActionExecutor<'a> {
         let remote_target = get_header(&a_invite.headers, "contact")
             .map(unwrap_angle)
             .unwrap_or_else(|| a_invite.from.uri.clone());
-        let route_set: Vec<String> = sip_message::message_helpers::get_headers(&a_invite.headers, "record-route")
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        // §12.1.1: the a-leg is a UAS dialog — route set is the INVITE's
+        // Record-Route values in forward order. Split top-level commas so a
+        // comma-combined header (the proxy's double-record-route halves) becomes
+        // individual route URIs, same as the b-leg path above.
+        let route_set: Vec<String> =
+            sip_message::message_helpers::get_headers(&a_invite.headers, "record-route")
+                .iter()
+                .flat_map(|h| split_top_level_commas(h))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
         let dialog = Dialog {
             sip: StackDialog {
                 call_id: call.a_leg.call_id.clone(),

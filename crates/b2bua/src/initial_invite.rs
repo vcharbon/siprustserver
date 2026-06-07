@@ -30,12 +30,17 @@ const STANDARD_HEADERS: &[&str] = &[
 ];
 
 /// Derive the HA [`CallTopology`] from the proxy's stickiness cookie, carried as
-/// URI params on the **topmost Record-Route** the front proxy inserted
-/// (`w_pri`/`w_bak`/`e`/`v`/`kid`/`sig`; see `sip-proxy` `load_balancer.rs` /
-/// `build_record_route_value`). The b2bua reads `w_pri`/`w_bak` so the backup
-/// peer AGREES with the proxy's rendezvous (HRW 2nd-best) choice by construction
-/// rather than re-deriving it (the proxy keys HRW off the alive-set + Call-ID the
-/// b2bua cannot reproduce locally — see [`crate::repl::replication_target`]).
+/// URI params on the front proxy's Record-Route (`w_pri`/`w_bak`/`e`/`v`/`kid`/
+/// `sig`; see `sip-proxy` `load_balancer.rs` / `build_record_route_value`). The
+/// b2bua reads `w_pri`/`w_bak` so the backup peer AGREES with the proxy's
+/// rendezvous (HRW 2nd-best) choice by construction rather than re-deriving it
+/// (the proxy keys HRW off the alive-set + Call-ID the b2bua cannot reproduce
+/// locally — see [`crate::repl::replication_target`]).
+///
+/// The proxy double-record-routes (`ProxyCore` §16.6): it inserts BOTH a cookie
+/// RR and a direction-only `;outbound` RR, and on an inbound INVITE the
+/// `;outbound` half is topmost. So we scan all Record-Route headers for the one
+/// that actually carries the stickiness grammar rather than assuming the first.
 ///
 /// - Cookie present → `Some(CallTopology { pri: w_pri (or self_ordinal if the
 ///   param is absent/empty), bak: w_bak (may be empty), gen: 1 })`. A brand-new
@@ -44,14 +49,12 @@ const STANDARD_HEADERS: &[&str] = &[
 /// - No cookie (non-proxied / legacy INVITE) → `None`: the flush path then stays
 ///   non-replicating (`PutOpts::default()`), preserving today's behaviour.
 fn topology_from_cookie(invite: &SipRequest, self_ordinal: &str) -> Option<CallTopology> {
-    // The topmost Record-Route is the LAST proxy to add one on the request path
-    // (proxies prepend), i.e. the FIRST Record-Route header here.
-    let rr = get_header(&invite.headers, "record-route")?;
-    let params = parse_uri_params(rr);
-    // Treat it as a cookie only if it actually carries the stickiness grammar.
-    if !params.contains_key("w_pri") && !params.contains_key("w_bak") {
-        return None;
-    }
+    // Find the Record-Route that carries the stickiness cookie; the partner
+    // `;outbound` half (direction only) has no `w_pri`/`w_bak`.
+    let params = get_headers(&invite.headers, "record-route")
+        .into_iter()
+        .map(parse_uri_params)
+        .find(|p| p.contains_key("w_pri") || p.contains_key("w_bak"))?;
     let pri = params
         .get("w_pri")
         .filter(|s| !s.is_empty())
