@@ -441,6 +441,10 @@ pub enum RuleAction {
     CreateLeg {
         destination: (String, u16),
         new_ruri: Option<String>,
+        /// Identity rewrites (ADR-0017): override the new leg's From/To **URI**
+        /// (the from/to numbers); tags stay B2BUA-owned. `None` keeps A's URIs.
+        new_from: Option<String>,
+        new_to: Option<String>,
         no_answer_timeout_sec: Option<i64>,
         callback_context: Option<String>,
         /// Body override for the C INVITE (REFER transfer held SDP). `None`
@@ -586,6 +590,18 @@ pub enum RuleAction {
     /// (the terminate-after-`/call/failure` path — relay the b-leg failure to A
     /// once the backend declines to fail over). Reuses the a-dialog tag.
     RelayFailureToALeg { status: u16, reason: String },
+    /// Author a decision-layer **Reject** or **Redirect** treatment on the a-leg
+    /// INVITE server txn (ADR-0017 failover path). `header_updates` add
+    /// non-structural headers (e.g. `Reason:`, RFC 3326); `contacts` (`uri`, `q`)
+    /// render `Contact:` headers for a 3xx redirect. Distinct from
+    /// [`RelayFailureToALeg`], which relays the b-leg's own failure with the
+    /// B2BUA Contact.
+    RespondToALeg {
+        status: u16,
+        reason: String,
+        header_updates: Vec<(String, Option<String>)>,
+        contacts: Vec<(String, Option<f32>)>,
+    },
 }
 
 impl RuleAction {
@@ -606,6 +622,7 @@ impl RuleAction {
             | RuleAction::RelayToLeg { .. }
             | RuleAction::RelayFirstBare180 { .. }
             | RuleAction::RelayFailureToALeg { .. }
+            | RuleAction::RespondToALeg { .. }
             | RuleAction::Respond { .. }
             | RuleAction::AckLeg { .. }
             | RuleAction::CreateLeg { .. }

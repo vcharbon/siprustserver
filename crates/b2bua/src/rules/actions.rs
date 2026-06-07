@@ -133,6 +133,8 @@ impl<'a> ActionExecutor<'a> {
             RuleAction::CreateLeg {
                 destination,
                 new_ruri,
+                new_from,
+                new_to,
                 no_answer_timeout_sec,
                 callback_context,
                 body_override,
@@ -148,6 +150,8 @@ impl<'a> ActionExecutor<'a> {
                     &a_invite,
                     destination.clone(),
                     new_ruri.as_deref(),
+                    new_from.as_deref(),
+                    new_to.as_deref(),
                     *no_answer_timeout_sec,
                     self.config,
                     self.id_gen,
@@ -358,6 +362,24 @@ impl<'a> ActionExecutor<'a> {
                     None,
                     None,
                     vec![],
+                ));
+            }
+            RuleAction::RespondToALeg { status, reason, header_updates, contacts } => {
+                let a_tag = self.ensure_a_dialog(call);
+                let a_invite = relay::rebuild_a_leg_invite(call);
+                let extra = build_a_leg_response_headers(header_updates, contacts);
+                // No B2BUA Contact: a redirect carries its own Contact list (via
+                // `extra`), a reject carries none (ADR-0017 header-ownership X2).
+                fx.outbound.push(relay::response_to_a_leg(
+                    &a_invite,
+                    *status,
+                    reason,
+                    Some(a_tag),
+                    None,
+                    vec![],
+                    None,
+                    None,
+                    extra,
                 ));
             }
         }
@@ -1577,4 +1599,37 @@ fn unwrap_angle(value: &str) -> String {
         (Some(a), Some(b)) if b > a + 1 => t[a + 1..b].to_string(),
         _ => t.to_string(),
     }
+}
+
+/// Structural headers the response generator owns — never settable via the flat
+/// header map (ADR-0017 X2). `Contact` is excluded because a redirect authors it
+/// from the typed contact list and a reject carries none.
+const A_LEG_RESPONSE_STRUCTURAL: &[&str] = &[
+    "from", "to", "via", "call-id", "cseq", "max-forwards", "content-length", "record-route",
+    "contact",
+];
+
+/// Build the extra a-leg response headers for a decision-authored Reject/Redirect
+/// ([`RuleAction::RespondToALeg`]): non-structural `header_updates` *sets* plus one
+/// `Contact: <uri>;q=…` per redirect target. Removals and structural keys drop.
+fn build_a_leg_response_headers(
+    header_updates: &[(String, Option<String>)],
+    contacts: &[(String, Option<f32>)],
+) -> Vec<sip_message::SipHeader> {
+    let mut out: Vec<sip_message::SipHeader> = Vec::new();
+    for (name, val) in header_updates {
+        let is_structural =
+            A_LEG_RESPONSE_STRUCTURAL.contains(&name.to_ascii_lowercase().as_str());
+        if let (Some(v), false) = (val, is_structural) {
+            out.push(sip_message::SipHeader { name: name.clone(), value: v.clone() });
+        }
+    }
+    for (uri, q) in contacts {
+        let value = match q {
+            Some(q) => format!("<{uri}>;q={q}"),
+            None => format!("<{uri}>"),
+        };
+        out.push(sip_message::SipHeader { name: "Contact".to_string(), value });
+    }
+    out
 }

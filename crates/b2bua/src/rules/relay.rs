@@ -168,13 +168,18 @@ pub fn apply_b_leg_egress(
 
 /// Build a fresh b-leg + its outbound INVITE effect (initial route + failover).
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn build_b_leg(
     call_ref: &str,
     leg_id: &str,
     a_leg_invite: &SipRequest,
     dest: (String, u16),
     new_ruri: Option<&str>,
+    // Identity rewrites (ADR-0017): override the b-leg From/To **URI** (the
+    // from/to numbers). The B2BUA always owns the tags, so only the URI is
+    // settable here; `None` keeps the relayed a-leg URI. The basic path passes
+    // `(None, None)`.
+    new_from: Option<&str>,
+    new_to: Option<&str>,
     no_answer_timeout_sec: Option<i64>,
     config: &B2buaConfig,
     id_gen: &IdGen,
@@ -192,8 +197,8 @@ pub fn build_b_leg(
     let from_tag = id_gen.new_tag();
     let b_call_id = format!("{}-{}@{}", leg_id, id_gen.new_tag(), config.sip_local_ip);
     let request_uri = new_ruri.map(str::to_string).unwrap_or_else(|| a_leg_invite.uri.clone());
-    let from_uri = a_leg_invite.from.uri.clone();
-    let to_uri = a_leg_invite.to.uri.clone();
+    let from_uri = new_from.map(str::to_string).unwrap_or_else(|| a_leg_invite.from.uri.clone());
+    let to_uri = new_to.map(str::to_string).unwrap_or_else(|| a_leg_invite.to.uri.clone());
     let body = match body_override {
         Some(b) => b.to_vec(),
         None => a_leg_invite.body.clone(),

@@ -94,6 +94,40 @@ fn sm_cursors_round_trip_and_back_compat() {
     assert!(from_old.sm_cursors.is_empty(), "absent field decodes to empty");
 }
 
+/// ADR-0017 X4 — the numbering-plan **reroute remainder** rides the existing
+/// opaque `callback_context` string (and per-service `ext`), so it is part of the
+/// replicated `Call` body and survives failover by construction: no new wire
+/// field, no positional-codec change. This is the data-layer proof that the plan
+/// is "saved by the HA mechanisms".
+#[test]
+fn reroute_plan_in_callback_context_survives_replication() {
+    let codec = MsgpackCodec::new();
+    let mut call = representative_call();
+
+    // The opaque blob a real HTTP backend would round-trip as a token; here it
+    // carries the remaining attempts + the exhaustion treatment.
+    let plan = serde_json::json!({
+        "routes": [
+            {"destination": {"host": "10.0.0.2", "port": 5070}, "new_to": "sip:+1@b"}
+        ],
+        "on_exhausted": {"action": "reject", "code": 603, "reason": "Declined",
+                         "update_headers": {"Reason": "Q.850;cause=21"}}
+    })
+    .to_string();
+    call.callback_context = Some(plan.clone());
+    call.ext
+        .get_or_insert_with(Default::default)
+        .insert("numbering-plan".to_string(), serde_json::json!({"attempt": 1}));
+
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded.callback_context.as_deref(), Some(plan.as_str()));
+    assert_eq!(
+        decoded.ext.as_ref().and_then(|e| e.get("numbering-plan")),
+        Some(&serde_json::json!({"attempt": 1}))
+    );
+    assert_eq!(decoded, call, "full value preserved with a plan stashed");
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 

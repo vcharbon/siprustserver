@@ -408,6 +408,8 @@ define_service! {
                     RuleAction::CreateLeg {
                         destination: (host, port),
                         new_ruri: Some(effective),
+                        new_from: None,
+                        new_to: None,
                         no_answer_timeout_sec: no_answer,
                         callback_context,
                         body_override,

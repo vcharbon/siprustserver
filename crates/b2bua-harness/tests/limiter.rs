@@ -216,7 +216,7 @@ async fn failover_on_reject_routes_to_backup() {
                 r.callback_context = Some("limiter-failover".into());
                 NewCallResponse::Route(r)
             })
-            .on_failure(move |_req| CallFailureResponse::Failover(route_to("127.0.0.1", 5071)))
+            .on_failure(move |_req| CallFailureResponse::Route(route_to("127.0.0.1", 5071)))
             .build(),
     );
     let b2bua =

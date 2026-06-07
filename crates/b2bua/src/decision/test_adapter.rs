@@ -10,8 +10,9 @@ use async_trait::async_trait;
 use std::collections::BTreeMap;
 
 use super::schemas::{
-    default_platform_features, BodyUpdate, CallLimiterEntry, NewCallRequest, NewCallResponse,
-    RejectDecision, RouteDecision, SipDestination,
+    default_platform_features, BodyUpdate, CallLimiterEntry, CallTreatment, NewCallRequest,
+    NewCallResponse, RedirectContact, RedirectDecision, RejectDecision, RouteDecision,
+    SipDestination, SipHeaderUpdates,
 };
 use super::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
@@ -105,6 +106,20 @@ impl ScriptedDecisionEngine {
             .build()
     }
 
+    /// A backend that treats the inbound `X-Api-Call` header as a full
+    /// **call-treatment plan** (ADR-0017): route + identity/header rewrites, an
+    /// ordered reroute list walked on b-leg failure, and direct reject / 302
+    /// redirect. The remaining reroute list rides `callback_context` between hops
+    /// (the platform keeps it opaque; a real HTTP backend would hold it itself).
+    /// Absent / non-plan `X-Api-Call` → reject 404. This is how a test (Alice)
+    /// injects an advanced numbering plan.
+    pub fn numbering_plan() -> Self {
+        Self::builder()
+            .fallback(new_call_from_plan)
+            .on_failure(failure_from_context)
+            .build()
+    }
+
     pub fn builder() -> ScriptedBuilder {
         ScriptedBuilder {
             rules: Vec::new(),
@@ -113,6 +128,156 @@ impl ScriptedDecisionEngine {
             refer: None,
         }
     }
+}
+
+// ── ADR-0017 numbering-plan walker ──────────────────────────────────────────
+
+/// Parse the inbound `X-Api-Call` header as a JSON plan object.
+fn parse_api_call_plan(req: &NewCallRequest) -> Option<serde_json::Value> {
+    let raw = req.sip_headers.get("X-Api-Call")?;
+    serde_json::from_str(raw).ok()
+}
+
+/// `{name: value | null}` → [`SipHeaderUpdates`] (`null` = remove).
+fn parse_update_headers(v: Option<&serde_json::Value>) -> Option<SipHeaderUpdates> {
+    v.and_then(|x| x.as_object()).map(|m| {
+        let mut out = SipHeaderUpdates::new();
+        for (k, val) in m {
+            out.insert(k.clone(), val.as_str().map(str::to_string));
+        }
+        out
+    })
+}
+
+/// `[{uri, q?}]` → ordered redirect Contact list.
+fn parse_contacts(v: Option<&serde_json::Value>) -> Vec<RedirectContact> {
+    v.and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| {
+                    Some(RedirectContact {
+                        uri: c.get("uri")?.as_str()?.to_string(),
+                        q: c.get("q").and_then(|q| q.as_f64()).map(|q| q as f32),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Build a [`RouteDecision`] from one plan route object (destination + identity
+/// rewrites + header rewrites + optional per-route limiter). `callback_context`
+/// is filled in by the caller with the remaining plan.
+fn route_from_obj(obj: &serde_json::Value) -> Option<RouteDecision> {
+    let dest = obj.get("destination")?;
+    let host = dest.get("host")?.as_str()?.to_string();
+    let port = dest.get("port").and_then(|p| p.as_u64()).map(|p| p as u16).unwrap_or(5060);
+    let mut r = route_to(&host, port);
+    r.new_ruri = obj.get("new_ruri").and_then(|v| v.as_str()).map(str::to_string);
+    r.new_from = obj.get("new_from").and_then(|v| v.as_str()).map(str::to_string);
+    r.new_to = obj.get("new_to").and_then(|v| v.as_str()).map(str::to_string);
+    r.update_headers = parse_update_headers(obj.get("update_headers"));
+    if let Some(arr) = obj.get("call_limiter").and_then(|v| v.as_array()) {
+        for e in arr {
+            if let (Some(id), Some(limit)) = (
+                e.get("id").and_then(|v| v.as_str()),
+                e.get("limit").and_then(|v| v.as_i64()),
+            ) {
+                r.call_limiter.push(CallLimiterEntry { id: id.to_string(), limit });
+            }
+        }
+    }
+    Some(r)
+}
+
+/// Map a plan treatment object (`action`: route / reject / redirect / relay) to a
+/// [`CallTreatment`]. A route with no resolvable destination falls back to `None`.
+fn treatment_from_obj(obj: &serde_json::Value) -> Option<CallTreatment> {
+    match obj.get("action").and_then(|v| v.as_str()).unwrap_or("route") {
+        "reject" => Some(CallTreatment::Reject(RejectDecision {
+            reject_code: obj.get("code").and_then(|v| v.as_u64()).unwrap_or(603) as u16,
+            reject_reason: obj.get("reason").and_then(|v| v.as_str()).map(str::to_string),
+            update_headers: parse_update_headers(obj.get("update_headers")),
+        })),
+        "redirect" => Some(CallTreatment::Redirect(RedirectDecision {
+            code: obj.get("code").and_then(|v| v.as_u64()).unwrap_or(302) as u16,
+            reason: obj.get("reason").and_then(|v| v.as_str()).map(str::to_string),
+            contacts: parse_contacts(obj.get("contacts")),
+            update_headers: parse_update_headers(obj.get("update_headers")),
+        })),
+        "relay" => Some(CallTreatment::Relay),
+        _ => route_from_obj(obj).map(CallTreatment::Route),
+    }
+}
+
+/// Serialize the *remaining* reroute list + the `on_exhausted` treatment — the
+/// opaque blob the platform round-trips as `callback_context` (ADR-0017 X3).
+fn remainder_context(rest: &[serde_json::Value], on_exhausted: &serde_json::Value) -> String {
+    serde_json::json!({ "routes": rest, "on_exhausted": on_exhausted }).to_string()
+}
+
+/// `new_call`: parse the plan, emit the first treatment, and stash the remainder
+/// in `callback_context`.
+fn new_call_from_plan(req: &NewCallRequest) -> NewCallResponse {
+    let plan = match parse_api_call_plan(req) {
+        Some(p) => p,
+        None => return reject(404, "Not Found"),
+    };
+    // Direct reject / redirect at the top level.
+    match plan.get("action").and_then(|v| v.as_str()) {
+        Some("reject") | Some("redirect") => {
+            return treatment_from_obj(&plan).unwrap_or_else(|| reject(603, "Declined"));
+        }
+        _ => {}
+    }
+    // Route (+ reroute): the ordered attempt list is `routes`, or the top-level
+    // object treated as a single route.
+    let routes: Vec<serde_json::Value> = plan
+        .get("routes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_else(|| vec![plan.clone()]);
+    let first = match routes.first().and_then(route_from_obj) {
+        Some(r) => r,
+        None => return reject(404, "Not Found"),
+    };
+    let on_exhausted = plan
+        .get("on_exhausted")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({ "action": "relay" }));
+    // Only carry a context when there is something to fail over to (a remaining
+    // route or an explicit exhaustion treatment) — a plain single route keeps the
+    // pre-failover behaviour (relay + terminate on failure).
+    let mut r = first;
+    if routes.len() > 1 || plan.get("on_exhausted").is_some() {
+        r.callback_context = Some(remainder_context(&routes[1..], &on_exhausted));
+    }
+    NewCallResponse::Route(r)
+}
+
+/// `call_failure`: pop the next route off `callback_context`, re-stash the tail;
+/// on an empty list return the plan's `on_exhausted` treatment (ADR-0017 X3).
+fn failure_from_context(req: &CallFailureRequest) -> CallFailureResponse {
+    let ctx = match req
+        .callback_context
+        .as_ref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+    {
+        Some(v) => v,
+        None => return CallTreatment::Relay,
+    };
+    let routes = ctx.get("routes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let on_exhausted = ctx
+        .get("on_exhausted")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({ "action": "relay" }));
+    if let Some(next) = routes.first() {
+        if let Some(mut r) = route_from_obj(next) {
+            r.callback_context = Some(remainder_context(&routes[1..], &on_exhausted));
+            return CallTreatment::Route(r);
+        }
+    }
+    treatment_from_obj(&on_exhausted).unwrap_or(CallTreatment::Relay)
 }
 
 /// Default scripted `/call/refer` behavior, keyed on the REFER's `X-Api-Call`
@@ -228,6 +393,8 @@ pub fn route_to(host: &str, port: u16) -> RouteDecision {
     RouteDecision {
         destination: SipDestination::new(host, port),
         new_ruri: None,
+        new_from: None,
+        new_to: None,
         update_headers: None,
         update_body: BodyUpdate::Keep,
         no_answer_timeout_sec: None,
@@ -312,7 +479,7 @@ impl ScriptedBuilder {
             fallback: self
                 .fallback
                 .unwrap_or_else(|| Box::new(|_| reject(404, "Not Found"))),
-            failure: self.failure.unwrap_or_else(|| Box::new(|_| CallFailureResponse::Terminate)),
+            failure: self.failure.unwrap_or_else(|| Box::new(|_| CallTreatment::Relay)),
             refer: self.refer.unwrap_or_else(|| {
                 // Default: transfer is dormant — reject 501 (the pre-slice stub).
                 Box::new(|_| {
@@ -467,6 +634,162 @@ mod tests {
         match eng.new_call(req("bob")).await.unwrap() {
             NewCallResponse::Route(_) => {}
             _ => panic!("expected route"),
+        }
+    }
+
+    // ── ADR-0017 numbering-plan walker ──────────────────────────────────────
+
+    fn plan_req(plan: serde_json::Value) -> NewCallRequest {
+        req_with_header("X-Api-Call", &plan.to_string())
+    }
+
+    fn failure_req(ctx: Option<&str>) -> CallFailureRequest {
+        CallFailureRequest {
+            callback_context: ctx.map(str::to_string),
+            failure: crate::decision::FailureInfo {
+                origin: "external".into(),
+                status_code: Some(503),
+                limiter_id: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_route_sets_all_identity_and_header_fields() {
+        let eng = ScriptedDecisionEngine::numbering_plan();
+        let plan = serde_json::json!({
+            "action": "route",
+            "destination": {"host": "10.0.0.9", "port": 5070},
+            "new_ruri": "sip:+18001234@carrier",
+            "new_from": "sip:+15551000@me",
+            "new_to": "sip:+19005678@dest",
+            "update_headers": {
+                "P-Asserted-Identity": "sip:+15551000@me",
+                "P-Access-Network-Info": "3GPP-E-UTRAN-FDD"
+            }
+        });
+        match eng.new_call(plan_req(plan)).await.unwrap() {
+            NewCallResponse::Route(r) => {
+                assert_eq!(r.destination.host, "10.0.0.9");
+                assert_eq!(r.new_ruri.as_deref(), Some("sip:+18001234@carrier"));
+                assert_eq!(r.new_from.as_deref(), Some("sip:+15551000@me"));
+                assert_eq!(r.new_to.as_deref(), Some("sip:+19005678@dest"));
+                let h = r.update_headers.unwrap();
+                assert_eq!(h.get("P-Asserted-Identity").unwrap().as_deref(), Some("sip:+15551000@me"));
+                assert_eq!(h.get("P-Access-Network-Info").unwrap().as_deref(), Some("3GPP-E-UTRAN-FDD"));
+                // No reroute / on_exhausted ⇒ no carried context.
+                assert!(r.callback_context.is_none());
+            }
+            _ => panic!("expected route"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_reroute_walks_list_then_rejects_on_exhaustion() {
+        let eng = ScriptedDecisionEngine::numbering_plan();
+        let plan = serde_json::json!({
+            "action": "route",
+            "routes": [
+                {"destination": {"host": "10.0.0.1", "port": 5070}, "new_to": "sip:+1@a"},
+                {"destination": {"host": "10.0.0.2", "port": 5070}, "new_to": "sip:+1@b"}
+            ],
+            "on_exhausted": {"action": "reject", "code": 603, "reason": "Declined",
+                             "update_headers": {"Reason": "Q.850;cause=21"}}
+        });
+        // First attempt → route #1, context carries the remainder.
+        let ctx1 = match eng.new_call(plan_req(plan)).await.unwrap() {
+            NewCallResponse::Route(r) => {
+                assert_eq!(r.destination.host, "10.0.0.1");
+                assert_eq!(r.new_to.as_deref(), Some("sip:+1@a"));
+                r.callback_context.expect("context carries remainder")
+            }
+            _ => panic!("expected route #1"),
+        };
+        // First failure → route #2.
+        let ctx2 = match eng.call_failure(failure_req(Some(&ctx1))).await.unwrap() {
+            CallTreatment::Route(r) => {
+                assert_eq!(r.destination.host, "10.0.0.2");
+                assert_eq!(r.new_to.as_deref(), Some("sip:+1@b"));
+                r.callback_context.expect("context carries empty remainder")
+            }
+            _ => panic!("expected route #2"),
+        };
+        // Second failure → list exhausted → the on_exhausted reject (+ Reason).
+        match eng.call_failure(failure_req(Some(&ctx2))).await.unwrap() {
+            CallTreatment::Reject(rj) => {
+                assert_eq!(rj.reject_code, 603);
+                assert_eq!(rj.reject_reason.as_deref(), Some("Declined"));
+                assert_eq!(
+                    rj.update_headers.unwrap().get("Reason").unwrap().as_deref(),
+                    Some("Q.850;cause=21")
+                );
+            }
+            _ => panic!("expected exhaustion reject"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_on_exhausted_defaults_to_relay() {
+        let eng = ScriptedDecisionEngine::numbering_plan();
+        let plan = serde_json::json!({
+            "action": "route",
+            "routes": [{"destination": {"host": "10.0.0.1", "port": 5070}}],
+            "on_exhausted": {"action": "relay"}
+        });
+        let ctx = match eng.new_call(plan_req(plan)).await.unwrap() {
+            NewCallResponse::Route(r) => r.callback_context.unwrap(),
+            _ => panic!("expected route"),
+        };
+        // Only one route → next failure exhausts → Relay.
+        assert!(matches!(
+            eng.call_failure(failure_req(Some(&ctx))).await.unwrap(),
+            CallTreatment::Relay
+        ));
+        // No context at all → Relay too.
+        assert!(matches!(
+            eng.call_failure(failure_req(None)).await.unwrap(),
+            CallTreatment::Relay
+        ));
+    }
+
+    #[tokio::test]
+    async fn plan_direct_reject_and_redirect() {
+        let eng = ScriptedDecisionEngine::numbering_plan();
+        // Direct reject with a Reason header.
+        let reject_plan = serde_json::json!({
+            "action": "reject", "code": 403, "reason": "Forbidden",
+            "update_headers": {"Reason": "SIP;cause=403;text=\"blocked\""}
+        });
+        match eng.new_call(plan_req(reject_plan)).await.unwrap() {
+            NewCallResponse::Reject(rj) => {
+                assert_eq!(rj.reject_code, 403);
+                assert!(rj.update_headers.unwrap().contains_key("Reason"));
+            }
+            _ => panic!("expected reject"),
+        }
+        // Direct 302 redirect with an ordered Contact list.
+        let redirect_plan = serde_json::json!({
+            "action": "redirect", "code": 302,
+            "contacts": [{"uri": "sip:primary@h1", "q": 1.0}, {"uri": "sip:backup@h2", "q": 0.5}]
+        });
+        match eng.new_call(plan_req(redirect_plan)).await.unwrap() {
+            NewCallResponse::Redirect(rd) => {
+                assert_eq!(rd.code, 302);
+                assert_eq!(rd.contacts.len(), 2);
+                assert_eq!(rd.contacts[0].uri, "sip:primary@h1");
+                assert_eq!(rd.contacts[0].q, Some(1.0));
+                assert_eq!(rd.contacts[1].uri, "sip:backup@h2");
+            }
+            _ => panic!("expected redirect"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_absent_header_rejects_404() {
+        let eng = ScriptedDecisionEngine::numbering_plan();
+        match eng.new_call(req("bob")).await.unwrap() {
+            NewCallResponse::Reject(rj) => assert_eq!(rj.reject_code, 404),
+            _ => panic!("expected 404"),
         }
     }
 }

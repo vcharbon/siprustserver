@@ -131,6 +131,8 @@ fn on_mscml_done(ctx: &RuleContext) -> Option<RuleHandleResult> {
         RuleAction::CreateLeg {
             destination: (data.dest_host.clone(), data.dest_port),
             new_ruri: Some(format!("sip:{}:{}", data.dest_host, data.dest_port)),
+            new_from: None,
+            new_to: None,
             no_answer_timeout_sec: None,
             callback_context: None,
             body_override: None,
@@ -189,6 +191,8 @@ define_service! {
                 RuleAction::CreateLeg {
                     destination: (data.mrf_host.clone(), data.mrf_port),
                     new_ruri: Some(format!("sip:mrf@{}:{}", data.mrf_host, data.mrf_port)),
+                    new_from: None,
+                    new_to: None,
                     no_answer_timeout_sec: None,
                     callback_context: None,
                     body_override: None,

@@ -78,6 +78,13 @@ pub struct CallLimiterEntry {
 pub struct RouteDecision {
     pub destination: SipDestination,
     pub new_ruri: Option<String>,
+    /// Rewrite the outbound b-leg **From URI** (the "from number"). The B2BUA
+    /// always owns the From *tag* (ADR-0017 header-ownership matrix) — only the
+    /// URI is HTTP-settable. `None` keeps the relayed a-leg From URI.
+    pub new_from: Option<String>,
+    /// Rewrite the outbound b-leg **To URI** (the "to number"). The To tag stays
+    /// B2BUA-owned. `None` keeps the relayed a-leg To URI.
+    pub new_to: Option<String>,
     pub update_headers: Option<SipHeaderUpdates>,
     pub update_body: BodyUpdate,
     pub no_answer_timeout_sec: Option<i64>,
@@ -87,7 +94,8 @@ pub struct RouteDecision {
     pub service_ext: BTreeMap<String, serde_json::Value>,
 }
 
-/// A "reject" decision — answer the INVITE with a failure response.
+/// A "reject" decision — answer the INVITE with a failure response the decision
+/// layer authors (code + reason-phrase + extra headers, e.g. `Reason:`).
 #[derive(Debug, Clone)]
 pub struct RejectDecision {
     pub reject_code: u16,
@@ -95,13 +103,52 @@ pub struct RejectDecision {
     pub update_headers: Option<SipHeaderUpdates>,
 }
 
-/// Response to [`NewCallRequest`].
+/// One redirect target in a [`RedirectDecision`]'s Contact list. `q` is the
+/// advisory caller-side preference (RFC 3261 §20.10); rendered verbatim in list
+/// order (the platform does not reorder — ADR-0017 X5).
+#[derive(Debug, Clone)]
+pub struct RedirectContact {
+    pub uri: String,
+    pub q: Option<f32>,
+}
+
+/// A "redirect" decision — answer the caller with a 3xx (default 302) carrying an
+/// ordered Contact list. Contact is the one header the decision layer owns *only*
+/// on a redirect (ADR-0017 header-ownership matrix).
+#[derive(Debug, Clone)]
+pub struct RedirectDecision {
+    /// 3xx status (300/301/302/305); defaults to 302 when built via helpers.
+    pub code: u16,
+    pub reason: Option<String>,
+    pub contacts: Vec<RedirectContact>,
+    pub update_headers: Option<SipHeaderUpdates>,
+}
+
+/// The single **call treatment** the decision layer returns — at *every* hop
+/// (new-call and failover) it draws from the same closed set (ADR-0017 X1):
+///   - `Route`    — bridge to a destination, with identity/header rewrites;
+///   - `Redirect` — emit a 3xx to the caller with a Contact list;
+///   - `Reject`   — author a final failure response (code/reason/headers);
+///   - `Relay`    — pass the last attempted b-leg's failure response verbatim
+///     (only meaningful on the failover path; with no captured failure it falls
+///     back to 480, ADR-0017 X5).
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)] // Route is the hot path; boxing adds an alloc per call.
-pub enum NewCallResponse {
+pub enum CallTreatment {
     Route(RouteDecision),
+    Redirect(RedirectDecision),
     Reject(RejectDecision),
+    Relay,
 }
+
+/// Response to a new INVITE. An alias for [`CallTreatment`] — `new_call` returns
+/// `Route | Redirect | Reject` (`Relay` is failover-only and treated as an error
+/// if returned here).
+pub type NewCallResponse = CallTreatment;
+
+/// Response to a b-leg failure. An alias for [`CallTreatment`] — any of the four
+/// variants is valid on the failover path.
+pub type CallFailureResponse = CallTreatment;
 
 /// What failed on a b-leg, for the failover decision.
 #[derive(Debug, Clone)]
@@ -115,13 +162,6 @@ pub struct FailureInfo {
 pub struct CallFailureRequest {
     pub callback_context: Option<String>,
     pub failure: FailureInfo,
-}
-
-#[derive(Debug, Clone)]
-#[allow(clippy::large_enum_variant)]
-pub enum CallFailureResponse {
-    Failover(RouteDecision),
-    Terminate,
 }
 
 /// The REFER authorization request POSTed to `/call/refer` (port of TS

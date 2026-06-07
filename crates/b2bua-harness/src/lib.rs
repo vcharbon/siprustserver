@@ -189,6 +189,7 @@ impl B2buaSut {
             clock: Clock::test_at(0),
             id_gen: Arc::new(IdGen::seeded(0xB2B0)),
             replication: None,
+            metrics: b2bua::metrics::B2buaMetrics::new(),
         };
         let core = B2buaCore::spawn_with_services(endpoint, deps, services);
         let metrics = core.metrics().clone();
@@ -307,7 +308,7 @@ impl B2buaSut {
                 .on_failure(move |_req| {
                     let mut r = route_to_with_18x(&failover.0, failover.1, strategy);
                     r.new_ruri = Some(failover_ruri.clone());
-                    CallFailureResponse::Failover(r)
+                    CallFailureResponse::Route(r)
                 })
                 .build(),
         );

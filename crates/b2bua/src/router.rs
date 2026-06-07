@@ -568,6 +568,8 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
                 &a_invite,
                 400,
                 Some("Bad Request - missing From tag".into()),
+                None,
+                &[],
                 &ctx.id_gen,
                 now_ms,
             );
@@ -910,8 +912,9 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
+                    use crate::decision::CallTreatment;
                     let (outcome, payload) = match ctx2.decision.call_failure(req).await {
-                        Ok(crate::decision::CallFailureResponse::Failover(route)) => {
+                        Ok(CallTreatment::Route(route)) => {
                             let mut p = serde_json::Map::new();
                             p.insert(
                                 "destination".into(),
@@ -922,6 +925,12 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
                             );
                             if let Some(v) = route.new_ruri {
                                 p.insert("new_ruri".into(), serde_json::json!(v));
+                            }
+                            if let Some(v) = route.new_from {
+                                p.insert("new_from".into(), serde_json::json!(v));
+                            }
+                            if let Some(v) = route.new_to {
+                                p.insert("new_to".into(), serde_json::json!(v));
                             }
                             if let Some(v) = route.update_headers {
                                 p.insert("update_headers".into(), serde_json::json!(v));
@@ -935,10 +944,43 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
                             p.insert("failed_leg_id".into(), serde_json::json!(failed_leg_id));
                             ("failover", serde_json::Value::Object(p))
                         }
-                        // Terminate / backend error → relay the original failure
-                        // (response path) + tear the call down. Echo the failure's
-                        // status/reason the seed stashed for the relay.
-                        _ => {
+                        // Decision-authored reject — the plan declined to fail over
+                        // and supplied its own final failure (code/reason/headers).
+                        Ok(CallTreatment::Reject(rj)) => {
+                            let mut p = serde_json::Map::new();
+                            p.insert("code".into(), serde_json::json!(rj.reject_code));
+                            if let Some(v) = rj.reject_reason {
+                                p.insert("reason".into(), serde_json::json!(v));
+                            }
+                            if let Some(v) = rj.update_headers {
+                                p.insert("update_headers".into(), serde_json::json!(v));
+                            }
+                            p.insert("failed_leg_id".into(), serde_json::json!(failed_leg_id));
+                            ("reject", serde_json::Value::Object(p))
+                        }
+                        // Decision-authored 3xx redirect with a Contact list.
+                        Ok(CallTreatment::Redirect(rd)) => {
+                            let mut p = serde_json::Map::new();
+                            p.insert("code".into(), serde_json::json!(rd.code));
+                            if let Some(v) = rd.reason {
+                                p.insert("reason".into(), serde_json::json!(v));
+                            }
+                            let contacts: Vec<serde_json::Value> = rd
+                                .contacts
+                                .iter()
+                                .map(|c| serde_json::json!({ "uri": c.uri, "q": c.q }))
+                                .collect();
+                            p.insert("contacts".into(), serde_json::json!(contacts));
+                            if let Some(v) = rd.update_headers {
+                                p.insert("update_headers".into(), serde_json::json!(v));
+                            }
+                            p.insert("failed_leg_id".into(), serde_json::json!(failed_leg_id));
+                            ("redirect", serde_json::Value::Object(p))
+                        }
+                        // Explicit `Relay`, or a backend error → relay the original
+                        // b-leg failure (response path) + tear the call down. Echo
+                        // the failure's status/reason the seed stashed for the relay.
+                        Ok(CallTreatment::Relay) | Err(_) => {
                             let mut p = serde_json::Map::new();
                             if let Some(v) = request.get("sip_code") {
                                 p.insert("status".into(), v.clone());

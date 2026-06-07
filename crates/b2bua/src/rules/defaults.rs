@@ -29,6 +29,16 @@ fn no_transform() -> MessageTransform {
     MessageTransform::default()
 }
 
+/// Parse a `call-failure-result` payload's `update_headers` object into the
+/// `(name, set-or-remove)` pairs the response/leg builders consume.
+fn parse_header_updates(payload: &serde_json::Value) -> Vec<(String, Option<String>)> {
+    payload
+        .get("update_headers")
+        .and_then(|v| v.as_object())
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().map(str::to_string))).collect())
+        .unwrap_or_default()
+}
+
 fn keepalive_interval(ctx: &RuleContext) -> i64 {
     // The in-dialog OPTIONS keepalive interval is an operator/worker knob
     // (`B2buaConfig::keepalive_interval_sec`, production default 300 s,
@@ -299,6 +309,8 @@ fn core_rules() -> Vec<RuleDefinition> {
                     .map(|p| p as u16)
                     .unwrap_or(5060);
                 let new_ruri = payload.get("new_ruri").and_then(|v| v.as_str()).map(str::to_string);
+                let new_from = payload.get("new_from").and_then(|v| v.as_str()).map(str::to_string);
+                let new_to = payload.get("new_to").and_then(|v| v.as_str()).map(str::to_string);
                 let no_answer = payload.get("no_answer_timeout_sec").and_then(|v| v.as_i64());
                 let callback_context = payload.get("callback_context").and_then(|v| v.as_str()).map(str::to_string);
                 let header_updates: Vec<(String, Option<String>)> = payload
@@ -317,6 +329,8 @@ fn core_rules() -> Vec<RuleDefinition> {
                 actions.push(RuleAction::CreateLeg {
                     destination: (host, port),
                     new_ruri,
+                    new_from,
+                    new_to,
                     no_answer_timeout_sec: no_answer,
                     callback_context,
                     // `fromInvite: "snapshot"` — keep A's INVITE body (delayed
@@ -353,6 +367,72 @@ fn core_rules() -> Vec<RuleDefinition> {
                 }
                 actions.push(RuleAction::BeginTermination { reason: Some("failover-declined".into()) });
                 ok(actions)
+            },
+        ),
+        // `reject` → the plan declined to fail over and authored its own final
+        // failure (code/reason/headers, e.g. a `Reason:` header). Send it to A and
+        // tear the call down. Port-parallel of `failover-terminate` (ADR-0017).
+        rule(
+            "failover-reject",
+            &[],
+            Match::internal_event()
+                .topic("call-failure-result")
+                .outcome("reject"),
+            |ctx| {
+                let payload = match ctx.event {
+                    crate::event::CallEvent::InternalEvent { payload, .. } => payload,
+                    _ => return None,
+                };
+                let status = payload.get("code").and_then(|v| v.as_u64()).unwrap_or(500) as u16;
+                let reason = payload
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Declined")
+                    .to_string();
+                let header_updates = parse_header_updates(payload);
+                ok(vec![
+                    RuleAction::RespondToALeg { status, reason, header_updates, contacts: vec![] },
+                    RuleAction::BeginTermination { reason: Some("failover-reject".into()) },
+                ])
+            },
+        ),
+        // `redirect` → the plan authored a 3xx with a Contact list. Send it to A
+        // (the caller retries the targets) and tear the call down (ADR-0017).
+        rule(
+            "failover-redirect",
+            &[],
+            Match::internal_event()
+                .topic("call-failure-result")
+                .outcome("redirect"),
+            |ctx| {
+                let payload = match ctx.event {
+                    crate::event::CallEvent::InternalEvent { payload, .. } => payload,
+                    _ => return None,
+                };
+                let status = payload.get("code").and_then(|v| v.as_u64()).unwrap_or(302) as u16;
+                let reason = payload
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Moved Temporarily")
+                    .to_string();
+                let header_updates = parse_header_updates(payload);
+                let contacts: Vec<(String, Option<f32>)> = payload
+                    .get("contacts")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|c| {
+                                let uri = c.get("uri")?.as_str()?.to_string();
+                                let q = c.get("q").and_then(|v| v.as_f64()).map(|q| q as f32);
+                                Some((uri, q))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                ok(vec![
+                    RuleAction::RespondToALeg { status, reason, header_updates, contacts },
+                    RuleAction::BeginTermination { reason: Some("failover-redirect".into()) },
+                ])
             },
         ),
         rule(

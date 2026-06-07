@@ -8,7 +8,7 @@ use sip_message::SipRequest;
 use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
-use crate::decision::{CallDecisionEngine, CallFailureRequest, CallFailureResponse, FailureInfo};
+use crate::decision::{CallDecisionEngine, CallFailureRequest, CallTreatment, FailureInfo};
 use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
 use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry};
 use crate::rules::relay;
@@ -91,32 +91,44 @@ pub async fn apply_route(
                         },
                     };
                     match decision.call_failure(req).await {
-                        Ok(CallFailureResponse::Failover(route2)) => {
+                        Ok(CallTreatment::Route(route2)) => {
                             return Box::pin(apply_route(
                                 call, route2, a_invite, decision, limiter, config, id_gen, now_ms,
                                 depth + 1,
                             ))
                             .await;
                         }
-                        Ok(CallFailureResponse::Terminate) | Err(_) => {
+                        Ok(CallTreatment::Reject(rj)) => {
                             return crate::initial_invite::reject_call(
-                                call,
-                                a_invite,
-                                486,
-                                Some("Busy Here".into()),
-                                id_gen,
-                                now_ms,
+                                call, a_invite, rj.reject_code, rj.reject_reason,
+                                rj.update_headers.as_ref(), &[], id_gen, now_ms,
+                            );
+                        }
+                        Ok(CallTreatment::Redirect(rd)) => {
+                            return crate::initial_invite::reject_call(
+                                call, a_invite, rd.code, rd.reason,
+                                rd.update_headers.as_ref(), &rd.contacts, id_gen, now_ms,
+                            );
+                        }
+                        // Relay with no captured failure (a limiter reject is
+                        // pre-leg) → 480 fallback (ADR-0017 X5); backend error →
+                        // 486 Busy Here (today's behaviour).
+                        Ok(CallTreatment::Relay) => {
+                            return crate::initial_invite::reject_call(
+                                call, a_invite, 480, Some("Temporarily Unavailable".into()),
+                                None, &[], id_gen, now_ms,
+                            );
+                        }
+                        Err(_) => {
+                            return crate::initial_invite::reject_call(
+                                call, a_invite, 486, Some("Busy Here".into()), None, &[],
+                                id_gen, now_ms,
                             );
                         }
                     }
                 } else {
                     return crate::initial_invite::reject_call(
-                        call,
-                        a_invite,
-                        486,
-                        Some("Busy Here".into()),
-                        id_gen,
-                        now_ms,
+                        call, a_invite, 486, Some("Busy Here".into()), None, &[], id_gen, now_ms,
                     );
                 }
             }
@@ -139,17 +151,26 @@ pub async fn apply_route(
     let no_answer = route
         .no_answer_timeout_sec
         .or(route.features.no_answer_timeout_sec);
+    // Additive header rewrites (PAI, PANI, any X-*). Structural From/To/R-URI go
+    // through the typed fields below, never this map (ADR-0017 X2).
+    let header_updates: Vec<(String, Option<String>)> = route
+        .update_headers
+        .as_ref()
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
     let (mut leg, mut effect) = relay::build_b_leg(
         &call.call_ref,
         leg_id,
         a_invite,
         dest,
         route.new_ruri.as_deref(),
+        route.new_from.as_deref(),
+        route.new_to.as_deref(),
         no_answer,
         config,
         id_gen,
         None,
-        &[],
+        &header_updates,
         None,
     );
 

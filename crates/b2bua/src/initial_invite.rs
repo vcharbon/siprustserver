@@ -17,7 +17,9 @@ use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
 use crate::decision::apply_route::apply_route;
-use crate::decision::{CallDecisionEngine, NewCallRequest, NewCallResponse};
+use crate::decision::{
+    CallDecisionEngine, NewCallRequest, NewCallResponse, RedirectContact, SipHeaderUpdates,
+};
 use crate::effects::{HandlerEffects, HandlerResult};
 use crate::event::CallEvent;
 use crate::limiter::CallLimiter;
@@ -183,11 +185,40 @@ pub async fn handle_initial_invite(
             let setup_event = setup_event(&result.call, &a_invite);
             seed_services(result, services, &exec, &setup_event, "a", call::Direction::FromA)
         }
-        Ok(NewCallResponse::Reject(reject)) => {
-            reject_call(call, &a_invite, reject.reject_code, reject.reject_reason, id_gen, now_ms)
-        }
+        Ok(NewCallResponse::Reject(reject)) => reject_call(
+            call,
+            &a_invite,
+            reject.reject_code,
+            reject.reject_reason,
+            reject.update_headers.as_ref(),
+            &[],
+            id_gen,
+            now_ms,
+        ),
+        Ok(NewCallResponse::Redirect(rd)) => reject_call(
+            call,
+            &a_invite,
+            rd.code,
+            rd.reason,
+            rd.update_headers.as_ref(),
+            &rd.contacts,
+            id_gen,
+            now_ms,
+        ),
+        // `Relay` is a failover-only treatment; with no captured downstream
+        // failure at new-call time it falls back to 480 (ADR-0017 X5).
+        Ok(NewCallResponse::Relay) => reject_call(
+            call,
+            &a_invite,
+            480,
+            Some("Temporarily Unavailable".into()),
+            None,
+            &[],
+            id_gen,
+            now_ms,
+        ),
         Err(_unavailable) => {
-            reject_call(call, &a_invite, 503, Some("Service Unavailable".into()), id_gen, now_ms)
+            reject_call(call, &a_invite, 503, Some("Service Unavailable".into()), None, &[], id_gen, now_ms)
         }
     }
 }
@@ -206,15 +237,24 @@ fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
     }
 }
 
+/// Answer the a-leg with a final failure / redirect the decision layer authors.
+/// `update_headers` adds non-structural headers (e.g. `Reason:`, RFC 3326);
+/// `contacts` renders one `Contact: <uri>;q=…` header per entry (used for a 3xx
+/// redirect — ADR-0017). Structural headers are skipped (the generator owns
+/// them, header-ownership matrix X2).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn reject_call(
     mut call: Call,
     a_invite: &SipRequest,
     status: u16,
     reason: Option<String>,
+    update_headers: Option<&SipHeaderUpdates>,
+    contacts: &[RedirectContact],
     id_gen: &IdGen,
     now_ms: i64,
 ) -> HandlerResult {
     let reason = reason.unwrap_or_else(|| default_reason(status));
+    let extra_headers = build_reject_headers(update_headers, contacts);
     // A non-100 final response needs a To-tag (the B2BUA's a-facing tag).
     let effect = relay::response_to_a_leg(
         a_invite,
@@ -225,7 +265,7 @@ pub(crate) fn reject_call(
         vec![],
         None,
         None,
-        vec![],
+        extra_headers,
     );
     call.cdr_events.push(CdrEvent {
         event_type: CdrEventType::Reject,
@@ -263,11 +303,48 @@ fn build_request(invite: &SipRequest) -> NewCallRequest {
 
 fn default_reason(status: u16) -> String {
     match status {
+        302 => "Moved Temporarily",
         403 => "Forbidden",
         404 => "Not Found",
+        480 => "Temporarily Unavailable",
         486 => "Busy Here",
         503 => "Service Unavailable",
         _ => "Declined",
     }
     .to_string()
+}
+
+/// Structural headers the response generator owns — never settable via the flat
+/// header map (ADR-0017 X2). `Contact` is excluded too: on a redirect it is
+/// authored from the typed `contacts` list, elsewhere the B2BUA owns it.
+const REJECT_STRUCTURAL_HEADERS: &[&str] = &[
+    "from", "to", "via", "call-id", "cseq", "max-forwards", "content-length", "record-route",
+    "contact",
+];
+
+/// Build the extra response headers for a reject/redirect: the non-structural
+/// `update_headers` *sets* (e.g. `Reason:`) plus one `Contact: <uri>;q=…` per
+/// redirect target. Removals and structural keys are dropped.
+fn build_reject_headers(
+    update_headers: Option<&SipHeaderUpdates>,
+    contacts: &[RedirectContact],
+) -> Vec<sip_message::SipHeader> {
+    let mut out: Vec<sip_message::SipHeader> = Vec::new();
+    if let Some(map) = update_headers {
+        for (name, val) in map {
+            let is_structural = REJECT_STRUCTURAL_HEADERS
+                .contains(&name.to_ascii_lowercase().as_str());
+            if let (Some(v), false) = (val, is_structural) {
+                out.push(sip_message::SipHeader { name: name.clone(), value: v.clone() });
+            }
+        }
+    }
+    for c in contacts {
+        let value = match c.q {
+            Some(q) => format!("<{}>;q={q}", c.uri),
+            None => format!("<{}>", c.uri),
+        };
+        out.push(sip_message::SipHeader { name: "Contact".to_string(), value });
+    }
+    out
 }
