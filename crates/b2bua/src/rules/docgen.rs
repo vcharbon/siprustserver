@@ -1,13 +1,16 @@
 //! State-machine documentation generation (ADR-0016 X5). Walks the composed
-//! service registry, derives each machine's transition graph from its rules'
-//! declared `active_states` / `transitions` (plus the framework `global-call`
-//! machine), and renders one Mermaid `stateDiagram-v2` per machine. Both the
-//! `xtask state-machine-docs` subcommand and the CI freshness test call
-//! [`render_registry`], so the committed diagrams cannot silently drift.
+//! service registry and derives each **service machine's** transition graph
+//! *entirely* from its rules' declared `active_states` / `transitions` / `effects`
+//! / matchers — a diagram is only worth generating if it is fully generated, so
+//! nothing here is hand-authored. (The always-on `global-call` machine is a
+//! projection of `CallModelState` with no declarative transition data, so it has
+//! no generated diagram — only the real runtime cursor in `sm_cursors` / the
+//! `b2bua_sm_cursors` gauge.) Both the `xtask state-machine-docs` subcommand and
+//! the CI freshness test call [`render_registry`], so the committed diagrams
+//! cannot silently drift.
 
 use std::collections::BTreeSet;
 
-use super::invariants::GLOBAL_CALL_MACHINE;
 use super::model::{Effect, Match, MatchKind, RuleDefinition, StatusMatch};
 use super::service::ServiceDef;
 
@@ -135,27 +138,6 @@ fn edge_label(r: &RuleDefinition) -> String {
     }
 }
 
-/// The framework global call machine — projected from `CallModelState`
-/// (ADR-0016 X2), so its edges are the lifecycle, not rule-declared. Unlike a
-/// service machine, it has no rules to derive triggers from, so its start edge
-/// and lifecycle-edge labels are described here directly.
-pub fn global_call_graph() -> MachineGraph {
-    let edges = [
-        ("[*]", "Active", "INVITE accepted (call setup)"),
-        ("Active", "Terminating", "BeginTermination (a leg BYE / failure / timer)"),
-        ("Active", "Terminated", "immediate teardown (no live legs)"),
-        ("Terminating", "Terminated", "all legs resolved"),
-    ]
-    .into_iter()
-    .map(|(a, b, l)| Edge { from: a.into(), to: b.into(), label: l.into() })
-    .collect();
-    graph_from(
-        GLOBAL_CALL_MACHINE.as_str(),
-        ["Active", "Terminating", "Terminated"].into_iter().map(str::to_string),
-        edges,
-    )
-}
-
 /// Prepend `[*] --> entry` start edges (ADR-0016 X8 activation): a real state
 /// with no **cross-state** inbound edge is an entry point — the cursor the
 /// service's `init` (or its seed rules) writes when the machine activates. Self-
@@ -242,17 +224,15 @@ fn diagram_body(g: &MachineGraph) -> String {
     out
 }
 
-/// Every machine's graph in document order: the framework `global-call` first,
-/// then one per registered service.
+/// Every fully-generated service machine's graph, in registration order. (The
+/// `global-call` projection has no declarative graph and is intentionally absent.)
 fn registry_graphs(services: &[ServiceDef]) -> Vec<MachineGraph> {
-    let mut v = vec![global_call_graph()];
-    v.extend(services.iter().map(service_graph));
-    v
+    services.iter().map(service_graph).collect()
 }
 
-/// Render the whole registry: the framework `global-call` machine first, then
-/// one document per registered service. Returns `(machine_id, markdown)` pairs —
-/// the doc file is `docs/sm/<machine_id>.md`.
+/// Render the whole registry: one document per registered service machine,
+/// derived entirely from its rules. Returns `(machine_id, markdown)` pairs — the
+/// doc file is `docs/sm/<machine_id>.md`.
 pub fn render_registry(services: &[ServiceDef]) -> Vec<(String, String)> {
     registry_graphs(services)
         .into_iter()
@@ -377,21 +357,6 @@ mod tests {
     }
 
     #[test]
-    fn global_call_diagram_is_non_empty_and_well_formed() {
-        let g = global_call_graph();
-        assert_eq!(g.id, "global-call");
-        assert_eq!(g.states, vec!["Active", "Terminated", "Terminating"]);
-        // Lifecycle edges now carry descriptive labels + a `[*] --> Active` start.
-        assert!(g.edges.iter().any(|e| e.from == "Active"
-            && e.to == "Terminating"
-            && e.label.starts_with("BeginTermination")));
-        assert!(g.edges.contains(&Edge { from: "[*]".into(), to: "Active".into(), label: "INVITE accepted (call setup)".into() }));
-        let md = render_mermaid(&g);
-        assert_well_formed_mermaid(&md, "global-call");
-        assert!(md.contains("[*] --> Active : INVITE accepted (call setup)"));
-    }
-
-    #[test]
     fn stub_service_diagram_is_derived_from_rules() {
         let g = service_graph(&stub_def());
         assert_eq!(g.id, "stub");
@@ -412,10 +377,11 @@ mod tests {
     }
 
     #[test]
-    fn render_registry_prepends_global_call() {
+    fn render_registry_is_service_machines_only() {
+        // Only fully-generated service machines — no fabricated `global-call`.
         let rendered = render_registry(&[stub_def()]);
         let ids: Vec<&str> = rendered.iter().map(|(id, _)| id.as_str()).collect();
-        assert_eq!(ids, vec!["global-call", "stub"]);
+        assert_eq!(ids, vec!["stub"]);
     }
 
     #[test]

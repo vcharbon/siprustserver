@@ -20,9 +20,10 @@ pub fn compose_services() -> Vec<ServiceDef> {
 }
 
 /// The committed state-machine diagrams (ADR-0016): `(machine_id, markdown)`
-/// pairs, one per machine, written to `docs/sm/<machine_id>.md`. The framework
-/// `global-call` machine is prepended by the renderer. Single source for both
-/// the `xtask state-machine-docs` writer and the CI freshness test.
+/// pairs, one per **service machine**, written to `docs/sm/<machine_id>.md` —
+/// each derived entirely from its rules (the `global-call` projection has no
+/// generated diagram). Single source for both the `xtask state-machine-docs`
+/// writer and the CI freshness test.
 pub fn state_machine_docs() -> Vec<(String, String)> {
     b2bua::rules::render_registry(&compose_services())
 }
