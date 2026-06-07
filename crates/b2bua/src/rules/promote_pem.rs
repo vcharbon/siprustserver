@@ -33,13 +33,7 @@ fn rule(
     matcher: Match,
     handle: fn(&RuleContext) -> Option<RuleHandleResult>,
 ) -> RuleDefinition {
-    RuleDefinition {
-        id,
-        layer: SERVICE_LAYER,
-        overrides,
-        matcher,
-        handle,
-    }
+    RuleDefinition::core(id, SERVICE_LAYER, overrides, matcher, handle)
 }
 
 fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {

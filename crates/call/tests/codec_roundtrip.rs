@@ -7,7 +7,7 @@
 
 mod common;
 
-use call::{CallBodyCodec, CallDecodeError, MsgpackCodec, PolicyUpdateBody};
+use call::{CallBodyCodec, CallDecodeError, MachineId, MsgpackCodec, PolicyUpdateBody, StateLabel};
 use common::{arb_call, representative_call};
 use proptest::prelude::*;
 
@@ -55,6 +55,43 @@ fn policy_body_three_states_round_trip() {
         let decoded = codec.decode(&codec.encode(&call)).unwrap();
         assert_eq!(decoded.policy_update_body, v);
     }
+}
+
+/// ADR-0016 slice 0 — `sm_cursors` is replication-compatible under the positional
+/// msgpack codec: a populated map round-trips, an empty map round-trips, and an
+/// **old-shape body** (encoded before the field existed) decodes to an empty map.
+#[test]
+fn sm_cursors_round_trip_and_back_compat() {
+    let codec = MsgpackCodec::new();
+
+    // Populated map round-trips.
+    let mut call = representative_call();
+    call.sm_cursors.insert(
+        MachineId::new("global-call"),
+        StateLabel::new("Active"),
+    );
+    call.sm_cursors.insert(
+        MachineId::new("transfer"),
+        StateLabel::new("CRinging"),
+    );
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded.sm_cursors, call.sm_cursors);
+    assert_eq!(decoded, call, "full value preserved with cursors set");
+
+    // Empty map round-trips (and is skipped on the wire).
+    let empty = representative_call();
+    assert!(empty.sm_cursors.is_empty());
+    let decoded_empty = codec.decode(&codec.encode(&empty)).unwrap();
+    assert!(decoded_empty.sm_cursors.is_empty());
+    assert_eq!(decoded_empty, empty);
+
+    // Old-shape body: an empty `sm_cursors` is skipped by
+    // `skip_serializing_if`, so the encoding of a cursors-free call is
+    // byte-identical to what an old node (without the field) would emit. It
+    // decodes back into an empty map via `#[serde(default)]`.
+    let old_bytes = codec.encode(&empty);
+    let from_old = codec.decode(&old_bytes).unwrap();
+    assert!(from_old.sm_cursors.is_empty(), "absent field decodes to empty");
 }
 
 proptest! {

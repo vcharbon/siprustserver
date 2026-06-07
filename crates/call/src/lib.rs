@@ -32,8 +32,8 @@ pub use codec::{CallBodyCodec, CallDecodeError, MsgpackCodec};
 pub use model::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, B2buaDialogExt, ByeDisposition, Call,
     CallLimiterState, CallModelState, CallTopology, CdrEvent, CdrEventType, Dialog, Direction,
-    ExtMap, HostPort, InviteTxnHandle, Leg, LegDisposition, LegKind, LegState, PendingRequest,
-    PolicyUpdateBody, PromotePemState, RelayFirst18xState, RemoteInfo, SipHeader, StackDialog,
-    TagMapping,
+    ExtMap, HostPort, InviteTxnHandle, Leg, LegDisposition, LegKind, LegState, MachineId,
+    PendingRequest, PolicyUpdateBody, PromotePemState, RelayFirst18xState, RemoteInfo, SipHeader,
+    StackDialog, StateLabel, TagMapping,
     TimerEntry, TimerType, TransferPhase, TransferState,
 };

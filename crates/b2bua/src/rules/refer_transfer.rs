@@ -51,7 +51,7 @@ fn core_rule(
     matcher: Match,
     handle: fn(&RuleContext) -> Option<super::model::RuleHandleResult>,
 ) -> RuleDefinition {
-    RuleDefinition { id, layer: CORE_LAYER, overrides, matcher, handle }
+    RuleDefinition::core(id, CORE_LAYER, overrides, matcher, handle)
 }
 
 fn svc_rule(
@@ -60,7 +60,7 @@ fn svc_rule(
     matcher: Match,
     handle: fn(&RuleContext) -> Option<super::model::RuleHandleResult>,
 ) -> RuleDefinition {
-    RuleDefinition { id, layer: SERVICE_LAYER, overrides, matcher, handle }
+    RuleDefinition::core(id, SERVICE_LAYER, overrides, matcher, handle)
 }
 
 // ── Timer-id minting (must match `ActionExecutor::schedule`) ─────────────────

@@ -18,13 +18,7 @@ fn rule(
     matcher: Match,
     handle: fn(&RuleContext) -> Option<RuleHandleResult>,
 ) -> RuleDefinition {
-    RuleDefinition {
-        id,
-        layer: CORE_LAYER,
-        overrides,
-        matcher,
-        handle,
-    }
+    RuleDefinition::core(id, CORE_LAYER, overrides, matcher, handle)
 }
 
 fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {

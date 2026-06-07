@@ -257,6 +257,7 @@ pub fn representative_call() -> Call {
         relay_first_18x: None,
         promote_pem: None,
         transfer: None,
+        sm_cursors: BTreeMap::new(),
     }
 }
 
@@ -282,6 +283,16 @@ fn arb_json() -> impl Strategy<Value = serde_json::Value> {
 }
 fn arb_ext() -> impl Strategy<Value = Option<ExtMap>> {
     proptest::option::of(proptest::collection::btree_map("[a-z]{1,8}", arb_json(), 0..3))
+}
+
+/// Varied `sm_cursors` maps (ADR-0016): empty (drops off the wire) through a few
+/// `MachineId → StateLabel` entries, exercising the round-trip + serde default.
+fn arb_sm_cursors() -> impl Strategy<Value = BTreeMap<MachineId, StateLabel>> {
+    proptest::collection::btree_map(
+        "[a-z-]{1,12}".prop_map(|s| MachineId(s.into())),
+        "[A-Za-z]{1,12}".prop_map(|s| StateLabel(s.into())),
+        0..3,
+    )
 }
 
 fn arb_remote_info() -> impl Strategy<Value = RemoteInfo> {
@@ -647,6 +658,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
         arb_ext(),
         proptest::option::of(any::<i64>()),
         proptest::option::of(proptest::collection::vec(arb_tag(), 0..3)),
+        arb_sm_cursors(),
     );
 
     (head, collections, state, trace, tail).prop_map(
@@ -664,6 +676,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
                 ext,
                 message_count,
                 terminating_refresh_legs,
+                sm_cursors,
             ),
         )| Call {
             call_ref,
@@ -697,6 +710,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             relay_first_18x: None,
             promote_pem: None,
             transfer: None,
+            sm_cursors,
         },
     )
 }

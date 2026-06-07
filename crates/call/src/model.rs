@@ -21,6 +21,7 @@
 //!   `serde_bytes` so msgpack stores them as `bin`, and the INVITE handle keeps
 //!   the request as raw bytes — the data model takes no `sip-message` dep.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,43 @@ use serde::{Deserialize, Serialize};
 /// Per-service opaque extension carry, keyed by callflow-service id. Core never
 /// interprets the values; each service decodes its own slice at the rule layer.
 pub type ExtMap = BTreeMap<String, serde_json::Value>;
+
+// ── State-machine identifiers (ADR-0016) ─────────────────────────────────────
+
+/// Identifier of a per-call state machine (ADR-0016 X4). Newtype over a
+/// `Cow<'static, str>` so a `RuleDefinition` can declare its machine with a
+/// compile-time `&'static str` literal (`MachineId::new`), while a replicated
+/// `Call` body deserialises the same type into an owned string. Used both as a
+/// static rule-declaration column and as the [`Call::sm_cursors`] map key.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct MachineId(pub Cow<'static, str>);
+
+impl MachineId {
+    /// Construct from a compile-time literal (usable in `const`/`static`).
+    pub const fn new(s: &'static str) -> Self {
+        MachineId(Cow::Borrowed(s))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A state label within a machine (ADR-0016 X4). Newtype over a
+/// `Cow<'static, str>` for the same reason as [`MachineId`]: static rule
+/// declarations carry `&'static str` literals; replicated cursors deserialise
+/// into owned strings.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct StateLabel(pub Cow<'static, str>);
+
+impl StateLabel {
+    /// Construct from a compile-time literal (usable in `const`/`static`).
+    pub const fn new(s: &'static str) -> Self {
+        StateLabel(Cow::Borrowed(s))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 // ── INVITE client transaction handle (in-memory; opaque) ────────────────────
 
@@ -476,6 +514,15 @@ pub struct Call {
     /// for the early port). `None` until a REFER is intercepted; presence is the
     /// service-activation guard. Cleared (`None`) on every terminal transition.
     pub transfer: Option<TransferState>,
+    /// Per-call state-machine cursors (ADR-0016 X4): the single home for every
+    /// active machine's current state label, keyed by [`MachineId`]. The
+    /// `SetState` action is its sole writer; the rule engine reads it to gate
+    /// machine-bound rules. `#[serde(default, skip_serializing_if)]` keeps
+    /// old/new bodies interoperable under the positional msgpack codec — empty
+    /// maps drop off the wire and absent maps decode to empty, so this MUST
+    /// remain the last `Call` field.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sm_cursors: BTreeMap<MachineId, StateLabel>,
 }
 
 /// REFER blind-transfer phase — gates which transfer service rules can match

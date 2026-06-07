@@ -4,7 +4,8 @@
 //! ext narrowing and rule composition are deferred with their consumers.
 
 use call::{
-    Call, CallModelState, CdrEventType, Dialog, Direction, Leg, LegDisposition, LegState, TimerType,
+    Call, CallModelState, CdrEventType, Dialog, Direction, Leg, LegDisposition, LegState, MachineId,
+    StateLabel, TimerType,
 };
 use sip_message::{SipRequest, SipResponse};
 
@@ -238,6 +239,14 @@ impl Match {
 }
 
 /// A rule: a named, layer-ranked event handler that returns actions or declines.
+///
+/// A rule may belong to a per-call **machine** (ADR-0016 X1): it is then a
+/// selection candidate only when that machine's cursor is in [`Self::active_states`]
+/// (see `executor::pick_ranked`). Machine-less ("core") rules — built via
+/// [`Self::core`] — leave `machine`/`active_states`/`transitions` unset and are
+/// always candidates. The `transitions` it declares are the `(from, to)` edges
+/// its handle may cause via `SetState` (checked + diagram-generated in later
+/// slices).
 #[derive(Clone)]
 pub struct RuleDefinition {
     pub id: &'static str,
@@ -245,6 +254,36 @@ pub struct RuleDefinition {
     pub overrides: &'static [&'static str],
     pub matcher: Match,
     pub handle: fn(&RuleContext) -> Option<RuleHandleResult>,
+    /// Owner machine, or `None` for a machine-less core rule.
+    pub machine: Option<MachineId>,
+    /// States (within `machine`) in which this rule is a candidate.
+    pub active_states: &'static [StateLabel],
+    /// Declared `(from, to)` transition edges this rule's handle may cause.
+    pub transitions: &'static [(StateLabel, StateLabel)],
+}
+
+impl RuleDefinition {
+    /// A machine-less ("core") rule: always a selection candidate, regardless of
+    /// any machine cursor. Every pre-ADR-0016 rule is built through this; only
+    /// `sm_rule!`-generated service rules populate the machine fields directly.
+    pub fn core(
+        id: &'static str,
+        layer: u8,
+        overrides: &'static [&'static str],
+        matcher: Match,
+        handle: fn(&RuleContext) -> Option<RuleHandleResult>,
+    ) -> Self {
+        Self {
+            id,
+            layer,
+            overrides,
+            matcher,
+            handle,
+            machine: None,
+            active_states: &[],
+            transitions: &[],
+        }
+    }
 }
 
 /// What a rule emits when it handles an event.
