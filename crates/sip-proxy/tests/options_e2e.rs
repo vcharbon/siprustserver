@@ -40,7 +40,7 @@ fn spawn_responder(ep: Box<dyn UdpEndpoint>, mode: Arc<Mutex<Mode>>) -> tokio::t
         let parser = CustomParser::new();
         while let Some(pkt) = ep.recv().await {
             let Ok(SipMessage::Request(req)) = parser.parse(&pkt.raw) else { continue };
-            if !req.method.eq_ignore_ascii_case("OPTIONS") {
+            if req.method != "OPTIONS" {
                 continue;
             }
             let m = *mode.lock().unwrap();

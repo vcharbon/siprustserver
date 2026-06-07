@@ -904,7 +904,7 @@ define_service! {
                 .filter(|ctx| {
                     let method_ok = ctx
                         .request()
-                        .map(|r| !r.method.eq_ignore_ascii_case("BYE"))
+                        .map(|r| r.method != "BYE")
                         .unwrap_or(false);
                     method_ok
                         && state(ctx).map(|s| s.referrer_leg_id.as_str()) == Some(ctx.source_leg_id)

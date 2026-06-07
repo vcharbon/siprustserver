@@ -158,7 +158,7 @@ fn rack_absent_is_none() {
 fn rack_well_formed() {
     let msg = build("PRACK", PRACK_BASE, "RAck: 776656 1 INVITE\r\n");
     let rack = msg.optional().rack.as_ref().unwrap().as_ref().unwrap();
-    assert_eq!(rack, &Rack { rseq: 776656, seq: 1, method: "INVITE".to_string() });
+    assert_eq!(rack, &Rack { rseq: 776656, seq: 1, method: "INVITE".into() });
 }
 
 #[test]

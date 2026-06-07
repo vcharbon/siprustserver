@@ -70,7 +70,7 @@ impl ProxyCore {
 
     pub(super) async fn handle_request(&self, req: SipRequest, src: SocketAddr) {
         let start_ms = self.now_ms();
-        let method = req.method.to_ascii_uppercase();
+        let method = req.method.as_str().to_ascii_uppercase();
         let call_id = req.call_id.clone();
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
         self.metrics.record_request(&method);

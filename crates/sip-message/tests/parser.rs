@@ -48,7 +48,7 @@ fn v3_1_1_4_escaped_nulls() {
 
 #[test]
 fn v3_1_1_5_percent_not_escape() {
-    assert!(!request("rfc4475-valid", "percentNotEscape").method.is_empty());
+    assert!(!request("rfc4475-valid", "percentNotEscape").method.as_str().is_empty());
 }
 
 #[test]

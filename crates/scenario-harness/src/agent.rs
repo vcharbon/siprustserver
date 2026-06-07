@@ -511,7 +511,7 @@ impl Agent {
         match self.recv().await {
             SipMessage::Request(r) => {
                 assert!(
-                    r.method.eq_ignore_ascii_case(method),
+                    r.method == method,
                     "{} expected a {method} request, got {}",
                     self.name,
                     r.method
@@ -571,10 +571,10 @@ impl Agent {
                 to_tag: None,
                 route_set,
             };
-            if txn.request.method.eq_ignore_ascii_case(method) {
+            if txn.request.method == method {
                 return Some(txn);
             }
-            if tolerate.iter().any(|t| t.eq_ignore_ascii_case(&txn.request.method)) {
+            if tolerate.iter().any(|t| txn.request.method == *t) {
                 txn.respond(200, "OK").send().await;
                 continue;
             }
@@ -598,7 +598,7 @@ impl Agent {
             let msg = self.recv().await;
             match msg {
                 SipMessage::Request(r) => {
-                    if r.method.eq_ignore_ascii_case(method) {
+                    if r.method == method {
                         let route_set = get_headers(&r.headers, "record-route")
                             .iter()
                             .map(|s| s.to_string())
@@ -610,7 +610,7 @@ impl Agent {
                             route_set,
                         };
                     }
-                    if tolerate.iter().any(|t| t.eq_ignore_ascii_case(&r.method)) {
+                    if tolerate.iter().any(|t| r.method == *t) {
                         // Drain + answer the duplicate so the txn layer stops
                         // retransmitting it, then keep waiting for `method`.
                         let route_set: Vec<String> = get_headers(&r.headers, "record-route")
@@ -1278,7 +1278,7 @@ impl Proxy {
         strip_top_route_if_self(&mut req, self.agent.addr);
         // Record-Route dialog-creating requests so in-dialog traffic returns
         // through us (§16.6.4). A dialog-creating INVITE has no To-tag yet.
-        if req.method.eq_ignore_ascii_case("INVITE") && req.to.tag.is_none() {
+        if req.method == "INVITE" && req.to.tag.is_none() {
             prepend_header(&mut req.headers, "Record-Route", &self.record_route_value());
         }
         // Add our Via on top so the response comes back to us (§16.6).
@@ -1396,7 +1396,7 @@ async fn expect_response_tolerating(agent: &Agent, status: u16, tolerate: &[&str
                 );
                 return r;
             }
-            SipMessage::Request(r) if tolerate.iter().any(|t| t.eq_ignore_ascii_case(&r.method)) => {
+            SipMessage::Request(r) if tolerate.iter().any(|t| r.method == *t) => {
                 let route_set: Vec<String> = get_headers(&r.headers, "record-route")
                     .iter()
                     .map(|s| s.to_string())

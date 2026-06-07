@@ -12,6 +12,7 @@ use super::structured_headers::{
     split_top_level_commas, validate_strict_host, validate_strict_sip_uri,
 };
 use crate::error::SipParseError;
+use crate::method::Method;
 use crate::parser::SipParserLimits;
 use crate::types::{Contact, ContactSet, CSeq, NameAddr, RequestUri, Via};
 
@@ -577,7 +578,10 @@ pub fn extract_common_fields(
         from: to_name_addr(from_parsed),
         to: to_name_addr(to_parsed),
         call_id,
-        cseq: CSeq { seq: cseq_parsed.seq.min(u32::MAX as u64) as u32, method: cseq_parsed.method },
+        cseq: CSeq {
+            seq: cseq_parsed.seq.min(u32::MAX as u64) as u32,
+            method: Method::from_wire(&cseq_parsed.method),
+        },
         vias,
         contact,
         contacts,
@@ -699,7 +703,7 @@ pub fn extract_response_fields(
         )));
     }
     if mode == ExtractMode::Wire {
-        let cseq_method = common.cseq.method.to_uppercase();
+        let cseq_method = common.cseq.method.to_string();
         let is_redirect = status == 485 || (300..400).contains(&status);
         if !is_redirect && (cseq_method == "INVITE" || cseq_method == "SUBSCRIBE" || cseq_method == "REFER") {
             match &common.contacts {

@@ -6,6 +6,7 @@
 //! docs/MIGRATION_STRATEGY.md for the decisions behind this layout.
 
 pub mod error;
+pub mod method;
 pub mod types;
 pub mod parser;
 
@@ -17,6 +18,7 @@ pub mod message_helpers;
 pub mod sipfrag;
 
 pub use error::SipParseError;
+pub use method::Method;
 pub use serializer::{message_summary, serialize, sip_summary};
 pub use sdp::{
     build_answer_from_offer, build_held_sdp_from_profile, extract_codec_profile, validate_sdp_body,

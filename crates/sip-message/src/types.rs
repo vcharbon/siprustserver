@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use std::ops::Deref;
 
 use crate::error::SipParseError;
+use crate::method::Method;
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -114,7 +115,7 @@ pub enum ContactSet {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSeq {
     pub seq: u32,
-    pub method: String,
+    pub method: Method,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,7 +144,7 @@ pub struct Uri {
 pub struct Rack {
     pub rseq: u64,
     pub seq: u64,
-    pub method: String,
+    pub method: Method,
 }
 
 /// RFC 3891 Replaces value.
@@ -190,7 +191,7 @@ pub struct OptionalHeaders {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SipRequest {
-    pub method: String,
+    pub method: Method,
     /// Request-URI (raw string, on the wire).
     pub uri: String,
     pub request_uri: RequestUri,

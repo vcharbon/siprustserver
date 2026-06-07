@@ -176,8 +176,8 @@ impl Match {
 
         if let Some(methods) = &self.methods {
             let m = match self.kind {
-                MatchKind::Request => ctx.request().map(|r| r.method.clone()),
-                MatchKind::Response => ctx.response().map(|r| r.cseq.method.clone()),
+                MatchKind::Request => ctx.request().map(|r| r.method.to_string()),
+                MatchKind::Response => ctx.response().map(|r| r.cseq.method.to_string()),
                 MatchKind::Timeout => ctx.timeout_method().map(str::to_string),
                 _ => None,
             };

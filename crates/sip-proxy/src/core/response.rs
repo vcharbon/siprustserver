@@ -29,7 +29,7 @@ fn param_str<'a>(via: &'a Via, name: &str) -> Option<&'a str> {
 impl ProxyCore {
     pub(super) async fn handle_response(&self, resp: SipResponse) {
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
-        self.metrics.record_response(&resp.cseq.method.to_ascii_uppercase(), resp.status);
+        self.metrics.record_response(&resp.cseq.method.as_str().to_ascii_uppercase(), resp.status);
 
         // §16.7.3: need ≥2 Via (ours + the next hop's).
         if resp.via.len() < 2 {
@@ -93,7 +93,7 @@ impl ProxyCore {
         self.metrics.record_message(Direction::Outbound, MessageResult::Forwarded);
 
         // ── Hop-by-hop ACK for a non-2xx INVITE final (§17.1.1.3) ───────────
-        if (300..700).contains(&resp.status) && resp.cseq.method.eq_ignore_ascii_case("INVITE") {
+        if (300..700).contains(&resp.status) && resp.cseq.method == "INVITE" {
             let key = call_id_cseq_key(&resp.call_id, resp.cseq.seq);
             if let Some(found) = self.cancel_lru.lookup(&key) {
                 let ack = generate_proxy_ack_for_non_2xx(

@@ -98,7 +98,7 @@ impl RunReport {
 
 fn matches(msg: &SipMessage, matcher: &Match) -> bool {
     match (msg, matcher) {
-        (SipMessage::Request(r), Match::Method(m)) => r.method.eq_ignore_ascii_case(m),
+        (SipMessage::Request(r), Match::Method(m)) => r.method == *m,
         (SipMessage::Response(r), Match::Status(s)) => r.status == *s,
         (_, Match::Any) => true,
         _ => false,

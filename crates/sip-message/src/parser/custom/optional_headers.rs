@@ -15,6 +15,7 @@ use super::structured_headers::{
     split_top_level_commas, validate_strict_sip_uri, ParsedNameAddr, ParsedReferTo,
 };
 use crate::error::SipParseError;
+use crate::method::Method;
 use crate::types::{NameAddr, OptionalHeaders, Rack, ReferTo, Replaces, SipHeader, Uri};
 
 fn get_header_values<'a>(headers: &'a [SipHeader], name: &str) -> Vec<&'a str> {
@@ -83,7 +84,7 @@ fn parse_rack_header(headers: &[SipHeader]) -> Result<Option<Rack>, SipParseErro
         return Ok(None);
     }
     match parse_rack(values[0]) {
-        Some(r) => Ok(Some(Rack { rseq: r.rseq, seq: r.seq, method: r.method })),
+        Some(r) => Ok(Some(Rack { rseq: r.rseq, seq: r.seq, method: Method::from_wire(&r.method) })),
         None => Err(SipParseError::new(format!("Malformed RAck: \"{}\"", values[0]))),
     }
 }

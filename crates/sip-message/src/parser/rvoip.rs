@@ -113,7 +113,7 @@ fn placeholder_name_addr() -> crate::types::NameAddr {
 
 #[cfg(feature = "rvoip-oracle")]
 fn placeholder_cseq() -> crate::types::CSeq {
-    crate::types::CSeq { seq: 0, method: String::new() }
+    crate::types::CSeq { seq: 0, method: crate::method::Method::Other(String::new()) }
 }
 
 #[cfg(feature = "rvoip-oracle")]

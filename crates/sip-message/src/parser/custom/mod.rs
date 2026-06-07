@@ -47,7 +47,7 @@ pub fn hydrate_request(
     let via = non_empty_vias(c.vias)?;
     let optional = optional_headers::extract_optional(&headers);
     Ok(SipRequest {
-        method: method.to_string(),
+        method: crate::method::Method::from_wire(method),
         uri: uri.to_string(),
         request_uri: eager.request_uri,
         version: "SIP/2.0".to_string(),
@@ -157,7 +157,7 @@ impl SipParser for CustomParser {
                 let via = non_empty_vias(c.vias)?;
                 let optional = optional_headers::extract_optional(&headers_vec);
                 Ok(SipMessage::Request(SipRequest {
-                    method: rl.method,
+                    method: crate::method::Method::from_wire(&rl.method),
                     uri: rl.uri,
                     request_uri: eager.request_uri,
                     version: rl.version,

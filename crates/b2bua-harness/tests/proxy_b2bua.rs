@@ -178,7 +178,7 @@ fn find_request(
             return None;
         }
         match CustomParser::new().parse(&e.raw) {
-            Ok(SipMessage::Request(r)) if r.method.eq_ignore_ascii_case(method) => Some(r),
+            Ok(SipMessage::Request(r)) if r.method == method => Some(r),
             _ => None,
         }
     })

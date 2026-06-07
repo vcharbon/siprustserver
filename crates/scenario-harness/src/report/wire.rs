@@ -89,7 +89,7 @@ pub fn facets(raw: &[u8]) -> Facets {
             )
         }
         SipMessage::Response(r) => {
-            let method_tag = if r.cseq.method.is_empty() {
+            let method_tag = if r.cseq.method.as_str().is_empty() {
                 String::new()
             } else {
                 format!(" ({})", r.cseq.method)

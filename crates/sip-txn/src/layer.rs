@@ -547,7 +547,7 @@ impl Owner {
                 let method = t
                     .original_request
                     .as_ref()
-                    .map(|r| r.method.clone())
+                    .map(|r| r.method.to_string())
                     .or_else(|| match t.kind {
                         TxnKind::Invite => Some("INVITE".to_string()),
                         TxnKind::NonInvite => None,
@@ -648,7 +648,7 @@ impl Owner {
             branch: branch.clone(),
             role: TxnRole::Client,
             kind: txn_type,
-            method: msg.method.clone(),
+            method: msg.method.to_string(),
             call_id: msg.call_id.clone(),
             from_tag: msg.from.tag.clone().unwrap_or_default(),
             original_request: matches!(txn_type, TxnKind::Invite).then(|| msg.clone()),
@@ -876,7 +876,7 @@ impl Owner {
             branch: branch.clone(),
             role: TxnRole::Server,
             kind,
-            method: req.method.clone(),
+            method: req.method.to_string(),
             call_id: req.call_id.clone(),
             from_tag: req.from.tag.clone().unwrap_or_default(),
             original_request: Some(req.clone()),
@@ -1016,7 +1016,7 @@ impl Owner {
             return;
         }
 
-        let resp_cseq_method = resp.cseq.method.to_ascii_uppercase();
+        let resp_cseq_method = resp.cseq.method.as_str().to_ascii_uppercase();
 
         if !branch.is_empty() {
             // CANCEL responses reuse the INVITE branch — never match them to the

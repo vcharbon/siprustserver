@@ -253,8 +253,8 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     // message lands here once, so this is the single chokepoint to meter them.
     if let CallEvent::Sip { message, .. } = &event {
         match message.as_ref() {
-            SipMessage::Request(req) => ctx.metrics.record_request(&req.method),
-            SipMessage::Response(resp) => ctx.metrics.record_response(&resp.cseq.method, resp.status),
+            SipMessage::Request(req) => ctx.metrics.record_request(req.method.as_str()),
+            SipMessage::Response(resp) => ctx.metrics.record_response(resp.cseq.method.as_str(), resp.status),
         }
     }
 
@@ -283,7 +283,7 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     // (`sip-proxy::health::probe::classify_503`).
     if let CallEvent::Sip { message, src } = &event {
         if let SipMessage::Request(req) = message.as_ref() {
-            if req.method.eq_ignore_ascii_case("OPTIONS") && req.to.tag.is_none() {
+            if req.method == "OPTIONS" && req.to.tag.is_none() {
                 let resp = build_options_health_response(&ctx.readiness, &ctx.id_gen, req);
                 ctx.txn.send_response(resp, *src).await;
                 return;
@@ -378,7 +378,7 @@ fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
     match event {
         CallEvent::Sip { message, .. } => match message.as_ref() {
             SipMessage::Request(req) => {
-                if req.method.eq_ignore_ascii_case("INVITE") && req.to.tag.is_none() {
+                if req.method == "INVITE" && req.to.tag.is_none() {
                     let call_ref = call::derive_call_ref(
                         &ctx.config.self_ordinal,
                         &req.call_id,
@@ -715,7 +715,7 @@ async fn handle_limiter_refresh(ctx: &Arc<RouterCtx>, mut call: Call, now_ms: i6
 async fn maybe_reject_orphan(ctx: &RouterCtx, event: &CallEvent) {
     if let CallEvent::Sip { message, src } = event {
         if let SipMessage::Request(req) = message.as_ref() {
-            if !req.method.eq_ignore_ascii_case("ACK") {
+            if req.method != "ACK" {
                 let resp = generate_response(
                     req,
                     481,
@@ -787,7 +787,7 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
         // OPTIONS lands here) — pairs with inbound responses_total{OPTIONS,200} to
         // isolate the keepalive round-trip (sent vs answered) on the b2bua itself.
         if let OutboundBody::Request(req) = &eff.body {
-            ctx.metrics.record_request_out(&req.method);
+            ctx.metrics.record_request_out(req.method.as_str());
         }
         match (&eff.body, &eff.mode) {
             (OutboundBody::Response(resp), _) => ctx.txn.send_response(resp.clone(), dest).await,

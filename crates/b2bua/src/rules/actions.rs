@@ -20,7 +20,7 @@ use sip_message::generators::{
 use sip_message::message_helpers::get_header;
 use sip_message::parser::custom::structured_headers::split_top_level_commas;
 use sip_message::parser::custom::CustomParser;
-use sip_message::{SipMessage, SipParser};
+use sip_message::{Method, SipMessage, SipParser};
 use sip_txn::{IdGen, TxnKind};
 
 use crate::config::B2buaConfig;
@@ -526,7 +526,7 @@ impl<'a> ActionExecutor<'a> {
         // ACK's body through (the delayed-offer re-INVITE answer rides the ACK,
         // RFC 3264 §4). The target may be either side (a re-INVITE answered by
         // bob is ACKed toward bob; one answered by alice is ACKed toward alice).
-        if req.method.eq_ignore_ascii_case("ACK") {
+        if req.method == "ACK" {
             let leg = if target_leg == call.a_leg.leg_id {
                 Some(&call.a_leg)
             } else {
@@ -644,7 +644,7 @@ impl<'a> ActionExecutor<'a> {
         // locally and ACK has no response, so neither needs correlation.
         if !matches!(method, InDialogMethod::Bye) {
             let pending = PendingRequest {
-                method: req.method.to_uppercase(),
+                method: req.method.to_string(),
                 outbound_cseq,
                 inbound_cseq,
                 source_vias: sip_message::message_helpers::get_headers(&req.headers, "via")
@@ -725,10 +725,10 @@ impl<'a> ActionExecutor<'a> {
             out
         };
         let cseq_num = resp.cseq.seq as i64;
-        let cseq_method = if resp.cseq.method.is_empty() {
+        let cseq_method = if resp.cseq.method.as_str().is_empty() {
             "INVITE".to_string()
         } else {
-            resp.cseq.method.to_uppercase()
+            resp.cseq.method.to_string()
         };
         let to_tag = resp.to.tag.clone().unwrap_or_default();
         let source_leg_id = ctx.source_leg_id.to_string();
@@ -1131,7 +1131,7 @@ impl<'a> ActionExecutor<'a> {
         body: &[u8],
         content_type: Option<&str>,
     ) {
-        let m = match in_dialog_method(method) {
+        let m = match in_dialog_method(&Method::from_wire(method)) {
             Some(m) => m,
             None => return,
         };
@@ -1546,18 +1546,12 @@ fn leg_at(call: &Call, idx: usize) -> &call::Leg {
     }
 }
 
-fn in_dialog_method(method: &str) -> Option<InDialogMethod> {
-    Some(match method.to_ascii_uppercase().as_str() {
-        "BYE" => InDialogMethod::Bye,
-        "INVITE" => InDialogMethod::Invite,
-        "PRACK" => InDialogMethod::Prack,
-        "NOTIFY" => InDialogMethod::Notify,
-        "OPTIONS" => InDialogMethod::Options,
-        "INFO" => InDialogMethod::Info,
-        "UPDATE" => InDialogMethod::Update,
-        "MESSAGE" => InDialogMethod::Message,
-        _ => return None,
-    })
+/// Project a canonical [`Method`] onto the in-dialog admissibility view the
+/// in-dialog generators accept — `None` for methods that may not be sent as an
+/// ordinary in-dialog request (ACK/CANCEL, out-of-dialog-only). Formerly a
+/// hand-rolled `String → enum` re-parse; now a thin view over `Method`.
+fn in_dialog_method(method: &Method) -> Option<InDialogMethod> {
+    InDialogMethod::try_from(method).ok()
 }
 
 fn top_via_dest(req: &sip_message::SipRequest) -> (String, u16) {
