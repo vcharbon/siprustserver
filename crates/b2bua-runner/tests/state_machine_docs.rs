@@ -33,6 +33,19 @@ fn committed_diagrams_are_fresh() {
             "docs/sm/{machine}.md is stale — run `cargo run -p xtask -- state-machine-docs`"
         );
     }
+    // The rendered HTML view stays fresh the same way.
+    let html_path = dir.join("index.html");
+    let committed_html = fs::read_to_string(&html_path).unwrap_or_else(|e| {
+        panic!(
+            "missing committed {}: {e} — run `cargo run -p xtask -- state-machine-docs`",
+            html_path.display()
+        )
+    });
+    assert_eq!(
+        committed_html,
+        b2bua_runner::state_machine_docs_html(),
+        "docs/sm/index.html is stale — run `cargo run -p xtask -- state-machine-docs`"
+    );
 }
 
 /// Every machine the renderer emits has a committed file, and no orphan diagrams

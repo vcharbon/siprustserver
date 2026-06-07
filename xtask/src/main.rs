@@ -80,6 +80,12 @@ fn state_machine_docs() -> Result<(), String> {
         fs::write(&path, &markdown).map_err(|e| format!("write {}: {e}", path.display()))?;
         eprintln!("state-machine-docs: {machine:<16} -> {}", path.display());
     }
+    // A single self-contained HTML page that renders every machine as an SVG
+    // (Mermaid in-browser) — open it for the rendered view of the diagrams.
+    let html_path = dir.join("index.html");
+    fs::write(&html_path, b2bua_runner::state_machine_docs_html())
+        .map_err(|e| format!("write {}: {e}", html_path.display()))?;
+    eprintln!("state-machine-docs: {:<16} -> {}", "index.html", html_path.display());
     Ok(())
 }
 

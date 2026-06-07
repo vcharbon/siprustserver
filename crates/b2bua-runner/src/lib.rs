@@ -26,3 +26,10 @@ pub fn compose_services() -> Vec<ServiceDef> {
 pub fn state_machine_docs() -> Vec<(String, String)> {
     b2bua::rules::render_registry(&compose_services())
 }
+
+/// The committed rendered view (ADR-0016): one self-contained HTML page drawing
+/// every machine as an SVG (Mermaid in-browser), written to `docs/sm/index.html`.
+/// Single source for the `xtask state-machine-docs` writer and the freshness test.
+pub fn state_machine_docs_html() -> String {
+    b2bua::rules::render_registry_html(&compose_services())
+}
