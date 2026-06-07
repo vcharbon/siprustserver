@@ -8,7 +8,8 @@ stateDiagram-v2
     Active
     Terminated
     Terminating
-    Active --> Terminated
-    Active --> Terminating
-    Terminating --> Terminated
+    Active --> Terminated : immediate teardown (no live legs)
+    Active --> Terminating : BeginTermination (a leg BYE / failure / timer)
+    Terminating --> Terminated : all legs resolved
+    [*] --> Active : INVITE accepted (call setup)
 ```

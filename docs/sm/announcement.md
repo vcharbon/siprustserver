@@ -7,8 +7,9 @@
 stateDiagram-v2
     Announcing
     OfferingMrf
-    Announcing --> Announcing : INVITE (B) ⇒ MRF failure → A · terminate (MRF failure)
-    Announcing --> [*] : INFO (B) ⇒ 200 OK → media (answer MSCML INFO) · BYE → media leg · INVITE → destination
-    OfferingMrf --> Announcing : INVITE 2xx (B) ⇒ ACK → media (confirm early dialog) · early media (MRF SDP) → A · MSCML <play> → media
-    OfferingMrf --> OfferingMrf : INVITE (B) ⇒ MRF failure → A · terminate (MRF failure)
+    Announcing --> Announcing : INVITE (B) [guard] ⇒ MRF failure → A · terminate (MRF failure)
+    Announcing --> [*] : INFO (B) [guard] ⇒ 200 OK → media (answer MSCML INFO) · BYE → media leg · INVITE → destination
+    OfferingMrf --> Announcing : INVITE 2xx (B) [leg Trying/Early] [guard] ⇒ ACK → media (confirm early dialog) · early media (MRF SDP) → A · MSCML <play> → media
+    OfferingMrf --> OfferingMrf : INVITE (B) [guard] ⇒ MRF failure → A · terminate (MRF failure)
+    [*] --> OfferingMrf
 ```

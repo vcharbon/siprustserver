@@ -54,7 +54,9 @@ fn graph_from(
 }
 
 /// Summarise a rule's matcher as the **input** half of an edge label — the SIP
-/// message / timer / internal event that triggers the rule.
+/// message / timer / internal event that triggers the rule, followed by its
+/// **guard** conditions (the leg/call state the rule peeks at, and `[guard]` when
+/// a corner-case `filter` predicate gates it — opaque, so shown only as a flag).
 fn summarize_matcher(m: &Match) -> String {
     let dir = match m.direction {
         Some(call::Direction::FromA) => " (A)",
@@ -62,7 +64,7 @@ fn summarize_matcher(m: &Match) -> String {
         None => "",
     };
     let methods = m.methods.as_ref().map(|v| v.join("/"));
-    match m.kind {
+    let base = match m.kind {
         MatchKind::Request => format!("{}{dir}", methods.unwrap_or_else(|| "request".into())),
         MatchKind::Response => {
             let status = match m.status {
@@ -87,7 +89,24 @@ fn summarize_matcher(m: &Match) -> String {
             (Some(t), None) => t.to_string(),
             _ => "event".into(),
         },
+    };
+    fn dbg_list<T: std::fmt::Debug>(v: &[T]) -> String {
+        v.iter().map(|x| format!("{x:?}")).collect::<Vec<_>>().join("/")
     }
+    let mut guards = String::new();
+    if let Some(ls) = &m.leg_state {
+        guards.push_str(&format!(" [leg {}]", dbg_list(ls)));
+    }
+    if let Some(cs) = &m.call_state {
+        guards.push_str(&format!(" [call {}]", dbg_list(cs)));
+    }
+    if let Some(ds) = &m.leg_disposition {
+        guards.push_str(&format!(" [disp {}]", dbg_list(ds)));
+    }
+    if m.filter.is_some() {
+        guards.push_str(" [guard]");
+    }
+    format!("{base}{guards}")
 }
 
 /// Summarise a rule's declared effects as the **output** half of an edge label —
@@ -117,21 +136,47 @@ fn edge_label(r: &RuleDefinition) -> String {
 }
 
 /// The framework global call machine — projected from `CallModelState`
-/// (ADR-0016 X2), so its edges are the lifecycle, not rule-declared (unlabelled).
+/// (ADR-0016 X2), so its edges are the lifecycle, not rule-declared. Unlike a
+/// service machine, it has no rules to derive triggers from, so its start edge
+/// and lifecycle-edge labels are described here directly.
 pub fn global_call_graph() -> MachineGraph {
     let edges = [
-        ("Active", "Terminating"),
-        ("Active", "Terminated"),
-        ("Terminating", "Terminated"),
+        ("[*]", "Active", "INVITE accepted (call setup)"),
+        ("Active", "Terminating", "BeginTermination (a leg BYE / failure / timer)"),
+        ("Active", "Terminated", "immediate teardown (no live legs)"),
+        ("Terminating", "Terminated", "all legs resolved"),
     ]
     .into_iter()
-    .map(|(a, b)| Edge { from: a.into(), to: b.into(), label: String::new() })
+    .map(|(a, b, l)| Edge { from: a.into(), to: b.into(), label: l.into() })
     .collect();
     graph_from(
         GLOBAL_CALL_MACHINE.as_str(),
         ["Active", "Terminating", "Terminated"].into_iter().map(str::to_string),
         edges,
     )
+}
+
+/// Prepend `[*] --> entry` start edges (ADR-0016 X8 activation): a real state
+/// with no **cross-state** inbound edge is an entry point — the cursor the
+/// service's `init` (or its seed rules) writes when the machine activates. Self-
+/// loops don't count as inbound, so an entry that also handles in-state events is
+/// still detected.
+fn with_start_edges(states: &[String], mut edges: Vec<Edge>) -> Vec<Edge> {
+    let incoming: BTreeSet<&str> = edges
+        .iter()
+        .filter(|e| e.from != e.to)
+        .map(|e| e.to.as_str())
+        .collect();
+    let terminal = call::StateLabel::terminal();
+    let entries: BTreeSet<&str> = states
+        .iter()
+        .map(String::as_str)
+        .filter(|s| *s != terminal.as_str() && !incoming.contains(s))
+        .collect();
+    for s in entries {
+        edges.push(Edge { from: terminal.as_str().into(), to: s.into(), label: String::new() });
+    }
+    edges
 }
 
 /// Derive a service machine's graph from its rules. A rule with a transition
@@ -163,6 +208,7 @@ pub fn service_graph(def: &ServiceDef) -> MachineGraph {
             }
         }
     }
+    let edges = with_start_edges(&states, edges);
     graph_from(def.id, states, edges)
 }
 
@@ -239,16 +285,20 @@ pub fn render_registry_html(services: &[ServiceDef]) -> String {
          h1{{margin-bottom:.25rem}}\n\
          section{{margin:2.5rem 0}}\n\
          h2{{border-bottom:1px solid #ddd;padding-bottom:.3rem}}\n\
-         .mermaid{{overflow-x:auto}}\n\
+         .mermaid{{overflow-x:auto;border:1px solid #eee;padding:.5rem}}\n\
+         .mermaid svg{{height:auto}}\n\
          p.sub{{color:#666;margin-top:0}}\n\
          </style>\n</head>\n<body>\n\
          <h1>Callflow state machines</h1>\n\
          <p class=\"sub\">ADR-0016 \u{2014} generated from the composed service registry. \
-         Edge labels read <em>input message \u{21d2} output side effects</em>.</p>\n\
+         Edge labels read <em>input message [guards] \u{21d2} output side effects</em>; \
+         <code>[*]</code> is machine activation / deactivation.</p>\n\
          {sections}\
          <script type=\"module\">\n\
          import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';\n\
-         mermaid.initialize({{ startOnLoad: true, theme: 'neutral' }});\n\
+         // useMaxWidth:false renders each diagram at its natural size (the wide\n\
+         // transfer machine then scrolls in its box instead of being shrunk to fit).\n\
+         mermaid.initialize({{ startOnLoad: true, theme: 'neutral', state: {{ useMaxWidth: false }} }});\n\
          </script>\n</body>\n</html>\n",
     )
 }
@@ -331,15 +381,14 @@ mod tests {
         let g = global_call_graph();
         assert_eq!(g.id, "global-call");
         assert_eq!(g.states, vec!["Active", "Terminated", "Terminating"]);
-        assert!(g.edges.contains(&Edge {
-            from: "Active".into(),
-            to: "Terminating".into(),
-            label: String::new(),
-        }));
+        // Lifecycle edges now carry descriptive labels + a `[*] --> Active` start.
+        assert!(g.edges.iter().any(|e| e.from == "Active"
+            && e.to == "Terminating"
+            && e.label.starts_with("BeginTermination")));
+        assert!(g.edges.contains(&Edge { from: "[*]".into(), to: "Active".into(), label: "INVITE accepted (call setup)".into() }));
         let md = render_mermaid(&g);
         assert_well_formed_mermaid(&md, "global-call");
-        // Lifecycle edges are unlabelled (no trailing " : ...").
-        assert!(md.contains("Active --> Terminating\n"));
+        assert!(md.contains("[*] --> Active : INVITE accepted (call setup)"));
     }
 
     #[test]
@@ -347,14 +396,19 @@ mod tests {
         let g = service_graph(&stub_def());
         assert_eq!(g.id, "stub");
         assert_eq!(g.states, vec!["S0", "S1"]);
-        // The edge is labelled with the matcher summary (no effects declared).
+        // The move edge is labelled with the matcher summary (no effects declared);
+        // S0 has no cross-state inbound edge, so it gets a `[*] --> S0` start edge.
         assert_eq!(
             g.edges,
-            vec![Edge { from: "S0".into(), to: "S1".into(), label: "INFO".into() }]
+            vec![
+                Edge { from: "S0".into(), to: "S1".into(), label: "INFO".into() },
+                Edge { from: "[*]".into(), to: "S0".into(), label: String::new() },
+            ]
         );
         let md = render_mermaid(&g);
         assert_well_formed_mermaid(&md, "stub");
         assert!(md.contains("S0 --> S1 : INFO"));
+        assert!(md.contains("[*] --> S0"));
     }
 
     #[test]
