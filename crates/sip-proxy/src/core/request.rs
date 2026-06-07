@@ -118,17 +118,29 @@ impl ProxyCore {
         let mut headers: Vec<SipHeader> = req.headers.clone();
         let mut stripped_route_params: Option<crate::strategy::RouteParams> = None;
         let mut is_worker_outbound = false;
-        if let Some(top_route) = first_header_value(&headers, "route") {
-            if let Some(parsed) = parse_sip_uri(top_route) {
-                if parsed.host == self.advertised.host && parsed.port as u16 == self.advertised.port {
-                    let params = sip_message::message_helpers::parse_uri_params(top_route);
-                    remove_first_header(&mut headers, "route");
-                    if params.contains_key("outbound") {
-                        is_worker_outbound = true;
-                    } else {
-                        stripped_route_params = Some(params);
-                    }
+        // §16.12 + double-record-route: pop ALL leading Route values that are
+        // ours, and read the in-dialog direction from the FIRST one — which the
+        // proxy itself chose at dialog set-up. The worker-facing half carries
+        // `;outbound` (→ forward to the R-URI); the external-facing half carries
+        // the stickiness cookie (→ decode to the worker). Direction is therefore
+        // intrinsic to the proxy's own self-issued Record-Route, not a marker the
+        // worker stamps. The partner half of the pair (the other self-RR, present
+        // because we double-record-route) is popped and ignored.
+        let mut first_self_route = true;
+        while let Some(top_route) = first_header_value(&headers, "route") {
+            let Some(parsed) = parse_sip_uri(top_route) else { break };
+            if parsed.host != self.advertised.host || parsed.port as u16 != self.advertised.port {
+                break;
+            }
+            let params = sip_message::message_helpers::parse_uri_params(top_route);
+            remove_first_header(&mut headers, "route");
+            if first_self_route {
+                if params.contains_key("outbound") {
+                    is_worker_outbound = true;
+                } else {
+                    stripped_route_params = Some(params);
                 }
+                first_self_route = false;
             }
         }
         // Worker-outbound override — break the in-dialog loop. A worker-originated
@@ -264,13 +276,35 @@ impl ProxyCore {
         upsert_header(&mut headers, "Max-Forwards", &mf_next.to_string());
 
         if is_dialog_creating(method) {
+            // Double record-route so in-dialog DIRECTION is intrinsic to the
+            // proxy's own Record-Route — no worker-stamped `;outbound`. We insert
+            // two RRs:
+            //   • cookie RR  — used by the EXTERNAL party to reach the worker
+            //     (decode → w_pri, registry-keyed, so it survives a worker pod-IP
+            //     change after reboot).
+            //   • outbound RR — used by the WORKER to reach the external party
+            //     (classified `;outbound` → forward to the R-URI).
+            // The §12.1.1 (UAS, forward) / §12.1.2 (UAC, reverse) route-set rule
+            // then puts the right half on top of each party's route set on its
+            // own; here we only choose which faces the *next hop*: forwarding TO a
+            // worker (inbound) puts the outbound/worker-facing RR on top, forwarding
+            // to the external party (worker-outbound) puts the cookie RR on top.
+            // `prepend_header` pushes onto the top, so prepend the lower half first.
             let cookie_addr = if is_worker_outbound { ProxyAddr::from(src) } else { target.clone() };
             let stickiness = self.strategy.encode_stickiness(&cookie_addr, &SipMessage::Request(req.clone()));
-            let rr_value = match &stickiness {
+            let cookie_rr = match &stickiness {
                 Some(params) => build_record_route_value(&self.advertised, params.iter()),
                 None => build_record_route_value(&self.advertised, std::iter::empty()),
             };
-            prepend_header(&mut headers, "Record-Route", &rr_value);
+            let outbound_rr =
+                format!("<sip:{}:{};outbound;lr>", self.advertised.host, self.advertised.port);
+            if is_worker_outbound {
+                prepend_header(&mut headers, "Record-Route", &outbound_rr);
+                prepend_header(&mut headers, "Record-Route", &cookie_rr);
+            } else {
+                prepend_header(&mut headers, "Record-Route", &cookie_rr);
+                prepend_header(&mut headers, "Record-Route", &outbound_rr);
+            }
             self.metrics.record_route_inserted();
         }
 
@@ -496,16 +530,11 @@ Content-Length: 0\r\n\r\n"
         assert_eq!(outcome.target, Some(ProxyAddr::new(W1_POD, 5060)));
     }
 
-    // Reboot case (the reclaimed-long-call-loss root cause): a worker that has
-    // just respawned onto a NEW pod IP the EndpointSlice informer has not yet
-    // learned sends its keepalive with the `;outbound` marker the b2bua egress
-    // now stamps (relay::apply_b_leg_egress). Neither the SNAT'd source nor the
-    // top Via (the new IP) is a registered worker, so the registry-based
-    // discriminators MISS — only the `;outbound` param can classify it. It must
-    // still be worker-outbound and reach the UAC, not bounce back to a worker via
-    // the stale cookie `target=`.
+    // A worker-stamped `;outbound` is still accepted (backward-compatible
+    // defense-in-depth), but it is NO LONGER how the b2bua operates: see the
+    // double-record-route tests below for the load-bearing path.
     #[tokio::test]
-    async fn rebooted_worker_keepalive_with_outbound_marker_routes_to_uac() {
+    async fn worker_stamped_outbound_marker_still_accepted() {
         let reg: Arc<dyn WorkerRegistry> =
             Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060))]));
         let core = core(reg).await;
@@ -524,19 +553,89 @@ Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr;outbound>\r\n\
 Content-Length: 0\r\n\r\n"
         );
         let SipMessage::Request(req) = CustomParser::default().parse(raw.as_bytes()).unwrap() else { unreachable!() };
-        // SNAT'd source (node IP) — also not a registered worker.
         let snat_src = "172.20.0.12:51000".parse().unwrap();
+        let outcome = core.route_request(&req, "OPTIONS", snat_src).await;
+        assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
+        assert_eq!(outcome.target, Some(ProxyAddr::new(UAC, 5060)));
+    }
+
+    // ── Double-record-route: direction is intrinsic to the proxy's own RR ─────
+    //
+    // THE load-bearing case. A worker that has just rebooted onto a NEW pod IP
+    // (absent from the registry) sends, behind the SNAT'd VIP, its keepalive on
+    // the route set captured at dialog set-up: the proxy's OWN `;outbound`
+    // Record-Route on top, the stickiness cookie below. The worker stamps NOTHING.
+    // Neither the SNAT'd source nor the top Via (the new IP) is a registered
+    // worker, so every registry-based discriminator MISSES — yet direction is
+    // still correct because it is read from the proxy's own self-issued top RR.
+    // This is what makes `;outbound`-by-the-worker no longer load-bearing.
+    #[tokio::test]
+    async fn rebooted_worker_keepalive_direction_from_proxy_issued_outbound_rr() {
+        let reg: Arc<dyn WorkerRegistry> =
+            Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060))]));
+        let core = core(reg).await;
+
+        let new_pod_ip = "10.244.9.99"; // rebooted worker's new IP — NOT in registry
+        let raw = format!(
+            "OPTIONS sip:sipp@{UAC}:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {new_pod_ip}:5060;branch=z9hG4bKreboot;lg=a;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:service@{PROXY_VIP}:5060>;tag=svc\r\n\
+To: <sip:sipp@{UAC}:5060>;tag=uactag\r\n\
+Call-ID: longcall-3@{UAC}\r\n\
+CSeq: 4 OPTIONS\r\n\
+Contact: <sip:b2bua@{new_pod_ip}:5060;leg=a>\r\n\
+Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
+Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
+Content-Length: 0\r\n\r\n"
+        );
+        let SipMessage::Request(req) = CustomParser::default().parse(raw.as_bytes()).unwrap() else { unreachable!() };
+        let snat_src = "172.20.0.12:51000".parse().unwrap(); // node IP, not a worker
         let outcome = core.route_request(&req, "OPTIONS", snat_src).await;
 
         assert_eq!(
             outcome.decision,
             RoutingDecisionKind::WorkerOutbound,
-            "a rebooted worker's keepalive must be worker-outbound via the ;outbound marker even when its new IP is absent from the registry"
+            "direction must come from the proxy's own top `;outbound` RR — no worker marker, no registry/Via match"
         );
         assert_eq!(
             outcome.target,
             Some(ProxyAddr::new(UAC, 5060)),
-            "the keepalive must reach the UAC (R-URI), not bounce back to a worker via the stale cookie target="
+            "the keepalive must reach the UAC (R-URI), not bounce back via the cookie below"
         );
+    }
+
+    // The mirror direction with the double-record-route present: an EXTERNAL
+    // in-dialog request from the UAC carries the cookie on top (alice's route set
+    // is the reverse of the 2xx: cookie, then outbound). The proxy pops BOTH self
+    // RRs but reads direction from the top (cookie) → decode to the worker. The
+    // trailing `;outbound` half must NOT flip it to worker-outbound.
+    #[tokio::test]
+    async fn external_in_dialog_with_double_rr_decodes_to_worker() {
+        let reg: Arc<dyn WorkerRegistry> =
+            Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060))]));
+        let core = core(reg).await;
+
+        let raw = format!(
+            "BYE sip:b2bua@{W1_POD}:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKext;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:sipp@{UAC}:5060>;tag=uactag\r\n\
+To: <sip:service@{PROXY_VIP}:5060>;tag=svc\r\n\
+Call-ID: longcall-3@{UAC}\r\n\
+CSeq: 5 BYE\r\n\
+Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
+Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
+Content-Length: 0\r\n\r\n"
+        );
+        let SipMessage::Request(req) = CustomParser::default().parse(raw.as_bytes()).unwrap() else { unreachable!() };
+        let outcome = core.route_request(&req, "BYE", format!("{UAC}:5060").parse().unwrap()).await;
+
+        assert_eq!(
+            outcome.decision,
+            RoutingDecisionKind::DecodeForward,
+            "cookie on top → decode to the worker; the trailing ;outbound half must not flip direction"
+        );
+        assert_eq!(outcome.target, Some(ProxyAddr::new(W1_POD, 5060)));
     }
 }

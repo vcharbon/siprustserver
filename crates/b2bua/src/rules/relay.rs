@@ -13,7 +13,7 @@ use sip_message::generators::{
     self, ContactSpec, GenerateAckFor2xxOpts, GenerateOutOfDialogRequestOpts, GenerateResponseOpts,
     OutOfDialogMethod, ViaSpec,
 };
-use sip_message::message_helpers::{get_header, parse_uri_params};
+use sip_message::message_helpers::get_header;
 use sip_message::{hydrate_request, SipHeader as MsgHeader, SipMessage, SipRequest};
 use sip_txn::{IdGen, TxnKind};
 
@@ -104,31 +104,19 @@ pub fn dest_of(uri_host_port: &str) -> (String, u16) {
 ///      remote target. The generator already emitted the Route headers from the
 ///      route set; this fixes only the wire destination so in-dialog requests
 ///      toward a record-routing proxy traverse it instead of going pod-direct.
-///   2. **b-leg outbound-proxy fallback**: when the route set is empty, `leg_id`
-///      is a b-leg, and `config.b2b_outbound_proxy` is set, preload a loose
-///      `;outbound` `Route` at the proxy and redirect the wire destination there
-///      (the b-leg invariant: every B2BUA→callee message traverses the front
-///      proxy). The `;outbound` param is the proxy's deterministic
-///      worker-outbound classifier (`ProxyCore` §16.4).
+///   2. **b-leg outbound-proxy bootstrap**: when the route set is empty (the
+///      pre-confirmation initial INVITE), `leg_id` is a b-leg, and
+///      `config.b2b_outbound_proxy` is set, preload a *plain* loose `Route` at the
+///      proxy and redirect the wire destination there (the b-leg invariant: every
+///      B2BUA→callee message traverses the front proxy). The proxy classifies the
+///      initial INVITE worker-outbound from the top Via and double-record-routes
+///      the dialog, so in-dialog direction is carried by the proxy's own
+///      Record-Route thereafter — the worker stamps no `;outbound` (`ProxyCore`
+///      §16.4 / §16.12).
 ///
 /// `route_set` is the source dialog's route set in dialog order. For the a-leg
 /// the natural route set (from the inbound INVITE's Record-Route) carries the
 /// routing; `b2b_outbound_proxy` is a b-leg concept and is not applied there.
-/// Append `;outbound` to the top `Route` header's URI params (idempotent). The
-/// front proxy strips a top Route matching its own advertised host and, seeing
-/// `;outbound`, forwards to the Request-URI instead of decoding the stickiness
-/// cookie — the SNAT- and registry-independent worker-outbound discriminator.
-fn mark_top_route_outbound(req: &mut SipRequest) {
-    if let Some(h) = req.headers.iter_mut().find(|h| h.name.eq_ignore_ascii_case("route")) {
-        if !parse_uri_params(&h.value).contains_key("outbound") {
-            match h.value.rfind('>') {
-                Some(close) => h.value.insert_str(close, ";outbound"),
-                None => h.value.push_str(";outbound"),
-            }
-        }
-    }
-}
-
 pub fn apply_b_leg_egress(
     config: &B2buaConfig,
     leg_id: &str,
@@ -143,26 +131,27 @@ pub fn apply_b_leg_egress(
             // unwrap to the bare URI before reducing to host:port.
             let uri = generators::strip_route_uri_to_request_uri(first);
             let dest = dest_of(&strip_uri(&uri));
-            // Mark this worker-originated in-dialog request worker-outbound (same
-            // `;outbound` signal as the empty-route-set b-leg fallback below). The
-            // top Route is our own front-proxy Record-Route cookie; without the
-            // marker the proxy must infer "from a worker" from the SNAT-masqueraded
-            // source or the top Via via its registry — both MISS for a worker that
-            // has just rebooted onto a NEW pod IP the EndpointSlice informer has not
-            // yet learned, so the cookie's `target=<old-worker>` decode bounces the
-            // request back to a worker and the far endpoint never sees it. For the
-            // a-leg keepalive OPTIONS that is the steady-state long-call-loss class:
-            // no 200 → keepalive timeout → BYE → reclaimed dialog torn down. The
-            // `;outbound` param is registry- and IP-independent, so it survives the
-            // reboot. (CLAUDE.md/ADR-0014: no timer/settle dependency.)
-            mark_top_route_outbound(&mut req);
+            // The worker no longer stamps `;outbound`: the front proxy double-
+            // record-routes, so the worker-facing half of the dialog route set —
+            // captured from the dialog-creating message (§12.1.1/§12.1.2) — is
+            // ALREADY the proxy's own `;outbound` Record-Route on top. The proxy
+            // reads direction from its own self-issued RR (registry- and pod-IP-
+            // independent, so it survives a worker reboot), not from anything the
+            // worker adds. We just forward the route set verbatim to the proxy.
             return (req, dest);
         }
         // Strict routing is handled by the generator's R-URI rewrite; the wire
         // destination already resolves to the first route via `remote_target`.
         return (req, dest);
     }
-    // (2) Empty route set + b-leg outbound-proxy fallback.
+    // (2) Empty route set (pre-confirmation INVITE) + b-leg outbound-proxy
+    // bootstrap. There is no dialog route set yet, so preload a plain loose Route
+    // to the front proxy to get the initial INVITE there; the proxy classifies it
+    // worker-outbound from the top Via (the originating worker is live and
+    // registered at call set-up — the reboot window only affects in-dialog traffic
+    // of EXISTING calls, which the double-record-route above covers) and double-
+    // record-routes the dialog so every subsequent in-dialog request is direction-
+    // correct without a worker-stamped marker.
     if leg_id == "a" {
         return (req, dest);
     }
@@ -171,7 +160,7 @@ pub fn apply_b_leg_egress(
     };
     let route = MsgHeader {
         name: "Route".to_string(),
-        value: format!("<sip:{host}:{port};lr;outbound>"),
+        value: format!("<sip:{host}:{port};lr>"),
     };
     req.headers.insert(0, route);
     (req, (host, port))
@@ -237,9 +226,11 @@ pub fn build_b_leg(
     };
     let invite = generators::generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
     // Behind the front proxy, the b-leg INVITE traverses the proxy: preload a
-    // `;outbound` Route and make the wire destination the proxy (R-URI stays the
-    // callee). `wire_dest` drives the client transaction's send + retransmits;
-    // the preloaded Route rides the snapshot so retransmits carry it too.
+    // plain loose Route and make the wire destination the proxy (R-URI stays the
+    // callee). The proxy classifies the initial INVITE worker-outbound from the
+    // top Via and double-record-routes the dialog. `wire_dest` drives the client
+    // transaction's send + retransmits; the preloaded Route rides the snapshot so
+    // retransmits carry it too.
     let (invite, wire_dest) = apply_b_leg_egress(config, leg_id, &[], invite, dest.clone());
 
     let dialog = Dialog {
@@ -429,6 +420,7 @@ pub fn strip_uri(uri: &str) -> String {
 #[cfg(test)]
 mod egress_tests {
     use super::*;
+    use sip_message::message_helpers::parse_uri_params;
     use sip_message::parser::custom::CustomParser;
     use sip_message::SipParser;
 
@@ -453,14 +445,36 @@ Content-Length: 0\r\n\r\n"
         ))
     }
 
-    // A worker-originated in-dialog request whose route set loose-routes back
-    // through our front proxy (the proxy's Record-Route cookie) must leave egress
-    // marked `;outbound` — the registry/IP-independent worker-outbound signal the
-    // proxy classifies on. This is the reclaimed-long-call-loss fix: without it a
-    // worker rebooted onto a new pod IP has its keepalive OPTIONS decoded by the
-    // cookie and bounced back to a worker instead of reaching the UAC.
+    // A worker-originated in-dialog request loose-routes back through our front
+    // proxy on the route set captured at dialog set-up. The worker no longer
+    // stamps anything: under double-record-routing the worker-facing half of that
+    // route set is ALREADY the proxy's own `;outbound` Record-Route, so egress
+    // just forwards the top Route verbatim and resolves the wire destination to
+    // it. (The proxy reads direction from its own self-issued RR — registry- and
+    // pod-IP-independent, so it survives a worker reboot.)
     #[test]
-    fn worker_in_dialog_loose_route_is_marked_outbound() {
+    fn worker_in_dialog_loose_route_is_forwarded_verbatim() {
+        let route = "<sip:10.0.0.9:5060;outbound;lr>";
+        let (out, dest) = apply_b_leg_egress(
+            &B2buaConfig::default(),
+            "a",
+            &[route.to_string()],
+            in_dialog_options(route),
+            ("10.244.2.7".to_string(), 5060),
+        );
+        let top_route = get_header(&out.headers, "route").expect("route header");
+        // The top Route is unchanged (the proxy issued the `;outbound`, not us).
+        assert_eq!(top_route, route, "egress must forward the captured route set verbatim");
+        // Loose route → wire destination is the proxy (top route); R-URI unchanged.
+        assert_eq!(dest, ("10.0.0.9".to_string(), 5060));
+    }
+
+    // The worker does NOT add `;outbound` to a cookie route it did not issue: a
+    // route set whose top is the proxy's stickiness cookie (no `;outbound`) is
+    // forwarded untouched (this is the EXTERNAL-facing half — it should never be
+    // on top of a worker-originated request, but egress must not mutate it).
+    #[test]
+    fn worker_in_dialog_does_not_stamp_outbound() {
         let route = "<sip:10.0.0.9:5060;target=10.244.1.5:5060;lr>";
         let (out, dest) = apply_b_leg_egress(
             &B2buaConfig::default(),
@@ -471,29 +485,34 @@ Content-Length: 0\r\n\r\n"
         );
         let top_route = get_header(&out.headers, "route").expect("route header");
         assert!(
-            parse_uri_params(top_route).contains_key("outbound"),
-            "worker in-dialog loose-route request must be marked ;outbound, got {top_route}"
+            !parse_uri_params(top_route).contains_key("outbound"),
+            "egress must not stamp ;outbound; got {top_route}"
         );
-        // Loose route → wire destination is the proxy (top route); R-URI unchanged.
         assert_eq!(dest, ("10.0.0.9".to_string(), 5060));
     }
 
-    // Idempotent: a route that already carries `;outbound` is not double-stamped.
+    // The pre-confirmation b-leg INVITE (empty route set) preloads a PLAIN loose
+    // Route to the outbound proxy — no `;outbound`. The proxy classifies the
+    // initial INVITE worker-outbound from the top Via (the originating worker is
+    // live at set-up) and double-record-routes the dialog from there.
     #[test]
-    fn outbound_marking_is_idempotent() {
-        let route = "<sip:10.0.0.9:5060;lr;outbound>";
-        let (out, _dest) = apply_b_leg_egress(
-            &B2buaConfig::default(),
-            "a",
-            &[route.to_string()],
-            in_dialog_options(route),
-            ("10.244.2.7".to_string(), 5060),
+    fn b_leg_bootstrap_preloads_plain_loose_route() {
+        let mut config = B2buaConfig::default();
+        config.b2b_outbound_proxy = Some(("10.0.0.9".to_string(), 5060));
+        let invite = parse(
+            "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.244.1.5:5060;branch=z9hG4bKb;lg=b\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:svc@10.0.0.9:5060>;tag=svc\r\n\
+To: <sip:bob@10.244.2.7:5060>\r\n\
+Call-ID: c2@x\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n",
         );
-        let top_route = get_header(&out.headers, "route").expect("route header");
-        assert_eq!(
-            top_route.matches("outbound").count(),
-            1,
-            "must not double-stamp the outbound param: {top_route}"
-        );
+        let (out, dest) = apply_b_leg_egress(&config, "b-1", &[], invite, ("10.244.2.7".to_string(), 5060));
+        let top_route = get_header(&out.headers, "route").expect("preloaded route");
+        assert_eq!(top_route, "<sip:10.0.0.9:5060;lr>", "bootstrap preload must be a plain loose Route");
+        assert!(!parse_uri_params(top_route).contains_key("outbound"), "no ;outbound on the bootstrap preload");
+        assert_eq!(dest, ("10.0.0.9".to_string(), 5060), "wire destination is the outbound proxy");
     }
 }
