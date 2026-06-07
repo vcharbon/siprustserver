@@ -169,11 +169,62 @@ the `init` clause. Seeding rides the same audited `RuleAction`/effects path as
 every later transition — there is no privileged back-door that writes call state
 outside the executor.
 
+## Decision X9 — A rule declares its tracked side effects; the type system forces it
+
+A machine-bound rule **declares the side effects its handler may emit**, the same
+declare-then-verify contract X1 already uses for `transitions`. The declaration is
+**type-forced**: `sm_rule!` requires the `effects` field (a service rule that omits
+it does not compile), and a *total* `RuleAction::effect_kind` maps every action to
+a category (the compiler's exhaustiveness check forces each present and future
+action into one). The executor verifies the actually-emitted actions are a subset
+of the declared effects **by category** (`emitted ⊆ declared`); payloads are
+diagram labels only, so a handler targeting a dynamically-named leg still
+satisfies its declaration. Drift is a debug-build panic (a test failure), never a
+live-worker panic — identical to `check_declared_transition`.
+
+The taxonomy is cut by the **attribution principle** — *who authors the message*,
+not which bytes hit the wire — yielding exactly three **tracked side effects**:
+
+- **leg message** — a SIP message the service rule authors toward a leg
+  (originate / relay / respond / provisional); carries the canonical `Method` +
+  a free label. The rule owns the semantic payload; the core engine fills the
+  mechanical SIP layer (Contact / From-tag / Via / CSeq).
+- **call-lifecycle command** — the one service → global hop of X3
+  (`BeginTermination` / `TerminateCall` / `Merge` / `Split`); the global call
+  machine owns any wire messages it then generates (they belong on *its* diagram).
+- **guard timer** — a service safety/watchdog timer the rule arms or cancels.
+
+Two `RuleAction`s are deliberately **not** side effects: `SetState` *is* the
+transition (drawn as the edge), and `ClearState` is **machine deactivation**
+(drawn as the transition to the terminal `[*]` — see X4). Pure data bookkeeping
+(CDR events, tag-map / typed-slice writes, async-HTTP kicks) is **auto-allowed**:
+categorised for exhaustiveness but neither declared nor rendered.
+
+A coarser single "call-lifecycle command swallows leg creation/teardown" cut (per
+the literal X3 subset, which lists `CreateLeg`/`CancelLeg`) was rejected: it would
+hide the precise outgoing messages a rule author needs to see (the MRF INVITE, the
+re-INVITEs to A and C). `CreateLeg` is attributed to the service as a *leg message*
+(method `INVITE`) because the rule initiates the leg and authors its INVITE
+payload; the global machine owns only leg *registration* and the mechanical layer.
+
+This assumes a **single canonical `sip-message::Method`** (in- and out-of-dialog,
+shared by every crate) for the leg-message method. Today methods are fragmented
+(`InDialogMethod` + `OutOfDialogMethod` + bare `String`); unifying them is a
+**prerequisite cleanup tracked independently** (see the consequences) — this ADR
+assumes it has landed.
+
 ## Consequences
 
 - `RuleDefinition` gains optional `machine` / `active_states` / `transitions`
   fields; existing core rules leave them unset and are unaffected (always
   candidates).
+- `RuleDefinition` gains a required-for-service-rules `effects` field
+  (`RuleDefinition::core` defaults it empty); `RuleAction` gains `ClearState`
+  (machine deactivation) and a total `effect_kind`.
+- **Prerequisite cleanup (independent):** consolidate `InDialogMethod` +
+  `OutOfDialogMethod` + bare-`String` methods into a single canonical
+  `sip-message::Method` shared by all crates. The leg-message effect assumes it;
+  it is *not* part of this work and lands before it.
 - `Call` gains `sm_cursors`; the global call machine's cursor projects from
   `CallModelState`, so the termination invariants are untouched.
 - `xtask` depends on `b2bua-runner` for doc-gen (it must see the composed

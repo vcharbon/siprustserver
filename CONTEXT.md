@@ -291,6 +291,55 @@ associated *data* only, never the label.
 _Avoid_: storing the state label in the service's data slice as well (the
 mirror/slice divergence the single home exists to prevent).
 
+**Tracked side effect**:
+An outward consequence a service rule's handler emits that the framework makes a
+service **declare** (type-forced via `sm_rule!`), **verifies** against what the
+handler actually emits (`emitted ⊆ declared`, by category — the same
+declare-then-check contract as `transitions`), and **renders** on the generated
+diagram. There are exactly three: a **leg message**, a **call-lifecycle
+command**, and a **guard timer**. They are categorised by the **attribution
+principle** — *who authors the message*, not which bytes hit the wire:
+a message the service rule authors is a *leg message* it owns; a wire message the
+**global call machine** generates after the service merely commanded it is the
+*global* machine's effect, not the service's.
+_Avoid_: calling a cursor move or a local data write a "side effect" — see below.
+
+**Leg message**:
+A **tracked side effect**: a SIP message the service rule authors toward a leg —
+originated (the MRF INVITE, an MSCML `INFO`, a re-INVITE to A/C), relayed
+(transparent passthrough), a final response, or an unreliable provisional (early
+media). It carries the **canonical `Method`** (the shared sip-stack method type)
+plus a free, **unenforced label** (`"MSCML <play>"`, `"re-INVITE → A"`). The rule
+owns the *semantic* payload (method, body, target, the headers it cares about);
+the **core engine** fills the mechanical SIP layer (Contact, From-tag, Via, CSeq).
+_Avoid_: attributing a leg message to the service when the *global call machine*
+generated it (e.g. the BYEs that fall out of a `call-lifecycle command`).
+
+**Call-lifecycle command**:
+A **tracked side effect**: the one synchronous **service → global** hop (ADR-0016
+X3) — the call-lifecycle subset of the action union
+(`BeginTermination`/`TerminateCall`/`Merge`/`Split`). The service emits the
+command; the **global call machine** interprets it and owns any wire messages it
+then generates (those appear on the *global* diagram, never re-documented on the
+service's).
+_Avoid_: re-listing the global machine's downstream BYEs as service leg messages.
+
+**Guard timer**:
+A **tracked side effect**: a service safety/watchdog timer the rule **arms** (or
+cancels) — e.g. the REFER re-INVITE-answer watchdog. (Re-uses the existing
+`TimerType`; "armed" is the canonical verb, per the HA glossary above.)
+
+**Machine deactivation**:
+A machine leaving the call's active set by having its **cursor removed**
+(`ClearState`, the declarative inverse of `SetState`). It is **not** a tracked
+side effect — it is the machine's own terminal move, drawn as the transition to
+the terminal state `[*]`. A `SetState` is likewise not a side effect: it *is* the
+transition, already drawn as the edge. Pure data bookkeeping (CDR events, tag-map
+writes, typed-slice writes, async-HTTP kicks) is **auto-allowed** — invisible to
+the diagram and not something an author declares.
+_Avoid_: "clear state" in prose for the *concept* (say a machine **deactivates**
+/ reaches its **terminal** state); `ClearState` is the action that realises it.
+
 **K8sMembership**:
 The real `topology::Membership` source (S11): a kube EndpointSlice informer over
 the headless worker Service. *Ready* endpoints → `Peer{ordinal = pod name, host
