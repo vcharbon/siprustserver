@@ -128,6 +128,7 @@ name = "b2bua"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "b2bua-sdk",
  "call",
  "call-limiter",
  "http-net",
@@ -181,6 +182,16 @@ dependencies = [
  "sip-txn",
  "tokio",
  "topology",
+]
+
+[[package]]
+name = "b2bua-sdk"
+version = "0.1.0"
+dependencies = [
+ "call",
+ "serde_json",
+ "sip-message",
+ "sip-txn",
 ]
 
 [[package]]
