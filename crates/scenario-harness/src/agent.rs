@@ -887,8 +887,15 @@ impl ClientInvite {
     /// later ACK/BYE route and address correctly. Returns the response.
     pub async fn expect(&mut self, status: u16) -> SipResponse {
         let resp = expect_response(&self.agent, status).await;
-        if self.dialog.remote_tag.is_empty() {
-            if let Some(tag) = &resp.to.tag {
+        // RFC 3261 §13.2.2.4 / §12.1: the 2xx to the INVITE establishes the
+        // dialog, so its To-tag is THE confirmed remote tag — even when an
+        // earlier provisional from a *different* fork (RFC 3261 §12.1.2) seeded
+        // another. A provisional only seeds the (early) remote tag when none is
+        // known yet; the final 2xx overrides it so the ACK and every subsequent
+        // in-dialog request address the dialog the 2xx actually confirmed.
+        let is_2xx_invite = (200..300).contains(&resp.status) && resp.cseq.method == "INVITE";
+        if let Some(tag) = &resp.to.tag {
+            if is_2xx_invite || self.dialog.remote_tag.is_empty() {
                 self.dialog.remote_tag = tag.clone();
             }
         }

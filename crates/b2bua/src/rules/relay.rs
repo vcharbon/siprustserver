@@ -402,9 +402,14 @@ pub fn ack_b_leg(
     let dialog = leg.dialogs.first()?;
     let gen_dialog = to_gen_dialog(&dialog.sip);
     let branch = id_gen.new_branch();
+    // RFC 3261 §13.2.2.4: the ACK for a 2xx reuses the CSeq of the INVITE it
+    // acknowledges — not the dialog's running `local_cseq`, which an intervening
+    // early PRACK/UPDATE (or a later in-dialog request) has advanced past the
+    // INVITE. Recover it from the cached INVITE transaction handle.
+    let ack_cseq = acked_invite_cseq(dialog).unwrap_or_else(|| dialog.sip.local_cseq.max(0) as u32);
     let opts = GenerateAckFor2xxOpts {
         via: Some(leg_via(config, call_ref, &leg.leg_id, branch)),
-        cseq: Some(dialog.sip.local_cseq.max(0) as u32),
+        cseq: Some(ack_cseq),
         body,
         content_type,
         ..Default::default()
@@ -419,6 +424,21 @@ pub fn ack_b_leg(
         label: format!("ACK → {}", leg.leg_id),
         leg_id: Some(leg.leg_id.clone()),
     })
+}
+
+/// The CSeq sequence number of the INVITE last sent on this dialog (initial or
+/// re-INVITE), recovered from the cached client-transaction handle so the
+/// 2xx ACK can echo it (RFC 3261 §13.2.2.4).
+fn acked_invite_cseq(dialog: &Dialog) -> Option<u32> {
+    use sip_message::SipParser;
+    let handle = dialog.ext.pending_invite_txn.as_ref()?;
+    match sip_message::parser::custom::CustomParser::new()
+        .parse(&handle.original_invite)
+        .ok()?
+    {
+        SipMessage::Request(r) => Some(r.cseq.seq),
+        _ => None,
+    }
 }
 
 /// The address a response to `req` is sent to (its topmost Via sent-by).

@@ -193,11 +193,161 @@ fn cseq_violation_msg(
     }
 }
 
+/// Top (first) `Via` branch token from a raw header list — the transaction
+/// identifier a response echoes from the request it answers (RFC 3261 §8.1.1.7,
+/// §17). Works for both requests and responses.
+fn top_via_branch_headers(headers: &[sip_message::SipHeader]) -> Option<String> {
+    let top = get_headers(headers, "via").into_iter().next()?;
+    parse_via_params(top).branch.filter(|b| !b.is_empty())
+}
+
+/// **RFC 3261 §8.1.3.5 / §17 — a response's CSeq MUST equal its request's.** A
+/// response is matched to the client transaction by the topmost `Via` branch,
+/// and §8.1.3.5 requires the response to copy the request's `CSeq` (sequence
+/// number *and* method) verbatim. So for every transaction (keyed by that
+/// branch) the responses' `(CSeq number, method)` must be one the requests on
+/// that branch actually carried.
+///
+/// This is the teeth for a B2BUA that, failing to correlate an in-dialog
+/// response to its pending request (e.g. a forked early dialog whose PRACK/UPDATE
+/// 200 was looked up on the wrong fork), regenerates it on the *INVITE* server
+/// transaction — emitting a spurious `200 (INVITE)` carrying the PRACK/UPDATE's
+/// CSeq number on the INVITE's branch. A real UAC discards a response whose CSeq
+/// does not match the transaction it sent (the test UA accepts whatever 200 it
+/// sees, hiding the corruption). Conservative: a branch whose *request* was never
+/// observed is skipped (cannot judge), so only a genuine mismatch flags.
+pub struct ResponseCseqMatchesTransactionRule;
+
+impl CrossMessageAuditRule for ResponseCseqMatchesTransactionRule {
+    fn name(&self) -> &'static str {
+        "rfc3261.responseCseqMatchesTransaction"
+    }
+
+    fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        let parser = CustomParser::new();
+        // top-Via branch -> the set of (CSeq number, method) seen on REQUESTS.
+        let mut req_cseqs: HashMap<String, HashSet<(u32, String)>> = HashMap::new();
+        for s in events {
+            let SignalingNetworkEvent::RecvItem { packet, .. } = &s.event else {
+                continue;
+            };
+            if let Ok(SipMessage::Request(req)) = parser.parse(&packet.raw) {
+                if let Some(branch) = top_via_branch_headers(&req.headers) {
+                    req_cseqs
+                        .entry(branch)
+                        .or_default()
+                        .insert((req.cseq.seq, req.cseq.method.as_str().to_string()));
+                }
+            }
+        }
+        let mut findings = Vec::new();
+        for s in events {
+            let SignalingNetworkEvent::RecvItem { bind_key, packet } = &s.event else {
+                continue;
+            };
+            let Ok(SipMessage::Response(resp)) = parser.parse(&packet.raw) else {
+                continue;
+            };
+            let Some(branch) = top_via_branch_headers(&resp.headers) else {
+                continue;
+            };
+            // Never saw the request for this branch → cannot judge (the other
+            // side may not be recorded). Only a positive mismatch is a finding.
+            let Some(reqs) = req_cseqs.get(&branch) else {
+                continue;
+            };
+            let pair = (resp.cseq.seq, resp.cseq.method.as_str().to_string());
+            if !reqs.contains(&pair) {
+                findings.push((
+                    bind_key.clone(),
+                    format!(
+                        "response CSeq does not match its transaction (RFC 3261 §8.1.3.5): \
+                         {} {} response carries CSeq {} {} on Via branch {branch}, but no request \
+                         on that transaction had that CSeq — a real UAC drops a response whose \
+                         CSeq/method does not match the request it sent (the test UA accepts it, \
+                         hiding the bug)",
+                        resp.status, resp.reason, resp.cseq.seq, resp.cseq.method.as_str(),
+                    ),
+                ));
+            }
+        }
+        findings
+    }
+}
+
+/// **RFC 3261 §13.2.2.4 — the ACK for a 2xx reuses the INVITE's CSeq.** The ACK
+/// for a 2xx (and the hop-by-hop ACK for a non-2xx final) carries the same CSeq
+/// sequence number as the INVITE it acknowledges. So within a request stream
+/// (`receiving endpoint, Call-ID, From-tag`) every ACK's CSeq number must be one
+/// that an INVITE on that stream actually used.
+///
+/// The in-dialog CSeq rule ([`CSeqInDialogOrderRule`]) deliberately *exempts*
+/// ACK/CANCEL (they legitimately reuse a CSeq), so it cannot catch an ACK that
+/// reuses the *wrong* number. This rule does: a B2BUA that builds the 2xx ACK
+/// from the dialog's running `local_cseq` — advanced past the INVITE by an early
+/// PRACK/UPDATE — sends `ACK CSeq 3` for an `INVITE CSeq 1`, which a real UAS
+/// cannot match to the INVITE server transaction (§13.2.2.4 / §17.2.1).
+pub struct AckCseqMatchesInviteRule;
+
+impl CrossMessageAuditRule for AckCseqMatchesInviteRule {
+    fn name(&self) -> &'static str {
+        "rfc3261.ackCseqMatchesInvite"
+    }
+
+    fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        let parser = CustomParser::new();
+        // (receiving bind, Call-ID, From-tag) -> INVITE CSeq numbers seen so far.
+        let mut invite_cseqs: HashMap<(LaneKey, String, String), HashSet<u32>> = HashMap::new();
+        let mut findings = Vec::new();
+        for s in events {
+            let SignalingNetworkEvent::RecvItem { bind_key, packet } = &s.event else {
+                continue;
+            };
+            let Ok(SipMessage::Request(req)) = parser.parse(&packet.raw) else {
+                continue;
+            };
+            let (Some(call_id), Some(from_tag)) = (
+                get_header(&req.headers, "call-id").map(str::to_string),
+                get_header(&req.headers, "from").and_then(extract_tag),
+            ) else {
+                continue;
+            };
+            let key = (bind_key.clone(), call_id, from_tag);
+            let method = req.method.as_str();
+            if method.eq_ignore_ascii_case("INVITE") {
+                invite_cseqs.entry(key).or_default().insert(req.cseq.seq);
+            } else if method.eq_ignore_ascii_case("ACK") {
+                // Only judge when an INVITE was seen on this stream (an ACK always
+                // follows its INVITE on the wire). No INVITE → cannot judge.
+                if let Some(seen) = invite_cseqs.get(&key) {
+                    if !seen.contains(&req.cseq.seq) {
+                        findings.push((
+                            bind_key.clone(),
+                            format!(
+                                "ACK CSeq does not match any INVITE (RFC 3261 §13.2.2.4): \
+                                 ACK CSeq {} on Call-ID={} from-tag={} acknowledges no INVITE the \
+                                 stream sent (an INVITE 2xx ACK reuses the INVITE's CSeq; a running \
+                                 dialog CSeq advanced by an intervening PRACK/UPDATE is wrong) — a \
+                                 real UAS cannot match it to the INVITE server transaction",
+                                req.cseq.seq, key.1, key.2,
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        findings
+    }
+}
+
 /// The built-in RFC 3261 cross-message audit rules every test harness installs by
-/// default (see [`crate::with_all_contracts`]). Currently the in-dialog CSeq
-/// ordering check; add further wire invariants here.
+/// default (see [`crate::with_all_contracts`]). Add further wire invariants here.
 pub fn rfc_cross_message_rules() -> Vec<Arc<dyn CrossMessageAuditRule>> {
-    vec![Arc::new(CSeqInDialogOrderRule)]
+    vec![
+        Arc::new(CSeqInDialogOrderRule),
+        Arc::new(ResponseCseqMatchesTransactionRule),
+        Arc::new(AckCseqMatchesInviteRule),
+    ]
 }
 
 #[cfg(test)]
@@ -252,6 +402,22 @@ mod tests {
              Call-ID: {call_id}\r\n\
              CSeq: {cseq} {method}\r\n\
              Max-Forwards: 70\r\n\
+             Content-Length: 0\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// A minimal parseable response carrying a chosen `(CSeq, method)` and a
+    /// top-Via `branch` — to model the response a UAS sends back on a given
+    /// client transaction.
+    fn resp(status: u16, cseq: u32, method: &str, branch: &str) -> Vec<u8> {
+        format!(
+            "SIP/2.0 {status} OK\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5091;branch={branch}\r\n\
+             From: <sip:b2bua@127.0.0.1>;tag=ft\r\n\
+             To: <sip:bob@127.0.0.1>;tag=btag\r\n\
+             Call-ID: cid-1@127.0.0.1\r\n\
+             CSeq: {cseq} {method}\r\n\
              Content-Length: 0\r\n\r\n"
         )
         .into_bytes()
@@ -416,6 +582,78 @@ mod tests {
             recv_at("bob", req_to("BYE", "cid-1", "ft", 4, "z9hG4bK-b", Some("fork1")), 4),
         ];
         assert!(CSeqInDialogOrderRule.check(&evs).is_empty());
+    }
+
+    // ── ResponseCseqMatchesTransactionRule (RFC 3261 §8.1.3.5) ──────────────
+
+    #[test]
+    fn response_cseq_matching_its_request_is_clean() {
+        // PRACK CSeq 2 on branch brP, answered by 200 CSeq 2 PRACK on the same
+        // branch — the response copies the request's CSeq verbatim.
+        let evs = vec![
+            recv_at("b2bua", req("PRACK", "cid-1@127.0.0.1", "ft", 2, "z9hG4bK-brP"), 0),
+            recv_at("alice", resp(200, 2, "PRACK", "z9hG4bK-brP"), 1),
+        ];
+        assert!(ResponseCseqMatchesTransactionRule.check(&evs).is_empty());
+    }
+
+    #[test]
+    fn response_cseq_mismatch_on_branch_is_flagged() {
+        // The forking corruption: alice's INVITE is CSeq 1 on branch brI, but a
+        // `200 (INVITE)` carrying CSeq 2 (the PRACK's number, mis-regenerated on
+        // the INVITE server txn) comes back on that same branch — no INVITE
+        // request had CSeq 2, so the response cannot belong to this transaction.
+        let evs = vec![
+            recv_at("b2bua", req("INVITE", "cid-1@127.0.0.1", "ft", 1, "z9hG4bK-brI"), 0),
+            recv_at("alice", resp(200, 2, "INVITE", "z9hG4bK-brI"), 1),
+        ];
+        let findings = ResponseCseqMatchesTransactionRule.check(&evs);
+        assert_eq!(findings.len(), 1, "the CSeq/transaction mismatch must be flagged");
+        assert!(findings[0].1.contains("does not match its transaction"), "{}", findings[0].1);
+    }
+
+    #[test]
+    fn response_on_unseen_request_branch_is_skipped() {
+        // A response whose request branch was never recorded cannot be judged —
+        // no false positive.
+        let evs = vec![recv_at("alice", resp(200, 7, "OPTIONS", "z9hG4bK-unseen"), 0)];
+        assert!(ResponseCseqMatchesTransactionRule.check(&evs).is_empty());
+    }
+
+    // ── AckCseqMatchesInviteRule (RFC 3261 §13.2.2.4) ───────────────────────
+
+    #[test]
+    fn ack_reusing_the_invite_cseq_is_clean() {
+        // INVITE 1 / ACK 1, then re-INVITE 4 / ACK 4: each ACK reuses its
+        // INVITE's CSeq — clean.
+        let evs = vec![
+            recv_at("bob", req("INVITE", "cid-1@127.0.0.1", "ft", 1, "z9hG4bK-brI1"), 0),
+            recv_at("bob", req("ACK", "cid-1@127.0.0.1", "ft", 1, "z9hG4bK-brA1"), 1),
+            recv_at("bob", req("INVITE", "cid-1@127.0.0.1", "ft", 4, "z9hG4bK-brI2"), 2),
+            recv_at("bob", req("ACK", "cid-1@127.0.0.1", "ft", 4, "z9hG4bK-brA2"), 3),
+        ];
+        assert!(AckCseqMatchesInviteRule.check(&evs).is_empty());
+    }
+
+    #[test]
+    fn ack_reusing_a_non_invite_cseq_is_flagged() {
+        // The bug: INVITE 1, then an early PRACK/UPDATE advanced the dialog CSeq,
+        // so the 2xx ACK lands at CSeq 3 — a number no INVITE used. A real UAS
+        // cannot match it to the INVITE server transaction (§13.2.2.4).
+        let evs = vec![
+            recv_at("bob", req("INVITE", "cid-1@127.0.0.1", "ft", 1, "z9hG4bK-brI"), 0),
+            recv_at("bob", req("ACK", "cid-1@127.0.0.1", "ft", 3, "z9hG4bK-brA"), 1),
+        ];
+        let findings = AckCseqMatchesInviteRule.check(&evs);
+        assert_eq!(findings.len(), 1, "the ACK reusing a non-INVITE CSeq must be flagged");
+        assert!(findings[0].1.contains("acknowledges no INVITE"), "{}", findings[0].1);
+    }
+
+    #[test]
+    fn ack_without_any_invite_seen_is_skipped() {
+        // No INVITE on the stream → cannot judge the ACK; no false positive.
+        let evs = vec![recv_at("bob", req("ACK", "cid-1@127.0.0.1", "ft", 9, "z9hG4bK-brA"), 0)];
+        assert!(AckCseqMatchesInviteRule.check(&evs).is_empty());
     }
 
     #[test]

@@ -762,7 +762,19 @@ impl<'a> ActionExecutor<'a> {
         let source_leg_id = ctx.source_leg_id.to_string();
 
         // ── Pending transparent-relay correlation (§8.1.3.3) ──
-        if let Some(src_dialog) = ctx.source_dialog().cloned() {
+        // Resolve the *exact* source dialog the response belongs to by its
+        // To-tag (the responder's tag = this leg's dialog `remote_tag`). Under
+        // forking (RFC 3261 §12.1.2) the source leg holds several early dialogs;
+        // `source_dialog()` would return `dialogs.first()` (fork 1), so fork 2's
+        // PRACK/UPDATE response would miss its pending entry and fall through to
+        // the INVITE-response regeneration below — corrupting a `200 (PRACK)` /
+        // `200 (UPDATE)` into a spurious `200 (INVITE)` toward the caller.
+        let src_dialog = ctx
+            .source_leg()
+            .and_then(|leg| call::helpers::find_dialog_by_to_tag(leg, &to_tag))
+            .or_else(|| ctx.source_dialog())
+            .cloned();
+        if let Some(src_dialog) = src_dialog {
             if let Some(pending) = find_pending_request(&src_dialog, cseq_num).cloned() {
                 let contact = relay::leg_contact(self.config, &call.call_ref, target_leg);
                 let opts = GenerateRelayedResponseOpts {
@@ -796,12 +808,16 @@ impl<'a> ActionExecutor<'a> {
             }
         }
 
-        // ── Reliable-1xx early-dialog tracking (b-leg) + a-facing tag map ──
+        // ── b-leg INVITE 1xx/2xx → per-fork a-facing tag map ──
         // Each callee early dialog (forking → several per b-leg) gets its own
-        // a-facing tag so the caller sees independent early dialogs; the 1xx is
-        // relayed under that per-fork tag (RFC 3261 §12; source confirm/relay).
+        // a-facing tag so the caller sees independent early dialogs; the response
+        // is relayed under that per-fork tag (RFC 3261 §12; source confirm/relay).
+        // The 2xx is included so that when a *non-first* fork wins, the confirmed
+        // dialog the caller sees carries the WINNING fork's a-tag — not the first
+        // fork's primary (RFC 3261 §13.2.2.4) — so the caller's ACK/in-dialog
+        // requests address the dialog the B2BUA actually established.
         if cseq_method == "INVITE"
-            && (100..200).contains(&resp.status)
+            && (100..300).contains(&resp.status)
             && !to_tag.is_empty()
             && source_leg_id != "a"
         {
@@ -843,6 +859,15 @@ impl<'a> ActionExecutor<'a> {
                 passthrough,
             );
             fx.outbound.push(effect);
+            return;
+        }
+
+        // A non-INVITE response that reached here failed pending correlation
+        // (§8.1.3.3): there is no a-leg transaction to answer. Regenerating it as
+        // an INVITE response would emit a spurious `200 (INVITE)` toward the
+        // caller (the exact forking corruption above). Drop it instead — only an
+        // INVITE response legitimately regenerates on the a-leg server txn.
+        if cseq_method != "INVITE" {
             return;
         }
 
@@ -902,7 +927,15 @@ impl<'a> ActionExecutor<'a> {
                 }
             } else {
                 // Additional fork: append a fresh independent early dialog
-                // (RFC 3261 §12.1.2). Its INVITE handle falls back to the leg's.
+                // (RFC 3261 §12.1.2). All forks share the one INVITE the B2BUA
+                // sent, so this dialog inherits the leg's initial-INVITE handle —
+                // otherwise its 2xx ACK (and RAck CSeq) would fall back to the
+                // running `local_cseq`, which any early PRACK/UPDATE has already
+                // advanced past the INVITE (§13.2.2.4 wants the INVITE's CSeq).
+                let leg_handle = leg
+                    .dialogs
+                    .iter()
+                    .find_map(|d| d.ext.pending_invite_txn.clone());
                 let ctx = call::helpers::MakeDialogLegCtx {
                     call_id: &leg.call_id,
                     local_uri: leg.local_uri.as_deref().unwrap_or(""),
@@ -911,6 +944,7 @@ impl<'a> ActionExecutor<'a> {
                     remote_tag: to_tag,
                 };
                 let mut d = call::helpers::make_empty_dialog(&ctx, invite_cseq);
+                d.ext.pending_invite_txn = leg_handle;
                 if !contact.is_empty() {
                     d.sip.remote_target = contact.clone();
                 }
@@ -954,17 +988,37 @@ impl<'a> ActionExecutor<'a> {
                 .collect();
         route_set.reverse();
         if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
-            if let Some(d) = leg.dialogs.first_mut() {
-                if !remote_tag.is_empty() {
-                    d.sip.remote_tag = remote_tag;
+            // Forking (RFC 3261 §12.1.2): the 2xx confirms exactly ONE early
+            // dialog — the one whose callee tag it carries. Promote *that* fork
+            // (it already holds its own CSeq sequence, advanced by any early
+            // PRACK/UPDATE) and discard the losing early dialogs. Confirming
+            // `dialogs.first()` unconditionally would resurrect fork 1's stale
+            // CSeq under fork 2's tag, so the next in-dialog request re-uses a
+            // number the winning fork already spent (§12.2.1.1 violation).
+            let idx = leg
+                .dialogs
+                .iter()
+                .position(|d| !remote_tag.is_empty() && d.sip.remote_tag == remote_tag)
+                .or_else(|| leg.dialogs.iter().position(|d| d.sip.remote_tag.is_empty()))
+                .unwrap_or(0);
+            if idx < leg.dialogs.len() {
+                {
+                    let d = &mut leg.dialogs[idx];
+                    if !remote_tag.is_empty() {
+                        d.sip.remote_tag = remote_tag;
+                    }
+                    if !remote_target.is_empty() {
+                        d.sip.remote_target = remote_target;
+                    }
+                    if !route_set.is_empty() {
+                        d.sip.route_set = route_set;
+                    }
+                    d.ext.remote_cseq = Some(resp.cseq.seq as i64);
                 }
-                if !remote_target.is_empty() {
-                    d.sip.remote_target = remote_target;
-                }
-                if !route_set.is_empty() {
-                    d.sip.route_set = route_set;
-                }
-                d.ext.remote_cseq = Some(resp.cseq.seq as i64);
+                // One dialog survives confirmation (model: "one survives after
+                // confirmed") — drop the losing forks so per-call state is bounded.
+                let winner = leg.dialogs.remove(idx);
+                leg.dialogs = vec![winner];
             }
             leg.state = LegState::Confirmed;
             leg.disposition = LegDisposition::Bridged;
@@ -972,7 +1026,16 @@ impl<'a> ActionExecutor<'a> {
         // Reuse the a-facing tag pre-seeded for this callee (relayFirst18x's
         // `force-tag-consistency`) so the 200 OK To-tag matches the first 180.
         let preferred = find_by_b_tag(call, leg_id, &remote_tag_clone).map(|m| m.a_tag.clone());
-        self.ensure_a_dialog_with(call, preferred);
+        self.ensure_a_dialog_with(call, preferred.clone());
+        // When a *non-first* fork wins, the a-dialog was already created under
+        // the first fork's primary tag; adopt the winning fork's a-face tag so
+        // the confirmed a-dialog matches the To-tag the caller saw on the 2xx
+        // (and any B2BUA-originated a-facing in-dialog request uses it).
+        if let (Some(pref), Some(d)) = (preferred, call.a_leg.dialogs.first_mut()) {
+            if !pref.is_empty() {
+                d.sip.local_tag = pref;
+            }
+        }
         *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
     }
 
