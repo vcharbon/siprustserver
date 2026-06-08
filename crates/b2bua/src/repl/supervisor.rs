@@ -532,19 +532,51 @@ impl ReplicationSupervisor {
             .unwrap_or(false)
     }
 
-    /// Are ALL known peers' **Reclaim** flows current — or unreachable? (S7
-    /// readiness gate.) Empty set → `true`. A peer that is bootstrap-complete only
-    /// via the hard timer and was **never reached** does NOT block readiness (per
-    /// Decision 4 a node must boot and serve even when peers are unreachable). A
-    /// reachable-then-blipped peer keeps the strict gate (sticky `current`).
+    /// The set of peer ordinals this node is currently responsible for (the
+    /// desired membership snapshot minus self). `None` until membership is wired
+    /// by [`start`](Self::start) — pre-start no pullers are spawned, so the
+    /// retained map is empty and the gates' `None`-means-no-filter is harmless.
+    ///
+    /// The readiness gates ([`all_current`](Self::all_current) /
+    /// [`all_bootstrapped`](Self::all_bootstrapped)) filter the retained `peers`
+    /// map through this so a peer that has **left** the desired membership cannot
+    /// pin readiness NotReady. The departed entry is **retained** (its watermark
+    /// survives for a warm resume if the ordinal returns, X5) but it is no longer
+    /// our responsibility — exactly as the backup-deferral gate already treats
+    /// `desired` (`run_backup_gate`). Without this filter a cold double-restart
+    /// that briefly sees a peer at a **stale** IP then loses it (both NotReady →
+    /// `publishNotReadyAddresses:false` empties the EndpointSlice) parks that
+    /// entry `{current:false, bootstrap_complete:false, ever_connected:false}`
+    /// forever and wedges the node NotReady — no puller is left to fire the
+    /// bootstrap hard timer that would otherwise mark it complete (ADR-0012 D2).
+    fn desired_ordinals(&self) -> Option<std::collections::HashSet<String>> {
+        self.inner.membership.lock().unwrap().as_ref().map(|m| {
+            m.snapshot()
+                .into_iter()
+                .filter(|p| p.ordinal != self.inner.self_ordinal)
+                .map(|p| p.ordinal)
+                .collect()
+        })
+    }
+
+    /// Are ALL **desired** peers' **Reclaim** flows current — or unreachable? (S7
+    /// readiness gate.) Empty set → `true`. Peers that have left the desired
+    /// membership are excluded ([`desired_ordinals`](Self::desired_ordinals)) so a
+    /// parked, departed entry cannot pin readiness. A peer that is bootstrap-
+    /// complete only via the hard timer and was **never reached** does NOT block
+    /// readiness (per Decision 4 a node must boot and serve even when peers are
+    /// unreachable). A reachable-then-blipped peer **still desired** keeps the
+    /// strict gate (sticky `current`).
     pub fn all_current(&self) -> bool {
         self.sync();
+        let desired = self.desired_ordinals();
         self.inner
             .peers
             .lock()
             .unwrap()
-            .values()
-            .all(|e| e.reclaim.ready())
+            .iter()
+            .filter(|(ord, _)| desired.as_ref().is_none_or(|d| d.contains(ord.as_str())))
+            .all(|(_, e)| e.reclaim.ready())
     }
 
     /// Has `peer`'s **Reclaim** bootstrap completed (first `Noop`, hard timer, or
@@ -560,16 +592,20 @@ impl ReplicationSupervisor {
             .unwrap_or(false)
     }
 
-    /// Are ALL known peers' **Reclaim** flows bootstrap-complete? (S7 readiness
-    /// gate.) Empty set → `true`.
+    /// Are ALL **desired** peers' **Reclaim** flows bootstrap-complete? (S7
+    /// readiness gate.) Empty set → `true`. Peers that have left the desired
+    /// membership are excluded ([`desired_ordinals`](Self::desired_ordinals)) so a
+    /// parked, departed entry cannot pin readiness.
     pub fn all_bootstrapped(&self) -> bool {
         self.sync();
+        let desired = self.desired_ordinals();
         self.inner
             .peers
             .lock()
             .unwrap()
-            .values()
-            .all(|e| e.reclaim.bootstrap_complete)
+            .iter()
+            .filter(|(ord, _)| desired.as_ref().is_none_or(|d| d.contains(ord.as_str())))
+            .all(|(_, e)| e.reclaim.bootstrap_complete)
     }
 
     /// The retained **Reclaim** watermark for `peer` (test introspection).

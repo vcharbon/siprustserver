@@ -282,3 +282,76 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
     assert!(reason_of(&resp).unwrap().to_ascii_lowercase().contains("draining"));
     assert_eq!(get_header(&resp.headers, "retry-after"), Some("0"));
 }
+
+/// Cold double-restart readiness deadlock regression (handoff
+/// `repl-coldstart-readiness-deadlock`): a peer that is seen **once** at a stale
+/// address, never connects, then **leaves** the desired membership (both pods
+/// NotReady → `publishNotReadyAddresses:false` empties the EndpointSlice) is
+/// parked with `{current:false, bootstrap_complete:false, ever_connected:false}`
+/// and retained in the `peers` map. Before the fix `all_current`/
+/// `all_bootstrapped` iterated **every** retained entry, so that parked-departed
+/// peer pinned the node NotReady forever — no puller was left to fire the
+/// bootstrap hard timer. The node must still reach Ready (the peer is no longer
+/// desired; readiness filters to the desired membership, like the backup gate).
+#[tokio::test(start_paused = true)]
+async fn departed_unreachable_peer_does_not_wedge_readiness_not_ready() {
+    let clock = Clock::test_at(0);
+    // No B server is ever spawned: every connect to B's (stale) addr fails, so
+    // B's Reclaim flow never connects (ever_connected stays false) and — parked
+    // before the 2 s hard timer — never goes bootstrap-complete.
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let b_addr = addr(2);
+    let resolve = Arc::new(FnPeerResolver(move |peer: &Peer| {
+        assert_eq!(peer.ordinal, "B");
+        b_addr
+    }));
+
+    let a_store = ReplicatingCallStore::new(2, clock.clone());
+    let a_sup = ReplicationSupervisor::with_config(
+        "A",
+        net.clone(),
+        a_store.clone(),
+        resolve,
+        clock.clone(),
+        fast_config(),
+    );
+
+    // Boot seeing the peer once (its pre-restart, now-stale identity).
+    let membership = Arc::new(SimulatedMembership::with_clock(
+        vec![Peer::new("B", "B")],
+        clock.clone(),
+    ));
+    a_sup.start(membership.clone());
+
+    // Let the Reclaim puller spawn + fail its first connect. Stay well under the
+    // 2 s bootstrap hard timer so it is genuinely still pending (not yet
+    // best-effort complete) — the exact pre-condition the bug needs.
+    tick(100).await;
+    assert!(!a_sup.all_current(), "peer B still pending → NotReady (sanity)");
+    assert!(a_sup.is_running("B"), "B's Reclaim puller is running while desired");
+
+    // EndpointSlice empties: B leaves the desired membership before its hard
+    // timer fires → reconcile parks B (entry retained, flags all false).
+    membership.remove("B");
+    tick(100).await; // let the watch-driven reconcile park B
+    assert!(!a_sup.is_running("B"), "departed B is parked (puller cancelled)");
+
+    // Still BEFORE the 2 s hard timer (≈200 ms elapsed): B never went
+    // bootstrap-complete. The node must nonetheless be Ready — B is no longer
+    // desired, so its parked entry must not pin readiness.
+    assert!(
+        a_sup.all_bootstrapped(),
+        "departed parked peer must not block all_bootstrapped"
+    );
+    assert!(
+        a_sup.all_current(),
+        "departed parked peer must not block all_current (cold-start deadlock)"
+    );
+
+    // End to end through the readiness latch + OPTIONS responder: 200 OK.
+    let readiness = Readiness::new(Arc::new(a_sup.clone()));
+    let id_gen = IdGen::seeded(0xC0FFEE);
+    let resp = build_options_health_response(&readiness, &id_gen, &options_probe());
+    assert_eq!(resp.status, 200, "peerless-after-departure node serves Ready");
+    assert!(reason_of(&resp).is_none());
+}
