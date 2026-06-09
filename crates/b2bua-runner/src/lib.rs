@@ -13,6 +13,9 @@ use b2bua::rules::ServiceDef;
 pub fn compose_services() -> Vec<ServiceDef> {
     vec![
         b2bua::rules::transfer_service_def(),
+        // The early-media masking service (ADR-0016) — in-tree like `transfer`,
+        // rides `default_rules()` at runtime; registered here for its diagram.
+        b2bua::rules::relay_first_18x_service_def(),
         // The out-of-tree announcement service (ADR-0016 slice 8) — depends only
         // on `b2bua-sdk`, injected here as a separate-crate integrator.
         announcement::service(),

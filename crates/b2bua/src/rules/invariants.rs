@@ -44,6 +44,10 @@ pub fn finalize(mut result: HandlerResult) -> HandlerResult {
     // cursor (ADR-0016 slice 7) the same way — a read-only view the transfer
     // service rules gate on; clearing the slice removes the cursor.
     super::refer_transfer::project_cursor(&mut result.call);
+    // Project `(strategy, first_relayed)` into the `relayFirst18x` machine cursor
+    // (ADR-0016) — Masking → Suppressing as the first 18x is relayed; absent when
+    // no masking strategy is active (incl. the delayed-offer self-disable).
+    super::relay_first_18x::project_cursor(&mut result.call);
     result
 }
 

@@ -20,7 +20,7 @@ pub use actions::ActionExecutor;
 pub use defaults::default_rules;
 pub use promote_pem::promote_pem_rules;
 pub use refer_transfer::{transfer_rules, transfer_seed_rules, transfer_service_def};
-pub use relay_first_18x::relay_first_18x_rules;
+pub use relay_first_18x::{relay_first_18x_rules, relay_first_18x_service_def};
 pub use executor::{execute_rules, pick_ranked};
 pub use docgen::{check_registry, render_registry, render_registry_html, MachineGraph};
 pub use service::{compose_rules, seed_services, ServiceDef, ServiceSeed, Terminal};

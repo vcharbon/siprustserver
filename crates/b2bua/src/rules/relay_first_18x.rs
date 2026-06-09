@@ -1,33 +1,50 @@
-//! `relayFirst18xTo180` — SERVICE_LAYER rules that hide forking/failover from
-//! the caller. Port of `src/b2bua/rules/custom/relayFirst18xTo180.ts`.
+//! `relayFirst18xTo180` — the early-media masking callflow **service** that hides
+//! forking/failover from the caller. Port of
+//! `src/b2bua/rules/custom/relayFirst18xTo180.ts`, expressed as an ADR-0016
+//! `define_service!` state machine (mirroring the `transfer` retrofit, slice 7).
 //!
-//! Activated by `features.relay_first_18x_to_180` (strategy `drop-sdp` /
-//! `keep-sdp` / `fake-prack`; `promote-pem-to-200` is owned by the PEM service,
-//! Slice 4). Each rule is `layer = SERVICE_LAYER` and overrides the CORE rule it
-//! displaces. The rules read per-call state off `ctx.call` (the Rust rule
-//! `handle`/`filter` are pure `fn` pointers — no closure ext), namely the
-//! strategy (`features`), `first_relayed`/`stored_a_tag` (`relay_first_18x`),
-//! and per-dialog `cached_sdp`.
+//! The machine has two states tracking how far the masking has progressed:
+//!   - **`Masking`** — the first 18x has not been relayed yet. The next 18x from
+//!     any b-leg is rewritten into a bare 180 (no SDP, no `100rel`) toward A and
+//!     the call advances to `Suppressing`.
+//!   - **`Suppressing`** — the first 18x is out (as a bare 180). Every later 18x
+//!     across every b-leg is suppressed; the 200 OK reuses the first 180's To-tag
+//!     so the caller sees one stable callee identity across forking/failover.
+//!
+//! Its cursor is a read-only **projection** (see [`project_cursor`], mirroring the
+//! `global-call` / `transfer` projections) of two authoritative facts that already
+//! live on the call: the active strategy (`features.relay_first_18x_to_180` —
+//! `drop-sdp` / `keep-sdp` / `fake-prack`; `promote-pem-to-200` is owned by the
+//! PEM service and never activates this machine) and whether the first 18x has
+//! been relayed (`Call.relay_first_18x.first_relayed`, flipped by the
+//! `RelayFirstBare180` action). The projection runs in `invariants::finalize`, so
+//! the cursor is set at call setup (the router finalizes `handle_initial_invite`'s
+//! result) — before the first 18x — and maintained on every event. Activation is
+//! therefore implicit in the strategy: the delayed-offer fallback that nulls the
+//! feature in `apply_route` (no alice SDP under `fake-prack`) deactivates the
+//! machine the same turn, so the rules go inert and the call falls back to plain
+//! relay. Each rule is gated by `active_states` instead of the old
+//! `module_active`/`is_fake_prack` *strategy* filter; the `fake-prack`-only rules
+//! keep an `is_fake_prack` filter because the machine is active for all three
+//! strategies. Handlers are unchanged from the pre-retrofit core rules.
+//!
+//! These rules ride `default_rules()` (the flat list, like `transfer`): their
+//! `machine_active` gate keeps them dormant until the cursor is projected, and
+//! `pick_ranked` ranks SERVICE_LAYER above CORE so they win the events they
+//! handle. `relay_first_18x_service_def()` is registered in the doc-generator
+//! registry (`b2bua-runner::compose_services`) so `docs/sm/relayFirst18x.md` is
+//! generated from the same declared `active_states`/`transitions`/`effects`.
 
+use b2bua_sdk::{define_service, sm_rule};
 use call::features::RelayFirst18xStrategy;
-use call::{CdrEventType, Direction, LegState};
+use call::{Call, CdrEventType, Direction, LegState, TimerType};
 use sip_message::message_helpers::{get_header, get_headers};
-use sip_message::SipResponse;
+use sip_message::{Method, SipResponse};
 
 use super::model::{
-    Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
-    SERVICE_LAYER,
+    Effect, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
 };
 use super::sdp_answer::{build_answer_from_offer, SdpBuildResult};
-
-fn rule(
-    id: &'static str,
-    overrides: &'static [&'static str],
-    matcher: Match,
-    handle: fn(&RuleContext) -> Option<RuleHandleResult>,
-) -> RuleDefinition {
-    RuleDefinition::core(id, SERVICE_LAYER, overrides, matcher, handle)
-}
 
 fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
     Some(RuleHandleResult::new(actions))
@@ -41,43 +58,59 @@ fn reliable_rseq(resp: &SipResponse) -> Option<i64> {
     if !has_100rel {
         return None;
     }
-    get_header(&resp.headers, "rseq")
-        .and_then(|r| r.trim().parse::<i64>().ok())
+    get_header(&resp.headers, "rseq").and_then(|r| r.trim().parse::<i64>().ok())
 }
 
-fn strategy(ctx: &RuleContext) -> Option<RelayFirst18xStrategy> {
-    call::helpers::relay_first_18x_strategy(ctx.call)
-}
-
-/// True when an 18x-management strategy that this module owns is active
-/// (`drop-sdp` / `keep-sdp` / `fake-prack` — not `promote-pem-to-200`).
-fn module_active(ctx: &RuleContext) -> bool {
+/// True iff an 18x-masking strategy this machine owns is active (`drop-sdp` /
+/// `keep-sdp` / `fake-prack` — *not* `promote-pem-to-200`). The single source of
+/// the cursor projection's activation gate.
+fn relay_first_18x_active(call: &Call) -> bool {
     matches!(
-        strategy(ctx),
+        call::helpers::relay_first_18x_strategy(call),
         Some(RelayFirst18xStrategy::DropSdp)
             | Some(RelayFirst18xStrategy::KeepSdp)
             | Some(RelayFirst18xStrategy::FakePrack)
     )
 }
 
+/// The `fake-prack` strategy is active (a per-rule guard on the fake-prack-only
+/// rules — the machine itself is active for all three masking strategies).
 fn is_fake_prack(ctx: &RuleContext) -> bool {
-    strategy(ctx) == Some(RelayFirst18xStrategy::FakePrack)
+    call::helpers::relay_first_18x_strategy(ctx.call) == Some(RelayFirst18xStrategy::FakePrack)
 }
 
-/// The SERVICE_LAYER `relayFirst18xTo180` rules (appended to the default set;
-/// dormant unless the feature activates the call).
-pub fn relay_first_18x_rules() -> Vec<RuleDefinition> {
-    vec![
-        // ── suppress-18x (overrides relay-provisional) ───────────────────────
-        rule(
-            "suppress-18x",
-            &["relay-provisional"],
-            Match::response()
+// The `relayFirst18x` callflow service (ADR-0016). `Phase` is the declared
+// machine; its cursor is a projection of `(strategy, first_relayed)` (see
+// `project_cursor`), so the `transitions` a rule declares are diagram edges, never
+// enforced (the cursor is moved by the projection in `finalize`, not by a
+// `SetState`). `init` stays dormant (`None`): the projection sets the cursor at
+// setup from the strategy `apply_route` already decided, so no seed is needed.
+define_service! {
+    id: "relayFirst18x",
+    machine: RELAY_FIRST_18X_MACHINE,
+    states: Phase { Masking, Suppressing },
+    init: |_call| None,
+    rules: [
+        // ── suppress-18x — first 18x → bare 180; suppress the rest ────────────
+        // Wins over CORE `relay-provisional` by SERVICE_LAYER. On the first 18x:
+        // relay a bare 180 (minting the a-facing tag + seeding the tag map, in the
+        // `RelayFirstBare180` executor) and advance to `Suppressing`. On later
+        // 18x: suppress the relay. Reliable 1xx is PRACKed by the B2BUA itself
+        // (alice never saw it); `fake-prack` caches bob's SDP per dialog.
+        sm_rule! {
+            id: "suppress-18x",
+            machine: RELAY_FIRST_18X_MACHINE,
+            active: [ Phase::Masking, Phase::Suppressing ],
+            transitions: [ Phase::Masking => Phase::Suppressing ],
+            effects: [
+                Effect::Provisional { status: 180, label: "first 18x → bare 180 → A (drop SDP/100rel)" },
+                Effect::Originate { method: Method::Prack, label: "PRACK → B (B2BUA absorbs reliable 1xx)" },
+            ],
+            matcher: Match::response()
                 .method("INVITE")
                 .status_class(1)
-                .direction(Direction::FromB)
-                .filter(module_active),
-            |ctx| {
+                .direction(Direction::FromB),
+            handle: |ctx| {
                 let resp = ctx.response()?;
                 let b_tag = resp.to.tag.clone().unwrap_or_default();
                 let rseq = reliable_rseq(resp);
@@ -123,7 +156,8 @@ pub fn relay_first_18x_rules() -> Vec<RuleDefinition> {
                 }
 
                 // First 18x — mint an a-facing tag + relay as a bare 180 (the
-                // executor owns the IdGen and the tag-map seeding).
+                // executor owns the IdGen and the tag-map seeding, and flips
+                // `first_relayed`, which the projection mirrors → `Suppressing`).
                 let mut actions = vec![
                     RuleAction::RelayFirstBare180 {
                         leg_id: leg.clone(),
@@ -146,24 +180,34 @@ pub fn relay_first_18x_rules() -> Vec<RuleDefinition> {
                 }
                 ok(actions)
             },
-        ),
-        // ── force-tag-consistency (composes with confirm-dialog) ─────────────
+        },
+        // ── force-tag-consistency — reuse the stored To-tag on 200 OK ────────
         //
-        // Pre-seed the tag map with the stored a-facing tag so confirm-dialog
-        // reuses it (200 OK To-tag matches the first 180), and (fake-prack)
-        // stage the winning dialog's cached SDP into policy_update_body so the
-        // relay substitutes it into the 200 toward alice. Does NOT override
-        // confirm-dialog (both must run); ordered before it by SERVICE_LAYER so
-        // the tag map / policy body are set when confirm-dialog relays.
-        rule(
-            "force-tag-consistency",
-            &[],
-            Match::response()
+        // Composes with CORE `confirm-dialog`: pre-seed the tag map with the
+        // stored a-facing tag so the 200 OK To-tag matches the first 180, and
+        // (fake-prack) stage the winning dialog's cached SDP into the relayed 200.
+        // The engine is first-match-wins, so when this rule acts it must replay
+        // `confirm-dialog`'s action sequence itself (see `confirm_dialog_actions`);
+        // when it has nothing to pre-seed it declines (`None`) and `confirm-dialog`
+        // (CORE, ranked just below) handles the 2xx. No cursor move — the call
+        // bridges via the `global-call` machine; the masking property persists.
+        sm_rule! {
+            id: "force-tag-consistency",
+            machine: RELAY_FIRST_18X_MACHINE,
+            active: [ Phase::Masking, Phase::Suppressing ],
+            transitions: [],
+            effects: [
+                Effect::Relay { label: "200 OK → A (reuse stored To-tag; fake-prack: inject cached SDP)" },
+                Effect::LifecycleCommand { label: "merge A↔B (bridge)" },
+                Effect::GuardTimer { timer: TimerType::NoAnswer, label: "cancel B no-answer" },
+                Effect::GuardTimer { timer: TimerType::GlobalDuration, label: "arm max-duration" },
+                Effect::GuardTimer { timer: TimerType::Keepalive, label: "arm keepalive" },
+            ],
+            matcher: Match::response()
                 .method("INVITE")
                 .status_class(2)
-                .direction(Direction::FromB)
-                .filter(module_active),
-            |ctx| {
+                .direction(Direction::FromB),
+            handle: |ctx| {
                 let resp = ctx.response()?;
                 let b_tag = resp.to.tag.clone().unwrap_or_default();
                 let leg = ctx.source_leg_id.to_string();
@@ -208,17 +252,21 @@ pub fn relay_first_18x_rules() -> Vec<RuleDefinition> {
                 actions.extend(confirm_dialog_actions(ctx));
                 ok(actions)
             },
-        ),
-        // ── absorb-prack-200 (overrides relay-non-invite-200 for PRACK) ──────
-        rule(
-            "absorb-prack-200",
-            &["relay-non-invite-200"],
-            Match::response()
+        },
+        // ── absorb-prack-200 — swallow bob's 200 for the B2BUA's own PRACK ───
+        // Wins over CORE `relay-non-invite-200`. The B2BUA originated the PRACK
+        // (alice never saw the reliable 1xx), so its 200 must not reach alice.
+        sm_rule! {
+            id: "absorb-prack-200",
+            machine: RELAY_FIRST_18X_MACHINE,
+            active: [ Phase::Masking, Phase::Suppressing ],
+            transitions: [],
+            effects: [],
+            matcher: Match::response()
                 .method("PRACK")
                 .status_class(2)
-                .direction(Direction::FromB)
-                .filter(module_active),
-            |ctx| {
+                .direction(Direction::FromB),
+            handle: |ctx| {
                 ok(vec![RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Provisional,
                     leg_id: ctx.source_leg_id.to_string(),
@@ -226,16 +274,26 @@ pub fn relay_first_18x_rules() -> Vec<RuleDefinition> {
                     reason: None,
                 }])
             },
-        ),
-        // ── fake-prack: locally answer b-leg UPDATE (overrides relay-update) ─
-        rule(
-            "fake-prack-handle-update-from-b",
-            &["relay-update"],
-            Match::request()
+        },
+        // ── fake-prack: locally answer b-leg UPDATE (wins over relay-update) ─
+        // alice has no committed bob-SDP to negotiate against, so the B2BUA
+        // answers bob's early-dialog UPDATE itself: a skeleton-fit answer derived
+        // from alice's INVITE offer (488 on no codec intersection), advancing the
+        // cached SDP to bob's UPDATE offer.
+        sm_rule! {
+            id: "fake-prack-handle-update-from-b",
+            machine: RELAY_FIRST_18X_MACHINE,
+            active: [ Phase::Masking, Phase::Suppressing ],
+            transitions: [],
+            effects: [
+                Effect::Respond { status: 200, label: "200 OK → B (local skeleton-fit answer)" },
+                Effect::Respond { status: 488, label: "488 → B (no codec intersection)" },
+            ],
+            matcher: Match::request()
                 .method("UPDATE")
                 .direction(Direction::FromB)
                 .filter(is_fake_prack),
-            |ctx| {
+            handle: |ctx| {
                 let req = ctx.request()?;
                 let b_tag = req.from.tag.clone().unwrap_or_default();
                 let leg = ctx.source_leg_id.to_string();
@@ -272,17 +330,24 @@ pub fn relay_first_18x_rules() -> Vec<RuleDefinition> {
                     }]),
                 }
             },
-        ),
+        },
         // ── fake-prack: locally answer a-leg early-dialog UPDATE ─────────────
-        rule(
-            "fake-prack-handle-update-from-a",
-            &["relay-update"],
-            Match::request()
+        // alice has no committed bob-SDP to re-offer, so a 200 OK with no body
+        // (early state only; after merge, normal in-dialog UPDATE relay applies).
+        sm_rule! {
+            id: "fake-prack-handle-update-from-a",
+            machine: RELAY_FIRST_18X_MACHINE,
+            active: [ Phase::Masking, Phase::Suppressing ],
+            transitions: [],
+            effects: [
+                Effect::Respond { status: 200, label: "200 OK → A (local answer; no committed B SDP)" },
+            ],
+            matcher: Match::request()
                 .method("UPDATE")
                 .direction(Direction::FromA)
                 .leg_states(&[LegState::Trying, LegState::Early])
                 .filter(is_fake_prack),
-            |_ctx| {
+            handle: |_ctx| {
                 ok(vec![RuleAction::Respond {
                     status: 200,
                     reason: "OK".to_string(),
@@ -290,15 +355,51 @@ pub fn relay_first_18x_rules() -> Vec<RuleDefinition> {
                     content_type: None,
                 }])
             },
-        ),
-    ]
+        },
+    ],
+}
+
+/// The machine-gated service rules, kept under the pre-retrofit name for
+/// `default_rules()` (the engine runs them via the flat rule list; the
+/// `define_service!`-generated `rules()` is the source). Mirrors `transfer_rules`.
+pub fn relay_first_18x_rules() -> Vec<RuleDefinition> {
+    rules()
+}
+
+/// The `relayFirst18x` service descriptor — registered in the doc-generator
+/// registry (`b2bua-runner::compose_services`) so `docs/sm/relayFirst18x.md` is
+/// generated from the same declared `active_states`/`transitions`/`effects` the
+/// engine gates on. (Its `init` is dormant, so it is *not* in the runtime
+/// `services` list — the rules ride `default_rules()`; this is doc-only, like
+/// `transfer_service_def`.)
+pub fn relay_first_18x_service_def() -> crate::rules::ServiceDef {
+    service_def()
+}
+
+/// Project the authoritative `(strategy, first_relayed)` into the `relayFirst18x`
+/// machine cursor (ADR-0016), mirroring the `global-call` / `transfer`
+/// projections. Called from `invariants::finalize`, so the cursor is set at call
+/// setup (the router finalizes `handle_initial_invite`'s result, after
+/// `apply_route` decided the strategy) — before the first 18x — and removed when
+/// the strategy is absent / nulled (the delayed-offer self-disable), deactivating
+/// the machine so the masking rules go inert.
+pub fn project_cursor(call: &mut Call) {
+    if relay_first_18x_active(call) {
+        let label = if call::helpers::relay_first_18x_first_relayed(call) {
+            Phase::Suppressing.label()
+        } else {
+            Phase::Masking.label()
+        };
+        call.sm_cursors.insert(RELAY_FIRST_18X_MACHINE, label);
+    } else {
+        call.sm_cursors.remove(&RELAY_FIRST_18X_MACHINE);
+    }
 }
 
 /// Replay `confirm-dialog`'s action sequence (the `force-tag-consistency` rule
 /// composes with it: it wins the 2xx match, so it must emit confirm-dialog's
 /// effects itself). Kept in sync with `defaults.rs::confirm-dialog`.
 fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
-    use call::TimerType;
     let b = ctx.source_leg_id.to_string();
     let a = ctx.call.a_leg.leg_id.clone();
     let max_duration = ctx
