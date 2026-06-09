@@ -340,9 +340,10 @@ impl CrossMessageAuditRule for AckCseqMatchesInviteRule {
     }
 }
 
-/// The built-in RFC 3261 cross-message audit rules every test harness installs by
-/// default (see [`crate::with_all_contracts`]). Add further wire invariants here.
-pub fn rfc_cross_message_rules() -> Vec<Arc<dyn CrossMessageAuditRule>> {
+/// The in-dialog CSeq / response-CSeq / ACK-CSeq cross-message rules (the
+/// original three RFC 3261 §8/§12/§13 wire invariants). Aggregated into the
+/// full default set by [`super::rfc_cross_message_rules`].
+pub(crate) fn cross_rules() -> Vec<Arc<dyn CrossMessageAuditRule>> {
     vec![
         Arc::new(CSeqInDialogOrderRule),
         Arc::new(ResponseCseqMatchesTransactionRule),

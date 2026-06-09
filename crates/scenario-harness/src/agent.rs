@@ -34,11 +34,12 @@
 //! `SignalingNetwork`, so the reports are projected from the record exactly as
 //! before — the auto-generation only changes *who writes the bytes*.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::RandomState;
 use std::collections::BTreeMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -51,7 +52,7 @@ use sip_message::generators::{
     generate_response, strip_route_uri_to_request_uri, ContactSpec, GenerateAckFor2xxOpts,
     GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts, GenerateResponseOpts,
     InDialogMethod, InviteClientTransactionHandle, OutOfDialogMethod, SipTransport, StackDialog,
-    ViaSpec,
+    ViaSpec, B2BUA_ALLOW, B2BUA_SUPPORTED,
 };
 use sip_message::message_helpers::{get_header, get_headers};
 use sip_message::parser::custom::CustomParser;
@@ -161,10 +162,15 @@ pub struct Harness {
     /// [`finish`](Harness::finish) renders a report. `finish` disarms it.
     dump: PanicDump,
     /// MANDATORY HARD GATE: fails the test on Drop if the recorded trace violates
-    /// the RFC 3261 in-dialog CSeq rule — the backstop for a harness dropped
-    /// WITHOUT [`finish`](Harness::finish) (which enforces the same gate inline).
+    /// any non-advisory RFC rule — the backstop for a harness dropped WITHOUT
+    /// [`finish`](Harness::finish) (which enforces the same gate inline).
     /// `finish` disarms it (it has already run the gate itself).
     cseq_gate: CseqGate,
+    /// Rules a test is allowed to violate (a deliberate non-compliance fixture
+    /// where Alice/Bob intentionally emit non-conforming SIP). The hard gate
+    /// skips findings from these rule names. Shared (`Rc`) with [`CseqGate`] so a
+    /// `allow_violation` registered before `finish`/Drop is honoured by both.
+    allow_violations: Rc<RefCell<HashSet<String>>>,
 }
 
 impl Harness {
@@ -187,11 +193,14 @@ impl Harness {
         let transit_delay_ms = transit_delay_ms.max(1);
         let recorder = Recorder::with_clock(TransportKind::Fake, Clock::test_at(0));
         let sim = Arc::new(SimulatedSignalingNetwork::new(transit_delay_ms));
-        // Install the built-in RFC 3261 wire-invariant rules (CSeq in-dialog
-        // ordering, …) by default so every harness run gets the same post-run
-        // "all clean" check the live SIPp endpoints apply — a stale-CSeq probe a
-        // test UA would silently answer is caught at layer close.
+        // Install the full default RFC 3261 / 3262 / 3264 wire-invariant suite
+        // (per-message peer rules + cross-message rules) by default so every
+        // harness run gets the same post-run "all clean" RFC check the live SIPp
+        // endpoints apply — a stale-CSeq probe, a mid-dialog tag/route mutation,
+        // an RFC 3262/3264 PRACK/offer-answer slip that a test UA would silently
+        // answer is caught at layer close.
         let audit_opts = ScopedAuditOptions {
+            rules: sip_net::rfc_peer_rules(),
             cross_message_rules: sip_net::rfc_cross_message_rules(),
             ..Default::default()
         };
@@ -209,10 +218,12 @@ impl Harness {
             recorder: recorder.clone(),
             armed: Cell::new(true),
         };
+        let allow_violations: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
         let cseq_gate = CseqGate {
             name: name.clone(),
             channel: wrapped.recording.channel(),
             armed: Cell::new(true),
+            allow: allow_violations.clone(),
         };
         Self {
             network: wrapped.network,
@@ -223,6 +234,7 @@ impl Harness {
             description: None,
             dump,
             cseq_gate,
+            allow_violations,
         }
     }
 
@@ -230,6 +242,27 @@ impl Harness {
     pub fn describe(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self
+    }
+
+    /// Allow a single RFC rule to be violated on this run WITHOUT failing the
+    /// hard gate — the **only** sanctioned way to deactivate a rule in a test.
+    ///
+    /// Reserve this for a deliberate non-compliance fixture, where Alice/Bob
+    /// intentionally emit non-conforming SIP to exercise the B2BUA's reject /
+    /// error path (e.g. an out-of-dialog BYE to drive a 481). The `justification`
+    /// is mandatory and logged. It is **not** an escape hatch for a finding that
+    /// reflects a real B2BUA bug — fix the B2BUA (or the test peer) instead.
+    ///
+    /// `rule` is the rule's `name()` (e.g. `"rfc3261.byeOnlyInDialog"`). The
+    /// finding is still recorded (advisory) so the report shows what was waived.
+    pub fn allow_violation(&self, rule: impl Into<String>, justification: impl Into<String>) {
+        let rule = rule.into();
+        let justification = justification.into();
+        eprintln!(
+            "[harness] RFC rule '{rule}' allowed to be violated on '{}': {justification}",
+            self.name
+        );
+        self.allow_violations.borrow_mut().insert(rule);
     }
 
     /// Disarm the Drop-time RFC 3261 CSeq hard gate. For multi-SUT harnesses
@@ -341,38 +374,106 @@ impl Harness {
         // violation must fail the test (a real UA would reject these). Skip if the
         // test is already unwinding so we never double-panic. The structural
         // close() anomalies are intentionally NOT gated.
-        let cseq_findings = rfc_cseq_findings(&events);
+        let cseq_findings = rfc_hard_gate_findings(&events, &self.allow_violations.borrow());
         if !cseq_findings.is_empty() && !std::thread::panicking() {
-            panic!("{}", render_cseq_panic(&self.name, &cseq_findings));
+            panic!("{}", render_rfc_panic(&self.name, &cseq_findings));
         }
         let audit = self.recording.close().await;
         RunReport::from_recording(self.name, self.description, self.recorder, events, audit)
     }
 }
 
-/// The RFC 3261 cross-message (in-dialog CSeq) findings over a recorded trace —
-/// the `(lane, detail)` pairs the hard gate fails on. ONLY the cross-message
-/// rules run here (the structural layer-close anomalies are deliberately not
-/// consulted), so timeout / reap / stall fixtures that legitimately leave an
-/// in-flight imbalance are not gated. Shared by `Harness::finish` and the
-/// `Harness` Drop guard so the SAME rule set runs on every run with no per-test
-/// opt-in. Empty ⇒ clean.
-fn rfc_cseq_findings(
+/// The RFC 3261 / 3262 / 3264 audit findings over a recorded trace that MUST
+/// fail the test — the `(lane, detail)` pairs the hard gate panics on. Runs the
+/// full default suite (per-message peer rules + cross-message rules), skipping:
+///   - any `force_advisory()` rule (architectural divergences recorded but not
+///     gated — they still reach the report via the layer-close `close()`);
+///   - any finding whose rule `subject()` does not intersect the originating
+///     bind's declared roles (default = all roles, so this only narrows when a
+///     test sets roles);
+///   - any rule a test explicitly waived via [`Harness::allow_violation`].
+///
+/// ONLY the audit rules run here (the structural layer-close anomalies —
+/// in-flight imbalance, queue leaks — are deliberately not consulted), so
+/// timeout / reap / stall fixtures are not gated. Shared by `Harness::finish`
+/// and the `Harness` Drop guard so the SAME suite runs on every run with no
+/// per-test opt-in. Empty ⇒ clean.
+fn rfc_hard_gate_findings(
     events: &[layer_harness::Stamped<SignalingNetworkEvent>],
+    allow: &HashSet<String>,
 ) -> Vec<(String, String)> {
+    use sip_net::all_ua_roles;
+
+    // Reconstruct each bind's declared roles from its BindAcquire summary so
+    // subject dispatch needs no harness-private state (default = all roles).
+    let mut roles: HashMap<String, HashSet<sip_net::UaRole>> = HashMap::new();
+    for s in events {
+        if let SignalingNetworkEvent::BindAcquire { bind_key, summary } = &s.event {
+            roles.insert(bind_key.clone(), summary.roles.clone());
+        }
+    }
+    let roles_of = |bind: &str| roles.get(bind).cloned().unwrap_or_else(all_ua_roles);
+    let subject_hits = |subject: &HashSet<sip_net::UaRole>, bind: &str| {
+        let r = roles_of(bind);
+        subject.iter().any(|s| r.contains(s))
+    };
+
     let mut findings = Vec::new();
+
+    // Cross-message rules — one pass over the whole channel each.
     for rule in sip_net::rfc_cross_message_rules() {
-        findings.extend(rule.check(events));
+        if rule.force_advisory() || allow.contains(rule.name()) {
+            continue;
+        }
+        let subject = rule.subject();
+        for (bind, detail) in rule.check(events) {
+            if subject_hits(&subject, &bind) {
+                findings.push((bind, detail));
+            }
+        }
+    }
+
+    // Peer rules — per-bind slice (the RAII Drop path records the same to the
+    // ledger, but the gate runs them inline so a harness `finish`/Drop fails
+    // regardless of endpoint Drop ordering).
+    let peer_rules = sip_net::rfc_peer_rules();
+    if !peer_rules.is_empty() {
+        let mut binds: Vec<String> = Vec::new();
+        for s in events {
+            let bk = s.event.bind_key();
+            if !binds.iter().any(|b| b == bk) {
+                binds.push(bk.clone());
+            }
+        }
+        for bind in &binds {
+            let slice: Vec<layer_harness::Stamped<SignalingNetworkEvent>> = events
+                .iter()
+                .filter(|s| s.event.bind_key() == bind)
+                .cloned()
+                .collect();
+            for rule in &peer_rules {
+                if rule.force_advisory()
+                    || allow.contains(rule.name())
+                    || !subject_hits(&rule.subject(), bind)
+                {
+                    continue;
+                }
+                for detail in rule.check(&slice, bind) {
+                    findings.push((bind.clone(), detail));
+                }
+            }
+        }
     }
     findings
 }
 
-/// Format the hard-gate panic message listing every RFC CSeq violation.
-fn render_cseq_panic(name: &str, findings: &[(String, String)]) -> String {
+/// Format the hard-gate panic message listing every RFC audit violation.
+fn render_rfc_panic(name: &str, findings: &[(String, String)]) -> String {
     format!(
-        "[{name}] SIP RFC 3261 audit violation(s) on the recorded trace — a real \
-         UA would have rejected these, so this test MUST fail (RFC check is a \
-         mandatory hard gate):\n{}",
+        "[{name}] SIP RFC audit violation(s) on the recorded trace — a real \
+         UA would have rejected these, so this test MUST fail (the RFC check is a \
+         mandatory hard gate; if a fixture deliberately violates a rule, waive it \
+         with Harness::allow_violation):\n{}",
         findings
             .iter()
             .map(|(lane, detail)| format!("  • [{lane}] {detail}"))
@@ -481,6 +582,9 @@ struct CseqGate {
     name: String,
     channel: Channel<SignalingNetworkEvent>,
     armed: Cell<bool>,
+    /// Shared with the owning [`Harness`] so a deliberate-violation waiver
+    /// registered via `allow_violation` is honoured by this Drop backstop too.
+    allow: Rc<RefCell<HashSet<String>>>,
 }
 
 impl CseqGate {
@@ -494,16 +598,17 @@ impl Drop for CseqGate {
         if !self.armed.get() || std::thread::panicking() {
             return;
         }
-        // Reading the snapshot + running the rule is panic-free in practice, but
+        // Reading the snapshot + running the rules is panic-free in practice, but
         // guard it so a render fault can never turn into a double-panic abort.
+        let allow = self.allow.borrow().clone();
         let findings = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            rfc_cseq_findings(&self.channel.snapshot())
+            rfc_hard_gate_findings(&self.channel.snapshot(), &allow)
         })) {
             Ok(f) => f,
             Err(_) => return,
         };
         if !findings.is_empty() {
-            panic!("{}", render_cseq_panic(&self.name, &findings));
+            panic!("{}", render_rfc_panic(&self.name, &findings));
         }
     }
 }
@@ -1297,12 +1402,30 @@ impl<'a> Respond<'a> {
         } else {
             None
         };
+        // A conformant UAS lists its methods/extensions on a 2xx INVITE
+        // (RFC 3261 §13.2.1 SHOULD Allow, §20.37 Supported) so the peer can
+        // negotiate re-INVITE/UPDATE/PRACK. The test UA answers anything, so it
+        // omitted these — add them (unless the fixture already supplied one) so
+        // the UA is RFC-compliant, matching the live SIPp endpoints.
+        let mut extra_headers = self.extra_headers.clone();
+        if (200..300).contains(&self.status) && txn.request.cseq.method.as_str() == "INVITE" {
+            let has_allow = extra_headers.iter().any(|h| h.name.eq_ignore_ascii_case("Allow"));
+            let has_supported =
+                extra_headers.iter().any(|h| h.name.eq_ignore_ascii_case("Supported"));
+            if !has_allow {
+                extra_headers.push(SipHeader { name: "Allow".into(), value: B2BUA_ALLOW.into() });
+            }
+            if !has_supported {
+                extra_headers
+                    .push(SipHeader { name: "Supported".into(), value: B2BUA_SUPPORTED.into() });
+            }
+        }
         let opts = GenerateResponseOpts {
             to_tag,
             contact,
             body: self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
             content_type: None,
-            extra_headers: self.extra_headers.clone(),
+            extra_headers,
             incoming_source: None,
         };
         let mut resp = generate_response(&txn.request, self.status, &self.reason, &opts);

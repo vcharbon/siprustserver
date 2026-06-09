@@ -72,6 +72,7 @@ From: <sip:alice@127.0.0.1>;tag=t1\r\n\
 To: <sip:bob@127.0.0.1>\r\n\
 Call-ID: mf0-call@127.0.0.1\r\n\
 CSeq: 1 INVITE\r\n\
+Contact: <sip:alice@127.0.0.1:5060>\r\n\
 Max-Forwards: 0\r\n\
 Content-Length: 0\r\n\r\n";
     client.send_to(invite.as_bytes(), proxy.addr()).await.unwrap();

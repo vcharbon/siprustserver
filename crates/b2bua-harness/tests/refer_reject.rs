@@ -183,6 +183,16 @@ async fn refer_replaces_rejected() {
 #[tokio::test]
 async fn refer_out_of_dialog() {
     let h = Harness::with_transit_delay("refer-out-of-dialog", 1);
+    // This scenario DELIBERATELY sends an out-of-dialog REFER carrying a bogus
+    // To-tag (a §8.1.1.2 / MUST-016 violation) to drive the router's orphan-reject
+    // 481 path — exactly the kind of intentional non-compliance the RFC audit's
+    // `allow_violation` waiver exists for. The stranger, not the B2BUA, is the
+    // non-conformant party here.
+    h.allow_violation(
+        "rfc3261.noToTagOnInitialRequest",
+        "stranger deliberately sends an out-of-dialog REFER with a bogus To-tag to \
+         exercise the router's unknown-dialog 481 reject",
+    );
     let alice = h.agent("alice", "127.0.0.1:5704").await;
     let bob = h.agent("bob", "127.0.0.1:5714").await;
     let stranger = h.agent("stranger", "127.0.0.1:5734").await;

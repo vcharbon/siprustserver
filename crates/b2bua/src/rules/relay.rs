@@ -217,13 +217,22 @@ pub fn build_b_leg(
             v.as_ref().map(|val| MsgHeader { name: n.clone(), value: val.clone() })
         })
         .collect();
-    // Advertise accepted methods on the originated b-leg INVITE so the callee can
-    // negotiate UPDATE/PRACK/etc. (RFC 3261 §20.5, RFC 3311 §5). `Supported` is
-    // managed separately by `apply_supported_for_18x` (it forwards alice's value);
-    // don't clobber a caller-supplied Allow from `header_updates`.
+    // Advertise accepted methods + understood extensions on the originated b-leg
+    // INVITE so the callee can negotiate UPDATE/PRACK/etc. (RFC 3261 §20.5/§20.37,
+    // RFC 3311 §5) and the 2xx/re-INVITE audit (§13.2.1) sees a capability set.
+    // `Supported` is a *default*: when a `relayFirst18x` strategy is active,
+    // `apply_supported_for_18x` runs after this and rewrites it from alice's value
+    // (stripping `100rel` as the strategy dictates). Neither clobbers a
+    // caller-supplied value from `header_updates`.
     if !extra_headers.iter().any(|h| h.name.eq_ignore_ascii_case("Allow")) {
         extra_headers
             .push(MsgHeader { name: "Allow".to_string(), value: generators::B2BUA_ALLOW.to_string() });
+    }
+    if !extra_headers.iter().any(|h| h.name.eq_ignore_ascii_case("Supported")) {
+        extra_headers.push(MsgHeader {
+            name: "Supported".to_string(),
+            value: generators::B2BUA_SUPPORTED.to_string(),
+        });
     }
 
     let opts = GenerateOutOfDialogRequestOpts {
@@ -334,6 +343,45 @@ pub fn relay_response_passthrough_headers(resp: &sip_message::SipResponse) -> Ve
             value: h.value.clone(),
         })
         .collect()
+}
+
+/// Ensure an a-facing INVITE 2xx header set carries exactly ONE `Allow` and ONE
+/// `Supported` — the B2BUA's own capability set (RFC 3261 §13.2.1/§20.37). The
+/// B2BUA is a back-to-back UA: a 2xx it mints toward the caller must advertise
+/// *its* methods/extensions, not whatever the callee's 200 happened to carry
+/// (or omit). For each of Allow/Supported, `rule_stamped` names the headers the
+/// firing rule already set with its own value (e.g. `promote18xPemTo200`
+/// advertises `Supported` WITHOUT `100rel`, since Alice never saw a reliable
+/// provisional from us) — those are kept verbatim and only de-duplicated. For
+/// the rest we drop the callee's passed-through value and append the B2BUA
+/// default. Either way exactly one of each results (no §7.3.1 duplicate);
+/// `Require`/`RSeq` (reliable-provisional negotiation) are untouched.
+pub fn stamp_a_facing_invite_advert(
+    headers: &mut Vec<MsgHeader>,
+    rule_stamped: &[(&'static str, String)],
+) {
+    let stamped = |name: &str| rule_stamped.iter().any(|(n, _)| n.eq_ignore_ascii_case(name));
+    for (name, default) in
+        [("Allow", generators::B2BUA_ALLOW), ("Supported", generators::B2BUA_SUPPORTED)]
+    {
+        if stamped(name) {
+            // The rule owns this value; just collapse any duplicate to one.
+            let mut seen = false;
+            headers.retain(|h| {
+                if h.name.eq_ignore_ascii_case(name) {
+                    let keep = !seen;
+                    seen = true;
+                    keep
+                } else {
+                    true
+                }
+            });
+            continue;
+        }
+        // Replace any passed-through value with the B2BUA default, exactly once.
+        headers.retain(|h| !h.name.eq_ignore_ascii_case(name));
+        headers.push(MsgHeader { name: name.to_string(), value: default.to_string() });
+    }
 }
 
 /// Headers carried transparently when relaying an in-dialog *request* across

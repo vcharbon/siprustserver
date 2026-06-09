@@ -777,6 +777,18 @@ impl<'a> ActionExecutor<'a> {
         if let Some(src_dialog) = src_dialog {
             if let Some(pending) = find_pending_request(&src_dialog, cseq_num).cloned() {
                 let contact = relay::leg_contact(self.config, &call.call_ref, target_leg);
+                let mut transparent_headers =
+                    filter_passthrough(relay::relay_response_passthrough_headers(resp));
+                // A 2xx answer to a B2BUA-relayed re-INVITE advertises the B2BUA's
+                // own Allow/Supported toward the peer (RFC 3261 §13.2.1/§20.37),
+                // replacing the source response's. Non-INVITE 2xx (PRACK/UPDATE)
+                // and provisionals keep verbatim passthrough.
+                if cseq_method == "INVITE" && (200..300).contains(&status) {
+                    relay::stamp_a_facing_invite_advert(
+                        &mut transparent_headers,
+                        &transform.add_headers,
+                    );
+                }
                 let opts = GenerateRelayedResponseOpts {
                     vias: pending.source_vias.clone(),
                     record_routes: vec![],
@@ -785,7 +797,7 @@ impl<'a> ActionExecutor<'a> {
                     call_id: pending.source_call_id.clone(),
                     cseq: format!("{} {}", pending.inbound_cseq, cseq_method),
                     body: relay_body.clone(),
-                    transparent_headers: filter_passthrough(relay::relay_response_passthrough_headers(resp)),
+                    transparent_headers,
                     content_type: relay_content_type.clone(),
                     contact: Some(contact),
                 };
@@ -846,7 +858,14 @@ impl<'a> ActionExecutor<'a> {
             };
             let a_invite = relay::rebuild_a_leg_invite(call);
             let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
-            let passthrough = filter_passthrough(relay::relay_response_passthrough_headers(resp));
+            let mut passthrough = filter_passthrough(relay::relay_response_passthrough_headers(resp));
+            // A 2xx INVITE answer the B2BUA mints toward the caller advertises the
+            // B2BUA's own capability set (RFC 3261 §13.2.1/§20.37), replacing any
+            // Allow/Supported the callee's 200 carried. Provisionals keep verbatim
+            // passthrough so reliable-1xx (Supported:100rel) negotiation survives.
+            if (200..300).contains(&status) {
+                relay::stamp_a_facing_invite_advert(&mut passthrough, &transform.add_headers);
+            }
             let effect = relay::response_to_a_leg(
                 &a_invite,
                 status,
@@ -877,7 +896,12 @@ impl<'a> ActionExecutor<'a> {
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
         // Reliable-provisional negotiation headers (Require/Supported/RSeq) pass
         // through transparently so end-to-end PRACK keeps working (RFC 3262).
-        let passthrough = filter_passthrough(relay::relay_response_passthrough_headers(resp));
+        let mut passthrough = filter_passthrough(relay::relay_response_passthrough_headers(resp));
+        // A 2xx INVITE answer carries the B2BUA's own Allow/Supported, replacing
+        // the callee's (RFC 3261 §13.2.1/§20.37); provisionals keep passthrough.
+        if (200..300).contains(&status) {
+            relay::stamp_a_facing_invite_advert(&mut passthrough, &transform.add_headers);
+        }
         let effect = relay::response_to_a_leg(
             &a_invite,
             status,

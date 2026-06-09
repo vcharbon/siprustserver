@@ -331,7 +331,8 @@ fn apply_supported_for_18x(invite: &mut SipRequest, a_invite: &SipRequest, call:
         }
     };
 
-    // The b-leg INVITE has no Supported yet (build_b_leg omits it); set or drop.
+    // build_b_leg stamped a default Supported; this strategy path rewrites it
+    // from alice's value (or drops it entirely). Clear then set-or-drop.
     invite.headers.retain(|h| !h.name.eq_ignore_ascii_case("supported"));
     if let Some(val) = supported_out {
         invite.headers.push(sip_message::SipHeader {

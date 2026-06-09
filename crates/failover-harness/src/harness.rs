@@ -1040,6 +1040,15 @@ impl FailoverHarness {
             .collect();
         let mut findings = Vec::new();
         for rule in sip_net::rfc_cross_message_rules() {
+            // Honour the advisory tier exactly as the scenario-harness hard gate
+            // does: a `force_advisory` rule (a documented B2BUA-architectural
+            // divergence — per-leg SDP re-origin, OPTIONS-keepalive response
+            // headers, the un-timeable proxy-100 bound, …) is recorded, not
+            // gated. Skipping it here keeps the failover matrix from failing on
+            // the same architectural divergences the main gate already excuses.
+            if rule.force_advisory() {
+                continue;
+            }
             findings.extend(rule.check(&events));
         }
         findings
