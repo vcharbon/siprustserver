@@ -8,10 +8,17 @@
   rejects the rest with 486.
 
   Calls that get 200 → ACK / 30s hold / BYE → counted "Successful" by sipp.
-  Calls rejected with 486 → the mandatory recv 200 below goes unmatched → counted
-  "Failed". sipp auto-ACKs the 486 in UAC mode, so no leaking transaction state.
-  Those 486s are EXPECTED (the cap biting) — the suite scores role=limiter apart
-  from the baseline success ratio (like role=abuse).
+  Calls rejected with 486 → matched by the EXPLICIT optional `recv response="486"`
+  below, which branches to the `rejected` label so the call ends cleanly and is
+  counted "Successful" (an expected cap rejection), NOT FailedUnexpectedMessage.
+  sipp auto-ACKs the 486 in UAC mode, so the transaction closes with no leak.
+  Earlier this scenario had NO 486 branch, so every cap rejection (a flat ~1.3/s
+  baseline at 2 cps vs cap 20 — the cap working AS DESIGNED) aborted the call and
+  inflated sipp_failed_total{cause="unexpected_msg"}; an instrumented peak repro
+  (2026-06-09) traced those "failures" to exactly these correct 486 responses, so
+  they are now scored as the expected outcome they are. The suite still scores
+  role=limiter by cap RECONVERGENCE (snap_limiter_conc), apart from the long|short
+  success ratio — flipping these 486s Failed→Successful does not touch that gate.
 
   The vendored sipp parses any literal `[...]` in CDATA as a keyword reference
   ("Unsupported keyword"), so the X-Api-Call JSON (a `call_limiter` array) is
@@ -52,9 +59,15 @@
 
   <recv response="100" optional="true"/>
   <recv response="180" optional="true"/>
-  <!-- 200 OK is mandatory: a 486 from a rejected call leaves this recv
-       unmatched and the call is counted as Failed. sipp's UAC mode auto-ACKs
-       the 486 to close the transaction cleanly. -->
+  <!-- EXPLICIT cap-rejection branch: a rejected call gets 486 (optionally after a
+       100). Catch it BEFORE the mandatory 200 so it does not fall through to that
+       recv as an unexpected message. sipp's UAC mode auto-ACKs the 486 final
+       response (closing the INVITE client transaction), and `next` jumps past the
+       ACK/hold/BYE to the terminal `rejected` label → the call ends cleanly and is
+       counted Successful. When the call is admitted instead, no 486 arrives, this
+       optional recv is skipped, and the mandatory 200 below matches normally. -->
+  <recv response="486" optional="true" next="rejected"/>
+  <!-- 200 OK = admitted. -->
   <recv response="200" rtd="true" rrs="true"/>
 
   <send>
@@ -90,6 +103,11 @@
   </send>
 
   <recv response="200" crlf="true"/>
+
+  <!-- Terminal join point: the admitted path falls through here after its BYE/200;
+       the cap-rejected 486 path jumps straight here (auto-ACKed, nothing more to
+       do). Reaching the end of the scenario counts the call Successful either way. -->
+  <label id="rejected"/>
 
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
   <CallLengthRepartition value="10, 50, 100, 500, 1000, 5000, 10000, 15000"/>
