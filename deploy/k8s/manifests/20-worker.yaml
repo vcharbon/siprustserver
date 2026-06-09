@@ -146,8 +146,11 @@ spec:
             # Headroom for a fully-ramped 2h profile: long(~6000) + short(~3000)
             # split across 2 workers ≈ 4500 live dialogs each, plus the per-call
             # replication changelog. 512Mi OOM-killed under that load (the killed
-            # worker then drops its calls → cascading churn), so give 1Gi.
-            limits:   { memory: "1Gi" }
+            # worker then drops its calls → cascading churn), so gave 1Gi — but a 2h
+            # run drove RSS to ~913/1024Mi (a single GC blip away from OOM, which
+            # would confound a load-gen-tuning experiment with an SUT crash), so 2Gi.
+            # On tier=app nodes (~19Gi), so this never pressures the node.
+            limits:   { memory: "2Gi" }
 ---
 # Headless service: gives each worker stable DNS (b2bua-worker-0.b2bua-worker...)
 # and — crucially for replication — is the Service whose EndpointSlices the

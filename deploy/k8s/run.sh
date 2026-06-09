@@ -212,6 +212,10 @@ caps() {
   local ramp=8 sample=$(( secs > 8 ? secs-8 : secs ))
   export CAPS="$cps" MAX_CALLS=$(( cps * (secs+20) )) UAC_JOB_NAME="sipp-uac-${cps}"
   export ROLE="${ROLE:-load}" MAX_CONCURRENT="${MAX_CONCURRENT:-$(( cps * 600 ))}"
+  # Pod-resource envsubst vars for the shared 40-sipp-uac-job template (no default
+  # syntax in envsubst — every render site must export them).
+  export UAC_CPU_REQ="${UAC_CPU_REQ:-2}" UAC_CPU_LIM="${UAC_CPU_LIM:-8}" \
+         UAC_MEM_REQ="${UAC_MEM_REQ:-384Mi}" UAC_MEM_LIM="${UAC_MEM_LIM:-1536Mi}"
   kubectl -n "$NS" delete job "$UAC_JOB_NAME" --ignore-not-found >/dev/null 2>&1 || true
   log "cap=$cps: launching UAC job (${secs}s), ramp ${ramp}s, sample ${sample}s"
   envsubst < manifests/40-sipp-uac-job.yaml | kubectl apply -f -

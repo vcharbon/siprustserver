@@ -119,9 +119,21 @@ spec:
           # The 24-core load nodes have ample headroom (a load node runs ~1 UAS + 2
           # UAC jobs), so this never risks Pending. Memory stays 1Gi (RSS is ~132MB;
           # memory is not the constraint) under the 1.5GiB node cap.
+          # The exit-255 crash is a timer-wheel slip under CPU starvation, NOT OOM
+          # or -l (proven: RSS ~132MB, no dmesg OOM). Adding replicas was REJECTED:
+          # more SIPp processes fight for the same 2×24-core load-node pool and the
+          # per-process scheduling jitter that trips the wheel gets WORSE, not better
+          # (sharding `long` to 5 pods is what exposed the oversubscription). The
+          # right lever is to make each process CPU-FAT: a high guaranteed request so
+          # the scheduler reserves cores for timely wheel servicing, and a very high
+          # burst limit so CFS never throttles the 100ms catch-up bursts (servicing
+          # ~2900 timers + thousands of 200-OK retransmits) that cause the slip. 5
+          # UAS × req 4 = 20 cores reserved on 48 allocatable — fits with the UAC
+          # streams; bursts to 16 on a 24-core node are free headroom. Memory stays
+          # generous (RSS is tiny; mem is not the constraint) only as a safety margin.
           resources:
-            requests: { cpu: "2", memory: "512Mi" }
-            limits:   { cpu: "8", memory: "1Gi" }
+            requests: { cpu: "4", memory: "1Gi" }
+            limits:   { cpu: "16", memory: "4Gi" }
           volumeMounts:
             - { name: scenarios, mountPath: /scenarios }
       volumes:

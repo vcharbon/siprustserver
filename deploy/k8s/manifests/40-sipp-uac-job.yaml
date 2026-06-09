@@ -20,7 +20,14 @@ metadata:
   namespace: sip-test
   labels: { app: sipp-uac }
 spec:
-  backoffLimit: 0
+  # Was 0 (one SIPp exit-255 timer-wheel slip or a transient exporter-configmap
+  # mount race permanently failed the Job → the stream vanished until the next
+  # ensure_baseline sweep relaunched it). A small retry budget lets k8s recreate
+  # the pod in-place within seconds, so an intermittent abort no longer drops a
+  # baseline stream out of steady state. The `long` stream is ALSO sharded across
+  # LONG_SHARDS pods (endurance.sh) to keep each SIPp process under the ~2900
+  # single-process timer-wheel ceiling so these aborts become rare in the first place.
+  backoffLimit: 4
   ttlSecondsAfterFinished: 120
   template:
     metadata:
@@ -130,9 +137,17 @@ spec:
           # Generous CPU: SIPp's timer wheel is CPU-bound (a slip aborts the run with
           # exit 255) and the short stream drives 100cps. Reserve a guaranteed core and
           # allow a wide burst — the 24-core load nodes have ample headroom.
+          # Per-stream sized (envsubst from launch_stream): the `short` stream holds
+          # ~3000 concurrent in ONE process — right at the SIPp timer-wheel ceiling —
+          # so it gets a high guaranteed request + very high burst limit (timer-wheel
+          # servicing is CPU-bound; a slip aborts the run with exit 255). Low-rate /
+          # low-concurrency streams (long shards @1cps/≤800, reinvite, limiter) keep
+          # modest reservations so the total request budget fits the 2×24-core load
+          # pool alongside the 5 fattened UAS pods. We do NOT add pods — more SIPp
+          # processes worsen the per-process scheduling jitter that trips the wheel.
           resources:
-            requests: { cpu: "2", memory: "384Mi" }
-            limits:   { cpu: "8", memory: "1536Mi" }
+            requests: { cpu: "${UAC_CPU_REQ}", memory: "${UAC_MEM_REQ}" }
+            limits:   { cpu: "${UAC_CPU_LIM}", memory: "${UAC_MEM_LIM}" }
           volumeMounts:
             - { name: scenarios, mountPath: /scenarios }
             - { name: stats,     mountPath: /stats }

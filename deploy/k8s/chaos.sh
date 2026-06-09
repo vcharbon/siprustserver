@@ -51,6 +51,12 @@ PROXY_VIP="${PROXY_VIP:-172.20.255.250}"
 PROXY_TARGET="${PROXY_TARGET:-$PROXY_VIP}"
 LIMITER_CAP="${LIMITER_CAP:-20}"
 export PROXY_VIP PROXY_TARGET LIMITER_CAP
+# Pod-resource envsubst vars for the shared 40-sipp-uac-job template (envsubst has
+# no default syntax, so EVERY render site must export them — endurance.sh sizes
+# these per-role; the chaos/abuse/orphan/peak/failover streams here are transient
+# and low-concurrency, so a modest default is fine).
+export UAC_CPU_REQ="${UAC_CPU_REQ:-2}" UAC_CPU_LIM="${UAC_CPU_LIM:-8}" \
+       UAC_MEM_REQ="${UAC_MEM_REQ:-384Mi}" UAC_MEM_LIM="${UAC_MEM_LIM:-1536Mi}"
 
 log()  { printf '\033[1;36m>> %s\033[0m\n' "$*" >&2; }
 ok()   { printf '\033[1;32mPASS: %s\033[0m\n' "$*" >&2; }
