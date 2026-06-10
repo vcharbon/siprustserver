@@ -153,13 +153,23 @@ fn split_host_port(s: &str) -> (String, u16) {
 }
 
 /// **Incarnation gen** (deferred S11 decision: boot wall-clock vs pod epoch).
-/// We pick **boot wall-clock seconds**: it is monotonic across pod restarts (the
-/// clock only moves forward), so a rebooted worker always serves under a higher
-/// `gen` than its previous life — `(new_gen, 0) > (old_gen, *)` — and pullers
-/// apply its frames without a manual reset (ADR-0011 X9). Falls back to 0 only
-/// if the wall clock is before the epoch (never, in practice).
+/// We pick **boot wall-clock milliseconds**: normally monotonic across pod
+/// restarts, so a rebooted worker serves under a higher `gen` than its previous
+/// life — `(new_gen, 0) > (old_gen, *)` — and pullers apply its frames without
+/// a manual reset (ADR-0011 X9). Milliseconds (not seconds) so a sub-second
+/// crash-restart cannot reuse the previous life's gen with the counter reset to
+/// 0 — under the old seconds gen a warm peer kept tailing from its stale high
+/// counter and silently skipped every new entry. The wall clock can still step
+/// BACKWARD (NTP/VM resync); that case — and any residual collision — is
+/// handled server-side: `Changelog::needs_reset` forces a `ResetToBootstrap`
+/// whenever a puller presents a same-gen counter above our head or a
+/// future-gen watermark. Falls back to 0 only if the wall clock is before the
+/// epoch (never, in practice).
 fn boot_incarnation() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Where replication peer addresses come from (ADR-0012 D3).

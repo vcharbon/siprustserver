@@ -264,15 +264,31 @@ impl Changelog {
         }
     }
 
-    /// Whether a warm puller on `partition` resuming from `since` has fallen off
-    /// that sub-log's compacted tail and must re-bootstrap. True iff `since` is
-    /// same-incarnation (`since.gen >= self.gen`) **and** `since.counter` is below
-    /// the partition's `retained_floor`.
+    /// Whether a warm puller on `partition` resuming from `since` must
+    /// re-bootstrap. True when:
+    /// - `since.gen > self.gen` — a watermark from a FUTURE incarnation (the
+    ///   wall clock stepped backward across our restart, or a gen collision):
+    ///   meaningless against this log, and the warm path would silently skip
+    ///   everything until our counter outgrew it;
+    /// - `since.gen == self.gen` and `since.counter` exceeds our head — a
+    ///   counter we never issued, i.e. a same-instant gen collision after a
+    ///   fast restart (the counter restarted at 0 under a reused gen);
+    /// - `since.gen == self.gen` and `since.counter` is below the partition's
+    ///   `retained_floor` — fell off the compacted tail (a reaped tombstone the
+    ///   puller may have missed).
+    /// `since.gen < self.gen` is the ordinary cold case — `drain_since` already
+    /// treats it as drain-everything, no reset needed.
     pub fn needs_reset(&self, peer: &str, partition: Partition, since: Watermark) -> bool {
+        if since.gen > self.gen {
+            return true;
+        }
         if since.gen < self.gen {
             return false;
         }
         let inner = self.inner.lock().unwrap();
+        if since.counter > inner.counter {
+            return true;
+        }
         inner
             .peers
             .get(peer)

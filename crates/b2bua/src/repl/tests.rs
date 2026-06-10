@@ -376,6 +376,39 @@ async fn needs_reset_after_tombstone_reap_raises_floor() {
     assert!(!cl.needs_reset("Z", BAK_P, Watermark::new(1, 1)), "unknown peer → no reset");
 }
 
+/// An incarnation-gen collision or backward clock step must force a
+/// `ResetToBootstrap` — never a silent warm tail. A sub-second crash-restart
+/// (or an NTP step-back) can hand a fresh changelog the SAME (or a lower) gen
+/// while its counter restarts at 0; a warm puller then presents a same-gen
+/// watermark ABOVE our head (a counter we never issued) or a future-gen
+/// watermark, and the old `since.gen < gen ⇒ cold, else warm` split silently
+/// skipped every new entry until the counter outgrew the stale watermark.
+#[tokio::test(start_paused = true)]
+async fn gen_collision_or_backward_clock_forces_reset() {
+    let clock = Clock::test_at(0);
+    // "Restarted" changelog: same gen 1 as the previous life, counter back at 0.
+    let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 60_000);
+    let store = ReplicatingCallStore::with_changelog(cl.clone(), clock.clone());
+    put(&store, "c1", b"v1", 0, 1, &fwd("A")).await; // head = (1, 1)
+
+    // Same-gen watermark above our head: the previous life issued it, we never
+    // did — gen collision. Must reset, not warm-tail from counter 5000.
+    assert!(
+        cl.needs_reset("A", BAK_P, Watermark::new(1, 5_000)),
+        "same-gen counter above head = collision → reset"
+    );
+    // Future-gen watermark: our boot clock stepped backward across the restart.
+    assert!(
+        cl.needs_reset("A", BAK_P, Watermark::new(2, 3)),
+        "future-gen watermark → reset"
+    );
+    // A legitimate same-gen watermark at/below head stays warm.
+    assert!(
+        !cl.needs_reset("A", BAK_P, Watermark::new(1, 1)),
+        "watermark at head is an ordinary warm resume"
+    );
+}
+
 /// A peer log with an active serve task (a held [`ServeGuard`]) is NOT reaped
 /// while idle past the dead-peer TTL (so a parked poll-server never loses the log
 /// it is draining out from under itself); once the guard drops, the next reap
