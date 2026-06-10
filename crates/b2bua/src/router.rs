@@ -185,6 +185,35 @@ async fn reclaim_all(ctx: &Arc<RouterCtx>) {
     );
 }
 
+/// Strip a stale `KeepaliveTimeout` from a timer set hydrated off a replica
+/// snapshot (reclaim or reactive takeover).
+///
+/// A `KeepaliveTimeout` guards an in-flight keepalive OPTIONS *client
+/// transaction* — armed when the OPTIONS is sent (`keepalive` rule) and
+/// cancelled the instant its 200 lands (`absorb-options-200`). It exists on the
+/// wire for only the round-trip, but a flush that catches that window
+/// replicates it, so a `bak:`/`pri:` snapshot can carry an *armed*
+/// `KeepaliveTimeout`. When that snapshot is hydrated onto a different node
+/// (the rebooted primary's reclaim, or the acting-backup's reactive takeover),
+/// the client transaction it guarded **died with the crashed node** — its 200
+/// can never arrive to cancel it. Worse, its absolute `fire_at` came from the
+/// dead node's clock and is typically already **past-due**, so `restore` fires
+/// it on the next tick → the `keepalive-timeout` rule BYEs *both* legs of a
+/// perfectly healthy long hold (the parked UAC then sees an unexpected BYE =
+/// SIPp `unexpected_msg`). The smoothing in [`reclaim_into_live`] only defers
+/// `Keepalive`, never `KeepaliveTimeout`, so it does not save this entry.
+///
+/// The hydrated call re-probes safely on its own schedule: its `Keepalive`
+/// timer (smoothed for the bulk sweep, immediate for a single straggler) fires
+/// a *fresh* OPTIONS and arms a *fresh* `KeepaliveTimeout` against the live
+/// node's clock. So dropping the stale guard loses nothing and removes the
+/// spurious teardown. Purely local timer hygiene — no clock/settle, no `(p,b)`
+/// interaction (ADR-0014 untouched). Matches the endurance residual: held long
+/// calls torn down during the crash→reclaim window while reclaim is "complete".
+fn drop_stale_keepalive_timeout(timers: &mut Vec<TimerEntry>) {
+    timers.retain(|t| !matches!(t.timer_type, TimerType::KeepaliveTimeout));
+}
+
 /// Materialise one reclaimed call into the live map + re-arm its timers (ADR-0011
 /// X11). `smoothing = Some((now_ms, l_max))` staggers a **past-due** keepalive per
 /// the oldest-first batch schedule (the bulk reboot sweep, [`reclaim_all`]);
@@ -204,6 +233,10 @@ async fn reclaim_into_live(
     // `process` does, so a concurrent dispatcher handler for this call_ref cannot
     // interleave and double-arm.
     let _guard = ctx.state.lock(&call_ref).await;
+    // A keepalive OPTIONS transaction caught mid-flight in the replicated
+    // snapshot guards a probe that died with the crashed node; drop the stale
+    // timeout so it does not fire a spurious keepalive-timeout BYE on reclaim.
+    drop_stale_keepalive_timeout(&mut call.timers);
     if let Some((now_ms, l_max)) = smoothing {
         let speedup = ctx.config.keepalive_catchup_speedup.max(1);
         let cap_ms = ctx.config.max_catchup_window_sec.map(|s| s * 1000);
@@ -663,7 +696,14 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
                     // all reach a terminal state, at which point the router sheds
                     // the live copy (keeping the `bak:` replica).
                     ctx.state.mark_takeover(&call_ref);
-                    ctx.timers.restore(c.timers.clone(), call_ref.clone()).await;
+                    // Drop a stale in-flight `KeepaliveTimeout` (the OPTIONS it
+                    // guarded died with the crashed primary) so it does not fire a
+                    // spurious keepalive-timeout BYE on this reactive takeover; the
+                    // re-armed `Keepalive` re-probes fresh. See
+                    // `drop_stale_keepalive_timeout`.
+                    let mut takeover_timers = c.timers.clone();
+                    drop_stale_keepalive_timeout(&mut takeover_timers);
+                    ctx.timers.restore(takeover_timers, call_ref.clone()).await;
                     ctx.txn.watch_self_release(&call_ref).await;
                 }
                 c
@@ -686,7 +726,9 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
             // needs an on-demand pull from the peer (s11 CASE B, open).
             None => match ctx.state.peek_reclaimable(&call_ref).await {
                 Some(call) => {
-                    let timers = call.timers.clone();
+                    let mut timers = call.timers.clone();
+                    // Same stale-guard hygiene as the bulk/reactive reclaim paths.
+                    drop_stale_keepalive_timeout(&mut timers);
                     if ctx.state.materialize_if_absent(call.clone()) {
                         ctx.timers.restore(timers, call_ref.clone()).await;
                         ctx.metrics.bump_repl_reclaimed();
@@ -1142,4 +1184,92 @@ fn via_cr_lg(via: Option<&str>) -> Option<(Option<String>, String)> {
         }
     }
     Some((cr, lg))
+}
+
+#[cfg(test)]
+mod reclaim_timer_tests {
+    use super::*;
+    use crate::timers::TimerService;
+    use std::time::Duration;
+
+    fn keepalive(fire_at: i64) -> TimerEntry {
+        TimerEntry { id: "Keepalive".into(), timer_type: TimerType::Keepalive, fire_at, leg_id: None }
+    }
+    fn keepalive_timeout(leg: &str, fire_at: i64) -> TimerEntry {
+        TimerEntry {
+            id: format!("KeepaliveTimeout:{leg}"),
+            timer_type: TimerType::KeepaliveTimeout,
+            fire_at,
+            leg_id: Some(leg.into()),
+        }
+    }
+
+    // The reclaim/takeover hygiene: a snapshot caught mid-keepalive-round-trip
+    // carries an armed `KeepaliveTimeout`; restoring it verbatim onto the
+    // reclaiming/taking-over node fires it (its guarded OPTIONS died with the
+    // crashed node) and BYEs a healthy long hold. The fix strips it; the next
+    // `Keepalive` re-probes fresh. Asserts both the stripping AND that the
+    // remaining `Keepalive` survives.
+    #[test]
+    fn drop_stale_keepalive_timeout_strips_only_the_timeout() {
+        let mut timers = vec![
+            keepalive(300_000),
+            keepalive_timeout("a", 35_000),
+            keepalive_timeout("b-1", 35_000),
+            TimerEntry { id: "GlobalDuration".into(), timer_type: TimerType::GlobalDuration, fire_at: 3_600_000, leg_id: None },
+        ];
+        drop_stale_keepalive_timeout(&mut timers);
+        assert!(
+            timers.iter().all(|t| !matches!(t.timer_type, TimerType::KeepaliveTimeout)),
+            "every KeepaliveTimeout is stripped from the reclaimed snapshot",
+        );
+        assert!(
+            timers.iter().any(|t| matches!(t.timer_type, TimerType::Keepalive)),
+            "the Keepalive (re-probe) timer is kept — the call re-probes on its own schedule",
+        );
+        assert!(
+            timers.iter().any(|t| matches!(t.timer_type, TimerType::GlobalDuration)),
+            "unrelated timers (GlobalDuration) are kept",
+        );
+    }
+
+    // REPRO of the residual endurance loss at the timer layer: a *past-due*
+    // `KeepaliveTimeout` restored from a pre-crash snapshot fires IMMEDIATELY
+    // (`restore` clamps `fire_at <= now` to a next-tick fire) — this is the
+    // event that drives `keepalive-timeout` → BYE on a healthy reclaimed call.
+    // With the fix the stripped set restores NOTHING that fires at now=reclaim.
+    #[tokio::test(start_paused = true)]
+    async fn past_due_keepalive_timeout_fires_on_restore_without_the_fix() {
+        let clock = Clock::test_at(0);
+        // now is well past the snapshot's KeepaliveTimeout deadline (the dead
+        // node armed it +120 s before its clock, which is in our past).
+        tokio::time::advance(Duration::from_millis(200_000)).await;
+
+        // WITHOUT the fix: the verbatim snapshot includes the past-due timeout.
+        let (timers, mut fire_rx) = TimerService::spawn(clock.clone());
+        let snapshot = vec![keepalive(500_000), keepalive_timeout("b-1", 120_000)];
+        timers.restore(snapshot.clone(), "w0|cid|tag".into()).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let fired = fire_rx.recv().await.unwrap();
+        match fired {
+            CallEvent::Timer { timer_type, .. } => assert_eq!(
+                timer_type,
+                TimerType::KeepaliveTimeout,
+                "BUG: the stale past-due KeepaliveTimeout fires on reclaim → spurious BYE",
+            ),
+            _ => panic!("expected a timer event"),
+        }
+
+        // WITH the fix: the same snapshot, stripped, fires NOTHING at reclaim time
+        // (the future Keepalive is the only survivor and is far off).
+        let (timers2, mut fire_rx2) = TimerService::spawn(clock);
+        let mut fixed = snapshot;
+        drop_stale_keepalive_timeout(&mut fixed);
+        timers2.restore(fixed, "w0|cid|tag2".into()).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(
+            fire_rx2.try_recv().is_err(),
+            "FIX: no spurious keepalive-timeout fires on reclaim; the call survives",
+        );
+    }
 }

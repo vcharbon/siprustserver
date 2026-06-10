@@ -317,15 +317,63 @@ snap_limiter_conc() { vmq 'sum(sipp_current_calls{role="limiter"})'; }
 # pods are matched on exported_pod, not pod.
 snap_uas_restarts() { vmq 'sum(kube_pod_container_status_restarts_total{exported_namespace="sip-test",exported_pod=~"sipp-uas.*",exported_container="sipp-uas"})'; }
 
+# A UAS crash (exit-255 timer-wheel abort) wipes that pod's B-leg dialog state, so
+# ~1/N of established long calls are left A-leg-up / B-leg-dead. Those calls are not
+# torn down at crash time — they limp until their next in-dialog OPTIONS keepalive
+# (interval KEEPALIVE_SEC) gets no 200 and the KEEPALIVE_TIMEOUT_SEC grace elapses.
+# A subsequent worker reboot ACCELERATES that detection: reclaim_all's catchup
+# smoothing re-probes the whole partition at once, so the dead-B-leg backlog drains
+# as a keepalive-timeout BYE burst inside the reboot window — a LOAD-GENERATOR
+# aftermath, not a SUT failure (endurance-20260610 #7: 12.8% long-loss == all 1968
+# keepalive-timeout BYEs, evenly across shards, B-legs on the crashed sipp-uas-2).
+# The in-window restart-delta below misses it (the crash predates the event), so we
+# also taint when a UAS crash occurred within the dead-B-leg drain window
+# (keepalive interval + timeout, the longest a dead B-leg can linger undetected).
+UAS_CRASH_DRAIN_SEC="${UAS_CRASH_DRAIN_SEC:-$(( ${KEEPALIVE_SEC:-300} + ${KEEPALIVE_TIMEOUT_SEC:-120} ))}"
+# Epoch of the most recent involuntary UAS crash, written by the backgrounded
+# uas_crash_watcher (a subshell — cannot mutate a parent var) and read here.
+UAS_CRASH_TS_FILE="${UAS_CRASH_TS_FILE:-${RUN_DIR:-/tmp}/.last_uas_crash_ts}"
+# Epoch of this worker's PREVIOUS reboot, written by reboot_event after it finishes.
+# A kill_worker reclaim's catchup re-probes the WHOLE partition at once, so it
+# surfaces the entire dead-B-leg backlog accrued since that partition was last
+# reclaimed (= the previous reboot) — REGARDLESS of wall-clock age, which is why the
+# fixed drain window below is not enough on its own (endurance-20260610 #7: the UAS
+# crash predated the reboot by 2264s ≫ drain, yet the reboot still surfaced it).
+LAST_REBOOT_TS_FILE="${LAST_REBOOT_TS_FILE:-${RUN_DIR:-/tmp}/.last_reboot_ts}"
+
 # Downgrade a non-pass result to "tainted" when the UAS crashed during the window
-# [$2 = restart count at event start .. now]. Echoes the (possibly downgraded)
-# result; warns loudly so the monitor/subagent SKIPS a SUT investigation for it.
+# [$2 = restart count at event start .. now] OR when a UAS crash within the last
+# UAS_CRASH_DRAIN_SEC left a dead-B-leg backlog this event's reclaim surfaced.
+# Echoes the (possibly downgraded) result; warns loudly so the monitor/subagent
+# SKIPS a SUT investigation for it.
 taint_if_uas_crash() {  # $1=result  $2=uas_restarts_at_start  $3=event-type
+  [ "$1" = "pass" ] && { echo "$1"; return; }
+  [ "$1" = "n/a" ]  && { echo "$1"; return; }
   local d; d="$(python3 -c "print(int(float('$(snap_uas_restarts)')-float('$2')))" 2>/dev/null || echo 0)"
-  if [ "${d:-0}" -gt 0 ] && [ "$1" != "pass" ] && [ "$1" != "n/a" ]; then
+  if [ "${d:-0}" -gt 0 ]; then
     warn "  ↳ TAINTED: $d involuntary SIPp-UAS crash(es) (exit 255 timer-wheel abort) during the $3 window — this is a LOAD-GENERATOR fault, NOT a SUT failure. Do not investigate the SUT for it."
     push_metric "sip_chaos_event{type=\"$3\",result=\"tainted\"} 1"
     echo "tainted"; return
+  fi
+  local last_crash; last_crash="$(cat "$UAS_CRASH_TS_FILE" 2>/dev/null || echo 0)"
+  local age=$(( $(date +%s) - last_crash ))
+  if [ "${last_crash:-0}" -gt 0 ] && [ "$age" -lt "$UAS_CRASH_DRAIN_SEC" ]; then
+    warn "  ↳ TAINTED (aftermath): an involuntary SIPp-UAS crash ${age}s ago (< ${UAS_CRASH_DRAIN_SEC}s drain) left dead B-legs; this $3 reclaim re-probed them as a keepalive-timeout BYE burst — LOAD-GENERATOR aftermath, NOT a SUT failure. Do not investigate the SUT for it."
+    push_metric "sip_chaos_event{type=\"$3\",result=\"tainted\"} 1"
+    echo "tainted"; return
+  fi
+  # kill_worker only: the reclaim catchup surfaces the dead-B-leg backlog accrued
+  # since this partition's PREVIOUS reclaim (= the last reboot), at any age. Taint
+  # if a UAS crash falls in that (prev-reboot, now] interval — the natural-drain
+  # window above misses it because the backlog limped (no keepalive re-fired) until
+  # this reboot's catchup compressed it into the event window.
+  if [ "$3" = "kill_worker" ] && [ "${last_crash:-0}" -gt 0 ]; then
+    local last_reboot; last_reboot="$(cat "$LAST_REBOOT_TS_FILE" 2>/dev/null || echo 0)"
+    if [ "$last_crash" -gt "${last_reboot:-0}" ]; then
+      warn "  ↳ TAINTED (aftermath): an involuntary SIPp-UAS crash occurred since this worker's previous reboot ($(( $(date +%s) - last_crash ))s ago); its reclaim catchup re-probed the dead-B-leg backlog as a keepalive-timeout BYE burst — LOAD-GENERATOR aftermath, NOT a SUT failure. Do not investigate the SUT for it."
+      push_metric "sip_chaos_event{type=\"$3\",result=\"tainted\"} 1"
+      echo "tainted"; return
+    fi
   fi
   echo "$1"
 }
@@ -345,7 +393,8 @@ uas_crash_watcher() {
       pods="$(kubectl -n "$NS" get pods -l app=sipp-uas \
         -o jsonpath='{range .items[*]}{.metadata.name}=r{.status.containerStatuses[0].restartCount} {end}' 2>/dev/null)"
       exitc="$(vmq 'max(kube_pod_container_status_last_terminated_exitcode{exported_namespace="sip-test",exported_pod=~"sipp-uas.*"})')"
-      warn "INVOLUNTARY UAS CRASH (test-infra, NOT SUT): +${delta} restart(s), last exit=${exitc%.*} — [$pods] — flagged; overlapping chaos windows will be TAINTED"
+      warn "INVOLUNTARY UAS CRASH (test-infra, NOT SUT): +${delta} restart(s), last exit=${exitc%.*} — [$pods] — flagged; overlapping chaos windows AND the next ${UAS_CRASH_DRAIN_SEC}s (dead-B-leg drain) will be TAINTED"
+      date +%s > "$UAS_CRASH_TS_FILE"   # aftermath taint window: read by taint_if_uas_crash
       push_metric "sip_chaos_uas_crash_total ${cur%.*}
 sip_chaos_window{type=\"uas_crash\"} 1
 sip_chaos_event{type=\"uas_crash\",result=\"involuntary\"} 1"
@@ -566,6 +615,9 @@ sip_chaos_ghost_gap{type=\"kill_worker\"} $g1"
     tainted) warn "CHAOS #$idx kill_worker($mode): TAINTED by involuntary UAS crash — long-loss ${lloss}%/leak ${rise} NOT attributable to the SUT (skip investigation)" ;;
     *)       warn "CHAOS #$idx kill_worker($mode): FAILURE — short ${spct}%/${thr}% ($res_short); LONG-LOSS ${lloss}% > ${LONG_LOSS_TOL}% ($res_long, ${ldf}/${ldc} long calls); leak ghost rise ${rise} ($res_leak)" ;;
   esac
+  # Stamp THIS reboot's epoch for the next reboot's aftermath-taint comparison
+  # (written AFTER taint_if_uas_crash ran above, so that read saw the PREVIOUS reboot).
+  date +%s > "$LAST_REBOOT_TS_FILE"
 }
 
 # Record one chaos event: snapshot baseline outcomes, run it, settle, snapshot
