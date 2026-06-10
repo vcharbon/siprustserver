@@ -400,3 +400,106 @@ delta non-fatal (ADR-0012 D1/D2). The repl puller additionally resolves a
 the proxy reaches workers by the informer-fed Pod IP (ADR-0012 D4). Consistency
 is enforced on *identity + membership source*, not *address representation*
 (ADR-0012 D5).
+
+## E2E test-management vocabulary
+
+The language of the test-management website + CLI (Axum/Maud/htmx front-end and a
+CI/CD CLI over one shared run-core) that authors, launches, and displays
+end-to-end SIP tests. See [ADR-0018](./docs/adr/0018-e2e-test-management-architecture.md)
+(architecture) and [ADR-0019](./docs/adr/0019-e2e-check-model-and-anchors.md)
+(checks/anchors). Its organising idea is **four orthogonal axes** — *what the
+call does* (Callflow shape), *what the topology is* (Infra shape), *where the
+endpoints live* (Endpoint config), and *what data fills the call* (Test case) —
+that a fused `#[tokio::test]` currently interleaves and this layer pulls apart.
+
+**Callflow shape**:
+A compiled-Rust, registered message-sequence template (basic call, re-routing,
+re-routing + PRACK) parameterised over a declared **input-data schema** and the
+**checks** it supports. Built on the fluent `Harness`/`Agent` DSL. Selected — not
+authored — from the website; a new shape is Rust + redeploy.
+_Avoid_: "scenario" (triple-overloaded — the Rust `Scenario` struct, the TS
+instance, and the JSON **Test case** all collide); "framework".
+
+**Infra shape**:
+A compiled-Rust topology + clock a Callflow shape runs under — **fake** (Alice/
+Bob1/Bob2/LB/b2bua all in-process on `SimulatedSignalingNetwork`, paused clock)
+or **real** (Alice/Bob* are real-socket **Test Agents**, the **SUT** is an
+external kind cluster, wall clock). The *same* Callflow shape runs unchanged over
+any Infra shape — the portability invariant.
+_Avoid_: "topology"/"network" unqualified (the latter is the `SignalingNetwork`
+trait).
+
+**Test Agent**:
+A scenario-driven UA the framework controls (Alice, Bob1, Bob2) — a simulated
+endpoint under a fake **Infra shape**, a real UDP socket under a real one.
+_Avoid_: "client"/"UA"/"endpoint" unqualified.
+
+**SUT** (system under test):
+What the **Test Agents** exercise (the LSBC LB + b2bua) — spawned in-process on
+the sim fabric under a fake **Infra shape**, an external kind ip:port under a real
+one. Never scenario-driven. The **LB is the sole boundary in BOTH directions**:
+Test Agents reach the SUT only via the LB VIP (a-leg in), and the SUT reaches Test
+Agents only *back through the LB* (b-leg out — `B2BUA_OUTBOUND_PROXY` = LB VIP),
+**never pod-direct**. So in the real shape Alice/Bob must be reachable *from the LB
+alone*; a b2bua contacting Bob directly is the known NAT-failure mode this
+invariant exists to forbid (see the `force-b-leg-through-lb-proxy` finding).
+"Fully fake" / "fully real" name the two ends of this.
+
+**Test case** (a.k.a. **test data**):
+A committed JSON file = input data (From/To/R-URI, timers, specific header
+content) + **checks** + the **list of compatible Callflow shapes** it can drive
+(validated against each shape's declared input schema at load). The unit a user
+authors from the website.
+_Avoid_: "scenario" (the overloaded word this replaces).
+
+**Endpoint config**:
+A JSON file binding an **Infra shape**'s logical roles (alice, bob1, sut…) to
+concrete addresses + clock + recv-timeout. One per Infra shape (fake = loopback
+sim ports; real = kind ip:ports). The `RECV_TIMEOUT` knob is part of it.
+
+**Check**:
+A declared assertion in a **Test case** / **Check set**, evaluated **post-call
+over the recorded trace by the same engine as the 77 RFC rules** — a check is a
+*parameterised audit rule contributed by the JSON*, surfaced as a verdict/anomaly
+in the report exactly like an RFC finding, and identical across fake & real Infra
+shapes. Checks are declarative and cannot influence the flow (no live Bob-side
+branching). A check keys off a `<agent>.<anchor>` (**Message anchor**) and asserts
+over a field: **URI-bearing headers** (From/To/PAI/PPI/R-URI/Diversion[]/Contact[])
+expose typed helpers `.userInfo/.host/.port/.displayName/.tag/.param(x)`; **any
+other header** gets `.present/.absent/.regex`; the **payload** gets `.body.regex`
+(SDP-aware helpers later); and the **transport source/dest** (`source.ip/.port`,
+`dest.ip/.port`, read from the recorded `from`/`to` `SocketAddr`) is assertable too,
+so a Test case *may optionally* verify which IP a message came from (e.g. b-leg
+source == LB VIP) — a capability, never a forced/default check. Values may bind a
+Test-case input (`${input.from}`) or an Infra value (`${infra.lbVip}`).
+_Avoid_: a separate live-assertion path in the Callflow shape (rejected — keeps
+fake/real uniform and reuses the audit engine).
+
+**Message anchor**:
+A name from a **canonical, project-wide vocabulary** (`initialInvite`, `reInvite`,
+`firstProvisional`, `answer`, `ack`, `bye`, `refer`, …) that a **Callflow shape**
+*publishes* for each message it produces. Checks bind to `<agent>.<anchor>` rather
+than a step index, so a **Check set** is portable across every shape that publishes
+the anchors it references (validated at load — a referenced-but-unpublished anchor
+is a compatibility error).
+_Avoid_: per-shape free-string anchors (drift), raw `{method, nth}` selectors
+(fragile).
+
+**Check set**:
+A committed, reusable JSON bundle of **checks** keyed by **Message anchor** (e.g.
+`invite-identity` = From + PAI + R-URI + Diversion assertions on `initialInvite`).
+Referenced by name from any **Test case** whose shape publishes the needed anchors,
+so "verify the identity headers" is authored once and shared everywhere.
+_Avoid_: re-authoring the same identity checks inline per Test case.
+
+**Campaign**:
+A JSON batch that crosses {**Test cases**} × {their compatible **Callflow
+shapes**} × {**Infra shapes**}; launching it materialises one **Run** per cell and
+collects the results.
+_Avoid_: the TS meaning of "campaign" (a SUT-config *variant* — b2bonly / proxy+
+b2b / HA); here a campaign is a test *batch*.
+
+**Run** / **Result**:
+One executed (**Test case**, **Callflow shape**, **Infra shape**) cell and its
+recorded artifacts (SVG call diagram, wire trace, **check** verdicts, RFC audit,
+received RTP). Generated, not committed.
