@@ -412,17 +412,56 @@ async fn nonpositive_ttl_replica_self_evicts_via_backstop() {
     let clock = Clock::test_at(0);
     let store = ReplicatingCallStore::new(1, clock.clone()).with_default_ttl_ms(1_000);
 
-    // Apply-path replica (peer:None, ttl 0) — the shape a puller stores.
+    // Apply-path replica (peer:None, ttl 0) — the shape a puller stores. The
+    // index keys ride along exactly as the puller passes them.
+    let idx = vec!["leg:cid-1|tag-a".to_string()];
     store
-        .put_call(BAK, "A", "c1", b"v1".to_vec(), &[], 0, 1, 0, &PutOpts::default())
+        .put_call(BAK, "A", "c1", b"v1".to_vec(), &idx, 0, 1, 0, &PutOpts::default())
         .await
         .unwrap();
     assert!(store.get_call(BAK, "A", "c1").await.unwrap().is_some());
+    assert_eq!(
+        store.get_index("leg:cid-1|tag-a").await.unwrap().as_deref(),
+        Some("c1")
+    );
 
-    // Past the backstop → lazily evicted on access (no permanent ghost).
+    // Past the backstop → lazily evicted on access (no permanent ghost), AND the
+    // ghost's idx:* entries are freed with it — a stranded index would both leak
+    // and let `resolve_from_replica_index` resolve a takeover to a dead callRef.
     tokio::time::advance(Duration::from_millis(1_001)).await;
     assert!(
         store.get_call(BAK, "A", "c1").await.unwrap().is_none(),
         "ttl<=0 replica self-evicts via the backstop"
     );
+    assert_eq!(
+        store.get_index("leg:cid-1|tag-a").await.unwrap(),
+        None,
+        "lazy eviction must free the replica's index entries too"
+    );
+}
+
+/// The bulk `reap` path frees an expired ghost's `idx:*` entries along with its
+/// body — same invariant as the lazy-eviction path above, on the sweep the
+/// runner drives every few seconds.
+#[tokio::test(start_paused = true)]
+async fn reap_frees_expired_replica_index_entries() {
+    let clock = Clock::test_at(0);
+    let store = ReplicatingCallStore::new(1, clock.clone()).with_default_ttl_ms(1_000);
+
+    let idx = vec!["leg:cid-2|tag-b".to_string(), "leg:cid-2".to_string()];
+    store
+        .put_call(BAK, "A", "c2", b"v1".to_vec(), &idx, 0, 1, 0, &PutOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_index("leg:cid-2|tag-b").await.unwrap().as_deref(),
+        Some("c2")
+    );
+
+    tokio::time::advance(Duration::from_millis(1_001)).await;
+    store.reap(clock.now_ms()).await;
+
+    assert!(store.get_call(BAK, "A", "c2").await.unwrap().is_none());
+    assert_eq!(store.get_index("leg:cid-2|tag-b").await.unwrap(), None);
+    assert_eq!(store.get_index("leg:cid-2").await.unwrap(), None);
 }

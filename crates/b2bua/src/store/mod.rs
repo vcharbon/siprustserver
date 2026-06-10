@@ -206,6 +206,16 @@ impl CallState {
     /// divergence the old single counter suffered. A brand-new call enters at
     /// `(1,0)` (stamped at INVITE time in [`crate::initial_invite`]). The bump is
     /// a no-op for non-proxied calls that carry no `topology`.
+    ///
+    /// **Replace-only.** `update` never *inserts*: every live call enters the map
+    /// through [`create`](Self::create) / [`hydrate_from_replica`](Self::hydrate_from_replica)
+    /// / [`materialize_if_absent`](Self::materialize_if_absent), all of which
+    /// mark/index/arm as the entry path requires. An update racing a release
+    /// (`remove`/`drop_local` evicted the call after this handler checked it out)
+    /// must NOT resurrect an unmarked, unwatched, timer-less zombie copy — the
+    /// X11 double-serve class. The dropped mutation is safe: the call is gone on
+    /// this node by an authoritative teardown, and any later event re-enters via
+    /// a fresh hydrate.
     pub fn update(&self, mut call: Call) {
         if let Some(t) = call.topology.as_mut() {
             match role_of(&self.self_ordinal, &call.call_ref) {
@@ -214,6 +224,9 @@ impl CallState {
             }
         }
         let mut inner = self.inner.lock().unwrap();
+        if !inner.calls.contains_key(&call.call_ref) {
+            return;
+        }
         Self::reindex(&mut inner, &call);
         inner.calls.insert(call.call_ref.clone(), call);
     }

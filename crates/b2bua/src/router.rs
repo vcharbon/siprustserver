@@ -232,19 +232,61 @@ async fn reclaim_into_live(
     }
 }
 
-/// **Acting-backup self-release** (ADR-0014): shed a reactive takeover copy once
-/// the transaction(s) the backup served for it have all reached a terminal state.
-/// Local-only — drop the live copy + cancel its timers/txns/dispatch — propagating
-/// **no** delete: the `bak:{primary}` replica and the reverse-flushed deltas
-/// remain, so the call lives on at its reclaiming primary (which keeps
-/// forward-refreshing this node's backup `Element`). Replaces the X11 `Deactivate`
-/// watermark handback. The caller has already dropped the per-call lock guard.
-async fn self_release(ctx: &Arc<RouterCtx>, call_ref: &str) {
-    if ctx.state.drop_local(call_ref) {
-        ctx.timers.cancel_all(call_ref.to_string()).await;
-        ctx.txn.cancel_txns_for_call(call_ref).await;
-        ctx.dispatcher.enqueue_poison(call_ref);
-        ctx.metrics.bump_repl_self_release();
+/// How a call's per-node runtime state is being released. Every path that frees
+/// per-call state funnels through [`release_call`] — the ONE teardown executor —
+/// so no path can forget a step of the "all per-call state MUST be released at
+/// call end" invariant (CLAUDE.md). The three kinds differ ONLY in which side
+/// effects they must NOT perform (encoded here, not in comments):
+enum ReleaseKind {
+    /// Terminated call: evict from map/index/store and **propagate the delete**
+    /// to the replica peer (the `RemoveCall` critical effect).
+    Terminated,
+    /// **Acting-backup self-release** (ADR-0014): shed a reactive takeover copy
+    /// once the transaction(s) the backup served for it have all reached a
+    /// terminal state. Local-only — **no** store mutation, **no** delete
+    /// propagation: the `bak:{primary}` replica and the reverse-flushed deltas
+    /// remain, so the call lives on at its reclaiming primary. Replaces the X11
+    /// `Deactivate` watermark handback.
+    SelfRelease,
+    /// Orphan reject: the 481 path hydrated NO call — only the lock entry and
+    /// the dispatch queue exist. **No** store mutation (a `remove` would
+    /// reverse-propagate a spurious delete), **no** timers/txns were armed.
+    Orphan,
+}
+
+/// The single per-call teardown executor (see [`ReleaseKind`]). Owns the full
+/// release checklist — map/index entry, store propagation, per-call lock,
+/// takeover mark, timers (physical `try_remove`, CLAUDE.md), transactions, and
+/// the dispatch queue — so the released-at-call-end invariant lives in ONE
+/// place instead of three hand-maintained copies (the orphan-lock ratchet and
+/// the timer-tombstone CPU climb were both a copy missing one step).
+async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: ReleaseKind) {
+    match kind {
+        ReleaseKind::Terminated => {
+            ctx.state.remove(call_ref);
+            // Idempotent with an explicit `CancelAllTimers` effect, but no longer
+            // dependent on every rule remembering to emit one: a terminated call
+            // frees EVERY timer slot it owns now, not at its deadline.
+            ctx.timers.cancel_all(call_ref.to_string()).await;
+            ctx.txn.cancel_txns_for_call(call_ref).await;
+            // Poison the per-call dispatch queue; its worker exits and bumps
+            // `removal` exactly once (dispatch.rs). We deliberately do NOT
+            // bump here — removal is counted at the single dispatch-queue
+            // teardown site so creations/removals stay a matched pair.
+            ctx.dispatcher.enqueue_poison(call_ref);
+        }
+        ReleaseKind::SelfRelease => {
+            if ctx.state.drop_local(call_ref) {
+                ctx.timers.cancel_all(call_ref.to_string()).await;
+                ctx.txn.cancel_txns_for_call(call_ref).await;
+                ctx.dispatcher.enqueue_poison(call_ref);
+                ctx.metrics.bump_repl_self_release();
+            }
+        }
+        ReleaseKind::Orphan => {
+            ctx.state.discard_orphan(call_ref);
+            ctx.dispatcher.enqueue_poison(call_ref);
+        }
     }
 }
 
@@ -264,15 +306,26 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     // serializes this against any in-flight handler for the call; we re-check under
     // it because a fresh in-dialog request could have re-armed a transaction (a
     // second takeover during a sustained partition) since the notice was emitted.
+    //
+    // The guard is held ACROSS the release — never dropped between the re-check
+    // and `drop_local`. Dropping it first opened a thread-skew window (multi-
+    // threaded runtime only; paused-clock tests never tripped it) where a queued
+    // per-call handler could hydrate the still-resident copy (`fresh == false` →
+    // no re-mark, no re-watch) and its `process_result → update()` re-inserted a
+    // ZOMBIE after `drop_local`: resident, unmarked, unwatched, timers racing-
+    // cancelled — the X11 double-serve class ADR-0014 exists to kill. Under the
+    // guard, a parked handler acquires only after the call is gone; it then
+    // re-hydrates FRESH (re-marked, re-watched) and converges via the next
+    // CallQuiesced. `release_call` takes no per-call lock itself, so holding the
+    // guard across it is deadlock-free.
     if let CallEvent::CallQuiesced { call_ref } = &event {
         let call_ref = call_ref.clone();
         if ctx.state.is_takeover(&call_ref) {
-            let guard = ctx.state.lock(&call_ref).await;
-            let release = ctx.state.is_takeover(&call_ref)
-                && ctx.txn.active_txn_count_for_call(&call_ref).await == 0;
-            drop(guard);
-            if release {
-                self_release(ctx, &call_ref).await;
+            let _guard = ctx.state.lock(&call_ref).await;
+            if ctx.state.is_takeover(&call_ref)
+                && ctx.txn.active_txn_count_for_call(&call_ref).await == 0
+            {
+                release_call(ctx, &call_ref, ReleaseKind::SelfRelease).await;
             }
         }
         return;
@@ -626,14 +679,14 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
                 // ALL leak permanently — ~1 per orphan, which a mass-orphan failover
                 // (thousands of in-dialog BYEs hitting a rebooted worker whose calls
                 // were never reclaimed) turns into a multi-thousand `active_calls` +
-                // `store_locks` ratchet that never drains. Release the lock entry
-                // (no store mutation — `remove` would reverse-propagate a spurious
-                // delete) and poison the queue so the worker exits and `removals`
-                // balances `creations`. Drop our guard first so the poisoned worker
-                // never contends on this call_ref's (now removed) lock.
+                // `store_locks` ratchet that never drains. Release through the one
+                // teardown executor (`ReleaseKind::Orphan` — no store mutation, so
+                // no spurious reverse-propagated delete) so the worker exits and
+                // `removals` balances `creations`. Drop our guard first so the
+                // poisoned worker never contends on this call_ref's (now removed)
+                // lock.
                 drop(_guard);
-                ctx.state.discard_orphan(&call_ref);
-                ctx.dispatcher.enqueue_poison(&call_ref);
+                release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
                 return;
             }
         };
@@ -777,15 +830,7 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
             }
             CriticalStateEffect::Flush => ctx.state.flush(&result.call),
             CriticalStateEffect::RemoveCall => {
-                ctx.state.remove(call_ref);
-                ctx.txn.cancel_txns_for_call(call_ref).await;
-                // Poison the per-call dispatch queue; its worker exits and bumps
-                // `removal` exactly once (dispatch.rs). We deliberately do NOT
-                // bump here — removal is counted at the single dispatch-queue
-                // teardown site so creations/removals stay a matched pair (one
-                // per call_ref). Counting here too double-counted every removal
-                // (~2× creations) and made `active_calls` saturate to 0.
-                ctx.dispatcher.enqueue_poison(call_ref);
+                release_call(ctx, call_ref, ReleaseKind::Terminated).await;
             }
         }
     }

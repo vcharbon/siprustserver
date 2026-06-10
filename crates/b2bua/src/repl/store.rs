@@ -201,6 +201,12 @@ impl ReplicatingCallStore {
     }
 
     /// Lazily evict an expired body + meta on access; returns `true` if evicted.
+    ///
+    /// The meta's captured `indexes` ride the delete: an expired ghost must free
+    /// its `idx:*` entries too (all per-call state released, CLAUDE.md) — the
+    /// meta is removed in the same step, so this is the LAST moment the index
+    /// keys are recoverable. Leaving them stranded both leaked the index map and
+    /// let `resolve_from_replica_index` resolve a takeover to a dead callRef.
     async fn evict_if_expired(
         &self,
         role: PartitionRole,
@@ -210,10 +216,16 @@ impl ReplicatingCallStore {
         if !self.is_expired(call_ref) {
             return false;
         }
-        self.meta.lock().unwrap().remove(call_ref);
+        let indexes = self
+            .meta
+            .lock()
+            .unwrap()
+            .remove(call_ref)
+            .map(|m| m.meta.indexes)
+            .unwrap_or_default();
         let _ = self
             .inner
-            .delete_call(role, primary, call_ref, &[], &PutOpts::default())
+            .delete_call(role, primary, call_ref, &indexes, &PutOpts::default())
             .await;
         true
     }
@@ -221,20 +233,21 @@ impl ReplicatingCallStore {
     /// Evict every expired body + reap changelog tombstones/idle peers. Call
     /// after advancing the clock (lazy TTL — deterministic, no background task).
     pub async fn reap(&self, now_ms: i64) {
-        // Snapshot the expired (callRef, role, primary) tuples, drop the lock,
-        // then delete each body from the backing store.
-        let expired: Vec<(String, PartitionRole, String)> = {
+        // Snapshot the expired (callRef, role, primary, indexes) tuples, drop the
+        // lock, then delete each body — WITH its captured index keys, so the
+        // ghost's `idx:*` entries are freed too (see `evict_if_expired`).
+        let expired: Vec<(String, PartitionRole, String, Vec<String>)> = {
             let meta = self.meta.lock().unwrap();
             meta.iter()
                 .filter(|(_, m)| matches!(m.expiry_at_ms, Some(e) if now_ms >= e))
-                .map(|(k, m)| (k.clone(), m.role, m.primary.clone()))
+                .map(|(k, m)| (k.clone(), m.role, m.primary.clone(), m.meta.indexes.clone()))
                 .collect()
         };
-        for (call_ref, role, primary) in &expired {
+        for (call_ref, role, primary, indexes) in &expired {
             self.meta.lock().unwrap().remove(call_ref);
             let _ = self
                 .inner
-                .delete_call(*role, primary, call_ref, &[], &PutOpts::default())
+                .delete_call(*role, primary, call_ref, indexes, &PutOpts::default())
                 .await;
         }
         self.changelog.reap(now_ms);
