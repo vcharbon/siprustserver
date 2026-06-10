@@ -93,6 +93,10 @@ pub struct CellSummary {
     pub passed: bool,
     /// The cell directory (relative to the run dir) holding `result.json`.
     pub dir: String,
+    /// Set when the cell CRASHED (a harness assertion / the RFC hard gate
+    /// panicked) — there is then no `result.json`, only `error.txt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// The aggregate index of one campaign run.

@@ -94,6 +94,7 @@ async fn result_json_round_trips_and_campaign_indexes() {
             cell: result.cell.clone(),
             passed: result.passed,
             dir: result.cell.dir_name(),
+            error: None,
         }],
     };
     result::write_campaign_index(&run_dir, &index).expect("write campaign.json");

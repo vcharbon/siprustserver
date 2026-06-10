@@ -1,0 +1,12 @@
+{
+  "$schema": "../schemas/endpoint-config.schema.json",
+  "infraShape": "fake-lsbc-b2bua",
+  "roles": {
+    "alice": "127.0.0.1:5060",
+    "bob1": "127.0.0.1:5070",
+    "lb": "127.0.0.1:5080",
+    "b2bua": "127.0.0.1:5090"
+  },
+  "recvTimeoutMs": 2000,
+  "transitDelayMs": 1
+}

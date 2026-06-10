@@ -1,0 +1,9 @@
+{
+  "$schema": "../schemas/endpoint-config.schema.json",
+  "infraShape": "real-loopback-direct",
+  "roles": {
+    "alice": "127.0.0.1:37060",
+    "bob1": "127.0.0.1:37070"
+  },
+  "recvTimeoutMs": 5000
+}

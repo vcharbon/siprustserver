@@ -1,0 +1,7 @@
+{
+  "$schema": "../schemas/campaign.schema.json",
+  "id": "smoke",
+  "description": "The committed basic-call identity case over the in-process fake SUT — the always-runnable CI smoke campaign.",
+  "cases": ["basic-call-identity"],
+  "infraShapes": ["fake-lsbc-b2bua"]
+}

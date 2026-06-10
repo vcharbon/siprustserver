@@ -19,7 +19,10 @@ sip-clock = { path = "../sip-clock", features = ["testkit"] }
 sip-txn = { path = "../sip-txn" }
 sip-message = { path = "../sip-message" }
 async-trait = { workspace = true }
-tokio = { workspace = true }
+# `test-util` on top of the workspace `full`: the run executor builds one
+# current-thread runtime per cell, `start_paused(true)` for fake infra cells
+# (the library-side analogue of `#[tokio::test(start_paused = true)]`).
+tokio = { workspace = true, features = ["test-util"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }

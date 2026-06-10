@@ -27,6 +27,7 @@ members = [
     "crates/call-limiter-runner",
     "crates/cdr-consumer-runner",
     "crates/e2e-core",
+    "crates/e2e-cli",
     "xtask",
 ]
 

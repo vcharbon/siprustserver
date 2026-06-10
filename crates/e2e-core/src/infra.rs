@@ -143,6 +143,22 @@ pub trait InfraShape {
     async fn build(&self, scenario_name: &str, cfg: &EndpointConfig) -> InfraRuntime;
 }
 
+/// The compiled Infra-shape registry, as a by-id factory: `InfraShape` is
+/// `!Send` (it builds a `Harness`), so the run executor resolves the id
+/// *inside* each cell's thread instead of passing trait objects across.
+pub fn by_id(id: &str) -> Option<Box<dyn InfraShape>> {
+    match id {
+        "fake-lsbc-b2bua" => Some(Box::new(FakeLsbcB2bua)),
+        "real-loopback-direct" => Some(Box::new(RealLoopbackDirect)),
+        _ => None,
+    }
+}
+
+/// Every registered Infra-shape id (for precise unknown-id errors).
+pub fn known_ids() -> Vec<&'static str> {
+    vec!["fake-lsbc-b2bua", "real-loopback-direct"]
+}
+
 /// The **fake** infra: alice / bob1 / bob2 on the simulated fabric under a paused
 /// clock, with an in-process LSBC LB (a real `ProxyCore`) fronting one in-process
 /// b2bua worker. The b2bua's b-leg egresses through the LB (`b2b_outbound_proxy`
