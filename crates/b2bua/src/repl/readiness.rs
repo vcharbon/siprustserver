@@ -44,6 +44,16 @@ pub trait ReadinessSource: Send + Sync {
     fn all_bootstrapped(&self) -> bool;
     /// Every peer's forward replog is caught up — sticky `current` (S5).
     fn all_current(&self) -> bool;
+    /// The membership view behind the two gates is authoritative (the informer's
+    /// initial LIST completed). Both gates are `.all()` over the desired peer
+    /// set — vacuously TRUE over the empty snapshot an informer starts with —
+    /// so without this gate a rebooting node could latch Ready in the first
+    /// instants of boot, before its peers (and the calls to reclaim from them)
+    /// were even visible. Default `true` for sources with no async view
+    /// (always-ready / static / tests).
+    fn membership_synced(&self) -> bool {
+        true
+    }
 }
 
 impl ReadinessSource for ReplicationSupervisor {
@@ -52,6 +62,9 @@ impl ReadinessSource for ReplicationSupervisor {
     }
     fn all_current(&self) -> bool {
         ReplicationSupervisor::all_current(self)
+    }
+    fn membership_synced(&self) -> bool {
+        ReplicationSupervisor::membership_synced(self)
     }
 }
 
@@ -107,7 +120,9 @@ impl Readiness {
     }
 
     /// The current readiness state (Draining wins; else latched/gated Ready;
-    /// else NotReady). Latches `Ready` the first time both gates are true.
+    /// else NotReady). Latches `Ready` the first time the gates are all true —
+    /// and only over a SYNCED membership view, so the informer's empty boot
+    /// snapshot can never vacuously latch a node that has peers to reclaim from.
     pub fn state(&self) -> ReadinessState {
         if self.inner.draining.load(Ordering::SeqCst) {
             return ReadinessState::Draining;
@@ -115,7 +130,10 @@ impl Readiness {
         if self.inner.ready_latched.load(Ordering::SeqCst) {
             return ReadinessState::Ready;
         }
-        if self.inner.source.all_bootstrapped() && self.inner.source.all_current() {
+        if self.inner.source.membership_synced()
+            && self.inner.source.all_bootstrapped()
+            && self.inner.source.all_current()
+        {
             self.inner.ready_latched.store(true, Ordering::SeqCst);
             return ReadinessState::Ready;
         }
@@ -166,6 +184,39 @@ mod tests {
             let r = Readiness::new(FlagSource::new(b, c));
             assert_eq!(r.state(), want, "({b},{c})");
         }
+    }
+
+    /// A source whose gates are vacuously true over an UNSYNCED membership view
+    /// (the informer's empty boot snapshot) must NOT latch Ready: peers — and
+    /// the calls to reclaim from them — are not visible yet.
+    struct UnsyncedSource {
+        synced: AtomicBool,
+    }
+    impl ReadinessSource for UnsyncedSource {
+        fn all_bootstrapped(&self) -> bool {
+            true // vacuous .all() over the empty peer set
+        }
+        fn all_current(&self) -> bool {
+            true // vacuous
+        }
+        fn membership_synced(&self) -> bool {
+            self.synced.load(Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn vacuous_gates_cannot_latch_before_membership_syncs() {
+        let src = Arc::new(UnsyncedSource { synced: AtomicBool::new(false) });
+        let r = Readiness::new(src.clone());
+        assert_eq!(
+            r.state(),
+            ReadinessState::NotReady,
+            "empty-but-unsynced membership must not vacuously latch Ready"
+        );
+        // The informer's initial LIST completes; an (actually) empty cluster —
+        // or one whose gates are genuinely satisfied — may now latch.
+        src.synced.store(true, Ordering::SeqCst);
+        assert_eq!(r.state(), ReadinessState::Ready);
     }
 
     #[test]

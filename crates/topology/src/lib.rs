@@ -81,6 +81,17 @@ pub trait Membership: Send + Sync {
     fn snapshot(&self) -> Vec<Peer>;
     /// Subscribe to membership deltas from this point on (no backfill).
     fn changes(&self) -> broadcast::Receiver<MemberDelta>;
+    /// Whether this source's view is **authoritative** yet. Static/simulated
+    /// memberships are authoritative at construction (default `true`); an
+    /// informer-backed source (`K8sMembership`) starts with an EMPTY snapshot
+    /// and flips this only once its initial LIST completes. Consumers gating
+    /// vacuous-truth decisions over the peer set (the b2bua readiness gates: an
+    /// empty set is "ready" ONLY if the empty view is real) MUST check this —
+    /// treating the informer's pre-sync empty snapshot as a peerless cluster
+    /// let a rebooting node latch Ready before a single reclaim puller existed.
+    fn synced(&self) -> bool {
+        true
+    }
 }
 
 /// Layer-build-time parse failure for the `ordinal@host,...` grammar.

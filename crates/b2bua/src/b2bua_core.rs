@@ -308,14 +308,18 @@ impl B2buaCore {
         self.supervisor.as_ref()
     }
 
-    /// Readiness gate: every reachable peer bootstrapped AND current (the S7
-    /// readiness state — read straight off the supervisor). Legacy (no
-    /// replication) is always ready.
+    /// Readiness gate, routed through the SAME latched [`Readiness`] state
+    /// machine the SIP OPTIONS self-report uses (X6 anti-flap). The kube
+    /// `/ready` probe previously read the raw supervisor gates: with ready-gated
+    /// EndpointSlice membership, a desired-but-not-yet-current peer flipped the
+    /// un-latched predicate back to 503 within one probe period, unpublishing
+    /// the node — which removed it from every peer's desired set, vacuously
+    /// re-readying them, and the simultaneously-restarted cluster oscillated
+    /// published↔unpublished (the cold-start mutual-unpublish deadlock). The
+    /// latch makes Ready sticky on both probe surfaces; `Draining` reports
+    /// not-ready (the probe's job during drain is to unpublish).
     pub fn is_ready(&self) -> bool {
-        match &self.supervisor {
-            Some(s) => s.all_bootstrapped() && s.all_current(),
-            None => true,
-        }
+        self.readiness.state() == crate::repl::ReadinessState::Ready
     }
 
     /// CRASH: abort the directly-spawned tasks (serve loop + router) and park

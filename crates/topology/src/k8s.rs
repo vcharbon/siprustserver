@@ -39,6 +39,10 @@ const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 /// `Membership` trait object; the background informer task is aborted on drop.
 pub struct K8sMembership {
     state: Arc<MembershipState>,
+    /// Flipped once the informer's initial LIST completes (`Event::InitDone`).
+    /// Until then the snapshot is the constructor's empty placeholder, NOT an
+    /// authoritative "this cluster has no peers" — see [`Membership::synced`].
+    synced: Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -60,7 +64,10 @@ impl K8sMembership {
             .labels(&format!("{SERVICE_NAME_LABEL}={service_name}"));
         let (reader, writer) = reflector::store();
 
+        let synced = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         let st = state.clone();
+        let synced_flag = synced.clone();
         let task = tokio::spawn(async move {
             // `reflector` keeps `reader` an up-to-date cache of the whole slice
             // set; we recompute the desired peer set from that full cache on
@@ -70,10 +77,16 @@ impl K8sMembership {
             futures::pin_mut!(stream);
             loop {
                 match stream.next().await {
-                    Some(Ok(_event)) => {
+                    Some(Ok(event)) => {
                         let slices = reader.state();
                         let desired = peers_from_slices(slices.iter().map(|s| s.as_ref()));
                         reconcile_to_desired(&st, desired);
+                        // Initial LIST complete: the snapshot is now authoritative
+                        // (an empty set really means a peerless pool). Sticky —
+                        // re-list churn after a watch error never un-syncs.
+                        if matches!(event, watcher::Event::InitDone) {
+                            synced_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
                     }
                     Some(Err(e)) => {
                         tracing::warn!(error = %e, "EndpointSlice watch error (will retry)");
@@ -84,7 +97,7 @@ impl K8sMembership {
             }
         });
 
-        Self { state, task }
+        Self { state, synced, task }
     }
 }
 
@@ -100,6 +113,9 @@ impl Membership for K8sMembership {
     }
     fn changes(&self) -> broadcast::Receiver<MemberDelta> {
         self.state.changes()
+    }
+    fn synced(&self) -> bool {
+        self.synced.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 

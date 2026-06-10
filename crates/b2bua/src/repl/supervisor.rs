@@ -592,6 +592,22 @@ impl ReplicationSupervisor {
             .unwrap_or(false)
     }
 
+    /// Whether the membership source's view is **authoritative** yet
+    /// ([`Membership::synced`]). `false` before [`start`](Self::start) wires a
+    /// membership at all. The readiness gates' empty-set vacuous truth is only
+    /// sound over a synced view: an informer-backed membership starts EMPTY and
+    /// fills async, and treating that placeholder as "peerless cluster" let a
+    /// rebooting node latch Ready before a single reclaim puller existed —
+    /// routing in-dialog traffic at it pre-reclaim (orphan 481s).
+    pub fn membership_synced(&self) -> bool {
+        self.inner
+            .membership
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|m| m.synced())
+    }
+
     /// Are ALL **desired** peers' **Reclaim** flows bootstrap-complete? (S7
     /// readiness gate.) Empty set → `true`. Peers that have left the desired
     /// membership are excluded ([`desired_ordinals`](Self::desired_ordinals)) so a
