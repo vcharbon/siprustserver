@@ -71,7 +71,17 @@ enum Timer {
     ClientTimeout(String),
     /// Timer H (INVITE) / Timer J (non-INVITE) / Timer-H-487 — server cleanup.
     ServerCleanup(String),
+    /// Re-deliver `CallQuiesced` notices a full events queue deferred (ADR-0014
+    /// self-release). At most ONE in flight (`quiesce_retry_armed`); its `Key` is
+    /// never stored, so the CLAUDE.md stale-`Key` aliasing hazard cannot arise.
+    QuiescedRetry,
 }
+
+/// Retry cadence for deferred `CallQuiesced` delivery. Short — the router drains
+/// the events queue continuously, so capacity returns within a few polls; the
+/// timer exists only so an otherwise-idle owner (no packets, no commands, no
+/// txn timers left) still delivers the notice.
+const QUIESCE_RETRY_MS: u64 = 100;
 
 struct Transaction {
     branch: String,
@@ -205,6 +215,8 @@ impl TransactionLayer {
             metrics: metrics_inner,
             id_gen: config.id_gen,
             self_release_watch: HashSet::new(),
+            quiesce_retry: HashSet::new(),
+            quiesce_retry_armed: false,
         };
 
         tokio::spawn(run(owner, endpoint, cmd_rx));
@@ -333,6 +345,15 @@ struct Owner {
     /// single-writer discipline CLAUDE.md prescribes for the timer driver's
     /// `active`/queue lockstep: never let this drift from `txns`.
     txn_counts: HashMap<String, usize>,
+    /// `CallQuiesced` notices a full events queue deferred. `CallQuiesced` is the
+    /// ONLY self-release trigger a takeover copy gets — dropping it (the old
+    /// drop-newest `emit`) stranded the copy double-serving until its 1 h
+    /// `GlobalDuration` backstop. The watch entry stays armed until the send
+    /// actually lands; this set + the [`Timer::QuiescedRetry`] tick re-offer it.
+    /// Bounded: ⊆ `self_release_watch` (one entry per live takeover copy).
+    quiesce_retry: HashSet<String>,
+    /// Whether a [`Timer::QuiescedRetry`] is already in the wheel (at most one).
+    quiesce_retry_armed: bool,
 }
 
 /// The next expired timer. Only ever awaited while `q` is non-empty — an empty
@@ -421,8 +442,7 @@ impl Owner {
                 // this naturally fires at Timer H, after the ACK was relayed.)
                 if let Some(cr) = t.call_ref {
                     if self.self_release_watch.contains(&cr) && !self.has_txns_for(&cr) {
-                        self.self_release_watch.remove(&cr);
-                        self.emit(TransactionEvent::CallQuiesced { call_ref: cr });
+                        self.notify_quiesced(cr);
                     }
                 }
                 true
@@ -501,6 +521,48 @@ impl Owner {
             Timer::ClientTimeout(branch) => self.fire_timeout(&branch),
             Timer::ServerCleanup(branch) => {
                 self.delete_txn(&branch);
+            }
+            Timer::QuiescedRetry => {
+                self.quiesce_retry_armed = false;
+                self.flush_quiesce_retry();
+            }
+        }
+    }
+
+    /// Re-offer every deferred `CallQuiesced`. A call that re-armed transactions
+    /// since the deferral is dropped from the retry set — its (still-armed) watch
+    /// re-fires the check on the eventual last `delete_txn`. A still-failing send
+    /// re-defers via `notify_quiesced` (which re-arms the timer).
+    fn flush_quiesce_retry(&mut self) {
+        let pending = std::mem::take(&mut self.quiesce_retry);
+        for cr in pending {
+            if self.self_release_watch.contains(&cr) && !self.has_txns_for(&cr) {
+                self.notify_quiesced(cr);
+            }
+        }
+    }
+
+    /// Deliver the one-shot `CallQuiesced` for a watched, txn-free call. The
+    /// watch entry is cleared ONLY when the send lands: `CallQuiesced` is the
+    /// only self-release trigger the router gets for a takeover copy, so the old
+    /// remove-then-drop-newest `emit` turned one full-queue instant (exactly the
+    /// post-failover storm in which takeover copies exist) into a copy that
+    /// double-serves until its 1 h `GlobalDuration` backstop. A failed send keeps
+    /// the watch, joins `quiesce_retry`, and re-offers on [`Timer::QuiescedRetry`].
+    fn notify_quiesced(&mut self, call_ref: String) {
+        let event = TransactionEvent::CallQuiesced { call_ref: call_ref.clone() };
+        if self.events_tx.try_send(event).is_ok() {
+            self.self_release_watch.remove(&call_ref);
+            self.quiesce_retry.remove(&call_ref);
+        } else {
+            // Counted as a *deferral* under the existing drop metric (the queue
+            // pressure signal is the same); delivery is retried, not lost.
+            self.metrics.event_queue_drops[EventQueueDropReason::CallQuiesced.index()]
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.quiesce_retry.insert(call_ref);
+            if !self.quiesce_retry_armed {
+                self.timers.insert(Timer::QuiescedRetry, ms(QUIESCE_RETRY_MS));
+                self.quiesce_retry_armed = true;
             }
         }
     }
@@ -609,12 +671,14 @@ impl Owner {
                 let _ = reply.send(n);
             }
             Command::WatchSelfRelease { call_ref, reply } => {
-                // If the call already has no transactions, fire at once; else arm
-                // the watch so the last `delete_txn` emits CallQuiesced.
-                if self.has_txns_for(&call_ref) {
-                    self.self_release_watch.insert(call_ref);
-                } else {
-                    self.emit(TransactionEvent::CallQuiesced { call_ref });
+                // Arm the watch FIRST in both branches: `notify_quiesced` clears
+                // it only when the event actually lands on the queue, so a full
+                // queue can never strand a takeover copy with no watch at all
+                // (the old immediate-fire path emitted without arming — a drop
+                // there meant the release signal never existed).
+                self.self_release_watch.insert(call_ref.clone());
+                if !self.has_txns_for(&call_ref) {
+                    self.notify_quiesced(call_ref);
                 }
                 let _ = reply.send(());
             }

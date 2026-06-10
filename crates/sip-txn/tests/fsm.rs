@@ -298,3 +298,46 @@ async fn self_release_fires_only_after_the_last_call_txn_clears() {
     assert_eq!(stack.txn.active_txn_count_for_call(cr).await, 0, "index drained to 0");
     assert!(drained_quiesced(&mut stack, cr), "last txn cleared → CallQuiesced");
 }
+
+/// A FULL events queue must DEFER `CallQuiesced`, never destroy it. It is the
+/// only self-release trigger a takeover copy gets, and the queue saturates
+/// exactly when takeover copies exist (the post-failover storm) — the old
+/// drop-newest `emit` stranded the copy double-serving until its 1 h
+/// `GlobalDuration` backstop. The watch stays armed until the send lands, and
+/// the `QuiescedRetry` tick re-offers once the consumer drains the backlog.
+#[tokio::test(start_paused = true)]
+async fn call_quiesced_survives_a_full_event_queue() {
+    // udp_queue_max 16 → event-queue capacity max(64, 16*4) = 64.
+    let mut stack = Stack::build(TRANSIT, 16, 64).await;
+    let cr = "w0z-full|caller-tag";
+
+    // Saturate the bounded events queue: 70 undrained inbound OPTIONS (each
+    // emits one Message event; 65+ are drop-newest discarded — that class is
+    // legitimately lossy, CallQuiesced is not).
+    for i in 0..70 {
+        stack
+            .inject(&inbound_request(
+                "OPTIONS",
+                &format!("z9hG4bK-fq{i}"),
+                &format!("cid-fq{i}"),
+                None,
+            ))
+            .await;
+    }
+    elapse_ms(60).await;
+
+    // The watch's immediate-fire path (no txns for `cr`) hits the full queue.
+    stack.txn.watch_self_release(cr).await;
+
+    // The backlog the consumer now drains does NOT contain the notice…
+    assert!(
+        !drained_quiesced(&mut stack, cr),
+        "the full-queue instant must not have squeezed the notice in"
+    );
+    // …but the deferred delivery lands on the next retry tick.
+    elapse_ms(150).await;
+    assert!(
+        drained_quiesced(&mut stack, cr),
+        "deferred CallQuiesced is re-delivered once queue capacity returns"
+    );
+}
