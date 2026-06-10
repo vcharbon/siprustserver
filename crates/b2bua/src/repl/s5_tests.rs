@@ -469,7 +469,6 @@ async fn lagged_membership_channel_still_redirects_puller_to_new_addr() {
         net.clone(),
         b.store.clone(),
         resolve,
-        clock.clone(),
         fast_backoff(),
     );
     sup.start(Arc::new(membership.clone()));

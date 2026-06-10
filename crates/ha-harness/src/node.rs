@@ -119,7 +119,6 @@ impl HaNode {
             wiring.network.clone(),
             store.clone(),
             resolve,
-            clock.clone(),
             wiring.config,
         );
         let membership = Arc::new(SimulatedMembership::with_clock(

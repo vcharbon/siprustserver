@@ -469,7 +469,6 @@ async fn bidirectional_supervisor_replication_over_real_tcp() {
         Arc::new(net.clone()),
         w0.clone(),
         resolve.clone(),
-        clock.clone(),
         fast_config(),
     );
     let sup1 = ReplicationSupervisor::with_config(
@@ -477,7 +476,6 @@ async fn bidirectional_supervisor_replication_over_real_tcp() {
         Arc::new(net.clone()),
         w1.clone(),
         resolve.clone(),
-        clock.clone(),
         fast_config(),
     );
     sup0.start(members());

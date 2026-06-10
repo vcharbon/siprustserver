@@ -21,13 +21,10 @@ use super::{Changelog, FnPeerResolver, PullerConfig, ReplServer, ReplicatingCall
 use crate::store::{PropagateDirection, PutOpts};
 
 /// Puller config with short backoff + a finite bootstrap hard-timeout so a
-/// couple of advances trip the relevant deadline deterministically.
+/// couple of advances trip the relevant deadline deterministically. Canonical
+/// values live on [`PullerConfig::fast_test`] (shared with ha-harness).
 pub fn fast_config() -> PullerConfig {
-    PullerConfig {
-        backoff_init_ms: 100,
-        backoff_max_ms: 1_000,
-        bootstrap_hard_timeout_ms: 2_000,
-    }
+    PullerConfig::fast_test()
 }
 
 /// Advance ~`ms` in 100 ms chunks under the settle/advance/settle discipline
@@ -111,12 +108,12 @@ pub fn supervisor_for(
 ) -> ReplicationSupervisor {
     let map: HashMap<String, SocketAddr> = addrs.into_iter().collect();
     let resolve = Arc::new(FnPeerResolver(move |peer: &Peer| *map.get(&peer.ordinal).unwrap()));
+    let _ = clock; // signature kept stable for the many s5–s10 call sites
     ReplicationSupervisor::with_config(
         self_ordinal,
         net.clone(),
         store.clone(),
         resolve,
-        clock.clone(),
         config,
     )
 }

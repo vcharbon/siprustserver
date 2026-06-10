@@ -242,7 +242,6 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
         net.clone(),
         a_store.clone(),
         resolve,
-        clock.clone(),
         fast_config(),
     );
 
@@ -312,7 +311,6 @@ async fn departed_unreachable_peer_does_not_wedge_readiness_not_ready() {
         net.clone(),
         a_store.clone(),
         resolve,
-        clock.clone(),
         fast_config(),
     );
 

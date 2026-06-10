@@ -45,7 +45,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use repl_net::frame::{Partition, Watermark};
 use repl_net::transport::ReplicationNetwork;
-use sip_clock::Clock;
 use tokio::sync::{mpsc, watch};
 use topology::{Membership, Peer};
 
@@ -223,8 +222,6 @@ struct SupervisorInner {
     config: PullerConfig,
     /// Replication observability, handed to each spawned puller.
     metrics: crate::metrics::B2buaMetrics,
-    #[allow(dead_code)]
-    clock: Clock,
     /// Cadence of the periodic snapshot reconcile (ADR-0012 D2).
     reconcile_period: Duration,
     /// Router command sink handed to every spawned puller (ADR-0011 X11 fail-back).
@@ -263,10 +260,9 @@ impl ReplicationSupervisor {
         network: Arc<dyn ReplicationNetwork>,
         store: ReplicatingCallStore,
         resolve: AddrResolver,
-        clock: Clock,
         metrics: crate::metrics::B2buaMetrics,
     ) -> Self {
-        Self::build(self_ordinal, network, store, resolve, clock, PullerConfig::default(), metrics)
+        Self::build(self_ordinal, network, store, resolve, PullerConfig::default(), metrics)
     }
 
     /// Build with explicit puller backoff config (tests inject short backoff).
@@ -277,10 +273,9 @@ impl ReplicationSupervisor {
         network: Arc<dyn ReplicationNetwork>,
         store: ReplicatingCallStore,
         resolve: AddrResolver,
-        clock: Clock,
         config: PullerConfig,
     ) -> Self {
-        Self::build(self_ordinal, network, store, resolve, clock, config, crate::metrics::B2buaMetrics::new())
+        Self::build(self_ordinal, network, store, resolve, config, crate::metrics::B2buaMetrics::new())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -289,7 +284,6 @@ impl ReplicationSupervisor {
         network: Arc<dyn ReplicationNetwork>,
         store: ReplicatingCallStore,
         resolve: AddrResolver,
-        clock: Clock,
         config: PullerConfig,
         metrics: crate::metrics::B2buaMetrics,
     ) -> Self {
@@ -301,7 +295,6 @@ impl ReplicationSupervisor {
                 resolve,
                 config,
                 metrics,
-                clock,
                 reconcile_period: DEFAULT_RECONCILE_PERIOD,
                 repl_tx: Mutex::new(None),
                 backup_enabled: AtomicBool::new(false),
@@ -626,14 +619,7 @@ impl ReplicationSupervisor {
 
     /// The retained **Reclaim** watermark for `peer` (test introspection).
     pub fn watermark(&self, peer: &str) -> Watermark {
-        self.sync();
-        self.inner
-            .peers
-            .lock()
-            .unwrap()
-            .get(peer)
-            .map(|e| e.reclaim.watermark)
-            .unwrap_or_else(|| Watermark::new(0, 0))
+        self.flow_watermark(peer, Partition::Pri)
     }
 
     /// The retained watermark for a specific `(peer, flow)` (test introspection

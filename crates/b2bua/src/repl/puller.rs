@@ -134,6 +134,21 @@ impl Default for PullerConfig {
     }
 }
 
+impl PullerConfig {
+    /// Test-tier config: short backoff + a 2 s bootstrap hard timeout, so a few
+    /// paused-clock advances trip the relevant deadline deterministically. ONE
+    /// definition — these values are timing-load-bearing under the paused clock
+    /// (tests advance exactly to a deadline), and the previous per-harness
+    /// copies (ha-harness, b2bua test_support, s5) had already drifted.
+    pub fn fast_test() -> Self {
+        Self {
+            backoff_init_ms: 100,
+            backoff_max_ms: 1_000,
+            bootstrap_hard_timeout_ms: 2_000,
+        }
+    }
+}
+
 /// Shared, observable per-`(peer, flow)` puller status. The supervisor reads
 /// `current` for readiness (scoped to the **Reclaim** flow) and the retained
 /// `watermark`.
@@ -446,28 +461,34 @@ impl Puller {
         // ---- Connecting ---- resolve fresh (D3) + connect, racing the hard
         // deadline so a hung connect to an unreachable/stalled peer still lets the
         // node go bootstrap-complete.
-        let conn = match *deadline {
-            Some(at) => tokio::select! {
-                c = self.try_connect() => c,
-                _ = tokio::time::sleep_until(at) => {
-                    // Hard timer tripped mid-connect: best-effort complete for
-                    // readiness, then back off + retry (now warm → no hard timer).
-                    self.mark_bootstrap_complete();
-                    *deadline = None;
-                    return RunOutcome::ConnectFailed;
-                }
-                _ = cancel.changed() => {
-                    if *cancel.borrow() { return RunOutcome::Cancelled; }
-                    self.try_connect().await
-                }
-            },
-            None => tokio::select! {
-                c = self.try_connect() => c,
-                _ = cancel.changed() => {
-                    if *cancel.borrow() { return RunOutcome::Cancelled; }
-                    self.try_connect().await
-                }
-            },
+        // A spurious (non-cancelling) `cancel.changed()` wake re-enters the race
+        // via `continue` — the deadline arm stays armed. The old shape re-awaited
+        // `try_connect` OUTSIDE the select, so a hard timer expiring during that
+        // window was missed and the node never went bootstrap-complete by timer.
+        let conn = loop {
+            match *deadline {
+                Some(at) => tokio::select! {
+                    c = self.try_connect() => break c,
+                    _ = tokio::time::sleep_until(at) => {
+                        // Hard timer tripped mid-connect: best-effort complete for
+                        // readiness, then back off + retry (now warm → no hard timer).
+                        self.mark_bootstrap_complete();
+                        *deadline = None;
+                        return RunOutcome::ConnectFailed;
+                    }
+                    _ = cancel.changed() => {
+                        if *cancel.borrow() { return RunOutcome::Cancelled; }
+                        continue;
+                    }
+                },
+                None => tokio::select! {
+                    c = self.try_connect() => break c,
+                    _ = cancel.changed() => {
+                        if *cancel.borrow() { return RunOutcome::Cancelled; }
+                        continue;
+                    }
+                },
+            }
         };
         let conn = match conn {
             Some(c) => c,

@@ -196,7 +196,6 @@ impl B2buaCore {
                     setup.network.clone(),
                     (*setup.store).clone(),
                     setup.addr_resolver.clone(),
-                    clock.clone(),
                     metrics.clone(),
                 );
                 // Pullers forward X11 fail-back commands to the router; wire the

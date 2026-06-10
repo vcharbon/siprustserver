@@ -245,27 +245,17 @@ async fn ttl_eviction_drops_body_on_access_and_reap() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn dead_peer_auto_clean_via_drop_and_idle() {
+async fn dead_peer_auto_clean_via_idle_reap() {
+    // Idle reaping is the ONE dead-peer clean-up mechanism (no per-disconnect
+    // drop — a disconnected puller's pending log is kept until the TTL so a
+    // quick reconnect resumes warm).
     let clock = Clock::test_at(0);
     let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 2_000);
     let store = ReplicatingCallStore::with_changelog(cl, clock.clone());
-    put(&store, "c1", b"v1", 0, 1, &fwd("A")).await;
-    assert!(store.changelog().has_peer("A"));
-
-    // Explicit drop.
-    assert!(store.changelog().drop_peer("A"));
-    assert!(!store.changelog().has_peer("A"));
-
-    // Re-create after drop starts clean from genesis.
-    put(&store, "c2", b"w1", 0, 1, &fwd("A")).await;
-    let frames = store
-        .changelog()
-        .drain_since("A", BAK_P, Watermark::new(1, 0), NO_LIMIT, &store, PRI, SELF)
-        .await;
-    assert_eq!(frames.len(), 1);
 
     // Idle-reap: advance past dead-peer TTL with no activity → peer dropped.
     put(&store, "c3", b"z1", 0, 1, &fwd("B")).await;
+    assert!(store.changelog().has_peer("B"));
     tokio::time::advance(Duration::from_millis(2_001)).await;
     store.changelog().reap(clock.now_ms());
     assert!(!store.changelog().has_peer("B"));

@@ -33,13 +33,11 @@ use crate::report::{Marker, ReplReport};
 const DEFAULT_TTLS: (i64, i64) = (30_000, 300_000);
 
 /// Short backoff + bootstrap hard timeout so a couple of advances trip the
-/// relevant deadline deterministically (mirrors the b2bua repl tests' fast cfg).
+/// relevant deadline deterministically — the canonical values live on
+/// [`PullerConfig::fast_test`], shared with the b2bua repl tests so the
+/// harnesses can never drift onto different timing-load-bearing deadlines.
 fn fast_config() -> PullerConfig {
-    PullerConfig {
-        backoff_init_ms: 100,
-        backoff_max_ms: 1_000,
-        bootstrap_hard_timeout_ms: 2_000,
-    }
+    PullerConfig::fast_test()
 }
 
 /// `127.0.0.1:9300+n` — a stable per-ordinal repl address.

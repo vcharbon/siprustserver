@@ -377,12 +377,6 @@ impl Changelog {
         frames
     }
 
-    /// Drop a peer's whole changelog (auto-clean on disconnect; it re-bootstraps
-    /// on return). Returns `true` if a log existed.
-    pub fn drop_peer(&self, peer: &str) -> bool {
-        self.inner.lock().unwrap().peers.remove(peer).is_some()
-    }
-
     /// `(entries, peers)` outbound-buffer depth for the memory-attribution
     /// gauges: total compacted entries summed across every peer's two sub-logs,
     /// and the live peer-log count. A peer whose entries grow without draining is
