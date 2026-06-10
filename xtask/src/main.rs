@@ -9,6 +9,10 @@
 //!                       (ADR-0016) under docs/sm/<machine>.md from the composed
 //!                       service registry. A CI test asserts the committed files
 //!                       match this output (drift fails CI).
+//!   e2e-schema          Regenerate the committed JSON Schemas for the authored
+//!                       E2E test-management docs (ADR-0018 Phase D) under
+//!                       e2e/schemas/<doc>.schema.json from the e2e-core model.
+//!                       Authored files reference them via `$schema`.
 //!
 //! The corpus is committed so CI is deterministic and needs no external
 //! binary at test time; this task is the opt-in refresh path. See
@@ -53,10 +57,17 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("e2e-schema") => match e2e_schema() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("e2e-schema failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
         other => {
             eprintln!(
                 "unknown task: {other:?}\nusage: cargo run -p xtask -- \
-                 (abnf-regen [N] | state-machine-docs)"
+                 (abnf-regen [N] | state-machine-docs | e2e-schema)"
             );
             ExitCode::FAILURE
         }
@@ -86,6 +97,22 @@ fn state_machine_docs() -> Result<(), String> {
     fs::write(&html_path, b2bua_runner::state_machine_docs_html())
         .map_err(|e| format!("write {}: {e}", html_path.display()))?;
     eprintln!("state-machine-docs: {:<16} -> {}", "index.html", html_path.display());
+    Ok(())
+}
+
+/// Regenerate `e2e/schemas/<doc>.schema.json` from the e2e-core model types.
+fn e2e_schema() -> Result<(), String> {
+    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    dir.pop(); // workspace root
+    dir.push("e2e/schemas");
+    fs::create_dir_all(&dir).map_err(|e| format!("create e2e/schemas dir: {e}"))?;
+    for (stem, schema) in e2e_core::model::schemas() {
+        let path = dir.join(format!("{stem}.schema.json"));
+        let json = serde_json::to_string_pretty(&schema)
+            .map_err(|e| format!("serialize {stem} schema: {e}"))?;
+        fs::write(&path, json + "\n").map_err(|e| format!("write {}: {e}", path.display()))?;
+        eprintln!("e2e-schema: {stem:<16} -> {}", path.display());
+    }
     Ok(())
 }
 

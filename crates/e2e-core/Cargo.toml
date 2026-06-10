@@ -1,0 +1,29 @@
+[package]
+name = "e2e-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "E2E test-management run-core (ADR-0018): the registry of compiled Callflow shapes + Infra shapes, and the seam that runs the SAME scenario over a fake (simulated, paused-clock, in-process LB+b2bua SUT) or a real (external kind cluster) Infra shape. Fronted later by the web site and the CI CLI."
+
+[dependencies]
+scenario-harness = { path = "../scenario-harness" }
+seq-report = { path = "../seq-report" }
+layer-harness = { path = "../layer-harness" }
+b2bua-harness = { path = "../b2bua-harness" }
+b2bua = { path = "../b2bua" }
+call = { path = "../call" }
+sip-proxy = { path = "../sip-proxy" }
+sip-net = { path = "../sip-net" }
+sip-clock = { path = "../sip-clock", features = ["testkit"] }
+sip-txn = { path = "../sip-txn" }
+sip-message = { path = "../sip-message" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

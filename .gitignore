@@ -19,3 +19,6 @@ sipp-*.csv
 # Vendored reference source snapshot (not part of the build)
 /portsource
 .worktrees/
+
+# E2E test-management generated run artifacts (committed inputs live in e2e/{cases,checksets,infra,campaigns,schemas})
+/e2e/runs/

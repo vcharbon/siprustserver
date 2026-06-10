@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Campaign",
+  "description": "A campaign: the {case × compatible shape × infra} matrix to expand and run.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "cases": {
+      "description": "Test-case ids.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "concurrency": {
+      "$ref": "#/$defs/Concurrency",
+      "default": {
+        "fake": 8,
+        "real": 1
+      }
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "type": "string"
+    },
+    "infraShapes": {
+      "description": "Infra-shape ids to run each compatible cell over.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "cases",
+    "infraShapes"
+  ],
+  "$defs": {
+    "Concurrency": {
+      "description": "Per-[`InfraKind`](crate::infra::InfraKind) run-executor concurrency caps:\nfake cells fan out wide; real cells share one external cluster.",
+      "type": "object",
+      "properties": {
+        "fake": {
+          "type": "integer",
+          "format": "uint",
+          "default": 8,
+          "minimum": 0
+        },
+        "real": {
+          "type": "integer",
+          "format": "uint",
+          "default": 1,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

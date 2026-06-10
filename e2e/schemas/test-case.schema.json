@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TestCase",
+  "description": "An authored Test case: input data + checks + the Callflow shapes it is\ncompatible with (validated, never assumed).",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "checkSets": {
+      "description": "Ids of shared [`CheckSet`]s this case pulls in.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "checks": {
+      "description": "Case-local check blocks.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CheckBlock"
+      }
+    },
+    "compatibleShapes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "type": "string"
+    },
+    "input": {
+      "$ref": "#/$defs/Input",
+      "default": {
+        "core": {}
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "compatibleShapes"
+  ],
+  "$defs": {
+    "Check": {
+      "description": "One field assertion over the anchored message. The field grammar\n(ADR-0019): URI-bearing headers expose `.userInfo/.host/.port/.displayName/`\n`.tag/.param(x)` (e.g. `from.userInfo`); any other header gets\npresent/absent/regex over its raw value (`header(X-Foo)`); the payload is\n`body`; the transport endpoints are `source.ip/.port` / `dest.ip/.port`.",
+      "type": "object",
+      "properties": {
+        "field": {
+          "description": "Field selector, e.g. `from.userInfo`, `header(P-Asserted-Identity)`,\n`body`, `source.ip`.",
+          "type": "string"
+        },
+        "op": {
+          "$ref": "#/$defs/CheckOp"
+        },
+        "value": {
+          "description": "Expected value: a literal, a regex (op `regex`), or a binding —\n`${input.from}`, `${infra.lbVip}`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "op"
+      ]
+    },
+    "CheckBlock": {
+      "description": "A bundle of [`Check`]s bound to one `<agent>.<anchor>` message selector.",
+      "type": "object",
+      "properties": {
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Check"
+          }
+        },
+        "on": {
+          "description": "`<agent>.<anchor>`, e.g. `bob1.initialInvite`. The anchor must come from\nthe canonical vocabulary and be published by every compatible shape.",
+          "type": "string"
+        },
+        "optional": {
+          "description": "An optional block whose selector matches no recorded message is skipped;\na non-optional one **fails** (ADR-0019).",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "on",
+        "checks"
+      ]
+    },
+    "CheckOp": {
+      "description": "The assertion operator of a [`Check`] (ADR-0019).",
+      "oneOf": [
+        {
+          "description": "`value` is a regex the extracted field must match.",
+          "type": "string",
+          "const": "regex"
+        },
+        {
+          "description": "`value` (after `${…}` substitution) must equal the extracted field.",
+          "type": "string",
+          "const": "eq"
+        },
+        {
+          "description": "The field must be present (no `value`).",
+          "type": "string",
+          "const": "exists"
+        },
+        {
+          "description": "The field must be absent (no `value`).",
+          "type": "string",
+          "const": "absent"
+        }
+      ]
+    },
+    "CoreInput": {
+      "description": "The shared input CORE a Test case supplies to a shape: From / To / R-URI\noverrides (the numbers), each optional. This is both the runtime input and\nthe `core` of the authored JSON [`Input`](crate::model::Input) — headers /\ntimers join when the harness builder can honour them (no silent fields).",
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ruri": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "to": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Input": {
+      "description": "The input a Test case feeds a shape: the shared **core** (From / To / R-URI\noverrides — always optional) plus per-shape **extras** (an open map until a\nshape declares a typed extras schema).",
+      "type": "object",
+      "properties": {
+        "core": {
+          "$ref": "#/$defs/CoreInput",
+          "default": {}
+        },
+        "extras": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

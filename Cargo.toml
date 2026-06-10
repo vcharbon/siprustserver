@@ -26,6 +26,7 @@ members = [
     "crates/sip-proxy-runner",
     "crates/call-limiter-runner",
     "crates/cdr-consumer-runner",
+    "crates/e2e-core",
     "xtask",
 ]
 
@@ -74,6 +75,12 @@ async-trait = "0.1"
 # carries the per-service opaque `ext` slices losslessly. See ADR-0008.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# E2E test-management JSON model (ADR-0018): authored Test cases / Endpoint
+# configs / Check sets derive `JsonSchema`; `xtask e2e-schema` emits committed
+# `e2e/schemas/*.schema.json` the authored files reference via `$schema`.
+# `regex` backs the check engine's `regex` op (ADR-0019 field grammar).
+schemars = "1"
+regex = "1"
 serde_bytes = "0.11"
 rmp-serde = "1"
 # HA replication wire codec (`crates/repl-net`, slice S2). The five replication

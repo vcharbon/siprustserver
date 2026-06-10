@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EndpointConfig",
+  "description": "The JSON **Endpoint config** (ADR-0018): binds one Infra shape's logical\nroles (alice, bob1, lb, b2bua) to concrete addresses, plus the agent recv\nbound. Addresses are infra-specific, so a config names the Infra shape it\nis for — `build` rejects a mismatch.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "infraShape": {
+      "description": "The Infra shape these addresses bind (e.g. `fake-lsbc-b2bua`).",
+      "type": "string"
+    },
+    "recvTimeoutMs": {
+      "description": "Per-`recv` wait bound handed to every agent (real clock needs a wide one).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "transitDelayMs": {
+      "description": "One-hop simulated transit delay (fake only; coerced to ≥1ms).",
+      "type": "integer",
+      "format": "uint64",
+      "default": 0,
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "infraShape",
+    "roles",
+    "recvTimeoutMs"
+  ]
+}

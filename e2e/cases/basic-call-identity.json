@@ -1,0 +1,32 @@
+{
+  "$schema": "../schemas/test-case.schema.json",
+  "id": "basic-call-identity",
+  "description": "M1 as data: a basic call with authored From/To/R-URI; the SUT must preserve the caller identity end-to-end to bob1's initial INVITE.",
+  "compatibleShapes": ["basic-call"],
+  "input": {
+    "core": {
+      "from": "sip:+33123456789@example.com",
+      "to": "sip:+33987654321@example.com",
+      "ruri": "sip:+33987654321@127.0.0.1:5070"
+    }
+  },
+  "checks": [
+    {
+      "on": "bob1.initialInvite",
+      "checks": [
+        { "field": "from.userInfo", "op": "regex", "value": "^\\+33123456789$" },
+        { "field": "from.uri", "op": "eq", "value": "${input.from}" },
+        { "field": "from.tag", "op": "exists" },
+        { "field": "to.userInfo", "op": "regex", "value": "^\\+33987654321$" },
+        { "field": "header(Max-Forwards)", "op": "exists" },
+        { "field": "body", "op": "regex", "value": "m=audio" }
+      ]
+    },
+    {
+      "on": "alice.answer",
+      "checks": [
+        { "field": "to.tag", "op": "exists" }
+      ]
+    }
+  ]
+}

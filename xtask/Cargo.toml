@@ -11,3 +11,7 @@ description = "Workspace automation tasks (e.g. ABNF corpus regeneration)."
 # runner (so it sees separate-crate services) and renders via b2bua's docgen.
 b2bua = { path = "../crates/b2bua" }
 b2bua-runner = { path = "../crates/b2bua-runner" }
+# `e2e-schema` emits the committed JSON Schemas for the authored E2E docs
+# (Test case / Check set / Campaign / Endpoint config) from the e2e-core model.
+e2e-core = { path = "../crates/e2e-core" }
+serde_json = { workspace = true }

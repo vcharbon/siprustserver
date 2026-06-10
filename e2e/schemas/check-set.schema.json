@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CheckSet",
+  "description": "A committed, shareable bundle of check blocks (e.g. `invite-identity`),\nreusable by every Test case whose shapes publish the referenced anchors.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "blocks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CheckBlock"
+      }
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "blocks"
+  ],
+  "$defs": {
+    "Check": {
+      "description": "One field assertion over the anchored message. The field grammar\n(ADR-0019): URI-bearing headers expose `.userInfo/.host/.port/.displayName/`\n`.tag/.param(x)` (e.g. `from.userInfo`); any other header gets\npresent/absent/regex over its raw value (`header(X-Foo)`); the payload is\n`body`; the transport endpoints are `source.ip/.port` / `dest.ip/.port`.",
+      "type": "object",
+      "properties": {
+        "field": {
+          "description": "Field selector, e.g. `from.userInfo`, `header(P-Asserted-Identity)`,\n`body`, `source.ip`.",
+          "type": "string"
+        },
+        "op": {
+          "$ref": "#/$defs/CheckOp"
+        },
+        "value": {
+          "description": "Expected value: a literal, a regex (op `regex`), or a binding —\n`${input.from}`, `${infra.lbVip}`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "op"
+      ]
+    },
+    "CheckBlock": {
+      "description": "A bundle of [`Check`]s bound to one `<agent>.<anchor>` message selector.",
+      "type": "object",
+      "properties": {
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Check"
+          }
+        },
+        "on": {
+          "description": "`<agent>.<anchor>`, e.g. `bob1.initialInvite`. The anchor must come from\nthe canonical vocabulary and be published by every compatible shape.",
+          "type": "string"
+        },
+        "optional": {
+          "description": "An optional block whose selector matches no recorded message is skipped;\na non-optional one **fails** (ADR-0019).",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "on",
+        "checks"
+      ]
+    },
+    "CheckOp": {
+      "description": "The assertion operator of a [`Check`] (ADR-0019).",
+      "oneOf": [
+        {
+          "description": "`value` is a regex the extracted field must match.",
+          "type": "string",
+          "const": "regex"
+        },
+        {
+          "description": "`value` (after `${…}` substitution) must equal the extracted field.",
+          "type": "string",
+          "const": "eq"
+        },
+        {
+          "description": "The field must be present (no `value`).",
+          "type": "string",
+          "const": "exists"
+        },
+        {
+          "description": "The field must be absent (no `value`).",
+          "type": "string",
+          "const": "absent"
+        }
+      ]
+    }
+  }
+}
