@@ -7,7 +7,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use repl_net::frame::{Partition, Watermark};
+use repl_net::frame::{Frame, Partition, Watermark};
 use repl_net::transport::{Fault, ReplicationNetwork, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 use topology::{Membership, Peer, SimulatedMembership};
@@ -512,5 +512,66 @@ async fn lagged_membership_channel_still_redirects_puller_to_new_addr() {
         b.store.get_call(BAK, "A", &c2).await.unwrap().as_deref(),
         Some(&b"two"[..]),
         "after a Lagged delta the puller redirected to A's new address and pulled c2"
+    );
+}
+
+/// The catch-up `Noop` carries the FLOW's own cursor — the last `Data.at`
+/// actually sent — never a separately-read global `head()`. The head counter is
+/// shared across every (peer, partition) sub-log, so jumping the cursor to it
+/// persisted OTHER flows' counters into this puller's watermark; a bump for THIS
+/// flow landing between the drain snapshot and the head read was then excluded
+/// from every future drain (`Bound::Excluded`) and survived reconnects — a
+/// missed DELETE never re-bumps, so the backup held the dead call until its
+/// body-TTL backstop.
+#[tokio::test(start_paused = true)]
+async fn catchup_noop_carries_flow_cursor_not_global_head() {
+    use std::time::Duration;
+
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let a = Node::spawn("A", addr(61), 1, &net, &clock).await;
+
+    // One entry for peer B (global counter 1) and one for peer C (counter 2):
+    // the global head is (1,2); B's Bak sub-log tops out at (1,1).
+    let c1 = cref("A", "1");
+    let c2 = cref("A", "2");
+    a.store
+        .put_call(PRI, "A", &c1, b"v1".to_vec(), &[], 0, 1, 0, &fwd("B"))
+        .await
+        .unwrap();
+    a.store
+        .put_call(PRI, "A", &c2, b"v1".to_vec(), &[], 0, 1, 0, &fwd("C"))
+        .await
+        .unwrap();
+
+    // Hand-rolled WARM Backup-flow pull as B (warm ⇒ no bootstrap scan).
+    let conn = net.connect(a.addr).await.unwrap();
+    conn.send(Frame::PullRequest {
+        proto_ver: 3,
+        caller: "B".into(),
+        partition: Partition::Bak,
+        since: Watermark::new(1, 0),
+    })
+    .await
+    .unwrap();
+
+    let mut last_data_at = None;
+    let mut noop_at = None;
+    for _ in 0..10 {
+        match tokio::time::timeout(Duration::from_millis(1_000), conn.recv()).await {
+            Ok(Some(Frame::Data { at, .. })) => last_data_at = Some(at),
+            Ok(Some(Frame::Noop { at })) => {
+                noop_at = Some(at);
+                break;
+            }
+            _ => break,
+        }
+    }
+
+    assert_eq!(last_data_at, Some(Watermark::new(1, 1)), "B's one Data frame");
+    assert_eq!(
+        noop_at,
+        Some(Watermark::new(1, 1)),
+        "the catch-up Noop must carry B's flow cursor (1,1), not the global head (1,2)"
     );
 }

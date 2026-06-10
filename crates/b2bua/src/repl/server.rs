@@ -212,16 +212,22 @@ impl ReplServer {
                 continue;
             }
 
-            // Caught up: advance to head.
-            let head = self.changelog.head();
-            if head > w {
-                w = head;
-            }
+            // Caught up. The cursor (and the Noop it rides on) advances ONLY past
+            // entries actually sent — NEVER to a separately-read `head()`.
+            // `drain_since` snapshots under the changelog lock and reads bodies
+            // with it dropped, so a concurrent bump for this (peer, partition)
+            // could land between the snapshot and a later head read; jumping `w`
+            // over it excluded the entry from every future drain
+            // (`Bound::Excluded(w)`) and the Noop persisted the too-high
+            // watermark across reconnects. A skipped Put self-healed on the
+            // call's next flush; a skipped DELETE never re-bumps — the backup
+            // held the dead call until its body-TTL backstop.
+            //
             // Noop on the catch-up edge (first-ever, or after draining a real
             // backlog) and on the idle floor; a trickle needs none (its Data
             // frames already carried `at`).
             if !ever_caught_up || streamed_full_batch {
-                if conn.send(Frame::Noop { at: head }).await.is_err() {
+                if conn.send(Frame::Noop { at: w }).await.is_err() {
                     return;
                 }
                 if let Some(m) = &self.metrics {
@@ -233,7 +239,7 @@ impl ReplServer {
             } else {
                 idle_cycles += 1;
                 if idle_cycles >= IDLE_NOOP_CYCLES {
-                    if conn.send(Frame::Noop { at: head }).await.is_err() {
+                    if conn.send(Frame::Noop { at: w }).await.is_err() {
                         return;
                     }
                     if let Some(m) = &self.metrics {
@@ -261,13 +267,21 @@ impl ReplServer {
         role: PartitionRole,
         primary: &str,
     ) -> Result<Watermark, ()> {
+        // W = head at scan-START (ADR-0014 §8) — read BEFORE the key snapshot.
+        // The writer order is body/meta-insert → changelog bump, so a call that
+        // lands after this read necessarily bumps a counter > W and the tail
+        // drains it; at worst the scan ALSO carries it (harmless double-deliver,
+        // the apply side is idempotent). Reading head AFTER the scan opened the
+        // reverse window — a call inserted between the scan snapshot and the
+        // head read was in neither the scan nor the tail (`Bound::Excluded(W)`),
+        // and if it then quiesced the backup never held it.
+        let w = self.changelog.head();
         let keys = match partition {
             // Reclaim: the caller's own calls we hold as backup.
             Partition::Pri => self.source.scan_refs(PartitionRole::Backup, caller),
             // Backup: our own calls the caller backs up (Option B).
             Partition::Bak => self.source.scan_refs_backed_by(&self.self_ordinal, caller),
         };
-        let w = self.changelog.head();
 
         for group in keys.chunks(BOOTSTRAP_CHUNK) {
             let mut frames = Vec::with_capacity(group.len());
