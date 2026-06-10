@@ -575,3 +575,70 @@ async fn catchup_noop_carries_flow_cursor_not_global_head() {
         "the catch-up Noop must carry B's flow cursor (1,1), not the global head (1,2)"
     );
 }
+
+/// A `ResetToBootstrap` must RE-ARM the bootstrap hard deadline (X5). The reset
+/// clears `bootstrap_complete`; without re-arming, a peer that then goes
+/// unreachable left every retry as ConnectFailed with `deadline == None` — the
+/// best-effort timer could never fire and `all_bootstrapped()` pinned the node
+/// NotReady until the dead peer returned (and, via ready-gated membership,
+/// cascaded NotReady to its peers). The forced re-bootstrap gets exactly the
+/// liveness bound a cold boot gets.
+#[tokio::test(start_paused = true)]
+async fn reset_to_bootstrap_rearms_the_hard_deadline() {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+
+    // Hand-rolled peer "A": per flow, round 1 = catch-up Noop (bootstrap
+    // completes), round 2 = ResetToBootstrap; once every flow got its reset the
+    // listener is dropped — A is unreachable from then on.
+    let a_addr = addr(71);
+    let listener = net.listen(a_addr).await.unwrap();
+    tokio::spawn(async move {
+        let mut rounds: HashMap<String, u32> = HashMap::new();
+        while let Some(conn) = listener.accept().await {
+            let Some(Frame::PullRequest { caller, partition, .. }) = conn.recv().await else {
+                continue;
+            };
+            let round = rounds.entry(format!("{caller}:{partition:?}")).or_insert(0);
+            *round += 1;
+            if *round == 1 {
+                let _ = conn.send(Frame::Noop { at: Watermark::new(1, 5) }).await;
+            } else {
+                let _ = conn
+                    .send(Frame::ResetToBootstrap { reason: "compacted".into() })
+                    .await;
+            }
+            // Let the frame land before dropping (closing) the connection.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if rounds.len() >= 2 && rounds.values().all(|r| *r >= 2) {
+                return; // drop the listener → unreachable.
+            }
+        }
+    });
+
+    let store = ReplicatingCallStore::new(1, clock.clone());
+    let sup = supervisor_for("B", &store, &net, &clock, vec![("A".into(), a_addr)], super::test_support::fast_config());
+    sup.start(super::test_support::one_peer("A", &clock));
+
+    // By t=500ms: round 1 (Noop → bootstrap-complete), reconnect, round 2
+    // (ResetToBootstrap re-opens the gate), and the peer has gone dark. The
+    // re-armed deadline (2 s from the reset) has NOT fired yet.
+    tick(500).await;
+    assert!(
+        !sup.all_bootstrapped(),
+        "ResetToBootstrap re-opened the bootstrap gate"
+    );
+    assert!(sup.is_current("A"), "current stays sticky across the reset");
+
+    // The RE-ARMED hard deadline (2 s, fast_config) fires through the
+    // ConnectFailed/backoff cycles: best-effort bootstrap-complete, NOT a
+    // permanent NotReady wedge.
+    tick(3_000).await;
+    assert!(
+        sup.all_bootstrapped(),
+        "re-armed hard deadline must unwedge readiness while the peer stays dark"
+    );
+}

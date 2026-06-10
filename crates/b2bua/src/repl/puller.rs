@@ -617,6 +617,17 @@ impl Puller {
                         s.bootstrap_complete = false;
                         s.reset_gen = s.reset_gen.saturating_add(1);
                     });
+                    // RE-ARM the bootstrap hard deadline (X5): clearing
+                    // `bootstrap_complete` without it left the forced re-bootstrap
+                    // with NO liveness escape — if the peer then went unreachable,
+                    // every retry was ConnectFailed with `deadline == None`, the
+                    // best-effort timer could never fire, and `all_bootstrapped()`
+                    // pinned the node NotReady until the dead peer returned. The
+                    // re-bootstrap gets exactly the bound a cold boot gets.
+                    *deadline = Some(
+                        tokio::time::Instant::now()
+                            + Duration::from_millis(self.config.bootstrap_hard_timeout_ms),
+                    );
                     return RunOutcome::Disconnected;
                 }
                 // PullRequest is client→server; never expected here. Ignore.
