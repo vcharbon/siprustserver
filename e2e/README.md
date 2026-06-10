@@ -16,7 +16,26 @@ e2e/
   runs/       Run output (gitignored): <campaign>/<ts>/<cell>/result.json + campaign.json
 ```
 
-## Launch a campaign
+## Start the website
+
+```sh
+cargo run -p e2e-web            # http://127.0.0.1:8378/campaigns
+# flags: --port <p>  --e2e-dir <dir>  --runs-root <dir>
+```
+
+List campaigns and hit **Launch**; the run page live-updates (htmx 1s poll)
+until every cell settles; click a cell for the SVG call diagram + check
+verdicts. `/cases/<id>` views a Test case and lets you edit it in place —
+saves are validated against the compiled registries and rejected with the
+precise problem list. Every route also mirrors JSON for scripts:
+
+```sh
+curl -H 'Accept: application/json' http://127.0.0.1:8378/campaigns
+curl -X POST -H 'Accept: application/json' http://127.0.0.1:8378/campaigns/smoke/runs   # → {"runId": ...}
+curl -H 'Accept: application/json' http://127.0.0.1:8378/runs/<runId>                   # → live status
+```
+
+## Launch a campaign headless (CI)
 
 ```sh
 cargo run -p e2e-cli -- run e2e/campaigns/smoke.json
@@ -35,15 +54,19 @@ The same campaigns also run as plain tests (no CLI): `cargo test -p e2e-core`.
 
 ## Author or update a test
 
-1. **Test case** — add/edit `e2e/cases/<id>.json` (file name = `id`). Point
-   `$schema` at `../schemas/test-case.schema.json` for completion. A case
-   declares its `compatibleShapes`, the `input` (`core.from/to/ruri` + per-shape
-   `extras`), and `checks`: blocks keyed `"<agent>.<anchor>"` (e.g.
-   `bob1.initialInvite`) with field assertions — `from.userInfo`,
-   `header(Max-Forwards)`, `body`, `source.ip`, … ops `regex|eq|exists|absent`,
-   values may bind `${input.from}` / `${infra.lbVip}`.
-2. **Campaign** — list case ids + infra shapes in `e2e/campaigns/<id>.json`.
-3. **Lint before running** — precise load-time errors (unknown shape, anchor
+1. **Test case** — add/edit `e2e/cases/<id>.json` (file name = `id`), in your
+   editor or on the website (`/cases/<id>`). Point `$schema` at
+   `../schemas/test-case.schema.json` for completion. A case declares its
+   `compatibleShapes`, the `input` (`core.from/to/ruri` + per-shape `extras`),
+   shared `checkSets` it pulls in by id, and inline `checks`: blocks keyed
+   `"<agent>.<anchor>"` (e.g. `bob1.initialInvite`) with field assertions —
+   `from.userInfo`, `header(Max-Forwards)`, `body`, `source.ip`, … ops
+   `regex|eq|exists|absent`, values may bind `${input.from}` / `${infra.lbVip}`.
+2. **Check set** — reusable check bundles in `e2e/checksets/<id>.json` (e.g.
+   `invite-identity`), shareable by every case whose shapes publish the anchors
+   the set references.
+3. **Campaign** — list case ids + infra shapes in `e2e/campaigns/<id>.json`.
+4. **Lint before running** — precise load-time errors (unknown shape, anchor
    not published, missing required input):
 
    ```sh
@@ -69,5 +92,7 @@ its shape publishes, so a typo fails before anything runs.
   cargo run -p xtask -- e2e-schema      # or: cargo run -p e2e-cli -- schema
   ```
 
-The web front-end (Axum/Maud/htmx over the same run-core) is the next planned
-phase — see [docs/plan/e2e-test-management-website.md](../docs/plan/e2e-test-management-website.md).
+Remaining planned breadth (see
+[docs/plan/e2e-test-management-website.md](../docs/plan/e2e-test-management-website.md)):
+media opt-in (per-agent `.wav` + classifier check, Phase J) and the
+`rerouting` / `rerouting-prack` Callflow shapes (Phase K).

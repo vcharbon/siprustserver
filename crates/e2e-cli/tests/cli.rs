@@ -53,6 +53,8 @@ fn failing_campaign_exits_one() {
           "checks": [ { "field": "from.userInfo", "op": "regex", "value": "^\\+44" } ] }
     ]);
     case.as_object_mut().unwrap().remove("$schema");
+    // This temp e2e dir has no check sets — drop the committed case's reference.
+    case.as_object_mut().unwrap().remove("checkSets");
     std::fs::write(e2e.join("cases/wrong-number.json"), case.to_string()).unwrap();
     std::fs::copy(
         committed.join("infra/fake-lsbc-b2bua.json"),

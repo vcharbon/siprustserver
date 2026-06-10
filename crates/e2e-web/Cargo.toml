@@ -1,0 +1,25 @@
+[package]
+name = "e2e-web"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "E2E test-management website (ADR-0018 Phase I): an axum + maud + htmx front-end over the e2e-core registry — list/launch campaigns, watch run progress live, inspect cells (SVG call diagram + check verdicts), view/author Test cases. One content-negotiated route set: every handler serves HTML to a browser and the mirrored JSON to the CLI/API."
+
+[[bin]]
+name = "e2e-web"
+path = "src/main.rs"
+
+[dependencies]
+e2e-core = { path = "../e2e-core" }
+seq-report = { path = "../seq-report" }
+axum = { workspace = true }
+maud = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+# Drive the Router in-process (`ServiceExt::oneshot`) — no listener needed.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

@@ -1,0 +1,22 @@
+{
+  "$schema": "../schemas/check-set.schema.json",
+  "id": "invite-identity",
+  "description": "Caller-identity preservation through the SUT: the b-leg INVITE bob receives carries the case's From untouched (URI bound to ${input.from}), a From tag, Max-Forwards, and no SUT-injected P-Asserted-Identity; the answer alice receives is properly tagged. Shape-portable: binds only initialInvite/answer anchors.",
+  "blocks": [
+    {
+      "on": "bob1.initialInvite",
+      "checks": [
+        { "field": "from.uri", "op": "eq", "value": "${input.from}" },
+        { "field": "from.tag", "op": "exists" },
+        { "field": "header(Max-Forwards)", "op": "exists" },
+        { "field": "pai", "op": "absent" }
+      ]
+    },
+    {
+      "on": "alice.answer",
+      "checks": [
+        { "field": "to.tag", "op": "exists" }
+      ]
+    }
+  ]
+}

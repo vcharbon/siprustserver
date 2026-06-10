@@ -42,6 +42,8 @@ fn fake_cfg() -> EndpointConfig {
 async fn produce_result() -> RunResult {
     let case = model::load_test_case(&workspace_root().join("e2e/cases/basic-call-identity.json"))
         .expect("committed case loads");
+    let check_sets = model::load_check_sets(&workspace_root().join("e2e/checksets"))
+        .expect("committed check sets load");
     let mut rt = FakeLsbcB2bua.build("result/fake", &fake_cfg()).await;
     let lb_vip = rt.lb_vip;
     BasicCall.run(&mut rt, &case.input.core).await;
@@ -49,7 +51,7 @@ async fn produce_result() -> RunResult {
 
     let verdicts = checks::evaluate_case(
         &case,
-        &BTreeMap::new(),
+        &check_sets,
         &report,
         &Bindings { input: &case.input, lb_vip },
     );

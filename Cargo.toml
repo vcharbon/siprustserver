@@ -28,6 +28,7 @@ members = [
     "crates/cdr-consumer-runner",
     "crates/e2e-core",
     "crates/e2e-cli",
+    "crates/e2e-web",
     "xtask",
 ]
 
@@ -82,6 +83,12 @@ serde_json = "1"
 # `regex` backs the check engine's `regex` op (ADR-0019 field grammar).
 schemars = "1"
 regex = "1"
+# E2E test-management website (`e2e-web`, ADR-0018 Phase I): axum serves the
+# content-negotiated route set (HTML + JSON on ONE handler per resource), maud
+# renders the HTML server-side (htmx does fragment polling client-side, loaded
+# from CDN — no JS build step). TEST-TOOLING ONLY, never in a runner.
+axum = "0.8"
+maud = "0.27"
 serde_bytes = "0.11"
 rmp-serde = "1"
 # HA replication wire codec (`crates/repl-net`, slice S2). The five replication

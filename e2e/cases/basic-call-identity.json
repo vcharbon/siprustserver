@@ -10,22 +10,14 @@
       "ruri": "sip:+33987654321@127.0.0.1:5070"
     }
   },
+  "checkSets": ["invite-identity"],
   "checks": [
     {
       "on": "bob1.initialInvite",
       "checks": [
         { "field": "from.userInfo", "op": "regex", "value": "^\\+33123456789$" },
-        { "field": "from.uri", "op": "eq", "value": "${input.from}" },
-        { "field": "from.tag", "op": "exists" },
         { "field": "to.userInfo", "op": "regex", "value": "^\\+33987654321$" },
-        { "field": "header(Max-Forwards)", "op": "exists" },
         { "field": "body", "op": "regex", "value": "m=audio" }
-      ]
-    },
-    {
-      "on": "alice.answer",
-      "checks": [
-        { "field": "to.tag", "op": "exists" }
       ]
     }
   ]
