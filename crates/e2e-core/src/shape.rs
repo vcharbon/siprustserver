@@ -71,6 +71,17 @@ pub struct Input {
     pub ruri: Option<String>,
 }
 
+/// Whether a Callflow shape exchanges RTP audio alongside the signaling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaMode {
+    /// Signaling only.
+    Off,
+    /// Each Test Agent opens a `MediaEndpoint` on the same `SignalingNetwork`,
+    /// streams its deterministic reference clip, and records inbound audio;
+    /// per-agent `.wav` artifacts + the classifier verdict land on the result.
+    Exchange,
+}
+
 /// A compiled Callflow shape — selected (not authored) from the registry.
 #[async_trait(?Send)]
 pub trait CallflowShape {
@@ -83,6 +94,10 @@ pub trait CallflowShape {
     /// load time.
     fn required_input(&self) -> &[&str] {
         &[]
+    }
+    /// Whether this shape exchanges media (off by default).
+    fn media(&self) -> MediaMode {
+        MediaMode::Off
     }
     /// Drive the flow over the given Infra runtime. Assertion failures panic
     /// in-line (the harness philosophy); the run-core isolates the panic per cell.

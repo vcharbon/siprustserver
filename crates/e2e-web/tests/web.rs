@@ -79,8 +79,8 @@ async fn launch_poll_and_inspect_a_run() {
     assert!(html.contains("/campaigns/smoke/runs"), "launch form present");
     let (st, json) = get(&app, "/campaigns", true).await;
     assert_eq!(st, StatusCode::OK);
-    let docs: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(docs[0]["id"], "smoke");
+    let docs: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    assert!(docs.iter().any(|d| d["id"] == "smoke"), "{docs:?}");
 
     // Launch (API flavor → 202 + runId; the browser flavor would 303).
     let (st, body) = post(&app, "/campaigns/smoke/runs", "", true).await;
@@ -133,6 +133,50 @@ async fn launch_poll_and_inspect_a_run() {
     )
     .unwrap();
     assert_eq!(from_api, on_disk, "the cell API is the result.json, verbatim");
+
+    std::fs::remove_dir_all(&e2e).ok();
+}
+
+/// Phase J on the web: the media cell's page embeds <audio> players and the
+/// file route serves the actual RIFF/WAVE recording.
+#[tokio::test(flavor = "multi_thread")]
+async fn media_cell_serves_audio() {
+    let e2e = temp_e2e("media");
+    let app = app(&e2e);
+
+    let (st, body) = post(&app, "/campaigns/full/runs", "", true).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+    let run_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["runId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut status_doc = serde_json::Value::Null;
+    for _ in 0..600 {
+        let (_, body) = get(&app, &format!("/runs/{run_id}"), true).await;
+        status_doc = serde_json::from_str(&body).unwrap();
+        if status_doc["finished"] == true {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(status_doc["finished"], true, "{status_doc}");
+    let media_cell = status_doc["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["dir"].as_str().unwrap().starts_with("basic-call-media"))
+        .expect("media cell ran");
+    assert_eq!(media_cell["passed"], true, "{media_cell}");
+    let dir = media_cell["dir"].as_str().unwrap();
+
+    let (st, html) = get(&app, &format!("/runs/{run_id}/cells/{dir}"), false).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(html.contains("<audio"), "audio players on the cell page");
+
+    let (st, wav) =
+        get(&app, &format!("/runs/{run_id}/cells/{dir}/files/alice.received.wav"), false).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(wav.as_bytes().starts_with(b"RIFF"), "a real WAV is served");
 
     std::fs::remove_dir_all(&e2e).ok();
 }

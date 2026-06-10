@@ -865,7 +865,10 @@ pub fn generate_relayed_response(
 /// Build an ACK for a non-2xx final response inside the INVITE client
 /// transaction (RFC 3261 §17.1.1.3). Reuses the INVITE's topmost Via (same
 /// branch); copies From / To / Call-ID from the response; CSeq method ACK with
-/// the INVITE's sequence number.
+/// the INVITE's sequence number; and reproduces the INVITE's Route headers
+/// verbatim ("the Route header fields of the ACK MUST equal" the INVITE's) —
+/// load-bearing when the INVITE carried a preloaded outbound-proxy Route
+/// (RFC3261-MUST-145, flagged by the cross-message audit).
 pub fn generate_ack_for_non_2xx(
     original_invite: &SipRequest,
     final_response: &SipResponse,
@@ -877,15 +880,18 @@ pub fn generate_ack_for_non_2xx(
     let call_id = get_header(&final_response.headers, "call-id").unwrap_or("");
     let cseq_num = original_invite.cseq.seq;
 
-    let headers: Vec<SipHeader> = vec![
+    let mut headers: Vec<SipHeader> = vec![
         h("Via", via),
         h("Max-Forwards", "70"),
         h("From", from),
         h("To", to),
         h("Call-ID", call_id),
         h("CSeq", format!("{cseq_num} ACK")),
-        h("Content-Length", "0"),
     ];
+    for route in crate::message_helpers::get_headers(&original_invite.headers, "route") {
+        headers.push(h("Route", route));
+    }
+    headers.push(h("Content-Length", "0"));
 
     make_request("ACK", &original_invite.uri, headers, Vec::new())
 }

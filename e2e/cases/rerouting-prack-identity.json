@@ -1,0 +1,36 @@
+{
+  "$schema": "../schemas/test-case.schema.json",
+  "id": "rerouting-prack-identity",
+  "description": "Rerouting plus a reliable provisional on the winning leg: bob2 answers 183 Require:100rel/RSeq, alice PRACKs, then the call completes. The reliability markers must survive the SUT relay.",
+  "compatibleShapes": ["rerouting-prack"],
+  "input": {
+    "core": {
+      "from": "sip:+33123456789@example.com",
+      "to": "sip:+33987654321@example.com",
+      "ruri": "sip:+33987654321@127.0.0.1:5070"
+    }
+  },
+  "checkSets": ["invite-identity"],
+  "checks": [
+    {
+      "on": "alice.firstProvisional",
+      "checks": [
+        { "field": "header(Require)", "op": "regex", "value": "100rel" },
+        { "field": "header(RSeq)", "op": "exists" }
+      ]
+    },
+    {
+      "on": "bob2.prack",
+      "checks": [
+        { "field": "header(RAck)", "op": "exists" },
+        { "field": "from.uri", "op": "eq", "value": "${input.from}" }
+      ]
+    },
+    {
+      "on": "bob2.initialInvite",
+      "checks": [
+        { "field": "from.userInfo", "op": "regex", "value": "^\\+33123456789$" }
+      ]
+    }
+  ]
+}

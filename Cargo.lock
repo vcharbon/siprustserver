@@ -1024,6 +1024,8 @@ dependencies = [
  "b2bua-harness",
  "call",
  "layer-harness",
+ "media",
+ "media-harness",
  "regex",
  "scenario-harness",
  "schemars",

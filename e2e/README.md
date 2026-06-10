@@ -6,6 +6,12 @@ real sockets) × **Endpoint config** (JSON addresses) × **Test case** (JSON inp
 + checks). The same shape body runs unchanged over fake and real — only
 transport, clock and timeouts differ.
 
+Compiled shapes: `basic-call`, `basic-call-media` (real RTP both ways + the
+"alice hears bob" spectral-classifier check, per-agent `.wav` artifacts),
+`rerouting` (bob1 rejects → the SUT fails over to bob2, ADR-0017), and
+`rerouting-prack` (+ reliable 183/PRACK on the winning leg). Campaigns:
+`smoke` (one fast cell) and `full` (every case).
+
 ```
 e2e/
   cases/      Test cases (input data + checks + compatible shapes)
@@ -24,10 +30,12 @@ cargo run -p e2e-web            # http://127.0.0.1:8378/campaigns
 ```
 
 List campaigns and hit **Launch**; the run page live-updates (htmx 1s poll)
-until every cell settles; click a cell for the SVG call diagram + check
-verdicts. `/cases/<id>` views a Test case and lets you edit it in place —
-saves are validated against the compiled registries and rejected with the
-precise problem list. Every route also mirrors JSON for scripts:
+until every cell settles; click a cell for the SVG call diagram, check
+verdicts, and — for media cells — inline `<audio>` players over the recorded
+`.wav`s with the classifier verdict. `/cases/<id>` views a Test case and lets
+you edit it in place — saves are validated against the compiled registries and
+rejected with the precise problem list. Every route also mirrors JSON for
+scripts:
 
 ```sh
 curl -H 'Accept: application/json' http://127.0.0.1:8378/campaigns
@@ -92,7 +100,8 @@ its shape publishes, so a typo fails before anything runs.
   cargo run -p xtask -- e2e-schema      # or: cargo run -p e2e-cli -- schema
   ```
 
-Remaining planned breadth (see
-[docs/plan/e2e-test-management-website.md](../docs/plan/e2e-test-management-website.md)):
-media opt-in (per-agent `.wav` + classifier check, Phase J) and the
-`rerouting` / `rerouting-prack` Callflow shapes (Phase K).
+All plan milestones (M1–M6, [docs/plan/e2e-test-management-website.md](../docs/plan/e2e-test-management-website.md))
+are implemented. The env-gated `real-kind` Infra shape (an external kind
+cluster behind the LB VIP) is the same `with_network_and_clock` seam as
+`real-loopback-direct` with the Endpoint config pointed at the cluster — add
+its config under `infra/` when a reachable cluster is available.

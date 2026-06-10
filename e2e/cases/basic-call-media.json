@@ -1,0 +1,22 @@
+{
+  "$schema": "../schemas/test-case.schema.json",
+  "id": "basic-call-media",
+  "description": "The identity call with real RTP both ways: alice streams her 200 Hz reference clip, bob1 his 110 Hz one; each side's recording is classified ('alice hears bob') and saved as a playable .wav beside the result.",
+  "compatibleShapes": ["basic-call-media"],
+  "input": {
+    "core": {
+      "from": "sip:+33123456789@example.com",
+      "to": "sip:+33987654321@example.com",
+      "ruri": "sip:+33987654321@127.0.0.1:5070"
+    }
+  },
+  "checkSets": ["invite-identity"],
+  "checks": [
+    {
+      "on": "bob1.initialInvite",
+      "checks": [
+        { "field": "body", "op": "regex", "value": "m=audio" }
+      ]
+    }
+  ]
+}

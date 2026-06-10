@@ -928,6 +928,20 @@ impl<'a> ActionExecutor<'a> {
         to_tag: &str,
     ) {
         let contact = get_header(&resp.headers, "contact").map(unwrap_angle).unwrap_or_default();
+        // §12.1.2: an EARLY dialog's route set is established from the reliable
+        // 1xx's Record-Route, exactly like the 2xx path below — split the
+        // comma-combined double-record-route halves first, then reverse the
+        // individual URIs (UAC side). Without this a PRACK/UPDATE on the early
+        // dialog rides the preloaded bootstrap Route only and under-reproduces
+        // the route set (the §12.2.1.1 audit catches it behind a front proxy).
+        let mut early_route_set: Vec<String> =
+            sip_message::message_helpers::get_headers(&resp.headers, "record-route")
+                .iter()
+                .flat_map(|h| split_top_level_commas(h))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        early_route_set.reverse();
         // The response echoes the INVITE's CSeq (§8.1.3.3); seed each forked
         // early dialog's sequence from it so they advance independently.
         let invite_cseq = resp.cseq.seq as i64;
@@ -948,6 +962,9 @@ impl<'a> ActionExecutor<'a> {
                 d.sip.remote_tag = to_tag.to_string();
                 if !contact.is_empty() {
                     d.sip.remote_target = contact.clone();
+                }
+                if !early_route_set.is_empty() {
+                    d.sip.route_set = early_route_set.clone();
                 }
             } else {
                 // Additional fork: append a fresh independent early dialog
@@ -971,6 +988,9 @@ impl<'a> ActionExecutor<'a> {
                 d.ext.pending_invite_txn = leg_handle;
                 if !contact.is_empty() {
                     d.sip.remote_target = contact.clone();
+                }
+                if !early_route_set.is_empty() {
+                    d.sip.route_set = early_route_set.clone();
                 }
                 leg.dialogs.push(d);
             }

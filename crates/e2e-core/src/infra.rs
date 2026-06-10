@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use b2bua::decision::test_adapter::route_to;
+use b2bua::decision::{CallTreatment, NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::B2buaSut;
 use scenario_harness::{Agent, Harness, RunReport};
 use sip_clock::Clock;
@@ -65,6 +67,17 @@ impl EndpointConfig {
         Duration::from_millis(self.recv_timeout_ms)
     }
 
+    /// The RTP address for a media-exchanging agent: an explicit
+    /// `"<role>.rtp"` role wins; otherwise the agent's signaling IP with
+    /// `default_port` (fine on the simulated fabric; real configs should pin
+    /// `<role>.rtp` to avoid port clashes).
+    pub fn media_addr(&self, role: &str, default_port: u16) -> SocketAddr {
+        self.roles
+            .get(&format!("{role}.rtp"))
+            .copied()
+            .unwrap_or_else(|| SocketAddr::new(self.addr(role).ip(), default_port))
+    }
+
     /// Fail loudly when a config authored for one infra is handed to another.
     fn assert_binds(&self, infra_id: &str) {
         assert_eq!(
@@ -86,6 +99,14 @@ pub struct InfraRuntime {
     pub sut_ingress: SocketAddr,
     /// The LB VIP (== `sut_ingress`); exposed for `${infra.lbVip}` checks later.
     pub lb_vip: SocketAddr,
+    /// The Endpoint config this runtime was built from (media addrs etc.).
+    pub cfg: EndpointConfig,
+    /// The RAW (un-recorded) network — media endpoints ride the same fabric as
+    /// the signaling but BELOW the SIP recording/audit decorators (RTP bytes
+    /// must not enter the SIP trace or the RFC rule engine).
+    raw_net: Arc<dyn sip_net::SignalingNetwork>,
+    /// Audio a media-exchanging shape captured, folded into the result later.
+    media: std::cell::RefCell<Vec<crate::media::MediaCapture>>,
     _proxy: Option<ProxyGuard>,
     _b2bua: Option<B2buaSut>,
 }
@@ -107,6 +128,23 @@ impl InfraRuntime {
         keys: impl Into<scenario_harness::AnchorKeys>,
     ) {
         self.harness.tag_anchor(self.agent(role), anchor.as_str(), keys);
+    }
+
+    /// The raw network for media endpoints (same fabric, below the SIP
+    /// recording decorators).
+    pub fn raw_network(&self) -> Arc<dyn sip_net::SignalingNetwork> {
+        self.raw_net.clone()
+    }
+
+    /// A media-exchanging shape deposits what each agent received here; the
+    /// run executor folds it into `.wav` artifacts + "hears" check verdicts.
+    pub fn push_media(&self, capture: crate::media::MediaCapture) {
+        self.media.borrow_mut().push(capture);
+    }
+
+    /// Drain the media captures (call before [`finish`](Self::finish)).
+    pub fn take_media(&self) -> Vec<crate::media::MediaCapture> {
+        std::mem::take(&mut *self.media.borrow_mut())
     }
 
     /// Close the recording and return the report. Keeps the SUT guards alive
@@ -185,7 +223,7 @@ impl InfraShape for FakeLsbcB2bua {
         );
         let h = Harness::with_network_and_clock(
             scenario_name.to_string(),
-            net,
+            net.clone(),
             Clock::test_at(0),
             layer_harness::TransportKind::Fake,
             cfg.recv_timeout(),
@@ -201,18 +239,39 @@ impl InfraShape for FakeLsbcB2bua {
         let lb = cfg.addr("lb");
         let b2bua_addr = cfg.addr("b2bua");
         // Route every call to bob1, but send the b-leg through the LB (never
-        // pod-direct to bob1) — the production invariant.
+        // pod-direct to bob1) — the production invariant. When the config
+        // binds a bob2, the engine is failover-capable: a bob1 rejection makes
+        // the b2bua re-target bob2 (rejection-driven, ADR-0017 — no timer, so
+        // rerouting shapes stay advance-free).
         let bob1 = cfg.addr("bob1");
+        let bob2 = cfg.roles.get("bob2").copied();
 
         let proxy = spawn_lb_proxy(&h, lb, "b2bua", b2bua_addr).await;
-        let b2bua = B2buaSut::route_all_to_via_proxy(
+        let decision = ScriptedDecisionEngine::builder()
+            .fallback(move |_req| {
+                let mut r = route_to(&bob1.ip().to_string(), bob1.port());
+                if bob2.is_some() {
+                    r.callback_context = Some("reroute:bob2".into());
+                }
+                NewCallResponse::Route(r)
+            })
+            .on_failure(move |req| match (req.callback_context.as_deref(), bob2) {
+                (Some("reroute:bob2"), Some(b2)) => {
+                    let mut r = route_to(&b2.ip().to_string(), b2.port());
+                    // The b-leg egresses through the LB, which forwards by
+                    // R-URI — it MUST name the rerouted callee, not bob1.
+                    r.new_ruri = Some(format!("sip:{}:{}", b2.ip(), b2.port()));
+                    CallTreatment::Route(r)
+                }
+                _ => CallTreatment::Relay,
+            })
+            .build();
+        let b2bua = B2buaSut::start_with_outbound_proxy(
             &h,
             "b2bua",
             &b2bua_addr.to_string(),
-            &bob1.ip().to_string(),
-            bob1.port(),
-            &lb.ip().to_string(),
-            lb.port(),
+            Arc::new(decision),
+            Some((lb.ip().to_string(), lb.port())),
         )
         .await;
 
@@ -221,6 +280,9 @@ impl InfraShape for FakeLsbcB2bua {
             agents,
             sut_ingress: lb,
             lb_vip: lb,
+            cfg: cfg.clone(),
+            raw_net: net,
+            media: Default::default(),
             _proxy: Some(proxy),
             _b2bua: Some(b2bua),
         }
@@ -249,7 +311,7 @@ impl InfraShape for RealLoopbackDirect {
         let net: Arc<dyn sip_net::SignalingNetwork> = Arc::new(sip_net::RealSignalingNetwork::new());
         let h = Harness::with_network_and_clock(
             scenario_name.to_string(),
-            net,
+            net.clone(),
             Clock::system(),
             layer_harness::TransportKind::Live,
             cfg.recv_timeout(),
@@ -267,6 +329,9 @@ impl InfraShape for RealLoopbackDirect {
             agents,
             sut_ingress: bob1,
             lb_vip: bob1,
+            cfg: cfg.clone(),
+            raw_net: net,
+            media: Default::default(),
             _proxy: None,
             _b2bua: None,
         }

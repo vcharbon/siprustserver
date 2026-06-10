@@ -1,0 +1,25 @@
+{
+  "$schema": "../schemas/test-case.schema.json",
+  "id": "rerouting-identity",
+  "description": "bob1 rejects (486), the SUT fails over to bob2 (ADR-0017 rejection-driven reroute); the caller identity must survive to BOTH b-legs, and the same shared invite-identity set drives the first leg.",
+  "compatibleShapes": ["rerouting"],
+  "input": {
+    "core": {
+      "from": "sip:+33123456789@example.com",
+      "to": "sip:+33987654321@example.com",
+      "ruri": "sip:+33987654321@127.0.0.1:5070"
+    }
+  },
+  "checkSets": ["invite-identity"],
+  "checks": [
+    {
+      "on": "bob2.initialInvite",
+      "checks": [
+        { "field": "from.uri", "op": "eq", "value": "${input.from}" },
+        { "field": "from.userInfo", "op": "regex", "value": "^\\+33123456789$" },
+        { "field": "ruri.host", "op": "eq", "value": "127.0.0.1" },
+        { "field": "ruri.port", "op": "eq", "value": "5071" }
+      ]
+    }
+  ]
+}

@@ -41,6 +41,21 @@ pub struct Timings {
     pub messages: usize,
 }
 
+/// One media artifact a cell produced: what `agent` RECEIVED, as a sibling
+/// `.wav` next to `result.json` (never inlined), plus the spectral classifier
+/// verdict over the recorded PCM.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaRef {
+    pub agent: String,
+    /// The sibling file name (e.g. `alice.received.wav`), relative to the cell dir.
+    pub wav: String,
+    /// The classifier's label for the received audio (e.g. `tone:200hz`).
+    pub classify: String,
+    /// RMS level of the recorded PCM (silence ≈ 0).
+    pub rms: f64,
+}
+
 /// Everything one cell run produced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +69,9 @@ pub struct RunResult {
     /// Findings the report surfaces alongside the diagram (advisory/structural;
     /// same fold as the HTML report's anomaly list).
     pub rfc: Vec<Anomaly>,
+    /// Media artifacts (media-exchanging shapes only; empty otherwise).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media: Vec<MediaRef>,
     /// The neutral sequence diagram — render with `seq_report::render_svg`.
     pub seq_doc: SeqDoc,
     pub timings: Timings,
@@ -79,9 +97,17 @@ impl RunResult {
             passed,
             checks: check_verdicts,
             rfc: seq_doc.anomalies.clone(),
+            media: Vec::new(),
             seq_doc,
             timings,
         }
+    }
+
+    /// Attach media artifact refs (the executor writes the `.wav`s; the
+    /// matching "hears" verdicts are already folded into `checks`).
+    pub fn with_media(mut self, media: Vec<MediaRef>) -> Self {
+        self.media = media;
+        self
     }
 }
 

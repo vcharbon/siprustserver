@@ -50,6 +50,7 @@ pub fn router(e2e_dir: PathBuf, runs_root: PathBuf) -> Router {
         .route("/runs", get(runs_index))
         .route("/runs/{campaign}/{ts}", get(run_status))
         .route("/runs/{campaign}/{ts}/cells/{cell}", get(cell_detail))
+        .route("/runs/{campaign}/{ts}/cells/{cell}/files/{name}", get(cell_file))
         .route("/cases", get(cases_index))
         .route("/cases/{id}", get(case_view).post(case_save))
         .with_state(state)
@@ -422,6 +423,23 @@ async fn cell_detail(
                     }
                 }
             }
+            @if !result.media.is_empty() {
+                h2 { "Media" }
+                table {
+                    tr { th { "agent" } th { "heard" } th { "rms" } th { "recording" } }
+                    @for m in &result.media {
+                        tr {
+                            td { (m.agent) }
+                            td { (m.classify) }
+                            td { (format!("{:.3}", m.rms)) }
+                            td {
+                                audio controls
+                                    src={ "/runs/" (campaign) "/" (ts) "/cells/" (cell) "/files/" (m.wav) } {}
+                            }
+                        }
+                    }
+                }
+            }
             @if !result.rfc.is_empty() {
                 h2 { "Report findings" }
                 ul { @for a in &result.rfc { li { (a.check) ": " (a.detail) } } }
@@ -431,6 +449,22 @@ async fn cell_detail(
         },
     )
     .into_response())
+}
+
+/// Serve a cell's sibling artifact (the `.wav` recordings). File names are
+/// constrained to a single path segment (no traversal).
+async fn cell_file(
+    State(st): State<Arc<AppState>>,
+    UrlPath((campaign, ts, cell, name)): UrlPath<(String, String, String, String)>,
+) -> Result<Response, HttpError> {
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err((StatusCode::BAD_REQUEST, "bad file name".to_string()));
+    }
+    let path = e2e_core::result::run_dir(&st.runs_root, &campaign, &ts).join(&cell).join(&name);
+    let bytes = std::fs::read(&path).map_err(|_| not_found(format!("file {name:?}")))?;
+    let content_type =
+        if name.ends_with(".wav") { "audio/wav" } else { "application/octet-stream" };
+    Ok(([(header::CONTENT_TYPE, content_type)], bytes).into_response())
 }
 
 // ---------------------------------------------------------------------------

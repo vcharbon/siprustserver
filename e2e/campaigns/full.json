@@ -1,0 +1,12 @@
+{
+  "$schema": "../schemas/campaign.schema.json",
+  "id": "full",
+  "description": "Every committed Test case over the fake SUT: identity, media (RTP + classifier), rejection-driven rerouting, and rerouting with reliable provisionals — all sharing the invite-identity check set.",
+  "cases": [
+    "basic-call-identity",
+    "basic-call-media",
+    "rerouting-identity",
+    "rerouting-prack-identity"
+  ],
+  "infraShapes": ["fake-lsbc-b2bua"]
+}

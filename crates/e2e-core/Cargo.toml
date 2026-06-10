@@ -9,6 +9,8 @@ description = "E2E test-management run-core (ADR-0018): the registry of compiled
 [dependencies]
 scenario-harness = { path = "../scenario-harness" }
 seq-report = { path = "../seq-report" }
+media = { path = "../media" }
+media-harness = { path = "../media-harness" }
 layer-harness = { path = "../layer-harness" }
 b2bua-harness = { path = "../b2bua-harness" }
 b2bua = { path = "../b2bua" }

@@ -151,15 +151,22 @@ fn run_cell(spec: &CellSpec) -> CellSummary {
         let mut rt = infra.build(&dir_name, &spec.cfg).await;
         let lb_vip = rt.lb_vip;
         shape.run(&mut rt, &spec.case.input.core).await;
+        let captures = rt.take_media();
         let report = rt.finish().await;
 
-        let verdicts = checks::evaluate_case(
+        let mut verdicts = checks::evaluate_case(
             &spec.case,
             &spec.check_sets,
             &report,
             &checks::Bindings { input: &spec.case.input, lb_vip },
         );
-        RunResult::from_run(spec.cell.clone(), &report, verdicts)
+        // Media: write the per-agent .wav siblings now (same dir result.json
+        // lands in) and fold the classifier verdicts in with the checks.
+        let (media_refs, media_verdicts) =
+            crate::media::write_and_fold(&spec.run_dir.join(&dir_name), &captures)
+                .expect("persist media artifacts");
+        verdicts.extend(media_verdicts);
+        RunResult::from_run(spec.cell.clone(), &report, verdicts).with_media(media_refs)
     });
 
     result::write_result(&spec.run_dir, &result).expect("persist result.json");
