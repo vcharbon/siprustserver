@@ -22,6 +22,7 @@ use sip_net::{
     SignalingAuditViolation, SignalingNetworkEvent, SimulatedSignalingNetwork, UdpEndpoint,
 };
 
+use crate::anchors::AnchorTag;
 use crate::dsl::{Match, Scenario, Step};
 
 /// Default per-`Expect` wait. Generous because the simulated fabric delivers
@@ -51,6 +52,10 @@ pub struct RunReport {
     pub audit: Result<(), SignalingAuditViolation>,
     recorder: Recorder,
     events: Vec<Stamped<SignalingNetworkEvent>>,
+    /// `(agent, anchor)` message labels the scenario attached via
+    /// [`Harness::tag_anchor`](crate::agent::Harness::tag_anchor) (the data-DSL
+    /// driver tags nothing). See [`crate::anchors`].
+    anchors: Vec<AnchorTag>,
 }
 
 impl RunReport {
@@ -64,6 +69,7 @@ impl RunReport {
         recorder: Recorder,
         events: Vec<Stamped<SignalingNetworkEvent>>,
         audit: Result<(), SignalingAuditViolation>,
+        anchors: Vec<AnchorTag>,
     ) -> Self {
         Self {
             scenario_name,
@@ -72,6 +78,7 @@ impl RunReport {
             audit,
             recorder,
             events,
+            anchors,
         }
     }
 
@@ -93,6 +100,12 @@ impl RunReport {
     /// Raw recorded events, for tests that assert on the channel directly.
     pub fn events(&self) -> &[Stamped<SignalingNetworkEvent>] {
         &self.events
+    }
+
+    /// The scenario's `(agent, anchor)` message labels, in tag order — the E2E
+    /// check engine resolves `<agent>.<anchor>` through these (ADR-0019).
+    pub fn anchors(&self) -> &[AnchorTag] {
+        &self.anchors
     }
 }
 
@@ -183,6 +196,7 @@ pub async fn run(scenario: &Scenario) -> RunReport {
         audit,
         recorder,
         events,
+        anchors: Vec::new(),
     }
 }
 

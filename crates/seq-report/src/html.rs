@@ -103,7 +103,7 @@ pub fn render_html(doc: &SeqDoc) -> String {
         .map(|(i, l)| (l.id.as_str(), i))
         .collect();
 
-    let svg = render_svg(doc, &rows, base, &lane_idx);
+    let svg = svg_markup(doc, &rows, base, &lane_idx);
     let payloads = render_payloads(doc, &rows, base);
     let anomalies = render_anomalies(doc);
 
@@ -204,7 +204,22 @@ pub fn render_html(doc: &SeqDoc) -> String {
     )
 }
 
-fn render_svg(
+/// Render ONLY the SVG sequence diagram — the exact markup [`render_html`]
+/// embeds in its diagram panel. For callers that persist/serve the diagram
+/// standalone (the E2E `result.json` sibling artifacts, ADR-0018 Phase F).
+pub fn render_svg(doc: &SeqDoc) -> String {
+    let rows = doc.sorted_rows();
+    let base = doc.base_ms();
+    let lane_idx: std::collections::HashMap<&str, usize> = doc
+        .lanes
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (l.id.as_str(), i))
+        .collect();
+    svg_markup(doc, &rows, base, &lane_idx)
+}
+
+fn svg_markup(
     doc: &SeqDoc,
     rows: &[&SeqRow],
     base: i64,

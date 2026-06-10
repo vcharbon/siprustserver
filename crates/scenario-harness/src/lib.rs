@@ -30,6 +30,7 @@
 //! never belong in a production network tree.
 
 pub mod agent;
+pub mod anchors;
 pub mod dsl;
 pub mod report;
 pub mod run;
@@ -51,5 +52,6 @@ pub use agent::{
 // The low-level scenarios-as-data DSL — for raw/torture cases that must send
 // exact (possibly malformed) bytes. `dsl::Agent` is the data-DSL agent handle;
 // the fluent `agent::Agent` (re-exported above) is the stateful UA.
+pub use anchors::{AnchorKeys, AnchorMsgKind, AnchorTag};
 pub use dsl::{AgentId, Match, Scenario, Step};
 pub use run::{run, ExpectOutcome, RunReport};

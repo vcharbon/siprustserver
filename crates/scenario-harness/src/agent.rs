@@ -171,6 +171,16 @@ pub struct Harness {
     /// skips findings from these rule names. Shared (`Rc`) with [`CseqGate`] so a
     /// `allow_violation` registered before `finish`/Drop is honoured by both.
     allow_violations: Rc<RefCell<HashSet<String>>>,
+    /// Per-`recv` wait bound handed to every [`Agent`] this harness binds. Small
+    /// under a paused (simulated) clock — a parked `recv` auto-advances virtual
+    /// time, so the bound only catches a genuinely stuck flow. A *real*-clock
+    /// infra shape (an external SUT over real sockets) must widen it, since the
+    /// wait is then real wall-clock latency. Sourced from the Endpoint config.
+    recv_timeout: Duration,
+    /// `(agent, anchor)` message labels a scenario attached via
+    /// [`tag_anchor`](Harness::tag_anchor), surfaced on the [`RunReport`] for
+    /// the E2E check engine (ADR-0019).
+    anchors: Rc<RefCell<Vec<crate::anchors::AnchorTag>>>,
 }
 
 impl Harness {
@@ -191,27 +201,67 @@ impl Harness {
     /// deterministically. See [`SimulatedSignalingNetwork::new`].
     pub fn with_transit_delay(scenario_name: impl Into<String>, transit_delay_ms: u64) -> Self {
         let transit_delay_ms = transit_delay_ms.max(1);
-        let recorder = Recorder::with_clock(TransportKind::Fake, Clock::test_at(0));
-        let sim = Arc::new(SimulatedSignalingNetwork::new(transit_delay_ms));
-        // Install the full default RFC 3261 / 3262 / 3264 wire-invariant suite
-        // (per-message peer rules + cross-message rules) by default so every
-        // harness run gets the same post-run "all clean" RFC check the live SIPp
-        // endpoints apply — a stale-CSeq probe, a mid-dialog tag/route mutation,
-        // an RFC 3262/3264 PRACK/offer-answer slip that a test UA would silently
-        // answer is caught at layer close.
+        let sim: Arc<dyn SignalingNetwork> =
+            Arc::new(SimulatedSignalingNetwork::new(transit_delay_ms));
+        Self::build(
+            scenario_name.into(),
+            sim,
+            Clock::test_at(0),
+            TransportKind::Fake,
+            RECV_TIMEOUT,
+        )
+    }
+
+    /// Start a session over a **caller-supplied** network + clock — the seam an
+    /// E2E *Infra shape* uses to run the **same** scenario over either a
+    /// `SimulatedSignalingNetwork` under a paused clock (fake) or a
+    /// `RealSignalingNetwork` under a wall clock (real, external SUT). The only
+    /// per-shape differences are transport + clock + the `recv_timeout`; the
+    /// scenario body is identical (ADR-0018). `transport_kind` tags the recording
+    /// (`Fake` / `Live` / `Hybrid`); `recv_timeout` comes from the Endpoint config
+    /// (small for sim, wide for a real socket).
+    pub fn with_network_and_clock(
+        scenario_name: impl Into<String>,
+        network: Arc<dyn SignalingNetwork>,
+        clock: Clock,
+        transport_kind: TransportKind,
+        recv_timeout: Duration,
+    ) -> Self {
+        Self::build(
+            scenario_name.into(),
+            network,
+            clock,
+            transport_kind,
+            recv_timeout,
+        )
+    }
+
+    /// Shared constructor body: wrap the raw network in the recorder + the full
+    /// default RFC 3261 / 3262 / 3264 wire-invariant suite (per-message peer rules
+    /// + cross-message rules) so every harness run gets the same post-run "all
+    /// clean" RFC check the live SIPp endpoints apply — a stale-CSeq probe, a
+    /// mid-dialog tag/route mutation, an RFC 3262/3264 PRACK/offer-answer slip that
+    /// a test UA would silently answer is caught at layer close.
+    fn build(
+        name: String,
+        raw_network: Arc<dyn SignalingNetwork>,
+        clock: Clock,
+        transport_kind: TransportKind,
+        recv_timeout: Duration,
+    ) -> Self {
+        let recorder = Recorder::with_clock(transport_kind, clock);
         let audit_opts = ScopedAuditOptions {
             rules: sip_net::rfc_peer_rules(),
             cross_message_rules: sip_net::rfc_cross_message_rules(),
             ..Default::default()
         };
         let wrapped = with_all_contracts(
-            sim,
+            raw_network,
             recorder.clone(),
             RunContext::TestWithRecorder,
             audit_opts,
             true,
         );
-        let name = scenario_name.into();
         let dump = PanicDump {
             name: name.clone(),
             channel: wrapped.recording.channel(),
@@ -235,7 +285,29 @@ impl Harness {
             dump,
             cseq_gate,
             allow_violations,
+            recv_timeout,
+            anchors: Rc::new(RefCell::new(Vec::new())),
         }
+    }
+
+    /// Label a message `agent` received with a canonical **anchor** name
+    /// (ADR-0019) — e.g. `tag_anchor(&bob1, "initialInvite", uas.request())`.
+    /// The tag stores the message's identity keys; the E2E check engine
+    /// resolves `<agent>.<anchor>` to the recorded wire entry post-call via
+    /// [`RunReport::anchors`]. Tagging the same `(agent, anchor)` twice keeps
+    /// both (resolution takes the first — re-tag deliberately, not by accident).
+    pub fn tag_anchor(
+        &self,
+        agent: &Agent,
+        anchor: impl Into<String>,
+        keys: impl Into<crate::anchors::AnchorKeys>,
+    ) {
+        self.anchors.borrow_mut().push(crate::anchors::AnchorTag {
+            agent: agent.name().to_string(),
+            anchor: anchor.into(),
+            rx_addr: agent.addr(),
+            keys: keys.into(),
+        });
     }
 
     /// Set the report description (port of `.describe(...)`).
@@ -300,6 +372,7 @@ impl Harness {
             ep: Arc::from(ep),
             ids: self.ids.clone(),
             rr_fold,
+            recv_timeout: self.recv_timeout,
         }
     }
 
@@ -379,7 +452,8 @@ impl Harness {
             panic!("{}", render_rfc_panic(&self.name, &cseq_findings));
         }
         let audit = self.recording.close().await;
-        RunReport::from_recording(self.name, self.description, self.recorder, events, audit)
+        let anchors = self.anchors.borrow().clone();
+        RunReport::from_recording(self.name, self.description, self.recorder, events, audit, anchors)
     }
 }
 
@@ -630,6 +704,8 @@ pub struct Agent {
     /// How this UA echoes multiple Record-Route rows when it acts as UAS
     /// ([`RecordRouteFold`]). Chosen per-UA at bind time.
     rr_fold: RecordRouteFold,
+    /// Per-`recv` wait bound, inherited from the [`Harness`] (Endpoint config).
+    recv_timeout: Duration,
 }
 
 impl Agent {
@@ -672,7 +748,7 @@ impl Agent {
     }
 
     async fn recv(&self) -> SipMessage {
-        let pkt = tokio::time::timeout(RECV_TIMEOUT, self.ep.recv())
+        let pkt = tokio::time::timeout(self.recv_timeout, self.ep.recv())
             .await
             .unwrap_or_else(|_| panic!("{} timed out waiting for a datagram", self.name))
             .unwrap_or_else(|| panic!("{} endpoint queue closed", self.name));
@@ -690,6 +766,9 @@ impl Agent {
             sdp: None,
             extra_headers: vec![],
             wire_dst: None,
+            from_uri: None,
+            to_uri: None,
+            request_uri: None,
         }
     }
 
@@ -886,6 +965,12 @@ pub struct Invite<'a> {
     /// Contact is the Request-URI) but *sent* here. Set by [`Invite::through`]
     /// to route an initial INVITE via a proxy/LB.
     wire_dst: Option<SocketAddr>,
+    /// Optional From/To/Request-URI overrides — the seam an E2E *Test case*
+    /// uses to drive From/To/R-URI from input data (numbers) instead of the
+    /// default `sip:name@ip` agent identities. `None` keeps the default.
+    from_uri: Option<String>,
+    to_uri: Option<String>,
+    request_uri: Option<String>,
 }
 
 impl<'a> Invite<'a> {
@@ -909,6 +994,27 @@ impl<'a> Invite<'a> {
     /// Request-URI still targets the peer). Used to drive an LB/record-routing
     /// proxy; subsequent in-dialog requests then follow the route set learned
     /// from the proxy's Record-Route automatically.
+    /// Override the From URI (e.g. `"sip:+33123456789@example.com"`) — drives
+    /// From from Test-case input instead of the default `sip:caller@ip`.
+    pub fn from(mut self, uri: impl Into<String>) -> Self {
+        self.from_uri = Some(uri.into());
+        self
+    }
+
+    /// Override the To URI — drives To from Test-case input. The To URI also
+    /// seeds the dialog's remote URI.
+    pub fn to(mut self, uri: impl Into<String>) -> Self {
+        self.to_uri = Some(uri.into());
+        self
+    }
+
+    /// Override the Request-URI — drives the R-URI from Test-case input. The
+    /// INVITE is still *sent* to the peer/`through` wire destination.
+    pub fn ruri(mut self, uri: impl Into<String>) -> Self {
+        self.request_uri = Some(uri.into());
+        self
+    }
+
     pub fn through(mut self, proxy: SocketAddr) -> Self {
         self.wire_dst = Some(proxy);
         self
@@ -922,14 +1028,21 @@ impl<'a> Invite<'a> {
         let wire_dst = self.wire_dst.unwrap_or(peer.addr);
         let call_id = format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip());
         let from_tag = caller.tag();
-        let request_uri = format!("sip:{}@{}:{}", peer.name, peer.addr.ip(), peer.addr.port());
+        // Default identities are the agent URIs / a peer-addressed R-URI; a Test
+        // case may override any of From/To/R-URI from its input data.
+        let request_uri = self
+            .request_uri
+            .clone()
+            .unwrap_or_else(|| format!("sip:{}@{}:{}", peer.name, peer.addr.ip(), peer.addr.port()));
+        let from_uri = self.from_uri.clone().unwrap_or_else(|| caller.uri.clone());
+        let to_uri = self.to_uri.clone().unwrap_or_else(|| peer.uri.clone());
 
         let opts = GenerateOutOfDialogRequestOpts {
             request_uri: request_uri.clone(),
             call_id: call_id.clone(),
-            from_uri: caller.uri.clone(),
+            from_uri: from_uri.clone(),
             from_tag: from_tag.clone(),
-            to_uri: peer.uri.clone(),
+            to_uri: to_uri.clone(),
             to_tag: None,
             cseq: 1,
             via: Some(caller.via()),
@@ -946,8 +1059,8 @@ impl<'a> Invite<'a> {
             call_id,
             local_tag: from_tag,
             remote_tag: String::new(),
-            local_uri: caller.uri.clone(),
-            remote_uri: peer.uri.clone(),
+            local_uri: from_uri,
+            remote_uri: to_uri,
             remote_target: request_uri,
             local_cseq: 1,
             route_set: vec![],

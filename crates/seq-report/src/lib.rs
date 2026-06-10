@@ -47,12 +47,13 @@
 mod html;
 mod text;
 
-pub use html::render_html;
+pub use html::{render_html, render_svg};
 pub use text::render_global_txt;
 
 /// What an actor lane represents — drives only its styling/label decoration, not
 /// its position (the projector fixes column order via the `lanes` vector).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum LaneKind {
     /// A user agent / external endpoint (alice, bob).
     Ua,
@@ -65,7 +66,8 @@ pub enum LaneKind {
 
 /// One diagram column. `id` is the stable key rows reference; `label` is the
 /// human caption shown at the column head.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Lane {
     /// Stable identity referenced by [`SeqRow::from`] / [`SeqRow::to`].
     pub id: String,
@@ -88,7 +90,8 @@ impl Lane {
 
 /// Which plane a row belongs to. `delivered` carries through for the message
 /// planes so an undelivered (lost / unbound) datagram or frame is flagged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum RowKind {
     /// A SIP request/response datagram.
     Sip {
@@ -107,7 +110,8 @@ pub enum RowKind {
 /// One time-ordered event on the unified timeline. For the message planes it is
 /// a point-to-point arrow `from → to`; for [`RowKind::Lifecycle`] it is a band
 /// (`to == None`) optionally anchored at the `from` lane.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SeqRow {
     /// Virtual-clock timestamp (ms). The primary sort key.
     pub at_ms: i64,
@@ -134,7 +138,8 @@ pub struct SeqRow {
 }
 
 /// A recorded finding to surface alongside the diagram (e.g. an RFC audit hit).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Anomaly {
     /// The rule/invariant id (e.g. `rfc.cseqInDialogOrder`).
     pub check: String,
@@ -149,7 +154,8 @@ pub struct Anomaly {
 ///
 /// Rows do not need to be pre-sorted — both renderers sort a copy by
 /// `(at_ms, seq)` — but a projector may sort them for its own assertions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SeqDoc {
     /// Diagram title (the scenario / cell name).
     pub title: String,
