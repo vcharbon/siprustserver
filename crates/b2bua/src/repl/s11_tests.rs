@@ -209,11 +209,17 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
 /// CASE A — the body WAS pulled into `pri:{self}` but never materialised (the
 /// flip-race straggler: the one-shot `reclaim_all` already swept before the
 /// import landed, and only a backup reverse-flush `ReclaimCall` — never an
-/// arriving in-dialog request — re-materialises a post-sweep straggler). The
-/// call is fully present on THIS node, yet the BYE still 481s.
+/// arriving in-dialog request — re-materialised a post-sweep straggler).
 ///
-/// This is the case the recommended fix (wire `peek_reclaimable` into the
-/// primary-role branch) would actually recover — see the closing assertion.
+/// FIXED at the router: `process()` now wires `peek_reclaimable` into the
+/// hydrate-miss path (ON-DEMAND reclaim — router.rs, "REBOOTED-PRIMARY
+/// on-demand reclaim"), so the arriving BYE materialises + serves the call
+/// instead of orphan-481ing. This test pins the STATE-LEVEL seam contract the
+/// router fix builds on: `hydrate_from_replica` itself still (correctly)
+/// refuses a primary-role miss — the backup partition is a takeover source,
+/// `pri:{self}` is a reclaim source read by `peek_reclaimable` — and the body
+/// is reachable through the latter. The end-to-end recovery is asserted by
+/// `failover-harness::in_dialog_bye_races_bulk_reclaim_served_on_demand`.
 #[tokio::test]
 async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));

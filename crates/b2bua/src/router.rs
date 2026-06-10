@@ -636,7 +636,8 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
         // In-dialog: peek the in-memory map, falling back to the acting-backup
         // takeover read-path (S10b) — hydrate the call from the replica store's
         // backup partition when the primary crashed and the proxy failed this
-        // dialog over to us. A genuine orphan (no replica) still rejects.
+        // dialog over to us. A primary-role miss then tries the ON-DEMAND
+        // reclaim below; only a genuine orphan (no replica anywhere) rejects.
         let call = match ctx.state.hydrate_from_replica(&call_ref).await {
             Some((c, fresh)) => {
                 // Failover timer re-arm: per-call timers (keepalive, global
@@ -667,28 +668,55 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
                 }
                 c
             }
-            None => {
-                maybe_reject_orphan(ctx, &event).await;
-                // ORPHAN TEARDOWN (leak fix). This event was dispatched into a
-                // per-call queue — one `bump_creation` (→ `b2bua_active_calls`) —
-                // and `process` took the per-call lock above, but it resolved to
-                // NO live call. Nothing will ever emit `RemoveCall`, and a per-call
-                // dispatch worker exits ONLY on poison (its sender lives in the
-                // queue map, so the channel never closes on its own). So the queue,
-                // its idle task, the unmatched creation, and the lock entry would
-                // ALL leak permanently — ~1 per orphan, which a mass-orphan failover
-                // (thousands of in-dialog BYEs hitting a rebooted worker whose calls
-                // were never reclaimed) turns into a multi-thousand `active_calls` +
-                // `store_locks` ratchet that never drains. Release through the one
-                // teardown executor (`ReleaseKind::Orphan` — no store mutation, so
-                // no spurious reverse-propagated delete) so the worker exits and
-                // `removals` balances `creations`. Drop our guard first so the
-                // poisoned worker never contends on this call_ref's (now removed)
-                // lock.
-                drop(_guard);
-                release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
-                return;
-            }
+            // REBOOTED-PRIMARY on-demand reclaim (ADR-0014). An in-dialog
+            // request (BYE / re-INVITE / UPDATE) can race the bulk `ReclaimAll`
+            // sweep on a rebooted primary: the body sits fully reclaimable in
+            // `pri:{self}` (the bootstrap imported it) but the serial sweep has
+            // not materialised it yet — and the only other materialisation
+            // trigger was a backup's reverse-flush `ReclaimCall` push, never an
+            // arriving request. Refusing to look 481'd a healthy long-hold call
+            // whose state lives RIGHT HERE (the endurance long-call-on-reboot /
+            // re-INVITE-mid-reclaim loss). Materialise on demand, exactly as the
+            // reactive straggler path does (timers restored, no smoothing — one
+            // call), under the per-call guard we already hold; the bulk sweep's
+            // own `materialize_if_absent` keeps the two passes idempotent. NOT a
+            // takeover: this is our own call — no mark, no self-release watch.
+            // A call never imported into `pri:{self}` (its only copy is the
+            // peer's `bak:{self}`) still orphans — recovering THAT population
+            // needs an on-demand pull from the peer (s11 CASE B, open).
+            None => match ctx.state.peek_reclaimable(&call_ref).await {
+                Some(call) => {
+                    let timers = call.timers.clone();
+                    if ctx.state.materialize_if_absent(call.clone()) {
+                        ctx.timers.restore(timers, call_ref.clone()).await;
+                        ctx.metrics.bump_repl_reclaimed();
+                    }
+                    call
+                }
+                None => {
+                    maybe_reject_orphan(ctx, &event).await;
+                    // ORPHAN TEARDOWN (leak fix). This event was dispatched into a
+                    // per-call queue — one `bump_creation` (→ `b2bua_active_calls`)
+                    // — and `process` took the per-call lock above, but it resolved
+                    // to NO live call. Nothing will ever emit `RemoveCall`, and a
+                    // per-call dispatch worker exits ONLY on poison (its sender
+                    // lives in the queue map, so the channel never closes on its
+                    // own). So the queue, its idle task, the unmatched creation,
+                    // and the lock entry would ALL leak permanently — ~1 per
+                    // orphan, which a mass-orphan failover (thousands of in-dialog
+                    // BYEs hitting a rebooted worker whose calls were never
+                    // reclaimed) turns into a multi-thousand `active_calls` +
+                    // `store_locks` ratchet that never drains. Release through the
+                    // one teardown executor (`ReleaseKind::Orphan` — no store
+                    // mutation, so no spurious reverse-propagated delete) so the
+                    // worker exits and `removals` balances `creations`. Drop our
+                    // guard first so the poisoned worker never contends on this
+                    // call_ref's (now removed) lock.
+                    drop(_guard);
+                    release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
+                    return;
+                }
+            },
         };
         // The limiter-refresh timer is async (an HTTP call to migrate holds), so
         // it is handled outside the synchronous rule chain — like initial-INVITE.

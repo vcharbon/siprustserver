@@ -385,6 +385,18 @@ impl B2buaCore {
         self.ctx.state.lock_count()
     }
 
+    /// HARNESS SURGERY: drop the live in-memory copy of `call_ref` — map, index,
+    /// lock, takeover mark — with NO store mutation (the `pri:`/`bak:` replica
+    /// bodies stay). Recreates, deterministically, the rebooted-primary
+    /// mid-reclaim state ("body imported into `pri:{self}`, not yet
+    /// materialised") that the bulk-`ReclaimAll` race only produces under
+    /// timing: the failover tests use it to pin the on-demand reclaim read-path.
+    /// Test/observability only — production teardown goes through the router's
+    /// `release_call`.
+    pub fn drop_live_copy(&self, call_ref: &str) -> bool {
+        self.ctx.state.drop_local(call_ref)
+    }
+
     /// Sample the store + replication map sizes into the memory-attribution
     /// gauges (`b2bua_store_*`, `b2bua_repl_meta_*`, `b2bua_repl_changelog_*`).
     /// Called on a slow cadence by the runner so a RSS climb can be pinned to a

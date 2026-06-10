@@ -1328,3 +1328,79 @@ async fn find_backed_up_ref(b2: &ReplicatedB2buaSut, primary: &str) -> String {
     }
     panic!("no backed-up call ref found in bak:{primary} on the backup");
 }
+
+// ===========================================================================
+// ON-DEMAND RECLAIM (ADR-0014) — an in-dialog request that races the bulk
+// `ReclaimAll` sweep on a rebooted primary must be served from `pri:{self}`,
+// not orphan-481'd. The endurance "long-hold dialogs die on B2BUA reboot" /
+// "re-INVITE mid-reclaim gets BYE'd" loss: the body sits fully reclaimable in
+// the node's own pri partition (the bootstrap imported it) but the serial
+// sweep has not materialised it yet, and the resolve path refused to look —
+// the UAC's end-of-hold BYE got `481 Call/Transaction Does Not Exist` while
+// the call's state lived RIGHT THERE. The mid-reclaim window is recreated
+// deterministically with `drop_live_copy` (live map entry dropped, store
+// untouched — exactly a rebooted node's imported-but-unmaterialised state).
+// ===========================================================================
+#[tokio::test(start_paused = true)]
+async fn in_dialog_bye_races_bulk_reclaim_served_on_demand() {
+    let mut fh = FailoverHarness::new("s11-on-demand-reclaim", &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+
+    let proxy = fh
+        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
+        .await;
+    let mut w_b1 = fh
+        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    let mut w_b2 = fh
+        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
+
+    // ── establish alice ⇄ bob on the HRW primary ─────────────────────────────
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
+        .expect("b-leg INVITE carries the cookie");
+    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
+        if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
+    let primary_ord = b1.ordinal().to_string();
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(500)).await; // flush lands in pri:{primary}
+
+    let call_ref = find_backed_up_ref(b2, &primary_ord).await;
+    assert!(b1.serves(&call_ref), "primary serves the established call");
+
+    // ── SURGERY: the mid-reclaim window — body in pri:{self}, live map empty ─
+    assert!(b1.drop_live_copy(&call_ref), "live copy dropped (store untouched)");
+    assert!(!b1.serves(&call_ref), "the call is no longer materialised");
+
+    // ── the end-of-hold BYE routes (sticky) to the primary. Pre-fix: orphan
+    //    481 with the state sitting locally reclaimable. Post-fix: the resolve
+    //    path materialises on demand and the BYE completes the call. ──────────
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await; // ← THE GATE: 200, not 481
+    fh.advance(Duration::from_millis(500)).await;
+
+    // The on-demand reclaim served AND terminated the call cleanly: no live
+    // copy, no leaked per-call state, and the delete propagated to the backup.
+    assert!(!b1.serves(&call_ref), "terminated — not re-materialised as a ghost");
+    assert!(b1.memory_clean(), "no per-call state left on the primary");
+    for _ in 0..20 {
+        if !b2.is_synchronized_backup(&call_ref).await {
+            break;
+        }
+        fh.advance(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !b2.is_synchronized_backup(&call_ref).await,
+        "the terminate's delete propagated to the backup replica"
+    );
+}

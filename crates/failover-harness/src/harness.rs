@@ -314,6 +314,15 @@ impl ReplicatedB2buaSut {
         self.core.as_ref().map(|c| c.serves(call_ref)).unwrap_or(false)
     }
 
+    /// HARNESS SURGERY (see `B2buaCore::drop_live_copy`): drop the live
+    /// in-memory copy of `call_ref` with NO store mutation — the deterministic
+    /// recreation of the rebooted-primary "imported into `pri:{self}` but not
+    /// yet materialised" mid-reclaim state, which the bulk-`ReclaimAll` race
+    /// only yields under timing.
+    pub fn drop_live_copy(&self, call_ref: &str) -> bool {
+        self.core.as_ref().map(|c| c.drop_live_copy(call_ref)).unwrap_or(false)
+    }
+
     /// Is this node **synchronized** as the backup for `call_ref` — does it hold a
     /// current replica it could take the call over from? (The primary is encoded in
     /// `call_ref`; this reads the `bak:{primary}` partition.) The behavioural twin
