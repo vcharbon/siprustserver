@@ -23,6 +23,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use sip_message::generators::{generate_ack_for_non_2xx, generate_response, GenerateResponseOpts};
+use sip_message::message_helpers::decode_param;
 use sip_message::{serialize, ParamValue, SipMessage, SipParser, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 use tokio::sync::{mpsc, oneshot};
@@ -1373,7 +1374,7 @@ fn client_timeout_ms(kind: TxnKind, req: &SipRequest) -> u64 {
 fn extract_via_custom_params(req: &SipRequest) -> (Option<String>, Option<String>) {
     let params = &req.via.first().params;
     let read = |name: &str| match params.get(name) {
-        Some(ParamValue::Value(v)) => Some(percent_decode(v)),
+        Some(ParamValue::Value(v)) => Some(decode_param(v)),
         _ => None,
     };
     (read("cr"), read("lg"))
@@ -1387,32 +1388,5 @@ fn extract_via_custom_params(req: &SipRequest) -> (Option<String>, Option<String
 fn extract_ruri_call_ref(req: &SipRequest) -> Option<String> {
     sip_message::message_helpers::parse_uri_params(&req.uri)
         .get("callref")
-        .map(|v| percent_decode(v))
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push(h * 16 + l);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
+        .map(|v| decode_param(v))
 }

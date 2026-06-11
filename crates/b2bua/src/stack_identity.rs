@@ -8,6 +8,10 @@
 //! [`decode_param`] on the read path.
 
 use sip_message::generators::{ContactSpec, ViaSpec, SipTransport};
+// The cr/lg/callRef param codec lives in sip-message so the encoder and its
+// inverse can't drift across crates; re-export so existing `stack_identity::`
+// callers (the router's read path) are unchanged.
+pub use sip_message::message_helpers::{decode_param, encode_param};
 
 /// Inputs shared by the Via + Contact builders.
 pub struct StackIdentityOpts<'a> {
@@ -51,57 +55,6 @@ pub fn build_call_contact(opts: &StackIdentityOpts) -> ContactSpec {
         host: opts.local_ip.to_string(),
         port: opts.local_port,
         uri_params,
-    }
-}
-
-/// Percent-encode all but RFC 3986 unreserved characters.
-pub fn encode_param(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for &b in s.as_bytes() {
-        let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~');
-        if unreserved {
-            out.push(b as char);
-        } else {
-            out.push('%');
-            out.push(hex_digit(b >> 4));
-            out.push(hex_digit(b & 0x0f));
-        }
-    }
-    out
-}
-
-/// Inverse of [`encode_param`]; invalid escapes are passed through verbatim.
-pub fn decode_param(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push((hi << 4) | lo);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_digit(v: u8) -> char {
-    match v {
-        0..=9 => (b'0' + v) as char,
-        _ => (b'a' + (v - 10)) as char,
-    }
-}
-
-fn hex_val(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
     }
 }
 
