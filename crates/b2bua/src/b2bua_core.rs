@@ -332,6 +332,11 @@ impl B2buaCore {
         for t in self.tasks.drain(..) {
             t.abort();
         }
+        // Also abort the transaction-layer owner task — it is spawned untracked
+        // inside `TransactionLayer::spawn` and owns the SIP endpoint, so without
+        // this the "crashed" node keeps answering SIP (100/200/487, cached replays,
+        // retransmits) until every surviving per-call task drops its cmd_tx clone.
+        self.ctx.txn.abort_owner();
         if let Some(s) = &self.supervisor {
             s.shutdown();
         }

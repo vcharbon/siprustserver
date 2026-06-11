@@ -192,6 +192,11 @@ enum Command {
 pub struct TransactionLayer {
     cmd_tx: mpsc::Sender<Command>,
     metrics: TransactionMetrics,
+    /// Aborts the owner task (and so drops the SIP endpoint it owns). Used to
+    /// simulate a hard crash: the owner otherwise lives until every `cmd_tx` clone
+    /// drops, which a surviving per-call task would keep alive — so a "crashed"
+    /// node would keep answering SIP. Cheap to clone.
+    owner_abort: tokio::task::AbortHandle,
 }
 
 impl TransactionLayer {
@@ -226,13 +231,22 @@ impl TransactionLayer {
             pending_quiesce: Vec::new(),
         };
 
-        tokio::spawn(run(owner, endpoint, cmd_rx));
+        let owner_abort = tokio::spawn(run(owner, endpoint, cmd_rx)).abort_handle();
 
-        (Self { cmd_tx, metrics }, events_rx)
+        (Self { cmd_tx, metrics, owner_abort }, events_rx)
     }
 
     pub fn metrics(&self) -> &TransactionMetrics {
         &self.metrics
+    }
+
+    /// Abort the owner task — and so drop the SIP endpoint it owns, silencing the
+    /// wire. For hard-crash simulation (the failover harness): without it the owner
+    /// outlives `B2buaCore::abort` (a surviving per-call task still holds a `cmd_tx`
+    /// clone, so `cmd_rx` never closes) and the "crashed" node keeps answering SIP
+    /// — 100 Trying, 200/487 to CANCEL, cached-final replays, client retransmits.
+    pub fn abort_owner(&self) {
+        self.owner_abort.abort();
     }
 
     /// Send an outbound SIP request, allocating a client transaction and
