@@ -10,10 +10,21 @@ pub const T1: u64 = 500;
 /// Max retransmit interval for non-INVITE (ms) — Timer E caps here.
 pub const T2: u64 = 4000;
 
-/// INVITE client transaction timeout (Timer B = 64·T1 = 32 s).
+/// INVITE client transaction timeout (Timer B = 64·T1 = 32 s). Applies to
+/// *in-dialog* re-INVITEs and (as Timer F) every non-INVITE — fast failure
+/// detection for in-dialog traffic.
 pub const TIMER_B: u64 = 64 * T1;
 /// Non-INVITE client transaction timeout (Timer F = 64·T1 = 32 s).
 pub const TIMER_F: u64 = 64 * T1;
+
+/// INITIAL (out-of-dialog) INVITE client-transaction timeout — a call-setup
+/// backstop, NOT the 32 s Timer B. RFC 3261 §17.1.1.2 scopes Timer B to the
+/// Calling state; a ringing callee may legitimately take minutes, and the upper
+/// layer's no-answer timer owns that deadline. We keep a hard expiry but place it
+/// *below* the 180 s (3-minute) Timer-C mark and *above* any deployment no-answer
+/// timeout, so the no-answer always fires first (clean CANCEL→487) and the
+/// 3-minute timer never beats us — only this backstop, if no-answer is unset.
+pub const INVITE_INITIAL_TIMEOUT: u64 = 158_000;
 /// INVITE server txn cleanup after a final response (Timer H, RFC 3261 §17.2.1).
 pub const TIMER_H: u64 = 64 * T1;
 /// Non-INVITE server txn cleanup after a final response (Timer J, §17.2.2).

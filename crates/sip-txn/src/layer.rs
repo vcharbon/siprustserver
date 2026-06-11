@@ -31,7 +31,10 @@ use tokio_util::time::{delay_queue::Key, DelayQueue};
 use crate::event::{ClientTransactionHandle, EventQueueDropReason, TransactionEvent, TxnKind};
 use crate::metrics::{MetricsInner, TransactionMetrics};
 use crate::rng::IdGen;
-use crate::timers::{ms, T1, T2, TIMER_B, TIMER_F, TIMER_H, TIMER_J, TXN_MAX_AGE, TXN_SWEEP_INTERVAL};
+use crate::timers::{
+    ms, INVITE_INITIAL_TIMEOUT, T1, T2, TIMER_B, TIMER_F, TIMER_H, TIMER_J, TXN_MAX_AGE,
+    TXN_SWEEP_INTERVAL,
+};
 
 // ---------------------------------------------------------------------------
 // Internal transaction state
@@ -369,6 +372,9 @@ async fn next_expired(q: &mut DelayQueue<Timer>) -> Timer {
 async fn run(mut owner: Owner, endpoint: Box<dyn UdpEndpoint>, mut cmd_rx: mpsc::Receiver<Command>) {
     let endpoint: &dyn UdpEndpoint = endpoint.as_ref();
     let mut sweep = tokio::time::interval(ms(TXN_SWEEP_INTERVAL));
+    // Coalesce missed ticks: after any owner stall the catch-up must be a single
+    // pass, not a burst of back-to-back full-map scans (default `Burst`).
+    sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // The first `interval` tick is immediate; skip it (the source's sweep
     // fiber sleeps before its first pass).
     sweep.tick().await;
@@ -502,21 +508,17 @@ impl Owner {
         branch: &str,
         buf: Vec<u8>,
         dest: SocketAddr,
-        kind: TxnKind,
+        max_ms: u64,
     ) {
-        let max = match kind {
-            TxnKind::Invite => TIMER_B,
-            TxnKind::NonInvite => TIMER_F,
-        };
         let r_key = self.timers.insert(Timer::ClientRetransmit(branch.to_string()), ms(T1));
-        let t_key = self.timers.insert(Timer::ClientTimeout(branch.to_string()), ms(max));
+        let t_key = self.timers.insert(Timer::ClientTimeout(branch.to_string()), ms(max_ms));
         if let Some(txn) = self.txns.get_mut(branch) {
             txn.retransmit_key = Some(r_key);
             txn.timeout_key = Some(t_key);
             txn.retransmit_buf = Some(buf);
             txn.retransmit_interval_ms = T1;
             txn.retransmit_elapsed_ms = T1;
-            txn.retransmit_max_ms = max;
+            txn.retransmit_max_ms = max_ms;
             txn.destination = Some(dest);
         }
     }
@@ -659,7 +661,7 @@ impl Owner {
         let stale: Vec<String> = self
             .txns
             .iter()
-            .filter(|(_, t)| t.created_at.elapsed() > ms(TXN_MAX_AGE))
+            .filter(|(_, t)| t.created_at.elapsed() > sweep_max_age(t))
             .map(|(b, _)| b.clone())
             .collect();
         for branch in stale {
@@ -763,7 +765,7 @@ impl Owner {
         self.set_txn(txn);
 
         self.send_buffer(endpoint, &buf, dest).await;
-        self.start_client_retransmit(&branch, buf, dest, txn_type);
+        self.start_client_retransmit(&branch, buf, dest, client_timeout_ms(txn_type, &msg));
 
         match txn_type {
             TxnKind::Invite => ClientTransactionHandle::Invite {
@@ -1164,6 +1166,37 @@ impl Owner {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Per-txn safety-net age for the sweep. A still-ringing INVITE (no final
+/// response yet — an inbound INVITE awaiting the app's answer, or an outbound
+/// INVITE past its retransmit window) legitimately outlives the 35 s net: a
+/// callee may ring for minutes and the no-answer timer / long initial-INVITE
+/// Timer B owns that deadline. Give it a backstop just above that long timeout so
+/// the net never reaps a live call. Everything else — completed txns governed by
+/// Timer H/J, all non-INVITE — keeps the tight 35 s net just above 32 s, so the
+/// sweep still only ever catches what a missing-cleanup bug would otherwise leak.
+fn sweep_max_age(t: &Transaction) -> std::time::Duration {
+    match (t.kind, t.state) {
+        (TxnKind::Invite, TxnState::Trying | TxnState::Proceeding) => {
+            ms(INVITE_INITIAL_TIMEOUT + TXN_MAX_AGE)
+        }
+        _ => ms(TXN_MAX_AGE),
+    }
+}
+
+/// RFC 3261 §17.1 client-transaction timeout (Timer B/F). Differentiated for
+/// INVITE: an INITIAL (out-of-dialog — no To-tag) INVITE is a call setup whose
+/// ring time the upper layer's no-answer timer owns, so it gets the long
+/// [`INVITE_INITIAL_TIMEOUT`] backstop (below the 180 s Timer-C mark, above any
+/// deployment no-answer timeout). An in-dialog re-INVITE (To-tag present) and
+/// every non-INVITE keep the 32 s failure-detection timeout.
+fn client_timeout_ms(kind: TxnKind, req: &SipRequest) -> u64 {
+    match kind {
+        TxnKind::Invite if req.to.tag.is_none() => INVITE_INITIAL_TIMEOUT,
+        TxnKind::Invite => TIMER_B,
+        TxnKind::NonInvite => TIMER_F,
+    }
+}
 
 /// Extract + URL-decode the Via `cr` (callRef) / `lg` (legId) custom params.
 /// Production `buildCallVia` URL-encodes both (callRefs contain `|`/`@`); the

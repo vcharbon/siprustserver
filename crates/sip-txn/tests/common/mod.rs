@@ -178,6 +178,22 @@ pub fn outbound_request(method: &str, branch: &str) -> SipRequest {
     ))
 }
 
+/// An in-dialog re-INVITE (carries a To-tag) — keeps the 32 s Timer B, unlike an
+/// out-of-dialog initial INVITE which gets the long no-answer-window backstop.
+pub fn outbound_reinvite(branch: &str) -> SipRequest {
+    parse_request(&format!(
+        "INVITE sip:bob@192.0.2.20:5060 SIP/2.0\n\
+         Via: SIP/2.0/UDP 127.0.0.1:15070;branch={branch}\n\
+         Max-Forwards: 70\n\
+         From: <sip:b2bua@127.0.0.1:15070>;tag=b2bua-tag\n\
+         To: <sip:bob@192.0.2.20:5060>;tag=remote-bob\n\
+         Call-ID: reinvite-test\n\
+         CSeq: 2 INVITE\n\
+         Contact: <sip:b2bua@127.0.0.1:15070>\n\
+         Content-Length: 0\n\n"
+    ))
+}
+
 /// INVITE carrying Via `cr`/`lg` custom params (cancel-on-evict test).
 pub fn invite_with_cr_lg(call_ref: &str, call_id: &str, branch: &str, leg_id: &str) -> SipRequest {
     parse_request(&format!(

@@ -115,9 +115,10 @@ async fn same_branch_displacement_does_not_fork_retransmits() {
 #[tokio::test(start_paused = true)]
 async fn timer_b_emits_timeout_event() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    // An IN-DIALOG re-INVITE (To-tag present) keeps the 32 s Timer B.
     stack
         .txn
-        .send_request(outbound_request("INVITE", "z9hG4bK-tb"), addr(PEER), TxnKind::Invite)
+        .send_request(outbound_reinvite("z9hG4bK-tb"), addr(PEER), TxnKind::Invite)
         .await;
 
     // Timer B fires at 64·T1 = 32 s with no final response.
@@ -129,6 +130,42 @@ async fn timer_b_emits_timeout_event() {
     });
     assert_eq!(method, Some(Some("INVITE".to_string())));
     assert_eq!(active(&stack), 0, "timed-out txn is removed");
+}
+
+/// An INITIAL (out-of-dialog) INVITE must NOT expire at the 32 s Timer-B mark — a
+/// callee may legitimately ring past it, and the upper layer's no-answer timer
+/// (≤180 s) owns that deadline (a clean CANCEL→487). We keep only a hard backstop
+/// at [`INVITE_INITIAL_TIMEOUT`] = 158 s (below the 180 s Timer-C mark), so the
+/// no-answer always fires first and the 3-minute timer never beats us.
+#[tokio::test(start_paused = true)]
+async fn initial_invite_outlives_the_no_answer_window() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    stack
+        .txn
+        .send_request(outbound_request("INVITE", "z9hG4bK-init"), addr(PEER), TxnKind::Invite)
+        .await;
+
+    // No Timeout at 35 s — still ringing.
+    elapse_ms(35_000).await;
+    assert!(
+        !stack
+            .drain_events()
+            .iter()
+            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        "initial INVITE must not expire inside the ring window"
+    );
+    assert_eq!(active(&stack), 1, "still live, ringing");
+
+    // The 158 s backstop eventually fires (total elapsed ~165 s, below 180 s).
+    elapse_ms(130_000).await;
+    assert!(
+        stack
+            .drain_events()
+            .iter()
+            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        "the initial-INVITE backstop fires below the 3-minute mark"
+    );
+    assert_eq!(active(&stack), 0);
 }
 
 // ── CANCEL (server INVITE) ──────────────────────────────────────────────────

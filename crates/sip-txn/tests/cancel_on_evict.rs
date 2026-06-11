@@ -87,8 +87,9 @@ async fn t3_cancel_targets_only_the_owning_callref() {
     stack.txn.cancel_txns_for_call(ref_a).await;
     assert_eq!(stack.txn.metrics().active_transactions(), 1);
 
-    // Drive Timer B for call B (32 s) — only B should time out.
-    elapse_ms(35_000).await;
+    // Drive the initial-INVITE backstop for call B (158 s) — only B should time
+    // out (these are out-of-dialog INVITEs, so they get the long expiry).
+    elapse_ms(160_000).await;
 
     let refs = timeout_call_refs(&stack.drain_events());
     assert_eq!(refs.len(), 1, "exactly one timeout (call B)");
