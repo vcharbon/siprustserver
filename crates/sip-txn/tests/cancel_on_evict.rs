@@ -29,10 +29,10 @@ async fn t1_cancellation_prevents_timer_b_timeout() {
     stack
         .txn
         .send_request(invite, addr("192.0.2.20:5060"), TxnKind::Invite)
-        .await;
+        .await.unwrap();
     assert_eq!(stack.txn.metrics().active_transactions(), 1);
 
-    stack.txn.cancel_txns_for_call(call_ref).await;
+    stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
     assert_eq!(stack.txn.metrics().active_transactions(), 0);
     assert_eq!(stack.txn.metrics().txn_cancelled_on_call_evict(), 1);
 
@@ -53,10 +53,10 @@ async fn t2_cancel_is_idempotent() {
     stack
         .txn
         .send_request(invite, addr("192.0.2.20:5060"), TxnKind::Invite)
-        .await;
-    stack.txn.cancel_txns_for_call(call_ref).await;
+        .await.unwrap();
+    stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
     let first = stack.txn.metrics().txn_cancelled_on_call_evict();
-    stack.txn.cancel_txns_for_call(call_ref).await;
+    stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
     assert_eq!(stack.txn.metrics().txn_cancelled_on_call_evict(), first);
 }
 
@@ -73,7 +73,7 @@ async fn t3_cancel_targets_only_the_owning_callref() {
             addr("192.0.2.20:5060"),
             TxnKind::Invite,
         )
-        .await;
+        .await.unwrap();
     stack
         .txn
         .send_request(
@@ -81,10 +81,10 @@ async fn t3_cancel_targets_only_the_owning_callref() {
             addr("192.0.2.21:5060"),
             TxnKind::Invite,
         )
-        .await;
+        .await.unwrap();
     assert_eq!(stack.txn.metrics().active_transactions(), 2);
 
-    stack.txn.cancel_txns_for_call(ref_a).await;
+    stack.txn.cancel_txns_for_call(ref_a).await.unwrap();
     assert_eq!(stack.txn.metrics().active_transactions(), 1);
 
     // Drive the initial-INVITE backstop for call B (158 s) — only B should time
@@ -109,11 +109,11 @@ async fn t5_url_encoded_cr_lg_round_trip_matches_decoded_callref() {
     stack
         .txn
         .send_request(invite, addr("192.0.2.20:5060"), TxnKind::Invite)
-        .await;
+        .await.unwrap();
     assert_eq!(stack.txn.metrics().active_transactions(), 1);
 
     // Caller passes the natural (decoded) callRef.
-    stack.txn.cancel_txns_for_call(decoded).await;
+    stack.txn.cancel_txns_for_call(decoded).await.unwrap();
     assert_eq!(stack.txn.metrics().active_transactions(), 0);
     assert!(stack.txn.metrics().txn_cancelled_on_call_evict() >= 1);
 }

@@ -15,7 +15,7 @@ async fn send_request_invite_returns_invite_handle() {
     let handle = stack
         .txn
         .send_request(invite.clone(), addr("192.0.2.20:5060"), TxnKind::Invite)
-        .await;
+        .await.unwrap();
 
     match handle {
         ClientTransactionHandle::Invite {
@@ -41,7 +41,7 @@ async fn send_request_non_invite_returns_non_invite_handle() {
     let handle = stack
         .txn
         .send_request(bye.clone(), addr("192.0.2.20:5060"), TxnKind::NonInvite)
-        .await;
+        .await.unwrap();
 
     match handle {
         ClientTransactionHandle::NonInvite {

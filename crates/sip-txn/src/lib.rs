@@ -33,6 +33,6 @@ pub mod rng;
 pub mod timers;
 
 pub use event::{ClientTransactionHandle, EventQueueDropReason, TransactionEvent, TxnKind};
-pub use layer::{TransactionConfig, TransactionLayer};
+pub use layer::{TransactionConfig, TransactionLayer, TransactionLayerClosed};
 pub use metrics::TransactionMetrics;
 pub use rng::IdGen;

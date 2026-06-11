@@ -301,7 +301,7 @@ async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: ReleaseKind) {
             // dependent on every rule remembering to emit one: a terminated call
             // frees EVERY timer slot it owns now, not at its deadline.
             ctx.timers.cancel_all(call_ref.to_string()).await;
-            ctx.txn.cancel_txns_for_call(call_ref).await;
+            let _ = ctx.txn.cancel_txns_for_call(call_ref).await;
             // Poison the per-call dispatch queue; its worker exits and bumps
             // `removal` exactly once (dispatch.rs). We deliberately do NOT
             // bump here — removal is counted at the single dispatch-queue
@@ -311,7 +311,7 @@ async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: ReleaseKind) {
         ReleaseKind::SelfRelease => {
             if ctx.state.drop_local(call_ref) {
                 ctx.timers.cancel_all(call_ref.to_string()).await;
-                ctx.txn.cancel_txns_for_call(call_ref).await;
+                let _ = ctx.txn.cancel_txns_for_call(call_ref).await;
                 ctx.dispatcher.enqueue_poison(call_ref);
                 ctx.metrics.bump_repl_self_release();
             }
@@ -356,7 +356,7 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         if ctx.state.is_takeover(&call_ref) {
             let _guard = ctx.state.lock(&call_ref).await;
             if ctx.state.is_takeover(&call_ref) {
-                if ctx.txn.active_txn_count_for_call(&call_ref).await == 0 {
+                if ctx.txn.active_txn_count_for_call(&call_ref).await.unwrap_or(0) == 0 {
                     release_call(ctx, &call_ref, ReleaseKind::SelfRelease).await;
                 } else {
                     // A fresh in-dialog request (a second takeover during a
@@ -367,7 +367,7 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
                     // takeover copy is stranded double-serving until its 1 h
                     // GlobalDuration backstop (the watch is never re-armed elsewhere
                     // for an already-resident copy: hydrate returns fresh == false).
-                    ctx.txn.watch_self_release(&call_ref).await;
+                    let _ = ctx.txn.watch_self_release(&call_ref).await;
                 }
             }
         }
@@ -381,7 +381,7 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         if let SipMessage::Request(req) = message.as_ref() {
             if req.method == "OPTIONS" && req.to.tag.is_none() {
                 let resp = build_options_health_response(&ctx.readiness, &ctx.id_gen, req);
-                ctx.txn.send_response(resp, *src).await;
+                let _ = ctx.txn.send_response(resp, *src).await;
                 return;
             }
         }
@@ -714,7 +714,7 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
                     let mut takeover_timers = c.timers.clone();
                     drop_stale_keepalive_timeout(&mut takeover_timers);
                     ctx.timers.restore(takeover_timers, call_ref.clone()).await;
-                    ctx.txn.watch_self_release(&call_ref).await;
+                    let _ = ctx.txn.watch_self_release(&call_ref).await;
                 }
                 c
             }
@@ -867,7 +867,7 @@ async fn maybe_reject_orphan(ctx: &RouterCtx, event: &CallEvent) {
                     "Call/Transaction Does Not Exist",
                     &GenerateResponseOpts::default(),
                 );
-                ctx.txn.send_response(resp, *src).await;
+                let _ = ctx.txn.send_response(resp, *src).await;
             }
         }
     }
@@ -927,16 +927,16 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
             ctx.metrics.record_request_out(req.method.as_str());
         }
         match (&eff.body, &eff.mode) {
-            (OutboundBody::Response(resp), _) => ctx.txn.send_response(resp.clone(), dest).await,
+            (OutboundBody::Response(resp), _) => { let _ = ctx.txn.send_response(resp.clone(), dest).await; }
             (OutboundBody::Request(req), OutboundTxnMode::NewClient(kind)) => {
                 let _ = ctx.txn.send_request(req.clone(), dest, *kind).await;
             }
             (OutboundBody::Request(req), OutboundTxnMode::Raw) => {
-                ctx.txn.send_raw(serialize(&SipMessage::Request(req.clone())), dest).await
+                let _ = ctx.txn.send_raw(serialize(&SipMessage::Request(req.clone())), dest).await;
             }
             (OutboundBody::Request(req), OutboundTxnMode::ServerResponse) => {
                 // A request tagged ServerResponse is a misuse; send raw as a fallback.
-                ctx.txn.send_raw(serialize(&SipMessage::Request(req.clone())), dest).await
+                let _ = ctx.txn.send_raw(serialize(&SipMessage::Request(req.clone())), dest).await;
             }
         }
     }

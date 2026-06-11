@@ -251,96 +251,108 @@ impl TransactionLayer {
         self.owner_abort.abort();
     }
 
+    /// Funnel one command to the owner and await its oneshot reply. Returns
+    /// [`TransactionLayerClosed`] instead of panicking when the owner task is gone
+    /// (endpoint closed, or `abort_owner`) — the single funnel-and-error site for
+    /// every public method.
+    async fn roundtrip<R>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<R>) -> Command,
+    ) -> Result<R, TransactionLayerClosed> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(build(reply))
+            .await
+            .map_err(|_| TransactionLayerClosed)?;
+        rx.await.map_err(|_| TransactionLayerClosed)
+    }
+
     /// Send an outbound SIP request, allocating a client transaction and
-    /// returning its handle.
+    /// returning its handle. `Err` if the owner task is gone (see [`roundtrip`]).
     pub async fn send_request(
         &self,
         msg: SipRequest,
         dest: SocketAddr,
         txn_type: TxnKind,
-    ) -> ClientTransactionHandle {
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(Command::SendRequest {
-                msg: Box::new(msg),
-                dest,
-                txn_type,
-                reply,
-            })
-            .await
-            .expect("transaction layer owner task dropped");
-        rx.await.expect("transaction layer owner task dropped")
+    ) -> Result<ClientTransactionHandle, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::SendRequest {
+            msg: Box::new(msg),
+            dest,
+            txn_type,
+            reply,
+        })
+        .await
     }
 
     /// Send an outbound SIP response through its server transaction.
-    pub async fn send_response(&self, msg: SipResponse, dest: SocketAddr) {
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(Command::SendResponse {
-                msg: Box::new(msg),
-                dest,
-                reply,
-            })
-            .await
-            .expect("transaction layer owner task dropped");
-        rx.await.expect("transaction layer owner task dropped");
+    pub async fn send_response(
+        &self,
+        msg: SipResponse,
+        dest: SocketAddr,
+    ) -> Result<(), TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::SendResponse {
+            msg: Box::new(msg),
+            dest,
+            reply,
+        })
+        .await
     }
 
     /// Send a raw buffer directly, bypassing transaction management.
-    pub async fn send_raw(&self, buf: Vec<u8>, dest: SocketAddr) {
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(Command::SendRaw { buf, dest, reply })
-            .await
-            .expect("transaction layer owner task dropped");
-        rx.await.expect("transaction layer owner task dropped");
+    pub async fn send_raw(&self, buf: Vec<u8>, dest: SocketAddr) -> Result<(), TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::SendRaw { buf, dest, reply }).await
     }
 
     /// Cancel every client transaction whose `call_ref` matches — the
     /// call-eviction teardown (so Timer B/F can't fire against a vanished
     /// call). Idempotent.
-    pub async fn cancel_txns_for_call(&self, call_ref: &str) {
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(Command::CancelTxnsForCall {
-                call_ref: call_ref.to_string(),
-                reply,
-            })
-            .await
-            .expect("transaction layer owner task dropped");
-        rx.await.expect("transaction layer owner task dropped");
+    pub async fn cancel_txns_for_call(&self, call_ref: &str) -> Result<(), TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::CancelTxnsForCall {
+            call_ref: call_ref.to_string(),
+            reply,
+        })
+        .await
     }
 
     /// How many transactions for `call_ref` are still resident in the map (any
     /// role/state). The acting-backup self-release (ADR-0014) reads it as a
     /// defensive re-check — see [`Command::ActiveTxnCount`].
-    pub async fn active_txn_count_for_call(&self, call_ref: &str) -> usize {
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(Command::ActiveTxnCount {
-                call_ref: call_ref.to_string(),
-                reply,
-            })
-            .await
-            .expect("transaction layer owner task dropped");
-        rx.await.expect("transaction layer owner task dropped")
+    pub async fn active_txn_count_for_call(
+        &self,
+        call_ref: &str,
+    ) -> Result<usize, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::ActiveTxnCount {
+            call_ref: call_ref.to_string(),
+            reply,
+        })
+        .await
     }
 
     /// Ask to be notified (via [`TransactionEvent::CallQuiesced`]) when the last
     /// transaction for `call_ref` clears — the push signal the B2BUA acting-backup
     /// self-release (ADR-0014) arms when it takes a dialog over. Idempotent.
-    pub async fn watch_self_release(&self, call_ref: &str) {
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(Command::WatchSelfRelease {
-                call_ref: call_ref.to_string(),
-                reply,
-            })
-            .await
-            .expect("transaction layer owner task dropped");
-        rx.await.expect("transaction layer owner task dropped");
+    pub async fn watch_self_release(&self, call_ref: &str) -> Result<(), TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::WatchSelfRelease {
+            call_ref: call_ref.to_string(),
+            reply,
+        })
+        .await
     }
 }
+
+/// Returned by every [`TransactionLayer`] method when the owner task is no longer
+/// running (the endpoint closed, or [`TransactionLayer::abort_owner`] was called).
+/// Lets callers wind down gracefully instead of panicking on a dead owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransactionLayerClosed;
+
+impl std::fmt::Display for TransactionLayerClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("transaction layer owner task is no longer running")
+    }
+}
+
+impl std::error::Error for TransactionLayerClosed {}
 
 // ---------------------------------------------------------------------------
 // The owner task

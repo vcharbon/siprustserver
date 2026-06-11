@@ -34,7 +34,7 @@ async fn client_retransmits_on_timer_a_cadence() {
     stack
         .txn
         .send_request(outbound_request("INVITE", "z9hG4bK-rtx"), addr(PEER), TxnKind::Invite)
-        .await;
+        .await.unwrap();
 
     // By 2 s the peer has seen the initial send + retransmits at 500 ms and
     // 1500 ms (the source's doubling cadence) = 3 INVITEs.
@@ -49,7 +49,7 @@ async fn provisional_response_stops_retransmit() {
     stack
         .txn
         .send_request(outbound_request("INVITE", branch), addr(PEER), TxnKind::Invite)
-        .await;
+        .await.unwrap();
 
     elapse_ms(700).await; // initial + retransmit @500
     assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 2);
@@ -87,7 +87,7 @@ async fn same_branch_displacement_does_not_fork_retransmits() {
             addr(PEER),
             TxnKind::Invite,
         )
-        .await;
+        .await.unwrap();
     // Second INVITE reusing `branch` → displaces the first; its orphan retransmit
     // must be cancelled, not left to fire against this txn.
     stack
@@ -97,7 +97,7 @@ async fn same_branch_displacement_does_not_fork_retransmits() {
             addr(PEER),
             TxnKind::Invite,
         )
-        .await;
+        .await.unwrap();
     assert_eq!(active(&stack), 1, "displaced, not doubled");
 
     // Two initial sends + exactly ONE retransmit (the live txn's, @500 ms) by
@@ -120,7 +120,7 @@ async fn non_invite_keeps_retransmitting_after_provisional() {
     stack
         .txn
         .send_request(outbound_request("BYE", branch), addr(PEER), TxnKind::NonInvite)
-        .await;
+        .await.unwrap();
 
     // A 100 Trying arrives early — must NOT stop the retransmit.
     stack
@@ -145,7 +145,7 @@ async fn timer_b_emits_timeout_event() {
     stack
         .txn
         .send_request(outbound_reinvite("z9hG4bK-tb"), addr(PEER), TxnKind::Invite)
-        .await;
+        .await.unwrap();
 
     // Timer B fires at 64·T1 = 32 s with no final response.
     elapse_ms(35_000).await;
@@ -169,7 +169,7 @@ async fn initial_invite_outlives_the_no_answer_window() {
     stack
         .txn
         .send_request(outbound_request("INVITE", "z9hG4bK-init"), addr(PEER), TxnKind::Invite)
-        .await;
+        .await.unwrap();
 
     // No Timeout at 35 s — still ringing.
     elapse_ms(35_000).await;
@@ -261,7 +261,7 @@ async fn cancel_after_answer_does_not_tear_down_the_call() {
     let _ = stack.drain_events();
     let _ = stack.drain_peer();
     let resp = parse_response(&response_bytes(200, "OK", "INVITE", branch, call_id, true));
-    stack.txn.send_response(resp, addr(PEER)).await;
+    stack.txn.send_response(resp, addr(PEER)).await.unwrap();
     elapse_ms(60).await;
     let _ = stack.drain_peer();
 
@@ -290,7 +290,7 @@ async fn invite_then_final(stack: &mut Stack, branch: &str, call_id: &str, statu
 
     // The application sends the final response through its server txn.
     let resp = parse_response(&response_bytes(status, "Final", "INVITE", branch, call_id, true));
-    stack.txn.send_response(resp, addr(PEER)).await;
+    stack.txn.send_response(resp, addr(PEER)).await.unwrap();
     elapse_ms(60).await;
     let _ = stack.drain_peer();
     assert_eq!(active(stack), 1, "completed txn pinned for Timer H");
@@ -348,13 +348,13 @@ async fn duplicate_final_on_completed_server_txn_is_dropped() {
 
     // First final: 487 → Completed, classifier = non-2xx.
     let first = parse_response(&response_bytes(487, "Request Terminated", "INVITE", branch, call_id, true));
-    stack.txn.send_response(first, addr(PEER)).await;
+    stack.txn.send_response(first, addr(PEER)).await.unwrap();
     elapse_ms(60).await;
     assert_eq!(count_responses(&stack.drain_peer(), 487), 1);
 
     // Second, conflicting final: 200 → must be dropped (no wire, no state flip).
     let second = parse_response(&response_bytes(200, "OK", "INVITE", branch, call_id, true));
-    stack.txn.send_response(second, addr(PEER)).await;
+    stack.txn.send_response(second, addr(PEER)).await.unwrap();
     elapse_ms(60).await;
     let out = stack.drain_peer();
     assert_eq!(count_responses(&out, 200), 0, "conflicting final dropped");
@@ -379,7 +379,7 @@ async fn client_auto_acks_non_2xx_final() {
     stack
         .txn
         .send_request(outbound_request("INVITE", branch), addr(PEER), TxnKind::Invite)
-        .await;
+        .await.unwrap();
     elapse_ms(60).await;
     let _ = stack.drain_peer(); // the initial INVITE
 
@@ -411,7 +411,7 @@ async fn non_2xx_invite_final_absorbs_retransmits_for_timer_d() {
     stack
         .txn
         .send_request(outbound_request("INVITE", branch), addr(PEER), TxnKind::Invite)
-        .await;
+        .await.unwrap();
     elapse_ms(60).await;
     let _ = stack.drain_peer();
 
@@ -459,7 +459,7 @@ async fn duplicate_request_retransmits_cached_response() {
 
     // App answers 200 — cached on the server txn.
     let resp = parse_response(&response_bytes(200, "OK", "OPTIONS", branch, "dup-call", true));
-    stack.txn.send_response(resp, addr(PEER)).await;
+    stack.txn.send_response(resp, addr(PEER)).await.unwrap();
     elapse_ms(60).await;
     assert_eq!(count_responses(&stack.drain_peer(), 200), 1);
 
@@ -496,12 +496,12 @@ async fn cancel_txns_for_call_spares_server_timer_j_absorption() {
 
     // App answers 200 → server txn Completed, 200 cached, Timer J armed.
     let resp = parse_response(&response_bytes(200, "OK", "BYE", branch, "cid-bye", true));
-    stack.txn.send_response(resp, addr(PEER)).await;
+    stack.txn.send_response(resp, addr(PEER)).await.unwrap();
     elapse_ms(60).await;
     assert_eq!(count_responses(&stack.drain_peer(), 200), 1);
 
     // Call torn down — the server txn must SURVIVE this.
-    stack.txn.cancel_txns_for_call(cr).await;
+    stack.txn.cancel_txns_for_call(cr).await.unwrap();
 
     // Retransmitted BYE → cached 200 replayed, NOT re-surfaced to the app.
     stack.inject(&inbound_with_callref("BYE", branch, "cid-bye", cr)).await;
@@ -529,7 +529,7 @@ async fn timeout_survives_a_full_event_queue() {
     stack
         .txn
         .send_request(outbound_reinvite("z9hG4bK-tofull"), addr(PEER), TxnKind::Invite)
-        .await;
+        .await.unwrap();
 
     // Saturate the events queue with undrained inbound OPTIONS (lossy Messages).
     for i in 0..70 {
@@ -631,29 +631,29 @@ async fn self_release_fires_only_after_the_last_call_txn_clears() {
     stack.inject(&inbound_with_callref("OPTIONS", "z9hG4bK-r2", "cid-sr", cr)).await;
     elapse_ms(60).await;
     let _ = stack.drain_events();
-    assert_eq!(stack.txn.active_txn_count_for_call(cr).await, 2, "both txns counted");
+    assert_eq!(stack.txn.active_txn_count_for_call(cr).await.unwrap(), 2, "both txns counted");
     assert_eq!(
-        stack.txn.active_txn_count_for_call("w0z-other|t").await,
+        stack.txn.active_txn_count_for_call("w0z-other|t").await.unwrap(),
         0,
         "a different call_ref is isolated in the index"
     );
 
     // Arm the watch while txns are live → NO immediate CallQuiesced.
-    stack.txn.watch_self_release(cr).await;
+    stack.txn.watch_self_release(cr).await.unwrap();
     assert!(!drained_quiesced(&mut stack, cr), "must not fire while txns are in flight");
 
     // Clear the FIRST txn (200 → non-INVITE server Timer J eviction). Count → 1.
     let r1 = parse_response(&response_bytes(200, "OK", "OPTIONS", "z9hG4bK-r1", "cid-sr", true));
-    stack.txn.send_response(r1, addr(PEER)).await;
+    stack.txn.send_response(r1, addr(PEER)).await.unwrap();
     elapse_ms(33_000).await; // past TIMER_J (64*T1 = 32 s)
-    assert_eq!(stack.txn.active_txn_count_for_call(cr).await, 1, "one txn cleared");
+    assert_eq!(stack.txn.active_txn_count_for_call(cr).await.unwrap(), 1, "one txn cleared");
     assert!(!drained_quiesced(&mut stack, cr), "one txn still live → no self-release");
 
     // Clear the SECOND: the last `delete_txn` for the call fires CallQuiesced.
     let r2 = parse_response(&response_bytes(200, "OK", "OPTIONS", "z9hG4bK-r2", "cid-sr", true));
-    stack.txn.send_response(r2, addr(PEER)).await;
+    stack.txn.send_response(r2, addr(PEER)).await.unwrap();
     elapse_ms(33_000).await;
-    assert_eq!(stack.txn.active_txn_count_for_call(cr).await, 0, "index drained to 0");
+    assert_eq!(stack.txn.active_txn_count_for_call(cr).await.unwrap(), 0, "index drained to 0");
     assert!(drained_quiesced(&mut stack, cr), "last txn cleared → CallQuiesced");
 }
 
@@ -685,7 +685,7 @@ async fn call_quiesced_survives_a_full_event_queue() {
     elapse_ms(60).await;
 
     // The watch's immediate-fire path (no txns for `cr`) hits the full queue.
-    stack.txn.watch_self_release(cr).await;
+    stack.txn.watch_self_release(cr).await.unwrap();
 
     // The backlog the consumer now drains does NOT contain the notice…
     assert!(
