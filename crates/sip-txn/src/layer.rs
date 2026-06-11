@@ -837,10 +837,17 @@ impl Owner {
     }
 
     fn do_cancel_txns_for_call(&mut self, call_ref: &str) {
+        // CLIENT transactions only (matching the doc + the TS source, whose server
+        // txns carried no callRef). The eviction's job is to stop Timer B/F firing
+        // against a vanished call — both are client timers. A SERVER txn must be
+        // left to its own Timer H/J: cancelling a Completed BYE/INVITE server txn
+        // here would drop its retransmit-absorption window (RFC 3261 §17.2.1/§17.2.2),
+        // so a retransmitted request after teardown builds a fresh txn and 481s
+        // upstream instead of replaying the cached final.
         let victims: Vec<String> = self
             .txns
             .iter()
-            .filter(|(_, t)| t.call_ref.as_deref() == Some(call_ref))
+            .filter(|(_, t)| t.role == TxnRole::Client && t.call_ref.as_deref() == Some(call_ref))
             .map(|(b, _)| b.clone())
             .collect();
         for branch in victims {

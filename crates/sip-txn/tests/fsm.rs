@@ -313,6 +313,46 @@ async fn duplicate_request_retransmits_cached_response() {
     );
 }
 
+// ── cancel_txns_for_call spares server txns (Timer-J absorption) ────────────
+
+/// Tearing a call down (`cancel_txns_for_call`) must cancel only CLIENT txns —
+/// a Completed SERVER txn keeps its Timer-J retransmit-absorption window so a
+/// BYE retransmit after teardown replays the cached 200 instead of building a
+/// fresh txn that 481s upstream (the unexpected-481-on-BYE wire signature).
+#[tokio::test(start_paused = true)]
+async fn cancel_txns_for_call_spares_server_timer_j_absorption() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let cr = "w0|bye-cr";
+    let branch = "z9hG4bK-bye";
+
+    // Inbound BYE attributed to the call (R-URI callref) → server txn.
+    stack.inject(&inbound_with_callref("BYE", branch, "cid-bye", cr)).await;
+    elapse_ms(60).await;
+    assert!(has_message_request(&stack.drain_events(), "BYE"));
+
+    // App answers 200 → server txn Completed, 200 cached, Timer J armed.
+    let resp = parse_response(&response_bytes(200, "OK", "BYE", branch, "cid-bye", true));
+    stack.txn.send_response(resp, addr(PEER)).await;
+    elapse_ms(60).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 200), 1);
+
+    // Call torn down — the server txn must SURVIVE this.
+    stack.txn.cancel_txns_for_call(cr).await;
+
+    // Retransmitted BYE → cached 200 replayed, NOT re-surfaced to the app.
+    stack.inject(&inbound_with_callref("BYE", branch, "cid-bye", cr)).await;
+    elapse_ms(60).await;
+    assert_eq!(
+        count_responses(&stack.drain_peer(), 200),
+        1,
+        "cached 200 replayed for the BYE retransmit"
+    );
+    assert!(
+        stack.drain_events().is_empty(),
+        "retransmitted BYE must not re-surface (no orphan 481 path)"
+    );
+}
+
 // ── #9: call_ref → txn-count index (acting-backup self-release gate) ─────────
 
 /// An inbound in-dialog request whose Request-URI carries the `callref` param the
