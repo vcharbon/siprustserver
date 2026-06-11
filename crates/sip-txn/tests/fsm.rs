@@ -66,6 +66,50 @@ async fn provisional_response_stops_retransmit() {
     );
 }
 
+// ── Same-branch displacement releases the replaced txn's timers ─────────────
+
+/// A second `send_request` reusing a live Via branch DISPLACES the first txn.
+/// The displaced txn's retransmit/Timer-B entries must be physically removed in
+/// lockstep — otherwise they linger in the shared `DelayQueue` keyed by the same
+/// branch string and fire against the REPLACEMENT, forking its retransmit chain
+/// (and, once their freed slab slots are reused, aliasing unrelated timers — the
+/// CLAUDE.md no-generation `Key` hazard). Observable here as a doubled retransmit.
+#[tokio::test(start_paused = true)]
+async fn same_branch_displacement_does_not_fork_retransmits() {
+    let stack = Stack::build(TRANSIT, 64, 64).await;
+    let branch = "z9hG4bK-displace";
+
+    // First INVITE on `branch` → immediate send + retransmit armed @500 ms.
+    stack
+        .txn
+        .send_request(
+            invite_with_cr_lg("self|old", "cid-old", branch, "b-1"),
+            addr(PEER),
+            TxnKind::Invite,
+        )
+        .await;
+    // Second INVITE reusing `branch` → displaces the first; its orphan retransmit
+    // must be cancelled, not left to fire against this txn.
+    stack
+        .txn
+        .send_request(
+            invite_with_cr_lg("self|new", "cid-new", branch, "b-1"),
+            addr(PEER),
+            TxnKind::Invite,
+        )
+        .await;
+    assert_eq!(active(&stack), 1, "displaced, not doubled");
+
+    // Two initial sends + exactly ONE retransmit (the live txn's, @500 ms) by
+    // 700 ms. A leaked orphan retransmit would double the @500 ms fire → 4.
+    elapse_ms(700).await;
+    assert_eq!(
+        count_requests(&stack.drain_peer(), "INVITE"),
+        3,
+        "one retransmit chain, not a forked pair"
+    );
+}
+
 // ── Client timeout (Timer B) ────────────────────────────────────────────────
 
 #[tokio::test(start_paused = true)]

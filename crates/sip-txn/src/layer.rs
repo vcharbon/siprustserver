@@ -400,6 +400,14 @@ impl Owner {
         // A re-insert of the same branch (rare) must not double-count: drop the
         // displaced txn's contribution before adding the new one.
         if let Some(old) = self.txns.insert(txn.branch.clone(), txn) {
+            // The displaced txn's queue entries are keyed by the SAME branch string
+            // the replacement now owns; left in the wheel they would fire against
+            // the new txn (spurious retransmit/timeout/cleanup) and their Keys would
+            // alias once their slots are reused. Physically remove them now —
+            // cancel and queue membership move together (CLAUDE.md).
+            self.cancel_timer(old.retransmit_key);
+            self.cancel_timer(old.timeout_key);
+            self.cancel_timer(old.cleanup_key);
             self.untrack_call_ref(&old.call_ref);
         }
         self.track_call_ref(&new_call_ref);
@@ -516,10 +524,30 @@ impl Owner {
     // ── timer firing ─────────────────────────────────────────────────────────
 
     async fn fire_timer(&mut self, endpoint: &dyn UdpEndpoint, timer: Timer) {
+        // A fired entry has already left the `DelayQueue` (`poll_expired` freed its
+        // slab slot), so the `Key` we still hold for it is now STALE — the next
+        // `insert` reuses that exact slot and yields the SAME `Key`. Null the field
+        // BEFORE any further work, so a later `cancel_timer`/`delete_txn` can never
+        // `try_remove` a reused slot and evict an unrelated live timer (the
+        // CLAUDE.md no-generation aliasing hazard). `fire_retransmit` re-sets the
+        // retransmit `Key` if it reschedules; the no-reschedule path leaves None.
         match timer {
-            Timer::ClientRetransmit(branch) => self.fire_retransmit(endpoint, &branch).await,
-            Timer::ClientTimeout(branch) => self.fire_timeout(&branch),
+            Timer::ClientRetransmit(branch) => {
+                if let Some(t) = self.txns.get_mut(&branch) {
+                    t.retransmit_key = None;
+                }
+                self.fire_retransmit(endpoint, &branch).await
+            }
+            Timer::ClientTimeout(branch) => {
+                if let Some(t) = self.txns.get_mut(&branch) {
+                    t.timeout_key = None;
+                }
+                self.fire_timeout(&branch)
+            }
             Timer::ServerCleanup(branch) => {
+                if let Some(t) = self.txns.get_mut(&branch) {
+                    t.cleanup_key = None;
+                }
                 self.delete_txn(&branch);
             }
             Timer::QuiescedRetry => {
