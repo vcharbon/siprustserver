@@ -535,9 +535,12 @@ impl Owner {
             .outbound_message_bytes_total
             .fetch_add(buf.len() as u64, Relaxed);
         self.metrics.outbound_messages_total.fetch_add(1, Relaxed);
-        // Errors are logged-and-swallowed in the source; a send failure must
-        // not abort the owner. (No tracing dep here yet — drop silently.)
-        let _ = endpoint.send_to(buf, dest).await;
+        // Errors are logged-and-swallowed in the source; a send failure must not
+        // abort the owner. No tracing dep here yet — count it so a failing socket
+        // (ENOBUFS/EPERM) is visible rather than a silent black hole.
+        if endpoint.send_to(buf, dest).await.is_err() {
+            self.metrics.send_errors.fetch_add(1, Relaxed);
+        }
     }
 
     /// Offer an ordinary event to the bounded output queue. Producers NEVER block
@@ -798,8 +801,12 @@ impl Owner {
             }
             Command::SendRaw { buf, dest, reply } => {
                 // sendRaw bypasses transaction management AND the byte counters
-                // (matches the source `sendRaw`).
-                let _ = endpoint.send_to(&buf, dest).await;
+                // (matches the source `sendRaw`); still count send failures.
+                if endpoint.send_to(&buf, dest).await.is_err() {
+                    self.metrics
+                        .send_errors
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 let _ = reply.send(());
             }
             Command::CancelTxnsForCall { call_ref, reply } => {
@@ -988,7 +995,12 @@ impl Owner {
         use std::sync::atomic::Ordering::Relaxed;
         let parsed = match self.parser.parse(&packet.raw) {
             Ok(m) => m,
-            Err(_e) => return, // parse error: the source logs a WARN; drop here
+            Err(_e) => {
+                // Parse error: dropped (the source logs a WARN). Count it so a
+                // malformed-traffic flood / parser regression is visible.
+                self.metrics.parse_errors.fetch_add(1, Relaxed);
+                return;
+            }
         };
         self.metrics.messages_processed.fetch_add(1, Relaxed);
         self.metrics

@@ -20,6 +20,14 @@ pub(crate) struct MetricsInner {
     /// Per-reason drop counters, indexed by [`EventQueueDropReason::index`].
     pub event_queue_drops: [AtomicU64; 6],
     pub txn_cancelled_on_call_evict: AtomicU64,
+    /// Inbound packets the parser rejected (dropped). A persistent climb here vs a
+    /// flat `messages_processed` is the signature of a malformed-traffic flood or a
+    /// parser regression — distinguishable from "no traffic arrived".
+    pub parse_errors: AtomicU64,
+    /// Outbound `send_to` failures (logged-and-swallowed so a send error never
+    /// aborts the owner). A climb here means the socket is failing (ENOBUFS/EPERM
+    /// under netfilter churn) while everything else looks idle.
+    pub send_errors: AtomicU64,
 }
 
 impl MetricsInner {
@@ -32,6 +40,8 @@ impl MetricsInner {
             outbound_messages_total: AtomicU64::new(0),
             event_queue_drops: Default::default(),
             txn_cancelled_on_call_evict: AtomicU64::new(0),
+            parse_errors: AtomicU64::new(0),
+            send_errors: AtomicU64::new(0),
         }
     }
 }
@@ -96,5 +106,15 @@ impl TransactionMetrics {
     /// Client transactions torn down because their owning call was evicted.
     pub fn txn_cancelled_on_call_evict(&self) -> u64 {
         self.inner.txn_cancelled_on_call_evict.load(Ordering::Relaxed)
+    }
+
+    /// Inbound packets the parser rejected and dropped (counter).
+    pub fn parse_errors(&self) -> u64 {
+        self.inner.parse_errors.load(Ordering::Relaxed)
+    }
+
+    /// Outbound `send_to` failures (counter).
+    pub fn send_errors(&self) -> u64 {
+        self.inner.send_errors.load(Ordering::Relaxed)
     }
 }
