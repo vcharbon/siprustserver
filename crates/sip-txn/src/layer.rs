@@ -18,7 +18,7 @@
 //! ADR-0005 single-writer seam, preserved without a per-call dispatcher (which
 //! is a B2BUA-only concern; this layer is shared with the proxy).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -74,17 +74,19 @@ enum Timer {
     ClientTimeout(String),
     /// Timer H (INVITE) / Timer J (non-INVITE) / Timer-H-487 — server cleanup.
     ServerCleanup(String),
-    /// Re-deliver `CallQuiesced` notices a full events queue deferred (ADR-0014
-    /// self-release). At most ONE in flight (`quiesce_retry_armed`); its `Key` is
-    /// never stored, so the CLAUDE.md stale-`Key` aliasing hazard cannot arise.
-    QuiescedRetry,
+    /// Re-offer CRITICAL events (Timeout / Cancelled / CallQuiesced / a consumed
+    /// non-2xx final / an inbound INVITE whose 100 silenced the UAC) that a full
+    /// events queue deferred — never dropped. At most ONE in flight
+    /// (`event_retry_armed`); its `Key` is never stored, so the CLAUDE.md
+    /// stale-`Key` aliasing hazard cannot arise.
+    EventRetry,
 }
 
-/// Retry cadence for deferred `CallQuiesced` delivery. Short — the router drains
+/// Retry cadence for deferred critical-event delivery. Short — the router drains
 /// the events queue continuously, so capacity returns within a few polls; the
 /// timer exists only so an otherwise-idle owner (no packets, no commands, no
-/// txn timers left) still delivers the notice.
-const QUIESCE_RETRY_MS: u64 = 100;
+/// txn timers left) still delivers the backlog.
+const EVENT_RETRY_MS: u64 = 100;
 
 struct Transaction {
     branch: String,
@@ -218,8 +220,9 @@ impl TransactionLayer {
             metrics: metrics_inner,
             id_gen: config.id_gen,
             self_release_watch: HashSet::new(),
-            quiesce_retry: HashSet::new(),
-            quiesce_retry_armed: false,
+            deferred_events: VecDeque::new(),
+            event_retry_armed: false,
+            pending_quiesce: Vec::new(),
         };
 
         tokio::spawn(run(owner, endpoint, cmd_rx));
@@ -335,9 +338,9 @@ struct Owner {
     id_gen: Arc<IdGen>,
     /// call_refs the consumer asked to be told about when their **last**
     /// transaction clears (ADR-0014 acting-backup self-release). On the
-    /// last-`delete_txn` for a watched call we emit
-    /// [`TransactionEvent::CallQuiesced`] and drop the watch. Bounded — one entry
-    /// per live takeover copy, removed when it fires.
+    /// last-`delete_txn` for a watched call we capture
+    /// [`TransactionEvent::CallQuiesced`] onto the lossless critical path and drop
+    /// the watch. Bounded — one entry per live takeover copy, removed when it fires.
     self_release_watch: HashSet<String>,
     /// `call_ref → live-txn count`, kept in **lockstep** with `txns` (every
     /// `set_txn`/`delete_txn` updates both; an entry is dropped at count 0). Makes
@@ -348,15 +351,23 @@ struct Owner {
     /// single-writer discipline CLAUDE.md prescribes for the timer driver's
     /// `active`/queue lockstep: never let this drift from `txns`.
     txn_counts: HashMap<String, usize>,
-    /// `CallQuiesced` notices a full events queue deferred. `CallQuiesced` is the
-    /// ONLY self-release trigger a takeover copy gets — dropping it (the old
-    /// drop-newest `emit`) stranded the copy double-serving until its 1 h
-    /// `GlobalDuration` backstop. The watch entry stays armed until the send
-    /// actually lands; this set + the [`Timer::QuiescedRetry`] tick re-offer it.
-    /// Bounded: ⊆ `self_release_watch` (one entry per live takeover copy).
-    quiesce_retry: HashSet<String>,
-    /// Whether a [`Timer::QuiescedRetry`] is already in the wheel (at most one).
-    quiesce_retry_armed: bool,
+    /// CRITICAL events a full events queue deferred, in FIFO order — re-offered on
+    /// the [`Timer::EventRetry`] tick, NEVER dropped. These are one-shot signals
+    /// whose protocol-level redelivery the layer already consumed (a deleted txn's
+    /// Timeout, an answered CANCEL's Cancelled, a takeover copy's only CallQuiesced,
+    /// an auto-ACKed non-2xx final, an inbound INVITE whose 100 silenced the UAC);
+    /// the old drop-newest `emit` lost them exactly under the post-failover/overload
+    /// burst that produces them. Bounded by live txns + watches (same order as the
+    /// `txns` map), so this is not a new unbounded buffer.
+    deferred_events: VecDeque<TransactionEvent>,
+    /// Whether a [`Timer::EventRetry`] is already in the wheel (at most one).
+    event_retry_armed: bool,
+    /// call_refs whose last txn cleared THIS turn but whose `CallQuiesced` must be
+    /// emitted only AFTER the turn's protocol events (the ACK/Timeout that drove the
+    /// delete) — else the router self-releases the takeover copy ahead of the very
+    /// event it was about, orphaning it. Drained by `flush_pending_quiesce` at the
+    /// end of every owner turn.
+    pending_quiesce: Vec<String>,
 }
 
 /// The next expired timer. Only ever awaited while `q` is non-empty — an empty
@@ -395,6 +406,10 @@ async fn run(mut owner: Owner, endpoint: Box<dyn UdpEndpoint>, mut cmd_rx: mpsc:
             }
             _ = sweep.tick() => owner.sweep(),
         }
+        // End-of-turn: emit deferred CallQuiesced notices AFTER this turn's
+        // protocol events, so the router never self-releases a takeover copy ahead
+        // of the ACK/Timeout that cleared the call's last txn (ADR-0014 ordering).
+        owner.flush_pending_quiesce();
     }
 }
 
@@ -450,13 +465,15 @@ impl Owner {
                 self.untrack_call_ref(&t.call_ref);
                 self.sync_active();
                 // ADR-0014 self-release: if this was the LAST transaction for a
-                // watched call, notify the consumer so it can shed its acting-backup
-                // takeover copy. (For a 2xx INVITE the server txn lingers in
-                // `Completed` until Timer H — the ACK reuses a different branch — so
-                // this naturally fires at Timer H, after the ACK was relayed.)
+                // watched call, the consumer must hear CallQuiesced so it can shed
+                // its acting-backup takeover copy — but only AFTER this turn's
+                // protocol event (the ACK/Timeout that drove the delete), so defer
+                // it to `flush_pending_quiesce`. (For a 2xx INVITE the server txn
+                // lingers in `Completed` until Timer H — the ACK reuses a different
+                // branch — so this naturally fires at Timer H, after the ACK relay.)
                 if let Some(cr) = t.call_ref {
                     if self.self_release_watch.contains(&cr) && !self.has_txns_for(&cr) {
-                        self.notify_quiesced(cr);
+                        self.pending_quiesce.push(cr);
                     }
                 }
                 true
@@ -490,14 +507,98 @@ impl Owner {
         let _ = endpoint.send_to(buf, dest).await;
     }
 
-    /// Offer an event to the bounded output queue. Producers NEVER block — a
-    /// full queue drops the newest and counts it (drop-newest), so backpressure
-    /// never reaches the recv path. Port of `emit`.
-    fn emit(&self, event: TransactionEvent) {
+    /// Offer an ordinary event to the bounded output queue. Producers NEVER block
+    /// — a full queue drops the newest and counts it (drop-newest), so backpressure
+    /// never reaches the recv path. Correct for events the protocol will resend if
+    /// lost (inbound non-INVITE requests, provisionals, 2xx that the UAS keeps
+    /// retransmitting until ACKed). Port of `emit`.
+    fn emit(&mut self, event: TransactionEvent) {
+        self.offer(event, false);
+    }
+
+    /// Offer a CRITICAL one-shot event — its only delivery, because the layer has
+    /// already consumed its protocol-level redelivery (deleted the client txn,
+    /// auto-ACKed a non-2xx final, answered a CANCEL, or 100-silenced an inbound
+    /// INVITE). A full queue DEFERS it onto the retry deque instead of dropping it,
+    /// so the consumer always sees it once capacity returns.
+    fn emit_critical(&mut self, event: TransactionEvent) {
+        self.offer(event, true);
+    }
+
+    fn offer(&mut self, event: TransactionEvent, critical: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        // Preserve FIFO: once a critical backlog exists, queue further criticals
+        // behind it rather than letting a fresh one jump the deferred ones.
+        if critical && !self.deferred_events.is_empty() {
+            let reason = EventQueueDropReason::of(&event);
+            self.metrics.event_queue_drops[reason.index()].fetch_add(1, Relaxed);
+            self.deferred_events.push_back(event);
+            self.arm_event_retry();
+            return;
+        }
         let reason = EventQueueDropReason::of(&event);
-        if self.events_tx.try_send(event).is_err() {
-            self.metrics.event_queue_drops[reason.index()]
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match self.events_tx.try_send(event) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(ev)) => {
+                self.metrics.event_queue_drops[reason.index()].fetch_add(1, Relaxed);
+                if critical {
+                    self.deferred_events.push_back(ev);
+                    self.arm_event_retry();
+                }
+                // else: ordinary event, drop-newest (counted above).
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                // Consumer gone — the owner winds down via its other arms; do not
+                // spin retrying into a closed channel.
+                self.deferred_events.clear();
+                self.event_retry_armed = false;
+            }
+        }
+    }
+
+    fn arm_event_retry(&mut self) {
+        if !self.event_retry_armed {
+            self.timers.insert(Timer::EventRetry, ms(EVENT_RETRY_MS));
+            self.event_retry_armed = true;
+        }
+    }
+
+    /// Re-offer deferred critical events in FIFO order once queue capacity returns.
+    /// A still-full queue re-arms the tick; a closed channel clears the backlog.
+    fn flush_deferred(&mut self) {
+        while let Some(ev) = self.deferred_events.pop_front() {
+            match self.events_tx.try_send(ev) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(ev)) => {
+                    self.deferred_events.push_front(ev);
+                    break;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    self.deferred_events.clear();
+                    self.event_retry_armed = false;
+                    return;
+                }
+            }
+        }
+        if self.deferred_events.is_empty() {
+            self.event_retry_armed = false;
+        } else {
+            self.arm_event_retry();
+        }
+    }
+
+    /// Emit any CallQuiesced notices `delete_txn` deferred this turn — AFTER the
+    /// turn's protocol events (ADR-0014 ordering). Re-checks under the lockstep
+    /// index: a later effect this turn could have re-armed a txn for the call, in
+    /// which case the still-armed watch re-fires on its eventual last delete.
+    fn flush_pending_quiesce(&mut self) {
+        if self.pending_quiesce.is_empty() {
+            return;
+        }
+        for cr in std::mem::take(&mut self.pending_quiesce) {
+            if self.self_release_watch.contains(&cr) && !self.has_txns_for(&cr) {
+                self.notify_quiesced(cr);
+            }
         }
     }
 
@@ -552,49 +653,23 @@ impl Owner {
                 }
                 self.delete_txn(&branch);
             }
-            Timer::QuiescedRetry => {
-                self.quiesce_retry_armed = false;
-                self.flush_quiesce_retry();
+            Timer::EventRetry => {
+                self.event_retry_armed = false;
+                self.flush_deferred();
             }
         }
     }
 
-    /// Re-offer every deferred `CallQuiesced`. A call that re-armed transactions
-    /// since the deferral is dropped from the retry set — its (still-armed) watch
-    /// re-fires the check on the eventual last `delete_txn`. A still-failing send
-    /// re-defers via `notify_quiesced` (which re-arms the timer).
-    fn flush_quiesce_retry(&mut self) {
-        let pending = std::mem::take(&mut self.quiesce_retry);
-        for cr in pending {
-            if self.self_release_watch.contains(&cr) && !self.has_txns_for(&cr) {
-                self.notify_quiesced(cr);
-            }
-        }
-    }
-
-    /// Deliver the one-shot `CallQuiesced` for a watched, txn-free call. The
-    /// watch entry is cleared ONLY when the send lands: `CallQuiesced` is the
-    /// only self-release trigger the router gets for a takeover copy, so the old
-    /// remove-then-drop-newest `emit` turned one full-queue instant (exactly the
-    /// post-failover storm in which takeover copies exist) into a copy that
-    /// double-serves until its 1 h `GlobalDuration` backstop. A failed send keeps
-    /// the watch, joins `quiesce_retry`, and re-offers on [`Timer::QuiescedRetry`].
+    /// Deliver the one-shot `CallQuiesced` for a watched, txn-free call. It is the
+    /// ONLY self-release trigger the router gets for a takeover copy, so it rides
+    /// the lossless critical path (`emit_critical`): a full queue defers it onto
+    /// the retry deque instead of dropping it (the old drop-newest `emit` stranded
+    /// the copy double-serving until its 1 h `GlobalDuration` backstop, exactly in
+    /// the post-failover storm where takeover copies exist). The watch is cleared
+    /// here because the event is now captured — the deque guarantees its delivery.
     fn notify_quiesced(&mut self, call_ref: String) {
-        let event = TransactionEvent::CallQuiesced { call_ref: call_ref.clone() };
-        if self.events_tx.try_send(event).is_ok() {
-            self.self_release_watch.remove(&call_ref);
-            self.quiesce_retry.remove(&call_ref);
-        } else {
-            // Counted as a *deferral* under the existing drop metric (the queue
-            // pressure signal is the same); delivery is retried, not lost.
-            self.metrics.event_queue_drops[EventQueueDropReason::CallQuiesced.index()]
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.quiesce_retry.insert(call_ref);
-            if !self.quiesce_retry_armed {
-                self.timers.insert(Timer::QuiescedRetry, ms(QUIESCE_RETRY_MS));
-                self.quiesce_retry_armed = true;
-            }
-        }
+        self.self_release_watch.remove(&call_ref);
+        self.emit_critical(TransactionEvent::CallQuiesced { call_ref });
     }
 
     async fn fire_retransmit(&mut self, endpoint: &dyn UdpEndpoint, branch: &str) {
@@ -649,7 +724,9 @@ impl Owner {
             _ => return,
         };
         self.delete_txn(branch);
-        self.emit(TransactionEvent::Timeout {
+        // Critical: the txn is gone and Timer B/F cancelled, so nothing re-fires —
+        // a dropped Timeout would strand the leg until the 1 h GlobalDuration.
+        self.emit_critical(TransactionEvent::Timeout {
             branch: branch.to_string(),
             call_ref,
             leg_id,
@@ -701,13 +778,12 @@ impl Owner {
                 let _ = reply.send(n);
             }
             Command::WatchSelfRelease { call_ref, reply } => {
-                // Arm the watch FIRST in both branches: `notify_quiesced` clears
-                // it only when the event actually lands on the queue, so a full
-                // queue can never strand a takeover copy with no watch at all
-                // (the old immediate-fire path emitted without arming — a drop
-                // there meant the release signal never existed).
-                self.self_release_watch.insert(call_ref.clone());
-                if !self.has_txns_for(&call_ref) {
+                if self.has_txns_for(&call_ref) {
+                    // Live txns — arm the watch; the last `delete_txn` fires the
+                    // (lossless) CallQuiesced at end-of-turn.
+                    self.self_release_watch.insert(call_ref);
+                } else {
+                    // Already quiesced — capture CallQuiesced now (lossless path).
                     self.notify_quiesced(call_ref);
                 }
                 let _ = reply.send(());
@@ -1011,13 +1087,27 @@ impl Owner {
             self.send_buffer(endpoint, &trying_buf, src).await;
             if let Some(txn) = self.txns.get_mut(&branch) {
                 txn.state = TxnState::Proceeding;
+                // Cache the 100 as the latest provisional so a retransmitted INVITE
+                // replays it (RFC 3261 §17.2.1) instead of being absorbed silently —
+                // the auto-100 already silenced the UAC's own retransmission timer.
+                txn.last_response = Some(trying_buf);
+                txn.last_response_status = Some(100);
             }
         }
 
-        self.emit(TransactionEvent::Message {
+        // Critical for INVITE: the 100 we just sent stops the UAC retransmitting,
+        // so this Message is the app's ONLY notice of the call — a drop would leave
+        // a timer-less server txn squatting until the sweep while the caller hears
+        // 100-then-silence. Non-INVITE requests stay lossy (the UAC resends them).
+        let event = TransactionEvent::Message {
             message: Box::new(SipMessage::Request(req)),
             src,
-        });
+        };
+        if is_invite {
+            self.emit_critical(event);
+        } else {
+            self.emit(event);
+        }
     }
 
     async fn handle_cancel(&mut self, endpoint: &dyn UdpEndpoint, req: SipRequest, src: SocketAddr) {
@@ -1110,7 +1200,9 @@ impl Owner {
             }
         }
 
-        self.emit(TransactionEvent::Cancelled { call_id, from_tag });
+        // Critical: we already answered 200 + 487 on the wire; a dropped Cancelled
+        // would leave the b-leg ringing a cancelled call (no other signal upstream).
+        self.emit_critical(TransactionEvent::Cancelled { call_id, from_tag });
     }
 
     async fn handle_inbound_response(
@@ -1177,11 +1269,21 @@ impl Owner {
                         }
                     }
                     self.delete_txn(&branch);
+                    // Critical: we deleted our client txn (consuming our request
+                    // retransmission) and auto-ACKed any non-2xx (silencing the
+                    // UAS's resend of that final), so this is the app's only
+                    // delivery of the final response.
+                    self.emit_critical(TransactionEvent::Message {
+                        message: Box::new(SipMessage::Response(resp)),
+                        src,
+                    });
+                    return;
                 }
             }
             // (a response landing on a server txn is anomalous — pass through)
         }
 
+        // Provisionals and unmatched responses are protocol-redelivered → lossy.
         self.emit(TransactionEvent::Message {
             message: Box::new(SipMessage::Response(resp)),
             src,

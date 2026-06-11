@@ -445,6 +445,79 @@ async fn cancel_txns_for_call_spares_server_timer_j_absorption() {
     );
 }
 
+/// A one-shot Timeout must be DEFERRED, never dropped, when the events queue is
+/// full — the post-failover storm saturates it exactly when reclaimed calls time
+/// out, and a lost Timeout strands the leg until the 1 h GlobalDuration backstop.
+#[tokio::test(start_paused = true)]
+async fn timeout_survives_a_full_event_queue() {
+    // udp_queue_max 16 → event-queue capacity max(64, 16*4) = 64; generous recv
+    // queue so all injected OPTIONS reach the owner and fill the event queue.
+    let mut stack = Stack::build(TRANSIT, 16, 1024).await;
+    // An in-dialog client txn whose Timer B (32 s) will fire.
+    stack
+        .txn
+        .send_request(outbound_reinvite("z9hG4bK-tofull"), addr(PEER), TxnKind::Invite)
+        .await;
+
+    // Saturate the events queue with undrained inbound OPTIONS (lossy Messages).
+    for i in 0..70 {
+        stack
+            .inject(&inbound_request(
+                "OPTIONS",
+                &format!("z9hG4bK-q{i}"),
+                &format!("cid-q{i}"),
+                None,
+            ))
+            .await;
+    }
+    elapse_ms(60).await;
+
+    // Timer B fires (32 s) into the full queue → the Timeout must DEFER, not drop.
+    elapse_ms(33_000).await;
+    assert!(
+        !stack
+            .drain_events()
+            .iter()
+            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        "the full-queue instant must have deferred the Timeout, not squeezed it in"
+    );
+    // Capacity returned (we just drained) → the retry tick redelivers it.
+    elapse_ms(150).await;
+    assert!(
+        stack
+            .drain_events()
+            .iter()
+            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        "deferred Timeout redelivered once queue capacity returned"
+    );
+}
+
+/// The auto-sent 100 Trying is cached, so a retransmitted INVITE replays it (RFC
+/// 3261 §17.2.1) instead of being absorbed silently — the 100 already silenced
+/// the UAC's own retransmit timer, so a black hole here fails the call.
+#[tokio::test(start_paused = true)]
+async fn retransmitted_invite_replays_the_cached_100() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let branch = "z9hG4bK-100cache";
+    stack.inject(&inbound_request("INVITE", branch, "cid-100", None)).await;
+    elapse_ms(60).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 100), 1, "100 Trying for the INVITE");
+    let _ = stack.drain_events();
+
+    // Retransmitted INVITE (same branch) before any final → replays the cached 100.
+    stack.inject(&inbound_request("INVITE", branch, "cid-100", None)).await;
+    elapse_ms(60).await;
+    assert_eq!(
+        count_responses(&stack.drain_peer(), 100),
+        1,
+        "cached 100 replayed for the INVITE retransmit"
+    );
+    assert!(
+        stack.drain_events().is_empty(),
+        "retransmitted INVITE must not re-surface to the app"
+    );
+}
+
 // ── #9: call_ref → txn-count index (acting-backup self-release gate) ─────────
 
 /// An inbound in-dialog request whose Request-URI carries the `callref` param the
