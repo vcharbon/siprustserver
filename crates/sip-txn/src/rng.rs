@@ -34,15 +34,25 @@ impl IdGen {
         Self { state: AtomicU64::new(if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed }) }
     }
 
-    /// Production generator, seeded from the wall clock once at construction.
-    /// (The sip-clock ADR explicitly allows reading `SystemTime` directly at
-    /// the rare site that needs it; identifier seeding is such a site.)
+    /// Production generator, seeded with per-process OS entropy at construction.
+    ///
+    /// `RandomState` is seeded once per process from the OS RNG, so two pods that
+    /// start in the same clock-nanosecond still get DISTINCT id streams. The old
+    /// `SystemTime`-nanos-only seed collided under coarse clocks (WSL2/VM), and
+    /// because all b-leg traffic is masqueraded behind one LB VIP (identical
+    /// sent-by at the peer), two workers emitting the same Via-branch / To-tag
+    /// sequence would have their transactions merged at the common UAS. We still
+    /// fold in the wall clock + PID so a single process's seed is also time-varying.
     pub fn from_entropy() -> Self {
+        use std::hash::{BuildHasher, Hasher};
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x1234_5678_9ABC_DEF0);
-        Self::seeded(nanos ^ 0xD1B5_4A32_D192_ED03)
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(nanos);
+        h.write_u64(std::process::id() as u64);
+        Self::seeded(h.finish() ^ 0xD1B5_4A32_D192_ED03)
     }
 
     /// xorshift64* — one step of state, returns a well-mixed `u64`.
