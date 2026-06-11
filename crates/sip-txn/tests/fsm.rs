@@ -306,6 +306,44 @@ async fn ack_for_2xx_passes_through() {
     );
 }
 
+/// A second final on an already-Completed server txn (a 200 racing the
+/// autonomous 487, or a duplicate relayed final) must be DROPPED — not put a
+/// second final with a different To-tag on the wire and flip the ACK classifier.
+#[tokio::test(start_paused = true)]
+async fn duplicate_final_on_completed_server_txn_is_dropped() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let branch = "z9hG4bK-dupfinal";
+    let call_id = "dupfinal-call";
+
+    stack.inject(&inbound_request("INVITE", branch, call_id, None)).await;
+    elapse_ms(60).await;
+    let _ = stack.drain_events();
+    let _ = stack.drain_peer();
+
+    // First final: 487 → Completed, classifier = non-2xx.
+    let first = parse_response(&response_bytes(487, "Request Terminated", "INVITE", branch, call_id, true));
+    stack.txn.send_response(first, addr(PEER)).await;
+    elapse_ms(60).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 487), 1);
+
+    // Second, conflicting final: 200 → must be dropped (no wire, no state flip).
+    let second = parse_response(&response_bytes(200, "OK", "INVITE", branch, call_id, true));
+    stack.txn.send_response(second, addr(PEER)).await;
+    elapse_ms(60).await;
+    let out = stack.drain_peer();
+    assert_eq!(count_responses(&out, 200), 0, "conflicting final dropped");
+    assert_eq!(count_responses(&out, 487), 0, "no re-send");
+
+    // The ACK for 487 is still absorbed as non-2xx (classifier intact, not 200).
+    stack.inject(&inbound_request("ACK", branch, call_id, Some("peer-tag"))).await;
+    elapse_ms(60).await;
+    assert!(
+        !has_message_request(&stack.drain_events(), "ACK"),
+        "ACK for 487 absorbed, not surfaced as a 2xx ACK"
+    );
+    assert_eq!(active(&stack), 0);
+}
+
 // ── Auto-ACK for non-2xx (client INVITE) ────────────────────────────────────
 
 #[tokio::test(start_paused = true)]

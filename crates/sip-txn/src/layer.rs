@@ -792,15 +792,22 @@ impl Owner {
         let buf = serialize(&SipMessage::Response(msg.clone()));
 
         if let Some(branch) = branch {
-            let is_final = status >= 200;
-            let outbound_to_tag = if status > 100 { msg.to.tag.clone() } else { None };
-            let mut completed_kind: Option<TxnKind> = None;
-
             if let Some(txn) = self.txns.get_mut(&branch) {
                 if txn.role == TxnRole::Server {
-                    if is_final {
-                        completed_kind = Some(txn.kind);
+                    // RFC 3261 §17.2.1: a Completed server txn has already sent its
+                    // final and now only retransmits the STORED response on a
+                    // request retransmit. DROP any further final from the TU here
+                    // (a 200 racing handle_cancel's autonomous 487, or a duplicate
+                    // relayed final) — re-sending it would put a second final with a
+                    // different To-tag on the wire, flip the ACK 2xx/non-2xx
+                    // classifier (last_response_status), and orphan a duplicate
+                    // Timer H/J. The stored final + dup-absorption cover retransmits.
+                    if txn.state == TxnState::Completed {
+                        return;
                     }
+
+                    let is_final = status >= 200;
+                    let outbound_to_tag = if status > 100 { msg.to.tag.clone() } else { None };
                     // Pin the UAS To-tag on the first >100 response (§17.2.1).
                     if txn.uas_to_tag.is_none() {
                         txn.uas_to_tag = outbound_to_tag;
@@ -816,19 +823,17 @@ impl Owner {
                     // for retransmit absorption.
                     if is_final {
                         txn.original_request = None;
+                        // Schedule Timer H/J cleanup (disjoint-field borrow: txns
+                        // and timers are separate Owner fields).
+                        let delay = match txn.kind {
+                            TxnKind::Invite => TIMER_H,
+                            TxnKind::NonInvite => TIMER_J,
+                        };
+                        let key = self.timers.insert(Timer::ServerCleanup(branch.clone()), ms(delay));
+                        if let Some(txn) = self.txns.get_mut(&branch) {
+                            txn.cleanup_key = Some(key);
+                        }
                     }
-                }
-            }
-
-            // Schedule Timer H/J cleanup for completed server transactions.
-            if let Some(kind) = completed_kind {
-                let delay = match kind {
-                    TxnKind::Invite => TIMER_H,
-                    TxnKind::NonInvite => TIMER_J,
-                };
-                let key = self.timers.insert(Timer::ServerCleanup(branch.clone()), ms(delay));
-                if let Some(txn) = self.txns.get_mut(&branch) {
-                    txn.cleanup_key = Some(key);
                 }
             }
         }
