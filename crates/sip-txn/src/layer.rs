@@ -391,20 +391,30 @@ async fn run(mut owner: Owner, endpoint: Box<dyn UdpEndpoint>, mut cmd_rx: mpsc:
     sweep.tick().await;
 
     loop {
+        // `biased` polls the arms top-to-bottom and the INBOUND PACKET arm is LAST
+        // on purpose: a sustained packet flood keeps `endpoint.recv()` ready every
+        // iteration, so if it were polled first it would starve the timer wheel and
+        // the safety-net sweep indefinitely — retransmits/timeouts/cleanups would
+        // stall and the txns map + DelayQueue would grow unbounded exactly under
+        // the overload the sweep exists to bound. Polling commands, due timers, and
+        // the sweep ahead of new packets guarantees the internal machinery always
+        // makes progress; the flood source (packets) can only be drained once
+        // nothing else is pending. (cmd/timer can't themselves flood without
+        // packets — the router only issues commands in response to events.)
         tokio::select! {
             biased;
             cmd = cmd_rx.recv() => match cmd {
                 Some(c) => owner.handle_command(endpoint, c).await,
                 None => break, // all handles dropped → shut down
             },
-            packet = endpoint.recv() => match packet {
-                Some(p) => owner.handle_packet(endpoint, p).await,
-                None => break, // endpoint closed
-            },
             timer = next_expired(&mut owner.timers), if !owner.timers.is_empty() => {
                 owner.fire_timer(endpoint, timer).await;
             }
             _ = sweep.tick() => owner.sweep(),
+            packet = endpoint.recv() => match packet {
+                Some(p) => owner.handle_packet(endpoint, p).await,
+                None => break, // endpoint closed
+            },
         }
         // End-of-turn: emit deferred CallQuiesced notices AFTER this turn's
         // protocol events, so the router never self-releases a takeover copy ahead
