@@ -137,6 +137,13 @@ async fn recv_loop(
             }
         }
     }
+    // The pump is terminating (recv_from error). CLOSE the queue so the
+    // endpoint's `recv()` resolves to None and the owner task can wind down.
+    // Without this the layer goes permanently DEAF — sends still work, nothing is
+    // ever received, no panic/metric/readiness change — because the endpoint is
+    // owned by the very owner task blocked on `recv()`, so its `Drop` (the only
+    // other `close` site) can never run until that `recv()` returns.
+    queue.close();
 }
 
 struct RealEndpoint {
