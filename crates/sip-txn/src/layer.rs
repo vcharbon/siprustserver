@@ -1281,13 +1281,16 @@ impl Owner {
     ) {
         let branch = resp.via.first().branch.clone().unwrap_or_default();
 
-        // 100 Trying: absorb after nudging the matching client txn's state.
+        // 100 Trying: absorb after nudging the matching client txn's state. An
+        // INVITE client stops retransmitting on a provisional (§17.1.1.2); a
+        // non-INVITE client KEEPS retransmitting at T2 in Proceeding (§17.1.2.2),
+        // so leave its timer running.
         if resp.status == 100 {
             if !branch.is_empty() {
                 let key = match self.txns.get_mut(&branch) {
                     Some(txn) if txn.role == TxnRole::Client => {
                         txn.state = TxnState::Proceeding;
-                        txn.retransmit_key.take()
+                        (txn.kind == TxnKind::Invite).then(|| txn.retransmit_key.take()).flatten()
                     }
                     _ => None,
                 };
@@ -1316,11 +1319,13 @@ impl Owner {
 
             if let Some((kind, original_request, destination)) = client_match {
                 if resp.status < 200 {
-                    // Provisional 1xx>100 — proceeding, stop retransmit.
+                    // Provisional 1xx>100 — Proceeding. INVITE stops retransmitting
+                    // (§17.1.1.2); non-INVITE continues at T2 (§17.1.2.2), so only
+                    // cancel the retransmit for INVITE.
                     let key = match self.txns.get_mut(&branch) {
                         Some(txn) => {
                             txn.state = TxnState::Proceeding;
-                            txn.retransmit_key.take()
+                            (kind == TxnKind::Invite).then(|| txn.retransmit_key.take()).flatten()
                         }
                         None => None,
                     };

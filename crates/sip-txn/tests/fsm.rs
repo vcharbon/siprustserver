@@ -110,6 +110,32 @@ async fn same_branch_displacement_does_not_fork_retransmits() {
     );
 }
 
+/// A non-INVITE client transaction CONTINUES retransmitting at T2 after a
+/// provisional (RFC 3261 §17.1.2.2) — only INVITE stops. A 100 to a BYE must not
+/// silence its Timer E, or a lost final is never re-elicited.
+#[tokio::test(start_paused = true)]
+async fn non_invite_keeps_retransmitting_after_provisional() {
+    let stack = Stack::build(TRANSIT, 64, 64).await;
+    let branch = "z9hG4bK-bye-rtx";
+    stack
+        .txn
+        .send_request(outbound_request("BYE", branch), addr(PEER), TxnKind::NonInvite)
+        .await;
+
+    // A 100 Trying arrives early — must NOT stop the retransmit.
+    stack
+        .inject(&response_bytes(100, "Trying", "BYE", branch, "bye-rtx-call", false))
+        .await;
+
+    // By 2 s: initial + retransmits @500 ms and @1500 ms = 3 BYEs (Timer E runs on).
+    elapse_ms(2_000).await;
+    assert_eq!(
+        count_requests(&stack.drain_peer(), "BYE"),
+        3,
+        "non-INVITE keeps retransmitting in Proceeding"
+    );
+}
+
 // ── Client timeout (Timer B) ────────────────────────────────────────────────
 
 #[tokio::test(start_paused = true)]
