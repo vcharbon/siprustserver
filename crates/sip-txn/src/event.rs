@@ -112,7 +112,9 @@ use sip_message::SipRequest;
 
 /// Handle to an outgoing client transaction, returned by `send_request`. Later
 /// messages sourced from the same transaction (CANCEL, ACK-for-2xx) reuse the
-/// branch / original request RFC 3261 mandates (§9.1, §13.2.2.4).
+/// branch / original request RFC 3261 mandates (§9.1, §13.2.2.4) — send those via
+/// `send_raw` (or `send_request`, which routes a CANCEL/ACK raw): they share this
+/// transaction's branch and must NOT open a second, colliding client transaction.
 #[derive(Debug, Clone)]
 pub enum ClientTransactionHandle {
     Invite {

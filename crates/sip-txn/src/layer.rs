@@ -863,6 +863,32 @@ impl Owner {
         let wrapped = SipMessage::Request(msg);
         let buf = serialize(&wrapped);
         let SipMessage::Request(msg) = wrapped else { unreachable!("just wrapped a request") };
+
+        // CANCEL and ACK deliberately REUSE the branch of the request they relate
+        // to (RFC 3261 §9.1 / §13.2.2.4). The txns map is keyed by branch, so
+        // creating a client transaction for them here would DISPLACE the live INVITE
+        // client txn at that shared branch — and the txn could never complete anyway
+        // (CANCEL responses are passed through, an ACK elicits none). Send them raw
+        // — the same path the B2BUA already uses (OutboundTxnMode::Raw) — without
+        // touching the map. This closes the branch-collision foot-gun at its source,
+        // so the branch-only key never has to disambiguate by method.
+        if msg.method == "CANCEL" || msg.method == "ACK" {
+            self.send_buffer(endpoint, &buf, dest).await;
+            let branch = msg.via.first().branch.clone().unwrap_or_default();
+            return match txn_type {
+                TxnKind::Invite => ClientTransactionHandle::Invite {
+                    branch,
+                    original_invite: msg,
+                    destination: dest,
+                },
+                TxnKind::NonInvite => ClientTransactionHandle::NonInvite {
+                    branch,
+                    original_request: msg,
+                    destination: dest,
+                },
+            };
+        }
+
         let branch = msg
             .via
             .first()
