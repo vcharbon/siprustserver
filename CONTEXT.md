@@ -401,6 +401,49 @@ the proxy reaches workers by the informer-fed Pod IP (ADR-0012 D4). Consistency
 is enforced on *identity + membership source*, not *address representation*
 (ADR-0012 D5).
 
+## Call reaper vocabulary
+
+The terminal-guarantee module (design in progress; extends ADR-0010 X5's
+invariant enforcer). Its one-sentence interface: **every call admitted to the
+live map is released exactly once, through the existing `release_call` +
+invariant path, with exactly one CDR** — guaranteed in-process (panic, dropped
+event, lost timer, wedged `Terminating`); a hard-crash window is out of scope.
+
+**Call reaper**:
+The module owning that promise. Three implementation legs, all funnelling into
+the *existing* teardown path (never a second teardown vocabulary): a handler
+panic becomes a synthetic event through the normal rules (two-strike: a second
+panic on the same call discharges **obligations** directly and releases); a
+liveness sweep keyed off the **last-touched stamp** catches wedged calls; both
+ride the per-call FIFO + lock.
+_Avoid_: "garbage collector", "orphan sweep" (the source-era concept); reaping
+`bak:` **Elements** or **takeover copies** (**self-release** owns those, push-based
+on `CallQuiesced` — ADR-0014).
+
+**Obligation**:
+A consequence of admitting a call that must be discharged exactly once at
+release, **derivable from the persisted `Call` snapshot alone** and idempotently
+dischargeable through the normal effects pipeline. The two today: the owed CDR
+(from the call itself) and one limiter decrement per `limiter_entries` hold
+(the derivation `invariants::enforce` already performs). The Call *is* the
+ledger.
+_Avoid_: a parallel allocation registry / resource ledger (the mirror/slice
+divergence hazard; would not survive failover, while `limiter_entries` and
+`cdr_events` ride the replicated Element for free).
+
+**Last-touched stamp**:
+The node-local, store-side per-call activity timestamp — refreshed on every
+dispatched event and at hydration/**reclaim** — that is the reaper's *only*
+liveness input. Never `created_at`, never timer deadlines (keepalive catch-up
+smoothing makes a freshly reclaimed call look overdue).
+
+**Acting-backup terminal contract**:
+An acting backup terminates a call (CDR + cleanup + propagated delete) only
+when *serving an explicit termination message* (BYE/CANCEL) during its takeover
+window. Timer-driven teardown (GlobalDuration, keepalive timeout) of a
+failed-over call waits for the **reclaiming** primary's reaper. The reaper
+sweep runs only where the node serves the call live as primary.
+
 ## E2E test-management vocabulary
 
 The language of the test-management website + CLI (Axum/Maud/htmx front-end and a
