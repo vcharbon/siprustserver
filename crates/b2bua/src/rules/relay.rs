@@ -47,8 +47,7 @@ pub fn to_gen_dialog(d: &StackDialog) -> generators::StackDialog {
 }
 
 /// Rebuild the a-leg's original INVITE as a `SipRequest` (for `generate_response`).
-pub fn rebuild_a_leg_invite(call: &call::Call) -> SipRequest {
-    let snap = &call.a_leg_invite;
+pub fn rebuild_a_leg_invite(snap: &call::ALegInviteSnapshot) -> SipRequest {
     hydrate_request(
         "INVITE",
         &snap.uri,

@@ -19,13 +19,13 @@ fn advance(_ctx: &RuleContext) -> Option<RuleHandleResult> {
 
 mod stub {
     use super::*;
-    use b2bua_sdk::rules::Call;
+    use b2bua_sdk::rules::RuleCall;
 
     define_service! {
         id: "stub",
         machine: STUB_MACHINE,
         states: StubState { S0, S1 },
-        init: |_call: &Call| None,
+        init: |_call: &RuleCall| None,
         rules: [
             sm_rule! {
                 id: "stub-advance",
@@ -64,8 +64,9 @@ fn sm_rule_populates_the_machine_columns() {
 
 #[test]
 fn service_def_carries_the_id_and_rule_factory() {
-    // The `init` field's type (`fn(&Call) -> Option<ServiceSeed>`) is proven by
-    // compilation; here we pin the id and the rule factory the registry composes.
+    // The `init` field's type (`fn(&RuleCall) -> Option<ServiceSeed>`, the
+    // narrow read view — ADR-0020 X8) is proven by compilation; here we pin the
+    // id and the rule factory the registry composes.
     let def = stub::service_def();
     assert_eq!(def.id, "stub");
     assert_eq!((def.rules)().len(), 1);

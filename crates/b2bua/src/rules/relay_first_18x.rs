@@ -76,7 +76,7 @@ fn relay_first_18x_active(call: &Call) -> bool {
 /// The `fake-prack` strategy is active (a per-rule guard on the fake-prack-only
 /// rules — the machine itself is active for all three masking strategies).
 fn is_fake_prack(ctx: &RuleContext) -> bool {
-    call::helpers::relay_first_18x_strategy(ctx.call) == Some(RelayFirst18xStrategy::FakePrack)
+    ctx.call.relay_first_18x_strategy() == Some(RelayFirst18xStrategy::FakePrack)
 }
 
 // The `relayFirst18x` callflow service (ADR-0016). `Phase` is the declared
@@ -137,7 +137,7 @@ define_service! {
                     None
                 };
 
-                if call::helpers::relay_first_18x_first_relayed(ctx.call) {
+                if ctx.call.relay_first_18x_first_relayed() {
                     // Subsequent 18x — suppress relay; still PRACK + cache.
                     let mut actions = Vec::new();
                     if let Some(a) = prack_action {
@@ -213,7 +213,7 @@ define_service! {
                 let leg = ctx.source_leg_id.to_string();
                 let mut actions = Vec::new();
 
-                if let Some(stored) = call::helpers::relay_first_18x_stored_a_tag(ctx.call) {
+                if let Some(stored) = ctx.call.relay_first_18x_stored_a_tag() {
                     actions.push(RuleAction::AddTagMapping {
                         a_tag: stored.to_string(),
                         b_leg_id: leg.clone(),
@@ -222,7 +222,7 @@ define_service! {
                 }
 
                 if is_fake_prack(ctx) {
-                    let cached = call::helpers::cached_sdp_for_leg_dialog(ctx.call, &leg, &b_tag)
+                    let cached = ctx.call.cached_sdp_for_leg_dialog(&leg, &b_tag)
                         .map(|b| b.to_vec());
                     match cached {
                         Some(b) if !b.is_empty() => {
@@ -307,7 +307,7 @@ define_service! {
                     }]);
                 }
 
-                let alice_body = &ctx.call.a_leg_invite.body;
+                let alice_body = &ctx.call.a_leg_invite().body;
                 match build_answer_from_offer(&req.body, alice_body, &ctx.config.sip_local_ip, ctx.now_ms) {
                     SdpBuildResult::Ok(body) => ok(vec![
                         RuleAction::Respond {
@@ -401,11 +401,10 @@ pub fn project_cursor(call: &mut Call) {
 /// effects itself). Kept in sync with `defaults.rs::confirm-dialog`.
 fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
     let b = ctx.source_leg_id.to_string();
-    let a = ctx.call.a_leg.leg_id.clone();
+    let a = ctx.call.a_leg().leg_id.clone();
     let max_duration = ctx
         .call
-        .features
-        .as_ref()
+        .features()
         .map(|f| f.platform.max_duration_sec)
         .unwrap_or(3600);
     // Operator/worker knob (`B2buaConfig::keepalive_interval_sec`, production

@@ -420,6 +420,7 @@ dependencies = [
  "call",
  "call-limiter",
  "http-net",
+ "proptest",
  "repl-net",
  "serde",
  "serde_json",

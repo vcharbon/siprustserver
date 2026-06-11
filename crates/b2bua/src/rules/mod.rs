@@ -25,7 +25,7 @@ pub use executor::{execute_rules, pick_ranked};
 pub use docgen::{check_registry, render_registry, render_registry_html, MachineGraph};
 pub use service::{compose_rules, seed_services, ServiceDef, ServiceSeed, Terminal};
 pub use model::{
-    Effect, EffectKind, Match, MatchKind, MessageTransform, RuleAction, RuleContext,
+    Effect, EffectKind, Match, MatchKind, MessageTransform, RuleAction, RuleCall, RuleContext,
     RuleDefinition, RuleHandleResult, StatusMatch, CORE_LAYER, SERVICE_LAYER,
 };
 

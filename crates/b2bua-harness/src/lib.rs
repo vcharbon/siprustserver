@@ -136,6 +136,20 @@ impl B2buaSut {
         Self::start_inner(h, name, addr, decision, None, Arc::new(NoopLimiter), services, |_| {}).await
     }
 
+    /// [`start_with_services`](Self::start_with_services) plus the config
+    /// mutator hook (the reaper scenarios register a panicking probe rule AND
+    /// tune the reaper cadence).
+    pub async fn start_with_services_and_config(
+        h: &Harness,
+        name: &str,
+        addr: &str,
+        decision: Arc<dyn CallDecisionEngine>,
+        services: Vec<b2bua::rules::ServiceDef>,
+        tune: impl FnOnce(&mut B2buaConfig),
+    ) -> Self {
+        Self::start_inner(h, name, addr, decision, None, Arc::new(NoopLimiter), services, tune).await
+    }
+
     /// Bind a B2BUA with a custom [`CallLimiter`] (e.g. an `HttpCallLimiter` over
     /// the simulated HTTP fabric serving a real `LimiterServer`). No outbound
     /// proxy; `tune` may override config (e.g. `limiter_refresh_sec`,
@@ -397,6 +411,14 @@ impl B2buaSut {
             0,
             "lock leak: {} stranded per-call serialization lock(s)",
             self.lock_count()
+        );
+        // 4. (ADR-0020) the reaper's last-touched ledger mirrors the call map;
+        //    a residue is a stamp leak.
+        assert_eq!(
+            self._core.touched_count(),
+            0,
+            "stamp leak: {} stranded last-touched ledger entr(ies)",
+            self._core.touched_count()
         );
     }
 }

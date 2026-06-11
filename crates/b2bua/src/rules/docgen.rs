@@ -334,7 +334,7 @@ mod tests {
             effects: &[],
         }]
     }
-    fn stub_init(_: &call::Call) -> Option<ServiceSeed> {
+    fn stub_init(_: &crate::rules::RuleCall) -> Option<ServiceSeed> {
         None
     }
     fn stub_def() -> ServiceDef {

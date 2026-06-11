@@ -35,3 +35,6 @@ call-limiter = { path = "../call-limiter" }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
 # IdGen for the rule-engine `ActionExecutor` in state-machine tests.
 sip-txn = { path = "../sip-txn" }
+# ADR-0020 X7 refactor gate: the obligation extraction must be effect-multiset
+# equivalent to the pre-extraction `enforce` over arbitrary snapshots.
+proptest = { workspace = true }

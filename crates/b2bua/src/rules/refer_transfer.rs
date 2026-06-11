@@ -4,7 +4,7 @@
 //!
 //! There is no `defineService`/typed-ext machinery in the Rust port: the per-call
 //! state lives on the typed `Call.transfer` slice (mirrors `promote_pem`), and
-//! the rules are stateless `fn`s that read `ctx.call.transfer` and emit
+//! the rules are stateless `fn`s that read `ctx.call.transfer_state()` and emit
 //! `SetTransfer` to advance the phase. Activation guard = "the `transfer` slice
 //! is `Some`", checked per rule exactly like `promote_pem_active`.
 //!
@@ -69,11 +69,11 @@ fn timer_id(t: call::TimerType, leg: Option<&str>) -> String {
 }
 
 fn transfer_active(ctx: &RuleContext) -> bool {
-    call::helpers::transfer_active(ctx.call)
+    ctx.call.transfer_active()
 }
 
 fn state<'a>(ctx: &'a RuleContext<'a>) -> Option<&'a TransferState> {
-    call::helpers::transfer_state(ctx.call)
+    ctx.call.transfer_state()
 }
 
 /// Refer-To URI carries a `Replaces=` parameter → attended transfer (RFC 3891).
@@ -217,7 +217,7 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                 // Build the /call/refer request JSON the interpreter reposts.
                 let dialog_id = state_dialog_id(ctx, &leg_id);
                 let mut request = serde_json::Map::new();
-                request.insert("call_id".into(), serde_json::json!(ctx.call.a_leg.call_id));
+                request.insert("call_id".into(), serde_json::json!(ctx.call.a_leg().call_id));
                 request.insert("dialog_id".into(), serde_json::json!(dialog_id));
                 request.insert("refer_to".into(), serde_json::json!(refer_to));
                 if let Some(rb) = &referred_by {
@@ -378,7 +378,7 @@ define_service! {
 
                 // Held SDP from A's INVITE snapshot (preserves codecs, port 0,
                 // a=inactive). No profile → drop the body.
-                let a_invite = super::relay::rebuild_a_leg_invite(ctx.call);
+                let a_invite = super::relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());
                 let held = sip_message::extract_codec_profile(&a_invite.body).map(|profile| {
                     sip_message::build_held_sdp_from_profile(
                         &profile,
@@ -394,7 +394,7 @@ define_service! {
 
                 let raw_refer_to = new_refer_to.unwrap_or_else(|| st.refer_to_uri.clone());
                 let effective = to_bare_uri(&raw_refer_to);
-                let c_leg_id = format!("b-{}", ctx.call.b_legs.len() + 1);
+                let c_leg_id = format!("b-{}", ctx.call.b_legs().len() + 1);
 
                 let mut new_state = st.clone();
                 new_state.phase = TransferPhase::CRinging;
@@ -505,7 +505,7 @@ define_service! {
                 // Capture C's 200 SDP (drives the a-realign re-INVITE in 5b).
                 let c_initial_sdp = (!resp.body.is_empty()).then(|| resp.body.clone());
                 // A's SDP for the c-realign re-INVITE-C offer.
-                let a_sdp = super::relay::rebuild_a_leg_invite(ctx.call).body;
+                let a_sdp = super::relay::rebuild_a_leg_invite(ctx.call.a_leg_invite()).body;
 
                 let mut new_state = st.clone();
                 new_state.phase = TransferPhase::CRealigning;

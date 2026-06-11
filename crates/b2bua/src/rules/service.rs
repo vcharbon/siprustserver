@@ -15,7 +15,7 @@ use crate::effects::HandlerResult;
 use crate::event::CallEvent;
 
 use super::actions::ActionExecutor;
-use super::model::RuleContext;
+use super::model::{RuleCall, RuleContext};
 
 // Re-export the authoring registry types so `crate::rules::{ServiceDef,
 // ServiceSeed}` and the macros' `$crate::rules::…` references resolve identically
@@ -49,7 +49,7 @@ pub fn seed_services(
     direction: call::Direction,
 ) -> HandlerResult {
     for def in services {
-        let Some(seed) = (def.init)(&result.call) else {
+        let Some(seed) = (def.init)(&RuleCall::new(&result.call)) else {
             continue;
         };
         // 1) seed the cursor (the service id is its machine id),
@@ -63,7 +63,7 @@ pub fn seed_services(
         if !seed.actions.is_empty() {
             let sub = {
                 let ctx = RuleContext {
-                    call: &result.call,
+                    call: RuleCall::new(&result.call),
                     call_ref: &result.call.call_ref,
                     event: setup_event,
                     source_leg_id,
@@ -71,7 +71,7 @@ pub fn seed_services(
                     now_ms: exec.now_ms,
                     config: exec.config,
                 };
-                exec.execute(&seed.actions, &ctx)
+                exec.execute(&seed.actions, &result.call, &ctx)
             };
             result.call = sub.call;
             result.effects.extend(sub.effects);

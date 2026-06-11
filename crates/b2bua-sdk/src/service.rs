@@ -11,9 +11,14 @@
 //! the executor. The engine-side composition glue (`compose_rules` /
 //! `seed_services`, which need the executor) lives in `b2bua`, not here.
 
-use call::{Call, StateLabel};
+use call::StateLabel;
+// `Call` is nameable here ONLY for the [`ServiceSeed::data_write`] installer
+// (ADR-0016 X8's sanctioned one-shot data-backing write — a typed slice needs
+// the full struct). Rule handlers and `init` read through the narrow
+// [`RuleCall`](crate::model::RuleCall) view (ADR-0020 X8) and never see it.
+pub use call::Call;
 
-use crate::model::{RuleAction, RuleDefinition};
+use crate::model::{RuleAction, RuleCall, RuleDefinition};
 
 /// The terminal-state marker for a `sm_rule!` transition (ADR-0016 X9). Writing
 /// `transitions: [ State::Bridging => Terminal ]` declares that the rule
@@ -71,7 +76,7 @@ impl ServiceSeed {
 /// nothing), and a factory for its state-gated rules.
 pub struct ServiceDef {
     pub id: &'static str,
-    pub init: fn(&Call) -> Option<ServiceSeed>,
+    pub init: fn(&RuleCall) -> Option<ServiceSeed>,
     pub rules: fn() -> Vec<RuleDefinition>,
 }
 
@@ -85,7 +90,7 @@ pub struct ServiceDef {
 ///     id: "stub",
 ///     machine: STUB_MACHINE,
 ///     states: StubState { S0, S1 },
-///     init: |call: &Call| { /* -> Option<ServiceSeed> */ },
+///     init: |call: &RuleCall| { /* -> Option<ServiceSeed> */ },
 ///     rules: [ advance_rule() ],
 /// }
 /// ```
@@ -122,8 +127,9 @@ macro_rules! define_service {
         }
 
         /// The setup `init` hook (X8): seed the machine, or `None` to stay dormant.
-        pub fn init(call: &$crate::rules::Call) -> ::core::option::Option<$crate::rules::ServiceSeed> {
-            let f: fn(&$crate::rules::Call) -> ::core::option::Option<$crate::rules::ServiceSeed> = $init;
+        /// Reads the narrow [`RuleCall`]($crate::rules::RuleCall) view (ADR-0020 X8).
+        pub fn init(call: &$crate::rules::RuleCall) -> ::core::option::Option<$crate::rules::ServiceSeed> {
+            let f: fn(&$crate::rules::RuleCall) -> ::core::option::Option<$crate::rules::ServiceSeed> = $init;
             f(call)
         }
 

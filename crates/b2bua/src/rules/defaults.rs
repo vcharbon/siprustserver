@@ -55,7 +55,37 @@ fn keepalive_timeout(ctx: &RuleContext) -> i64 {
     ctx.config.keepalive_timeout_sec
 }
 fn max_duration(ctx: &RuleContext) -> i64 {
-    ctx.call.features.as_ref().map(|f| f.platform.max_duration_sec).unwrap_or(3600)
+    ctx.call.features().map(|f| f.platform.max_duration_sec).unwrap_or(3600)
+}
+
+/// Shared body of the reaper-verdict rules (ADR-0020 X1): force every
+/// still-unresolved leg terminal (mirroring `is_fully_resolved`, like
+/// `terminating-safety-timeout`), record the reason on the CDR, and command
+/// termination. No wire messages: the legs were force-resolved above, so
+/// `BeginTermination` skips them all and just moves the lifecycle — finalize
+/// promotes, the invariant discharges the obligations.
+fn reap_force_terminal(ctx: &RuleContext, reason: &'static str) -> Option<RuleHandleResult> {
+    let mut actions = Vec::new();
+    for leg in std::iter::once(ctx.call.a_leg()).chain(ctx.call.b_legs().iter()) {
+        let resolved = match leg.bye_disposition {
+            None => leg.state == LegState::Trying,
+            Some(b) => b.is_terminal(),
+        };
+        if !resolved {
+            actions.push(RuleAction::TerminateLeg {
+                leg_id: leg.leg_id.clone(),
+                bye_disposition: Some(ByeDisposition::ByeTimeout),
+            });
+        }
+    }
+    actions.push(RuleAction::AddCdrEvent {
+        event_type: CdrEventType::Bye,
+        leg_id: ctx.call.a_leg().leg_id.clone(),
+        status_code: None,
+        reason: Some(reason.into()),
+    });
+    actions.push(RuleAction::BeginTermination { reason: Some(reason.into()) });
+    ok(actions)
 }
 
 /// The ordered basic-B2BUA rule list. The SERVICE_LAYER `relayFirst18xTo180`
@@ -193,7 +223,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                 .direction(Direction::FromB),
             |ctx| {
                 let b = ctx.source_leg_id.to_string();
-                let a = ctx.call.a_leg.leg_id.clone();
+                let a = ctx.call.a_leg().leg_id.clone();
                 ok(vec![
                     RuleAction::ConfirmDialog { leg_id: b.clone() },
                     RuleAction::Merge { leg_a: a, leg_b: b.clone() },
@@ -254,7 +284,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                         bye_disposition: Some(ByeDisposition::Rejected),
                     },
                 ];
-                match &ctx.call.callback_context {
+                match ctx.call.callback_context() {
                     // Failover-capable call → ask /call/failure (origin external).
                     // The result (call-failure-result internal event) drives either
                     // `failover-create-leg` or `failover-terminate`. We deliberately
@@ -550,7 +580,7 @@ fn core_rules() -> Vec<RuleDefinition> {
         // ── lifecycle ───────────────────────────────────────────────────────
         rule("handle-cancel", &[], Match::cancelled(), |ctx| {
             let mut actions = Vec::new();
-            for b in &ctx.call.b_legs {
+            for b in ctx.call.b_legs() {
                 match b.state {
                     LegState::Confirmed => actions.push(RuleAction::DestroyLeg { leg_id: b.leg_id.clone() }),
                     LegState::Trying | LegState::Early => actions.push(RuleAction::CancelLeg { leg_id: b.leg_id.clone() }),
@@ -559,7 +589,7 @@ fn core_rules() -> Vec<RuleDefinition> {
             }
             actions.push(RuleAction::AddCdrEvent {
                 event_type: CdrEventType::Cancel,
-                leg_id: ctx.call.a_leg.leg_id.clone(),
+                leg_id: ctx.call.a_leg().leg_id.clone(),
                 status_code: None,
                 reason: None,
             });
@@ -576,7 +606,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                 RuleAction::AddCdrEvent { event_type: CdrEventType::Timeout, leg_id: leg.clone(), status_code: None, reason: Some("no_answer_timeout".into()) },
                 RuleAction::DestroyLeg { leg_id: leg.clone() },
             ];
-            match &ctx.call.callback_context {
+            match ctx.call.callback_context() {
                 // Failover-capable → ask /call/failure (origin no_answer_timeout);
                 // the result drives `failover-create-leg` / `failover-terminate`.
                 Some(cbctx) => actions.push(RuleAction::FailureAsyncHttp {
@@ -592,13 +622,13 @@ fn core_rules() -> Vec<RuleDefinition> {
         }),
         rule("max-duration", &[], Match::timer().timer_type(TimerType::GlobalDuration), |ctx| {
             ok(vec![
-                RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: ctx.call.a_leg.leg_id.clone(), status_code: None, reason: Some("max_duration".into()) },
+                RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: ctx.call.a_leg().leg_id.clone(), status_code: None, reason: Some("max_duration".into()) },
                 RuleAction::BeginTermination { reason: Some("max-duration".into()) },
             ])
         }),
         rule("keepalive", &[], Match::timer().timer_type(TimerType::Keepalive).call_state(CallModelState::Active), |ctx| {
             let mut actions = Vec::new();
-            for leg_id in call::helpers::all_peered_legs(ctx.call) {
+            for leg_id in ctx.call.all_peered_legs() {
                 actions.push(RuleAction::SendRequestToLeg { leg_id: leg_id.clone(), method: "OPTIONS".into(), body: vec![], content_type: None });
                 actions.push(RuleAction::ScheduleTimer { timer_type: TimerType::KeepaliveTimeout, delay_sec: keepalive_timeout(ctx), leg_id: Some(leg_id) });
             }
@@ -612,6 +642,32 @@ fn core_rules() -> Vec<RuleDefinition> {
                 RuleAction::BeginTermination { reason: Some("keepalive-timeout".into()) },
             ])
         }),
+        // ── call reaper verdicts (ADR-0020 X1/X6) ───────────────────────────
+        // The reaper's sweep / panic-strike verdicts arrive as ordinary
+        // InternalEvents and are handled by ordinary CORE rules — the single
+        // funnel: force every unresolved leg terminal (no wire traffic — the
+        // call is provably dead: its stamp froze past the idle threshold, or
+        // its handler panicked), record the reason, and BeginTermination; the
+        // invariant then promotes → Terminated and discharges the obligations
+        // (CDR + limiter) exactly once. The `discharge` outcome deliberately
+        // has NO rule (the router's bypass branch owns it — rules are the
+        // thing that failed by then).
+        rule(
+            "reaper-stale",
+            &[],
+            Match::internal_event()
+                .topic(crate::reaper::REAPER_TOPIC)
+                .outcome(crate::reaper::OUTCOME_STALE),
+            |ctx| reap_force_terminal(ctx, "reaper-stale"),
+        ),
+        rule(
+            "reaper-fatal-error",
+            &[],
+            Match::internal_event()
+                .topic(crate::reaper::REAPER_TOPIC)
+                .outcome(crate::reaper::OUTCOME_FATAL),
+            |ctx| reap_force_terminal(ctx, "handler-panic"),
+        ),
         rule("terminating-safety-timeout", &[], Match::timer().timer_type(TimerType::TerminatingTimeout).call_state(CallModelState::Terminating), |ctx| {
             // A BYE we sent went unanswered within TERMINATING_TIMEOUT_MS (a lost
             // BYE, a dead UAC/UAS, or proxy churn during teardown). The call is
@@ -625,7 +681,7 @@ fn core_rules() -> Vec<RuleDefinition> {
             // replication delete propagates. If the call already resolved, the
             // loop yields no actions and this stays the harmless canary it was.
             let mut actions = Vec::new();
-            for leg in std::iter::once(&ctx.call.a_leg).chain(ctx.call.b_legs.iter()) {
+            for leg in std::iter::once(ctx.call.a_leg()).chain(ctx.call.b_legs().iter()) {
                 let resolved = match leg.bye_disposition {
                     None => leg.state == LegState::Trying,
                     Some(b) => b.is_terminal(),

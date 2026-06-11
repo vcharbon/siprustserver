@@ -168,7 +168,7 @@ pub async fn handle_initial_invite(
     services: &[ServiceDef],
     now_ms: i64,
 ) -> HandlerResult {
-    let a_invite = relay::rebuild_a_leg_invite(&call);
+    let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
     let req = build_request(&a_invite);
 
     match decision.new_call(req).await {

@@ -3,9 +3,13 @@
 //! (non-type-narrowed) shape sufficient for the basic B2BUA. Service-layer
 //! ext narrowing and rule composition are deferred with their consumers.
 
+use std::collections::BTreeMap;
+
+use call::features::{FeatureActivations, RelayFirst18xStrategy};
 use call::{
-    Call, CallModelState, CdrEventType, Dialog, Direction, Leg, LegDisposition, LegKind, LegState,
-    MachineId, StateLabel, TimerType,
+    ALegInviteSnapshot, ActivePeer, Call, CallModelState, CdrEvent, CdrEventType, Dialog,
+    Direction, ExtMap, Leg, LegDisposition, LegKind, LegState, MachineId, PromotePemState,
+    StateLabel, TagMapping, TimerType, TransferState,
 };
 use sip_message::{Method, SipRequest, SipResponse};
 
@@ -203,7 +207,7 @@ impl Match {
         }
 
         if let Some(states) = &self.call_state {
-            if !states.contains(&ctx.call.state) {
+            if !states.contains(&ctx.call.state()) {
                 return false;
             }
         }
@@ -661,10 +665,129 @@ impl RuleAction {
     }
 }
 
+/// The **refined view** of a [`Call`] a rule reads (ADR-0020 X8) — the entire
+/// read surface a rule handler, `Match::filter` guard, or service `init` hook
+/// gets. A borrowed newtype exposing only the *semantic* call state; there is
+/// deliberately **no `Deref` and no raw escape hatch** to the underlying
+/// `Call`, so framework internals are not part of the rule-author interface
+/// and can change freely. The write side is unchanged: rules mutate only by
+/// returning [`RuleAction`]s through the executor.
+///
+/// Hidden by design (the framework-internal fields — do not add accessors for
+/// these): `topology` (the HA `(p,b)` version vector), `worker_index`,
+/// `sampled`/`trace_id`/`root_span_id` (observability), `message_count`,
+/// `terminating_refresh_legs`, `a_leg_pending_vias`/`a_leg_pending_cseq`
+/// (relay frame state), `limiter_entries`, `timers`, `active_rules`,
+/// `policy_update_headers`/`policy_update_body`, `billing_context`,
+/// `emergency`. Add an accessor only when a real rule needs it — never
+/// speculatively.
+#[derive(Clone, Copy)]
+pub struct RuleCall<'a>(&'a Call);
+
+impl<'a> RuleCall<'a> {
+    /// Wrap a call for rule consumption. Built by the engine at the dispatch
+    /// boundary (router / seed path); constructing one grants only the narrow
+    /// read surface below.
+    pub fn new(call: &'a Call) -> Self {
+        Self(call)
+    }
+
+    // ── identity / lifecycle ─────────────────────────────────────────────
+    pub fn call_ref(&self) -> &'a str {
+        &self.0.call_ref
+    }
+    pub fn state(&self) -> CallModelState {
+        self.0.state
+    }
+    /// Every machine's current cursor (ADR-0016 X4) — read-only; `SetState` /
+    /// `ClearState` are the only writers.
+    pub fn sm_cursors(&self) -> &'a BTreeMap<MachineId, StateLabel> {
+        &self.0.sm_cursors
+    }
+    pub fn created_at(&self) -> i64 {
+        self.0.created_at
+    }
+
+    // ── legs ─────────────────────────────────────────────────────────────
+    pub fn a_leg(&self) -> &'a Leg {
+        &self.0.a_leg
+    }
+    pub fn b_legs(&self) -> &'a [Leg] {
+        &self.0.b_legs
+    }
+    /// The read-only snapshot of the original a-leg INVITE (URI/headers/body).
+    pub fn a_leg_invite(&self) -> &'a ALegInviteSnapshot {
+        &self.0.a_leg_invite
+    }
+
+    // ── routing / decision ───────────────────────────────────────────────
+    /// The opaque decision-layer token (carries the reroute plan, ADR-0017).
+    pub fn callback_context(&self) -> Option<&'a str> {
+        self.0.callback_context.as_deref()
+    }
+    pub fn features(&self) -> Option<&'a FeatureActivations> {
+        self.0.features.as_ref()
+    }
+    pub fn active_peer(&self) -> Option<&'a ActivePeer> {
+        self.0.active_peer.as_ref()
+    }
+    pub fn tag_map(&self) -> &'a [TagMapping] {
+        &self.0.tag_map
+    }
+    /// The b-leg real-tag ↔ a-facing-tag mapping for a given b-leg dialog.
+    pub fn find_by_b_tag(&self, b_leg_id: &str, b_tag: &str) -> Option<&'a TagMapping> {
+        call::helpers::find_by_b_tag(self.0, b_leg_id, b_tag)
+    }
+    /// Both peered leg ids (`active_peer`), or empty when split.
+    pub fn all_peered_legs(&self) -> Vec<String> {
+        call::helpers::all_peered_legs(self.0)
+    }
+
+    // ── service slices (typed data backing; the cursor lives in sm_cursors) ──
+    pub fn ext(&self) -> Option<&'a ExtMap> {
+        self.0.ext.as_ref()
+    }
+    pub fn transfer_state(&self) -> Option<&'a TransferState> {
+        self.0.transfer.as_ref()
+    }
+    pub fn transfer_active(&self) -> bool {
+        call::helpers::transfer_active(self.0)
+    }
+    pub fn relay_first_18x_strategy(&self) -> Option<RelayFirst18xStrategy> {
+        call::helpers::relay_first_18x_strategy(self.0)
+    }
+    pub fn relay_first_18x_first_relayed(&self) -> bool {
+        call::helpers::relay_first_18x_first_relayed(self.0)
+    }
+    pub fn relay_first_18x_stored_a_tag(&self) -> Option<&'a str> {
+        call::helpers::relay_first_18x_stored_a_tag(self.0)
+    }
+    pub fn promote_pem_state(&self) -> Option<&'a PromotePemState> {
+        self.0.promote_pem.as_ref()
+    }
+    pub fn promote_pem_promoted(&self) -> bool {
+        call::helpers::promote_pem_promoted(self.0)
+    }
+    pub fn promote_pem_window_open(&self) -> bool {
+        call::helpers::promote_pem_window_open(self.0)
+    }
+    /// The SDP cached on a b-leg early dialog (`fake-prack`).
+    pub fn cached_sdp_for_leg_dialog(&self, leg_id: &str, b_tag: &str) -> Option<&'a [u8]> {
+        call::helpers::cached_sdp_for_leg_dialog(self.0, leg_id, b_tag)
+    }
+
+    // ── bookkeeping (read-only; written via `AddCdrEvent`) ───────────────
+    pub fn cdr_events(&self) -> &'a [CdrEvent] {
+        &self.0.cdr_events
+    }
+}
+
 /// The resolved context a rule sees. Built by the executor/router from the
-/// event + call (the source's match-narrowed `RuleContext`, flattened).
+/// event + call (the source's match-narrowed `RuleContext`, flattened). The
+/// call is exposed as the narrow [`RuleCall`] view — the framework keeps the
+/// full `Call` on its side of the seam (ADR-0020 X8).
 pub struct RuleContext<'a> {
-    pub call: &'a Call,
+    pub call: RuleCall<'a>,
     pub call_ref: &'a str,
     pub event: &'a CallEvent,
     pub source_leg_id: &'a str,
@@ -705,11 +828,11 @@ impl<'a> RuleContext<'a> {
         }
     }
     /// The leg the event arrived on.
-    pub fn source_leg(&self) -> Option<&Leg> {
-        if self.source_leg_id == self.call.a_leg.leg_id {
-            Some(&self.call.a_leg)
+    pub fn source_leg(&self) -> Option<&'a Leg> {
+        if self.source_leg_id == self.call.a_leg().leg_id {
+            Some(self.call.a_leg())
         } else {
-            self.call.b_legs.iter().find(|l| l.leg_id == self.source_leg_id)
+            self.call.b_legs().iter().find(|l| l.leg_id == self.source_leg_id)
         }
     }
     /// The dialog the event is on (confirmed dialog, else the first).

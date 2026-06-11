@@ -64,15 +64,15 @@ fn reason_header(status: u16, phrase: &str) -> String {
 
 /// The PEM service owns this call.
 fn promote_pem_active(ctx: &RuleContext) -> bool {
-    call::helpers::relay_first_18x_strategy(ctx.call) == Some(RelayFirst18xStrategy::PromotePemTo200)
+    ctx.call.relay_first_18x_strategy() == Some(RelayFirst18xStrategy::PromotePemTo200)
 }
 
 fn promoted(ctx: &RuleContext) -> bool {
-    call::helpers::promote_pem_promoted(ctx.call)
+    ctx.call.promote_pem_promoted()
 }
 
 fn window_open(ctx: &RuleContext) -> bool {
-    call::helpers::promote_pem_window_open(ctx.call)
+    ctx.call.promote_pem_window_open()
 }
 
 /// Allow + Supported header updates for messages we mint toward Alice.
@@ -209,18 +209,18 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
             |ctx| {
                 let resp = ctx.response()?;
                 let b = ctx.source_leg_id.to_string();
-                let a = ctx.call.a_leg.leg_id.clone();
+                let a = ctx.call.a_leg().leg_id.clone();
                 let b_tag = resp.to.tag.clone().unwrap_or_default();
                 let final_sdp = resp.body.clone();
-                let state = call::helpers::promote_pem_state(ctx.call).cloned().unwrap_or_default();
+                let state = ctx.call.promote_pem_state().cloned().unwrap_or_default();
                 let promoted_sdp = state.promoted_sdp.clone();
 
                 // Re-seed the (bLegId, winningBTag) → aFacingTag mapping under the
                 // winning fork's tag using the SAME a-facing tag pinned at
                 // promotion (forking). confirm-dialog reuses a pre-seeded a-tag
                 // via find_by_b_tag, so this keeps Alice's identity stable.
-                let existing = call::helpers::find_by_b_tag(ctx.call, &b, &b_tag);
-                let seeded = ctx.call.tag_map.iter().find(|m| m.b_leg_id == b);
+                let existing = ctx.call.find_by_b_tag(&b, &b_tag);
+                let seeded = ctx.call.tag_map().iter().find(|m| m.b_leg_id == b);
                 let a_facing = existing
                     .map(|m| m.a_tag.clone())
                     .or_else(|| seeded.map(|m| m.a_tag.clone()));
@@ -246,7 +246,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 actions.push(RuleAction::ConfirmDialog { leg_id: b.clone() });
                 actions.push(RuleAction::AckLeg { leg_id: b.clone() });
                 actions.push(RuleAction::Merge { leg_a: a.clone(), leg_b: b.clone() });
-                for other in &ctx.call.b_legs {
+                for other in ctx.call.b_legs() {
                     if other.leg_id != b && other.state != LegState::Terminated {
                         actions.push(RuleAction::DestroyLeg { leg_id: other.leg_id.clone() });
                     }
@@ -277,7 +277,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 }
                 let a_dialog_cseq = ctx
                     .call
-                    .a_leg
+                    .a_leg()
                     .dialogs
                     .first()
                     .map(|d| d.sip.local_cseq)
@@ -314,7 +314,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     if !promote_pem_active(ctx) {
                         return false;
                     }
-                    let expected = call::helpers::promote_pem_state(ctx.call)
+                    let expected = ctx.call.promote_pem_state()
                         .and_then(|s| s.resync_reinvite_cseq);
                     match (ctx.response(), expected) {
                         (Some(r), Some(c)) => r.cseq.seq as i64 == c,
@@ -395,7 +395,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
             Match::request()
                 .method("ACK")
                 .direction(Direction::FromA)
-                .filter(|ctx| promote_pem_active(ctx) && promoted(ctx) && ctx.call.active_peer.is_none()),
+                .filter(|ctx| promote_pem_active(ctx) && promoted(ctx) && ctx.call.active_peer().is_none()),
             |_ctx| {
                 ok(vec![RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Provisional,
@@ -448,8 +448,7 @@ fn keepalive_interval(ctx: &RuleContext) -> i64 {
 }
 fn max_duration(ctx: &RuleContext) -> i64 {
     ctx.call
-        .features
-        .as_ref()
+        .features()
         .map(|f| f.platform.max_duration_sec)
         .unwrap_or(3600)
 }

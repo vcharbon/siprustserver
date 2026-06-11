@@ -13,8 +13,8 @@ use b2bua::effects::HandlerResult;
 use b2bua::event::CallEvent;
 use b2bua::initial_invite::build_initial_call;
 use b2bua::rules::{
-    execute_rules, pick_ranked, seed_services, ActionExecutor, Match, RuleAction, RuleContext,
-    RuleDefinition, RuleHandleResult, ServiceSeed,
+    execute_rules, pick_ranked, seed_services, ActionExecutor, Match, RuleAction, RuleCall,
+    RuleContext, RuleDefinition, RuleHandleResult, ServiceSeed,
 };
 use b2bua::{define_service, sm_rule};
 use call::{Call, Direction, MachineId, StateLabel};
@@ -36,7 +36,7 @@ mod stub {
         // Always applicable in the test; a real service decides applicability
         // here (returning `None` to stay dormant). Seeds cursor=S0 + a data
         // marker (using `callback_context` as the stub's "data backing").
-        init: |_call: &Call| {
+        init: |_call: &RuleCall| {
             Some(
                 ServiceSeed::new(StubState::S0.label())
                     .with_data(|c| c.callback_context = Some("stub-seeded".into())),
@@ -112,7 +112,7 @@ fn info_event() -> CallEvent {
 
 fn ctx_for<'a>(call: &'a Call, event: &'a CallEvent, config: &'a B2buaConfig) -> RuleContext<'a> {
     RuleContext {
-        call,
+        call: RuleCall::new(call),
         call_ref: &call.call_ref,
         event,
         source_leg_id: "a",
@@ -154,18 +154,18 @@ fn stub_service_init_seeds_then_rule_advances_then_declines() {
     let advanced = {
         let ctx = ctx_for(&seeded.call, &event, &config);
         assert_eq!(
-            pick_ranked(&rules, &ctx).first().map(|r| r.id),
+            pick_ranked(&rules, &seeded.call, &ctx).first().map(|r| r.id),
             Some("stub-advance"),
             "candidate in S0"
         );
-        execute_rules(&rules, &ctx, &exec, |c: &RuleContext| HandlerResult::new(c.call.clone()))
+        execute_rules(&rules, &seeded.call, &ctx, &exec, &b2bua::obligations::ObligationSet::core())
     };
     assert_eq!(cursor(&advanced.call).as_deref(), Some("S1"), "SetState moved cursor to S1");
 
     // ── declines in S1: the S0-gated rule is no longer a candidate ──
     {
         let ctx = ctx_for(&advanced.call, &event, &config);
-        assert!(pick_ranked(&rules, &ctx).is_empty(), "rule declines in S1");
+        assert!(pick_ranked(&rules, &advanced.call, &ctx).is_empty(), "rule declines in S1");
     }
 }
 
@@ -180,7 +180,7 @@ fn dormant_service_leaves_call_untouched() {
     let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
     let event = info_event();
 
-    fn dormant_init(_: &Call) -> Option<ServiceSeed> {
+    fn dormant_init(_: &RuleCall) -> Option<ServiceSeed> {
         None
     }
     let dormant = ServiceDef { id: "dormant", init: dormant_init, rules: Vec::new };

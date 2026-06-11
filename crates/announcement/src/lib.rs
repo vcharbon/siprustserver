@@ -28,7 +28,7 @@
 //! (the one-hop service→global command, `BeginTermination`).
 
 use b2bua_sdk::rules::{
-    Call, Effect, Match, Method, RuleAction, RuleContext, RuleHandleResult, Terminal,
+    Effect, Match, Method, RuleAction, RuleCall, RuleContext, RuleHandleResult, Terminal,
 };
 use b2bua_sdk::{define_service, sm_rule};
 use call::{CdrEventType, Direction, LegState};
@@ -54,15 +54,15 @@ struct AnnData {
     dest_port: u16,
 }
 
-fn ann_data(call: &Call) -> Option<AnnData> {
-    let v = call.ext.as_ref()?.get(EXT_KEY)?.clone();
+fn ann_data(call: &RuleCall) -> Option<AnnData> {
+    let v = call.ext()?.get(EXT_KEY)?.clone();
     serde_json::from_value(v).ok()
 }
 
 /// The parked media leg toward the MRF (the single unadopted `media`-kind leg
 /// that is not yet torn down).
-fn media_leg_id(call: &Call) -> Option<String> {
-    call.b_legs
+fn media_leg_id(call: &RuleCall) -> Option<String> {
+    call.b_legs()
         .iter()
         .find(|l| call::helpers::leg_kind(l) == call::LegKind::Media && l.state != LegState::Terminated)
         .map(|l| l.leg_id.clone())
@@ -78,8 +78,8 @@ fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
 /// as a 183 early-media, ACK the media dialog, open the MSCML control channel,
 /// and advance to `Announcing`.
 fn on_media_answer(ctx: &RuleContext) -> Option<RuleHandleResult> {
-    let data = ann_data(ctx.call)?;
-    let media = media_leg_id(ctx.call)?;
+    let data = ann_data(&ctx.call)?;
+    let media = media_leg_id(&ctx.call)?;
     let resp = ctx.response()?;
     let mrf_sdp = resp.body.clone();
     ok(vec![
@@ -114,8 +114,8 @@ fn on_media_answer(ctx: &RuleContext) -> Option<RuleHandleResult> {
 /// Answer the INFO, BYE the media leg, dial the real destination, advance to
 /// `Bridging` (where the framework's core bridge takes over).
 fn on_mscml_done(ctx: &RuleContext) -> Option<RuleHandleResult> {
-    let data = ann_data(ctx.call)?;
-    let media = media_leg_id(ctx.call)?;
+    let data = ann_data(&ctx.call)?;
+    let media = media_leg_id(&ctx.call)?;
     ok(vec![
         // Answer the MRF's in-dialog INFO (the B2BUA is its UAS).
         RuleAction::Respond {
@@ -149,7 +149,7 @@ fn on_mscml_done(ctx: &RuleContext) -> Option<RuleHandleResult> {
 /// @OfferingMrf/@Announcing — the media leg failed (MRF rejected/timed out).
 /// Terminate the call cleanly (the one-hop service → global command).
 fn on_media_failure(ctx: &RuleContext) -> Option<RuleHandleResult> {
-    let media = media_leg_id(ctx.call)?;
+    let media = media_leg_id(&ctx.call)?;
     let resp = ctx.response()?;
     let status = resp.status;
     let reason = resp.reason.clone();
@@ -173,7 +173,7 @@ fn on_media_failure(ctx: &RuleContext) -> Option<RuleHandleResult> {
 /// Is the event a response on the parked media leg? (the rule filter — the media
 /// leg is the unadopted `media`-kind leg).
 fn on_media_leg(ctx: &RuleContext) -> bool {
-    media_leg_id(ctx.call).as_deref() == Some(ctx.source_leg_id)
+    media_leg_id(&ctx.call).as_deref() == Some(ctx.source_leg_id)
 }
 
 // ── the service machine ──────────────────────────────────────────────────────
@@ -184,7 +184,7 @@ define_service! {
     states: State { OfferingMrf, Announcing },
     // Activate iff the routing decision requested an announcement; seed the
     // cursor and launch the unadopted media leg toward the MRF.
-    init: |call: &Call| {
+    init: |call: &RuleCall| {
         let data = ann_data(call)?;
         Some(
             b2bua_sdk::rules::ServiceSeed::new(State::OfferingMrf.label()).with_actions(vec![

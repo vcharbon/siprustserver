@@ -40,8 +40,16 @@ pub struct ActionExecutor<'a> {
 }
 
 impl<'a> ActionExecutor<'a> {
-    pub fn execute(&self, actions: &[RuleAction], ctx: &RuleContext) -> HandlerResult {
-        let mut call = ctx.call.clone();
+    /// Apply `actions` to a working copy of the authoritative `call`. The
+    /// `ctx` view carries the event; the full struct comes in explicitly —
+    /// rules never hold it (ADR-0020 X8).
+    pub fn execute(
+        &self,
+        actions: &[RuleAction],
+        call: &Call,
+        ctx: &RuleContext,
+    ) -> HandlerResult {
+        let mut call = call.clone();
         let mut fx = HandlerEffects::new();
         for action in actions {
             self.apply(action, ctx, &mut call, &mut fx);
@@ -143,7 +151,7 @@ impl<'a> ActionExecutor<'a> {
             } => {
                 let n = call.b_legs.len() + 1;
                 let leg_id = format!("b-{n}");
-                let a_invite = relay::rebuild_a_leg_invite(call);
+                let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
                 let (leg, effect) = relay::build_b_leg(
                     &call.call_ref,
                     &leg_id,
@@ -350,7 +358,7 @@ impl<'a> ActionExecutor<'a> {
             }
             RuleAction::RelayFailureToALeg { status, reason } => {
                 let a_tag = self.ensure_a_dialog(call);
-                let a_invite = relay::rebuild_a_leg_invite(call);
+                let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
                 let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
                 fx.outbound.push(relay::response_to_a_leg(
                     &a_invite,
@@ -366,7 +374,7 @@ impl<'a> ActionExecutor<'a> {
             }
             RuleAction::RespondToALeg { status, reason, header_updates, contacts } => {
                 let a_tag = self.ensure_a_dialog(call);
-                let a_invite = relay::rebuild_a_leg_invite(call);
+                let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
                 let extra = build_a_leg_response_headers(header_updates, contacts);
                 // No B2BUA Contact: a redirect carries its own Contact list (via
                 // `extra`), a reject carries none (ADR-0017 header-ownership X2).
@@ -856,7 +864,7 @@ impl<'a> ActionExecutor<'a> {
                     a_face
                 }
             };
-            let a_invite = relay::rebuild_a_leg_invite(call);
+            let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
             let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
             let mut passthrough = filter_passthrough(relay::relay_response_passthrough_headers(resp));
             // A 2xx INVITE answer the B2BUA mints toward the caller advertises the
@@ -892,7 +900,7 @@ impl<'a> ActionExecutor<'a> {
 
         // ── Default: regenerate the INVITE response on the a-leg server txn ──
         let a_tag = self.ensure_a_dialog(call);
-        let a_invite = relay::rebuild_a_leg_invite(call);
+        let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
         // Reliable-provisional negotiation headers (Require/Supported/RSeq) pass
         // through transparently so end-to-end PRACK keeps working (RFC 3262).
@@ -1099,7 +1107,7 @@ impl<'a> ActionExecutor<'a> {
             }
         }
         let tag = preferred.unwrap_or_else(|| self.id_gen.new_tag());
-        let a_invite = relay::rebuild_a_leg_invite(call);
+        let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let remote_target = get_header(&a_invite.headers, "contact")
             .map(unwrap_angle)
             .unwrap_or_else(|| a_invite.from.uri.clone());
@@ -1390,7 +1398,7 @@ impl<'a> ActionExecutor<'a> {
         let content_type = content_type
             .map(str::to_string)
             .or_else(|| (!body.is_empty()).then(|| "application/sdp".to_string()));
-        let a_invite = relay::rebuild_a_leg_invite(call);
+        let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
         let mut extra_headers = Vec::new();
         if let Some(pem) = p_early_media {

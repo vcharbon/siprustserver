@@ -27,8 +27,9 @@ use crate::event::CallEvent;
 use crate::initial_invite::{build_initial_call, handle_initial_invite};
 use crate::limiter::CallLimiter;
 use crate::metrics::B2buaMetrics;
+use crate::obligations::ObligationSet;
 use crate::repl::{Readiness, ReadinessState};
-use crate::rules::{execute_rules, ActionExecutor, RuleContext, RuleDefinition, ServiceDef};
+use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext, RuleDefinition, ServiceDef};
 use crate::store::CallState;
 use crate::timers::TimerService;
 
@@ -52,6 +53,10 @@ pub struct RouterCtx {
     /// service is retrofitted (slices 7/8).
     pub services: Arc<Vec<ServiceDef>>,
     pub metrics: B2buaMetrics,
+    /// The obligation registry (ADR-0020 X7) — what every call owes at release
+    /// (the CDR, the limiter decrements), derived from the snapshot by
+    /// `invariants::enforce` on each `→ Terminated` transition.
+    pub obligations: Arc<ObligationSet>,
     /// Self-reported readiness driving the OPTIONS health responder (S7). The
     /// default/legacy path uses [`Readiness::always_ready`] → always 200.
     pub readiness: Readiness,
@@ -636,6 +641,60 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
     let _guard = ctx.state.lock(&call_ref).await;
     let now_ms = ctx.clock.now_ms();
 
+    // ── Call-reaper verdict gate (ADR-0020 X5/X6) — BEFORE any hydration ──
+    // A verdict is check-then-act made safe: it applies only if the call's
+    // last-touched stamp still matches what the sweep observed (stale) or the
+    // call is still resident (fatal-error/discharge). The gate runs before the
+    // in-dialog hydrate below so a late verdict for a RELEASED call can never
+    // resurrect it from the replica store via on-demand reclaim.
+    if let CallEvent::InternalEvent { topic, outcome, payload, .. } = &event {
+        if topic == crate::reaper::REAPER_TOPIC {
+            let watermark = payload.get("watermark").and_then(|v| v.as_i64());
+            let current = ctx.state.last_touched(&call_ref);
+            if !crate::reaper::verdict_confirmed(outcome, watermark, current) {
+                if current.is_none() && ctx.state.peek(&call_ref).is_none() {
+                    // The call is gone — but this verdict's dispatch may have
+                    // spun up a fresh per-call queue (+ lock entry). Tear the
+                    // ephemera down via the orphan path so nothing ratchets.
+                    drop(_guard);
+                    release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
+                }
+                return;
+            }
+            if outcome == crate::reaper::OUTCOME_DISCHARGE {
+                // Strike-2: the rules path itself failed. Force the last
+                // persisted snapshot terminal and run it through the ORDINARY
+                // finalize → enforce → process_result — the ObligationSet
+                // discharges the CDR + limiter holds, RemoveCall rides
+                // release_call(Terminated), the delete propagates (X6).
+                let Some(call) = ctx.state.peek(&call_ref) else { return };
+                ctx.metrics.bump_reaper_discharged();
+                let before = call.clone();
+                let result = crate::rules::invariants::enforce(
+                    &ctx.obligations,
+                    &before,
+                    crate::rules::invariants::finalize(crate::reaper::discharge_result(
+                        call, now_ms,
+                    )),
+                );
+                process_result(ctx, &call_ref, result, now_ms).await;
+                return;
+            }
+            // A confirmed stale / fatal-error verdict falls through to the
+            // normal rules (`reaper-stale` / `reaper-fatal-error`). It does
+            // NOT refresh the stamp — an ineffective verdict must keep the
+            // call stale so the sweep escalates instead of waiting idle_max.
+        } else {
+            ctx.state.touch(&call_ref, now_ms);
+        }
+    } else {
+        // The last-touched stamp (ADR-0020 X4): one site covers every
+        // dispatched event class because all of them funnel through here. A
+        // wedged FIFO never reaches this line — its stamp freezes, which IS
+        // the staleness signal the sweep reads.
+        ctx.state.touch(&call_ref, now_ms);
+    }
+
     let result = if res.initial_invite {
         if ctx.state.peek(&call_ref).is_some() {
             return; // retransmitted INVITE for an existing call — ignore
@@ -658,7 +717,7 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
         // Created-then-rejected mirrors the decision-reject path below so the
         // Terminated invariant reaps the call + propagates the delete.
         if call.a_leg.from_tag.is_empty() {
-            let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call);
+            let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
             let rejected = crate::initial_invite::reject_call(
                 call.clone(),
                 &a_invite,
@@ -669,11 +728,11 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
                 &ctx.id_gen,
                 now_ms,
             );
-            crate::rules::invariants::enforce(&call, crate::rules::invariants::finalize(rejected))
+            crate::rules::invariants::enforce(&ctx.obligations, &call, crate::rules::invariants::finalize(rejected))
         } else {
             let result =
                 handle_initial_invite(call.clone(), ctx.decision.as_ref(), ctx.limiter.as_ref(), &ctx.config, &ctx.id_gen, &ctx.services, now_ms).await;
-            crate::rules::invariants::enforce(&call, crate::rules::invariants::finalize(result))
+            crate::rules::invariants::enforce(&ctx.obligations, &call, crate::rules::invariants::finalize(result))
         }
     } else {
         // In-dialog: peek the in-memory map, falling back to the acting-backup
@@ -781,10 +840,10 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
         ) {
             let before = call.clone();
             let res = handle_limiter_refresh(ctx, call, now_ms).await;
-            crate::rules::invariants::enforce(&before, crate::rules::invariants::finalize(res))
+            crate::rules::invariants::enforce(&ctx.obligations, &before, crate::rules::invariants::finalize(res))
         } else {
             let rule_ctx = RuleContext {
-                call: &call,
+                call: RuleCall::new(&call),
                 call_ref: &call_ref,
                 event: &event,
                 source_leg_id: &res.source_leg_id,
@@ -797,15 +856,11 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
                 id_gen: &ctx.id_gen,
                 now_ms,
             };
-            execute_rules(&ctx.rules, &rule_ctx, &exec, default_handler)
+            execute_rules(&ctx.rules, &call, &rule_ctx, &exec, &ctx.obligations)
         }
     };
 
     process_result(ctx, &call_ref, result, now_ms).await;
-}
-
-fn default_handler(ctx: &RuleContext) -> HandlerResult {
-    HandlerResult::new(ctx.call.clone())
 }
 
 /// Handle a `LimiterRefresh` timer: migrate every live hold to the current
@@ -897,6 +952,14 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
         ctx.state.flush(&result.call);
     }
 
+    // The terminal `RemoveCall` is interpreted LAST — after the buffered
+    // `WriteCdr` enqueue (ADR-0020 X2). It used to run here in the critical
+    // lane, which propagated the replica delete *before* the CDR was even
+    // enqueued: a failure in that window erased the call everywhere (including
+    // the backup Element) with no CDR. Deferring only delays the eviction /
+    // txn-cancel by the in-process lanes below; the call is already
+    // unreachable for new work (its state is persisted and terminal).
+    let mut remove_call = false;
     for eff in &result.effects.critical {
         match eff {
             CriticalStateEffect::ScheduleTimer(entry) => {
@@ -909,9 +972,7 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
                 ctx.timers.cancel_all(call_ref.to_string()).await
             }
             CriticalStateEffect::Flush => ctx.state.flush(&result.call),
-            CriticalStateEffect::RemoveCall => {
-                release_call(ctx, call_ref, ReleaseKind::Terminated).await;
-            }
+            CriticalStateEffect::RemoveCall => remove_call = true,
         }
     }
 
@@ -958,6 +1019,12 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
         match eff {
             BufferedObservabilityEffect::WriteCdr => ctx.cdr.write(&result.call, now_ms).await,
         }
+    }
+
+    // Terminal eviction last of all (ADR-0020 X2): the CDR is enqueued before
+    // the call — and its replicated Element — ceases to exist anywhere.
+    if remove_call {
+        release_call(ctx, call_ref, ReleaseKind::Terminated).await;
     }
 
     // Fire-and-forget: detached async work that folds its result back into the

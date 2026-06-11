@@ -95,6 +95,23 @@ pub struct B2buaConfig {
     /// pathological `L_max` (a very long reboot). `None` = no cap (drain over the
     /// full `L_max / speedup`). See [`keepalive_catchup_speedup`](Self::keepalive_catchup_speedup).
     pub max_catchup_window_sec: Option<i64>,
+    /// **Call reaper** master switch (ADR-0020 X1). ON by default; `false` is a
+    /// debugging escape hatch only — the in-process "released exactly once, one
+    /// CDR" promise does not hold without it.
+    pub reaper_enabled: bool,
+    /// Reaper sweep cadence, seconds (rides `tokio::time::interval` —
+    /// deterministic under `start_paused` tests). Default 30 s; the sweep is
+    /// one short store-lock pass, off the call path.
+    pub reaper_sweep_interval_sec: i64,
+    /// A live call whose **last-touched stamp** is older than this is
+    /// reap-eligible (ADR-0020 X4). `0` (the default) derives
+    /// `3 × keepalive_interval_sec` at spawn: every healthy call — even an idle
+    /// long-hold — dispatches a keepalive timer event each interval, so a stamp
+    /// older than 3 intervals provably means lost events/timers, never
+    /// quietness. An explicit value must be ≥ `2 × keepalive_interval_sec`
+    /// (enforced by [`validate`](Self::validate)). Liveness derives ONLY from
+    /// the stamp — never `created_at`, never timer deadlines.
+    pub reaper_idle_max_sec: i64,
 }
 
 impl Default for B2buaConfig {
@@ -118,6 +135,9 @@ impl Default for B2buaConfig {
             limiter_refresh_sec: 300,
             keepalive_catchup_speedup: 10,
             max_catchup_window_sec: None,
+            reaper_enabled: true,
+            reaper_sweep_interval_sec: 30,
+            reaper_idle_max_sec: 0,
         }
     }
 }
@@ -162,6 +182,31 @@ impl B2buaConfig {
                 self.reboot_budget_sec, self.keepalive_interval_sec
             ));
         }
+        // The reaper's staleness verdict is only provable when a healthy call is
+        // guaranteed at least one dispatched event (its keepalive timer) inside
+        // the idle window — below 2 keepalive intervals a merely-quiet call
+        // could be reaped (ADR-0020 X4).
+        if self.reaper_idle_max_sec != 0
+            && self.reaper_idle_max_sec < 2 * self.keepalive_interval_sec
+        {
+            return Err(format!(
+                "reaper_idle_max_sec={} < 2 × keepalive_interval_sec={}: a healthy \
+                 call is only provably dead after missing at least two keepalive \
+                 cycles (0 derives 3× automatically)",
+                self.reaper_idle_max_sec, self.keepalive_interval_sec
+            ));
+        }
         Ok(())
+    }
+
+    /// The effective reaper idle threshold, ms (ADR-0020 X4): the explicit
+    /// override, or the derived `3 × keepalive_interval_sec`.
+    pub fn reaper_idle_max_ms(&self) -> i64 {
+        let sec = if self.reaper_idle_max_sec > 0 {
+            self.reaper_idle_max_sec
+        } else {
+            3 * self.keepalive_interval_sec
+        };
+        sec.saturating_mul(1000)
     }
 }

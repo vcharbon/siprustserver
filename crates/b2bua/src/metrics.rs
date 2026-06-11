@@ -32,6 +32,15 @@ struct Inner {
     force_purge: AtomicU64,
     fast_reject_terminating: AtomicU64,
     unroutable_dropped: AtomicU64,
+    // call reaper (ADR-0020). `handler_panics` counts dispatcher-observed body
+    // panics (pre-reaper these were swallowed — the zero-CDR leak class);
+    // `reaper_verdicts` counts injected synthetic events (stale + fatal +
+    // discharge); `reaper_discharged` is the ALARM — the rules path itself
+    // failed twice for a call; expected ~0 in any healthy run.
+    handler_panics: AtomicU64,
+    reaper_sweeps: AtomicU64,
+    reaper_verdicts: AtomicU64,
+    reaper_discharged: AtomicU64,
     // cdr
     cdr_written: AtomicU64,
     cdr_dropped: AtomicU64,
@@ -109,6 +118,7 @@ struct Inner {
     store_indexed: AtomicU64,
     store_locks: AtomicU64,
     store_takeover_at: AtomicU64,
+    store_touched: AtomicU64,
     // Replicating-store sizes: `repl_meta_total` = all replica metadata entries
     // this node holds; `repl_meta_backup` = the BACKUP-partition subset (the
     // replicas this node holds for its peers; a backup self-releases its *live*
@@ -169,6 +179,11 @@ impl B2buaMetrics {
     counter!(bump_unroutable_dropped, unroutable_dropped_total, unroutable_dropped);
     counter!(bump_cdr_written, cdr_written_total, cdr_written);
     counter!(bump_cdr_dropped, cdr_dropped_total, cdr_dropped);
+    // --- call reaper (ADR-0020) ---
+    counter!(bump_handler_panic, handler_panics_total, handler_panics);
+    counter!(bump_reaper_sweep, reaper_sweeps_total, reaper_sweeps);
+    counter!(bump_reaper_verdict, reaper_verdicts_total, reaper_verdicts);
+    counter!(bump_reaper_discharged, reaper_discharged_total, reaper_discharged);
 
     /// Count one catch-up/idle `Noop` SENT on a serve-side stream, for
     /// `b2bua_repl_noops_sent_total{flow,peer}` (ADR-0014). `flow` is the stream
@@ -302,12 +317,14 @@ impl B2buaMetrics {
         indexed: u64,
         locks: u64,
         takeover_at: u64,
+        touched: u64,
     ) {
         self.inner.store_calls.store(calls, Ordering::Relaxed);
         self.inner.store_sip_index.store(sip_index, Ordering::Relaxed);
         self.inner.store_indexed.store(indexed, Ordering::Relaxed);
         self.inner.store_locks.store(locks, Ordering::Relaxed);
         self.inner.store_takeover_at.store(takeover_at, Ordering::Relaxed);
+        self.inner.store_touched.store(touched, Ordering::Relaxed);
     }
 
     /// Push the replicating-store sizes (memory-attribution gauges): total +
@@ -362,6 +379,11 @@ impl B2buaMetrics {
         counter("b2bua_unroutable_dropped_total", "messages dropped: no route resolved", self.unroutable_dropped_total());
         counter("b2bua_cdr_written_total", "CDRs successfully written to the sink", self.cdr_written_total());
         counter("b2bua_cdr_dropped_total", "CDRs dropped (submit-queue overflow or sink failure)", self.cdr_dropped_total());
+        // ── call reaper (ADR-0020) ──
+        counter("b2bua_handler_panics_total", "handler bodies that panicked (dispatcher-observed; each becomes a reaper strike instead of a silent call leak)", self.handler_panics_total());
+        counter("b2bua_reaper_sweeps_total", "reaper sweep ticks executed", self.reaper_sweeps_total());
+        counter("b2bua_reaper_verdicts_total", "reaper verdicts injected (stale + fatal-error + discharge synthetic events)", self.reaper_verdicts_total());
+        counter("b2bua_reaper_discharged_total", "strike-2 discharges: the rules path itself failed for a call and the snapshot was forced terminal directly (ALARM: expected ~0)", self.reaper_discharged_total());
         // ── replication (peer-to-peer HA) — own namespace, distinct from the
         // data-path counters above so an HA failure can be localised by layer. ──
         counter("b2bua_repl_flush_propagated_total", "primary flushes that propagated to a backup peer (topology.bak set)", self.repl_flush_propagated_total());
@@ -427,6 +449,7 @@ impl B2buaMetrics {
         g(&mut s, "b2bua_store_indexed", "per-call owned-index-key sets", self.inner.store_indexed.load(Ordering::Relaxed));
         g(&mut s, "b2bua_store_locks", "per-callRef serialization locks held (should track store_calls; a gap is a lock leak)", self.inner.store_locks.load(Ordering::Relaxed));
         g(&mut s, "b2bua_store_takeover_at", "live acting-backup takeover copies (ADR-0014; self-released on the served transaction's terminal state)", self.inner.store_takeover_at.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_store_touched", "last-touched ledger entries (reaper liveness stamps, ADR-0020; mirrors store_calls — a gap is a stamp leak)", self.inner.store_touched.load(Ordering::Relaxed));
         g(&mut s, "b2bua_repl_meta_total", "replica metadata entries held (all partitions)", self.inner.repl_meta_total.load(Ordering::Relaxed));
         g(&mut s, "b2bua_repl_meta_backup", "replica metadata entries in BACKUP partitions (resident backup bodies this node holds for peers; ADR-0014)", self.inner.repl_meta_backup.load(Ordering::Relaxed));
         g(&mut s, "b2bua_repl_changelog_entries", "outbound changelog entries across all peer logs (replication buffer depth)", self.inner.repl_changelog_entries.load(Ordering::Relaxed));
@@ -473,7 +496,7 @@ mod tests {
         assert!(zero.contains("b2bua_store_calls 0"));
         assert!(zero.contains("b2bua_repl_meta_backup 0"));
 
-        m.set_store_gauges(7, 11, 7, 9, 3);
+        m.set_store_gauges(7, 11, 7, 9, 3, 7);
         m.set_repl_store_gauges(40, 22, 64, 4);
         let txt = m.prometheus_text();
         // A store_locks (9) > store_calls (7) gap is exactly the lock-leak signal.
@@ -482,6 +505,7 @@ mod tests {
         assert!(txt.contains("b2bua_store_indexed 7"));
         assert!(txt.contains("b2bua_store_locks 9"));
         assert!(txt.contains("b2bua_store_takeover_at 3"));
+        assert!(txt.contains("b2bua_store_touched 7"));
         assert!(txt.contains("b2bua_repl_meta_total 40"));
         assert!(txt.contains("b2bua_repl_meta_backup 22"));
         assert!(txt.contains("b2bua_repl_changelog_entries 64"));

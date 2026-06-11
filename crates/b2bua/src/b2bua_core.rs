@@ -158,7 +158,8 @@ impl B2buaCore {
         let terminate_writer = BufferedTerminateWriter::spawn(drain_store, 1024);
 
         let mut state =
-            CallState::new(store, terminate_writer, config.self_ordinal.clone(), metrics.clone());
+            CallState::new(store, terminate_writer, config.self_ordinal.clone(), metrics.clone())
+                .with_clock(clock.clone());
 
         // Abort handles for the directly-spawned tasks (serve loop + router).
         // Collected so a harness can simulate a crash by aborting them.
@@ -240,14 +241,25 @@ impl B2buaCore {
             None => (Readiness::always_ready(), None),
         };
 
+        // The re-entry channel feeds both fire-and-forget results and the call
+        // reaper's verdicts; created before the dispatcher so the reaper's
+        // failure hook (two-strike panic escalation, ADR-0020 X6) can be wired
+        // into the per-call workers at construction.
+        let (reentry_tx, reentry_rx) = tokio::sync::mpsc::unbounded_channel();
+        let reaper = crate::reaper::Reaper::new(
+            config.reaper_enabled,
+            config.reaper_sweep_interval_sec,
+            config.reaper_idle_max_ms(),
+            reentry_tx.clone(),
+            metrics.clone(),
+        );
         let dispatcher = PerCallDispatcher::new(
             config.event_dispatch_concurrency,
             config.per_call_queue_depth,
             config.per_call_queue_cap,
             metrics.clone(),
-        );
-
-        let (reentry_tx, reentry_rx) = tokio::sync::mpsc::unbounded_channel();
+        )
+        .with_failure_hook(reaper.failure_hook());
         // Compose the registered services' state-gated rules above the core
         // defaults (ADR-0016). With an empty `services` this is exactly
         // `default_rules()` — behaviour-preserving. Note: in-tree `transfer` rides
@@ -269,6 +281,9 @@ impl B2buaCore {
             rules: Arc::new(rules),
             services: Arc::new(services),
             metrics: metrics.clone(),
+            // The two core obligation kinds (limiter, CDR); a future service-
+            // contributed kind registers here via `.with(...)` (ADR-0020 X7).
+            obligations: Arc::new(crate::obligations::ObligationSet::core()),
             readiness: readiness.clone(),
             reentry_tx,
         });
@@ -280,6 +295,14 @@ impl B2buaCore {
             reentry_rx,
             repl_rx,
         )));
+        // The reaper sweep (ADR-0020): scans the last-touched ledger and injects
+        // verdicts through the re-entry channel. Inert when disabled; aborted by
+        // the harness `crash()` like the router/serve loops.
+        tasks.push(reaper.spawn_sweep(
+            ctx.state.clone(),
+            ctx.dispatcher.clone(),
+            ctx.clock.clone(),
+        ));
 
         Self {
             ctx,
@@ -387,6 +410,13 @@ impl B2buaCore {
     /// [`active_calls`](Self::active_calls); a gap is the orphan-reject lock leak.
     pub fn lock_count(&self) -> usize {
         self.ctx.state.lock_count()
+    }
+
+    /// Live last-touched ledger entries (the reaper's liveness stamps,
+    /// ADR-0020 X4). Mirrors the call map by construction; a residue after
+    /// teardown is a stamp leak (the harness reap oracle's 4th invariant).
+    pub fn touched_count(&self) -> usize {
+        self.ctx.state.touched_count()
     }
 
     /// HARNESS SURGERY: drop the live in-memory copy of `call_ref` — map, index,

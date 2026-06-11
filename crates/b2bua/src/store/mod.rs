@@ -47,6 +47,14 @@ struct Inner {
     /// handshake. Local-only; never serialized/replicated. Cleared on
     /// drop_local/remove.
     takeover: HashSet<String>,
+    /// **Last-touched stamps** (ADR-0020 X4) — the call reaper's only liveness
+    /// input: epoch-ms of the last dispatched event that reached the handler
+    /// (`router::process` touches), refreshed at every materialisation
+    /// (create / fresh hydrate / reclaim). Node-local, NEVER a `Call` field
+    /// (touching must not dirty the call or trigger a replication flush).
+    /// Membership mirrors `calls` exactly: stamped at insertion, cleared in
+    /// `remove`/`drop_local`; an orphan never enters either.
+    touched: HashMap<String, i64>,
 }
 
 /// The call store. Clone-cheap (one `Arc`); share across the stack.
@@ -71,6 +79,11 @@ pub struct CallState {
     /// bound, not `max_duration`). A healthy call is re-flushed every keepalive,
     /// well inside the window.
     replicated_ttl_ms: i64,
+    /// Time source for the last-touched stamps written at the materialisation
+    /// sites (create / fresh hydrate / reclaim) — internal so no entry path can
+    /// forget to stamp (ADR-0020 X4). `b2bua_core` wires the runtime clock;
+    /// the default reads the same paused/tokio time the tests advance.
+    clock: sip_clock::Clock,
 }
 
 impl CallState {
@@ -103,7 +116,16 @@ impl CallState {
             self_ordinal: self_ordinal.into(),
             metrics,
             replicated_ttl_ms: CALL_TTL_MS,
+            clock: sip_clock::Clock::test_at(0),
         }
+    }
+
+    /// Wire the runtime clock (stamps the last-touched ledger at the
+    /// materialisation sites). Builder-style; the default test clock reads the
+    /// same paused tokio time the harnesses advance.
+    pub fn with_clock(mut self, clock: sip_clock::Clock) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Retune the replicated-body TTL (ADR-0011 X11). The replicating runner sets
@@ -130,10 +152,57 @@ impl CallState {
     /// Insert a freshly-created call + index it. Returns its `callRef`.
     pub fn create(&self, call: Call) -> String {
         let call_ref = call.call_ref.clone();
+        let now_ms = self.clock.now_ms();
         let mut inner = self.inner.lock().unwrap();
         Self::reindex(&mut inner, &call);
         inner.calls.insert(call_ref.clone(), call);
+        inner.touched.insert(call_ref.clone(), now_ms);
         call_ref
+    }
+
+    /// Refresh the **last-touched stamp** (ADR-0020 X4) — the call reaper's only
+    /// liveness input. Called by `router::process` once per dispatched event
+    /// that reached the handler (a wedged FIFO never reaches it, so its stamp
+    /// freezes — exactly the staleness signal). Monotonic-max, no-op for a
+    /// non-resident call (membership mirrors the live map).
+    pub fn touch(&self, call_ref: &str, now_ms: i64) {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.calls.contains_key(call_ref) {
+            return;
+        }
+        let stamp = inner.touched.entry(call_ref.to_string()).or_insert(now_ms);
+        *stamp = (*stamp).max(now_ms);
+    }
+
+    /// The current last-touched stamp, or `None` for a non-resident call — the
+    /// reaper verdict confirm input (ADR-0020 X5): a verdict whose observed
+    /// watermark no longer matches is stale and must be discarded.
+    pub fn last_touched(&self, call_ref: &str) -> Option<i64> {
+        self.inner.lock().unwrap().touched.get(call_ref).copied()
+    }
+
+    /// Cheap residency check (no `Call` clone) — sweep-side strike pruning.
+    pub fn contains(&self, call_ref: &str) -> bool {
+        self.inner.lock().unwrap().calls.contains_key(call_ref)
+    }
+
+    /// Sweep input (ADR-0020 X3/X4): every live call whose last-touched stamp is
+    /// older than `now_ms - idle_max_ms`, paired with the observed stamp (the
+    /// verdict's confirm watermark) — **excluding acting-backup takeover
+    /// copies** (self-release owns those, push-based on `CallQuiesced`; the
+    /// reaper sweep never selects one). `bak:` Elements are structurally absent
+    /// (they live in the replica store, not in `calls`). One pass under the
+    /// inner lock.
+    pub fn stale_candidates(&self, now_ms: i64, idle_max_ms: i64) -> Vec<(String, i64)> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .touched
+            .iter()
+            .filter(|(call_ref, stamp)| {
+                now_ms - **stamp > idle_max_ms && !inner.takeover.contains(*call_ref)
+            })
+            .map(|(call_ref, stamp)| (call_ref.clone(), *stamp))
+            .collect()
     }
 
     /// Snapshot a call (clone) from memory, if present.
@@ -174,6 +243,7 @@ impl CallState {
         }
         let body = repl.get_call(role, &primary, call_ref).await.ok().flatten()?;
         let call = self.codec.decode(&body).ok()?;
+        let now_ms = self.clock.now_ms();
         let mut inner = self.inner.lock().unwrap();
         // Re-check under the lock (a concurrent hydrate may have won the race).
         if let Some(c) = inner.calls.get(call_ref) {
@@ -181,6 +251,9 @@ impl CallState {
         }
         Self::reindex(&mut inner, &call);
         inner.calls.insert(call_ref.to_string(), call.clone());
+        // The idle clock starts at hydration, never at `created_at` — a freshly
+        // failed-over hours-old call must not look reap-stale (ADR-0020 X4).
+        inner.touched.insert(call_ref.to_string(), now_ms);
         drop(inner);
         // A failed-over in-dialog request just loaded its dialog from a backup
         // replica — the acting-backup takeover actually fired.
@@ -284,6 +357,7 @@ impl CallState {
         inner.calls.remove(call_ref);
         inner.locks.remove(call_ref);
         inner.takeover.remove(call_ref);
+        inner.touched.remove(call_ref);
         drop(inner);
 
         self.terminate_writer.submit_delete(
@@ -314,6 +388,7 @@ impl CallState {
         }
         inner.locks.remove(call_ref);
         inner.takeover.remove(call_ref);
+        inner.touched.remove(call_ref);
         present
     }
 
@@ -404,12 +479,16 @@ impl CallState {
             .map(|t| t.bak.clone())
             .filter(|b| !b.is_empty());
         let call_ref = call.call_ref.clone();
+        let now_ms = self.clock.now_ms();
         {
             let mut inner = self.inner.lock().unwrap();
             if inner.calls.contains_key(&call.call_ref) {
                 return false;
             }
             Self::reindex(&mut inner, &call);
+            // Reclaim restarts the idle clock (ADR-0020 X4): a 2 h-old reclaimed
+            // long-hold call is fresh here, not reap-stale.
+            inner.touched.insert(call.call_ref.clone(), now_ms);
             inner.calls.insert(call.call_ref.clone(), call);
         }
         if let (Some(repl), Some(backup)) = (self.repl_store.as_ref(), backup) {
@@ -531,6 +610,13 @@ impl CallState {
         self.inner.lock().unwrap().locks.len()
     }
 
+    /// The number of last-touched ledger entries. Mirrors `calls` by
+    /// construction; a residue after teardown is a stamp leak (the harness
+    /// `assert_fully_reaped` 4th invariant — ADR-0020).
+    pub fn touched_count(&self) -> usize {
+        self.inner.lock().unwrap().touched.len()
+    }
+
     /// Push the store's map lengths into the memory-attribution gauges (one
     /// brief lock). `calls.len()` is the TRUE live call-map size — compare to
     /// `b2bua_active_calls` (creations - removals): a divergence is a store-side
@@ -546,6 +632,7 @@ impl CallState {
             inner.indexed.len() as u64,
             inner.locks.len() as u64,
             inner.takeover.len() as u64,
+            inner.touched.len() as u64,
         );
         // State-machine cursor census (ADR-0016 slice 9): how many live calls
         // rest at each (machine,state) cursor. Computed under the same brief lock

@@ -1,17 +1,16 @@
 //! Framework guarantees — port of `InvariantEnforcer.ts` + the bye-disposition
 //! invariant. On the `→ terminated` transition the framework appends the
-//! cleanup a buggy rule might have forgotten (cancel-all-timers, write-cdr,
-//! remove-call), so termination is always clean. Termination is also *promoted*
-//! (`terminating → terminated`) once every leg is resolved.
-
-use std::collections::HashSet;
+//! cleanup a buggy rule might have forgotten: cancel-all-timers first, then
+//! every **obligation** the call still owes (the CDR, the limiter decrements —
+//! derived from the snapshot by the [`ObligationSet`], ADR-0020 X7), then
+//! remove-call last — so termination is always clean. Termination is also
+//! *promoted* (`terminating → terminated`) once every leg is resolved.
 
 use call::helpers::is_fully_resolved;
 use call::{Call, CallModelState, MachineId, StateLabel};
 
-use crate::effects::{
-    BufferedObservabilityEffect, CriticalStateEffect, HandlerResult, SoftBoundedEffect,
-};
+use crate::effects::{CriticalStateEffect, HandlerResult};
+use crate::obligations::ObligationSet;
 
 /// The always-on global call machine (ADR-0016 X2). Its cursor is a uniform,
 /// read-only **projection** of the authoritative `CallModelState` — the engine,
@@ -51,8 +50,15 @@ pub fn finalize(mut result: HandlerResult) -> HandlerResult {
     result
 }
 
-/// Guarantee cleanup on the `→ terminated` transition.
-pub fn enforce(before: &Call, mut result: HandlerResult) -> HandlerResult {
+/// Guarantee cleanup on the `→ terminated` transition: CancelAllTimers first,
+/// then every owed obligation (`obligations.settle` — the CDR + limiter
+/// decrements derived from the snapshot, idempotent against rule-emitted
+/// cleanup), then RemoveCall last.
+pub fn enforce(
+    obligations: &ObligationSet,
+    before: &Call,
+    mut result: HandlerResult,
+) -> HandlerResult {
     let became_terminated =
         before.state != CallModelState::Terminated && result.call.state == CallModelState::Terminated;
     if !became_terminated {
@@ -64,40 +70,7 @@ pub fn enforce(before: &Call, mut result: HandlerResult) -> HandlerResult {
     }
     result.call.timers.clear();
 
-    if !result
-        .effects
-        .buffered
-        .iter()
-        .any(|e| matches!(e, BufferedObservabilityEffect::WriteCdr))
-    {
-        result.effects.buffered.push(BufferedObservabilityEffect::WriteCdr);
-    }
-
-    // Limiter release: every recorded hold is decremented exactly once on
-    // termination (the strong INCR↔DECR invariant). Fail-open admissions
-    // (`increment_succeeded == Some(false)`) carry no real increment, so they
-    // are skipped. Dedupe against any release a rule already emitted.
-    let already: HashSet<(String, i64)> = result
-        .effects
-        .soft
-        .iter()
-        .map(|SoftBoundedEffect::DecrementLimiter { limiter_id, window }| {
-            (limiter_id.clone(), *window)
-        })
-        .collect();
-    for entry in &result.call.limiter_entries {
-        if entry.increment_succeeded == Some(false) {
-            continue;
-        }
-        let key = (entry.limiter_id.clone(), entry.origin_window);
-        if already.contains(&key) {
-            continue;
-        }
-        result.effects.soft.push(SoftBoundedEffect::DecrementLimiter {
-            limiter_id: entry.limiter_id.clone(),
-            window: entry.origin_window,
-        });
-    }
+    obligations.settle(&result.call, &mut result.effects);
 
     // remove-call must run last.
     result

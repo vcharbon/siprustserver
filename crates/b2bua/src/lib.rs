@@ -28,6 +28,8 @@ pub mod initial_invite;
 pub mod limiter;
 pub mod limiter_http;
 pub mod metrics;
+pub mod obligations;
+pub mod reaper;
 pub mod repl;
 pub mod router;
 pub mod rules;

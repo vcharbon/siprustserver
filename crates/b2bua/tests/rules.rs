@@ -10,7 +10,7 @@ use b2bua::event::CallEvent;
 use b2bua::initial_invite::build_initial_call;
 use b2bua::rules::{
     default_rules, execute_rules, invariants, pick_ranked, ActionExecutor, Effect, Match,
-    RuleAction, RuleContext, RuleDefinition, RuleHandleResult, SERVICE_LAYER,
+    RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, SERVICE_LAYER,
 };
 use call::{
     B2buaDialogExt, CallModelState, Dialog, Direction, Leg, LegDisposition, LegKind, LegState,
@@ -68,7 +68,7 @@ fn timer_global_duration_selects_max_duration() {
         leg_id: None,
     };
     let ctx = RuleContext {
-        call: &call,
+        call: RuleCall::new(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "a",
@@ -77,7 +77,7 @@ fn timer_global_duration_selects_max_duration() {
         config: &B2buaConfig::default(),
     };
     let rules = default_rules();
-    let ranked = pick_ranked(&rules, &ctx);
+    let ranked = pick_ranked(&rules, &call, &ctx);
     assert_eq!(ranked.first().map(|r| r.id), Some("max-duration"));
 }
 
@@ -93,7 +93,7 @@ fn in_dialog_bye_selects_relay_bye() {
         src: "127.0.0.1:5060".parse().unwrap(),
     };
     let ctx = RuleContext {
-        call: &call,
+        call: RuleCall::new(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "a",
@@ -102,7 +102,7 @@ fn in_dialog_bye_selects_relay_bye() {
         config: &B2buaConfig::default(),
     };
     let rules = default_rules();
-    let ranked = pick_ranked(&rules, &ctx);
+    let ranked = pick_ranked(&rules, &call, &ctx);
     assert_eq!(ranked.first().map(|r| r.id), Some("relay-bye"));
 }
 
@@ -112,7 +112,11 @@ fn invariants_append_cleanup_on_terminated() {
     let before = call.clone();
     call.state = CallModelState::Terminated;
     call.a_leg.state = LegState::Terminated;
-    let result = invariants::enforce(&before, HandlerResult::new(call));
+    let result = invariants::enforce(
+        &b2bua::obligations::ObligationSet::core(),
+        &before,
+        HandlerResult::new(call),
+    );
 
     assert!(
         result.effects.critical.iter().any(|e| matches!(e, CriticalStateEffect::CancelAllTimers)),
@@ -255,7 +259,7 @@ fn info_event() -> CallEvent {
 
 fn ctx_for<'a>(call: &'a call::Call, event: &'a CallEvent, config: &'a B2buaConfig) -> RuleContext<'a> {
     RuleContext {
-        call,
+        call: RuleCall::new(call),
         call_ref: &call.call_ref,
         event,
         source_leg_id: "a",
@@ -275,7 +279,7 @@ fn machine_rule_is_candidate_only_in_active_state() {
     // No cursor seeded → machine dormant → not a candidate.
     {
         let ctx = ctx_for(&call, &event, &config);
-        assert!(pick_ranked(&rules, &ctx).is_empty(), "dormant without a cursor");
+        assert!(pick_ranked(&rules, &call, &ctx).is_empty(), "dormant without a cursor");
     }
 
     // Cursor in `active_states` (S0) → candidate.
@@ -283,7 +287,7 @@ fn machine_rule_is_candidate_only_in_active_state() {
     {
         let ctx = ctx_for(&call, &event, &config);
         assert_eq!(
-            pick_ranked(&rules, &ctx).first().map(|r| r.id),
+            pick_ranked(&rules, &call, &ctx).first().map(|r| r.id),
             Some("test-sm-rule"),
             "candidate when cursor ∈ active_states"
         );
@@ -293,7 +297,7 @@ fn machine_rule_is_candidate_only_in_active_state() {
     call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S1"));
     {
         let ctx = ctx_for(&call, &event, &config);
-        assert!(pick_ranked(&rules, &ctx).is_empty(), "skipped when cursor ∉ active_states");
+        assert!(pick_ranked(&rules, &call, &ctx).is_empty(), "skipped when cursor ∉ active_states");
     }
 }
 
@@ -309,7 +313,7 @@ fn set_state_moves_cursor_and_gates_the_next_event() {
 
     let result = {
         let ctx = ctx_for(&call, &event, &config);
-        execute_rules(&rules, &ctx, &exec, |c: &RuleContext| HandlerResult::new(c.call.clone()))
+        execute_rules(&rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core())
     };
     assert_eq!(
         result.call.sm_cursors.get(&MachineId::new(TEST_MACHINE)).map(StateLabel::as_str),
@@ -321,7 +325,7 @@ fn set_state_moves_cursor_and_gates_the_next_event() {
     let next = result.call;
     let ctx2 = ctx_for(&next, &event, &config);
     assert!(
-        pick_ranked(&rules, &ctx2).is_empty(),
+        pick_ranked(&rules, &next, &ctx2).is_empty(),
         "the S0-gated rule is no longer a candidate at S1"
     );
 }
@@ -341,7 +345,7 @@ fn undeclared_transition_trips_debug_assert() {
     let rules = vec![sm_rule(handle_to_s2_undeclared)];
 
     let ctx = ctx_for(&call, &event, &config);
-    let _ = execute_rules(&rules, &ctx, &exec, |c: &RuleContext| HandlerResult::new(c.call.clone()));
+    let _ = execute_rules(&rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
 }
 
 /// A tracked side effect the handler emits but the rule did not declare trips the
@@ -360,7 +364,7 @@ fn undeclared_effect_trips_debug_assert() {
     let rules = vec![sm_rule(handle_emits_leg_message)];
 
     let ctx = ctx_for(&call, &event, &config);
-    let _ = execute_rules(&rules, &ctx, &exec, |c: &RuleContext| HandlerResult::new(c.call.clone()));
+    let _ = execute_rules(&rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
 }
 
 /// Declaring the matching `LegMessage` effect satisfies the drift-check — the
@@ -377,7 +381,7 @@ fn declared_effect_passes_the_drift_check() {
 
     let ctx = ctx_for(&call, &event, &config);
     // Must not panic: the emitted Respond is a declared LegMessage.
-    let _ = execute_rules(&rules, &ctx, &exec, |c: &RuleContext| HandlerResult::new(c.call.clone()));
+    let _ = execute_rules(&rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
 }
 
 /// `ClearState` (machine deactivation) removes the cursor, and with a declared
@@ -393,7 +397,7 @@ fn declared_terminal_clear_state_deactivates_machine() {
     let rules = vec![sm_rule_with_transitions(handle_clears_state, &SM_TRANSITIONS_TERMINAL)];
 
     let ctx = ctx_for(&call, &event, &config);
-    let r = execute_rules(&rules, &ctx, &exec, |c: &RuleContext| HandlerResult::new(c.call.clone()));
+    let r = execute_rules(&rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
     // The machine is deactivated: its cursor is gone.
     assert!(!r.call.sm_cursors.contains_key(&MachineId::new(TEST_MACHINE)));
 }
@@ -413,7 +417,7 @@ fn undeclared_terminal_clear_state_trips_debug_assert() {
     let rules = vec![sm_rule(handle_clears_state)]; // transitions: S0 => S1 only
 
     let ctx = ctx_for(&call, &event, &config);
-    let _ = execute_rules(&rules, &ctx, &exec, |c: &RuleContext| HandlerResult::new(c.call.clone()));
+    let _ = execute_rules(&rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
 }
 
 // ── b-leg route-set capture (RFC 3261 §12.1.2) ──────────────────────────────
@@ -497,7 +501,7 @@ Content-Length: 0\r\n\r\n";
     };
     let config = B2buaConfig::default();
     let ctx = RuleContext {
-        call: &call,
+        call: RuleCall::new(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "b-1",
@@ -508,7 +512,7 @@ Content-Length: 0\r\n\r\n";
     let id_gen = IdGen::seeded(1);
     let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
 
-    let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &ctx);
+    let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
 
     let d = &result.call.b_legs[0].dialogs[0].sip;
     assert_eq!(
@@ -559,7 +563,7 @@ Content-Length: 0\r\n\r\n";
     };
     let config = B2buaConfig::default();
     let ctx = RuleContext {
-        call: &call,
+        call: RuleCall::new(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "b-1",
@@ -570,7 +574,7 @@ Content-Length: 0\r\n\r\n";
     let id_gen = IdGen::seeded(1);
     let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
 
-    let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &ctx);
+    let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
     let rs = &result.call.b_legs[0].dialogs[0].sip.route_set;
     assert_eq!(rs.len(), 2, "combined header must be split into 2 individual routes: {rs:?}");
     assert!(
@@ -607,7 +611,7 @@ Content-Length: 0\r\n\r\n";
     };
     let config = B2buaConfig::default();
     let ctx = RuleContext {
-        call: &call,
+        call: RuleCall::new(&call),
         call_ref: &call.call_ref,
         event: &event,
         source_leg_id: "b-1",
@@ -618,7 +622,7 @@ Content-Length: 0\r\n\r\n";
     let id_gen = IdGen::seeded(1);
     let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
 
-    let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &ctx);
+    let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
 
     assert!(
         result.call.b_legs[0].dialogs[0].sip.route_set.is_empty(),
@@ -703,7 +707,7 @@ mod media_primitives {
     ) -> HandlerResult {
         let exec = ActionExecutor { config, id_gen, now_ms: 0 };
         let ctx = RuleContext {
-            call,
+            call: RuleCall::new(call),
             call_ref: &call.call_ref,
             event,
             source_leg_id,
@@ -711,7 +715,7 @@ mod media_primitives {
             now_ms: 0,
             config,
         };
-        exec.execute(actions, &ctx)
+        exec.execute(actions, call, &ctx)
     }
 
     // Port of leg-kind-gate test 1: relay-to-peer from an unadopted media leg
@@ -892,5 +896,160 @@ mod media_primitives {
             }],
         );
         assert!(result.effects.outbound.is_empty(), "a non-1xx provisional is rejected");
+    }
+}
+
+// ── ADR-0020 X7: obligation-extraction equivalence gate ─────────────────────
+//
+// The limiter/CDR blocks of `invariants::enforce` were extracted verbatim into
+// `obligations::{LimiterObligations, CdrObligation}`. This property test pins
+// the refactor: over arbitrary call snapshots (states × limiter entries incl.
+// fail-open × pre-emitted effects), the new `enforce(&ObligationSet::core(), …)`
+// must produce an effect set and call identical to the pre-extraction body
+// (kept VERBATIM below as the oracle).
+mod enforce_equivalence {
+    use super::*;
+    use b2bua::effects::{
+        BufferedObservabilityEffect, CriticalStateEffect, HandlerEffects, SoftBoundedEffect,
+    };
+    use b2bua::obligations::ObligationSet;
+    use call::{CallLimiterState, TimerEntry};
+    use proptest::prelude::*;
+    use std::collections::HashSet;
+
+    /// The pre-extraction `enforce` body (ADR-0010 X5 shape), verbatim.
+    fn old_enforce(before: &call::Call, mut result: HandlerResult) -> HandlerResult {
+        let became_terminated = before.state != CallModelState::Terminated
+            && result.call.state == CallModelState::Terminated;
+        if !became_terminated {
+            return result;
+        }
+        let crit = &mut result.effects.critical;
+        if !crit.iter().any(|e| matches!(e, CriticalStateEffect::CancelAllTimers)) {
+            crit.insert(0, CriticalStateEffect::CancelAllTimers);
+        }
+        result.call.timers.clear();
+
+        if !result
+            .effects
+            .buffered
+            .iter()
+            .any(|e| matches!(e, BufferedObservabilityEffect::WriteCdr))
+        {
+            result.effects.buffered.push(BufferedObservabilityEffect::WriteCdr);
+        }
+
+        let already: HashSet<(String, i64)> = result
+            .effects
+            .soft
+            .iter()
+            .map(|SoftBoundedEffect::DecrementLimiter { limiter_id, window }| {
+                (limiter_id.clone(), *window)
+            })
+            .collect();
+        for entry in &result.call.limiter_entries {
+            if entry.increment_succeeded == Some(false) {
+                continue;
+            }
+            let key = (entry.limiter_id.clone(), entry.origin_window);
+            if already.contains(&key) {
+                continue;
+            }
+            result.effects.soft.push(SoftBoundedEffect::DecrementLimiter {
+                limiter_id: entry.limiter_id.clone(),
+                window: entry.origin_window,
+            });
+        }
+
+        result
+            .effects
+            .critical
+            .retain(|e| !matches!(e, CriticalStateEffect::RemoveCall));
+        result.effects.critical.push(CriticalStateEffect::RemoveCall);
+        result
+    }
+
+    fn arb_state() -> impl Strategy<Value = CallModelState> {
+        prop_oneof![
+            Just(CallModelState::Active),
+            Just(CallModelState::Terminating),
+            Just(CallModelState::Terminated),
+        ]
+    }
+
+    fn arb_limiter_entry() -> impl Strategy<Value = CallLimiterState> {
+        (
+            prop_oneof![Just("l1"), Just("l2")],
+            0..3i64,
+            prop_oneof![Just(None), Just(Some(true)), Just(Some(false))],
+        )
+            .prop_map(|(id, w, inc)| CallLimiterState {
+                limiter_id: id.to_string(),
+                limit: 10,
+                origin_window: w * 100,
+                increment_succeeded: inc,
+            })
+    }
+
+    /// A pre-emitted rule decrement (possibly overlapping a recorded hold —
+    /// the dedupe case — or naming a hold that does not exist).
+    fn arb_pre_decrement() -> impl Strategy<Value = SoftBoundedEffect> {
+        (prop_oneof![Just("l1"), Just("l2"), Just("lX")], 0..3i64).prop_map(|(id, w)| {
+            SoftBoundedEffect::DecrementLimiter { limiter_id: id.to_string(), window: w * 100 }
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn extracted_enforce_is_equivalent_to_the_old_body(
+            before_state in arb_state(),
+            after_state in arb_state(),
+            entries in proptest::collection::vec(arb_limiter_entry(), 0..4),
+            pre_decrements in proptest::collection::vec(arb_pre_decrement(), 0..3),
+            pre_write_cdr in proptest::bool::ANY,
+            pre_cancel_all in proptest::bool::ANY,
+            pre_remove_call in proptest::bool::ANY,
+            timer_count in 0..3usize,
+        ) {
+            let mut before = test_call();
+            before.state = before_state;
+
+            let mut after = test_call();
+            after.state = after_state;
+            after.limiter_entries = entries;
+            after.timers = (0..timer_count)
+                .map(|i| TimerEntry {
+                    id: format!("Keepalive:{i}"),
+                    timer_type: TimerType::Keepalive,
+                    fire_at: 1_000 + i as i64,
+                    leg_id: None,
+                })
+                .collect();
+
+            let mut effects = HandlerEffects::new();
+            if pre_cancel_all {
+                effects.critical.push(CriticalStateEffect::CancelAllTimers);
+            }
+            if pre_remove_call {
+                effects.critical.push(CriticalStateEffect::RemoveCall);
+            }
+            effects.critical.push(CriticalStateEffect::CancelTimer { id: "NoAnswer:b-1".into() });
+            effects.soft.extend(pre_decrements);
+            if pre_write_cdr {
+                effects.buffered.push(BufferedObservabilityEffect::WriteCdr);
+            }
+
+            let result = HandlerResult { call: after, effects };
+
+            let old = old_enforce(&before, result.clone());
+            let new = invariants::enforce(&ObligationSet::core(), &before, result);
+
+            prop_assert_eq!(&old.call, &new.call, "call (incl. cleared timers) must match");
+            prop_assert_eq!(
+                format!("{:?}", (&old.effects.critical, &old.effects.soft, &old.effects.buffered)),
+                format!("{:?}", (&new.effects.critical, &new.effects.soft, &new.effects.buffered)),
+                "effect lanes must be identical (order included)"
+            );
+        }
     }
 }

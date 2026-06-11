@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use call::Call;
 
 use crate::effects::HandlerResult;
+use crate::obligations::ObligationSet;
 
 use super::actions::ActionExecutor;
 use super::invariants;
@@ -28,14 +29,20 @@ fn machine_active(r: &RuleDefinition, call: &Call) -> bool {
 }
 
 /// Filter rules by columns + filter predicate, drop overridden rules, and sort
-/// by layer (desc) then registration order (asc, stable).
-pub fn pick_ranked<'a>(rules: &'a [RuleDefinition], ctx: &RuleContext) -> Vec<&'a RuleDefinition> {
+/// by layer (desc) then registration order (asc, stable). `call` is the
+/// authoritative full struct (machine gating reads `sm_cursors`); rules
+/// themselves see only the narrow `ctx.call` view (ADR-0020 X8).
+pub fn pick_ranked<'a>(
+    rules: &'a [RuleDefinition],
+    call: &Call,
+    ctx: &RuleContext,
+) -> Vec<&'a RuleDefinition> {
     let mut candidates: Vec<(usize, &RuleDefinition)> = rules
         .iter()
         .enumerate()
         .filter(|(_, r)| {
             r.matcher.accepts_columns(ctx)
-                && machine_active(r, ctx.call)
+                && machine_active(r, call)
                 && r.matcher.filter.is_none_or(|f| f(ctx))
         })
         .collect();
@@ -50,25 +57,27 @@ pub fn pick_ranked<'a>(rules: &'a [RuleDefinition], ctx: &RuleContext) -> Vec<&'
     candidates.into_iter().map(|(_, r)| r).collect()
 }
 
-/// Run the rule chain for `ctx`. The first matching rule that returns `Some`
-/// handles the event; otherwise `default` is invoked.
+/// Run the rule chain for `ctx` over the authoritative `call`. The first
+/// matching rule that returns `Some` handles the event; no candidate → the
+/// default no-op result (the unchanged call, no effects).
 pub fn execute_rules(
     rules: &[RuleDefinition],
+    call: &Call,
     ctx: &RuleContext,
     exec: &ActionExecutor,
-    default: fn(&RuleContext) -> HandlerResult,
+    obligations: &ObligationSet,
 ) -> HandlerResult {
-    for rule in pick_ranked(rules, ctx) {
+    for rule in pick_ranked(rules, call, ctx) {
         if let Some(outcome) = (rule.handle)(ctx) {
-            let before = ctx.call.clone();
+            let before = call.clone();
             check_declared_effects(rule, &outcome.actions);
-            let result = exec.execute(&outcome.actions, ctx);
+            let result = exec.execute(&outcome.actions, call, ctx);
             check_declared_transition(rule, &before.sm_cursors, &result.call.sm_cursors);
             let result = invariants::finalize(result);
-            return invariants::enforce(&before, result);
+            return invariants::enforce(obligations, &before, result);
         }
     }
-    default(ctx)
+    HandlerResult::new(call.clone())
 }
 
 /// Assert any cursor move the winning rule caused on its **own** machine is a

@@ -20,6 +20,23 @@ use crate::metrics::B2buaMetrics;
 /// the event.
 pub type DispatchBody = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
+/// Why a handler body died (ADR-0020 X6). `Panicked` = the spawned body's
+/// `JoinError::is_panic()`; `Aborted` = the call reaper's escalation cancelled
+/// a hung body via [`PerCallDispatcher::abort_in_flight`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandlerFailure {
+    Panicked,
+    Aborted,
+}
+
+/// Notified from the per-call worker when a handler body failed — AFTER the
+/// body unwound (its per-call lock guard is already released) and BEFORE the
+/// worker dequeues the next item, so notifications are FIFO-ordered with the
+/// call's own event stream. Must be cheap and non-blocking (it runs on the
+/// worker). The call reaper installs the only production hook (two-strike
+/// escalation); `None` keeps the pre-ADR-0020 swallow.
+pub type FailureHook = Arc<dyn Fn(&str, HandlerFailure) + Send + Sync>;
+
 enum DispatchItem {
     Event(DispatchBody),
     Poison,
@@ -30,6 +47,7 @@ struct PerCallQueue {
 }
 
 type QueueMap = Arc<Mutex<HashMap<String, PerCallQueue>>>;
+type InflightMap = Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>;
 
 /// The dispatcher handle. Clone-cheap.
 #[derive(Clone)]
@@ -39,6 +57,10 @@ pub struct PerCallDispatcher {
     depth: usize,
     cap: usize,
     metrics: B2buaMetrics,
+    failure_hook: Option<FailureHook>,
+    /// The currently in-flight body per call (FIFO ⇒ at most one) — the
+    /// reaper's [`abort_in_flight`](Self::abort_in_flight) target.
+    inflight: InflightMap,
 }
 
 impl PerCallDispatcher {
@@ -49,6 +71,26 @@ impl PerCallDispatcher {
             depth: depth.max(1),
             cap: cap.max(1),
             metrics,
+            failure_hook: None,
+            inflight: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Install the handler-failure hook (builder-style; the call reaper's
+    /// two-strike escalation — ADR-0020 X6).
+    pub fn with_failure_hook(mut self, hook: FailureHook) -> Self {
+        self.failure_hook = Some(hook);
+        self
+    }
+
+    /// Abort the currently in-flight handler body for `call_ref` (ADR-0020 X6
+    /// escalation rung): a hung body holds both the worker and the per-call
+    /// lock; aborting drops the body future — releasing the lock guard — and
+    /// the worker observes the cancellation and reports
+    /// [`HandlerFailure::Aborted`]. No-op when the call has no body in flight.
+    pub fn abort_in_flight(&self, call_ref: &str) {
+        if let Some(h) = self.inflight.lock().unwrap().get(call_ref) {
+            h.abort();
         }
     }
 
@@ -78,6 +120,8 @@ impl PerCallDispatcher {
             self.queues.clone(),
             self.semaphore.clone(),
             self.metrics.clone(),
+            self.failure_hook.clone(),
+            self.inflight.clone(),
         ));
     }
 
@@ -104,6 +148,8 @@ async fn worker(
     queues: QueueMap,
     semaphore: Arc<Semaphore>,
     metrics: B2buaMetrics,
+    failure_hook: Option<FailureHook>,
+    inflight: InflightMap,
 ) {
     while let Some(item) = rx.recv().await {
         match item {
@@ -116,12 +162,32 @@ async fn worker(
                     metrics.bump_saturation();
                 }
                 let permit = semaphore.clone().acquire_owned().await.expect("semaphore closed");
-                // Isolate handler panics: a JoinError is logged, the worker lives.
-                let _ = tokio::spawn(body).await;
+                // Isolate handler panics/aborts: the worker survives and the
+                // failure is REPORTED (ADR-0020 X6 — the pre-reaper swallow
+                // here was the "call leaks forever, zero CDR" escape route).
+                let task = tokio::spawn(body);
+                inflight.lock().unwrap().insert(call_ref.clone(), task.abort_handle());
+                let outcome = task.await;
+                inflight.lock().unwrap().remove(&call_ref);
+                match outcome {
+                    Err(e) if e.is_panic() => {
+                        metrics.bump_handler_panic();
+                        if let Some(hook) = &failure_hook {
+                            hook(&call_ref, HandlerFailure::Panicked);
+                        }
+                    }
+                    Err(e) if e.is_cancelled() => {
+                        if let Some(hook) = &failure_hook {
+                            hook(&call_ref, HandlerFailure::Aborted);
+                        }
+                    }
+                    _ => {}
+                }
                 drop(permit);
             }
         }
     }
+    inflight.lock().unwrap().remove(&call_ref);
     queues.lock().unwrap().remove(&call_ref);
     metrics.bump_removal();
 }

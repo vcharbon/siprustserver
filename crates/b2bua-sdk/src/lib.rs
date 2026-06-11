@@ -32,12 +32,16 @@ pub mod service;
 /// imports (`use b2bua_sdk::rules::*`).
 pub mod rules {
     pub use crate::model::{
-        Effect, EffectKind, Match, MatchKind, MessageTransform, RuleAction, RuleContext,
-        RuleDefinition, RuleHandleResult, StatusMatch, CORE_LAYER, SERVICE_LAYER,
+        Effect, EffectKind, Match, MatchKind, MessageTransform, RuleAction, RuleCall,
+        RuleContext, RuleDefinition, RuleHandleResult, StatusMatch, CORE_LAYER, SERVICE_LAYER,
     };
     pub use sip_message::Method;
     pub use crate::service::{ServiceDef, ServiceSeed, Terminal};
-    pub use call::{Call, MachineId, StateLabel};
+    // NOTE: `Call` is deliberately NOT re-exported here (ADR-0020 X8) — rules
+    // read through the [`RuleCall`](crate::model::RuleCall) view. The full
+    // struct stays nameable only as `b2bua_sdk::service::Call`, for the
+    // `ServiceSeed::data_write` installer.
+    pub use call::{MachineId, StateLabel};
 }
 
 pub use config::B2buaConfig;
