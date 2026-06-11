@@ -213,13 +213,13 @@ impl TransactionLayer {
 
         let owner = Owner {
             txns: HashMap::new(),
-            txn_counts: HashMap::new(),
             timers: DelayQueue::new(),
             parser,
             events_tx,
             metrics: metrics_inner,
             id_gen: config.id_gen,
             self_release_watch: HashSet::new(),
+            txn_index: HashMap::new(),
             deferred_events: VecDeque::new(),
             event_retry_armed: false,
             pending_quiesce: Vec::new(),
@@ -342,15 +342,16 @@ struct Owner {
     /// [`TransactionEvent::CallQuiesced`] onto the lossless critical path and drop
     /// the watch. Bounded — one entry per live takeover copy, removed when it fires.
     self_release_watch: HashSet<String>,
-    /// `call_ref → live-txn count`, kept in **lockstep** with `txns` (every
-    /// `set_txn`/`delete_txn` updates both; an entry is dropped at count 0). Makes
-    /// the acting-backup self-release machinery — `has_txns_for`,
-    /// `active_txn_count_for_call`, and the last-`delete_txn` check — O(1) instead
-    /// of an O(total_txns) scan of the branch-keyed map, which on a backup serving
-    /// many failed-over dialogs ran per teardown under endurance load. Same
-    /// single-writer discipline CLAUDE.md prescribes for the timer driver's
-    /// `active`/queue lockstep: never let this drift from `txns`.
-    txn_counts: HashMap<String, usize>,
+    /// `call_ref → its set of live branches`, kept in **lockstep** with `txns`
+    /// (every `set_txn`/`delete_txn` updates both; the entry is dropped when the set
+    /// empties). Makes the acting-backup self-release machinery — `has_txns_for`,
+    /// `active_txn_count_for_call`, the last-`delete_txn` check — AND the
+    /// per-call-eviction `do_cancel_txns_for_call` O(k-branches) instead of an
+    /// O(total_txns) scan of the branch-keyed map, which on a backup serving many
+    /// failed-over dialogs ran per teardown under endurance load. Same single-writer
+    /// discipline CLAUDE.md prescribes for the timer driver's `active`/queue
+    /// lockstep: never let this drift from `txns`.
+    txn_index: HashMap<String, HashSet<String>>,
     /// CRITICAL events a full events queue deferred, in FIFO order — re-offered on
     /// the [`Timer::EventRetry`] tick, NEVER dropped. These are one-shot signals
     /// whose protocol-level redelivery the layer already consumed (a deleted txn's
@@ -428,39 +429,46 @@ impl Owner {
 
     fn set_txn(&mut self, txn: Transaction) {
         let new_call_ref = txn.call_ref.clone();
+        let branch = txn.branch.clone();
         // A re-insert of the same branch (rare) must not double-count: drop the
         // displaced txn's contribution before adding the new one.
-        if let Some(old) = self.txns.insert(txn.branch.clone(), txn) {
+        if let Some(old) = self.txns.insert(branch.clone(), txn) {
             // The displaced txn's queue entries are keyed by the SAME branch string
             // the replacement now owns; left in the wheel they would fire against
             // the new txn (spurious retransmit/timeout/cleanup) and their Keys would
             // alias once their slots are reused. Physically remove them now —
-            // cancel and queue membership move together (CLAUDE.md).
+            // cancel and queue membership move together (CLAUDE.md). (old.branch ==
+            // branch — the same map key.)
             self.cancel_timer(old.retransmit_key);
             self.cancel_timer(old.timeout_key);
             self.cancel_timer(old.cleanup_key);
-            self.untrack_call_ref(&old.call_ref);
+            self.untrack_call_ref(&old.call_ref, &branch);
         }
-        self.track_call_ref(&new_call_ref);
+        self.track_call_ref(&new_call_ref, &branch);
         self.sync_active();
     }
 
-    /// `call_ref → txn-count` increment, in lockstep with a `txns` insert. A txn
-    /// with no `call_ref` (out-of-dialog initial INVITE / OPTIONS) is not counted.
-    fn track_call_ref(&mut self, call_ref: &Option<String>) {
+    /// Add `branch` to `call_ref`'s live-branch set, in lockstep with a `txns`
+    /// insert. A txn with no `call_ref` (out-of-dialog initial INVITE / OPTIONS) is
+    /// not indexed.
+    fn track_call_ref(&mut self, call_ref: &Option<String>, branch: &str) {
         if let Some(cr) = call_ref {
-            *self.txn_counts.entry(cr.clone()).or_insert(0) += 1;
+            self.txn_index
+                .entry(cr.clone())
+                .or_default()
+                .insert(branch.to_string());
         }
     }
 
-    /// `call_ref → txn-count` decrement, in lockstep with a `txns` remove; the
-    /// entry is dropped at 0 so `has_txns_for` is a plain `contains_key`.
-    fn untrack_call_ref(&mut self, call_ref: &Option<String>) {
+    /// Remove `branch` from `call_ref`'s live-branch set, in lockstep with a `txns`
+    /// remove; the entry is dropped when the set empties so `has_txns_for` is a
+    /// plain `contains_key`.
+    fn untrack_call_ref(&mut self, call_ref: &Option<String>, branch: &str) {
         if let Some(cr) = call_ref {
-            if let Some(n) = self.txn_counts.get_mut(cr) {
-                *n -= 1;
-                if *n == 0 {
-                    self.txn_counts.remove(cr);
+            if let Some(set) = self.txn_index.get_mut(cr) {
+                set.remove(branch);
+                if set.is_empty() {
+                    self.txn_index.remove(cr);
                 }
             }
         }
@@ -472,7 +480,7 @@ impl Owner {
                 self.cancel_timer(t.retransmit_key);
                 self.cancel_timer(t.timeout_key);
                 self.cancel_timer(t.cleanup_key);
-                self.untrack_call_ref(&t.call_ref);
+                self.untrack_call_ref(&t.call_ref, branch);
                 self.sync_active();
                 // ADR-0014 self-release: if this was the LAST transaction for a
                 // watched call, the consumer must hear CallQuiesced so it can shed
@@ -784,7 +792,7 @@ impl Owner {
                 let _ = reply.send(());
             }
             Command::ActiveTxnCount { call_ref, reply } => {
-                let n = self.txn_counts.get(call_ref.as_str()).copied().unwrap_or(0);
+                let n = self.txn_index.get(call_ref.as_str()).map_or(0, |s| s.len());
                 let _ = reply.send(n);
             }
             Command::WatchSelfRelease { call_ref, reply } => {
@@ -802,9 +810,9 @@ impl Owner {
     }
 
     /// Any transaction (any role/state) still attributed to `call_ref`? O(1) via
-    /// the lockstep `txn_counts` index (a 0-count call_ref has no entry).
+    /// the lockstep `txn_index` (an empty branch set has no entry).
     fn has_txns_for(&self, call_ref: &str) -> bool {
-        self.txn_counts.contains_key(call_ref)
+        self.txn_index.contains_key(call_ref)
     }
 
     async fn do_send_request(
@@ -928,6 +936,9 @@ impl Owner {
     }
 
     fn do_cancel_txns_for_call(&mut self, call_ref: &str) {
+        // O(k-branches) over just this call's live branches (the lockstep index),
+        // not an O(total_txns) scan of the whole map.
+        //
         // CLIENT transactions only (matching the doc + the TS source, whose server
         // txns carried no callRef). The eviction's job is to stop Timer B/F firing
         // against a vanished call — both are client timers. A SERVER txn must be
@@ -935,14 +946,16 @@ impl Owner {
         // here would drop its retransmit-absorption window (RFC 3261 §17.2.1/§17.2.2),
         // so a retransmitted request after teardown builds a fresh txn and 481s
         // upstream instead of replaying the cached final.
-        let victims: Vec<String> = self
-            .txns
-            .iter()
-            .filter(|(_, t)| t.role == TxnRole::Client && t.call_ref.as_deref() == Some(call_ref))
-            .map(|(b, _)| b.clone())
-            .collect();
-        for branch in victims {
-            if self.delete_txn(&branch) {
+        let branches: Vec<String> = match self.txn_index.get(call_ref) {
+            Some(set) => set.iter().cloned().collect(),
+            None => return,
+        };
+        for branch in branches {
+            let is_client = self
+                .txns
+                .get(&branch)
+                .is_some_and(|t| t.role == TxnRole::Client);
+            if is_client && self.delete_txn(&branch) {
                 self.metrics
                     .txn_cancelled_on_call_evict
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1124,17 +1137,29 @@ impl Owner {
         let call_id = req.call_id.clone();
         let from_tag = req.from.tag.clone().unwrap_or_default();
 
-        // Find the matching INVITE server txn (CANCEL shares the INVITE's
-        // branch, but we match by callId+fromTag per RFC 3261 §9.1). Only an
-        // ACTIVE INVITE can be cancelled.
-        let matched_branch = self.txns.iter().find_map(|(b, t)| {
-            (t.role == TxnRole::Server
+        // Find the matching ACTIVE INVITE server txn. The CANCEL shares the
+        // INVITE's top-Via branch (RFC 3261 §9.1), so a compliant peer keys it
+        // directly — an O(1) `get` instead of an O(total_txns) scan; we still
+        // confirm callId+fromTag (and fall back to the scan for a peer that didn't
+        // preserve the branch).
+        let cancel_branch = req.via.first().branch.clone().unwrap_or_default();
+        let is_cancel_target = |t: &Transaction| {
+            t.role == TxnRole::Server
                 && t.kind == TxnKind::Invite
                 && t.call_id == call_id
                 && t.from_tag == from_tag
-                && t.state.is_active())
-            .then(|| b.clone())
-        });
+                && t.state.is_active()
+        };
+        let matched_branch = self
+            .txns
+            .get(&cancel_branch)
+            .filter(|t| is_cancel_target(t))
+            .map(|_| cancel_branch.clone())
+            .or_else(|| {
+                self.txns
+                    .iter()
+                    .find_map(|(b, t)| is_cancel_target(t).then(|| b.clone()))
+            });
 
         // RFC 3261 §9.2: a CANCEL matching no active INVITE server txn gets a 481
         // and has NO effect. Emitting a 200 + a Cancelled event here (the old
