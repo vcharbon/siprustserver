@@ -355,10 +355,20 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         let call_ref = call_ref.clone();
         if ctx.state.is_takeover(&call_ref) {
             let _guard = ctx.state.lock(&call_ref).await;
-            if ctx.state.is_takeover(&call_ref)
-                && ctx.txn.active_txn_count_for_call(&call_ref).await == 0
-            {
-                release_call(ctx, &call_ref, ReleaseKind::SelfRelease).await;
+            if ctx.state.is_takeover(&call_ref) {
+                if ctx.txn.active_txn_count_for_call(&call_ref).await == 0 {
+                    release_call(ctx, &call_ref, ReleaseKind::SelfRelease).await;
+                } else {
+                    // A fresh in-dialog request (a second takeover during a
+                    // sustained partition) re-armed a transaction since this notice
+                    // was emitted, and the txn layer's watch is one-shot — it was
+                    // consumed delivering THIS CallQuiesced. Re-arm it so the
+                    // eventual last-txn clear notifies us again; otherwise the
+                    // takeover copy is stranded double-serving until its 1 h
+                    // GlobalDuration backstop (the watch is never re-armed elsewhere
+                    // for an already-resident copy: hydrate returns fresh == false).
+                    ctx.txn.watch_self_release(&call_ref).await;
+                }
             }
         }
         return;
