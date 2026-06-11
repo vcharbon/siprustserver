@@ -29,6 +29,10 @@ pub const INVITE_INITIAL_TIMEOUT: u64 = 158_000;
 pub const TIMER_H: u64 = 64 * T1;
 /// Non-INVITE server txn cleanup after a final response (Timer J, §17.2.2).
 pub const TIMER_J: u64 = 64 * T1;
+/// INVITE *client* txn Completed-state hold after ACKing a non-2xx final (Timer D,
+/// §17.1.1.2). ≥ 32 s for unreliable transports — long enough to re-ACK + absorb
+/// retransmitted finals after a lost ACK rather than re-surfacing them.
+pub const TIMER_D: u64 = 64 * T1;
 
 /// Safety-net sweep cadence (ms).
 pub const TXN_SWEEP_INTERVAL: u64 = 10_000;

@@ -33,7 +33,7 @@ use crate::event::{ClientTransactionHandle, EventQueueDropReason, TransactionEve
 use crate::metrics::{MetricsInner, TransactionMetrics};
 use crate::rng::IdGen;
 use crate::timers::{
-    ms, INVITE_INITIAL_TIMEOUT, T1, T2, TIMER_B, TIMER_F, TIMER_H, TIMER_J, TXN_MAX_AGE,
+    ms, INVITE_INITIAL_TIMEOUT, T1, T2, TIMER_B, TIMER_D, TIMER_F, TIMER_H, TIMER_J, TXN_MAX_AGE,
     TXN_SWEEP_INTERVAL,
 };
 
@@ -73,8 +73,10 @@ enum Timer {
     ClientRetransmit(String),
     /// Timer B (INVITE) / Timer F (non-INVITE) — client transaction timeout.
     ClientTimeout(String),
-    /// Timer H (INVITE) / Timer J (non-INVITE) / Timer-H-487 — server cleanup.
-    ServerCleanup(String),
+    /// Delete-by-branch cleanup: Timer H/J/Timer-H-487 (server final-response hold)
+    /// AND Timer D (client non-2xx-final hold, §17.1.1.2). The fire handler just
+    /// `delete_txn`s the branch, so it serves both roles.
+    Cleanup(String),
     /// Re-offer CRITICAL events (Timeout / Cancelled / CallQuiesced / a consumed
     /// non-2xx final / an inbound INVITE whose 100 silenced the UAC) that a full
     /// events queue deferred — never dropped. At most ONE in flight
@@ -683,7 +685,7 @@ impl Owner {
                 }
                 self.fire_timeout(&branch)
             }
-            Timer::ServerCleanup(branch) => {
+            Timer::Cleanup(branch) => {
                 if let Some(t) = self.txns.get_mut(&branch) {
                     t.cleanup_key = None;
                 }
@@ -949,7 +951,7 @@ impl Owner {
                             TxnKind::Invite => TIMER_H,
                             TxnKind::NonInvite => TIMER_J,
                         };
-                        let key = self.timers.insert(Timer::ServerCleanup(branch.clone()), ms(delay));
+                        let key = self.timers.insert(Timer::Cleanup(branch.clone()), ms(delay));
                         if let Some(txn) = self.txns.get_mut(&branch) {
                             txn.cleanup_key = Some(key);
                         }
@@ -1262,7 +1264,7 @@ impl Owner {
                 txn.original_request = None;
             }
             // Timer-H-487 cleanup if the ACK for 487 never arrives.
-            let key = self.timers.insert(Timer::ServerCleanup(branch.clone()), ms(TIMER_H));
+            let key = self.timers.insert(Timer::Cleanup(branch.clone()), ms(TIMER_H));
             if let Some(txn) = self.txns.get_mut(&branch) {
                 txn.cleanup_key = Some(key);
             }
@@ -1315,35 +1317,66 @@ impl Owner {
                 .txns
                 .get(&branch)
                 .filter(|t| t.role == TxnRole::Client)
-                .map(|t| (t.kind, t.original_request.clone(), t.destination));
+                .map(|t| (t.kind, t.state, t.original_request.clone(), t.destination));
 
-            if let Some((kind, original_request, destination)) = client_match {
+            if let Some((kind, state, original_request, destination)) = client_match {
                 if resp.status < 200 {
-                    // Provisional 1xx>100 — Proceeding. INVITE stops retransmitting
-                    // (§17.1.1.2); non-INVITE continues at T2 (§17.1.2.2), so only
-                    // cancel the retransmit for INVITE.
-                    let key = match self.txns.get_mut(&branch) {
-                        Some(txn) => {
-                            txn.state = TxnState::Proceeding;
-                            (kind == TxnKind::Invite).then(|| txn.retransmit_key.take()).flatten()
-                        }
-                        None => None,
-                    };
-                    self.cancel_timer(key);
-                } else {
-                    // Final — stop timers, auto-ACK non-2xx for INVITE, delete.
-                    if kind == TxnKind::Invite && resp.status >= 300 {
-                        if let (Some(orig), Some(dest)) = (original_request, destination) {
-                            let ack = generate_ack_for_non_2xx(&orig, &resp);
-                            self.send_buffer(endpoint, &serialize(&SipMessage::Request(ack)), dest)
-                                .await;
-                        }
+                    // Provisional 1xx>100 — Proceeding. Ignore once Completed (a
+                    // late provisional must not downgrade a txn that already took its
+                    // final). INVITE stops retransmitting (§17.1.1.2); non-INVITE
+                    // continues at T2 (§17.1.2.2), so only cancel retransmit for INVITE.
+                    if state != TxnState::Completed {
+                        let key = match self.txns.get_mut(&branch) {
+                            Some(txn) => {
+                                txn.state = TxnState::Proceeding;
+                                (kind == TxnKind::Invite).then(|| txn.retransmit_key.take()).flatten()
+                            }
+                            None => None,
+                        };
+                        self.cancel_timer(key);
                     }
+                } else if kind == TxnKind::Invite && resp.status >= 300 {
+                    // Non-2xx INVITE final: (re-)ACK hop-by-hop (RFC 3261 §17.1.1.2).
+                    if let (Some(orig), Some(dest)) = (original_request, destination) {
+                        let ack = generate_ack_for_non_2xx(&orig, &resp);
+                        self.send_buffer(endpoint, &serialize(&SipMessage::Request(ack)), dest)
+                            .await;
+                    }
+                    if state == TxnState::Completed {
+                        // A RETRANSMITTED non-2xx final (our first ACK was lost): we
+                        // just re-ACKed it above; absorb without re-notifying.
+                        return;
+                    }
+                    // FIRST non-2xx final: hold the txn in Completed for Timer D so
+                    // retransmitted finals are re-ACKed + absorbed, not re-surfaced.
+                    // The auto-ACK silenced the UAS's retransmission *trigger*, so
+                    // without Timer D a lost ACK would have the UAS resend the final
+                    // unanswered until its own Timer H, each resend re-emitting
+                    // upstream as a duplicate.
+                    let (r, t) = match self.txns.get_mut(&branch) {
+                        Some(txn) => {
+                            txn.state = TxnState::Completed;
+                            (txn.retransmit_key.take(), txn.timeout_key.take())
+                        }
+                        None => (None, None),
+                    };
+                    self.cancel_timer(r);
+                    self.cancel_timer(t);
+                    let key = self.timers.insert(Timer::Cleanup(branch.clone()), ms(TIMER_D));
+                    if let Some(txn) = self.txns.get_mut(&branch) {
+                        txn.cleanup_key = Some(key);
+                    }
+                    // Critical: we auto-ACKed (silenced the UAS's resend), so this is
+                    // the app's only delivery of the final.
+                    self.emit_critical(TransactionEvent::Message {
+                        message: Box::new(SipMessage::Response(resp)),
+                        src,
+                    });
+                    return;
+                } else {
+                    // 2xx INVITE (the TU ACKs end-to-end) or any non-INVITE final:
+                    // terminate the client txn immediately.
                     self.delete_txn(&branch);
-                    // Critical: we deleted our client txn (consuming our request
-                    // retransmission) and auto-ACKed any non-2xx (silencing the
-                    // UAS's resend of that final), so this is the app's only
-                    // delivery of the final response.
                     self.emit_critical(TransactionEvent::Message {
                         message: Box::new(SipMessage::Response(resp)),
                         src,

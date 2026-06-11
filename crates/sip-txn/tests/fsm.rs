@@ -397,7 +397,53 @@ async fn client_auto_acks_non_2xx_final() {
                 if matches!(message.as_ref(), SipMessage::Response(r) if r.status == 480))),
         "the 480 still surfaces to the app"
     );
-    assert_eq!(active(&stack), 0, "client txn removed on final response");
+    // Held in Completed for Timer D (re-ACK/absorb window), not deleted on the spot.
+    assert_eq!(active(&stack), 1, "client txn held in Completed for Timer D");
+}
+
+/// After ACKing a non-2xx INVITE final the client txn stays in Completed for
+/// Timer D (32 s): a retransmitted final (our ACK was lost) is RE-ACKed and
+/// absorbed — not re-surfaced — then the txn terminates at Timer D.
+#[tokio::test(start_paused = true)]
+async fn non_2xx_invite_final_absorbs_retransmits_for_timer_d() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let branch = "z9hG4bK-timerd";
+    stack
+        .txn
+        .send_request(outbound_request("INVITE", branch), addr(PEER), TxnKind::Invite)
+        .await;
+    elapse_ms(60).await;
+    let _ = stack.drain_peer();
+
+    // First 486 → auto-ACK, surfaces once, txn held for Timer D.
+    stack
+        .inject(&response_bytes(486, "Busy Here", "INVITE", branch, "timerd-call", true))
+        .await;
+    elapse_ms(60).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1, "auto-ACK for the 486");
+    assert_eq!(
+        stack
+            .drain_events()
+            .iter()
+            .filter(|e| matches!(e, TransactionEvent::Message { message, .. }
+                if matches!(message.as_ref(), SipMessage::Response(r) if r.status == 486)))
+            .count(),
+        1,
+        "the 486 surfaces exactly once"
+    );
+    assert_eq!(active(&stack), 1, "held in Completed for Timer D");
+
+    // Retransmitted 486 (first ACK lost) → RE-ACK, absorbed (no second Message).
+    stack
+        .inject(&response_bytes(486, "Busy Here", "INVITE", branch, "timerd-call", true))
+        .await;
+    elapse_ms(60).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1, "retransmitted 486 re-ACKed");
+    assert!(stack.drain_events().is_empty(), "retransmitted final must not re-surface");
+
+    // Timer D (32 s) fires → the client txn terminates.
+    elapse_ms(33_000).await;
+    assert_eq!(active(&stack), 0, "Timer D cleaned up the client txn");
 }
 
 // ── Duplicate request → cached-response retransmit ──────────────────────────
