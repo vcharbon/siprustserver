@@ -199,6 +199,60 @@ async fn cancel_sends_200_and_487_and_emits_cancelled() {
     );
 }
 
+/// RFC 3261 §9.2: a CANCEL matching no active INVITE server txn gets a 481 and
+/// has NO effect — never a 200 + a spurious Cancelled that tears a call down.
+#[tokio::test(start_paused = true)]
+async fn unmatched_cancel_gets_481_and_emits_nothing() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    stack
+        .inject(&inbound_request("CANCEL", "z9hG4bK-stray", "stray-call", None))
+        .await;
+    elapse_ms(60).await;
+
+    let out = stack.drain_peer();
+    assert_eq!(count_responses(&out, 481), 1, "unmatched CANCEL → 481");
+    assert_eq!(count_responses(&out, 200), 0, "no 200 for an unmatched CANCEL");
+    assert!(
+        !stack
+            .drain_events()
+            .iter()
+            .any(|e| matches!(e, TransactionEvent::Cancelled { .. })),
+        "an unmatched CANCEL must not surface a Cancelled"
+    );
+}
+
+/// A CANCEL arriving after the INVITE was answered (200 raced the CANCEL, then
+/// the CANCEL retransmits) finds the server txn Completed — not active — so §9.2
+/// applies: 481, NOT a 487 that would tear the established call down.
+#[tokio::test(start_paused = true)]
+async fn cancel_after_answer_does_not_tear_down_the_call() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let branch = "z9hG4bK-late-cxl";
+    let call_id = "late-call";
+
+    stack.inject(&inbound_request("INVITE", branch, call_id, None)).await;
+    elapse_ms(60).await;
+    let _ = stack.drain_events();
+    let _ = stack.drain_peer();
+    let resp = parse_response(&response_bytes(200, "OK", "INVITE", branch, call_id, true));
+    stack.txn.send_response(resp, addr(PEER)).await;
+    elapse_ms(60).await;
+    let _ = stack.drain_peer();
+
+    stack.inject(&inbound_request("CANCEL", branch, call_id, None)).await;
+    elapse_ms(60).await;
+    let out = stack.drain_peer();
+    assert_eq!(count_responses(&out, 481), 1, "late CANCEL → 481");
+    assert_eq!(count_responses(&out, 487), 0, "no 487 — the call was answered");
+    assert!(
+        !stack
+            .drain_events()
+            .iter()
+            .any(|e| matches!(e, TransactionEvent::Cancelled { .. })),
+        "no Cancelled for a CANCEL after answer"
+    );
+}
+
 // ── ACK absorption (server INVITE) ──────────────────────────────────────────
 
 async fn invite_then_final(stack: &mut Stack, branch: &str, call_id: &str, status: u16) {

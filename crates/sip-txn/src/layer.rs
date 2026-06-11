@@ -1020,8 +1020,8 @@ impl Owner {
         let from_tag = req.from.tag.clone().unwrap_or_default();
 
         // Find the matching INVITE server txn (CANCEL shares the INVITE's
-        // branch, but we match by callId+fromTag per RFC 3261 §9.1) so we can
-        // echo its UAS To-tag on the 200/487.
+        // branch, but we match by callId+fromTag per RFC 3261 §9.1). Only an
+        // ACTIVE INVITE can be cancelled.
         let matched_branch = self.txns.iter().find_map(|(b, t)| {
             (t.role == TxnRole::Server
                 && t.kind == TxnKind::Invite
@@ -1031,19 +1031,35 @@ impl Owner {
             .then(|| b.clone())
         });
 
-        // Resolve (and lazily pin) the UAS To-tag.
-        let mut uas_to_tag = matched_branch
-            .as_ref()
-            .and_then(|b| self.txns.get(b))
-            .and_then(|t| t.uas_to_tag.clone());
-        if let Some(branch) = &matched_branch {
-            if uas_to_tag.is_none() {
-                let pinned = self.id_gen.new_tag();
-                if let Some(txn) = self.txns.get_mut(branch) {
-                    txn.uas_to_tag = Some(pinned.clone());
-                }
-                uas_to_tag = Some(pinned);
+        // RFC 3261 §9.2: a CANCEL matching no active INVITE server txn gets a 481
+        // and has NO effect. Emitting a 200 + a Cancelled event here (the old
+        // unconditional path) let a late/retransmitted/replayed CANCEL — one
+        // arriving after the call was answered (txn Completed, not active) — tear
+        // down an established call upstream, and gave the retransmitted CANCEL a
+        // tagless 200 plus a duplicate Cancelled. Reject it cleanly instead.
+        let branch = match matched_branch {
+            Some(b) => b,
+            None => {
+                let reject = generate_response(
+                    &req,
+                    481,
+                    "Call/Transaction Does Not Exist",
+                    &GenerateResponseOpts::default(),
+                );
+                self.send_buffer(endpoint, &serialize(&SipMessage::Response(reject)), src)
+                    .await;
+                return;
             }
+        };
+
+        // Resolve (and lazily pin) the UAS To-tag on the matched INVITE.
+        let mut uas_to_tag = self.txns.get(&branch).and_then(|t| t.uas_to_tag.clone());
+        if uas_to_tag.is_none() {
+            let pinned = self.id_gen.new_tag();
+            if let Some(txn) = self.txns.get_mut(&branch) {
+                txn.uas_to_tag = Some(pinned.clone());
+            }
+            uas_to_tag = Some(pinned);
         }
 
         // 200 OK to the CANCEL itself.
@@ -1060,34 +1076,32 @@ impl Owner {
             .await;
 
         // 487 Request Terminated on the matched INVITE.
-        if let Some(branch) = matched_branch {
-            let original = self
-                .txns
-                .get(&branch)
-                .and_then(|t| t.original_request.clone());
-            if let Some(original) = original {
-                let terminated = generate_response(
-                    &original,
-                    487,
-                    "Request Terminated",
-                    &GenerateResponseOpts {
-                        to_tag: uas_to_tag,
-                        ..Default::default()
-                    },
-                );
-                let terminated_buf = serialize(&SipMessage::Response(terminated));
-                self.send_buffer(endpoint, &terminated_buf, src).await;
-                if let Some(txn) = self.txns.get_mut(&branch) {
-                    txn.state = TxnState::Completed;
-                    txn.last_response = Some(terminated_buf);
-                    txn.last_response_status = Some(487);
-                    txn.original_request = None;
-                }
-                // Timer-H-487 cleanup if the ACK for 487 never arrives.
-                let key = self.timers.insert(Timer::ServerCleanup(branch.clone()), ms(TIMER_H));
-                if let Some(txn) = self.txns.get_mut(&branch) {
-                    txn.cleanup_key = Some(key);
-                }
+        let original = self
+            .txns
+            .get(&branch)
+            .and_then(|t| t.original_request.clone());
+        if let Some(original) = original {
+            let terminated = generate_response(
+                &original,
+                487,
+                "Request Terminated",
+                &GenerateResponseOpts {
+                    to_tag: uas_to_tag,
+                    ..Default::default()
+                },
+            );
+            let terminated_buf = serialize(&SipMessage::Response(terminated));
+            self.send_buffer(endpoint, &terminated_buf, src).await;
+            if let Some(txn) = self.txns.get_mut(&branch) {
+                txn.state = TxnState::Completed;
+                txn.last_response = Some(terminated_buf);
+                txn.last_response_status = Some(487);
+                txn.original_request = None;
+            }
+            // Timer-H-487 cleanup if the ACK for 487 never arrives.
+            let key = self.timers.insert(Timer::ServerCleanup(branch.clone()), ms(TIMER_H));
+            if let Some(txn) = self.txns.get_mut(&branch) {
+                txn.cleanup_key = Some(key);
             }
         }
 
