@@ -822,7 +822,11 @@ impl Owner {
         dest: SocketAddr,
         txn_type: TxnKind,
     ) -> ClientTransactionHandle {
-        let buf = serialize(&SipMessage::Request(msg.clone()));
+        // Wrap by value to serialize (avoids a full request clone just to make a
+        // `&SipMessage`), then destructure `msg` back out for the rest.
+        let wrapped = SipMessage::Request(msg);
+        let buf = serialize(&wrapped);
+        let SipMessage::Request(msg) = wrapped else { unreachable!("just wrapped a request") };
         let branch = msg
             .via
             .first()
@@ -1084,7 +1088,9 @@ impl Owner {
             method: req.method.to_string(),
             call_id: req.call_id.clone(),
             from_tag: req.from.tag.clone().unwrap_or_default(),
-            original_request: Some(req.clone()),
+            // INVITE server txns keep the request for the CANCEL→487 path; a
+            // non-INVITE server txn never reads it, so skip that clone.
+            original_request: is_invite.then(|| req.clone()),
             last_response: None,
             last_response_status: None,
             call_ref,
@@ -1263,12 +1269,10 @@ impl Owner {
             return;
         }
 
-        let resp_cseq_method = resp.cseq.method.as_str().to_ascii_uppercase();
-
         if !branch.is_empty() {
             // CANCEL responses reuse the INVITE branch — never match them to the
             // INVITE client txn (would tear it down on the 200 and miss the 487).
-            if resp_cseq_method == "CANCEL" {
+            if resp.cseq.method.as_str().eq_ignore_ascii_case("CANCEL") {
                 self.emit(TransactionEvent::Message {
                     message: Box::new(SipMessage::Response(resp)),
                     src,
