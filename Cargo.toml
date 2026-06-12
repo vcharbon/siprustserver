@@ -111,6 +111,10 @@ sha1 = "0.10"
 base64 = "0.22"
 subtle = "2"
 arc-swap = "1"
+# `socket2` builds the proxy's SO_REUSEPORT recv shards (tokio's UdpSocket has
+# no reuse-port knob): N sockets on one port, kernel flow-hashing keeps a given
+# UAC src:port pinned to one shard so per-flow ordering is preserved. Pass 9.
+socket2 = "0.6"
 # Media layer (`crates/media`, slice S-media). `rtp`/`rtcp` are the webrtc-rs
 # wire-codec crates used as the independent framing *witness* against our
 # hand-rolled RFC 3550 encoder (the rtp.js role in the TS port). `rustfft` backs

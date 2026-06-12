@@ -36,8 +36,10 @@ fn is_dialog_creating(method: &str) -> bool {
     method == "INVITE" || method == "SUBSCRIBE"
 }
 
-/// The dependency bundle for a [`ProxyCore`] (avoids a 10-argument constructor).
-pub struct ProxyCoreParts {
+/// The dependency bundle for a [`ProxyCore`] (avoids a 10-argument
+/// constructor). Crate-private: external wiring goes through
+/// [`ProxyCoreBuilder`], which is the one place the defaults live.
+pub(crate) struct ProxyCoreParts {
     pub endpoint: Box<dyn UdpEndpoint>,
     /// The address the proxy stamps on Via / Record-Route (its advertised
     /// `host:port`). Usually the endpoint's bound address.
@@ -52,6 +54,10 @@ pub struct ProxyCoreParts {
     /// Resolver for DNS-named forward targets (worker-outbound b-leg R-URIs).
     /// IP-literal traffic never touches it; see [`crate::resolver`].
     pub resolver: Arc<dyn HostResolver>,
+    /// Recv-shard index for this core's endpoint-stats slot (`0` for the
+    /// single-socket wiring; `0..N` when the runner shards the recv path over
+    /// N reuse-port sockets).
+    pub shard: usize,
 }
 
 /// The stateless proxy.
@@ -68,10 +74,11 @@ pub struct ProxyCore {
     parser: CustomParser,
     /// Off-loop send path for DNS-named targets (cache + single-flight resolve).
     named: NamedForwarder,
+    shard: usize,
 }
 
 impl ProxyCore {
-    pub fn new(parts: ProxyCoreParts) -> Self {
+    pub(crate) fn new(parts: ProxyCoreParts) -> Self {
         let endpoint: Arc<dyn UdpEndpoint> = Arc::from(parts.endpoint);
         let named = NamedForwarder::new(
             endpoint.clone(),
@@ -92,6 +99,7 @@ impl ProxyCore {
             self_gate: parts.self_gate,
             parser: CustomParser::default(),
             named,
+            shard: parts.shard,
         }
     }
 
@@ -134,29 +142,28 @@ impl ProxyCore {
     /// The recv loop. Runs until the endpoint's queue is closed (the endpoint
     /// is dropped). Parse failures are dropped silently (RFC 3261 §16.3).
     pub async fn run(self) {
-        // Background sweeper for the `(Call-ID|CSeq#)` LRU. `lookup` only evicts
-        // an entry when it is looked up *after* expiry — which an answered (2xx)
-        // call never does (no CANCEL, no proxy-absorbed ACK), so without this
-        // task the map (and `sip_proxy_pending_invite_lru_size`) grows ≈ the
-        // cumulative-INVITE count for the life of the process. Sweeping every
-        // half-TTL physically reclaims expired slots and re-publishes the gauge,
-        // pinning the map at ~1× working set. See [`crate::cancel_lru`].
-        let sweeper = {
-            let lru = self.cancel_lru.clone();
+        // The shared `(Call-ID|CSeq#)` LRU sweeper — spawned exactly once per
+        // LRU however many recv-shard cores share it (see
+        // [`CancelBranchLru::ensure_sweeper`]).
+        self.cancel_lru.ensure_sweeper(self.metrics.clone());
+
+        // Per-shard endpoint-stats publisher: a tail-dropping queue otherwise
+        // shows 100% forwarded on dashboards. Each core owns its endpoint's
+        // slot, so N shards never stomp one gauge; the metrics render the
+        // cross-shard aggregate.
+        let stats = {
             let metrics = self.metrics.clone();
             let endpoint = self.endpoint.clone();
+            let shard = self.shard;
             tokio::spawn(async move {
                 let mut tick =
                     tokio::time::interval(Duration::from_millis(crate::cancel_lru::DEFAULT_SWEEP_INTERVAL_MS));
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tick.tick().await;
-                    lru.sweep_expired();
-                    metrics.set_pending_invite_lru_size(lru.size() as u64);
-                    // Publish the endpoint's queue state: a tail-dropping
-                    // queue otherwise shows 100% forwarded on dashboards.
                     let c = endpoint.counters();
                     metrics.set_udp_endpoint_stats(
+                        shard,
                         endpoint.queue_depth() as u64,
                         endpoint.queue_max() as u64,
                         c.enqueued,
@@ -177,8 +184,8 @@ impl ProxyCore {
             }
         }
 
-        // Endpoint closed — stop the sweeper so it doesn't outlive the core.
-        sweeper.abort();
+        // Endpoint closed — stop the stats task so it doesn't outlive the core.
+        stats.abort();
     }
 }
 
@@ -194,6 +201,7 @@ pub struct ProxyCoreBuilder {
     metrics: Option<Arc<ProxyMetrics>>,
     self_gate: Option<Arc<dyn ProxySelfGate>>,
     resolver: Option<Arc<dyn HostResolver>>,
+    shard: usize,
 }
 
 impl ProxyCoreBuilder {
@@ -208,6 +216,7 @@ impl ProxyCoreBuilder {
             metrics: None,
             self_gate: None,
             resolver: None,
+            shard: 0,
         }
     }
 
@@ -235,6 +244,12 @@ impl ProxyCoreBuilder {
         self.resolver = Some(resolver);
         self
     }
+    /// Recv-shard index (the endpoint-stats slot). Defaults to 0; the sharded
+    /// runner numbers its cores 0..N.
+    pub fn shard(mut self, shard: usize) -> Self {
+        self.shard = shard;
+        self
+    }
 
     /// Finish into a [`ProxyCore`] bound on `endpoint`.
     pub fn build(self, endpoint: Box<dyn UdpEndpoint>) -> ProxyCore {
@@ -250,6 +265,7 @@ impl ProxyCoreBuilder {
             metrics: self.metrics.unwrap_or_else(|| Arc::new(ProxyMetrics::new())),
             self_gate: self.self_gate.unwrap_or_else(|| Arc::new(AlwaysAdmitGate)),
             resolver: self.resolver.unwrap_or_else(|| Arc::new(SystemResolver)),
+            shard: self.shard,
         })
     }
 }

@@ -35,7 +35,7 @@ pub mod strategy;
 pub mod strategies;
 
 pub use addr::ProxyAddr;
-pub use core::{ProxyCore, ProxyCoreBuilder, ProxyCoreParts};
+pub use core::{ProxyCore, ProxyCoreBuilder};
 pub use observability::ProxyMetrics;
 pub use strategies::{ForwardAllStrategy, LoadBalancerConfig, LoadBalancerStrategy};
 pub use strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};

@@ -38,14 +38,28 @@ impl RealSignalingNetwork {
 #[async_trait]
 impl SignalingNetwork for RealSignalingNetwork {
     async fn bind_udp(&self, opts: BindUdpOpts) -> Result<Box<dyn UdpEndpoint>, BindError> {
-        // `reuse_port` is accepted but not yet wired (tokio's UdpSocket has no
-        // direct knob; honoring it needs a socket2 detour). Loopback tests
-        // don't need it. Tracked as deferred in MIGRATION_STATUS.
-        let socket = UdpSocket::bind(opts.addr).await.map_err(|e| BindError {
+        let os_err = |e: std::io::Error| BindError {
             reason: BindErrorReason::OsError,
             addr: opts.addr,
             message: e.to_string(),
-        })?;
+        };
+        // `reuse_port` (SO_REUSEPORT) needs a socket2 detour — tokio's
+        // `UdpSocket::bind` has no knob for it. N reuse-port sockets on one
+        // port shard the recv path across N tasks; the kernel flow-hashes on
+        // the 4-tuple, so all datagrams from one src:port land on ONE socket
+        // and per-flow ordering (INVITE→CANCEL, retransmits) is preserved.
+        let socket = if opts.reuse_port {
+            let domain = socket2::Domain::for_address(opts.addr);
+            let raw = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))
+                .map_err(os_err)?;
+            raw.set_reuse_port(true).map_err(os_err)?;
+            // tokio's reactor requires the fd non-blocking.
+            raw.set_nonblocking(true).map_err(os_err)?;
+            raw.bind(&opts.addr.into()).map_err(os_err)?;
+            UdpSocket::from_std(raw.into()).map_err(os_err)?
+        } else {
+            UdpSocket::bind(opts.addr).await.map_err(os_err)?
+        };
         let local = socket.local_addr().map_err(|e| BindError {
             reason: BindErrorReason::OsError,
             addr: opts.addr,

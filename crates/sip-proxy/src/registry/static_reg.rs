@@ -31,7 +31,8 @@ pub struct StaticRegistryParseError {
 
 /// Parse `id@host:port,...` into `WorkerEntry`s (all `alive`). An empty/blank
 /// string yields an empty set. Rejects empty entries, missing/edge `@`, empty
-/// ids, duplicate ids, and malformed `host:port`.
+/// ids, duplicate ids, malformed `host:port`, and DNS-named hosts (the pool
+/// must be IP literals — see the in-loop comment).
 pub fn parse_worker_list(source: &str, raw: &str) -> Result<Vec<WorkerEntry>, StaticRegistryParseError> {
     let err = |reason: String| StaticRegistryParseError { origin: source.to_string(), reason };
     let trimmed = raw.trim();
@@ -63,6 +64,16 @@ pub fn parse_worker_list(source: &str, raw: &str) -> Result<Vec<WorkerEntry>, St
                 let addr = ProxyAddr::parse(&part[at + 1..])
                     .filter(|a| a.port >= 1)
                     .ok_or_else(|| err(format!("entry \"{part}\" has malformed host:port (port must be 1..65535)")))?;
+                // IP literals only: `lookup_by_address` (worker-outbound
+                // classification) compares raw host strings against datagram
+                // source IPs, so a DNS-named pool silently never matches —
+                // fail loudly at startup instead.
+                if addr.host.parse::<std::net::IpAddr>().is_err() {
+                    return Err(err(format!(
+                        "entry \"{part}\": worker host must be an IP literal — a DNS name breaks \
+                         worker-outbound classification (lookup_by_address compares raw host strings)"
+                    )));
+                }
                 out.push(WorkerEntry::alive(id, addr));
             }
         }
@@ -77,19 +88,34 @@ pub struct StaticWorkerRegistry {
 }
 
 impl StaticWorkerRegistry {
-    /// Build from an inline `id@host:port,...` string. Fails on malformed input.
+    /// Build from an inline `id@host:port,...` string on the system clock.
+    /// Fails on malformed input.
     pub fn from_string(raw: &str, source: &str) -> Result<Self, StaticRegistryParseError> {
-        Ok(Self::from_entries(parse_worker_list(source, raw)?))
+        Self::from_string_with_clock(raw, source, Clock::system())
     }
 
-    /// Build directly from entries (programmatic wiring/tests). The `id@host`
-    /// becomes the topology membership; the `:port` + health become annotation
-    /// presets so the one-shot recompose materialises them.
+    /// [`from_string`](Self::from_string) with an injected clock.
+    pub fn from_string_with_clock(raw: &str, source: &str, clock: Clock) -> Result<Self, StaticRegistryParseError> {
+        Ok(Self::from_entries_with_clock(parse_worker_list(source, raw)?, clock))
+    }
+
+    /// Build directly from entries on the system clock (programmatic wiring /
+    /// tests with no time dependency).
     pub fn from_entries(entries: Vec<WorkerEntry>) -> Self {
+        Self::from_entries_with_clock(entries, Clock::system())
+    }
+
+    /// Build directly from entries with an injected clock — paused-clock tests
+    /// MUST use this (`Clock::test_at(..)`): the `WorkerSet`'s clock stamps
+    /// `draining_since` / drain-window reads, and a hard-coded system clock
+    /// breaks those under `tokio::time::advance`. The `id@host` becomes the
+    /// topology membership; the `:port` + health become annotation presets so
+    /// the one-shot recompose materialises them.
+    pub fn from_entries_with_clock(entries: Vec<WorkerEntry>, clock: Clock) -> Self {
         let membership = StaticMembership::from_peers(
             entries.iter().map(|e| Peer::new(e.id.clone(), e.address.host.clone())).collect(),
         );
-        let set = Arc::new(WorkerSet::new(Arc::new(membership), DEFAULT_PORT, Clock::system()));
+        let set = Arc::new(WorkerSet::new(Arc::new(membership), DEFAULT_PORT, clock));
         for e in &entries {
             set.preset(&e.id, e.address.host.clone(), e.address.port, e.health, e.draining_since, e.first_seen_at_ms);
         }
@@ -144,6 +170,12 @@ mod tests {
     #[test]
     fn empty_string_is_empty_set() {
         assert!(StaticWorkerRegistry::from_string("   ", "test").unwrap().snapshot().is_empty());
+    }
+
+    #[test]
+    fn rejects_dns_named_hosts() {
+        let e = parse_worker_list("t", "w0@b2bua-worker-0.svc:5070").unwrap_err();
+        assert!(e.reason.contains("IP literal"), "got: {}", e.reason);
     }
 
     #[test]

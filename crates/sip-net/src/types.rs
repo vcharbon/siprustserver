@@ -77,9 +77,8 @@ pub struct BindUdpOpts {
     pub addr: SocketAddr,
     pub queue_max: usize,
     pub pre_ingress: Option<PreIngressHook>,
-    /// `SO_REUSEPORT`. Honored by the real impl when the platform allows;
-    /// ignored by the simulated fabric. (Currently a no-op pending socket2
-    /// wiring — see real.rs.)
+    /// `SO_REUSEPORT`. Honored by the real impl (socket2-built socket — see
+    /// real.rs); ignored by the simulated fabric (one endpoint per addr).
     pub reuse_port: bool,
     /// SIP role(s) this bind serves. `None` → [`all_ua_roles`].
     pub roles: Option<HashSet<UaRole>>,
@@ -100,6 +99,13 @@ impl BindUdpOpts {
 
     pub fn with_pre_ingress(mut self, hook: PreIngressHook) -> Self {
         self.pre_ingress = Some(hook);
+        self
+    }
+
+    /// Request `SO_REUSEPORT` (recv-shard binds — every shard on the port must
+    /// set it, including the first).
+    pub fn with_reuse_port(mut self, on: bool) -> Self {
+        self.reuse_port = on;
         self
     }
 

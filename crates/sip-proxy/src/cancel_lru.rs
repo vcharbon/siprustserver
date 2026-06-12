@@ -25,12 +25,14 @@
 //! the owner task can drive.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use sip_clock::Clock;
 use sip_txn::timers::{INVITE_INITIAL_TIMEOUT, TIMER_F, TIMER_H};
 
 use crate::addr::ProxyAddr;
+use crate::observability::ProxyMetrics;
 
 /// TTL for pending-INVITE entries (CANCEL forwarding + non-2xx ACK synthesis).
 /// Must cover the downstream UA's **whole INVITE transaction window**: the
@@ -82,6 +84,9 @@ struct StoredEntry {
 pub struct CancelBranchLru {
     table: Mutex<HashMap<String, StoredEntry>>,
     clock: Clock,
+    /// Latched by the first [`ensure_sweeper`](Self::ensure_sweeper) caller so
+    /// N recv-shard cores sharing one LRU spawn exactly one sweeper.
+    sweeper_claimed: AtomicBool,
 }
 
 impl CancelBranchLru {
@@ -93,7 +98,35 @@ impl CancelBranchLru {
     /// Explicit clock (tests use `Clock::test_at(..)` for deterministic
     /// eviction under `tokio::time`).
     pub fn with_clock(clock: Clock) -> Self {
-        Self { table: Mutex::new(HashMap::new()), clock }
+        Self { table: Mutex::new(HashMap::new()), clock, sweeper_claimed: AtomicBool::new(false) }
+    }
+
+    /// Spawn the background sweeper for this LRU — once. Every `ProxyCore::run`
+    /// calls this; the first caller claims it and N recv-shard cores sharing one
+    /// LRU don't end up with N sweepers. `lookup` only evicts an entry looked up
+    /// *after* expiry — which an answered (2xx) call never is (no CANCEL, no
+    /// proxy-absorbed ACK) — so without the sweep the map (and
+    /// `sip_proxy_pending_invite_lru_size`) grows ≈ the cumulative-INVITE count
+    /// for the life of the process. Sweeping every half-TTL physically reclaims
+    /// expired slots and re-publishes the gauge, pinning the map at ~1× working
+    /// set. The task is detached (process-lifetime, like the LRU itself);
+    /// supervision exits the process if a core dies, so an orphaned sweeper
+    /// cannot outlive the data path in production.
+    pub fn ensure_sweeper(self: &Arc<Self>, metrics: Arc<ProxyMetrics>) {
+        if self.sweeper_claimed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let lru = self.clone();
+        tokio::spawn(async move {
+            let mut tick =
+                tokio::time::interval(std::time::Duration::from_millis(DEFAULT_SWEEP_INTERVAL_MS));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                lru.sweep_expired();
+                metrics.set_pending_invite_lru_size(lru.size() as u64);
+            }
+        });
     }
 
     fn now_ms(&self) -> u64 {

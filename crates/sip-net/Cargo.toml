@@ -10,6 +10,7 @@ description = "SIP signaling network layer (UDP transport + SignalingNetwork) â€
 tokio = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
+socket2 = { workspace = true }
 layer-harness = { path = "../layer-harness" }
 sip-message = { path = "../sip-message" }
 

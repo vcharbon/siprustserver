@@ -242,8 +242,9 @@ scope (later slices).
 - **`ScopedAuditOptions.exceptions`** (per-test RFC-rule downgrade ledger) — the
   RFC rule packs it gates are a rules-slice concern; the `should_audit_bind`
   escape valve **is** ported.
-- **`reuse_port`** wiring — accepted on `BindUdpOpts` but a no-op pending a
-  `socket2` detour (tokio exposes no direct knob). Loopback tests don't need it.
+- ~~**`reuse_port`** wiring~~ — DONE (sip-proxy Pass 9): wired via `socket2`
+  in `real.rs`; backs the proxy's `PROXY_RECV_SHARDS` recv-loop sharding.
+  Still ignored by the simulated fabric (one endpoint per addr).
 
 ---
 

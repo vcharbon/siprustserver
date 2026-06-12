@@ -25,6 +25,10 @@
 //!   PROXY_NAMESPACE  namespace for k8s discovery            (default $POD_NAMESPACE / sip-test)
 //!   PROXY_METRICS    Prometheus HTTP listen addr           (default 0.0.0.0:9090)
 //!   PROXY_QUEUE      inbound UDP queue depth (packets)      (default 8192)
+//!   PROXY_RECV_SHARDS  N reuse-port recv sockets/cores      (default 1; >1 shards
+//!                    the serial recv loop — the ~550 OPTIONS/s burst ceiling —
+//!                    across N sockets; kernel flow-hashing keeps each UAC
+//!                    src:port on one socket so per-flow ordering holds)
 //!   PROXY_HMAC_KID   stickiness cookie key id              (default k0)
 //!   PROXY_HMAC_KEY   stickiness cookie secret (>=16 bytes) (default dev key)
 //!   HEALTH_INTERVAL_MS / HEALTH_TIMEOUT_MS / HEALTH_THRESHOLD  (probe tuning)
@@ -80,7 +84,7 @@ async fn build_registry(
     clock: Clock,
 ) -> (Arc<dyn WorkerRegistry>, Arc<dyn WorkerRegistryControl>) {
     if !workers.trim().is_empty() {
-        let reg = StaticWorkerRegistry::from_string(workers, "PROXY_WORKERS")
+        let reg = StaticWorkerRegistry::from_string_with_clock(workers, "PROXY_WORKERS", clock)
             .unwrap_or_else(|e| panic!("bad PROXY_WORKERS {workers:?}: {e}"));
         let control = reg.control();
         eprintln!("sip-proxy-runner worker pool: static PROXY_WORKERS={workers}");
@@ -150,13 +154,23 @@ async fn main() {
         }
     };
 
+    let recv_shards: usize = env_or("PROXY_RECV_SHARDS", "1").parse().expect("PROXY_RECV_SHARDS");
+    assert!(recv_shards >= 1, "PROXY_RECV_SHARDS must be >= 1");
+
     let net = RealSignalingNetwork::new();
 
-    // Main signaling endpoint.
-    let endpoint = net
-        .bind_udp(BindUdpOpts::new(listen_sa, queue_max))
-        .await
-        .unwrap_or_else(|e| panic!("bind {listen_sa} failed: {e:?}"));
+    // Main signaling endpoint(s) — one per recv shard. With N > 1 every bind
+    // (including the first) sets SO_REUSEPORT; the kernel flow-hashes on the
+    // 4-tuple so all datagrams from one UAC src:port land on ONE socket and
+    // per-flow ordering (INVITE→CANCEL, retransmits) is preserved.
+    let mut endpoints = Vec::with_capacity(recv_shards);
+    for _ in 0..recv_shards {
+        let ep = net
+            .bind_udp(BindUdpOpts::new(listen_sa, queue_max).with_reuse_port(recv_shards > 1))
+            .await
+            .unwrap_or_else(|e| panic!("bind {listen_sa} failed: {e:?}"));
+        endpoints.push(ep);
+    }
 
     // Separate endpoint for the OPTIONS health probe (its own source socket).
     let probe_ep = net
@@ -206,14 +220,26 @@ async fn main() {
         },
     );
 
-    let core = ProxyCoreBuilder::new(advertised.clone(), strategy, registry.clone())
-        .clock(clock)
-        .id_gen(id_gen)
-        .metrics(metrics.clone())
-        .build(endpoint);
+    // N recv-shard cores over the shared routing state: strategy/registry/
+    // metrics are `Arc`s, and the CANCEL/rtx LRU MUST be one instance across
+    // shards — a response or CANCEL can hash to a different socket than the
+    // INVITE that populated the entry.
+    let cancel_lru = Arc::new(sip_proxy::cancel_lru::CancelBranchLru::with_clock(clock.clone()));
+    let mut cores = Vec::with_capacity(recv_shards);
+    for (shard, endpoint) in endpoints.into_iter().enumerate() {
+        cores.push(
+            ProxyCoreBuilder::new(advertised.clone(), strategy.clone(), registry.clone())
+                .clock(clock.clone())
+                .id_gen(id_gen.clone())
+                .metrics(metrics.clone())
+                .cancel_lru(cancel_lru.clone())
+                .shard(shard)
+                .build(endpoint),
+        );
+    }
 
     eprintln!(
-        "sip-proxy-runner pid={} listening UDP {listen_sa} advertise={}:{} workers=[{}] (queue={queue_max})",
+        "sip-proxy-runner pid={} listening UDP {listen_sa} advertise={}:{} workers=[{}] (queue={queue_max}, recv_shards={recv_shards})",
         std::process::id(),
         advertised.host,
         advertised.port,
@@ -276,18 +302,21 @@ async fn main() {
     };
 
     let probe_task = tokio::spawn(probe.run());
-    let core_task = tokio::spawn(core.run());
+    let mut core_tasks = tokio::task::JoinSet::new();
+    for core in cores {
+        core_tasks.spawn(core.run());
+    }
 
-    // Supervise the two data-path tasks: a panicked/exited recv loop used to
+    // Supervise every data-path task: a panicked/exited recv loop used to
     // leave the process alive with /healthz green — k8s never restarted the
     // pod and every datagram was silently black-holed. Exiting non-zero makes
-    // the container restart the moment either task dies.
+    // the container restart the moment ANY recv shard or the probe dies.
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             eprintln!("sip-proxy-runner shutting down");
         }
-        res = core_task => {
-            eprintln!("sip-proxy-runner FATAL: SIP data path exited ({res:?}) — exiting for restart");
+        res = core_tasks.join_next() => {
+            eprintln!("sip-proxy-runner FATAL: a SIP recv shard exited ({res:?}) — exiting for restart");
             std::process::exit(1);
         }
         res = probe_task => {

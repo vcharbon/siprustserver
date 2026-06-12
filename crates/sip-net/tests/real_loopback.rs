@@ -64,3 +64,57 @@ async fn real_has_no_transit_or_inflight() {
     assert!(net.queue_depths().is_empty());
     assert!(net.drain_undeliverable().await.is_empty());
 }
+
+/// SO_REUSEPORT sharding (Pass 9): two endpoints bind the SAME addr:port, and
+/// every datagram of one flow (one src socket) lands on exactly ONE of them —
+/// the kernel 4-tuple flow-hash that preserves per-flow ordering when the
+/// proxy shards its recv loop.
+#[tokio::test]
+async fn reuse_port_shards_one_flow_to_one_socket() {
+    let net = RealSignalingNetwork::new();
+    // First bind picks the port (reuse_port set so the second can join it).
+    let s1 = net
+        .bind_udp(loopback(64).with_reuse_port(true))
+        .await
+        .expect("first reuse-port bind");
+    let addr = s1.local_addr();
+    let s2 = net
+        .bind_udp(BindUdpOpts::new(addr, 64).with_reuse_port(true))
+        .await
+        .expect("second reuse-port bind on the same port");
+    assert_eq!(s2.local_addr(), addr);
+
+    // One flow: a single source socket sends N datagrams to the shared port.
+    let uac = net.bind_udp(loopback(64)).await.unwrap();
+    const N: usize = 20;
+    for i in 0..N {
+        uac.send_to(format!("pkt-{i}").as_bytes(), addr).await.unwrap();
+    }
+
+    // All N land on exactly one shard, in order. Wait until the kernel has
+    // delivered all N (loopback — fast), then drain via try_recv.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while s1.counters().enqueued + s2.counters().enqueued < N as u64 {
+        assert!(tokio::time::Instant::now() < deadline, "flow never fully arrived");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (e1, e2) = (s1.counters().enqueued, s2.counters().enqueued);
+    assert!(
+        (e1 == N as u64 && e2 == 0) || (e2 == N as u64 && e1 == 0),
+        "one flow must hash to exactly one shard (got s1={e1}, s2={e2})",
+    );
+    let receiver = if e1 > 0 { &s1 } else { &s2 };
+    let got: Vec<usize> = std::iter::from_fn(|| receiver.try_recv())
+        .map(|pkt| std::str::from_utf8(&pkt.raw).unwrap().strip_prefix("pkt-").unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(got, (0..N).collect::<Vec<_>>(), "per-flow order preserved on one shard");
+}
+
+/// Without reuse_port, a second bind on a taken port still fails loudly.
+#[tokio::test]
+async fn plain_rebind_still_conflicts() {
+    let net = RealSignalingNetwork::new();
+    let s1 = net.bind_udp(loopback(64)).await.unwrap();
+    let err = net.bind_udp(BindUdpOpts::new(s1.local_addr(), 64)).await;
+    assert!(err.is_err(), "non-reuse-port rebind must fail");
+}
