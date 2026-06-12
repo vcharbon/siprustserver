@@ -141,11 +141,6 @@ pub fn route_value_to_addr(route_value: &str) -> Option<ProxyAddr> {
     Some(ProxyAddr::new(parsed.host, uri_port_u16(parsed.port)?))
 }
 
-/// True if `route_value`'s URI host:port is the proxy's advertised address.
-pub fn route_targets_self(route_value: &str, advertised: &ProxyAddr) -> bool {
-    route_value_to_addr(route_value).as_ref() == Some(advertised)
-}
-
 /// The sent-by `host:port` of a Via entry value (the token after the transport).
 fn via_sent_by(via_entry: &str) -> Option<&str> {
     via_entry.split_whitespace().nth(1).and_then(|s| s.split(';').next()).map(str::trim)
@@ -158,14 +153,6 @@ fn via_sent_by(via_entry: &str) -> Option<&str> {
 /// node IP behind keepalived).
 pub fn via_sent_by_addr(via_entry: &str) -> Option<ProxyAddr> {
     via_sent_by(via_entry).and_then(ProxyAddr::parse)
-}
-
-/// True if a Via entry's sent-by is the proxy's advertised address.
-pub fn via_entry_is_self(via_entry: &str, advertised: &ProxyAddr) -> bool {
-    via_sent_by(via_entry)
-        .and_then(ProxyAddr::parse)
-        .map(|a| &a == advertised)
-        .unwrap_or(false)
 }
 
 // received/rport stamping: the verbatim local copy of
@@ -221,19 +208,5 @@ mod tests {
             [("v".to_string(), "3".to_string()), ("w_pri".to_string(), "b2b-1".to_string())].into_iter().collect();
         let rr = build_record_route_value(&adv, params.iter());
         assert_eq!(rr, "<sip:10.0.0.1:5060;v=3;w_pri=b2b-1;lr>");
-    }
-
-    #[test]
-    fn route_targets_self_matches_advertised() {
-        let adv = ProxyAddr::new("10.0.0.1", 5060);
-        assert!(route_targets_self("<sip:10.0.0.1:5060;lr>", &adv));
-        assert!(!route_targets_self("<sip:10.9.9.9:5060;lr>", &adv));
-    }
-
-    #[test]
-    fn via_entry_self_detection() {
-        let adv = ProxyAddr::new("10.0.0.1", 5060);
-        assert!(via_entry_is_self("SIP/2.0/UDP 10.0.0.1:5060;branch=z", &adv));
-        assert!(!via_entry_is_self("SIP/2.0/UDP 10.0.0.9:5060;branch=z", &adv));
     }
 }

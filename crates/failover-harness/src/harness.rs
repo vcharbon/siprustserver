@@ -46,7 +46,6 @@ use scenario_harness::{Agent, Harness};
 use sip_clock::Clock;
 use sip_proxy::health::{HealthProbe, HealthProbeConfig};
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
-use sip_proxy::registry::control::SimulatedControl;
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
 use sip_proxy::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
@@ -772,7 +771,7 @@ impl FailoverHarness {
         // multiples of the 100 ms advance chunk so no paused-clock reply race).
         let probe_task = if let Some(paddr) = probe_addr {
             let (probe_ep, _psock) = self.harness.bind_sut("proxy-probe", paddr).await;
-            let control = Arc::new(SimulatedControl::new(registry.clone()));
+            let control = registry.control();
             let probe = HealthProbe::new(
                 probe_ep,
                 registry_dyn,

@@ -45,19 +45,16 @@ pub enum DecodeResult {
 }
 
 /// `select_for_new_dialog` failure. The core maps each to a distinct 503.
+/// (A `RateCapExhausted { worker_id, retry_after_sec }` variant — the per-worker
+/// AIMD bucket's 503 + `Retry-After` — was deleted as dead: the bucket is
+/// deferred (ADR-0009) and band-only selection never raised it. Re-add it with
+/// the real bucket.)
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SelectError {
     /// No alive target (empty registry, or all alive workers in `above_critical`
     /// band for a non-emergency request). → 503.
     #[error("no target available: {reason}")]
     NoTarget { reason: String },
-    /// The rendezvous winner exists but its per-worker AIMD bucket is empty. →
-    /// 503 + `Retry-After`. **Dead in this slice** (the AIMD token bucket is
-    /// deferred — ADR-0009 — so band-only selection never raises this); the
-    /// variant + the core's `Retry-After` branch are kept so the bucket drops in
-    /// later with no surface change.
-    #[error("rate cap exhausted for worker {worker_id}")]
-    RateCapExhausted { worker_id: String, retry_after_sec: u32 },
 }
 
 /// Options for [`RoutingStrategy::select_for_new_dialog`].

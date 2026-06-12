@@ -79,19 +79,13 @@ pub fn parse_x_overload_header(value: Option<&str>) -> Option<OverloadPayload> {
     Some(OverloadPayload { elu: clamp01(elu), gc: clamp01(gc), adm })
 }
 
-#[derive(Debug, Clone, Copy)]
-struct WorkerState {
-    elu: f64,
-    gc: f64,
-    band: EluBand,
-    last_payload_at_ms: u64,
-}
+
 
 /// Tracks the latest band per worker. Interior mutability via `Mutex` — only the
 /// background OPTIONS path writes and only the LB select reads, both CPU-only.
 pub struct WorkerLoadObserver {
     config: LoadObserverConfig,
-    workers: Mutex<HashMap<String, WorkerState>>,
+    workers: Mutex<HashMap<String, EluBand>>,
 }
 
 impl WorkerLoadObserver {
@@ -118,29 +112,16 @@ impl WorkerLoadObserver {
 
     /// Process an `X-Overload` payload from a worker (OPTIONS reply path):
     /// recompute its band and record the observation time.
-    pub fn apply_payload(&self, worker_id: &str, payload: &OverloadPayload, now_ms: u64) {
+    pub fn apply_payload(&self, worker_id: &str, payload: &OverloadPayload) {
         let mut workers = self.workers.lock().unwrap();
-        let prev = workers.get(worker_id).map(|s| s.band).unwrap_or(EluBand::BelowSoft);
+        let prev = workers.get(worker_id).copied().unwrap_or(EluBand::BelowSoft);
         let band = self.compute_band(payload.elu, prev);
-        workers.insert(
-            worker_id.to_string(),
-            WorkerState { elu: payload.elu, gc: payload.gc, band, last_payload_at_ms: now_ms },
-        );
+        workers.insert(worker_id.to_string(), band);
     }
 
     /// The worker's current band, or `None` if no payload has ever arrived.
     pub fn band_for(&self, worker_id: &str) -> Option<EluBand> {
-        self.workers.lock().unwrap().get(worker_id).map(|s| s.band)
-    }
-
-    /// Latest observed `(elu, gc)` for a worker — for metrics/tests.
-    pub fn observed(&self, worker_id: &str) -> Option<(f64, f64)> {
-        self.workers.lock().unwrap().get(worker_id).map(|s| (s.elu, s.gc))
-    }
-
-    /// ms since the last payload from a worker (for staleness metrics).
-    pub fn payload_age_ms(&self, worker_id: &str, now_ms: u64) -> Option<u64> {
-        self.workers.lock().unwrap().get(worker_id).map(|s| now_ms.saturating_sub(s.last_payload_at_ms))
+        self.workers.lock().unwrap().get(worker_id).copied()
     }
 
     /// Drop state for workers that left the registry — the map stays bounded
@@ -197,24 +178,24 @@ mod tests {
     #[test]
     fn band_thresholds() {
         let o = obs();
-        o.apply_payload("w", &payload(0.3), 0);
+        o.apply_payload("w", &payload(0.3));
         assert_eq!(o.band_for("w"), Some(EluBand::BelowSoft));
-        o.apply_payload("w", &payload(0.5), 1);
+        o.apply_payload("w", &payload(0.5));
         assert_eq!(o.band_for("w"), Some(EluBand::SoftToHard));
-        o.apply_payload("w", &payload(0.7), 2);
+        o.apply_payload("w", &payload(0.7));
         assert_eq!(o.band_for("w"), Some(EluBand::HardToCritical));
-        o.apply_payload("w", &payload(0.9), 3);
+        o.apply_payload("w", &payload(0.9));
         assert_eq!(o.band_for("w"), Some(EluBand::AboveCritical));
     }
 
     #[test]
     fn hysteresis_holds_higher_band_until_below_enter_minus_h() {
         let o = obs();
-        o.apply_payload("w", &payload(0.9), 0); // above_critical
+        o.apply_payload("w", &payload(0.9)); // above_critical
         // elu_critical=0.75, h=0.05 → stays above_critical until elu <= 0.70.
-        o.apply_payload("w", &payload(0.73), 1);
+        o.apply_payload("w", &payload(0.73));
         assert_eq!(o.band_for("w"), Some(EluBand::AboveCritical));
-        o.apply_payload("w", &payload(0.69), 2);
+        o.apply_payload("w", &payload(0.69));
         assert_eq!(o.band_for("w"), Some(EluBand::HardToCritical));
     }
 
@@ -226,8 +207,8 @@ mod tests {
     #[test]
     fn retain_drops_departed_workers() {
         let o = obs();
-        o.apply_payload("w0", &payload(0.5), 1);
-        o.apply_payload("w1", &payload(0.5), 1);
+        o.apply_payload("w0", &payload(0.5));
+        o.apply_payload("w1", &payload(0.5));
         o.retain(|id| id == "w0");
         assert!(o.band_for("w0").is_some());
         assert!(o.band_for("w1").is_none(), "departed worker state must be dropped");
@@ -236,7 +217,7 @@ mod tests {
     #[test]
     fn reset_clears_inherited_state_for_a_recreated_pod() {
         let o = obs();
-        o.apply_payload("w0", &payload(0.99), 1); // crashed while AboveCritical
+        o.apply_payload("w0", &payload(0.99)); // crashed while AboveCritical
         assert_eq!(o.band_for("w0"), Some(EluBand::AboveCritical));
         o.reset("w0");
         assert!(o.band_for("w0").is_none(), "the fresh pod must be judged from scratch");

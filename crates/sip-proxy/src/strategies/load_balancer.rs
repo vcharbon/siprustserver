@@ -25,13 +25,12 @@ use crate::addr::ProxyAddr;
 use crate::load_observer::{EluBand, WorkerLoadObserver};
 use crate::observability::metrics::{HmacFailureReason, ProxyMetrics};
 use crate::registry::{WorkerHealth, WorkerRegistry};
-use crate::security::hmac::HmacKeyProvider;
+use crate::security::hmac::{HmacKeyProvider, TRUNCATED_MAC_BYTES};
 use crate::strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};
 
 use super::rendezvous::{rendezvous_select, RendezvousCandidate};
 
 const COOKIE_VERSION: &str = "3";
-const TRUNCATED_MAC_BYTES: usize = 16;
 const DEFAULT_DRAIN_GRACE_MS: u64 = 5_000;
 const DEFAULT_FRESH_POD_GUARD_MS: u64 = 20_000;
 

@@ -276,7 +276,7 @@ impl HealthProbe {
 
         // Feed the AIMD observer with the self-reported overload payload.
         if let Some(payload) = parse_x_overload_header(get_header(&resp.headers, "x-overload")) {
-            self.observer.apply_payload(&p.worker_id, &payload, self.now_ms());
+            self.observer.apply_payload(&p.worker_id, &payload);
         }
     }
 

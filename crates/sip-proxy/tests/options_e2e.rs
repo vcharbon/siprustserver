@@ -20,7 +20,6 @@ use sip_message::{serialize, SipMessage, SipParser};
 use sip_net::UdpEndpoint;
 use sip_proxy::health::{HealthProbe, HealthProbeConfig};
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
-use sip_proxy::registry::control::SimulatedControl;
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
 use sip_proxy::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
 use sip_proxy::ProxyAddr;
@@ -71,7 +70,7 @@ async fn probe_drives_worker_health_through_options() {
         Clock::test_at(0),
     );
     let registry = Arc::new(registry);
-    let control = Arc::new(SimulatedControl::new((*registry).clone()));
+    let control = registry.control();
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
 
     let (probe_ep, _probe_sock) = h.bind_sut("probe", "127.0.0.1:5099").await;
@@ -169,7 +168,7 @@ async fn single_packet_loss_is_absorbed_by_timer_e_retransmit() {
     let registry = Arc::new(registry);
     let writes = Arc::new(Mutex::new(Vec::new()));
     let control = Arc::new(RecordingControl {
-        inner: Arc::new(SimulatedControl::new((*registry).clone())),
+        inner: registry.control(),
         writes: writes.clone(),
     });
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));

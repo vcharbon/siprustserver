@@ -7,9 +7,11 @@
 //!   bits before base64url-encoding into the cookie).
 //! - `verify_truncated(input, kid, mac_prefix)` recomputes the digest under the
 //!   named key (current OR previous, for the rotation overlap window) and
-//!   compares the leading `mac_prefix.len()` bytes in constant time (`subtle`,
-//!   the `timingSafeEqual` analogue). `false` on unknown kid, zero-length
-//!   prefix, over-long prefix, or mismatch.
+//!   compares the leading [`TRUNCATED_MAC_BYTES`] in constant time (`subtle`,
+//!   the `timingSafeEqual` analogue). `false` on unknown kid, on ANY prefix
+//!   length other than the canonical truncation, or on mismatch — the provider
+//!   enforces the length so no caller can accidentally accept a 1-byte prefix
+//!   (a ≤256-guess forgery).
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -17,6 +19,10 @@ use subtle::ConstantTimeEq;
 
 /// RFC 2104 §3: keys shorter than the hash output should be avoided.
 const MIN_KEY_BYTES: usize = 16;
+
+/// Canonical cookie-MAC truncation: 128 bits. Signers truncate to this;
+/// `verify_truncated` accepts EXACTLY this many bytes.
+pub const TRUNCATED_MAC_BYTES: usize = 16;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -114,11 +120,14 @@ impl HmacKeyProvider for StaticHmacKeyProvider {
         let Some(key) = self.lookup_key(kid) else {
             return false;
         };
-        if mac_prefix.is_empty() || mac_prefix.len() > 32 {
+        // Exactly the canonical truncation — a shorter prefix would shrink the
+        // forgery space (1 byte = a 256-guess cookie), and only the caller's
+        // own length check used to stand in the way.
+        if mac_prefix.len() != TRUNCATED_MAC_BYTES {
             return false;
         }
         let full = mac_for(key, input);
-        full[..mac_prefix.len()].ct_eq(mac_prefix).into()
+        full[..TRUNCATED_MAC_BYTES].ct_eq(mac_prefix).into()
     }
 }
 
@@ -139,6 +148,22 @@ mod tests {
             Some(HmacKey::new("k", vec![1u8; 32]))
         )
         .is_err());
+    }
+
+    #[test]
+    fn short_prefix_is_rejected_even_if_it_matches() {
+        // A 1-byte "prefix" of the genuine MAC must NOT verify: accepting it
+        // would shrink the cookie's forgery space to 256 guesses. Only the
+        // exact canonical truncation is acceptable.
+        let p = provider();
+        let signed = p.sign(b"input");
+        for n in [0usize, 1, 8, 15, 17, 32] {
+            assert!(
+                !p.verify_truncated(b"input", "k1", &signed.mac[..n]),
+                "a {n}-byte prefix must be rejected (only {TRUNCATED_MAC_BYTES} is valid)"
+            );
+        }
+        assert!(p.verify_truncated(b"input", "k1", &signed.mac[..TRUNCATED_MAC_BYTES]));
     }
 
     #[test]

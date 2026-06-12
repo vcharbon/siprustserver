@@ -133,6 +133,13 @@ impl SimulatedWorkerRegistry {
     pub fn membership(&self) -> &SimulatedMembership {
         &self.membership
     }
+
+    /// A health-write [`WorkerRegistryControl`](super::control::WorkerRegistryControl)
+    /// over this pool — the same `WorkerSet` adapter the production registries
+    /// hand out, so probe wiring in tests matches the runner's exactly.
+    pub fn control(&self) -> Arc<dyn super::control::WorkerRegistryControl> {
+        Arc::new(super::control::WorkerSetControl::new(self.set.clone()))
+    }
 }
 
 impl WorkerRegistry for SimulatedWorkerRegistry {

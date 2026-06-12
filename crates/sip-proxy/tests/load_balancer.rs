@@ -249,7 +249,7 @@ async fn above_critical_band_filtered_for_non_emergency_only() {
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
     // Single worker, pinned above_critical.
     let reg = SimulatedWorkerRegistry::with_clock(vec![WorkerEntry::alive(W1, addr(A1))], clock.clone());
-    observer.apply_payload(W1, &OverloadPayload { elu: 0.95, gc: 0.0, adm: 0.0 }, 0);
+    observer.apply_payload(W1, &OverloadPayload { elu: 0.95, gc: 0.0, adm: 0.0 });
     let s = strategy_with_observer(reg, clock, observer);
 
     // Non-emergency new dialog is filtered out → NoTarget.

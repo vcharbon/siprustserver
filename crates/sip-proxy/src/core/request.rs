@@ -468,17 +468,12 @@ impl ProxyCore {
         self.metrics.record_message(Direction::Outbound, MessageResult::Responded);
     }
 
-    /// Map a `select_for_new_dialog` failure to its 503 (distinct Reason/Retry-After).
+    /// Map a `select_for_new_dialog` failure to its 503.
     async fn reply_select_failure(&self, req: &SipRequest, src: SocketAddr, err: SelectError) -> RouteOutcome {
-        let (retry_after, reason) = match err {
-            SelectError::RateCapExhausted { retry_after_sec, .. } => {
-                (retry_after_sec.to_string(), "SIP;cause=503;text=\"rate_cap_exhausted\"".to_string())
-            }
-            SelectError::NoTarget { .. } => ("5".to_string(), "SIP;cause=503;text=\"no_target_available\"".to_string()),
-        };
+        let SelectError::NoTarget { .. } = err;
         let extra = [
-            SipHeader { name: "Retry-After".into(), value: retry_after },
-            SipHeader { name: "Reason".into(), value: reason },
+            SipHeader { name: "Retry-After".into(), value: "5".into() },
+            SipHeader { name: "Reason".into(), value: "SIP;cause=503;text=\"no_target_available\"".into() },
         ];
         self.reply(req, src, 503, "Service Unavailable", &extra).await;
         RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }

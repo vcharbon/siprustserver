@@ -1,14 +1,13 @@
 //! [`WorkerRegistryControl`] — the health-write seam (port of
 //! `health/WorkerRegistryControl.ts`). The HealthProbe writes worker health
 //! through this seam so it does not depend on a concrete registry's internals.
-//! Impls: an adapter over the shared [`WorkerSet`] (the production wiring, fed by
-//! the OPTIONS `HealthProbe`), an adapter over the [`SimulatedWorkerRegistry`]
-//! (tests), and a no-op (used where health must stay pinned).
+//! The one impl is the adapter over the shared [`WorkerSet`] — every registry
+//! (static, composed, simulated) wraps a `WorkerSet`, so each hands out the
+//! same adapter from its `control()`.
 
 use std::sync::Arc;
 
 use super::projection::WorkerSet;
-use super::simulated::SimulatedWorkerRegistry;
 use super::WorkerHealth;
 
 /// The write seam. Suspending allowed (the routing hot path never calls this).
@@ -38,27 +37,3 @@ impl WorkerRegistryControl for WorkerSetControl {
     }
 }
 
-/// Adapter exposing a [`SimulatedWorkerRegistry`] as a control seam.
-pub struct SimulatedControl {
-    registry: SimulatedWorkerRegistry,
-}
-
-impl SimulatedControl {
-    pub fn new(registry: SimulatedWorkerRegistry) -> Self {
-        Self { registry }
-    }
-}
-
-impl WorkerRegistryControl for SimulatedControl {
-    fn set_health(&self, id: &str, health: WorkerHealth) {
-        self.registry.set_health(id, health);
-    }
-}
-
-/// Production stub: accepts and discards all writes.
-#[derive(Debug, Default, Clone)]
-pub struct NoopControl;
-
-impl WorkerRegistryControl for NoopControl {
-    fn set_health(&self, _id: &str, _health: WorkerHealth) {}
-}
