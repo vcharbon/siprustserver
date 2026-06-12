@@ -8,8 +8,9 @@
 //!     watcher registry is a deferred slice).
 //!   - `HealthProbe` — periodic OPTIONS to workers, feeding the
 //!     `WorkerLoadObserver` band classifier (above-critical workers are excluded
-//!     from new-dialog selection). Health writes use `NoopControl` (the static
-//!     pool stays alive; band classification still applies).
+//!     from new-dialog selection). Health writes flow through the registry's
+//!     `control()` seam, so an unanswered worker is demoted (Dead/NotReady/
+//!     Draining) and routing reacts — for the static pool too.
 //!   - `AlwaysAdmitGate` self-gate (the real ELU/CPS gate is deferred).
 //!   - Prometheus `/metrics` + `/healthz` via the crate's `MetricsServer`.
 //!
@@ -274,12 +275,25 @@ async fn main() {
         }
     };
 
-    tokio::spawn(probe.run());
-    tokio::spawn(core.run());
+    let probe_task = tokio::spawn(probe.run());
+    let core_task = tokio::spawn(core.run());
 
-    tokio::signal::ctrl_c()
-        .await
-        .expect("install ctrl-c handler");
-    eprintln!("sip-proxy-runner shutting down");
+    // Supervise the two data-path tasks: a panicked/exited recv loop used to
+    // leave the process alive with /healthz green — k8s never restarted the
+    // pod and every datagram was silently black-holed. Exiting non-zero makes
+    // the container restart the moment either task dies.
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("sip-proxy-runner shutting down");
+        }
+        res = core_task => {
+            eprintln!("sip-proxy-runner FATAL: SIP data path exited ({res:?}) — exiting for restart");
+            std::process::exit(1);
+        }
+        res = probe_task => {
+            eprintln!("sip-proxy-runner FATAL: health probe exited ({res:?}) — exiting for restart");
+            std::process::exit(1);
+        }
+    }
     drop(_metrics_server);
 }

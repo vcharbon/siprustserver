@@ -44,11 +44,19 @@ impl MetricsServer {
     ) -> std::io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         let local = listener.local_addr()?;
+        // Bounded concurrency + a per-connection read deadline: without them an
+        // idle client (or port scanner) that connects and sends nothing parks a
+        // task + fd forever, and enough of them exhaust fds for the SIP socket.
+        let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
         let task = tokio::spawn(async move {
             while let Ok((stream, _peer)) = listener.accept().await {
+                let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    continue; // at the cap — drop the connection
+                };
                 let m = metrics.clone();
                 let r = ready.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     let _ = handle_conn(stream, m, r).await;
                 });
             }
@@ -67,9 +75,17 @@ impl Drop for MetricsServer {
     }
 }
 
+/// Concurrent-connection cap (k8s probes + a scraper need a handful).
+const MAX_CONNECTIONS: usize = 32;
+/// A client that hasn't sent its request line within this window is dropped.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 async fn handle_conn(mut stream: TcpStream, metrics: Arc<ProxyMetrics>, ready: ReadinessFn) -> std::io::Result<()> {
     let mut buf = [0u8; 1024];
-    let n = stream.read(&mut buf).await?;
+    let n = match tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf)).await {
+        Ok(read) => read?,
+        Err(_elapsed) => return Ok(()), // silent client — drop the connection
+    };
     let req = String::from_utf8_lossy(&buf[..n]);
     let path = req.split_whitespace().nth(1).unwrap_or("/");
 

@@ -120,7 +120,9 @@ impl ProxyCore {
     /// recv loop NEVER waits on DNS (see [`crate::resolver`]).
     async fn send_to(&self, bytes: &[u8], target: &ProxyAddr) {
         if let Some(dst) = target.to_socket_addr() {
-            let _ = self.endpoint.send_to(bytes, dst).await;
+            if self.endpoint.send_to(bytes, dst).await.is_err() {
+                self.metrics.record_send_failure();
+            }
             return;
         }
         self.named.send(bytes, target).await;
@@ -128,7 +130,9 @@ impl ProxyCore {
 
     /// Reply to the packet's source.
     async fn reply_to_source(&self, bytes: &[u8], src: SocketAddr) {
-        let _ = self.endpoint.send_to(bytes, src).await;
+        if self.endpoint.send_to(bytes, src).await.is_err() {
+            self.metrics.record_send_failure();
+        }
     }
 
     /// The recv loop. Runs until the endpoint's queue is closed (the endpoint
@@ -144,6 +148,7 @@ impl ProxyCore {
         let sweeper = {
             let lru = self.cancel_lru.clone();
             let metrics = self.metrics.clone();
+            let endpoint = self.endpoint.clone();
             tokio::spawn(async move {
                 let mut tick =
                     tokio::time::interval(Duration::from_millis(crate::cancel_lru::DEFAULT_SWEEP_INTERVAL_MS));
@@ -152,6 +157,15 @@ impl ProxyCore {
                     tick.tick().await;
                     lru.sweep_expired();
                     metrics.set_pending_invite_lru_size(lru.size() as u64);
+                    // Publish the endpoint's queue state: a tail-dropping
+                    // queue otherwise shows 100% forwarded on dashboards.
+                    let c = endpoint.counters();
+                    metrics.set_udp_endpoint_stats(
+                        endpoint.queue_depth() as u64,
+                        endpoint.queue_max() as u64,
+                        c.enqueued,
+                        c.tail_dropped,
+                    );
                 }
             })
         };

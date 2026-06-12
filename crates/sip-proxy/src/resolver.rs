@@ -187,7 +187,9 @@ impl NamedForwarder {
         match inner.cache.lookup(&key) {
             CacheLookup::Hit(dst) => {
                 inner.metrics.record_named_send(outcome::CACHED);
-                let _ = inner.endpoint.send_to(bytes, dst).await;
+                if inner.endpoint.send_to(bytes, dst).await.is_err() {
+                    inner.metrics.record_send_failure();
+                }
             }
             CacheLookup::NegativeHit => {
                 inner.metrics.record_named_send(outcome::DROPPED_NEGATIVE);
@@ -218,7 +220,9 @@ impl NamedForwarder {
                     match resolved {
                         Some(dst) => {
                             inner.metrics.record_named_send(outcome::RESOLVED);
-                            let _ = inner.endpoint.send_to(&bytes, dst).await;
+                            if inner.endpoint.send_to(&bytes, dst).await.is_err() {
+                                inner.metrics.record_send_failure();
+                            }
                         }
                         None => inner.metrics.record_named_send(outcome::RESOLVE_FAILED),
                     }
