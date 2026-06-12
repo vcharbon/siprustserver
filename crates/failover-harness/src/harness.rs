@@ -767,8 +767,18 @@ impl FailoverHarness {
         let task = tokio::spawn(core.run());
 
         // Optional REAL health probe: its own bound endpoint on the fabric, the
-        // registry's control seam, production-cadence config (1 s / 1.5 s, both
-        // multiples of the 100 ms advance chunk so no paused-clock reply race).
+        // registry's control seam. Cadence is 10 s / 1.5 s — NOT the production
+        // 1 s tick. Every tick fans a real sip-txn OPTIONS to every worker, and
+        // under the paused clock that churn is pure CPU (each probe = client txn
+        // + worker server txn + Timer E/F/J entries + recorded-trace events the
+        // Drop-time RFC audit must scan): at the production cadence the long
+        // keepalive cell (≈700 sim-seconds pumped in 100 ms chunks) ran ~420 s
+        // wall, ~10 s at this cadence (super-linear: trace-scanning costs grow
+        // with probe-event count). Nothing under test depends on the tick period
+        // — cells pump until a health transition is observed (`reboot_and_reclaim` waits for
+        // Alive, kill/drain set health directly) — so a slower tick is
+        // semantics-preserving. Keep both values multiples of the 100 ms advance
+        // chunk so there is no paused-clock reply race.
         let probe_task = if let Some(paddr) = probe_addr {
             let (probe_ep, _psock) = self.harness.bind_sut("proxy-probe", paddr).await;
             let control = registry.control();
@@ -779,7 +789,7 @@ impl FailoverHarness {
                 observer,
                 self.clock.clone(),
                 Arc::new(IdGen::seeded(0x9809BE)),
-                HealthProbeConfig::default(),
+                HealthProbeConfig { interval_ms: 10_000, timeout_ms: 1_500, threshold: 2 },
             );
             Some(tokio::spawn(probe.run()))
         } else {

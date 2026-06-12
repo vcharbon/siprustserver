@@ -15,6 +15,25 @@ Port an pass all test of the given layer. Provide a full list of un-ported test 
 
 When porting scenario, you can get reference traces of the sipjs behavior under ../sipjsserver/test-results/fake-clock/
 
+## Test-runtime policy (default vs slow lane)
+
+**An integration test that takes >60 s of wall-clock on the REAL clock must not
+run by default.** Mark it `#[ignore = "real-clock >60s — slow lane (just
+test-slow)"]` and keep a fake-clock (`start_paused`) equivalent of the scenario
+in the default lane — writing one if missing is the point of the rule. Lanes
+live in the `justfile`: `just test` (default), `just test-slow`
+(`cargo test --release -- --ignored`).
+
+Paused-clock tests are exempt from the 60 s rule but are NOT free: their cost
+is CPU (timer churn + recorded-trace scans), and it compounds super-linearly
+with per-sim-second traffic. Concrete case: the failover harness's REAL OPTIONS
+health probe at the production 1 s cadence made ONE keepalive cell (~700
+sim-seconds) burn ~420 s of CPU; at the harness's 10 s cadence it is ~10 s.
+Before `#[ignore]`-ing a slow paused-clock test, cut the churn at its source
+(probe/keepalive cadence, traffic volume per sim-second) — slower cadences are
+semantics-preserving wherever the test pumps for a condition instead of
+counting ticks.
+
 ## Test-time clock & timers (read before touching timer or paused-clock code)
 
 Behaviour rides `tokio::time` directly (monotonic) — there is **no** separate
