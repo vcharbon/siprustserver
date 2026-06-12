@@ -240,9 +240,7 @@ impl ProxyCoreBuilder {
             advertised: self.advertised,
             strategy: self.strategy,
             registry: self.registry,
-            cancel_lru: self
-                .cancel_lru
-                .unwrap_or_else(|| Arc::new(CancelBranchLru::with_opts(crate::cancel_lru::DEFAULT_TTL_MS, clock.clone()))),
+            cancel_lru: self.cancel_lru.unwrap_or_else(|| Arc::new(CancelBranchLru::with_clock(clock.clone()))),
             id_gen: self.id_gen.unwrap_or_else(|| Arc::new(IdGen::from_entropy())),
             clock,
             metrics: self.metrics.unwrap_or_else(|| Arc::new(ProxyMetrics::new())),
@@ -261,7 +259,7 @@ mod sweeper_tests {
     use async_trait::async_trait;
     use sip_net::{SendError, UdpEndpointCounters, UdpPacket};
 
-    use crate::cancel_lru::{call_id_cseq_key, CancelEntry, DEFAULT_SWEEP_INTERVAL_MS, DEFAULT_TTL_MS};
+    use crate::cancel_lru::{call_id_cseq_key, CancelEntry, RTX_ENTRY_TTL_MS};
     use crate::registry::static_reg::StaticWorkerRegistry;
     use crate::ForwardAllStrategy;
 
@@ -301,19 +299,17 @@ mod sweeper_tests {
     /// and `sip_proxy_pending_invite_lru_size` would climb without bound.
     #[tokio::test(start_paused = true)]
     async fn run_sweeps_expired_pending_invite_entries() {
-        // Cadence is sub-TTL by construction, else a reclaimed slot would
-        // outlive its usefulness (kept as a compile-time invariant).
-        const _: () = assert!(DEFAULT_SWEEP_INTERVAL_MS <= DEFAULT_TTL_MS);
-
+        // (Cadence ≤ shortest TTL is a compile-time invariant in cancel_lru.rs.)
         let clock = Clock::test_at(0);
-        let lru = Arc::new(CancelBranchLru::with_opts(DEFAULT_TTL_MS, clock.clone()));
+        let lru = Arc::new(CancelBranchLru::with_clock(clock.clone()));
         let metrics = Arc::new(ProxyMetrics::new());
 
-        // Remember one pending INVITE and publish the gauge, as the request path
-        // does on every outbound INVITE.
+        // Remember one entry at the SHORT (rtx) TTL and publish the gauge, as
+        // the request path does on every forward.
         lru.remember(
-            &call_id_cseq_key("call-leaky", 1),
+            &call_id_cseq_key("call-leaky", Some("t"), 1),
             CancelEntry { target: ProxyAddr::new("10.0.0.2", 5070), branch: "z9hG4bK-x".into() },
+            RTX_ENTRY_TTL_MS,
         );
         metrics.set_pending_invite_lru_size(lru.size() as u64);
         assert_eq!(metrics.pending_invite_lru_size(), 1);

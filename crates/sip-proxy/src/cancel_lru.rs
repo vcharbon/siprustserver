@@ -1,17 +1,24 @@
-//! [`CancelBranchLru`] — proxy-local `(Call-ID, CSeq number) → {target, branch}`
-//! cache with TTL (port of `CancelBranchLru.ts`).
+//! [`CancelBranchLru`] — proxy-local `(Call-ID, From-tag, CSeq number) →
+//! {target, branch}` cache with per-entry TTL (port of `CancelBranchLru.ts`).
 //!
 //! RFC 3261 §16.10 / §17.2.3: a stateless proxy must forward a CANCEL to the
 //! same downstream the matching INVITE went to, **and** reuse the INVITE's
 //! outbound top-Via branch so the downstream transaction layer correlates them.
-//! Keying on `(Call-ID, CSeq number)` (RFC 3261 §9.1) is the canonical
-//! correlator — it works at any hop regardless of whether the upstream rewrote
-//! the branch, and (unlike keying on the proxy's outbound branch) survives the
-//! LoadBalancer re-sharding a fallback selection to a different worker.
+//! Keying on `(Call-ID, From-tag, CSeq number)` (RFC 3261 §9.1) is the
+//! canonical correlator — it works at any hop regardless of whether the
+//! upstream rewrote the branch, and (unlike keying on the proxy's outbound
+//! branch) survives the LoadBalancer re-sharding a fallback selection to a
+//! different worker. The From-tag matters because BOTH directions of a dialog
+//! are remembered here and share the Call-ID with *independent* CSeq spaces
+//! (§12.2.1.1): without it, a UAC re-INVITE and a worker-outbound re-INVITE
+//! that happen to land on the same CSeq number within one TTL overwrite each
+//! other's entry, and the later CANCEL/ACK is forwarded to the wrong party
+//! with the wrong branch.
 //!
 //! The same cache also drives hop-by-hop ACK absorption (the proxy synthesized
-//! the ACK for a non-2xx final on the response path) and the non-2xx ACK
-//! synthesis itself.
+//! the ACK for a non-2xx final on the response path), the non-2xx ACK
+//! synthesis itself, and the retransmission branch memo (`rtx|`-prefixed keys,
+//! see `core/request.rs`).
 //!
 //! Reads are O(1) and lock-only (never block on I/O). Eviction is lazy on
 //! lookup plus an optional periodic [`sweep_expired`](CancelBranchLru::sweep_expired)
@@ -21,20 +28,40 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use sip_clock::Clock;
+use sip_txn::timers::{INVITE_INITIAL_TIMEOUT, TIMER_F, TIMER_H};
 
 use crate::addr::ProxyAddr;
 
-/// Default per-entry TTL — Timer C reaches 3 min, but at the proxy hop what
-/// matters is that a user-driven CANCEL in the first seconds of ringing finds
-/// the right downstream; 32 s covers that comfortably.
-pub const DEFAULT_TTL_MS: u64 = 32_000;
-/// Default sweep cadence — half the TTL keeps the map near 1× working set.
+/// TTL for pending-INVITE entries (CANCEL forwarding + non-2xx ACK synthesis).
+/// Must cover the downstream UA's **whole INVITE transaction window**: the
+/// B2BUA answers or gives up within `sip-txn`'s `INVITE_INITIAL_TIMEOUT`
+/// (158 s, which wraps its 150 s `SetupTimeout` ledger), plus the
+/// final-response retransmit tail (Timer H). Imported from `sip-txn` so the
+/// proxy's memory and the B2BUA's transaction timers cannot drift apart. The
+/// old 32 s TTL made a CANCEL after half a minute of (perfectly legal) ringing
+/// miss the entry and go downstream with a FRESH branch → 481 Transaction Does
+/// Not Exist, while the callee kept ringing.
+pub const INVITE_ENTRY_TTL_MS: u64 = INVITE_INITIAL_TIMEOUT + TIMER_H;
+
+/// TTL for retransmission branch memos (`rtx|` keys): upstream retransmits
+/// stop at Timer B/F (64×T1 = 32 s), so these need live no longer. They are
+/// written for EVERY forwarded request — including each keepalive OPTIONS — so
+/// keeping them short keeps the map at ≈ one transaction window of traffic.
+pub const RTX_ENTRY_TTL_MS: u64 = TIMER_F;
+
+/// Default sweep cadence — half the SHORT (rtx) TTL, so the dominant entry
+/// class is physically reclaimed near its expiry and the map stays at ~1×
+/// working set.
 pub const DEFAULT_SWEEP_INTERVAL_MS: u64 = 16_000;
 
-/// Build the composite key. `|` is illegal inside an RFC 3261 Call-ID `word`,
-/// so the join is unambiguous.
-pub fn call_id_cseq_key(call_id: &str, cseq_num: u32) -> String {
-    format!("{call_id}|{cseq_num}")
+const _: () = assert!(DEFAULT_SWEEP_INTERVAL_MS <= RTX_ENTRY_TTL_MS);
+const _: () = assert!(RTX_ENTRY_TTL_MS <= INVITE_ENTRY_TTL_MS);
+
+/// Build the composite key. `|` is illegal inside an RFC 3261 Call-ID `word`
+/// and inside a `tag` token, so the join is unambiguous. A missing From-tag
+/// (pre-RFC-3261 UA) keys as the empty string.
+pub fn call_id_cseq_key(call_id: &str, from_tag: Option<&str>, cseq_num: u32) -> String {
+    format!("{call_id}|{}|{cseq_num}", from_tag.unwrap_or(""))
 }
 
 /// What we cache per remembered INVITE: the downstream target + the branch we
@@ -54,29 +81,30 @@ struct StoredEntry {
 /// The TTL cache. Cheap to share behind an `Arc`.
 pub struct CancelBranchLru {
     table: Mutex<HashMap<String, StoredEntry>>,
-    ttl_ms: u64,
     clock: Clock,
 }
 
 impl CancelBranchLru {
-    /// Default TTL (32 s), system clock.
+    /// System clock.
     pub fn new() -> Self {
-        Self::with_opts(DEFAULT_TTL_MS, Clock::system())
+        Self::with_clock(Clock::system())
     }
 
-    /// Explicit TTL + clock (tests use `Clock::test_at(..)` for deterministic
+    /// Explicit clock (tests use `Clock::test_at(..)` for deterministic
     /// eviction under `tokio::time`).
-    pub fn with_opts(ttl_ms: u64, clock: Clock) -> Self {
-        Self { table: Mutex::new(HashMap::new()), ttl_ms, clock }
+    pub fn with_clock(clock: Clock) -> Self {
+        Self { table: Mutex::new(HashMap::new()), clock }
     }
 
     fn now_ms(&self) -> u64 {
         self.clock.now_ms().max(0) as u64
     }
 
-    /// Remember the downstream target + outbound branch used on an INVITE.
-    pub fn remember(&self, key: &str, entry: CancelEntry) {
-        let expires_at_ms = self.now_ms() + self.ttl_ms;
+    /// Remember the downstream target + outbound branch used on a forward.
+    /// TTL is per entry: [`INVITE_ENTRY_TTL_MS`] for CANCEL/ACK correlation,
+    /// [`RTX_ENTRY_TTL_MS`] for retransmission branch memos.
+    pub fn remember(&self, key: &str, entry: CancelEntry, ttl_ms: u64) {
+        let expires_at_ms = self.now_ms() + ttl_ms;
         self.table.lock().unwrap().insert(
             key.to_string(),
             StoredEntry { target: entry.target, branch: entry.branch, expires_at_ms },
@@ -129,35 +157,46 @@ mod tests {
     }
 
     #[test]
-    fn key_format_is_callid_pipe_cseq() {
-        assert_eq!(call_id_cseq_key("abc@h", 7), "abc@h|7");
+    fn key_format_is_callid_tag_cseq() {
+        assert_eq!(call_id_cseq_key("abc@h", Some("t1"), 7), "abc@h|t1|7");
+        assert_eq!(call_id_cseq_key("abc@h", None, 7), "abc@h||7");
+    }
+
+    #[test]
+    fn from_tag_disambiguates_the_two_dialog_directions() {
+        // Both directions share the Call-ID; CSeq spaces are independent and
+        // can collide on the same number — the From-tag keeps them apart.
+        assert_ne!(call_id_cseq_key("c1", Some("uac"), 5), call_id_cseq_key("c1", Some("b2bua"), 5));
     }
 
     #[test]
     fn remember_then_lookup_returns_entry() {
-        let lru = CancelBranchLru::with_opts(1000, Clock::test_at(0));
-        let k = call_id_cseq_key("call-1", 1);
-        lru.remember(&k, entry("z9hG4bK-1"));
+        let lru = CancelBranchLru::with_clock(Clock::test_at(0));
+        let k = call_id_cseq_key("call-1", Some("t"), 1);
+        lru.remember(&k, entry("z9hG4bK-1"), 1000);
         assert_eq!(lru.lookup(&k).unwrap().branch, "z9hG4bK-1");
         assert_eq!(lru.size(), 1);
         assert!(lru.lookup("absent").is_none());
     }
 
     #[tokio::test(start_paused = true)]
-    async fn entries_expire_after_ttl() {
-        let lru = CancelBranchLru::with_opts(1000, Clock::test_at(0));
-        let k = call_id_cseq_key("call-1", 1);
-        lru.remember(&k, entry("b"));
+    async fn entries_expire_after_their_own_ttl() {
+        let lru = CancelBranchLru::with_clock(Clock::test_at(0));
+        let short = call_id_cseq_key("call-1", Some("t"), 1);
+        let long = call_id_cseq_key("call-2", Some("t"), 1);
+        lru.remember(&short, entry("a"), 1000);
+        lru.remember(&long, entry("b"), 5000);
         tokio::time::advance(std::time::Duration::from_millis(1001)).await;
-        assert!(lru.lookup(&k).is_none(), "entry should have expired");
-        assert_eq!(lru.sweep_expired(), 0, "lazy lookup already evicted it");
+        assert!(lru.lookup(&short).is_none(), "short-TTL entry should have expired");
+        assert!(lru.lookup(&long).is_some(), "long-TTL entry must outlive the short one");
+        assert_eq!(lru.sweep_expired(), 0, "lazy lookup already evicted the expired one");
     }
 
     #[tokio::test(start_paused = true)]
     async fn sweep_drops_expired() {
-        let lru = CancelBranchLru::with_opts(1000, Clock::test_at(0));
-        lru.remember(&call_id_cseq_key("c1", 1), entry("a"));
-        lru.remember(&call_id_cseq_key("c2", 1), entry("b"));
+        let lru = CancelBranchLru::with_clock(Clock::test_at(0));
+        lru.remember(&call_id_cseq_key("c1", Some("t"), 1), entry("a"), 1000);
+        lru.remember(&call_id_cseq_key("c2", Some("t"), 1), entry("b"), 1000);
         tokio::time::advance(std::time::Duration::from_millis(1001)).await;
         assert_eq!(lru.sweep_expired(), 2);
         assert_eq!(lru.size(), 0);

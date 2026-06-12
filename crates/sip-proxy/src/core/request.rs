@@ -74,10 +74,8 @@ impl ProxyCore {
         let call_id = req.call_id.clone();
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
         self.metrics.record_request(&method);
-        // A new call = an initial dialog-creating INVITE (no To-tag yet).
-        if is_dialog_creating(&method) && method == "INVITE" && req.to.tag.is_none() {
-            self.metrics.record_call();
-        }
+        // (`sip_proxy_calls_total` is counted inside `route_request`, where the
+        // retransmission memo can exclude re-sent copies of the same INVITE.)
 
         let outcome = self.route_request(&req, &method, src).await;
 
@@ -108,10 +106,41 @@ impl ProxyCore {
 
         // ── Hop-by-hop ACK absorption (§17.1.1.3) ───────────────────────────
         if method == "ACK" && first_header_value(&req.headers, "route").is_none() {
-            let key = call_id_cseq_key(&req.call_id, req.cseq.seq);
+            let key = call_id_cseq_key(&req.call_id, req.from.tag.as_deref(), req.cseq.seq);
             if self.cancel_lru.lookup(&key).is_some() {
                 return RouteOutcome { decision: select, target: None };
             }
+        }
+
+        // ── §16.6 / §17.2.3 retransmission memo (looked up FIRST) ───────────
+        // A retransmission repeats an already-forwarded request, so it must
+        // repeat the original forward exactly: same outbound top-Via branch
+        // (else the downstream transaction layer sees a fresh transaction at
+        // the same CSeq and the on-wire §12.2.2 CSeq audit rejects it) and the
+        // SAME downstream target (re-running the strategy under a changed
+        // candidate set would send the same branch to a DIFFERENT worker — one
+        // INVITE transaction split across two B2BUAs, a doubled call). It must
+        // also not be re-counted as a new call nor re-gated: a 503 to a
+        // retransmit of an admitted INVITE tears down a setup the first copy
+        // already started. Keyed on the full (Call-ID, upstream branch,
+        // method, CSeq) so a genuine retransmit matches but a different
+        // request that merely collides on the branch (a backup's reset `IdGen`
+        // after failover) does not. CANCEL is excluded — it resolves target +
+        // branch from the INVITE's own entry below.
+        let incoming_branch = top_via_branch(req);
+        let rtx_key = incoming_branch
+            .as_ref()
+            .map(|b| retransmit_key(&req.call_id, b, method, req.cseq.seq));
+        let rtx_hit: Option<CancelEntry> = if method == "CANCEL" {
+            None
+        } else {
+            rtx_key.as_ref().and_then(|k| self.cancel_lru.lookup(k))
+        };
+
+        // A new call = an initial dialog-creating INVITE (no To-tag yet), first
+        // transmission only.
+        if method == "INVITE" && req.to.tag.is_none() && rtx_hit.is_none() {
+            self.metrics.record_call();
         }
 
         // ── §16.4 Route preprocessing ───────────────────────────────────────
@@ -169,24 +198,29 @@ impl ProxyCore {
         }
 
         // ── Proxy-self gate (stubbed always-admit) ──────────────────────────
+        // A retransmission bypasses the gate entirely: its first copy was
+        // already admitted and forwarded, so rejecting the re-sent copy would
+        // 503 a setup that is already ringing downstream.
         let has_to_tag = req.to.tag.as_deref().is_some_and(|t| !t.is_empty());
         let is_new_dialog_invite = method == "INVITE" && !has_to_tag;
         let is_emergency = is_emergency_request(req);
-        if is_new_dialog_invite && !is_emergency && !is_worker_outbound {
-            let decision = self.self_gate.try_admit_external();
-            if !decision.admit {
-                let reason = decision.reason.unwrap_or_else(|| "proxy_overload_cps".to_string());
-                let extra = [
-                    SipHeader { name: "Retry-After".into(), value: decision.retry_after_sec.to_string() },
-                    SipHeader { name: "Reason".into(), value: format!("SIP;cause=503;text=\"{reason}\"") },
-                ];
-                self.reply(req, src, 503, "Service Unavailable", &extra).await;
-                return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
+        if rtx_hit.is_none() {
+            if is_new_dialog_invite && !is_emergency && !is_worker_outbound {
+                let decision = self.self_gate.try_admit_external();
+                if !decision.admit {
+                    let reason = decision.reason.unwrap_or_else(|| "proxy_overload_cps".to_string());
+                    let extra = [
+                        SipHeader { name: "Retry-After".into(), value: decision.retry_after_sec.to_string() },
+                        SipHeader { name: "Reason".into(), value: format!("SIP;cause=503;text=\"{reason}\"") },
+                    ];
+                    self.reply(req, src, 503, "Service Unavailable", &extra).await;
+                    return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
+                }
+            } else if is_new_dialog_invite && is_emergency {
+                self.self_gate.note_bypass(BypassKind::Emergency);
+            } else if is_new_dialog_invite && is_worker_outbound {
+                self.self_gate.note_bypass(BypassKind::Internal);
             }
-        } else if is_new_dialog_invite && is_emergency {
-            self.self_gate.note_bypass(BypassKind::Emergency);
-        } else if is_new_dialog_invite && is_worker_outbound {
-            self.self_gate.note_bypass(BypassKind::Internal);
         }
 
         // ── Loose-route next hop (a downstream proxy's surviving Route) ──────
@@ -206,7 +240,7 @@ impl ProxyCore {
         let mut reuse_branch: Option<String> = None;
 
         if method == "CANCEL" {
-            let key = call_id_cseq_key(&req.call_id, req.cseq.seq);
+            let key = call_id_cseq_key(&req.call_id, req.from.tag.as_deref(), req.cseq.seq);
             if let Some(found) = self.cancel_lru.lookup(&key) {
                 target = Some(found.target);
                 reuse_branch = Some(found.branch);
@@ -249,14 +283,29 @@ impl ProxyCore {
                     return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
                 }
                 DecodeResult::Unknown { is_emergency } => {
-                    let opts = SelectOpts { emergency_override: is_emergency };
-                    match self.strategy.select_for_new_dialog(&SipMessage::Request(req.clone()), opts).await {
-                        Ok(t) => target = Some(t),
-                        Err(e) => return self.reply_select_failure(req, src, e).await,
+                    // A retransmit must repeat the original (random) selection,
+                    // not roll the dice again — see the rtx memo above.
+                    if let Some(found) = &rtx_hit {
+                        target = Some(found.target.clone());
+                    } else {
+                        let opts = SelectOpts { emergency_override: is_emergency };
+                        match self.strategy.select_for_new_dialog(&SipMessage::Request(req.clone()), opts).await {
+                            Ok(t) => target = Some(t),
+                            Err(e) => return self.reply_select_failure(req, src, e).await,
+                        }
                     }
                     decision = RoutingDecisionKind::DecodeForward;
                 }
             }
+        } else if let Some(found) = &rtx_hit {
+            // Retransmitted out-of-dialog request: repeat the original
+            // selection. Re-running the strategy under a changed candidate set
+            // (an ELU band flip, a worker join/leave) would forward the SAME
+            // reused branch to a DIFFERENT worker — one INVITE transaction
+            // split across two B2BUAs (double call), with the CANCEL entry
+            // then overwritten to point at the second one.
+            target = Some(found.target.clone());
+            decision = RoutingDecisionKind::SelectNew;
         } else {
             match self.strategy.select_for_new_dialog(&SipMessage::Request(req.clone()), SelectOpts::default()).await {
                 Ok(t) => target = Some(t),
@@ -314,26 +363,15 @@ impl ProxyCore {
         }
 
         // ── §16.6 / §17.2.3 retransmission branch reuse ─────────────────────
-        // Forward a *retransmission* with the SAME outbound top-Via branch the
-        // original forward used, so the downstream transaction layer (and the
-        // on-wire RFC 3261 §12.2.2 in-dialog-CSeq audit) correlate it to the
-        // existing transaction instead of seeing a fresh transaction at the same
-        // CSeq. Keyed on the full (Call-ID, upstream branch, method, CSeq) so a
-        // genuine retransmit reuses the branch but a *different* request that
-        // merely collides on the branch (a backup's reset `IdGen` after failover)
-        // does not. Without this, a keepalive OPTIONS that retransmits before its
-        // 200 lands reaches the callee as several distinct CSeq-N transactions and
-        // the audit (correctly) rejects the 2nd as a CSeq reuse. CANCEL already
-        // resolves its branch from the INVITE LRU above.
-        let incoming_branch = top_via_branch(req);
-        let rtx_key = incoming_branch
-            .as_ref()
-            .map(|b| retransmit_key(&req.call_id, b, &method, req.cseq.seq));
-        if method != "CANCEL" && reuse_branch.is_none() {
-            if let Some(k) = &rtx_key {
-                if let Some(found) = self.cancel_lru.lookup(k) {
-                    reuse_branch = Some(found.branch);
-                }
+        // A retransmission carries the SAME outbound top-Via branch the
+        // original forward used (looked up at the top of this fn); CANCEL
+        // already resolved its branch from the INVITE entry above. Without
+        // this, a keepalive OPTIONS that retransmits before its 200 lands
+        // reaches the callee as several distinct CSeq-N transactions and the
+        // on-wire §12.2.2 audit (correctly) rejects the 2nd as a CSeq reuse.
+        if reuse_branch.is_none() {
+            if let Some(found) = &rtx_hit {
+                reuse_branch = Some(found.branch.clone());
             }
         }
 
@@ -342,19 +380,28 @@ impl ProxyCore {
             format!("SIP/2.0/UDP {}:{};branch={};rport", self.advertised.host, self.advertised.port, our_branch);
         prepend_header(&mut headers, "Via", &via_value);
 
-        // Remember the outbound branch so a retransmit of THIS request reuses it.
+        // Remember the outbound (target, branch) so a retransmit of THIS
+        // request repeats the forward. Short TTL: retransmits stop at Timer B/F.
         if method != "CANCEL" {
             if let Some(k) = &rtx_key {
                 self.cancel_lru.remember(
                     k,
                     CancelEntry { target: target.clone(), branch: our_branch.clone() },
+                    crate::cancel_lru::RTX_ENTRY_TTL_MS,
                 );
             }
         }
 
         if method == "INVITE" {
-            let key = call_id_cseq_key(&req.call_id, req.cseq.seq);
-            self.cancel_lru.remember(&key, CancelEntry { target: target.clone(), branch: our_branch });
+            // Long TTL: a CANCEL or non-2xx final can legally arrive any time
+            // inside the downstream UA's INVITE window (B2BUA SetupTimeout /
+            // sip-txn INVITE_INITIAL_TIMEOUT) — see cancel_lru.rs.
+            let key = call_id_cseq_key(&req.call_id, req.from.tag.as_deref(), req.cseq.seq);
+            self.cancel_lru.remember(
+                &key,
+                CancelEntry { target: target.clone(), branch: our_branch },
+                crate::cancel_lru::INVITE_ENTRY_TTL_MS,
+            );
             self.metrics.set_pending_invite_lru_size(self.cancel_lru.size() as u64);
         }
 
@@ -692,5 +739,244 @@ Content-Length: 0\r\n\r\n"
             "cookie on top → decode to the worker; the trailing ;outbound half must not flip direction"
         );
         assert_eq!(outcome.target, Some(ProxyAddr::new(W1_POD, 5060)));
+    }
+}
+
+#[cfg(test)]
+mod retransmission_tests {
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use sip_clock::Clock;
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+    use sip_net::types::BindUdpOpts;
+    use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
+
+    use crate::addr::ProxyAddr;
+    use crate::core::{ProxyCore, ProxyCoreBuilder};
+    use crate::observability::metrics::RoutingDecisionKind;
+    use crate::registry::static_reg::StaticWorkerRegistry;
+    use crate::registry::WorkerRegistry;
+    use crate::self_gate::{AdmitDecision, ProxySelfGate};
+    use crate::strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};
+    use crate::ProxyMetrics;
+
+    const UAC: &str = "10.244.7.13";
+    const PROXY_VIP: &str = "172.20.255.250";
+    const W1: &str = "10.0.0.1";
+    const W2: &str = "10.0.0.2";
+
+    /// Strategy double: pops targets off a queue, counting selections — a
+    /// changed candidate set is modeled as "the next selection differs".
+    struct QueueStrategy {
+        targets: Mutex<VecDeque<ProxyAddr>>,
+        calls: AtomicU32,
+    }
+
+    impl QueueStrategy {
+        fn of(targets: &[ProxyAddr]) -> Arc<Self> {
+            Arc::new(Self { targets: Mutex::new(targets.iter().cloned().collect()), calls: AtomicU32::new(0) })
+        }
+    }
+
+    #[async_trait]
+    impl RoutingStrategy for QueueStrategy {
+        fn name(&self) -> &str {
+            "Queue"
+        }
+        async fn select_for_new_dialog(&self, _msg: &SipMessage, _opts: SelectOpts) -> Result<ProxyAddr, SelectError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.targets.lock().unwrap().pop_front().expect("selection queue exhausted"))
+        }
+        async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+            DecodeResult::Unknown { is_emergency: false }
+        }
+        fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
+            None
+        }
+    }
+
+    /// Gate double: admits the first external INVITE, rejects everything after
+    /// — the shape of a capacity gate that filled up between two transmissions.
+    #[derive(Default)]
+    struct AdmitOnceGate {
+        used: AtomicBool,
+        tries: AtomicU32,
+    }
+
+    impl ProxySelfGate for AdmitOnceGate {
+        fn try_admit_external(&self) -> AdmitDecision {
+            self.tries.fetch_add(1, Ordering::SeqCst);
+            if self.used.swap(true, Ordering::SeqCst) {
+                AdmitDecision { admit: false, reason: Some("proxy_overload_cps".into()), retry_after_sec: 3 }
+            } else {
+                AdmitDecision::admit()
+            }
+        }
+    }
+
+    struct Fixture {
+        core: ProxyCore,
+        strategy: Arc<QueueStrategy>,
+        gate: Arc<AdmitOnceGate>,
+        metrics: Arc<ProxyMetrics>,
+    }
+
+    async fn fixture(targets: &[ProxyAddr]) -> Fixture {
+        let net = SimulatedSignalingNetwork::new(1);
+        let ep = net.bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64)).await.unwrap();
+        let strategy = QueueStrategy::of(targets);
+        let gate = Arc::new(AdmitOnceGate::default());
+        let metrics = Arc::new(ProxyMetrics::new());
+        let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
+        let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy.clone(), reg)
+            .clock(Clock::test_at(0))
+            .metrics(metrics.clone())
+            .self_gate(gate.clone())
+            .build(ep);
+        Fixture { core, strategy, gate, metrics }
+    }
+
+    fn parse_req(raw: &str) -> sip_message::SipRequest {
+        let SipMessage::Request(req) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
+            panic!("expected request")
+        };
+        req
+    }
+
+    fn invite(call_id: &str, from_tag: &str, cseq: u32, branch: &str) -> sip_message::SipRequest {
+        parse_req(&format!(
+            "INVITE sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch={branch};rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{UAC}>;tag={from_tag}\r\n\
+To: <sip:bob@10.0.0.50>\r\n\
+Call-ID: {call_id}\r\n\
+CSeq: {cseq} INVITE\r\n\
+Contact: <sip:alice@{UAC}:5060>\r\n\
+Content-Length: 0\r\n\r\n"
+        ))
+    }
+
+    fn cancel(call_id: &str, from_tag: &str, cseq: u32, branch: &str) -> sip_message::SipRequest {
+        parse_req(&format!(
+            "CANCEL sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch={branch};rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{UAC}>;tag={from_tag}\r\n\
+To: <sip:bob@10.0.0.50>\r\n\
+Call-ID: {call_id}\r\n\
+CSeq: {cseq} CANCEL\r\n\
+Content-Length: 0\r\n\r\n"
+        ))
+    }
+
+    fn src() -> std::net::SocketAddr {
+        format!("{UAC}:5060").parse().unwrap()
+    }
+
+    // The finding this guards: an INVITE retransmission re-ran the strategy
+    // while reusing the memoized branch — under a changed candidate set the
+    // same branch went to a DIFFERENT worker, splitting one transaction into
+    // two B2BUA calls. The retransmit must repeat the original forward.
+    #[tokio::test(start_paused = true)]
+    async fn retransmitted_invite_repeats_the_original_selection() {
+        let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
+        let req = invite("split-1@test", "tag-a", 1, "z9hG4bKr1");
+
+        let first = f.core.route_request(&req, "INVITE", src()).await;
+        let retx = f.core.route_request(&req, "INVITE", src()).await;
+
+        assert_eq!(first.target, Some(ProxyAddr::new(W1, 5060)));
+        assert_eq!(retx.target, Some(ProxyAddr::new(W1, 5060)), "retransmit must NOT be re-routed to w2");
+        assert_eq!(f.strategy.calls.load(Ordering::SeqCst), 1, "the strategy must not run again for a retransmit");
+    }
+
+    // A retransmit of an admitted INVITE must bypass the gate (no 503 to a
+    // setup already ringing downstream) and not inflate sip_proxy_calls_total.
+    #[tokio::test(start_paused = true)]
+    async fn retransmitted_invite_is_not_regated_or_recounted() {
+        let f = fixture(&[ProxyAddr::new(W1, 5060)]).await;
+        let req = invite("regate-1@test", "tag-a", 1, "z9hG4bKr2");
+
+        let first = f.core.route_request(&req, "INVITE", src()).await;
+        let retx = f.core.route_request(&req, "INVITE", src()).await;
+
+        assert_eq!(first.decision, RoutingDecisionKind::SelectNew);
+        assert_ne!(retx.decision, RoutingDecisionKind::Reject, "gate must not 503 a retransmission");
+        assert_eq!(retx.target, Some(ProxyAddr::new(W1, 5060)));
+        assert_eq!(f.gate.tries.load(Ordering::SeqCst), 1, "gate consulted once per transaction");
+        assert_eq!(f.metrics.calls_total(), 1, "one call, not one per transmission");
+    }
+
+    // The finding this guards: the old 32 s entry TTL was far below the legal
+    // ringing window (B2BUA SetupTimeout / sip-txn INVITE_INITIAL_TIMEOUT), so
+    // a CANCEL after half a minute of ringing was forwarded via fresh selection
+    // with a fresh branch → downstream 481 and the callee kept ringing.
+    #[tokio::test(start_paused = true)]
+    async fn cancel_after_a_minute_of_ringing_still_follows_the_invite() {
+        let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
+        let inv = invite("longring-1@test", "tag-a", 7, "z9hG4bKr3");
+        f.core.route_request(&inv, "INVITE", src()).await;
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+
+        let cxl = cancel("longring-1@test", "tag-a", 7, "z9hG4bKr3c");
+        let outcome = f.core.route_request(&cxl, "CANCEL", src()).await;
+        assert_eq!(outcome.decision, RoutingDecisionKind::Cancel);
+        assert_eq!(outcome.target, Some(ProxyAddr::new(W1, 5060)), "CANCEL must follow the INVITE, not re-select");
+        assert_eq!(f.strategy.calls.load(Ordering::SeqCst), 1, "no fallback selection for the CANCEL");
+    }
+
+    // Same window for the response side: a late non-2xx final must still find
+    // the entry and get its hop-by-hop ACK synthesized toward the worker.
+    #[tokio::test(start_paused = true)]
+    async fn late_non_2xx_final_still_gets_ack_synthesized() {
+        let f = fixture(&[ProxyAddr::new(W1, 5060)]).await;
+        let inv = invite("latefinal-1@test", "tag-a", 9, "z9hG4bKr4");
+        f.core.route_request(&inv, "INVITE", src()).await;
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+
+        let raw = format!(
+            "SIP/2.0 486 Busy Here\r\n\
+Via: SIP/2.0/UDP {PROXY_VIP}:5060;branch=z9hG4bKout\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKr4\r\n\
+From: <sip:alice@{UAC}>;tag=tag-a\r\n\
+To: <sip:bob@10.0.0.50>;tag=callee-1\r\n\
+Call-ID: latefinal-1@test\r\n\
+CSeq: 9 INVITE\r\n\
+Content-Length: 0\r\n\r\n"
+        );
+        let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
+            panic!("expected response")
+        };
+        f.core.handle_response(resp).await;
+        assert_eq!(f.metrics.ack_synthesized_total(), 1, "late 486 must still get the proxy ACK");
+    }
+
+    // The finding this guards: the entry key had no From-tag, so the two
+    // directions of one Call-ID (independent CSeq spaces, both remembered
+    // here) overwrote each other when their CSeq numbers coincided, and a
+    // CANCEL was then forwarded to the wrong party with the wrong branch.
+    #[tokio::test(start_paused = true)]
+    async fn same_callid_same_cseq_different_from_tags_do_not_collide() {
+        let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
+        let dir_a = invite("glare-1@test", "tag-a", 5, "z9hG4bKa");
+        let dir_b = invite("glare-1@test", "tag-b", 5, "z9hG4bKb");
+        f.core.route_request(&dir_a, "INVITE", src()).await;
+        f.core.route_request(&dir_b, "INVITE", src()).await;
+
+        let cxl_a = cancel("glare-1@test", "tag-a", 5, "z9hG4bKac");
+        let cxl_b = cancel("glare-1@test", "tag-b", 5, "z9hG4bKbc");
+        let out_a = f.core.route_request(&cxl_a, "CANCEL", src()).await;
+        let out_b = f.core.route_request(&cxl_b, "CANCEL", src()).await;
+
+        assert_eq!(out_a.target, Some(ProxyAddr::new(W1, 5060)), "direction A's CANCEL follows A's INVITE");
+        assert_eq!(out_b.target, Some(ProxyAddr::new(W2, 5060)), "direction B's CANCEL follows B's INVITE");
     }
 }

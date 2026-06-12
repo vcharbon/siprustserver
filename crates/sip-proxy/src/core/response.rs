@@ -94,7 +94,9 @@ impl ProxyCore {
 
         // ── Hop-by-hop ACK for a non-2xx INVITE final (§17.1.1.3) ───────────
         if (300..700).contains(&resp.status) && resp.cseq.method == "INVITE" {
-            let key = call_id_cseq_key(&resp.call_id, resp.cseq.seq);
+            // The response echoes the request's From (tag included), so this
+            // re-builds exactly the key the INVITE was remembered under.
+            let key = call_id_cseq_key(&resp.call_id, resp.from.tag.as_deref(), resp.cseq.seq);
             if let Some(found) = self.cancel_lru.lookup(&key) {
                 let ack = generate_proxy_ack_for_non_2xx(
                     &resp,
