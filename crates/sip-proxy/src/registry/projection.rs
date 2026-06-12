@@ -74,10 +74,18 @@ impl WorkerAnnotations {
     }
 
     /// Read-modify-write helper (annotations only mutate off the hot path).
-    fn update(&self, f: impl FnOnce(&mut HashMap<WorkerId, Annot>)) {
-        let mut next = (*self.snapshot()).clone();
-        f(&mut next);
-        self.records.store(Arc::new(next));
+    /// `rcu`, not load-clone-store: the probe task's `set_health` and the
+    /// reconcile task's `sync_membership` run concurrently, and a plain store
+    /// could publish a map cloned BEFORE the other writer's update — silently
+    /// erasing a `Dead` mark until the next probe tick re-wrote it (a window
+    /// where new dialogs kept routing to a dead worker). `rcu` re-runs the
+    /// closure on contention, so `f` must be idempotent over its captures.
+    fn update(&self, f: impl Fn(&mut HashMap<WorkerId, Annot>)) {
+        self.records.rcu(|cur| {
+            let mut next = (**cur).clone();
+            f(&mut next);
+            next
+        });
     }
 
     /// Keep the overlay in step with the membership set: drop departed ordinals,
@@ -216,7 +224,7 @@ impl WorkerSet {
         self.annotations.update(|recs| {
             recs.insert(
                 id.to_string(),
-                Annot { health, draining_since, first_seen_at_ms, host, port_override: Some(port) },
+                Annot { health, draining_since, first_seen_at_ms, host: host.clone(), port_override: Some(port) },
             );
         });
     }

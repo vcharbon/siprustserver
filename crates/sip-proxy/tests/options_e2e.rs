@@ -116,3 +116,85 @@ async fn wait_for_health(registry: &SimulatedWorkerRegistry, id: &str, want: Wor
     }
     panic!("worker {id} never reached {want:?} (now {:?})", registry.resolve(id).map(|w| w.health));
 }
+
+/// Control wrapper recording every health write — lets the test assert a
+/// worker was never (even transiently) marked Dead.
+struct RecordingControl {
+    inner: Arc<dyn sip_proxy::registry::control::WorkerRegistryControl>,
+    writes: Arc<Mutex<Vec<WorkerHealth>>>,
+}
+
+impl sip_proxy::registry::control::WorkerRegistryControl for RecordingControl {
+    fn set_health(&self, worker_id: &str, health: WorkerHealth) {
+        self.writes.lock().unwrap().push(health);
+        self.inner.set_health(worker_id, health);
+    }
+}
+
+/// Regression for the false-Dead flap: the old probe sent ONE datagram per
+/// worker per tick, so a single lost packet was a full miss — with
+/// `threshold: 1` it would flip a healthy worker Dead on the spot. Riding the
+/// transaction layer, Timer E retransmits at T1 (500 ms) inside the reply
+/// window, so a responder that drops the FIRST datagram of every transaction
+/// still yields Alive and the worker is never marked Dead.
+#[tokio::test]
+async fn single_packet_loss_is_absorbed_by_timer_e_retransmit() {
+    let h = Harness::with_transit_delay("options-retransmit", 0);
+    let worker_addr = "127.0.0.1:5072";
+    let (worker_ep, worker_sock) = h.bind_sut("b2b-rtx", worker_addr).await;
+
+    // Responder that drops the first datagram of each Call-ID and answers the
+    // retransmit with 200.
+    let _responder = tokio::spawn(async move {
+        let parser = CustomParser::new();
+        let mut seen = std::collections::HashSet::new();
+        while let Some(pkt) = worker_ep.recv().await {
+            let Ok(SipMessage::Request(req)) = parser.parse(&pkt.raw) else { continue };
+            if req.method != "OPTIONS" {
+                continue;
+            }
+            if seen.insert(req.call_id.clone()) {
+                continue; // first transmission lost
+            }
+            let opts = GenerateResponseOpts { to_tag: Some("uas".into()), ..Default::default() };
+            let resp = generate_response(&req, 200, "OK", &opts);
+            let _ = worker_ep.send_to(&serialize(&SipMessage::Response(resp)), pkt.src).await;
+        }
+    });
+
+    let registry = SimulatedWorkerRegistry::with_clock(
+        vec![WorkerEntry { health: WorkerHealth::Unknown, ..WorkerEntry::alive("b2b-rtx", ProxyAddr::from(worker_sock)) }],
+        Clock::test_at(0),
+    );
+    let registry = Arc::new(registry);
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let control = Arc::new(RecordingControl {
+        inner: Arc::new(SimulatedControl::new((*registry).clone())),
+        writes: writes.clone(),
+    });
+    let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
+
+    let (probe_ep, _probe_sock) = h.bind_sut("probe-rtx", "127.0.0.1:5098").await;
+    let probe = HealthProbe::new(
+        probe_ep,
+        registry.clone(),
+        control,
+        observer,
+        Clock::test_at(0),
+        Arc::new(IdGen::seeded(2)),
+        // threshold 1: under the old single-shot design the dropped first
+        // datagram alone would have flipped the worker Dead. The 800 ms reply
+        // window comfortably covers Timer E's first retransmit (T1 = 500 ms).
+        HealthProbeConfig { interval_ms: 1_000, timeout_ms: 800, threshold: 1 },
+    );
+    let probe_task = tokio::spawn(probe.run());
+
+    wait_for_health(&registry, "b2b-rtx", WorkerHealth::Alive).await;
+    assert!(
+        !writes.lock().unwrap().contains(&WorkerHealth::Dead),
+        "a single lost datagram must not mark the worker Dead (Timer E retransmit covers it)"
+    );
+
+    probe_task.abort();
+    let _ = h.finish().await;
+}

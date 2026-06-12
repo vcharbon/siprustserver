@@ -142,6 +142,20 @@ impl WorkerLoadObserver {
     pub fn payload_age_ms(&self, worker_id: &str, now_ms: u64) -> Option<u64> {
         self.workers.lock().unwrap().get(worker_id).map(|s| now_ms.saturating_sub(s.last_payload_at_ms))
     }
+
+    /// Drop state for workers that left the registry — the map stays bounded
+    /// under worker churn (nothing else ever removes an entry).
+    pub fn retain(&self, keep: impl Fn(&str) -> bool) {
+        self.workers.lock().unwrap().retain(|id, _| keep(id));
+    }
+
+    /// Forget a worker's state entirely. A recreated pod (same ordinal, new
+    /// host) must be judged from scratch — inheriting the dead pod's band
+    /// (e.g. `AboveCritical` at the moment it crashed) excluded the idle fresh
+    /// pod from new-dialog selection until its first `X-Overload` reply.
+    pub fn reset(&self, worker_id: &str) {
+        self.workers.lock().unwrap().remove(worker_id);
+    }
 }
 
 #[cfg(test)]
@@ -207,5 +221,24 @@ mod tests {
     #[test]
     fn unknown_worker_has_no_band() {
         assert!(obs().band_for("nope").is_none());
+    }
+
+    #[test]
+    fn retain_drops_departed_workers() {
+        let o = obs();
+        o.apply_payload("w0", &payload(0.5), 1);
+        o.apply_payload("w1", &payload(0.5), 1);
+        o.retain(|id| id == "w0");
+        assert!(o.band_for("w0").is_some());
+        assert!(o.band_for("w1").is_none(), "departed worker state must be dropped");
+    }
+
+    #[test]
+    fn reset_clears_inherited_state_for_a_recreated_pod() {
+        let o = obs();
+        o.apply_payload("w0", &payload(0.99), 1); // crashed while AboveCritical
+        assert_eq!(o.band_for("w0"), Some(EluBand::AboveCritical));
+        o.reset("w0");
+        assert!(o.band_for("w0").is_none(), "the fresh pod must be judged from scratch");
     }
 }
