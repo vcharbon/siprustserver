@@ -16,7 +16,7 @@ use crate::addr::ProxyAddr;
 use crate::cancel_lru::{call_id_cseq_key, CancelEntry};
 use crate::headers::{
     build_record_route_value, first_header_value, populate_received_rport_on_top_via, prepend_header, via_sent_by_addr,
-    remove_first_header, upsert_header,
+    upsert_header,
 };
 use crate::observability::logger::RoutingDecisionLog;
 use crate::observability::metrics::{Direction, MessageResult, RoutingDecisionKind};
@@ -100,6 +100,12 @@ impl ProxyCore {
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(70);
         if mf <= 0 {
+            // §16.3 check 2: an exhausted ACK is silently discarded, never
+            // answered — a response to an ACK is a stray message (the ACK
+            // terminates a transaction; nothing upstream awaits a reply to it).
+            if method == "ACK" {
+                return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
+            }
             self.reply(req, src, 483, "Too Many Hops", &[]).await;
             return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
         }
@@ -157,13 +163,23 @@ impl ProxyCore {
         // worker stamps. The partner half of the pair (the other self-RR, present
         // because we double-record-route) is popped and ignored.
         let mut first_self_route = true;
-        while let Some(top_route) = first_header_value(&headers, "route") {
-            let Some(parsed) = parse_sip_uri(top_route) else { break };
-            if parsed.host != self.advertised.host || parsed.port as u16 != self.advertised.port {
+        loop {
+            // Inspect (and pop) only the FIRST entry of the first Route line:
+            // §7.3.1 lets a UA fold its whole route set into one comma-combined
+            // header, and removing the whole line would delete a downstream
+            // proxy's Route along with our own entry — the request would then
+            // bypass the downstream route set entirely.
+            let Some(top_route) = first_header_value(&headers, "route") else { break };
+            let Some(entry) = crate::headers::split_top_level_commas(top_route).into_iter().next() else { break };
+            let Some(parsed) = parse_sip_uri(&entry) else { break };
+            // Out-of-range port → malformed, never truncated (70596 ≢ 5060).
+            if parsed.host != self.advertised.host
+                || crate::headers::uri_port_u16(parsed.port) != Some(self.advertised.port)
+            {
                 break;
             }
-            let params = sip_message::message_helpers::parse_uri_params(top_route);
-            remove_first_header(&mut headers, "route");
+            let params = sip_message::message_helpers::parse_uri_params(&entry);
+            crate::headers::remove_first_header_entry(&mut headers, "route");
             if first_self_route {
                 if params.contains_key("outbound") {
                     is_worker_outbound = true;
@@ -268,9 +284,13 @@ impl ProxyCore {
             target = Some(next);
             decision = RoutingDecisionKind::LooseRoute;
         } else if is_worker_outbound {
-            match parse_sip_uri(&req.uri) {
-                Some(parsed) => {
-                    target = Some(ProxyAddr::new(parsed.host, parsed.port as u16));
+            // An out-of-range R-URI port is malformed (400), not truncated —
+            // `sip:host:70596` must not be forwarded to port 5060.
+            match parse_sip_uri(&req.uri)
+                .and_then(|p| Some(ProxyAddr::new(p.host, crate::headers::uri_port_u16(p.port)?)))
+            {
+                Some(addr) => {
+                    target = Some(addr);
                     decision = RoutingDecisionKind::WorkerOutbound;
                 }
                 None => {
@@ -1125,5 +1145,118 @@ Content-Length: 0\r\n\r\n"
             Some(ProxyAddr::new(W1_POD, 5060)),
             "un-NAT'd worker source still identifies the cookie"
         );
+    }
+}
+
+#[cfg(test)]
+mod rfc_small_fix_tests {
+    use std::sync::Arc;
+
+    use sip_clock::Clock;
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+    use sip_net::types::BindUdpOpts;
+    use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
+
+    use crate::addr::ProxyAddr;
+    use crate::core::{ProxyCore, ProxyCoreBuilder};
+    use crate::observability::metrics::RoutingDecisionKind;
+    use crate::registry::static_reg::StaticWorkerRegistry;
+    use crate::registry::WorkerRegistry;
+    use crate::strategies::forward_all::ForwardAllStrategy;
+    use crate::{ProxyMetrics, RoutingStrategy};
+
+    const UAC: &str = "10.244.7.13";
+    const PROXY_VIP: &str = "172.20.255.250";
+    const W1: &str = "10.0.0.1";
+
+    async fn core_with_metrics() -> (ProxyCore, Arc<ProxyMetrics>) {
+        let net = SimulatedSignalingNetwork::new(1);
+        let ep = net.bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64)).await.unwrap();
+        let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
+        let metrics = Arc::new(ProxyMetrics::new());
+        let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
+        let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
+            .clock(Clock::test_at(0))
+            .metrics(metrics.clone())
+            .build(ep);
+        (core, metrics)
+    }
+
+    fn parse_req(raw: &str) -> sip_message::SipRequest {
+        let SipMessage::Request(req) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
+            panic!("expected request")
+        };
+        req
+    }
+
+    // §16.3 check 2: an ACK with Max-Forwards: 0 is silently discarded — a 483
+    // (or any response) to an ACK is a protocol violation.
+    #[tokio::test]
+    async fn ack_at_max_forwards_zero_is_dropped_silently() {
+        let (core, metrics) = core_with_metrics().await;
+        let req = parse_req(&format!(
+            "ACK sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKmf0;rport\r\n\
+Max-Forwards: 0\r\n\
+From: <sip:alice@{UAC}>;tag=t\r\n\
+To: <sip:bob@10.0.0.50>;tag=u\r\n\
+Call-ID: mf0-1@test\r\n\
+CSeq: 1 ACK\r\n\
+Content-Length: 0\r\n\r\n"
+        ));
+        let before = metrics.messages_total();
+        let outcome = core.route_request(&req, "ACK", format!("{UAC}:5060").parse().unwrap()).await;
+        assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
+        assert_eq!(metrics.messages_total(), before, "no response (and no forward) may be generated for the ACK");
+    }
+
+    // §7.3.1: a UA may fold its route set into ONE comma-combined Route header.
+    // Stripping our own entry must pop only that entry — deleting the whole
+    // line dropped the downstream proxy's Route and bypassed its route set.
+    #[tokio::test]
+    async fn folded_route_strip_preserves_the_downstream_route() {
+        let (core, _metrics) = core_with_metrics().await;
+        let req = parse_req(&format!(
+            "BYE sip:b2bua@{W1}:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKfold;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{UAC}>;tag=t\r\n\
+To: <sip:bob@10.0.0.50>;tag=u\r\n\
+Call-ID: fold-1@test\r\n\
+CSeq: 2 BYE\r\n\
+Route: <sip:{PROXY_VIP}:5060;lr>, <sip:10.9.9.9:5062;lr>\r\n\
+Content-Length: 0\r\n\r\n"
+        ));
+        let outcome = core.route_request(&req, "BYE", format!("{UAC}:5060").parse().unwrap()).await;
+        assert_eq!(
+            outcome.decision,
+            RoutingDecisionKind::LooseRoute,
+            "the surviving downstream Route entry must drive loose routing"
+        );
+        assert_eq!(outcome.target, Some(ProxyAddr::new("10.9.9.9", 5062)));
+    }
+
+    // An out-of-range URI port (70596 & 0xFFFF == 5060) must read as malformed,
+    // never silently truncate into an alias of the proxy's own address.
+    #[tokio::test]
+    async fn oversized_route_port_does_not_alias_the_advertised_address() {
+        let (core, _metrics) = core_with_metrics().await;
+        let req = parse_req(&format!(
+            "BYE sip:b2bua@{W1}:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKbig;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{UAC}>;tag=t\r\n\
+To: <sip:bob@10.0.0.50>;tag=u\r\n\
+Call-ID: bigport-1@test\r\n\
+CSeq: 2 BYE\r\n\
+Route: <sip:{PROXY_VIP}:70596;lr>\r\n\
+Content-Length: 0\r\n\r\n"
+        ));
+        let outcome = core.route_request(&req, "BYE", format!("{UAC}:5060").parse().unwrap()).await;
+        // 70596 used to wrap to 5060, match the advertised VIP, and be stripped
+        // as a self-route. It must instead stay foreign (and being malformed,
+        // it can't drive loose routing either) → plain selection.
+        assert_eq!(outcome.decision, RoutingDecisionKind::SelectNew);
     }
 }

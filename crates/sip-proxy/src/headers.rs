@@ -138,12 +138,21 @@ pub fn build_record_route_value<'a>(
     uri
 }
 
+/// A parsed URI port (`u64` in the lenient parser) as a real `u16`. A value
+/// above 65535 is malformed and must NOT be silently truncated: `sip:host:70596`
+/// would otherwise wrap to 5060 — forwarding to the wrong port and even
+/// aliasing the proxy's own advertised address in self-route checks.
+pub fn uri_port_u16(port: u64) -> Option<u16> {
+    u16::try_from(port).ok()
+}
+
 /// Parse the `host:port` of a Route/Record-Route URI value into a [`ProxyAddr`].
-/// Defaults the port to 5060 when the URI omits it (RFC 3261 default).
+/// Defaults the port to 5060 when the URI omits it (RFC 3261 default); `None`
+/// for an out-of-range port (malformed, not truncated).
 pub fn route_value_to_addr(route_value: &str) -> Option<ProxyAddr> {
     let uri = strip_route_uri_to_request_uri(route_value);
     let parsed = parse_sip_uri(&uri)?;
-    Some(ProxyAddr::new(parsed.host, parsed.port as u16))
+    Some(ProxyAddr::new(parsed.host, uri_port_u16(parsed.port)?))
 }
 
 /// True if `route_value`'s URI host:port is the proxy's advertised address.

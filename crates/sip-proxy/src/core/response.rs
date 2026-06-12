@@ -44,6 +44,13 @@ impl ProxyCore {
             return;
         }
 
+        // §16.7 / §16.11: 100 Trying is hop-by-hop — it quenched OUR hop's
+        // retransmissions and must not be forwarded upstream.
+        if resp.status == 100 {
+            self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
+            return;
+        }
+
         let next = resp.via.iter().nth(1).expect("len >= 2 checked");
         // received / rport take precedence over sent-by (§18.2.2 / §16.7.3).
         let mut host = param_str(next, "received").unwrap_or(&next.host).to_string();
@@ -128,7 +135,9 @@ impl ProxyCore {
         for h in resp.headers.iter().filter(|h| h.name.eq_ignore_ascii_case("record-route")) {
             for entry in crate::headers::split_top_level_commas(&h.value) {
                 if let Some(parsed) = parse_sip_uri(&entry) {
-                    if parsed.host == self.advertised.host && parsed.port as u16 == self.advertised.port {
+                    if parsed.host == self.advertised.host
+                        && crate::headers::uri_port_u16(parsed.port) == Some(self.advertised.port)
+                    {
                         return Some(parse_uri_params(&entry));
                     }
                 }
@@ -304,5 +313,63 @@ Content-Length: 0\r\n\r\n"
 
         let sent = ep.sent.lock().unwrap();
         assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);
+    }
+}
+
+#[cfg(test)]
+mod hop_by_hop_tests {
+    use std::sync::Arc;
+
+    use sip_clock::Clock;
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+    use sip_net::types::BindUdpOpts;
+    use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
+
+    use crate::addr::ProxyAddr;
+    use crate::core::ProxyCoreBuilder;
+    use crate::registry::static_reg::StaticWorkerRegistry;
+    use crate::registry::WorkerRegistry;
+    use crate::strategies::forward_all::ForwardAllStrategy;
+    use crate::{ProxyMetrics, RoutingStrategy};
+
+    const UAC: &str = "10.244.7.13";
+    const W1: &str = "10.0.0.1";
+    const PROXY_VIP: &str = "172.20.255.250";
+
+    // §16.7 / §16.11: 100 Trying is hop-by-hop — the worker's 100 quenched the
+    // proxy→worker hop; relaying it upstream leaks the wrong scope.
+    #[tokio::test]
+    async fn trying_100_is_absorbed_not_relayed() {
+        let net = SimulatedSignalingNetwork::new(1);
+        let ep = net.bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64)).await.unwrap();
+        let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
+        let metrics = Arc::new(ProxyMetrics::new());
+        let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
+        let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
+            .clock(Clock::test_at(0))
+            .metrics(metrics.clone())
+            .build(ep);
+
+        let raw = format!(
+            "SIP/2.0 100 Trying\r\n\
+Via: SIP/2.0/UDP {PROXY_VIP}:5060;branch=z9hG4bKout\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKin\r\n\
+From: <sip:alice@{UAC}>;tag=t\r\n\
+To: <sip:bob@10.0.0.50>\r\n\
+Call-ID: t100-1@test\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n"
+        );
+        let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
+            panic!("expected response")
+        };
+        let outbound_forwarded_before = metrics.messages_total();
+        core.handle_response(resp).await;
+        // One inbound record, one outbound DROPPED record — never a forward.
+        assert_eq!(metrics.messages_total(), outbound_forwarded_before + 2);
+        let txt = metrics.prometheus_text();
+        assert!(txt.contains("sip_messages_total{label=\"outbound:dropped\"} 1"));
+        assert!(!txt.contains("outbound:forwarded"), "the 100 must not be relayed upstream");
     }
 }
