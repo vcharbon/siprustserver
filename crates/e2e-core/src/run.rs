@@ -152,7 +152,9 @@ fn run_cell(spec: &CellSpec) -> CellSummary {
         let lb_vip = rt.lb_vip;
         shape.run(&mut rt, &spec.case.input.core).await;
         let captures = rt.take_media();
-        let report = rt.finish().await;
+        // A gating RFC violation fails the cell WITH the report intact (the
+        // findings ride the result's rfc rows as `advisory: false`).
+        let (report, rfc_gate) = rt.finish().await;
 
         let mut verdicts = checks::evaluate_case(
             &spec.case,
@@ -166,7 +168,7 @@ fn run_cell(spec: &CellSpec) -> CellSummary {
             crate::media::write_and_fold(&spec.run_dir.join(&dir_name), &captures)
                 .expect("persist media artifacts");
         verdicts.extend(media_verdicts);
-        RunResult::from_run(spec.cell.clone(), &report, verdicts).with_media(media_refs)
+        RunResult::from_run(spec.cell.clone(), &report, verdicts, &rfc_gate).with_media(media_refs)
     });
 
     result::write_result(&spec.run_dir, &result).expect("persist result.json");

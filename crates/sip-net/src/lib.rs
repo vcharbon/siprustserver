@@ -25,7 +25,10 @@ pub use contracts::{
     RecordingSignalingNetwork, ScopedAuditOptions, SendOutcome, SignalingAuditViolation,
     SignalingNetworkEvent, WrappedNetwork, SIGNALING_TAG,
 };
-pub use rfc_audit::{rfc_cross_message_rules, rfc_peer_rules, CSeqInDialogOrderRule};
+pub use rfc_audit::{
+    bind_roles_of, evaluate_rfc_findings, rfc_cross_message_rules, rfc_peer_rules,
+    CSeqInDialogOrderRule, RfcFinding,
+};
 pub use net::{SignalingNetwork, UdpEndpoint};
 pub use report::{to_sip_entries, RecordedSipEntry};
 pub use real::RealSignalingNetwork;

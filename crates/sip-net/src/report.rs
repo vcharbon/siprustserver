@@ -53,13 +53,35 @@ pub struct RecordedSipEntry {
 /// identical. Each `RecvItem` is consumed by at most one send (so a duplicate
 /// retransmission pairs with a distinct delivery), and the earliest matching
 /// delivery after the send wins.
+///
+/// **External peers** (a real SUT outside the recorded network — the kind
+/// cluster behind the LB VIP): the recording only sees this process's binds, so
+/// a message FROM the cluster has no `SendCalled` half and a message INTO the
+/// cluster has no `RecvItem` half. Two adjustments keep the trace truthful:
+///   - a `RecvItem` whose `packet.src` is not a recorded bind becomes its OWN
+///     entry (`from` = the external sender, `delivered = true`) — without it,
+///     everything the cluster sent us (the b-leg INVITE, the 200s) vanished
+///     from the trace and every anchor on a received message failed;
+///   - a send addressed to a non-recorded destination cannot be judged
+///     undelivered (nobody on the recording could have observed the receive),
+///     so it is NOT flagged lost. On the fully-recorded fabrics every
+///     destination is a recorded bind and the strict semantics are unchanged.
 pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<RecordedSipEntry> {
+    // Every bind the recording observed (BindAcquire plus any event's bind key
+    // as a backstop) — the boundary between in-trace and external peers.
+    let mut recorded_binds: std::collections::HashSet<SocketAddr> = std::collections::HashSet::new();
+    for s in events {
+        if let Ok(addr) = s.event.bind_key().parse::<SocketAddr>() {
+            recorded_binds.insert(addr);
+        }
+    }
+
     // Pre-index the deliveries so a send can claim the first unconsumed match.
-    let mut recvs: Vec<(usize, SocketAddr, SocketAddr, &[u8], u64)> = Vec::new();
+    let mut recvs: Vec<(usize, SocketAddr, SocketAddr, &[u8], u64, u64)> = Vec::new();
     for s in events {
         if let SignalingNetworkEvent::RecvItem { bind_key, packet } = &s.event {
             if let Ok(receiver) = bind_key.parse::<SocketAddr>() {
-                recvs.push((s.seq as usize, receiver, packet.src, &packet.raw, s.at_ms));
+                recvs.push((s.seq as usize, receiver, packet.src, &packet.raw, s.at_ms, s.seq));
             }
         }
     }
@@ -77,7 +99,7 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
         // Earliest unconsumed delivery: receiver == `to`, packet.src == `from`,
         // same bytes, and observed at-or-after this send (seq order).
         let mut matched: Option<usize> = None;
-        for (i, (rseq, receiver, src, raw, _)) in recvs.iter().enumerate() {
+        for (i, (rseq, receiver, src, raw, _, _)) in recvs.iter().enumerate() {
             if consumed[i] {
                 continue;
             }
@@ -99,8 +121,29 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
             raw: msg.clone(),
             sent_ms: s.at_ms,
             received_ms,
-            delivered: received_ms.is_some(),
+            // Unmatched + recorded destination ⇒ genuinely lost on the fabric;
+            // unmatched + external destination ⇒ left the recording's horizon.
+            delivered: received_ms.is_some() || !recorded_binds.contains(to),
             seq: s.seq,
+        });
+    }
+
+    // Orphan deliveries from EXTERNAL senders: one entry per packet, stamped at
+    // its arrival. (An orphan whose src IS a recorded bind — e.g. a fake
+    // fabric's pre-ingress synthetic reply — keeps the historic behaviour of
+    // not being an entry, so fully-recorded reports are byte-identical.)
+    for (i, (_, receiver, src, raw, at_ms, seq)) in recvs.iter().enumerate() {
+        if consumed[i] || recorded_binds.contains(src) {
+            continue;
+        }
+        out.push(RecordedSipEntry {
+            from: *src,
+            to: *receiver,
+            raw: raw.to_vec(),
+            sent_ms: *at_ms,
+            received_ms: Some(*at_ms),
+            delivered: true,
+            seq: *seq,
         });
     }
 

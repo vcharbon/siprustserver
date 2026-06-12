@@ -72,7 +72,8 @@ async fn media_call_over_fake_infra_classifies_both_ways() {
     let mut rt = FakeLsbcB2bua.build("media/fake", &fake_cfg()).await;
     BasicCallMedia.run(&mut rt, &Input::default()).await;
     let captures = rt.take_media();
-    let report = rt.finish().await;
+    let (report, rfc_gate) = rt.finish().await;
+    assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
     assert!(report.passed());
     assert_media_captures(&captures, "fake");
 }
@@ -100,7 +101,8 @@ async fn media_call_over_real_infra_classifies_both_ways() {
     let mut rt = RealLoopbackDirect.build("media/real", &cfg).await;
     BasicCallMedia.run(&mut rt, &Input::default()).await;
     let captures = rt.take_media();
-    let report = rt.finish().await;
+    let (report, rfc_gate) = rt.finish().await;
+    assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
     assert!(report.passed());
     assert_media_captures(&captures, "real");
 }
@@ -117,7 +119,8 @@ async fn rerouting_shape_fails_over_to_bob2() {
     let mut rt = FakeLsbcB2bua.build("rerouting/fake", &fake_cfg()).await;
     let lb_vip = rt.lb_vip;
     Rerouting.run(&mut rt, &case.input.core).await;
-    let report = rt.finish().await;
+    let (report, rfc_gate) = rt.finish().await;
+    assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
     assert!(report.passed());
 
     let verdicts = checks::evaluate_case(
@@ -145,7 +148,8 @@ async fn rerouting_prack_shape_relays_reliable_provisional() {
     let mut rt = FakeLsbcB2bua.build("rerouting-prack/fake", &fake_cfg()).await;
     let lb_vip = rt.lb_vip;
     ReroutingPrack.run(&mut rt, &case.input.core).await;
-    let report = rt.finish().await;
+    let (report, rfc_gate) = rt.finish().await;
+    assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
     assert!(report.passed());
 
     let verdicts = checks::evaluate_case(

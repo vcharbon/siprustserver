@@ -39,7 +39,15 @@ impl CallflowShape for ReroutingPrack {
         let bob1 = rt.agent("bob1");
         let bob2 = rt.agent("bob2");
 
-        let mut invite = alice.invite(bob1).with_sdp(OFFER).through(sut);
+        // A UAC that intends to PRACK advertises 100rel support on the INVITE
+        // (RFC 3262 §3) — without it, bob2's reliable 183 (relayed end-to-end
+        // by the SUT) would be a MUST-004 "reliable 1xx without client opt-in"
+        // violation by every UAS on the path.
+        let mut invite = alice
+            .invite(bob1)
+            .with_sdp(OFFER)
+            .with_header("Supported", "100rel")
+            .through(sut);
         if let Some(from) = &input.from {
             invite = invite.from(from);
         }

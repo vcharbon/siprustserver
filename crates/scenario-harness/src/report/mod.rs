@@ -32,19 +32,28 @@ pub fn seq_doc(report: &RunReport) -> seq_report::SeqDoc {
     )
 }
 
-/// RFC 3261 status MUST reach the report: run the cross-message (CSeq) rule(s)
-/// over the raw recording and fold any findings into the doc anomalies. A
-/// violation forces the report to FAIL and lists the offending CSeq pair —
-/// never PASS while the trace breaks the rule. (Only the cseq cross-message
-/// rules; the structural close anomalies stay native to the recorder snapshot.)
+/// RFC status reaches the report: run the full suite over the raw recording via
+/// the SHARED role-aware evaluator (`sip_net::evaluate_rfc_findings`) and fold
+/// the findings into the doc anomalies, each tagged with its rule name and its
+/// advisory/gating severity. The evaluator applies **subject dispatch** — a
+/// finding is kept only when the rule's `subject()` intersects the originating
+/// bind's declared roles — so the report can no longer list a proxy-subject
+/// rule against a UA lane (the e2e false-positive class). This is the same
+/// pass the `agent.rs` hard gate panics on; the two can never disagree.
+///
+/// (For the `agent.rs` path the recorder also carries these rules natively, so
+/// findings duplicate the recorder's ledger entries — the projector dedupes
+/// them; for the `run.rs` path, whose recorder carries no rules, this fold is
+/// the only source.)
 fn cross_message_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
-    sip_net::rfc_cross_message_rules()
-        .iter()
-        .flat_map(|rule| rule.check(report.events()))
-        .map(|(lane, detail)| seq_report::Anomaly {
-            check: "rfc3261.cseqInDialogOrder".to_string(),
-            detail,
-            lane: Some(lane),
+    sip_net::evaluate_rfc_findings(report.events())
+        .into_iter()
+        .map(|f| seq_report::Anomaly {
+            check: f.rule,
+            detail: f.detail,
+            lane: Some(f.lane),
+            endpoint: None, // resolved against the recorder lanes by `sip_doc`
+            advisory: Some(f.advisory),
         })
         .collect()
 }

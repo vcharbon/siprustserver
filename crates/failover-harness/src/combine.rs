@@ -179,6 +179,8 @@ pub fn combine_doc(
             check: a.check.clone(),
             detail: a.detail.clone(),
             lane: a.bind_key.as_ref().map(|k| sip_col_str(k, &sip_addr_col)),
+            endpoint: None,
+            advisory: Some(!a.severity.fails()),
         })
         .collect();
 

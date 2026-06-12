@@ -1,0 +1,10 @@
+{
+  "$schema": "../schemas/campaign.schema.json",
+  "id": "real",
+  "description": "The basic-call cases (identity + real-RTP media with classifier replay) driven through the ALREADY-RUNNING kind cluster: alice and bob1 on the host's kind-bridge address (172.20.0.1), calls ingressing the sip-front-proxy VRRP VIP (172.20.255.250), the b-leg pinned to bob1 via X-Api-Call.destination and still riding LB-first per the production invariant.",
+  "cases": [
+    "basic-call-identity",
+    "basic-call-media"
+  ],
+  "infraShapes": ["real"]
+}

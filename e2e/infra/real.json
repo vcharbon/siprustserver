@@ -1,0 +1,12 @@
+{
+  "$schema": "../schemas/endpoint-config.schema.json",
+  "infraShape": "real",
+  "roles": {
+    "alice": "172.20.0.1:36060",
+    "alice.rtp": "127.0.0.1:40610",
+    "bob1": "172.20.0.1:36070",
+    "bob1.rtp": "127.0.0.1:40612",
+    "lb": "172.20.255.250:5060"
+  },
+  "recvTimeoutMs": 15000
+}

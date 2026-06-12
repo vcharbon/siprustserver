@@ -219,6 +219,83 @@ pub fn render_svg(doc: &SeqDoc) -> String {
     svg_markup(doc, &rows, base, &lane_idx)
 }
 
+/// Render the diagram as a SELF-CONTAINED, EMBEDDABLE fragment for a host page
+/// (the E2E cell page): the clickable SVG in a bounded scrollable pane on the
+/// LEFT, a FIXED message-detail pane on the RIGHT, the hidden per-message
+/// payload blocks, and the click `<script>` — everything scoped under
+/// `.seq-embed` with its own `<style>` so it drops into a host document without
+/// colliding with the host CSS. Unlike [`render_html`] it emits NO
+/// `<html>/<head>/<body>` chrome; unlike [`render_svg`] the messages are wired
+/// to actually reveal their payload on click. The script scopes its lookups to
+/// the embed root, so multiple embeds (or other page content) never interfere.
+pub fn render_embed(doc: &SeqDoc) -> String {
+    let rows = doc.sorted_rows();
+    let base = doc.base_ms();
+    let lane_idx: std::collections::HashMap<&str, usize> = doc
+        .lanes
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (l.id.as_str(), i))
+        .collect();
+    let svg = svg_markup(doc, &rows, base, &lane_idx);
+    let payloads = render_payloads(doc, &rows, base);
+
+    format!(
+        r#"<div class="seq-embed">
+<style>
+  .seq-embed {{ margin: .5rem 0; }}
+  .seq-embed .seq-main {{ display: flex; height: 70vh; border: 1px solid #e5e7eb;
+        border-radius: 6px; overflow: hidden; }}
+  .seq-embed .seq-diagram {{ flex: 1; overflow: auto; padding: 16px; }}
+  .seq-embed .seq-diagram svg {{ display: block; }}
+  .seq-embed .seq-detail {{ width: 460px; border-left: 1px solid #e5e7eb; background: #fff;
+        display: flex; flex-direction: column; overflow: hidden; }}
+  .seq-embed .seq-detail-header {{ padding: 10px 14px; background: #f3f4f6;
+        border-bottom: 1px solid #e5e7eb; font-size: 13px; font-weight: 600; color: #374151; }}
+  .seq-embed .detail-body {{ flex: 1; overflow: auto; padding: 14px; }}
+  .seq-embed .detail-placeholder {{ color: #9ca3af; font-style: italic; padding: 20px; text-align: center; }}
+  .seq-embed .payload-head {{ margin-bottom: 8px; }}
+  .seq-embed .seq-sip .payload-head {{ color: {SIP_COLOR}; }}
+  .seq-embed .seq-repl .payload-head {{ color: {REPL_COLOR}; }}
+  .seq-embed .ts {{ color: #6b7280; font-family: monospace; }}
+  .seq-embed .seq-msg {{ cursor: pointer; }}
+  .seq-embed .seq-msg:hover line {{ stroke-width: 3; }}
+  .seq-embed .seq-msg:hover text {{ text-decoration: underline; }}
+  .seq-embed .seq-msg:hover rect {{ fill: rgba(37, 99, 235, 0.05); }}
+  .seq-embed .seq-msg.selected rect {{ fill: rgba(37, 99, 235, 0.12); }}
+  .seq-embed .payload {{ display: none; }}
+  .seq-embed .detail-body pre {{ background: #f9fafb; padding: 8px; border-radius: 4px; margin: 4px 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible; max-height: none; }}
+</style>
+<div class="seq-main">
+  <div class="seq-diagram">{svg}</div>
+  <div class="seq-detail">
+    <div class="seq-detail-header">Message detail</div>
+    <div class="detail-body"><div class="detail-placeholder">Click a message to inspect</div></div>
+  </div>
+</div>
+<!-- Hidden, already-HTML-escaped payload blocks, one per diagram message. -->
+{payloads}
+<script>
+  (function() {{
+    var root = document.currentScript.closest('.seq-embed');
+    root.querySelectorAll('.seq-msg').forEach(function(g) {{
+      g.addEventListener('click', function() {{
+        root.querySelectorAll('.seq-msg.selected').forEach(function(s) {{ s.classList.remove('selected'); }});
+        g.classList.add('selected');
+        var src = root.querySelector('#evt-' + g.dataset.idx);
+        root.querySelector('.detail-body').innerHTML = src ? src.innerHTML
+            : '<div class="detail-placeholder">No payload recorded for this message</div>';
+      }});
+    }});
+  }})();
+</script>
+</div>
+"#
+    )
+}
+
 fn svg_markup(
     doc: &SeqDoc,
     rows: &[&SeqRow],

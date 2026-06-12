@@ -20,6 +20,7 @@ use crate::rfc_audit::dialog_model::{
     slot_is_relay, status, to_tag, to_uri, top_via_branch, DialogModel, EventKind, OrderedEvent,
     ParsedSdpOrigin,
 };
+use crate::types::UaRole;
 use sip_message::message_helpers::{get_header, get_headers, parse_sip_uri};
 use sip_message::SipMessage;
 
@@ -404,6 +405,12 @@ fn check_wire_destination(
 /// `o=` tuple; per-fixture allowance until Phase 2 narrows subject or models
 /// 3264 §8 origin replication." A real endpoint mints one origin per session; a
 /// B2BUA re-offers with its own origin, which this rule flags but cannot gate on.
+///
+/// Relay slots are skipped and the subject is `{Uac, Uas}`: a transparent proxy
+/// forwards BOTH directions' SDP on one bind, so its "sent" stream legitimately
+/// interleaves alice's `o=alice` offer and bob's `o=bob` answer — origin
+/// continuity is a per-ORIGINATOR invariant and judging a relay's mixed stream
+/// against it false-fired on every proxy lane (the e2e LB class).
 pub struct SdpOriginContinuityRule;
 
 #[derive(Clone)]
@@ -415,6 +422,10 @@ struct OriginHistory {
 impl CrossMessageAuditRule for SdpOriginContinuityRule {
     fn name(&self) -> &'static str {
         "rfc3264.sdpOriginContinuity"
+    }
+
+    fn subject(&self) -> HashSet<UaRole> {
+        HashSet::from([UaRole::Uac, UaRole::Uas])
     }
 
     fn force_advisory(&self) -> bool {
@@ -429,6 +440,9 @@ impl CrossMessageAuditRule for SdpOriginContinuityRule {
         let mut history: HashMap<String, OriginHistory> = HashMap::new();
         for slice in project_per_dialog(events) {
             for slot in &slice.per_agent {
+                if slot_is_relay(slot) {
+                    continue;
+                }
                 for ev in &slot.ordered {
                     if ev.kind != EventKind::Sent {
                         continue;
@@ -1199,6 +1213,40 @@ mod tests {
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].1.contains("origin tuple changed"), "{}", f[0].1);
         assert!(SdpOriginContinuityRule.force_advisory());
+    }
+
+    #[test]
+    fn sdp_origin_skips_relay_slots() {
+        // A transparent proxy forwards alice's offer AND bob's answer on one
+        // bind — its sent stream interleaves o=alice / o=bob for one Call-ID.
+        // That is not an origin-continuity violation by the relay; the rule
+        // must skip the relay slot (it both sent and received the INVITE).
+        assert_eq!(
+            SdpOriginContinuityRule.subject(),
+            std::collections::HashSet::from([UaRole::Uac, UaRole::Uas])
+        );
+        let inv = req_full(
+            "INVITE",
+            "sip:bob@127.0.0.1",
+            "z9hG4bK-i",
+            1,
+            "at",
+            None,
+            "",
+            &sdp("alice 1 1 IN IP4 10.0.0.1", ""),
+        );
+        let ok = resp_full(200, 1, "INVITE", "z9hG4bK-i", "bt", "", &sdp("bob 1 1 IN IP4 10.0.0.2", ""));
+        let evs = vec![
+            recv("proxy", inv.clone(), "127.0.0.1:5060", 0), // alice → proxy
+            sent("proxy", inv, "127.0.0.1:5070", 1),         // proxy → bob (o=alice)
+            recv("proxy", ok.clone(), "127.0.0.1:5070", 2),  // bob → proxy
+            sent("proxy", ok, "127.0.0.1:5060", 3),          // proxy → alice (o=bob)
+        ];
+        assert!(
+            SdpOriginContinuityRule.check(&evs).is_empty(),
+            "{:?}",
+            SdpOriginContinuityRule.check(&evs)
+        );
     }
 
     // -- RecordRoutePlacementRule --------------------------------------------

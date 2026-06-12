@@ -101,6 +101,13 @@ pub struct InfraRuntime {
     pub lb_vip: SocketAddr,
     /// The Endpoint config this runtime was built from (media addrs etc.).
     pub cfg: EndpointConfig,
+    /// `Some(bob)` ⇒ the SUT's decision engine routes by the caller-supplied
+    /// `X-Api-Call.destination` (the REAL kind cluster's worker, whose
+    /// fallback is its own in-cluster `B2BUA_DEST`), so the initial INVITE
+    /// must pin the b-leg callee explicitly. `None` ⇒ the infra's own engine
+    /// already routes to bob (the fake shapes' scripted engine ignores the
+    /// header). Shapes consult [`api_call_destination`](Self::api_call_destination).
+    b_leg_destination: Option<SocketAddr>,
     /// The RAW (un-recorded) network — media endpoints ride the same fabric as
     /// the signaling but BELOW the SIP recording/audit decorators (RTP bytes
     /// must not enter the SIP trace or the RFC rule engine).
@@ -147,9 +154,20 @@ impl InfraRuntime {
         std::mem::take(&mut *self.media.borrow_mut())
     }
 
-    /// Close the recording and return the report. Keeps the SUT guards alive
-    /// across `finish()` (the recording snapshot is read first), then drops them.
-    pub async fn finish(self) -> RunReport {
+    /// The b-leg callee the initial INVITE must pin via `X-Api-Call.destination`
+    /// (real cluster), or `None` when the infra's own engine routes to bob.
+    pub fn api_call_destination(&self) -> Option<SocketAddr> {
+        self.b_leg_destination
+    }
+
+    /// Close the recording and return the report plus the RFC hard-gate
+    /// findings (non-advisory, subject-applicable, unwaived). The executor
+    /// folds non-empty findings into a FAILED cell **with the report intact**
+    /// — a gating RFC violation must fail the cell, but crashing it would
+    /// throw away the diagram and findings table a human needs to see why.
+    /// Keeps the SUT guards alive across `finish()` (the recording snapshot is
+    /// read first), then drops them.
+    pub async fn finish(self) -> (RunReport, Vec<sip_net::RfcFinding>) {
         // Drain already-due in-flight deliveries (SUT teardown, final 200s, CDR)
         // before the snapshot — the generic analogue of b2bua-harness
         // `settle_until`. Under a paused clock each yield auto-advances virtual
@@ -165,11 +183,11 @@ impl InfraRuntime {
             _b2bua,
             ..
         } = self;
-        let report = harness.finish().await;
+        let (report, gate) = harness.finish_collecting().await;
         drop(agents);
         drop(_proxy);
         drop(_b2bua);
-        report
+        (report, gate)
     }
 }
 
@@ -188,13 +206,14 @@ pub fn by_id(id: &str) -> Option<Box<dyn InfraShape>> {
     match id {
         "fake-lsbc-b2bua" => Some(Box::new(FakeLsbcB2bua)),
         "real-loopback-direct" => Some(Box::new(RealLoopbackDirect)),
+        "real" => Some(Box::new(RealKindLb)),
         _ => None,
     }
 }
 
 /// Every registered Infra-shape id (for precise unknown-id errors).
 pub fn known_ids() -> Vec<&'static str> {
-    vec!["fake-lsbc-b2bua", "real-loopback-direct"]
+    vec!["fake-lsbc-b2bua", "real-loopback-direct", "real"]
 }
 
 /// The **fake** infra: alice / bob1 / bob2 on the simulated fabric under a paused
@@ -281,6 +300,7 @@ impl InfraShape for FakeLsbcB2bua {
             sut_ingress: lb,
             lb_vip: lb,
             cfg: cfg.clone(),
+            b_leg_destination: None,
             raw_net: net,
             media: Default::default(),
             _proxy: Some(proxy),
@@ -330,6 +350,76 @@ impl InfraShape for RealLoopbackDirect {
             sut_ingress: bob1,
             lb_vip: bob1,
             cfg: cfg.clone(),
+            b_leg_destination: None,
+            raw_net: net,
+            media: Default::default(),
+            _proxy: None,
+            _b2bua: None,
+        }
+    }
+}
+
+/// The **real cluster** infra (`real`): alice & bob1 on real sockets under a
+/// wall clock, calling through the ALREADY-RUNNING kind cluster's LB VIP — the
+/// `sip-test` namespace's `sip-front-proxy` pair fronting the `b2bua-worker`s.
+/// Nothing is spawned in-process; the SUT is the live cluster.
+///
+/// Topology & addressing (everything comes from `e2e/infra/real.json`):
+///   - `lb` = the VRRP VIP (e.g. `172.20.255.250:5060`) — `sut_ingress`.
+///   - `alice`/`bob1` bind the HOST's address on the kind docker bridge (the
+///     network gateway, e.g. `172.20.0.1`) so the cluster can route the b-leg
+///     INVITE and in-dialog requests back out to them.
+///   - The deployed worker's decision engine falls back to its own in-cluster
+///     `B2BUA_DEST` unless the INVITE pins the callee via
+///     `X-Api-Call.destination` — so this shape sets `b_leg_destination =
+///     bob1` and the Callflow shapes attach the header. The b-leg still rides
+///     LB-first (`B2BUA_OUTBOUND_PROXY` = VIP): the production invariant holds.
+///   - RTP (`<role>.rtp` config keys) flows host↔host directly — real UDP via
+///     `RealSignalingNetwork`, same media seam as the fake fabric (ADR-0018).
+pub struct RealKindLb;
+
+#[async_trait(?Send)]
+impl InfraShape for RealKindLb {
+    fn id(&self) -> &str {
+        "real"
+    }
+    fn kind(&self) -> InfraKind {
+        InfraKind::Real
+    }
+
+    async fn build(&self, scenario_name: &str, cfg: &EndpointConfig) -> InfraRuntime {
+        cfg.assert_binds(self.id());
+        let net: Arc<dyn sip_net::SignalingNetwork> = Arc::new(sip_net::RealSignalingNetwork::new());
+        let h = Harness::with_network_and_clock(
+            scenario_name.to_string(),
+            net.clone(),
+            Clock::system(),
+            layer_harness::TransportKind::Live,
+            cfg.recv_timeout(),
+        );
+        // The cluster is a stateful, shared SUT: Call-IDs / branches must be
+        // unique ACROSS runs or its transaction layer absorbs the next run's
+        // INVITE as a retransmission of this one (see `Harness::seed_ids`).
+        h.seed_ids(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(1),
+        );
+        let mut agents = BTreeMap::new();
+        for role in ["alice", "bob1", "bob2"] {
+            if let Some(addr) = cfg.roles.get(role) {
+                agents.insert(role.to_string(), h.agent(role, &addr.to_string()).await);
+            }
+        }
+        let lb = cfg.addr("lb");
+        InfraRuntime {
+            harness: h,
+            agents,
+            sut_ingress: lb,
+            lb_vip: lb,
+            cfg: cfg.clone(),
+            b_leg_destination: Some(cfg.addr("bob1")),
             raw_net: net,
             media: Default::default(),
             _proxy: None,
@@ -379,7 +469,15 @@ async fn spawn_lb_proxy(
         LoadBalancerConfig::default(),
     ));
 
-    let (ep, sock) = h.bind_sut("lb", &addr.to_string()).await;
+    // The LB is a real `ProxyCore` — role-tag its bind `{Proxy}` so the RFC
+    // suite judges this lane by the proxy rules (and only those).
+    let (ep, sock) = h
+        .bind_sut_with_roles(
+            "lb",
+            &addr.to_string(),
+            std::collections::HashSet::from([sip_net::UaRole::Proxy]),
+        )
+        .await;
     let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry)
         .clock(Clock::test_at(0))
         .id_gen(Arc::new(IdGen::seeded(0xC0FFEE)))

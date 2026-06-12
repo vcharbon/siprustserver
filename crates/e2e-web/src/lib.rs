@@ -108,10 +108,12 @@ th { background: #f9fafb; }
 .fail { color: #dc2626; font-weight: 600; }
 .crash { color: #b45309; font-weight: 600; }
 .pending { color: #6b7280; }
+.muted { color: #6b7280; font-size: .9rem; margin: .25rem 0 .5rem; max-width: 60rem; }
+.muted-inline { color: #9ca3af; font-size: .85rem; }
+.advisory { color: #6b7280; }
 button { padding: .3rem .8rem; cursor: pointer; }
 textarea { width: 100%; min-height: 24rem; font-family: ui-monospace, monospace; }
 pre { background: #f9fafb; padding: .6rem; overflow-x: auto; }
-.diagram { border: 1px solid #e5e7eb; overflow: auto; max-height: 70vh; margin: .75rem 0; }
 "#;
 
 fn verdict_markup(passed: bool, error: Option<&str>) -> Markup {
@@ -403,7 +405,20 @@ async fn cell_detail(
         // The mirrored JSON IS the persisted result.json.
         return Ok(Json(&result).into_response());
     }
-    let svg = seq_report::render_svg(&result.seq_doc);
+    // The host-embeddable diagram: clickable messages with a fixed payload pane
+    // on the right (see `seq_report::render_embed`).
+    let diagram = seq_report::render_embed(&result.seq_doc);
+    // Older runs can carry the same finding twice under different rule names (a
+    // fixed re-fold bug); collapse exact (lane, detail) duplicates for display.
+    // Gating rows (advisory == false) sort first — they are why the cell failed.
+    let mut seen = std::collections::HashSet::new();
+    let mut rfc: Vec<&seq_report::Anomaly> = result
+        .rfc
+        .iter()
+        .filter(|a| seen.insert((a.lane.clone(), a.detail.clone())))
+        .collect();
+    rfc.sort_by_key(|a| !a.is_gating());
+    let has_gating = rfc.iter().any(|a| a.is_gating());
     Ok(page(
         &format!("Cell {cell}"),
         html! {
@@ -440,12 +455,46 @@ async fn cell_detail(
                     }
                 }
             }
-            @if !result.rfc.is_empty() {
-                h2 { "Report findings" }
-                ul { @for a in &result.rfc { li { (a.check) ": " (a.detail) } } }
+            @if !rfc.is_empty() {
+                h2 { "RFC audit findings" }
+                @if has_gating {
+                    p .muted {
+                        b { "Gating violations present — they FAILED this cell. " }
+                        "The RFC suite runs role-aware over the recorded wire: each rule judges "
+                        "only the endpoints whose declared role (UA / proxy) it governs. "
+                        "Advisory rows are informational and never gate."
+                    }
+                } @else {
+                    p .muted {
+                        "Advisory / informational only — these did "
+                        b { "not" }
+                        " fail the test. The RFC suite runs role-aware over the recorded wire: "
+                        "each rule judges only the endpoints whose declared role (UA / proxy) it "
+                        "governs, so a proxy rule can no longer flag a UA lane. A gating "
+                        "violation would FAIL the cell and show here in red."
+                    }
+                }
+                table {
+                    tr { th { "rule" } th { "endpoint" } th { "severity" } th { "detail" } }
+                    @for a in &rfc {
+                        tr {
+                            td { code { (a.check) } }
+                            td {
+                                @if let Some(ep) = &a.endpoint { b { (ep) } " " }
+                                span .muted-inline { (a.lane.as_deref().unwrap_or("")) }
+                            }
+                            td {
+                                @if a.is_gating() { span .fail { "GATING" } }
+                                @else { span .advisory { "advisory" } }
+                            }
+                            td { (a.detail) }
+                        }
+                    }
+                }
             }
             h2 { "Call flow" }
-            div .diagram { (PreEscaped(svg)) }
+            p .muted { "Click any message to inspect its full SIP payload in the pane on the right." }
+            (PreEscaped(diagram))
         },
     )
     .into_response())

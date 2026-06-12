@@ -47,7 +47,7 @@
 mod html;
 mod text;
 
-pub use html::{render_html, render_svg};
+pub use html::{render_embed, render_html, render_svg};
 pub use text::render_global_txt;
 
 /// What an actor lane represents — drives only its styling/label decoration, not
@@ -147,6 +147,22 @@ pub struct Anomaly {
     pub detail: String,
     /// The lane id the finding ties to, when one applies.
     pub lane: Option<String>,
+    /// The display name of the endpoint behind `lane` (e.g. `lb`, `bob1`),
+    /// when the projector could resolve one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// `Some(true)` ⇒ informational only; `Some(false)` ⇒ a gating violation.
+    /// `None` on documents written before severity was recorded (rendered as
+    /// advisory).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisory: Option<bool>,
+}
+
+impl Anomaly {
+    /// Severity for display: gating only when explicitly recorded as such.
+    pub fn is_gating(&self) -> bool {
+        self.advisory == Some(false)
+    }
 }
 
 /// The complete neutral input to the renderers: a title, optional description,
@@ -472,6 +488,33 @@ mod tests {
     }
 
     #[test]
+    fn embed_is_a_self_contained_clickable_fragment() {
+        // `render_embed` is the host-embeddable view (the E2E cell page): no
+        // `<html>` chrome, but the SVG messages ARE wired to reveal their
+        // payload on click — everything scoped under `.seq-embed`.
+        let doc = mixed_doc();
+        let embed = render_embed(&doc);
+
+        // A fragment, not a full document.
+        assert!(!embed.contains("<!DOCTYPE"), "embed is a fragment, no doctype");
+        assert!(embed.contains("class=\"seq-embed\""), "scoped root present");
+        // The clickable message group + its matching hidden payload block.
+        assert!(
+            embed.contains("class=\"seq-msg seq-sip\" data-idx=\"0\""),
+            "first message is a clickable group: {embed}"
+        );
+        assert!(embed.contains("id=\"evt-0\""), "matching payload block keyed by ordinal");
+        assert!(embed.contains("INVITE sip:bob SIP/2.0"), "payload carries the wire text");
+        // The detail pane + a click handler scoped to the embed root (so a host
+        // page with other content is never touched).
+        assert!(embed.contains("class=\"detail-body\""), "detail pane present");
+        assert!(
+            embed.contains("document.currentScript.closest('.seq-embed')"),
+            "click handler scopes to the embed root"
+        );
+    }
+
+    #[test]
     fn status_and_anomalies_surface() {
         let mut doc = mixed_doc();
         doc.passed = false;
@@ -479,6 +522,8 @@ mod tests {
             check: "rfc.cseqInDialogOrder".into(),
             detail: "out of order".into(),
             lane: Some("b1".into()),
+            endpoint: None,
+            advisory: Some(false),
         });
         let html = render_html(&doc);
         assert!(html.contains("FAIL"));

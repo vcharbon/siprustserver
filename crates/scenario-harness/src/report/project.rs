@@ -36,23 +36,64 @@ pub fn sip_doc(
     let lanes = project_lanes(&scenario.lanes, entries);
     let base = entries.iter().map(|e| e.sent_ms as i64).min().unwrap_or(0);
     let rows = entries.iter().map(|e| project_entry(e, base)).collect();
-    let mut anomalies: Vec<Anomaly> = scenario
+    let anomalies: Vec<Anomaly> = scenario
         .anomalies
         .iter()
         .map(|a| Anomaly {
             check: a.check.clone(),
             detail: a.detail.clone(),
             lane: a.bind_key.clone(),
+            endpoint: None,
+            // The structural layer-close kinds (queueLeak, inFlightImbalance,
+            // undeliverable) are deliberately never gated by the harness even
+            // when their recorded severity is deferred-fail (timeout / reap
+            // fixtures legitimately produce them) — surface them as advisory.
+            // Only a signalingAudit (RFC-rule) entry carries a gating severity.
+            advisory: Some(a.kind != "signalingAudit" || !a.severity.fails()),
         })
         .collect();
-    anomalies.extend(extra_anomalies.iter().cloned());
+    // The recorder's native findings and the re-folded `extra_anomalies` (same
+    // rule set, run again for the `run.rs` path that wires none into the
+    // recorder) overlap on the `agent.rs` path — same rule name, detail, and
+    // lane. Collapse exact duplicates so a finding is listed once, walking the
+    // EXTRAS first: the evaluator's advisory tag is authoritative when both
+    // carry the same finding.
+    let mut deduped: Vec<Anomaly> = Vec::with_capacity(anomalies.len() + extra_anomalies.len());
+    let mut seen = std::collections::HashSet::new();
+    for a in extra_anomalies.iter().cloned().chain(anomalies.into_iter()) {
+        if seen.insert((a.check.clone(), a.detail.clone(), a.lane.clone())) {
+            deduped.push(a);
+        }
+    }
+    let mut anomalies = deduped;
+
+    // Resolve each finding's lane to its registered display name (`lb`,
+    // `bob1`, …) so report tables can tag rows with the endpoint, not just an
+    // ip:port the reader has to cross-reference.
+    let name_of: std::collections::HashMap<&str, &str> = lanes
+        .iter()
+        .map(|l| (l.id.as_str(), l.label.as_str()))
+        .collect();
+    for a in &mut anomalies {
+        if a.endpoint.is_none() {
+            if let Some(lane) = &a.lane {
+                a.endpoint = name_of.get(lane.as_str()).map(|n| {
+                    // `label` is `name (ip:port)` — keep the bare name half.
+                    n.split(" (").next().unwrap_or(n).to_string()
+                });
+            }
+        }
+    }
+
+    // A trace with GATING RFC violations can never render PASS, regardless of
+    // the caller's `passed` (the fluent harness reports `passed = true` by
+    // construction). Advisory findings are informational and do not flip it.
+    let gating = anomalies.iter().any(|a| a.is_gating());
 
     SeqDoc {
         title: scenario_name.to_string(),
         description: description.map(str::to_string),
-        // A trace with RFC violations can never pass, regardless of the caller's
-        // `passed` (the fluent harness reports `passed = true` by construction).
-        passed: passed && extra_anomalies.is_empty(),
+        passed: passed && !gating,
         lanes,
         rows,
         anomalies,

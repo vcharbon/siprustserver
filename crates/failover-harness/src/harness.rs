@@ -1143,6 +1143,8 @@ impl FailoverHarness {
                     check: "rfc3261.cseqInDialogOrder".to_string(),
                     detail,
                     lane: Some(lane),
+                    endpoint: None,
+                    advisory: Some(false),
                 });
             }
         }

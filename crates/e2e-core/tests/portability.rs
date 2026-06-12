@@ -35,7 +35,8 @@ fn fake_cfg() -> EndpointConfig {
 async fn basic_call_over_fake_infra_default() {
     let mut rt = FakeLsbcB2bua.build("basic-call/fake/default", &fake_cfg()).await;
     BasicCall.run(&mut rt, &Input::default()).await;
-    let report = rt.finish().await;
+    let (report, rfc_gate) = rt.finish().await;
+    assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
 
     assert!(report.passed(), "run must pass the RFC hard gate");
     let entries = report.entries();
@@ -55,7 +56,8 @@ async fn basic_call_over_fake_infra_with_input() {
     };
     let mut rt = FakeLsbcB2bua.build("basic-call/fake/input", &fake_cfg()).await;
     BasicCall.run(&mut rt, &input).await;
-    let report = rt.finish().await;
+    let (report, rfc_gate) = rt.finish().await;
+    assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
 
     assert!(report.passed(), "run must pass the RFC hard gate");
 
@@ -99,7 +101,8 @@ async fn basic_call_over_real_infra() {
         .build("basic-call/real", &cfg)
         .await;
     BasicCall.run(&mut rt, &Input::default()).await;
-    let report = rt.finish().await;
+    let (report, rfc_gate) = rt.finish().await;
+    assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
 
     assert!(report.passed(), "real-transport run must pass the RFC hard gate");
     assert!(

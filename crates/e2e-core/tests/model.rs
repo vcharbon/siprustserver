@@ -55,7 +55,8 @@ async fn authored_json_case_loads_validates_and_runs() {
     let mut rt = FakeLsbcB2bua.build("basic-call/fake/json-case", &fake_cfg()).await;
     let lb_vip = rt.lb_vip;
     shape.run(&mut rt, &case.input.core).await;
-    let report = rt.finish().await;
+    let (report, rfc_gate) = rt.finish().await;
+    assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
 
     assert!(report.passed(), "run must pass the RFC hard gate");
 

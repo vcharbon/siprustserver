@@ -176,7 +176,18 @@ impl B2buaSut {
         services: Vec<b2bua::rules::ServiceDef>,
         tune: impl FnOnce(&mut B2buaConfig),
     ) -> Self {
-        let (endpoint, sa) = h.bind_sut(name, addr).await;
+        // The B2BUA terminates each leg as a UA (UAS on the a-leg, UAC on the
+        // b-leg) — it is NOT an RFC 3261 §16 proxy, so its bind declares
+        // `{Uac, Uas}` and the proxy-subject audit rules (no-target-404,
+        // 100-within-200ms, unmatched-PRACK forwarding, strict-route rewrite)
+        // do not judge this lane.
+        let (endpoint, sa) = h
+            .bind_sut_with_roles(
+                name,
+                addr,
+                std::collections::HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]),
+            )
+            .await;
         let cdr = InMemoryCdrWriter::new();
         let mut config = B2buaConfig {
             self_ordinal: "w0".into(),

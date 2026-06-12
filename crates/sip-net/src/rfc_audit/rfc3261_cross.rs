@@ -14,9 +14,10 @@ use std::sync::Arc;
 
 use layer_harness::{LaneKey, Stamped};
 use sip_message::message_helpers::get_headers;
-use sip_message::SipMessage;
+use sip_message::{SipMessage, SipParser};
 
 use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
+use crate::types::UaRole;
 use crate::rfc_audit::dialog_model::{
     call_id, cseq_method, extract_route_uri, from_tag, msg_headers, project_per_dialog,
     route_is_loose, slot_is_relay, status, to_tag, to_uri, top_via_branch, EventKind, OrderedEvent,
@@ -795,19 +796,30 @@ impl CrossMessageAuditRule for NoByeOutsideOrEarlyDialogRule {
 
 /// **RFC 3261 §16.3 — a proxy with no resolvable target MUST respond 404.**
 /// When a proxy cannot resolve any target for the Request-URI it MUST respond
-/// 404 (Not Found). Per-slot: a received request whose branch was never
-/// re-sent (not forwarded) but answered with a non-404 4xx/5xx/6xx final fires.
+/// 404 (Not Found). Per-slot: a received request that was never forwarded but
+/// answered with a non-404 4xx/5xx/6xx final fires.
 ///
-/// **Advisory** (mirrors the TS): the B2BUA worker is classified `proxy` for
-/// subject dispatch but terminates each leg as UAC/UAS and may legitimately
-/// reply 403/481/491 without forwarding when the backend rejects the call —
-/// these are not "no target" outcomes. Advisory until the subject narrows to a
-/// dedicated proxy bind.
+/// "Forwarded" is correlated by **Call-ID + CSeq** (method and number), NOT by
+/// top-Via branch: an RFC 3261 §16.6-conformant proxy mints a FRESH branch on
+/// the forwarded leg, so branch equality systematically misses the forward and
+/// flagged every relaying proxy (the e2e LB false-positive class). A 4xx/5xx
+/// final that merely RELAYS the downstream's rejection (the slot received the
+/// same final status on the same Call-ID+CSeq) is also clean — the proxy did
+/// resolve a target; the target said no.
+///
+/// **Advisory** (mirrors the TS): the B2BUA worker may legitimately reply
+/// 403/481/491 without forwarding when the backend rejects the call — these are
+/// not "no target" outcomes. Subject = `{Proxy}` so the rule no longer runs
+/// against UA binds at all once roles are declared.
 pub struct NoTarget404Rule;
 
 impl CrossMessageAuditRule for NoTarget404Rule {
     fn name(&self) -> &'static str {
         "rfc3261.noTarget404"
+    }
+
+    fn subject(&self) -> HashSet<UaRole> {
+        HashSet::from([UaRole::Proxy])
     }
 
     fn force_advisory(&self) -> bool {
@@ -818,43 +830,70 @@ impl CrossMessageAuditRule for NoTarget404Rule {
         let mut out = Vec::new();
         for slice in project_per_dialog(events) {
             for slot in &slice.per_agent {
-                let mut sent_branches: HashSet<String> = HashSet::new();
-                let mut received_by_branch: HashMap<String, (String, String)> = HashMap::new();
+                // (callId, cseq-num, cseq-method) the slot re-sent = forwarded.
+                let mut forwarded: HashSet<(String, String)> = HashSet::new();
+                let mut received_by_branch: HashMap<String, (String, String, String)> =
+                    HashMap::new();
                 let mut final_by_branch: HashMap<String, u16> = HashMap::new();
+                // Final statuses RECEIVED per (callId, cseq) — a relayed
+                // rejection is not a "no target" 404 case.
+                let mut received_finals: HashSet<(String, String, u16)> = HashSet::new();
 
                 for (kind, msg) in slot_events(&slot.ordered) {
-                    let branch = branch_of(msg);
-                    if branch.is_empty() {
-                        continue;
-                    }
+                    let txn = format!("{}\x00{}", call_id(msg), cseq_of(msg));
                     match (kind, msg) {
-                        (EventKind::Sent, SipMessage::Request(_)) => {
-                            sent_branches.insert(branch);
+                        (EventKind::Sent, SipMessage::Request(req)) => {
+                            forwarded
+                                .insert((txn, req.method.as_str().to_uppercase()));
                         }
                         (EventKind::Received, SipMessage::Request(req)) => {
+                            let branch = branch_of(msg);
+                            if branch.is_empty() {
+                                continue;
+                            }
                             received_by_branch.entry(branch).or_insert((
                                 req.method.as_str().to_string(),
                                 call_id(msg).to_string(),
+                                txn,
                             ));
                         }
+                        (EventKind::Received, SipMessage::Response(_)) => {
+                            let st = status(msg);
+                            if st >= 200 {
+                                received_finals.insert((
+                                    call_id(msg).to_string(),
+                                    cseq_of(msg),
+                                    st,
+                                ));
+                            }
+                        }
                         (EventKind::Sent, SipMessage::Response(_)) => {
+                            let branch = branch_of(msg);
+                            if branch.is_empty() {
+                                continue;
+                            }
                             let st = status(msg);
                             if st >= 200 {
                                 final_by_branch.entry(branch).or_insert(st);
                             }
                         }
-                        _ => {}
                     }
                 }
 
-                for (branch, (method, cid)) in &received_by_branch {
-                    if sent_branches.contains(branch) {
+                for (branch, (method, cid, txn)) in &received_by_branch {
+                    if forwarded.contains(&(txn.clone(), method.to_uppercase())) {
                         continue;
                     }
                     let Some(&st) = final_by_branch.get(branch) else {
                         continue;
                     };
                     if !(400..700).contains(&st) || st == 404 {
+                        continue;
+                    }
+                    // A relayed downstream rejection (same status received on
+                    // the same transaction) is not a no-target outcome.
+                    let (c, q) = txn.split_once('\x00').unwrap_or((txn, ""));
+                    if received_finals.contains(&(c.to_string(), q.to_string(), st)) {
                         continue;
                     }
                     out.push((
@@ -870,6 +909,12 @@ impl CrossMessageAuditRule for NoTarget404Rule {
         }
         out
     }
+}
+
+/// `CSeq` value of a message as one token (number + method), for transaction
+/// correlation that survives a proxy's per-hop branch rewrite.
+fn cseq_of(m: &SipMessage) -> String {
+    all_header_values(m, "cseq").first().map(|s| s.trim().to_string()).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -1338,21 +1383,29 @@ impl CrossMessageAuditRule for NoReInviteWhileInviteInProgressRule {
 /// **RFC 3261 §16.7 — a stateful proxy MUST send 100 Trying within T1.** A proxy
 /// relaying an INVITE must emit 100 within ~200ms of receipt. The recorded event
 /// model does not expose a per-message `at_ms` to the rule the way the TS stream
-/// does, so — exactly like the TS — this degrades to a structural "100 was sent
-/// on the same branch" check and CANNOT enforce the timing bound. When it cannot
-/// judge the timing it returns nothing (no false positives).
+/// does — but the raw [`Stamped`] events DO carry `at_ms`, so this rule walks
+/// them directly: a received INVITE is clean when the bind sent a 100 on the
+/// same branch, OR sent ANY final (≥200) on that branch within the 200ms
+/// window (RFC 3261 §16.7 only mandates the 100 when the final cannot be
+/// produced promptly — a proxy that relays a 486 in 2ms owes nobody a Trying).
+/// Otherwise it fires with the actually-observed Δ to the first final.
 ///
-/// **Advisory** (mirrors the TS): the B2BUA TransactionLayer does emit 100 Trying
-/// on inbound INVITE and absorbs inbound 100s; the rule still fires on some
-/// fixtures (a bypass code path or a branch-lookup heuristic gap across the
-/// projector's bucket migration). `at_ms` is also missing so the 200ms bound
-/// cannot be enforced. Advisory until the code path is found or the heuristic
-/// corrected.
+/// Subject = `{Proxy}` — §16.7 binds proxies; a UAS answering an INVITE is
+/// governed by §8.2.6, not this rule. Stays **advisory**: under a paused test
+/// clock a fixture may legitimately `advance` far past 200ms of virtual time
+/// before answering, which is not a real-world latency.
 pub struct Proxy100WithinT100msRule;
+
+/// §16.7's "within 200ms" bound.
+const PROXY_100_WINDOW_MS: u64 = 200;
 
 impl CrossMessageAuditRule for Proxy100WithinT100msRule {
     fn name(&self) -> &'static str {
         "rfc3261.proxy100WithinT100ms"
+    }
+
+    fn subject(&self) -> HashSet<UaRole> {
+        HashSet::from([UaRole::Proxy])
     }
 
     fn force_advisory(&self) -> bool {
@@ -1360,46 +1413,74 @@ impl CrossMessageAuditRule for Proxy100WithinT100msRule {
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
-        let mut out = Vec::new();
-        for slice in project_per_dialog(events) {
-            for slot in &slice.per_agent {
-                let idx = build_branch_index(events);
-                for ev in &slot.ordered {
-                    if ev.kind != EventKind::Received {
-                        continue;
-                    }
-                    let SipMessage::Request(invite) = &ev.msg else {
-                        continue;
-                    };
-                    if !invite.method.as_str().eq_ignore_ascii_case("INVITE") {
-                        continue;
-                    }
-                    let branch = branch_of(&ev.msg);
-                    if branch.is_empty() {
-                        continue;
-                    }
-                    let sent_100 = idx
-                        .responses_for(&branch, Direction::Sent)
-                        .iter()
-                        .any(|r| {
-                            status(&r.msg) == 100
-                                && cseq_method(&r.msg).eq_ignore_ascii_case("INVITE")
-                        });
-                    if sent_100 {
-                        continue;
-                    }
-                    out.push((
-                        slot.bind_key.clone(),
-                        format!(
-                            "{{Proxy}} did not emit 100 Trying within 200ms of INVITE receipt \
-                             (callId {}, branch {branch}; observed Δ=<ms>ms or no 100) — RFC 3261 \
-                             §16.7 / RFC3261-MUST-095",
-                            call_id(&ev.msg),
-                        ),
-                    ));
+        let parser = super::lenient_parser();
+        // Per (bind, branch): INVITE receipt time + identity, the sent-100
+        // flag, and the earliest sent-final time.
+        let mut invites: HashMap<(String, String), (u64, String)> = HashMap::new();
+        let mut sent_100: HashSet<(String, String)> = HashSet::new();
+        let mut first_final: HashMap<(String, String), u64> = HashMap::new();
+
+        for s in events {
+            let (bind, raw, received) = match &s.event {
+                SignalingNetworkEvent::RecvItem { bind_key, packet } => {
+                    (bind_key, &packet.raw, true)
                 }
+                SignalingNetworkEvent::SendCalled { bind_key, msg, .. } => {
+                    (bind_key, msg, false)
+                }
+                _ => continue,
+            };
+            let Ok(msg) = parser.parse(raw) else { continue };
+            let branch = branch_of(&msg);
+            if branch.is_empty() || !cseq_method(&msg).eq_ignore_ascii_case("INVITE") {
+                continue;
+            }
+            let key = (bind.clone(), branch);
+            match (&msg, received) {
+                (SipMessage::Request(r), true)
+                    if r.method.as_str().eq_ignore_ascii_case("INVITE") =>
+                {
+                    invites
+                        .entry(key)
+                        .or_insert((s.at_ms, call_id(&msg).to_string()));
+                }
+                (SipMessage::Response(_), false) => {
+                    let st = status(&msg);
+                    if st == 100 {
+                        sent_100.insert(key);
+                    } else if st >= 200 {
+                        let e = first_final.entry(key).or_insert(s.at_ms);
+                        *e = (*e).min(s.at_ms);
+                    }
+                }
+                _ => {}
             }
         }
+
+        let mut out: Vec<(LaneKey, String)> = invites
+            .into_iter()
+            .filter_map(|((bind, branch), (t0, cid))| {
+                if sent_100.contains(&(bind.clone(), branch.clone())) {
+                    return None;
+                }
+                let observed = match first_final.get(&(bind.clone(), branch.clone())) {
+                    Some(&tf) if tf.saturating_sub(t0) <= PROXY_100_WINDOW_MS => return None,
+                    Some(&tf) => format!("first final after Δ={}ms", tf.saturating_sub(t0)),
+                    None => "no response sent".to_string(),
+                };
+                Some((
+                    bind,
+                    format!(
+                        "{{Proxy}} did not emit 100 Trying within {PROXY_100_WINDOW_MS}ms of \
+                         INVITE receipt (callId {cid}, branch {branch}; {observed}) — RFC 3261 \
+                         §16.7 / RFC3261-MUST-095"
+                    ),
+                ))
+            })
+            .collect();
+        // HashMap iteration order is unstable; findings are reported in a
+        // deterministic order for the report/dedup layers.
+        out.sort();
         out
     }
 }
@@ -1412,12 +1493,17 @@ impl CrossMessageAuditRule for Proxy100WithinT100msRule {
 /// whose topmost Route URI lacks `;lr` (strict route) MUST have that URI swapped
 /// into the outgoing Request-URI before forwarding. A real proxy performs the
 /// §16.4 swap; the test UA forwards verbatim. Regression-only tripwire (current
-/// fixtures use loose routing).
+/// fixtures use loose routing). Subject = `{Proxy}` — §16.4 is proxy behaviour;
+/// a UA receiving a strict-Route request forwards nothing.
 pub struct StrictRouteRewriteHandledRule;
 
 impl CrossMessageAuditRule for StrictRouteRewriteHandledRule {
     fn name(&self) -> &'static str {
         "rfc3261.strictRouteRewriteHandled"
+    }
+
+    fn subject(&self) -> HashSet<UaRole> {
+        HashSet::from([UaRole::Proxy])
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
@@ -2030,6 +2116,39 @@ mod tests {
         assert!(f[0].1.contains("expected 404"), "{}", f[0].1);
     }
 
+    #[test]
+    fn no_target_404_subject_is_proxy_only() {
+        assert_eq!(NoTarget404Rule.subject(), HashSet::from([UaRole::Proxy]));
+    }
+
+    #[test]
+    fn no_target_404_clean_when_forwarded_on_fresh_branch() {
+        // A §16.6 proxy forwards the INVITE under a NEW branch and relays the
+        // downstream 486 — that is a resolved target, not a "no target" case.
+        // Branch-based forward detection used to miss this (the e2e LB false
+        // positive); Call-ID+CSeq correlation must keep it clean.
+        let evs = vec![
+            recv("proxy", req("INVITE", "z9hG4bK-in", 1, A, B, "at", None, ""), "127.0.0.1:5090", 0),
+            sent("proxy", req("INVITE", "z9hG4bK-out", 1, A, B, "at", None, ""), "127.0.0.1:5070", 1),
+            recv("proxy", resp(486, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-out", ""), "127.0.0.1:5070", 2),
+            sent("proxy", resp(486, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-in", ""), "127.0.0.1:5090", 3),
+        ];
+        assert!(NoTarget404Rule.check(&evs).is_empty(), "{:?}", NoTarget404Rule.check(&evs));
+    }
+
+    #[test]
+    fn no_target_404_clean_when_relaying_downstream_rejection() {
+        // Even when the forwarded leg is not visible in this slot (e.g. it rode
+        // a different bind), a sent final that MATCHES a received final on the
+        // same Call-ID+CSeq is a relayed rejection, not a no-target outcome.
+        let evs = vec![
+            recv("proxy", req("INVITE", "z9hG4bK-in", 1, A, B, "at", None, ""), "127.0.0.1:5090", 0),
+            recv("proxy", resp(486, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-other", ""), "127.0.0.1:5070", 1),
+            sent("proxy", resp(486, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-in", ""), "127.0.0.1:5090", 2),
+        ];
+        assert!(NoTarget404Rule.check(&evs).is_empty(), "{:?}", NoTarget404Rule.check(&evs));
+    }
+
     // ---- unsupportedExtension421 -----------------------------------------
 
     #[test]
@@ -2205,6 +2324,39 @@ mod tests {
         let f = Proxy100WithinT100msRule.check(&evs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].1.contains("100 Trying"), "{}", f[0].1);
+        assert!(f[0].1.contains("no response sent"), "{}", f[0].1);
+    }
+
+    #[test]
+    fn proxy_100_subject_is_proxy_only() {
+        assert_eq!(Proxy100WithinT100msRule.subject(), HashSet::from([UaRole::Proxy]));
+    }
+
+    #[test]
+    fn proxy_100_clean_when_final_within_window() {
+        // No 100 Trying, but the final went out 5ms after the INVITE — §16.7
+        // only obliges the 100 when the final cannot be produced within 200ms.
+        // (`sent`/`recv` stamp `at_ms = seq`.)
+        let evs = vec![
+            recv("proxy", req("INVITE", "z9hG4bK-i", 1, A, B, "at", None, ""), "127.0.0.1:5070", 0),
+            sent("proxy", resp(486, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-i", ""), "127.0.0.1:5070", 5),
+        ];
+        assert!(
+            Proxy100WithinT100msRule.check(&evs).is_empty(),
+            "{:?}",
+            Proxy100WithinT100msRule.check(&evs)
+        );
+    }
+
+    #[test]
+    fn proxy_100_flags_final_past_window_with_observed_delta() {
+        let evs = vec![
+            recv("proxy", req("INVITE", "z9hG4bK-i", 1, A, B, "at", None, ""), "127.0.0.1:5070", 0),
+            sent("proxy", resp(486, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-i", ""), "127.0.0.1:5070", 350),
+        ];
+        let f = Proxy100WithinT100msRule.check(&evs);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].1.contains("Δ=350ms"), "{}", f[0].1);
     }
 
     // ---- strictRouteRewriteHandled ---------------------------------------

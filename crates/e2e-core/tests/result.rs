@@ -47,7 +47,8 @@ async fn produce_result() -> RunResult {
     let mut rt = FakeLsbcB2bua.build("result/fake", &fake_cfg()).await;
     let lb_vip = rt.lb_vip;
     BasicCall.run(&mut rt, &case.input.core).await;
-    let report = rt.finish().await;
+    let (report, rfc_gate) = rt.finish().await;
+    assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
 
     let verdicts = checks::evaluate_case(
         &case,
@@ -60,7 +61,7 @@ async fn produce_result() -> RunResult {
         shape: "basic-call".into(),
         infra: "fake-lsbc-b2bua".into(),
     };
-    RunResult::from_run(cell, &report, verdicts)
+    RunResult::from_run(cell, &report, verdicts, &[])
 }
 
 #[tokio::test(start_paused = true)]

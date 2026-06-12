@@ -32,6 +32,7 @@ use crate::rfc_audit::dialog_model::{
     call_id, cseq_method, msg_headers, project_per_dialog, slot_is_relay, status, top_via_branch,
     EventKind, OrderedEvent,
 };
+use crate::types::UaRole;
 use crate::rfc_audit::txn_correlation::split_option_tags;
 
 // ---------------------------------------------------------------------------
@@ -205,6 +206,10 @@ impl CrossMessageAuditRule for ReliableNeedsClientOptInRule {
         "rfc3262.reliableNeedsClientOptIn"
     }
 
+    fn subject(&self) -> HashSet<UaRole> {
+        HashSet::from([UaRole::Uas])
+    }
+
     fn force_advisory(&self) -> bool {
         true
     }
@@ -358,6 +363,10 @@ pub struct UnmatchedPrackProxiedRule;
 impl CrossMessageAuditRule for UnmatchedPrackProxiedRule {
     fn name(&self) -> &'static str {
         "rfc3262.unmatchedPrackProxied"
+    }
+
+    fn subject(&self) -> HashSet<UaRole> {
+        HashSet::from([UaRole::Proxy])
     }
 
     fn force_advisory(&self) -> bool {
@@ -1126,24 +1135,32 @@ impl CrossMessageAuditRule for UacRseqStrictnessRule {
 // ===========================================================================
 
 /// **RFC 3262 §5 (MUST-025/-026/-027) — PRACK carries the answer to a 1xx offer.**
-/// When a reliable 1xx carries an SDP offer, the corresponding PRACK MUST carry the
-/// SDP answer; the 2xx to the PRACK MAY then carry a further exchange. Enforcing
-/// "offer-in-1xx ⇒ answer-in-PRACK" makes the negotiation observable. Body-presence
-/// is the loose proxy for offer/answer (the planned `_offer-answer.ts` will sharpen
-/// it to SDP-shape inspection).
+/// When a reliable 1xx carries an SDP **offer**, the corresponding PRACK MUST
+/// carry the SDP answer; the 2xx to the PRACK MAY then carry a further exchange.
+/// Enforcing "offer-in-1xx ⇒ answer-in-PRACK" makes the negotiation observable.
+///
+/// Offer detection: a reliable-1xx body counts as an OFFER only when the INVITE
+/// transaction it answers carried **no** body — when the INVITE carried the
+/// offer, the 1xx body is the **answer** (RFC 3264 §5) and the PRACK owes no
+/// body at all. The old body-presence-only heuristic flagged every
+/// INVITE-with-offer + reliable-183-with-answer + bodiless-PRACK flow (the
+/// standard PRACK call setup!) on every endpoint — the e2e false-positive
+/// class. An INVITE that was never observed in the slot conservatively keeps
+/// the old reading (body ⇒ offer).
 ///
 /// **Advisory** (TS `severityOverride:"advisory"`): the B2BUA terminates PRACK per
-/// leg — the reliable 1xx with the offer body lives on one leg's slice while the
-/// PRACK with the answer body lives on the other leg's slice (different Call-ID
-/// after the leg rewrite). The body-presence heuristic fires because both halves
-/// of the O/A round are not visible from a single per-slice view. Advisory until
-/// the planned `_offer-answer.ts` helper models cross-leg PRACK O/A correlation OR
-/// the subject narrows to non-DUT peer binds.
+/// leg — a genuine reliable-1xx offer and its PRACK answer can still straddle
+/// leg-mate slices (different Call-ID after the leg rewrite). Advisory until
+/// the planned `_offer-answer.ts` helper models cross-leg PRACK O/A correlation.
 pub struct PrackOfferAnswerModelRule;
 
 impl CrossMessageAuditRule for PrackOfferAnswerModelRule {
     fn name(&self) -> &'static str {
         "rfc3262.prackOfferAnswerModel"
+    }
+
+    fn subject(&self) -> HashSet<UaRole> {
+        HashSet::from([UaRole::Uac, UaRole::Uas])
     }
 
     fn force_advisory(&self) -> bool {
@@ -1157,14 +1174,31 @@ impl CrossMessageAuditRule for PrackOfferAnswerModelRule {
                 if slot_is_relay(slot) {
                     continue;
                 }
+                // callId → the INVITE (sent OR received) carried a body, i.e.
+                // the offer rode the INVITE and any 1xx body is the answer.
+                let mut invite_had_offer: HashMap<String, bool> = HashMap::new();
                 // callId → RSeqs of reliable 1xx (sent OR received) that carried a body.
                 let mut offer_rseqs: HashMap<String, HashSet<u64>> = HashMap::new();
 
                 for ev in &slot.ordered {
                     let msg = &ev.msg;
 
+                    if let SipMessage::Request(r) = msg {
+                        if r.method.as_str().eq_ignore_ascii_case("INVITE") {
+                            let had = invite_had_offer
+                                .entry(call_id(msg).to_string())
+                                .or_insert(false);
+                            *had = *had || !body_of(msg).is_empty();
+                            continue;
+                        }
+                    }
+
                     if is_reliable_1xx(msg) && !body_of(msg).is_empty() {
                         let cid = call_id(msg).to_string();
+                        // The INVITE carried the offer ⇒ this body is the answer.
+                        if invite_had_offer.get(&cid).copied().unwrap_or(false) {
+                            continue;
+                        }
                         let set = offer_rseqs.entry(cid).or_default();
                         for n in rseq_values(msg) {
                             set.insert(n);
@@ -1719,5 +1753,67 @@ mod tests {
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].1.contains("MUST-025"), "{}", f[0].1);
         assert!(PrackOfferAnswerModelRule.force_advisory());
+    }
+
+    #[test]
+    fn prack_offer_answer_clean_when_invite_carried_the_offer() {
+        // The STANDARD reliable-provisional call setup: INVITE carries the
+        // offer, the reliable 183's SDP is the ANSWER (RFC 3264 §5), so the
+        // PRACK legitimately has no body. The old body-presence heuristic
+        // flagged this on every endpoint of every PRACK flow.
+        let invite_with_offer = format!(
+            "INVITE sip:bob@127.0.0.1 SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-i\r\n\
+             From: <sip:alice@127.0.0.1>;tag=at\r\n\
+             To: <sip:bob@127.0.0.1>\r\n\
+             Call-ID: cid-1@127.0.0.1\r\n\
+             CSeq: 1 INVITE\r\n\
+             Max-Forwards: 70\r\n\
+             Content-Length: {}\r\n\r\n{SDP}",
+            SDP.len()
+        )
+        .into_bytes();
+        // UAC view: sent INVITE w/ offer, received reliable 183 w/ answer,
+        // sent bodiless PRACK.
+        let evs = vec![
+            sent("uac", invite_with_offer.clone(), 0),
+            recv("uac", invite_resp(183, "z9hG4bK-i", Some(1), true, false, true), 1),
+            sent("uac", prack("z9hG4bK-p", "1 1 INVITE", false), 2),
+        ];
+        assert!(
+            PrackOfferAnswerModelRule.check(&evs).is_empty(),
+            "{:?}",
+            PrackOfferAnswerModelRule.check(&evs)
+        );
+        // UAS view: received INVITE w/ offer, sent reliable 183 w/ answer,
+        // received bodiless PRACK.
+        let evs = vec![
+            recv("uas", invite_with_offer, 0),
+            sent("uas", invite_resp(183, "z9hG4bK-i", Some(1), true, false, true), 1),
+            recv("uas", prack("z9hG4bK-p", "1 1 INVITE", false), 2),
+        ];
+        assert!(
+            PrackOfferAnswerModelRule.check(&evs).is_empty(),
+            "{:?}",
+            PrackOfferAnswerModelRule.check(&evs)
+        );
+    }
+
+    // ---- subject narrowing ---------------------------------------------------
+
+    #[test]
+    fn rfc3262_rule_subjects_narrowed() {
+        assert_eq!(
+            ReliableNeedsClientOptInRule.subject(),
+            HashSet::from([UaRole::Uas])
+        );
+        assert_eq!(
+            UnmatchedPrackProxiedRule.subject(),
+            HashSet::from([UaRole::Proxy])
+        );
+        assert_eq!(
+            PrackOfferAnswerModelRule.subject(),
+            HashSet::from([UaRole::Uac, UaRole::Uas])
+        );
     }
 }

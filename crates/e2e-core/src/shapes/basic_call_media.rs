@@ -69,6 +69,13 @@ impl CallflowShape for BasicCallMedia {
             .invite(bob1)
             .with_sdp(&sdp("alice", &a_rtp.ip().to_string(), a_rtp.port()))
             .through(sut);
+        // Real cluster: pin the b-leg callee (see `basic_call.rs`).
+        if let Some(dest) = rt.api_call_destination() {
+            invite = invite.with_header(
+                "X-Api-Call",
+                &format!(r#"{{"destination":{{"host":"{}","port":{}}}}}"#, dest.ip(), dest.port()),
+            );
+        }
         if let Some(from) = &input.from {
             invite = invite.from(from);
         }

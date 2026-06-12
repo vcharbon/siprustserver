@@ -32,6 +32,16 @@ impl CallflowShape for BasicCall {
         // R-URI the Test case supplied. The LB HRW-routes to the b2bua, which
         // bridges the b-leg back through the LB to bob1.
         let mut invite = alice.invite(bob1).with_sdp(OFFER).through(sut);
+        // On the real cluster the worker's engine routes by the caller-pinned
+        // `X-Api-Call.destination` (fallback = its in-cluster B2BUA_DEST, which
+        // is NOT our bob); the fake engine ignores the header. Same shape body
+        // either way — the infra decides whether the pin is needed.
+        if let Some(dest) = rt.api_call_destination() {
+            invite = invite.with_header(
+                "X-Api-Call",
+                &format!(r#"{{"destination":{{"host":"{}","port":{}}}}}"#, dest.ip(), dest.port()),
+            );
+        }
         if let Some(from) = &input.from {
             invite = invite.from(from);
         }

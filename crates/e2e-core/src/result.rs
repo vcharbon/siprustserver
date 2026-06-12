@@ -61,13 +61,16 @@ pub struct MediaRef {
 #[serde(rename_all = "camelCase")]
 pub struct RunResult {
     pub cell: CellId,
-    /// Check verdicts all passed AND the run's expects held. Non-advisory RFC
-    /// violations never reach here — the harness hard-gates them at `finish()`
-    /// (the run panics, the executor records the cell as crashed).
+    /// Check verdicts all passed AND the run's expects held AND the RFC hard
+    /// gate found no gating (non-advisory, subject-applicable, unwaived)
+    /// violation. A gating RFC violation FAILS the cell with the report intact
+    /// (`rfc` rows carry `advisory: false`) instead of crashing it report-less.
     pub passed: bool,
     pub checks: Vec<CheckVerdict>,
-    /// Findings the report surfaces alongside the diagram (advisory/structural;
-    /// same fold as the HTML report's anomaly list).
+    /// Findings the report surfaces alongside the diagram — the role-aware RFC
+    /// suite fold plus the structural recorder anomalies; each row tags its
+    /// endpoint and advisory/gating severity (same fold as the HTML report's
+    /// anomaly list).
     pub rfc: Vec<Anomaly>,
     /// Media artifacts (media-exchanging shapes only; empty otherwise).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -78,8 +81,16 @@ pub struct RunResult {
 }
 
 impl RunResult {
-    /// Fold a finished run + its check verdicts into the persistable result.
-    pub fn from_run(cell: CellId, report: &RunReport, check_verdicts: Vec<CheckVerdict>) -> Self {
+    /// Fold a finished run + its check verdicts + the RFC hard-gate findings
+    /// into the persistable result. `rfc_gate` is what `Harness::finish` would
+    /// have panicked on — non-empty ⇒ the cell FAILS (the findings themselves
+    /// are already in the seq-doc fold as `advisory: false` rows).
+    pub fn from_run(
+        cell: CellId,
+        report: &RunReport,
+        check_verdicts: Vec<CheckVerdict>,
+        rfc_gate: &[sip_net::RfcFinding],
+    ) -> Self {
         let seq_doc = scenario_harness::report::seq_doc(report);
         let entries = report.entries();
         let timings = Timings {
@@ -91,7 +102,8 @@ impl RunResult {
                 .unwrap_or(0),
             messages: entries.len(),
         };
-        let passed = report.passed() && checks::all_passed(&check_verdicts);
+        let passed =
+            report.passed() && checks::all_passed(&check_verdicts) && rfc_gate.is_empty();
         RunResult {
             cell,
             passed,

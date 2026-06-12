@@ -290,6 +290,20 @@ impl Harness {
         }
     }
 
+    /// Re-seed the shared branch/tag/Call-ID counter. The default (1) is
+    /// deterministic so fake-fabric report bytes are stable across runs — but
+    /// against a REAL, stateful, shared SUT (the kind cluster) every run would
+    /// then mint the SAME Call-IDs and Via branches as the last one, and the
+    /// SUT's transaction layer rightly treats the new INVITE as a
+    /// retransmission of the finished call and replays its cached final
+    /// response (RFC 3261 §17.2.3 absorption — observed as an instant 200 OK
+    /// and a never-arriving b-leg). A real Infra shape seeds with wall-clock
+    /// entropy so identifiers are unique across runs, as RFC 3261 §8.1.1.4
+    /// demands of a real UA.
+    pub fn seed_ids(&self, seed: u64) {
+        self.ids.0.store(seed, Ordering::Relaxed);
+    }
+
     /// Label a message `agent` received with a canonical **anchor** name
     /// (ADR-0019) — e.g. `tag_anchor(&bob1, "initialInvite", uas.request())`.
     /// The tag stores the message's identity keys; the E2E check engine
@@ -350,14 +364,30 @@ impl Harness {
         self.cseq_gate.disarm();
     }
 
-    /// Declare and bind a named UA at `addr` (e.g. `"127.0.0.1:5060"`).
+    /// Declare and bind a named UA at `addr` (e.g. `"127.0.0.1:5060"`). The
+    /// bind is role-tagged `{Uac, Uas}` — a test UA originates and answers but
+    /// is never a proxy, so proxy-subject RFC rules (no-target-404,
+    /// 100-within-200ms, strict-route rewrite, PRACK forwarding) do not judge
+    /// its lane. Use [`agent_with_roles`](Self::agent_with_roles) to override.
     pub async fn agent(&self, name: impl Into<String>, addr: &str) -> Agent {
+        self.agent_with_roles(name, addr, HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]))
+            .await
+    }
+
+    /// [`agent`](Self::agent) with explicit bind roles for RFC-rule subject
+    /// dispatch (e.g. a UA scripted to relay should declare `{Proxy}` too).
+    pub async fn agent_with_roles(
+        &self,
+        name: impl Into<String>,
+        addr: &str,
+        roles: HashSet<sip_net::UaRole>,
+    ) -> Agent {
         let name = name.into();
         let addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
         self.recorder.register_lane(addr, name.clone(), NetworkTag::Ext);
         let ep = self
             .network
-            .bind_udp(BindUdpOpts::new(addr, 64))
+            .bind_udp(BindUdpOpts::new(addr, 64).with_roles(roles))
             .await
             .unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
         let rr_fold = decide_rr_fold(&name);
@@ -377,9 +407,13 @@ impl Harness {
     }
 
     /// Declare and bind a record-routing proxy / load balancer at `addr`.
+    /// Role-tagged `{Proxy}` so the proxy-subject RFC rules judge this lane
+    /// and the per-UA dialog rules do not.
     pub async fn proxy(&self, name: impl Into<String>, addr: &str) -> Proxy {
         Proxy {
-            agent: self.agent(name, addr).await,
+            agent: self
+                .agent_with_roles(name, addr, HashSet::from([sip_net::UaRole::Proxy]))
+                .await,
         }
     }
 
@@ -392,12 +426,27 @@ impl Harness {
     /// it on drop). This is the seam that lets the harness drive a real proxy,
     /// not just peer-to-peer agents (ADR-0006 → ADR-0009).
     pub async fn bind_sut(&self, name: impl Into<String>, addr: &str) -> (Box<dyn UdpEndpoint>, SocketAddr) {
+        self.bind_sut_with_roles(name, addr, sip_net::all_ua_roles()).await
+    }
+
+    /// [`bind_sut`](Self::bind_sut) with explicit bind roles for RFC-rule
+    /// subject dispatch: a `ProxyCore` SUT declares `{Proxy}`, a B2BUA SUT
+    /// `{Uac, Uas}` (it terminates each leg as a UA — proxy-subject rules like
+    /// no-target-404 do not govern it). The roles ride the recorded
+    /// `BindAcquire` summary, so the hard gate and the report projection
+    /// dispatch rules per endpoint with no extra plumbing.
+    pub async fn bind_sut_with_roles(
+        &self,
+        name: impl Into<String>,
+        addr: &str,
+        roles: HashSet<sip_net::UaRole>,
+    ) -> (Box<dyn UdpEndpoint>, SocketAddr) {
         let name = name.into();
         let addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
         self.recorder.register_lane(addr, name, NetworkTag::Core);
         let ep = self
             .network
-            .bind_udp(BindUdpOpts::new(addr, 256))
+            .bind_udp(BindUdpOpts::new(addr, 256).with_roles(roles))
             .await
             .unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
         (ep, addr)
@@ -455,6 +504,35 @@ impl Harness {
         let anchors = self.anchors.borrow().clone();
         RunReport::from_recording(self.name, self.description, self.recorder, events, audit, anchors)
     }
+
+    /// [`finish`](Self::finish) that **collects** the hard-gate findings
+    /// instead of panicking — for executors (the e2e run core) that want a
+    /// gating RFC violation to FAIL the cell *with the full report intact*
+    /// (diagram, checks, findings table) rather than crash it report-less.
+    /// The returned findings are exactly the set `finish` would have panicked
+    /// on: non-advisory, subject-applicable to the originating bind's declared
+    /// roles, and not waived via [`allow_violation`](Self::allow_violation).
+    pub async fn finish_collecting(self) -> (RunReport, Vec<sip_net::RfcFinding>) {
+        self.dump.disarm();
+        self.cseq_gate.disarm();
+        let events = self.recording.channel().snapshot();
+        let allow = self.allow_violations.borrow().clone();
+        let gating: Vec<sip_net::RfcFinding> = sip_net::evaluate_rfc_findings(&events)
+            .into_iter()
+            .filter(|f| !f.advisory && !allow.contains(&f.rule))
+            .collect();
+        let audit = self.recording.close().await;
+        let anchors = self.anchors.borrow().clone();
+        let report = RunReport::from_recording(
+            self.name,
+            self.description,
+            self.recorder,
+            events,
+            audit,
+            anchors,
+        );
+        (report, gating)
+    }
 }
 
 /// The RFC 3261 / 3262 / 3264 audit findings over a recorded trace that MUST
@@ -476,69 +554,15 @@ fn rfc_hard_gate_findings(
     events: &[layer_harness::Stamped<SignalingNetworkEvent>],
     allow: &HashSet<String>,
 ) -> Vec<(String, String)> {
-    use sip_net::all_ua_roles;
-
-    // Reconstruct each bind's declared roles from its BindAcquire summary so
-    // subject dispatch needs no harness-private state (default = all roles).
-    let mut roles: HashMap<String, HashSet<sip_net::UaRole>> = HashMap::new();
-    for s in events {
-        if let SignalingNetworkEvent::BindAcquire { bind_key, summary } = &s.event {
-            roles.insert(bind_key.clone(), summary.roles.clone());
-        }
-    }
-    let roles_of = |bind: &str| roles.get(bind).cloned().unwrap_or_else(all_ua_roles);
-    let subject_hits = |subject: &HashSet<sip_net::UaRole>, bind: &str| {
-        let r = roles_of(bind);
-        subject.iter().any(|s| r.contains(s))
-    };
-
-    let mut findings = Vec::new();
-
-    // Cross-message rules — one pass over the whole channel each.
-    for rule in sip_net::rfc_cross_message_rules() {
-        if rule.force_advisory() || allow.contains(rule.name()) {
-            continue;
-        }
-        let subject = rule.subject();
-        for (bind, detail) in rule.check(events) {
-            if subject_hits(&subject, &bind) {
-                findings.push((bind, detail));
-            }
-        }
-    }
-
-    // Peer rules — per-bind slice (the RAII Drop path records the same to the
-    // ledger, but the gate runs them inline so a harness `finish`/Drop fails
-    // regardless of endpoint Drop ordering).
-    let peer_rules = sip_net::rfc_peer_rules();
-    if !peer_rules.is_empty() {
-        let mut binds: Vec<String> = Vec::new();
-        for s in events {
-            let bk = s.event.bind_key();
-            if !binds.iter().any(|b| b == bk) {
-                binds.push(bk.clone());
-            }
-        }
-        for bind in &binds {
-            let slice: Vec<layer_harness::Stamped<SignalingNetworkEvent>> = events
-                .iter()
-                .filter(|s| s.event.bind_key() == bind)
-                .cloned()
-                .collect();
-            for rule in &peer_rules {
-                if rule.force_advisory()
-                    || allow.contains(rule.name())
-                    || !subject_hits(&rule.subject(), bind)
-                {
-                    continue;
-                }
-                for detail in rule.check(&slice, bind) {
-                    findings.push((bind.clone(), detail));
-                }
-            }
-        }
-    }
-    findings
+    // One shared evaluator (sip-net) runs the suite with subject dispatch —
+    // the SAME pass the report projection lists — so the gate and the report
+    // can never disagree on which endpoint a rule applies to. The gate keeps
+    // only the non-advisory, non-waived subset.
+    sip_net::evaluate_rfc_findings(events)
+        .into_iter()
+        .filter(|f| !f.advisory && !allow.contains(&f.rule))
+        .map(|f| (f.lane, f.detail))
+        .collect()
 }
 
 /// Format the hard-gate panic message listing every RFC audit violation.
