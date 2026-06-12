@@ -28,6 +28,7 @@ pub mod health;
 pub mod load_observer;
 pub mod observability;
 pub mod registry;
+pub mod resolver;
 pub mod security;
 pub mod self_gate;
 pub mod strategy;

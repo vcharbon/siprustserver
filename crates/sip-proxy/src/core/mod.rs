@@ -27,6 +27,7 @@ use crate::cancel_lru::CancelBranchLru;
 use crate::observability::logger::{NoopLogger, ProxyLogger};
 use crate::observability::ProxyMetrics;
 use crate::registry::WorkerRegistry;
+use crate::resolver::{HostResolver, NamedForwarder, ResolverConfig, SystemResolver};
 use crate::self_gate::{AlwaysAdmitGate, ProxySelfGate};
 use crate::strategy::RoutingStrategy;
 
@@ -34,43 +35,6 @@ use crate::strategy::RoutingStrategy;
 /// only for these.
 fn is_dialog_creating(method: &str) -> bool {
     method == "INVITE" || method == "SUBSCRIBE"
-}
-
-/// Resolve a [`ProxyAddr`] to a real socket address for forwarding. An IP-literal
-/// host is parsed directly (the fast path: workers come from the registry as IP
-/// literals, and the simulated harness fabric addresses everything by IP). A DNS
-/// NAME — e.g. a `sipp-uas` pod FQDN carried in a worker-outbound b-leg
-/// Request-URI — is resolved via the system resolver and cached for the process
-/// lifetime, so the LB (not the B2BUA) owns next-hop name resolution.
-///
-/// A per-pod name is single-A, so it resolves to ONE pod consistently: retransmits
-/// of an INVITE never split a call across pods, and in-dialog requests (addressed
-/// to the pinned pod Contact, an IP literal) take the fast path. The cache needs no
-/// TTL because callee pods are launched once and not restarted during a run; this
-/// also keeps the resolver out of any fake-clock path (the harness only ever
-/// forwards to IP literals, so it is never invoked under a paused clock).
-/// Returns `None` if a name can't be resolved (the datagram is dropped).
-async fn resolve_proxy_addr(target: &ProxyAddr) -> Option<SocketAddr> {
-    // IP-literal fast path (also the only path the simulated harness ever takes).
-    if let Some(dst) = target.to_socket_addr() {
-        return Some(dst);
-    }
-    use std::collections::HashMap;
-    use std::sync::OnceLock;
-    use tokio::sync::Mutex;
-
-    static CACHE: OnceLock<Mutex<HashMap<String, SocketAddr>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = target.to_string();
-    if let Some(addr) = cache.lock().await.get(&key).copied() {
-        return Some(addr);
-    }
-    let addr = tokio::net::lookup_host((target.host.as_str(), target.port))
-        .await
-        .ok()?
-        .next()?;
-    cache.lock().await.insert(key, addr);
-    Some(addr)
 }
 
 /// The dependency bundle for a [`ProxyCore`] (avoids a 10-argument constructor).
@@ -87,11 +51,14 @@ pub struct ProxyCoreParts {
     pub metrics: Arc<ProxyMetrics>,
     pub logger: Arc<dyn ProxyLogger>,
     pub self_gate: Arc<dyn ProxySelfGate>,
+    /// Resolver for DNS-named forward targets (worker-outbound b-leg R-URIs).
+    /// IP-literal traffic never touches it; see [`crate::resolver`].
+    pub resolver: Arc<dyn HostResolver>,
 }
 
 /// The stateless proxy.
 pub struct ProxyCore {
-    endpoint: Box<dyn UdpEndpoint>,
+    endpoint: Arc<dyn UdpEndpoint>,
     advertised: ProxyAddr,
     strategy: Arc<dyn RoutingStrategy>,
     registry: Arc<dyn WorkerRegistry>,
@@ -102,12 +69,22 @@ pub struct ProxyCore {
     logger: Arc<dyn ProxyLogger>,
     self_gate: Arc<dyn ProxySelfGate>,
     parser: CustomParser,
+    /// Off-loop send path for DNS-named targets (cache + single-flight resolve).
+    named: NamedForwarder,
 }
 
 impl ProxyCore {
     pub fn new(parts: ProxyCoreParts) -> Self {
+        let endpoint: Arc<dyn UdpEndpoint> = Arc::from(parts.endpoint);
+        let named = NamedForwarder::new(
+            endpoint.clone(),
+            parts.resolver,
+            ResolverConfig::default(),
+            parts.clock.clone(),
+            parts.metrics.clone(),
+        );
         Self {
-            endpoint: parts.endpoint,
+            endpoint,
             advertised: parts.advertised,
             strategy: parts.strategy,
             registry: parts.registry,
@@ -118,6 +95,7 @@ impl ProxyCore {
             logger: parts.logger,
             self_gate: parts.self_gate,
             parser: CustomParser::default(),
+            named,
         }
     }
 
@@ -134,13 +112,18 @@ impl ProxyCore {
         self.clock.now_ms().max(0) as u64
     }
 
-    /// Send raw bytes to a [`ProxyAddr`] target, resolving it to a socket addr.
-    /// An IP-literal host is used directly; a DNS name is resolved (and cached) via
-    /// [`resolve_proxy_addr`]. A name that fails to resolve is dropped.
+    /// Send raw bytes to a [`ProxyAddr`] target. An IP-literal host (the fast
+    /// path: registry workers and the simulated fabric are always IP literals)
+    /// is sent inline; a DNS name — e.g. a `sipp-uas` pod FQDN in a
+    /// worker-outbound b-leg R-URI — goes through the [`NamedForwarder`], which
+    /// serves cache hits inline and resolves misses on a spawned task so the
+    /// recv loop NEVER waits on DNS (see [`crate::resolver`]).
     async fn send_to(&self, bytes: &[u8], target: &ProxyAddr) {
-        if let Some(dst) = resolve_proxy_addr(target).await {
+        if let Some(dst) = target.to_socket_addr() {
             let _ = self.endpoint.send_to(bytes, dst).await;
+            return;
         }
+        self.named.send(bytes, target).await;
     }
 
     /// Reply to the packet's source.
@@ -201,6 +184,7 @@ pub struct ProxyCoreBuilder {
     metrics: Option<Arc<ProxyMetrics>>,
     logger: Option<Arc<dyn ProxyLogger>>,
     self_gate: Option<Arc<dyn ProxySelfGate>>,
+    resolver: Option<Arc<dyn HostResolver>>,
 }
 
 impl ProxyCoreBuilder {
@@ -215,6 +199,7 @@ impl ProxyCoreBuilder {
             metrics: None,
             logger: None,
             self_gate: None,
+            resolver: None,
         }
     }
 
@@ -242,6 +227,10 @@ impl ProxyCoreBuilder {
         self.cancel_lru = Some(lru);
         self
     }
+    pub fn resolver(mut self, resolver: Arc<dyn HostResolver>) -> Self {
+        self.resolver = Some(resolver);
+        self
+    }
 
     /// Finish into a [`ProxyCore`] bound on `endpoint`.
     pub fn build(self, endpoint: Box<dyn UdpEndpoint>) -> ProxyCore {
@@ -259,6 +248,7 @@ impl ProxyCoreBuilder {
             metrics: self.metrics.unwrap_or_else(|| Arc::new(ProxyMetrics::new())),
             logger: self.logger.unwrap_or_else(|| Arc::new(NoopLogger)),
             self_gate: self.self_gate.unwrap_or_else(|| Arc::new(AlwaysAdmitGate)),
+            resolver: self.resolver.unwrap_or_else(|| Arc::new(SystemResolver)),
         })
     }
 }

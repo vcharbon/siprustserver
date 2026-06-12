@@ -134,6 +134,8 @@ pub struct ProxyMetrics {
     record_route_inserted: AtomicU64,
     ack_synthesized: AtomicU64,
     pending_invite_lru_size: AtomicU64,
+    named_sends: LabeledCounter, // keyed outcome (crate::resolver::outcome — closed set)
+    resolver_cache_size: AtomicU64,
     health: HealthGauges,
     /// `1` ⇒ the worker pool has **zero routable (`Alive`) workers** — the proxy
     /// can serve no new dialog. Set from the registry by the runner's health
@@ -211,6 +213,16 @@ impl ProxyMetrics {
         self.pending_invite_lru_size.store(n, Ordering::Relaxed);
     }
 
+    /// Count a named-target send by outcome (cached/resolved/dropped_*…), for
+    /// `sip_proxy_named_sends_total{outcome}`. See [`crate::resolver`].
+    pub fn record_named_send(&self, outcome: &str) {
+        self.named_sends.inc(outcome);
+    }
+
+    pub fn set_resolver_cache_size(&self, n: u64) {
+        self.resolver_cache_size.store(n, Ordering::Relaxed);
+    }
+
     /// Set the worker-health gauges from a fleet count. Also derives
     /// `worker_pool_empty` = `1` iff no worker is `Alive` (routable) — the
     /// routing-fatal condition the `/readyz` gate also keys on.
@@ -244,6 +256,15 @@ impl ProxyMetrics {
     }
     pub fn pending_invite_lru_size(&self) -> u64 {
         self.pending_invite_lru_size.load(Ordering::Relaxed)
+    }
+    pub fn calls_total(&self) -> u64 {
+        self.calls.load(Ordering::Relaxed)
+    }
+    pub fn named_send_count(&self, outcome: &str) -> u64 {
+        self.named_sends.snapshot().get(outcome).copied().unwrap_or(0)
+    }
+    pub fn resolver_cache_size(&self) -> u64 {
+        self.resolver_cache_size.load(Ordering::Relaxed)
     }
 
     /// Render Prometheus text exposition (the `/metrics` body).
@@ -293,6 +314,8 @@ impl ProxyMetrics {
         g(&mut s, "sip_proxy_record_route_inserted_total", "Record-Route headers inserted.", "counter", self.record_route_inserted.load(Ordering::Relaxed));
         g(&mut s, "sip_proxy_ack_synthesized_total", "Hop-by-hop ACKs synthesized for non-2xx.", "counter", self.ack_synthesized.load(Ordering::Relaxed));
         g(&mut s, "sip_proxy_pending_invite_lru_size", "Pending-INVITE LRU size.", "gauge", self.pending_invite_lru_size.load(Ordering::Relaxed));
+        labeled(&mut s, "sip_proxy_named_sends_total", "Named-target (DNS) sends by outcome.", "counter", "outcome", &self.named_sends.snapshot());
+        g(&mut s, "sip_proxy_resolver_cache_size", "Resolver name-cache size.", "gauge", self.resolver_cache_size.load(Ordering::Relaxed));
         g(&mut s, "sip_proxy_worker_pool_empty", "1 iff no worker is Alive (routable) — the proxy can serve no new dialog.", "gauge", self.worker_pool_empty.load(Ordering::Relaxed));
 
         s.push_str("# HELP sip_worker_health Worker count by health state.\n# TYPE sip_worker_health gauge\n");

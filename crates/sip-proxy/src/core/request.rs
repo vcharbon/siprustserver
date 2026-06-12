@@ -492,6 +492,56 @@ Content-Length: 0\r\n\r\n"
         );
     }
 
+    // Regression for the recv-loop head-of-line block: a worker-outbound
+    // request whose R-URI is a DNS name must NOT make routing wait on the
+    // resolver — resolution happens on a spawned task (see crate::resolver).
+    // Under the old inline-await design a resolver that never answers would
+    // have parked route_request (and with it the whole recv loop) forever;
+    // here the only pending timer is the watchdog timeout, so a regression
+    // fails fast instead of hanging.
+    #[tokio::test(start_paused = true)]
+    async fn named_target_resolution_never_blocks_routing() {
+        struct PendingResolver;
+        #[async_trait::async_trait]
+        impl crate::resolver::HostResolver for PendingResolver {
+            async fn resolve(&self, _host: &str, _port: u16) -> Option<std::net::SocketAddr> {
+                std::future::pending().await
+            }
+        }
+
+        let reg: Arc<dyn WorkerRegistry> =
+            Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060))]));
+        let net = SimulatedSignalingNetwork::new(1);
+        let ep = net.bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64)).await.unwrap();
+        let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1_POD, 5060)));
+        let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
+            .clock(Clock::test_at(0))
+            .resolver(Arc::new(PendingResolver))
+            .build(ep);
+
+        let raw = format!(
+            "OPTIONS sip:sipp@uas.example:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {W1_POD}:5060;branch=z9hG4bKnamed;lg=a;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:service@{PROXY_VIP}:5060>;tag=svc\r\n\
+To: <sip:sipp@uas.example:5060>;tag=uactag\r\n\
+Call-ID: named-1@uas.example\r\n\
+CSeq: 2 OPTIONS\r\n\
+Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
+Content-Length: 0\r\n\r\n"
+        );
+        let SipMessage::Request(req) = CustomParser::default().parse(raw.as_bytes()).unwrap() else { unreachable!() };
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            core.route_request(&req, "OPTIONS", format!("{W1_POD}:5060").parse().unwrap()),
+        )
+        .await
+        .expect("route_request must not wait on DNS resolution");
+        assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
+        assert_eq!(outcome.target, Some(ProxyAddr::new("uas.example", 5060)));
+    }
+
     // The un-NAT'd fast path still works: source IS the registered worker.
     #[tokio::test]
     async fn pod_direct_worker_source_is_still_worker_outbound() {
