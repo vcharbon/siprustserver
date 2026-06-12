@@ -143,6 +143,7 @@ pub async fn apply_route(
     // GlobalDuration backstop below still arms for the call.
     if defers_routing(&call) {
         arm_global_duration(&mut call, &mut fx, route.features.platform.max_duration_sec, now_ms);
+        arm_setup_timeout(&mut call, &mut fx, config.setup_timeout_sec, now_ms);
         return HandlerResult { call, effects: fx };
     }
 
@@ -247,6 +248,7 @@ pub async fn apply_route(
     // bump and `replace_timer_by_id`'s id-dedup); a stuck-in-setup call is now
     // reaped at the cap by the existing `max-duration` rule.
     arm_global_duration(&mut call, &mut fx, route.features.platform.max_duration_sec, now_ms);
+    arm_setup_timeout(&mut call, &mut fx, config.setup_timeout_sec, now_ms);
 
     HandlerResult { call, effects: fx }
 }
@@ -262,6 +264,33 @@ fn arm_global_duration(call: &mut Call, fx: &mut HandlerEffects, max_duration_se
     };
     call.timers = call::helpers::replace_timer_by_id(std::mem::take(&mut call.timers), global.clone());
     fx.critical.push(CriticalStateEffect::ScheduleTimer(global));
+}
+
+/// Arm the call-level a-leg setup deadline (`SetupTimeout`) — armed once at
+/// route time, **arm-if-absent** so a reroute (the limiter-failover recursion
+/// re-enters `apply_route`) never extends the caller's total wait. Cancelled
+/// at answer (`confirm-dialog` and the promote/18x confirm paths); fired by
+/// the CORE `setup-timeout` rule (408 to A, CANCEL pending b-legs). Lives in
+/// `call.timers`, so a reclaimed mid-setup call still carries its deadline —
+/// the sip-txn `INVITE_INITIAL_TIMEOUT` backstop dies with a crashed node and
+/// left such calls holding their limiter slots for the full GlobalDuration
+/// (endurance 2026-06-12). `setup_timeout_sec <= 0` disables.
+fn arm_setup_timeout(call: &mut Call, fx: &mut HandlerEffects, setup_timeout_sec: i64, now_ms: i64) {
+    if setup_timeout_sec <= 0 {
+        return;
+    }
+    let id = format!("{:?}", TimerType::SetupTimeout);
+    if call.timers.iter().any(|t| t.id == id) {
+        return;
+    }
+    let entry = TimerEntry {
+        id,
+        timer_type: TimerType::SetupTimeout,
+        fire_at: now_ms + setup_timeout_sec * 1000,
+        leg_id: None,
+    };
+    call.timers.push(entry.clone());
+    fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
 }
 
 /// Whether any service-ext slice asks the framework to defer normal destination

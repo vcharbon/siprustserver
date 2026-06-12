@@ -107,7 +107,14 @@ Hazards (each has bitten us at least once; some twice across both codebases):
 
 - **Keepalive catch-up smoothing lives in the reclaim handler, never in the timer
   driver** (ADR-0014 §4). On reboot, `router::reclaim_all` pre-computes staggered
-  absolute `fire_at` for past-due keepalives (oldest-first, bounded to
-  `keepalive_catchup_speedup`× cadence) so a rehydrated node is not flooded. This
-  is **performance only** — it has no correctness role and no timing assumption.
-  Keep the epoch/`Key` driver in `timers.rs` untouched; never move smoothing into it.
+  absolute `fire_at` (in `smooth_keepalives`) for **both** keepalive cohorts a
+  rehydrated node carries, so it does not flood: *past-due* ones oldest-first,
+  bounded to `keepalive_catchup_speedup`× cadence; *future-dated* ones (a clean
+  reboot restores ~the whole partition with deadlines clustered in one interval —
+  left alone they fire as one burst a cadence later: the 2026-06-12 endurance
+  throughput collapse, ~550 OPTIONS/s vs ~20/s at ~4000 dialogs/worker, which
+  starved the single-task front proxy for ~2 min) de-correlated into
+  `[now, fire_at]` by a deterministic per-`callRef` hash — **earlier only**, since
+  delaying a probe risks the UAC keepalive timeout. This is **performance only** —
+  no correctness role, no timing assumption. Keep the epoch/`Key` driver in
+  `timers.rs` untouched; never move smoothing into it.

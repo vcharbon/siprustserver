@@ -106,12 +106,29 @@ pub struct B2buaConfig {
     /// A live call whose **last-touched stamp** is older than this is
     /// reap-eligible (ADR-0020 X4). `0` (the default) derives
     /// `3 × keepalive_interval_sec` at spawn: every healthy call — even an idle
-    /// long-hold — dispatches a keepalive timer event each interval, so a stamp
-    /// older than 3 intervals provably means lost events/timers, never
-    /// quietness. An explicit value must be ≥ `2 × keepalive_interval_sec`
-    /// (enforced by [`validate`](Self::validate)). Liveness derives ONLY from
-    /// the stamp — never `created_at`, never timer deadlines.
+    /// long-hold — receives its keepalive OPTIONS `200` each interval (only
+    /// **real SIP traffic** stamps the ledger; self-generated housekeeping
+    /// turns like `LimiterRefresh` do not), so a stamp older than 3 intervals
+    /// provably means a SIP-dead call, never quietness. An explicit value must
+    /// be ≥ `2 × keepalive_interval_sec` (enforced by
+    /// [`validate`](Self::validate)). Liveness derives ONLY from the stamp —
+    /// never `created_at`, never timer deadlines.
     pub reaper_idle_max_sec: i64,
+    /// **Setup timeout**, seconds — the call-level a-leg initial-INVITE
+    /// deadline: armed at route time, cancelled at answer, deliberately NOT
+    /// reset by reroute/failover (each new b-leg gets its own `NoAnswer`; this
+    /// caps the caller's *total* wait for a final response). It rides the
+    /// replicated `call.timers` ledger, so it survives a crash → reclaim —
+    /// the sip-txn `INVITE_INITIAL_TIMEOUT` (158 s) backstop cannot (the
+    /// transactions die with the node), which is how a worker kill stranded
+    /// mid-setup calls holding limiter slots for the full 1 h GlobalDuration
+    /// (endurance 2026-06-12). Default **150 s**: below the txn backstop so
+    /// the rules path owns the teardown (408 to the caller, CANCEL to pending
+    /// b-legs, obligations settled), above any sane no-answer timeout so a
+    /// route-supplied `NoAnswer` still fires first. `<= 0` disables (the txn
+    /// backstop and GlobalDuration remain). Overridable via
+    /// `B2BUA_SETUP_TIMEOUT_SEC`.
+    pub setup_timeout_sec: i64,
 }
 
 impl Default for B2buaConfig {
@@ -138,6 +155,7 @@ impl Default for B2buaConfig {
             reaper_enabled: true,
             reaper_sweep_interval_sec: 30,
             reaper_idle_max_sec: 0,
+            setup_timeout_sec: 150,
         }
     }
 }
@@ -183,9 +201,10 @@ impl B2buaConfig {
             ));
         }
         // The reaper's staleness verdict is only provable when a healthy call is
-        // guaranteed at least one dispatched event (its keepalive timer) inside
-        // the idle window — below 2 keepalive intervals a merely-quiet call
-        // could be reaped (ADR-0020 X4).
+        // guaranteed at least one liveness-bearing event (its keepalive OPTIONS
+        // `200` — only real SIP traffic stamps the ledger) inside the idle
+        // window — below 2 keepalive intervals a merely-quiet call could be
+        // reaped (ADR-0020 X4).
         if self.reaper_idle_max_sec != 0
             && self.reaper_idle_max_sec < 2 * self.keepalive_interval_sec
         {

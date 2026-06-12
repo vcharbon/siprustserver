@@ -219,12 +219,72 @@ fn drop_stale_keepalive_timeout(timers: &mut Vec<TimerEntry>) {
     timers.retain(|t| !matches!(t.timer_type, TimerType::KeepaliveTimeout));
 }
 
+/// Deterministic per-`callRef` hash (FNV-1a, 64-bit) used to de-correlate a
+/// rehydrated keepalive cohort in [`smooth_keepalives`]. Deterministic (no random
+/// seed) so the same call always lands in the same slot of its interval — a reboot
+/// re-pass is idempotent — yet distinct refs spread uniformly. NOT for security.
+fn stable_jitter(call_ref: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in call_ref.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// Re-spread a reclaimed call's `Keepalive` deadlines for the bulk reboot sweep
+/// ([`reclaim_all`]) — load management only, never correctness (`(p,b)`
+/// reconciliation makes any incidental keepalive overlap non-corrupting; ADR-0014).
+/// Two cohorts, both de-synchronised so a rehydrated partition does not re-probe in
+/// a single burst that overruns the single-task front proxy:
+/// - **Past-due** (`fire_at <= now`): oldest-first over `[0, l_max/speedup]`
+///   (optionally capped) so the most-overdue (most at risk of a UAC keepalive
+///   timeout) re-probes first and the backlog drains bounded to `speedup`× cadence.
+/// - **Future-dated** (`fire_at > now`): a *clean* reboot rehydrates ~the whole
+///   partition at one instant with deadlines clustered inside one interval, so left
+///   untouched they fire as a synchronised burst one cadence later (2026-06-12
+///   endurance: ~550 OPTIONS/s vs ~20/s steady at ~4000 dialogs/worker, which
+///   throttled INVITE forwarding to ~10% for ~2 min — silent, UAC retransmits
+///   absorbed it, so the past-due path never saw it). Spread each call into
+///   `[now, fire_at]` by [`stable_jitter`]. This only ever moves a probe EARLIER
+///   (an early keepalive is harmless; *delaying* one risks the UAC keepalive
+///   timeout — the loss we avoid), so there is still no settle/handback floor.
+///
+/// Non-`Keepalive` timers keep their absolute deadline.
+fn smooth_keepalives(
+    timers: &mut [TimerEntry],
+    call_ref: &str,
+    now_ms: i64,
+    l_max: i64,
+    speedup: i64,
+    cap_ms: Option<i64>,
+) {
+    for t in timers.iter_mut() {
+        if !matches!(t.timer_type, TimerType::Keepalive) {
+            continue;
+        }
+        let l = now_ms - t.fire_at;
+        if l > 0 {
+            let mut offset = (l_max - l) / speedup;
+            if let Some(cap) = cap_ms {
+                offset = offset.min(cap);
+            }
+            t.fire_at = now_ms + offset;
+        } else {
+            let window = t.fire_at - now_ms;
+            if window > 0 {
+                t.fire_at = now_ms + (stable_jitter(call_ref) % window as u64) as i64;
+            }
+        }
+    }
+}
+
 /// Materialise one reclaimed call into the live map + re-arm its timers (ADR-0011
-/// X11). `smoothing = Some((now_ms, l_max))` staggers a **past-due** keepalive per
-/// the oldest-first batch schedule (the bulk reboot sweep, [`reclaim_all`]);
-/// `None` fires a past-due keepalive immediately (a single reactive straggler).
-/// A future-dated keepalive and every non-keepalive timer keep their absolute
-/// deadline either way.
+/// X11). `smoothing = Some((now_ms, l_max))` re-spreads keepalives per
+/// [`smooth_keepalives`] for the bulk reboot sweep ([`reclaim_all`]): past-due
+/// ones oldest-first, future-dated ones de-correlated within `[now, fire_at]`.
+/// `None` (a single reactive straggler) restores verbatim — no cohort to smooth.
+/// Non-keepalive timers keep their absolute deadline either way.
 /// Returns `true` iff this call was freshly materialised into the live map (the
 /// caller meters per-pass reclaim completeness); `false` if it was already
 /// resident (idempotent re-pass).
@@ -245,20 +305,7 @@ async fn reclaim_into_live(
     if let Some((now_ms, l_max)) = smoothing {
         let speedup = ctx.config.keepalive_catchup_speedup.max(1);
         let cap_ms = ctx.config.max_catchup_window_sec.map(|s| s * 1000);
-        for t in call.timers.iter_mut() {
-            if matches!(t.timer_type, TimerType::Keepalive) {
-                let l = now_ms - t.fire_at;
-                if l > 0 {
-                    // Oldest-first: largest `l` → smallest offset (fires first).
-                    let mut offset = (l_max - l) / speedup;
-                    if let Some(cap) = cap_ms {
-                        offset = offset.min(cap);
-                    }
-                    t.fire_at = now_ms + offset;
-                }
-                // else (future-dated) — leave the absolute deadline.
-            }
-        }
+        smooth_keepalives(&mut call.timers, &call_ref, now_ms, l_max, speedup, cap_ms);
     }
     let timers = call.timers.clone();
     if ctx.state.materialize_if_absent(call) {
@@ -684,12 +731,16 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
             // normal rules (`reaper-stale` / `reaper-fatal-error`). It does
             // NOT refresh the stamp — an ineffective verdict must keep the
             // call stale so the sweep escalates instead of waiting idle_max.
-        } else {
-            ctx.state.touch(&call_ref, now_ms);
         }
-    } else {
-        // The last-touched stamp (ADR-0020 X4): one site covers every
-        // dispatched event class because all of them funnel through here. A
+    } else if matches!(event, CallEvent::Sip { .. }) {
+        // The last-touched stamp (ADR-0020 X4): liveness derives from **real
+        // SIP traffic only** — a received message here, or a turn that sent
+        // SIP out (stamped in `process_result` after the outbound effects).
+        // Self-generated turns that touch no wire (`LimiterRefresh`, internal
+        // events, timer fires whose rules emit nothing) deliberately do NOT
+        // stamp: a crash-orphaned call refreshing its limiter holds every
+        // 300 s kept itself reaper-"fresh" for a full hour while SIP-dead
+        // (endurance 2026-06-12) — the call must not vouch for itself. A
         // wedged FIFO never reaches this line — its stamp freezes, which IS
         // the staleness signal the sweep reads.
         ctx.state.touch(&call_ref, now_ms);
@@ -974,6 +1025,16 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
             CriticalStateEffect::Flush => ctx.state.flush(&result.call),
             CriticalStateEffect::RemoveCall => remove_call = true,
         }
+    }
+
+    // Sent SIP is liveness too (ADR-0020 X4 refinement): a turn that puts a
+    // message on the wire (a keepalive OPTIONS, a relayed response, a teardown
+    // BYE/CANCEL) stamps the ledger alongside received traffic, so the reaper
+    // never preempts a teardown that is legitimately waiting on a slow peer.
+    // Wire-silent turns (LimiterRefresh, absorbed events) stamp nothing. Only
+    // for a still-live call — a terminated result is being released below.
+    if !result.effects.outbound.is_empty() && result.call.state != CallModelState::Terminated {
+        ctx.state.touch(call_ref, now_ms);
     }
 
     for eff in &result.effects.outbound {
@@ -1348,5 +1409,64 @@ mod reclaim_timer_tests {
             fire_rx2.try_recv().is_err(),
             "FIX: no spurious keepalive-timeout fires on reclaim; the call survives",
         );
+    }
+
+    // REPRO of the 2026-06-12 endurance throughput collapse at the smoothing
+    // layer: a clean reboot rehydrates the whole partition at one instant with
+    // future-dated keepalive deadlines clustered in one interval. WITHOUT the
+    // future-dated branch they all keep the SAME `fire_at` and fire as one burst
+    // a cadence later (the ~550 OPTIONS/s spike that saturated the front proxy);
+    // WITH it each call's keepalive is spread into `[now, fire_at]` by a per-call
+    // hash, so a 1000-call cohort no longer shares a single deadline.
+    #[test]
+    fn future_dated_keepalive_cohort_is_de_correlated() {
+        let now = 1_000_000;
+        let deadline = now + 300_000; // whole cohort clustered at +300 s (one interval)
+        let speedup = 10;
+        let mut fire_ats = std::collections::HashSet::new();
+        for i in 0..1000 {
+            // Distinct call_ref per call, identical clustered keepalive deadline.
+            let call_ref = format!("w1|call-{i}|tag-{i}");
+            let mut timers = vec![keepalive(deadline)];
+            smooth_keepalives(&mut timers, &call_ref, now, 0, speedup, None);
+            let fa = timers[0].fire_at;
+            assert!(
+                (now..=deadline).contains(&fa),
+                "spread keepalive stays in [now, original deadline] (never delayed past it): {fa}",
+            );
+            fire_ats.insert(fa);
+        }
+        // De-correlation: a synchronised cohort would collapse to ONE deadline;
+        // the fix scatters them across the interval (allow a few hash collisions).
+        assert!(
+            fire_ats.len() > 900,
+            "cohort de-correlated: {} distinct fire_at over 1000 calls (was 1 before the fix)",
+            fire_ats.len(),
+        );
+        // Determinism: re-running the same ref yields the SAME slot (idempotent
+        // reboot re-pass — a second reclaim scan must not re-scatter live timers).
+        let mut a = vec![keepalive(deadline)];
+        let mut b = vec![keepalive(deadline)];
+        smooth_keepalives(&mut a, "w1|call-7|tag-7", now, 0, speedup, None);
+        smooth_keepalives(&mut b, "w1|call-7|tag-7", now, 0, speedup, None);
+        assert_eq!(a[0].fire_at, b[0].fire_at, "stable_jitter is deterministic per call_ref");
+    }
+
+    // The past-due (overdue) path is unchanged by the refactor: oldest-first,
+    // bounded to speedup× cadence — most-overdue fires first (smallest offset).
+    #[test]
+    fn past_due_keepalives_keep_oldest_first_schedule() {
+        let now = 1_000_000;
+        let l_max = 200_000; // most-overdue gap across the batch
+        let speedup = 10;
+        // Most-overdue (fire_at = now - 200s, l = l_max): offset (l_max-l)/speedup = 0.
+        let mut oldest = vec![keepalive(now - 200_000)];
+        smooth_keepalives(&mut oldest, "w1|a|a", now, l_max, speedup, None);
+        assert_eq!(oldest[0].fire_at, now, "most-overdue re-probes first (offset 0)");
+        // Least-overdue of the batch (fire_at = now - 100s, l = 100s): offset
+        // (l_max - l)/speedup = (200s - 100s)/10 = 10s later.
+        let mut newer = vec![keepalive(now - 100_000)];
+        smooth_keepalives(&mut newer, "w1|b|b", now, l_max, speedup, None);
+        assert_eq!(newer[0].fire_at, now + 10_000, "less-overdue drains later, bounded by speedup");
     }
 }

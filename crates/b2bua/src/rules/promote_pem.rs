@@ -252,6 +252,9 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     }
                 }
                 actions.push(RuleAction::CancelTimer { id: format!("NoAnswer:{b}") });
+                actions.push(RuleAction::CancelTimer {
+                    id: format!("{:?}", TimerType::SetupTimeout),
+                });
                 actions.push(RuleAction::ScheduleTimer {
                     timer_type: TimerType::GlobalDuration,
                     delay_sec: max_duration(ctx),

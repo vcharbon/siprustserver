@@ -229,6 +229,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                     RuleAction::Merge { leg_a: a, leg_b: b.clone() },
                     RuleAction::RelayToPeer { transform: no_transform() },
                     RuleAction::CancelTimer { id: format!("NoAnswer:{b}") },
+                    RuleAction::CancelTimer { id: format!("{:?}", TimerType::SetupTimeout) },
                     RuleAction::ScheduleTimer {
                         timer_type: TimerType::GlobalDuration,
                         delay_sec: max_duration(ctx),
@@ -619,6 +620,44 @@ fn core_rules() -> Vec<RuleDefinition> {
                 None => actions.push(RuleAction::BeginTermination { reason: Some("no-answer".into()) }),
             }
             ok(actions)
+        }),
+        // Call-level a-leg setup deadline (armed at route time, cancelled at
+        // answer). Deliberately NOT per-b-leg: reroute/failover creates fresh
+        // b-legs (each with its own optional NoAnswer), while this caps the
+        // caller's TOTAL wait for a final response. It rides the replicated
+        // `call.timers` ledger, so a crash → reclaim restores it and a
+        // stuck-in-setup call is torn down at the deadline instead of holding
+        // its limiter slots until GlobalDuration (the 2026-06-12 endurance
+        // zombie: the sip-txn INVITE_INITIAL_TIMEOUT died with the node).
+        rule("setup-timeout", &[], Match::timer().timer_type(TimerType::SetupTimeout), |ctx| {
+            // Answer raced the fire (e.g. a reclaim restored a stale ledger
+            // entry whose cancel was lost with the crashed node): absorb, and
+            // scrub the spent entry so a later reclaim cannot re-fire it.
+            let answered = ctx.call.a_leg().state == LegState::Confirmed
+                || ctx.call.b_legs().iter().any(|b| b.state == LegState::Confirmed);
+            if answered {
+                return ok(vec![RuleAction::CancelTimer {
+                    id: format!("{:?}", TimerType::SetupTimeout),
+                }]);
+            }
+            ok(vec![
+                RuleAction::AddCdrEvent {
+                    event_type: CdrEventType::Timeout,
+                    leg_id: ctx.call.a_leg().leg_id.clone(),
+                    status_code: Some(408),
+                    reason: Some("setup_timeout".into()),
+                },
+                // Final answer to the caller; BeginTermination then CANCELs the
+                // pending (trying/early) b-legs and the → terminated invariant
+                // settles the obligations (limiter decrements + CDR).
+                RuleAction::RespondToALeg {
+                    status: 408,
+                    reason: "Request Timeout".into(),
+                    header_updates: vec![],
+                    contacts: vec![],
+                },
+                RuleAction::BeginTermination { reason: Some("setup-timeout".into()) },
+            ])
         }),
         rule("max-duration", &[], Match::timer().timer_type(TimerType::GlobalDuration), |ctx| {
             ok(vec![

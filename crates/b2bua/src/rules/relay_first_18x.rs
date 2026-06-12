@@ -422,6 +422,9 @@ fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
         RuleAction::CancelTimer {
             id: format!("NoAnswer:{b}"),
         },
+        RuleAction::CancelTimer {
+            id: format!("{:?}", TimerType::SetupTimeout),
+        },
         RuleAction::ScheduleTimer {
             timer_type: TimerType::GlobalDuration,
             delay_sec: max_duration,

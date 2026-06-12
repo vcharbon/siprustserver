@@ -298,6 +298,13 @@ pub struct Leg {
 #[serde(rename_all = "snake_case")]
 pub enum TimerType {
     NoAnswer,
+    /// Call-level a-leg setup deadline: armed at route time, cancelled at
+    /// answer, untouched by reroutes (each reroute gets its own per-leg
+    /// `NoAnswer`; this caps the *whole* setup). Rides the replicated
+    /// `call.timers` ledger, so unlike the sip-txn `INVITE_INITIAL_TIMEOUT`
+    /// backstop (which dies with a crashed node's transactions) it survives
+    /// crash → reclaim and still reaps a stuck-in-setup call.
+    SetupTimeout,
     GlobalDuration,
     LimiterRefresh,
     Keepalive,

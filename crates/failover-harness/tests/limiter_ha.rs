@@ -148,3 +148,111 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
     // `FailoverHarness`'s write-on-Drop fallback into
     // `target/seq-reports/limiter-ha-takeover/` — no explicit call needed.
 }
+
+/// THE 2026-06-12 endurance zombie, end to end: a call caught **mid-setup**
+/// (b-leg ringing, no final response) by a primary crash. The sip-txn
+/// `INVITE_INITIAL_TIMEOUT` died with the node, the per-b-leg `NoAnswer` was
+/// never armed (endurance routes supply none), and the reclaimed copy sat
+/// `Active` holding its limiter slot — refreshing it every 300 s, reaper-proof
+/// — until the 1 h GlobalDuration. The ledger-replicated `SetupTimeout` is the
+/// fix: it rides `call.timers` into the bak: snapshot, is restored by the
+/// reboot reclaim, and tears the call down at the 150 s deadline — releasing
+/// the hold ~55 min earlier (the cap20 SIPp stream was pinned at 15/20 for the
+/// whole window).
+#[tokio::test(start_paused = true)]
+async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_reclaim() {
+    let mut fh = FailoverHarness::new("limiter-ha-setup-stall-reclaim", &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+
+    // Shared limiter server on its own simulated HTTP fabric (survives crashes).
+    let http = SimulatedHttpNetwork::new();
+    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
+    let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
+
+    let proxy = fh
+        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
+        .await;
+    let mut w_b1 = fh
+        .spawn_worker_limited(
+            "b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
+            limited_decision(), limiter_client(&http),
+        )
+        .await;
+    let mut w_b2 = fh
+        .spawn_worker_limited(
+            "b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
+            limited_decision(), limiter_client(&http),
+        )
+        .await;
+
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(w_b1.is_ready() && w_b2.is_ready(), "workers ready");
+
+    // ── Mid-setup stall: bob rings and never answers ──────────────────────────
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
+        .expect("b-leg carries the proxy cookie")
+        .to_string();
+    let primary_ord = pri_from_cookie(&rr);
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+
+    // Replicate the in-setup call (hold + the route-time SetupTimeout ledger
+    // entry) primary → backup before the crash.
+    fh.advance(Duration::from_millis(500)).await;
+    assert_eq!(store.stats().current_total, 1, "in-setup call holds its limiter slot");
+
+    let (primary, backup): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
+        if primary_ord == "b1" {
+            (&mut w_b1, &mut w_b2)
+        } else {
+            (&mut w_b2, &mut w_b1)
+        };
+
+    // ── Crash + reboot-pristine + reclaim (the endurance kill_worker shape) ───
+    primary.crash();
+    proxy.set_health(&primary_ord, WorkerHealth::Dead);
+    fh.advance(Duration::from_millis(300)).await;
+
+    let new_addr = primary.reboot().await;
+    for _ in 0..40 {
+        fh.advance(Duration::from_millis(500)).await;
+        if primary.is_ready() {
+            break;
+        }
+    }
+    assert!(primary.is_ready(), "rebooted primary re-hydrated from the backup");
+    proxy.set_address(&primary_ord, new_addr);
+    proxy.set_health(&primary_ord, WorkerHealth::Alive);
+
+    fh.advance(Duration::from_millis(500)).await;
+    assert_eq!(
+        primary.active_calls(),
+        1,
+        "the reboot reclaim re-materialised the in-setup call",
+    );
+    assert_eq!(store.stats().current_total, 1, "the hold rides the reclaim");
+
+    // ── The restored SetupTimeout fires at the (absolute) 150 s deadline ──────
+    // No SIP will ever arrive for this call again (the load generator gave up
+    // during the kill); only the replicated ledger timer can resolve it.
+    fh.advance(Duration::from_secs(155)).await;
+    let mut released = false;
+    for _ in 0..40 {
+        fh.advance(Duration::from_millis(200)).await;
+        if store.stats().current_total == 0 {
+            released = true;
+            break;
+        }
+    }
+    assert!(
+        released,
+        "the reclaimed in-setup call must release its limiter hold at the setup \
+         deadline — not at the 1 h GlobalDuration (the endurance cap20 pinning)",
+    );
+    assert_eq!(primary.active_calls(), 0, "no zombie call on the rebooted primary");
+    assert_eq!(backup.active_calls(), 0, "the backup never owned a live copy");
+}
