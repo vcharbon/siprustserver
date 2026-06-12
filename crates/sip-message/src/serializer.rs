@@ -7,7 +7,19 @@
 //! length that disagrees with the body is auto-corrected (and a warning is
 //! emitted), and a missing Content-Length is added when a body is present.
 
-use crate::types::{SipHeader, SipMessage};
+use crate::types::{SipHeader, SipMessage, SipRequest, SipResponse};
+
+/// Serialize a request whose header list was modified out-of-place (the
+/// proxy's header-surgery path): first line + body from `req`, headers from
+/// the caller — no whole-message clone just to swap the header vector.
+pub fn serialize_request_parts(req: &SipRequest, headers: &[SipHeader]) -> Vec<u8> {
+    serialize_with_first_line(&format!("{} {} {}", req.method, req.uri, req.version), headers, &req.body)
+}
+
+/// Response twin of [`serialize_request_parts`].
+pub fn serialize_response_parts(resp: &SipResponse, headers: &[SipHeader]) -> Vec<u8> {
+    serialize_with_first_line(&format!("{} {} {}", resp.version, resp.status, resp.reason), headers, &resp.body)
+}
 
 /// Serialize a structured SIP message to wire-format bytes.
 pub fn serialize(msg: &SipMessage) -> Vec<u8> {

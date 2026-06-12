@@ -19,10 +19,13 @@ use crate::method::Method;
 use crate::types::{NameAddr, OptionalHeaders, Rack, ReferTo, Replaces, SipHeader, Uri};
 
 fn get_header_values<'a>(headers: &'a [SipHeader], name: &str) -> Vec<&'a str> {
-    let lower = name.to_lowercase();
+    // eq_ignore_ascii_case, not to_lowercase(): this probe runs ~10x per
+    // parsed datagram (once per optional header), and two String allocations
+    // per header per probe was ~100+ dead allocs per packet on the proxy's
+    // single hot task.
     headers
         .iter()
-        .filter(|h| h.name.to_lowercase() == lower)
+        .filter(|h| h.name.eq_ignore_ascii_case(name))
         .map(|h| h.value.as_str())
         .collect()
 }

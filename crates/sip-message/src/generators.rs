@@ -380,7 +380,7 @@ fn append_body_headers(headers: &mut Vec<SipHeader>, body: &[u8], content_type: 
 /// RFC 3261 §18.2.1 + RFC 3581 §4: stamp `received=` (if sent-by host differs
 /// from the source) and replace any `rport` flag with `rport=<port>` on the
 /// topmost Via. Idempotent: already-populated parameters are left alone.
-fn stamp_received_rport_on_via(value: &str, src_ip: &str, src_port: u16) -> String {
+pub fn stamp_received_rport_on_via(value: &str, src_ip: &str, src_port: u16) -> String {
     let (head, mut params) = match value.find(';') {
         Some(semi) => (&value[..semi], value[semi..].to_string()),
         None => (value, String::new()),

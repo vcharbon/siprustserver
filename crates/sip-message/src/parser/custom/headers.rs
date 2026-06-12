@@ -4,6 +4,7 @@
 //! gate + CVE-regression quoted-string / Digest checks (ADR-0007).
 
 use super::compact_forms::expand_compact_form;
+use super::structured_headers::split_top_level_commas;
 use super::scanner::{is_token_char, is_wsp, strict_non_negative_decimal, Scanner, COLON, CR, HTAB, LF};
 use crate::error::SipParseError;
 use crate::parser::SipParserLimits;
@@ -257,34 +258,6 @@ fn is_valid_digest_credentials(value: &str) -> bool {
     true
 }
 
-/// Split on `,` not inside a quoted-string.
-fn split_top_level_commas(s: &str) -> Vec<&str> {
-    let bytes = s.as_bytes();
-    let mut parts = Vec::new();
-    let mut in_quote = false;
-    let mut start = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_quote {
-            if c == 0x5c {
-                i += 2;
-                continue;
-            }
-            if c == 0x22 {
-                in_quote = false;
-            }
-        } else if c == 0x22 {
-            in_quote = true;
-        } else if c == 0x2c {
-            parts.push(&s[start..i]);
-            start = i + 1;
-        }
-        i += 1;
-    }
-    parts.push(&s[start..]);
-    parts
-}
 
 /// Byte index of the first `=` outside a quoted-string, or `None`.
 fn find_unquoted_equals(s: &str) -> Option<usize> {

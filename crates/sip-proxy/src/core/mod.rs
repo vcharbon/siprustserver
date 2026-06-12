@@ -24,7 +24,6 @@ use sip_txn::IdGen;
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::CancelBranchLru;
-use crate::observability::logger::{NoopLogger, ProxyLogger};
 use crate::observability::ProxyMetrics;
 use crate::registry::WorkerRegistry;
 use crate::resolver::{HostResolver, NamedForwarder, ResolverConfig, SystemResolver};
@@ -49,7 +48,6 @@ pub struct ProxyCoreParts {
     pub id_gen: Arc<IdGen>,
     pub clock: Clock,
     pub metrics: Arc<ProxyMetrics>,
-    pub logger: Arc<dyn ProxyLogger>,
     pub self_gate: Arc<dyn ProxySelfGate>,
     /// Resolver for DNS-named forward targets (worker-outbound b-leg R-URIs).
     /// IP-literal traffic never touches it; see [`crate::resolver`].
@@ -66,7 +64,6 @@ pub struct ProxyCore {
     id_gen: Arc<IdGen>,
     clock: Clock,
     metrics: Arc<ProxyMetrics>,
-    logger: Arc<dyn ProxyLogger>,
     self_gate: Arc<dyn ProxySelfGate>,
     parser: CustomParser,
     /// Off-loop send path for DNS-named targets (cache + single-flight resolve).
@@ -92,7 +89,6 @@ impl ProxyCore {
             id_gen: parts.id_gen,
             clock: parts.clock,
             metrics: parts.metrics,
-            logger: parts.logger,
             self_gate: parts.self_gate,
             parser: CustomParser::default(),
             named,
@@ -176,7 +172,7 @@ impl ProxyCore {
                 continue;
             };
             match msg {
-                SipMessage::Request(req) => self.handle_request(req, pkt.src).await,
+                SipMessage::Request(_) => self.handle_request(msg, pkt.src).await,
                 SipMessage::Response(resp) => self.handle_response(resp).await,
             }
         }
@@ -186,8 +182,8 @@ impl ProxyCore {
     }
 }
 
-/// Convenience builder for the common all-defaults wiring (NoopLogger +
-/// AlwaysAdmitGate + fresh metrics + entropy IdGen + system clock).
+/// Convenience builder for the common all-defaults wiring (AlwaysAdmitGate +
+/// fresh metrics + entropy IdGen + system clock).
 pub struct ProxyCoreBuilder {
     advertised: ProxyAddr,
     strategy: Arc<dyn RoutingStrategy>,
@@ -196,7 +192,6 @@ pub struct ProxyCoreBuilder {
     id_gen: Option<Arc<IdGen>>,
     clock: Option<Clock>,
     metrics: Option<Arc<ProxyMetrics>>,
-    logger: Option<Arc<dyn ProxyLogger>>,
     self_gate: Option<Arc<dyn ProxySelfGate>>,
     resolver: Option<Arc<dyn HostResolver>>,
 }
@@ -211,7 +206,6 @@ impl ProxyCoreBuilder {
             id_gen: None,
             clock: None,
             metrics: None,
-            logger: None,
             self_gate: None,
             resolver: None,
         }
@@ -227,10 +221,6 @@ impl ProxyCoreBuilder {
     }
     pub fn metrics(mut self, metrics: Arc<ProxyMetrics>) -> Self {
         self.metrics = Some(metrics);
-        self
-    }
-    pub fn logger(mut self, logger: Arc<dyn ProxyLogger>) -> Self {
-        self.logger = Some(logger);
         self
     }
     pub fn self_gate(mut self, gate: Arc<dyn ProxySelfGate>) -> Self {
@@ -258,7 +248,6 @@ impl ProxyCoreBuilder {
             id_gen: self.id_gen.unwrap_or_else(|| Arc::new(IdGen::from_entropy())),
             clock,
             metrics: self.metrics.unwrap_or_else(|| Arc::new(ProxyMetrics::new())),
-            logger: self.logger.unwrap_or_else(|| Arc::new(NoopLogger)),
             self_gate: self.self_gate.unwrap_or_else(|| Arc::new(AlwaysAdmitGate)),
             resolver: self.resolver.unwrap_or_else(|| Arc::new(SystemResolver)),
         })

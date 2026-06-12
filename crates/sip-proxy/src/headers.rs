@@ -31,9 +31,12 @@ pub fn upsert_header(headers: &mut Vec<SipHeader>, name: &str, value: &str) {
     }
 }
 
-/// The value of the first header named `name` (case-insensitive).
+/// The value of the first header named `name` (case-insensitive). Same
+/// operation as `sip_message::message_helpers::get_header` — kept as a local
+/// alias because the proxy reads it everywhere, delegating so the two can't
+/// drift.
 pub fn first_header_value<'a>(headers: &'a [SipHeader], name: &str) -> Option<&'a str> {
-    headers.iter().find(|h| h.name.eq_ignore_ascii_case(name)).map(|h| h.value.as_str())
+    sip_message::message_helpers::get_header(headers, name)
 }
 
 /// Remove the first header named `name` (case-insensitive) entirely; returns its
@@ -63,37 +66,20 @@ pub fn remove_first_header_entry(headers: &mut Vec<SipHeader>, name: &str) -> Op
     }
 }
 
-/// Split a header value on top-level commas, ignoring commas inside `<...>`
-/// (URI) and `"..."` (display name) — RFC 3261 §7.3.1.
+/// Split a header value on top-level commas — RFC 3261 §7.3.1. Delegates to
+/// the canonical sip-message splitter (quote-, escape- AND angle-bracket-
+/// aware); the old local copy had drifted (it ignored backslash escapes
+/// inside quoted strings, so the same value could split differently here
+/// than in the parser that produced it).
 pub fn split_top_level_commas(value: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut depth_angle = 0i32;
-    let mut in_quote = false;
-    let mut cur = String::new();
-    for ch in value.chars() {
-        match ch {
-            '"' => {
-                in_quote = !in_quote;
-                cur.push(ch);
-            }
-            '<' if !in_quote => {
-                depth_angle += 1;
-                cur.push(ch);
-            }
-            '>' if !in_quote => {
-                depth_angle -= 1;
-                cur.push(ch);
-            }
-            ',' if !in_quote && depth_angle == 0 => {
-                out.push(cur.trim().to_string());
-                cur.clear();
-            }
-            _ => cur.push(ch),
-        }
+    let mut out = sip_message::message_helpers::split_top_level_commas(value);
+    // Preserve this module's historical edge behavior: a trailing empty entry
+    // is dropped (unless it is the only entry).
+    if out.len() > 1 && out.last().is_some_and(String::is_empty) {
+        out.pop();
     }
-    let last = cur.trim();
-    if !last.is_empty() || out.is_empty() {
-        out.push(last.to_string());
+    if out.is_empty() {
+        out.push(String::new());
     }
     out
 }
@@ -110,7 +96,7 @@ pub fn populate_received_rport_on_top_via(headers: &mut [SipHeader], src_ip: &st
     let Some((first, rest)) = entries.split_first() else {
         return;
     };
-    let stamped = stamp_received_rport(first, src_ip, src_port);
+    let stamped = sip_message::generators::stamp_received_rport_on_via(first, src_ip, src_port);
     if rest.is_empty() {
         h.value = stamped;
     } else {
@@ -182,45 +168,10 @@ pub fn via_entry_is_self(via_entry: &str, advertised: &ProxyAddr) -> bool {
         .unwrap_or(false)
 }
 
-// --- received/rport stamping (port of generators::stamp_received_rport_on_via) ---
-
-fn stamp_received_rport(value: &str, src_ip: &str, src_port: u16) -> String {
-    let (head, mut params) = match value.find(';') {
-        Some(semi) => (&value[..semi], value[semi..].to_string()),
-        None => (value, String::new()),
-    };
-    let hp = head.split(' ').next_back().unwrap_or("");
-    let sent_by_host = match hp.rfind(':') {
-        Some(colon) => &hp[..colon],
-        None => hp,
-    };
-    let need_received = sent_by_host != src_ip;
-    let lower = params.to_ascii_lowercase();
-    let has_received = lower.contains(";received=");
-    if need_received && !has_received {
-        params.push_str(&format!(";received={src_ip}"));
-    }
-    if let Some(idx) = find_rport_flag(&params) {
-        let after = idx + ";rport".len();
-        params = format!("{};rport={}{}", &params[..idx], src_port, &params[after..]);
-    }
-    format!("{head}{params}")
-}
-
-fn find_rport_flag(params: &str) -> Option<usize> {
-    let lower = params.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let mut from = 0;
-    while let Some(rel) = lower[from..].find(";rport") {
-        let idx = from + rel;
-        let after = idx + ";rport".len();
-        if after == bytes.len() || bytes[after] == b';' {
-            return Some(idx);
-        }
-        from = after;
-    }
-    None
-}
+// received/rport stamping: the verbatim local copy of
+// `generators::stamp_received_rport_on_via` is gone — one implementation in
+// sip-message now serves both the proxy hop and the B2BUA response path, so a
+// fix in one can no longer silently miss the other.
 
 #[cfg(test)]
 mod tests {

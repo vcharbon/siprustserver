@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::message_helpers::{is_emergency_request, parse_sip_uri, parse_via_params};
 use sip_message::types::SipHeader;
-use sip_message::{serialize, SipMessage, SipRequest};
+use sip_message::{serialize, serialize_request_parts, SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::{call_id_cseq_key, CancelEntry};
@@ -18,16 +18,18 @@ use crate::headers::{
     build_record_route_value, first_header_value, populate_received_rport_on_top_via, prepend_header, via_sent_by_addr,
     upsert_header,
 };
-use crate::observability::logger::RoutingDecisionLog;
 use crate::observability::metrics::{Direction, MessageResult, RoutingDecisionKind};
 use crate::self_gate::BypassKind;
 use crate::strategy::{DecodeResult, SelectError, SelectOpts};
 
 use super::{is_dialog_creating, ProxyCore};
 
-/// Outcome of routing a request — what to log/meter after the work is done.
+/// Outcome of routing a request — what to meter after the work is done.
 struct RouteOutcome {
     decision: RoutingDecisionKind,
+    /// The forwarded-to target. The lib meters only the decision; the routing
+    /// regression tests assert on this field.
+    #[allow(dead_code)]
     target: Option<ProxyAddr>,
 }
 
@@ -69,30 +71,29 @@ impl ProxyCore {
             .filter(|a| self.registry.lookup_by_address(a).is_some())
     }
 
-    pub(super) async fn handle_request(&self, req: SipRequest, src: SocketAddr) {
+    pub(super) async fn handle_request(&self, msg: SipMessage, src: SocketAddr) {
         let start_ms = self.now_ms();
-        let method = req.method.as_str().to_ascii_uppercase();
-        let call_id = req.call_id.clone();
+        let SipMessage::Request(req) = &msg else { return };
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
-        self.metrics.record_request(&method);
+        // Method::as_str() is already canonical-uppercase for known methods
+        // (Method::from_wire normalized at parse time); unknown tokens match
+        // no routing branch and land in the bounded `other` metric slot.
+        self.metrics.record_request(req.method.as_str());
         // (`sip_proxy_calls_total` is counted inside `route_request`, where the
         // retransmission memo can exclude re-sent copies of the same INVITE.)
 
-        let outcome = self.route_request(&req, &method, src).await;
+        let outcome = self.route_request(&msg, src).await;
 
         let duration = (self.now_ms().saturating_sub(start_ms)) as f64 / 1000.0;
         self.metrics.observe_routing_duration(duration);
         self.metrics.record_routing_decision(outcome.decision);
-        self.logger.routing_decision(&RoutingDecisionLog {
-            call_id,
-            method,
-            decision: decision_label(outcome.decision).to_string(),
-            strategy: self.strategy.name().to_string(),
-            target: outcome.target.as_ref().map(ProxyAddr::to_string),
-        });
     }
 
-    async fn route_request(&self, req: &SipRequest, method: &str, src: SocketAddr) -> RouteOutcome {
+    async fn route_request(&self, msg: &SipMessage, src: SocketAddr) -> RouteOutcome {
+        let SipMessage::Request(req) = msg else {
+            return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
+        };
+        let method = req.method.as_str();
         let select = RoutingDecisionKind::SelectNew;
 
         // ── §16.3 + Max-Forwards ────────────────────────────────────────────
@@ -275,7 +276,7 @@ impl ProxyCore {
             } else {
                 self.metrics.record_cancel_lookup("miss");
                 decision = RoutingDecisionKind::Cancel;
-                match self.strategy.select_for_new_dialog(&SipMessage::Request(req.clone()), SelectOpts::default()).await {
+                match self.strategy.select_for_new_dialog(msg, SelectOpts::default()).await {
                     Ok(t) => target = Some(t),
                     Err(e) => return self.reply_select_failure(req, src, e).await,
                 }
@@ -299,7 +300,7 @@ impl ProxyCore {
                 }
             }
         } else if let Some(params) = &stripped_route_params {
-            match self.strategy.decode_stickiness(params, &SipMessage::Request(req.clone())).await {
+            match self.strategy.decode_stickiness(params, msg).await {
                 DecodeResult::Forward { target: t, .. } => {
                     target = Some(t);
                     decision = RoutingDecisionKind::DecodeForward;
@@ -319,7 +320,7 @@ impl ProxyCore {
                         target = Some(found.target.clone());
                     } else {
                         let opts = SelectOpts { emergency_override: is_emergency };
-                        match self.strategy.select_for_new_dialog(&SipMessage::Request(req.clone()), opts).await {
+                        match self.strategy.select_for_new_dialog(msg, opts).await {
                             Ok(t) => target = Some(t),
                             Err(e) => return self.reply_select_failure(req, src, e).await,
                         }
@@ -337,7 +338,7 @@ impl ProxyCore {
             target = Some(found.target.clone());
             decision = RoutingDecisionKind::SelectNew;
         } else {
-            match self.strategy.select_for_new_dialog(&SipMessage::Request(req.clone()), SelectOpts::default()).await {
+            match self.strategy.select_for_new_dialog(msg, SelectOpts::default()).await {
                 Ok(t) => target = Some(t),
                 Err(e) => return self.reply_select_failure(req, src, e).await,
             }
@@ -387,7 +388,7 @@ impl ProxyCore {
             } else {
                 target.clone()
             };
-            let stickiness = self.strategy.encode_stickiness(&cookie_addr, &SipMessage::Request(req.clone()));
+            let stickiness = self.strategy.encode_stickiness(&cookie_addr, msg);
             let cookie_rr = match &stickiness {
                 Some(params) => build_record_route_value(&self.advertised, params.iter()),
                 None => build_record_route_value(&self.advertised, std::iter::empty()),
@@ -448,9 +449,7 @@ impl ProxyCore {
         }
 
         // ── Serialize + forward ─────────────────────────────────────────────
-        let mut out = req.clone();
-        out.headers = headers;
-        let bytes = serialize(&SipMessage::Request(out));
+        let bytes = serialize_request_parts(req, &headers);
         self.send_to(&bytes, &target).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Forwarded);
 
@@ -486,17 +485,6 @@ impl ProxyCore {
     }
 }
 
-fn decision_label(kind: RoutingDecisionKind) -> &'static str {
-    match kind {
-        RoutingDecisionKind::SelectNew => "select_new",
-        RoutingDecisionKind::DecodeForward => "decode_forward",
-        RoutingDecisionKind::DecodeForwardBackup => "decode_forward_backup",
-        RoutingDecisionKind::LooseRoute => "loose_route",
-        RoutingDecisionKind::WorkerOutbound => "worker_outbound",
-        RoutingDecisionKind::Cancel => "cancel",
-        RoutingDecisionKind::Reject => "reject",
-    }
-}
 
 #[cfg(test)]
 mod worker_outbound_tests {
@@ -566,8 +554,8 @@ Content-Length: 0\r\n\r\n"
 
         // SNAT'd source: the kind NODE ip + an ephemeral port — NOT in the registry.
         let snat_src = "172.20.0.11:63522".parse().unwrap();
-        let SipMessage::Request(req) = keepalive_options() else { unreachable!() };
-        let outcome = core.route_request(&req, "OPTIONS", snat_src).await;
+        let msg = keepalive_options();
+        let outcome = core.route_request(&msg, snat_src).await;
 
         assert_eq!(
             outcome.decision,
@@ -619,11 +607,11 @@ CSeq: 2 OPTIONS\r\n\
 Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
 Content-Length: 0\r\n\r\n"
         );
-        let SipMessage::Request(req) = CustomParser::default().parse(raw.as_bytes()).unwrap() else { unreachable!() };
+        let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
 
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            core.route_request(&req, "OPTIONS", format!("{W1_POD}:5060").parse().unwrap()),
+            core.route_request(&msg, format!("{W1_POD}:5060").parse().unwrap()),
         )
         .await
         .expect("route_request must not wait on DNS resolution");
@@ -639,8 +627,8 @@ Content-Length: 0\r\n\r\n"
         let core = core(reg).await;
 
         let pod_src = format!("{W1_POD}:5060").parse().unwrap();
-        let SipMessage::Request(req) = keepalive_options() else { unreachable!() };
-        let outcome = core.route_request(&req, "OPTIONS", pod_src).await;
+        let msg = keepalive_options();
+        let outcome = core.route_request(&msg, pod_src).await;
 
         assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
         assert_eq!(outcome.target, Some(ProxyAddr::new(UAC, 5060)));
@@ -667,8 +655,8 @@ CSeq: 2 BYE\r\n\
 Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
 Content-Length: 0\r\n\r\n"
         );
-        let SipMessage::Request(req) = CustomParser::default().parse(raw.as_bytes()).unwrap() else { unreachable!() };
-        let outcome = core.route_request(&req, "BYE", format!("{UAC}:5060").parse().unwrap()).await;
+        let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
+        let outcome = core.route_request(&msg, format!("{UAC}:5060").parse().unwrap()).await;
 
         assert_eq!(outcome.decision, RoutingDecisionKind::DecodeForward);
         assert_eq!(outcome.target, Some(ProxyAddr::new(W1_POD, 5060)));
@@ -696,9 +684,9 @@ Contact: <sip:b2bua@{new_pod_ip}:5060;leg=a>\r\n\
 Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr;outbound>\r\n\
 Content-Length: 0\r\n\r\n"
         );
-        let SipMessage::Request(req) = CustomParser::default().parse(raw.as_bytes()).unwrap() else { unreachable!() };
+        let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
         let snat_src = "172.20.0.12:51000".parse().unwrap();
-        let outcome = core.route_request(&req, "OPTIONS", snat_src).await;
+        let outcome = core.route_request(&msg, snat_src).await;
         assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
         assert_eq!(outcome.target, Some(ProxyAddr::new(UAC, 5060)));
     }
@@ -733,9 +721,9 @@ Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
 Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
 Content-Length: 0\r\n\r\n"
         );
-        let SipMessage::Request(req) = CustomParser::default().parse(raw.as_bytes()).unwrap() else { unreachable!() };
+        let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
         let snat_src = "172.20.0.12:51000".parse().unwrap(); // node IP, not a worker
-        let outcome = core.route_request(&req, "OPTIONS", snat_src).await;
+        let outcome = core.route_request(&msg, snat_src).await;
 
         assert_eq!(
             outcome.decision,
@@ -772,8 +760,8 @@ Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
 Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
 Content-Length: 0\r\n\r\n"
         );
-        let SipMessage::Request(req) = CustomParser::default().parse(raw.as_bytes()).unwrap() else { unreachable!() };
-        let outcome = core.route_request(&req, "BYE", format!("{UAC}:5060").parse().unwrap()).await;
+        let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
+        let outcome = core.route_request(&msg, format!("{UAC}:5060").parse().unwrap()).await;
 
         assert_eq!(
             outcome.decision,
@@ -883,14 +871,11 @@ mod retransmission_tests {
         Fixture { core, strategy, gate, metrics }
     }
 
-    fn parse_req(raw: &str) -> sip_message::SipRequest {
-        let SipMessage::Request(req) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
-            panic!("expected request")
-        };
-        req
+    fn parse_req(raw: &str) -> SipMessage {
+        CustomParser::default().parse(raw.as_bytes()).unwrap()
     }
 
-    fn invite(call_id: &str, from_tag: &str, cseq: u32, branch: &str) -> sip_message::SipRequest {
+    fn invite(call_id: &str, from_tag: &str, cseq: u32, branch: &str) -> SipMessage {
         parse_req(&format!(
             "INVITE sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {UAC}:5060;branch={branch};rport\r\n\
@@ -904,7 +889,7 @@ Content-Length: 0\r\n\r\n"
         ))
     }
 
-    fn cancel(call_id: &str, from_tag: &str, cseq: u32, branch: &str) -> sip_message::SipRequest {
+    fn cancel(call_id: &str, from_tag: &str, cseq: u32, branch: &str) -> SipMessage {
         parse_req(&format!(
             "CANCEL sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {UAC}:5060;branch={branch};rport\r\n\
@@ -930,8 +915,8 @@ Content-Length: 0\r\n\r\n"
         let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
         let req = invite("split-1@test", "tag-a", 1, "z9hG4bKr1");
 
-        let first = f.core.route_request(&req, "INVITE", src()).await;
-        let retx = f.core.route_request(&req, "INVITE", src()).await;
+        let first = f.core.route_request(&req, src()).await;
+        let retx = f.core.route_request(&req, src()).await;
 
         assert_eq!(first.target, Some(ProxyAddr::new(W1, 5060)));
         assert_eq!(retx.target, Some(ProxyAddr::new(W1, 5060)), "retransmit must NOT be re-routed to w2");
@@ -945,8 +930,8 @@ Content-Length: 0\r\n\r\n"
         let f = fixture(&[ProxyAddr::new(W1, 5060)]).await;
         let req = invite("regate-1@test", "tag-a", 1, "z9hG4bKr2");
 
-        let first = f.core.route_request(&req, "INVITE", src()).await;
-        let retx = f.core.route_request(&req, "INVITE", src()).await;
+        let first = f.core.route_request(&req, src()).await;
+        let retx = f.core.route_request(&req, src()).await;
 
         assert_eq!(first.decision, RoutingDecisionKind::SelectNew);
         assert_ne!(retx.decision, RoutingDecisionKind::Reject, "gate must not 503 a retransmission");
@@ -963,12 +948,12 @@ Content-Length: 0\r\n\r\n"
     async fn cancel_after_a_minute_of_ringing_still_follows_the_invite() {
         let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
         let inv = invite("longring-1@test", "tag-a", 7, "z9hG4bKr3");
-        f.core.route_request(&inv, "INVITE", src()).await;
+        f.core.route_request(&inv, src()).await;
 
         tokio::time::advance(Duration::from_secs(60)).await;
 
         let cxl = cancel("longring-1@test", "tag-a", 7, "z9hG4bKr3c");
-        let outcome = f.core.route_request(&cxl, "CANCEL", src()).await;
+        let outcome = f.core.route_request(&cxl, src()).await;
         assert_eq!(outcome.decision, RoutingDecisionKind::Cancel);
         assert_eq!(outcome.target, Some(ProxyAddr::new(W1, 5060)), "CANCEL must follow the INVITE, not re-select");
         assert_eq!(f.strategy.calls.load(Ordering::SeqCst), 1, "no fallback selection for the CANCEL");
@@ -980,7 +965,7 @@ Content-Length: 0\r\n\r\n"
     async fn late_non_2xx_final_still_gets_ack_synthesized() {
         let f = fixture(&[ProxyAddr::new(W1, 5060)]).await;
         let inv = invite("latefinal-1@test", "tag-a", 9, "z9hG4bKr4");
-        f.core.route_request(&inv, "INVITE", src()).await;
+        f.core.route_request(&inv, src()).await;
 
         tokio::time::advance(Duration::from_secs(60)).await;
 
@@ -1010,13 +995,13 @@ Content-Length: 0\r\n\r\n"
         let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
         let dir_a = invite("glare-1@test", "tag-a", 5, "z9hG4bKa");
         let dir_b = invite("glare-1@test", "tag-b", 5, "z9hG4bKb");
-        f.core.route_request(&dir_a, "INVITE", src()).await;
-        f.core.route_request(&dir_b, "INVITE", src()).await;
+        f.core.route_request(&dir_a, src()).await;
+        f.core.route_request(&dir_b, src()).await;
 
         let cxl_a = cancel("glare-1@test", "tag-a", 5, "z9hG4bKac");
         let cxl_b = cancel("glare-1@test", "tag-b", 5, "z9hG4bKbc");
-        let out_a = f.core.route_request(&cxl_a, "CANCEL", src()).await;
-        let out_b = f.core.route_request(&cxl_b, "CANCEL", src()).await;
+        let out_a = f.core.route_request(&cxl_a, src()).await;
+        let out_b = f.core.route_request(&cxl_b, src()).await;
 
         assert_eq!(out_a.target, Some(ProxyAddr::new(W1, 5060)), "direction A's CANCEL follows A's INVITE");
         assert_eq!(out_b.target, Some(ProxyAddr::new(W2, 5060)), "direction B's CANCEL follows B's INVITE");
@@ -1090,7 +1075,7 @@ mod cookie_identity_tests {
 
     /// A b-leg INVITE: worker-originated (top Via = the worker), dialog-creating
     /// (no To-tag), R-URI = the callee.
-    fn bleg_invite(top_via_host: &str) -> sip_message::SipRequest {
+    fn bleg_invite(top_via_host: &str) -> SipMessage {
         let raw = format!(
             "INVITE sip:sipp@{UAC}:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {top_via_host}:5060;branch=z9hG4bKbleg;rport\r\n\
@@ -1102,8 +1087,7 @@ CSeq: 1 INVITE\r\n\
 Contact: <sip:b2bua@{top_via_host}:5060;leg=b>\r\n\
 Content-Length: 0\r\n\r\n"
         );
-        let SipMessage::Request(req) = CustomParser::default().parse(raw.as_bytes()).unwrap() else { unreachable!() };
-        req
+        CustomParser::default().parse(raw.as_bytes()).unwrap()
     }
 
     // Regression for the b-leg long-call-loss class: behind the keepalived VIP
@@ -1118,7 +1102,7 @@ Content-Length: 0\r\n\r\n"
         let req = bleg_invite(W1_POD);
         let snat_src = format!("{SNAT_NODE}:63522").parse().unwrap();
 
-        let outcome = f.core.route_request(&req, "INVITE", snat_src).await;
+        let outcome = f.core.route_request(&req, snat_src).await;
 
         assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
         assert_eq!(
@@ -1137,7 +1121,7 @@ Content-Length: 0\r\n\r\n"
         let req = bleg_invite("10.244.9.99"); // not in the registry
         let pod_src = format!("{W1_POD}:5060").parse().unwrap();
 
-        let outcome = f.core.route_request(&req, "INVITE", pod_src).await;
+        let outcome = f.core.route_request(&req, pod_src).await;
 
         assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
         assert_eq!(
@@ -1183,11 +1167,8 @@ mod rfc_small_fix_tests {
         (core, metrics)
     }
 
-    fn parse_req(raw: &str) -> sip_message::SipRequest {
-        let SipMessage::Request(req) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
-            panic!("expected request")
-        };
-        req
+    fn parse_req(raw: &str) -> SipMessage {
+        CustomParser::default().parse(raw.as_bytes()).unwrap()
     }
 
     // §16.3 check 2: an ACK with Max-Forwards: 0 is silently discarded — a 483
@@ -1206,7 +1187,7 @@ CSeq: 1 ACK\r\n\
 Content-Length: 0\r\n\r\n"
         ));
         let before = metrics.messages_total();
-        let outcome = core.route_request(&req, "ACK", format!("{UAC}:5060").parse().unwrap()).await;
+        let outcome = core.route_request(&req, format!("{UAC}:5060").parse().unwrap()).await;
         assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
         assert_eq!(metrics.messages_total(), before, "no response (and no forward) may be generated for the ACK");
     }
@@ -1228,7 +1209,7 @@ CSeq: 2 BYE\r\n\
 Route: <sip:{PROXY_VIP}:5060;lr>, <sip:10.9.9.9:5062;lr>\r\n\
 Content-Length: 0\r\n\r\n"
         ));
-        let outcome = core.route_request(&req, "BYE", format!("{UAC}:5060").parse().unwrap()).await;
+        let outcome = core.route_request(&req, format!("{UAC}:5060").parse().unwrap()).await;
         assert_eq!(
             outcome.decision,
             RoutingDecisionKind::LooseRoute,
@@ -1253,7 +1234,7 @@ CSeq: 2 BYE\r\n\
 Route: <sip:{PROXY_VIP}:70596;lr>\r\n\
 Content-Length: 0\r\n\r\n"
         ));
-        let outcome = core.route_request(&req, "BYE", format!("{UAC}:5060").parse().unwrap()).await;
+        let outcome = core.route_request(&req, format!("{UAC}:5060").parse().unwrap()).await;
         // 70596 used to wrap to 5060, match the advertised VIP, and be stripped
         // as a self-route. It must instead stay foreign (and being malformed,
         // it can't drive loose routing either) → plain selection.

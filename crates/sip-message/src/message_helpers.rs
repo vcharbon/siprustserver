@@ -20,6 +20,14 @@ use crate::parser::custom::structured_headers::{
 use crate::types::{ParamValue, SipHeader, SipRequest};
 
 /// First header value matching `name` (case-insensitive).
+/// Canonical top-level comma splitter (quote-, escape- AND angle-bracket-
+/// aware) — the ONE implementation for header folding everywhere. Three
+/// near-copies used to exist (parser x2, proxy) and two had drifted: one
+/// honoured backslash escapes but split inside <...>, the other the reverse,
+/// so the same value could split differently at the proxy hop than in the
+/// parser that produced it.
+pub use crate::parser::custom::structured_headers::split_top_level_commas;
+
 pub fn get_header<'a>(headers: &'a [SipHeader], name: &str) -> Option<&'a str> {
     headers
         .iter()

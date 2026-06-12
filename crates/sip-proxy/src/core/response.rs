@@ -101,13 +101,12 @@ impl ProxyCore {
             }
         }
 
-        // Pop the top Via entry (comma-aware) and forward.
+        // Pop the top Via entry (comma-aware) and forward — serialize from the
+        // surgered header list directly (no whole-response clone).
         let mut headers = resp.headers.clone();
         remove_first_header_entry(&mut headers, "via");
-        let mut out = resp.clone();
-        out.headers = headers;
         let next_hop = ProxyAddr::new(host, port);
-        self.send_to(&serialize(&SipMessage::Response(out)), &next_hop).await;
+        self.send_to(&sip_message::serialize_response_parts(&resp, &headers), &next_hop).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Forwarded);
 
         // ── Hop-by-hop ACK for a non-2xx INVITE final (§17.1.1.3) ───────────

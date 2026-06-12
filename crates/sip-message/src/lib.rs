@@ -19,7 +19,7 @@ pub mod sipfrag;
 
 pub use error::SipParseError;
 pub use method::Method;
-pub use serializer::{message_summary, serialize, sip_summary};
+pub use serializer::{message_summary, serialize, serialize_request_parts, serialize_response_parts, sip_summary};
 pub use sdp::{
     build_answer_from_offer, build_held_sdp_from_profile, extract_codec_profile, validate_sdp_body,
     BuildAnswerOptions, BuildHeldSdpOptions, CodecProfile, SdpBuildResult, SdpValidationError,
