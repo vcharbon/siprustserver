@@ -19,6 +19,8 @@ pub enum Direction {
 }
 
 impl Direction {
+    const ALL: [Direction; 2] = [Direction::Inbound, Direction::Outbound];
+
     fn as_str(self) -> &'static str {
         match self {
             Direction::Inbound => "inbound",
@@ -36,6 +38,8 @@ pub enum MessageResult {
 }
 
 impl MessageResult {
+    const ALL: [MessageResult; 3] = [MessageResult::Forwarded, MessageResult::Responded, MessageResult::Dropped];
+
     fn as_str(self) -> &'static str {
         match self {
             MessageResult::Forwarded => "forwarded",
@@ -58,6 +62,16 @@ pub enum RoutingDecisionKind {
 }
 
 impl RoutingDecisionKind {
+    const ALL: [RoutingDecisionKind; 7] = [
+        RoutingDecisionKind::SelectNew,
+        RoutingDecisionKind::DecodeForward,
+        RoutingDecisionKind::DecodeForwardBackup,
+        RoutingDecisionKind::LooseRoute,
+        RoutingDecisionKind::WorkerOutbound,
+        RoutingDecisionKind::Cancel,
+        RoutingDecisionKind::Reject,
+    ];
+
     fn as_str(self) -> &'static str {
         match self {
             RoutingDecisionKind::SelectNew => "select_new",
@@ -87,6 +101,26 @@ impl HmacFailureReason {
             HmacFailureReason::Mismatch => "mismatch",
         }
     }
+}
+
+/// Known request methods get fixed counter slots; anything else lands in
+/// `other`. The method token is wire-controlled and the lenient parser accepts
+/// any token, so an open label set was a remote memory-exhaustion vector: a
+/// flood of invented methods (`FOO1`, `FOO2`, …) grew one permanent map entry
+/// + one `/metrics` line per distinct token, ballooning RSS and Prometheus
+/// cardinality without bound.
+const METHOD_SLOTS: [&str; 14] = [
+    "INVITE", "ACK", "BYE", "CANCEL", "OPTIONS", "REGISTER", "SUBSCRIBE", "NOTIFY", "PRACK", "UPDATE", "INFO",
+    "MESSAGE", "REFER", "PUBLISH",
+];
+
+/// Slot index for an (uppercased) method token; unknown → the `other` slot.
+fn method_slot(method: &str) -> usize {
+    METHOD_SLOTS.iter().position(|m| *m == method).unwrap_or(METHOD_SLOTS.len())
+}
+
+fn method_label(slot: usize) -> &'static str {
+    METHOD_SLOTS.get(slot).copied().unwrap_or("other")
 }
 
 #[derive(Default)]
@@ -119,11 +153,16 @@ struct HealthGauges {
 /// Live proxy metrics. Cheap to share behind an `Arc`.
 #[derive(Default)]
 pub struct ProxyMetrics {
-    messages: LabeledCounter,        // keyed "direction:result"
-    requests: LabeledCounter,        // keyed request method (INVITE/ACK/BYE/...)
-    responses: LabeledCounter,       // keyed "cseq_method|status_code"
+    /// `[direction][result]` — fixed slots, lock-free (multiple increments per
+    /// packet on the hot path).
+    messages: [[AtomicU64; 3]; 2],
+    /// One slot per known method + `other` — bounded and lock-free.
+    requests: [AtomicU64; METHOD_SLOTS.len() + 1],
+    /// Keyed "method|code" with the method slotted and the code validated to
+    /// 100..699 (else `other`) — both wire-controlled inputs bounded.
+    responses: LabeledCounter,
     calls: AtomicU64,                // initial (dialog-creating, no To-tag) INVITEs
-    routing_decisions: LabeledCounter, // keyed kind
+    routing_decisions: [AtomicU64; 7], // indexed by RoutingDecisionKind
     hmac_failures: LabeledCounter,   // keyed reason
     cancel_lookups: LabeledCounter,  // keyed outcome
     decode_forward_promoted: LabeledCounter, // keyed from-reason
@@ -162,19 +201,26 @@ impl ProxyMetrics {
     }
 
     pub fn record_message(&self, direction: Direction, result: MessageResult) {
-        self.messages.inc(&format!("{}:{}", direction.as_str(), result.as_str()));
+        self.messages[direction as usize][result as usize].fetch_add(1, Ordering::Relaxed);
     }
 
     /// Count one inbound request by SIP method (uppercased by the caller), for
-    /// `sip_proxy_requests_total{method}`.
+    /// `sip_proxy_requests_total{method}`. Unknown methods share one `other`
+    /// slot — see [`METHOD_SLOTS`].
     pub fn record_request(&self, method: &str) {
-        self.requests.inc(method);
+        self.requests[method_slot(method)].fetch_add(1, Ordering::Relaxed);
     }
 
     /// Count one inbound response by its CSeq method + status code, for
-    /// `sip_proxy_responses_total{method,code}`.
+    /// `sip_proxy_responses_total{method,code}`. Both labels are bounded:
+    /// unknown methods → `other`, out-of-range codes → `other`.
     pub fn record_response(&self, method: &str, code: u16) {
-        self.responses.inc(&format!("{method}|{code}"));
+        let method = method_label(method_slot(method));
+        if (100..700).contains(&code) {
+            self.responses.inc(&format!("{method}|{code}"));
+        } else {
+            self.responses.inc(&format!("{method}|other"));
+        }
     }
 
     /// Count one new call: a dialog-creating INVITE with no To-tag (an initial
@@ -184,7 +230,7 @@ impl ProxyMetrics {
     }
 
     pub fn record_routing_decision(&self, kind: RoutingDecisionKind) {
-        self.routing_decisions.inc(kind.as_str());
+        self.routing_decisions[kind as usize].fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn observe_routing_duration(&self, seconds: f64) {
@@ -261,10 +307,10 @@ impl ProxyMetrics {
 
     // --- read helpers (tests) ---
     pub fn messages_total(&self) -> u64 {
-        self.messages.sum()
+        self.messages.iter().flatten().map(|c| c.load(Ordering::Relaxed)).sum()
     }
     pub fn routing_decisions_total(&self) -> u64 {
-        self.routing_decisions.sum()
+        self.routing_decisions.iter().map(|c| c.load(Ordering::Relaxed)).sum()
     }
     pub fn routing_duration_count(&self) -> u64 {
         self.routing_duration_count.load(Ordering::Relaxed)
@@ -325,11 +371,37 @@ impl ProxyMetrics {
             }
         };
 
-        labeled(&mut s, "sip_messages_total", "SIP messages by direction+result.", "counter", "label", &self.messages.snapshot());
-        labeled(&mut s, "sip_proxy_requests_total", "Inbound SIP requests by method.", "counter", "method", &self.requests.snapshot());
+        // Slot-backed counters render only their non-zero entries, matching the
+        // sparse output the map-backed counters produced.
+        let mut messages_map = BTreeMap::new();
+        for d in Direction::ALL {
+            for r in MessageResult::ALL {
+                let v = self.messages[d as usize][r as usize].load(Ordering::Relaxed);
+                if v > 0 {
+                    messages_map.insert(format!("{}:{}", d.as_str(), r.as_str()), v);
+                }
+            }
+        }
+        let mut requests_map = BTreeMap::new();
+        for (slot, c) in self.requests.iter().enumerate() {
+            let v = c.load(Ordering::Relaxed);
+            if v > 0 {
+                requests_map.insert(method_label(slot).to_string(), v);
+            }
+        }
+        let mut decisions_map = BTreeMap::new();
+        for k in RoutingDecisionKind::ALL {
+            let v = self.routing_decisions[k as usize].load(Ordering::Relaxed);
+            if v > 0 {
+                decisions_map.insert(k.as_str().to_string(), v);
+            }
+        }
+
+        labeled(&mut s, "sip_messages_total", "SIP messages by direction+result.", "counter", "label", &messages_map);
+        labeled(&mut s, "sip_proxy_requests_total", "Inbound SIP requests by method.", "counter", "method", &requests_map);
         labeled2(&mut s, "sip_proxy_responses_total", "Inbound SIP responses by CSeq method + status code.", ("method", "code"), &self.responses.snapshot());
         g(&mut s, "sip_proxy_calls_total", "New calls: initial dialog-creating INVITEs (no To-tag).", "counter", self.calls.load(Ordering::Relaxed));
-        labeled(&mut s, "sip_routing_decision_total", "Routing decisions by kind.", "counter", "kind", &self.routing_decisions.snapshot());
+        labeled(&mut s, "sip_routing_decision_total", "Routing decisions by kind.", "counter", "kind", &decisions_map);
         labeled(&mut s, "sip_proxy_hmac_failures_total", "HMAC verify failures by reason.", "counter", "reason", &self.hmac_failures.snapshot());
 
         // Histogram (count + sum only — the slice does not bucket).
@@ -414,5 +486,22 @@ mod tests {
         let txt = m.prometheus_text();
         assert!(txt.contains("sip_worker_health{health=\"alive\"} 1"));
         assert!(txt.contains("sip_worker_health{health=\"draining\"} 0"));
+    }
+
+    #[test]
+    fn wire_controlled_labels_are_bounded() {
+        // A flood of invented methods/codes must not grow label cardinality —
+        // unknown tokens share the `other` slot (remote memory-exhaustion fix).
+        let m = ProxyMetrics::new();
+        for i in 0..1_000 {
+            m.record_request(&format!("FOO{i}"));
+            m.record_response(&format!("BAR{i}"), 9_999);
+        }
+        let txt = m.prometheus_text();
+        assert!(txt.contains("sip_proxy_requests_total{method=\"other\"} 1000"));
+        assert!(txt.contains("sip_proxy_responses_total{method=\"other\",code=\"other\"} 1000"));
+        assert!(!txt.contains("FOO"), "no per-token label may leak into the exposition");
+        // The whole body stays small — one line per slot, not per token.
+        assert!(txt.len() < 8_192, "exposition must stay bounded, got {} bytes", txt.len());
     }
 }
