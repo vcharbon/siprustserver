@@ -62,7 +62,18 @@ impl ProxyCore {
         // draining worker also legitimately finishes in-flight calls, so it keeps its
         // responses too. (Request-path routing-around a non-Alive worker is separate;
         // that lives in the strategy's `decode_stickiness`.)
-        if let Some(dest) = self.registry.lookup_by_address(&ProxyAddr::new(host.clone(), port)) {
+        //
+        // The worker is IDENTIFIED by its Via **sent-by** — its advertised
+        // registry address, SNAT-immune (the same signal the request path keys
+        // worker-outbound classification on). The received/rport-derived
+        // `host:port` above stays the SEND target per §18.2.2/RFC 3581, but it
+        // must not be the lookup key: behind the keepalived VIP it is the SNAT
+        // node IP + an ephemeral port, which matches no registry entry — that
+        // made this whole Dead branch unreachable in production, so a dead
+        // worker's in-flight responses were blackholed at its stale SNAT
+        // address instead of failing over to `w_bak`.
+        let sent_by = ProxyAddr::new(next.host.clone(), next.port.unwrap_or(5060));
+        if let Some(dest) = self.registry.lookup_by_address(&sent_by) {
             if dest.health == WorkerHealth::Dead {
                 match self.find_own_record_route_params(&resp) {
                     Some(params) => match self.strategy.decode_stickiness(&params, &SipMessage::Response(resp.clone())).await {
@@ -124,5 +135,174 @@ impl ProxyCore {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod reverse_failover_tests {
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use sip_clock::Clock;
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+    use sip_net::{SendError, UdpEndpoint, UdpEndpointCounters, UdpPacket};
+
+    use crate::addr::ProxyAddr;
+    use crate::core::{ProxyCore, ProxyCoreBuilder};
+    use crate::registry::static_reg::StaticWorkerRegistry;
+    use crate::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
+    use crate::strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};
+
+    const W1_POD: &str = "10.244.5.8";
+    const W2_POD: &str = "10.244.5.9";
+    const UAC: &str = "10.244.7.13";
+    const PROXY_VIP: &str = "172.20.255.250";
+    const SNAT_NODE: &str = "172.20.0.11";
+
+    /// Endpoint double recording every send's destination.
+    #[derive(Default)]
+    struct CapturingEndpoint {
+        sent: Mutex<Vec<SocketAddr>>,
+    }
+
+    #[async_trait]
+    impl UdpEndpoint for CapturingEndpoint {
+        async fn send_to(&self, _buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
+            self.sent.lock().unwrap().push(dst);
+            Ok(())
+        }
+        async fn recv(&self) -> Option<UdpPacket> {
+            std::future::pending().await
+        }
+        fn try_recv(&self) -> Option<UdpPacket> {
+            None
+        }
+        fn local_addr(&self) -> SocketAddr {
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 5060))
+        }
+        fn queue_depth(&self) -> usize {
+            0
+        }
+        fn queue_max(&self) -> usize {
+            0
+        }
+        fn counters(&self) -> UdpEndpointCounters {
+            UdpEndpointCounters::default()
+        }
+    }
+
+    /// Strategy double whose cookie decode fails over to w2.
+    struct BackupStrategy;
+
+    #[async_trait]
+    impl RoutingStrategy for BackupStrategy {
+        fn name(&self) -> &str {
+            "Backup"
+        }
+        async fn select_for_new_dialog(&self, _msg: &SipMessage, _opts: SelectOpts) -> Result<ProxyAddr, SelectError> {
+            Err(SelectError::NoTarget { reason: "unused".into() })
+        }
+        async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+            DecodeResult::ForwardBackup { target: ProxyAddr::new(W2_POD, 5060), is_emergency: false }
+        }
+        fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
+            None
+        }
+    }
+
+    fn core_with(w1_health: WorkerHealth) -> (ProxyCore, Arc<CapturingEndpoint>) {
+        let ep = Arc::new(CapturingEndpoint::default());
+        let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![
+            WorkerEntry {
+                id: "w1".into(),
+                address: ProxyAddr::new(W1_POD, 5060),
+                health: w1_health,
+                draining_since: None,
+                first_seen_at_ms: None,
+            },
+            WorkerEntry::alive("w2", ProxyAddr::new(W2_POD, 5060)),
+        ]));
+        let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), Arc::new(BackupStrategy), reg)
+            .clock(Clock::test_at(0))
+            .build(Box::new(CapturingEndpointHandle(ep.clone())));
+        (core, ep)
+    }
+
+    /// Box-able forwarding wrapper (the builder takes `Box<dyn UdpEndpoint>`;
+    /// the test keeps the `Arc` to read captures).
+    struct CapturingEndpointHandle(Arc<CapturingEndpoint>);
+
+    #[async_trait]
+    impl UdpEndpoint for CapturingEndpointHandle {
+        async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
+            self.0.send_to(buf, dst).await
+        }
+        async fn recv(&self) -> Option<UdpPacket> {
+            self.0.recv().await
+        }
+        fn try_recv(&self) -> Option<UdpPacket> {
+            self.0.try_recv()
+        }
+        fn local_addr(&self) -> SocketAddr {
+            self.0.local_addr()
+        }
+        fn queue_depth(&self) -> usize {
+            self.0.queue_depth()
+        }
+        fn queue_max(&self) -> usize {
+            self.0.queue_max()
+        }
+        fn counters(&self) -> UdpEndpointCounters {
+            self.0.counters()
+        }
+    }
+
+    /// A keepalive 200 heading back to the worker: top Via = the proxy, next
+    /// Via = the worker's sent-by, SNAT'd received/rport stamped by the request
+    /// path, the proxy's own cookie Record-Route echoed by the UAS.
+    fn keepalive_200() -> sip_message::types::SipResponse {
+        let raw = format!(
+            "SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP {PROXY_VIP}:5060;branch=z9hG4bKout;rport\r\n\
+Via: SIP/2.0/UDP {W1_POD}:5060;branch=z9hG4bKka;received={SNAT_NODE};rport=63522\r\n\
+Record-Route: <sip:{PROXY_VIP}:5060;w_pri=w1;w_bak=w2;lr>\r\n\
+From: <sip:service@{PROXY_VIP}:5060>;tag=svc\r\n\
+To: <sip:sipp@{UAC}:5060>;tag=uactag\r\n\
+Call-ID: ka-1@{UAC}\r\n\
+CSeq: 2 OPTIONS\r\n\
+Content-Length: 0\r\n\r\n"
+        );
+        let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
+            unreachable!()
+        };
+        resp
+    }
+
+    // Regression: the Dead-worker lookup was keyed on the received/rport-derived
+    // address — behind the VIP that is the SNAT node IP + ephemeral port, which
+    // matches no registry entry, so the failover branch was unreachable and a
+    // dead worker's responses were blackholed at its stale SNAT address. The
+    // worker must be identified by its Via SENT-BY (registry identity).
+    #[tokio::test]
+    async fn response_to_a_dead_worker_fails_over_to_the_backup() {
+        let (core, ep) = core_with(WorkerHealth::Dead);
+        core.handle_response(keepalive_200()).await;
+
+        let sent = ep.sent.lock().unwrap();
+        assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
+    }
+
+    // Control: an Alive worker keeps its response, delivered to the SNAT'd
+    // received/rport return path per §18.2.2/RFC 3581 — identity changes the
+    // LOOKUP key, never the send target.
+    #[tokio::test]
+    async fn response_to_an_alive_worker_keeps_the_received_rport_target() {
+        let (core, ep) = core_with(WorkerHealth::Alive);
+        core.handle_response(keepalive_200()).await;
+
+        let sent = ep.sent.lock().unwrap();
+        assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);
     }
 }
