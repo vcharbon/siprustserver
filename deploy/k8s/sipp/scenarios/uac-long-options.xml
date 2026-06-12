@@ -119,6 +119,16 @@
        `-l MAX_CONCURRENT` ceiling + `-recv_timeout` dead-call reaper
        (manifests/40-sipp-uac-job.yaml), not by a per-call message count. -->
   <label id="hold_loop"/>
+  <!-- An AS-initiated BYE (max-duration cap, keepalive-timeout, any policy
+       teardown) is a LEGITIMATE call end a real UAC answers with 200 — NOT a
+       loss. Parked solely on the OPTIONS recv, it scored unexpected_msg: the
+       2026-06-11 run's "peak 6.5% / kill_worker 16.6% long-loss" was in fact
+       the SUT's 1 h GlobalDuration mowing down the lockstep-aged long cohort
+       (the `-l` ceiling freezes creation ~14 min in, so the whole population
+       hits the cap together at run-start+1h, echoing hourly) — both chaos
+       events merely coincided with the wave. With this branch only true
+       SILENCE (no keepalive for 420 s → end_hold → UAC BYE) reads as loss. -->
+  <recv request="BYE" optional="true" next="answer_bye"/>
   <recv request="OPTIONS" crlf="true" timeout="420000" ontimeout="end_hold"/>
   <send>
     <![CDATA[
@@ -152,6 +162,25 @@
   </send>
 
   <recv response="200" crlf="true"/>
+  <nop next="hold_done"/>
+
+  <!-- AS-initiated teardown: answer the BYE and end the call SUCCESSFULLY. -->
+  <label id="answer_bye"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <label id="hold_done"/>
 
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
   <CallLengthRepartition value="60000, 300000, 600000, 900000, 1200000"/>

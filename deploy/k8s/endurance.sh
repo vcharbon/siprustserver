@@ -110,7 +110,11 @@ LIMITER_TARGET="${LIMITER_TARGET:-$LIMITER_CAP}" # the cap the stream pins conc.
 PROXY_VIP="${PROXY_VIP:-172.20.255.250}"
 PROXY_TARGET="${PROXY_TARGET:-$PROXY_VIP}"
 export PROXY_VIP PROXY_TARGET LIMITER_CAP
-LIMITER_TOL="${LIMITER_TOL:-10}"       # allowed band around the cap (±)
+LIMITER_TOL="${LIMITER_TOL:-3}"        # allowed band around the cap (±). Was ±10:
+                                       # the 2026-06-12 zombie pinning (15/20 held
+                                       # for ~50 min by stuck-in-setup calls) sat
+                                       # INSIDE that band and was invisible. A
+                                       # healthy stream pins the cap within ±1-2.
 LIMITER_GRACE="${LIMITER_GRACE:-600}"  # post-event divergence window (10 min): after
                                        # a limiter fault the cap may drift this long
                                        # (fail-open admits + ~window refill) before it
@@ -493,6 +497,47 @@ sip_chaos_limiter_conc{type=\"$type\"} $c1"
   fi
 }
 
+# Aftermath watch (2026-06-12). The #3 peak event destroyed essentially ALL
+# standing long calls (~4000), but the teardown cascade ran for ~12 more minutes
+# AFTER the gate's measurement window closed — so the event scored "long-loss
+# 6.5% (260/4000)" instead of ~100%. After an event's verdict, keep polling the
+# long-failed counter until it goes quiet (3 consecutive quiet polls) or
+# AFTERMATH_MAX_SEC elapses; a tail above LONG_LOSS_TOL emits a separate
+# "<type>_aftermath" FAIL row + metrics. Runs inside the inter-event idle
+# (CHAOS_INTERVAL), so it consumes no schedule time.
+AFTERMATH_MAX_SEC="${AFTERMATH_MAX_SEC:-540}"
+AFTERMATH_POLL_SEC="${AFTERMATH_POLL_SEC:-30}"
+long_aftermath_watch() {
+  local type="$1" idx="$2" lf_close="$3" ldenom="$4" u0="$5"
+  local waited=0 quiet=0 prev cur adf aloss result
+  prev="$lf_close"
+  while [ "$waited" -lt "$AFTERMATH_MAX_SEC" ] && [ "$quiet" -lt 3 ]; do
+    sleep "$AFTERMATH_POLL_SEC"; waited=$(( waited + AFTERMATH_POLL_SEC ))
+    cur="$(snap_failed_role long)"
+    if python3 -c "exit(0 if float('$cur') > float('$prev') else 1)"; then
+      quiet=0
+    else
+      quiet=$(( quiet + 1 ))
+    fi
+    prev="$cur"
+  done
+  adf=$(python3 -c "print(max(0,int(float('$prev'))-int(float('$lf_close'))))")
+  [ "$adf" -eq 0 ] && return 0
+  aloss=$(python3 -c "print(round(100.0*$adf/$ldenom,1) if $ldenom else 0.0)")
+  result=$(python3 -c "print('pass' if float('$aloss')<=$LONG_LOSS_TOL else 'fail')")
+  result="$(taint_if_uas_crash "$result" "$u0" "${type}_aftermath")"
+  push_metric "sip_chaos_event{type=\"${type}_aftermath\",result=\"$result\"} 1
+sip_chaos_long_loss_pct{type=\"${type}_aftermath\"} $aloss
+sip_chaos_long_failed{type=\"${type}_aftermath\"} $adf"
+  printf '{"ts":%s,"event":%d,"type":"%s_aftermath","long_failed":%d,"long_at_risk":%s,"long_loss_pct":%s,"watched_sec":%d,"result":"%s"}\n' \
+    "$(date +%s)" "$idx" "$type" "$adf" "$ldenom" "$aloss" "$waited" "$result" >> "$EVENTS"
+  if [ "$result" = "fail" ]; then
+    warn "CHAOS #$idx $type AFTERMATH: long-call teardown CONTINUED past the gate window — $adf more long failures (${aloss}% > ${LONG_LOSS_TOL}%) over ${waited}s — FAILURE"
+  else
+    log "CHAOS #$idx $type aftermath: $adf more long failures (${aloss}%) over ${waited}s (within tolerance)"
+  fi
+}
+
 # reboot_event = the ADR-0014 verification. A b2bua worker REBOOT (kill → the
 # StatefulSet recreates the same pod → it reclaims its primary partition + the
 # backup self-releases its takeover copy on the served txn's terminal state) must
@@ -528,6 +573,7 @@ LONG_LOSS_TOL="${LONG_LOSS_TOL:-5}"           # max % of long calls created in-w
 reboot_event() {
   local idx="$1" t0 s0 f0 g0 a0 mode tgt s s1 f1 g1 a1 ds df pct rise res_pct res_leak result conc
   local sf0 ss0 lf0 lc0 sf1 ss1 lf1 lc1 sds sdf spct ldf ldc ldenom lconc0 lloss res_short res_long u0
+  local lim1 res_limiter
   t0="$(date +%s)"
   s0="$(snap_success)"; f0="$(snap_failed)"; g0="$(snap_ghost)"; a0="$(snap_active)"; u0="$(snap_uas_restarts)"
   ss0="$(snap_success_role short)"; sf0="$(snap_failed_role short)"
@@ -560,6 +606,16 @@ reboot_event() {
   s1="$(snap_success)"; f1="$(snap_failed)"; a1="$(snap_active)"; conc="$(snap_conc)"
   ss1="$(snap_success_role short)"; sf1="$(snap_failed_role short)"
   lf1="$(snap_failed_role long)";   lc1="$(snap_created_role long)"
+  # (4) NO LIMITER PINNING (2026-06-12): calls caught mid-setup by the kill held
+  # their cap20 slots while SIP-dead, pinning the limiter stream below the cap —
+  # invisible to short/long/leak (and inside the old ±10 LIMITER_TOL). By now
+  # (Ready + settle + sampling, past the 150 s setup deadline) the stream must be
+  # back at the cap; take the MAX of 3 samples so a refill blip can't fail it.
+  lim1="$(snap_limiter_conc)"
+  for _ in 1 2; do
+    sleep 15; s="$(snap_limiter_conc)"
+    lim1=$(python3 -c "print(max(float('$lim1'),float('$s')))")
+  done
   close_window kill_worker
   ds=$(python3 -c "print(max(0,int(float('$s1'))-int(float('$s0'))))")
   df=$(python3 -c "print(max(0,int(float('$f1'))-int(float('$f0'))))")
@@ -586,11 +642,13 @@ reboot_event() {
   res_short=$(python3 -c "print('pass' if float('$spct')>=$thr else 'fail')")
   res_long=$(python3 -c "print('pass' if float('$lloss')<=$LONG_LOSS_TOL else 'fail')")
   res_leak=$(python3 -c "print('pass' if float('$rise')<=$REBOOT_GHOST_TOL else 'fail')")
+  res_limiter=$(python3 -c "print('pass' if abs(float('$lim1')-$LIMITER_TARGET) <= $LIMITER_TOL else 'fail')")
   res_pct="$res_short"   # kept for the legacy sip_chaos_success_pct series
-  # Overall pass requires ALL THREE: short survival, long survival, no leak.
+  # Overall pass requires ALL FOUR: short survival, long survival, no leak,
+  # and the limiter stream back at its cap (no slot pinning by zombie calls).
   if [ "$(( ds + df ))" -eq 0 ]; then
     result="n/a"                       # baseline streams were down — not a real pass
-  elif [ "$res_short" = pass ] && [ "$res_long" = pass ] && [ "$res_leak" = pass ]; then
+  elif [ "$res_short" = pass ] && [ "$res_long" = pass ] && [ "$res_leak" = pass ] && [ "$res_limiter" = pass ]; then
     result="pass"
   else
     result="fail"
@@ -606,18 +664,21 @@ sip_chaos_long_at_risk{type=\"kill_worker\"} $ldenom
 sip_chaos_resolved{type=\"kill_worker\",outcome=\"success\"} $ds
 sip_chaos_resolved{type=\"kill_worker\",outcome=\"failed\"} $df
 sip_chaos_ghost_rise{type=\"kill_worker\"} $rise
-sip_chaos_ghost_gap{type=\"kill_worker\"} $g1"
-  printf '{"ts":%s,"event":%d,"type":"kill_worker","mode":"%s","short_survival_pct":%s,"short_ok":%d,"short_fail":%d,"long_loss_pct":%s,"long_failed":%d,"long_created":%d,"long_at_risk":%d,"blended_success_pct":%s,"ghost_before":%s,"ghost_after":%s,"ghost_rise":%s,"active_after":%s,"concurrent":%s,"short_result":"%s","long_result":"%s","leak":"%s","result":"%s"}\n' \
-    "$t0" "$idx" "$mode" "$spct" "$sds" "$sdf" "$lloss" "$ldf" "$ldc" "$ldenom" "$pct" "${g0%.*}" "${g1%.*}" "${rise%.*}" "${a1%.*}" "${conc%.*}" "$res_short" "$res_long" "$res_leak" "$result" >> "$EVENTS"
+sip_chaos_ghost_gap{type=\"kill_worker\"} $g1
+sip_chaos_limiter_conc{type=\"kill_worker\"} $lim1"
+  printf '{"ts":%s,"event":%d,"type":"kill_worker","mode":"%s","short_survival_pct":%s,"short_ok":%d,"short_fail":%d,"long_loss_pct":%s,"long_failed":%d,"long_created":%d,"long_at_risk":%d,"blended_success_pct":%s,"ghost_before":%s,"ghost_after":%s,"ghost_rise":%s,"active_after":%s,"concurrent":%s,"limiter_conc":%s,"short_result":"%s","long_result":"%s","leak":"%s","limiter_result":"%s","result":"%s"}\n' \
+    "$t0" "$idx" "$mode" "$spct" "$sds" "$sdf" "$lloss" "$ldf" "$ldc" "$ldenom" "$pct" "${g0%.*}" "${g1%.*}" "${rise%.*}" "${a1%.*}" "${conc%.*}" "${lim1%.*}" "$res_short" "$res_long" "$res_leak" "$res_limiter" "$result" >> "$EVENTS"
   case "$result" in
-    pass)    ok   "CHAOS #$idx kill_worker($mode): short ${spct}% + long-loss ${lloss}%(tol ${LONG_LOSS_TOL}) + NO leak (ghost rise ${rise}) — PASS" ;;
+    pass)    ok   "CHAOS #$idx kill_worker($mode): short ${spct}% + long-loss ${lloss}%(tol ${LONG_LOSS_TOL}) + NO leak (ghost rise ${rise}) + limiter at cap (${lim1}/${LIMITER_TARGET}) — PASS" ;;
     n/a)     warn "CHAOS #$idx kill_worker($mode): no baseline calls resolved (streams down?) — n/a" ;;
     tainted) warn "CHAOS #$idx kill_worker($mode): TAINTED by involuntary UAS crash — long-loss ${lloss}%/leak ${rise} NOT attributable to the SUT (skip investigation)" ;;
-    *)       warn "CHAOS #$idx kill_worker($mode): FAILURE — short ${spct}%/${thr}% ($res_short); LONG-LOSS ${lloss}% > ${LONG_LOSS_TOL}% ($res_long, ${ldf}/${ldc} long calls); leak ghost rise ${rise} ($res_leak)" ;;
+    *)       warn "CHAOS #$idx kill_worker($mode): FAILURE — short ${spct}%/${thr}% ($res_short); LONG-LOSS ${lloss}% > ${LONG_LOSS_TOL}% ($res_long, ${ldf}/${ldc} long calls); leak ghost rise ${rise} ($res_leak); limiter ${lim1}/${LIMITER_TARGET}±${LIMITER_TOL} ($res_limiter — pinned slots = stuck-in-setup zombies)" ;;
   esac
   # Stamp THIS reboot's epoch for the next reboot's aftermath-taint comparison
   # (written AFTER taint_if_uas_crash ran above, so that read saw the PREVIOUS reboot).
   date +%s > "$LAST_REBOOT_TS_FILE"
+  # Watch for a post-window long-teardown tail (consumes inter-event idle only).
+  long_aftermath_watch kill_worker "$idx" "$lf1" "$ldenom" "$u0"
 }
 
 # Record one chaos event: snapshot baseline outcomes, run it, settle, snapshot
@@ -714,6 +775,9 @@ sip_chaos_resolved{type=\"$type\",outcome=\"failed\"} $df"
     tainted) warn "CHAOS #$idx $type: TAINTED by involuntary UAS crash — ${pct}%/long-loss ${lloss}% NOT attributable to the SUT (skip investigation)" ;;
     *)       warn "CHAOS #$idx $type: FAILURE — blended ${pct}%/${thr}% ($res_blend); LONG-LOSS ${lloss}% > ${LONG_LOSS_TOL}% ($res_long, ${ldf}/${ldenom} long) (Δok=$ds Δfail=$df)" ;;
   esac
+  # Watch for a post-window long-teardown tail (the e3 peak cascade ran ~12 min
+  # past the gate and was under-reported 6.5% vs ~100%).
+  long_aftermath_watch "$type" "$idx" "$lf1" "$ldenom" "$u0"
 }
 
 wireup() {

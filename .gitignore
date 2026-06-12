@@ -22,3 +22,4 @@ sipp-*.csv
 
 # E2E test-management generated run artifacts (committed inputs live in e2e/{cases,checksets,infra,campaigns,schemas})
 /e2e/runs/
+_TODOS.md
