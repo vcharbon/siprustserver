@@ -122,27 +122,29 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_millis(300)).await;
 
-    // alice BYEs: the backup hydrates the replicated call (limiter hold included)
-    // and tears it down — releasing the hold from the takeover node.
+    // alice BYEs: the backup hydrates the replicated call and answers the wire.
     let creations_before = backup.metrics().creations_total();
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    // Let the takeover handling + the soft release drain.
-    let mut released = false;
-    for _ in 0..40 {
-        fh.advance(Duration::from_millis(200)).await;
-        if store.stats().current_total == 0 {
-            released = true;
-            break;
-        }
-    }
+    // Model Y (amends ADR-0020 X3): the takeover backup DEFERS the discharge — it
+    // answers the wire but does NOT release the limiter itself (the primary is the
+    // sole discharge authority). With the primary crashed and never rebooting, the
+    // backup is the DURABLE HOLDER: the deferred terminal's alive-timer (short TTL)
+    // expires and the reap discharges it, releasing the hold. So the release is
+    // deferred to the fallback, not immediate — pump the mutualised settle past it.
+    let released = fh
+        .settle_terminal(async || store.stats().current_total == 0)
+        .await;
     assert!(
         backup.metrics().creations_total() > creations_before,
         "backup processed the failed-over BYE",
     );
-    assert!(released, "the takeover node released the limiter hold on BYE");
+    assert!(
+        released,
+        "the takeover node released the limiter hold via its alive-timer fallback",
+    );
 
     // The unified seq-report (HTML + global.txt + replication.mmd) is emitted by
     // `FailoverHarness`'s write-on-Drop fallback into
