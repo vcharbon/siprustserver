@@ -375,6 +375,25 @@ async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: ReleaseKind) {
     }
 }
 
+/// Force the last persisted snapshot of `call_ref` terminal and run it through
+/// the ordinary `finalize → enforce → process_result` funnel: the `ObligationSet`
+/// discharges the CDR + limiter holds, `RemoveCall` rides
+/// `release_call(Terminated)`, and the delete propagates. The single discharge
+/// implementation — reused by the reaper `OUTCOME_DISCHARGE` branch and the
+/// terminal self-release path (a `Terminating`/`Terminated` takeover copy whose
+/// served transactions have all cleared). `discharge_result` forces every leg
+/// terminal with NO wire traffic. The caller MUST hold the per-call lock.
+async fn discharge_as_own(ctx: &Arc<RouterCtx>, call_ref: &str, now_ms: i64) {
+    let Some(call) = ctx.state.peek(call_ref) else { return };
+    let before = call.clone();
+    let result = crate::rules::invariants::enforce(
+        &ctx.obligations,
+        &before,
+        crate::rules::invariants::finalize(crate::reaper::discharge_result(call, now_ms)),
+    );
+    process_result(ctx, call_ref, result, now_ms).await;
+}
+
 async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     // Per-method / per-(method,code) data-path counters. Every inbound SIP
     // message lands here once, so this is the single chokepoint to meter them.
@@ -409,7 +428,30 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
             let _guard = ctx.state.lock(&call_ref).await;
             if ctx.state.is_takeover(&call_ref) {
                 if ctx.txn.active_txn_count_for_call(&call_ref).await.unwrap_or(0) == 0 {
-                    release_call(ctx, &call_ref, ReleaseKind::SelfRelease).await;
+                    // An ACTIVE takeover copy genuinely lives on at its reclaiming
+                    // primary → shed it locally (SelfRelease); the call continues
+                    // there (ADR-0014; the C11 non-terminal guard rail).
+                    //
+                    // A copy already in Terminating/Terminated is ENDING. Shedding
+                    // it via `drop_local` does NO discharge (no CDR, no limiter
+                    // release, no delete) and strands a stale Active replica that
+                    // the call's own residual timers (the b-leg BYE Timer F, the
+                    // TerminatingTimeout) re-hydrate and RE-TERMINATE — the
+                    // unbounded ~32 s BYE re-termination storm (matrix cell C5).
+                    // Discharge it as its own call instead: force the snapshot
+                    // terminal, release the CDR + limiter holds, propagate
+                    // RemoveCall. One teardown, then gone — the acting-backup
+                    // honouring the "a Terminating call is killed COMPLETELY"
+                    // guarantee regardless of the (dead) primary's fate.
+                    match ctx.state.peek(&call_ref).map(|c| c.state) {
+                        Some(CallModelState::Terminating) | Some(CallModelState::Terminated) => {
+                            let now_ms = ctx.clock.now_ms();
+                            discharge_as_own(ctx, &call_ref, now_ms).await;
+                        }
+                        _ => {
+                            release_call(ctx, &call_ref, ReleaseKind::SelfRelease).await;
+                        }
+                    }
                 } else {
                     // A fresh in-dialog request (a second takeover during a
                     // sustained partition) re-armed a transaction since this notice
@@ -714,17 +756,11 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
                 // finalize → enforce → process_result — the ObligationSet
                 // discharges the CDR + limiter holds, RemoveCall rides
                 // release_call(Terminated), the delete propagates (X6).
-                let Some(call) = ctx.state.peek(&call_ref) else { return };
+                if ctx.state.peek(&call_ref).is_none() {
+                    return;
+                }
                 ctx.metrics.bump_reaper_discharged();
-                let before = call.clone();
-                let result = crate::rules::invariants::enforce(
-                    &ctx.obligations,
-                    &before,
-                    crate::rules::invariants::finalize(crate::reaper::discharge_result(
-                        call, now_ms,
-                    )),
-                );
-                process_result(ctx, &call_ref, result, now_ms).await;
+                discharge_as_own(ctx, &call_ref, now_ms).await;
                 return;
             }
             // A confirmed stale / fatal-error verdict falls through to the
