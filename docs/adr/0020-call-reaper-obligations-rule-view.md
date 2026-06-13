@@ -86,6 +86,27 @@ TTL with no CDR — an accepted gap (an "abandoned-Element CDR" was considered
 and rejected: duplicate-CDR risk under late reclaim for a case outside the
 "live-served + re-hydrated" promise).
 
+> **AMENDED (2026-06-13, Model Y — `FixCallTerminateOnBackup`).** The acting-backup
+> terminal contract is **inverted**: a backup **never discharges** (no CDR, no
+> limiter release, no delete) — *not even* on an explicit BYE/CANCEL. It answers
+> the wire (SIP continuity), records the terminal into the `(p,b)` Element, and
+> reverse-flushes it with a **short grace TTL as its alive-timer**, then
+> self-releases its live copy. The **primary is the sole discharge authority**, so
+> exactly-once holds by construction (no cross-node CDR/limiter idempotency). The
+> primary discharges exactly once: **immediately** if alive (its Reclaim-tail puller
+> reconciles the dominating terminal into the LIVE map and discharges via the funnel
+> — ADR-0014 amendment), or **on reboot reclaim** (a reclaimed `Terminated`/`Terminating`
+> body discharges instead of re-serving). This **closes the "expires by TTL with no
+> CDR" gap**: if the primary never returns, the deferred Element's alive-timer expires
+> and a paced reap task discharges it through the funnel — the backup is the **durable
+> fallback** (the exactly-once guarantee now rests on *primary OR backup* surviving /
+> restarting). A late reverse-flush racing the discharge cannot resurrect the call: a
+> store-side **delete tombstone** (apply-side delete-wins) rejects a re-creating `Put`
+> for a recently-deleted ref — required because the `(p,b)` vector structurally cannot
+> let a backup's discharged-marker apply to a primary that has bumped `p`. The reaper
+> X1 promise is unchanged (one funnel, one CDR); the reap task is a durability backstop,
+> not a reconciliation timer (ADR-0014 causality preserved).
+
 ## Decision X4 — liveness is a last-touched stamp, refreshed at worker dequeue
 
 Liveness derives from **one input only**: a node-local, store-side

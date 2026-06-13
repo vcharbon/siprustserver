@@ -356,6 +356,18 @@ snapshot (ADR-0020 X7), so no live copy is required.
 2. "Backup defers" and "expiry discharges" are ONE unit — landing defer without
    the fallback regresses C4/C5 (which pass today via immediate backup discharge).
 
+### STATUS: COMPLETE (2026-06-13, branch `feat/fix-call-terminate-model-y`)
+
+**Matrix 12/12.** Gates: b2bua --lib 129, transparent_v1 19, failover 14,
+limiter_ha 2 — all green. Commits: `3b79198` (defer+reconcile+flush bug fix),
+`5a7196e` (P3 fallback + resurrection tombstone), `1c4daa2` (HA tests → Model-Y
+contract), + ADR-0020 X3 / ADR-0014 amendments. The competing **Model X +
+discharged-marker** lives only as a handoff (`/tmp/handoff-model-x-discharge-marker.md`);
+the X agent confirmed both models need the same tombstone, so the comparison
+resolved toward Y (implemented + complete). Open follow-up (handed off): the LB
+proxy does not relay the b2bua's 481 back to a caller's BYE client transaction
+(C10's bob never receives its 481 — fire-and-forget in the test for now).
+
 ### Phased plan (discharge/BYE first, C11 last — per scope decision)
 
 - **P1 — reconcile seam (foundation).** Puller, on an applied reverse mutation,

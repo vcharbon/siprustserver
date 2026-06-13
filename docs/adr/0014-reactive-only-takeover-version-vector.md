@@ -221,3 +221,33 @@ over), *memory is clean* (no per-call state left), and *exactly one owner* /
 assert_call_fully_released}`, `ReplicatedB2buaSut::{serves, is_synchronized_backup,
 memory_clean, holds_any_trace}`). External behaviour (Alice/Bob: responses, CSeq
 order, call survival, clean teardown) is unchanged by this refactor.
+
+## Amendment (2026-06-13) — terminal reconcile into the live map + resurrection guard
+
+`FixCallTerminateOnBackup` (Model Y; see ADR-0020 X3 amendment) extends three
+points here, all **still purely causal — no reconciliation timers**:
+
+1. **The Reclaim-tail reconciles into the LIVE map, not just the replica store.**
+   The tail was already defined to "catch a post-partition reverse-flush a
+   live-but-partitioned primary missed," but it stopped at `pri:{self}`. It now
+   folds a dominating reverse-flush (Reverse `(p,b)` rule, unchanged) into the
+   primary's **live** copy: a non-terminal `Put` updates it (notably the bumped
+   b-leg `local_cseq`, so the primary's next request to the peer stays monotonic —
+   the alternative to the §"accepted trade-off" CSeq drop, when the flush is
+   timely); a `Terminated` `Put` drives a discharge through the reaper funnel.
+
+2. **Acting-backup self-release DEFERS the terminal** (ADR-0020 X3 amendment): a
+   takeover copy reaching terminal reverse-flushes the terminal (short grace TTL =
+   its alive-timer) and `drop_local`s — it does **not** discharge. The primary is
+   the sole discharge authority; if it never returns, the backup's alive-timer
+   fallback discharges (durability now rests on *primary OR backup* restarting).
+
+3. **A `flush` body/`(p,b)` consistency fix + an apply-side delete tombstone.**
+   `flush` now embeds the authoritative `(p,b)` in the replicated **body** (it
+   previously encoded the pre-bump clone, so a backup hydrating from it branched
+   one `p` stale — invisible vs a crashed primary, but it silently broke every
+   reverse-flush to an **alive** primary). And because the Reverse `(p,b)` rule
+   structurally cannot let a backup's discharged state apply to a primary that has
+   bumped `p`, a deleted `call_ref` is **tombstoned** (`ReplicatingCallStore`):
+   `put_call` rejects a re-creating `Put` within the window (apply-side
+   delete-wins), so a late reverse-flush cannot resurrect a just-discharged call.
