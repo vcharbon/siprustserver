@@ -506,7 +506,6 @@ impl CallState {
     /// peer. With no topology / no backup / no replicating store it is today's
     /// `PutOpts::default()` (no propagation) path.
     pub fn flush(&self, call: &Call) {
-        let body = self.codec.encode(call);
         let indexes = call_index_keys(call);
         // The authoritative `(p,b)` lives on the in-memory call (bumped by
         // `update`); the passed `call` may be a pre-bump clone, so prefer the
@@ -521,6 +520,26 @@ impl CallState {
             .or(call.topology.as_ref())
             .map(|t| (t.gen, t.bak_gen))
             .unwrap_or((0, 0));
+        // Embed the authoritative `(p,b)` in the BODY too, not just the frame meta.
+        // `call` is the pre-`update` clone (its `topology` counters are one bump
+        // stale), so a node that hydrates from this body would branch at the stale
+        // `(p,b)` — invisible while a backup only ever takes over a CRASHED primary
+        // (its meta is gone on reboot), but it desynced a reverse-flush against an
+        // ALIVE primary (the misroute): the backup branched one `p` behind, so the
+        // Reverse `(p,b)` apply rule rejected its flush and the live primary never
+        // reconciled (FixCallTerminateOnBackup C2/C3/C11). Keep the body's embedded
+        // version vector consistent with its `(p,b)`.
+        let body = match call.topology.as_ref() {
+            Some(_) => {
+                let mut consistent = call.clone();
+                if let Some(t) = consistent.topology.as_mut() {
+                    t.gen = call_gen;
+                    t.bak_gen = call_bgen;
+                }
+                self.codec.encode(&consistent)
+            }
+            None => self.codec.encode(call),
+        };
         let (role, primary, opts) = self.store_target(&call.call_ref);
         // Observability: a propagating flush is one whose call carries a backup
         // peer (topology.bak from the proxy cookie). Rising on the PRIMARY proves

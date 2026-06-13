@@ -272,3 +272,135 @@ gate) and fold it into the existing `transparent_matrix!` sweep. That instantly
 upgrades every existing HA cell from "transparent + no-leak" to also "exactly one
 CDR + limiter released," which will flush out the current under/over-discharge
 across the whole matrix and give us the failure map for free.
+
+---
+
+## 9. DECISION (2026-06-13) — Model Y + durable-backup fallback
+
+Matrix state when decided: **7 pass / 5 fail** (C2, C3, C7, C10, C11). The
+handoff proposed **B1** ("backup forwards statelessly when the primary is
+alive"). **B1 is rejected:**
+
+- It needs a *liveness oracle* — the only thing separating C2/C3/C11 (primary
+  alive) from C4–C9 (crashed) is membership (`simulate_peer_removed`). Gating
+  takeover on membership is the **eager/failure-detector** takeover ADR-0014
+  amended out.
+- "Forward to the primary" isn't viable: the proxy routed to the backup *because*
+  it deems the primary dead, and pod-direct is forbidden. A B2BUA also can't
+  stateless-forward a re-INVITE (independent a/b-leg CSeq spaces — C11).
+- "Backup never discharges" regresses C4/C5: a permanently-dead primary means
+  nobody writes the CDR.
+
+### The chosen model — primary-preferred discharge, backup durable fallback
+
+ONE discharge implementation (the reaper funnel `discharge_as_own`); **no second
+cleanup path** (esp. none in the puller). Exactly-once is **causal**
+(`(p,b)` + delete-wins), no reconciliation timer.
+
+1. **Backup defers discharge.** On a reactive takeover that drives a terminal
+   (BYE/CANCEL, or a timer-driven terminal), the backup answers the wire (SIP
+   continuity), records the terminal into the `(p,b)` Element, reverse-flushes
+   it, and **retains its takeover context with the call's own timers** — it does
+   **not** discharge and does **not** `drop_local`. (Today's a2dcf4c
+   discharge-on-`CallQuiesced` is replaced by defer-and-retain.)
+
+2. **The reconcile seam (NEW).** The primary's **Reclaim-tail** puller — which
+   ADR-0014 already created "to catch a post-partition reverse-flush a
+   live-but-partitioned primary missed" — currently stops at the replica store
+   (`repl/store.rs put_call/delete_call`; `repl/` never touches the live map
+   `store/mod.rs inner.calls`). Extend it to reconcile into the **live map** when
+   the primary holds the call live, `(p,b)`-gated:
+   - Reverse **Put** that dominates AND held live → fold into the live copy; if
+     the folded state is terminal → `discharge_as_own`. *(Fixes C2/C3; the
+     non-terminal Put fixes C11's b-leg CSeq.)*
+   - Any applied **Delete** (delete-wins) → evict the local live copy if present.
+     *(Exactly-once: the discharge winner's delete evicts the loser's retained
+     copy.)*
+
+3. **Backup fallback when the primary is gone.** If the primary never reconciles
+   (crashed / stays dead — C4/C5), the backup's **retained context** is the
+   durable owner and discharges it. Trigger = **OPEN QUESTION below.**
+
+4. **Guarantee (→ ADR amendment).** Exactly one CDR holds as long as the primary
+   **or** the backup survives — and since the terminal state + obligations ride
+   the replicated `(p,b)` Element, a backup that **restarts** recovers the
+   Element and re-arms its timers via reclaim. The accepted loss window is "both
+   primary and backup permanently gone." **Put the guarantee on backup
+   durability/restart.** Amends ADR-0020 X3 (acting-backup terminal contract:
+   defer, don't discharge-on-BYE) and ADR-0014 (Reclaim tail reconciles into the
+   live map; self-release retains a terminal-deferred copy).
+
+### RESOLVED (2026-06-13) — fallback = the existing replica-TTL "alive timer"
+
+Confirmed current impl (reuse, do not duplicate):
+- The "alive timer" IS `CallMeta.expiry_at_ms` (`repl/store.rs:57`), re-stamped to
+  `now + ttl` on **every** primary forward-flush (`store/mod.rs flush` → `put_call`)
+  — i.e. re-initiated on each change from the primary, exactly as specified.
+- Default `CALL_TTL_MS` = 1h; runner retunes to 1.5× refresh cadence; the
+  failover-harness injects nothing (1h).
+- Expiry is **lazy + periodic `reap`** (runner loop `b2bua-runner/src/main.rs:685`),
+  today a **silent `delete_call`, no CDR** — that silent drop IS the ADR-0020 X3
+  accepted gap.
+- This is NOT the reaper stamp (reaper = live-map, SIP-traffic-refreshed, excludes
+  backup copies). The alive timer is replication-refreshed.
+
+**The change:** TTL-expiry of a backup-held **terminal/deferred** Element
+discharges via the funnel instead of silent-deleting — emitted as a synthetic
+event into the router reentry channel (the reaper's verdict→router→`discharge_as_own`
+pattern; the store has no `RouterCtx`). Obligations derive from the replica
+snapshot (ADR-0020 X7), so no live copy is required.
+
+**Two coupling facts:**
+1. `1h ≫ settle_terminal (~345s)`. The harness must inject a **keepalive-scale**
+   alive TTL (the reaper's 3× idea) so C4/C5 discharge in-window.
+2. "Backup defers" and "expiry discharges" are ONE unit — landing defer without
+   the fallback regresses C4/C5 (which pass today via immediate backup discharge).
+
+### Phased plan (discharge/BYE first, C11 last — per scope decision)
+
+- **P1 — reconcile seam (foundation).** Puller, on an applied reverse mutation,
+  signals the router (synthetic `InternalEvent`); the router, under the per-call
+  lock, reconciles into the **live map** if held: Delete → evict (delete-wins);
+  dominating terminal Put → `discharge_as_own`. (Non-terminal Put handled in P4.)
+- **P2 — backup defers.** Replace the a2dcf4c `CallQuiesced`→discharge of a
+  Terminating/Terminated takeover copy with defer-and-retain (record terminal,
+  reverse-flush, keep the replica Element + its alive TTL; `drop_local` the live
+  copy per ADR-0014 self-release — X11-safe).
+- **P3 — fallback discharge.** Replica-TTL expiry of a terminal backup Element →
+  funnel discharge (not silent delete). Harness injects a keepalive-scale TTL.
+  → C2/C3 green, C4/C5 still green.
+- **P4 — C11 (last).** Non-terminal dominating reverse Put → reconcile b-leg CSeq
+  into the primary's live map. Gated by `(p,b)`; a racing primary keepalive that
+  rejects it is ADR-0014's accepted CSeq-drop trade-off.
+- **P5 — ADRs.** Amend 0020 X3 (defer, not discharge-on-BYE; TTL-expiry discharges
+  — closes the gap) and 0014 (Reclaim tail reconciles into the live map; the
+  exactly-once guarantee rests on primary-or-backup durability/restart).
+- C7 (reclaim-vs-fallback) and C10 (split-brain) ride delete-wins; a surviving
+  simultaneous race needs a discharged-marker on the Element (separate pass).
+
+### (superseded) earlier open question — what triggers the fallback?
+
+A deferred **Terminated** call on the backup has **no natural timer** (terminal
+state cancels timers), yet C4/C5 must discharge inside `settle_terminal`
+(~345 s). Candidates:
+
+- **(A) Causal — primary leaves membership.** k8s removes the dead primary's
+  endpoint (`simulate_peer_removed`); on that event the backup discharges the
+  terminal copies it holds for that primary. Purely causal (no timer → best
+  ADR-0014 fit), prompt (passes C4/C5). Cost: NEW membership→router hook (today
+  membership reaches only the supervisor/pullers, never the router).
+- **(B) Timer — the call's own retained cap.** Keep GlobalDuration (+ a
+  Terminating watchdog) on the deferred copy; it fires → backup discharges.
+  Matches "keep the context for timer," no new wiring — but it's a time-based
+  discharge (the thing ADR-0014 warns against), and default GlobalDuration is
+  3600 s ≫ 345 s, so C4/C5 would need a *new* short deferred-discharge timer.
+- **(C) Both:** (A) as the prompt causal trigger, GlobalDuration as the ultimate
+  backstop.
+
+### Work order (per the scope decision)
+**Discharge/BYE first, C11 last.** 1) reconcile seam (Delete-evict + terminal
+Put → `discharge_as_own`) + backup defer-and-retain + the chosen fallback
+trigger → turns C2/C3 green. 2) C11 (non-terminal Put → live-map CSeq reconcile)
+last. C7 (reclaim-vs-fallback race) and C10 (split-brain) ride delete-wins; if a
+truly-simultaneous race survives, they need a discharged-marker on the Element
+(separate pass).

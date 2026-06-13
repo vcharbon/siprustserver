@@ -129,14 +129,128 @@ pub async fn run(
 async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
     match cmd {
         ReplCommand::ReclaimAll => reclaim_all(ctx).await,
-        ReplCommand::ReclaimCall(call_ref) => {
-            if let Some(call) = ctx.state.peek_reclaimable(&call_ref).await {
-                // A single reactive straggler: re-serve it on its ORIGINAL
-                // schedule (a past-due keepalive fires immediately). The batch
-                // smoothing below is only for the bulk reboot sweep.
-                reclaim_into_live(ctx, call, None).await;
+        ReplCommand::ReclaimCall(call_ref) => reconcile_reverse_flush(ctx, &call_ref).await,
+    }
+}
+
+/// Apply a backup's reverse-flushed mutation that the puller just landed in our
+/// `pri:{self}` partition into our **live** map (ADR-0014 Reclaim-tail reconcile:
+/// "catch a post-partition reverse-flush a live-but-partitioned primary missed",
+/// extended from the replica store to the live copy — the gap the
+/// `FixCallTerminateOnBackup` matrix exposed). The acting-backup served an
+/// in-dialog request for a call **we still own live**; fold its dominating `(p,b)`
+/// view in so our copy converges — Model Y: the live primary is the *sole*
+/// discharge authority, the backup only defers:
+/// - **Terminated** → discharge as our own through the reaper funnel — one CDR,
+///   limiter released, the propagated delete evicts the backup's deferred copy.
+/// - **Active** (a re-INVITE/UPDATE the backup re-originated) → fold the new state
+///   in, notably the bumped b-leg `local_cseq`, so OUR next request to the peer
+///   continues the dialog monotonically (C11: no CSeq split).
+/// - **Terminating** → transient teardown-in-progress; wait for the Terminated
+///   flush rather than fold a half-state.
+///
+/// Not live: a **Terminated** body is a reboot-reclaimed deferral — materialise +
+/// discharge (no keepalive arming); anything else is the existing reactive
+/// straggler, materialised + re-armed by [`reclaim_into_live`].
+///
+/// The reverse `(p,b)` gate (`p_in == p_cur && b_in > b_cur`) is re-checked under
+/// the per-call lock; a primary that mutated the call since the backup branched
+/// keeps its own copy — ADR-0014's accepted keepalive-vs-takeover CSeq-drop, not a
+/// fold. Idempotent: `update` bumps our `p`, so a re-delivered flush no longer
+/// dominates.
+async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str) {
+    let Some(replica) = ctx.state.peek_reclaimable(call_ref).await else {
+        return;
+    };
+    // Not-live + non-terminal is the original reactive-straggler path; it manages
+    // its own per-call lock, so route it BEFORE taking the lock here (the guard is
+    // not reentrant).
+    if ctx.state.peek(call_ref).is_none() && replica.state != CallModelState::Terminated {
+        reclaim_into_live(ctx, replica, None).await;
+        return;
+    }
+    let _guard = ctx.state.lock(call_ref).await;
+    let now_ms = ctx.clock.now_ms();
+    match ctx.state.peek(call_ref) {
+        Some(live) => {
+            if !reverse_flush_dominates(&replica, &live) {
+                return;
+            }
+            match replica.state {
+                // The backup deferred a terminal it served; discharge OUR live copy
+                // through the funnel with the live (non-terminal) copy as `before`
+                // so the `→ Terminated` edge fires the ObligationSet + RemoveCall.
+                CallModelState::Terminated => {
+                    discharge_folded_terminal(ctx, call_ref, &live, replica, now_ms).await;
+                }
+                // A re-INVITE/UPDATE the backup re-originated: fold its state in
+                // (the bumped b-leg `local_cseq`) so OUR next request continues the
+                // dialog monotonically (C11). No discharge — the call continues.
+                CallModelState::Active => {
+                    ctx.state.update(replica);
+                }
+                // Transient teardown-in-progress; wait for the Terminated flush.
+                CallModelState::Terminating => {}
             }
         }
+        // A reverse-flushed deferral for a call we no longer hold live (the
+        // reactive straggler equivalent of the reboot-reclaim terminal): discharge.
+        None => {
+            if replica.state == CallModelState::Terminated {
+                discharge_reclaimed_terminal(ctx, call_ref, replica, now_ms).await;
+            }
+        }
+    }
+}
+
+/// Discharge a `Terminated` body we do NOT hold live — a backup's deferred
+/// terminal reclaimed on reboot (bulk `ReclaimAll`) or reverse-flushed after we
+/// released it. Materialise it first so `backup_of` resolves and the propagated
+/// delete reaches the peer, then discharge through the funnel with a synthetic
+/// non-terminal `before` (the body is already Terminated, so the live `→
+/// Terminated` edge must be synthesised — see [`discharge_folded_terminal`]).
+/// The caller MUST hold the per-call lock. No-op if already resident (idempotent
+/// reclaim re-pass).
+async fn discharge_reclaimed_terminal(ctx: &Arc<RouterCtx>, call_ref: &str, terminal: Call, now_ms: i64) {
+    if ctx.state.materialize_if_absent(terminal.clone()) {
+        let mut before = terminal.clone();
+        before.state = CallModelState::Active;
+        discharge_folded_terminal(ctx, call_ref, &before, terminal, now_ms).await;
+    }
+}
+
+/// Discharge an already-`Terminated` body (a backup's deferred terminal, folded
+/// into our live map or reclaimed on reboot) through the ONE enforcement funnel.
+/// `before` is the live (non-terminal) snapshot so `enforce`'s `became_terminated`
+/// edge fires — `discharge_result`/`discharge_as_own` cannot be reused here because
+/// they synthesise the terminal from a NON-terminal call, whereas this body is
+/// already Terminated (the edge would be vacuous and the ObligationSet would never
+/// settle the CDR / limiter / RemoveCall). The CDR + limiter release + propagated
+/// delete all ride `process_result`, exactly as a primary-served BYE would.
+async fn discharge_folded_terminal(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    before: &Call,
+    terminal: Call,
+    now_ms: i64,
+) {
+    let result = crate::rules::invariants::enforce(
+        &ctx.obligations,
+        before,
+        crate::rules::invariants::finalize(crate::effects::HandlerResult::new(terminal)),
+    );
+    process_result(ctx, call_ref, result, now_ms).await;
+}
+
+/// The ADR-0014 **Reverse** `(p,b)` apply rule for a live-map fold: the
+/// reverse-flushed `replica` dominates our `live` copy iff the primary counter is
+/// unchanged (`p_in == p_cur` — we have not mutated since the backup branched) and
+/// the backup counter genuinely advanced (`b_in > b_cur`). A call with no topology
+/// is non-replicable and never folds.
+fn reverse_flush_dominates(replica: &Call, live: &Call) -> bool {
+    match (replica.topology.as_ref(), live.topology.as_ref()) {
+        (Some(r), Some(l)) => r.gen == l.gen && r.bak_gen > l.bak_gen,
+        _ => false,
     }
 }
 
@@ -298,6 +412,15 @@ async fn reclaim_into_live(
     // `process` does, so a concurrent dispatcher handler for this call_ref cannot
     // interleave and double-arm.
     let _guard = ctx.state.lock(&call_ref).await;
+    // A reclaimed body that is already Terminated is a backup's DEFERRED terminal
+    // (Model Y): the backup served the BYE/CANCEL while we were down and never
+    // discharged it. Discharge it now — write the CDR, release the limiter,
+    // propagate the delete — instead of re-serving a dead dialog (which would arm
+    // keepalives on it and leak). Covers C6/C7 (crash → reboot → reclaim).
+    if call.state == CallModelState::Terminated {
+        discharge_reclaimed_terminal(ctx, &call_ref, call, ctx.clock.now_ms()).await;
+        return true;
+    }
     // A keepalive OPTIONS transaction caught mid-flight in the replicated
     // snapshot guards a probe that died with the crashed node; drop the stale
     // timeout so it does not fire a spurious keepalive-timeout BYE on reclaim.
@@ -428,30 +551,32 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
             let _guard = ctx.state.lock(&call_ref).await;
             if ctx.state.is_takeover(&call_ref) {
                 if ctx.txn.active_txn_count_for_call(&call_ref).await.unwrap_or(0) == 0 {
-                    // An ACTIVE takeover copy genuinely lives on at its reclaiming
-                    // primary → shed it locally (SelfRelease); the call continues
-                    // there (ADR-0014; the C11 non-terminal guard rail).
-                    //
-                    // A copy already in Terminating/Terminated is ENDING. Shedding
-                    // it via `drop_local` does NO discharge (no CDR, no limiter
-                    // release, no delete) and strands a stale Active replica that
-                    // the call's own residual timers (the b-leg BYE Timer F, the
-                    // TerminatingTimeout) re-hydrate and RE-TERMINATE — the
-                    // unbounded ~32 s BYE re-termination storm (matrix cell C5).
-                    // Discharge it as its own call instead: force the snapshot
-                    // terminal, release the CDR + limiter holds, propagate
-                    // RemoveCall. One teardown, then gone — the acting-backup
-                    // honouring the "a Terminating call is killed COMPLETELY"
-                    // guarantee regardless of the (dead) primary's fate.
-                    match ctx.state.peek(&call_ref).map(|c| c.state) {
-                        Some(CallModelState::Terminating) | Some(CallModelState::Terminated) => {
-                            let now_ms = ctx.clock.now_ms();
-                            discharge_as_own(ctx, &call_ref, now_ms).await;
-                        }
-                        _ => {
-                            release_call(ctx, &call_ref, ReleaseKind::SelfRelease).await;
+                    // Model Y (ADR-0020 X3 amended): a takeover copy DEFERS its
+                    // discharge to the live primary regardless of its state — it is
+                    // never an independent CDR/limiter writer. So self-release
+                    // unconditionally (drop the live copy; the `bak:` replica + the
+                    // reverse-flushed deltas remain):
+                    //   - **Active** → the call continues at the reclaiming primary
+                    //     (ADR-0014; the C11 non-terminal guard rail).
+                    //   - **Terminating/Terminated** → the terminal state was already
+                    //     reverse-flushed in `process_result` (the Active|Terminating
+                    //     flush gate; a Terminated copy was already deferred there).
+                    //     The primary discharges it EXACTLY ONCE — immediately if it
+                    //     is alive and reconciling, on reboot via reclaim, or via the
+                    //     replica-TTL fallback if it never returns. This replaces
+                    //     a2dcf4c's discharge-here: the backup discharging too was the
+                    //     C7 double-CDR. The "stale Active replica re-terminates"
+                    //     storm a2dcf4c fixed is gone a different way — the replica is
+                    //     reverse-flushed Terminating/Terminated, never Active.
+                    if let Some(call) = ctx.state.peek(&call_ref) {
+                        if matches!(call.state, CallModelState::Terminating | CallModelState::Terminated) {
+                            // Belt-and-braces reverse-flush of the terminal state (a
+                            // Terminated copy skips the process_result flush gate) so
+                            // the primary's reconcile/reclaim/fallback has it.
+                            ctx.state.flush(&call);
                         }
                     }
+                    release_call(ctx, &call_ref, ReleaseKind::SelfRelease).await;
                 } else {
                     // A fresh in-dialog request (a second takeover during a
                     // sustained partition) re-armed a transaction since this notice
@@ -1019,6 +1144,24 @@ async fn maybe_reject_orphan(ctx: &RouterCtx, event: &CallEvent) {
 async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerResult, now_ms: i64) {
     // Persist first (the source's invariant: state lands before effects run).
     ctx.state.update(result.call.clone());
+
+    // Model Y (ADR-0020 X3 amended): an acting-backup **takeover copy** that
+    // reaches Terminated DEFERS the discharge to the live primary. It reverse-
+    // flushes the terminal body — so the primary's Reclaim-tail reconcile
+    // (`reconcile_reverse_flush`) folds it in and discharges it **exactly once** —
+    // then self-releases its live copy. It writes **NO** CDR, releases **NO**
+    // limiter hold, propagates **NO** delete here (that is the primary's sole
+    // authority). If the primary never reconciles (crashed for good), the retained
+    // `bak:` replica discharges via its alive-timer (replica-TTL) fallback. This
+    // replaces a2dcf4c's discharge-on-CallQuiesced for a takeover copy: the backup
+    // is never an independent CDR/limiter writer, so exactly-once holds by
+    // construction (no cross-node idempotency). A primary-served (non-takeover)
+    // terminal falls through to the normal discharge below.
+    if result.call.state == CallModelState::Terminated && ctx.state.is_takeover(call_ref) {
+        ctx.state.flush(&result.call); // reverse-flush the Terminated body
+        release_call(ctx, call_ref, ReleaseKind::SelfRelease).await;
+        return;
+    }
 
     // Replicate a non-terminated, backed-up call to its peer after each
     // authoritative mutation (the S10 flush-on-mutation wiring point —
