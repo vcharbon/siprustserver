@@ -89,6 +89,40 @@ async fn handle_conn(mut stream: TcpStream, metrics: Arc<ProxyMetrics>, ready: R
     let req = String::from_utf8_lossy(&buf[..n]);
     let path = req.split_whitespace().nth(1).unwrap_or("/");
 
+    // On-demand CPU flamegraph (pprof SIGPROF sampling -> inferno SVG). Internal
+    // debug route on the metrics port — NOT the SIP datapath. It blocks for the
+    // sample window, so it holds one connection permit for that long; the
+    // profiler is built only for the request (zero overhead otherwise).
+    // `?seconds=N` (default 20, max 120). Sampling runs on a blocking thread so
+    // the proxy's async workers keep serving.
+    if path.split('?').next() == Some("/debug/flamegraph") {
+        let secs = flamegraph_util::parse_seconds(path, 20, 120);
+        let result = tokio::task::spawn_blocking(move || flamegraph_util::capture_svg(secs, 99))
+            .await
+            .unwrap_or_else(|e| Err(format!("join error: {e}")));
+        match result {
+            Ok(svg) => {
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    svg.len()
+                );
+                stream.write_all(header.as_bytes()).await?;
+                stream.write_all(&svg).await?;
+            }
+            Err(e) => {
+                let body = format!("flamegraph failed: {e}\n");
+                let header = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).await?;
+                stream.write_all(body.as_bytes()).await?;
+            }
+        }
+        stream.flush().await?;
+        return Ok(());
+    }
+
     let (status, content_type, body) = match path {
         "/metrics" => ("200 OK", "text/plain; version=0.0.4", metrics.prometheus_text()),
         "/healthz" => ("200 OK", "text/plain", "ok\n".to_string()),

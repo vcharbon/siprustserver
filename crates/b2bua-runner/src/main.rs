@@ -345,6 +345,39 @@ async fn serve_metrics(
             let mut buf = [0u8; 1024];
             let n = stream.read(&mut buf).await.unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]);
+            // On-demand CPU flamegraph (pprof SIGPROF sampling -> inferno SVG).
+            // Internal debug route on the metrics port — NOT the SIP datapath.
+            // Blocks for the sample window on a blocking thread (the worker's
+            // async runtime keeps serving SIP); the profiler is built only for
+            // the request. `?seconds=N` (default 20, max 120).
+            let target = req.split_whitespace().nth(1).unwrap_or("/");
+            if target.split('?').next() == Some("/debug/flamegraph") {
+                let secs = flamegraph_util::parse_seconds(target, 20, 120);
+                let result =
+                    tokio::task::spawn_blocking(move || flamegraph_util::capture_svg(secs, 99))
+                        .await
+                        .unwrap_or_else(|e| Err(format!("join error: {e}")));
+                match result {
+                    Ok(svg) => {
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            svg.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes()).await;
+                        let _ = stream.write_all(&svg).await;
+                    }
+                    Err(e) => {
+                        let body = format!("flamegraph failed: {e}\n");
+                        let header = format!(
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes()).await;
+                        let _ = stream.write_all(body.as_bytes()).await;
+                    }
+                }
+                return;
+            }
             let (status, body) = if req.starts_with("GET /metrics") {
                 let mut text = metrics.prometheus_text();
                 text.push_str(&txn_metrics_text(&txn_metrics));

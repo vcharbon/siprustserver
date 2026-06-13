@@ -22,6 +22,7 @@ members = [
     "crates/b2bua-harness",
     "crates/ha-harness",
     "crates/failover-harness",
+    "crates/flamegraph-util",
     "crates/b2bua-runner",
     "crates/sip-proxy-runner",
     "crates/call-limiter-runner",
@@ -137,3 +138,12 @@ webrtc-util = "0.10"
 lapin = "2"
 tokio-executor-trait = "2"
 tokio-reactor-trait = "1"
+
+# Keep line tables in release builds so on-demand pprof CPU flamegraphs (the
+# /debug/flamegraph route on the b2bua-worker + front-proxy metrics servers,
+# see crates/flamegraph-util) symbolize to function/file:line. This adds
+# debuginfo ONLY — opt-level/lto/codegen-units are untouched — so the captured
+# profile still reflects the fully-optimized production binary. The Dockerfile
+# does not strip, so symbols reach the running container.
+[profile.release]
+debug = "line-tables-only"

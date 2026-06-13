@@ -647,7 +647,7 @@
       },
       "targets": [
         {
-          "expr": "sip_chaos_success_pct",
+          "expr": "last_over_time(sip_chaos_success_pct[$__range:])",
           "refId": "A"
         }
       ],
@@ -702,7 +702,7 @@
       },
       "targets": [
         {
-          "expr": "sum(sip_chaos_active)",
+          "expr": "max(sip_chaos_window) or vector(0)",
           "refId": "A"
         }
       ],
@@ -751,7 +751,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (type,result)(sip_chaos_event)",
+          "expr": "last_over_time(sum by (type,result)(sip_chaos_event)[$__range:])",
           "refId": "A",
           "format": "table",
           "instant": true
