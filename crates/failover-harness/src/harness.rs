@@ -1002,6 +1002,46 @@ impl FailoverHarness {
         false
     }
 
+    /// **Mutualised long-wait teardown settle** (TODO `FixCallTerminateOnBackup`
+    /// §5.4). After a call's terminal request, pump the paused clock under the
+    /// settle/advance/settle discipline until `drained` is satisfied — first in
+    /// fine 200 ms steps for the immediate flush (CDR write + soft limiter release
+    /// + reverse-delete drain + an acting-backup takeover copy's self-release on
+    /// Timer H/J ~32 s), then in coarse 5 s steps **past one full
+    /// `keepalive_interval` (300 s) + `keepalive_timeout` (45 s)** so that any
+    /// zombie a buggy teardown left resurrectable *would* have armed its keepalive,
+    /// probed, and surfaced (or self-healed) before we assert. Returns `true` if
+    /// `drained` was satisfied within the budget, `false` if it timed out (the
+    /// caller's `assert_call_fully_over` then reports precisely which invariant is
+    /// still broken). Replaces the ad-hoc `for _ in 0..40 { advance(200ms) }` loops
+    /// in `limiter_ha.rs` and `runner.rs`.
+    pub async fn settle_terminal(&self, mut drained: impl AsyncFnMut() -> bool) -> bool {
+        if drained().await {
+            return true;
+        }
+        // Phase 1: fine steps for the fast path (flush + soft release, ~tens of s).
+        let mut elapsed = Duration::ZERO;
+        let fine = Duration::from_millis(200);
+        while elapsed < Duration::from_secs(60) {
+            self.advance(fine).await;
+            elapsed += fine;
+            if drained().await {
+                return true;
+            }
+        }
+        // Phase 2: coarse steps past keepalive_interval (300 s) + keepalive_timeout
+        // (45 s) + margin, so a resurrected/stranded copy surfaces or self-heals.
+        let coarse = Duration::from_secs(5);
+        while elapsed < Duration::from_secs(400) {
+            self.advance(coarse).await;
+            elapsed += coarse;
+            if drained().await {
+                return true;
+            }
+        }
+        false
+    }
+
     // -- report ------------------------------------------------------------
 
     /// Run the built-in RFC 3261 signaling audit (CSeq in-dialog ordering, …)

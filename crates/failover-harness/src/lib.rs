@@ -54,6 +54,64 @@ pub fn assert_single_owner(nodes: &[&ReplicatedB2buaSut], call_ref: &str) {
     );
 }
 
+/// Count the CDRs whose `call_ref` matches across **every** node's CDR sink — the
+/// cross-cluster "exactly one CDR" tally (`§2` invariant #1). Today only per-node
+/// `cdr_records()` exists, so this folds them: `0` = the call's end-event was lost
+/// (the backup self-released without a CDR), `2` = double-billed (both nodes
+/// discharged). A correct teardown leaves exactly `1` *anywhere* in the cluster.
+pub fn total_cdrs_for(nodes: &[&ReplicatedB2buaSut], call_ref: &str) -> usize {
+    nodes
+        .iter()
+        .map(|n| {
+            n.cdr_records()
+                .into_iter()
+                .filter(|r| r.call_ref == call_ref)
+                .count()
+        })
+        .sum()
+}
+
+/// **The universal "call terminated on the backup" post-condition** (TODO
+/// `FixCallTerminateOnBackup` §2). After the call ends and the cluster settles,
+/// *every* cell must hold all four invariants, regardless of which node served the
+/// terminal request and whatever the primary's fate:
+///
+/// 1. **Exactly ONE CDR** for `call_ref` across all nodes (not zero = lost, not
+///    two = double-billed) — [`total_cdrs_for`].
+/// 2. **The call is OVER** — no node serves it and no node holds a replica body,
+///    so no later reboot can resurrect it, and both nodes' per-call memory is
+///    clean ([`assert_call_fully_released`], which also asserts 0 serving owners).
+/// 3. **Limiter released exactly once** — the shared `LimiterServer`'s
+///    `current_total == 0` (not leaked at ≥1, not driven negative by a double
+///    release).
+///
+/// `limiter` is the shared `WindowStore` behind the cluster's one `LimiterServer`;
+/// since each cell runs a single call, its global `current_total` is this call's.
+pub async fn assert_call_fully_over(
+    nodes: &[&ReplicatedB2buaSut],
+    call_ref: &str,
+    limiter: &call_limiter::WindowStore,
+) {
+    // #2 — over everywhere (0 owners, no replica trace, memory clean).
+    assert_call_fully_released(nodes, call_ref).await;
+    // #1 — exactly one CDR across the whole cluster.
+    let cdrs = total_cdrs_for(nodes, call_ref);
+    assert_eq!(
+        cdrs, 1,
+        "expected EXACTLY ONE CDR for {call_ref} across the cluster (0 = lost / \
+         backup self-released without a CDR, 2 = double-billed); got {cdrs}",
+    );
+    // #3 — limiter released exactly once (drained to zero, never negative).
+    let total = limiter.stats().current_total;
+    assert_eq!(
+        total, 0,
+        "limiter hold for {call_ref} not released exactly once: current_total = {total} \
+         ({} = leaked / pinned, {} = double release)",
+        if total > 0 { "positive" } else { "" },
+        if total < 0 { "negative" } else { "" },
+    );
+}
+
 /// **High-level cluster invariant**: a terminated call left **no trace anywhere** —
 /// no node serves it and no node holds a replica body for it, so a later reboot
 /// cannot resurrect it and no per-call memory leaked. Reads
