@@ -37,7 +37,11 @@ pub async fn assert_cell_transparent(cell: Cell) {
     base_sweep.assert_clean(&format!("{name}/baseline"));
     let (variant, var_sweep) = run_cell(cell, true).await;
     var_sweep.assert_clean(&format!("{name}/variant"));
-    oracle::assert_transparent(&name, &baseline, &variant);
+    // A StayDead failover is SIP-transparent but loses the CDR (Model Y, ADR-0020
+    // X3), so the variant's disposition (`no-cdr`) differs from the baseline's
+    // (`terminated`) by design — compare it only when the primary recovers.
+    let compare_disposition = cell.recovery != Recovery::StayDead;
+    oracle::assert_transparent(&name, &baseline, &variant, compare_disposition);
 }
 
 /// **High-level cluster invariant**: across `nodes`, **exactly one** serves
@@ -107,6 +111,45 @@ pub async fn assert_call_fully_over(
         total, 0,
         "limiter hold for {call_ref} not released exactly once: current_total = {total} \
          ({} = leaked / pinned, {} = double release)",
+        if total > 0 { "positive" } else { "" },
+        if total < 0 { "negative" } else { "" },
+    );
+}
+
+/// **The StayDead post-condition** (ADR-0020 X3, Model Y): a call whose terminal was
+/// served on the backup while the primary CRASHED and NEVER returned (past the
+/// replica TTL). The primary is the sole CDR authority, so when it never reclaims
+/// the deferral the CDR is **lost** — the accepted double-failure (primary down AND
+/// never returns). But the periodic backup reap must still:
+///
+/// 1. **Write NO CDR** — exactly zero across the cluster ([`total_cdrs_for`] == 0).
+///    A `1` would mean the backup illegally discharged (the removed fallback).
+/// 2. **Release the limiter exactly once anyway** — the shared `WindowStore`'s
+///    `current_total == 0` (not leaked at ≥1 by skipping the release, not driven
+///    negative by a double release). This is the auto-cleanup the contract requires.
+/// 3. **Leave no trace / no leaked per-call memory** — the deferral body is evicted,
+///    so a later reboot cannot resurrect it ([`assert_call_fully_released`]).
+///
+/// Call this only AFTER advancing past the deferral's replica TTL (`reboot_budget`)
+/// so the reap has run; see [`settle_lost`](ReplicatedB2buaSut)/the cells' explicit
+/// advance.
+pub async fn assert_call_lost_no_cdr(
+    nodes: &[&ReplicatedB2buaSut],
+    call_ref: &str,
+    limiter: &call_limiter::WindowStore,
+) {
+    assert_call_fully_released(nodes, call_ref).await;
+    let cdrs = total_cdrs_for(nodes, call_ref);
+    assert_eq!(
+        cdrs, 0,
+        "expected ZERO CDRs for {call_ref} (StayDead: primary never reclaimed, CDR is \
+         the accepted loss); got {cdrs} — a backup illegally discharged",
+    );
+    let total = limiter.stats().current_total;
+    assert_eq!(
+        total, 0,
+        "limiter hold for {call_ref} not released by the backup auto-cleanup: \
+         current_total = {total} ({} = leaked / pinned, {} = double release)",
         if total > 0 { "positive" } else { "" },
         if total < 0 { "negative" } else { "" },
     );

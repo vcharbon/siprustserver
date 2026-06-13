@@ -128,14 +128,15 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    // Model Y (amends ADR-0020 X3): the takeover backup DEFERS the discharge — it
-    // answers the wire but does NOT release the limiter itself (the primary is the
-    // sole discharge authority). With the primary crashed and never rebooting, the
-    // backup is the DURABLE HOLDER: the deferred terminal's alive-timer (short TTL)
-    // expires and the reap discharges it, releasing the hold. So the release is
-    // deferred to the fallback, not immediate — pump the mutualised settle past it.
+    // Model Y (ADR-0020 X3): the takeover backup DEFERS the discharge — it answers
+    // the wire but writes NO CDR and does NOT release the limiter itself (the primary
+    // is the sole CDR authority). With the primary crashed and NEVER rebooting, the
+    // CDR is the accepted loss — BUT the backup must still not leak the limiter slot:
+    // once the deferral's replica TTL (`reboot_budget`) expires, the periodic reap
+    // releases the hold (no CDR) and frees the body. Pump past that TTL, then assert
+    // the limiter drained to 0 with zero CDRs and exactly one lost-CDR cleanup.
     let released = fh
-        .settle_terminal(async || store.stats().current_total == 0)
+        .settle_lossy_cleanup(async || store.stats().current_total == 0)
         .await;
     assert!(
         backup.metrics().creations_total() > creations_before,
@@ -143,7 +144,17 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
     );
     assert!(
         released,
-        "the takeover node released the limiter hold via its alive-timer fallback",
+        "the takeover node released the limiter hold via its lossy auto-cleanup reap",
+    );
+    assert_eq!(
+        w_b1.cdr_records().len() + w_b2.cdr_records().len(),
+        0,
+        "StayDead: primary never reclaimed, so NO CDR — the accepted loss",
+    );
+    assert_eq!(
+        w_b1.metrics().repl_terminal_lost_total() + w_b2.metrics().repl_terminal_lost_total(),
+        1,
+        "exactly one lost-CDR cleanup counted across the cluster",
     );
 
     // The unified seq-report (HTML + global.txt + replication.mmd) is emitted by

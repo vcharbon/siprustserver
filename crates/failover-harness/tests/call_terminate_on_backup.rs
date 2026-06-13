@@ -37,7 +37,10 @@ use b2bua::decision::{
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
 use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
-use failover_harness::{assert_call_fully_over, FailoverHarness, ProxySut, ReplicatedB2buaSut, WorkerHealth};
+use failover_harness::{
+    assert_call_fully_over, assert_call_lost_no_cdr, FailoverHarness, ProxySut, ReplicatedB2buaSut,
+    WorkerHealth,
+};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::{Agent, Dialog};
 use sip_clock::Clock;
@@ -371,8 +374,15 @@ async fn c4_bye_on_backup__primary_crashed__stay_dead() {
     bye.expect(200).await;
     let _ = &alice;
 
+    // StayDead (Model Y, ADR-0020 X3): the backup deferred a `Terminated` body and
+    // the primary CRASHED for good — it never reclaims. The primary is the sole CDR
+    // authority, so the CDR is LOST (the accepted double-failure). But the backup's
+    // periodic reap MUST still release the limiter hold + free the replica memory
+    // once the deferral's replica TTL (`reboot_budget`) expires. Advance past it so
+    // the reap runs, then assert the StayDead contract: NO CDR, limiter back to 0,
+    // no trace left.
     let _ = fh
-        .settle_terminal(async || {
+        .settle_lossy_cleanup(async || {
             store.stats().current_total == 0
                 && w_b1.memory_clean()
                 && w_b2.memory_clean()
@@ -380,13 +390,13 @@ async fn c4_bye_on_backup__primary_crashed__stay_dead() {
                 && !w_b2.holds_any_trace(&call_ref).await
         })
         .await;
-    // Keep alice/bob reading their sockets for a few seconds past the terminal so
-    // any SIP still in flight at teardown (a relayed final response, a redundant
-    // in-dialog BYE the owner 481s, a retransmit toward a silent peer) is delivered
-    // and consumed — never dropped into an about-to-close endpoint ("lost in
-    // transit") or left unread (a queueLeak at bind close).
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
-    assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
+    assert_call_lost_no_cdr(&[&w_b1, &w_b2], &call_ref, &store).await;
+    assert_eq!(
+        w_b1.metrics().repl_terminal_lost_total() + w_b2.metrics().repl_terminal_lost_total(),
+        1,
+        "exactly one lost-CDR cleanup counted across the cluster",
+    );
 }
 
 // =============================================================================
@@ -410,8 +420,13 @@ async fn c5_bye_on_backup__primary_crashed__peer_silent__stay_dead() {
     let _buas = bob.receive("BYE").await; // silent.
     let _ = &alice;
 
+    // StayDead + PEER SILENT: the backup deferred a `Terminating` body (b-leg BYE
+    // sent, no 200 from the silent peer) and the primary CRASHED for good. Same
+    // contract as C4 — CDR lost, but the backup's reap still releases the limiter +
+    // frees memory once the deferral TTL (`reboot_budget`) expires. This exercises
+    // the **Terminating** shape of the lossy cleanup.
     let _ = fh
-        .settle_terminal(async || {
+        .settle_lossy_cleanup(async || {
             store.stats().current_total == 0
                 && w_b1.memory_clean()
                 && w_b2.memory_clean()
@@ -419,13 +434,13 @@ async fn c5_bye_on_backup__primary_crashed__peer_silent__stay_dead() {
                 && !w_b2.holds_any_trace(&call_ref).await
         })
         .await;
-    // Keep alice/bob reading their sockets for a few seconds past the terminal so
-    // any SIP still in flight at teardown (a relayed final response, a redundant
-    // in-dialog BYE the owner 481s, a retransmit toward a silent peer) is delivered
-    // and consumed — never dropped into an about-to-close endpoint ("lost in
-    // transit") or left unread (a queueLeak at bind close).
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
-    assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
+    assert_call_lost_no_cdr(&[&w_b1, &w_b2], &call_ref, &store).await;
+    assert_eq!(
+        w_b1.metrics().repl_terminal_lost_total() + w_b2.metrics().repl_terminal_lost_total(),
+        1,
+        "exactly one lost-CDR cleanup counted across the cluster",
+    );
 }
 
 // =============================================================================
@@ -449,7 +464,11 @@ async fn c6_bye_on_backup__primary_crashed__reboot_reclaim() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     let _ = &alice;
-    fh.advance(Duration::from_millis(500)).await;
+
+    // Dead for 60 s — a real reboot gap, but well inside `reboot_budget` (600 s) so
+    // the backup's deferred `Terminated` is still held (NOT yet lossy-cleaned). The
+    // rebooting primary must reclaim it and discharge: ONE CDR, limiter back to 0.
+    fh.advance(Duration::from_secs(60)).await;
 
     {
         let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
@@ -466,13 +485,15 @@ async fn c6_bye_on_backup__primary_crashed__reboot_reclaim() {
                 && !w_b2.holds_any_trace(&call_ref).await
         })
         .await;
-    // Keep alice/bob reading their sockets for a few seconds past the terminal so
-    // any SIP still in flight at teardown (a relayed final response, a redundant
-    // in-dialog BYE the owner 481s, a retransmit toward a silent peer) is delivered
-    // and consumed — never dropped into an about-to-close endpoint ("lost in
-    // transit") or left unread (a queueLeak at bind close).
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
+    // The primary discharged on reclaim — the backup must NOT have lossy-cleaned it
+    // (the deferral was reclaimed well before its TTL), so no CDR was lost.
+    assert_eq!(
+        w_b1.metrics().repl_terminal_lost_total() + w_b2.metrics().repl_terminal_lost_total(),
+        0,
+        "reboot-within-budget reclaimed the deferral; no lossy cleanup should fire",
+    );
 }
 
 // =============================================================================
@@ -496,7 +517,12 @@ async fn c7_bye_on_backup__primary_crashed__peer_silent__reboot() {
     let _bye = dialog.bye().await;
     let _buas = bob.receive("BYE").await; // silent.
     let _ = &alice;
-    fh.advance(Duration::from_millis(500)).await;
+
+    // Dead for 60 s (inside `reboot_budget`): the backup holds a deferred
+    // **Terminating** body (b-leg BYE sent, no 200 from the silent peer). The
+    // rebooting primary must reclaim it, FORCE it terminal, and discharge: ONE CDR,
+    // limiter back to 0 — the Terminating shape of the reboot-reclaim discharge.
+    fh.advance(Duration::from_secs(60)).await;
 
     {
         let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
@@ -513,13 +539,14 @@ async fn c7_bye_on_backup__primary_crashed__peer_silent__reboot() {
                 && !w_b2.holds_any_trace(&call_ref).await
         })
         .await;
-    // Keep alice/bob reading their sockets for a few seconds past the terminal so
-    // any SIP still in flight at teardown (a relayed final response, a redundant
-    // in-dialog BYE the owner 481s, a retransmit toward a silent peer) is delivered
-    // and consumed — never dropped into an about-to-close endpoint ("lost in
-    // transit") or left unread (a queueLeak at bind close).
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
+    // Reclaimed within budget → no lossy cleanup, no lost CDR.
+    assert_eq!(
+        w_b1.metrics().repl_terminal_lost_total() + w_b2.metrics().repl_terminal_lost_total(),
+        0,
+        "reboot-within-budget reclaimed the deferral; no lossy cleanup should fire",
+    );
 }
 
 // =============================================================================

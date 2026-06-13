@@ -329,9 +329,21 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
     // served transaction's terminal state — Timer H/J absorb the final ACK /
     // retransmits (~32 s) — so the settle budget must outlast it (instant under the
     // paused clock). Wait for both the limiter to drain AND both nodes to go clean.
+    //
+    // StayDead variant (Model Y, ADR-0020 X3): the backup deferred the terminal and
+    // the primary never reclaims, so NOTHING drains until the deferral's replica TTL
+    // (`reboot_budget`, 600 s) expires and the periodic reap does the lossy cleanup
+    // (limiter released, memory freed, NO CDR). So this run needs a settle budget
+    // past `reboot_budget`; every other run drains in the fast ~50 s window.
+    let stay_dead_variant = inject && cell.recovery == Recovery::StayDead;
+    let (step, max_iters) = if stay_dead_variant {
+        (Duration::from_secs(30), 24) // 24 × 30 s = 720 s > reboot_budget + margin
+    } else {
+        (Duration::from_millis(200), 250) // 250 × 200 ms = 50 s
+    };
     let mut limiter_total = store.stats().current_total;
-    for _ in 0..250 {
-        fh.advance(Duration::from_millis(200)).await;
+    for _ in 0..max_iters {
+        fh.advance(step).await;
         limiter_total = store.stats().current_total;
         let nodes_clean = primary.active_calls() == 0
             && primary.lock_count() == 0
@@ -349,6 +361,11 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
         ],
         cdr_count: primary.cdr_records().len() + backup.cdr_records().len(),
         limiter_total,
+        // A StayDead failover loses the CDR (accepted double-failure): the backup
+        // never discharges and the dead primary never reclaims, so this run must end
+        // with ZERO CDRs. Every other run (incl. the StayDead BASELINE, which has no
+        // injected fault) ends normally with exactly one.
+        expect_cdr: !stay_dead_variant,
     };
     obs.disposition = disposition_of(primary, backup);
 

@@ -81,6 +81,14 @@ struct Inner {
     // and the active/sipp gap reaps to ~0.
     repl_reclaimed: AtomicU64,
     repl_self_release: AtomicU64,
+    // Model Y (ADR-0020 X3): a backup-held deferred terminal whose primary never
+    // came back to reclaim it (crashed for good, past the replica TTL). The backup
+    // is NOT a discharge authority, so its periodic reap releases the call's limiter
+    // hold(s) + frees the replica memory but writes **no CDR** — the CDR accounting
+    // is the accepted loss of the double-failure (primary down AND never returns).
+    // This counter is that lost-CDR count: it should stay ~0 in a healthy cluster
+    // and only climbs when a primary is permanently lost mid-call.
+    repl_terminal_lost: AtomicU64,
     // Re-hydration diagnostics (long-call-on-reboot study, 2026-06-05). How a
     // rebooted primary's bootstrap passes terminate: `seeded` = a pass reached
     // the first catch-up `Noop` (the peer streamed the full `bak:{me}` keyset);
@@ -226,6 +234,7 @@ impl B2buaMetrics {
     counter!(bump_repl_takeover_hydrated, repl_takeover_hydrated_total, repl_takeover_hydrated);
     counter!(bump_repl_reclaimed, repl_reclaimed_total, repl_reclaimed);
     counter!(bump_repl_self_release, repl_self_release_total, repl_self_release);
+    counter!(bump_repl_terminal_lost, repl_terminal_lost_total, repl_terminal_lost);
     counter!(bump_repl_bootstrap_seeded, repl_bootstrap_seeded_total, repl_bootstrap_seeded);
     counter!(bump_repl_bootstrap_stalled, repl_bootstrap_stalled_total, repl_bootstrap_stalled);
 
@@ -391,6 +400,7 @@ impl B2buaMetrics {
         counter("b2bua_repl_takeover_hydrated_total", "calls hydrated from a backup replica to serve a failed-over request", self.repl_takeover_hydrated_total());
         counter("b2bua_repl_reclaimed_total", "calls a rebooted primary re-materialised into its live map + re-armed (active reclaim, ADR-0011 X11)", self.repl_reclaimed_total());
         counter("b2bua_repl_self_release_total", "acting-backup takeover copies self-released once their served transaction(s) reached a terminal state (ADR-0014, replaces the Deactivate handback)", self.repl_self_release_total());
+        counter("b2bua_repl_terminal_lost_total", "backup-held deferred terminals whose primary never reclaimed them (dead past the replica TTL): limiter released + memory freed by the periodic reap, but NO CDR — the accepted lost-CDR double-failure (ADR-0020 X3)", self.repl_terminal_lost_total());
         counter("b2bua_repl_bootstrap_seeded_total", "rebooted-primary bootstrap passes that reached the first catch-up Noop (peer streamed the full bak:{me} keyset)", self.repl_bootstrap_seeded_total());
         counter("b2bua_repl_bootstrap_stalled_total", "rebooted-primary bootstrap passes that hit the bootstrap hard deadline before the first Noop (best-effort completion; keeps streaming on the same socket)", self.repl_bootstrap_stalled_total());
 

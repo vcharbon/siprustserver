@@ -302,13 +302,13 @@ impl B2buaCore {
         //   1. the reaper sweep (ADR-0020): scan the last-touched ledger + inject
         //      verdicts through the re-entry channel — `maybe_sweep` is a no-op for
         //      a disabled reaper.
-        //   2. the Model-Y backup-durable-fallback reap (FixCallTerminateOnBackup
-        //      §9; amends ADR-0020 X3 / ADR-0014): discharge a deferred-terminal
-        //      `bak:` Element whose alive-timer expired because the primary never
-        //      reconciled it (crashed for good), then evict the leftover ghosts. A
-        //      durability backstop, NOT a reconciliation timer — a live primary
-        //      always wins first via its prompt reverse-flush reconcile +
-        //      forward-delete. No-op without a replicating store.
+        //   2. the Model-Y replica-store maintenance (FixCallTerminateOnBackup §9;
+        //      ADR-0020 X3): physically evict expired replica bodies (missed-delete
+        //      ghosts AND a deferred terminal whose primary never reclaimed it) and
+        //      prune resurrection tombstones. **No discharge** — the primary is the
+        //      sole discharge authority; a deferred terminal the primary never comes
+        //      back to reclaim is silently evicted, its CDR/limiter cleanup lost (the
+        //      accepted double-failure). No-op without a replicating store.
         // The two gates are independent (reaper `enabled` vs replica store present),
         // so neither disabling the reaper nor running without HA suppresses the
         // other. The harness `advance` drives both under the paused clock.
@@ -327,7 +327,7 @@ impl B2buaCore {
                     tick.tick().await;
                     let now_ms = ctx2.clock.now_ms();
                     reaper.maybe_sweep(&state, &dispatcher, now_ms);
-                    router::reap_expired_terminals(&ctx2, now_ms).await;
+                    router::reap_expired_replicas(&ctx2, now_ms).await;
                 }
             }));
         }

@@ -1042,6 +1042,25 @@ impl FailoverHarness {
         false
     }
 
+    /// Like [`settle_terminal`](Self::settle_terminal) but pumps past the deferral's
+    /// replica TTL (`reboot_budget`, 600 s) so the Model-Y backup auto-cleanup reap
+    /// has fired: a never-reclaimed deferred terminal has its limiter hold released
+    /// and its body evicted only once that TTL expires. The StayDead cells need this
+    /// because NOTHING drains until then. Coarse 30 s steps (the reap cadence is
+    /// 30 s) to `reboot_budget` + margin; stops as soon as `drained` holds.
+    pub async fn settle_lossy_cleanup(&self, mut drained: impl AsyncFnMut() -> bool) -> bool {
+        let step = Duration::from_secs(30);
+        let mut elapsed = Duration::ZERO;
+        while elapsed < Duration::from_secs(720) {
+            if drained().await {
+                return true;
+            }
+            self.advance(step).await;
+            elapsed += step;
+        }
+        drained().await
+    }
+
     /// **Post-terminal peer linger** — keep the named peer UAs' sockets open and
     /// *reading* for `window` of virtual time after the scenario's logical end, so
     /// any SIP still in flight at teardown is delivered AND consumed instead of

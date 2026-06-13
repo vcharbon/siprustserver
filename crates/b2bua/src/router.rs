@@ -269,30 +269,59 @@ async fn discharge_folded_terminal(
     process_result(ctx, call_ref, result, now_ms).await;
 }
 
-/// **Model-Y backup-durable-fallback** (the only thing genuinely-primary-dead cells
-/// need; everything else is cleaned promptly by the propagated data-delete). A
-/// backup defers its terminal to the primary; if the primary never reconciles it
-/// (crashed for good), the deferred-terminal `bak:` Element's **alive-timer** (the
-/// per-Element TTL, refreshed by primary updates) expires. On expiry the backup —
-/// now the durable holder — discharges it through the ONE funnel: one CDR, limiter
-/// released, the delete propagated. Whatever has expired but is NOT a deferred
-/// terminal is the missed-delete ghost the plain reap evicts silently.
-///
-/// This is a durability backstop, NOT a reconciliation timer (ADR-0014): the live
-/// primary always wins via its prompt reverse-flush reconcile + forward-delete; this
-/// only fires when there IS no live primary. `discharge_result` FORCES the snapshot
-/// terminal first, so a deferral caught mid-teardown (`Terminating`, peer-silent) is
-/// resolved too. Spawned as a paced task by `b2bua_core`.
-pub(crate) async fn reap_expired_terminals(ctx: &Arc<RouterCtx>, now_ms: i64) {
+/// Periodic replica-store maintenance. **No CDR is ever written here** — the
+/// acting-backup terminal contract (ADR-0020 X3) makes the **primary the sole CDR
+/// authority**: a backup never discharges (no CDR, no delete propagation), *not even*
+/// as a durable fallback. But a deferred terminal whose primary never came back to
+/// reclaim it (crashed for good, past the replica TTL = `reboot_budget`) must NOT be
+/// left to pin its limiter slot or leak its replica body forever. So this pass, in
+/// order:
+///   1. for each **expired deferred terminal**, release the call's limiter hold(s)
+///      (the body carries `limiter_entries`; this is the SAME decrement the discharge
+///      funnel would emit) and count it as a lost-CDR cleanup — the accepted
+///      double-failure (primary down AND never returns): limiter freed, memory freed,
+///      **CDR lost**.
+///   2. `reap_replica` then physically evicts every expired body (the just-released
+///      terminals + the missed-delete ghosts) and prunes the resurrection tombstones.
+/// A primary that reboots *inside* `reboot_budget` reclaims and discharges first, then
+/// its propagated delete evicts the backup's copy — so the reclaim-discharge and this
+/// lossy cleanup are mutually exclusive by the TTL boundary (no double limiter
+/// release). Spawned as a paced task by `b2bua_core`.
+pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
     for terminal in ctx.state.expired_terminal_fallbacks(now_ms).await {
-        let call_ref = terminal.call_ref.clone();
-        let _guard = ctx.state.lock(&call_ref).await;
-        // `force_terminal` so a deferral caught mid-teardown (`Terminating`,
-        // peer-silent) is forced terminal by `discharge_result`.
-        discharge_materialized_terminal(ctx, &call_ref, terminal, now_ms, true).await;
+        // No per-call lock: this is a `bak:` Element the backup self-released (never
+        // in the live map), and the backup never reclaims its own backup partition
+        // (`reclaim_scan` reads `pri:{self}`), so there is no concurrent writer to
+        // serialize against — and taking the lock would leak a `locks` map entry
+        // (only `release_call`/`discard_orphan` clear it). The decoded snapshot is
+        // all the limiter release needs; `reap_replica` then evicts the body.
+        release_orphaned_limiter_holds(ctx, &terminal).await;
+        ctx.metrics.bump_repl_terminal_lost();
     }
-    // Evict the leftover (non-terminal missed-delete ghosts + already-discharged).
+    // Evict the leftover: the deferred terminals just limiter-released + the
+    // non-terminal missed-delete ghosts. Frees the replica memory (no CDR).
     ctx.state.reap_replica(now_ms).await;
+}
+
+/// Release the cluster-wide limiter hold(s) a never-reclaimed deferred terminal
+/// still owns, WITHOUT writing a CDR or propagating a delete. Mirrors the
+/// `LimiterObligations` derivation (skip fail-open admissions) so the decrement
+/// matches the increment the primary made on admission exactly once. The backup is
+/// the only node that can free this slot once its primary is dead for good.
+async fn release_orphaned_limiter_holds(ctx: &Arc<RouterCtx>, call: &Call) {
+    use crate::limiter::LimiterHold;
+    let holds: Vec<LimiterHold> = call
+        .limiter_entries
+        .iter()
+        .filter(|e| e.increment_succeeded != Some(false))
+        .map(|e| LimiterHold {
+            limiter_id: e.limiter_id.clone(),
+            window: e.origin_window,
+        })
+        .collect();
+    if !holds.is_empty() {
+        ctx.limiter.release(&holds).await;
+    }
 }
 
 /// The ADR-0014 **Reverse** `(p,b)` apply rule for a live-map fold: the
@@ -465,13 +494,24 @@ async fn reclaim_into_live(
     // `process` does, so a concurrent dispatcher handler for this call_ref cannot
     // interleave and double-arm.
     let _guard = ctx.state.lock(&call_ref).await;
-    // A reclaimed body that is already Terminated is a backup's DEFERRED terminal
+    // A reclaimed body that is already terminal is a backup's DEFERRED terminal
     // (Model Y): the backup served the BYE/CANCEL while we were down and never
-    // discharged it. Discharge it now — write the CDR, release the limiter,
-    // propagate the delete — instead of re-serving a dead dialog (which would arm
-    // keepalives on it and leak). Covers C6/C7 (crash → reboot → reclaim).
-    if call.state == CallModelState::Terminated {
-        discharge_materialized_terminal(ctx, &call_ref, call, ctx.clock.now_ms(), false).await;
+    // discharged it (the primary is the sole discharge authority — ADR-0020 X3).
+    // Discharge it now on rehydration — write the CDR, release the limiter, propagate
+    // the delete — instead of re-serving a dead dialog (which would arm keepalives on
+    // it and leak). BOTH terminal shapes are handled here, which is the whole point
+    // of "proper management on re-hydration":
+    //   - `Terminated` (C6: the backup got the b-leg BYE 200) → discharge the body's
+    //     own real BYE CDR as-is (`force_terminal = false`).
+    //   - `Terminating` (C7: the b-leg peer was SILENT, so the backup deferred a
+    //     teardown-in-progress before self-releasing) → FORCE every leg terminal +
+    //     synthesise the CDR (`force_terminal = true`, via `reaper::discharge_result`),
+    //     so the half-torn-down dialog is completed on the primary rather than
+    //     re-served as a live call that would re-probe a dead peer.
+    if matches!(call.state, CallModelState::Terminated | CallModelState::Terminating) {
+        let force_terminal = call.state == CallModelState::Terminating;
+        discharge_materialized_terminal(ctx, &call_ref, call, ctx.clock.now_ms(), force_terminal)
+            .await;
         return true;
     }
     // A keepalive OPTIONS transaction caught mid-flight in the replicated
@@ -616,20 +656,22 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
                     //     reverse-flushed in `process_result` (the Active|Terminating
                     //     flush gate; a Terminated copy was already deferred there).
                     //     The primary discharges it EXACTLY ONCE — immediately if it
-                    //     is alive and reconciling, on reboot via reclaim, or via the
-                    //     replica-TTL fallback if it never returns. This replaces
-                    //     a2dcf4c's discharge-here: the backup discharging too was the
-                    //     C7 double-CDR. The "stale Active replica re-terminates"
-                    //     storm a2dcf4c fixed is gone a different way — the replica is
-                    //     reverse-flushed Terminating/Terminated, never Active.
+                    //     is alive and reconciling, or on reboot via reclaim. If the
+                    //     primary never returns inside the replica TTL the deferral is
+                    //     silently evicted, CDR/limiter lost (accepted double-failure).
+                    //     This replaces a2dcf4c's discharge-here: the backup
+                    //     discharging too was the C7 double-CDR. The "stale Active
+                    //     replica re-terminates" storm a2dcf4c fixed is gone a
+                    //     different way — the replica is reverse-flushed
+                    //     Terminating/Terminated, never Active.
                     if let Some(call) = ctx.state.peek(&call_ref) {
                         if matches!(call.state, CallModelState::Terminating | CallModelState::Terminated) {
                             // Belt-and-braces reverse-flush of the terminal state (a
                             // Terminated copy skips the process_result flush gate) so
-                            // the primary's reconcile/reclaim/fallback has it — stamped
-                            // with the short defer grace as its alive-timer TTL.
-                            ctx.state
-                                .flush_with_ttl(&call, ctx.config.keepalive_timeout_sec * 1000);
+                            // the primary's reconcile/reclaim has it — held with the
+                            // normal replica TTL (`reboot_budget`) so a rebooting
+                            // primary has its full window to reclaim and discharge.
+                            ctx.state.flush(&call);
                         }
                     }
                     release_call(ctx, &call_ref, ReleaseKind::SelfRelease).await;
@@ -1207,19 +1249,20 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
     // (`reconcile_reverse_flush`) folds it in and discharges it **exactly once** —
     // then self-releases its live copy. It writes **NO** CDR, releases **NO**
     // limiter hold, propagates **NO** delete here (that is the primary's sole
-    // authority). If the primary never reconciles (crashed for good), the retained
-    // `bak:` replica discharges via its alive-timer (replica-TTL) fallback. This
-    // replaces a2dcf4c's discharge-on-CallQuiesced for a takeover copy: the backup
-    // is never an independent CDR/limiter writer, so exactly-once holds by
-    // construction (no cross-node idempotency). A primary-served (non-takeover)
-    // terminal falls through to the normal discharge below.
+    // authority). If the primary never reconciles (crashed for good, never returning
+    // inside the replica TTL), the retained `bak:` replica is silently evicted by the
+    // periodic reap and the CDR/limiter cleanup is LOST — the accepted double-failure
+    // (primary down AND never returns). This replaces a2dcf4c's
+    // discharge-on-CallQuiesced for a takeover copy: the backup is never an
+    // independent CDR/limiter writer, so exactly-once holds by construction (no
+    // cross-node idempotency). A primary-served (non-takeover) terminal falls through
+    // to the normal discharge below.
     if result.call.state == CallModelState::Terminated && ctx.state.is_takeover(call_ref) {
-        // Reverse-flush the Terminated body with the SHORT defer grace as its TTL
-        // (the alive-timer): a live primary reconciles + forward-deletes it within ~1
-        // poll, so the grace never fires; a dead primary never does, so it expires and
-        // the reap discharges it (the backup-durable-fallback).
-        ctx.state
-            .flush_with_ttl(&result.call, ctx.config.keepalive_timeout_sec * 1000);
+        // Reverse-flush the Terminated body held with the normal replica TTL
+        // (`reboot_budget`): a live primary reconciles + forward-deletes it within ~1
+        // poll; a rebooting primary still has its full reclaim window to fold and
+        // discharge it. The primary is the sole discharge authority either way.
+        ctx.state.flush(&result.call);
         release_call(ctx, call_ref, ReleaseKind::SelfRelease).await;
         return;
     }

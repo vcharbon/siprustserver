@@ -461,11 +461,10 @@ impl CallState {
     }
 
     /// Like [`peek_reclaimable`](Self::peek_reclaimable) but a **non-evicting**
-    /// read (`peek_body_raw`): a reverse-flushed *terminal* that has hit its short
-    /// defer grace must NOT be destroyed on read — the backup-durable fallback
-    /// (`reap_expired_terminals`, also a `peek_body_raw` reader) still needs to
-    /// decode and discharge it. The evicting `get_call` would physically delete it,
-    /// stranding the CDR for BOTH paths. Used by the reverse-flush reconcile.
+    /// read (`peek_body_raw`): a reverse-flushed *terminal* the live primary is about
+    /// to fold must NOT be destroyed on read — the evicting `get_call` would
+    /// physically delete it, stranding the CDR the reconcile is about to write. Used
+    /// by the reverse-flush reconcile.
     pub async fn peek_reclaimable_raw(&self, call_ref: &str) -> Option<Call> {
         self.peek_reclaimable_inner(call_ref, false).await
     }
@@ -484,22 +483,23 @@ impl CallState {
         self.codec.decode(&body).ok()
     }
 
-    /// **Model-Y backup-durable-fallback read-path.** Decode every expired Element
-    /// whose body is a **deferred terminal** (`Terminating`/`Terminated`) — a
-    /// backup served a BYE/CANCEL and deferred the discharge to the primary, but
-    /// the primary never came back to reconcile it (crashed for good), so the
-    /// alive-timer (per-Element TTL, refreshed by primary updates) expired. The
-    /// router discharges each through the funnel; the rest the plain `reap` evicts.
-    /// Excludes non-terminal expired Elements (those are the missed-delete ghosts
-    /// `reap` already handles silently). Empty when no replicating store is wired.
+    /// **Model-Y orphaned-deferred-terminal read-path.** Decode every **expired**
+    /// Element whose body is a deferred terminal (`Terminating`/`Terminated`) — a
+    /// backup served a BYE/CANCEL and deferred the discharge to the primary, but the
+    /// primary never came back to reclaim it inside the replica TTL (crashed for
+    /// good). The router does **not** discharge these (the primary is the sole CDR
+    /// authority); instead it releases the call's limiter hold(s) and lets
+    /// [`reap_replica`] free the memory, writing **no CDR** (the accepted lost-CDR
+    /// double-failure). A non-evicting [`peek_body_raw`] read so the body survives
+    /// for the limiter release before `reap_replica` evicts it in the same pass.
+    /// Excludes non-terminal expired Elements (missed-delete ghosts `reap` evicts
+    /// silently). Empty when no replicating store is wired.
     pub async fn expired_terminal_fallbacks(&self, now_ms: i64) -> Vec<Call> {
         let Some(repl) = self.repl_store.as_ref() else {
             return Vec::new();
         };
         let mut out = Vec::new();
         for (call_ref, role, primary) in repl.expired_refs(now_ms) {
-            // RAW read — `get_call` would lazily EVICT the expired body and return
-            // None, silently dropping the deferred terminal before we can discharge.
             if let Some(body) = repl.peek_body_raw(role, &primary, &call_ref).await {
                 if let Ok(call) = self.codec.decode(&body) {
                     if matches!(
@@ -514,11 +514,13 @@ impl CallState {
         out
     }
 
-    /// Physically evict expired replica bodies + changelog tombstones (the
-    /// missed-delete ghost backstop, ADR-0014). Call AFTER discharging any expired
-    /// deferred-terminals (`expired_terminal_fallbacks`) so their CDR/limiter are
-    /// settled first; this then silently reaps whatever is left. No-op without a
-    /// replicating store.
+    /// Physically evict expired replica bodies + changelog tombstones + prune
+    /// resurrection tombstones (the missed-delete ghost backstop, ADR-0014). Under
+    /// Model Y a deferred terminal whose primary never reclaimed it (crashed for
+    /// good) is also evicted here — but only **after** the router has released its
+    /// limiter hold(s) via [`expired_terminal_fallbacks`]; the eviction itself frees
+    /// the replica memory with **no CDR** (the accepted double-failure). No-op
+    /// without a replicating store.
     pub async fn reap_replica(&self, now_ms: i64) {
         if let Some(repl) = self.repl_store.as_ref() {
             repl.reap(now_ms).await;

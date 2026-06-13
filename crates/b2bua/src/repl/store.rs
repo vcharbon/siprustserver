@@ -167,13 +167,12 @@ impl ReplicatingCallStore {
             .collect()
     }
 
-    /// Snapshot `(call_ref, role, primary)` for every Element whose alive-timer
-    /// (the per-Element TTL, refreshed on each primary update) has **expired** at
-    /// `now`. The Model-Y backup-durable-fallback reads this to discharge a
-    /// deferred-terminal `bak:` Element whose primary never came back to reconcile
-    /// it: the body is still here (not yet reaped), so the caller can decode it,
-    /// confirm it is terminal, and run it through the discharge funnel before the
-    /// plain [`reap`](Self::reap) silently evicts it. Pure read; no body touched.
+    /// Snapshot `(call_ref, role, primary)` for every Element whose alive-timer (the
+    /// per-Element TTL, refreshed on each primary update) has **expired** at `now`.
+    /// The Model-Y orphaned-deferred-terminal cleanup reads this to find a deferred
+    /// terminal whose primary never reclaimed it (so the backup can release its
+    /// limiter hold before the body is reaped); the plain [`reap`](Self::reap) then
+    /// evicts whatever is left. Pure read; no body touched.
     pub fn expired_refs(&self, now_ms: i64) -> Vec<(String, PartitionRole, String)> {
         let meta = self.meta.lock().unwrap();
         meta.iter()
@@ -183,10 +182,11 @@ impl ReplicatingCallStore {
     }
 
     /// Read a body bypassing the lazy-TTL eviction. [`get_call`](Self::get_call)
-    /// evicts (and returns `None` for) an expired body on access — fatal for the
-    /// backup-durable-fallback, which must DECODE an EXPIRED deferred-terminal in
-    /// order to discharge it (else `get_call` silently evicts it → lost CDR). Pure
-    /// read of the backing store; no eviction, no meta change.
+    /// evicts (and returns `None` for) an expired body on access; the live
+    /// reverse-flush reconcile reads through here ([`peek_reclaimable_raw`]), and the
+    /// orphaned-deferred-terminal cleanup reads an EXPIRED body here, so neither is
+    /// destroyed on read before it is handled. Pure read of the backing store; no
+    /// eviction, no meta change.
     pub async fn peek_body_raw(
         &self,
         role: PartitionRole,
