@@ -295,25 +295,29 @@ impl B2buaCore {
             reentry_rx,
             repl_rx,
         )));
-        // The reaper sweep (ADR-0020): scans the last-touched ledger and injects
-        // verdicts through the re-entry channel. Inert when disabled; aborted by
-        // the harness `crash()` like the router/serve loops.
-        tasks.push(reaper.spawn_sweep(
-            ctx.state.clone(),
-            ctx.dispatcher.clone(),
-            ctx.clock.clone(),
-        ));
-        // Model-Y backup-durable-fallback reap (FixCallTerminateOnBackup §9; amends
-        // ADR-0020 X3 / ADR-0014): periodically discharge a deferred-terminal `bak:`
-        // Element whose alive-timer (per-Element TTL, refreshed by primary updates)
-        // expired because the primary never reconciled it (crashed for good), and
-        // evict the leftover ghosts. A durability backstop, NOT a reconciliation
-        // timer — a live primary always wins first via its prompt reverse-flush
-        // reconcile + forward-delete. No-op without a replicating store. Paced like
-        // the reaper sweep; the harness `advance` drives it under the paused clock.
+        // The single periodic sweep task, driving two concerns off ONE
+        // `tokio::time::interval` (was two tasks at the same cadence — racy under
+        // the paused clock, redundant timers). Aborted by the harness `crash()`
+        // like the router/serve loops. Per tick, in order:
+        //   1. the reaper sweep (ADR-0020): scan the last-touched ledger + inject
+        //      verdicts through the re-entry channel — `maybe_sweep` is a no-op for
+        //      a disabled reaper.
+        //   2. the Model-Y backup-durable-fallback reap (FixCallTerminateOnBackup
+        //      §9; amends ADR-0020 X3 / ADR-0014): discharge a deferred-terminal
+        //      `bak:` Element whose alive-timer expired because the primary never
+        //      reconciled it (crashed for good), then evict the leftover ghosts. A
+        //      durability backstop, NOT a reconciliation timer — a live primary
+        //      always wins first via its prompt reverse-flush reconcile +
+        //      forward-delete. No-op without a replicating store.
+        // The two gates are independent (reaper `enabled` vs replica store present),
+        // so neither disabling the reaper nor running without HA suppresses the
+        // other. The harness `advance` drives both under the paused clock.
         {
+            let reaper = reaper.clone();
+            let state = ctx.state.clone();
+            let dispatcher = ctx.dispatcher.clone();
             let ctx2 = ctx.clone();
-            let interval_ms = ctx.config.reaper_sweep_interval_sec.max(1) as u64 * 1000;
+            let interval_ms = reaper.sweep_interval_ms();
             tasks.push(tokio::spawn(async move {
                 let mut tick =
                     tokio::time::interval(std::time::Duration::from_millis(interval_ms));
@@ -321,7 +325,9 @@ impl B2buaCore {
                 tick.tick().await; // skip the immediate first tick
                 loop {
                     tick.tick().await;
-                    router::reap_expired_terminals(&ctx2, ctx2.clock.now_ms()).await;
+                    let now_ms = ctx2.clock.now_ms();
+                    reaper.maybe_sweep(&state, &dispatcher, now_ms);
+                    router::reap_expired_terminals(&ctx2, now_ms).await;
                 }
             }));
         }

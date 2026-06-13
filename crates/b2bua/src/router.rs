@@ -159,7 +159,9 @@ async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
 /// fold. Idempotent: `update` bumps our `p`, so a re-delivered flush no longer
 /// dominates.
 async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str) {
-    let Some(replica) = ctx.state.peek_reclaimable(call_ref).await else {
+    // Non-evicting read: an expired reverse-flushed terminal must not be destroyed
+    // on access — the backup-durable fallback still needs to discharge it (#7).
+    let Some(replica) = ctx.state.peek_reclaimable_raw(call_ref).await else {
         return;
     };
     // Not-live + non-terminal is the original reactive-straggler path; it manages
@@ -197,26 +199,51 @@ async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str) {
         // reactive straggler equivalent of the reboot-reclaim terminal): discharge.
         None => {
             if replica.state == CallModelState::Terminated {
-                discharge_reclaimed_terminal(ctx, call_ref, replica, now_ms).await;
+                discharge_materialized_terminal(ctx, call_ref, replica, now_ms, false).await;
             }
         }
     }
 }
 
-/// Discharge a `Terminated` body we do NOT hold live — a backup's deferred
-/// terminal reclaimed on reboot (bulk `ReclaimAll`) or reverse-flushed after we
-/// released it. Materialise it first so `backup_of` resolves and the propagated
-/// delete reaches the peer, then discharge through the funnel with a synthetic
-/// non-terminal `before` (the body is already Terminated, so the live `→
-/// Terminated` edge must be synthesised — see [`discharge_folded_terminal`]).
-/// The caller MUST hold the per-call lock. No-op if already resident (idempotent
-/// reclaim re-pass).
-async fn discharge_reclaimed_terminal(ctx: &Arc<RouterCtx>, call_ref: &str, terminal: Call, now_ms: i64) {
-    if ctx.state.materialize_if_absent(terminal.clone()) {
-        let mut before = terminal.clone();
-        before.state = CallModelState::Active;
-        discharge_folded_terminal(ctx, call_ref, &before, terminal, now_ms).await;
+/// Materialise a not-live deferred-terminal body and discharge it through the ONE
+/// funnel with a synthetic non-terminal `before` so `enforce`'s `became_terminated`
+/// edge fires (the body is already terminal, so the edge must be synthesised). The
+/// single materialise + synth-`before` + enforce + `process_result` site, shared by
+/// every "discharge a body we don't hold live" caller:
+///   - the reverse-flush reconcile (a backup's deferral for a call we released) and
+///     the reboot bulk/on-demand reclaim of a `Terminated` body → `force_terminal =
+///     false`: the body already carries its real BYE CDR, so discharge it as-is.
+///   - the backup-durable fallback (`reap_expired_terminals`) → `force_terminal =
+///     true`: routes through `reaper::discharge_result`, which FORCES every leg
+///     terminal + appends a synthetic CDR, so a deferral caught mid-teardown
+///     (`Terminating`, peer-silent) is resolved too.
+///
+/// Materialise-first so `backup_of` resolves and the propagated delete reaches the
+/// peer. The caller MUST hold the per-call lock. No-op if already resident
+/// (idempotent reclaim/reap re-pass — `materialize_if_absent` returns false).
+async fn discharge_materialized_terminal(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    terminal: Call,
+    now_ms: i64,
+    force_terminal: bool,
+) {
+    if !ctx.state.materialize_if_absent(terminal.clone()) {
+        return;
     }
+    let mut before = terminal.clone();
+    before.state = CallModelState::Active; // synth non-terminal → became_terminated fires
+    let discharged = if force_terminal {
+        crate::reaper::discharge_result(terminal, now_ms)
+    } else {
+        crate::effects::HandlerResult::new(terminal)
+    };
+    let result = crate::rules::invariants::enforce(
+        &ctx.obligations,
+        &before,
+        crate::rules::invariants::finalize(discharged),
+    );
+    process_result(ctx, call_ref, result, now_ms).await;
 }
 
 /// Discharge an already-`Terminated` body (a backup's deferred terminal, folded
@@ -260,16 +287,9 @@ pub(crate) async fn reap_expired_terminals(ctx: &Arc<RouterCtx>, now_ms: i64) {
     for terminal in ctx.state.expired_terminal_fallbacks(now_ms).await {
         let call_ref = terminal.call_ref.clone();
         let _guard = ctx.state.lock(&call_ref).await;
-        if ctx.state.materialize_if_absent(terminal.clone()) {
-            let mut before = terminal.clone();
-            before.state = CallModelState::Active; // synth non-terminal → became_terminated fires
-            let result = crate::rules::invariants::enforce(
-                &ctx.obligations,
-                &before,
-                crate::rules::invariants::finalize(crate::reaper::discharge_result(terminal, now_ms)),
-            );
-            process_result(ctx, &call_ref, result, now_ms).await;
-        }
+        // `force_terminal` so a deferral caught mid-teardown (`Terminating`,
+        // peer-silent) is forced terminal by `discharge_result`.
+        discharge_materialized_terminal(ctx, &call_ref, terminal, now_ms, true).await;
     }
     // Evict the leftover (non-terminal missed-delete ghosts + already-discharged).
     ctx.state.reap_replica(now_ms).await;
@@ -451,7 +471,7 @@ async fn reclaim_into_live(
     // propagate the delete — instead of re-serving a dead dialog (which would arm
     // keepalives on it and leak). Covers C6/C7 (crash → reboot → reclaim).
     if call.state == CallModelState::Terminated {
-        discharge_reclaimed_terminal(ctx, &call_ref, call, ctx.clock.now_ms()).await;
+        discharge_materialized_terminal(ctx, &call_ref, call, ctx.clock.now_ms(), false).await;
         return true;
     }
     // A keepalive OPTIONS transaction caught mid-flight in the replicated
@@ -534,11 +554,12 @@ async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: ReleaseKind) {
 /// Force the last persisted snapshot of `call_ref` terminal and run it through
 /// the ordinary `finalize → enforce → process_result` funnel: the `ObligationSet`
 /// discharges the CDR + limiter holds, `RemoveCall` rides
-/// `release_call(Terminated)`, and the delete propagates. The single discharge
-/// implementation — reused by the reaper `OUTCOME_DISCHARGE` branch and the
-/// terminal self-release path (a `Terminating`/`Terminated` takeover copy whose
-/// served transactions have all cleared). `discharge_result` forces every leg
-/// terminal with NO wire traffic. The caller MUST hold the per-call lock.
+/// `release_call(Terminated)`, and the delete propagates. Now reached ONLY by the
+/// reaper `OUTCOME_DISCHARGE` branch — Model Y removed the terminal self-release
+/// caller (a takeover copy now DEFERS its discharge to the primary instead of
+/// discharging here; see the `CallQuiesced` handler and `process_result`).
+/// `discharge_result` forces every leg terminal with NO wire traffic. The caller
+/// MUST hold the per-call lock.
 async fn discharge_as_own(ctx: &Arc<RouterCtx>, call_ref: &str, now_ms: i64) {
     let Some(call) = ctx.state.peek(call_ref) else { return };
     let before = call.clone();

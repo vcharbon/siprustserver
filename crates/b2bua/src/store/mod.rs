@@ -451,13 +451,36 @@ impl CallState {
     /// reclaimable call from this node's `pri:{self}` partition — the flip-race
     /// straggler an acting-backup reverse-flushed *after* the bulk sweep. `None`
     /// if absent, not primary-role for `self`, or no replicating store.
+    ///
+    /// **Evicting** read: an expired body here is a genuinely-dead own call (its
+    /// active-replica TTL = `reboot_budget` elapsed without a refresh), so it must
+    /// NOT be re-served — let `get_call`'s lazy eviction reap it. The reverse-flush
+    /// reconcile path wants the opposite (see [`peek_reclaimable_raw`]).
     pub async fn peek_reclaimable(&self, call_ref: &str) -> Option<Call> {
+        self.peek_reclaimable_inner(call_ref, true).await
+    }
+
+    /// Like [`peek_reclaimable`](Self::peek_reclaimable) but a **non-evicting**
+    /// read (`peek_body_raw`): a reverse-flushed *terminal* that has hit its short
+    /// defer grace must NOT be destroyed on read — the backup-durable fallback
+    /// (`reap_expired_terminals`, also a `peek_body_raw` reader) still needs to
+    /// decode and discharge it. The evicting `get_call` would physically delete it,
+    /// stranding the CDR for BOTH paths. Used by the reverse-flush reconcile.
+    pub async fn peek_reclaimable_raw(&self, call_ref: &str) -> Option<Call> {
+        self.peek_reclaimable_inner(call_ref, false).await
+    }
+
+    async fn peek_reclaimable_inner(&self, call_ref: &str, evict: bool) -> Option<Call> {
         let repl = self.repl_store.as_ref()?;
         let (role, primary) = partition_of(&self.self_ordinal, call_ref);
         if role != PartitionRole::Primary {
             return None;
         }
-        let body = repl.get_call(role, &primary, call_ref).await.ok().flatten()?;
+        let body = if evict {
+            repl.get_call(role, &primary, call_ref).await.ok().flatten()?
+        } else {
+            repl.peek_body_raw(role, &primary, call_ref).await?
+        };
         self.codec.decode(&body).ok()
     }
 
@@ -582,6 +605,11 @@ impl CallState {
         // reconciled (FixCallTerminateOnBackup C2/C3/C11). Keep the body's embedded
         // version vector consistent with its `(p,b)`.
         let body = match call.topology.as_ref() {
+            // Already consistent (the common path — `call` IS the authoritative
+            // copy, e.g. a fresh flush) → encode it directly, no clone.
+            Some(t) if t.gen == call_gen && t.bak_gen == call_bgen => self.codec.encode(call),
+            // A pre-`update` clone whose counters are one bump stale → patch the
+            // embedded `(p,b)` to the authoritative value before encoding.
             Some(_) => {
                 let mut consistent = call.clone();
                 if let Some(t) = consistent.topology.as_mut() {

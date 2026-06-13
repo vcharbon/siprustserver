@@ -29,7 +29,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use call::{ByeDisposition, Call, CallModelState, CdrEvent, CdrEventType, LegState};
-use sip_clock::Clock;
 use tokio::sync::mpsc;
 
 use crate::dispatch::{HandlerFailure, PerCallDispatcher};
@@ -127,28 +126,20 @@ impl Reaper {
         })
     }
 
-    /// Spawn the sweep task (one `tokio::time::interval` — deterministic under
-    /// `start_paused` + `Harness::advance`). Inert when disabled.
-    pub fn spawn_sweep(
-        &self,
-        state: CallState,
-        dispatcher: PerCallDispatcher,
-        clock: Clock,
-    ) -> tokio::task::JoinHandle<()> {
-        let this = self.clone();
-        tokio::spawn(async move {
-            if !this.enabled {
-                return;
-            }
-            let mut tick =
-                tokio::time::interval(std::time::Duration::from_millis(this.sweep_interval_ms));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            tick.tick().await; // the first tick is immediate — skip it
-            loop {
-                tick.tick().await;
-                this.sweep_once(&state, &dispatcher, clock.now_ms());
-            }
-        })
+    /// One paced sweep pass, gated on `enabled` (a no-op for a disabled reaper).
+    /// Driven per tick by the single sweep task `b2bua_core` spawns — which also
+    /// drives the Model-Y backup-durable reap, so the two periodic concerns share
+    /// one `tokio::time::interval` (deterministic under `start_paused` +
+    /// `Harness::advance`) with an explicit ordering instead of two racing timers.
+    pub fn maybe_sweep(&self, state: &CallState, dispatcher: &PerCallDispatcher, now_ms: i64) {
+        if self.enabled {
+            self.sweep_once(state, dispatcher, now_ms);
+        }
+    }
+
+    /// The shared sweep cadence (ms) — `b2bua_core` reads it to size the one task.
+    pub fn sweep_interval_ms(&self) -> u64 {
+        self.sweep_interval_ms
     }
 
     /// One sweep pass: emit verdicts for stale candidates (paced), escalate
