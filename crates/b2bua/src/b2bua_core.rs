@@ -303,6 +303,28 @@ impl B2buaCore {
             ctx.dispatcher.clone(),
             ctx.clock.clone(),
         ));
+        // Model-Y backup-durable-fallback reap (FixCallTerminateOnBackup §9; amends
+        // ADR-0020 X3 / ADR-0014): periodically discharge a deferred-terminal `bak:`
+        // Element whose alive-timer (per-Element TTL, refreshed by primary updates)
+        // expired because the primary never reconciled it (crashed for good), and
+        // evict the leftover ghosts. A durability backstop, NOT a reconciliation
+        // timer — a live primary always wins first via its prompt reverse-flush
+        // reconcile + forward-delete. No-op without a replicating store. Paced like
+        // the reaper sweep; the harness `advance` drives it under the paused clock.
+        {
+            let ctx2 = ctx.clone();
+            let interval_ms = ctx.config.reaper_sweep_interval_sec.max(1) as u64 * 1000;
+            tasks.push(tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_millis(interval_ms));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                tick.tick().await; // skip the immediate first tick
+                loop {
+                    tick.tick().await;
+                    router::reap_expired_terminals(&ctx2, ctx2.clock.now_ms()).await;
+                }
+            }));
+        }
 
         Self {
             ctx,

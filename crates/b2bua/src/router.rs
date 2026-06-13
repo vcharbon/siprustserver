@@ -242,6 +242,39 @@ async fn discharge_folded_terminal(
     process_result(ctx, call_ref, result, now_ms).await;
 }
 
+/// **Model-Y backup-durable-fallback** (the only thing genuinely-primary-dead cells
+/// need; everything else is cleaned promptly by the propagated data-delete). A
+/// backup defers its terminal to the primary; if the primary never reconciles it
+/// (crashed for good), the deferred-terminal `bak:` Element's **alive-timer** (the
+/// per-Element TTL, refreshed by primary updates) expires. On expiry the backup —
+/// now the durable holder — discharges it through the ONE funnel: one CDR, limiter
+/// released, the delete propagated. Whatever has expired but is NOT a deferred
+/// terminal is the missed-delete ghost the plain reap evicts silently.
+///
+/// This is a durability backstop, NOT a reconciliation timer (ADR-0014): the live
+/// primary always wins via its prompt reverse-flush reconcile + forward-delete; this
+/// only fires when there IS no live primary. `discharge_result` FORCES the snapshot
+/// terminal first, so a deferral caught mid-teardown (`Terminating`, peer-silent) is
+/// resolved too. Spawned as a paced task by `b2bua_core`.
+pub(crate) async fn reap_expired_terminals(ctx: &Arc<RouterCtx>, now_ms: i64) {
+    for terminal in ctx.state.expired_terminal_fallbacks(now_ms).await {
+        let call_ref = terminal.call_ref.clone();
+        let _guard = ctx.state.lock(&call_ref).await;
+        if ctx.state.materialize_if_absent(terminal.clone()) {
+            let mut before = terminal.clone();
+            before.state = CallModelState::Active; // synth non-terminal → became_terminated fires
+            let result = crate::rules::invariants::enforce(
+                &ctx.obligations,
+                &before,
+                crate::rules::invariants::finalize(crate::reaper::discharge_result(terminal, now_ms)),
+            );
+            process_result(ctx, &call_ref, result, now_ms).await;
+        }
+    }
+    // Evict the leftover (non-terminal missed-delete ghosts + already-discharged).
+    ctx.state.reap_replica(now_ms).await;
+}
+
 /// The ADR-0014 **Reverse** `(p,b)` apply rule for a live-map fold: the
 /// reverse-flushed `replica` dominates our `live` copy iff the primary counter is
 /// unchanged (`p_in == p_cur` — we have not mutated since the backup branched) and
@@ -572,8 +605,10 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
                         if matches!(call.state, CallModelState::Terminating | CallModelState::Terminated) {
                             // Belt-and-braces reverse-flush of the terminal state (a
                             // Terminated copy skips the process_result flush gate) so
-                            // the primary's reconcile/reclaim/fallback has it.
-                            ctx.state.flush(&call);
+                            // the primary's reconcile/reclaim/fallback has it — stamped
+                            // with the short defer grace as its alive-timer TTL.
+                            ctx.state
+                                .flush_with_ttl(&call, ctx.config.keepalive_timeout_sec * 1000);
                         }
                     }
                     release_call(ctx, &call_ref, ReleaseKind::SelfRelease).await;
@@ -1158,7 +1193,12 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
     // construction (no cross-node idempotency). A primary-served (non-takeover)
     // terminal falls through to the normal discharge below.
     if result.call.state == CallModelState::Terminated && ctx.state.is_takeover(call_ref) {
-        ctx.state.flush(&result.call); // reverse-flush the Terminated body
+        // Reverse-flush the Terminated body with the SHORT defer grace as its TTL
+        // (the alive-timer): a live primary reconciles + forward-deletes it within ~1
+        // poll, so the grace never fires; a dead primary never does, so it expires and
+        // the reap discharges it (the backup-durable-fallback).
+        ctx.state
+            .flush_with_ttl(&result.call, ctx.config.keepalive_timeout_sec * 1000);
         release_call(ctx, call_ref, ReleaseKind::SelfRelease).await;
         return;
     }

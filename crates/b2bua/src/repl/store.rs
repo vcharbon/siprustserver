@@ -59,6 +59,16 @@ struct CallMeta {
 
 /// A [`CallStore`] that replicates mutations through an in-memory backing store
 /// + a per-peer compacted [`Changelog`]. Clone-cheap (Arcs); share the handle.
+/// How long a deleted `call_ref` rejects re-creating `Put`s (the apply-side
+/// resurrection guard). A discharge deletes the call and propagates the delete,
+/// but a peer's late reverse-flush (e.g. a backup finishing its deferred teardown
+/// just after the primary discharged the reclaimed copy — `FixCallTerminateOnBackup`
+/// C7/C10) would otherwise re-create the body via the Reverse "no local copy →
+/// accept" rule and trigger a SECOND discharge. The window need only outlive
+/// replication latency + the served call's residual timers (Timer F ~32 s) + a
+/// reboot; 5 min is comfortably past that and bounds the set to `delete_rate × 5min`.
+const RESURRECTION_TOMBSTONE_MS: i64 = 300_000;
+
 #[derive(Clone)]
 pub struct ReplicatingCallStore {
     inner: Arc<InMemoryCallStore>,
@@ -66,6 +76,11 @@ pub struct ReplicatingCallStore {
     clock: Clock,
     /// `callRef → CallMeta`, updated atomically with the body.
     meta: Arc<Mutex<HashMap<String, CallMeta>>>,
+    /// `callRef → deleted_at_ms`: the apply-side resurrection guard. A `Put` for a
+    /// ref deleted within [`RESURRECTION_TOMBSTONE_MS`] is rejected so a late
+    /// reverse-flush cannot re-create a just-discharged call (delete-wins, extended
+    /// from the replica to the apply path). Pruned in [`reap`](Self::reap).
+    tombstones: Arc<Mutex<HashMap<String, i64>>>,
     /// Backstop TTL applied when a call is stored with `ttl_ms <= 0`
     /// ([`DEFAULT_REPLICATED_TTL_MS`] by default; tests inject a short value).
     default_ttl_ms: i64,
@@ -84,6 +99,7 @@ impl ReplicatingCallStore {
             changelog,
             clock,
             meta: Arc::new(Mutex::new(HashMap::new())),
+            tombstones: Arc::new(Mutex::new(HashMap::new())),
             default_ttl_ms: DEFAULT_REPLICATED_TTL_MS,
         }
     }
@@ -149,6 +165,35 @@ impl ReplicatingCallStore {
             .filter(|(_, m)| !matches!(m.expiry_at_ms, Some(e) if now >= e))
             .map(|(k, _)| k.clone())
             .collect()
+    }
+
+    /// Snapshot `(call_ref, role, primary)` for every Element whose alive-timer
+    /// (the per-Element TTL, refreshed on each primary update) has **expired** at
+    /// `now`. The Model-Y backup-durable-fallback reads this to discharge a
+    /// deferred-terminal `bak:` Element whose primary never came back to reconcile
+    /// it: the body is still here (not yet reaped), so the caller can decode it,
+    /// confirm it is terminal, and run it through the discharge funnel before the
+    /// plain [`reap`](Self::reap) silently evicts it. Pure read; no body touched.
+    pub fn expired_refs(&self, now_ms: i64) -> Vec<(String, PartitionRole, String)> {
+        let meta = self.meta.lock().unwrap();
+        meta.iter()
+            .filter(|(_, m)| matches!(m.expiry_at_ms, Some(e) if now_ms >= e))
+            .map(|(k, m)| (k.clone(), m.role, m.primary.clone()))
+            .collect()
+    }
+
+    /// Read a body bypassing the lazy-TTL eviction. [`get_call`](Self::get_call)
+    /// evicts (and returns `None` for) an expired body on access — fatal for the
+    /// backup-durable-fallback, which must DECODE an EXPIRED deferred-terminal in
+    /// order to discharge it (else `get_call` silently evicts it → lost CDR). Pure
+    /// read of the backing store; no eviction, no meta change.
+    pub async fn peek_body_raw(
+        &self,
+        role: PartitionRole,
+        primary: &str,
+        call_ref: &str,
+    ) -> Option<Arc<[u8]>> {
+        self.inner.get_call(role, primary, call_ref).await.ok().flatten()
     }
 
     /// Re-establish the denormalised `CallMeta.backup` for a `pri:{self}` call
@@ -280,6 +325,20 @@ impl CallStore for ReplicatingCallStore {
         call_bgen: i64,
         opts: &PutOpts,
     ) -> Result<(), StoreError> {
+        // Resurrection guard (apply-side delete-wins): reject a `Put` for a ref
+        // deleted within the tombstone window — a late reverse-flush racing a
+        // discharge (FixCallTerminateOnBackup C7/C10) must not re-create a
+        // just-discharged call (which would trigger a SECOND discharge). A
+        // tombstoned ref names a dead call (callRefs are unique), so no legitimate
+        // Put is lost.
+        {
+            let now = self.clock.now_ms();
+            if let Some(&deleted_at) = self.tombstones.lock().unwrap().get(call_ref) {
+                if now - deleted_at < RESURRECTION_TOMBSTONE_MS {
+                    return Ok(());
+                }
+            }
+        }
         // Store body (Arc wrapped once inside) + indexes.
         self.inner
             .put_call(role, primary, call_ref, body, indexes, ttl_ms, call_gen, call_bgen, opts)
@@ -336,6 +395,12 @@ impl CallStore for ReplicatingCallStore {
             .delete_call(role, primary, call_ref, indexes, opts)
             .await?;
         self.meta.lock().unwrap().remove(call_ref);
+        // Tombstone the ref so a late reverse-flush cannot resurrect it (see
+        // `put_call`); pruned in `reap`.
+        self.tombstones
+            .lock()
+            .unwrap()
+            .insert(call_ref.to_string(), self.clock.now_ms());
 
         if let Some(peer) = &opts.peer {
             let partition = Self::partition_for(opts.direction);

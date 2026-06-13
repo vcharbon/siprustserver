@@ -20,7 +20,7 @@ pub use terminate_writer::BufferedTerminateWriter;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use call::{call_index_keys, Call, CallBodyCodec, MsgpackCodec};
+use call::{call_index_keys, Call, CallBodyCodec, CallModelState, MsgpackCodec};
 
 use crate::metrics::B2buaMetrics;
 use crate::repl::{ReplicatingCallStore, ReplicationPlan};
@@ -461,6 +461,47 @@ impl CallState {
         self.codec.decode(&body).ok()
     }
 
+    /// **Model-Y backup-durable-fallback read-path.** Decode every expired Element
+    /// whose body is a **deferred terminal** (`Terminating`/`Terminated`) — a
+    /// backup served a BYE/CANCEL and deferred the discharge to the primary, but
+    /// the primary never came back to reconcile it (crashed for good), so the
+    /// alive-timer (per-Element TTL, refreshed by primary updates) expired. The
+    /// router discharges each through the funnel; the rest the plain `reap` evicts.
+    /// Excludes non-terminal expired Elements (those are the missed-delete ghosts
+    /// `reap` already handles silently). Empty when no replicating store is wired.
+    pub async fn expired_terminal_fallbacks(&self, now_ms: i64) -> Vec<Call> {
+        let Some(repl) = self.repl_store.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (call_ref, role, primary) in repl.expired_refs(now_ms) {
+            // RAW read — `get_call` would lazily EVICT the expired body and return
+            // None, silently dropping the deferred terminal before we can discharge.
+            if let Some(body) = repl.peek_body_raw(role, &primary, &call_ref).await {
+                if let Ok(call) = self.codec.decode(&body) {
+                    if matches!(
+                        call.state,
+                        CallModelState::Terminating | CallModelState::Terminated
+                    ) {
+                        out.push(call);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Physically evict expired replica bodies + changelog tombstones (the
+    /// missed-delete ghost backstop, ADR-0014). Call AFTER discharging any expired
+    /// deferred-terminals (`expired_terminal_fallbacks`) so their CDR/limiter are
+    /// settled first; this then silently reaps whatever is left. No-op without a
+    /// replicating store.
+    pub async fn reap_replica(&self, now_ms: i64) {
+        if let Some(repl) = self.repl_store.as_ref() {
+            repl.reap(now_ms).await;
+        }
+    }
+
     /// Materialise a reclaimed call into the live map + routing index iff it is
     /// not already resident (ADR-0011 X11). Returns `true` when just inserted —
     /// the router then re-arms its timers exactly once. Idempotent: a call
@@ -506,6 +547,17 @@ impl CallState {
     /// peer. With no topology / no backup / no replicating store it is today's
     /// `PutOpts::default()` (no propagation) path.
     pub fn flush(&self, call: &Call) {
+        self.flush_with_ttl(call, self.replicated_ttl_ms);
+    }
+
+    /// Like [`flush`](Self::flush) but stamps an explicit body TTL. The Model-Y
+    /// **deferred-terminal** flush uses a SHORT grace here (not the 1 h active
+    /// backstop): a `Terminating`/`Terminated` `bak:` Element a backup deferred is
+    /// the backup-durable-fallback's alive-timer — if the primary never reconciles
+    /// it (and forward-deletes it) within the grace, the reap discharges it. Active
+    /// replicas keep the long backstop (refreshed every keepalive), so a held call's
+    /// replica never expires mid-call.
+    pub fn flush_with_ttl(&self, call: &Call, ttl_ms: i64) {
         let indexes = call_index_keys(call);
         // The authoritative `(p,b)` lives on the in-memory call (bumped by
         // `update`); the passed `call` may be a pre-bump clone, so prefer the
@@ -554,7 +606,7 @@ impl CallState {
             call.call_ref.clone(),
             body,
             indexes,
-            self.replicated_ttl_ms,
+            ttl_ms,
             call_gen,
             call_bgen,
             opts,
