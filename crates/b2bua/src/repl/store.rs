@@ -275,8 +275,9 @@ impl ReplicatingCallStore {
         true
     }
 
-    /// Evict every expired body + reap changelog tombstones/idle peers. Call
-    /// after advancing the clock (lazy TTL — deterministic, no background task).
+    /// Evict every expired body + reap changelog tombstones/idle peers + prune
+    /// stale resurrection tombstones. Call after advancing the clock (lazy TTL —
+    /// deterministic, no background task).
     pub async fn reap(&self, now_ms: i64) {
         // Snapshot the expired (callRef, role, primary, indexes) tuples, drop the
         // lock, then delete each body — WITH its captured index keys, so the
@@ -295,6 +296,16 @@ impl ReplicatingCallStore {
                 .delete_call(*role, primary, call_ref, indexes, &PutOpts::default())
                 .await;
         }
+        // Prune resurrection tombstones past their window — `put_call` only ever
+        // reads an entry younger than `RESURRECTION_TOMBSTONE_MS`, so an older one
+        // is dead weight. Without this the map grows one entry per terminated call
+        // forever (the doc on `tombstones`/`delete_call` promised this prune but it
+        // was missing): an unbounded leak that violates "all per-call state released
+        // at call end" and bounds the set back to `delete_rate × RESURRECTION_TOMBSTONE_MS`.
+        self.tombstones
+            .lock()
+            .unwrap()
+            .retain(|_, &mut deleted_at| now_ms - deleted_at < RESURRECTION_TOMBSTONE_MS);
         self.changelog.reap(now_ms);
     }
 }

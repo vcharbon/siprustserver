@@ -245,6 +245,37 @@ async fn ttl_eviction_drops_body_on_access_and_reap() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn resurrection_tombstone_pruned_by_reap() {
+    // Regression: the resurrection tombstone (apply-side delete-wins) must be
+    // PRUNED past its window — `delete_call` inserts one per discharge and only
+    // `put_call` reads it (within the window), so without a prune the map grows
+    // one entry per terminated call forever (an unbounded leak). Behavioural
+    // probe: a Put for a just-deleted ref is rejected (silent Ok, no body), then
+    // after the window elapses + a reap the SAME ref accepts a Put again.
+    let clock = Clock::test_at(0);
+    let store = ReplicatingCallStore::new(1, clock.clone());
+
+    put(&store, "c1", b"v1", 60_000, 1, &fwd("A")).await;
+    store.delete_call(PRI, SELF, "c1", &[], &fwd("A")).await.unwrap();
+
+    // Within the tombstone window: a re-creating Put is rejected (delete-wins).
+    put(&store, "c1", b"v2", 60_000, 2, &fwd("A")).await;
+    assert!(
+        store.get_call(PRI, SELF, "c1").await.unwrap().is_none(),
+        "Put within the resurrection window must be rejected"
+    );
+
+    // Past the window + a reap: the tombstone is pruned, so a fresh Put lands.
+    tokio::time::advance(Duration::from_millis(300_001)).await;
+    store.reap(clock.now_ms()).await;
+    put(&store, "c1", b"v3", 60_000, 3, &fwd("A")).await;
+    assert!(
+        store.get_call(PRI, SELF, "c1").await.unwrap().is_some(),
+        "after the window + reap the tombstone is gone and the Put is accepted"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn dead_peer_auto_clean_via_idle_reap() {
     // Idle reaping is the ONE dead-peer clean-up mechanism (no per-disconnect
     // drop — a disconnected puller's pending log is kept until the TTL so a
