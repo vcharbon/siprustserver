@@ -1042,6 +1042,43 @@ impl FailoverHarness {
         false
     }
 
+    /// **Post-terminal peer linger** — keep the named peer UAs' sockets open and
+    /// *reading* for `window` of virtual time after the scenario's logical end, so
+    /// any SIP still in flight at teardown is delivered AND consumed instead of
+    /// dropped into an about-to-be-dropped endpoint (reported as "lost in transit")
+    /// or left unread in the queue (a `queueLeak` at bind close).
+    ///
+    /// Two things go wrong without it, both because the synchronous test `drop`
+    /// stops the world the instant the cell's body returns:
+    /// 1. A datagram a peer *sent* just before the end (a redundant in-dialog BYE
+    ///    the owner must answer `481`) never completes its transit hop — nothing
+    ///    pumps the paused clock, so the delivery task's `sleep` never fires.
+    /// 2. A datagram *delivered to* a peer's queue that the scenario never
+    ///    explicitly `receive`d (a relayed final response, a retransmit toward a
+    ///    deliberately-silent peer) is dropped unread when the endpoint closes.
+    ///
+    /// `linger_peers` pumps the clock in fine steps across `window` and drains each
+    /// peer after every step (and once up front), modelling a real always-on UA
+    /// that keeps its socket open and reading after the call. It asserts nothing —
+    /// a cell that wants to *check* a specific late response (e.g. C10's `481` to
+    /// bob) still does so explicitly; this only guarantees the trace is free of
+    /// teardown-race losses. Call it after [`settle_terminal`](Self::settle_terminal),
+    /// before the final invariant assertions.
+    pub async fn linger_peers(&self, peers: &[&Agent], window: Duration) {
+        let step = Duration::from_millis(200);
+        for p in peers {
+            p.drain().await;
+        }
+        let mut elapsed = Duration::ZERO;
+        while elapsed < window {
+            self.advance(step).await;
+            elapsed += step;
+            for p in peers {
+                p.drain().await;
+            }
+        }
+    }
+
     // -- report ------------------------------------------------------------
 
     /// Run the built-in RFC 3261 signaling audit (CSeq in-dialog ordering, …)

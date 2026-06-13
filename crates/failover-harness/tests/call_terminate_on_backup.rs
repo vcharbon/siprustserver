@@ -265,6 +265,12 @@ async fn c1_bye_on_primary__no_fault() {
         })
         .await;
     assert!(drained, "C1 must drain cleanly (control)");
+    // Keep alice/bob reading their sockets for a few seconds past the terminal so
+    // any SIP still in flight at teardown (a relayed final response, a redundant
+    // in-dialog BYE the owner 481s, a retransmit toward a silent peer) is delivered
+    // and consumed — never dropped into an about-to-close endpoint ("lost in
+    // transit") or left unread (a queueLeak at bind close).
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
 }
 
@@ -297,6 +303,12 @@ async fn c2_bye_on_backup__primary_alive__misroute() {
                 && !w_b2.holds_any_trace(&call_ref).await
         })
         .await;
+    // Keep alice/bob reading their sockets for a few seconds past the terminal so
+    // any SIP still in flight at teardown (a relayed final response, a redundant
+    // in-dialog BYE the owner 481s, a retransmit toward a silent peer) is delivered
+    // and consumed — never dropped into an about-to-close endpoint ("lost in
+    // transit") or left unread (a queueLeak at bind close).
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
 }
 
@@ -328,6 +340,12 @@ async fn c3_bye_on_backup__primary_alive__peer_silent() {
                 && !w_b2.holds_any_trace(&call_ref).await
         })
         .await;
+    // Keep alice/bob reading their sockets for a few seconds past the terminal so
+    // any SIP still in flight at teardown (a relayed final response, a redundant
+    // in-dialog BYE the owner 481s, a retransmit toward a silent peer) is delivered
+    // and consumed — never dropped into an about-to-close endpoint ("lost in
+    // transit") or left unread (a queueLeak at bind close).
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
 }
 
@@ -362,6 +380,12 @@ async fn c4_bye_on_backup__primary_crashed__stay_dead() {
                 && !w_b2.holds_any_trace(&call_ref).await
         })
         .await;
+    // Keep alice/bob reading their sockets for a few seconds past the terminal so
+    // any SIP still in flight at teardown (a relayed final response, a redundant
+    // in-dialog BYE the owner 481s, a retransmit toward a silent peer) is delivered
+    // and consumed — never dropped into an about-to-close endpoint ("lost in
+    // transit") or left unread (a queueLeak at bind close).
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
 }
 
@@ -395,6 +419,12 @@ async fn c5_bye_on_backup__primary_crashed__peer_silent__stay_dead() {
                 && !w_b2.holds_any_trace(&call_ref).await
         })
         .await;
+    // Keep alice/bob reading their sockets for a few seconds past the terminal so
+    // any SIP still in flight at teardown (a relayed final response, a redundant
+    // in-dialog BYE the owner 481s, a retransmit toward a silent peer) is delivered
+    // and consumed — never dropped into an about-to-close endpoint ("lost in
+    // transit") or left unread (a queueLeak at bind close).
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
 }
 
@@ -436,6 +466,12 @@ async fn c6_bye_on_backup__primary_crashed__reboot_reclaim() {
                 && !w_b2.holds_any_trace(&call_ref).await
         })
         .await;
+    // Keep alice/bob reading their sockets for a few seconds past the terminal so
+    // any SIP still in flight at teardown (a relayed final response, a redundant
+    // in-dialog BYE the owner 481s, a retransmit toward a silent peer) is delivered
+    // and consumed — never dropped into an about-to-close endpoint ("lost in
+    // transit") or left unread (a queueLeak at bind close).
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
 }
 
@@ -477,6 +513,12 @@ async fn c7_bye_on_backup__primary_crashed__peer_silent__reboot() {
                 && !w_b2.holds_any_trace(&call_ref).await
         })
         .await;
+    // Keep alice/bob reading their sockets for a few seconds past the terminal so
+    // any SIP still in flight at teardown (a relayed final response, a redundant
+    // in-dialog BYE the owner 481s, a retransmit toward a silent peer) is delivered
+    // and consumed — never dropped into an about-to-close endpoint ("lost in
+    // transit") or left unread (a queueLeak at bind close).
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
 }
 
@@ -508,13 +550,15 @@ async fn c10_bye_split_brain__primary_and_backup() {
     //     invariant under test is EXACTLY-ONE CDR cluster-wide despite both parties
     //     issuing a terminal, which `assert_call_fully_over` checks below.
     //
-    //     NOTE: the 481 is currently UNDELIVERED to bob — the LB proxy relays the
-    //     b2bua's 481 toward bob but it does not match bob's BYE client transaction
-    //     (a separate proxy-relay fix, handed off). So we do NOT assert bob's
-    //     response here; bob's redundant BYE is fire-and-forget for this cell.
+    //     bob MUST receive that 481: the LB proxy relays the owning b2bua's 481 back
+    //     down bob's BYE client transaction (the relayed response carries bob's own
+    //     top Via branch, so it matches). This only fails to land if the test tears
+    //     down before pumping the clock — `expect_tolerating` auto-advances under the
+    //     paused runtime, completing the BYE → 481 → bob round trip.
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
     fh.advance(Duration::from_millis(200)).await;
-    let _bye_b = bob_dialog.bye().await; // redundant terminal → 481 at the primary
+    let mut bye_b = bob_dialog.bye().await; // redundant terminal → 481 at the primary
+    bye_b.expect_tolerating(481, &["OPTIONS"]).await;
     let _ = &alice;
 
     let _ = fh
@@ -526,6 +570,12 @@ async fn c10_bye_split_brain__primary_and_backup() {
                 && !w_b2.holds_any_trace(&call_ref).await
         })
         .await;
+    // Keep alice/bob reading their sockets for a few seconds past the terminal so
+    // any SIP still in flight at teardown (a relayed final response, a redundant
+    // in-dialog BYE the owner 481s, a retransmit toward a silent peer) is delivered
+    // and consumed — never dropped into an about-to-close endpoint ("lost in
+    // transit") or left unread (a queueLeak at bind close).
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
 }
 
@@ -578,6 +628,12 @@ async fn c11_reinvite_on_backup__primary_alive__no_terminal() {
         })
         .await;
     assert!(drained, "C11 must drain cleanly after a normal hangup");
+    // Keep alice/bob reading their sockets for a few seconds past the terminal so
+    // any SIP still in flight at teardown (a relayed final response, a redundant
+    // in-dialog BYE the owner 481s, a retransmit toward a silent peer) is delivered
+    // and consumed — never dropped into an about-to-close endpoint ("lost in
+    // transit") or left unread (a queueLeak at bind close).
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
 }
 
@@ -623,6 +679,12 @@ async fn c8_keepalive_timeout_on_backup__reboot() {
                 && !w_b2.holds_any_trace(&call_ref).await
         })
         .await;
+    // Keep alice/bob reading their sockets for a few seconds past the terminal so
+    // any SIP still in flight at teardown (a relayed final response, a redundant
+    // in-dialog BYE the owner 481s, a retransmit toward a silent peer) is delivered
+    // and consumed — never dropped into an about-to-close endpoint ("lost in
+    // transit") or left unread (a queueLeak at bind close).
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
 }
 
@@ -666,6 +728,12 @@ async fn c9_max_duration_on_backup__reboot() {
                 && !w_b2.holds_any_trace(&call_ref).await
         })
         .await;
+    // Keep alice/bob reading their sockets for a few seconds past the terminal so
+    // any SIP still in flight at teardown (a relayed final response, a redundant
+    // in-dialog BYE the owner 481s, a retransmit toward a silent peer) is delivered
+    // and consumed — never dropped into an about-to-close endpoint ("lost in
+    // transit") or left unread (a queueLeak at bind close).
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
 }
 
@@ -740,5 +808,11 @@ async fn c12_bye_on_primary__then_reboot__no_resurrection() {
                 && !w_b2.holds_any_trace(&call_ref).await
         })
         .await;
+    // Keep alice/bob reading their sockets for a few seconds past the terminal so
+    // any SIP still in flight at teardown (a relayed final response, a redundant
+    // in-dialog BYE the owner 481s, a retransmit toward a silent peer) is delivered
+    // and consumed — never dropped into an about-to-close endpoint ("lost in
+    // transit") or left unread (a queueLeak at bind close).
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
 }

@@ -877,6 +877,25 @@ impl Agent {
         None
     }
 
+    /// **Best-effort socket drain** — read (and discard) every datagram *currently
+    /// queued* at this UA without waiting, asserting nothing about them. Each read
+    /// goes through the recording layer, so a message the scenario delivered but
+    /// never explicitly `receive`d (a relayed final response the test didn't await,
+    /// a retransmit toward a deliberately-silent peer) is recorded as **received**
+    /// rather than surfacing as "lost in transit" / a `queueLeak` at bind close.
+    ///
+    /// This models a real always-on UA: its kernel keeps reading the socket even
+    /// after the application is done driving the call. Pair it with a clock pump
+    /// (e.g. [`FailoverHarness::linger_peers`]) so in-flight datagrams first land in
+    /// the queue, then drain. Returns the number of datagrams drained.
+    pub async fn drain(&self) -> usize {
+        let mut n = 0;
+        while self.ep.try_recv().is_some() {
+            n += 1;
+        }
+        n
+    }
+
     /// Like [`receive`](Agent::receive), but first drains (and 200-OKs) any
     /// requests whose method is in `tolerate` — the harness equivalent of the
     /// TS `allowExtra(method)`. Under a paused clock an advance that crosses a
