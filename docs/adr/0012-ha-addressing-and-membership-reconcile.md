@@ -99,8 +99,9 @@ fixed mapping, so tiers 1–2 (ADR-0011 X10) are untouched.
 ## Decision D4 — the proxy joins the same informer (ADR-0011 X7, finally realized); it still reaches workers by direct Pod IP
 
 The proxy replaces its baked-IP `StaticWorkerRegistry` with a
-`K8sWorkerRegistry` that wraps the **same** `topology::K8sMembership` informer
-the repl path runs, mapping each ready `Peer{ordinal, host}` →
+`ComposedWorkerRegistry` (membership ⊕ health projection) that wraps the **same**
+`topology::K8sMembership` informer the repl path runs, mapping each ready
+`Peer{ordinal, host}` →
 `WorkerEntry{id = ordinal, address = host:sip_port}`. The proxy then **still
 sends OPTIONS and forwards SIP straight to the worker's Pod IP** — the informer's
 only job is to keep that IP list correct automatically on reboot/scale. No DNS in
@@ -207,6 +208,11 @@ up) stays separate from readiness (`/readyz`, fit to serve) — mirroring the
 worker.
 
 ## Decision D7 — front-proxy HA via active/passive keepalived VRRP VIP
+
+> **This is the live, deployed design.** ADR-0015 D5 proposes a cross-rack
+> evolution (unicast VRRP, failure-domain anti-affinity key, worker-zone proxy
+> placement) but is **not yet implemented** — the manifests still run the
+> multicast / `tier=edge` / `hostname`-key design described here.
 
 The end-state architecture is **fully resilient**: no component is a single point
 of failure. Worker HA is peer-to-peer replication (ADR-0011); this decision closes

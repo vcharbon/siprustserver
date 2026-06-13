@@ -1,12 +1,13 @@
 # 0011 — HA replication: peer-to-peer pull, no Redis
 
-**Status:** accepted (2026-05-31); amended 2026-06-03 (X11 — active reclaim +
-`Deactivate` ownership handshake, hardening X5's backup-side fail-back);
-**amended 2026-06-05 by [ADR-0014](0014-reactive-only-takeover-version-vector.md)** —
-the *eager* takeover and the `Deactivate` watermark handshake are **removed**;
-reactive takeover is **kept**; the acting-backup now **self-releases** a takeover
-copy on transaction completion; reconciliation is the `(p,b)` version vector (not
-LWW-by-`gen`). Read the X11 section below as superseded on those three points.
+**Status:** accepted (2026-05-31); **superseded in part by
+[ADR-0014](0014-reactive-only-takeover-version-vector.md)** (2026-06-05) and its
+Model-Y terminal-handling rules. The current takeover, stream-topology,
+wire-protocol, and terminal-discharge design lives in ADR-0014: takeover is
+**reactive-only**, the acting-backup **self-releases** (deferring any terminal
+discharge to the primary), reconciliation is the `(p,b)` version vector, and the
+wire is four frames over two single-flow sockets. The sections below are trimmed
+to what ADR-0014 did not replace.
 
 **Source:** sipjsserver @ `fffc4ac6`,
 `src/replication/{ReplLogServer,PullerFiber,ReplicationProtocol,ReplicationSupervisor,PeerScanBootstrap,ChannelStream,ChannelIndex,EpochCounter,genCounter,EchoApply,ReadinessController,PullerHttpTransport}.ts`,
@@ -75,16 +76,13 @@ a TTL; it re-bootstraps on return. Because it is compacted-by-callRef the log
 always equals the live set, so a cold puller from `(gen, 0)` gets everything and
 a caught-up one gets only deltas.
 
-## Decision X4 — re-hydration: snapshot-keys + lazy scan + conservative watermark + tail
+## Decision X4 — re-hydration: scan + conservative watermark + tail (per flow)
 
-> **Superseded in part by [ADR-0014](0014-reactive-only-takeover-version-vector.md)
-> §Stream topology.** The "**Re-hydration and backup-re-subscription are the same
-> pull stream**" claim below is **no longer true**: the two flows now run on **two
-> separate single-flow sockets** with **distinct watermarks** (one changelog, two
-> partition-filtered cursors), and the `Bootstrap`/`Replog` two-request handshake
-> is collapsed into a `since==(0,0)` rule. The scan + conservative-watermark + tail
-> *mechanism* of each individual flow is unchanged. The `Ack` frame and `PullMode`
-> enum named in X9 are removed.
+> Topology updated by [ADR-0014](0014-reactive-only-takeover-version-vector.md)
+> §Stream topology — re-hydration and backup-re-subscription run on **two separate
+> single-flow sockets** with distinct watermarks (one changelog, two
+> partition-filtered cursors); bootstrap is implicit when `since==(0,0)`. The
+> per-flow scan + conservative-watermark + tail mechanism below is **unchanged**.
 
 On boot a primary re-hydrates its owned calls by scanning a backup's
 `bak:{primary}` partition (`PeerScanBootstrap`). The server copies just the
@@ -93,33 +91,32 @@ batches reading each current body under a short lock — so a slow/crashing pull
 never holds the call-map lock. It captures `W = changelog head` **at scan
 start**; the client seeds its watermark to `W` and **keeps tailing**, so any
 mutation the acting-backup makes during/after the scan (`counter > W`) is
-re-delivered (idempotent by `call_gen`). Snapshot consistency is therefore
-*irrelevant* — correctness is bootstrap + conservative watermark + tail, not the
-snapshot. **Re-hydration and backup-re-subscription are the same pull stream**:
-frames are `partition`-tagged (`pri` = the primary reclaiming calls the backup
-touched, `bak` = the peer's own calls this node backs up); bootstrap is the bulk
-pre-seed of that one stream.
+re-delivered (idempotent by the `(p,b)` version vector). Snapshot consistency is
+therefore *irrelevant* — correctness is bootstrap + conservative watermark + tail,
+not the snapshot.
 
-## Decision X5 — fail-back: readiness-gated reclaim + hard-timer backstop
+## Decision X5 — fail-back: readiness-gated reclaim; hard timer is a readiness bound only
 
 When a primary reboots it reclaims its calls (vs *sticky failover*, where
 taken-over calls would live out their life on the backup, or *hard fencing* with
-epoch leases). Post-bootstrap the tail delta is small, so it catches up fast then
-flips. A **hard timer** bounds re-hydration and serves two purposes: it breaks
-the fail-back deadlock (the backup keeps mutating while the primary tails, so the
-tail may never quiet on its own — flip at timer expiry regardless) and it lets a
-node **boot and serve even when peers are unreachable** (best-effort re-hydration
-never blocks startup — liveness over completeness). The flip-instant race is
-covered by SIP retransmission + the proxy's existing ACK/CANCEL-to-primary rule
-(ADR-0009). Rejected: sticky failover (needs new per-call proxy ownership-flip)
-and hard fencing (epoch propagation + per-txn fence checks + a 2-phase drain
-handshake — too much machinery for "ultra early").
+epoch leases). Recovery is **purely causal**
+([ADR-0014](0014-reactive-only-takeover-version-vector.md)): the rebooting primary
+re-materialises its `pri:{self}` partition into its live map (**reclaim**), and a
+dialog that receives in-dialog traffic during the outage is taken over reactively
+on the survivor — there is **no time-based ownership flip**. The **hard timer
+survives only as a readiness/liveness bound**: best-effort re-hydration never
+blocks startup, so a node can **boot and serve even when peers are unreachable**
+(liveness over completeness; ADR-0014 §Stream-topology Decision 11). The
+flip-instant window is covered by SIP retransmission + the proxy's
+ACK/CANCEL-to-primary rule (ADR-0009 / ADR-0014 Decision 5). Rejected: sticky
+failover (needs new per-call proxy ownership-flip) and hard fencing (epoch
+propagation + per-txn fence checks + a 2-phase drain handshake — too much
+machinery for "ultra early").
 
-**Amended by X11.** X5 specified the *primary* half of fail-back (a rebooting
-primary reclaims) but left the *backup* half implicit — how/when the acting-backup
-releases the live call it took over. Under tier-3 chaos that gap **double-served**
-dialogs (a correctness bug, not merely a leak); X11 hardens it with active reclaim
-+ an explicit `Deactivate` handshake.
+The *backup* half of fail-back — how and when the acting-backup releases the live
+call it took over — is owned by ADR-0014: the backup **self-releases** on the
+served transaction's terminal state and **defers** any terminal discharge to the
+reclaiming primary.
 
 ## Decision X6 — readiness/OPTIONS gate: re-hydrated + backup-current
 
@@ -138,17 +135,20 @@ weak backup right after boot). This replaces the always-200 stub (ADR-0010 X8).
 
 Peer discovery is abstracted behind a shared `topology::Membership` (`Peer{
 ordinal, host}` + `snapshot()` + a `changes()` watch; `Static | Simulated | K8s`
-impls). It is **promoted out of the proxy's existing `WorkerRegistry`** — which
-is a well-factored, kept-in-sync `ArcSwap`+`broadcast` abstraction but *fake-
-only* (the k8s watcher is a documented TODO) — so the k8s watcher is written
-**once** and consumed by both the proxy (annotating SIP addr + health/draining/
-fresh-pod over it) and the b2bua (deriving the replication address from
-`ordinal + host + config`). Membership is **port-agnostic** (a k8s pod has one
+impls). It is **promoted out of the proxy's existing `WorkerRegistry`** — a
+well-factored `ArcSwap`+`broadcast` abstraction whose membership source is the
+shared `topology::K8sMembership` EndpointSlice informer — so the k8s watcher is
+written **once** (in `topology`, as `K8sMembership`) and consumed by both the
+proxy (annotating SIP addr + health/draining/fresh-pod over it) and the b2bua
+(deriving the replication address from `ordinal + host + config`). Membership is **port-agnostic** (a k8s pod has one
 address, many ports). "Which elements do I back up" *dissolves* into the
 contents of each peer's per-peer changelog (HRW 2nd-best, full mesh) — there is
 no separate retrieval. Rejected: reuse the proxy registry whole (drags routing/
 health/`ProxyAddr` baggage into the b2bua, couples crates against ADR-0002) and
 build a second independent provider (two membership sources + two k8s watchers).
+(The proxy was migrated onto this shared informer as `ComposedWorkerRegistry` in
+[ADR-0012](0012-ha-addressing-and-membership-reconcile.md) D4, which owns that
+realization timeline.)
 
 ## Decision X8 — server never blocks the call path; strict lock/ownership discipline
 
@@ -167,21 +167,21 @@ writes on the owned `Arc`. Safe under concurrent rewrite by the **immutable-
 shared-body invariant** (a rewrite swaps the slot to a new `Arc`; the in-flight
 drain keeps its old one alive) — the same `ArcSwap` discipline the registry uses.
 
-## Decision X9 — wire protocol: five positional-msgpack messages
+## Decision X9 — wire protocol: positional-msgpack frames
 
 Each message is a positional-msgpack array (ADR-0008 ethos), tag-discriminated by
-element 0: `PullRequest[0, proto_ver, caller, mode(Replog|Bootstrap), since_gen,
-since_counter, chunk]`, `Ack[1, caller, up_to_gen, up_to_counter]`, `Data[2, gen,
-counter, op, partition, call_ref, call_gen, body_ttl_ms, indexes, body]`,
-`Noop[3, gen, counter]` (caught-up marker / bootstrap terminal),
-`ResetToBootstrap[4, reason]` (the watermark fell off the compacted tail). The
-source's `latency_ms` and `__writtenAtMs` are dropped as vestigial. **Two
-distinct generations** (a source-side terminology trap, `EpochCounter` vs the
-call body's `_topology.gen`): `gen` = incarnation (per worker-restart, high word
-of the watermark), `call_gen` = content version (LWW). Steady state is
-**push-after-subscribe** (one `PullRequest` opens a subscription; the server
-pushes `Data` as the changelog grows and `Noop` when it drains; periodic `Ack`
-trims retention); a rebooted worker serves under a higher `gen`/counter-0, so
+element 0. The **canonical frame set is four frames — see
+[ADR-0014](0014-reactive-only-takeover-version-vector.md) §12**: `PullRequest`
+(opens one flow; bootstrap is implicit when `since==(0,0)`), `Data` (one mutation,
+carrying the `(p,b)` version vector — `call_gen`/`call_bgen`), `Noop` (catch-up
+edge + idle keepalive), `ResetToBootstrap` (the watermark fell off the compacted
+tail). The earlier `Ack` frame and the `PullMode` / `Bootstrap`-vs-`Replog`
+two-request handshake are **removed**.
+
+**Two distinct generations** (a source-side terminology trap, `EpochCounter` vs
+the call body's `_topology.gen`): `gen` = incarnation (per worker-restart, high
+word of the watermark), `call_gen` = the call's primary counter `p` of the `(p,b)`
+version vector. A rebooted worker serves under a higher `gen`/counter-0, so
 `(new_gen, 0) > (old_gen, *)` and pullers apply without a manual reset; a missed
 delete during a disconnect self-evicts via the call `ttl`.
 
@@ -197,108 +197,30 @@ clock: crash → failover → reboot → reclaim. (3) **Real chaos** on kind (re
 under `tokio::time::pause`). Every tier is recording-first (ADR-0006): the
 replication exchange renders as a sequence diagram beside the SIP exchange.
 
-## Decision X11 — fail-back, backup half: active reclaim + `Deactivate` handshake
+## Decision X11 — fail-back, backup half (superseded by ADR-0014)
 
-> **Amended by [ADR-0014](0014-reactive-only-takeover-version-vector.md) (2026-06-05).**
-> The *eager* (membership-driven) takeover and the `Deactivate` watermark handshake
-> described below were **removed** (they were the endurance stale-CSeq storm source).
-> Reactive takeover and active reclaim are **kept**; the acting-backup now
-> **self-releases** its takeover copy when the served transaction reaches a terminal
-> state, and reconciliation is the `(p,b)` version vector. The text below is retained
-> for history.
+X11 originally closed the *backup* half of fail-back with an eager
+(membership-driven) takeover and an explicit `Deactivate{ as_of: Watermark }`
+handshake. Both were **removed before they shipped** by
+[ADR-0014](0014-reactive-only-takeover-version-vector.md): takeover is
+reactive-only and the acting-backup **self-releases** on the served transaction's
+terminal state, deferring any terminal discharge to the reclaiming primary. Two
+facts from X11's analysis remain load-bearing and are recorded here:
 
-X5 fixed the *primary* half of fail-back but left the *backup* half implicit:
-**how, and when, the acting-backup relinquishes the live call it took over.**
-Tier-3 endurance exposed the gap. Reclaim as built was **passive** — the rebooted
-primary pulled its calls back into `pri:` *storage* (verified by
-`s8_tests::takeover_then_reclaim_keeps_backup_mutation`) but never re-materialised
-them into its live map, so it never re-*served* them; meanwhile the acting-backup's
-**takeover copy** kept serving. Both nodes then kept the *same* dialog alive, each
-sending in-dialog keepalive OPTIONS under its **own** CSeq counter. That is not
-merely a memory leak (`b2bua_active_calls` grew unbounded until the ~1 h
-`GlobalDuration` cap; worst for long-hold streams) — it is a **correctness bug**: a
-strict UAS may answer the lower-CSeq OPTIONS with `500`, which is not a 2xx, so
-`absorb-options-200` does not fire, `KeepaliveTimeout` trips at 5 s, and a
-**healthy call is torn down.** This is the "best-effort flip proves lossy under
-real chaos (tier 3)" trigger X5 deferred to.
+- **Why exclusive ownership matters (the correctness bug X11 found).** If two
+  nodes serve the *same* dialog, each sends in-dialog keepalive OPTIONS under its
+  own CSeq counter; a strict UAS answers the lower-CSeq OPTIONS with `500`, so
+  `absorb-options-200` does not fire, `KeepaliveTimeout` trips at 5 s, and a
+  **healthy call is torn down**. Double-serving is a correctness bug, not just a
+  leak — which is why the backup must hold a takeover copy only while actively
+  serving and self-release deterministically.
 
-**(a) Reclaim is *active*.** A reclaiming primary materialises each `pri:` call
-into the live map and re-arms its timers — it re-*serves*, not merely re-*stores*
-(the **Reclaim** vs **re-hydration** glossary split). Triggered by a **bulk sweep
-on bootstrap-complete** — lazy-on-in-dialog is rejected because a long-hold call
-receives no inbound in-dialog request (the B2BUA *sends* the keepalives), so lazy
-never fires for exactly the calls that leak — **plus** a **reactive per-call
-reclaim** driven by the backup's reverse-replication, which closes the flip-race
-straggler.
-
-**(b) An explicit ownership handshake replaces passive inference.** Inference was
-rejected: `call_gen` cannot tell "the primary reclaimed" from "I keepalived" —
-both bump it, and they **lockstep** (reclaim re-delivers at the *same* `call_gen`,
-so the LWW body-write is skipped); an incarnation stamp survives the lockstep but
-still leaves the double-OPTIONS window open. So ownership transfer is **told, not
-guessed**:
-
-- **Notify = existing reverse-replication.** When the backup serves a takeover
-  copy it already reverse-flushes it to the primary (`partition=Pri`); that frame
-  *is* "I am serving this." The only addition is a **prompt reverse-flush the
-  instant a takeover copy is activated** (don't wait for the next keepalive).
-- **`Deactivate{ as_of: Watermark }`** — one new server→client frame, pushed down
-  the backup's existing pull connection. `as_of` is the primary's **applied pull
-  watermark for THIS backup** — how far it has pulled this backup's reverse-flush
-  stream, a monotonic position **in the backup's own changelog-counter domain**.
-  The backup **deactivates** (local-only: stop timers → cease OPTIONS, drop the
-  live copy, **revert to a pure `Element`** — *no* delete propagated, the call
-  lives on under the primary) every takeover copy whose **reverse-flush position
-  is `<= as_of`** — exactly the copies the primary has provably applied and now
-  serves. A copy whose position is still `> as_of` (a later episode the primary
-  hasn't caught up to) is left serving; a re-send with a higher `as_of` sweeps it
-  once the primary catches up.
-  - **Why a watermark, not a timestamp.** An earlier sketch tagged each copy with
-    its activation wall-clock and compared `since T`. That compares the backup's
-    clock against the primary's clock — cross-node skew either leaks a ghost
-    (copy not dropped) or tears down a live call from a later episode (copy
-    wrongly dropped). The watermark keeps the **entire** ownership decision in one
-    monotonic domain (the backup's changelog counter, which the backup mints and
-    the primary echoes back as its pull position), so it is **immune to clock
-    skew** and needs no NTP. This is deliberately separate from timer rebuild,
-    which *must* stay on NTP wall-clock (a monotonic clock resets on the pod
-    restart that failover implies; an absolute cross-node deadline cannot).
-  - **Cadence:** one tick on going-active (after the bulk reclaim materialises the
-    population) + a handful of re-ticks over ~5 s; each tick re-reads the live
-    per-backup watermark (which advances as the primary keeps pulling), so the
-    sweep converges. **Bounded regardless of call count**, idempotent.
-- **Relaxed safety:** a straggler the primary has not yet reclaimed when it is
-  deactivated opens a few-ms unserved gap — accepted, as the *same* flip-instant
-  race X5 already declares covered by SIP retransmission + the proxy's
-  ACK/CANCEL-to-primary rule. (The `<= as_of` gate narrows this further: a copy is
-  only dropped once the primary has *applied* its reverse-flush.)
-- **Exclusive ownership:** the primary defers sending OPTIONS for a call until it
-  has deactivated the backup's copy, so the two never keepalive one dialog
-  concurrently — closing the CSeq-collision window.
-- **Disconnect backstop:** if the backup is unreachable when `Deactivate` is sent,
-  it is re-sent on reconnect (rides the pull channel); `GlobalDuration` is the
-  ultimate cap. No passive recheck — a disconnected backup is already steered away
-  by the health probe and deactivates the moment it reconnects.
-
-**Memory protection moves onto the keepalive cadence, not `max_duration`.** A
-backup `Element` no longer refreshed by its primary's **forward** flush within
-**1.5× the keepalive interval** self-evicts (the existing lazy-TTL, retuned from
-the 1 h backstop). 1.5× decomposes as 1.0× (normal refresh period) + 0.5× (max
-reboot+rehydrate budget that still lands the next refresh in-window) — so "no
-refresh in 1.5×" is a genuine split-brain/hard-down signal, and the reboot SLO is
-0.5× interval. Consequence: **endurance must run keepalive ≥ 5 min** (prod default
-300 s) so reboot fits the budget and the test stays representative instead of
-manufacturing fake reap artifacts.
-
-**Observability:** a deactivation writes a CDR end-event flagged **`ghost-backup`**
-(distinct from a real call end) + `b2bua_repl_handback_total`. Acceptance after a
-`kill_worker`+reclaim: `ghost-backup` count = duplicates handed back, and the
-`b2bua_active_calls − sipp_current_calls` gap reaps to ~0.
-
-**Still not hard fencing.** No epoch leases, no per-transaction fence checks, no
-2-phase drain (all rejected by X5 as too heavy). This is *one* idempotent
-timestamp-bulk message on the existing channel + reuse of reverse-replication as
-the notify — the minimum that makes ownership exclusive.
+- **Reclaim vs re-hydration.** A reclaiming primary **re-serves** (materialises
+  each `pri:` call into the live map and re-arms timers), not merely **re-stores**.
+  Reclaim is a **bulk sweep on bootstrap-complete**, not lazy-on-in-dialog: a
+  long-hold quiescent call receives no inbound in-dialog request (the B2BUA *sends*
+  the keepalives), so lazy would never fire for exactly the calls that would
+  otherwise leak.
 
 ## Deferred (with justification)
 
@@ -309,11 +231,12 @@ the notify — the minimum that makes ownership exclusive.
 - **Incarnation-gen real source** (boot wall-clock vs k8s pod start epoch) —
   injectable seam now (test = seed, like `IdGen::seeded`); real source finalised
   with the k8s slice.
-- **Sticky failover / hard fencing** — rejected (X5). The best-effort flip *did*
-  prove lossy under tier-3 chaos (orphaned takeover copies double-serving the same
-  dialog), so the fail-back was hardened in **X11** with a lightweight
-  ownership-deactivation handshake — still short of full hard fencing (no per-txn
-  fence, no epoch leases, no 2-phase drain).
+- **Sticky failover / hard fencing** — rejected (X5). The best-effort flip proved
+  lossy under tier-3 chaos (orphaned takeover copies double-serving the same
+  dialog), so fail-back was hardened in
+  [ADR-0014](0014-reactive-only-takeover-version-vector.md) (reactive takeover +
+  acting-backup self-release on transaction completion) — still short of full hard
+  fencing (no per-txn fence, no epoch leases, no 2-phase drain).
 
 ## References
 

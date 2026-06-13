@@ -66,7 +66,9 @@ machine interprets through its own transitions; it never reaches in and mutates
 global state directly. Coupling is kept to **one synchronous hop, service →
 global**: the global machine does not synchronously call back into services;
 service-slice cleanup rides the existing `→ Terminated` invariant
-(cancel-all-timers / write-cdr / remove-call). A second, parallel message
+(cancel-all-timers / write-cdr / remove-call; exactly-once enforcement of this
+cleanup is owned by [ADR-0020](./0020-call-reaper-obligations-rule-view.md)'s
+reaper + obligations). A second, parallel message
 vocabulary beside the action union was rejected as duplication (two ways to say
 "terminate") and as reintroducing cross-machine cascade/ordering complexity that
 the per-machine diagrams would not show.

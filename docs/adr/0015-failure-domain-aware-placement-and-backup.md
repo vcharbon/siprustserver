@@ -1,6 +1,15 @@
 # 0015 — Failure-domain-aware placement & backup selection: zone-pinned workers, single-picker distinct-zone backup, unified exclusion key
 
-**Status:** accepted (2026-06-05)
+> **⚠️ NOT YET IMPLEMENTED — TODO / target design (as of 2026-06-13).**
+> This ADR is the intended cross-rack / multi-zone evolution. The live
+> `deploy/k8s/` manifests do **not** implement any of it: they still run the
+> ADR-0012 D7 design (multicast VRRP, `tier=edge` proxy nodes,
+> `kubernetes.io/hostname` anti-affinity, a single worker StatefulSet — no zone
+> labels, no `unicast_peer`, no failure-domain key). **Until the manifests are
+> migrated, ADR-0012 D7 is the source of truth for what actually runs.** Treat
+> every decision below as planned, not live.
+
+**Status:** accepted as design (2026-06-05); **not yet deployed**
 
 **Source:** this codebase (no sipjsserver counterpart — the source's 2-worker
 deployment never scaled past a pair, so "primary and backup on distinct nodes"

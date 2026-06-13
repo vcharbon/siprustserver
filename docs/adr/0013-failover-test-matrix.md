@@ -1,37 +1,30 @@
 # 0013 — Failover test matrix: safe-point CallScenario DSL, transparent-failover oracle, generated cell tests
 
-**Status:** accepted (2026-06-04); **built** (2026-06-04) — `crates/failover-harness`,
-19 transparent cells + 5 oracle teeth tests green (the keepalive cell landed
-2026-06-05; see the keepalive amendment).
+**Status:** accepted (2026-06-04); **built** — `crates/failover-harness`,
+transparent cells + oracle teeth tests green (including the
+production-cadence keepalive cell; see §Keepalive cell at production cadence).
 
-**Amendment (2026-06-05) — reactive-only takeover ([ADR-0014](0014-reactive-only-takeover-version-vector.md)).**
-Eager takeover and the `Deactivate` handback were removed. Anywhere the amendments
-below say "eager `TakeOverPeer`" / "eager-takeover keepalive" / "three interleaving
-timers", read **reactive takeover + reboot reclaim**: a failed-over dialog is taken
-over only when the proxy reroutes its in-dialog traffic to a survivor, and a
-quiescent dialog is recovered by the rebooting primary's (smoothed) reclaim. The
-acting-backup then **self-releases** its takeover copy on transaction completion
-(no handback burst). The harness now asserts in cluster vocabulary (`serves` /
-`is_synchronized_backup` / `memory_clean` / `assert_single_owner` /
-`assert_call_fully_released`), not HA internals. Renamed cells:
-`hydrated_call_rearms_keepalive_and_reaps_dead_peer` →
-`hydrated_takeover_copy_self_releases_without_leaking`;
-`cseq_stays_in_order_across_eager_takeover_and_reclaim` →
-`cseq_stays_in_order_across_failover_and_reclaim`; added
-`quiescent_long_call_survives_kill_reboot_reclaim`; removed
-`eager_takeover_keeps_quiescent_dialog_alive_and_hands_back_once`.
+**Takeover model (ADR-0014, reactive-only).** A failed-over dialog is taken over
+**reactively** — only when the proxy reroutes its in-dialog traffic to a survivor;
+a quiescent dialog is recovered by the rebooting primary's (smoothed) reclaim.
+There is no eager/membership-driven takeover and no `Deactivate` handback. The
+acting-backup **self-releases** its takeover copy on transaction completion,
+deferring any terminal discharge to the primary. The harness asserts in cluster
+vocabulary (`serves` / `is_synchronized_backup` / `memory_clean` /
+`assert_single_owner` / `assert_call_fully_released`), not HA internals.
 
-**Amendment (2026-06-04, during build):** `Early` state / `CANCEL` are
-reclassified from the transparent matrix to **v2-disruptive**. By the same
+**Scope — `Early`/`CANCEL` are v2-disruptive, not transparent.** `Early` state /
+`CANCEL` are excluded from the transparent matrix and classified **v2-disruptive**. By the same
 quiescence rule that excludes re-negotiating/terminating-in-flight, an early
 dialog has a *pending INVITE transaction* — and transactions are not replicated,
 only confirmed call context is — so killing the primary mid-early-INVITE is not
 transparent. The transparent state axis is therefore `ConfirmedPreAck` (200 sent
 + replicated, ACK pending → ACK routes to the backup) and `Established`.
 
-**Amendment (2026-06-05) — keepalive cell landed at production cadence.** The
-`established__keepalive__kill__reboot_no_traffic` cell is now in the matrix (was
-`#[ignore]`). Two changes made it representative *and* fixed the cadence:
+### Keepalive cell at production cadence
+
+The `established__keepalive__kill__reboot_no_traffic` cell runs in the matrix at
+production cadence. Two things make it representative *and* fix the cadence:
 
 1. **Production timers, globally.** The harness no longer shortcuts the keepalive
    to 30 s — every worker runs the real `keepalive_interval_sec: 300`
@@ -53,27 +46,28 @@ transparent. The transparent state axis is therefore `ConfirmedPreAck` (200 sent
    advances in sub-reap (2 s) steps and stops the instant an async probe is
    satisfied; `Agent::try_receive_tolerating` is the non-blocking drain it polls
    with. The runner answers both legs inside their 5 s window regardless of the
-   three interleaving timers (eager-takeover keepalive, reclaimed-primary
-   keepalive, dead-peer reap). Teeth verified: deliberately dropping the reclaim
-   keepalive re-arm fails the cell.
+   interleaving timers (the reclaimed-primary keepalive re-arm and the dead-peer
+   reap). Teeth verified: deliberately dropping the reclaim keepalive re-arm fails
+   the cell.
 
 The happy-path foundation is `failover.rs::successful_long_call_with_as_generated_options`
 (no fault: a long call kept alive across two AS-generated OPTIONS cycles at 300 s,
 then a clean BYE). Core rearm-on-takeover stays covered by
-`failover.rs::hydrated_call_rearms_keepalive_and_reaps_dead_peer`.
+`failover.rs::hydrated_takeover_copy_self_releases_without_leaking`.
 
-**Amendment (2026-06-05) — complete k8s kill + default RFC CSeq audit.** Two
-representativeness upgrades targeting the endurance `unexpected_msg` long-call
-loss (handoff `handoff-eager-takeover-residuals-2026-06-05.md` Fix A):
+### Complete k8s kill + default RFC CSeq audit
 
-1. **The kill is now the COMPLETE k8s death signal.** A `Kill`/`Drain` cell no
-   longer only marks the worker dead at the proxy (reactive, proxy-reroute
-   takeover) — `inject_failover` also drives the dead pod's endpoint OUT of the
-   survivor's membership (`simulate_peer_removed`), the signal the supervisor
-   turns into an eager `TakeOverPeer`; the reboot re-adds it
-   (`simulate_peer_added`, a StatefulSet restart = Removed-then-Added). So every
-   kill cell now exercises the eager-takeover path that serves quiescent long
-   calls, not just proxy reroute.
+Two representativeness upgrades targeting the endurance `unexpected_msg` long-call
+loss:
+
+1. **The kill is the COMPLETE k8s death signal.** A `Kill`/`Drain` cell does not
+   only mark the worker dead at the proxy — `inject_failover` also drives the dead
+   pod's endpoint OUT of the survivor's membership (`simulate_peer_removed`), which
+   keeps the survivor's membership view honest (it does **not** drive an eager
+   takeover — that mechanism was removed in ADR-0014); the reboot re-adds it
+   (`simulate_peer_added`, a StatefulSet restart = Removed-then-Added). Takeover
+   itself stays reactive: the survivor takes a dialog over only when the proxy
+   reroutes its in-dialog traffic to it.
 
 2. **A default RFC 3261 audit over the recorded SIP layer, every cell.** New
    `sip-net::CSeqInDialogOrderRule` (a `CrossMessageAuditRule` installed in the
@@ -84,21 +78,21 @@ loss (handoff `handoff-eager-takeover-residuals-2026-06-05.md` Fix A):
    `run_cell` calls `FailoverHarness::assert_sip_rfc_clean` for baseline + variant
    — the SIP-plane analogue of the universal teardown sweep, on ALL endpoints.
    Rule teeth: `sip-net::rfc_audit::tests`. A representative end-to-end guard with
-   in-dialog CSeq churn through the full kill→eager-takeover→reboot→reclaim cycle
-   is `failover.rs::cseq_stays_in_order_across_eager_takeover_and_reclaim`.
+   in-dialog CSeq churn through the full kill→failover→reboot→reclaim cycle
+   is `failover.rs::cseq_stays_in_order_across_failover_and_reclaim`.
 
-   **Framework finding (open).** The genuine production *race* behind Fix A — the
-   last in-dialog flush dying with the primary so the survivor probes from a stale
-   CSeq snapshot — is **not yet reproducible** here: under the simulated repl
-   fabric the backup replica stays current (a `partition()` does NOT sever an
-   established forward-replication stream — only a crash closes streams, and the
-   primary must be alive to create the lag; observed the backup gen advancing
-   4→8 across a partition). So the audit is in place and proven to have teeth, but
-   the stale-CSeq lag itself needs a new seam to inject deterministically (e.g. a
-   store-level "hold the replica back" hook, or a fault that cuts forward
-   replication on a live primary). Until then the CSeq-regression bug is guarded
-   against but not actively reproduced in CI. Fix A in the b2bua remains a
-   PROPOSAL (pending the ADR-0011 X11 grill) and is **not** applied.
+   **Framework finding (open).** The genuine production *race* — the last in-dialog
+   flush dying with the primary so the survivor probes from a stale CSeq snapshot —
+   is **not yet reproducible** here: under the simulated repl fabric the backup
+   replica stays current (a `partition()` does NOT sever an established
+   forward-replication stream — only a crash closes streams, and the primary must
+   be alive to create the lag; observed the backup gen advancing 4→8 across a
+   partition). So the audit is in place and proven to have teeth, but the stale-CSeq
+   lag itself needs a new seam to inject deterministically (e.g. a store-level "hold
+   the replica back" hook, or a fault that cuts forward replication on a live
+   primary). The underlying b2bua behaviour is settled (ADR-0014 reactive-only,
+   superseding X11; ADR-0020 Model-Y terminal handling); the only open item is this
+   deterministic injection seam.
 
 **Source:** this codebase. The HA re-hydration / backup / switchback paths
 accumulated a string of bugs that were each long to detect, reproduce, and debug
@@ -118,9 +112,9 @@ the SIP plane (`scenario-harness`), a real load-balancing `ProxyCore` over a
 recording `SimulatedReplicationNetwork`. It exposes `crash()`, `reboot()`,
 `partition()/heal()`, `set_health()`, `is_ready()`, and call introspection
 (`active_calls`, `lock_count`, `call_gen`, `scan_backed_up`, `scan_primary`,
-`get`). Eight hand-written tests use it (`canonical_failover`,
-`hydrated_call_rearms_keepalive_and_reaps_dead_peer`,
-`reboot_reclaim_hands_back_exactly_one_owner`,
+`get`). Several hand-written tests use it (`canonical_failover`,
+`hydrated_takeover_copy_self_releases_without_leaking`,
+`reboot_reclaim_exactly_one_owner_after_self_release`,
 `acting_backup_terminate_leaves_no_expired_context_for_reclaim`, four
 `matrix_*` fault cases).
 
@@ -214,8 +208,11 @@ transparency oracle.
   re-negotiating · terminating-in-flight.
 - **B. In-dialog event the backup processes**, as behavioral *categories*:
   - *Terminating* — `BYE` (confirmed/established → 200) or `CANCEL` (early → 487);
-    same invariant family (release takeover copy + lock + `bak:` Element,
-    propagate Reverse DELETE, no resurrection on reboot).
+    same invariant family (release the takeover copy + lock, **retain** the `bak:`
+    Element as a short-TTL deferred terminal reverse-flushed to the primary — the
+    backup propagates **no** delete and discharges nothing; the reclaiming primary
+    is the sole discharge authority; no resurrection on reboot via the delete
+    tombstone — ADR-0014 / ADR-0020 X3).
   - *Generic in-dialog* — re-INVITE / UPDATE / INFO / in-dialog OPTIONS ping;
     behaviorally interchangeable, so the driver picks `{method × direction}` by
     **seeded random** rather than permuting (keeps the matrix from exploding).
@@ -224,7 +221,7 @@ transparency oracle.
   - *Nothing* — no event routed to the backup; pure re-hydration on reboot.
 - **D. Recovery permutation:** kill-and-stay-dead (rest of call served on backup) ·
   kill-then-reboot-with-no-traffic-while-dead (clean reclaim) ·
-  kill-then-reboot-after-backup-served-part (takeover → reclaim → handback).
+  kill-then-reboot-after-backup-served-part (takeover → reclaim → self-release).
 - **Failure mode:** abrupt kill · graceful drain (both must be transparent at a
   safe-point).
 - **Direction (C)** and the concrete generic method are folded into the seeded

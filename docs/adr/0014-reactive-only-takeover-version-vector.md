@@ -34,8 +34,12 @@ primary+backup mutations (a latent equal-`gen` divergence).
 2. **Remove the `Deactivate` handback** (wire frame tag 5 + the watermark handshake
    + the go-active burst). The acting-backup **self-releases**: when the **last
    in-flight transaction** for a taken-over call reaches a terminal state, it
-   `drop_local`s the live copy (the `bak:` replica + the reverse-flushed deltas
-   remain). Durability of the reverse-flush replaces the handshake.
+   `drop_local`s its live copy (the `bak:` replica + the reverse-flushed deltas
+   remain). On a **terminal** (BYE/CANCEL) the backup **does not discharge** — no
+   CDR, no limiter release, no propagated delete: it records the terminal into the
+   `(p,b)` Element and reverse-flushes it with a short grace TTL (its alive-timer)
+   before dropping the live copy; the **primary is the sole discharge authority**
+   (§Terminal reconcile). Durability of the reverse-flush replaces the handshake.
 
 3. **Reconcile by a per-context `(p, b)` version vector** — `p` = primary counter,
    `b` = backup counter; each node bumps **only its own** on a local mutation, so
@@ -180,10 +184,14 @@ The trigger is the transaction layer, push-based — the router never polls:
   param (the dialog remote target = the B2BUA Contact); client transactions via the
   Via `cr` param. When the **last** transaction for a watched call leaves the map,
   the txn layer emits `TransactionEvent::CallQuiesced{call_ref}`.
-- The router handles `CallQuiesced` by self-releasing (`drop_local` + cancel
-  timers/txns + poison the dispatch queue + `bump_repl_self_release`), re-checking
+- The router handles `CallQuiesced` by self-releasing: `drop_local` + cancel
+  timers/txns + poison the dispatch queue + `bump_repl_self_release`, re-checking
   under the per-call lock (a fresh in-dialog request may have re-armed a transaction
-  — a second takeover during a sustained partition continues to the next `b`).
+  — a second takeover during a sustained partition continues to the next `b`). If
+  the served call reached a **terminal** state, the backup first reverse-flushes that
+  terminal with a short grace TTL (its alive-timer) and **defers** the discharge to
+  the primary rather than writing a CDR / releasing the limiter / propagating a
+  delete itself.
 
 "Last transaction left the map" — not merely "reached its final response" — is
 deliberate: a **2xx INVITE** server transaction lingers in `Completed` until Timer H
@@ -222,32 +230,31 @@ assert_call_fully_released}`, `ReplicatedB2buaSut::{serves, is_synchronized_back
 memory_clean, holds_any_trace}`). External behaviour (Alice/Bob: responses, CSeq
 order, call survival, clean teardown) is unchanged by this refactor.
 
-## Amendment (2026-06-13) — terminal reconcile into the live map + resurrection guard
+## Terminal reconcile, deferred discharge & resurrection guard
 
-`FixCallTerminateOnBackup` (Model Y; see ADR-0020 X3 amendment) extends three
-points here, all **still purely causal — no reconciliation timers**:
+Terminal handling is **purely causal — no reconciliation timers** — and rests on
+three rules (the primary is the sole discharge authority; see ADR-0020 X3):
 
 1. **The Reclaim-tail reconciles into the LIVE map, not just the replica store.**
-   The tail was already defined to "catch a post-partition reverse-flush a
-   live-but-partitioned primary missed," but it stopped at `pri:{self}`. It now
-   folds a dominating reverse-flush (Reverse `(p,b)` rule, unchanged) into the
+   The tail catches a post-partition reverse-flush a live-but-partitioned primary
+   missed, and folds a dominating reverse-flush (Reverse `(p,b)` rule) into the
    primary's **live** copy: a non-terminal `Put` updates it (notably the bumped
    b-leg `local_cseq`, so the primary's next request to the peer stays monotonic —
-   the alternative to the §"accepted trade-off" CSeq drop, when the flush is
-   timely); a `Terminated` `Put` drives a discharge through the reaper funnel.
+   the timely-flush alternative to the §"accepted trade-off" CSeq drop); a
+   `Terminated` `Put` drives a discharge through the reaper funnel.
 
-2. **Acting-backup self-release DEFERS the terminal** (ADR-0020 X3 amendment): a
-   takeover copy reaching terminal reverse-flushes the terminal (short grace TTL =
-   its alive-timer) and `drop_local`s — it does **not** discharge. The primary is
-   the sole discharge authority; if it never returns, the backup's alive-timer
-   fallback discharges (durability now rests on *primary OR backup* restarting).
+2. **The acting-backup defers the terminal.** A takeover copy reaching terminal
+   reverse-flushes it (short grace TTL = its alive-timer) and `drop_local`s — it
+   does **not** discharge. The primary is the sole discharge authority; if it never
+   returns, the backup's alive-timer fallback discharges (durability rests on
+   *primary OR backup* restarting).
 
-3. **A `flush` body/`(p,b)` consistency fix + an apply-side delete tombstone.**
-   `flush` now embeds the authoritative `(p,b)` in the replicated **body** (it
-   previously encoded the pre-bump clone, so a backup hydrating from it branched
-   one `p` stale — invisible vs a crashed primary, but it silently broke every
-   reverse-flush to an **alive** primary). And because the Reverse `(p,b)` rule
-   structurally cannot let a backup's discharged state apply to a primary that has
-   bumped `p`, a deleted `call_ref` is **tombstoned** (`ReplicatingCallStore`):
-   `put_call` rejects a re-creating `Put` within the window (apply-side
-   delete-wins), so a late reverse-flush cannot resurrect a just-discharged call.
+3. **`flush` carries the authoritative `(p,b)`; a delete is tombstoned.** `flush`
+   embeds the authoritative `(p,b)` in the replicated **body** (encoding the
+   pre-bump clone would branch a backup one `p` stale — invisible vs a crashed
+   primary, but it silently breaks every reverse-flush to an **alive** primary).
+   And because the Reverse `(p,b)` rule structurally cannot let a backup's
+   discharged state apply to a primary that has bumped `p`, a deleted `call_ref` is
+   **tombstoned** (`ReplicatingCallStore`): `put_call` rejects a re-creating `Put`
+   within the window (apply-side delete-wins), so a late reverse-flush cannot
+   resurrect a just-discharged call.

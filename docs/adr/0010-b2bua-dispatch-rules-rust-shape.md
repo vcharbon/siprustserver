@@ -68,9 +68,12 @@ rules, and the first handler returning actions wins. Actions run through an
 `ActionExecutor` that mutates a working `Call` and emits typed effects. The
 B2BUA *regenerates* messages on the peer leg's own transaction/dialog rather than
 rewriting bytes (back-to-back UAs: independent tags/CSeq/Contact). The
-`InvariantEnforcer` guarantees cleanup on the `→ terminated` transition
+`InvariantEnforcer` performs cleanup on the `→ terminated` transition
 (cancel-all-timers, write-cdr, remove-call-last) and promotes
-`terminating → terminated` once all legs resolve.
+`terminating → terminated` once all legs resolve. (This is the happy-path
+property; [ADR-0020](./0020-call-reaper-obligations-rule-view.md) adds the call
+reaper + obligation vocabulary that make it exactly-once across the panic / dropped
+-event / lost-timer / wedged-`Terminating` escape routes.)
 
 The basic-B2BUA default rule set is ported (relay / dialog / absorb / lifecycle /
 terminating / corner-case / failure / timer). The 18x-management strategies
