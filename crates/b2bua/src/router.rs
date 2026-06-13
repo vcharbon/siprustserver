@@ -1020,21 +1020,32 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
     // Persist first (the source's invariant: state lands before effects run).
     ctx.state.update(result.call.clone());
 
-    // Replicate an active, backed-up call to its peer after each authoritative
-    // mutation (the S10 flush-on-mutation wiring point — `replication.rs` defers
-    // sourcing the backup peer to S10, which the cookie-stamped `topology.bak`
-    // now provides). `CallState::flush` is a no-op for calls with no replicable
-    // topology, so the non-HA path is unchanged; for a backed-up call it routes
-    // through the S8 write-side policy (Forward when primary, Reverse when
-    // acting-backup) so the backup holds the latest `call_gen`. The flush rides
-    // the buffered terminate-writer (non-blocking). Terminated calls take the
-    // `remove` path instead (propagates a delete), so gate on the active state.
-    if result.call.state == CallModelState::Active
-        && result
-            .call
-            .topology
-            .as_ref()
-            .is_some_and(|t| !t.bak.is_empty())
+    // Replicate a non-terminated, backed-up call to its peer after each
+    // authoritative mutation (the S10 flush-on-mutation wiring point —
+    // `replication.rs` defers sourcing the backup peer to S10, which the
+    // cookie-stamped `topology.bak` now provides). `CallState::flush` is a no-op
+    // for calls with no replicable topology, so the non-HA path is unchanged; for
+    // a backed-up call it routes through the S8 write-side policy (Forward when
+    // primary, Reverse when acting-backup) so the backup holds the latest state.
+    // The flush rides the buffered terminate-writer (non-blocking).
+    //
+    // `Terminating` MUST flush too, not just `Active`: a teardown-in-progress
+    // carries authoritative state the replica needs — the b-leg `ByeSent`
+    // disposition and its bumped `local_cseq`. Skipping it (the old `== Active`
+    // gate) stranded that progress in the live copy only, so an acting-backup
+    // whose primary had crashed never propagated it; a reclaim racing the
+    // in-flight BYE then pulled the STALE `Active` snapshot, restarted
+    // termination, and re-sent the BYE at the *reused* CSeq a real UAS drops
+    // (matrix cells C7/RFC). Only `Terminated` is excluded — it takes the
+    // `RemoveCall` delete path below instead.
+    if matches!(
+        result.call.state,
+        CallModelState::Active | CallModelState::Terminating
+    ) && result
+        .call
+        .topology
+        .as_ref()
+        .is_some_and(|t| !t.bak.is_empty())
     {
         ctx.state.flush(&result.call);
     }
