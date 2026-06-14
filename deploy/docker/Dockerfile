@@ -14,6 +14,12 @@
 
 FROM rust:1-slim-bookworm AS builder
 WORKDIR /src
+# tikv-jemalloc-sys (the jemalloc global allocator linked into b2bua-runner)
+# builds the bundled C jemalloc with `./configure && make`; the slim Rust image
+# ships cc but not make, so add build tooling. Discarded with the builder stage
+# (multi-stage) — no effect on the runtime image size.
+RUN apt-get update && apt-get install -y --no-install-recommends make \
+    && rm -rf /var/lib/apt/lists/*
 # Copy the whole workspace (cheap on loopback; .dockerignore drops target/).
 COPY . .
 RUN cargo build --release -p sip-proxy-runner -p b2bua-runner -p call-limiter-runner -p cdr-consumer-runner

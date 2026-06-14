@@ -739,15 +739,39 @@ impl CallState {
         // rest at each (machine,state) cursor. Computed under the same brief lock
         // so the distribution is consistent with the call-map size above, then
         // pushed to the `b2bua_sm_cursors` gauge.
+        //
+        // Per-call Vec census (memory leak localisation): summed in the SAME pass
+        // — the count-gauges above bound the map sizes, these bound the bytes
+        // held INSIDE each call. The Vec whose sum/store_calls ratio climbs while
+        // every count is flat is the leak (a held OPTIONS-hold/re-INVITE dialog's
+        // per-event tail never pruned till terminal).
         let mut census: BTreeMap<(String, String), u64> = BTreeMap::new();
+        let (mut cdr, mut pend, mut pend_max, mut dialogs, mut rset, mut timers, mut tagmap, mut blegs) =
+            (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
         for call in inner.calls.values() {
             for (machine, state) in &call.sm_cursors {
                 *census
                     .entry((machine.as_str().to_string(), state.as_str().to_string()))
                     .or_insert(0) += 1;
             }
+            cdr += call.cdr_events.len() as u64;
+            timers += call.timers.len() as u64;
+            tagmap += call.tag_map.len() as u64;
+            blegs += call.b_legs.len() as u64;
+            let mut call_pend = 0u64;
+            for leg in std::iter::once(&call.a_leg).chain(call.b_legs.iter()) {
+                dialogs += leg.dialogs.len() as u64;
+                for d in &leg.dialogs {
+                    rset += d.sip.route_set.len() as u64;
+                    call_pend += d.ext.inbound_pending_requests.len() as u64;
+                }
+            }
+            pend += call_pend;
+            pend_max = pend_max.max(call_pend);
         }
         self.metrics.set_sm_cursor_census(census);
+        self.metrics
+            .set_call_census(cdr, pend, pend_max, dialogs, rset, timers, tagmap, blegs);
     }
 
     /// Recompute and apply a call's routing index, dropping any stale keys.

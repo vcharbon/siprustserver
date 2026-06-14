@@ -1,0 +1,1025 @@
+{
+  "uid": "jemalloc-allocator",
+  "title": "jemalloc \u2014 Allocator footprint & fragmentation",
+  "tags": [
+    "siprustserver",
+    "jemalloc",
+    "memory"
+  ],
+  "timezone": "",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "pod",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "vm"
+        },
+        "query": "label_values(jemalloc_resident_bytes, pod)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Overview \u2014 footprint & resolved config",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "RSS (cgroup OOM watches this)",
+      "description": "process_resident_memory_bytes \u2014 the OS RSS the node cgroup OOM-kills on. Compare to jemalloc_resident.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(process_resident_memory_bytes{pod=~\"$pod\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "red"
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "graphMode": "area",
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "jemalloc resident",
+      "description": "Physical resident bytes jemalloc manages. If ~= RSS, growth is on-heap (jemalloc's problem); if RSS >> this, growth is off-heap.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(jemalloc_resident_bytes{pod=~\"$pod\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "graphMode": "area",
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "jemalloc allocated (live demand)",
+      "description": "Live application allocations. The floor the heap could shrink to with zero retention/fragmentation.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(jemalloc_allocated_bytes{pod=~\"$pod\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "graphMode": "area",
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "arenas (narenas)",
+      "description": "arenas.narenas \u2014 parallelism vs per-arena retention trade-off. 2026-06-14 finding flagged narenas=97 as a fragmentation suspect.",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 12,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "max(jemalloc_arenas{pod=~\"$pod\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "graphMode": "area",
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "background purge thread",
+      "description": "1 if purging runs on background threads (off the alloc hot path).",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 15,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "max(jemalloc_background_thread{pod=~\"$pod\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "OFF",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "ON",
+                  "color": "green"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "graphMode": "area",
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "opt.dirty_decay_ms",
+      "description": "Resolved dirty_decay_ms read back from jemalloc \u2014 confirms _RJEM_MALLOC_CONF parsed. Expect 1000.",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 18,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "max(jemalloc_opt_dirty_decay_ms{pod=~\"$pod\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1000": {
+                  "color": "green"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "graphMode": "area",
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "opt.muzzy_decay_ms",
+      "description": "Resolved muzzy_decay_ms. Expect 1000. A typo in MALLOC_CONF is silently ignored, so assert \u2014 don't infer.",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 21,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "max(jemalloc_opt_muzzy_decay_ms{pod=~\"$pod\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1000": {
+                  "color": "green"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "graphMode": "area",
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 9,
+      "type": "row",
+      "title": "Footprint over time",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "collapsed": false
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "jemalloc memory breakdown (sum across pods)",
+      "description": "The standard jemalloc size ladder: allocated <= active <= resident <= mapped. Widening allocated->resident gap = retention/fragmentation.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(jemalloc_allocated_bytes{pod=~\"$pod\"})",
+          "refId": "A",
+          "legendFormat": "allocated (live)"
+        },
+        {
+          "expr": "sum(jemalloc_active_bytes{pod=~\"$pod\"})",
+          "refId": "B",
+          "legendFormat": "active (pages backing allocs)"
+        },
+        {
+          "expr": "sum(jemalloc_resident_bytes{pod=~\"$pod\"})",
+          "refId": "C",
+          "legendFormat": "resident (RSS-equiv)"
+        },
+        {
+          "expr": "sum(jemalloc_mapped_bytes{pod=~\"$pod\"})",
+          "refId": "D",
+          "legendFormat": "mapped"
+        },
+        {
+          "expr": "sum(jemalloc_retained_bytes{pod=~\"$pod\"})",
+          "refId": "E",
+          "legendFormat": "retained (virtual, not resident)"
+        },
+        {
+          "expr": "sum(jemalloc_metadata_bytes{pod=~\"$pod\"})",
+          "refId": "F",
+          "legendFormat": "metadata"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "RSS vs jemalloc resident, per pod",
+      "description": "If the two lines per pod track, all RSS growth is jemalloc-managed (on-heap). If RSS diverges above jemalloc, the growth is OFF-heap (threads, mmap, glibc) and jemalloc tuning cannot fix it. 2026-06-14: they matched -> on-heap.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (process_resident_memory_bytes{pod=~\"$pod\"})",
+          "refId": "A",
+          "legendFormat": "{{pod}} RSS"
+        },
+        {
+          "expr": "sum by (pod) (jemalloc_resident_bytes{pod=~\"$pod\"})",
+          "refId": "B",
+          "legendFormat": "{{pod}} jemalloc"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "row",
+      "title": "Fragmentation & retention gaps (2026-06-14 finding)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "collapsed": false
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Slab fragmentation:  active - allocated  (per pod)",
+      "description": "On-heap slab fragmentation: active pages not backing live allocations. The 2026-06-14 soak isolated RSS growth to THIS (active-allocated), not dirty/muzzy. This is the number narenas tuning targets.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (jemalloc_active_bytes{pod=~\"$pod\"}) - sum by (pod) (jemalloc_allocated_bytes{pod=~\"$pod\"})",
+          "refId": "A",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Retention gap:  resident - allocated  (per pod)",
+      "description": "Total physical bytes held above live demand (fragmentation + dirty + muzzy + metadata). The headroom decay-based purging is meant to bound.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (jemalloc_resident_bytes{pod=~\"$pod\"}) - sum by (pod) (jemalloc_allocated_bytes{pod=~\"$pod\"})",
+          "refId": "A",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Off-heap RSS:  process_resident - jemalloc_resident  (per pod)",
+      "description": "Memory the OS counts that jemalloc does NOT account for: thread stacks, socket/skb buffers, mmap'd files, non-jemalloc C allocs. If this climbs while jemalloc_resident is flat, growth is off-heap. ~Flat on 2026-06-14 -> off-heap refuted.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (process_resident_memory_bytes{pod=~\"$pod\"}) - sum by (pod) (jemalloc_resident_bytes{pod=~\"$pod\"})",
+          "refId": "A",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Fragmentation ratio:  active / allocated  (per pod)",
+      "description": "1.0 = no slab fragmentation; higher = more active pages per live byte. Dimensionless, so comparable across pods of different size.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (jemalloc_active_bytes{pod=~\"$pod\"}) / clamp_min(sum by (pod) (jemalloc_allocated_bytes{pod=~\"$pod\"}), 1)",
+          "refId": "A",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 17,
+      "type": "row",
+      "title": "Dirty / muzzy pages & purge activity",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "collapsed": false
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Unpurged pages: dirty & muzzy (sum)",
+      "description": "Resident bytes freed but not yet returned to the OS. Bounded by the decay_ms config. Steady-state size ~ free-rate x decay window; an unbounded climb means decay isn't keeping up.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 33
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(jemalloc_dirty_bytes{pod=~\"$pod\"})",
+          "refId": "A",
+          "legendFormat": "dirty (awaiting dirty decay)"
+        },
+        {
+          "expr": "sum(jemalloc_muzzy_bytes{pod=~\"$pod\"})",
+          "refId": "B",
+          "legendFormat": "muzzy (madvise(FREE)'d, OS-reclaimable)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Purge syscall rate: madvise() calls/s",
+      "description": "The CPU cost of purging: each madvise unmaps pages (syscall + later re-fault). A high sustained rate is the price aggressive decay pays to bound RSS.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 33
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(jemalloc_dirty_nmadvise_total{pod=~\"$pod\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "dirty madvise/s"
+        },
+        {
+          "expr": "sum(rate(jemalloc_muzzy_nmadvise_total{pod=~\"$pod\"}[5m]))",
+          "refId": "B",
+          "legendFormat": "muzzy madvise/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Allocation churn & size classes",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 41
+      },
+      "collapsed": false
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Small allocation churn: nmalloc / ndalloc rate",
+      "description": "Small size classes carry most SIP allocations. nmalloc ~= ndalloc at steady state; a persistent gap = growing live small objects.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 42
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(jemalloc_small_nmalloc_total{pod=~\"$pod\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "nmalloc/s (allocations)"
+        },
+        {
+          "expr": "sum(rate(jemalloc_small_ndalloc_total{pod=~\"$pod\"}[5m]))",
+          "refId": "B",
+          "legendFormat": "ndalloc/s (frees)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Net live small allocations (nmalloc - ndalloc, per pod)",
+      "description": "Cumulative small allocs minus frees = count of live small objects. Flat = no logical leak; a steady ramp = a real object leak (distinct from allocator retention).",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 42
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (jemalloc_small_nmalloc_total{pod=~\"$pod\"} - jemalloc_small_ndalloc_total{pod=~\"$pod\"})",
+          "refId": "A",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Live bytes by size class: small vs large",
+      "description": "Where live demand sits. Large-class growth points at oversized bodies/buffers; small-class at per-call/per-message structs.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 42
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(jemalloc_small_allocated_bytes{pod=~\"$pod\"})",
+          "refId": "A",
+          "legendFormat": "small (most SIP allocs)"
+        },
+        {
+          "expr": "sum(jemalloc_large_allocated_bytes{pod=~\"$pod\"})",
+          "refId": "B",
+          "legendFormat": "large (big bodies/buffers)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}

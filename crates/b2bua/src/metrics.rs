@@ -142,6 +142,13 @@ struct Inner {
     // (slow/dead subscriber) is an outbound-side leak distinct from the call map.
     repl_meta_total: AtomicU64,
     repl_meta_backup: AtomicU64,
+    // Inner CallStore map sizes (bodies/idx) — the idx map is insert-only on
+    // put_call, so a call whose index keys change across re-flushes (or whose
+    // delete passes the wrong keys) strands `idx:*` entries. store_idx_entries
+    // climbing while store_bodies is flat is THAT leak (the no-chaos RSS climb).
+    store_bodies: AtomicU64,
+    store_idx_entries: AtomicU64,
+    store_tombstones: AtomicU64,
     repl_changelog_entries: AtomicU64,
     repl_changelog_peers: AtomicU64,
     // State-machine cursor census (ADR-0016 slice 9), keyed "machine|state": the
@@ -153,6 +160,22 @@ struct Inner {
     // backup-partition dialog never reconciled) shows here as a cursor census
     // that lingers while `active_calls` is otherwise quiet.
     sm_cursors: Mutex<BTreeMap<String, u64>>,
+    // Per-call Vec census (sampled, summed across the live call map under the
+    // store lock). The count-gauges above bound the MAP sizes; these bound the
+    // BYTES held *inside* each call. A 10h NO_CHAOS soak showed jemalloc
+    // `allocated` climbing ~135 MB/h with EVERY map count flat — the leak is a
+    // per-call Vec that grows per in-dialog event on a long-held (OPTIONS-hold /
+    // re-INVITE) dialog and is never pruned until terminal. These sums name it:
+    // the one whose ratio over `store_calls` climbs is the leaking Vec.
+    // `*_max` is the worst single call (a held dialog's unbounded tail).
+    census_cdr_events: AtomicU64,
+    census_pending_requests: AtomicU64,
+    census_pending_requests_max: AtomicU64,
+    census_dialogs: AtomicU64,
+    census_route_set: AtomicU64,
+    census_timers: AtomicU64,
+    census_tag_map: AtomicU64,
+    census_b_legs: AtomicU64,
 }
 
 /// Clone-cheap handle to the B2BUA counter set.
@@ -342,6 +365,40 @@ impl B2buaMetrics {
         self.inner.store_touched.store(touched, Ordering::Relaxed);
     }
 
+    /// Push the per-call Vec census (summed across the live call map). Sampled
+    /// alongside `set_store_gauges` under the same store lock. The sum whose
+    /// ratio over `store_calls` climbs while the count-gauges stay flat names the
+    /// leaking per-call Vec (the bytes-inside-each-call leak the count-gauges
+    /// cannot see).
+    #[allow(clippy::too_many_arguments)]
+    /// Push the inner CallStore map sizes (sampled in the runner's reap loop).
+    pub fn set_store_map_sizes(&self, bodies: u64, idx_entries: u64, tombstones: u64) {
+        self.inner.store_bodies.store(bodies, Ordering::Relaxed);
+        self.inner.store_idx_entries.store(idx_entries, Ordering::Relaxed);
+        self.inner.store_tombstones.store(tombstones, Ordering::Relaxed);
+    }
+
+    pub fn set_call_census(
+        &self,
+        cdr_events: u64,
+        pending_requests: u64,
+        pending_requests_max: u64,
+        dialogs: u64,
+        route_set: u64,
+        timers: u64,
+        tag_map: u64,
+        b_legs: u64,
+    ) {
+        self.inner.census_cdr_events.store(cdr_events, Ordering::Relaxed);
+        self.inner.census_pending_requests.store(pending_requests, Ordering::Relaxed);
+        self.inner.census_pending_requests_max.store(pending_requests_max, Ordering::Relaxed);
+        self.inner.census_dialogs.store(dialogs, Ordering::Relaxed);
+        self.inner.census_route_set.store(route_set, Ordering::Relaxed);
+        self.inner.census_timers.store(timers, Ordering::Relaxed);
+        self.inner.census_tag_map.store(tag_map, Ordering::Relaxed);
+        self.inner.census_b_legs.store(b_legs, Ordering::Relaxed);
+    }
+
     /// Push the replicating-store sizes (memory-attribution gauges): total +
     /// backup-partition replica metadata entries, and the outbound changelog
     /// depth (entries across peers + peer count). See the field docs.
@@ -467,6 +524,9 @@ impl B2buaMetrics {
         g(&mut s, "b2bua_store_locks", "per-callRef serialization locks held (should track store_calls; a gap is a lock leak)", self.inner.store_locks.load(Ordering::Relaxed));
         g(&mut s, "b2bua_store_takeover_at", "live acting-backup takeover copies (ADR-0014; self-released on the served transaction's terminal state)", self.inner.store_takeover_at.load(Ordering::Relaxed));
         g(&mut s, "b2bua_store_touched", "last-touched ledger entries (reaper liveness stamps, ADR-0020; mirrors store_calls — a gap is a stamp leak)", self.inner.store_touched.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_store_bodies", "inner CallStore body entries (pri:+bak: across partitions)", self.inner.store_bodies.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_store_idx_entries", "inner CallStore idx:* routing entries; outgrowing store_bodies = stranded-index leak (put_call is insert-only)", self.inner.store_idx_entries.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_store_tombstones", "resurrection-guard tombstones; outgrowing 300s×delete_rate = prune gap", self.inner.store_tombstones.load(Ordering::Relaxed));
         g(&mut s, "b2bua_repl_meta_total", "replica metadata entries held (all partitions)", self.inner.repl_meta_total.load(Ordering::Relaxed));
         g(&mut s, "b2bua_repl_meta_backup", "replica metadata entries in BACKUP partitions (resident backup bodies this node holds for peers; ADR-0014)", self.inner.repl_meta_backup.load(Ordering::Relaxed));
         g(&mut s, "b2bua_repl_changelog_entries", "outbound changelog entries across all peer logs (replication buffer depth)", self.inner.repl_changelog_entries.load(Ordering::Relaxed));
@@ -474,6 +534,17 @@ impl B2buaMetrics {
         g(&mut s, "b2bua_repl_bootstrap_last_applied", "bodies the most recent bootstrap pass imported (re-stalling at the same value across passes ⇒ the stream is truncating, not the materialisation)", self.repl_bootstrap_last_applied());
         g(&mut s, "b2bua_repl_reclaim_scanned", "bodies the most recent bulk reclaim pass found in pri:{self} (denominator: everything bootstrap import made reclaimable; ≪ peer repl_meta_backup ⇒ a bootstrap-import/forward-replication gap)", self.repl_reclaim_scanned());
         g(&mut s, "b2bua_repl_reclaim_materialized", "bodies the most recent bulk reclaim pass freshly re-served into the live map (cumulative total is repl_reclaimed_total; ≪ scanned cumulatively ⇒ a materialise gap)", self.repl_reclaim_materialized());
+        // Per-call Vec census: bytes-inside-each-call. The sum whose ratio over
+        // store_calls climbs while every count-gauge is flat names the leaking
+        // per-call Vec (a held dialog's per-event tail never pruned till terminal).
+        g(&mut s, "b2bua_census_cdr_events", "sum of cdr_events Vec len across live calls (drained only at terminal; climbing ratio vs store_calls = per-call CDR leak)", self.inner.census_cdr_events.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_census_pending_requests", "sum of inbound_pending_requests across all dialogs of live calls (removed only on a correlated final response; a climbing ratio = uncorrelated/lost-response leak)", self.inner.census_pending_requests.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_census_pending_requests_max", "max inbound_pending_requests on any single live call (the worst held dialog)", self.inner.census_pending_requests_max.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_census_dialogs", "sum of dialogs Vec len across all legs of live calls (forking early-dialogs should collapse to 1 after confirm; a climb = un-pruned fork)", self.inner.census_dialogs.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_census_route_set", "sum of dialog route_set entries across live calls", self.inner.census_route_set.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_census_timers", "sum of serializable timer-intent Vec len across live calls (deduped by id; should be flat per call)", self.inner.census_timers.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_census_tag_map", "sum of tag_map entries across live calls", self.inner.census_tag_map.load(Ordering::Relaxed));
+        g(&mut s, "b2bua_census_b_legs", "sum of b_legs Vec len across live calls", self.inner.census_b_legs.load(Ordering::Relaxed));
         // State-machine cursor census (ADR-0016 slice 9): live calls per
         // (machine,state). global-call is always present (Active/Terminating);
         // transfer/announcement appear only while a service is active — a labelled

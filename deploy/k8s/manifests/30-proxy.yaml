@@ -129,6 +129,11 @@ spec:
             # EndpointSlice informer over the headless worker Service.
             - { name: PROXY_WORKER_SERVICE, value: "b2bua-worker" }
             - { name: PROXY_WORKER_PORT,    value: "5060" }
+            # The binary uses jemalloc (#[global_allocator], see sip-proxy-runner
+            # src/main.rs); aggressive decay returns freed pages to the OS quickly.
+            # Confirm it parsed via the jemalloc_opt_*_decay_ms gauges on /metrics
+            # (a typo here is silently ignored). (_RJEM_ prefix = tikv-jemalloc.)
+            - { name: _RJEM_MALLOC_CONF,    value: "dirty_decay_ms:1000,muzzy_decay_ms:1000" }
           ports:
             - { name: sip,     containerPort: 5060, protocol: UDP }
             - { name: metrics, containerPort: 9090, protocol: TCP }

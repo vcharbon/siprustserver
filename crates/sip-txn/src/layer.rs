@@ -450,6 +450,12 @@ async fn run(mut owner: Owner, endpoint: Box<dyn UdpEndpoint>, mut cmd_rx: mpsc:
         // protocol events, so the router never self-releases a takeover copy ahead
         // of the ACK/Timeout that cleared the call's last txn (ADR-0014 ordering).
         owner.flush_pending_quiesce();
+        // Sample the DelayQueue depth (O(1)) so a timer/slab leak is visible even
+        // when active_transactions is flat (the no-chaos RSS-climb localisation).
+        owner
+            .metrics
+            .timer_queue_len
+            .store(owner.timers.len(), std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -794,6 +800,16 @@ impl Owner {
         for branch in stale {
             self.delete_txn(&branch);
         }
+        // Census the retained retransmit-buffer bytes (same periodic pass) so a
+        // buffer-retention leak is visible vs flat txns.
+        let buf_bytes: u64 = self
+            .txns
+            .values()
+            .map(|t| t.retransmit_buf.as_ref().map_or(0, |b| b.len()) as u64)
+            .sum();
+        self.metrics
+            .retransmit_buf_bytes
+            .store(buf_bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
     // ── send API command handling ─────────────────────────────────────────────

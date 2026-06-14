@@ -875,6 +875,20 @@ run() {
   fi
   local start now idx=0
   start="$(date +%s)"
+  if [ "${NO_CHAOS:-0}" = "1" ]; then
+    # Pure baseline soak: zero fault injection — used for the long memory/CPU/
+    # fragmentation run. We still loop ensure_baseline on the CHAOS_INTERVAL
+    # cadence so an involuntary SIPp UAC self-abort (exit 255) is restarted and
+    # steady load is held for the whole window (the only difference from a chaos
+    # run is that no chaos_event is injected).
+    log "NO_CHAOS=1 — pure baseline soak for ${DURATION}s (stream supervision only, zero fault injection)"
+    while :; do
+      now="$(date +%s)"
+      [ $(( now - start )) -ge "$DURATION" ] && break
+      ensure_baseline
+      sleep "$CHAOS_INTERVAL"
+    done
+  else
   # Let the steady state build before the first event.
   log "warmup ${CHAOS_INTERVAL}s before first chaos event"
   sleep "$CHAOS_INTERVAL"
@@ -889,6 +903,7 @@ run() {
     local rest=$(( CHAOS_INTERVAL - elapsed_since ))
     [ "$rest" -gt 0 ] && sleep "$rest" || true
   done
+  fi
 
   [ -n "$UAS_WATCH_PID" ] && kill "$UAS_WATCH_PID" >/dev/null 2>&1 || true
   log "=== run window elapsed — $idx chaos events injected ==="

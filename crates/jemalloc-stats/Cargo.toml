@@ -1,0 +1,15 @@
+[package]
+name = "jemalloc-stats"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Prometheus exposition of jemalloc's mallctl stats for the runner binaries that use tikv-jemallocator as their #[global_allocator]. Surfaces steady-state RSS (stats.resident vs stats.allocated — the fragmentation gap), the page-purge backlog + purge activity (the CPU cost of aggressive decay), and the *resolved* dirty/muzzy decay config so a soak can confirm _RJEM_MALLOC_CONF actually parsed (a typo fails silently in jemalloc). Read-only: it never sets the allocator — the binary does that."
+
+# jemalloc has no MSVC target; on msvc this crate compiles to no-op stubs so the
+# `#[cfg(not(target_env = \"msvc\"))]` callers do not need a second cfg arm.
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+# mallctl read interface into the SAME jemalloc the binary links via
+# tikv-jemallocator. Version-locked to tikv-jemalloc-sys 0.7 (one jemalloc in
+# the process); a mismatched sys version would link a second, unused jemalloc.
+tikv-jemalloc-ctl = { version = "0.7", features = ["stats"] }

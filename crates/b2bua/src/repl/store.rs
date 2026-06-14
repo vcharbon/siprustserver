@@ -104,6 +104,17 @@ impl ReplicatingCallStore {
         }
     }
 
+    /// `(bodies, indexes, meta, tombstones)` map lengths — leak-localisation
+    /// gauges. `indexes` outgrowing `bodies` is a stranded-`idx:*` leak (put_call
+    /// is insert-only); `tombstones` outgrowing the 300 s delete window is a
+    /// resurrection-guard prune gap.
+    pub fn map_lens(&self) -> (usize, usize, usize, usize) {
+        let (bodies, indexes) = self.inner.lens();
+        let meta = self.meta.lock().unwrap().len();
+        let tomb = self.tombstones.lock().unwrap().len();
+        (bodies, indexes, meta, tomb)
+    }
+
     /// Override the backstop TTL applied to calls stored with `ttl_ms <= 0`
     /// (tests inject a short value to exercise the missed-delete self-eviction).
     pub fn with_default_ttl_ms(mut self, default_ttl_ms: i64) -> Self {

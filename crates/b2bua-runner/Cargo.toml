@@ -50,7 +50,11 @@ serde_json = { workspace = true }
 # returns memory to the OS, OOMing a long soak. jemalloc's decay purging bounds
 # steady-state RSS. unix-only (jemalloc has no MSVC target).
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
-tikv-jemallocator = "0.7"
+# "profiling" builds bundled jemalloc with --enable-prof so the prof.* mallctls
+# exist; activated at runtime via _RJEM_MALLOC_CONF=prof:true (small always-on
+# overhead even when prof is inactive — acceptable for the leak-hunt soak). The
+# /debug/heap route dumps live-allocation call stacks (jemalloc_stats::dump_profile).
+tikv-jemallocator = { version = "0.7", features = ["profiling"] }
 # Reads jemalloc's mallctl stats (RSS, purge backlog/activity, resolved decay
 # config) back out as Prometheus text appended to /metrics — same cfg as the
 # allocator so the ctl crate never links a second, unused jemalloc.

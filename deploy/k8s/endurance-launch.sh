@@ -88,7 +88,7 @@ log "Starting endurance.sh (baseline + chaos events)..."
   LONG_CPS="$LONG_CPS" SHORT_CPS="$SHORT_CPS" \
   ABUSE_CAPS="$ABUSE_CAPS" PEAK_CAPS="$PEAK_CAPS" PEAK_SECS="$PEAK_SECS" \
   WORKER_REPLICAS="$WORKER_REPLICAS" SKIP_BUILD="$SKIP_BUILD" \
-  SMOKE="${SMOKE:-0}" KEEP="$KEEP_CLUSTER" \
+  SMOKE="${SMOKE:-0}" KEEP="$KEEP_CLUSTER" NO_CHAOS="${NO_CHAOS:-0}" \
   ./endurance.sh run
 ) > "$RUN_DIR/endurance.log" 2>&1 || true &
 
@@ -163,9 +163,9 @@ log "  dead-*            — dead pod diagnostics"
 
   if [ -f "$EVENTS" ]; then
     printf '## Chaos Events\n'
-    printf '- Passed: %d\n' "$(grep -c '"result":"pass"' "$EVENTS" 2>/dev/null || true)"
-    printf '- Failed: %d\n' "$(grep -c '"result":"fail"' "$EVENTS" 2>/dev/null || true)"
-    printf '- Tainted: %d\n\n' "$(grep -c '"result":"tainted"' "$EVENTS" 2>/dev/null || true)"
+    printf -- '- Passed: %d\n' "$(grep -c '"result":"pass"' "$EVENTS" 2>/dev/null || true)"
+    printf -- '- Failed: %d\n' "$(grep -c '"result":"fail"' "$EVENTS" 2>/dev/null || true)"
+    printf -- '- Tainted: %d\n\n' "$(grep -c '"result":"tainted"' "$EVENTS" 2>/dev/null || true)"
   fi
 
   if [ -f "$MONITOR_REPORT" ]; then

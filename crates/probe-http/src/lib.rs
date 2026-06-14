@@ -67,14 +67,22 @@ pub type MetricsFn = Arc<dyn Fn() -> String + Send + Sync>;
 /// Readiness provider for `/readyz` — cheap + non-blocking, called per probe.
 pub type ReadyFn = Arc<dyn Fn() -> ProbeState + Send + Sync>;
 
-/// The only two things that vary between the worker's and the proxy's probe
-/// server. Everything else is shared transport in [`ProbeServer`].
+/// On-demand heap-profile dump for `GET /debug/heap` (jemalloc `prof.dump` →
+/// jeprof/pprof bytes). Injected by the runner so the lib stays allocator-
+/// agnostic; `None` ⇒ the route reports profiling unavailable. May block on
+/// file I/O, so the server runs it on a blocking thread.
+pub type HeapDumpFn = Arc<dyn Fn() -> Result<Vec<u8>, String> + Send + Sync>;
+
+/// The things that vary between the worker's and the proxy's probe server.
+/// Everything else is shared transport in [`ProbeServer`].
 #[derive(Clone)]
 pub struct ProbeRoutes {
     /// `GET /metrics` body, regenerated per scrape.
     pub metrics: MetricsFn,
     /// `GET /readyz` / `GET /ready` state.
     pub ready: ReadyFn,
+    /// `GET /debug/heap` jemalloc heap dump; `None` ⇒ route 503s "unavailable".
+    pub heap: Option<HeapDumpFn>,
 }
 
 /// A connection that sends nothing for this long is cut and its fd reclaimed.
@@ -187,6 +195,41 @@ async fn handle_conn(
         return Ok(());
     }
 
+    // On-demand jemalloc heap profile (prof.dump -> jeprof/pprof bytes). Internal
+    // debug route, NOT the SIP datapath. Dumps the currently-LIVE sampled
+    // allocations by call stack, so one capture after the leak has grown names
+    // every leak source at once. Runs on a blocking thread (file I/O). `None`
+    // heap provider (proxy, or a non-profiling build) -> 503.
+    if path.split('?').next() == Some("/debug/heap") {
+        let result = match routes.heap.clone() {
+            Some(h) => tokio::task::spawn_blocking(move || h())
+                .await
+                .unwrap_or_else(|e| Err(format!("join error: {e}"))),
+            None => Err("heap profiling unavailable (non-jemalloc build or prof:false)".to_string()),
+        };
+        match result {
+            Ok(bytes) => {
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    bytes.len()
+                );
+                stream.write_all(header.as_bytes()).await?;
+                stream.write_all(&bytes).await?;
+            }
+            Err(e) => {
+                let body = format!("heap dump failed: {e}\n");
+                let header = format!(
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).await?;
+                stream.write_all(body.as_bytes()).await?;
+            }
+        }
+        stream.flush().await?;
+        return Ok(());
+    }
+
     let (status, content_type, body) = match path {
         "/metrics" => ("200 OK", "text/plain; version=0.0.4", (routes.metrics)()),
         "/healthz" => ("200 OK", "text/plain", "ok\n".to_string()),
@@ -216,6 +259,7 @@ mod tests {
         ProbeRoutes {
             metrics: Arc::new(move || body.to_string()),
             ready,
+            heap: None,
         }
     }
     fn always(state: ProbeState) -> ReadyFn {

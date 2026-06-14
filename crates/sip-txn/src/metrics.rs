@@ -13,6 +13,15 @@ use crate::event::{EventQueueDropReason, TransactionEvent};
 #[derive(Debug)]
 pub(crate) struct MetricsInner {
     pub active_transactions: AtomicUsize,
+    /// Live entries in the internal `DelayQueue` (retransmit / timeout / cleanup /
+    /// event-retry timers). Should track ~a small multiple of `active_transactions`;
+    /// a climb while txns are flat is a timer/slab leak (orphaned DelayQueue
+    /// entries never removed or fired — the no-chaos RSS-climb suspect).
+    pub timer_queue_len: AtomicUsize,
+    /// Sum of per-txn `retransmit_buf` bytes (the serialized requests held for
+    /// retransmission). Sampled in the sweep; a climb vs flat txns = buffers
+    /// retained past completion.
+    pub retransmit_buf_bytes: AtomicU64,
     pub messages_processed: AtomicU64,
     pub inbound_message_bytes_total: AtomicU64,
     pub outbound_message_bytes_total: AtomicU64,
@@ -34,6 +43,8 @@ impl MetricsInner {
     pub(crate) fn new() -> Self {
         Self {
             active_transactions: AtomicUsize::new(0),
+            timer_queue_len: AtomicUsize::new(0),
+            retransmit_buf_bytes: AtomicU64::new(0),
             messages_processed: AtomicU64::new(0),
             inbound_message_bytes_total: AtomicU64::new(0),
             outbound_message_bytes_total: AtomicU64::new(0),
@@ -63,6 +74,16 @@ impl TransactionMetrics {
     /// Current number of active transactions (gauge).
     pub fn active_transactions(&self) -> usize {
         self.inner.active_transactions.load(Ordering::Relaxed)
+    }
+
+    /// Live entries in the internal timer `DelayQueue` (gauge).
+    pub fn timer_queue_len(&self) -> usize {
+        self.inner.timer_queue_len.load(Ordering::Relaxed)
+    }
+
+    /// Sum of per-txn retransmit-buffer bytes (gauge, sampled in the sweep).
+    pub fn retransmit_buf_bytes(&self) -> u64 {
+        self.inner.retransmit_buf_bytes.load(Ordering::Relaxed)
     }
 
     /// Total inbound SIP messages parsed since start (counter).

@@ -311,6 +311,12 @@ fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     s.push_str("# HELP b2bua_txn_active_transactions In-flight client+server transactions.\n");
     s.push_str("# TYPE b2bua_txn_active_transactions gauge\n");
     s.push_str(&format!("b2bua_txn_active_transactions {}\n", m.active_transactions()));
+    s.push_str("# HELP b2bua_txn_timer_queue_len Live entries in the txn-layer DelayQueue (retransmit/timeout/cleanup); a climb vs flat active_transactions is a timer/slab leak.\n");
+    s.push_str("# TYPE b2bua_txn_timer_queue_len gauge\n");
+    s.push_str(&format!("b2bua_txn_timer_queue_len {}\n", m.timer_queue_len()));
+    s.push_str("# HELP b2bua_txn_retransmit_buf_bytes Sum of per-txn retransmit-buffer bytes retained for retransmission.\n");
+    s.push_str("# TYPE b2bua_txn_retransmit_buf_bytes gauge\n");
+    s.push_str(&format!("b2bua_txn_retransmit_buf_bytes {}\n", m.retransmit_buf_bytes()));
     s.push_str("# HELP b2bua_txn_event_queue_depth Inbound->app events channel current depth.\n");
     s.push_str("# TYPE b2bua_txn_event_queue_depth gauge\n");
     s.push_str(&format!("b2bua_txn_event_queue_depth {}\n", m.event_queue_depth()));
@@ -637,6 +643,13 @@ async fn main() {
                 b2bua::repl::ReadinessState::Draining => probe_http::ProbeState::Draining,
                 b2bua::repl::ReadinessState::NotReady => probe_http::ProbeState::NotReady,
             }),
+            // /debug/heap → jemalloc heap profile (needs the profiling build +
+            // _RJEM_MALLOC_CONF=prof:true). Names every live-allocation call
+            // stack so the RSS leak's sources are attributed, not guessed.
+            #[cfg(not(target_env = "msvc"))]
+            heap: Some(Arc::new(jemalloc_stats::dump_profile)),
+            #[cfg(target_env = "msvc")]
+            heap: None,
         };
         match probe_http::ProbeServer::start(metrics_sa, routes).await {
             Ok(server) => {
@@ -674,6 +687,10 @@ async fn main() {
                 // cleanup is bounded only by OOM; physical reclamation MUST be
                 // actively ticked.
                 if let Some(repl) = core.repl_store() {
+                    // Sample inner-store map sizes BEFORE reap so a leak is visible
+                    // even if reap is the thing fixing it (bodies/idx/tombstones).
+                    let (bodies, idx, _meta, tomb) = repl.map_lens();
+                    core.metrics().set_store_map_sizes(bodies as u64, idx as u64, tomb as u64);
                     repl.reap(clock.now_ms()).await;
                 }
             }

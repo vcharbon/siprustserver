@@ -126,6 +126,25 @@ spec:
             - { name: B2BUA_REPL_PORT,      value: "${REPL_PORT}" }
             - { name: B2BUA_REPL_SERVICE,   value: "b2bua-worker" }
             - { name: B2BUA_DRAIN_GRACE_MS, value: "5000" }
+            # The binary uses jemalloc (#[global_allocator], see b2bua-runner
+            # src/main.rs). The 2026-06-14 probe proved the RSS climb is a REAL
+            # APP LEAK — jemalloc_allocated (live heap) grows ~176 MB/h at flat
+            # calls; narenas:8 did NOT help (so it's not slab fragmentation). So:
+            #  - prof:true,prof_active:true — enable jemalloc heap profiling
+            #    (binary built with the tikv-jemallocator "profiling" feature).
+            #    The /debug/heap route dumps live-allocation call stacks → jeprof
+            #    names every leak source. prof_prefix sets where auto-dumps land.
+            #  - 1s dirty/muzzy decay kept (returns genuinely-free pages); narenas
+            #    back to default (it was a dead end, removing the confound).
+            #  - lg_prof_sample:13 → sample every ~8 KiB allocated (default 19 =
+            #    512 KiB). The leak is in LARGE (>16 KiB) allocations, which the
+            #    512 KiB default samples only ~3% of the time, so the profile
+            #    under-counted and looked FLAT while mallctl `allocated` climbed.
+            #    At 8 KiB any large alloc is sampled ~always → the profile
+            #    faithfully localises the leak (modest extra backtrace CPU, fine
+            #    for a diagnostic soak).
+            # Confirm via the startup log line `prof.active=1`. (_RJEM_ = tikv.)
+            - { name: _RJEM_MALLOC_CONF,    value: "prof:true,prof_active:true,lg_prof_sample:13,prof_prefix:/tmp/jeprof/auto,dirty_decay_ms:1000,muzzy_decay_ms:1000" }
           ports:
             - { name: sip,     containerPort: 5060, protocol: UDP }
             - { name: metrics, containerPort: 9091, protocol: TCP }

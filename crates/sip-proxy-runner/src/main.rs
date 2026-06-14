@@ -328,6 +328,9 @@ async fn main() {
             t
         }),
         ready,
+        // No heap profiling on the proxy (not the leak target; profiling build
+        // feature off here). /debug/heap → 503.
+        heap: None,
     };
     let _metrics_server = match probe_http::ProbeServer::start(metrics_sa, routes).await {
         Ok(s) => {
