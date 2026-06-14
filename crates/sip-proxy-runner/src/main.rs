@@ -12,7 +12,7 @@
 //!     `control()` seam, so an unanswered worker is demoted (Dead/NotReady/
 //!     Draining) and routing reacts — for the static pool too.
 //!   - `AlwaysAdmitGate` self-gate (the real ELU/CPS gate is deferred).
-//!   - Prometheus `/metrics` + `/healthz` via the crate's `MetricsServer`.
+//!   - Prometheus `/metrics` + `/healthz` + `/readyz` via the shared `probe-http`.
 //!
 //! Config via env (all optional):
 //!   PROXY_LISTEN     SIP listen addr                       (default 0.0.0.0:5060)
@@ -33,6 +33,17 @@
 //!   PROXY_HMAC_KEY   stickiness cookie secret (>=16 bytes) (default dev key)
 //!   HEALTH_INTERVAL_MS / HEALTH_TIMEOUT_MS / HEALTH_THRESHOLD  (probe tuning)
 
+// Use jemalloc instead of glibc malloc (mirrors b2bua-runner). glibc retains
+// freed arena chunks and ratchets RSS under sustained churn; jemalloc's decay
+// purging returns pages to the OS and bounds steady-state RSS. The proxy is
+// single-task and far less alloc-heavy than the b2bua, so this is mostly for a
+// uniform memory story across tiers — but it also lets the same jemalloc_*
+// /metrics probe rule the proxy in or out during a soak. Tuned via
+// _RJEM_MALLOC_CONF on the container (see deploy/k8s/manifests/30-proxy.yaml).
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
@@ -43,8 +54,6 @@ use sip_net::types::BindUdpOpts;
 use sip_net::{RealSignalingNetwork, SignalingNetwork};
 use sip_proxy::health::{HealthProbe, HealthProbeConfig};
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
-use sip_proxy::observability::metrics_server::MetricsServer;
-use sip_proxy::observability::metrics_server::ReadinessFn;
 use sip_proxy::observability::ProxyMetrics;
 use sip_proxy::registry::control::WorkerRegistryControl;
 use sip_proxy::registry::composed::ComposedWorkerRegistry;
@@ -127,6 +136,11 @@ async fn build_registry(
 
 #[tokio::main]
 async fn main() {
+    // Loud confirmation the jemalloc decay config (_RJEM_MALLOC_CONF) parsed —
+    // a typo is silently ignored. Mirrored by the jemalloc_opt_*_decay_ms gauges.
+    #[cfg(not(target_env = "msvc"))]
+    jemalloc_stats::log_config();
+
     let listen = env_or("PROXY_LISTEN", "0.0.0.0:5060");
     // PROXY_WORKERS (static `id@host:port,..`) takes precedence (dev/local). When
     // empty, the worker pool is discovered from k8s EndpointSlices (ADR-0012 D4).
@@ -258,9 +272,15 @@ async fn main() {
     // keeps the k8s Service from forwarding INVITEs into an empty pool — and turns
     // a misconfigured watch into a loud rollout timeout instead of a silent
     // black-hole. Mirrors the worker's `/ready`.
-    let ready: ReadinessFn = {
+    let ready: probe_http::ReadyFn = {
         let reg = registry.clone();
-        Arc::new(move || reg.snapshot().iter().any(|w| w.health == WorkerHealth::Alive))
+        Arc::new(move || {
+            if reg.snapshot().iter().any(|w| w.health == WorkerHealth::Alive) {
+                probe_http::ProbeState::Ready
+            } else {
+                probe_http::ProbeState::NotReady
+            }
+        })
     };
 
     // Health sampler: publish the worker-health gauges + `sip_proxy_worker_pool_empty`
@@ -288,9 +308,21 @@ async fn main() {
         });
     }
 
-    // Prometheus endpoint. NOTE: `MetricsServer` aborts its listener task on
-    // Drop, so the handle must stay live for the whole process lifetime.
-    let _metrics_server = match MetricsServer::start_with_readiness(metrics_sa, metrics, ready).await {
+    // Prometheus + readiness endpoint (shared `probe-http`). NOTE: `ProbeServer`
+    // aborts its accept loop on Drop, so the handle must stay live for the whole
+    // process lifetime. The `/metrics` body appends the jemalloc mallctl
+    // exposition (footprint/purge/decay config) per scrape — same cfg as the
+    // allocator dep.
+    let routes = probe_http::ProbeRoutes {
+        metrics: Arc::new(move || {
+            let mut t = metrics.prometheus_text();
+            #[cfg(not(target_env = "msvc"))]
+            t.push_str(&jemalloc_stats::prometheus_text());
+            t
+        }),
+        ready,
+    };
+    let _metrics_server = match probe_http::ProbeServer::start(metrics_sa, routes).await {
         Ok(s) => {
             eprintln!("sip-proxy-runner metrics on http://{}/metrics (readiness /readyz)", s.addr());
             Some(s)

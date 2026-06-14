@@ -11,7 +11,6 @@ sip-net = { path = "../sip-net" }
 sip-clock = { path = "../sip-clock" }
 sip-txn = { path = "../sip-txn" } # IdGen (Via branch generation) only — the proxy is stateless
 topology = { path = "../topology" } # cluster-membership identity substrate (ADR-0002: proxy → topology)
-flamegraph-util = { path = "../flamegraph-util" } # on-demand pprof CPU flamegraph for /debug/flamegraph
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }

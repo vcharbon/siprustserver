@@ -372,6 +372,13 @@ impl B2buaCore {
         self.readiness.state() == crate::repl::ReadinessState::Ready
     }
 
+    /// The full 3-valued readiness state (`NotReady`/`Ready`/`Draining`). The
+    /// runner maps it onto the HTTP probe's `ProbeState` so `/ready` can report
+    /// `draining` distinctly from `not-ready`, matching the OPTIONS self-report.
+    pub fn readiness_state(&self) -> crate::repl::ReadinessState {
+        self.readiness.state()
+    }
+
     /// CRASH: abort the directly-spawned tasks (serve loop + router) and park
     /// every replication puller (closing its pulled connections). Mirrors the
     /// ha-harness `HaNode::crash` discipline at the live-core level: the spawned

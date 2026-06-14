@@ -12,8 +12,9 @@ path = "src/main.rs"
 
 [dependencies]
 b2bua = { path = "../b2bua" }
-# On-demand pprof CPU flamegraph for the /debug/flamegraph metrics-port route.
-flamegraph-util = { path = "../flamegraph-util" }
+# The shared HTTP probe/metrics server: /metrics, /healthz, /ready, and the
+# /debug/flamegraph pprof route — one module shared with the front proxy.
+probe-http = { path = "../probe-http" }
 # Out-of-tree callflow service (ADR-0016 slice 8) — composed into the production
 # service registry (`compose_services`) so its diagram is generated alongside.
 announcement = { path = "../announcement" }
@@ -43,3 +44,14 @@ lapin = { workspace = true }
 tokio-executor-trait = { workspace = true }
 tokio-reactor-trait = { workspace = true }
 serde_json = { workspace = true }
+
+# jemalloc global allocator (see the #[global_allocator] note in src/main.rs):
+# glibc malloc ratchets RSS under sustained SIP churn (arena retention) and never
+# returns memory to the OS, OOMing a long soak. jemalloc's decay purging bounds
+# steady-state RSS. unix-only (jemalloc has no MSVC target).
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.7"
+# Reads jemalloc's mallctl stats (RSS, purge backlog/activity, resolved decay
+# config) back out as Prometheus text appended to /metrics — same cfg as the
+# allocator so the ctl crate never links a second, unused jemalloc.
+jemalloc-stats = { path = "../jemalloc-stats" }

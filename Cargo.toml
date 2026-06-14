@@ -23,6 +23,8 @@ members = [
     "crates/ha-harness",
     "crates/failover-harness",
     "crates/flamegraph-util",
+    "crates/probe-http",
+    "crates/jemalloc-stats",
     "crates/b2bua-runner",
     "crates/sip-proxy-runner",
     "crates/call-limiter-runner",

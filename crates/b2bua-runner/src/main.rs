@@ -100,8 +100,6 @@ use sip_clock::Clock;
 use sip_net::types::BindUdpOpts;
 use sip_net::{RealSignalingNetwork, SignalingNetwork};
 use sip_txn::IdGen;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 use topology::{Membership, Peer, StaticMembership};
 
 mod cdr_rabbitmq;
@@ -302,16 +300,6 @@ async fn build_membership() -> Option<(Arc<dyn Membership>, ReplAddressing)> {
     }
 }
 
-/// Minimal Prometheus exposition + probe server. Hand-rolled (no HTTP framework
-/// dep), mirroring `sip-proxy`'s MetricsServer.
-///   - `GET /metrics`  → Prometheus text.
-///   - `GET /healthz`  → liveness: `200 ok` while the process runs.
-///   - `GET /ready`    → readiness: `200 ready` iff the worker is replication-
-///                       ready (re-hydrated + backup-current) **and** not
-///                       draining; `503` otherwise. The k8s readinessProbe hits
-///                       this so the proxy's EndpointSlice view respects
-///                       `NotReady`/`Draining` (ADR-0011 X6), matching the
-///                       worker's own OPTIONS self-report.
 /// Prometheus text for the sip-txn backpressure signals that `B2buaMetrics`
 /// omits: events-channel depth/capacity, per-reason drop counters, and active
 /// transactions. The `reason="response"` drop series is the keepalive-response
@@ -339,84 +327,6 @@ fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
         ));
     }
     s
-}
-
-async fn serve_metrics(
-    addr: SocketAddr,
-    metrics: B2buaMetrics,
-    txn_metrics: sip_txn::TransactionMetrics,
-    ready: Arc<dyn Fn() -> bool + Send + Sync>,
-) -> std::io::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
-    eprintln!("b2bua-runner metrics on http://{}/metrics", listener.local_addr()?);
-    loop {
-        let (mut stream, _) = listener.accept().await?;
-        let metrics = metrics.clone();
-        let txn_metrics = txn_metrics.clone();
-        let ready = ready.clone();
-        tokio::spawn(async move {
-            let mut buf = [0u8; 1024];
-            let n = stream.read(&mut buf).await.unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]);
-            // On-demand CPU flamegraph (pprof SIGPROF sampling -> inferno SVG).
-            // Internal debug route on the metrics port — NOT the SIP datapath.
-            // Blocks for the sample window on a blocking thread (the worker's
-            // async runtime keeps serving SIP); the profiler is built only for
-            // the request. `?seconds=N` (default 20, max 120).
-            let target = req.split_whitespace().nth(1).unwrap_or("/");
-            if target.split('?').next() == Some("/debug/flamegraph") {
-                let secs = flamegraph_util::parse_seconds(target, 20, 120);
-                let result =
-                    tokio::task::spawn_blocking(move || flamegraph_util::capture_svg(secs, 99))
-                        .await
-                        .unwrap_or_else(|e| Err(format!("join error: {e}")));
-                match result {
-                    Ok(svg) => {
-                        let header = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            svg.len()
-                        );
-                        let _ = stream.write_all(header.as_bytes()).await;
-                        let _ = stream.write_all(&svg).await;
-                    }
-                    Err(e) => {
-                        let body = format!("flamegraph failed: {e}\n");
-                        let header = format!(
-                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            body.len()
-                        );
-                        let _ = stream.write_all(header.as_bytes()).await;
-                        let _ = stream.write_all(body.as_bytes()).await;
-                    }
-                }
-                return;
-            }
-            let (status, body) = if req.starts_with("GET /metrics") {
-                let mut text = metrics.prometheus_text();
-                text.push_str(&txn_metrics_text(&txn_metrics));
-                // jemalloc footprint/purge/decay-config counters (see the
-                // #[global_allocator] note). Same cfg as the allocator dep.
-                #[cfg(not(target_env = "msvc"))]
-                text.push_str(&jemalloc_stats::prometheus_text());
-                ("200 OK", text)
-            } else if req.starts_with("GET /healthz") {
-                ("200 OK", "ok\n".to_string())
-            } else if req.starts_with("GET /ready") {
-                if ready() {
-                    ("200 OK", "ready\n".to_string())
-                } else {
-                    ("503 Service Unavailable", "not-ready\n".to_string())
-                }
-            } else {
-                ("404 Not Found", String::new())
-            };
-            let resp = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(resp.as_bytes()).await;
-        });
-    }
 }
 
 #[tokio::main]
@@ -698,20 +608,41 @@ async fn main() {
         std::process::id()
     );
 
-    // Readiness probe state: a node reports NotReady while re-hydrating, then
-    // not-ready once SIGTERM latches `Draining`. `core.is_ready()` already folds
-    // in the Draining latch (it returns false for Draining), so the predicate is
-    // a single read of one source — no second flag to drift from it.
-    {
-        let core = core.clone();
+    // Readiness/metrics probe server (shared `probe-http`). The `/ready` state is
+    // a single read of one source: `core.readiness_state()` already folds in the
+    // Draining latch, so there is no second flag to drift from it. Held in a
+    // binding for the process lifetime (its accept loop aborts on drop). The
+    // `/metrics` body concatenates this worker's metric sources per scrape.
+    let _probe = {
+        let core_ready = core.clone();
         let txn_metrics = core.txn_metrics().clone();
-        let ready: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || core.is_ready());
-        tokio::spawn(async move {
-            if let Err(e) = serve_metrics(metrics_sa, metrics, txn_metrics, ready).await {
-                eprintln!("b2bua-runner metrics server error: {e}");
+        let routes = probe_http::ProbeRoutes {
+            metrics: Arc::new(move || {
+                let mut text = metrics.prometheus_text();
+                text.push_str(&txn_metrics_text(&txn_metrics));
+                // jemalloc footprint/purge/decay-config counters (see the
+                // #[global_allocator] note). Same cfg as the allocator dep.
+                #[cfg(not(target_env = "msvc"))]
+                text.push_str(&jemalloc_stats::prometheus_text());
+                text
+            }),
+            ready: Arc::new(move || match core_ready.readiness_state() {
+                b2bua::repl::ReadinessState::Ready => probe_http::ProbeState::Ready,
+                b2bua::repl::ReadinessState::Draining => probe_http::ProbeState::Draining,
+                b2bua::repl::ReadinessState::NotReady => probe_http::ProbeState::NotReady,
+            }),
+        };
+        match probe_http::ProbeServer::start(metrics_sa, routes).await {
+            Ok(server) => {
+                eprintln!("b2bua-runner metrics on http://{}/metrics (readiness /ready)", server.addr());
+                Some(server)
             }
-        });
-    }
+            Err(e) => {
+                eprintln!("b2bua-runner metrics server failed to bind {metrics_sa}: {e}");
+                None
+            }
+        }
+    };
 
     // Memory-attribution sampler: push the store + replication map sizes into
     // their gauges every 5 s so an RSS climb can be pinned to a specific map

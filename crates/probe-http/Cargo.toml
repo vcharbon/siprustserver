@@ -1,0 +1,14 @@
+[package]
+name = "probe-http"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The single hand-rolled HTTP probe/metrics server both runner binaries (b2bua-worker + front-proxy) expose on their observability port. One deep module behind a ProbeRoutes seam: /metrics, /healthz, /readyz (+ /ready alias) driven by an injected 3-valued ProbeState, and the /debug/flamegraph CPU profile route. Replaces the two divergent hand-rolled copies; the hardening (exact-path match, fully-idle connection cut) lives here once."
+
+[dependencies]
+# Rides tokio::time directly so the idle-cut is paused-clock controllable.
+tokio = { workspace = true }
+# The /debug/flamegraph route (pprof sampling -> inferno SVG). Both runners
+# already depend on this directly, so it adds no new weight.
+flamegraph-util = { path = "../flamegraph-util" }

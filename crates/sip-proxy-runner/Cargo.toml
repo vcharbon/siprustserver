@@ -12,6 +12,9 @@ path = "src/main.rs"
 
 [dependencies]
 sip-proxy = { path = "../sip-proxy" }
+# The shared HTTP probe/metrics server: /metrics, /healthz, /readyz, and the
+# /debug/flamegraph pprof route — one module shared with the b2bua worker.
+probe-http = { path = "../probe-http" }
 sip-net = { path = "../sip-net" }
 sip-txn = { path = "../sip-txn" }
 sip-clock = { path = "../sip-clock" }
@@ -27,3 +30,12 @@ kube = { version = "1", default-features = false, features = ["client", "rustls-
 # b2bua-runner) or the kube client panics.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio = { workspace = true }
+
+# jemalloc global allocator + its stats probe (see the #[global_allocator] note
+# in src/main.rs). The front proxy is single-task but still churns SIP buffers
+# under sustained load; using the same decay-purging allocator as the b2bua
+# keeps RSS bounded and makes the soak's memory story uniform across both tiers.
+# unix-only (jemalloc has no MSVC target).
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.7"
+jemalloc-stats = { path = "../jemalloc-stats" }
