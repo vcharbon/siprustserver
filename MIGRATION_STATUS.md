@@ -677,7 +677,7 @@ scenario-harness in a dedicated `crates/b2bua-harness` test crate.
 #### SIP-behaviour scenarios (ports of `tests/scenarios/*`)
 | Source scenario | Behaviour exercised | Rust home | Status |
 |---|---|---|---|
-| `prack.ts` | end-to-end reliable provisional: 183(100rel,RSeq) → PRACK(RAck) → 200(PRACK) → 200(INVITE). The B2BUA relays it as a back-to-back UA with **per-dialog CSeq** (`relayCSeqDelta`), **RAck CSeq rewrite** (RFC 3262 §7.2), b-leg early-dialog capture, and pending-request response correlation (`generate_relayed_response`) | `b2bua-harness/tests/prack.rs` | ✅ 1 |
+| `prack.ts` | **transparent / default reliable-provisional path** — active when NO non-transparent 18x service (`relayFirst18xTo180` `drop-sdp`/`fake-prack`, rows below) is configured. end-to-end reliable provisional: 183(100rel,RSeq) → PRACK(RAck) → 200(PRACK) → 200(INVITE). The B2BUA relays PRACK/100rel **transparently** as a back-to-back UA (`relay-prack` + `relay-non-invite-200`; it does NOT run the RFC 3262 state machine — RSeq/RAck bookkeeping stays end-to-end between the UAs) with **per-dialog CSeq** (`relayCSeqDelta`), **RAck CSeq rewrite** (RFC 3262 §7.2), b-leg early-dialog capture, and pending-request response correlation (`generate_relayed_response`). Verified green 2026-06-14 | `b2bua-harness/tests/prack.rs` | ✅ 1 |
 | `prack-forking.ts` | delayed-offer forking: two reliable 183s with distinct callee fork-tags → two independent early dialogs on one b-leg, each mapped to its own a-facing tag; per-fork PRACK routed by To-tag through the tag map | `b2bua-harness/tests/prack_forking.rs` | ✅ 1 |
 | `keepalive-happy.ts` | long call: keepalive timer sends in-dialog OPTIONS to both legs every interval, each 200 absorbed + timer re-armed; two cycles | `b2bua-harness/tests/keepalive.rs` | ✅ 1 |
 | `options-keepalive-timeout.ts` | auto-cutoff: a leg that never answers its keepalive OPTIONS trips the per-leg `KeepaliveTimeout`, which terminates that leg and BYEs the healthy peer | `b2bua-harness/tests/keepalive_timeout.rs` | ✅ 1 |
@@ -696,6 +696,39 @@ scenario-harness in a dedicated `crates/b2bua-harness` test crate.
 | `fake-prack.ts` (`delayed-offer-fallback`) | alice INVITE has no SDP → outbound INVITE strips `Supported:100rel` and the policy self-disables (plain relay) | `b2bua-harness/tests/fake_prack.rs` | ✅ 1 |
 | `fake-prack.ts` (`no-policy-control`) | no policy → full end-to-end PRACK (183/Require:100rel relayed verbatim, alice PRACKs end-to-end) | `b2bua-harness/tests/fake_prack.rs` | ✅ 1 |
 | `fake-prack.ts` (`forking`, `failover`) | `/call/failure` failover-on-503: bob1 reliable (183/100rel → bare 180 + PRACK + cached SDP) then 503 → failover to bob2 (unreliable); bob1's per-leg cache discarded with its leg, so alice's 200 carries bob2's own SDP | `b2bua-harness/tests/fake_prack.rs` | ✅ 2 |
+
+#### Limit-enforcement & message-crossing edge cases (Rust-native, 2026-06-14)
+
+Beyond the TS scenario ports, a suite of **limit-enforcement and
+message-crossing** edge cases is pinned end-to-end through the single-SUT
+harness. Each wires a **real `LimiterServer`** and asserts the limiter hold
+drains back to 0 (no leaked slot, no double-decrement) **plus** full reap
+(`assert_fully_reaped`) **plus** the `h.finish()` RFC compliance gate. These have
+no 1:1 TS scenario (the TS enforces the same limits in `SipRouter.ts` /
+`rules/defaults` but ships no dedicated scenario tests for them).
+
+| Limit / race | Behaviour exercised | Rust home | Status |
+|---|---|---|---|
+| No-answer / ring forever | a-leg `SetupTimeout` (150 s; >180 s unreachable — sip-txn `INVITE_INITIAL_TIMEOUT` backstop is 158 s) → 408 + CANCEL b-leg + limiter release | `b2bua-harness/tests/setup_timeout.rs` | ✅ 2 |
+| Max call duration (never hung up) | established call → `GlobalDuration` (`features.platform.max_duration_sec`) → BYE both legs + `max_duration` CDR + limiter release | `limit_cases.rs::max_duration_byes_both_legs_*` | ✅ 1 |
+| Max-duration mid-re-INVITE | cap fires while a re-INVITE is pending → teardown abandons the re-INVITE + limiter release | `limit_cases.rs::max_duration_fires_mid_reinvite_*` | ✅ 1 |
+| Provisional storm before connect | >200 `18x` to the initial INVITE → `MAX_MESSAGES_PER_CALL` cap → 503 to caller + CANCEL b-leg + limiter release | `limit_cases.rs::provisional_storm_*` | ✅ 1 |
+| Reliable-provisional / PRACK-loop storm | >200 events from a `183(100rel)`/PRACK/`200(PRACK)` loop → cap trips with an in-flight PRACK txn open → 503 to a-leg + CANCEL b-leg, PRACK abandoned with no leak, RFC gate clean + limiter release | `limit_cases.rs::prack_loop_storm_*` | ✅ 1 |
+| In-dialog message storm | >200 in-dialog OPTIONS round-trips on an up call → cap → BYE both legs + limiter release | `limit_cases.rs::in_dialog_message_storm_*` | ✅ 1 |
+| 200/CANCEL crossing | CANCEL races the callee's 200 OK → `cancel-200-crossing` confirms + ACKs + BYEs the b-leg + limiter release (sibling of `crossingReInvite`) | `b2bua-harness/tests/cancel_200_crossing.rs` | ✅ 1 |
+| BYE/BYE glare | both parties hang up at once → call reaps once + limiter released exactly once | `teardown_races.rs::bye_bye_glare_*` | ✅ 1 |
+| Re-INVITE crossing a BYE | re-INVITE crosses the peer's BYE → BYE wins, re-INVITE abandoned + limiter release | `teardown_races.rs::reinvite_crossing_bye_*` | ✅ 1 |
+| Limiter at capacity | Nth call over cap → 486 (no over-increment), release-on-BYE frees the slot, shared cross-worker count, failover-on-reject | `b2bua-harness/tests/limiter.rs` | ✅ 5 |
+
+**Compliance fix found while writing these:** the `MAX_MESSAGES_PER_CALL` cap path
+ran `begin-termination` **alone**. `begin_termination` assumes an unanswered a-leg
+was already replied to by the firing rule (true for `setup-timeout`), but the cap
+fires from the **router, not a rule** — so a cap trip **before connect** left the
+caller's INVITE with no final response (caller hangs to its own Timer B; limiter
+slot held until the ~32 s `TerminatingTimeout`). Fixed in `b2bua/src/router.rs`:
+reply **503** to a `Trying/Early` a-leg before `begin-termination` (answered legs
+still take the BYE path). **The TS source (`SipRouter.ts`) carries the identical
+latent gap — port the fix back.**
 
 #### Slice 4 — `promote18xPemTo200` (early-media 183→synthetic 200)
 

@@ -7,7 +7,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::{Call, CallModelState, Direction, TimerEntry, TimerType};
+use call::{Call, CallModelState, Direction, LegState, TimerEntry, TimerType};
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::message_helpers::parse_uri_params;
@@ -1211,13 +1211,32 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
                     now_ms,
                     config: &ctx.config,
                 };
-                let cap = exec.execute(
-                    &[RuleAction::BeginTermination {
-                        reason: Some("SIP;cause=503;text=\"message-cap-exceeded\"".into()),
-                    }],
-                    &result.call,
-                    &cap_ctx,
-                );
+                // An UNANSWERED a-leg (still trying/early) has no final response
+                // yet: `begin_termination` assumes the firing *rule* already
+                // replied (as `setup-timeout` does via RespondToALeg) and so only
+                // settles the leg's disposition. The cap fires from the router,
+                // not a rule, so nobody replied — without this the caller's INVITE
+                // hangs until its own Timer B and the limiter slot is held until
+                // the ~32 s TerminatingTimeout. Send the 503 cap cause as the
+                // caller's final so the INVITE resolves now and the call
+                // terminates (decrementing the limiter) immediately. An answered
+                // a-leg (confirmed) takes the BYE path inside begin_termination —
+                // no response then. NB: the TS port (`SipRouter.ts`) runs
+                // begin-termination alone and carries the same latent gap — the
+                // fix should be ported back.
+                let mut cap_actions = Vec::new();
+                if matches!(result.call.a_leg.state, LegState::Trying | LegState::Early) {
+                    cap_actions.push(RuleAction::RespondToALeg {
+                        status: 503,
+                        reason: "Service Unavailable".into(),
+                        header_updates: vec![],
+                        contacts: vec![],
+                    });
+                }
+                cap_actions.push(RuleAction::BeginTermination {
+                    reason: Some("SIP;cause=503;text=\"message-cap-exceeded\"".into()),
+                });
+                let cap = exec.execute(&cap_actions, &result.call, &cap_ctx);
                 result.call = cap.call;
                 result.effects.critical.extend(cap.effects.critical);
                 result.effects.outbound.extend(cap.effects.outbound);
