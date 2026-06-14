@@ -12,10 +12,98 @@ use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
 use b2bua::store::InMemoryCallStore;
-use b2bua::{B2buaCore, B2buaDeps};
+use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
 use scenario_harness::{Agent, Dialog, Harness};
 use sip_clock::Clock;
+use sip_net::UdpEndpoint;
 use sip_txn::IdGen;
+
+// ===========================================================================
+// Shared b2bua spawn primitive
+// ===========================================================================
+//
+// The bind→config→deps→spawn wiring for a `b2bua::B2buaCore` is identical
+// between the single-SUT harness here (`B2buaSut::start_inner`) and the
+// multi-node `failover-harness` (`ReplicatedB2buaSut::spawn_core`): the only
+// things that vary are the `replication` value, the `clock`, the `id_gen`
+// seed, the config tuning, and the `services` vec. Both bind their own
+// endpoint (this crate uses `bind_sut_with_roles`, failover binds via its
+// harness handle); the SHARED part is everything from "build the config" to
+// "spawn the core", captured by [`B2buaSpawnParams`] + [`spawn_b2bua_core`].
+// `failover-harness` reuses these (it depends on this crate).
+
+/// Everything that varies between a single-SUT and a replicated b2bua spawn.
+/// The caller binds its own endpoint and passes it (plus these params) to
+/// [`spawn_b2bua_core`].
+pub struct B2buaSpawnParams {
+    /// `self_ordinal` (e.g. "w0" single-SUT, the worker ordinal in a cluster).
+    pub ordinal: String,
+    /// This worker's SIP wire address (drives `sip_local_ip`/`sip_local_port`).
+    pub sip_addr: SocketAddr,
+    pub decision: Arc<dyn CallDecisionEngine>,
+    pub limiter: Arc<dyn CallLimiter>,
+    /// Callflow services to register (ADR-0016). Empty for the plain path.
+    pub services: Vec<b2bua::rules::ServiceDef>,
+    pub outbound_proxy: Option<(String, u16)>,
+    /// Already-built replication setup (`None` → non-replicating). The caller
+    /// constructs this — keeping repl-net/topology deps out of this crate.
+    pub replication: Option<ReplicationSetup>,
+    pub clock: Clock,
+    pub id_gen: Arc<IdGen>,
+    /// CDR writer; cloned into the deps (the caller keeps its own handle to
+    /// snapshot records).
+    pub cdr: InMemoryCdrWriter,
+}
+
+/// Builds the base [`B2buaConfig`] (ip/port/ordinal/outbound_proxy wired),
+/// applies `tune`, assembles [`B2buaDeps`], and spawns the core on the
+/// already-bound `endpoint`. The single home for the spawn wiring that
+/// `B2buaSut` and `failover-harness`'s `ReplicatedB2buaSut` share.
+///
+/// The legacy `store` slot is a throwaway [`InMemoryCallStore`]: on the
+/// replicating path the repl store is the drain target (the legacy slot is
+/// unused), and on the non-replicating path each call site already passed a
+/// fresh in-memory store. `services` is honoured via `spawn_with_services`
+/// (`spawn` is just `spawn_with_services(.., vec![])`, so an empty vec is
+/// behaviour-identical to the old `spawn` path).
+pub fn spawn_b2bua_core(
+    endpoint: Box<dyn UdpEndpoint>,
+    params: B2buaSpawnParams,
+    tune: impl FnOnce(&mut B2buaConfig),
+) -> B2buaCore {
+    let B2buaSpawnParams {
+        ordinal,
+        sip_addr,
+        decision,
+        limiter,
+        services,
+        outbound_proxy,
+        replication,
+        clock,
+        id_gen,
+        cdr,
+    } = params;
+    let mut config = B2buaConfig {
+        self_ordinal: ordinal,
+        sip_local_ip: sip_addr.ip().to_string(),
+        sip_local_port: sip_addr.port(),
+        b2b_outbound_proxy: outbound_proxy,
+        ..Default::default()
+    };
+    tune(&mut config);
+    let deps = B2buaDeps {
+        config,
+        decision,
+        limiter,
+        cdr: Arc::new(cdr),
+        store: Arc::new(InMemoryCallStore::new()),
+        clock,
+        id_gen,
+        replication,
+        metrics: B2buaMetrics::new(),
+    };
+    B2buaCore::spawn_with_services(endpoint, deps, services)
+}
 
 // The multi-node HA failover harness (FailoverHarness / ReplicatedB2buaSut /
 // ProxySut) moved to the dedicated `failover-harness` crate (ADR-0013 §0). This
@@ -189,34 +277,31 @@ impl B2buaSut {
             )
             .await;
         let cdr = InMemoryCdrWriter::new();
-        let mut config = B2buaConfig {
-            self_ordinal: "w0".into(),
-            sip_local_ip: sa.ip().to_string(),
-            sip_local_port: sa.port(),
-            b2b_outbound_proxy: outbound_proxy,
+        let params = B2buaSpawnParams {
+            ordinal: "w0".into(),
+            sip_addr: sa,
+            decision,
+            limiter,
+            services,
+            outbound_proxy,
+            replication: None,
+            clock: Clock::test_at(0),
+            id_gen: Arc::new(IdGen::seeded(0xB2B0)),
+            cdr: cdr.clone(),
+        };
+        let core = spawn_b2bua_core(endpoint, params, |config| {
             // Production default is 300 s (5 min); the paused-clock keepalive
             // tests advance in 30 s steps, so the harness baseline stays at 30 s.
             // A scenario can still override via `tune`.
-            keepalive_interval_sec: 30,
+            config.keepalive_interval_sec = 30;
             // Production default is now 32 s; the paused-clock keepalive-timeout
             // tests advance a fixed 5 s after the probe, so the harness pins the
             // old 5 s grace to keep those steps valid (a scenario can `tune` it).
-            keepalive_timeout_sec: 5,
-            ..Default::default()
-        };
-        tune(&mut config);
-        let deps = B2buaDeps {
-            config,
-            decision,
-            limiter,
-            cdr: Arc::new(cdr.clone()),
-            store: Arc::new(InMemoryCallStore::new()),
-            clock: Clock::test_at(0),
-            id_gen: Arc::new(IdGen::seeded(0xB2B0)),
-            replication: None,
-            metrics: b2bua::metrics::B2buaMetrics::new(),
-        };
-        let core = B2buaCore::spawn_with_services(endpoint, deps, services);
+            config.keepalive_timeout_sec = 5;
+            // The caller's tune runs LAST so it can still override the keepalive
+            // defaults above (preserving the prior ordering).
+            tune(config);
+        });
         let metrics = core.metrics().clone();
         Self {
             addr: sa,

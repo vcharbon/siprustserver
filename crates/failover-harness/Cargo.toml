@@ -8,6 +8,8 @@ description = "Test-only harness for multi-node HA failover: composes the proxy 
 
 [dependencies]
 b2bua = { path = "../b2bua" }
+# Shared b2bua/proxy spawn primitives live in b2bua-harness; failover-harness reuses them.
+b2bua-harness = { path = "../b2bua-harness" }
 call = { path = "../call" }
 sip-message = { path = "../sip-message" }
 sip-net = { path = "../sip-net" }

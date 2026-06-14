@@ -30,13 +30,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::cdr::{CdrRecord, InMemoryCdrWriter};
-use b2bua::config::B2buaConfig;
 use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
 use b2bua::repl::{Changelog, ReplicatingCallStore};
 use b2bua::store::{CallStore, PartitionRole};
-use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
+use b2bua::{B2buaCore, ReplicationSetup};
+use b2bua_harness::B2buaSpawnParams;
 
 use ha_harness::{Marker, ReplReport};
 use repl_net::transport::{
@@ -474,12 +474,21 @@ impl ReplicatedB2buaSut {
     /// given replication setup.
     async fn spawn_core(&self, replication: Option<ReplicationSetup>) -> B2buaCore {
         let (endpoint, _sa) = self.harness.bind_sut(&self.sip_name, &self.sip_bind).await;
-        let cdr = self.cdr.clone();
-        let config = B2buaConfig {
-            self_ordinal: self.ordinal.clone(),
-            sip_local_ip: self.sip_addr.ip().to_string(),
-            sip_local_port: self.sip_addr.port(),
-            b2b_outbound_proxy: self.outbound_proxy.clone(),
+        let params = B2buaSpawnParams {
+            ordinal: self.ordinal.clone(),
+            sip_addr: self.sip_addr,
+            decision: self.decision.clone(),
+            limiter: self.limiter.clone(),
+            // No callflow services on the replicating path (the plain `spawn`
+            // path before was `spawn_with_services(.., vec![])`).
+            services: Vec::new(),
+            outbound_proxy: self.outbound_proxy.clone(),
+            replication,
+            clock: self.clock.clone(),
+            id_gen: Arc::new(IdGen::seeded(0xB2B0 + self.gen)),
+            cdr: self.cdr.clone(),
+        };
+        b2bua_harness::spawn_b2bua_core(endpoint, params, |config| {
             // EXACT production (kind) timers — `deploy/k8s/manifests/20-worker.yaml`.
             // The keepalive cells must be representative: a long quiescent call is
             // flushed (and its backup TTL refreshed) only by its in-dialog OPTIONS,
@@ -492,9 +501,9 @@ impl ReplicatedB2buaSut {
             // TIMEOUT_SEC) is the reboot-recovery grace before a reclaimed dialog's
             // re-armed OPTIONS is declared dead — the code default (32 s) is NOT the
             // cluster value, so set it explicitly here for parity.
-            keepalive_interval_sec: 300,
-            keepalive_timeout_sec: 45,
-            reboot_budget_sec: 600,
+            config.keepalive_interval_sec = 300;
+            config.keepalive_timeout_sec = 45;
+            config.reboot_budget_sec = 600;
             // Disable the RFC 3261 §13.3.1.4 un-ACKed-2xx watchdog in this harness:
             // the `confirmed_pre_ack` matrix cells deliberately hold the dialog in
             // the pre-ACK window for longer than the 1 s 2xx-retransmit cadence, so
@@ -503,23 +512,8 @@ impl ReplicatedB2buaSut {
             // designed to align — they are pure noise for what this harness tests
             // (SIP-transparent failover), exercised instead by the dedicated
             // `unacked_2xx_reap` b2bua-harness test.
-            ack_timeout_sec: 0,
-            ..Default::default()
-        };
-        let deps = B2buaDeps {
-            config,
-            decision: self.decision.clone(),
-            limiter: self.limiter.clone(),
-            cdr: Arc::new(cdr),
-            // The legacy `store` slot is unused on the replicating path (the repl
-            // store is the drain target); pass a throwaway in-memory store.
-            store: Arc::new(b2bua::store::InMemoryCallStore::new()),
-            clock: self.clock.clone(),
-            id_gen: Arc::new(IdGen::seeded(0xB2B0 + self.gen)),
-            replication,
-            metrics: b2bua::metrics::B2buaMetrics::new(),
-        };
-        B2buaCore::spawn(endpoint, deps)
+            config.ack_timeout_sec = 0;
+        })
     }
 }
 

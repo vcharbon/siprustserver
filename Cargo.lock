@@ -1232,6 +1232,7 @@ name = "failover-harness"
 version = "0.1.0"
 dependencies = [
  "b2bua",
+ "b2bua-harness",
  "call",
  "call-limiter",
  "ha-harness",
