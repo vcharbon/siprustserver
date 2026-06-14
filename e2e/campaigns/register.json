@@ -1,0 +1,7 @@
+{
+  "$schema": "../schemas/campaign.schema.json",
+  "id": "register",
+  "description": "Register front-proxy (fake-register-proxy), exercised through the PORTABLE basic-call / basic-call-media shapes — the SAME shapes that run over the LB+b2bua and real-cluster infras. The layout pre-REGISTERs the callees' AORs and rewrites alice's Request-URI to the registered AOR (no X-Api-Call pin), so routing is purely binding-driven SIP. register-call proves the caller identity + the proxy Record-Route + Max-Forwards decrement on bob1's binding-routed INVITE; register-call-media adds real bidirectional RTP (alice hears bob1 / bob1 hears alice). Faithfully mimics sipjs's sip-front-proxy registrar.",
+  "cases": ["register-call", "register-call-media"],
+  "infraShapes": ["fake-register-proxy"]
+}

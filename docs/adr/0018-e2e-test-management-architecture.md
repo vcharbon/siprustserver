@@ -2,7 +2,7 @@
 
 ## Status
 
-accepted
+accepted — amended 2026-06-14 (layout-owned **egress rewrite**; see Decision).
 
 ## Context
 
@@ -37,6 +37,33 @@ invariant. It holds because both signaling and media ride the one
 auto-advances virtual time, so a send/expect shape is already clock-agnostic
 (paused-sim auto-advances; real-clock blocks on the real timeout). The single
 clock knob, `RECV_TIMEOUT`, lives in Endpoint config.
+
+**Egress rewrite (amendment 2026-06-14).** Topologies reach the callee by
+*different* conventions — the real cluster needs a proprietary `X-Api-Call`
+b-leg pin, the register front proxy resolves a registered AOR from the
+Request-URI, the fake LB's scripted engine just routes. A shape must not bake in
+any of these, or the portability invariant is a fiction. So the *layout* owns
+the resolution of **every** logical callee role and the transform from a shape's
+**logical** INVITE to the **wire** INVITE:
+
+- `InfraRuntime::callee(role)` resolves ANY callee — the a-leg target, a reroute
+  candidate, a REFER transfer target — to a `CalleeTarget { uri, addr }` (the
+  registered AOR or `sip:<role>@<addr>`, plus the pin address). A shape never
+  hard-codes `cfg.addr("bob2")` or an AOR.
+- Each Infra shape declares an `EgressPolicy` (`Transparent` / `ApiCallPin` /
+  `RegistrarAor`); `InfraRuntime::outgoing_invite(callees, …)` takes an **ordered
+  candidate list** (primary + failover targets), folds in the Test case's core
+  From/To/R-URI, then applies the policy's `EgressRewrite` (R-URI override + extra
+  headers). One pinned callee → an `X-Api-Call` `destination`; several → an
+  `X-Api-Call` `routes` failover plan (ADR-0017), so rerouting is expressed
+  generically rather than hard-wired into one infra's engine.
+
+A shape no longer branches on the infra; the layout may also do call setup the
+convention requires (the register layout pre-REGISTERs the callees in `build`).
+This is what lets `basic-call` / `basic-call-media` run over the register front
+proxy — retiring the bespoke `register-call*` shapes — and is the seam any future
+"rewrite the outgoing INVITE per topology" need (other proprietary headers,
+forced routes) extends.
 
 Execution is an **in-process registry** in a shared **`e2e-core`** crate (shape
 id → parameterised fn). Two thin front-ends consume it: an **`e2e-web`** Axum +

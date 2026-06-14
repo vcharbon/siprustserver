@@ -46,6 +46,18 @@ impl Input {
             other => self.extras.contains_key(other),
         }
     }
+
+    /// Deserialize the open `extras` map into a shape's typed parameters `T`
+    /// (paired with its `JsonSchema` via [`CallflowShape::params_schema`], so the
+    /// schema the author saw IS the type `run` reads). `T` should carry
+    /// `#[serde(default)]` so an absent/partial `extras` yields its defaults; a
+    /// *malformed* one panics loudly (the harness philosophy — never a silent
+    /// fallback to defaults that masks a typo).
+    pub fn params<T: DeserializeOwned>(&self) -> T {
+        let obj = serde_json::Value::Object(self.extras.clone().into_iter().collect());
+        serde_json::from_value(obj)
+            .unwrap_or_else(|e| panic!("invalid shape params in `extras`: {e}"))
+    }
 }
 
 /// The assertion operator of a [`Check`] (ADR-0019).

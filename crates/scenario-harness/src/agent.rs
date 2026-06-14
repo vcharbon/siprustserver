@@ -992,6 +992,51 @@ impl Agent {
             agent: self.clone(),
         }
     }
+
+    /// REGISTER this UA's AOR → its own Contact with a `registrar` front proxy,
+    /// then wait for the 200 OK. A faithful mimic of a SIP UA's register step
+    /// (RFC 3261 §10.2): the AOR is `aor` (the To/From URI), the Contact is this
+    /// agent's `sip:name@ip:port`, and `ttl_sec` becomes the `Expires` the
+    /// registrar grants. Returns the granted `Expires` (seconds) parsed back off
+    /// the 200's `Expires` header, so a caller can assert / schedule a refresh
+    /// (re-REGISTER) before it lapses. Out-of-dialog, no dialog is created.
+    ///
+    /// `aor` is the address-of-record URI (e.g. `sip:bob@example.com`); its
+    /// userpart is what the registrar keys the binding on (matching sipjs's
+    /// `sip-front-proxy/Registrar`). Send `ttl_sec = 0` to de-register.
+    pub async fn register(&self, registrar: SocketAddr, aor: &str, ttl_sec: u32) -> u32 {
+        let call_id = format!("reg-{}-{}@{}", self.name, self.ids.next(), self.addr.ip());
+        let opts = GenerateOutOfDialogRequestOpts {
+            // The REGISTER Request-URI is the registrar (domain), not a user.
+            request_uri: format!("sip:{}", registrar.ip()),
+            call_id,
+            from_uri: aor.to_string(),
+            from_tag: self.tag(),
+            to_uri: aor.to_string(),
+            to_tag: None,
+            cseq: 1,
+            via: Some(self.via()),
+            // The Contact the registrar stores verbatim is this agent's wire
+            // address (`sip:name@ip:port`) — the standard generated Contact.
+            contact: Some(self.contact()),
+            max_forwards: Some(70),
+            body: vec![],
+            content_type: None,
+            // The requested binding lifetime (RFC 3261 §10.2.1.1).
+            extra_headers: vec![SipHeader {
+                name: "Expires".into(),
+                value: ttl_sec.to_string(),
+            }],
+        };
+        let req = generate_out_of_dialog_request(OutOfDialogMethod::Register, &opts);
+        self.send(&SipMessage::Request(req), registrar).await;
+        let resp = expect_response(self, 200).await;
+        // Echo back the Expires the registrar actually granted (RFC 3261 §10.3
+        // step 8): the registrar may clamp our request; the UA refreshes on it.
+        get_header(&resp.headers, "expires")
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(ttl_sec)
+    }
 }
 
 // ---------------------------------------------------------------------------

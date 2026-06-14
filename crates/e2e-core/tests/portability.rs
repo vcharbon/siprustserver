@@ -34,7 +34,7 @@ fn fake_cfg() -> EndpointConfig {
 #[tokio::test(start_paused = true)]
 async fn basic_call_over_fake_infra_default() {
     let mut rt = FakeLsbcB2bua.build("basic-call/fake/default", &fake_cfg()).await;
-    BasicCall.run(&mut rt, &Input::default()).await;
+    BasicCall.run(&mut rt, &e2e_core::model::Input::default()).await;
     let (report, rfc_gate) = rt.finish().await;
     assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
 
@@ -49,10 +49,13 @@ async fn basic_call_over_fake_infra_default() {
 /// The Test case drives From / To / R-URI from input data (numbers).
 #[tokio::test(start_paused = true)]
 async fn basic_call_over_fake_infra_with_input() {
-    let input = Input {
-        from: Some("sip:+33123456789@example.com".into()),
-        to: Some("sip:+33987654321@example.com".into()),
-        ruri: Some("sip:+33987654321@127.0.0.1:5070".into()),
+    let input = e2e_core::model::Input {
+        core: Input {
+            from: Some("sip:+33123456789@example.com".into()),
+            to: Some("sip:+33987654321@example.com".into()),
+            ruri: Some("sip:+33987654321@127.0.0.1:5070".into()),
+        },
+        ..Default::default()
     };
     let mut rt = FakeLsbcB2bua.build("basic-call/fake/input", &fake_cfg()).await;
     BasicCall.run(&mut rt, &input).await;
@@ -100,7 +103,7 @@ async fn basic_call_over_real_infra() {
     let mut rt = RealLoopbackDirect
         .build("basic-call/real", &cfg)
         .await;
-    BasicCall.run(&mut rt, &Input::default()).await;
+    BasicCall.run(&mut rt, &e2e_core::model::Input::default()).await;
     let (report, rfc_gate) = rt.finish().await;
     assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
 

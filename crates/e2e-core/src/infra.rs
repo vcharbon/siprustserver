@@ -11,7 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use b2bua::decision::test_adapter::route_to;
+use crate::egress::{CalleeTarget, EgressPolicy};
+use b2bua::decision::test_adapter::{default_call_refer, route_to};
 use b2bua::decision::{CallTreatment, NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::B2buaSut;
 use scenario_harness::{Agent, Harness, RunReport};
@@ -101,13 +102,14 @@ pub struct InfraRuntime {
     pub lb_vip: SocketAddr,
     /// The Endpoint config this runtime was built from (media addrs etc.).
     pub cfg: EndpointConfig,
-    /// `Some(bob)` ⇒ the SUT's decision engine routes by the caller-supplied
-    /// `X-Api-Call.destination` (the REAL kind cluster's worker, whose
-    /// fallback is its own in-cluster `B2BUA_DEST`), so the initial INVITE
-    /// must pin the b-leg callee explicitly. `None` ⇒ the infra's own engine
-    /// already routes to bob (the fake shapes' scripted engine ignores the
-    /// header). Shapes consult [`api_call_destination`](Self::api_call_destination).
-    b_leg_destination: Option<SocketAddr>,
+    /// How THIS layout realizes a logical INVITE on its wire (ADR-0018, the
+    /// generic egress rewrite). The real cluster pins the b-leg via the
+    /// proprietary `X-Api-Call` header ([`EgressPolicy::ApiCallPin`]); the
+    /// register front proxy rewrites the R-URI to the registered AOR
+    /// ([`EgressPolicy::RegistrarAor`]); the fake LB+b2bua and direct-peer infras
+    /// are [`EgressPolicy::Transparent`]. Shapes never branch on it — they call
+    /// [`outgoing_invite`](Self::outgoing_invite), which consults this.
+    egress: EgressPolicy,
     /// The RAW (un-recorded) network — media endpoints ride the same fabric as
     /// the signaling but BELOW the SIP recording/audit decorators (RTP bytes
     /// must not enter the SIP trace or the RFC rule engine).
@@ -116,6 +118,9 @@ pub struct InfraRuntime {
     media: std::cell::RefCell<Vec<crate::media::MediaCapture>>,
     _proxy: Option<ProxyGuard>,
     _b2bua: Option<B2buaSut>,
+    /// The in-process register front proxy (the `fake-register-proxy` shape);
+    /// `None` for every other infra. Aborts its recv loop on drop.
+    _register_proxy: Option<crate::registrar::RegisterProxyGuard>,
 }
 
 impl InfraRuntime {
@@ -154,10 +159,45 @@ impl InfraRuntime {
         std::mem::take(&mut *self.media.borrow_mut())
     }
 
-    /// The b-leg callee the initial INVITE must pin via `X-Api-Call.destination`
-    /// (real cluster), or `None` when the infra's own engine routes to bob.
-    pub fn api_call_destination(&self) -> Option<SocketAddr> {
-        self.b_leg_destination
+    /// Resolve a logical callee **role** (e.g. `"bob1"`, `"bob2"`) to how THIS
+    /// layout addresses it — the one generic primitive every shape uses for ANY
+    /// callee: the a-leg INVITE target, a reroute candidate, a REFER transfer
+    /// target. So a shape never hard-codes `cfg.addr("bob2")` or an AOR. Returns
+    /// the topology-correct URI (registered AOR / `sip:<role>@<addr>`) and the
+    /// callee's wire address (for an `X-Api-Call` destination pin).
+    pub fn callee(&self, role: &str) -> CalleeTarget {
+        let addr = self.cfg.addr(role);
+        CalleeTarget { role: role.to_string(), uri: self.egress.callee_uri(role, addr), addr }
+    }
+
+    /// Realize a Callflow shape's logical INVITE on THIS layout's wire — the
+    /// single seam that replaces every shape's hand-coded `api_call_destination`
+    /// + From/To/R-URI block. `callees` is the ordered candidate list: the
+    /// **primary** first, then any **failover** targets (the rerouting shape
+    /// passes `["bob1", "bob2"]`; a plain call passes `["bob1"]`). It (1) routes
+    /// through the SUT ingress, (2) applies the Test case's `core` From/To/R-URI
+    /// (the author's logical intent), then (3) applies the layout's egress rewrite
+    /// (the topology's wire reality), which has the final say — a register
+    /// layout's AOR R-URI supersedes a topology-agnostic authored one, and a
+    /// pinned layout turns several candidates into an `X-Api-Call` failover plan.
+    pub fn outgoing_invite<'a>(
+        &self,
+        callees: &[&str],
+        input: &crate::model::Input,
+        invite: scenario_harness::Invite<'a>,
+    ) -> scenario_harness::Invite<'a> {
+        let mut invite = invite.through(self.sut_ingress);
+        if let Some(from) = &input.core.from {
+            invite = invite.from(from);
+        }
+        if let Some(to) = &input.core.to {
+            invite = invite.to(to);
+        }
+        if let Some(ruri) = &input.core.ruri {
+            invite = invite.ruri(ruri);
+        }
+        let targets: Vec<CalleeTarget> = callees.iter().map(|r| self.callee(r)).collect();
+        self.egress.rewrite_for(&targets).apply(invite)
     }
 
     /// Close the recording and return the report plus the RFC hard-gate
@@ -181,12 +221,14 @@ impl InfraRuntime {
             agents,
             _proxy,
             _b2bua,
+            _register_proxy,
             ..
         } = self;
         let (report, gate) = harness.finish_collecting().await;
         drop(agents);
         drop(_proxy);
         drop(_b2bua);
+        drop(_register_proxy);
         (report, gate)
     }
 }
@@ -205,6 +247,7 @@ pub trait InfraShape {
 pub fn by_id(id: &str) -> Option<Box<dyn InfraShape>> {
     match id {
         "fake-lsbc-b2bua" => Some(Box::new(FakeLsbcB2bua)),
+        "fake-register-proxy" => Some(Box::new(FakeRegisterProxy)),
         "real-loopback-direct" => Some(Box::new(RealLoopbackDirect)),
         "real" => Some(Box::new(RealKindLb)),
         _ => None,
@@ -213,7 +256,12 @@ pub fn by_id(id: &str) -> Option<Box<dyn InfraShape>> {
 
 /// Every registered Infra-shape id (for precise unknown-id errors).
 pub fn known_ids() -> Vec<&'static str> {
-    vec!["fake-lsbc-b2bua", "real-loopback-direct", "real"]
+    vec![
+        "fake-lsbc-b2bua",
+        "fake-register-proxy",
+        "real-loopback-direct",
+        "real",
+    ]
 }
 
 /// The **fake** infra: alice / bob1 / bob2 on the simulated fabric under a paused
@@ -284,6 +332,11 @@ impl InfraShape for FakeLsbcB2bua {
                 }
                 _ => CallTreatment::Relay,
             })
+            // REFER blind-transfer authorization (the `transfer-refer-media`
+            // shape): the scripted `/call/refer` backend keyed on the REFER's
+            // `X-Api-Call.refer_key` / `destination`. Inert for the other shapes
+            // (they never REFER); composes with the failover wiring above.
+            .on_refer(default_call_refer)
             .build();
         let b2bua = B2buaSut::start_with_outbound_proxy(
             &h,
@@ -300,11 +353,121 @@ impl InfraShape for FakeLsbcB2bua {
             sut_ingress: lb,
             lb_vip: lb,
             cfg: cfg.clone(),
-            b_leg_destination: None,
+            // The scripted decision engine already routes to bob1; the logical
+            // INVITE is the wire INVITE.
+            egress: EgressPolicy::Transparent,
             raw_net: net,
             media: Default::default(),
             _proxy: Some(proxy),
             _b2bua: Some(b2bua),
+            _register_proxy: None,
+        }
+    }
+}
+
+/// The **fake register-proxy** infra (`fake-register-proxy`): alice / bob1 on the
+/// simulated fabric under a paused clock, fronted by an in-process **register
+/// front proxy** ([`crate::registrar`]) that faithfully mimics sipjs's
+/// `sip-front-proxy/` registrar mode — UAs REGISTER an AOR→Contact binding and
+/// the proxy routes an inbound INVITE by the registered AOR (the Request-URI
+/// userpart), with **no** `X-Api-Call` pin.
+///
+/// Unlike `fake-lsbc-b2bua` (an LB + b2bua bridge whose routing is HRW + scripted
+/// engine), this layout's routing is **purely binding-driven**: the proxy
+/// record-routes the call and relays it straight to the registered Contact, so a
+/// shape proves "this INVITE reached bob *because* bob registered" — the thing
+/// the X-Api-Call pin convenience hides. `sut_ingress` is the proxy address.
+///
+/// Routing is a **layout property**, not shape logic (ADR-0018, the egress
+/// rewrite): `build` pre-REGISTERs every bound callee's AOR, and
+/// [`InfraRuntime::outgoing_invite`] rewrites alice's Request-URI to
+/// `sip:<callee>@register.example` ([`EgressPolicy::RegistrarAor`]). So the SAME
+/// topology-agnostic Callflow shapes that run over the LB+b2bua and real-cluster
+/// infras (`basic-call`, `basic-call-media`) run here unchanged — no bespoke
+/// register-* shape. The retired `register-call*` shapes' inline REGISTER + AOR
+/// dial moved into this layout verbatim.
+pub struct FakeRegisterProxy;
+
+/// The AOR domain the register layout binds and dials. The userpart (the callee
+/// role, e.g. `bob1`) is what the registrar keys on; the host is intentionally
+/// ignored (sipjs v1 single-tenant, userpart-only AOR). A logical INVITE to
+/// `bob1` is rewritten to `sip:bob1@register.example` so the proxy resolves the
+/// binding bob1 registered.
+const REGISTER_AOR_DOMAIN: &str = "register.example";
+
+#[async_trait(?Send)]
+impl InfraShape for FakeRegisterProxy {
+    fn id(&self) -> &str {
+        "fake-register-proxy"
+    }
+    fn kind(&self) -> InfraKind {
+        InfraKind::Fake
+    }
+
+    async fn build(&self, scenario_name: &str, cfg: &EndpointConfig) -> InfraRuntime {
+        cfg.assert_binds(self.id());
+        let net: Arc<dyn sip_net::SignalingNetwork> = Arc::new(
+            sip_net::SimulatedSignalingNetwork::new(cfg.transit_delay_ms.max(1)),
+        );
+        let clock = Clock::test_at(0);
+        let h = Harness::with_network_and_clock(
+            scenario_name.to_string(),
+            net.clone(),
+            clock.clone(),
+            layer_harness::TransportKind::Fake,
+            cfg.recv_timeout(),
+        );
+
+        let mut agents = BTreeMap::new();
+        for role in ["alice", "bob1", "bob2"] {
+            if let Some(addr) = cfg.roles.get(role) {
+                agents.insert(role.to_string(), h.agent(role, &addr.to_string()).await);
+            }
+        }
+
+        // The register front proxy — its own SUT bind, role-tagged `{Proxy}` so
+        // the RFC suite judges this lane by the proxy rules.
+        let proxy_addr = cfg.addr("proxy");
+        let (ep, sock) = h
+            .bind_sut_with_roles(
+                "proxy",
+                &proxy_addr.to_string(),
+                std::collections::HashSet::from([sip_net::UaRole::Proxy]),
+            )
+            .await;
+        let registrar = crate::registrar::Registrar::new(clock);
+        let guard = crate::registrar::spawn_register_proxy(ep, sock, registrar);
+
+        // The LAYOUT pre-REGISTERs every bound callee's AOR → its Contact — the
+        // setup the retired `register-*` shapes did inline. With the binding
+        // live, a topology-agnostic shape (basic-call, basic-call-media) reaches
+        // bob purely because bob registered, the thing the X-Api-Call pin hides:
+        // [`outgoing_invite`](InfraRuntime::outgoing_invite) rewrites alice's
+        // R-URI to `sip:<callee>@register.example` and the proxy resolves it.
+        for role in ["bob1", "bob2"] {
+            if let Some(agent) = agents.get(role) {
+                let aor = format!("sip:{role}@{REGISTER_AOR_DOMAIN}");
+                let granted = agent.register(sock, &aor, 3600).await;
+                assert!(
+                    granted > 0,
+                    "registrar must grant a positive Expires for {role}, got {granted}"
+                );
+            }
+        }
+
+        InfraRuntime {
+            harness: h,
+            agents,
+            sut_ingress: sock,
+            lb_vip: sock,
+            cfg: cfg.clone(),
+            // Pure SIP routing by the registered AOR — no proprietary header.
+            egress: EgressPolicy::RegistrarAor { domain: REGISTER_AOR_DOMAIN.to_string() },
+            raw_net: net,
+            media: Default::default(),
+            _proxy: None,
+            _b2bua: None,
+            _register_proxy: Some(guard),
         }
     }
 }
@@ -350,11 +513,13 @@ impl InfraShape for RealLoopbackDirect {
             sut_ingress: bob1,
             lb_vip: bob1,
             cfg: cfg.clone(),
-            b_leg_destination: None,
+            // alice talks straight to bob1; no rewrite.
+            egress: EgressPolicy::Transparent,
             raw_net: net,
             media: Default::default(),
             _proxy: None,
             _b2bua: None,
+            _register_proxy: None,
         }
     }
 }
@@ -371,9 +536,10 @@ impl InfraShape for RealLoopbackDirect {
 ///     INVITE and in-dialog requests back out to them.
 ///   - The deployed worker's decision engine falls back to its own in-cluster
 ///     `B2BUA_DEST` unless the INVITE pins the callee via
-///     `X-Api-Call.destination` — so this shape sets `b_leg_destination =
-///     bob1` and the Callflow shapes attach the header. The b-leg still rides
-///     LB-first (`B2BUA_OUTBOUND_PROXY` = VIP): the production invariant holds.
+///     `X-Api-Call.destination` — so this layout's egress policy is
+///     [`EgressPolicy::ApiCallPin`] and [`InfraRuntime::outgoing_invite`]
+///     attaches the header (pinning the callee role's address). The b-leg still
+///     rides LB-first (`B2BUA_OUTBOUND_PROXY` = VIP): the production invariant holds.
 ///   - RTP (`<role>.rtp` config keys) flows host↔host directly — real UDP via
 ///     `RealSignalingNetwork`, same media seam as the fake fabric (ADR-0018).
 pub struct RealKindLb;
@@ -419,11 +585,14 @@ impl InfraShape for RealKindLb {
             sut_ingress: lb,
             lb_vip: lb,
             cfg: cfg.clone(),
-            b_leg_destination: Some(cfg.addr("bob1")),
+            // The deployed worker falls back to its in-cluster `B2BUA_DEST`
+            // unless the INVITE pins the callee — pin the b-leg via `X-Api-Call`.
+            egress: EgressPolicy::ApiCallPin,
             raw_net: net,
             media: Default::default(),
             _proxy: None,
             _b2bua: None,
+            _register_proxy: None,
         }
     }
 }

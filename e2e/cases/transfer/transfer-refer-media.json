@@ -1,0 +1,31 @@
+{
+  "$schema": "../schemas/test-case.schema.json",
+  "id": "transfer-refer-media",
+  "description": "Blind call transfer via SIP REFER with RTP media re-exchange: alice↔bob1 is established, bob1 REFERs the call to bob2, the SUT drives the C-leg + NOTIFY + both realign re-INVITEs, and after merge(a,c) alice and bob2 exchange real audio. The 'hears' checks (alice hears bob2 / bob2 hears alice) prove media survived the transfer; saved as playable .wav beside the result.",
+  "compatibleShapes": [
+    "transfer-refer-media"
+  ],
+  "input": {
+    "core": {
+      "from": "sip:+33123456789@example.com",
+      "to": "sip:+33987654321@example.com",
+      "ruri": "sip:+33987654321@127.0.0.1:5070"
+    }
+  },
+  "checkSets": [
+    "transfer-refer"
+  ],
+  "checks": [
+    {
+      "on": "bob1.initialInvite",
+      "optional": false,
+      "checks": [
+        {
+          "field": "body",
+          "op": "regex",
+          "value": "m=audio"
+        }
+      ]
+    }
+  ]
+}

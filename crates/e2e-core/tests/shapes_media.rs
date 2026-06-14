@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use e2e_core::checks::{self, Bindings};
 use e2e_core::model;
 use e2e_core::{
-    BasicCallMedia, CallflowShape, EndpointConfig, FakeLsbcB2bua, InfraShape, Input,
-    RealLoopbackDirect, Rerouting, ReroutingPrack, run,
+    BasicCall, BasicCallMedia, CallflowShape, EndpointConfig, FakeLsbcB2bua, FakeRegisterProxy,
+    InfraShape, RealLoopbackDirect, Rerouting, ReroutingPrack, TransferReferMedia, run,
 };
 
 fn workspace_root() -> PathBuf {
@@ -70,7 +70,7 @@ fn assert_media_captures(captures: &[e2e_core::media::MediaCapture], dir_tag: &s
 #[tokio::test(start_paused = true)]
 async fn media_call_over_fake_infra_classifies_both_ways() {
     let mut rt = FakeLsbcB2bua.build("media/fake", &fake_cfg()).await;
-    BasicCallMedia.run(&mut rt, &Input::default()).await;
+    BasicCallMedia.run(&mut rt, &model::Input::default()).await;
     let captures = rt.take_media();
     let (report, rfc_gate) = rt.finish().await;
     assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
@@ -99,12 +99,46 @@ async fn media_call_over_real_infra_classifies_both_ways() {
         transit_delay_ms: 0,
     };
     let mut rt = RealLoopbackDirect.build("media/real", &cfg).await;
-    BasicCallMedia.run(&mut rt, &Input::default()).await;
+    BasicCallMedia.run(&mut rt, &model::Input::default()).await;
     let captures = rt.take_media();
     let (report, rfc_gate) = rt.finish().await;
     assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
     assert!(report.passed());
     assert_media_captures(&captures, "real");
+}
+
+/// Phase L over the FAKE infra: a blind transfer via REFER with media
+/// re-exchange — alice↔bob1 up, bob1 REFERs to bob2, the SUT realigns both legs,
+/// then alice and bob2 exchange real audio ("alice hears bob2" / "bob2 hears
+/// alice"). RTP rides the simulated fabric; the talk window auto-advances.
+#[tokio::test(start_paused = true)]
+async fn transfer_refer_media_over_fake_infra_reexchanges_audio() {
+    let mut rt = FakeLsbcB2bua.build("transfer/fake", &fake_cfg()).await;
+    TransferReferMedia.run(&mut rt, &model::Input::default()).await;
+    let captures = rt.take_media();
+    let (report, rfc_gate) = rt.finish().await;
+    assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
+    assert!(report.passed());
+
+    // The post-transfer peers are alice + bob2 (not bob1): assert each heard the
+    // other's clip across the merged A↔C dialog.
+    let dir = std::env::temp_dir().join(format!("e2e-transfer-{}", std::process::id()));
+    let (refs, verdicts) = e2e_core::media::write_and_fold(&dir, &captures).unwrap();
+    assert_eq!(verdicts.len(), 2);
+    for v in &verdicts {
+        assert!(v.passed, "{}.{}: {} (actual {:?})", v.on, v.field, v.detail, v.actual);
+    }
+    let hears = |agent: &str| {
+        verdicts.iter().find(|v| v.on == format!("{agent}.media")).unwrap().actual.clone()
+    };
+    assert_eq!(hears("alice").as_deref(), Some("Bob"), "alice hears bob2's clip");
+    assert_eq!(hears("bob2").as_deref(), Some("Alice"), "bob2 hears alice's clip");
+    for r in &refs {
+        let bytes = std::fs::read(dir.join(&r.wav)).unwrap();
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert!(r.rms > 0.01, "{} not silence (rms {})", r.wav, r.rms);
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// Phase K: bob1 rejects, the SUT re-targets bob2, identity survives to the
@@ -118,7 +152,7 @@ async fn rerouting_shape_fails_over_to_bob2() {
 
     let mut rt = FakeLsbcB2bua.build("rerouting/fake", &fake_cfg()).await;
     let lb_vip = rt.lb_vip;
-    Rerouting.run(&mut rt, &case.input.core).await;
+    Rerouting.run(&mut rt, &case.input).await;
     let (report, rfc_gate) = rt.finish().await;
     assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
     assert!(report.passed());
@@ -135,6 +169,87 @@ async fn rerouting_shape_fails_over_to_bob2() {
     }
 }
 
+/// Register front-proxy via the PORTABLE `basic-call` shape (the register-* shapes
+/// are retired — routing is now a layout property). The `fake-register-proxy`
+/// layout pre-REGISTERs bob1's AOR and rewrites alice's R-URI to it (no X-Api-Call
+/// pin); the SAME `basic-call` body that runs over the LB+b2bua infra reaches bob1
+/// *purely by the registered binding*, and the committed case's checks (R-URI
+/// userpart resolved to `bob1`, Max-Forwards decremented, proxy Record-Route,
+/// identity preserved) all pass.
+#[tokio::test(start_paused = true)]
+async fn register_layout_routes_basic_call_by_registered_binding() {
+    let case =
+        model::load_test_case(&workspace_root().join("e2e/cases/register-call.json")).unwrap();
+    let check_sets = model::load_check_sets(&workspace_root().join("e2e/checksets")).unwrap();
+    model::validate_case(&case, &e2e_core::shapes::registry(), &check_sets).unwrap();
+
+    let cfg = EndpointConfig {
+        schema: None,
+        infra_shape: "fake-register-proxy".into(),
+        roles: [
+            ("alice", "127.0.0.1:5160"),
+            ("bob1", "127.0.0.1:5170"),
+            ("bob2", "127.0.0.1:5171"),
+            ("proxy", "127.0.0.1:5180"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.parse().unwrap()))
+        .collect(),
+        recv_timeout_ms: 2_000,
+        transit_delay_ms: 0,
+    };
+    let mut rt = FakeRegisterProxy.build("register/fake", &cfg).await;
+    let lb_vip = rt.lb_vip;
+    BasicCall.run(&mut rt, &case.input).await;
+    let (report, rfc_gate) = rt.finish().await;
+    assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
+    assert!(report.passed());
+
+    let verdicts = checks::evaluate_case(
+        &case,
+        &check_sets,
+        &report,
+        &Bindings { input: &case.input, lb_vip },
+    );
+    assert!(!verdicts.is_empty());
+    for v in &verdicts {
+        assert!(v.passed, "{}.{}: {} (actual {:?})", v.on, v.field, v.detail, v.actual);
+    }
+}
+
+/// Register front-proxy with media via the PORTABLE `basic-call-media` shape: the
+/// `fake-register-proxy` layout pre-REGISTERs bob1's AOR and rewrites alice's
+/// R-URI to it (no X-Api-Call pin), so the SAME media body that runs over the
+/// LB+b2bua infra reaches bob1 by the registered binding and exchanges real RTP
+/// both ways — `alice hears bob` / `bob hears alice` (the standard two-verdict
+/// fold), with the RFC hard gate empty for the binding-routed call.
+#[tokio::test(start_paused = true)]
+async fn register_layout_basic_call_media_both_directions() {
+    let cfg = EndpointConfig {
+        schema: None,
+        infra_shape: "fake-register-proxy".into(),
+        roles: [
+            ("alice", "127.0.0.1:5160"),
+            ("bob1", "127.0.0.1:5170"),
+            ("bob2", "127.0.0.1:5171"),
+            ("proxy", "127.0.0.1:5180"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.parse().unwrap()))
+        .collect(),
+        recv_timeout_ms: 2_000,
+        transit_delay_ms: 0,
+    };
+    let mut rt = FakeRegisterProxy.build("register-media/fake", &cfg).await;
+    BasicCallMedia.run(&mut rt, &model::Input::default()).await;
+    let captures = rt.take_media();
+    let (report, rfc_gate) = rt.finish().await;
+    assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
+    assert!(report.passed());
+    // Same two-direction fold as the LB+b2bua media test — alice↔bob1 by binding.
+    assert_media_captures(&captures, "register-media");
+}
+
 /// Phase K: rerouting + reliable 183/PRACK on the winning leg.
 #[tokio::test(start_paused = true)]
 async fn rerouting_prack_shape_relays_reliable_provisional() {
@@ -147,7 +262,7 @@ async fn rerouting_prack_shape_relays_reliable_provisional() {
 
     let mut rt = FakeLsbcB2bua.build("rerouting-prack/fake", &fake_cfg()).await;
     let lb_vip = rt.lb_vip;
-    ReroutingPrack.run(&mut rt, &case.input.core).await;
+    ReroutingPrack.run(&mut rt, &case.input).await;
     let (report, rfc_gate) = rt.finish().await;
     assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
     assert!(report.passed());
@@ -175,7 +290,7 @@ fn committed_full_campaign_runs_green() {
             .expect("committed full campaign loads");
     let result = run::run_blocking(&spec).expect("full campaign runs");
     assert!(result.passed(), "{:#?}", result.index);
-    assert_eq!(result.index.cells.len(), 4);
+    assert_eq!(result.index.cells.len(), 5);
 
     // The media cell persisted its artifacts + refs + hears-verdicts.
     let media_cell = result

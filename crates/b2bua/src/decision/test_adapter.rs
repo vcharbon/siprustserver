@@ -133,6 +133,14 @@ impl ScriptedDecisionEngine {
             // Reroute/failover walker (no-op unless a `routes` plan set a
             // callback_context above; otherwise returns Relay = the prior default).
             .on_failure(failure_from_context)
+            // REFER blind-transfer authorization (the deployed cluster engine).
+            // Keyed on the REFER's `X-Api-Call` (`refer_key` + `destination`),
+            // mirroring the fake infra's `/call/refer` wiring. Without this the
+            // builder default rejects every REFER 501, so the worker accepts the
+            // REFER (202 + NOTIFY) but never dials the transfer C leg — the
+            // `transfer-refer-media` real cell hangs at `bob2.receive(INVITE)`.
+            // Inert for non-REFER traffic (the endurance/sipp streams never REFER).
+            .on_refer(default_call_refer)
             .build()
     }
 

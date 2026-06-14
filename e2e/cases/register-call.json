@@ -1,0 +1,30 @@
+{
+  "$schema": "../schemas/test-case.schema.json",
+  "id": "register-call",
+  "description": "Register-driven routing (sipjs sip-front-proxy mimic), realized via the PORTABLE basic-call shape over the fake-register-proxy infra. The layout pre-REGISTERs bob1's AOR (sip:bob1@register.example) and rewrites alice's Request-URI to that AOR with NO X-Api-Call pin (pure SIP routing); the register front proxy resolves the userpart 'bob1' to bob1's registered Contact, decrements Max-Forwards, pushes its Via and record-routes the dialog. So bob1's initial INVITE arrives carrying the AOR userpart, the caller identity and a proxy Record-Route — proving the call reached bob1 purely because bob1 registered, the thing the X-Api-Call convenience hides.",
+  "compatibleShapes": ["basic-call"],
+  "input": {
+    "core": {
+      "from": "sip:+33123456789@example.com"
+    }
+  },
+  "checks": [
+    {
+      "on": "bob1.initialInvite",
+      "checks": [
+        { "field": "ruri.userInfo", "op": "eq", "value": "bob1" },
+        { "field": "from.uri", "op": "eq", "value": "${input.from}" },
+        { "field": "from.tag", "op": "exists" },
+        { "field": "header(Record-Route)", "op": "exists" },
+        { "field": "header(Max-Forwards)", "op": "eq", "value": "69" },
+        { "field": "body", "op": "regex", "value": "m=audio" }
+      ]
+    },
+    {
+      "on": "alice.answer",
+      "checks": [
+        { "field": "to.tag", "op": "exists" }
+      ]
+    }
+  ]
+}

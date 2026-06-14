@@ -1,0 +1,19 @@
+{
+  "$schema": "../schemas/check-set.schema.json",
+  "id": "transfer-refer",
+  "description": "Blind-transfer (REFER) structural checks: the transfer-target leg bob2 receives a media INVITE, and the a-realign re-INVITE alice receives carries the post-transfer SDP. Shape-portable to any shape publishing initialInvite/reInvite on bob2 + alice. The 'hears' media verdicts (alice hears bob2 / bob2 hears alice) are folded automatically by the executor.",
+  "blocks": [
+    {
+      "on": "bob2.initialInvite",
+      "checks": [
+        { "field": "body", "op": "regex", "value": "m=audio" }
+      ]
+    },
+    {
+      "on": "alice.reInvite",
+      "checks": [
+        { "field": "body", "op": "regex", "value": "m=audio" }
+      ]
+    }
+  ]
+}

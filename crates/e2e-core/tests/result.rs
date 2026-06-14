@@ -46,7 +46,7 @@ async fn produce_result() -> RunResult {
         .expect("committed check sets load");
     let mut rt = FakeLsbcB2bua.build("result/fake", &fake_cfg()).await;
     let lb_vip = rt.lb_vip;
-    BasicCall.run(&mut rt, &case.input.core).await;
+    BasicCall.run(&mut rt, &case.input).await;
     let (report, rfc_gate) = rt.finish().await;
     assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
 

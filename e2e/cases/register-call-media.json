@@ -1,0 +1,29 @@
+{
+  "$schema": "../schemas/test-case.schema.json",
+  "id": "register-call-media",
+  "description": "Register-driven routing with real bidirectional RTP (sipjs sip-front-proxy mimic), realized via the PORTABLE basic-call-media shape over the fake-register-proxy infra. The layout pre-REGISTERs bob1's AOR (sip:bob1@register.example) and rewrites alice's Request-URI to it with NO X-Api-Call pin; the register front proxy resolves the binding, decrements Max-Forwards, pushes its Via and record-routes the dialog (so the in-dialog BYE loops back). The same media folds as the LB+b2bua infra prove alice hears bob1 and bob1 hears alice — proving the binding-routed call carries audio both ways.",
+  "compatibleShapes": ["basic-call-media"],
+  "input": {
+    "core": {
+      "from": "sip:+33123456789@example.com"
+    }
+  },
+  "checks": [
+    {
+      "on": "bob1.initialInvite",
+      "checks": [
+        { "field": "ruri.userInfo", "op": "eq", "value": "bob1" },
+        { "field": "from.uri", "op": "eq", "value": "${input.from}" },
+        { "field": "header(Record-Route)", "op": "exists" },
+        { "field": "header(Max-Forwards)", "op": "eq", "value": "69" },
+        { "field": "body", "op": "regex", "value": "m=audio" }
+      ]
+    },
+    {
+      "on": "alice.answer",
+      "checks": [
+        { "field": "to.tag", "op": "exists" }
+      ]
+    }
+  ]
+}

@@ -5,7 +5,8 @@
 use async_trait::async_trait;
 
 use crate::infra::InfraRuntime;
-use crate::shape::{Anchor, CallflowShape, Input};
+use crate::model::Input;
+use crate::shape::{Anchor, CallflowShape};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -22,35 +23,19 @@ impl CallflowShape for BasicCall {
     fn anchors(&self) -> &[Anchor] {
         ANCHORS
     }
+    fn agents(&self) -> &[&str] {
+        &["alice", "bob1"]
+    }
 
     async fn run(&self, rt: &mut InfraRuntime, input: &Input) {
-        let sut = rt.sut_ingress;
         let alice = rt.agent("alice");
         let bob1 = rt.agent("bob1");
 
-        // alice INVITEs through the SUT ingress (the LB), carrying any From/To/
-        // R-URI the Test case supplied. The LB HRW-routes to the b2bua, which
-        // bridges the b-leg back through the LB to bob1.
-        let mut invite = alice.invite(bob1).with_sdp(OFFER).through(sut);
-        // On the real cluster the worker's engine routes by the caller-pinned
-        // `X-Api-Call.destination` (fallback = its in-cluster B2BUA_DEST, which
-        // is NOT our bob); the fake engine ignores the header. Same shape body
-        // either way — the infra decides whether the pin is needed.
-        if let Some(dest) = rt.api_call_destination() {
-            invite = invite.with_header(
-                "X-Api-Call",
-                &format!(r#"{{"destination":{{"host":"{}","port":{}}}}}"#, dest.ip(), dest.port()),
-            );
-        }
-        if let Some(from) = &input.from {
-            invite = invite.from(from);
-        }
-        if let Some(to) = &input.to {
-            invite = invite.to(to);
-        }
-        if let Some(ruri) = &input.ruri {
-            invite = invite.ruri(ruri);
-        }
+        // alice INVITEs bob1. The LAYOUT realizes this logical INVITE on its wire
+        // (the real cluster's `X-Api-Call` pin, the register proxy's registered-
+        // AOR R-URI, or nothing for the fake LB+b2bua) and applies the Test case's
+        // From/To/R-URI — so the SAME body runs over every infra (ADR-0018).
+        let invite = rt.outgoing_invite(&["bob1"], input, alice.invite(bob1).with_sdp(OFFER));
         let mut call = invite.send().await;
 
         // INITIAL INVITE arrives at bob1 (anchor: bob1.initialInvite).

@@ -8,13 +8,19 @@ transport, clock and timeouts differ.
 
 Compiled shapes: `basic-call`, `basic-call-media` (real RTP both ways + the
 "alice hears bob" spectral-classifier check, per-agent `.wav` artifacts),
-`rerouting` (bob1 rejects → the SUT fails over to bob2, ADR-0017), and
-`rerouting-prack` (+ reliable 183/PRACK on the winning leg). Campaigns:
-`smoke` (one fast cell) and `full` (every case).
+`rerouting` (bob1 rejects → the SUT fails over to bob2, ADR-0017),
+`rerouting-prack` (+ reliable 183/PRACK on the winning leg), and
+`transfer-refer-media` (blind transfer via REFER: bob1 REFERs the call to bob2,
+the SUT drives the C-leg + NOTIFYs + both realign re-INVITEs, then alice and
+bob2 re-exchange audio — "alice hears bob2" proves media survived the transfer).
+Campaigns: `smoke` (one fast cell), `full` (every case), and `transfer`
+(the transfer case over fake + real).
 
 ```
 e2e/
-  cases/      Test cases (input data + checks + compatible shapes)
+  cases/      Test cases (input data + checks + compatible shapes); may be
+              organised into subfolders — each is still referenced by its id
+              (the file name equals the id), and the website groups them by folder
   checksets/  Shared, reusable check bundles (referenced by id from cases)
   campaigns/  Campaigns: which cases over which infra shapes
   infra/      Endpoint configs, one per Infra shape (role → address)
@@ -32,10 +38,14 @@ cargo run -p e2e-web            # http://127.0.0.1:8378/campaigns
 List campaigns and hit **Launch**; the run page live-updates (htmx 1s poll)
 until every cell settles; click a cell for the SVG call diagram, check
 verdicts, and — for media cells — inline `<audio>` players over the recorded
-`.wav`s with the classifier verdict. `/cases/<id>` views a Test case and lets
-you edit it in place — saves are validated against the compiled registries and
-rejected with the precise problem list. Every route also mirrors JSON for
-scripts:
+`.wav`s with the classifier verdict. `/cases/<id>` and `/campaigns/<id>` view a
+doc and let you edit it in place in a **schema-aware Monaco editor** (vendored
+under `/static/vs`, validating live against `/schemas/<doc>` — the same schema
+the model generates, so the editor can't drift from the code). The campaign page
+also shows the matrix preview and the layout knobs (`concurrency` fake/real).
+Saves are re-validated server-side (a case against the compiled registries; a
+campaign's referenced cases + infra shapes must exist) and rejected with the
+precise problem list. Every route also mirrors JSON for scripts:
 
 ```sh
 curl -H 'Accept: application/json' http://127.0.0.1:8378/campaigns

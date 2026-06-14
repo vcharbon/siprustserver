@@ -54,7 +54,7 @@ async fn authored_json_case_loads_validates_and_runs() {
     let shape = shapes.get(case.compatible_shapes[0].as_str()).unwrap();
     let mut rt = FakeLsbcB2bua.build("basic-call/fake/json-case", &fake_cfg()).await;
     let lb_vip = rt.lb_vip;
-    shape.run(&mut rt, &case.input.core).await;
+    shape.run(&mut rt, &case.input).await;
     let (report, rfc_gate) = rt.finish().await;
     assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
 
@@ -159,7 +159,7 @@ fn missing_required_input_is_incompatible() {
         fn required_input(&self) -> &[&str] {
             &["from", "rerouteTarget"]
         }
-        async fn run(&self, _rt: &mut e2e_core::InfraRuntime, _input: &e2e_core::Input) {
+        async fn run(&self, _rt: &mut e2e_core::InfraRuntime, _input: &e2e_core::model::Input) {
             unreachable!("validation-only shape")
         }
     }

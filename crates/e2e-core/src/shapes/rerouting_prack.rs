@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use sip_message::generators::InDialogMethod;
 
 use crate::infra::InfraRuntime;
-use crate::shape::{Anchor, CallflowShape, Input};
+use crate::model::Input;
+use crate::shape::{Anchor, CallflowShape};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -32,9 +33,11 @@ impl CallflowShape for ReroutingPrack {
     fn anchors(&self) -> &[Anchor] {
         ANCHORS
     }
+    fn agents(&self) -> &[&str] {
+        &["alice", "bob1", "bob2"]
+    }
 
     async fn run(&self, rt: &mut InfraRuntime, input: &Input) {
-        let sut = rt.sut_ingress;
         let alice = rt.agent("alice");
         let bob1 = rt.agent("bob1");
         let bob2 = rt.agent("bob2");
@@ -42,21 +45,14 @@ impl CallflowShape for ReroutingPrack {
         // A UAC that intends to PRACK advertises 100rel support on the INVITE
         // (RFC 3262 §3) — without it, bob2's reliable 183 (relayed end-to-end
         // by the SUT) would be a MUST-004 "reliable 1xx without client opt-in"
-        // violation by every UAS on the path.
-        let mut invite = alice
-            .invite(bob1)
-            .with_sdp(OFFER)
-            .with_header("Supported", "100rel")
-            .through(sut);
-        if let Some(from) = &input.from {
-            invite = invite.from(from);
-        }
-        if let Some(to) = &input.to {
-            invite = invite.to(to);
-        }
-        if let Some(ruri) = &input.ruri {
-            invite = invite.ruri(ruri);
-        }
+        // violation by every UAS on the path. That header is shape semantics; the
+        // layout then realizes the [bob1, bob2] candidate list on its wire (the
+        // pinned `routes` failover plan / the fake engine's own failover).
+        let invite = rt.outgoing_invite(
+            &["bob1", "bob2"],
+            input,
+            alice.invite(bob1).with_sdp(OFFER).with_header("Supported", "100rel"),
+        );
         let mut call = invite.send().await;
 
         // bob1 rejects; the SUT fails over to bob2.

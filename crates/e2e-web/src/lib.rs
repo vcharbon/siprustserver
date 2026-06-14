@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Path as UrlPath, State};
+use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
@@ -30,6 +30,7 @@ use e2e_core::model::{self, ModelError};
 use e2e_core::result::CellSummary;
 use e2e_core::run::{self, JobHandle};
 use maud::{DOCTYPE, Markup, PreEscaped, html};
+use tower_http::services::ServeDir;
 
 /// Shared app state: the authored-files dir, the runs root, and the live jobs.
 pub struct AppState {
@@ -45,7 +46,7 @@ pub fn router(e2e_dir: PathBuf, runs_root: PathBuf) -> Router {
     Router::new()
         .route("/", get(|| async { Redirect::to("/campaigns") }))
         .route("/campaigns", get(campaigns_index))
-        .route("/campaigns/{id}", get(campaign_detail))
+        .route("/campaigns/{id}", get(campaign_detail).post(campaign_save))
         .route("/campaigns/{id}/runs", axum::routing::post(campaign_launch))
         .route("/runs", get(runs_index))
         .route("/runs/{campaign}/{ts}", get(run_status))
@@ -53,7 +54,195 @@ pub fn router(e2e_dir: PathBuf, runs_root: PathBuf) -> Router {
         .route("/runs/{campaign}/{ts}/cells/{cell}/files/{name}", get(cell_file))
         .route("/cases", get(cases_index))
         .route("/cases/{id}", get(case_view).post(case_save))
+        // The registry's shapes (for the editor's shape-lens picker) and the
+        // derived compatible-shapes of an in-progress buffer (the read-only panel).
+        .route("/shapes", get(shapes_index))
+        .route("/compat", axum::routing::post(case_compat))
+        // The live model-generated JSON schema (never the on-disk copy) the
+        // Monaco editor validates against — so authoring can't drift from code.
+        // `?shape=<id>` narrows the test-case schema to one shape's vocabulary.
+        .route("/schemas/{name}", get(schema_doc))
+        // The vendored Monaco editor assets (the only client-side dependency
+        // besides htmx). `CARGO_MANIFEST_DIR` keeps the path independent of cwd.
+        .nest_service(
+            "/static",
+            ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/static")),
+        )
         .with_state(state)
+}
+
+/// Serve a top-level doc schema by name (`test-case`, `campaign`, `check-set`,
+/// `endpoint-config`; a trailing `.schema.json` is tolerated). `test-case` is
+/// served from [`e2e_core::schema_gen`] — the live projection that narrows
+/// `field`/`on` to the registry's vocabulary, optionally pinned to one shape via
+/// `?shape=<id>`; the rest come straight from [`e2e_core::model::schemas`]. Both
+/// are generated from code, so authoring can never drift from the model.
+async fn schema_doc(
+    UrlPath(name): UrlPath<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Response, HttpError> {
+    let key = name.strip_suffix(".schema.json").unwrap_or(&name);
+    if key == "test-case" {
+        let registry = e2e_core::shapes::registry();
+        let shape = q.get("shape").and_then(|id| registry.get(id));
+        let schema = e2e_core::schema_gen::test_case_schema(shape.map(|b| b.as_ref()));
+        return Ok(Json(schema).into_response());
+    }
+    let schema = model::schemas()
+        .into_iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, s)| s)
+        .ok_or_else(|| not_found(format!("schema {key:?}")))?;
+    Ok(Json(schema).into_response())
+}
+
+/// The registry's shapes for the editor's shape-lens picker: id + the agents,
+/// anchors and `<agent>.<anchor>` selectors each drives, and whether it exchanges
+/// media. Always JSON (consumed by the editor, not browsed directly).
+async fn shapes_index() -> Response {
+    let registry = e2e_core::shapes::registry();
+    let docs: Vec<_> = registry
+        .iter()
+        .map(|(id, s)| {
+            serde_json::json!({
+                "id": id,
+                "agents": s.agents(),
+                "anchors": s.anchors().iter().map(|a| a.as_str()).collect::<Vec<_>>(),
+                "selectors": e2e_core::schema_gen::selectors_for(s.as_ref()),
+                "media": matches!(s.media(), e2e_core::MediaMode::Exchange),
+            })
+        })
+        .collect();
+    Json(docs).into_response()
+}
+
+/// Derive the compatible shapes of an in-progress Test-case buffer (the editor's
+/// read-only "this case also fits…" panel). A buffer that is not yet valid JSON
+/// is a soft 422 — the editor just blanks the panel until it parses.
+async fn case_compat(State(st): State<Arc<AppState>>, body: String) -> Result<Response, HttpError> {
+    let case: model::TestCase = serde_json::from_str(&body)
+        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, format!("not a test case: {e}")))?;
+    let check_sets = model::load_check_sets(&st.e2e_dir.join("checksets")).map_err(internal)?;
+    let compat =
+        e2e_core::schema_gen::compatible_shapes(&case, &e2e_core::shapes::registry(), &check_sets);
+    Ok(Json(serde_json::json!({ "compatibleShapes": compat })).into_response())
+}
+
+/// A schema-aware Monaco JSON editor bound to `model_uri`, validating live
+/// against `/schemas/{schema_name}`, seeded with `text`, with a "Validate &
+/// save" button that POSTs the buffer back to the current path. Shared by the
+/// Test-case and Campaign authoring pages.
+///
+/// When `shapes` is non-empty (the Test-case page) it also renders a **shape-lens
+/// picker** — re-binding the schema to `/schemas/{schema_name}?shape=<id>` so
+/// completion narrows to that shape's `<agent>.<anchor>` + field vocabulary — and
+/// a read-only **compatible-shapes panel** recomputed from the buffer (debounced)
+/// via `POST /compat`. `initial_shape` preselects the lens (the case's first
+/// compatible shape); `None`/`""` leaves the base lens until the author picks.
+fn json_editor(
+    model_uri: &str,
+    schema_name: &str,
+    text: &str,
+    shapes: &[String],
+    initial_shape: Option<&str>,
+) -> Markup {
+    // JSON-encode the seed so any quotes/newlines embed safely in the script.
+    let text_json = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into());
+    let boot = format!(
+        r#"require.config({{ paths: {{ vs: '/static/vs' }} }});
+self.MonacoEnvironment = {{
+  getWorkerUrl: function() {{
+    return 'data:text/javascript;charset=utf-8,' + encodeURIComponent(
+      "self.MonacoEnvironment={{baseUrl:'" + location.origin + "/static/'}};" +
+      "importScripts('" + location.origin + "/static/vs/base/worker/workerMain.js');");
+  }}
+}};
+require(['vs/editor/editor.main'], function() {{
+  var uri = monaco.Uri.parse('{model_uri}');
+  // The committed files carry `"$schema": "../schemas/{schema_name}.schema.json"`
+  // (for on-disk editors). Relative to the model URI that resolves to the URI
+  // below — register the live schema under THAT exact id so the in-document
+  // $schema binds to it instead of triggering a (disabled) network fetch.
+  var schemaUri = uri.with({{ path: '/schemas/{schema_name}.schema.json' }}).toString();
+  var model = monaco.editor.createModel({text_json}, 'json', uri);
+
+  // (Re)bind the live schema for the current shape lens (empty = base lens).
+  function bindSchema(shape) {{
+    var url = '/schemas/{schema_name}' + (shape ? ('?shape=' + encodeURIComponent(shape)) : '');
+    return fetch(url).then(function(r){{ return r.json(); }}).then(function(schema){{
+      monaco.languages.json.jsonDefaults.setDiagnosticsOptions({{
+        validate: true, allowComments: false, enableSchemaRequest: false,
+        schemas: [{{ uri: schemaUri, fileMatch: [uri.toString()], schema: schema }}]
+      }});
+    }});
+  }}
+
+  // The read-only "compatible shapes" panel, recomputed from the buffer.
+  var compatEl = document.getElementById('compat-panel');
+  function refreshCompat() {{
+    if (!compatEl) return;
+    fetch('/compat', {{ method: 'POST',
+      headers: {{ 'content-type': 'application/json' }}, body: window.__editor.getValue() }})
+      .then(function(r){{ return r.ok ? r.json() : null; }})
+      .then(function(d){{
+        if (!d) {{ compatEl.innerHTML = '<i>buffer not yet valid — fix errors to compute</i>'; return; }}
+        var list = d.compatibleShapes.length
+          ? d.compatibleShapes.map(function(s){{ return '<code>' + s + '</code>'; }}).join(' ')
+          : '<i>none — no shape publishes these anchors</i>';
+        compatEl.innerHTML = '<b>Compatible shapes</b> (computed from your checks): ' + list;
+      }})
+      .catch(function(){{}});
+  }}
+
+  window.__editor = monaco.editor.create(document.getElementById('editor'), {{
+    model: model, automaticLayout: true, minimap: {{ enabled: false }}, scrollBeyondLastLine: false
+  }});
+
+  var picker = document.getElementById('shape-picker');
+  if (picker) {{
+    picker.addEventListener('change', function() {{ bindSchema(picker.value); }});
+  }}
+  var debounce;
+  model.onDidChangeContent(function() {{ clearTimeout(debounce); debounce = setTimeout(refreshCompat, 400); }});
+
+  bindSchema(picker ? picker.value : '').then(refreshCompat);
+
+  document.getElementById('save-btn').onclick = function() {{
+    fetch(location.pathname, {{ method: 'POST',
+      headers: {{ 'content-type': 'application/json' }}, body: window.__editor.getValue() }})
+      .then(function(r){{ return r.text().then(function(t){{
+        document.getElementById('save-result').textContent = r.ok ? 'saved' : ('rejected: ' + t);
+      }}); }});
+  }};
+}});"#
+    );
+    html! {
+        script src="/static/vs/loader.js" {}
+        @if !shapes.is_empty() {
+            p {
+                label { "Shape lens: "
+                    select id="shape-picker" {
+                        option value="" { "— pick a shape —" }
+                        @for s in shapes {
+                            @if Some(s.as_str()) == initial_shape {
+                                option value=(s) selected { (s) }
+                            } @else {
+                                option value=(s) { (s) }
+                            }
+                        }
+                    }
+                }
+                " " span .muted-inline { "narrows <agent>.<anchor> + field suggestions to the chosen shape" }
+            }
+            div id="compat-panel" .muted {}
+        }
+        p {
+            button id="save-btn" type="button" { "Validate & save" }
+            " " span id="save-result" {}
+        }
+        div id="editor" {}
+        script { (PreEscaped(boot)) }
+    }
 }
 
 fn wants_json(headers: &HeaderMap) -> bool {
@@ -112,7 +301,7 @@ th { background: #f9fafb; }
 .muted-inline { color: #9ca3af; font-size: .85rem; }
 .advisory { color: #6b7280; }
 button { padding: .3rem .8rem; cursor: pointer; }
-textarea { width: 100%; min-height: 24rem; font-family: ui-monospace, monospace; }
+#editor { width: 100%; height: 28rem; border: 1px solid #d1d5db; }
 pre { background: #f9fafb; padding: .6rem; overflow-x: auto; }
 "#;
 
@@ -185,10 +374,12 @@ async fn campaign_detail(
     UrlPath(id): UrlPath<String>,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
+    let path = st.e2e_dir.join("campaigns").join(format!("{id}.json"));
     let campaign = load_campaign_by_id(&st, &id)?;
     if wants_json(&headers) {
         return Ok(Json(campaign).into_response());
     }
+    let text = std::fs::read_to_string(&path).map_err(internal)?;
     Ok(page(
         &format!("Campaign {id}"),
         html! {
@@ -203,12 +394,65 @@ async fn campaign_detail(
                     }
                 }
             }
+            // The layout knobs, made explicit (also present in the JSON below).
+            h2 { "Concurrency (layout)" }
+            p .muted {
+                "fake cells: " b { (campaign.concurrency.fake) }
+                " · real cells: " b { (campaign.concurrency.real) }
+                " — how many cells of each Infra kind run at once."
+            }
             form method="post" action={ "/campaigns/" (id) "/runs" } {
                 button type="submit" { "Launch" }
             }
+            // The full campaign JSON, schema-aware + editable (validated server-
+            // side: referenced cases must exist and infra shapes must be known).
+            h2 { "Edit" }
+            (json_editor("inmemory://model/campaign.json", "campaign", &text, &[], None))
         },
     )
     .into_response())
+}
+
+/// Author/overwrite a campaign (mirrors [`case_save`]). The `deny_unknown_fields`
+/// derive rejects typos; beyond that we referentially check that every case file
+/// exists and every infra-shape id is known, so a launch can't fail late on a
+/// dangling reference.
+async fn campaign_save(
+    State(st): State<Arc<AppState>>,
+    UrlPath(id): UrlPath<String>,
+    body: String,
+) -> Result<Response, HttpError> {
+    let campaign: model::Campaign = serde_json::from_str(&body)
+        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, format!("not a campaign: {e}")))?;
+    if campaign.id != id {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("campaign id {:?} must match the path id {id:?}", campaign.id),
+        ));
+    }
+    let mut problems = Vec::new();
+    let cases_dir = st.e2e_dir.join("cases");
+    for c in &campaign.cases {
+        if !cases_dir.join(format!("{c}.json")).is_file() {
+            problems.push(format!("unknown case {c:?}"));
+        }
+    }
+    for shape in &campaign.infra_shapes {
+        if e2e_core::infra::by_id(shape).is_none() {
+            problems.push(format!(
+                "unknown infra shape {shape:?} (known: {:?})",
+                e2e_core::infra::known_ids()
+            ));
+        }
+    }
+    if !problems.is_empty() {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, problems.join("; ")));
+    }
+    let dir = st.e2e_dir.join("campaigns");
+    std::fs::create_dir_all(&dir).map_err(internal)?;
+    let pretty = serde_json::to_string_pretty(&campaign).map_err(internal)?;
+    std::fs::write(dir.join(format!("{id}.json")), pretty + "\n").map_err(internal)?;
+    Ok((StatusCode::OK, Json(campaign)).into_response())
 }
 
 async fn campaign_launch(
@@ -520,22 +764,65 @@ async fn cell_file(
 // Test cases (view + authoring)
 // ---------------------------------------------------------------------------
 
+/// Recursively collect cases under `root`, returning `(rel_dir, TestCase)` —
+/// `rel_dir` is the folder path under `cases/` ("" at the root). Cases may be
+/// organised into subdirectories; they are still referenced everywhere by `id`.
+fn list_cases_grouped(root: &Path) -> Vec<(String, model::TestCase)> {
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, model::TestCase)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(base, &path, out);
+            } else if path.extension().is_some_and(|e| e == "json") {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if let Ok(doc) = serde_json::from_str::<model::TestCase>(&text) {
+                        let rel_dir = path
+                            .parent()
+                            .and_then(|p| p.strip_prefix(base).ok())
+                            .map(|p| p.to_string_lossy().replace('\\', "/"))
+                            .unwrap_or_default();
+                        out.push((rel_dir, doc));
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort_by(|a, b| (a.0.as_str(), a.1.id.as_str()).cmp(&(b.0.as_str(), b.1.id.as_str())));
+    out
+}
+
 async fn cases_index(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    let cases = list_docs::<model::TestCase>(&st.e2e_dir.join("cases"));
+    let cases = list_cases_grouped(&st.e2e_dir.join("cases"));
     if wants_json(&headers) {
-        let docs: Vec<_> = cases.into_iter().map(|(_, c)| c).collect();
+        let docs: Vec<_> = cases.iter().map(|(_, c)| c).collect();
         return Json(docs).into_response();
+    }
+    // Group by folder for display; the BTreeMap keeps the sections ordered.
+    let mut by_dir: std::collections::BTreeMap<&str, Vec<&model::TestCase>> =
+        std::collections::BTreeMap::new();
+    for (dir, c) in &cases {
+        by_dir.entry(dir.as_str()).or_default().push(c);
     }
     page(
         "Test cases",
         html! {
-            table {
-                tr { th { "id" } th { "compatible shapes" } th { "description" } }
-                @for (_, c) in &cases {
-                    tr {
-                        td { a href={ "/cases/" (c.id) } { (c.id) } }
-                        td { (c.compatible_shapes.join(", ")) }
-                        td { (c.description.as_deref().unwrap_or("")) }
+            p .muted {
+                "Organise cases into folders under " code { "e2e/cases/" }
+                " — they are grouped by folder here and still referenced by id."
+            }
+            @for (dir, group) in &by_dir {
+                h2 { "cases/" @if !dir.is_empty() { (dir) "/" } }
+                table {
+                    tr { th { "id" } th { "compatible shapes" } th { "description" } }
+                    @for c in group {
+                        tr {
+                            td { a href={ "/cases/" (c.id) } { (c.id) } }
+                            td { (c.compatible_shapes.join(", ")) }
+                            td { (c.description.as_deref().unwrap_or("")) }
+                        }
                     }
                 }
             }
@@ -549,32 +836,29 @@ async fn case_view(
     UrlPath(id): UrlPath<String>,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    let path = st.e2e_dir.join("cases").join(format!("{id}.json"));
+    // Resolve by id, searching subdirectories (cases may be organised in folders).
+    let path = run::find_case_file(&st.e2e_dir, &id).ok_or_else(|| not_found(format!("case {id:?}")))?;
     let case = model::load_test_case(&path).map_err(|_| not_found(format!("case {id:?}")))?;
     if wants_json(&headers) {
         return Ok(Json(case).into_response());
     }
     let text = std::fs::read_to_string(&path).map_err(internal)?;
+    // The shape-lens picker is driven by the live registry; preselect the case's
+    // first declared compatible shape (a brand-new case has none → base lens).
+    let shape_ids: Vec<String> = e2e_core::shapes::registry().into_keys().collect();
+    let initial_shape = case.compatible_shapes.first().map(String::as_str);
     Ok(page(
         &format!("Case {id}"),
         html! {
             p { (case.description.as_deref().unwrap_or("")) }
-            // Authoring: the textarea body POSTs back as raw JSON; the server
-            // re-validates against the compiled registries before writing.
-            form onsubmit=(PreEscaped(SAVE_JS)) {
-                textarea id="case-json" { (text) }
-                p { button type="submit" { "Validate & save" } " " span id="save-result" {} }
-            }
+            // Authoring: the schema-aware Monaco editor POSTs its buffer back as
+            // raw JSON; the server re-validates against the compiled registries
+            // before writing (the editor's live schema check is advisory).
+            (json_editor("inmemory://model/case.json", "test-case", &text, &shape_ids, initial_shape))
         },
     )
     .into_response())
 }
-
-/// Posts the textarea as a JSON body and shows the validation outcome inline.
-const SAVE_JS: &str = "event.preventDefault();\
- fetch(location.pathname, {method:'POST', headers:{'content-type':'application/json'},\
- body:document.getElementById('case-json').value})\
- .then(r=>r.text().then(t=>{document.getElementById('save-result').textContent=(r.ok?'saved':('rejected: '+t))}));";
 
 async fn case_save(
     State(st): State<Arc<AppState>>,
@@ -596,9 +880,14 @@ async fn case_save(
     {
         return Err((StatusCode::UNPROCESSABLE_ENTITY, e.to_string()));
     }
-    let dir = st.e2e_dir.join("cases");
-    std::fs::create_dir_all(&dir).map_err(internal)?;
+    // Preserve the case's folder when it already exists; a brand-new case lands
+    // at the root of cases/.
+    let path = run::find_case_file(&st.e2e_dir, &id)
+        .unwrap_or_else(|| st.e2e_dir.join("cases").join(format!("{id}.json")));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(internal)?;
+    }
     let pretty = serde_json::to_string_pretty(&case).map_err(internal)?;
-    std::fs::write(dir.join(format!("{id}.json")), pretty + "\n").map_err(internal)?;
+    std::fs::write(&path, pretty + "\n").map_err(internal)?;
     Ok((StatusCode::OK, Json(case)).into_response())
 }

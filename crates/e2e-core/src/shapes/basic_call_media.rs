@@ -16,7 +16,8 @@ use media_harness::{reference_clip, ClipName, NegotiateOptions, negotiate_call};
 
 use crate::infra::InfraRuntime;
 use crate::media::MediaCapture;
-use crate::shape::{Anchor, CallflowShape, Input, MediaMode};
+use crate::model::Input;
+use crate::shape::{Anchor, CallflowShape, MediaMode};
 
 const ANCHORS: &[Anchor] = &[Anchor::InitialInvite, Anchor::Answer, Anchor::Ack, Anchor::Bye];
 
@@ -41,6 +42,9 @@ impl CallflowShape for BasicCallMedia {
     fn anchors(&self) -> &[Anchor] {
         ANCHORS
     }
+    fn agents(&self) -> &[&str] {
+        &["alice", "bob1"]
+    }
     fn media(&self) -> MediaMode {
         MediaMode::Exchange
     }
@@ -61,30 +65,17 @@ impl CallflowShape for BasicCallMedia {
         let session = negotiate_call(&alice_t, &bob_t, NegotiateOptions::default())
             .expect("media offer/answer");
 
-        let sut = rt.sut_ingress;
         let alice = rt.agent("alice");
         let bob1 = rt.agent("bob1");
 
-        let mut invite = alice
-            .invite(bob1)
-            .with_sdp(&sdp("alice", &a_rtp.ip().to_string(), a_rtp.port()))
-            .through(sut);
-        // Real cluster: pin the b-leg callee (see `basic_call.rs`).
-        if let Some(dest) = rt.api_call_destination() {
-            invite = invite.with_header(
-                "X-Api-Call",
-                &format!(r#"{{"destination":{{"host":"{}","port":{}}}}}"#, dest.ip(), dest.port()),
-            );
-        }
-        if let Some(from) = &input.from {
-            invite = invite.from(from);
-        }
-        if let Some(to) = &input.to {
-            invite = invite.to(to);
-        }
-        if let Some(ruri) = &input.ruri {
-            invite = invite.ruri(ruri);
-        }
+        // The layout realizes the logical INVITE on its wire (X-Api-Call pin /
+        // AOR R-URI / nothing) and applies the Test case overrides — see
+        // `basic_call.rs`. The SDP describes alice's real RTP port either way.
+        let invite = rt.outgoing_invite(
+            &["bob1"],
+            input,
+            alice.invite(bob1).with_sdp(&sdp("alice", &a_rtp.ip().to_string(), a_rtp.port())),
+        );
         let mut call = invite.send().await;
 
         let mut uas = bob1.receive("INVITE").await;

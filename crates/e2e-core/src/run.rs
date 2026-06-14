@@ -150,7 +150,7 @@ fn run_cell(spec: &CellSpec) -> CellSummary {
 
         let mut rt = infra.build(&dir_name, &spec.cfg).await;
         let lb_vip = rt.lb_vip;
-        shape.run(&mut rt, &spec.case.input.core).await;
+        shape.run(&mut rt, &spec.case.input).await;
         let captures = rt.take_media();
         // A gating RFC violation fails the cell WITH the report intact (the
         // findings ride the result's rfc rows as `advisory: false`).
@@ -323,12 +323,23 @@ pub fn load_spec(
     ts: String,
 ) -> Result<CampaignSpec, ModelError> {
     let campaign = crate::model::load_campaign(campaign_path)?;
+    let cases_dir = e2e_dir.join("cases");
     let mut cases = BTreeMap::new();
     for case_id in &campaign.cases {
-        let case = crate::model::load_test_case(&e2e_dir.join("cases").join(format!("{case_id}.json")))?;
+        // Cases may be organised into subdirectories; the file name still equals
+        // the case id, so a campaign references it by id regardless of folder.
+        let path = find_case_file(e2e_dir, case_id).ok_or_else(|| ModelError::Io {
+            path: cases_dir.join(format!("{case_id}.json")),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("no case file named {case_id}.json under cases/"),
+            ),
+        })?;
+        let case = crate::model::load_test_case(&path)?;
         if case.id != *case_id {
             return Err(ModelError::Invalid(vec![format!(
-                "case file cases/{case_id}.json declares id {:?} (must match its file name)",
+                "case file {} declares id {:?} (must match its file name)",
+                path.display(),
                 case.id
             )]));
         }
@@ -343,4 +354,27 @@ pub fn load_spec(
         endpoint_configs.insert(infra_id.clone(), cfg);
     }
     Ok(CampaignSpec { campaign, cases, check_sets, endpoint_configs, runs_root, ts })
+}
+
+/// Find a case file by id under `cases/`, searching subdirectories so cases can
+/// be organised into folders (the file name still equals the case id). First
+/// match wins (ids are globally unique).
+pub fn find_case_file(e2e_dir: &std::path::Path, case_id: &str) -> Option<PathBuf> {
+    find_json_named(&e2e_dir.join("cases"), &format!("{case_id}.json"))
+}
+
+/// Recursively find a `*.json` file named `name` under `dir` (depth-first, dirs
+/// after files at each level so a top-level hit wins).
+fn find_json_named(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+    let mut subdirs = Vec::new();
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            subdirs.push(path);
+        } else if path.file_name().is_some_and(|f| f == name) {
+            return Some(path);
+        }
+    }
+    subdirs.sort();
+    subdirs.iter().find_map(|sd| find_json_named(sd, name))
 }

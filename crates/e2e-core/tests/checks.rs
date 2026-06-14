@@ -97,7 +97,7 @@ async fn run_fake() -> (RunReport, Input, SocketAddr) {
     let input = case_input("127.0.0.1:5070");
     let mut rt = FakeLsbcB2bua.build("checks/fake", &cfg).await;
     let lb_vip = rt.lb_vip;
-    BasicCall.run(&mut rt, &input.core).await;
+    BasicCall.run(&mut rt, &input).await;
     let (report, rfc_gate) = rt.finish().await;
     assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
     assert!(report.passed());
@@ -125,7 +125,7 @@ async fn run_real(base: u16) -> (RunReport, Input, SocketAddr) {
     let input = case_input(&format!("127.0.0.1:{}", base + 10));
     let mut rt = RealLoopbackDirect.build("checks/real", &cfg).await;
     let lb_vip = rt.lb_vip;
-    BasicCall.run(&mut rt, &input.core).await;
+    BasicCall.run(&mut rt, &input).await;
     let (report, rfc_gate) = rt.finish().await;
     assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
     assert!(report.passed());

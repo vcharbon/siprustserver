@@ -1,0 +1,7 @@
+{
+  "$schema": "../schemas/campaign.schema.json",
+  "id": "transfer",
+  "description": "The blind-transfer-with-media case (REFER → C-leg → realign → A↔bob2 audio) over the in-process fake SUT and, when a kind cluster is up, the real cluster. The real cell exercises the deployed b2bua's X-Api-Call REFER-authorization (route_all_to_with_limiter's on_refer): it dials the C-leg to bob2, realigns, and re-exchanges audio both ways — VERIFIED PASS on the kind cluster 2026-06-14 (bob2.initialInvite carries a real worker-pod SDP; alice hears Bob / bob2 hears Alice; RFC gate clean). User-gated, like every real-infra cell (needs the cluster up).",
+  "cases": ["transfer-refer-media"],
+  "infraShapes": ["fake-lsbc-b2bua", "real"]
+}

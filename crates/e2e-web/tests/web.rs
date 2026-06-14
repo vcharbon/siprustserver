@@ -25,15 +25,23 @@ fn temp_e2e(tag: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("e2e-web-test-{tag}-{}", std::process::id()));
     let committed = workspace_root().join("e2e");
     for sub in ["cases", "checksets", "campaigns", "infra"] {
-        let dst = root.join(sub);
-        std::fs::create_dir_all(&dst).unwrap();
-        if let Ok(entries) = std::fs::read_dir(committed.join(sub)) {
-            for e in entries.flatten() {
-                std::fs::copy(e.path(), dst.join(e.file_name())).unwrap();
-            }
-        }
+        copy_tree(&committed.join(sub), &root.join(sub));
     }
     root
+}
+
+/// Recursively mirror `src` into `dst` (cases may be organised into folders).
+fn copy_tree(src: &std::path::Path, dst: &PathBuf) {
+    std::fs::create_dir_all(dst).unwrap();
+    let Ok(entries) = std::fs::read_dir(src) else { return };
+    for e in entries.flatten() {
+        let path = e.path();
+        if path.is_dir() {
+            copy_tree(&path, &dst.join(e.file_name()));
+        } else {
+            std::fs::copy(&path, dst.join(e.file_name())).unwrap();
+        }
+    }
 }
 
 fn app(e2e_dir: &PathBuf) -> Router {
@@ -191,7 +199,9 @@ async fn case_authoring_validates_then_writes() {
     // View the committed case (both flavors).
     let (st, html) = get(&app, "/cases/basic-call-identity", false).await;
     assert_eq!(st, StatusCode::OK);
-    assert!(html.contains("textarea"));
+    // The schema-aware Monaco editor, bound to the test-case schema.
+    assert!(html.contains("/static/vs/loader.js"), "loads vendored Monaco");
+    assert!(html.contains("/schemas/test-case"), "validates against the live schema");
     let (st, _) = get(&app, "/cases/basic-call-identity", true).await;
     assert_eq!(st, StatusCode::OK);
 
@@ -219,6 +229,100 @@ async fn case_authoring_validates_then_writes() {
     let served: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(served["description"], "edited from the web");
 
+    std::fs::remove_dir_all(&e2e).ok();
+}
+
+/// The Monaco editor's validation source: `/schemas/{name}` serves the live
+/// model-generated JSON Schema (with or without the `.schema.json` suffix);
+/// an unknown name 404s.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_route_serves_live_schemas() {
+    let e2e = temp_e2e("schema");
+    let app = app(&e2e);
+    for name in ["test-case", "campaign", "check-set.schema.json"] {
+        let (st, body) = get(&app, &format!("/schemas/{name}"), false).await;
+        assert_eq!(st, StatusCode::OK, "{name}");
+        let schema: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(schema.get("properties").is_some(), "{name} is a JSON schema object");
+    }
+    let (st, _) = get(&app, "/schemas/nope", false).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    std::fs::remove_dir_all(&e2e).ok();
+}
+
+/// Campaign authoring: the detail page shows the editor + visible concurrency,
+/// a dangling case/shape reference is rejected, and a valid edit round-trips.
+#[tokio::test(flavor = "multi_thread")]
+async fn campaign_authoring_validates_then_writes() {
+    let e2e = temp_e2e("campaign-author");
+    let app = app(&e2e);
+
+    // Detail page: matrix + the layout knobs + the schema-aware editor.
+    let (st, html) = get(&app, "/campaigns/smoke", false).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(html.contains("Concurrency (layout)"), "layout params visible");
+    assert!(html.contains("/schemas/campaign"), "campaign editor schema-bound");
+
+    // Reject: a dangling case + unknown infra shape; file untouched.
+    let before = std::fs::read_to_string(e2e.join("campaigns/smoke.json")).unwrap();
+    let bad = serde_json::json!({
+        "id": "smoke",
+        "cases": ["does-not-exist"],
+        "infraShapes": ["no-such-infra"]
+    });
+    let (st, body) = post(&app, "/campaigns/smoke", &bad.to_string(), true).await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body.contains("does-not-exist") && body.contains("no-such-infra"), "{body}");
+    assert_eq!(std::fs::read_to_string(e2e.join("campaigns/smoke.json")).unwrap(), before);
+
+    // Accept: a valid edit lands and round-trips.
+    let mut good: serde_json::Value = serde_json::from_str(&before).unwrap();
+    good["description"] = "edited from the web".into();
+    let (st, _) = post(&app, "/campaigns/smoke", &good.to_string(), true).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, json) = get(&app, "/campaigns/smoke", true).await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json).unwrap()["description"],
+        "edited from the web"
+    );
+    std::fs::remove_dir_all(&e2e).ok();
+}
+
+/// Cases organised into a subfolder are discovered, grouped by folder in the
+/// index, and still resolve + save by id (the folder is preserved on save).
+#[tokio::test(flavor = "multi_thread")]
+async fn cases_can_be_organised_into_folders() {
+    let e2e = temp_e2e("folders");
+    // Move a committed case into a subfolder (filename still equals its id).
+    let nested = e2e.join("cases/group-a");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::rename(
+        e2e.join("cases/basic-call-identity.json"),
+        nested.join("basic-call-identity.json"),
+    )
+    .unwrap();
+    let app = app(&e2e);
+
+    // Index groups by folder and still links the nested case by id.
+    let (st, html) = get(&app, "/cases", false).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(html.contains("cases/group-a/"), "folder section shown: {html}");
+    assert!(html.contains("/cases/basic-call-identity"), "nested case linked by id");
+
+    // It resolves by id regardless of folder.
+    let (st, json) = get(&app, "/cases/basic-call-identity", true).await;
+    assert_eq!(st, StatusCode::OK);
+    let mut doc: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    // Saving preserves the folder (does not duplicate at the root).
+    doc["description"] = "edited in folder".into();
+    let (st, _) = post(&app, "/cases/basic-call-identity", &doc.to_string(), true).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(nested.join("basic-call-identity.json").is_file(), "saved back into the folder");
+    assert!(
+        !e2e.join("cases/basic-call-identity.json").exists(),
+        "not duplicated at the cases/ root"
+    );
     std::fs::remove_dir_all(&e2e).ok();
 }
 
