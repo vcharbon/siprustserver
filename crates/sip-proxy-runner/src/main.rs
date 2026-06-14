@@ -46,6 +46,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -272,10 +273,16 @@ async fn main() {
     // keeps the k8s Service from forwarding INVITEs into an empty pool — and turns
     // a misconfigured watch into a loud rollout timeout instead of a silent
     // black-hole. Mirrors the worker's `/ready`.
+    // SIGTERM latches this; `/readyz` then reports Draining so k8s unpublishes
+    // the proxy from its Service and stops routing new datagrams here.
+    let draining = Arc::new(AtomicBool::new(false));
     let ready: probe_http::ReadyFn = {
         let reg = registry.clone();
+        let draining = draining.clone();
         Arc::new(move || {
-            if reg.snapshot().iter().any(|w| w.health == WorkerHealth::Alive) {
+            if draining.load(Ordering::Relaxed) {
+                probe_http::ProbeState::Draining
+            } else if reg.snapshot().iter().any(|w| w.health == WorkerHealth::Alive) {
                 probe_http::ProbeState::Ready
             } else {
                 probe_http::ProbeState::NotReady
@@ -339,13 +346,27 @@ async fn main() {
         core_tasks.spawn(core.run());
     }
 
+    // Graceful shutdown on SIGTERM (k8s pod termination). The proxy holds no
+    // per-call state to quiesce — it is a stateless forwarder — so the drain is
+    // latch-then-grace: flip `/readyz` to Draining (k8s unpublishes the pod and
+    // stops routing new datagrams here), then wait the grace so in-flight
+    // transactions settle and the EndpointSlice withdrawal propagates before
+    // exit. Ctrl-C (interactive) exits at once.
+    let drain_grace_ms: u64 = env_or("PROXY_DRAIN_GRACE_MS", "5000").parse().unwrap_or(5000);
+
     // Supervise every data-path task: a panicked/exited recv loop used to
     // leave the process alive with /healthz green — k8s never restarted the
     // pod and every datagram was silently black-holed. Exiting non-zero makes
     // the container restart the moment ANY recv shard or the probe dies.
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
-            eprintln!("sip-proxy-runner shutting down");
+            eprintln!("sip-proxy-runner SIGINT — shutting down");
+        }
+        _ = wait_sigterm() => {
+            eprintln!("sip-proxy-runner SIGTERM — draining ({drain_grace_ms}ms grace)");
+            draining.store(true, Ordering::Relaxed);
+            tokio::time::sleep(std::time::Duration::from_millis(drain_grace_ms)).await;
+            eprintln!("sip-proxy-runner drain grace elapsed — exiting");
         }
         res = core_tasks.join_next() => {
             eprintln!("sip-proxy-runner FATAL: a SIP recv shard exited ({res:?}) — exiting for restart");
@@ -357,4 +378,25 @@ async fn main() {
         }
     }
     drop(_metrics_server);
+}
+
+/// Await a SIGTERM (k8s sends this on pod termination). On non-unix this future
+/// never resolves (only Ctrl-C drives shutdown there).
+#[cfg(unix)]
+async fn wait_sigterm() {
+    use tokio::signal::unix::{signal, SignalKind};
+    match signal(SignalKind::terminate()) {
+        Ok(mut s) => {
+            s.recv().await;
+        }
+        Err(e) => {
+            eprintln!("sip-proxy-runner cannot install SIGTERM handler: {e}");
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_sigterm() {
+    std::future::pending::<()>().await;
 }
