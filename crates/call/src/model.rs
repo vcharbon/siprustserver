@@ -309,6 +309,17 @@ pub enum TimerType {
     LimiterRefresh,
     Keepalive,
     KeepaliveTimeout,
+    /// RFC 3261 §13.3.1.4 — periodic retransmit of the a-leg INVITE **2xx** while
+    /// the caller's ACK is missing (re-armed each fire; cancelled on the a-leg
+    /// ACK). Paired with [`AckTimeout`](Self::AckTimeout), which bounds the window.
+    AckRetransmit,
+    /// RFC 3261 §13.3.1.4 — the a-leg 2xx-without-ACK **give-up** deadline (RFC's
+    /// 64·T1). Single-shot, armed when the a-leg 2xx is relayed at dialog
+    /// confirmation, cancelled on the a-leg ACK; on expiry the B2BUA BYEs the
+    /// just-created a-leg dialog AND tears down the b-leg (the answered-call leak
+    /// fix). Distinct from [`AckRetransmit`](Self::AckRetransmit), the on-wire
+    /// re-send cadence.
+    AckTimeout,
     /// Safety-net timer scheduled when entering "terminating" state.
     TerminatingTimeout,
     /// REFER subscription expiry (RFC 3515).

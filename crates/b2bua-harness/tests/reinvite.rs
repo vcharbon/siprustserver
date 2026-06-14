@@ -18,6 +18,109 @@ use b2bua_harness::B2buaSut;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
 
+/// A non-2xx final to a re-INVITE (in-dialog INVITE) MUST leave the dialog in
+/// its prior state — the call is NOT torn down, the prior media/session
+/// continues, and the failure is merely reported to the originator (RFC 3261
+/// §14.1). This is the happy-path regression (no provisional): the 488 matches
+/// `relay-reinvite-response` (overrides `route-failure`) so the call stays up.
+#[tokio::test]
+async fn failed_reinvite_keeps_dialog_state() {
+    let h = Harness::with_transit_delay("b2bua-reinvite-failed", 0);
+    let alice = h.agent("alice", "127.0.0.1:5066").await;
+    let bob = h.agent("bob", "127.0.0.1:5076").await;
+    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5086", "127.0.0.1", 5076).await;
+
+    // ── call setup ──
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    assert_eq!(b2bua.active_calls(), 1, "call established");
+
+    // ── alice re-INVITEs; bob rejects 488 with NO provisional ──
+    let mut reinv = dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(488, "Not Acceptable Here").await;
+
+    // The 488 is relayed to the originator (alice) — the failure is reported.
+    reinv.expect(488).await;
+
+    // ── the call MUST still be up: the live call-map entry survives (a teardown
+    //    would BeginTermination and reap it). Drain the txn-layer auto-ACK toward
+    //    bob (RFC 3261 §17.1.1.3) so it is not mistaken for in-transit loss. ──
+    assert_eq!(b2bua.active_calls(), 1, "failed re-INVITE kept the call up");
+    alice.drain().await;
+    bob.drain().await;
+
+    // ── the dialog is still answerable: a normal BYE completes (proof the prior
+    //    session continued, RFC 3261 §14.1) ──
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    let _report = h.finish().await;
+}
+
+/// A re-INVITE that sends a provisional (`18x`) and THEN a non-2xx final
+/// (`488`) MUST also leave the dialog in its prior state (RFC 3261 §14.1). The
+/// provisional must NOT discard the pending-relay snapshot, so the final still
+/// matches `relay-reinvite-response` and the call stays up. (Reproduces the
+/// narrow teardown-on-failed-reINVITE bug: the 18x deleting the snapshot let
+/// the 488 fall through to `route-failure` → `TerminateCall`.)
+#[tokio::test]
+async fn reinvite_18x_then_488_keeps_call() {
+    let h = Harness::with_transit_delay("b2bua-reinvite-18x-488", 0);
+    let alice = h.agent("alice", "127.0.0.1:5068").await;
+    let bob = h.agent("bob", "127.0.0.1:5078").await;
+    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5088", "127.0.0.1", 5078).await;
+
+    // ── call setup ──
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    assert_eq!(b2bua.active_calls(), 1, "call established");
+
+    // ── alice re-INVITEs; bob sends 183 (provisional) THEN 488 (final) ──
+    let mut reinv = dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(183, "Session Progress").await;
+
+    // Alice sees the relayed provisional first.
+    reinv.expect(183).await;
+
+    // bob then rejects the re-INVITE.
+    bob_uas.respond(488, "Not Acceptable Here").await;
+
+    // The 488 is relayed to the originator (alice) — the failure is reported.
+    // (Pre-fix this never arrives: the 183 dropped the pending snapshot, so the
+    // 488 fell through to `route-failure` → `TerminateCall` and alice times out.)
+    reinv.expect(488).await;
+
+    // ── the call MUST still be up: the provisional must not have dropped the
+    //    pending snapshot, so the 488 was relayed (not `route-failure`d) and the
+    //    live call-map entry survives. ──
+    assert_eq!(b2bua.active_calls(), 1, "18x→488 re-INVITE kept the call up");
+    alice.drain().await;
+    bob.drain().await;
+
+    // ── the dialog is still answerable: a normal BYE completes (proof the prior
+    //    session continued, RFC 3261 §14.1) ──
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    let _report = h.finish().await;
+}
+
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 const REOFFER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";

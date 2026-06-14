@@ -381,6 +381,12 @@ async fn main() {
     let setup_timeout_sec: i64 =
         env_or("B2BUA_SETUP_TIMEOUT_SEC", "150").parse().expect("B2BUA_SETUP_TIMEOUT_SEC");
 
+    // ACK-timeout grace (seconds, RFC 3261 §13.3.1.4): the 2xx-without-ACK
+    // give-up window (RFC 64·T1 = 32 s). Below this the un-ACKed answered call is
+    // retransmitted then BYE'd both legs; <= 0 disables. See `B2buaConfig`.
+    let ack_timeout_sec: i64 =
+        env_or("B2BUA_ACK_TIMEOUT_SEC", "32").parse().expect("B2BUA_ACK_TIMEOUT_SEC");
+
     // Call limiter. Unset LIMITER_URL → NoopLimiter (today's non-limiting
     // behaviour). The refresh cadence MUST match the limiter's window seconds.
     let limiter_url = env_or("LIMITER_URL", "");
@@ -481,6 +487,7 @@ async fn main() {
         reboot_budget_sec,
         limiter_refresh_sec,
         setup_timeout_sec,
+        ack_timeout_sec,
         ..Default::default()
     };
     // Forbid booting with a config that would silently break HA: too-short a

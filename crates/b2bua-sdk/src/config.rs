@@ -129,6 +129,17 @@ pub struct B2buaConfig {
     /// backstop and GlobalDuration remain). Overridable via
     /// `B2BUA_SETUP_TIMEOUT_SEC`.
     pub setup_timeout_sec: i64,
+    /// **ACK-timeout grace**, seconds (RFC 3261 §13.3.1.4 — the 2xx-without-ACK
+    /// give-up window, RFC's `64·T1` = 32 s). Armed when the a-leg 2xx is relayed
+    /// at dialog confirmation; cancelled when the a-leg ACK arrives. While it is
+    /// pending the B2BUA retransmits the stored 2xx toward the caller (T1,
+    /// doubling, capped T2). If no ACK has arrived by this deadline the caller is
+    /// presumed gone: the B2BUA BYEs the (just-created) a-leg dialog AND tears
+    /// down the b-leg — without this an answered-but-un-ACKed bridged call leaks
+    /// until the 1 h `GlobalDuration` cap (the a-leg INVITE server txn goes
+    /// `Completed` on the 2xx and is deleted silently at Timer H — no BYE). `<= 0`
+    /// disables the watchdog. Overridable via `B2BUA_ACK_TIMEOUT_SEC`.
+    pub ack_timeout_sec: i64,
 }
 
 impl Default for B2buaConfig {
@@ -164,6 +175,7 @@ impl Default for B2buaConfig {
             reaper_sweep_interval_sec: 30,
             reaper_idle_max_sec: 0,
             setup_timeout_sec: 150,
+            ack_timeout_sec: 32,
         }
     }
 }

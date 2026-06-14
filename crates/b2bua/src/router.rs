@@ -1422,6 +1422,12 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
             ctx.metrics.record_request_out(req.method.as_str());
         }
         match (&eff.body, &eff.mode) {
+            // A 2xx retransmit (RFC 3261 §13.3.1.4) must bypass the server txn:
+            // the a-leg INVITE server txn is already `Completed`, so the txn layer
+            // would DROP a second final on `send_response`. Send it raw.
+            (OutboundBody::Response(resp), OutboundTxnMode::Raw) => {
+                let _ = ctx.txn.send_raw(serialize(&SipMessage::Response(resp.clone())), dest).await;
+            }
             (OutboundBody::Response(resp), _) => { let _ = ctx.txn.send_response(resp.clone(), dest).await; }
             (OutboundBody::Request(req), OutboundTxnMode::NewClient(kind)) => {
                 let _ = ctx.txn.send_request(req.clone(), dest, *kind).await;

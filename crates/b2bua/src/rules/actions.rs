@@ -390,7 +390,51 @@ impl<'a> ActionExecutor<'a> {
                     extra,
                 ));
             }
+            RuleAction::RetransmitALeg2xx => {
+                self.retransmit_a_leg_2xx(call, fx);
+            }
         }
+    }
+
+    /// RFC 3261 §13.3.1.4 — re-send the a-leg INVITE 2xx toward the caller while
+    /// its ACK is missing. The a-leg INVITE server txn is already `Completed`, so
+    /// the txn layer would DROP a second final on the `ServerResponse` path; we
+    /// send a faithful copy **raw** instead (same confirmed To-tag, same cached
+    /// answer SDP, the B2BUA Contact). No-op until the a-dialog is confirmed.
+    fn retransmit_a_leg_2xx(&self, call: &Call, fx: &mut HandlerEffects) {
+        let Some(d) = call.a_leg.dialogs.first() else { return };
+        let a_tag = d.sip.local_tag.clone();
+        if a_tag.is_empty() {
+            return;
+        }
+        let body = d.ext.cached_sdp.clone().unwrap_or_default();
+        let content_type = if body.is_empty() {
+            None
+        } else {
+            Some("application/sdp".to_string())
+        };
+        let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+        let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
+        // A 2xx INVITE answer carries the B2BUA's own Allow/Supported (RFC 3261
+        // §13.2.1/§20.37), exactly as the original confirm-dialog relay stamped —
+        // so the retransmit is byte-faithful and the RFC audit stays clean.
+        let mut extra: Vec<sip_message::SipHeader> = Vec::new();
+        relay::stamp_a_facing_invite_advert(&mut extra, &[]);
+        let mut effect = relay::response_to_a_leg(
+            &a_invite,
+            200,
+            "OK",
+            Some(a_tag),
+            Some(contact),
+            body,
+            content_type,
+            None,
+            extra,
+        );
+        // Bypass the (Completed) a-leg server txn — it would drop a second final.
+        effect.mode = OutboundTxnMode::Raw;
+        effect.label = "200 (2xx retransmit, no ACK) → a-leg".to_string();
+        fx.outbound.push(effect);
     }
 
     /// Originate a NOTIFY on `leg_id`'s confirmed dialog (toward the referrer)
@@ -811,7 +855,16 @@ impl<'a> ActionExecutor<'a> {
                 };
                 let relayed = generators::generate_relayed_response(status, &reason, &opts);
                 let s_id = dialog_identity_tag(&source_leg_id, &src_dialog);
-                *call = remove_pending_request(call.clone(), &source_leg_id, &s_id, cseq_num);
+                // §8.1.3.3 / §14.1: the snapshot correlates EVERY response of the
+                // transaction back to the originator, so it must outlive a relayed
+                // provisional (1xx) — a re-INVITE may send 18x THEN a non-2xx final,
+                // and dropping the snapshot on the 18x would orphan the final
+                // (it would miss `relay-reinvite-response`, fall through to
+                // `route-failure`, and wrongly tear the call down). Remove it only
+                // on the FINAL (>= 200); the transaction has no later response then.
+                if status >= 200 {
+                    *call = remove_pending_request(call.clone(), &source_leg_id, &s_id, cseq_num);
+                }
                 let dest = pending
                     .source_vias
                     .first()
@@ -1087,6 +1140,18 @@ impl<'a> ActionExecutor<'a> {
             if !pref.is_empty() {
                 d.sip.local_tag = pref;
             }
+        }
+        // Stash the answer SDP that was relayed toward alice on the 2xx so an
+        // un-ACKed-2xx retransmit (RFC 3261 §13.3.1.4) re-sends a faithful copy —
+        // the caller that lost the original 200 needs its answer. Mirror the relay
+        // body choice (policy override else the callee's 200 body).
+        let answer_body = match call.policy_update_body.clone() {
+            Some(call::PolicyUpdateBody::Bytes(b)) => Some(b),
+            _ if !resp.body.is_empty() => Some(resp.body.clone()),
+            _ => None,
+        };
+        if let (Some(body), Some(d)) = (answer_body, call.a_leg.dialogs.first_mut()) {
+            d.ext.cached_sdp = Some(body);
         }
         *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
     }

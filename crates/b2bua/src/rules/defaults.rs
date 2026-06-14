@@ -57,6 +57,19 @@ fn keepalive_timeout(ctx: &RuleContext) -> i64 {
 fn max_duration(ctx: &RuleContext) -> i64 {
     ctx.call.features().map(|f| f.platform.max_duration_sec).unwrap_or(3600)
 }
+fn ack_timeout(ctx: &RuleContext) -> i64 {
+    // RFC 3261 §13.3.1.4 — the a-leg 2xx-without-ACK give-up window (operator knob
+    // `B2BUA_ACK_TIMEOUT_SEC`, default 32 s = 64·T1). `<= 0` disables the watchdog.
+    ctx.config.ack_timeout_sec
+}
+/// First a-leg 2xx-retransmit interval (RFC 3261 T1 = 500 ms). The
+/// [`TimerType::AckRetransmit`](call::TimerType::AckRetransmit) timer re-arms at a
+/// fixed cadence (a faithful simplification of T1→T2 doubling — it retransmits no
+/// less often than RFC requires); [`TimerType::AckTimeout`](call::TimerType::AckTimeout)
+/// bounds the whole window. Seconds for the `ScheduleTimer` delay_sec contract is
+/// integer, so the cadence is kept as a whole second (1 s) to stay on the
+/// existing seconds-granularity timer plumbing without a finer-grained API.
+const ACK_RETRANSMIT_SEC: i64 = 1;
 
 /// Shared body of the reaper-verdict rules (ADR-0020 X1): force every
 /// still-unresolved leg terminal (mirroring `is_fully_resolved`, like
@@ -224,7 +237,7 @@ fn core_rules() -> Vec<RuleDefinition> {
             |ctx| {
                 let b = ctx.source_leg_id.to_string();
                 let a = ctx.call.a_leg().leg_id.clone();
-                ok(vec![
+                let mut actions = vec![
                     RuleAction::ConfirmDialog { leg_id: b.clone() },
                     RuleAction::Merge { leg_a: a, leg_b: b.clone() },
                     RuleAction::RelayToPeer { transform: no_transform() },
@@ -246,7 +259,28 @@ fn core_rules() -> Vec<RuleDefinition> {
                         status_code: Some(200),
                         reason: None,
                     },
-                ])
+                ];
+                // RFC 3261 §13.3.1.4: arm the a-leg 2xx-without-ACK watchdog. The
+                // a-leg INVITE *server* txn went `Completed` on this final, so the
+                // txn layer will NOT retransmit the 2xx proactively and at Timer H
+                // deletes the un-ACKed txn silently — without this an answered call
+                // whose caller never ACKs leaks until the 1 h GlobalDuration cap.
+                // `AckRetransmit` re-sends the stored 2xx each cadence; `AckTimeout`
+                // bounds the window and, on expiry, BYEs both legs. Both are
+                // cancelled by `relay-ack` when the a-leg ACK arrives.
+                if ack_timeout(ctx) > 0 {
+                    actions.push(RuleAction::ScheduleTimer {
+                        timer_type: TimerType::AckRetransmit,
+                        delay_sec: ACK_RETRANSMIT_SEC,
+                        leg_id: None,
+                    });
+                    actions.push(RuleAction::ScheduleTimer {
+                        timer_type: TimerType::AckTimeout,
+                        delay_sec: ack_timeout(ctx),
+                        leg_id: None,
+                    });
+                }
+                ok(actions)
             },
         ),
         rule(
@@ -546,8 +580,19 @@ fn core_rules() -> Vec<RuleDefinition> {
             },
         ),
         // ── relay (broad) ───────────────────────────────────────────────────
-        rule("relay-ack", &[], Match::request().method("ACK"), |_| {
-            ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
+        rule("relay-ack", &[], Match::request().method("ACK"), |ctx| {
+            let mut actions = vec![RuleAction::RelayToPeer { transform: no_transform() }];
+            // The a-leg ACK (Direction::FromA) arrived → the caller confirmed the
+            // 2xx, so cancel the RFC 3261 §13.3.1.4 un-ACKed-2xx watchdog
+            // (retransmit cadence + give-up). A b-leg ACK (FromB) leaves them
+            // untouched — they only ever guard the a-leg dialog. Cancelling a timer
+            // that was never armed (ack_timeout disabled, or this is a b-leg ACK)
+            // is a harmless no-op in the driver.
+            if ctx.direction == Direction::FromA {
+                actions.push(RuleAction::CancelTimer { id: format!("{:?}", TimerType::AckRetransmit) });
+                actions.push(RuleAction::CancelTimer { id: format!("{:?}", TimerType::AckTimeout) });
+            }
+            ok(actions)
         }),
         rule("relay-bye", &[], Match::request().method("BYE").call_state(CallModelState::Active), |ctx| {
             // Pre-mark the BYE-sending leg `bye_received` (RFC 3261 §15.1.2) so the
@@ -679,6 +724,29 @@ fn core_rules() -> Vec<RuleDefinition> {
                 RuleAction::TerminateLeg { leg_id: ctx.source_leg_id.to_string(), bye_disposition: Some(ByeDisposition::ByeTimeout) },
                 RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: ctx.source_leg_id.to_string(), status_code: None, reason: Some("keepalive timeout".into()) },
                 RuleAction::BeginTermination { reason: Some("keepalive-timeout".into()) },
+            ])
+        }),
+        // ── un-ACKed 2xx watchdog (RFC 3261 §13.3.1.4) ───────────────────────
+        // The caller's ACK has not yet arrived: retransmit the a-leg 2xx and
+        // re-arm the cadence. Cancelled by `relay-ack` on the a-leg ACK; bounded
+        // by `unacked-2xx-give-up` (the AckTimeout). Only fires while Active.
+        rule("unacked-2xx-retransmit", &[], Match::timer().timer_type(TimerType::AckRetransmit).call_state(CallModelState::Active), |_ctx| {
+            ok(vec![
+                RuleAction::RetransmitALeg2xx,
+                RuleAction::ScheduleTimer { timer_type: TimerType::AckRetransmit, delay_sec: ACK_RETRANSMIT_SEC, leg_id: None },
+            ])
+        }),
+        // The give-up deadline (64·T1) elapsed with no a-leg ACK: the caller is
+        // gone. Clear the just-created a-leg dialog with a BYE AND tear down the
+        // b-leg — without this the answered, bridged call leaks until the 1 h
+        // GlobalDuration cap. BeginTermination BYEs every confirmed leg (a-leg +
+        // b-leg) and the → terminated invariant settles the obligations; the
+        // companion AckRetransmit cadence is reclaimed by the terminal CancelAll.
+        rule("unacked-2xx-give-up", &[], Match::timer().timer_type(TimerType::AckTimeout).call_state(CallModelState::Active), |ctx| {
+            ok(vec![
+                RuleAction::CancelTimer { id: format!("{:?}", TimerType::AckRetransmit) },
+                RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: ctx.call.a_leg().leg_id.clone(), status_code: None, reason: Some("ack_timeout".into()) },
+                RuleAction::BeginTermination { reason: Some("ack-timeout".into()) },
             ])
         }),
         // ── call reaper verdicts (ADR-0020 X1/X6) ───────────────────────────

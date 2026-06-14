@@ -495,6 +495,15 @@ impl ReplicatedB2buaSut {
             keepalive_interval_sec: 300,
             keepalive_timeout_sec: 45,
             reboot_budget_sec: 600,
+            // Disable the RFC 3261 §13.3.1.4 un-ACKed-2xx watchdog in this harness:
+            // the `confirmed_pre_ack` matrix cells deliberately hold the dialog in
+            // the pre-ACK window for longer than the 1 s 2xx-retransmit cadence, so
+            // the watchdog would emit retransmits that the strict differential
+            // transparency oracle (baseline vs failover, token-for-token) is not
+            // designed to align — they are pure noise for what this harness tests
+            // (SIP-transparent failover), exercised instead by the dedicated
+            // `unacked_2xx_reap` b2bua-harness test.
+            ack_timeout_sec: 0,
             ..Default::default()
         };
         let deps = B2buaDeps {

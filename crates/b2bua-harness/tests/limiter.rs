@@ -128,6 +128,10 @@ async fn release_on_bye_frees_the_slot() {
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     bob.receive("INVITE").await.respond(200, "OK").with_sdp(ANSWER).await;
     call2.expect(200).await;
+    // Complete the handshake so the 2xx is ACKed (RFC 3261 §13.3.1.4 — an un-ACKed
+    // answered call is now caught by the rfc3261.unackedInvite2xxByed audit).
+    call2.ack().await;
+    bob.receive("ACK").await;
     let _ = h.finish().await;
 }
 
@@ -150,6 +154,9 @@ async fn fail_open_admits_when_limiter_is_cut() {
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     bob.receive("INVITE").await.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
+    // Complete the handshake so the 2xx is ACKed (rfc3261.unackedInvite2xxByed).
+    call.ack().await;
+    bob.receive("ACK").await;
     // No increment ever reached the server (it was cut), so no hold to leak.
     assert_eq!(store.stats().current_total, 0, "fail-open records no hold");
     let _ = h.finish().await;
@@ -231,5 +238,8 @@ async fn failover_on_reject_routes_to_backup() {
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     bob2.receive("INVITE").await.respond(200, "OK").with_sdp(ANSWER).await;
     call2.expect(200).await;
+    // Complete the handshake so the 2xx is ACKed (rfc3261.unackedInvite2xxByed).
+    call2.ack().await;
+    bob2.receive("ACK").await;
     let _ = h.finish().await;
 }

@@ -606,6 +606,13 @@ pub enum RuleAction {
         header_updates: Vec<(String, Option<String>)>,
         contacts: Vec<(String, Option<f32>)>,
     },
+    /// RFC 3261 §13.3.1.4 — retransmit the a-leg INVITE **2xx** toward the caller
+    /// while its ACK is missing. Sent **raw** (the a-leg INVITE server txn is
+    /// already `Completed` and would DROP a second final via the txn layer), with
+    /// the dialog's confirmed To-tag + the cached answer SDP, so it is a faithful
+    /// copy of the original 200 the caller can ACK. No-op if the a-leg dialog is
+    /// not yet confirmed.
+    RetransmitALeg2xx,
 }
 
 impl RuleAction {
@@ -637,7 +644,8 @@ impl RuleAction {
             | RuleAction::SendProvisionalToLeg { .. }
             | RuleAction::SendPrackToLeg { .. }
             | RuleAction::SendReinvite { .. }
-            | RuleAction::SendNotify { .. } => EffectKind::LegMessage,
+            | RuleAction::SendNotify { .. }
+            | RuleAction::RetransmitALeg2xx => EffectKind::LegMessage,
             // Call-lifecycle commands — the one service → global hop (X3).
             RuleAction::BeginTermination { .. }
             | RuleAction::TerminateCall

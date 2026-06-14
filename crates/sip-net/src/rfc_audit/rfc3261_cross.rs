@@ -1628,6 +1628,236 @@ impl CrossMessageAuditRule for AckPreservesInviteRouteRule {
 }
 
 // ---------------------------------------------------------------------------
+// rfc3261.unackedInvite2xxByed
+// ---------------------------------------------------------------------------
+
+/// **RFC 3261 §13.3.1.4 — a 2xx to an INVITE that is never ACKed MUST be cleared
+/// with a BYE.** A UAS (here the B2BUA a-leg) that answers an INVITE 2xx and then
+/// never receives the matching ACK MUST retransmit the 2xx and, on giving up
+/// (64·T1), send a BYE to clear the just-created dialog. A 2xx that is neither
+/// ACKed nor BYE'd is the silent answered-call leak this audit catches: the
+/// dialog stays live on the UAS forever (the test UA, which answers whatever it
+/// is handed, never reveals it).
+///
+/// Per-UA dialog walk: for each slot, a SENT INVITE 2xx whose To-tag identifies a
+/// confirmed dialog this agent is the UAS of opens an obligation; a subsequent
+/// RECEIVED ACK on that dialog, or any BYE (sent or received) on it, discharges
+/// it. An obligation still open at end-of-trace fires. Relay slots are skipped
+/// (a transparent proxy forwards both directions and is not the dialog's UAS).
+pub struct UnackedInvite2xxByedRule;
+
+impl CrossMessageAuditRule for UnackedInvite2xxByedRule {
+    fn name(&self) -> &'static str {
+        "rfc3261.unackedInvite2xxByed"
+    }
+
+    fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        // This rule deliberately walks each BIND's whole stream rather than the
+        // per-`(Call-ID, From-tag, To-tag)` dialog slices: the give-up BYE the UAS
+        // sends carries its OWN tag in From (To/From swapped vs the answered
+        // INVITE), so the 2xx and the discharging BYE land in DIFFERENT dialog
+        // slices. Correlating them needs the bind-wide view, keyed by
+        // `(Call-ID, UAS-tag)` where the UAS-tag is this agent's own dialog tag
+        // (the To-tag it minted on the 2xx). Forking is handled naturally — each
+        // fork's 2xx mints a distinct To-tag, so each opens its own obligation.
+        let parser = crate::rfc_audit::lenient_parser();
+        // bind → (Call-ID, uas-tag) → discharged?
+        let mut per_bind: HashMap<LaneKey, HashMap<String, bool>> = HashMap::new();
+        // Tags this agent owns per Call-ID (the From-tag of an INVITE it sent as
+        // UAC, or the To-tag it minted as UAS) — so a BYE/ACK can be attributed to
+        // the right side regardless of direction.
+        for s in events {
+            let (bind, raw, kind) = match &s.event {
+                SignalingNetworkEvent::SendCalled { bind_key, msg, .. } => {
+                    (bind_key, msg.as_slice(), EventKind::Sent)
+                }
+                SignalingNetworkEvent::RecvItem { bind_key, packet } => {
+                    (bind_key, packet.raw.as_slice(), EventKind::Received)
+                }
+                _ => continue,
+            };
+            let Ok(msg) = parser.parse(raw) else { continue };
+            let cid = call_id(&msg);
+            match &msg {
+                // SENT 2xx to an INVITE → this agent is the UAS of the dialog its
+                // own To-tag identifies; open the obligation.
+                SipMessage::Response(_)
+                    if kind == EventKind::Sent
+                        && cseq_method(&msg).eq_ignore_ascii_case("INVITE")
+                        && (200..300).contains(&status(&msg)) =>
+                {
+                    let uas_tag = to_tag(&msg).unwrap_or("");
+                    if uas_tag.is_empty() {
+                        continue;
+                    }
+                    per_bind
+                        .entry(bind.clone())
+                        .or_default()
+                        .entry(dialog_key(cid, uas_tag, ""))
+                        .or_insert(false);
+                }
+                // ACK / BYE (either direction) → the dialog is confirmed or being
+                // cleared; discharge it. The UAS-tag is whichever of the two tags
+                // names this bind's side — we cannot know which from the message
+                // alone, so probe BOTH against the open obligations (a stray match
+                // is impossible: the key also pins the Call-ID).
+                SipMessage::Request(req)
+                    if req.method.as_str().eq_ignore_ascii_case("ACK")
+                        || req.method.as_str().eq_ignore_ascii_case("BYE") =>
+                {
+                    let ft = from_tag(&msg).unwrap_or("");
+                    let tt = to_tag(&msg).unwrap_or("");
+                    if let Some(m) = per_bind.get_mut(bind) {
+                        for tag in [ft, tt] {
+                            if tag.is_empty() {
+                                continue;
+                            }
+                            if let Some(v) = m.get_mut(&dialog_key(cid, tag, "")) {
+                                *v = true;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for (bind, obligations) in per_bind {
+            for (key, discharged) in obligations {
+                if !discharged {
+                    let mut parts = key.split('\x00');
+                    let cid = parts.next().unwrap_or("");
+                    let tt = parts.next().unwrap_or("");
+                    out.push((
+                        bind.clone(),
+                        format!(
+                            "Sent a 2xx to an INVITE (callId {cid}, To-tag {tt}) that was never \
+                             ACKed and the dialog was never BYE'd — the answered call leaks; \
+                             RFC 3261 §13.3.1.4 requires retransmitting the 2xx and, on no ACK, \
+                             BYE-ing the dialog"
+                        ),
+                    ));
+                }
+            }
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// rfc3261.failedReinviteTearsDownDialog
+// ---------------------------------------------------------------------------
+
+/// **RFC 3261 §14.1 — a failed re-INVITE MUST leave the dialog in its prior
+/// state.** A non-2xx final to an in-dialog INVITE (a re-INVITE) does NOT tear
+/// the call down: the prior session/media continues and the failure is merely
+/// reported to the originator. A B2BUA that drops a re-INVITE's
+/// transaction-correlation state on a relayed *provisional* (1xx) lets the
+/// subsequent non-2xx final fall through its `route-failure` path and silently
+/// destroys the bridged call — the originator's re-INVITE transaction then sees
+/// a provisional with **no final** (RFC 3261 §17.1.1.2 also requires the UAS
+/// transaction to deliver a final): the prior session is gone.
+///
+/// Per-transaction (top-Via branch) walk: for each SENT in-dialog INVITE (a
+/// re-INVITE — To-tag already present, so the dialog is confirmed) that received
+/// at least one *provisional* response on its branch but NEVER a *final*
+/// (status >= 200), the transaction was abandoned. The only RFC-conformant ways
+/// to end an in-dialog INVITE transaction are a 2xx or a non-2xx final; a
+/// provisional-then-silence on a confirmed dialog is the §14.1 teardown this
+/// audit catches (the silent-destroy variant — the buggy path emits no BYE at
+/// all, so a BYE-keyed rule cannot see it; the abandoned transaction can).
+///
+/// **"absent another cause":** the rule fires only when NO BYE was observed on
+/// that dialog (same bind, same Call-ID). An independent teardown — max-duration
+/// (GlobalDuration), keepalive timeout, an ACK-timeout watchdog, or a peer BYE —
+/// abandons any in-flight re-INVITE *as a side effect* but is itself signalled by
+/// a BYE on the dialog, which is a legitimate §15 teardown for a different cause.
+/// A re-INVITE provisional-without-final on a dialog that is *never* BYE'd is the
+/// §14.1 violation: the failed re-INVITE silently dropped the prior session.
+pub struct FailedReinviteTearsDownDialogRule;
+
+impl CrossMessageAuditRule for FailedReinviteTearsDownDialogRule {
+    fn name(&self) -> &'static str {
+        "rfc3261.failedReinviteTearsDownDialog"
+    }
+
+    fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        let idx = build_branch_index(events);
+        // Per-bind set of Call-IDs that carried a BYE in either direction — the
+        // "another cause" escape: an independent teardown is signalled by a BYE.
+        let parser = crate::rfc_audit::lenient_parser();
+        let mut byed_call_ids: HashMap<LaneKey, HashSet<String>> = HashMap::new();
+        for s in events {
+            let (bind, raw) = match &s.event {
+                SignalingNetworkEvent::SendCalled { bind_key, msg, .. } => (bind_key, msg.as_slice()),
+                SignalingNetworkEvent::RecvItem { bind_key, packet } => (bind_key, packet.raw.as_slice()),
+                _ => continue,
+            };
+            let Ok(msg) = parser.parse(raw) else { continue };
+            if let SipMessage::Request(req) = &msg {
+                if req.method.as_str().eq_ignore_ascii_case("BYE") {
+                    byed_call_ids
+                        .entry(bind.clone())
+                        .or_default()
+                        .insert(call_id(&msg).to_string());
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (branch, entry) in &idx.by_branch {
+            for sent in &entry.sent_requests {
+                let Some(req) = sent.as_request() else { continue };
+                // Only in-dialog INVITEs (re-INVITEs): a confirmed-dialog request
+                // carries a To-tag. An initial INVITE (no To-tag) that is
+                // abandoned is a different obligation (`unackedInvite2xx*` / txn
+                // timeout) and not a §14.1 prior-state violation.
+                if !req.method.as_str().eq_ignore_ascii_case("INVITE") {
+                    continue;
+                }
+                let in_dialog = req
+                    .to
+                    .tag
+                    .as_deref()
+                    .map(|t| !t.is_empty())
+                    .unwrap_or(false);
+                if !in_dialog {
+                    continue;
+                }
+                let responses = idx.responses_for(branch, Direction::Received);
+                let saw_provisional = responses
+                    .iter()
+                    .any(|m| (100..200).contains(&m.as_response().map(|r| r.status).unwrap_or(0)));
+                let saw_final = idx.has_final_response_for(branch, Direction::Received);
+                if !saw_provisional || saw_final {
+                    continue;
+                }
+                // "absent another cause": skip when the dialog was BYE'd (an
+                // independent teardown legitimately abandons the re-INVITE).
+                let cid = call_id(&sent.msg);
+                let dialog_byed = byed_call_ids
+                    .get(&sent.bind_key)
+                    .map(|s| s.contains(cid))
+                    .unwrap_or(false);
+                if dialog_byed {
+                    continue;
+                }
+                out.push((
+                    sent.bind_key.clone(),
+                    format!(
+                        "re-INVITE (in-dialog INVITE, callId {cid}, branch {branch}) received a \
+                         provisional but never a final response, and the dialog was never BYE'd — \
+                         the prior dialog state was silently torn down on a failed re-INVITE; \
+                         RFC 3261 §14.1 requires a failed re-INVITE to leave the dialog in its \
+                         prior state (and §17.1.1.2 a final response)"
+                    ),
+                ));
+            }
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Local helpers shared across rules
 // ---------------------------------------------------------------------------
 
@@ -1669,6 +1899,8 @@ pub(crate) fn cross_rules() -> Vec<Arc<dyn CrossMessageAuditRule>> {
         Arc::new(Proxy100WithinT100msRule),
         Arc::new(StrictRouteRewriteHandledRule),
         Arc::new(AckPreservesInviteRouteRule),
+        Arc::new(UnackedInvite2xxByedRule),
+        Arc::new(FailedReinviteTearsDownDialogRule),
     ]
 }
 
@@ -2411,10 +2643,108 @@ mod tests {
         assert!(f[0].1.contains("differ"), "{}", f[0].1);
     }
 
+    // ---- unackedInvite2xxByed --------------------------------------------
+
+    #[test]
+    fn unacked_2xx_clean_when_acked() {
+        // bob (UAS): INVITE in, 200 out, ACK in → obligation discharged.
+        let evs = vec![
+            recv("bob", req("INVITE", "z9hG4bK-i", 1, A, B, "at", None, ""), "127.0.0.1:5070", 0),
+            sent("bob", resp(200, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-i", ""), "127.0.0.1:5070", 1),
+            recv("bob", req("ACK", "z9hG4bK-a", 1, A, B, "at", Some("bt"), ""), "127.0.0.1:5070", 2),
+        ];
+        assert!(UnackedInvite2xxByedRule.check(&evs).is_empty());
+    }
+
+    #[test]
+    fn unacked_2xx_clean_when_byed() {
+        // No ACK ever arrives, but the UAS BYEs the just-created dialog (the
+        // RFC-correct give-up) → obligation discharged.
+        let evs = vec![
+            recv("bob", req("INVITE", "z9hG4bK-i", 1, A, B, "at", None, ""), "127.0.0.1:5070", 0),
+            sent("bob", resp(200, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-i", ""), "127.0.0.1:5070", 1),
+            // A retransmit of the same 2xx must not re-open the obligation.
+            sent("bob", resp(200, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-i", ""), "127.0.0.1:5070", 2),
+            // bob sends BYE: From = bob's own tag (bt), To = alice (at).
+            sent("bob", req("BYE", "z9hG4bK-b", 2, B, A, "bt", Some("at"), ""), "127.0.0.1:5070", 3),
+        ];
+        assert!(UnackedInvite2xxByedRule.check(&evs).is_empty());
+    }
+
+    #[test]
+    fn unacked_2xx_never_acked_nor_byed_is_flagged() {
+        // The leak: bob answers 200 and the call is neither ACKed nor BYE'd.
+        let evs = vec![
+            recv("bob", req("INVITE", "z9hG4bK-i", 1, A, B, "at", None, ""), "127.0.0.1:5070", 0),
+            sent("bob", resp(200, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-i", ""), "127.0.0.1:5070", 1),
+        ];
+        let f = UnackedInvite2xxByedRule.check(&evs);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].1.contains("never ACKed"), "{}", f[0].1);
+        // A gating (non-advisory) finding.
+        assert!(!UnackedInvite2xxByedRule.force_advisory());
+    }
+
+    // ---- failedReinviteTearsDownDialog -----------------------------------
+
+    #[test]
+    fn failed_reinvite_clean_when_final_relayed() {
+        // alice's bind: a re-INVITE (in-dialog INVITE — To-tag present) that
+        // receives 183 then 488 on its branch is clean (the final arrived).
+        let evs = vec![
+            sent("alice", req("INVITE", "z9hG4bK-re", 2, A, B, "at", Some("bt"), ""), "127.0.0.1:5070", 0),
+            recv("alice", resp(183, 2, "INVITE", A, B, "at", "bt", "z9hG4bK-re", ""), "127.0.0.1:5070", 1),
+            recv("alice", resp(488, 2, "INVITE", A, B, "at", "bt", "z9hG4bK-re", ""), "127.0.0.1:5070", 2),
+        ];
+        assert!(FailedReinviteTearsDownDialogRule.check(&evs).is_empty());
+    }
+
+    #[test]
+    fn failed_reinvite_provisional_then_silence_is_flagged() {
+        // The bug: a re-INVITE gets a relayed 183 but the 488 final is never
+        // delivered — the prior dialog state was silently torn down.
+        let evs = vec![
+            sent("alice", req("INVITE", "z9hG4bK-re", 2, A, B, "at", Some("bt"), ""), "127.0.0.1:5070", 0),
+            recv("alice", resp(183, 2, "INVITE", A, B, "at", "bt", "z9hG4bK-re", ""), "127.0.0.1:5070", 1),
+        ];
+        let f = FailedReinviteTearsDownDialogRule.check(&evs);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].1.contains("silently torn down"), "{}", f[0].1);
+        // A gating (non-advisory) finding.
+        assert!(!FailedReinviteTearsDownDialogRule.force_advisory());
+    }
+
+    #[test]
+    fn failed_reinvite_clean_when_dialog_byed_for_another_cause() {
+        // A re-INVITE got a provisional and no final, BUT the dialog was BYE'd
+        // (an independent teardown — max-duration, keepalive, peer BYE — that
+        // legitimately abandons the in-flight re-INVITE). "absent another cause"
+        // ⇒ NOT flagged.
+        let evs = vec![
+            sent("alice", req("INVITE", "z9hG4bK-re", 2, A, B, "at", Some("bt"), ""), "127.0.0.1:5070", 0),
+            recv("alice", resp(100, 2, "INVITE", A, B, "at", "bt", "z9hG4bK-re", ""), "127.0.0.1:5070", 1),
+            // The dialog is torn down by a BYE (another cause).
+            sent("alice", req("BYE", "z9hG4bK-bye", 3, A, B, "at", Some("bt"), ""), "127.0.0.1:5070", 2),
+        ];
+        assert!(FailedReinviteTearsDownDialogRule.check(&evs).is_empty());
+    }
+
+    #[test]
+    fn failed_reinvite_initial_invite_not_flagged() {
+        // An INITIAL INVITE (no To-tag) that gets a 100 Trying and is then
+        // abandoned is NOT a §14.1 prior-state violation — a different
+        // obligation owns it. This rule scopes strictly to in-dialog INVITEs.
+        let evs = vec![
+            sent("alice", req("INVITE", "z9hG4bK-init", 1, A, B, "at", None, ""), "127.0.0.1:5070", 0),
+            recv("alice", resp(100, 1, "INVITE", A, B, "at", "", "z9hG4bK-init", ""), "127.0.0.1:5070", 1),
+        ];
+        assert!(FailedReinviteTearsDownDialogRule.check(&evs).is_empty());
+    }
+
     // ---- registration sanity ---------------------------------------------
 
     #[test]
-    fn all_nineteen_rules_registered() {
-        assert_eq!(cross_rules().len(), 19);
+    fn all_cross_rules_registered() {
+        assert_eq!(cross_rules().len(), 21);
     }
 }

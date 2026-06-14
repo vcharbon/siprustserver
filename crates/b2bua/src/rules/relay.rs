@@ -602,3 +602,108 @@ Content-Length: 0\r\n\r\n",
         assert_eq!(dest, ("10.0.0.9".to_string(), 5060), "wire destination is the outbound proxy");
     }
 }
+
+#[cfg(test)]
+mod identity_tests {
+    //! Per-leg identity invariants (ID-1/2/3, HDR-2) — the core back-to-back-UA
+    //! property: the B2BUA mints the b-leg's dialog identity from scratch, copying
+    //! *nothing* dialog-identifying from the a-leg. A b-leg whose Call-ID / From-tag
+    //! / CSeq / Contact leaked from the a-leg would couple the two dialogs and is
+    //! exactly what a transparent proxy (not a B2BUA) would do. Asserted directly
+    //! against [`build_b_leg`] (the single mint point, `relay.rs`).
+    use super::*;
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::SipParser;
+
+    fn parse(raw: &str) -> SipRequest {
+        match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+            SipMessage::Request(r) => r,
+            _ => panic!("expected request"),
+        }
+    }
+
+    /// A representative inbound a-leg INVITE with its OWN Call-ID, From-tag, an
+    /// absent To-tag (initial INVITE), CSeq 314 and a caller-owned Contact user.
+    fn a_leg_invite() -> SipRequest {
+        parse(
+            "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-alice;lg=a\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@192.0.2.5:5060>;tag=alice-from-tag\r\n\
+To: <sip:bob@10.244.2.7:5060>\r\n\
+Contact: <sip:alice@192.0.2.5:5060>\r\n\
+Call-ID: alice-call-id@192.0.2.5\r\n\
+CSeq: 314 INVITE\r\n\
+Content-Length: 0\r\n\r\n",
+        )
+    }
+
+    /// The Contact user from the b-leg INVITE's first Contact URI.
+    fn contact_user(req: &SipRequest) -> String {
+        let c = get_header(&req.headers, "contact").expect("b-leg INVITE has a Contact");
+        // `<sip:user@host:port;params>` → user
+        let inside = c.trim_start_matches('<').trim_end_matches('>');
+        let no_scheme = inside.strip_prefix("sip:").or_else(|| inside.strip_prefix("sips:")).unwrap_or(inside);
+        no_scheme.split('@').next().unwrap_or("").to_string()
+    }
+
+    // The b-leg INVITE's dialog identity is independent of the a-leg's: a fresh
+    // Call-ID, a fresh From-tag, no To-tag, CSeq 1, and the B2BUA's own Contact.
+    #[test]
+    fn b_leg_identity_is_independent_of_a_leg() {
+        let a = a_leg_invite();
+        let config = B2buaConfig::default(); // sip_local_ip = 127.0.0.1
+        let id_gen = IdGen::seeded(0xB2B);
+
+        let (leg, effect) = build_b_leg(
+            "w0|call-ref|xyz",
+            "b-1",
+            &a,
+            ("10.244.2.7".to_string(), 5060),
+            None, // R-URI defaults to a-leg's
+            None, // From URI relayed from a-leg
+            None, // To URI relayed from a-leg
+            None, // no NoAnswer
+            &config,
+            &id_gen,
+            None, // no body override
+            &[],  // no header updates
+            None, // Destination leg
+        );
+
+        let invite = match effect.body {
+            OutboundBody::Request(r) => r,
+            OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
+        };
+
+        // (a) ID-1 — fresh Call-ID, NOT the a-leg's.
+        assert_ne!(invite.call_id, a.call_id, "b-leg Call-ID must not be the a-leg's");
+        assert_eq!(invite.call_id, leg.call_id, "leg + INVITE Call-IDs agree");
+        // The mint shape is `<leg>-<tag>@<local_ip>` (relay.rs), so it carries the
+        // leg id and the B2BUA's own host — never alice's Call-ID host.
+        assert!(invite.call_id.starts_with("b-1-"), "Call-ID carries the leg id: {}", invite.call_id);
+        assert!(invite.call_id.ends_with("@127.0.0.1"), "Call-ID host is the B2BUA's: {}", invite.call_id);
+
+        // (b) ID-2 — fresh From-tag (B2BUA-owned), NOT the a-leg's; To-tag absent
+        // on the initial INVITE (the callee mints it in its 2xx, RFC 3261 §12.1.1).
+        let from_tag = invite.from.tag.as_deref().expect("b-leg From carries a tag");
+        assert_ne!(from_tag, "alice-from-tag", "b-leg From-tag must not be the a-leg's");
+        assert_eq!(from_tag, leg.from_tag, "leg + INVITE From-tags agree");
+        assert!(invite.to.tag.is_none(), "initial b-leg INVITE has no To-tag, got {:?}", invite.to.tag);
+
+        // (c) ID-3 — the b-leg dialog starts a fresh CSeq space at 1 (the a-leg's
+        // INVITE was CSeq 314).
+        assert_eq!(invite.cseq.seq, 1, "b-leg CSeq starts at 1, independent of the a-leg's 314");
+
+        // (d) HDR-2 — Contact is the B2BUA's own address (host = local_ip), and its
+        // user is the B2BUA's, NOT the a-leg caller's ("alice").
+        let cuser = contact_user(&invite);
+        assert_ne!(cuser, "alice", "b-leg Contact user must not be the a-leg caller's");
+        assert_eq!(cuser, "b2bua", "b-leg Contact is the B2BUA's own identity");
+        let contact = get_header(&invite.headers, "contact").unwrap();
+        assert!(
+            contact.contains("127.0.0.1"),
+            "b-leg Contact host must be the B2BUA local addr: {contact}"
+        );
+    }
+}
