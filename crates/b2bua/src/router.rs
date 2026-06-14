@@ -29,6 +29,7 @@ use crate::limiter::CallLimiter;
 use crate::metrics::B2buaMetrics;
 use crate::obligations::ObligationSet;
 use crate::repl::{Readiness, ReadinessState};
+use crate::rules::model::RuleAction;
 use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext, RuleDefinition, ServiceDef};
 use crate::store::CallState;
 use crate::timers::TimerService;
@@ -1050,7 +1051,7 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
         // backup partition when the primary crashed and the proxy failed this
         // dialog over to us. A primary-role miss then tries the ON-DEMAND
         // reclaim below; only a genuine orphan (no replica anywhere) rejects.
-        let call = match ctx.state.hydrate_from_replica(&call_ref).await {
+        let mut call = match ctx.state.hydrate_from_replica(&call_ref).await {
             Some((c, fresh)) => {
                 // Failover timer re-arm: per-call timers (keepalive, global
                 // duration, …) live in this node's in-memory `TimerService`, NOT
@@ -1152,6 +1153,30 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
             let res = handle_limiter_refresh(ctx, call, now_ms).await;
             crate::rules::invariants::enforce(&ctx.obligations, &before, crate::rules::invariants::finalize(res))
         } else {
+            // ── MAX_MESSAGES_PER_CALL cap-defense ──────────────────────────
+            // Port of the TS `SipRouter` per-event `messageCount` bump + cap
+            // check (src/sip/SipRouter.ts). EVERY in-dialog rule-chain event
+            // bumps the counter; if the bump crosses `max_messages_per_call`
+            // and the handler did not itself terminate the call, append a
+            // begin-termination so a runaway dialog (re-INVITE/OPTIONS storm,
+            // glare loop, a peer that never stops) is torn down instead of
+            // processing unbounded in-dialog events forever — each of which
+            // allocates a txn (`set_txn`), a working `Call` clone, and a store
+            // body. Initial-INVITE (the `if` arm) and the async limiter-refresh
+            // do NOT count, mirroring TS (only `handlers.inDialog` events).
+            // The bump rides the existing per-event flush — `message_count` adds
+            // no extra replication traffic (it mutates with the CSeq/state the
+            // event already changes). Order matches TS: bump + capture
+            // `cap_exceeded` BEFORE the handler runs, terminate AFTER, so the
+            // in-flight event (e.g. relaying this re-INVITE's response) is still
+            // serviced before teardown.
+            let bumped = call.message_count.unwrap_or(0) + 1;
+            call.message_count = Some(bumped);
+            let cap_exceeded = bumped > ctx.config.max_messages_per_call as i64
+                && !matches!(
+                    call.state,
+                    CallModelState::Terminating | CallModelState::Terminated
+                );
             let rule_ctx = RuleContext {
                 call: RuleCall::new(&call),
                 call_ref: &call_ref,
@@ -1166,7 +1191,42 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
                 id_gen: &ctx.id_gen,
                 now_ms,
             };
-            execute_rules(&ctx.rules, &call, &rule_ctx, &exec, &ctx.obligations)
+            let mut result = execute_rules(&ctx.rules, &call, &rule_ctx, &exec, &ctx.obligations);
+            if cap_exceeded
+                && !matches!(
+                    result.call.state,
+                    CallModelState::Terminating | CallModelState::Terminated
+                )
+            {
+                // Tear the runaway call down through the standard executor so
+                // per-leg BYE/CANCEL, dialog-tag ownership and the safety-timer
+                // contract apply exactly as a rule-driven termination would. The
+                // RFC-3326 cause rides the reason (must start with "SIP").
+                let cap_ctx = RuleContext {
+                    call: RuleCall::new(&result.call),
+                    call_ref: &call_ref,
+                    event: &event,
+                    source_leg_id: &res.source_leg_id,
+                    direction: res.direction,
+                    now_ms,
+                    config: &ctx.config,
+                };
+                let cap = exec.execute(
+                    &[RuleAction::BeginTermination {
+                        reason: Some("SIP;cause=503;text=\"message-cap-exceeded\"".into()),
+                    }],
+                    &result.call,
+                    &cap_ctx,
+                );
+                result.call = cap.call;
+                result.effects.critical.extend(cap.effects.critical);
+                result.effects.outbound.extend(cap.effects.outbound);
+                result.effects.soft.extend(cap.effects.soft);
+                result.effects.buffered.extend(cap.effects.buffered);
+                result.effects.fire_and_forget.extend(cap.effects.fire_and_forget);
+                ctx.metrics.bump_message_cap_terminated();
+            }
+            result
         }
     };
 

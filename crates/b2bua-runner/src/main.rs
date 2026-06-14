@@ -350,6 +350,11 @@ async fn main() {
     // if either is actually hit.
     let concurrency: usize = env_or("B2BUA_CONCURRENCY", "8192").parse().expect("B2BUA_CONCURRENCY");
     let call_cap: usize = env_or("B2BUA_CALL_CAP", "1000000").parse().expect("B2BUA_CALL_CAP");
+    // MAX_MESSAGES_PER_CALL cap-defense (loop/runaway guard). TS default 100;
+    // we default 200 (headroom for a multi-hour keepalive-held call). Enforced
+    // in the router's in-dialog path — a call past the cap is begin-terminated.
+    let max_messages_per_call: u64 =
+        env_or("B2BUA_MAX_MESSAGES_PER_CALL", "200").parse().expect("B2BUA_MAX_MESSAGES_PER_CALL");
     // In-dialog OPTIONS keepalive interval (seconds). Production default 300 s
     // (5 min); a shorter poke breaks long-hold endurance traffic.
     let keepalive_sec: i64 = env_or("B2BUA_KEEPALIVE_SEC", "300").parse().expect("B2BUA_KEEPALIVE_SEC");
@@ -464,6 +469,7 @@ async fn main() {
         cdr_buffer_queue_max: cdr_queue,
         event_dispatch_concurrency: concurrency,
         per_call_queue_cap: call_cap,
+        max_messages_per_call,
         keepalive_interval_sec: keepalive_sec,
         keepalive_timeout_sec,
         reboot_budget_sec,

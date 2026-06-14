@@ -25,6 +25,11 @@ struct Inner {
     queue_drops: AtomicU64,
     cap_drops: AtomicU64,
     saturation: AtomicU64,
+    // MAX_MESSAGES_PER_CALL cap-defense: calls torn down for crossing the
+    // per-call message cap (a runaway re-INVITE/OPTIONS storm or glare loop).
+    // Port of the TS SipRouter cap (was missing in the Rust port — a call could
+    // process unbounded in-dialog events, ratcheting txn/clone/store churn).
+    message_cap_terminated: AtomicU64,
     creations: AtomicU64,
     removals: AtomicU64,
     // router / handler
@@ -172,6 +177,7 @@ impl B2buaMetrics {
         Self::default()
     }
 
+    counter!(bump_message_cap_terminated, message_cap_terminated_total, message_cap_terminated);
     counter!(bump_queue_drop, queue_drops_total, queue_drops);
     counter!(bump_cap_drop, cap_drops_total, cap_drops);
     counter!(bump_saturation, saturation_total, saturation);
@@ -377,6 +383,7 @@ impl B2buaMetrics {
         let mut counter = |name: &str, help: &str, v: u64| {
             s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n{name} {v}\n"));
         };
+        counter("b2bua_message_cap_terminated_total", "calls terminated for exceeding max_messages_per_call (cap-defense; a climbing rate names a runaway-traffic call class)", self.message_cap_terminated_total());
         counter("b2bua_dispatch_queue_drops_total", "events dropped: per-call queue full", self.queue_drops_total());
         counter("b2bua_dispatch_cap_drops_total", "events dropped: global call cap reached", self.cap_drops_total());
         counter("b2bua_dispatch_saturation_total", "global handler concurrency saturation hits", self.saturation_total());

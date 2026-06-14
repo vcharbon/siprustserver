@@ -141,7 +141,15 @@ impl Default for B2buaConfig {
             event_dispatch_concurrency: 1024,
             per_call_queue_depth: 64,
             per_call_queue_cap: 200_000,
-            max_messages_per_call: 5_000,
+            // Loop/runaway guard: terminate a call after this many in-dialog
+            // events. TS default is 100 (MAX_MESSAGES_PER_CALL); kept a touch
+            // higher (200) so a legitimate long-hold call — keepalive OPTIONS at
+            // a 300 s cadence over a multi-hour hold (~2 events/cycle) — stays
+            // well under it, while a flood/glare loop is still capped. The Rust
+            // port previously set 5_000 AND never enforced it, so a call grew its
+            // txn/clone/store churn unbounded (the no-chaos RSS climb). Override
+            // with `B2BUA_MAX_MESSAGES_PER_CALL`.
+            max_messages_per_call: 200,
             cdr_buffer_queue_max: 1_024,
             refer_subscription_expiry_sec: 60,
             refer_reinvite_answer_sec: 32,
