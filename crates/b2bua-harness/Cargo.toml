@@ -15,6 +15,11 @@ sip-txn = { path = "../sip-txn" }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
 scenario-harness = { path = "../scenario-harness" }
 tokio = { workspace = true }
+# The shared `spawn_proxy_core` LB-SUT primitive (in `src/lib.rs`) is reused by
+# both this crate's `tests/common/mod.rs` (single-worker `spawn_lb_proxy`) and
+# the `failover-harness` crate (multi-worker `spawn_proxy_inner`), so the
+# LoadBalancer `ProxyCore` wiring is a normal dependency, not test-only.
+sip-proxy = { path = "../sip-proxy" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
@@ -30,11 +35,6 @@ media-harness = { path = "../media-harness" }
 http-net = { path = "../http-net" }
 call-limiter = { path = "../call-limiter" }
 serde_json = { workspace = true }
-# The `common/mod.rs` proxy helper (keepalive_via_proxy / proxy_b2bua tests)
-# binds a real LoadBalancer SUT. The multi-node failover harness moved to the
-# `failover-harness` crate (ADR-0013 §0), so this is the only remaining proxy
-# user and it is test-only.
-sip-proxy = { path = "../sip-proxy" }
 # Slice 8 capstone: the out-of-tree `announcement` callflow service, injected
 # into the SUT via `B2buaSut::start_with_services` for the early-media e2e.
 announcement = { path = "../announcement" }

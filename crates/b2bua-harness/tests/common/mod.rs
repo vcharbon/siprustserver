@@ -8,17 +8,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use b2bua_harness::spawn_proxy_core;
 use scenario_harness::Harness;
 use sip_clock::Clock;
-use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
-use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
-use sip_proxy::registry::{WorkerEntry, WorkerRegistry};
-use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
-use sip_proxy::{
-    LoadBalancerConfig, LoadBalancerStrategy, ProxyAddr, ProxyCoreBuilder, ProxyMetrics,
-    RoutingStrategy,
-};
-use sip_txn::IdGen;
+use sip_proxy::ProxyMetrics;
 use tokio::task::JoinHandle;
 
 /// A running proxy SUT. Aborts its recv loop on drop.
@@ -41,34 +34,14 @@ impl Drop for ProxySut {
 }
 
 /// Spawn a real load-balancing `ProxyCore` on the harness fabric, fronting the
-/// single registered B2BUA worker at `worker` (so HRW always picks it).
+/// single registered B2BUA worker at `worker` (so HRW always picks it). Thin
+/// wrapper over the shared [`b2bua_harness::spawn_proxy_core`] primitive: bind
+/// the proxy endpoint, hand it a one-element worker slice + a fresh
+/// `Clock::test_at(0)`, and wrap the returned parts in the test-local
+/// [`ProxySut`] (the registry/observer parts are unused on this single-worker,
+/// no-health-probe path).
 pub async fn spawn_lb_proxy(h: &Harness, addr: &str, worker_name: &str, worker: SocketAddr) -> ProxySut {
-    let registry: Arc<dyn WorkerRegistry> = Arc::new(SimulatedWorkerRegistry::with_clock(
-        vec![WorkerEntry::alive(
-            worker_name,
-            ProxyAddr::new(worker.ip().to_string(), worker.port()),
-        )],
-        Clock::test_at(0),
-    ));
-    let hmac =
-        Arc::new(StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap());
-    let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
-    let strategy: Arc<dyn RoutingStrategy> = Arc::new(LoadBalancerStrategy::new(
-        registry.clone(),
-        hmac,
-        observer,
-        Arc::new(ProxyMetrics::new()),
-        Clock::test_at(0),
-        LoadBalancerConfig::default(),
-    ));
-
     let (ep, sock) = h.bind_sut("proxy", addr).await;
-    let metrics = Arc::new(ProxyMetrics::new());
-    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry)
-        .clock(Clock::test_at(0))
-        .id_gen(Arc::new(IdGen::seeded(0xC0FFEE)))
-        .metrics(metrics.clone())
-        .build(ep);
-    let task = tokio::spawn(core.run());
-    ProxySut { addr: sock, metrics, task }
+    let parts = spawn_proxy_core(ep, sock, &[(worker_name, worker)], Clock::test_at(0));
+    ProxySut { addr: parts.addr, metrics: parts.metrics, task: parts.task }
 }

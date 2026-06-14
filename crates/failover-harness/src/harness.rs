@@ -36,7 +36,7 @@ use b2bua::metrics::B2buaMetrics;
 use b2bua::repl::{Changelog, ReplicatingCallStore};
 use b2bua::store::{CallStore, PartitionRole};
 use b2bua::{B2buaCore, ReplicationSetup};
-use b2bua_harness::B2buaSpawnParams;
+use b2bua_harness::{spawn_proxy_core, B2buaSpawnParams};
 
 use ha_harness::{Marker, ReplReport};
 use repl_net::transport::{
@@ -45,14 +45,9 @@ use repl_net::transport::{
 use scenario_harness::{Agent, Harness};
 use sip_clock::Clock;
 use sip_proxy::health::{HealthProbe, HealthProbeConfig};
-use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
-use sip_proxy::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
-use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
-use sip_proxy::{
-    LoadBalancerConfig, LoadBalancerStrategy, ProxyAddr, ProxyCoreBuilder, ProxyMetrics,
-    RoutingStrategy,
-};
+use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
+use sip_proxy::{ProxyAddr, ProxyMetrics};
 use sip_txn::IdGen;
 use tokio::task::JoinHandle;
 use topology::{Peer, SimulatedMembership};
@@ -742,32 +737,16 @@ impl FailoverHarness {
         workers: &[(&str, SocketAddr)],
         probe_addr: Option<&str>,
     ) -> ProxySut {
-        let entries: Vec<WorkerEntry> = workers
-            .iter()
-            .map(|(id, sa)| WorkerEntry::alive(*id, ProxyAddr::new(sa.ip().to_string(), sa.port())))
-            .collect();
-        let registry = SimulatedWorkerRegistry::with_clock(entries, self.clock.clone());
-        let registry_dyn: Arc<dyn WorkerRegistry> = Arc::new(registry.clone());
-        let hmac =
-            Arc::new(StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap());
-        let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
-        let strategy: Arc<dyn RoutingStrategy> = Arc::new(LoadBalancerStrategy::new(
-            registry_dyn.clone(),
-            hmac,
-            observer.clone(),
-            Arc::new(ProxyMetrics::new()),
-            self.clock.clone(),
-            LoadBalancerConfig::default(),
-        ));
-
+        // The registry→hmac→observer→strategy→ProxyCore wiring is the shared
+        // `b2bua_harness::spawn_proxy_core` primitive (ADR-0013 §0): bind the
+        // proxy endpoint here, then hand it the multi-worker slice + this
+        // harness's shared clock. The returned parts carry the CONCRETE registry
+        // (retained below so `set_health`/`set_address` drive the live proxy) and
+        // the SAME load observer the strategy reads (fed by the probe's
+        // `X-Overload` payloads below — failover-only).
         let (ep, sock) = self.harness.bind_sut("proxy", addr).await;
-        let metrics = Arc::new(ProxyMetrics::new());
-        let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry_dyn.clone())
-            .clock(self.clock.clone())
-            .id_gen(Arc::new(IdGen::seeded(0xC0FFEE)))
-            .metrics(metrics.clone())
-            .build(ep);
-        let task = tokio::spawn(core.run());
+        let parts = spawn_proxy_core(ep, sock, workers, self.clock.clone());
+        let b2bua_harness::ProxyCoreParts { addr: sock, registry, metrics, observer, task } = parts;
 
         // Optional REAL health probe: its own bound endpoint on the fabric, the
         // registry's control seam. Cadence is 10 s / 1.5 s — NOT the production
@@ -784,6 +763,7 @@ impl FailoverHarness {
         // chunk so there is no paused-clock reply race.
         let probe_task = if let Some(paddr) = probe_addr {
             let (probe_ep, _psock) = self.harness.bind_sut("proxy-probe", paddr).await;
+            let registry_dyn: Arc<dyn WorkerRegistry> = Arc::new(registry.clone());
             let control = registry.control();
             let probe = HealthProbe::new(
                 probe_ep,
