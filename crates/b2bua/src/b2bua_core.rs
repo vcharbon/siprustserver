@@ -404,6 +404,19 @@ impl B2buaCore {
         self.readiness.set_draining();
     }
 
+    /// Graceful shutdown: latch `Draining` (so the proxy steers new calls away
+    /// via the OPTIONS / `/ready` self-report) and then **wait for the live call
+    /// map to clear**, bounded by `grace`. Returns the residual active-call
+    /// count — `0` ⇒ fully quiesced, `>0` ⇒ the grace elapsed with calls still
+    /// live. Replaces the runner's blind fixed-duration drain sleep: a node with
+    /// no calls exits at once, a busy node is capped at `grace`, and the cut is
+    /// never silent (the caller logs the residual). `Draining` is the single
+    /// home for the drain state — there is no second flag to keep in sync.
+    pub async fn drain(&self, grace: std::time::Duration) -> usize {
+        self.begin_draining();
+        crate::drain::drain_until_quiescent(|| self.active_calls(), grace).await
+    }
+
     pub fn metrics(&self) -> &B2buaMetrics {
         &self.metrics
     }

@@ -22,6 +22,7 @@ pub mod cdr;
 pub mod config;
 pub mod decision;
 pub mod dispatch;
+pub mod drain;
 pub mod effects;
 pub mod event;
 pub mod initial_invite;

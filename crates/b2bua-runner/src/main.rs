@@ -64,9 +64,22 @@
 //! And SIGTERM latches the worker into `Draining` (OPTIONS 503 + readiness
 //! probe fails) so k8s steers new calls away while in-flight calls finish.
 
+// Use jemalloc instead of the glibc system allocator. Under the many tokio
+// worker threads, glibc malloc spawns up to 8×ncpu arenas and retains freed
+// chunks (it caps arena *count*, not per-arena high-water mark), so a churning
+// SIP B2BUA's RSS ratchets monotonically up under sustained load and never
+// returns memory to the OS — a 2026-06-13/14 no-chaos soak measured ~209 MiB/h
+// growth with all logical state (active_calls/store/txn/repl) dead flat, leading
+// to a node-cgroup OOM. jemalloc's decay-based purging returns dirty/muzzy pages
+// to the OS (tuned aggressively via _RJEM_MALLOC_CONF on the worker container),
+// bounding steady-state RSS. No logical leak exists; this is purely allocator
+// retention. See deploy/k8s/manifests/20-worker.yaml.
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -381,6 +394,10 @@ async fn serve_metrics(
             let (status, body) = if req.starts_with("GET /metrics") {
                 let mut text = metrics.prometheus_text();
                 text.push_str(&txn_metrics_text(&txn_metrics));
+                // jemalloc footprint/purge/decay-config counters (see the
+                // #[global_allocator] note). Same cfg as the allocator dep.
+                #[cfg(not(target_env = "msvc"))]
+                text.push_str(&jemalloc_stats::prometheus_text());
                 ("200 OK", text)
             } else if req.starts_with("GET /healthz") {
                 ("200 OK", "ok\n".to_string())
@@ -404,6 +421,12 @@ async fn serve_metrics(
 
 #[tokio::main]
 async fn main() {
+    // Loud confirmation the jemalloc decay config (_RJEM_MALLOC_CONF) actually
+    // parsed — a typo is silently ignored. Mirrored by the jemalloc_opt_*_decay_ms
+    // gauges on /metrics.
+    #[cfg(not(target_env = "msvc"))]
+    jemalloc_stats::log_config();
+
     let listen = env_or("B2BUA_LISTEN", "0.0.0.0:5060");
     let dest = env_or("B2BUA_DEST", "127.0.0.1:5070");
     let metrics_addr = env_or("B2BUA_METRICS", "0.0.0.0:9091");
@@ -675,15 +698,14 @@ async fn main() {
         std::process::id()
     );
 
-    // Readiness probe state: a node reports NotReady while re-hydrating and once
-    // SIGTERM latches `draining`. The metrics server reads both.
-    let draining = Arc::new(AtomicBool::new(false));
+    // Readiness probe state: a node reports NotReady while re-hydrating, then
+    // not-ready once SIGTERM latches `Draining`. `core.is_ready()` already folds
+    // in the Draining latch (it returns false for Draining), so the predicate is
+    // a single read of one source — no second flag to drift from it.
     {
         let core = core.clone();
         let txn_metrics = core.txn_metrics().clone();
-        let draining = draining.clone();
-        let ready: Arc<dyn Fn() -> bool + Send + Sync> =
-            Arc::new(move || core.is_ready() && !draining.load(Ordering::Relaxed));
+        let ready: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || core.is_ready());
         tokio::spawn(async move {
             if let Err(e) = serve_metrics(metrics_sa, metrics, txn_metrics, ready).await {
                 eprintln!("b2bua-runner metrics server error: {e}");
@@ -732,10 +754,15 @@ async fn main() {
         }
         _ = wait_sigterm() => {
             eprintln!("b2bua-runner SIGTERM — begin draining ({drain_grace_ms}ms grace)");
-            core.begin_draining();
-            draining.store(true, Ordering::Relaxed);
-            tokio::time::sleep(std::time::Duration::from_millis(drain_grace_ms)).await;
-            eprintln!("b2bua-runner drain grace elapsed — exiting");
+            // Latch Draining, then wait for the live call map to clear — capped
+            // at the grace. A node with no calls exits at once; a busy node is
+            // bounded; a residual is logged, never silently cut.
+            let residual = core.drain(std::time::Duration::from_millis(drain_grace_ms)).await;
+            if residual == 0 {
+                eprintln!("b2bua-runner drained cleanly — exiting");
+            } else {
+                eprintln!("b2bua-runner drain grace elapsed with {residual} call(s) still active — exiting");
+            }
         }
     }
     drop(core);
