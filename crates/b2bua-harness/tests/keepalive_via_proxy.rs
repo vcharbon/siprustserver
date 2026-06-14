@@ -50,9 +50,10 @@ async fn keepalive_options_travels_via_proxy_on_both_legs() {
     let alice = h.agent("alice", ALICE).await;
     let bob = h.agent("bob", BOB).await;
     let proxy = common::spawn_lb_proxy(&h, PROXY, "b2bua", B2BUA.parse().unwrap()).await;
-    let _b2bua =
-        B2buaSut::route_all_to_via_proxy(&h, "b2bua", B2BUA, "127.0.0.1", 5071, "127.0.0.1", 5081)
-            .await;
+    let _b2bua = B2buaSut::route_all_to("127.0.0.1", 5071)
+        .outbound_proxy("127.0.0.1", 5081)
+        .start(&h, "b2bua", B2BUA)
+        .await;
 
     // ── Call setup (alice → proxy → b2bua → proxy → bob) ─────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;

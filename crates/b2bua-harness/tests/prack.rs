@@ -26,7 +26,7 @@ async fn prack_reliable_provisional_relayed_end_to_end() {
     let h = Harness::with_transit_delay("b2bua-prack", 0);
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     let bob = h.agent("bob", "127.0.0.1:5073").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5083", "127.0.0.1", 5073).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
 
     // Alice INVITEs (offer in the INVITE) advertising 100rel support.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

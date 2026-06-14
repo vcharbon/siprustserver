@@ -56,7 +56,7 @@ async fn setup_stalled_call_is_reaped_by_global_duration() {
             })
             .build(),
     );
-    let b2bua = B2buaSut::start(&h, "b2bua", "127.0.0.1:5089", decision).await;
+    let b2bua = B2buaSut::builder(decision).start(&h, "b2bua", "127.0.0.1:5089").await;
 
     // ── Call setup that stalls: bob rings, then goes silent (no 200) ──────────
     let _call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

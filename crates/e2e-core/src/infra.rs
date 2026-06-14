@@ -338,14 +338,10 @@ impl InfraShape for FakeLsbcB2bua {
             // (they never REFER); composes with the failover wiring above.
             .on_refer(default_call_refer)
             .build();
-        let b2bua = B2buaSut::start_with_outbound_proxy(
-            &h,
-            "b2bua",
-            &b2bua_addr.to_string(),
-            Arc::new(decision),
-            Some((lb.ip().to_string(), lb.port())),
-        )
-        .await;
+        let b2bua = B2buaSut::builder(Arc::new(decision))
+            .outbound_proxy(&lb.ip().to_string(), lb.port())
+            .start(&h, "b2bua", &b2bua_addr.to_string())
+            .await;
 
         InfraRuntime {
             harness: h,

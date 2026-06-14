@@ -73,7 +73,7 @@ async fn refer_gating_a_reinvite_refer_authorizing() {
     let h = Harness::new("refer-gating-a-reinvite-refer-authorizing");
     let alice = h.agent("alice", "127.0.0.1:6001").await;
     let bob = h.agent("bob", "127.0.0.1:6011").await;
-    let b2bua = B2buaSut::route_all_with_refer(&h, "b2bua", "127.0.0.1:6021", "127.0.0.1", 6011).await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6011).start(&h, "b2bua", "127.0.0.1:6021").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -146,7 +146,7 @@ async fn refer_gating_a_reinvite_c_ringing() {
     let alice = h.agent("alice", "127.0.0.1:6002").await;
     let bob = h.agent("bob", "127.0.0.1:6012").await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
-    let b2bua = B2buaSut::route_all_with_refer(&h, "b2bua", "127.0.0.1:6022", "127.0.0.1", 6012).await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6012).start(&h, "b2bua", "127.0.0.1:6022").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -216,7 +216,7 @@ async fn refer_gating_a_reinvite_c_realigning() {
     let alice = h.agent("alice", "127.0.0.1:6003").await;
     let bob = h.agent("bob", "127.0.0.1:6013").await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
-    let b2bua = B2buaSut::route_all_with_refer(&h, "b2bua", "127.0.0.1:6023", "127.0.0.1", 6013).await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6013).start(&h, "b2bua", "127.0.0.1:6023").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -287,7 +287,7 @@ async fn refer_gating_a_info_refer_authorizing() {
     let h = Harness::new("refer-gating-a-info-refer-authorizing");
     let alice = h.agent("alice", "127.0.0.1:6004").await;
     let bob = h.agent("bob", "127.0.0.1:6014").await;
-    let b2bua = B2buaSut::route_all_with_refer(&h, "b2bua", "127.0.0.1:6024", "127.0.0.1", 6014).await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6014).start(&h, "b2bua", "127.0.0.1:6024").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -357,7 +357,7 @@ async fn refer_gating_a_info_c_ringing() {
     let alice = h.agent("alice", "127.0.0.1:6005").await;
     let bob = h.agent("bob", "127.0.0.1:6015").await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
-    let b2bua = B2buaSut::route_all_with_refer(&h, "b2bua", "127.0.0.1:6025", "127.0.0.1", 6015).await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6015).start(&h, "b2bua", "127.0.0.1:6025").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -424,7 +424,7 @@ async fn refer_gating_b_info_refer_authorizing() {
     let h = Harness::new("refer-gating-b-info-refer-authorizing");
     let alice = h.agent("alice", "127.0.0.1:6006").await;
     let bob = h.agent("bob", "127.0.0.1:6016").await;
-    let b2bua = B2buaSut::route_all_with_refer(&h, "b2bua", "127.0.0.1:6026", "127.0.0.1", 6016).await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6016).start(&h, "b2bua", "127.0.0.1:6026").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -488,7 +488,7 @@ async fn refer_gating_second_refer_c_ringing() {
     let alice = h.agent("alice", "127.0.0.1:6007").await;
     let bob = h.agent("bob", "127.0.0.1:6017").await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
-    let b2bua = B2buaSut::route_all_with_refer(&h, "b2bua", "127.0.0.1:6027", "127.0.0.1", 6017).await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6017).start(&h, "b2bua", "127.0.0.1:6027").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -548,7 +548,7 @@ async fn refer_gating_second_refer_c_realigning() {
     let alice = h.agent("alice", "127.0.0.1:6008").await;
     let bob = h.agent("bob", "127.0.0.1:6018").await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
-    let b2bua = B2buaSut::route_all_with_refer(&h, "b2bua", "127.0.0.1:6028", "127.0.0.1", 6018).await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6018).start(&h, "b2bua", "127.0.0.1:6028").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;

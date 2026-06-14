@@ -110,14 +110,16 @@ async fn stale_active_call_is_swept_and_reaped() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let decision = Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
-    let b2bua = B2buaSut::start_with_config(&h, "b2bua", "127.0.0.1:5080", decision, None, |c| {
-        // Simulate the lost-timer class: no keepalive inside the horizon (its
-        // interval is pushed out), and an explicit short idle threshold.
-        c.keepalive_interval_sec = 3_600;
-        c.reaper_idle_max_sec = 60;
-        c.reaper_sweep_interval_sec = 30;
-    })
-    .await;
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            // Simulate the lost-timer class: no keepalive inside the horizon (its
+            // interval is pushed out), and an explicit short idle threshold.
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_idle_max_sec = 60;
+            c.reaper_sweep_interval_sec = 30;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
 
     // Establish, then both UAs go silent forever (their timers "lost").
     let _dialog = establish_call(&alice, &bob, b2bua.addr).await;
@@ -152,14 +154,10 @@ async fn handler_panic_strike1_reaps_via_rules() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let decision = Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
-    let b2bua = B2buaSut::start_with_services(
-        &h,
-        "b2bua",
-        "127.0.0.1:5080",
-        decision,
-        vec![panic_on_info_service()],
-    )
-    .await;
+    let b2bua = B2buaSut::builder(decision)
+        .services(vec![panic_on_info_service()])
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
 
     let mut dialog = establish_call(&alice, &bob, b2bua.addr).await;
 
@@ -191,17 +189,13 @@ async fn second_panic_discharges_outside_the_rules() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let decision = Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
-    let b2bua = B2buaSut::start_with_services(
-        &h,
-        "b2bua",
-        "127.0.0.1:5080",
-        decision,
+    let b2bua = B2buaSut::builder(decision)
         // The INFO panics (strike 1) AND the fatal-error verdict's rule panics
         // too (strike 2) — the rules path is broken for this call, so only the
         // discharge bypass can save the CDR.
-        vec![panic_on_info_service(), panic_on_fatal_service()],
-    )
-    .await;
+        .services(vec![panic_on_info_service(), panic_on_fatal_service()])
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
 
     let mut dialog = establish_call(&alice, &bob, b2bua.addr).await;
     let _txn = dialog.request(InDialogMethod::Info, None).await;
@@ -229,18 +223,13 @@ async fn wedged_setup_is_aborted_and_reaped() {
     let h = Harness::with_transit_delay("reaper-wedged-setup", 0);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let b2bua = B2buaSut::start_with_config(
-        &h,
-        "b2bua",
-        "127.0.0.1:5080",
-        Arc::new(NeverDecide),
-        None,
-        |c| {
+    let b2bua = B2buaSut::builder(Arc::new(NeverDecide))
+        .tune(|c| {
             c.reaper_idle_max_sec = 60;
             c.reaper_sweep_interval_sec = 30;
-        },
-    )
-    .await;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
     let _ = bob; // never reached: the decision wedges before any b-leg exists
 
     // The INVITE parks the per-call worker (and its lock) inside the

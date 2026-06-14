@@ -78,7 +78,7 @@ async fn rejected_call_gets_486_and_no_second_increment() {
     let (store, _lh) = serve_limiter(&http).await;
     let decision = route_with_limiter("127.0.0.1", 5070, "trunk-A", 1);
     let b2bua =
-        B2buaSut::start_with_limiter(&h, "b2bua", "127.0.0.1:5080", decision, limiter_client(&http), |_| {})
+        B2buaSut::builder(decision).limiter(limiter_client(&http)).start(&h, "b2bua", "127.0.0.1:5080")
             .await;
 
     // First call admitted + answered.
@@ -106,7 +106,7 @@ async fn release_on_bye_frees_the_slot() {
     let (store, _lh) = serve_limiter(&http).await;
     let decision = route_with_limiter("127.0.0.1", 5070, "trunk-A", 1);
     let b2bua =
-        B2buaSut::start_with_limiter(&h, "b2bua", "127.0.0.1:5080", decision, limiter_client(&http), |_| {})
+        B2buaSut::builder(decision).limiter(limiter_client(&http)).start(&h, "b2bua", "127.0.0.1:5080")
             .await;
 
     // Establish then hang up call 1.
@@ -147,7 +147,7 @@ async fn fail_open_admits_when_limiter_is_cut() {
 
     let decision = route_with_limiter("127.0.0.1", 5070, "trunk-A", 1);
     let b2bua =
-        B2buaSut::start_with_limiter(&h, "b2bua", "127.0.0.1:5080", decision, limiter_client(&http), |_| {})
+        B2buaSut::builder(decision).limiter(limiter_client(&http)).start(&h, "b2bua", "127.0.0.1:5080")
             .await;
 
     // The call is admitted despite the limiter being down: bob sees the INVITE.
@@ -172,24 +172,16 @@ async fn shared_counting_across_two_workers() {
     let (_store, _lh) = serve_limiter(&http).await;
 
     // Two workers, distinct ordinals, ONE shared limiter server.
-    let w0 = B2buaSut::start_with_limiter(
-        &h,
-        "w0",
-        "127.0.0.1:5080",
-        route_with_limiter("127.0.0.1", 5070, "trunk-A", 1),
-        limiter_client(&http),
-        |c| c.self_ordinal = "w0".into(),
-    )
-    .await;
-    let w1 = B2buaSut::start_with_limiter(
-        &h,
-        "w1",
-        "127.0.0.1:5081",
-        route_with_limiter("127.0.0.1", 5070, "trunk-A", 1),
-        limiter_client(&http),
-        |c| c.self_ordinal = "w1".into(),
-    )
-    .await;
+    let w0 = B2buaSut::builder(route_with_limiter("127.0.0.1", 5070, "trunk-A", 1))
+        .limiter(limiter_client(&http))
+        .tune(|c| c.self_ordinal = "w0".into())
+        .start(&h, "w0", "127.0.0.1:5080")
+        .await;
+    let w1 = B2buaSut::builder(route_with_limiter("127.0.0.1", 5070, "trunk-A", 1))
+        .limiter(limiter_client(&http))
+        .tune(|c| c.self_ordinal = "w1".into())
+        .start(&h, "w1", "127.0.0.1:5081")
+        .await;
 
     // Call through w0 fills the shared cap of 1.
     let _d = establish_call(&alice, &bob, w0.addr).await;
@@ -227,7 +219,7 @@ async fn failover_on_reject_routes_to_backup() {
             .build(),
     );
     let b2bua =
-        B2buaSut::start_with_limiter(&h, "b2bua", "127.0.0.1:5080", decision, limiter_client(&http), |_| {})
+        B2buaSut::builder(decision).limiter(limiter_client(&http)).start(&h, "b2bua", "127.0.0.1:5080")
             .await;
 
     // Call 1 fills the cap on the primary.

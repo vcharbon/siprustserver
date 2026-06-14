@@ -24,7 +24,7 @@ async fn keepalive_options_to_both_legs_two_cycles() {
     let h = Harness::new("b2bua-keepalive");
     let alice = h.agent("alice", "127.0.0.1:5064").await;
     let bob = h.agent("bob", "127.0.0.1:5074").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5084", "127.0.0.1", 5074).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5074).start(&h, "b2bua", "127.0.0.1:5084").await;
 
     // ── Call setup ───────────────────────────────────────────────────────────
     let mut dialog = establish_call(&alice, &bob, b2bua.addr).await;

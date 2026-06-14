@@ -30,15 +30,9 @@ async fn basic() {
     let h = Harness::with_transit_delay("suppress-18x-basic", 0);
     let alice = h.agent("alice", "127.0.0.1:5601").await;
     let bob = h.agent("bob", "127.0.0.1:5611").await;
-    let b2bua = B2buaSut::route_all_to_with_18x(
-        &h,
-        "b2bua",
-        "127.0.0.1:5621",
-        "127.0.0.1",
-        5611,
-        RelayFirst18xStrategy::DropSdp,
-    )
-    .await;
+    let b2bua = B2buaSut::route_all_to_with_18x("127.0.0.1", 5611, RelayFirst18xStrategy::DropSdp)
+        .start(&h, "b2bua", "127.0.0.1:5621")
+        .await;
 
     let mut call = alice
         .invite(&bob)
@@ -110,15 +104,13 @@ async fn failover_reject() {
     let bob1 = h.agent("bob1", "127.0.0.1:5613").await;
     let bob2 = h.agent("bob2", "127.0.0.1:5614").await;
     let b2bua = B2buaSut::route_all_to_with_18x_failover(
-        &h,
-        "b2bua",
-        "127.0.0.1:5623",
         "127.0.0.1",
         5613,
         5614,
         "sip:+1234@127.0.0.1:5614",
         RelayFirst18xStrategy::DropSdp,
     )
+    .start(&h, "b2bua", "127.0.0.1:5623")
     .await;
 
     let mut call = alice.invite(&bob1).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -170,15 +162,13 @@ async fn failover_no_answer() {
     let bob1 = h.agent("bob1", "127.0.0.1:5615").await;
     let bob2 = h.agent("bob2", "127.0.0.1:5616").await;
     let b2bua = B2buaSut::route_all_to_with_18x_failover(
-        &h,
-        "b2bua",
-        "127.0.0.1:5625",
         "127.0.0.1",
         5615,
         5616,
         "sip:+1234@127.0.0.1:5616",
         RelayFirst18xStrategy::DropSdp,
     )
+    .start(&h, "b2bua", "127.0.0.1:5625")
     .await;
 
     // Delayed offer: no SDP in the INVITE — bob2's 200 OK carries the offer.
@@ -237,7 +227,7 @@ async fn disabled() {
     let alice = h.agent("alice", "127.0.0.1:5602").await;
     let bob = h.agent("bob", "127.0.0.1:5612").await;
     // route_all_to → no relay_first_18x feature.
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5622", "127.0.0.1", 5612).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5612).start(&h, "b2bua", "127.0.0.1:5622").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
 

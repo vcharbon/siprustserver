@@ -40,7 +40,7 @@ async fn orphan_in_dialog_481_does_not_leak_dispatch_state() {
     let h = Harness::new("b2bua-orphan-reject-no-leak");
     let alice = h.agent("alice", "127.0.0.1:5066").await;
     let bob = h.agent("bob", "127.0.0.1:5076").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5086", "127.0.0.1", 5076).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
 
     // ── Establish N independent calls and tear each down, KEEPING each dialog so
     //    we can orphan it. Each in-dialog R-URI carries the B2BUA's callRef (the

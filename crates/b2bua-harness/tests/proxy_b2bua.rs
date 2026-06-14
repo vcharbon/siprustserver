@@ -49,7 +49,10 @@ async fn alice_calls_bob_through_proxy_and_b2bua() {
     // The proxy fronts the single B2BUA worker (HRW always picks it).
     let proxy = common::spawn_lb_proxy(&h, PROXY, "b2bua", B2BUA.parse().unwrap()).await;
     // The worker routes every call to bob, but sends its b-leg through the proxy.
-    let b2bua = B2buaSut::route_all_to_via_proxy(&h, "b2bua", B2BUA, "127.0.0.1", 5070, "127.0.0.1", 5080).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5070)
+        .outbound_proxy("127.0.0.1", 5080)
+        .start(&h, "b2bua", B2BUA)
+        .await;
 
     // alice INVITEs bob, but sends through the proxy (it HRW-routes to the worker).
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;

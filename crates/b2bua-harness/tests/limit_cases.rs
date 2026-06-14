@@ -112,18 +112,14 @@ async fn max_duration_byes_both_legs_and_releases_the_limiter() {
     // clock; keepalive pushed far out and the reaper off so the ONLY thing that
     // can resolve this call is the GlobalDuration timer (isolating the cap).
     let decision = route_limited("127.0.0.1", 5070, "trunk-A", 1, 60);
-    let b2bua = B2buaSut::start_with_limiter(
-        &h,
-        "b2bua",
-        "127.0.0.1:5080",
-        decision,
-        limiter_client(&http),
-        |c| {
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter_client(&http))
+        .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
-        },
-    )
-    .await;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
 
     // ── establish ────────────────────────────────────────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -180,18 +176,14 @@ async fn max_duration_fires_mid_reinvite_and_releases_the_limiter() {
     // pending — below the b-leg re-INVITE's 32 s transaction Timer B, which would
     // otherwise resolve the re-INVITE first.
     let decision = route_limited("127.0.0.1", 5075, "trunk-A", 1, 10);
-    let b2bua = B2buaSut::start_with_limiter(
-        &h,
-        "b2bua",
-        "127.0.0.1:5085",
-        decision,
-        limiter_client(&http),
-        |c| {
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter_client(&http))
+        .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
-        },
-    )
-    .await;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5085")
+        .await;
 
     // ── establish ────────────────────────────────────────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -250,15 +242,11 @@ async fn provisional_storm_before_connect_trips_the_cap_and_releases_the_limiter
     let http = SimulatedHttpNetwork::new();
     let (store, _limiter_srv) = serve_limiter(&http).await;
     let decision = route_limited("127.0.0.1", 5071, "trunk-A", 1, 3_600);
-    let b2bua = B2buaSut::start_with_limiter(
-        &h,
-        "b2bua",
-        "127.0.0.1:5081",
-        decision,
-        limiter_client(&http),
-        |c| c.reaper_enabled = false,
-    )
-    .await;
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter_client(&http))
+        .tune(|c| c.reaper_enabled = false)
+        .start(&h, "b2bua", "127.0.0.1:5081")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -317,15 +305,11 @@ async fn prack_loop_storm_before_connect_trips_the_cap_and_releases_the_limiter(
     let http = SimulatedHttpNetwork::new();
     let (store, _limiter_srv) = serve_limiter(&http).await;
     let decision = route_limited("127.0.0.1", 5076, "trunk-A", 1, 3_600);
-    let b2bua = B2buaSut::start_with_limiter(
-        &h,
-        "b2bua",
-        "127.0.0.1:5086",
-        decision,
-        limiter_client(&http),
-        |c| c.reaper_enabled = false,
-    )
-    .await;
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter_client(&http))
+        .tune(|c| c.reaper_enabled = false)
+        .start(&h, "b2bua", "127.0.0.1:5086")
+        .await;
 
     // alice INVITEs advertising reliable provisionals.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -401,20 +385,16 @@ async fn in_dialog_message_storm_trips_the_cap_and_releases_the_limiter() {
     let http = SimulatedHttpNetwork::new();
     let (store, _limiter_srv) = serve_limiter(&http).await;
     let decision = route_limited("127.0.0.1", 5072, "trunk-A", 1, 3_600);
-    let b2bua = B2buaSut::start_with_limiter(
-        &h,
-        "b2bua",
-        "127.0.0.1:5082",
-        decision,
-        limiter_client(&http),
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter_client(&http))
         // Keepalive far out so the ONLY in-dialog events are our OPTIONS — the
         // count is then exactly 2 per round, deterministic.
-        |c| {
+        .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
-        },
-    )
-    .await;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5082")
+        .await;
 
     // ── establish ────────────────────────────────────────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

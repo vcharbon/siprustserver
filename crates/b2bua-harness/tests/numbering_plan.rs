@@ -45,7 +45,7 @@ async fn route_rewrites_from_to_ruri_pai_and_pani() {
     let h = Harness::with_transit_delay("plan-rewrite", 1);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let b2bua = B2buaSut::start(&h, "b2bua", "127.0.0.1:5080", plan_engine()).await;
+    let b2bua = B2buaSut::builder(plan_engine()).start(&h, "b2bua", "127.0.0.1:5080").await;
 
     // Wire destination is bob; the R-URI/From/To numbers are rewritten freely.
     let plan = serde_json::json!({
@@ -108,7 +108,7 @@ async fn reroutes_to_second_destination_on_failure() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let carol = h.agent("carol", "127.0.0.1:5070").await; // first attempt — fails
     let bob = h.agent("bob", "127.0.0.1:5071").await; // second attempt — answers
-    let b2bua = B2buaSut::start(&h, "b2bua", "127.0.0.1:5080", plan_engine()).await;
+    let b2bua = B2buaSut::builder(plan_engine()).start(&h, "b2bua", "127.0.0.1:5080").await;
 
     let plan = serde_json::json!({
         "action": "route",
@@ -160,7 +160,7 @@ async fn direct_reject_carries_reason_header() {
     let h = Harness::with_transit_delay("plan-reject", 1);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let b2bua = B2buaSut::start(&h, "b2bua", "127.0.0.1:5080", plan_engine()).await;
+    let b2bua = B2buaSut::builder(plan_engine()).start(&h, "b2bua", "127.0.0.1:5080").await;
 
     let plan = serde_json::json!({
         "action": "reject",
@@ -195,7 +195,7 @@ async fn direct_302_redirect_carries_contact_list() {
     let h = Harness::with_transit_delay("plan-redirect", 1);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let b2bua = B2buaSut::start(&h, "b2bua", "127.0.0.1:5080", plan_engine()).await;
+    let b2bua = B2buaSut::builder(plan_engine()).start(&h, "b2bua", "127.0.0.1:5080").await;
 
     let plan = serde_json::json!({
         "action": "redirect",
@@ -233,7 +233,7 @@ async fn reroute_exhaustion_redirects_caller() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let carol = h.agent("carol", "127.0.0.1:5070").await; // only attempt — fails
     let bob = h.agent("bob", "127.0.0.1:5071").await; // never dialed
-    let b2bua = B2buaSut::start(&h, "b2bua", "127.0.0.1:5080", plan_engine()).await;
+    let b2bua = B2buaSut::builder(plan_engine()).start(&h, "b2bua", "127.0.0.1:5080").await;
 
     let plan = serde_json::json!({
         "action": "route",

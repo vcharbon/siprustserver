@@ -69,10 +69,13 @@ async fn refresh_keeps_a_long_call_counted_across_a_window() {
     );
 
     // Refresh once per second (matches the window).
-    let b2bua = B2buaSut::start_with_limiter(&h, "b2bua", "127.0.0.1:5080", decision, limiter, |c| {
-        c.limiter_refresh_sec = 1;
-    })
-    .await;
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter)
+        .tune(|c| {
+            c.limiter_refresh_sec = 1;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
 
     // Establish the long call (hold in window 0).
     let mut call1 = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

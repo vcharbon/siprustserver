@@ -95,8 +95,10 @@ async fn b2bua_with_ack_timeout(
 ) -> B2buaSut {
     use std::sync::Arc;
     let decision = Arc::new(b2bua::decision::ScriptedDecisionEngine::route_all_to("127.0.0.1", dest_port));
-    B2buaSut::start_with_config(h, name, addr, decision, None, move |c| {
-        c.ack_timeout_sec = ack_timeout_sec;
-    })
-    .await
+    B2buaSut::builder(decision)
+        .tune(move |c| {
+            c.ack_timeout_sec = ack_timeout_sec;
+        })
+        .start(h, name, addr)
+        .await
 }

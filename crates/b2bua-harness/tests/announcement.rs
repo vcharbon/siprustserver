@@ -2,7 +2,7 @@
 //! service, exercised end to end through a real `B2buaCore`.
 //!
 //! `announcement` depends on `b2bua-sdk` alone (no `b2bua`), and is injected
-//! into the SUT via `B2buaSut::start_with_services`. The flow:
+//! into the SUT via `B2buaSut::builder(..).services(..)`. The flow:
 //! alice ↔ b2bua ↔ {MRF media server, destination} — early media from the MRF,
 //! an MSCML control channel, then a BYE+dial+bridge to the real destination.
 
@@ -52,14 +52,10 @@ async fn announcement_happy_path() {
     let alice = h.agent("alice", "127.0.0.1:5901").await;
     let mrf = h.agent("mrf", &format!("127.0.0.1:{MRF_PORT}")).await;
     let dest = h.agent("dest", &format!("127.0.0.1:{DEST_PORT}")).await;
-    let b2bua = B2buaSut::start_with_services(
-        &h,
-        "b2bua",
-        "127.0.0.1:5921",
-        announcement_decision(),
-        vec![announcement::service()],
-    )
-    .await;
+    let b2bua = B2buaSut::builder(announcement_decision())
+        .services(vec![announcement::service()])
+        .start(&h, "b2bua", "127.0.0.1:5921")
+        .await;
 
     // Alice calls; routing is deferred and the service launches a media leg to
     // the MRF.
@@ -127,14 +123,10 @@ async fn announcement_mrf_rejects() {
     let h = Harness::with_transit_delay("announcement-mrf-rejects", 1);
     let alice = h.agent("alice", "127.0.0.1:5902").await;
     let mrf = h.agent("mrf", &format!("127.0.0.1:{MRF_PORT}")).await;
-    let b2bua = B2buaSut::start_with_services(
-        &h,
-        "b2bua",
-        "127.0.0.1:5922",
-        announcement_decision(),
-        vec![announcement::service()],
-    )
-    .await;
+    let b2bua = B2buaSut::builder(announcement_decision())
+        .services(vec![announcement::service()])
+        .start(&h, "b2bua", "127.0.0.1:5922")
+        .await;
 
     let mut call = alice.invite(&mrf).with_sdp(OFFER).through(b2bua.addr).send().await;
 
@@ -157,14 +149,10 @@ async fn announcement_caller_cancels_mid_clip() {
     let h = Harness::with_transit_delay("announcement-caller-cancels", 1);
     let alice = h.agent("alice", "127.0.0.1:5903").await;
     let mrf = h.agent("mrf", &format!("127.0.0.1:{MRF_PORT}")).await;
-    let b2bua = B2buaSut::start_with_services(
-        &h,
-        "b2bua",
-        "127.0.0.1:5923",
-        announcement_decision(),
-        vec![announcement::service()],
-    )
-    .await;
+    let b2bua = B2buaSut::builder(announcement_decision())
+        .services(vec![announcement::service()])
+        .start(&h, "b2bua", "127.0.0.1:5923")
+        .await;
 
     let mut call = alice.invite(&mrf).with_sdp(OFFER).through(b2bua.addr).send().await;
 

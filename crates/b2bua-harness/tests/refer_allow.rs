@@ -57,7 +57,7 @@ async fn refer_allow_happy() {
     let alice = h.agent("alice", "127.0.0.1:5901").await;
     let bob = h.agent("bob", "127.0.0.1:5911").await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
-    let b2bua = B2buaSut::route_all_with_refer(&h, "b2bua", "127.0.0.1:5921", "127.0.0.1", 5911).await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5911).start(&h, "b2bua", "127.0.0.1:5921").await;
 
     // A↔B established.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -125,7 +125,7 @@ async fn refer_allow_c486() {
     let alice = h.agent("alice", "127.0.0.1:5902").await;
     let bob = h.agent("bob", "127.0.0.1:5912").await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
-    let b2bua = B2buaSut::route_all_with_refer(&h, "b2bua", "127.0.0.1:5922", "127.0.0.1", 5912).await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5912).start(&h, "b2bua", "127.0.0.1:5922").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -174,7 +174,7 @@ async fn refer_allow_c_multiple_18x() {
     let alice = h.agent("alice", "127.0.0.1:5905").await;
     let bob = h.agent("bob", "127.0.0.1:5915").await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
-    let b2bua = B2buaSut::route_all_with_refer(&h, "b2bua", "127.0.0.1:5925", "127.0.0.1", 5915).await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5915).start(&h, "b2bua", "127.0.0.1:5925").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -253,7 +253,7 @@ async fn refer_allow_c_no_answer() {
     let alice = h.agent("alice", "127.0.0.1:5904").await;
     let bob = h.agent("bob", "127.0.0.1:5914").await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
-    let b2bua = B2buaSut::route_all_with_refer(&h, "b2bua", "127.0.0.1:5924", "127.0.0.1", 5914).await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5914).start(&h, "b2bua", "127.0.0.1:5924").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -312,7 +312,7 @@ async fn refer_allow_c603() {
     let alice = h.agent("alice", "127.0.0.1:5903").await;
     let bob = h.agent("bob", "127.0.0.1:5913").await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
-    let b2bua = B2buaSut::route_all_with_refer(&h, "b2bua", "127.0.0.1:5923", "127.0.0.1", 5913).await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5913).start(&h, "b2bua", "127.0.0.1:5923").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;

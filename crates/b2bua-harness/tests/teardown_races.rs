@@ -73,18 +73,14 @@ async fn bye_bye_glare_reaps_once_and_releases_the_limiter_once() {
     let http = SimulatedHttpNetwork::new();
     let (store, _limiter_srv) = serve_limiter(&http).await;
     let decision = route_limited("127.0.0.1", 5070, "trunk-A", 1);
-    let b2bua = B2buaSut::start_with_limiter(
-        &h,
-        "b2bua",
-        "127.0.0.1:5080",
-        decision,
-        limiter_client(&http),
-        |c| {
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter_client(&http))
+        .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
-        },
-    )
-    .await;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
 
     let (mut alice_dialog, mut bob_dialog) =
         establish_call_both_sides(&alice, &bob, &b2bua, &store).await;
@@ -123,18 +119,14 @@ async fn reinvite_crossing_bye_terminates_and_releases_the_limiter() {
     let http = SimulatedHttpNetwork::new();
     let (store, _limiter_srv) = serve_limiter(&http).await;
     let decision = route_limited("127.0.0.1", 5071, "trunk-A", 1);
-    let b2bua = B2buaSut::start_with_limiter(
-        &h,
-        "b2bua",
-        "127.0.0.1:5081",
-        decision,
-        limiter_client(&http),
-        |c| {
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter_client(&http))
+        .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
-        },
-    )
-    .await;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5081")
+        .await;
 
     let (mut alice_dialog, mut bob_dialog) =
         establish_call_both_sides(&alice, &bob, &b2bua, &store).await;

@@ -39,7 +39,7 @@ async fn caller_silent_keepalive_reaps_with_cdr() {
     let h = Harness::new("b2bua-keepalive-reap-a-silent");
     let alice = h.agent("alice", "127.0.0.1:5065").await;
     let bob = h.agent("bob", "127.0.0.1:5075").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5085", "127.0.0.1", 5075).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5075).start(&h, "b2bua", "127.0.0.1:5085").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -79,7 +79,7 @@ async fn callee_silent_keepalive_reaps_with_cdr() {
     let h = Harness::new("b2bua-keepalive-reap-b-silent");
     let alice = h.agent("alice", "127.0.0.1:5066").await;
     let bob = h.agent("bob", "127.0.0.1:5076").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5086", "127.0.0.1", 5076).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -124,7 +124,7 @@ async fn two_calls_both_reap_despite_shared_timer_ids() {
     let alice1 = h.agent("alice1", "127.0.0.1:5067").await;
     let alice2 = h.agent("alice2", "127.0.0.1:5068").await;
     let bob = h.agent("bob", "127.0.0.1:5077").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5087", "127.0.0.1", 5077).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5077).start(&h, "b2bua", "127.0.0.1:5087").await;
 
     // ── Call 1 setup ─────────────────────────────────────────────────────────
     let mut c1 = alice1.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

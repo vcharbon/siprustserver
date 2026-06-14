@@ -28,7 +28,7 @@ async fn unanswered_bye_is_reaped_by_safety_timer() {
     let h = Harness::new("b2bua-bye-no-200-reap");
     let alice = h.agent("alice", "127.0.0.1:5068").await;
     let bob = h.agent("bob", "127.0.0.1:5078").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5088", "127.0.0.1", 5078).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5078).start(&h, "b2bua", "127.0.0.1:5088").await;
 
     // ── Call setup ───────────────────────────────────────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

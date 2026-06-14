@@ -27,7 +27,7 @@ async fn bob_481_on_options_byes_only_the_healthy_peer() {
     let h = Harness::new("b2bua-keepalive-481");
     let alice = h.agent("alice", "127.0.0.1:5066").await;
     let bob = h.agent("bob", "127.0.0.1:5076").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5086", "127.0.0.1", 5076).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
 
     // ── Call setup ───────────────────────────────────────────────────────────
     let _dialog = establish_call(&alice, &bob, b2bua.addr).await;

@@ -39,15 +39,9 @@ fn rack_matches(headers: &[sip_message::SipHeader], rseq: i64, method: &str) -> 
 }
 
 async fn b2bua_fake_prack(h: &Harness, name: &str, addr: &str, dest_port: u16) -> B2buaSut {
-    B2buaSut::route_all_to_with_18x(
-        h,
-        name,
-        addr,
-        "127.0.0.1",
-        dest_port,
-        RelayFirst18xStrategy::FakePrack,
-    )
-    .await
+    B2buaSut::route_all_to_with_18x("127.0.0.1", dest_port, RelayFirst18xStrategy::FakePrack)
+        .start(h, name, addr)
+        .await
 }
 
 #[tokio::test]
@@ -220,7 +214,7 @@ async fn no_policy_control() {
     let alice = h.agent("alice", "127.0.0.1:5706").await;
     let bob = h.agent("bob", "127.0.0.1:5716").await;
     // route_all_to → no relay_first_18x feature.
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5726", "127.0.0.1", 5716).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5716).start(&h, "b2bua", "127.0.0.1:5726").await;
 
     let mut call = alice
         .invite(&bob)
@@ -374,15 +368,13 @@ async fn run_fake_prack_failover(scenario: &str, alice_p: u16, bob1_p: u16, bob2
     let bob1 = h.agent("bob1", &format!("127.0.0.1:{bob1_p}")).await;
     let bob2 = h.agent("bob2", &format!("127.0.0.1:{bob2_p}")).await;
     let b2bua = B2buaSut::route_all_to_with_18x_failover(
-        &h,
-        "b2bua",
-        &format!("127.0.0.1:{b2b_p}"),
         "127.0.0.1",
         bob1_p,
         bob2_p,
         &format!("sip:+1234@127.0.0.1:{bob2_p}"),
         RelayFirst18xStrategy::FakePrack,
     )
+    .start(&h, "b2bua", &format!("127.0.0.1:{b2b_p}"))
     .await;
 
     let mut call = alice

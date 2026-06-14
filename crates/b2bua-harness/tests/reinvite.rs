@@ -28,7 +28,7 @@ async fn failed_reinvite_keeps_dialog_state() {
     let h = Harness::with_transit_delay("b2bua-reinvite-failed", 0);
     let alice = h.agent("alice", "127.0.0.1:5066").await;
     let bob = h.agent("bob", "127.0.0.1:5076").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5086", "127.0.0.1", 5076).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
 
     // ── call setup ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -76,7 +76,7 @@ async fn reinvite_18x_then_488_keeps_call() {
     let h = Harness::with_transit_delay("b2bua-reinvite-18x-488", 0);
     let alice = h.agent("alice", "127.0.0.1:5068").await;
     let bob = h.agent("bob", "127.0.0.1:5078").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5088", "127.0.0.1", 5078).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5078).start(&h, "b2bua", "127.0.0.1:5088").await;
 
     // ── call setup ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -133,7 +133,7 @@ async fn alice_reinvite() {
     let h = Harness::with_transit_delay("b2bua-reinvite-alice", 0);
     let alice = h.agent("alice", "127.0.0.1:5061").await;
     let bob = h.agent("bob", "127.0.0.1:5071").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5081", "127.0.0.1", 5071).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5071).start(&h, "b2bua", "127.0.0.1:5081").await;
 
     // ── call setup ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -180,7 +180,7 @@ async fn bob_reinvite() {
     let h = Harness::with_transit_delay("b2bua-reinvite-bob", 0);
     let alice = h.agent("alice", "127.0.0.1:5062").await;
     let bob = h.agent("bob", "127.0.0.1:5072").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5082", "127.0.0.1", 5072).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5072).start(&h, "b2bua", "127.0.0.1:5082").await;
 
     // ── call setup ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -230,7 +230,7 @@ async fn crossing_reinvite_glare() {
     let h = Harness::with_transit_delay("b2bua-reinvite-crossing", 0);
     let alice = h.agent("alice", "127.0.0.1:5064").await;
     let bob = h.agent("bob", "127.0.0.1:5074").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5084", "127.0.0.1", 5074).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5074).start(&h, "b2bua", "127.0.0.1:5084").await;
 
     // ── call setup ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

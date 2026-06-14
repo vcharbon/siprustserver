@@ -76,15 +76,11 @@ async fn cancel_200_crossing_acks_then_byes_the_b_leg_and_releases_the_limiter()
     let http = SimulatedHttpNetwork::new();
     let (store, _limiter_srv) = serve_limiter(&http).await;
     let decision = route_limited("127.0.0.1", 5073, "trunk-A", 1);
-    let b2bua = B2buaSut::start_with_limiter(
-        &h,
-        "b2bua",
-        "127.0.0.1:5083",
-        decision,
-        limiter_client(&http),
-        |c| c.reaper_enabled = false,
-    )
-    .await;
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter_client(&http))
+        .tune(|c| c.reaper_enabled = false)
+        .start(&h, "b2bua", "127.0.0.1:5083")
+        .await;
 
     // ── ringing call ─────────────────────────────────────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

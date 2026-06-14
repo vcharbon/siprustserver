@@ -31,15 +31,10 @@ async fn keepalive_interval_honors_config() {
     let alice = h.agent("alice", "127.0.0.1:5066").await;
     let bob = h.agent("bob", "127.0.0.1:5076").await;
     let decision = Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5076));
-    let b2bua = B2buaSut::start_with_config(
-        &h,
-        "b2bua",
-        "127.0.0.1:5086",
-        decision,
-        None,
-        |c| c.keepalive_interval_sec = CONFIGURED_INTERVAL_SEC,
-    )
-    .await;
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| c.keepalive_interval_sec = CONFIGURED_INTERVAL_SEC)
+        .start(&h, "b2bua", "127.0.0.1:5086")
+        .await;
 
     // ── Call setup ───────────────────────────────────────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

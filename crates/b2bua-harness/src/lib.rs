@@ -269,100 +269,60 @@ pub struct B2buaSut {
     _core: B2buaCore,
 }
 
-impl B2buaSut {
-    /// Bind a B2BUA at `addr` driven by `decision`.
-    pub async fn start(
-        h: &Harness,
-        name: &str,
-        addr: &str,
-        decision: Arc<dyn CallDecisionEngine>,
-    ) -> Self {
-        Self::start_with_outbound_proxy(h, name, addr, decision, None).await
-    }
+/// Composable builder for a single-SUT [`B2buaSut`] (slice 3). Replaces the
+/// former fan of `start*` / `route_all*` constructors: the decision engine is
+/// fixed at construction (via [`B2buaSut::builder`] or one of the `route_all*`
+/// convenience constructors that pre-build a common decision engine), and every
+/// other axis — outbound proxy, limiter, callflow services, config tuning — is
+/// an optional chain method. [`start`](Self::start) is the single terminal that
+/// binds and spawns the core, preserving the exact wiring the old `start_inner`
+/// had (binds `{Uac, Uas}` roles; keepalive defaults 30/5 applied FIRST then the
+/// caller `tune` LAST so a test overriding keepalive still wins; `NoopLimiter`,
+/// empty services, no replication, `Clock::test_at(0)`, id-gen seed `0xB2B0`,
+/// ordinal `"w0"` defaults).
+pub struct B2buaSutBuilder {
+    decision: Arc<dyn CallDecisionEngine>,
+    outbound_proxy: Option<(String, u16)>,
+    limiter: Arc<dyn CallLimiter>,
+    services: Vec<b2bua::rules::ServiceDef>,
+    tune: Box<dyn FnOnce(&mut B2buaConfig)>,
+}
 
-    /// Bind a B2BUA at `addr` driven by `decision`, optionally deployed behind
-    /// the front proxy: when `outbound_proxy` is `Some((host, port))`, every
-    /// b-leg outbound request traverses that proxy (see
+impl B2buaSutBuilder {
+    /// Route the b-leg through the front proxy at `(host, port)` (the
+    /// `alice → proxy → b2bua → proxy → bob` topology; see
     /// [`B2buaConfig::b2b_outbound_proxy`]).
-    pub async fn start_with_outbound_proxy(
-        h: &Harness,
-        name: &str,
-        addr: &str,
-        decision: Arc<dyn CallDecisionEngine>,
-        outbound_proxy: Option<(String, u16)>,
-    ) -> Self {
-        Self::start_with_config(h, name, addr, decision, outbound_proxy, |_| {}).await
+    pub fn outbound_proxy(mut self, host: &str, port: u16) -> Self {
+        self.outbound_proxy = Some((host.to_string(), port));
+        self
     }
 
-    /// Bind a B2BUA with a config mutator hook. The base config is the default
-    /// (with `self_ordinal`/local IP+port/outbound-proxy wired); `tune` may
-    /// override any other field (the faithful equivalent of a per-scenario
-    /// `configOverrides` — the source stack applies them worker-wide too).
-    pub async fn start_with_config(
-        h: &Harness,
-        name: &str,
-        addr: &str,
-        decision: Arc<dyn CallDecisionEngine>,
-        outbound_proxy: Option<(String, u16)>,
-        tune: impl FnOnce(&mut B2buaConfig),
-    ) -> Self {
-        Self::start_inner(h, name, addr, decision, outbound_proxy, Arc::new(NoopLimiter), Vec::new(), tune).await
+    /// Use a custom [`CallLimiter`] (e.g. an `HttpCallLimiter` over the
+    /// simulated HTTP fabric serving a real `LimiterServer`). Defaults to
+    /// `NoopLimiter`.
+    pub fn limiter(mut self, limiter: Arc<dyn CallLimiter>) -> Self {
+        self.limiter = limiter;
+        self
     }
 
-    /// Bind a B2BUA with a set of registered callflow services (ADR-0016): each
-    /// service's `init` runs at setup and its state-gated rules compose above the
-    /// core defaults. Used by the out-of-tree `announcement` capstone (slice 8) —
-    /// the service is injected here, so `b2bua` never depends on it.
-    pub async fn start_with_services(
-        h: &Harness,
-        name: &str,
-        addr: &str,
-        decision: Arc<dyn CallDecisionEngine>,
-        services: Vec<b2bua::rules::ServiceDef>,
-    ) -> Self {
-        Self::start_inner(h, name, addr, decision, None, Arc::new(NoopLimiter), services, |_| {}).await
+    /// Register a set of callflow services (ADR-0016): each service's `init`
+    /// runs at setup and its state-gated rules compose above the core defaults.
+    pub fn services(mut self, services: Vec<b2bua::rules::ServiceDef>) -> Self {
+        self.services = services;
+        self
     }
 
-    /// [`start_with_services`](Self::start_with_services) plus the config
-    /// mutator hook (the reaper scenarios register a panicking probe rule AND
-    /// tune the reaper cadence).
-    pub async fn start_with_services_and_config(
-        h: &Harness,
-        name: &str,
-        addr: &str,
-        decision: Arc<dyn CallDecisionEngine>,
-        services: Vec<b2bua::rules::ServiceDef>,
-        tune: impl FnOnce(&mut B2buaConfig),
-    ) -> Self {
-        Self::start_inner(h, name, addr, decision, None, Arc::new(NoopLimiter), services, tune).await
+    /// Config mutator hook (the faithful equivalent of a per-scenario
+    /// `configOverrides`). Runs LAST in [`start`](Self::start) — after the
+    /// harness keepalive defaults — so a test may still override them.
+    pub fn tune(mut self, tune: impl FnOnce(&mut B2buaConfig) + 'static) -> Self {
+        self.tune = Box::new(tune);
+        self
     }
 
-    /// Bind a B2BUA with a custom [`CallLimiter`] (e.g. an `HttpCallLimiter` over
-    /// the simulated HTTP fabric serving a real `LimiterServer`). No outbound
-    /// proxy; `tune` may override config (e.g. `limiter_refresh_sec`,
-    /// `self_ordinal` for the cross-worker scenario).
-    pub async fn start_with_limiter(
-        h: &Harness,
-        name: &str,
-        addr: &str,
-        decision: Arc<dyn CallDecisionEngine>,
-        limiter: Arc<dyn CallLimiter>,
-        tune: impl FnOnce(&mut B2buaConfig),
-    ) -> Self {
-        Self::start_inner(h, name, addr, decision, None, limiter, Vec::new(), tune).await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn start_inner(
-        h: &Harness,
-        name: &str,
-        addr: &str,
-        decision: Arc<dyn CallDecisionEngine>,
-        outbound_proxy: Option<(String, u16)>,
-        limiter: Arc<dyn CallLimiter>,
-        services: Vec<b2bua::rules::ServiceDef>,
-        tune: impl FnOnce(&mut B2buaConfig),
-    ) -> Self {
+    /// Bind the B2BUA at `addr` and spawn its core, consuming the builder.
+    pub async fn start(self, h: &Harness, name: &str, addr: &str) -> B2buaSut {
+        let B2buaSutBuilder { decision, outbound_proxy, limiter, services, tune } = self;
         // The B2BUA terminates each leg as a UA (UAS on the a-leg, UAC on the
         // b-leg) — it is NOT an RFC 3261 §16 proxy, so its bind declares
         // `{Uac, Uas}` and the proxy-subject audit rules (no-target-404,
@@ -402,74 +362,51 @@ impl B2buaSut {
             tune(config);
         });
         let metrics = core.metrics().clone();
-        Self {
+        B2buaSut {
             addr: sa,
             cdr,
             metrics,
             _core: core,
         }
     }
+}
 
-    /// Bind a B2BUA that routes every call to `dest` (the common case).
-    pub async fn route_all_to(
-        h: &Harness,
-        name: &str,
-        addr: &str,
-        dest_host: &str,
-        dest_port: u16,
-    ) -> Self {
-        let decision = Arc::new(ScriptedDecisionEngine::route_all_to(dest_host, dest_port));
-        Self::start(h, name, addr, decision).await
+impl B2buaSut {
+    /// Base builder: a B2BUA driven by `decision`, every other axis at its
+    /// default (no outbound proxy, `NoopLimiter`, no services, no-op tune).
+    pub fn builder(decision: Arc<dyn CallDecisionEngine>) -> B2buaSutBuilder {
+        B2buaSutBuilder {
+            decision,
+            outbound_proxy: None,
+            limiter: Arc::new(NoopLimiter),
+            services: Vec::new(),
+            tune: Box::new(|_| {}),
+        }
     }
 
-    /// Bind a B2BUA that routes every call to `dest` and authorizes REFER
+    /// Builder for a B2BUA that routes every call to `dest` (the common case).
+    pub fn route_all_to(dest_host: &str, dest_port: u16) -> B2buaSutBuilder {
+        Self::builder(Arc::new(ScriptedDecisionEngine::route_all_to(dest_host, dest_port)))
+    }
+
+    /// Builder for a B2BUA that routes every call to `dest` and authorizes REFER
     /// transfers via the default `X-Api-Call`-keyed `/call/refer` behavior (the
     /// REFER-scenario constructor).
-    pub async fn route_all_with_refer(
-        h: &Harness,
-        name: &str,
-        addr: &str,
-        dest_host: &str,
-        dest_port: u16,
-    ) -> Self {
-        let decision = Arc::new(ScriptedDecisionEngine::route_all_with_refer(dest_host, dest_port));
-        Self::start(h, name, addr, decision).await
+    pub fn route_all_with_refer(dest_host: &str, dest_port: u16) -> B2buaSutBuilder {
+        Self::builder(Arc::new(ScriptedDecisionEngine::route_all_with_refer(
+            dest_host, dest_port,
+        )))
     }
 
-    /// Like [`route_all_with_refer`](Self::route_all_with_refer) but with the
-    /// REFER realignment / overall-safety timers overridden (the per-scenario
-    /// `configOverrides` the `refer-timers` corpus uses: push
-    /// `refer_reinvite_answer` out past `refer_overall_safety` so the overall
-    /// watchdog trips first while a realign re-INVITE is stuck unanswered).
-    pub async fn route_all_with_refer_timers(
-        h: &Harness,
-        name: &str,
-        addr: &str,
-        dest_host: &str,
-        dest_port: u16,
-        refer_reinvite_answer_sec: i64,
-        refer_overall_safety_sec: i64,
-    ) -> Self {
-        let decision = Arc::new(ScriptedDecisionEngine::route_all_with_refer(dest_host, dest_port));
-        Self::start_with_config(h, name, addr, decision, None, move |c| {
-            c.refer_reinvite_answer_sec = refer_reinvite_answer_sec;
-            c.refer_overall_safety_sec = refer_overall_safety_sec;
-        })
-        .await
-    }
-
-    /// Bind a B2BUA that routes every call to `dest` with the
+    /// Builder for a B2BUA that routes every call to `dest` with the
     /// `relayFirst18xTo180` feature active under `strategy` (suppress / fake-prack).
-    pub async fn route_all_to_with_18x(
-        h: &Harness,
-        name: &str,
-        addr: &str,
+    pub fn route_all_to_with_18x(
         dest_host: &str,
         dest_port: u16,
         strategy: call::features::RelayFirst18xStrategy,
-    ) -> Self {
+    ) -> B2buaSutBuilder {
         let dest = (dest_host.to_string(), dest_port);
-        let decision = Arc::new(
+        Self::builder(Arc::new(
             b2bua::decision::ScriptedDecisionEngine::builder()
                 .fallback(move |_req| {
                     b2bua::decision::NewCallResponse::Route(
@@ -479,32 +416,27 @@ impl B2buaSut {
                     )
                 })
                 .build(),
-        );
-        Self::start(h, name, addr, decision).await
+        ))
     }
 
-    /// Bind a B2BUA that routes the call to `dest_port` (bob1) with the
+    /// Builder for a B2BUA that routes the call to `dest_port` (bob1) with the
     /// `relayFirst18xTo180` feature active under `strategy` and a `callback_context`
     /// set (the failover-capable marker), and fails over via `/call/failure` to
     /// `failover_port` (bob2) with `failover_ruri` as the new Request-URI. Mirrors
     /// the TS `on_failure: { action: "failover", destination, new_ruri }` instruction.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn route_all_to_with_18x_failover(
-        h: &Harness,
-        name: &str,
-        addr: &str,
+    pub fn route_all_to_with_18x_failover(
         dest_host: &str,
         dest_port: u16,
         failover_port: u16,
         failover_ruri: &str,
         strategy: call::features::RelayFirst18xStrategy,
-    ) -> Self {
-        use b2bua::decision::{CallFailureResponse, NewCallResponse};
+    ) -> B2buaSutBuilder {
         use b2bua::decision::test_adapter::route_to_with_18x;
+        use b2bua::decision::{CallFailureResponse, NewCallResponse};
         let primary = (dest_host.to_string(), dest_port);
         let failover = (dest_host.to_string(), failover_port);
         let failover_ruri = failover_ruri.to_string();
-        let decision = Arc::new(
+        Self::builder(Arc::new(
             ScriptedDecisionEngine::builder()
                 .fallback(move |_req| {
                     let mut r = route_to_with_18x(&primary.0, primary.1, strategy);
@@ -520,31 +452,7 @@ impl B2buaSut {
                     CallFailureResponse::Route(r)
                 })
                 .build(),
-        );
-        Self::start(h, name, addr, decision).await
-    }
-
-    /// Bind a B2BUA that routes every call to `dest` but sends its b-leg
-    /// (worker→callee) traffic through the front proxy at `proxy` — the
-    /// `alice → proxy → b2bua → proxy → bob` topology.
-    pub async fn route_all_to_via_proxy(
-        h: &Harness,
-        name: &str,
-        addr: &str,
-        dest_host: &str,
-        dest_port: u16,
-        proxy_host: &str,
-        proxy_port: u16,
-    ) -> Self {
-        let decision = Arc::new(ScriptedDecisionEngine::route_all_to(dest_host, dest_port));
-        Self::start_with_outbound_proxy(
-            h,
-            name,
-            addr,
-            decision,
-            Some((proxy_host.to_string(), proxy_port)),
-        )
-        .await
+        ))
     }
 
     pub fn cdr_records(&self) -> Vec<CdrRecord> {

@@ -22,15 +22,9 @@ fn has_token(value: Option<&str>, token: &str) -> bool {
 }
 
 async fn b2bua_pem(h: &Harness, name: &str, addr: &str, dest_port: u16) -> B2buaSut {
-    B2buaSut::route_all_to_with_18x(
-        h,
-        name,
-        addr,
-        "127.0.0.1",
-        dest_port,
-        RelayFirst18xStrategy::PromotePemTo200,
-    )
-    .await
+    B2buaSut::route_all_to_with_18x("127.0.0.1", dest_port, RelayFirst18xStrategy::PromotePemTo200)
+        .start(h, name, addr)
+        .await
 }
 
 #[tokio::test]
@@ -89,7 +83,7 @@ async fn no_policy_control() {
     let h = Harness::with_transit_delay("promote-pem-no-policy-control", 0);
     let alice = h.agent("alice", "127.0.0.1:5808").await;
     let bob = h.agent("bob", "127.0.0.1:5818").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5828", "127.0.0.1", 5818).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5818).start(&h, "b2bua", "127.0.0.1:5828").await;
 
     let mut call = alice
         .invite(&bob)

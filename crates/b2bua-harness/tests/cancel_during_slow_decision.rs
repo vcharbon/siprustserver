@@ -86,7 +86,7 @@ async fn cancel_during_slow_decision_tears_down_cleanly() {
         inner: Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5071)),
         delay: DECISION_DELAY,
     });
-    let b2bua = B2buaSut::start(&h, "b2bua", "127.0.0.1:5081", decision).await;
+    let b2bua = B2buaSut::builder(decision).start(&h, "b2bua", "127.0.0.1:5081").await;
 
     // ── alice INVITEs through the B2BUA; the decision backend stalls ───────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

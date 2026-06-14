@@ -36,5 +36,5 @@ http-net = { path = "../http-net" }
 call-limiter = { path = "../call-limiter" }
 serde_json = { workspace = true }
 # Slice 8 capstone: the out-of-tree `announcement` callflow service, injected
-# into the SUT via `B2buaSut::start_with_services` for the early-media e2e.
+# into the SUT via `B2buaSut::builder(..).services(..)` for the early-media e2e.
 announcement = { path = "../announcement" }

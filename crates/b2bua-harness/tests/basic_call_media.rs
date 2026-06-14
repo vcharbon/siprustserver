@@ -29,7 +29,7 @@ async fn alice_and_bob_hear_each_other_through_b2bua() {
     let h = Harness::with_transit_delay("b2bua-basic-media", 1);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5080", "127.0.0.1", 5070).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5070).start(&h, "b2bua", "127.0.0.1:5080").await;
 
     // Media rides a separate simulated fabric (peer-to-peer; the B2BUA never
     // touches RTP). Both transports bind on the same media net so RTP routes.

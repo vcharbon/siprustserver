@@ -96,18 +96,14 @@ async fn ringing_forever_is_torn_down_at_setup_timeout_and_releases_the_limiter(
     let http = SimulatedHttpNetwork::new();
     let (store, _limiter_srv) = serve_limiter(&http).await;
     let decision = route_with_limiter("127.0.0.1", 5070, "trunk-A", 1);
-    let b2bua = B2buaSut::start_with_limiter(
-        &h,
-        "b2bua",
-        "127.0.0.1:5080",
-        decision,
-        limiter_client(&http),
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter_client(&http))
         // Isolate the timer mechanism: the reaper's liveness policy has its own
         // suite (`reaper_liveness.rs`); in production the reaper was masked by
         // the LimiterRefresh self-touch, so it must not save this test either.
-        |c| c.reaper_enabled = false,
-    )
-    .await;
+        .tune(|c| c.reaper_enabled = false)
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
 
     // ── Setup stalls: bob rings, then silence (no final response ever) ───────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -170,15 +166,10 @@ async fn long_ring_that_answers_before_the_deadline_survives() {
     let decision = Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5071));
     // Keepalive pushed out so the post-answer advance exercises ONLY the
     // (cancelled) setup timer, not the keepalive machinery.
-    let b2bua = B2buaSut::start_with_config(
-        &h,
-        "b2bua",
-        "127.0.0.1:5081",
-        decision,
-        None,
-        |c| c.keepalive_interval_sec = 3_600,
-    )
-    .await;
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| c.keepalive_interval_sec = 3_600)
+        .start(&h, "b2bua", "127.0.0.1:5081")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;

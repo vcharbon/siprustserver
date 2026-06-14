@@ -57,10 +57,13 @@ async fn refer_overall_safety_fires() {
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
     // reinvite_answer=600s, overall_safety=10s → the overall watchdog trips
     // first while the c-realign re-INVITE toward C is unanswered.
-    let b2bua = B2buaSut::route_all_with_refer_timers(
-        &h, "b2bua", "127.0.0.1:5771", "127.0.0.1", 5761, 600, 10,
-    )
-    .await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5761)
+        .tune(move |c| {
+            c.refer_reinvite_answer_sec = 600;
+            c.refer_overall_safety_sec = 10;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5771")
+        .await;
 
     // A↔B established.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

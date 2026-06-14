@@ -78,22 +78,18 @@ async fn limiter_refresh_self_touch_does_not_mask_staleness() {
     let http = SimulatedHttpNetwork::new();
     let (store, _limiter_srv) = serve_limiter(&http).await;
     let decision = route_with_limiter("127.0.0.1", 5072, "trunk-A", 1);
-    let b2bua = B2buaSut::start_with_limiter(
-        &h,
-        "b2bua",
-        "127.0.0.1:5082",
-        decision,
-        limiter_client(&http),
-        |c| {
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter_client(&http))
+        .tune(|c| {
             // No keepalive inside the horizon; an aggressive refresh cadence
             // (10 s << idle 60 s) so the self-touch masking is fully exercised.
             c.keepalive_interval_sec = 3_600;
             c.reaper_idle_max_sec = 60;
             c.reaper_sweep_interval_sec = 30;
             c.limiter_refresh_sec = 10;
-        },
-    )
-    .await;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5082")
+        .await;
 
     let _dialog = establish_call(&alice, &bob, b2bua.addr).await;
     assert_eq!(store.stats().current_total, 1, "limiter hold taken");
@@ -134,12 +130,14 @@ async fn received_sip_refreshes_liveness() {
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     let bob = h.agent("bob", "127.0.0.1:5073").await;
     let decision = Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5073));
-    let b2bua = B2buaSut::start_with_config(&h, "b2bua", "127.0.0.1:5083", decision, None, |c| {
-        c.keepalive_interval_sec = 3_600;
-        c.reaper_idle_max_sec = 60;
-        c.reaper_sweep_interval_sec = 30;
-    })
-    .await;
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_idle_max_sec = 60;
+            c.reaper_sweep_interval_sec = 30;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5083")
+        .await;
 
     let mut dialog = establish_call(&alice, &bob, b2bua.addr).await;
 

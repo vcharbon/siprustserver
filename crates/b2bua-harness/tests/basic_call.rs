@@ -14,7 +14,7 @@ async fn alice_calls_bob_through_b2bua() {
     let h = Harness::with_transit_delay("b2bua-basic", 0);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5080", "127.0.0.1", 5070).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5070).start(&h, "b2bua", "127.0.0.1:5080").await;
 
     // alice INVITEs (addressed to bob) but sends through the B2BUA.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

@@ -25,7 +25,7 @@ async fn cancel_after_answer_does_not_tear_down() {
     let h = Harness::with_transit_delay("b2bua-cancel-after-answer", 1);
     let alice = h.agent("alice", "127.0.0.1:5066").await;
     let bob = h.agent("bob", "127.0.0.1:5076").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5086", "127.0.0.1", 5076).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
 
     // ── establish the call (INVITE → 180 → 200 → ACK) ────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

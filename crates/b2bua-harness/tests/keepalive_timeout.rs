@@ -29,7 +29,7 @@ async fn unanswered_keepalive_byes_the_healthy_peer() {
     let h = Harness::new("b2bua-keepalive-timeout");
     let alice = h.agent("alice", "127.0.0.1:5065").await;
     let bob = h.agent("bob", "127.0.0.1:5075").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5085", "127.0.0.1", 5075).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5075).start(&h, "b2bua", "127.0.0.1:5085").await;
 
     // ── Call setup ───────────────────────────────────────────────────────────
     let _dialog = establish_call(&alice, &bob, b2bua.addr).await;

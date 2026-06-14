@@ -56,7 +56,7 @@ async fn prack_update_forking_answer_on_second_fork() {
     let h = Harness::with_transit_delay("b2bua-prack-update-forking", 1);
     let alice = h.agent("alice", "127.0.0.1:5067").await;
     let bob = h.agent("bob", "127.0.0.1:5077").await;
-    let b2bua = B2buaSut::route_all_to(&h, "b2bua", "127.0.0.1:5087", "127.0.0.1", 5077).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5077).start(&h, "b2bua", "127.0.0.1:5087").await;
 
     // Alice INVITEs with the offer in the INVITE, advertising 100rel support.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
