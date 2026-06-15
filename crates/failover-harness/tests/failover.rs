@@ -120,11 +120,9 @@ async fn canonical_failover() {
 
     // ── STEP 3: alice in-dialog BYE → proxy sees w_pri dead → routes to b2 ────
     let b2_creations_before = b2.metrics().creations_total();
-    let mut bye = dialog.bye().await;
     // The acting-backup b2 handles the in-dialog request and tears the call down
     // (it BYEs bob through the proxy too).
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     fh.advance(Duration::from_millis(500)).await;
 
     // ── GATE 3: the in-dialog request was handled on B2 (acting-backup) ──────
@@ -190,9 +188,7 @@ async fn canonical_failover() {
 
     // The recovered B1 is serving again (creations advanced on whichever primary
     // HRW picked — with both alive the cookie names a definite primary).
-    let mut bye2 = dlg2.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye2.expect(200).await;
+    scenario_harness::callflow::hangup(&mut dlg2, &bob).await;
     fh.advance(Duration::from_millis(300)).await;
 
     // ── combined report (recording-first; SIP + replication together) ────────
@@ -1044,9 +1040,7 @@ async fn matrix_crash_mid_invite() {
     call2.expect(200).await;
     let mut dlg2 = call2.ack().await;
     bob.receive("ACK").await;
-    let mut bye2 = dlg2.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye2.expect(200).await;
+    scenario_harness::callflow::hangup(&mut dlg2, &bob).await;
     fh.advance(Duration::from_millis(300)).await;
     // Reaching here without a panic IS the assertion (liveness preserved).
     drop((w_b1, w_b2, proxy));
@@ -1154,9 +1148,7 @@ async fn matrix_partition_during_failover() {
     // The acting-backup b2 still handles the in-dialog BYE (reverse-propagation
     // to the partitioned/crashed primary is best-effort; the call is served).
     let b2_before = b2.metrics().creations_total();
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(
         b2.metrics().creations_total() > b2_before,
@@ -1226,9 +1218,7 @@ async fn matrix_double_fault() {
 
     // Liveness: the BYE still completes on b2 despite the double fault.
     let b2_before = b2.metrics().creations_total();
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(
         b2.metrics().creations_total() > b2_before,
@@ -1266,9 +1256,7 @@ async fn combined_report_carries_sip_and_replication() {
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
     fh.advance(Duration::from_millis(500)).await;
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
 
     // A crash marker so the report shows a crash/reboot event band.
     fh.mark("b1", None, "crash", "report demo");

@@ -13,7 +13,14 @@ use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
 use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
-use scenario_harness::{Agent, Dialog, Harness};
+use scenario_harness::{Agent, Dialog, Harness, RunReport};
+
+// The canonical INVITE/180/200/ACK choreography now lives in `scenario-harness`
+// (`scenario_harness::callflow`), so the single-SUT b2bua tests and the HA
+// failover tests share ONE implementation of the dance. Re-exported here so
+// existing `b2bua_harness::{establish, hangup, OFFER_SDP, …}` imports keep
+// working — the home for the dance is `scenario_harness::callflow`.
+pub use scenario_harness::callflow::{self, establish, hangup, Call, ANSWER_SDP, OFFER_SDP};
 use sip_clock::Clock;
 use sip_net::UdpEndpoint;
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
@@ -227,37 +234,6 @@ pub async fn settle_until(cond: impl Fn() -> bool) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
-}
-
-/// Canonical minimal SDP offer used by [`establish_call`]. A single audio
-/// `m=` line — enough for the B2BUA to relay; tests that don't probe media
-/// don't care about its contents.
-pub const OFFER_SDP: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
-/// Canonical minimal SDP answer used by [`establish_call`]. See [`OFFER_SDP`].
-pub const ANSWER_SDP: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
-
-/// Establish a confirmed dialog through the B2BUA and return alice's `Dialog`
-/// so the caller can drive the in-dialog phase (BYE, re-INVITE, keepalive, …).
-///
-/// Runs the canonical happy-path handshake — alice INVITEs (with [`OFFER_SDP`])
-/// through `b2bua_addr`; bob rings (180) then answers (200 with [`ANSWER_SDP`]);
-/// the ACK is relayed end-to-end — the ~8 lines every "set the call up, then
-/// test the interesting part" test used to re-type.
-///
-/// Opt-in: a test that asserts on the intermediate 18x, on the relayed SDP
-/// bodies, or that injects a non-2xx final response should keep driving the
-/// handshake by hand — this fixture is for tests whose subject is what happens
-/// *after* the call is up.
-pub async fn establish_call(alice: &Agent, bob: &Agent, b2bua_addr: SocketAddr) -> Dialog {
-    let mut call = alice.invite(bob).with_sdp(OFFER_SDP).through(b2bua_addr).send().await;
-    let mut uas = bob.receive("INVITE").await;
-    uas.respond(180, "Ringing").await;
-    call.expect(180).await;
-    uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
-    call.expect(200).await;
-    let dialog = call.ack().await;
-    bob.receive("ACK").await;
-    dialog
 }
 
 /// A running B2BUA bound on the harness fabric. Keep it alive for the duration
@@ -523,5 +499,98 @@ impl B2buaSut {
             "stamp leak: {} stranded last-touched ledger entr(ies)",
             self._core.touched_count()
         );
+    }
+}
+
+/// Canonical default port for `alice` in a [`B2buaScene`].
+pub const ALICE_PORT: u16 = 5060;
+/// Canonical default port for `bob` in a [`B2buaScene`].
+pub const BOB_PORT: u16 = 5070;
+/// Canonical default port for the `b2bua` SUT in a [`B2buaScene`].
+pub const B2BUA_PORT: u16 = 5080;
+
+/// The standard alice ↔ b2bua ↔ bob fixture with canonical default ports and a
+/// b2bua that routes every call to bob — so a new test never picks ports or
+/// wires routing by hand. Access [`alice`](Self::alice)/[`bob`](Self::bob)/
+/// [`b2bua`](Self::b2bua) for the interesting part; [`establish`](Self::establish)
+/// runs the canonical call (delegating to [`callflow::establish`]);
+/// [`finish`](Self::finish) gates RFC + renders.
+///
+/// # Writing a new single-SUT b2bua test
+///
+/// The 90% case is one line:
+///
+/// ```ignore
+/// let s = B2buaScene::new("my-test").await;
+/// let mut dialog = s.establish().await;          // alice → b2bua → bob, confirmed
+/// // ... the interesting part, driving `s.alice` / `s.bob` / `s.b2bua` ...
+/// s.hangup(&mut dialog).await;                    // BYE / 200
+/// s.finish().await;                              // RFC gate + render
+/// ```
+///
+/// Each `Harness` has its own simulated network namespace, so the fixed ports
+/// never collide between tests. For a non-default b2bua decision (refer, limiter,
+/// services, config tune) build it via [`with_b2bua`](Self::with_b2bua), which
+/// hands you bob's port and the full [`B2buaSutBuilder`]:
+///
+/// ```ignore
+/// let s = B2buaScene::with_b2bua("refer-test", |bob_port| {
+///     B2buaSut::route_all_with_refer("127.0.0.1", bob_port)
+/// }).await;
+/// ```
+pub struct B2buaScene {
+    pub h: Harness,
+    pub alice: Agent,
+    pub bob: Agent,
+    pub b2bua: B2buaSut,
+}
+
+impl B2buaScene {
+    /// alice/bob/b2bua bound at the canonical default ports
+    /// ([`ALICE_PORT`]/[`BOB_PORT`]/[`B2BUA_PORT`]); the b2bua routes every call
+    /// to bob. The 90%-case fixture — one line for a new test.
+    pub async fn new(name: &str) -> Self {
+        Self::with_b2bua(name, |bob_port| B2buaSut::route_all_to("127.0.0.1", bob_port)).await
+    }
+
+    /// Like [`new`](Self::new) but customise the b2bua: `build` is handed bob's
+    /// canonical port and must return the [`B2buaSutBuilder`] to start (start is
+    /// done for you at [`B2BUA_PORT`]). This composes cleanly with every existing
+    /// `B2buaSut::route_all*` entry point and the builder's chain methods
+    /// (`outbound_proxy`, `limiter`, `services`, `tune`), so a test needing a
+    /// non-default decision still gets the canonical alice/bob/ports wiring for
+    /// free. Default decision = `route_all_to(bob)` (see [`new`](Self::new)).
+    pub async fn with_b2bua(
+        name: &str,
+        build: impl FnOnce(u16) -> B2buaSutBuilder,
+    ) -> Self {
+        // Match the common b2bua-test convention: the harness's default
+        // SIMULATED_TRANSIT_DELAY_MS (1 ms floor enforced by the fabric).
+        let h = Harness::new(name);
+        let alice = h.agent("alice", &format!("127.0.0.1:{ALICE_PORT}")).await;
+        let bob = h.agent("bob", &format!("127.0.0.1:{BOB_PORT}")).await;
+        let b2bua = build(BOB_PORT)
+            .start(&h, "b2bua", &format!("127.0.0.1:{B2BUA_PORT}"))
+            .await;
+        Self { h, alice, bob, b2bua }
+    }
+
+    /// Run the canonical call (alice → b2bua → bob, confirmed) and return alice's
+    /// [`Dialog`]. Equivalent to
+    /// `callflow::establish(&self.alice, &self.bob, self.b2bua.addr)`.
+    pub async fn establish(&self) -> Dialog {
+        callflow::establish(&self.alice, &self.bob, self.b2bua.addr).await
+    }
+
+    /// Tear the call down (alice BYE / bob 200). Equivalent to
+    /// `callflow::hangup(dialog, &self.bob)`.
+    pub async fn hangup(&self, dialog: &mut Dialog) {
+        callflow::hangup(dialog, &self.bob).await
+    }
+
+    /// Gate RFC audit + render the report. Consumes the scene (`Harness::finish`
+    /// consumes `self`).
+    pub async fn finish(self) -> RunReport {
+        self.h.finish().await
     }
 }

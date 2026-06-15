@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-use b2bua_harness::{establish_call, settle_until, B2buaSut};
+use b2bua_harness::{establish, settle_until, B2buaSut};
 use call::CdrEventType;
 use scenario_harness::Harness;
 
@@ -32,7 +32,7 @@ async fn unanswered_keepalive_byes_the_healthy_peer() {
     let b2bua = B2buaSut::route_all_to("127.0.0.1", 5075).start(&h, "b2bua", "127.0.0.1:5085").await;
 
     // ── Call setup ───────────────────────────────────────────────────────────
-    let _dialog = establish_call(&alice, &bob, b2bua.addr).await;
+    let _dialog = establish(&alice, &bob, b2bua.addr).await;
 
     // ── Keepalive probe ──────────────────────────────────────────────────────
     h.advance(KEEPALIVE_INTERVAL).await;

@@ -55,6 +55,18 @@ vendored ABNF grammars, replayed deterministically by the ABNF fuzz test.
 Regenerated only on demand via `cargo run -p xtask -- abnf-regen`.
 _Avoid_: "fuzz corpus" (implies live mutation each run — ours is frozen).
 
+**Callflow choreography** (`scenario_harness::callflow`):
+The imperative, inline helper a `#[tokio::test]` calls to run the canonical
+INVITE/180/200/ACK dance (`establish`/`hangup`/`Call`), parameterised only on the
+address the caller routes *through* (a `B2buaSut` addr single-SUT, a proxy VIP for
+HA). It is the one home for the handshake both harnesses used to hand-roll. This
+is **distinct** from the ADR-0018 **"Callflow shape"** — a registered,
+parameterised *template* (data) in the e2e test-management framework that the
+executor runs over compatible Infra shapes. The choreography is code you call;
+the shape is a declared artifact you register. (Both differ again from
+failover-harness's ADR-0013 **CallScenario** safe-point DSL.)
+_Avoid_: naming the choreography "CallScenario" or "Callflow shape".
+
 ### Typed messages
 
 **Refined view**:

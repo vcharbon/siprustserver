@@ -253,9 +253,7 @@ async fn c1_bye_on_primary__no_fault() {
         call_ref, mut dialog, bob_dialog: _bd,
     } = establish("cterm-c1-bye-on-primary").await;
 
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     let _ = &alice;
 
     let drained = fh
@@ -292,9 +290,7 @@ async fn c2_bye_on_backup__primary_alive__misroute() {
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_millis(200)).await;
 
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     let _ = &alice;
 
     let _ = fh
@@ -369,9 +365,7 @@ async fn c4_bye_on_backup__primary_crashed__stay_dead() {
     }
     fh.advance(Duration::from_millis(300)).await;
 
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     let _ = &alice;
 
     // StayDead (Model Y, ADR-0020 X3): the backup deferred a `Terminated` body and
@@ -460,9 +454,7 @@ async fn c6_bye_on_backup__primary_crashed__reboot_reclaim() {
     }
     fh.advance(Duration::from_millis(300)).await;
 
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     let _ = &alice;
 
     // Dead for 60 s — a real reboot gap, but well inside `reboot_budget` (600 s) so
@@ -564,9 +556,7 @@ async fn c10_bye_split_brain__primary_and_backup() {
     // (1) Misroute alice's BYE to the backup; the live primary still owns it.
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_millis(200)).await;
-    let mut bye_a = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye_a.expect(200).await;
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     fh.advance(Duration::from_millis(500)).await;
 
     // (2) Heal the misroute; bob now BYEs the SAME dialog. Under Model Y, alice's
@@ -794,9 +784,7 @@ async fn c12_bye_on_primary__then_reboot__no_resurrection() {
     // alice BYEs → routed to the (healthy) primary → bob 200 → alice 200. The
     // primary discharges (CDR + limiter release + RemoveCall) and replicates the
     // delete to the backup over the live stream.
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     let _ = &alice;
     fh.advance(Duration::from_millis(500)).await;
 

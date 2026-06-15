@@ -124,9 +124,7 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
 
     // alice BYEs: the backup hydrates the replicated call and answers the wire.
     let creations_before = backup.metrics().creations_total();
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
 
     // Model Y (ADR-0020 X3): the takeover backup DEFERS the discharge — it answers
     // the wire but writes NO CDR and does NOT release the limiter itself (the primary

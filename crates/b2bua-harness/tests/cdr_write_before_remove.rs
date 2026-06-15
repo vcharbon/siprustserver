@@ -18,7 +18,7 @@ use b2bua::limiter::NoopLimiter;
 use b2bua::metrics::B2buaMetrics;
 use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaCore, B2buaDeps};
-use b2bua_harness::{establish_call, settle_until};
+use b2bua_harness::{establish, settle_until};
 use scenario_harness::Harness;
 use sip_clock::Clock;
 use sip_txn::IdGen;
@@ -80,7 +80,7 @@ async fn cdr_is_written_while_the_call_is_still_live() {
     let _ = live_calls.set(Box::new(move || probe_core.active_calls()));
 
     // Establish + tear down a canonical call.
-    let mut dialog = establish_call(&alice, &bob, sa).await;
+    let mut dialog = establish(&alice, &bob, sa).await;
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;

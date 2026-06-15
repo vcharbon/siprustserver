@@ -27,7 +27,7 @@ use b2bua::rules::{
     Match, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, ServiceDef, ServiceSeed,
     SERVICE_LAYER,
 };
-use b2bua_harness::{establish_call, settle_until, B2buaSut, OFFER_SDP};
+use b2bua_harness::{establish, settle_until, B2buaSut, OFFER_SDP};
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
 
@@ -122,7 +122,7 @@ async fn stale_active_call_is_swept_and_reaped() {
         .await;
 
     // Establish, then both UAs go silent forever (their timers "lost").
-    let _dialog = establish_call(&alice, &bob, b2bua.addr).await;
+    let _dialog = establish(&alice, &bob, b2bua.addr).await;
 
     // Advance past idle_max + one sweep: 30/60 sweeps see idle < 60 s; the 90 s
     // sweep proves staleness and injects the verdict.
@@ -159,7 +159,7 @@ async fn handler_panic_strike1_reaps_via_rules() {
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
-    let mut dialog = establish_call(&alice, &bob, b2bua.addr).await;
+    let mut dialog = establish(&alice, &bob, b2bua.addr).await;
 
     // The INFO trips the panicking probe rule: pre-ADR-0020 this leaked the
     // call forever with zero CDR; now it is strike 1 → fatal-error → reaped.
@@ -197,7 +197,7 @@ async fn second_panic_discharges_outside_the_rules() {
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
-    let mut dialog = establish_call(&alice, &bob, b2bua.addr).await;
+    let mut dialog = establish(&alice, &bob, b2bua.addr).await;
     let _txn = dialog.request(InDialogMethod::Info, None).await;
 
     settle_until(|| b2bua.cdr_records().len() == 1).await;

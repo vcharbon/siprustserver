@@ -13,36 +13,31 @@
 
 use std::time::Duration;
 
-use b2bua_harness::{establish_call, B2buaSut};
-use scenario_harness::Harness;
+use b2bua_harness::B2buaScene;
 
 /// The Rust default keepalive interval (`KeepaliveActivation.interval_sec`).
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[tokio::test(start_paused = true)]
 async fn keepalive_options_to_both_legs_two_cycles() {
-    let h = Harness::new("b2bua-keepalive");
-    let alice = h.agent("alice", "127.0.0.1:5064").await;
-    let bob = h.agent("bob", "127.0.0.1:5074").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5074).start(&h, "b2bua", "127.0.0.1:5084").await;
+    // The whole setup is the default alice ↔ b2bua(→bob) ↔ bob fixture.
+    let s = B2buaScene::new("b2bua-keepalive").await;
 
     // ── Call setup ───────────────────────────────────────────────────────────
-    let mut dialog = establish_call(&alice, &bob, b2bua.addr).await;
+    let mut dialog = s.establish().await;
 
     // ── First keepalive cycle ────────────────────────────────────────────────
-    h.advance(KEEPALIVE_INTERVAL).await;
-    alice.receive("OPTIONS").await.respond(200, "OK").await;
-    bob.receive("OPTIONS").await.respond(200, "OK").await;
+    s.h.advance(KEEPALIVE_INTERVAL).await;
+    s.alice.receive("OPTIONS").await.respond(200, "OK").await;
+    s.bob.receive("OPTIONS").await.respond(200, "OK").await;
 
     // ── Second cycle — confirms the timer re-armed ───────────────────────────
-    h.advance(KEEPALIVE_INTERVAL).await;
-    alice.receive("OPTIONS").await.respond(200, "OK").await;
-    bob.receive("OPTIONS").await.respond(200, "OK").await;
+    s.h.advance(KEEPALIVE_INTERVAL).await;
+    s.alice.receive("OPTIONS").await.respond(200, "OK").await;
+    s.bob.receive("OPTIONS").await.respond(200, "OK").await;
 
     // ── Teardown ─────────────────────────────────────────────────────────────
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
+    s.hangup(&mut dialog).await;
 
-    let _report = h.finish().await;
+    let _report = s.finish().await;
 }

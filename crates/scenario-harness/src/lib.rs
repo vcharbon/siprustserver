@@ -31,6 +31,7 @@
 
 pub mod agent;
 pub mod anchors;
+pub mod callflow;
 pub mod dsl;
 pub mod report;
 pub mod run;
@@ -53,5 +54,9 @@ pub use agent::{
 // exact (possibly malformed) bytes. `dsl::Agent` is the data-DSL agent handle;
 // the fluent `agent::Agent` (re-exported above) is the stateful UA.
 pub use anchors::{AnchorKeys, AnchorMsgKind, AnchorTag};
+// Imperative call-choreography primitives (the canonical INVITE/180/200/ACK
+// dance) — re-exported at the crate root so tests reach for `callflow::establish`
+// / `callflow::hangup` / `callflow::Call` without re-typing the handshake.
+pub use callflow::{establish, hangup, Call, ANSWER_SDP, OFFER_SDP};
 pub use dsl::{AgentId, Match, Scenario, Step};
 pub use run::{run, ExpectOutcome, RunReport};

@@ -19,7 +19,7 @@ use b2bua::decision::{
 };
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
-use b2bua_harness::{establish_call, settle_until, B2buaSut};
+use b2bua_harness::{establish, settle_until, B2buaSut};
 use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::Harness;
@@ -91,7 +91,7 @@ async fn limiter_refresh_self_touch_does_not_mask_staleness() {
         .start(&h, "b2bua", "127.0.0.1:5082")
         .await;
 
-    let _dialog = establish_call(&alice, &bob, b2bua.addr).await;
+    let _dialog = establish(&alice, &bob, b2bua.addr).await;
     assert_eq!(store.stats().current_total, 1, "limiter hold taken");
 
     // Both UAs go silent forever. Only the LimiterRefresh timer fires (every
@@ -139,7 +139,7 @@ async fn received_sip_refreshes_liveness() {
         .start(&h, "b2bua", "127.0.0.1:5083")
         .await;
 
-    let mut dialog = establish_call(&alice, &bob, b2bua.addr).await;
+    let mut dialog = establish(&alice, &bob, b2bua.addr).await;
 
     // In-dialog INFO every 40 s (inside the 60 s idle window): the received
     // traffic must keep the call off the reaper's stale list.
