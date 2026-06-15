@@ -1,7 +1,7 @@
 # SIP front proxy + load balancer — HIGH-AVAILABILITY (ADR-0012 D7).
 #
 # TWO anti-affined replicas on the two tier=edge nodes, fronted by a keepalived
-# VRRP virtual IP (172.20.255.250, static in the kind 172.20.0.0/16 node subnet).
+# VRRP virtual IP (${PROXY_VIP}, the top of the configurable kind SIP_SUBNET).
 # Active/passive: the VRRP master owns the VIP and serves ALL traffic; the backup
 # is warm (its OPTIONS health probes source from its own node IP — the runner
 # binds a SEPARATE ephemeral probe socket — so it keeps a live worker view and its
@@ -39,13 +39,13 @@ data:
         advert_int 0.5
         nopreempt
         virtual_ipaddress {
-            172.20.255.250
+            ${PROXY_VIP}
         }
         # Keep the VIP on lo at all times so either pod can bind(VIP:5060) and use
         # it as the outbound source IP for forwarded SIP (source-IP discipline).
-        notify_master "/bin/sh -c 'ip addr add 172.20.255.250/32 dev lo 2>/dev/null || true'"
-        notify_backup "/bin/sh -c 'ip addr add 172.20.255.250/32 dev lo 2>/dev/null || true'"
-        notify_fault  "/bin/sh -c 'ip addr add 172.20.255.250/32 dev lo 2>/dev/null || true'"
+        notify_master "/bin/sh -c 'ip addr add ${PROXY_VIP}/32 dev lo 2>/dev/null || true'"
+        notify_backup "/bin/sh -c 'ip addr add ${PROXY_VIP}/32 dev lo 2>/dev/null || true'"
+        notify_fault  "/bin/sh -c 'ip addr add ${PROXY_VIP}/32 dev lo 2>/dev/null || true'"
     }
 ---
 apiVersion: apps/v1
@@ -96,8 +96,8 @@ spec:
           args:
             - |
               set -e
-              ip addr add 172.20.255.250/32 dev lo 2>/dev/null || \
-                ip addr show dev lo | grep -q "172.20.255.250/32"
+              ip addr add ${PROXY_VIP}/32 dev lo 2>/dev/null || \
+                ip addr show dev lo | grep -q "${PROXY_VIP}/32"
               # strict-ARP (LVS/DSR fix): with the VIP on lo on BOTH nodes, only
               # the interface that actually owns the IP should answer ARP, else
               # both eth0s reply and client traffic flaps. Write /proc/sys directly
@@ -106,7 +106,7 @@ spec:
               echo 2 > /proc/sys/net/ipv4/conf/all/arp_announce
               echo 1 > /proc/sys/net/ipv4/conf/lo/arp_ignore
               echo 2 > /proc/sys/net/ipv4/conf/lo/arp_announce
-              echo "vip-loopback: 172.20.255.250/32 + strict-ARP ready"
+              echo "vip-loopback: ${PROXY_VIP}/32 + strict-ARP ready"
           securityContext:
             privileged: true
             capabilities: { add: ["NET_ADMIN"] }
@@ -122,8 +122,8 @@ spec:
             # from the VIP (responses return to the master); the OPTIONS health
             # probe uses a SEPARATE 0.0.0.0:0 socket so the backup still probes
             # from its node IP and stays warm.
-            - { name: PROXY_LISTEN,    value: "172.20.255.250:5060" }
-            - { name: PROXY_ADVERTISE, value: "172.20.255.250:5060" }
+            - { name: PROXY_LISTEN,    value: "${PROXY_VIP}:${SIP_PORT}" }
+            - { name: PROXY_ADVERTISE, value: "${PROXY_VIP}:${SIP_PORT}" }
             - { name: PROXY_METRICS,   value: "0.0.0.0:9090" }
             # Worker pool discovered from k8s (ADR-0012 D4). PROXY_WORKERS UNSET →
             # EndpointSlice informer over the headless worker Service.
@@ -135,6 +135,8 @@ spec:
             # (a typo here is silently ignored). (_RJEM_ prefix = tikv-jemalloc.)
             - { name: _RJEM_MALLOC_CONF,    value: "dirty_decay_ms:1000,muzzy_decay_ms:1000" }
           ports:
+            # containerPort is cosmetic under hostNetwork (the real bind is
+            # PROXY_LISTEN=${PROXY_VIP}:${SIP_PORT}); kept at 5060 as a label only.
             - { name: sip,     containerPort: 5060, protocol: UDP }
             - { name: metrics, containerPort: 9090, protocol: TCP }
           # Readiness gates on >=1 routable (Alive) worker (ADR-0012 D4). Liveness

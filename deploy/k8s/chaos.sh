@@ -46,11 +46,11 @@ JOB="sipp-uac-failover"
 export REPL_ENABLE=1
 export WORKER_REPLICAS="${WORKER_REPLICAS:-2}"
 export SCENARIO
-# Front-proxy HA VIP (ADR-0012 D7): UAC streams target the VIP, not the Service.
-PROXY_VIP="${PROXY_VIP:-172.20.255.250}"
-PROXY_TARGET="${PROXY_TARGET:-$PROXY_VIP}"
+# Front-proxy HA VIP + LB port (ADR-0012 D7): from the shared lib (subnet→VIP
+# derivation, all three runners agree). UAC streams target PROXY_VIP, not the Service.
+source "$HERE/lib/net-env.sh"
 LIMITER_CAP="${LIMITER_CAP:-20}"
-export PROXY_VIP PROXY_TARGET LIMITER_CAP
+export LIMITER_CAP
 # Pod-resource envsubst vars for the shared 40-sipp-uac-job template (envsubst has
 # no default syntax, so EVERY render site must export them — endurance.sh sizes
 # these per-role; the chaos/abuse/orphan/peak/failover streams here are transient

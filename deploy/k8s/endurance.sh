@@ -106,10 +106,10 @@ LIMITER_CPS="${LIMITER_CPS:-2}"        # continuous limiter stream rate; 2cps x 
                                        # hold ≈ 60 offered vs cap 20 → ~40 rejected
 LIMITER_CAP="${LIMITER_CAP:-20}"       # cap stamped into the -key xapi JSON (40-job)
 LIMITER_TARGET="${LIMITER_TARGET:-$LIMITER_CAP}" # the cap the stream pins conc. at
-# Front-proxy HA VIP (ADR-0012 D7): UAC streams target the VIP, not the Service.
-PROXY_VIP="${PROXY_VIP:-172.20.255.250}"
-PROXY_TARGET="${PROXY_TARGET:-$PROXY_VIP}"
-export PROXY_VIP PROXY_TARGET LIMITER_CAP
+# Front-proxy HA VIP + LB port (ADR-0012 D7): from the shared lib (subnet→VIP
+# derivation, all three runners agree). UAC streams target PROXY_VIP, not the Service.
+source "$HERE/lib/net-env.sh"
+export LIMITER_CAP
 LIMITER_TOL="${LIMITER_TOL:-3}"        # allowed band around the cap (±). Was ±10:
                                        # the 2026-06-12 zombie pinning (15/20 held
                                        # for ~50 min by stuck-in-setup calls) sat

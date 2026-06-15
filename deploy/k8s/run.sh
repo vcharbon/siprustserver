@@ -25,6 +25,7 @@
 #   ./run.sh caps 200 30             # 200 cps for 30s, sample CPU/mem
 #   ./run.sh sweep 30 50 100 200 400 # run a list of caps, 30s sampling each
 #   ./run.sh all 30 50 100 200 400   # up + deploy + sweep (leaves cluster up)
+#   ./run.sh heal-kindnet            # restart any kindnetd stuck in a watch hot-loop
 #   ./run.sh down                    # delete the cluster
 #
 # Observability (VictoriaMetrics + Grafana + vmagent/KSM/node-exporter/fluent-bit)
@@ -40,6 +41,12 @@ cd "$(dirname "$0")"
 HERE="$(pwd)"
 REPO_ROOT="$(cd ../.. && pwd)"
 
+# Network/port wiring (SIP_SUBNET/SIP_GATEWAY/PROXY_VIP/PROXY_TARGET/SIP_PORT) and
+# host prerequisite checks (cgroups/sysctls) live in shared, env-overridable libs
+# so run.sh, endurance.sh and chaos.sh stay in lock-step.
+source "$HERE/lib/net-env.sh"
+source "$HERE/lib/host-checks.sh"
+
 CLUSTER="${CLUSTER:-sip-e2e}"
 NS="${NS:-sip-test}"
 SUT_IMAGE="${SUT_IMAGE:-siprustserver:dev}"
@@ -53,19 +60,19 @@ SCENARIOS="$SIPP_DIR/scenarios"
 REPL_ENABLE="${REPL_ENABLE:-0}"
 REPL_PORT="${REPL_PORT:-9092}"
 SCENARIO="${SCENARIO:-uac-basic.xml}"   # UAC scenario the load sweep drives
-# Front-proxy HA (ADR-0012 D7): the proxy sits behind a keepalived VRRP VIP. SIPp
-# UAC streams target the VIP, not the Service. PROXY_VIP is baked into the proxy
-# manifest literally; PROXY_TARGET (what envsubst stamps into the UAC job) defaults
-# to it. LIMITER_CAP feeds the -key xapi JSON in the UAC job (default 20).
-PROXY_VIP="${PROXY_VIP:-172.20.255.250}"
-PROXY_TARGET="${PROXY_TARGET:-$PROXY_VIP}"
+# Front-proxy HA (ADR-0012 D7): the proxy sits behind a keepalived VRRP VIP
+# (PROXY_VIP) on SIP_PORT — both come from lib/net-env.sh, derived from SIP_SUBNET
+# and stamped into the proxy/worker/UAC manifests by envsubst. PROXY_TARGET (what
+# the UAC job dials) defaults to the VIP. LIMITER_CAP feeds the -key xapi JSON in
+# the UAC job (default 20).
 LIMITER_CAP="${LIMITER_CAP:-20}"
 KEEPALIVED_IMAGE="${KEEPALIVED_IMAGE:-siprustserver-keepalived:dev}"
 # CDR transport: RabbitMQ broker (55-rabbitmq) + cdr-consumer (56-cdr-consumer).
 # The broker is a public image pulled + side-loaded into kind so the run is
 # offline-capable like every other image.
 RABBITMQ_IMAGE="${RABBITMQ_IMAGE:-rabbitmq:3.13-management}"
-export SUT_IMAGE WORKER_REPLICAS REPL_ENABLE REPL_PORT SCENARIO PROXY_VIP PROXY_TARGET LIMITER_CAP RABBITMQ_IMAGE
+# PROXY_VIP/PROXY_TARGET/SIP_PORT are exported by lib/net-env.sh.
+export SUT_IMAGE WORKER_REPLICAS REPL_ENABLE REPL_PORT SCENARIO LIMITER_CAP RABBITMQ_IMAGE
 # Observability: VictoriaMetrics + Grafana host stack + in-cluster vmagent/KSM/
 # node-exporter/fluent-bit. Deployed automatically on `up` so the freshly
 # (re)created cluster always has scraping wired and Grafana dashboards loaded.
@@ -85,8 +92,33 @@ preflight() {
 
 up() {
   preflight
+  check_host   # cgroups + sysctls (advisory; PREFLIGHT_STRICT=1 to enforce)
   log "tearing down any existing '$CLUSTER' cluster (WSL one-cluster switch)"
   kind delete cluster --name "$CLUSTER" 2>/dev/null || true
+
+  # Pin the kind docker bridge to an IMMUTABLE $SIP_SUBNET so the keepalived VRRP
+  # VIP ($PROXY_VIP, ADR-0012 D7) is ALWAYS on-subnet across recreates. Without
+  # this, kind lets docker re-pick the first free /16 from its default pool on
+  # each `up`; if a lower /16 is momentarily free the kind net lands there and the
+  # VIP is off-subnet → whole cluster unreachable. We recreate the network here
+  # (single-cluster host: it is empty right after the delete) and point kind at it
+  # via KIND_EXPERIMENTAL_DOCKER_NETWORK; kind reuses a pre-existing network named
+  # `kind` as-is and inherits the /16. The sibling docker stacks are pinned to
+  # distinct /16s in their own compose files (victoria 172.18, callviewer 172.19)
+  # so none can ever claim this one. Subnet/gateway/VIP are all configurable and
+  # derived from a single SIP_SUBNET — see lib/net-env.sh.
+  log "pinning kind docker bridge to immutable $SIP_SUBNET (keepalived VIP $PROXY_VIP on-subnet)"
+  # If a `kind` network already exists with the correct /16, REUSE it — the obs
+  # stack (grafana/victoria*) stays attached across cluster recreates, so
+  # `docker network rm` would fail (active endpoints) and the subsequent
+  # `create` would abort the whole `up`. Only (re)create when absent or wrong.
+  if [ "$(docker network inspect kind --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null | tr ' ' '\n' | grep -cF "$SIP_SUBNET")" != "1" ]; then
+    docker network rm kind >/dev/null 2>&1 || true
+    docker network create --driver bridge \
+      --subnet "$SIP_SUBNET" --gateway "$SIP_GATEWAY" kind >/dev/null
+  fi
+  export KIND_EXPERIMENTAL_DOCKER_NETWORK=kind
+
   log "creating cluster '$CLUSTER' from shared topology"
   kind create cluster --name "$CLUSTER" --config cluster.yaml --wait 120s
 
@@ -247,6 +279,36 @@ sweep() {
   printf "\nPer-cap CPU%%/RSS in %s/. Scrape app metrics with:\n  kubectl -n %s port-forward deploy/sip-front-proxy 9090 & curl localhost:9090/metrics\n" "$RESULTS" "$NS"
 }
 
+# Restart any kindnetd (CNI daemon) stuck in the client-go reflector hot-loop.
+# After a chaos netcut, a node's kindnetd can lose its API-server watch and never
+# cleanly re-establish it: the Pod/Namespace/NetworkPolicy reflectors fall into a
+# tight relist/reconnect loop (DNS i/o timeout + TLS handshake timeout on every
+# iteration) that burns ~1 core forever on WSL2. kindnetd never crashes, and its
+# distroless image has no shell and serves no health port, so it cannot self-heal
+# via a liveness probe — the only fix is to delete the pod so the DaemonSet
+# recreates it with fresh watches. This detects the confirmed log signature and
+# does exactly that. Idempotent and safe: routes/nft survive a kindnetd restart,
+# so node connectivity is not torn down. Run it after a chaos/endurance run (or
+# any time `top` shows kindnetd spinning).
+heal-kindnet() {
+  command -v kubectl >/dev/null || die "missing tool: kubectl"
+  local pods p n thresh="${KINDNET_HEAL_THRESHOLD:-5}" win="${KINDNET_HEAL_WINDOW:-6m}" healed=0
+  pods="$(kubectl -n kube-system get pods -l app=kindnet \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)"
+  [ -n "$pods" ] || { log "no kindnet pods found (is the cluster up?)"; return 0; }
+  for p in $pods; do
+    # grep -c exits 1 on no match under set -e — guard it.
+    n="$(kubectl -n kube-system logs --since="$win" "$p" 2>/dev/null | grep -c 'Failed to watch' || true)"
+    if [ "${n:-0}" -gt "$thresh" ]; then
+      log "kindnet $p: $n watch failures in last $win (> $thresh) — restarting"
+      kubectl -n kube-system delete pod "$p" >/dev/null 2>&1 || true
+      healed=$((healed+1))
+    fi
+  done
+  [ "$healed" -eq 0 ] && log "all kindnet pods healthy (no stuck reflector loops)" \
+                      || log "restarted $healed stuck kindnet pod(s); DaemonSet will recreate them"
+}
+
 down() { kind delete cluster --name "$CLUSTER"; }
 
 cmd="${1:-}"; shift || true
@@ -257,6 +319,7 @@ case "$cmd" in
   caps)   caps "$@" ;;
   sweep)  sweep "$@" ;;
   all)    up; deploy; sweep "$@" ;;
+  heal-kindnet) heal-kindnet ;;
   down)   down ;;
-  *) die "usage: $0 {up|deploy|obs|caps <cps> <secs>|sweep <secs> <cps...>|all <secs> <cps...>|down}" ;;
+  *) die "usage: $0 {up|deploy|obs|caps <cps> <secs>|sweep <secs> <cps...>|all <secs> <cps...>|heal-kindnet|down}" ;;
 esac

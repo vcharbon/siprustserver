@@ -72,7 +72,7 @@ spec:
             # b-leg keepalives to a pod IP get no 200 → keepalive-timeout → BYE).
             # The VIP is the keepalived VRRP address (ADR-0012 D7), stable across
             # proxy failover and pod restart.
-            - { name: B2BUA_OUTBOUND_PROXY, value: "${PROXY_VIP}:5060" }
+            - { name: B2BUA_OUTBOUND_PROXY, value: "${PROXY_VIP}:${SIP_PORT}" }
             - { name: B2BUA_METRICS, value: "0.0.0.0:9091" }
             # --- CDR sink: publish one JSON CDR per terminated call to RabbitMQ
             # (55-rabbitmq). Sits behind the in-process BufferedCdrWriter

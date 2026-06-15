@@ -53,6 +53,57 @@ Each cap prints per-pod CPU% and RSS(MB) (sampled from `/proc/1` via
 `kubectl exec`, so no metrics-server needed). App metrics:
 `kubectl -n sip-test port-forward deploy/sip-front-proxy 9090 & curl localhost:9090/metrics`.
 
+### Configuration (env vars)
+
+Network and port wiring is a single source of truth in `deploy/k8s/lib/net-env.sh`
+(sourced by `run.sh`, `endurance.sh`, `chaos.sh`), so the three runners can never
+drift. Everything is overridable from the environment; defaults reproduce the
+historical layout.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `SIP_SUBNET` | `172.20.0.0/16` | Internal kind docker bridge **/16**. The gateway and VIP are *derived* from it — change this one knob to move the whole cluster off a colliding subnet. |
+| `SIP_GATEWAY` | `<prefix>.0.1` | Bridge gateway — the **bottom** of the subnet (kind hands node IPs out from the bottom up). Derived; override only for a bespoke address. |
+| `PROXY_VIP` | `<prefix>.255.250` | keepalived VRRP VIP — parked at the **top** of the subnet so it can never collide with a node IP. This top/bottom split is the invariant the layout depends on. Derived; overridable. |
+| `PROXY_TARGET` | `$PROXY_VIP` | What the SIPp UAC streams dial. |
+| `SIP_PORT` | `5060` | UDP port the front-proxy **LB** listens on (workers and UAC streams dial the VIP on this port). The internal worker/UAS SIP port stays 5060 regardless. |
+| `CLUSTER` / `NS` | `sip-e2e` / `sip-test` | kind cluster name / namespace. |
+| `SUT_IMAGE` | `siprustserver:dev` | Rust SUT image tag. |
+| `WORKER_REPLICAS` | `2` | b2bua worker pool size. |
+| `OBS_ENABLE` | `1` | Bring up the observability stack (Grafana :3333, VictoriaMetrics :8428). `0` to skip. |
+| `REPL_ENABLE` / `REPL_PORT` | `0` / `9092` | HA call replication (chaos suite sets `1`). |
+
+Host preflight knobs (see system requirements below):
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `PREFLIGHT_STRICT` | `0` | `1` makes a failed cgroup/sysctl check **abort** `up` instead of warning. |
+| `PREFLIGHT_FIX_SYSCTLS` | `0` | `1` auto-raises any low sysctl (needs root / passwordless sudo). |
+| `REQUIRED_SYSCTLS` | `fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288 fs.file-max=2097152` | Space-separated `key=min` pairs checked at `up`. |
+
+```bash
+# Example: run the whole stack on a different subnet + LB port (e.g. 172.20 collides
+# with a VMware vmnet), enforcing host prerequisites:
+SIP_SUBNET=10.80.0.0/16 SIP_PORT=5080 PREFLIGHT_STRICT=1 ./run.sh up
+SIP_SUBNET=10.80.0.0/16 SIP_PORT=5080 ./run.sh deploy
+# VIP derives to 10.80.255.250, gateway to 10.80.0.1.
+```
+
+## System requirements (kind host)
+
+The runner is developed on WSL2 but runs on any Linux box with rootful Docker
+(e.g. a VMware VM). `run.sh up` runs a host preflight (cgroups + sysctls,
+advisory by default — see the knobs above) before creating the cluster.
+
+| Requirement | Minimum / note |
+|---|---|
+| Tools on `PATH` | `docker` (rootful), `docker compose`, `kind`, `kubectl`, `envsubst` (gettext) — checked by `run.sh` preflight. |
+| **cgroups** | **v2 strongly preferred** (default on Ubuntu 22.04+, Debian 12, Fedora 35+, RHEL/Rocky 9). On cgroup **v1** the host must boot with `cgroup_enable=memory swapaccount=1`, otherwise `cap-kind-memory.sh`'s `--memory-swap` node ceiling is **silently ignored**. Verify: `docker info \| grep -i cgroup` → `Cgroup Version: 2`. |
+| **sysctls** | A 6-node kind cluster (`cluster.yaml`) exhausts default inotify/fd limits. Set `fs.inotify.max_user_instances≥512`, `fs.inotify.max_user_watches≥524288`, `fs.file-max≥2097152` (persist in `/etc/sysctl.d/`), plus the kind-standard `net.ipv4.ip_forward=1` and `net.bridge.bridge-nf-call-iptables=1`. |
+| Kernel modules | `sch_netem` (needed by `chaos.sh` `tc netem`), `br_netfilter`, `overlay`. |
+| RAM | ~16 GiB. The cluster ceiling alone is 9.5 GiB (`cap-kind-memory.sh`, tunable via `TOTAL_CAP_MB` and the per-tier `*_CAP_MB`). |
+| Network | `$SIP_SUBNET` (default `172.20.0.0/16`) **must be free** on the host — no vmnet / route / other docker network may overlap it. On VMware, check `ip route \| grep 172.20` and `docker network ls`; if it collides, set a free `SIP_SUBNET`. |
+
 ## HA replication chaos suite — `deploy/k8s/chaos.sh`
 
 Goal-3 (S11) acceptance: the **real-clock, real-TCP, real-k8s** test of

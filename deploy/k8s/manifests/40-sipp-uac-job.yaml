@@ -66,9 +66,9 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ["sipp"]
           args:
-            # Target the proxy VIP (keepalived HA, ADR-0012 D7). ${PROXY_TARGET}
-            # is exported by run.sh/endurance.sh/chaos.sh (default 172.20.255.250).
-            - "${PROXY_TARGET}:5060"
+            # Target the proxy VIP:port (keepalived HA, ADR-0012 D7). PROXY_TARGET
+            # and SIP_PORT are exported via lib/net-env.sh by all three runners.
+            - "${PROXY_TARGET}:${SIP_PORT}"
             - "-sf"
             - "/scenarios/${SCENARIO}"
             # Inject the X-Api-Call JSON via -key (sipp rejects literal `[...]` in
