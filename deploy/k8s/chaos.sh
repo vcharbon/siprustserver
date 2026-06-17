@@ -49,6 +49,7 @@ export SCENARIO
 # Front-proxy HA VIP + LB port (ADR-0012 D7): from the shared lib (subnet→VIP
 # derivation, all three runners agree). UAC streams target PROXY_VIP, not the Service.
 source "$HERE/lib/net-env.sh"
+source "$HERE/lib/kube-env.sh"   # pin every kubectl to context kind-$CLUSTER
 LIMITER_CAP="${LIMITER_CAP:-20}"
 export LIMITER_CAP
 # Pod-resource envsubst vars for the shared 40-sipp-uac-job template (envsubst has

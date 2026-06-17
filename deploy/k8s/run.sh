@@ -13,10 +13,12 @@
 # cluster name (`sip-e2e`).
 #
 # >>> WSL ONE-CLUSTER CONSTRAINT <<<
-# Only one kind cluster runs at a time on this host. `up` (and `all`) FIRST run
-# `kind delete cluster --name sip-e2e` — which destroys ANY existing sip-e2e
-# cluster, including sipjsserver's. That is the intended "stop the other, run
-# this" switch. Run `down` when done so the host is free for the other SUT.
+# Only one kind cluster runs at a time on this host. `up` is NON-DESTRUCTIVE: if a
+# `sip-e2e` cluster already exists it REFUSES rather than wiping it, so a cluster
+# left behind by a failed run survives for analysis. Destruction is explicit —
+# `down` — and `up` never auto-tears-down on failure either. To reclaim the host
+# for the other SUT (the old one-shot "stop the other, run this" switch), run
+# `./run.sh down` first, or `FORCE_RECREATE=1 ./run.sh up` to delete+recreate.
 #
 # Usage:
 #   ./run.sh up                      # (re)create cluster + build/load images + observability
@@ -26,7 +28,8 @@
 #   ./run.sh sweep 30 50 100 200 400 # run a list of caps, 30s sampling each
 #   ./run.sh all 30 50 100 200 400   # up + deploy + sweep (leaves cluster up)
 #   ./run.sh heal-kindnet            # restart any kindnetd stuck in a watch hot-loop
-#   ./run.sh down                    # delete the cluster
+#   ./run.sh down                    # delete the cluster (the ONLY destroy)
+#   FORCE_RECREATE=1 ./run.sh up     # delete any existing cluster, then recreate
 #
 # Observability (VictoriaMetrics + Grafana + vmagent/KSM/node-exporter/fluent-bit)
 # is brought up automatically by `up` via deploy/observability/install.sh and
@@ -46,9 +49,18 @@ REPO_ROOT="$(cd ../.. && pwd)"
 # so run.sh, endurance.sh and chaos.sh stay in lock-step.
 source "$HERE/lib/net-env.sh"
 source "$HERE/lib/host-checks.sh"
+# Pins every `kubectl` in this script to the kind cluster's own context (see lib)
+# — must be sourced AFTER CLUSTER is known to be overridable, but the wrapper
+# reads CLUSTER at call time so order is not load-bearing.
+source "$HERE/lib/kube-env.sh"
 
 CLUSTER="${CLUSTER:-sip-e2e}"
 NS="${NS:-sip-test}"
+# Bring-up waits, env-overridable. Defaults bumped from the historical 120s: on a
+# loaded WSL2 host node-ready + image build/load + first rollout regularly need
+# more, and a too-short wait used to abort the whole run.
+KIND_WAIT="${KIND_WAIT:-300s}"
+ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-300s}"
 SUT_IMAGE="${SUT_IMAGE:-siprustserver:dev}"
 WORKER_REPLICAS="${WORKER_REPLICAS:-2}"
 RESULTS="${RESULTS:-$HERE/results}"
@@ -93,8 +105,23 @@ preflight() {
 up() {
   preflight
   check_host   # cgroups + sysctls (advisory; PREFLIGHT_STRICT=1 to enforce)
-  log "tearing down any existing '$CLUSTER' cluster (WSL one-cluster switch)"
-  kind delete cluster --name "$CLUSTER" 2>/dev/null || true
+
+  # NON-DESTRUCTIVE by default. A cluster left over from a failed/aborted run must
+  # SURVIVE so it can be analysed — destruction is explicit (`./run.sh down`). If
+  # one already exists, refuse rather than silently wipe it. FORCE_RECREATE=1 opts
+  # back into the old one-shot "stop the other, run this" switch.
+  if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+    if [ "${FORCE_RECREATE:-0}" = "1" ]; then
+      log "FORCE_RECREATE=1 — deleting existing '$CLUSTER' cluster"
+      kind delete cluster --name "$CLUSTER" 2>/dev/null || true
+    else
+      die "cluster '$CLUSTER' already exists — left intact for analysis. Destroy it with './run.sh down' (or re-run as 'FORCE_RECREATE=1 ./run.sh up')."
+    fi
+  fi
+
+  # On ANY failure during bring-up, leave the partial cluster intact for analysis
+  # — never auto-teardown. Cleared on success at the end of up().
+  trap 'rc=$?; [ "$rc" -ne 0 ] && printf "\033[1;31m!! up failed (rc=%s) — cluster %s\047 left intact for analysis (NOT torn down).\n   Inspect: kubectl --context kind-%s -n %s get pods -o wide\n   Destroy: ./run.sh down\033[0m\n" "$rc" "$CLUSTER" "$CLUSTER" "$NS" >&2' EXIT
 
   # Pin the kind docker bridge to an IMMUTABLE $SIP_SUBNET so the keepalived VRRP
   # VIP ($PROXY_VIP, ADR-0012 D7) is ALWAYS on-subnet across recreates. Without
@@ -120,7 +147,7 @@ up() {
   export KIND_EXPERIMENTAL_DOCKER_NETWORK=kind
 
   log "creating cluster '$CLUSTER' from shared topology"
-  kind create cluster --name "$CLUSTER" --config cluster.yaml --wait 120s
+  kind create cluster --name "$CLUSTER" --config cluster.yaml --wait "$KIND_WAIT"
 
   # Cap each kind node's memory so the cluster can never starve the WSL2 host
   # (an uncapped node + a parallel cargo build OOM'd the host once). Pod limits
@@ -143,6 +170,7 @@ up() {
   kind load docker-image "$RABBITMQ_IMAGE" --name "$CLUSTER"
 
   obs   # bring up / refresh observability against the new cluster
+  trap - EXIT   # success — disarm the "left intact for analysis" handler
 }
 
 # Deploy (or re-apply) the observability stack: host VM+Grafana via docker
@@ -188,12 +216,12 @@ deploy() {
   # fail-open (drop CDRs) if the broker is slow/absent. So wait for it, but never
   # let an unhealthy broker/consumer abort the run (these gates are `|| true`,
   # unlike the call-path worker/proxy/uas gates below).
-  kubectl -n "$NS" rollout status deploy/rabbitmq --timeout=120s || true
+  kubectl -n "$NS" rollout status deploy/rabbitmq --timeout="$ROLLOUT_TIMEOUT" || true
   envsubst < manifests/56-cdr-consumer.yaml | kubectl apply -f -
   envsubst < manifests/20-worker.yaml | kubectl apply -f -
-  kubectl -n "$NS" rollout status statefulset/sipp-uas --timeout=120s
-  kubectl -n "$NS" rollout status statefulset/b2bua-worker --timeout=120s
-  kubectl -n "$NS" rollout status deploy/cdr-consumer --timeout=120s || true
+  kubectl -n "$NS" rollout status statefulset/sipp-uas --timeout="$ROLLOUT_TIMEOUT"
+  kubectl -n "$NS" rollout status statefulset/b2bua-worker --timeout="$ROLLOUT_TIMEOUT"
+  kubectl -n "$NS" rollout status deploy/cdr-consumer --timeout="$ROLLOUT_TIMEOUT" || true
 
   # The proxy now discovers the worker pool from k8s EndpointSlices (ADR-0012 D4)
   # — the SAME informer the b2bua replication engine uses (ADR-0011 X7) — so the
@@ -212,7 +240,7 @@ deploy() {
   log "deploying sip-front-proxy (k8s EndpointSlice worker discovery)"
   kubectl apply -f manifests/25-proxy-rbac.yaml
   envsubst < manifests/30-proxy.yaml | kubectl apply -f -
-  kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout=120s
+  kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout="$ROLLOUT_TIMEOUT"
   log "stack ready"
   kubectl -n "$NS" get pods -o wide
 }
