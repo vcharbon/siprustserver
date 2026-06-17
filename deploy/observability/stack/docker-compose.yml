@@ -14,8 +14,15 @@ services:
       - "-retentionPeriod=2d"
       - "-promscrape.config=/etc/vm/prometheus.yml"
       - "-httpListenAddr=:8428"
+      # VM sizes its in-memory caches to -memory.allowedPercent (default 60%)
+      # of HOST RAM — it reads /proc/meminfo, NOT the docker cgroup limit — so
+      # on a 16 GiB WSL2 box it would grab ~9.6 GiB of cache and thrash the
+      # page cache. Pin an absolute ceiling instead; this is the real footprint
+      # knob (the deploy.limit below is only a hard backstop).
+      - "-memory.allowedBytes=256MB"
+      - "-search.maxConcurrentRequests=4"
     deploy:
-      resources: { limits: { memory: 1g } }
+      resources: { limits: { memory: 768m } }
 
   victorialogs:
     image: victoriametrics/victoria-logs:v1.40.0
@@ -28,10 +35,13 @@ services:
       - ./data/victorialogs:/storage
     command:
       - "-storageDataPath=/storage"
-      - "-retentionPeriod=7d"
+      # 3d (was 7d): less stored data => smaller background merges => less
+      # read IO churn on a dev box that is recreated often anyway.
+      - "-retentionPeriod=3d"
       - "-httpListenAddr=:9428"
+      - "-memory.allowedBytes=384MB"   # see note on VM above — cgroup-blind cache sizing
     deploy:
-      resources: { limits: { memory: 1g } }
+      resources: { limits: { memory: 512m } }
 
   victoria-traces:
     image: victoriametrics/victoria-traces:v0.8.2
@@ -44,10 +54,11 @@ services:
       - ./data/victoria-traces:/storage
     command:
       - "-storageDataPath=/storage"
-      - "-retentionPeriod=2d"
+      - "-retentionPeriod=1d"   # traces are barely used here (~5 MB live) — keep one day
       - "-httpListenAddr=:10428"
+      - "-memory.allowedBytes=192MB"  # see note on VM above — cgroup-blind cache sizing
     deploy:
-      resources: { limits: { memory: 1g } }
+      resources: { limits: { memory: 256m } }
 
   grafana:
     image: grafana/grafana:11.4.0
@@ -65,9 +76,15 @@ services:
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
       - GF_AUTH_DISABLE_LOGIN_FORM=true
       - GF_INSTALL_PLUGINS=victoriametrics-logs-datasource
+      # Trim background work on a dev instance: no phone-home/update checks and
+      # no alerting engine (we only ever look at dashboards live).
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      - GF_UNIFIED_ALERTING_ENABLED=false
+      - GF_ALERTING_ENABLED=false
     depends_on: [victoriametrics, victorialogs, victoria-traces]
     deploy:
-      resources: { limits: { memory: 512m } }
+      resources: { limits: { memory: 320m } }
 
 networks:
   default:

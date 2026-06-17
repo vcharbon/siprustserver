@@ -44,9 +44,14 @@ collect_sipp_errors() {
 
   # Count error types from call failure messages.
   local timeout_errors unanswered_errors abort_errors other_errors
-  timeout_errors="$(printf '%s' "$stats" | grep -ciE 'timeout|no answer' || echo 0)"
-  unanswered_errors="$(printf '%s' "$stats" | grep -ciE 'unanswered|no.*response' || echo 0)"
-  abort_errors="$(printf '%s' "$stats" | grep -ciE 'abort|unexpected_msg|481' || echo 0)"
+  # `grep -c` ALWAYS prints the count (incl. "0") AND exits 1 on no-match; with
+  # set -e+pipefail we must swallow that exit, but `|| echo 0` APPENDS a second
+  # "0" → the var becomes "0\n0" and the $(( )) below dies with
+  # "syntax error in expression". Use `|| true`: grep already emitted the count.
+  timeout_errors="$(printf '%s' "$stats" | grep -ciE 'timeout|no answer' || true)"
+  unanswered_errors="$(printf '%s' "$stats" | grep -ciE 'unanswered|no.*response' || true)"
+  abort_errors="$(printf '%s' "$stats" | grep -ciE 'abort|unexpected_msg|481' || true)"
+  timeout_errors="${timeout_errors:-0}"; unanswered_errors="${unanswered_errors:-0}"; abort_errors="${abort_errors:-0}"
   other_errors=$(( fail - timeout_errors - unanswered_errors - abort_errors ))
   [ "$other_errors" -lt 0 ] && other_errors=0
 
@@ -56,9 +61,17 @@ collect_sipp_errors() {
     error_rate=$(python3 -c "print(int(100.0 * $fail / $total))" 2>/dev/null || echo 0)
   fi
 
-  printf 'sipp_calls_created_total{role="%s"} %d\n' "$role" "$total"
-  printf 'sipp_successful_calls_total{role="%s"} %d\n' "$role" "$ok"
-  printf 'sipp_failed_calls_total{role="%s"} %d\n' "$role" "$fail"
+  # DO NOT re-emit sipp_calls_created_total / sipp_successful_calls_total /
+  # sipp_failed_calls_total here. The native sidecar (sipp_stat_exporter.py, port
+  # 9035, scraped by vmagent) is the AUTHORITATIVE source for those counters,
+  # labelled {scenario,role,sipp_job} per pod. This script aggregates per {role}
+  # from a `tail -100` log scrape — a DIFFERENT label set, so it does not overwrite
+  # the sidecar series, it ADDS a second one. endurance.sh's gates do
+  # `sum(sipp_successful_calls_total{role=~"long|short"})`, which would then sum the
+  # sidecar's per-pod series AND this aggregate → double-counting that distorts the
+  # long-loss / success gates (the exact HA-regression signal). The dashboard reads
+  # the sidecar series too, never these. Emit ONLY the additive, non-conflicting
+  # error-breakdown series below (distinct names — safe to coexist).
   printf 'sipp_error_rate{role="%s"} %d\n' "$role" "$error_rate"
   printf 'sipp_errors_total{role="%s",type="timeout"} %d\n' "$role" "$timeout_errors"
   printf 'sipp_errors_total{role="%s",type="unanswered"} %d\n' "$role" "$unanswered_errors"
@@ -99,7 +112,11 @@ snapshot() {
 case "${1:-snapshot}" in
   snapshot) snapshot ;;
   loop)
-    local interval="${2:-30}"
+    # NB: not in a function here (this is the top-level `case`), so `local`
+    # would abort under `set -e` ("local: can only be used in a function") and
+    # the collector would die on startup — leaving sipp_error_rate unpopulated
+    # and the monitor's error-rate gate blind. Plain assignment.
+    interval="${2:-30}"
     log "collecting SIPp metrics every ${interval}s (stop with Ctrl-C)"
     while :; do
       snapshot

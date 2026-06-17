@@ -109,6 +109,7 @@ LIMITER_TARGET="${LIMITER_TARGET:-$LIMITER_CAP}" # the cap the stream pins conc.
 # Front-proxy HA VIP + LB port (ADR-0012 D7): from the shared lib (subnet→VIP
 # derivation, all three runners agree). UAC streams target PROXY_VIP, not the Service.
 source "$HERE/lib/net-env.sh"
+source "$HERE/lib/kube-env.sh"   # pin every kubectl to context kind-$CLUSTER
 export LIMITER_CAP
 LIMITER_TOL="${LIMITER_TOL:-3}"        # allowed band around the cap (±). Was ±10:
                                        # the 2026-06-12 zombie pinning (15/20 held
@@ -382,6 +383,24 @@ taint_if_uas_crash() {  # $1=result  $2=uas_restarts_at_start  $3=event-type
   echo "$1"
 }
 
+# Whole-VM stall detector (WSL2/kind host deschedule). Pods OFF the SIP data path
+# (cdr-consumer, call-limiter) cannot be moved by SIP traffic, so if their summed
+# container CPU collapses to <25% of its own in-window peak, EVERY container was
+# descheduled by the host — not a SIP event. Used to quarantine an aftermath
+# long-loss that is really recv_timeout from frozen b2bua event loops (the
+# 2026-06-16 endurance idx7 artifact: a ~2.5-min host freeze; cdr/limiter CPU
+# 0.04→0.004 in lockstep, workers 0.5→0.08 then RECOVERED, long loss 100%
+# timeout_recv), which is distinct from a genuine keepalive-BYE teardown
+# (unexpected_msg/481). $1 = lookback window in seconds (the aftermath span).
+# Returns 0 (stalled) / 1 (clean). Uses instant subqueries over the recent window
+# (no @ modifier) — correct because the aftermath runs while streams are still up.
+cluster_stalled_in_window() {  # $1 = window_seconds
+  local w="${1:-540}" mn mx cpu='sum(rate(container_cpu_usage_seconds_total{pod=~"cdr-consumer.*|call-limiter.*",container!=""}[1m]))'
+  mn="$(vmq "min_over_time(${cpu}[${w}s:30s])")"
+  mx="$(vmq "max_over_time(${cpu}[${w}s:30s])")"
+  python3 -c "import sys; mn=float('${mn:-0}'); mx=float('${mx:-0}'); sys.exit(0 if mx>0.02 and mn < 0.25*mx else 1)"
+}
+
 # Background watcher: poll the UAS restart total every 30s; on any increase, emit
 # an INVOLUNTARY chaos event (red annotation window + JSONL row + log) naming the
 # pod(s) and exit code, so the timeline shows exactly when a load-generator crash
@@ -526,6 +545,24 @@ long_aftermath_watch() {
   aloss=$(python3 -c "print(round(100.0*$adf/$ldenom,1) if $ldenom else 0.0)")
   result=$(python3 -c "print('pass' if float('$aloss')<=$LONG_LOSS_TOL else 'fail')")
   result="$(taint_if_uas_crash "$result" "$u0" "${type}_aftermath")"
+  # Quarantine a whole-VM host freeze (WSL2 deschedule): if this fail's loss is
+  # recv_timeout-dominated (frozen b2bua event loops — the A-leg's in-dialog request
+  # goes unanswered) AND off-SIP-path pods (cdr/limiter) CPU collapsed in-window, it
+  # is an INFRA artifact, NOT a SUT teardown (which is BYE-driven => unexpected_msg).
+  # Downgrade fail -> tainted. The timeout_recv≫unexpected_msg interlock deliberately
+  # leaves a genuine keepalive-BYE tail (unexpected_msg) FAILING the gate, so a real
+  # HA regression is never masked. (2026-06-16 idx7 kill_worker_aftermath.)
+  if [ "$result" = "fail" ]; then
+    local tr um
+    tr="$(vmq "sum(increase(sipp_failed_total{role=\"long\",cause=\"timeout_recv\"}[${waited}s]))")"
+    um="$(vmq "sum(increase(sipp_failed_total{role=\"long\",cause=\"unexpected_msg\"}[${waited}s]))")"
+    if python3 -c "import sys; sys.exit(0 if float('${tr:-0}') > 2*float('${um:-0}') else 1)" \
+       && cluster_stalled_in_window "$waited"; then
+      warn "  ↳ TAINTED (cluster-stall): off-path pods (cdr/limiter) CPU collapsed in-window = whole-VM host deschedule (WSL2). Long loss is recv_timeout from frozen b2bua event loops (timeout_recv≫unexpected_msg), NOT a SUT teardown — INFRA artifact, do not investigate the SUT."
+      push_metric "sip_chaos_event{type=\"${type}_aftermath\",result=\"tainted_cluster_stall\"} 1"
+      result="tainted"
+    fi
+  fi
   push_metric "sip_chaos_event{type=\"${type}_aftermath\",result=\"$result\"} 1
 sip_chaos_long_loss_pct{type=\"${type}_aftermath\"} $aloss
 sip_chaos_long_failed{type=\"${type}_aftermath\"} $adf"
