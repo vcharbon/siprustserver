@@ -3,14 +3,20 @@
 //! existing headers rather than constructing new ones (construction lives in
 //! [`crate::generators`]).
 //!
+//! One byte-level dispatcher helper is ported ahead of slice 2 because the
+//! Tier-1 overload brake's emergency bypass depends on it (see the byte-helpers
+//! section at the bottom):
+//!   - [`buffer_has_emergency_marker`] — the cheap pre-parse signal the Tier-1
+//!     UDP brake uses to NEVER 503 an emergency packet.
+//!
 //! Deferred to slice 2 (network/dispatch), NOT ported here:
 //!   - the identifier generators (`newTag`/`newBranch`/`newCallId`/`currentRng`)
 //!     — they read a fiber-local seeded RNG (Effect `Random`); the Rust port
 //!     will inject an RNG seam at the network layer.
-//!   - the byte-level overload/dispatcher helpers
+//!   - the remaining byte-level overload/dispatcher helpers
 //!     (`buildStatelessReject503Buffer`, `isInviteRequestBuffer`,
-//!     `bufferHasEmergencyMarker`, `bufferHasToTag`, `jitteredRetryAfter`) —
-//!     Tier-1 UDP / dispatcher concerns.
+//!     `bufferHasToTag`, `jitteredRetryAfter`) — Tier-1 UDP / dispatcher
+//!     concerns, ported with their consumers.
 
 use std::collections::BTreeMap;
 
@@ -225,6 +231,72 @@ pub fn is_emergency_request(req: &SipRequest) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cheap byte-level classifier helpers (overload protection)
+// ---------------------------------------------------------------------------
+//
+// These run on the RAW datagram *before* the SIP parser, in the Tier-1 UDP
+// brake's hot path: they decide whether to stateless-503 an INVITE while the
+// ingress queue is saturated, so they MUST be allocation-free byte scans, not
+// parses. Port of the byte-classifier block in `src/sip/MessageHelpers.ts`.
+
+/// The canonical emergency Resource-Priority namespace.value tokens (per
+/// docs/overload-protection.md). Matched case-SENSITIVELY — the upstream
+/// contract requires canonical casing, mirroring [`is_emergency_request`].
+const EMERGENCY_RPH_TOKENS: [&[u8]; 3] = [b"esnet.0", b"wps.0", b"q735.0"];
+
+/// Cheap byte scan: does the raw datagram carry an emergency signal?
+///
+/// Two signals, checked in TS order (cheapest first):
+///   1. the dispatcher-side markers `;emerg=1` (Request-URI) or `;em=1` (Via
+///      custom param) that the B2BUA stamps once an emergency call is admitted
+///      (see `b2bua::stack_identity`), which every subsequent in-dialog packet
+///      then carries — a plain substring match anywhere in the buffer; then
+///   2. an **initial** INVITE's `Resource-Priority:` header (case-sensitive
+///      canonical name) whose value, within that same header line, contains one
+///      of the canonical emergency tokens [`EMERGENCY_RPH_TOKENS`].
+///
+/// This is the exact signal the Tier-1 brake consults to NEVER 503 an emergency
+/// packet. It operates on bytes (no UTF-8/parse cost) and never allocates.
+pub fn buffer_has_emergency_marker(raw: &[u8]) -> bool {
+    // Cheap path: dispatcher-side markers stamped on admitted calls.
+    if find_subslice(raw, b";emerg=1").is_some() {
+        return true;
+    }
+    if find_subslice(raw, b";em=1").is_some() {
+        return true;
+    }
+
+    // Initial INVITE: Resource-Priority header (case-sensitive canonical name).
+    let rp_idx = match find_subslice(raw, b"Resource-Priority:") {
+        Some(idx) => idx,
+        None => return false,
+    };
+    // Confine the token scan to that header's own line: from the match to the
+    // next CRLF (or end of buffer if the line is unterminated), so a token in a
+    // later header / the body cannot spoof an emergency.
+    let line_end = find_subslice(&raw[rp_idx..], b"\r\n").map(|rel| rp_idx + rel);
+    let slice = match line_end {
+        Some(end) => &raw[rp_idx..end],
+        None => &raw[rp_idx..],
+    };
+    EMERGENCY_RPH_TOKENS.iter().any(|tok| find_subslice(slice, tok).is_some())
+}
+
+/// First index of `needle` within `haystack` (byte substring search), or
+/// `None`. The Rust equivalent of `Buffer.indexOf` used by the byte
+/// classifiers. Empty `needle` matches at 0 (as `indexOf("")` does), matching
+/// the TS contract; the callers here never pass an empty needle.
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    if needle.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
 #[cfg(test)]
 mod emergency_tests {
     //! Port of the documented `isEmergencyRequest` contract from
@@ -309,6 +381,188 @@ Content-Length: 0\r\n\r\n"
         // multi-namespace RPH value still flags emergency.
         let req = invite_with_rph(Some("Resource-Priority"), Some("dsn.flash, q735.0"));
         assert!(is_emergency_request(&req));
+    }
+}
+
+#[cfg(test)]
+mod buffer_emergency_tests {
+    //! Port of the `bufferHasEmergencyMarker` contract from
+    //! `src/sip/MessageHelpers.ts` (L421–438). Like its parsed sibling
+    //! `isEmergencyRequest`, the TS function has **no dedicated unit test** in
+    //! the source suite — it is exercised only end-to-end by the byte-level UDP
+    //! brake (`tests/sip/UdpTransport-brake.test.ts`), which cannot be ported
+    //! until the `UdpTransport` facade lands in slice 2 (network/dispatch).
+    //!
+    //! These tests therefore pin the byte-scan contract the TS implementation
+    //! encodes directly, including the three cases the brake integration relies
+    //! on (an `esnet.0` RPH INVITE bypasses the brake; a plain INVITE does not):
+    //!   - the stamped in-dialog markers `;emerg=1` (Request-URI) / `;em=1`
+    //!     (Via) match **anywhere** in the datagram — the cheap path checked
+    //!     first;
+    //!   - the **initial** INVITE path matches a case-SENSITIVE
+    //!     `Resource-Priority:` header name whose **same-line** value carries a
+    //!     canonical token (`esnet.0` / `wps.0` / `q735.0`);
+    //!   - a token on a *different* line than the `Resource-Priority:` header
+    //!     does NOT count (line-confined scan);
+    //!   - `false` when no signal is present.
+    //!
+    //! The marker strings asserted here are exactly what `b2bua::stack_identity`
+    //! stamps: `em=1` as a Via custom param and `emerg=1` as a Request-URI
+    //! param, which serialise to `;em=1` / `;emerg=1` on the wire.
+
+    use super::buffer_has_emergency_marker;
+
+    /// Build a minimal INVITE datagram. `rph` is the optional
+    /// `Resource-Priority` header *value*; `name` lets a test vary the header
+    /// casing to pin case-sensitivity.
+    fn invite_buf(rph: Option<(&str, &str)>) -> Vec<u8> {
+        let rph_line = match rph {
+            Some((name, value)) => format!("{name}: {value}\r\n"),
+            None => String::new(),
+        };
+        format!(
+            "INVITE sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5555;branch=z9hG4bK-brake-0\r\n\
+From: <sip:alice@flooder.test>;tag=alice-tag-0\r\n\
+To: <sip:bob@b2bua.test>\r\n\
+Call-ID: brake-test-0@10.0.0.1\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:alice@10.0.0.1:5555>\r\n\
+Max-Forwards: 70\r\n\
+{rph_line}\
+Content-Length: 0\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn each_canonical_rph_token_flags_emergency() {
+        // Mirrors `buildInviteBuffer(_, { emergency: true })` (esnet.0) plus the
+        // other two canonical tokens.
+        for tok in ["esnet.0", "wps.0", "q735.0"] {
+            let buf = invite_buf(Some(("Resource-Priority", tok)));
+            assert!(buffer_has_emergency_marker(&buf), "{tok} should flag emergency");
+        }
+    }
+
+    #[test]
+    fn plain_invite_is_not_emergency() {
+        // The non-emergency `buildInviteBuffer` shape — must NOT bypass the brake.
+        assert!(!buffer_has_emergency_marker(&invite_buf(None)));
+    }
+
+    #[test]
+    fn rph_header_name_is_case_sensitive() {
+        // TS scans for the literal "Resource-Priority:" — a lower-cased header
+        // name is not matched (canonical-casing contract).
+        let buf = invite_buf(Some(("resource-priority", "esnet.0")));
+        assert!(!buffer_has_emergency_marker(&buf));
+    }
+
+    #[test]
+    fn rph_token_match_is_case_sensitive() {
+        // Canonical token casing required: an upper-cased token does not flag.
+        let buf = invite_buf(Some(("Resource-Priority", "ESNET.0")));
+        assert!(!buffer_has_emergency_marker(&buf));
+    }
+
+    #[test]
+    fn non_emergency_rph_value_is_not_emergency() {
+        let buf = invite_buf(Some(("Resource-Priority", "dsn.flash")));
+        assert!(!buffer_has_emergency_marker(&buf));
+    }
+
+    #[test]
+    fn rph_token_matches_as_substring_among_multiple_namespaces() {
+        // indexOf semantics: a canonical token embedded in a multi-namespace
+        // value still flags.
+        let buf = invite_buf(Some(("Resource-Priority", "dsn.flash, q735.0")));
+        assert!(buffer_has_emergency_marker(&buf));
+    }
+
+    #[test]
+    fn token_on_a_different_line_than_rph_does_not_flag() {
+        // A canonical token elsewhere in the message (here a Subject header)
+        // must NOT count — the scan is confined to the Resource-Priority line.
+        // The RP header itself carries a non-emergency value.
+        let raw = "INVITE sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5555;branch=z9hG4bK-x\r\n\
+Subject: priority esnet.0 please\r\n\
+Resource-Priority: dsn.flash\r\n\
+Content-Length: 0\r\n\r\n";
+        assert!(!buffer_has_emergency_marker(raw.as_bytes()));
+    }
+
+    #[test]
+    fn unterminated_rph_line_still_scans_to_end() {
+        // No trailing CRLF after the value (lineEnd === -1 branch in TS):
+        // subarray(rpIdx) scans to the end and still finds the token.
+        let raw = b"INVITE sip:bob SIP/2.0\r\nResource-Priority: wps.0";
+        assert!(buffer_has_emergency_marker(raw));
+    }
+
+    #[test]
+    fn stamped_via_em_marker_flags_anywhere() {
+        // `;em=1` is the Via custom param b2bua::stack_identity stamps; it sits
+        // on the Via line, not in the Request-URI — must match anywhere.
+        let raw = b"BYE sip:bob@127.0.0.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-9;em=1\r\n\
+Content-Length: 0\r\n\r\n";
+        assert!(buffer_has_emergency_marker(raw));
+    }
+
+    #[test]
+    fn stamped_requri_emerg_marker_flags_anywhere() {
+        // `;emerg=1` is the Request-URI param stamped on admitted emergency
+        // calls; a later in-dialog request (no RPH header at all) carries it.
+        let raw = b"ACK sip:b2bua@127.0.0.1:5060;emerg=1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-3\r\n\
+Content-Length: 0\r\n\r\n";
+        assert!(buffer_has_emergency_marker(raw));
+    }
+
+    #[test]
+    fn em_marker_is_checked_before_rph_so_non_invite_in_dialog_passes() {
+        // An in-dialog OPTIONS with neither RPH nor markers is not emergency
+        // (sanity: the cheap path returns false, then no RPH header → false).
+        let raw = b"OPTIONS sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-opt\r\n\
+Content-Length: 0\r\n\r\n";
+        assert!(!buffer_has_emergency_marker(raw));
+    }
+
+    #[test]
+    fn empty_buffer_is_not_emergency() {
+        assert!(!buffer_has_emergency_marker(b""));
+    }
+
+    #[test]
+    fn short_buffer_below_needle_length_is_not_emergency() {
+        // Guards the `needle.len() > haystack.len()` early-out in find_subslice.
+        assert!(!buffer_has_emergency_marker(b"INV"));
+    }
+}
+
+#[cfg(test)]
+mod find_subslice_tests {
+    use super::find_subslice;
+
+    #[test]
+    fn finds_at_start_middle_and_absent() {
+        assert_eq!(find_subslice(b"abcdef", b"abc"), Some(0));
+        assert_eq!(find_subslice(b"abcdef", b"cd"), Some(2));
+        assert_eq!(find_subslice(b"abcdef", b"xyz"), None);
+    }
+
+    #[test]
+    fn empty_needle_matches_at_zero_like_indexof() {
+        assert_eq!(find_subslice(b"abc", b""), Some(0));
+        assert_eq!(find_subslice(b"", b""), Some(0));
+    }
+
+    #[test]
+    fn needle_longer_than_haystack_is_none() {
+        assert_eq!(find_subslice(b"ab", b"abc"), None);
     }
 }
 

@@ -109,7 +109,7 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
 | `Serializer.ts` | `serializer.rs` | ✅ ported (`serialize`/`sip_summary`/`message_summary`, Content-Length safety net) |
 | `SdpUtils.ts` + `SdpAnswerFromOffer.ts` | `sdp.rs` | ✅ ported (codec-profile extract, held-SDP, answer-from-offer, strict `validate_sdp_body`) |
 | `generators.ts` | `generators.rs` | ✅ ported (all 8 generators; `StackDialog`/`InviteClientTransactionHandle` are minimal local input shapes pending slice-2 `Dialog`/`TransactionLayer`) |
-| `SipFragUtils.ts`, `MessageHelpers.ts` | `sipfrag.rs`, `message_helpers.rs` | ✅ ported — sipfrag whole; MessageHelpers **pure half** only (header accessors + structured readers). RNG identifier generators + byte-level overload/dispatcher helpers deferred to slice 2 (see un-ported list) |
+| `SipFragUtils.ts`, `MessageHelpers.ts` | `sipfrag.rs`, `message_helpers.rs` | ✅ ported — sipfrag whole; MessageHelpers **pure half** (header accessors + structured readers) **plus the byte-level `bufferHasEmergencyMarker`** (pulled ahead of slice 2 — the Tier-1 brake's emergency-bypass signal). RNG identifier generators + the **remaining** byte-level overload/dispatcher helpers deferred to slice 2 (see un-ported list) |
 
 ### Tests to port
 | Source test | Rust home | Status |
@@ -148,9 +148,14 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
   (where determinism is plumbed); the Rust port will inject an RNG at that
   boundary. Deferred with the helpers themselves.
 - The byte-level overload/dispatcher helpers in `MessageHelpers.ts`
-  (`buildStatelessReject503Buffer`, `isInviteRequestBuffer`,
-  `bufferHasEmergencyMarker`, `bufferHasToTag`, `jitteredRetryAfter`) — Tier-1
-  UDP / dispatcher concerns, deferred to **slice 2** with their consumers.
+  (`buildStatelessReject503Buffer`, `isInviteRequestBuffer`, `bufferHasToTag`,
+  `jitteredRetryAfter`) — Tier-1 UDP / dispatcher concerns, deferred to
+  **slice 2** with their consumers. `bufferHasEmergencyMarker` was pulled ahead
+  (it is the emergency-bypass signal the brake consults to never 503 an
+  emergency packet); its only existing coverage, the end-to-end
+  `tests/sip/UdpTransport-brake.test.ts`, stays deferred until the `UdpTransport`
+  facade lands, so the Rust port pins the byte-scan contract with dedicated unit
+  tests (`message_helpers::buffer_emergency_tests`).
 - The `parser-extraction.test.ts` "custom vs JsSIP" cross-parser equivalence
   block and the `jssip`/`native` oracle columns in `parser-*.test.ts` — there
   is no JsSIP in the Rust stack ([ADR-0001](docs/adr/0001-port-custom-parser-rvoip-as-parity-oracle.md));
