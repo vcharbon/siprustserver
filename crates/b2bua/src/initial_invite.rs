@@ -11,7 +11,9 @@ use call::{
     ALegInviteSnapshot, Call, CallModelState, CallTopology, CdrEvent, CdrEventType, Leg,
     LegDisposition, LegKind, LegState, RemoteInfo,
 };
-use sip_message::message_helpers::{get_header, get_headers, parse_uri_params};
+use sip_message::message_helpers::{
+    get_header, get_headers, is_emergency_request, parse_uri_params,
+};
 use sip_message::{SipMessage, SipRequest};
 use sip_txn::IdGen;
 
@@ -142,7 +144,15 @@ pub fn build_initial_call(
         sampled: None,
         worker_index: None,
         topology,
-        emergency: None,
+        // Port of `SipRouter.ts` L1181/L1215: `isEmergency = isEmergencyRequest(req)`
+        // then `emergency: isEmergency || undefined`. The `|| undefined` coercion
+        // means a non-emergency INVITE writes *absence* (`None`), never `Some(false)`
+        // — production only ever stamps `Some(true)` or leaves the field unset (see
+        // `call` codec_roundtrip emergency contract). Downstream consumers — the
+        // `;emerg=1`/`;em=1` URI/Via markers in `stack_identity` and the cheap
+        // in-dialog byte classifier (`buffer_has_emergency_marker`) — depend on this
+        // being live, so it must be derived from the INVITE here, not hard-coded.
+        emergency: is_emergency_request(invite).then_some(true),
         features: None,
         policy_update_headers: None,
         policy_update_body: None,
@@ -347,4 +357,100 @@ fn build_reject_headers(
         out.push(sip_message::SipHeader { name: "Contact".to_string(), value });
     }
     out
+}
+
+#[cfg(test)]
+mod emergency_on_invite_tests {
+    //! Pins the `SipRouter.ts` L1181/L1215 contract that the B2BUA's initial-INVITE
+    //! handler stamps `Call.emergency` from the inbound INVITE
+    //! (`isEmergency = isEmergencyRequest(req)`; `emergency: isEmergency || undefined`).
+    //! The Rust home — [`build_initial_call`] — previously hard-coded
+    //! `emergency: None`, so the field was dead on the worker and every downstream
+    //! emergency consumer (the `;emerg=1`/`;em=1` markers, the in-dialog byte
+    //! classifier) was starved. The TS source has no dedicated unit test for this
+    //! wiring (it is covered end-to-end only); these pin it at the seam.
+    //!
+    //! These assert the *wiring* (helper → field + `|| undefined` coercion), not the
+    //! emergency-classification contract itself — that lives in
+    //! `sip_message::message_helpers::emergency_tests`. Pure builder, no clock.
+
+    use super::build_initial_call;
+    use crate::config::B2buaConfig;
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser, SipRequest};
+    use std::net::SocketAddr;
+
+    fn config_for(ordinal: &str) -> B2buaConfig {
+        B2buaConfig { self_ordinal: ordinal.into(), ..Default::default() }
+    }
+
+    fn src() -> SocketAddr {
+        SocketAddr::from(([10, 0, 0, 9], 5060))
+    }
+
+    /// Parse a minimal INVITE; `rph` (when `Some`) is the `Resource-Priority`
+    /// header VALUE (header name canonical). `None` omits the header entirely.
+    fn invite_with_rph(rph: Option<&str>) -> SipRequest {
+        let rph_line = match rph {
+            Some(v) => format!("Resource-Priority: {v}\r\n"),
+            None => String::new(),
+        };
+        let raw = format!(
+            "INVITE sip:bob@example.com SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-emerg-iih\r\n\
+             Max-Forwards: 70\r\n\
+             From: <sip:alice@example.com>;tag=alicetag\r\n\
+             To: <sip:bob@example.com>\r\n\
+             Call-ID: emerg-iih@10.0.0.9\r\n\
+             CSeq: 1 INVITE\r\n\
+             Contact: <sip:alice@10.0.0.9:5060>\r\n\
+             {rph_line}\
+             Content-Length: 0\r\n\r\n"
+        );
+        match CustomParser::new().parse(raw.as_bytes()).expect("fixture INVITE should parse") {
+            SipMessage::Request(r) => r,
+            SipMessage::Response(_) => panic!("expected a request"),
+        }
+    }
+
+    #[test]
+    fn emergency_invite_sets_emergency_true() {
+        // Each canonical emergency RPH token flags the new a-leg Call as emergency.
+        for tok in ["esnet.0", "wps.0", "q735.0"] {
+            let invite = invite_with_rph(Some(tok));
+            let call = build_initial_call(&invite, src(), &config_for("w0"), 0);
+            assert_eq!(
+                call.emergency,
+                Some(true),
+                "RPH {tok} must stamp emergency = Some(true) on the a-leg Call"
+            );
+        }
+    }
+
+    #[test]
+    fn non_emergency_invite_leaves_emergency_unset() {
+        // No Resource-Priority at all → field stays absent (`None`), NOT Some(false):
+        // this is the `isEmergency || undefined` coercion (SipRouter.ts L1215).
+        let call = build_initial_call(&invite_with_rph(None), src(), &config_for("w0"), 0);
+        assert_eq!(call.emergency, None, "no RPH → emergency stays None (|| undefined)");
+
+        // A well-formed but non-emergency RPH namespace.value also stays None.
+        let call = build_initial_call(&invite_with_rph(Some("dsn.flash")), src(), &config_for("w0"), 0);
+        assert_eq!(call.emergency, None, "non-emergency RPH → emergency stays None");
+    }
+
+    #[test]
+    fn emergency_is_derived_through_the_real_helper() {
+        // Proves the field is wired to `is_emergency_request` (case-SENSITIVE value
+        // match) and not a naive header-presence check: an upper-cased token is not
+        // canonical, so it must leave the field unset.
+        let call = build_initial_call(&invite_with_rph(Some("ESNET.0")), src(), &config_for("w0"), 0);
+        assert_eq!(call.emergency, None, "non-canonical casing must NOT flag emergency");
+
+        // And a canonical token embedded among multiple namespaces still flags it
+        // (substring match), mirroring the helper's indexOf contract.
+        let call =
+            build_initial_call(&invite_with_rph(Some("dsn.flash, q735.0")), src(), &config_for("w0"), 0);
+        assert_eq!(call.emergency, Some(true), "embedded canonical token flags emergency");
+    }
 }
