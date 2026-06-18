@@ -57,28 +57,46 @@ pub fn rebuild_a_leg_invite(snap: &call::ALegInviteSnapshot) -> SipRequest {
     .expect("a-leg INVITE snapshot is well-formed")
 }
 
-/// The B2BUA's Via for a leg's outbound message.
-pub fn leg_via(config: &B2buaConfig, call_ref: &str, leg_id: &str, branch: String) -> ViaSpec {
+/// The B2BUA's Via for a leg's outbound message. `is_emergency` is the call's
+/// emergency state (`call.emergency == Some(true)`); when set it stamps the
+/// `;em=1` marker every subsequent in-dialog packet then carries — the in-dialog
+/// signal the Tier-1 overload brake (`buffer_has_emergency_marker`) scans to
+/// never 503 an admitted emergency call. Port of `legStackIdentity`'s
+/// `isEmergency = call.emergency === true` (stack-identity.ts L137).
+pub fn leg_via(
+    config: &B2buaConfig,
+    call_ref: &str,
+    leg_id: &str,
+    is_emergency: bool,
+    branch: String,
+) -> ViaSpec {
     build_call_via(
         &StackIdentityOpts {
             local_ip: &config.sip_local_ip,
             local_port: config.sip_local_port,
             call_ref,
             leg: leg_id,
-            is_emergency: false,
+            is_emergency,
         },
         branch,
     )
 }
 
-/// The B2BUA's Contact for a leg's outbound message.
-pub fn leg_contact(config: &B2buaConfig, call_ref: &str, leg_id: &str) -> ContactSpec {
+/// The B2BUA's Contact for a leg's outbound message. `is_emergency` (the call's
+/// `call.emergency == Some(true)`) stamps the `;emerg=1` Contact marker — see
+/// [`leg_via`].
+pub fn leg_contact(
+    config: &B2buaConfig,
+    call_ref: &str,
+    leg_id: &str,
+    is_emergency: bool,
+) -> ContactSpec {
     build_call_contact(&StackIdentityOpts {
         local_ip: &config.sip_local_ip,
         local_port: config.sip_local_port,
         call_ref,
         leg: leg_id,
-        is_emergency: false,
+        is_emergency,
     })
 }
 
@@ -170,6 +188,11 @@ pub fn apply_b_leg_egress(
 pub fn build_b_leg(
     call_ref: &str,
     leg_id: &str,
+    // The call's emergency state (`call.emergency == Some(true)`); stamps the
+    // `;em=1` / `;emerg=1` markers on the originated b-leg INVITE's Via + Contact
+    // (port of `buildBLegInvite`, helpers.ts L214/L266-280). Every subsequent
+    // in-dialog packet then carries it (the Tier-1 overload-brake signal).
+    is_emergency: bool,
     a_leg_invite: &SipRequest,
     dest: (String, u16),
     new_ruri: Option<&str>,
@@ -242,8 +265,8 @@ pub fn build_b_leg(
         to_uri: to_uri.clone(),
         to_tag: None,
         cseq: 1,
-        via: Some(leg_via(config, call_ref, leg_id, branch.clone())),
-        contact: Some(leg_contact(config, call_ref, leg_id)),
+        via: Some(leg_via(config, call_ref, leg_id, is_emergency, branch.clone())),
+        contact: Some(leg_contact(config, call_ref, leg_id, is_emergency)),
         max_forwards: Some(70),
         body,
         content_type,
@@ -441,6 +464,7 @@ pub fn response_to_a_leg(
 pub fn ack_b_leg(
     call_ref: &str,
     leg: &Leg,
+    is_emergency: bool,
     config: &B2buaConfig,
     id_gen: &IdGen,
     body: Vec<u8>,
@@ -455,7 +479,7 @@ pub fn ack_b_leg(
     // INVITE. Recover it from the cached INVITE transaction handle.
     let ack_cseq = acked_invite_cseq(dialog).unwrap_or_else(|| dialog.sip.local_cseq.max(0) as u32);
     let opts = GenerateAckFor2xxOpts {
-        via: Some(leg_via(config, call_ref, &leg.leg_id, branch)),
+        via: Some(leg_via(config, call_ref, &leg.leg_id, is_emergency, branch)),
         cseq: Some(ack_cseq),
         body,
         content_type,
@@ -658,6 +682,7 @@ Content-Length: 0\r\n\r\n",
         let (leg, effect) = build_b_leg(
             "w0|call-ref|xyz",
             "b-1",
+            false, // non-emergency
             &a,
             ("10.244.2.7".to_string(), 5060),
             None, // R-URI defaults to a-leg's
@@ -704,6 +729,66 @@ Content-Length: 0\r\n\r\n",
         assert!(
             contact.contains("127.0.0.1"),
             "b-leg Contact host must be the B2BUA local addr: {contact}"
+        );
+    }
+
+    /// Build the initial b-leg INVITE for `is_emergency` and return its raw Via +
+    /// Contact header values (the on-the-wire surface, not the builder structs).
+    fn b_leg_invite_via_contact(is_emergency: bool) -> (String, String) {
+        let (_leg, effect) = build_b_leg(
+            "w0|call-ref|xyz",
+            "b-1",
+            is_emergency,
+            &a_leg_invite(),
+            ("10.244.2.7".to_string(), 5060),
+            None,
+            None,
+            None,
+            None,
+            &B2buaConfig::default(),
+            &IdGen::seeded(0xE3E),
+            None,
+            &[],
+            None,
+        );
+        let invite = match effect.body {
+            OutboundBody::Request(r) => r,
+            OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
+        };
+        (
+            get_header(&invite.headers, "via").expect("b-leg INVITE has a Via").to_string(),
+            get_header(&invite.headers, "contact").expect("b-leg INVITE has a Contact").to_string(),
+        )
+    }
+
+    // The wiring contract this slice closes: an EMERGENCY call's initial b-leg
+    // INVITE (the single mint point) carries `;em=1` on its Via and `;emerg=1`
+    // on its Contact ON THE WIRE — the in-dialog markers `buffer_has_emergency_
+    // marker` scans so the Tier-1 overload brake never 503s an admitted
+    // emergency call. The pure-builder tests prove the `if is_emergency` branch
+    // in isolation; this proves a production relay path actually passes `true`
+    // and the markers reach the serialized message (port of `buildBLegInvite`,
+    // helpers.ts L266-280).
+    #[test]
+    fn emergency_b_leg_invite_via_and_contact_carry_the_markers() {
+        let (via, contact) = b_leg_invite_via_contact(true);
+        assert!(via.contains(";em=1"), "emergency b-leg Via must carry ;em=1: {via}");
+        assert!(
+            contact.contains(";emerg=1"),
+            "emergency b-leg Contact must carry ;emerg=1: {contact}"
+        );
+    }
+
+    // A non-emergency call's b-leg INVITE carries NEITHER marker (the markers are
+    // strictly an emergency signal — stamping them on a normal call would exempt
+    // it from overload shedding).
+    #[test]
+    fn non_emergency_b_leg_invite_omits_the_markers() {
+        let (via, contact) = b_leg_invite_via_contact(false);
+        assert!(!via.contains(";em=1"), "non-emergency Via must NOT carry ;em=1: {via}");
+        assert!(
+            !contact.contains(";emerg=1"),
+            "non-emergency Contact must NOT carry ;emerg=1: {contact}"
         );
     }
 }

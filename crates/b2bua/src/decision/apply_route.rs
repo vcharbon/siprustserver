@@ -170,6 +170,7 @@ pub async fn apply_route(
     let (mut leg, mut effect) = relay::build_b_leg(
         &call.call_ref,
         leg_id,
+        call.emergency == Some(true),
         a_invite,
         dest,
         route.new_ruri.as_deref(),

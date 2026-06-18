@@ -662,7 +662,7 @@ scenario-harness in a dedicated `crates/b2bua-harness` test crate.
 | (HTTP backend) | `decision/test_adapter.rs` (`ScriptedDecisionEngine`) | ✅ jssip-emulating test impl |
 | `cdr/CdrWriter.ts` (+ `BufferedCdrLayer`) | `cdr/{mod,memory,buffered}.rs` | ✅ |
 | `CallLimiter*.ts` | `limiter.rs` (`NoopLimiter`) | 🟡 no-op seam (real limiter = row 20) |
-| `b2bua/stack-identity.ts` | `stack_identity.rs` | ✅ Via/Contact `cr`/`lg` stamping + param codec |
+| `b2bua/stack-identity.ts` | `stack_identity.rs` (+ `rules/relay.rs` leg builders) | ✅ Via/Contact `cr`/`lg` stamping + param codec; **emergency markers wired end-to-end** (slice 05): the `;em=1` (Via) / `;emerg=1` (Contact) markers are now stamped on every real outbound hop by threading `is_emergency = call.emergency == Some(true)` (port of `legStackIdentity`, stack-identity.ts L137) through `relay::{leg_via,leg_contact,build_b_leg,ack_b_leg}` + `bye_on_dialog` to all ~20 `actions.rs`/`apply_route.rs` call sites — so an admitted emergency call's in-dialog traffic carries the signal `buffer_has_emergency_marker` scans (the Tier-1 overload brake never 503s it). The `StackIdentity` public read-API (`from_config`/`advertised_{host,port}`) is a forward-looking consumer seam (no in-tree caller yet), mirroring the TS `StackIdentity` DI service |
 | `b2bua/helpers.ts` b2bOutboundProxy + `ActionExecutor` `applyEgressRouting` | `rules/relay.rs` (`apply_b_leg_egress`) + `config.b2b_outbound_proxy` | ✅ b-leg INVITE/ACK/BYE preload `;outbound` Route at the proxy; wire dest = proxy, R-URI = callee (RFC 3261 §16.12). Empty-routeSet error-fallback + the `;outbound` source-IP hardening folded into the one helper |
 | `B2buaCore.ts` (layer composition) | `b2bua_core.rs` | ✅ |
 
@@ -672,7 +672,8 @@ scenario-harness in a dedicated `crates/b2bua-harness` test crate.
 | per-call FIFO order + cap/queue drops | `dispatch.rs` | ✅ 2 |
 | timer fire/cancel under paused clock | `timers.rs` | ✅ 2 |
 | scripted decision route/reject | `decision/test_adapter.rs` | ✅ 2 |
-| stack-identity param round-trip | `stack_identity.rs` | ✅ 2 |
+| stack-identity param round-trip + emergency markers (`em`/`emerg` branch) + `StackIdentity` public read-API | `stack_identity.rs` | ✅ 9 |
+| emergency markers ON THE WIRE: an emergency call's relayed b-leg INVITE Via carries `;em=1` + Contact carries `;emerg=1` (non-emergency carries neither) | `rules/relay.rs` (`identity_tests`) | ✅ 2 |
 | matcher ranking + invariant enforcement | `tests/rules.rs` | ✅ 3 |
 | alice↔b2bua↔bob basic call (INVITE/180/200/ACK/BYE) + one CDR | `b2bua-harness/tests/basic_call.rs` | ✅ 1 |
 | b-leg 486 relayed + terminate; decision reject 403 | `b2bua-harness/tests/failure.rs` | ✅ 2 |

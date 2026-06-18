@@ -99,7 +99,7 @@ impl<'a> ActionExecutor<'a> {
                 };
                 if let Some(leg) = leg {
                     if let Some(e) =
-                        relay::ack_b_leg(&call.call_ref, leg, self.config, self.id_gen, vec![], None)
+                        relay::ack_b_leg(&call.call_ref, leg, call.emergency == Some(true), self.config, self.id_gen, vec![], None)
                     {
                         fx.outbound.push(e);
                     }
@@ -155,6 +155,7 @@ impl<'a> ActionExecutor<'a> {
                 let (leg, effect) = relay::build_b_leg(
                     &call.call_ref,
                     &leg_id,
+                    call.emergency == Some(true),
                     &a_invite,
                     destination.clone(),
                     new_ruri.as_deref(),
@@ -359,7 +360,7 @@ impl<'a> ActionExecutor<'a> {
             RuleAction::RelayFailureToALeg { status, reason } => {
                 let a_tag = self.ensure_a_dialog(call);
                 let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-                let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
+                let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
                 fx.outbound.push(relay::response_to_a_leg(
                     &a_invite,
                     *status,
@@ -414,7 +415,7 @@ impl<'a> ActionExecutor<'a> {
             Some("application/sdp".to_string())
         };
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
+        let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
         // A 2xx INVITE answer carries the B2BUA's own Allow/Supported (RFC 3261
         // §13.2.1/§20.37), exactly as the original confirm-dialog relay stamped —
         // so the retransmit is byte-faithful and the RFC audit stays clean.
@@ -472,8 +473,8 @@ impl<'a> ActionExecutor<'a> {
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&dialog.sip);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, branch)),
-            contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id)),
+            via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, call.emergency == Some(true), branch)),
+            contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id, call.emergency == Some(true))),
             body: body.to_vec(),
             content_type: content_type.map(str::to_string),
             cseq: Some(outbound_cseq as u32),
@@ -534,8 +535,8 @@ impl<'a> ActionExecutor<'a> {
             })
             .collect();
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, branch.clone())),
-            contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id)),
+            via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, call.emergency == Some(true), branch.clone())),
+            contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id, call.emergency == Some(true))),
             body: body.to_vec(),
             content_type: (!body.is_empty()).then(|| "application/sdp".to_string()),
             cseq: Some(outbound_cseq as u32),
@@ -617,6 +618,7 @@ impl<'a> ActionExecutor<'a> {
                 if let Some(e) = relay::ack_b_leg(
                     &call.call_ref,
                     leg,
+                    call.emergency == Some(true),
                     self.config,
                     self.id_gen,
                     req.body.clone(),
@@ -684,8 +686,8 @@ impl<'a> ActionExecutor<'a> {
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&target_dialog.sip);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, &call.call_ref, target_leg, branch.clone())),
-            contact: Some(relay::leg_contact(self.config, &call.call_ref, target_leg)),
+            via: Some(relay::leg_via(self.config, &call.call_ref, target_leg, call.emergency == Some(true), branch.clone())),
+            contact: Some(relay::leg_contact(self.config, &call.call_ref, target_leg, call.emergency == Some(true))),
             body: req.body.clone(),
             content_type: get_header(&req.headers, "content-type").map(str::to_string),
             rack,
@@ -828,7 +830,7 @@ impl<'a> ActionExecutor<'a> {
             .cloned();
         if let Some(src_dialog) = src_dialog {
             if let Some(pending) = find_pending_request(&src_dialog, cseq_num).cloned() {
-                let contact = relay::leg_contact(self.config, &call.call_ref, target_leg);
+                let contact = relay::leg_contact(self.config, &call.call_ref, target_leg, call.emergency == Some(true));
                 let mut transparent_headers =
                     filter_passthrough(relay::relay_response_passthrough_headers(resp));
                 // A 2xx answer to a B2BUA-relayed re-INVITE advertises the B2BUA's
@@ -918,7 +920,7 @@ impl<'a> ActionExecutor<'a> {
                 }
             };
             let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-            let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
+            let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
             let mut passthrough = filter_passthrough(relay::relay_response_passthrough_headers(resp));
             // A 2xx INVITE answer the B2BUA mints toward the caller advertises the
             // B2BUA's own capability set (RFC 3261 §13.2.1/§20.37), replacing any
@@ -954,7 +956,7 @@ impl<'a> ActionExecutor<'a> {
         // ── Default: regenerate the INVITE response on the a-leg server txn ──
         let a_tag = self.ensure_a_dialog(call);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
+        let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
         // Reliable-provisional negotiation headers (Require/Supported/RSeq) pass
         // through transparently so end-to-end PRACK keeps working (RFC 3262).
         let mut passthrough = filter_passthrough(relay::relay_response_passthrough_headers(resp));
@@ -1410,8 +1412,8 @@ impl<'a> ActionExecutor<'a> {
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&dialog.sip);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, branch)),
-            contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id)),
+            via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, call.emergency == Some(true), branch)),
+            contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id, call.emergency == Some(true))),
             cseq: Some(outbound_cseq as u32),
             body: body.to_vec(),
             content_type,
@@ -1464,7 +1466,7 @@ impl<'a> ActionExecutor<'a> {
             .map(str::to_string)
             .or_else(|| (!body.is_empty()).then(|| "application/sdp".to_string()));
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id);
+        let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
         let mut extra_headers = Vec::new();
         if let Some(pem) = p_early_media {
             extra_headers.push(sip_message::SipHeader {
@@ -1533,8 +1535,8 @@ impl<'a> ActionExecutor<'a> {
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&dialog.sip);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, branch)),
-            contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id)),
+            via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, call.emergency == Some(true), branch)),
+            contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id, call.emergency == Some(true))),
             rack: Some(format!("{rseq} {invite_cseq} INVITE")),
             cseq: Some(outbound_cseq as u32),
             ..Default::default()
@@ -1555,18 +1557,25 @@ impl<'a> ActionExecutor<'a> {
     fn bye_to_b_leg(&self, call: &Call, leg_id: &str, reason: Option<&str>) -> Option<OutboundSipEffect> {
         let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
         let d = leg.dialogs.first()?;
-        self.bye_on_dialog(&call.call_ref, leg_id, &d.sip, reason)
+        self.bye_on_dialog(&call.call_ref, leg_id, call.emergency == Some(true), &d.sip, reason)
     }
 
     fn bye_to_leg_a(&self, call: &Call, reason: Option<&str>) -> Option<OutboundSipEffect> {
         let d = call.a_leg.dialogs.first()?;
-        self.bye_on_dialog(&call.call_ref, &call.a_leg.leg_id, &d.sip, reason)
+        self.bye_on_dialog(
+            &call.call_ref,
+            &call.a_leg.leg_id,
+            call.emergency == Some(true),
+            &d.sip,
+            reason,
+        )
     }
 
     fn bye_on_dialog(
         &self,
         call_ref: &str,
         leg_id: &str,
+        is_emergency: bool,
         sip: &StackDialog,
         reason: Option<&str>,
     ) -> Option<OutboundSipEffect> {
@@ -1587,7 +1596,7 @@ impl<'a> ActionExecutor<'a> {
         // this dialog's `local_cseq + 1`, the next sequence number within THIS
         // dialog (a forked sibling's CSeq is irrelevant — distinct dialog).
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, call_ref, leg_id, branch)),
+            via: Some(relay::leg_via(self.config, call_ref, leg_id, is_emergency, branch)),
             extra_headers,
             ..Default::default()
         };
