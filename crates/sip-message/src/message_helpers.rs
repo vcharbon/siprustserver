@@ -226,6 +226,93 @@ pub fn is_emergency_request(req: &SipRequest) -> bool {
 }
 
 #[cfg(test)]
+mod emergency_tests {
+    //! Port of the documented `isEmergencyRequest` contract from
+    //! `src/sip/MessageHelpers.ts` (L379–387). The TS function has no dedicated
+    //! unit test in the source suite — it is exercised end-to-end by the proxy
+    //! admission (`selectForNewDialog-overload.test.ts`) and the byte-level UDP
+    //! brake (`UdpTransport-brake.test.ts`, which tests the *separate*
+    //! `bufferHasEmergencyMarker` helper, deferred per this module's doc). These
+    //! tests pin the contract the TS implementation encodes: case-INsensitive
+    //! header lookup, case-SENSITIVE value match (canonical casing required by
+    //! the upstream contract, per docs/overload-protection.md), substring match
+    //! against the three canonical RPH tokens, `false` when absent.
+
+    use super::is_emergency_request;
+    use crate::parser::SipParser;
+    use crate::parser::custom::CustomParser;
+    use crate::types::SipMessage;
+
+    /// Parse a minimal INVITE carrying `rph` as the `Resource-Priority` header
+    /// value. `rph == None` omits the header entirely.
+    fn invite_with_rph(header_name: Option<&str>, value: Option<&str>) -> crate::types::SipRequest {
+        let rph_line = match (header_name, value) {
+            (Some(name), Some(v)) => format!("{name}: {v}\r\n"),
+            _ => String::new(),
+        };
+        let raw = format!(
+            "INVITE sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-emerg\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=emerg-from\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: emerg-call@10.0.0.1\r\n\
+CSeq: 1 INVITE\r\n\
+{rph_line}\
+Content-Length: 0\r\n\r\n"
+        );
+        match CustomParser::new().parse(raw.as_bytes()).expect("fixture INVITE should parse") {
+            SipMessage::Request(r) => r,
+            SipMessage::Response(_) => panic!("expected request"),
+        }
+    }
+
+    #[test]
+    fn each_canonical_token_is_emergency() {
+        for tok in ["esnet.0", "wps.0", "q735.0"] {
+            let req = invite_with_rph(Some("Resource-Priority"), Some(tok));
+            assert!(is_emergency_request(&req), "{tok} should be emergency");
+        }
+    }
+
+    #[test]
+    fn header_name_lookup_is_case_insensitive() {
+        // Lower-cased header name still matched (getHeader is case-insensitive).
+        let req = invite_with_rph(Some("resource-priority"), Some("esnet.0"));
+        assert!(is_emergency_request(&req));
+    }
+
+    #[test]
+    fn value_match_is_case_sensitive() {
+        // Canonical casing is required by the contract — an upper-cased token
+        // must NOT be treated as emergency.
+        let req = invite_with_rph(Some("Resource-Priority"), Some("ESNET.0"));
+        assert!(!is_emergency_request(&req));
+    }
+
+    #[test]
+    fn absent_header_is_not_emergency() {
+        let req = invite_with_rph(None, None);
+        assert!(!is_emergency_request(&req));
+    }
+
+    #[test]
+    fn non_emergency_priority_value_is_not_emergency() {
+        // A well-formed but non-emergency RPH namespace.value.
+        let req = invite_with_rph(Some("Resource-Priority"), Some("dsn.flash"));
+        assert!(!is_emergency_request(&req));
+    }
+
+    #[test]
+    fn token_matches_as_substring_among_multiple() {
+        // The TS uses indexOf !== -1, so a canonical token embedded in a
+        // multi-namespace RPH value still flags emergency.
+        let req = invite_with_rph(Some("Resource-Priority"), Some("dsn.flash, q735.0"));
+        assert!(is_emergency_request(&req));
+    }
+}
+
+#[cfg(test)]
 mod codec_tests {
     use super::{decode_param, encode_param};
 
