@@ -69,6 +69,12 @@ pub struct B2buaSpawnParams {
     /// CDR writer; cloned into the deps (the caller keeps its own handle to
     /// snapshot records).
     pub cdr: InMemoryCdrWriter,
+    /// Worker-side overload signal to inject (migration/08 sampler-injection
+    /// seam). `None` → the core mints a fresh [`OverloadSignal::live`] exactly as
+    /// before. A `start_paused` test passes one built over the `simulated()`
+    /// sampler (retaining its control) so it can drive a known ELU THROUGH the
+    /// running 100 ms sampler task into the published `X-Overload` header.
+    pub overload: Option<b2bua::overload::OverloadSignal>,
 }
 
 /// Builds the base [`B2buaConfig`] (ip/port/ordinal/outbound_proxy wired),
@@ -98,6 +104,7 @@ pub fn spawn_b2bua_core(
         clock,
         id_gen,
         cdr,
+        overload,
     } = params;
     let mut config = B2buaConfig {
         self_ordinal: ordinal,
@@ -118,7 +125,7 @@ pub fn spawn_b2bua_core(
         replication,
         metrics: B2buaMetrics::new(),
     };
-    B2buaCore::spawn_with_services(endpoint, deps, services)
+    B2buaCore::spawn_with_overload(endpoint, deps, services, overload)
 }
 
 // The multi-node HA failover harness (FailoverHarness / ReplicatedB2buaSut /
@@ -262,6 +269,7 @@ pub struct B2buaSutBuilder {
     limiter: Arc<dyn CallLimiter>,
     services: Vec<b2bua::rules::ServiceDef>,
     tune: Box<dyn FnOnce(&mut B2buaConfig)>,
+    overload: Option<b2bua::overload::OverloadSignal>,
 }
 
 impl B2buaSutBuilder {
@@ -296,9 +304,24 @@ impl B2buaSutBuilder {
         self
     }
 
+    /// Inject the worker-side [`OverloadSignal`](b2bua::overload::OverloadSignal)
+    /// the running core publishes on its `X-Overload` header (migration/08
+    /// sampler-injection seam). Defaults to the core's own
+    /// [`OverloadSignal::live`](b2bua::overload::OverloadSignal::live).
+    ///
+    /// A `start_paused` test builds one over the `simulated()` sampler, keeps the
+    /// returned control, then advances the clock so the spawned 100 ms sampler
+    /// task drives the injected ELU through the EWMA into the published header —
+    /// the faithful port of the TS `it.live` "injection drives eluEwma" test the
+    /// live sampler (~0 ELU under a paused runtime) cannot reach.
+    pub fn overload(mut self, overload: b2bua::overload::OverloadSignal) -> Self {
+        self.overload = Some(overload);
+        self
+    }
+
     /// Bind the B2BUA at `addr` and spawn its core, consuming the builder.
     pub async fn start(self, h: &Harness, name: &str, addr: &str) -> B2buaSut {
-        let B2buaSutBuilder { decision, outbound_proxy, limiter, services, tune } = self;
+        let B2buaSutBuilder { decision, outbound_proxy, limiter, services, tune, overload } = self;
         // The B2BUA terminates each leg as a UA (UAS on the a-leg, UAC on the
         // b-leg) — it is NOT an RFC 3261 §16 proxy, so its bind declares
         // `{Uac, Uas}` and the proxy-subject audit rules (no-target-404,
@@ -323,6 +346,7 @@ impl B2buaSutBuilder {
             clock: Clock::test_at(0),
             id_gen: Arc::new(IdGen::seeded(0xB2B0)),
             cdr: cdr.clone(),
+            overload,
         };
         let core = spawn_b2bua_core(endpoint, params, |config| {
             // Production default is 300 s (5 min); the paused-clock keepalive
@@ -357,6 +381,7 @@ impl B2buaSut {
             limiter: Arc::new(NoopLimiter),
             services: Vec::new(),
             tune: Box::new(|_| {}),
+            overload: None,
         }
     }
 

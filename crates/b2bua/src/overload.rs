@@ -388,9 +388,15 @@ mod tests {
     /// Port of the `it.live` "LoadSampler injection drives eluEwma once the
     /// sampler fires". The TS version needed real time because its sampler was a
     /// raw `setInterval` off `TestClock`; the Rust `sample()` is an explicit tick,
-    /// so we drive it directly — no real clock, no paused-clock wait. (The
-    /// periodic *task* that calls `sample` is exercised in the `b2bua_core` /
-    /// router OPTIONS tests under `start_paused`.)
+    /// so we drive it directly — no real clock, no paused-clock wait. This pins
+    /// the `sample()`-to-EWMA half in isolation; the *full*
+    /// injected-value → running-100ms-task → published-header loop (the seam the
+    /// live sampler alone cannot exercise, since its busy proxy reads ~0 under a
+    /// paused runtime) is closed end-to-end by the `start_paused` harness test
+    /// `injected_sampler_drives_published_elu_through_the_running_task`
+    /// (`b2bua-harness/tests/x_overload_signal.rs`), which injects this exact
+    /// `simulated()` sampler into a running `B2buaCore` via the
+    /// `spawn_with_overload` seam.
     #[test]
     fn load_sampler_injection_drives_elu_ewma_once_sampled() {
         let (sampler, ctl) = simulated();

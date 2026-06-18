@@ -124,6 +124,30 @@ impl B2buaCore {
         deps: B2buaDeps,
         services: Vec<ServiceDef>,
     ) -> Self {
+        Self::spawn_with_overload(endpoint, deps, services, None)
+    }
+
+    /// Like [`spawn_with_services`](Self::spawn_with_services) but lets the caller
+    /// **inject the worker-side [`OverloadSignal`]** (migration/08) the periodic
+    /// sampler task drives and every OPTIONS-200 `X-Overload` header reads. `None`
+    /// reproduces today's behaviour exactly: a fresh [`OverloadSignal::live`]
+    /// backed by the [`LiveLoadSampler`](crate::overload::LiveLoadSampler), which
+    /// reads ~0 ELU under a healthy/paused runtime.
+    ///
+    /// This is the sampler-injection seam (mirroring `start_with_config` /
+    /// `spawn_with_services`): a `start_paused` test passes an `OverloadSignal`
+    /// built over the `simulated()` sampler, sets a non-zero ELU through its
+    /// control, advances a few [`SAMPLE_PERIOD`](OverloadSignal::SAMPLE_PERIOD)s,
+    /// and observes the published header's `elu` rise above 0 — driving the
+    /// injected value THROUGH the running sampler task into the EWMA and the
+    /// header (the faithful `start_paused` port of the TS `it.live` test, which
+    /// the live sampler alone cannot exercise because its busy proxy stays ~0).
+    pub fn spawn_with_overload(
+        endpoint: Box<dyn UdpEndpoint>,
+        deps: B2buaDeps,
+        services: Vec<ServiceDef>,
+        overload: Option<OverloadSignal>,
+    ) -> Self {
         let B2buaDeps {
             config,
             decision,
@@ -273,9 +297,11 @@ impl B2buaCore {
         // out-of-tree `announcement` capstone).
         let rules = compose_rules(&services, default_rules());
         // Worker-side overload signal (migration/08). A live ELU/GC sampler backs
-        // it; the periodic task below drives `sample()` at the 100 ms cadence so
-        // the EWMAs published on every OPTIONS-200 `X-Overload` header track load.
-        let overload = OverloadSignal::live();
+        // it by default; the periodic task below drives `sample()` at the 100 ms
+        // cadence so the EWMAs published on every OPTIONS-200 `X-Overload` header
+        // track load. A test may inject one over the `simulated()` sampler (the
+        // sampler-injection seam) to drive a known ELU through the running task.
+        let overload = overload.unwrap_or_else(OverloadSignal::live);
         let ctx = Arc::new(RouterCtx {
             config,
             state,

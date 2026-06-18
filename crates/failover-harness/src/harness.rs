@@ -482,6 +482,8 @@ impl ReplicatedB2buaSut {
             clock: self.clock.clone(),
             id_gen: Arc::new(IdGen::seeded(0xB2B0 + self.gen)),
             cdr: self.cdr.clone(),
+            // Live overload signal (no injection) on the replicating/failover path.
+            overload: None,
         };
         b2bua_harness::spawn_b2bua_core(endpoint, params, |config| {
             // EXACT production (kind) timers — `deploy/k8s/manifests/20-worker.yaml`.
