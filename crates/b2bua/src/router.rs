@@ -10,7 +10,7 @@ use std::sync::Arc;
 use call::{Call, CallModelState, Direction, LegState, TimerEntry, TimerType};
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
-use sip_message::message_helpers::parse_uri_params;
+use sip_message::message_helpers::{is_emergency_request, parse_uri_params};
 use sip_message::{serialize, SipMessage};
 use sip_txn::{IdGen, TransactionLayer};
 use tokio::sync::mpsc;
@@ -823,6 +823,48 @@ pub(crate) fn build_options_health_response(
     )
 }
 
+/// Build the **stateless 503** the Tier-3 admission gate sends when it rejects a
+/// new INVITE (migration/09 — port of `MessageHelpers.buildStatelessReject503Buffer`
+/// + the `Reason`/`Retry-After` the TS `TransactionLayer` gate stamps).
+///
+/// Stateless because no server transaction (and no call) is created — the router
+/// sends this via [`TransactionLayer::send_raw`](sip_txn::TransactionLayer::send_raw)
+/// and returns before `build_initial_call`. It echoes the INVITE's Via/From/To/
+/// Call-ID/CSeq (via [`generate_response`]) and adds:
+///   - `Reason: SIP;cause=503;text="overload"` — the overload cause token, matching
+///     the TS reject buffer (distinct from the readiness 503's `not-ready` / `draining`).
+///   - `Retry-After: <retry_after_sec>` — the gate's hint (bucket time-to-token for
+///     `bucket_empty`, the configured base for `panic_elu`).
+///
+/// **One faithful divergence from the TS raw buffer:** the TS builder deliberately
+/// omits a To-tag (the UAC's ACK is then orphaned and dropped). This codebase
+/// enforces a To-tag on every non-100 final (RFC 3261 §8.2.6.2; `generate_response`
+/// adds a fallback, the RFC audit gate flags a tagless final, and the sibling
+/// `reject_call` / readiness-503 paths both tag) — so this stamps a fresh tag too.
+/// It stays stateless regardless: with no server txn the ACK still can't match a
+/// dialog and is dropped at the orphan-ACK path, exactly the cheap-rejection contract.
+fn build_stateless_overload_503(
+    id_gen: &IdGen,
+    req: &sip_message::SipRequest,
+    retry_after_sec: u32,
+) -> sip_message::SipResponse {
+    use sip_message::types::SipHeader;
+    let hdr = |name: &str, value: String| SipHeader { name: name.to_string(), value };
+    generate_response(
+        req,
+        503,
+        "Service Unavailable",
+        &GenerateResponseOpts {
+            to_tag: Some(id_gen.new_tag()),
+            extra_headers: vec![
+                hdr("Reason", "SIP;cause=503;text=\"overload\"".to_string()),
+                hdr("Retry-After", retry_after_sec.to_string()),
+            ],
+            ..Default::default()
+        },
+    )
+}
+
 /// Resolve the `callRef` + source leg for an event (synchronous, no blocking).
 fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
     match event {
@@ -1043,6 +1085,44 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
             },
             _ => return,
         };
+
+        // ── Tier-3 admission gate (migration/09 — port of the `overload.shouldAdmit`
+        // + stateless-503 gate in `TransactionLayer.ts`). Only an *initial* INVITE
+        // reaches here (`res.initial_invite`); re-INVITEs (To-tag present) and
+        // non-INVITE in-dialog requests take the other branch and are never gated,
+        // exactly as in the TS source.
+        //
+        // Faithful split note vs TS: the TS gate runs in the txn layer *before* the
+        // server txn / 100 Trying. In the Rust split, sip-txn already created the
+        // INVITE server txn and auto-sent 100 Trying before emitting this Message
+        // (and the b2bua's `OverloadController`/config live a crate above sip-txn —
+        // the ADR-0007 deferral the layer.rs NOTE records). So the reject is sent
+        // *through that server txn* (`send_response`, which supersedes the cached
+        // 100 and drives the txn → Completed with proper retransmission + ACK
+        // absorption) rather than as a wire-raw datagram. It is still **stateless at
+        // the call layer** — no `build_initial_call`/`create`, so no dialog, CDR,
+        // limiter hold, or replicated state is ever born; we `return` before any of
+        // it. That "no per-call resources for a rejected INVITE" is the property the
+        // Tier-3 gate is about.
+        let is_emergency = is_emergency_request(&req);
+        let decision = ctx.overload.should_admit(is_emergency);
+        if !decision.admit {
+            let resp = build_stateless_overload_503(&ctx.id_gen, &req, decision.retry_after_sec);
+            let _ = ctx.txn.send_response(resp, src).await;
+            // The reject is observable via `b2bua_overload_rejected_total` (the
+            // b2bua has no log framework wired; the sibling orphan-reject /
+            // message-cap paths likewise signal only through metrics). The
+            // `reason`/`retry_after_sec` are carried on the 503 itself (Reason +
+            // Retry-After) for the caller and any wire trace.
+            ctx.metrics.bump_overload_rejected();
+            return;
+        }
+        // Counter published on X-Overload (`adm`). Emergency admits are NOT counted
+        // — the LB's AIMD caps non-emergency traffic only (TS contract).
+        if !is_emergency {
+            ctx.overload.increment_non_emergency_admitted();
+        }
+
         let call = build_initial_call(&req, src, &ctx.config, now_ms);
         ctx.state.create(call.clone());
         // RFC 3261 §8.1.1.3: a dialog-forming INVITE MUST carry a From tag. The

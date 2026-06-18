@@ -140,6 +140,39 @@ pub struct B2buaConfig {
     /// `Completed` on the 2xx and is deleted silently at Timer H — no BYE). `<= 0`
     /// disables the watchdog. Overridable via `B2BUA_ACK_TIMEOUT_SEC`.
     pub ack_timeout_sec: i64,
+    /// **Tier-3 CPS token-bucket capacity** (migration/09 — port of
+    /// `AppConfig.cpsBucketSize`). The hard ceiling on a *burst* of new-dialog
+    /// INVITEs this worker will admit: tokens accrue at
+    /// [`cps_bucket_rate`](Self::cps_bucket_rate)/s up to this cap, and the
+    /// admission gate consumes one per new INVITE (emergency callers consume
+    /// unconditionally, which may drive the level negative). `0` disables the
+    /// hard CPS gate (every non-emergency INVITE passes the bucket — the
+    /// panic-ELU backstop still applies). TS default **1000**. Overridable via
+    /// `B2BUA_CPS_BUCKET_SIZE`.
+    pub cps_bucket_size: u32,
+    /// **Tier-3 CPS token refill rate** (tokens/sec; port of
+    /// `AppConfig.cpsBucketRate`). The sustained new-INVITE rate the bucket
+    /// permits once its burst capacity is drained. TS default **500**.
+    /// Overridable via `B2BUA_CPS_BUCKET_RATE`.
+    pub cps_bucket_rate: u32,
+    /// **Tier-3 panic-ELU threshold** (`0..1`; port of
+    /// `AppConfig.overloadPanicEluThreshold`, slice 7 of the overload rework).
+    /// A *backstop* on the worker's OWN EWMA-smoothed Event-Loop Utilization:
+    /// above it, a non-emergency new INVITE that already passed the CPS bucket
+    /// is still 503'd locally, regardless of the LB's AIMD cap. The LB-side AIMD
+    /// (`sip_proxy::load_observer`) is the primary control loop; this catches the
+    /// cases where the LB is absent, misconfigured, or itself overloaded. Kept
+    /// high so it almost never fires in normal operation. TS env default
+    /// **0.75** (the `OverloadController.ts` source carries a stale `0.98`
+    /// comment; the shipped `OVERLOAD_PANIC_ELU_THRESHOLD` fallback is `0.75`).
+    /// `>= 1.0` effectively disables it (the clamped ELU never exceeds 1).
+    /// Overridable via `B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD`.
+    pub overload_panic_elu_threshold: f64,
+    /// **Retry-After base** (seconds; port of `AppConfig.retryAfterBaseSec`) for
+    /// the panic-ELU 503. The `bucket_empty` 503 instead derives its Retry-After
+    /// from the bucket's time-to-next-token. TS default **5**. Overridable via
+    /// `B2BUA_RETRY_AFTER_BASE_SEC`.
+    pub retry_after_base_sec: u32,
 }
 
 impl Default for B2buaConfig {
@@ -176,6 +209,14 @@ impl Default for B2buaConfig {
             reaper_idle_max_sec: 0,
             setup_timeout_sec: 150,
             ack_timeout_sec: 32,
+            // Tier-3 admission gate (migration/09). TS defaults
+            // (CPS_BUCKET_SIZE / CPS_BUCKET_RATE / OVERLOAD_PANIC_ELU_THRESHOLD /
+            // RETRY_AFTER_BASE_SEC). The hard CPS ceiling is 1000-burst @ 500/s;
+            // the panic-ELU backstop sits at 0.75 EWMA-ELU.
+            cps_bucket_size: 1000,
+            cps_bucket_rate: 500,
+            overload_panic_elu_threshold: 0.75,
+            retry_after_base_sec: 5,
         }
     }
 }

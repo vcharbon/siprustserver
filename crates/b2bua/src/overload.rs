@@ -219,6 +219,174 @@ impl Ewma {
 }
 
 // ---------------------------------------------------------------------------
+// TokenBucket — the Tier-3 hard CPS gate (port of TS `TokenBucket`)
+// ---------------------------------------------------------------------------
+
+/// Lazy-refill token bucket. Tokens accrue continuously at `rate_per_sec` up to
+/// `capacity`; [`try_consume`](TokenBucket::try_consume) succeeds iff at least
+/// one token is available. Port of the TS `TokenBucket` in `OverloadController.ts`.
+///
+/// **Clock — rides `tokio::time::Instant`, not wall time.** The TS source refills
+/// off `Date.now()`; here the elapsed-since-last-refill is measured on
+/// `tokio::time::Instant`, which `tokio::time::advance` moves under a paused
+/// runtime (CLAUDE.md: behaviour rides `tokio::time` directly — there is no
+/// separate fake clock). So a `start_paused` test that advances 1 s sees exactly
+/// `rate_per_sec` tokens refill, deterministically, with no real sleeping.
+#[derive(Debug)]
+struct TokenBucket {
+    /// Current token count. May go negative (the emergency `consume_forced` path).
+    tokens: f64,
+    capacity: f64,
+    rate_per_sec: f64,
+    last_refill: tokio::time::Instant,
+}
+
+impl TokenBucket {
+    /// Build a full bucket (`tokens == capacity`) refilling at `rate_per_sec`.
+    fn new(capacity: u32, rate_per_sec: u32) -> Self {
+        Self {
+            tokens: capacity as f64,
+            capacity: capacity as f64,
+            rate_per_sec: rate_per_sec as f64,
+            last_refill: tokio::time::Instant::now(),
+        }
+    }
+
+    /// Accrue tokens for the time elapsed since the last refill (capped at
+    /// `capacity`). A no-op when no time has passed (paused clock between
+    /// advances) — exactly the TS `elapsedSec <= 0` guard.
+    fn refill(&mut self) {
+        let now = tokio::time::Instant::now();
+        let elapsed_sec = now.saturating_duration_since(self.last_refill).as_secs_f64();
+        if elapsed_sec <= 0.0 {
+            return;
+        }
+        self.tokens = self.capacity.min(self.tokens + elapsed_sec * self.rate_per_sec);
+        self.last_refill = now;
+    }
+
+    /// Try to consume one token. Returns `true` (and decrements) iff ≥ 1 is
+    /// available after a refill; `false` leaves the bucket untouched.
+    fn try_consume(&mut self) -> bool {
+        self.refill();
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Consume one token unconditionally — the level may go negative. The
+    /// emergency path uses this so the bucket still reflects true CPS load (a
+    /// burst of emergency calls makes subsequent non-emergency callers wait
+    /// longer for refill). Port of TS `consumeForced`.
+    fn consume_forced(&mut self) {
+        self.refill();
+        self.tokens -= 1.0;
+    }
+
+    /// Seconds until ≥ 1 token will be available (`0` if available now). With a
+    /// zero refill rate and an empty bucket, returns `60` (the TS fallback so a
+    /// misconfigured `rate == 0` still hands the caller a finite Retry-After).
+    /// Port of TS `retryAfterSec`.
+    fn retry_after_sec(&mut self) -> u32 {
+        self.refill();
+        if self.tokens >= 1.0 {
+            return 0;
+        }
+        if self.rate_per_sec <= 0.0 {
+            return 60;
+        }
+        ((1.0 - self.tokens) / self.rate_per_sec).ceil() as u32
+    }
+
+    /// Current level, floored at `0` (the negative emergency overdraft reads as
+    /// empty to an observer). Port of TS `level`.
+    fn level(&mut self) -> f64 {
+        self.refill();
+        self.tokens.max(0.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Admission gate — Tier 3 of the overload-protection model (port of `shouldAdmit`)
+// ---------------------------------------------------------------------------
+
+/// Why the Tier-3 gate rejected a new INVITE. Port of TS `AdmitReason` (the
+/// `"shedder"` variant is omitted — the probabilistic shedder was retired in
+/// slice 7, so the worker only ever rejects for `bucket_empty` or `panic_elu`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmitReason {
+    /// The hard CPS token bucket was empty.
+    BucketEmpty,
+    /// The worker's own EWMA-ELU exceeded the panic backstop threshold.
+    PanicElu,
+}
+
+impl AdmitReason {
+    /// Short tag for logs/metrics (matches the TS reason strings).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AdmitReason::BucketEmpty => "bucket_empty",
+            AdmitReason::PanicElu => "panic_elu",
+        }
+    }
+}
+
+/// The Tier-3 admission verdict for one new INVITE. Port of TS `AdmitDecision`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdmitDecision {
+    /// `true` → proceed (build the call); `false` → send a stateless 503.
+    pub admit: bool,
+    /// The rejection reason when `!admit`; `None` on an admit.
+    pub reason: Option<AdmitReason>,
+    /// Suggested `Retry-After` value (seconds) when `!admit` (0 on an admit).
+    pub retry_after_sec: u32,
+}
+
+impl AdmitDecision {
+    /// An admit verdict (no reason, no Retry-After).
+    fn admitted() -> Self {
+        Self { admit: true, reason: None, retry_after_sec: 0 }
+    }
+    /// A reject verdict carrying the reason + a Retry-After hint.
+    fn rejected(reason: AdmitReason, retry_after_sec: u32) -> Self {
+        Self { admit: false, reason: Some(reason), retry_after_sec }
+    }
+}
+
+/// The admission-gate tunables, copied from [`B2buaConfig`](crate::config::B2buaConfig)
+/// when the signal is configured. The token bucket capacity/rate are fixed at
+/// configure time (as in the TS constructor); the panic threshold + Retry-After
+/// base are read live on each [`should_admit`](OverloadSignal::should_admit).
+#[derive(Debug, Clone, Copy)]
+struct AdmissionConfig {
+    panic_elu_threshold: f64,
+    retry_after_base_sec: u32,
+}
+
+impl Default for AdmissionConfig {
+    fn default() -> Self {
+        // Mirror `B2buaConfig::default()` so a signal that was never explicitly
+        // configured still gates with the TS defaults rather than admitting blind.
+        Self {
+            panic_elu_threshold: DEFAULT_PANIC_ELU_THRESHOLD,
+            retry_after_base_sec: DEFAULT_RETRY_AFTER_BASE_SEC,
+        }
+    }
+}
+
+/// Admission-gate seed defaults — kept in lock-step with the `B2buaConfig`
+/// defaults (`b2bua-sdk`), so a publish-only `OverloadSignal::new`/`live` built
+/// without config still gates with the TS defaults. `configure_admission`
+/// overwrites these with the operator's settings at ctx build.
+const DEFAULT_CPS_BUCKET_SIZE: u32 = 1000;
+const DEFAULT_CPS_BUCKET_RATE: u32 = 500;
+const DEFAULT_PANIC_ELU_THRESHOLD: f64 = 0.75;
+const DEFAULT_RETRY_AFTER_BASE_SEC: u32 = 5;
+
+// ---------------------------------------------------------------------------
 // OverloadSignal — the X-Overload publish surface
 // ---------------------------------------------------------------------------
 
@@ -233,12 +401,27 @@ pub struct OverloadMetrics {
     /// Monotonic count of non-emergency new-dialog INVITEs admitted by this
     /// worker — the `adm` published on X-Overload.
     pub non_emergency_admitted_total: u64,
+    /// Tier-3 rejects because the hard CPS token bucket was empty (migration/09;
+    /// the `rejectTotal.bucket_empty` subset of the TS metrics).
+    pub reject_bucket_empty_total: u64,
+    /// Tier-3 rejects because the worker's EWMA-ELU exceeded the panic backstop
+    /// (`rejectTotal.panic_elu`).
+    pub reject_panic_elu_total: u64,
+    /// Current CPS token-bucket level, floored at 0 (port of the TS
+    /// `tokenBucketLevel` gauge). A negative emergency overdraft reads as 0.
+    pub token_bucket_level: f64,
 }
 
 struct OverloadInner {
     sampler: Arc<dyn LoadSampler>,
     elu_ewma: Ewma,
     gc_fraction_ewma: Ewma,
+    /// Tier-3 hard CPS gate (migration/09). Seeded with the `B2buaConfig`
+    /// defaults; reconfigured to the operator's values by
+    /// [`configure_admission`](OverloadSignal::configure_admission) at ctx build.
+    bucket: TokenBucket,
+    /// Live-read admission knobs (panic-ELU threshold + Retry-After base).
+    admission: AdmissionConfig,
 }
 
 /// Worker-side overload signal. Clone-cheap (shares one `Arc`); wire one into
@@ -253,6 +436,12 @@ pub struct OverloadSignal {
     /// Lock-free `adm` counter — read on the header hot path without taking the
     /// EWMA lock. Monotonic; `uint53`-safe like the TS counter.
     non_emergency_admitted: Arc<AtomicU64>,
+    /// Tier-3 reject tallies (migration/09) — the subset of the TS
+    /// `OverloadControllerMetrics.rejectTotal` this worker can produce (the
+    /// `shedder` bucket is gone with the retired shedder). Lock-free so the
+    /// admission gate bumps them without the EWMA lock.
+    reject_bucket_empty: Arc<AtomicU64>,
+    reject_panic_elu: Arc<AtomicU64>,
 }
 
 impl OverloadSignal {
@@ -269,8 +458,12 @@ impl OverloadSignal {
                 sampler,
                 elu_ewma: Ewma::new(0.2),
                 gc_fraction_ewma: Ewma::new(0.2),
+                bucket: TokenBucket::new(DEFAULT_CPS_BUCKET_SIZE, DEFAULT_CPS_BUCKET_RATE),
+                admission: AdmissionConfig::default(),
             })),
             non_emergency_admitted: Arc::new(AtomicU64::new(0)),
+            reject_bucket_empty: Arc::new(AtomicU64::new(0)),
+            reject_panic_elu: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -306,6 +499,75 @@ impl OverloadSignal {
         self.non_emergency_admitted.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Configure the Tier-3 admission gate from the worker's [`B2buaConfig`].
+    /// Called once by `b2bua_core` at ctx build, after the config is final (the
+    /// harness `tune` seam has run), so the bucket capacity/rate and the live
+    /// panic-ELU / Retry-After knobs reflect the operator's settings — the TS
+    /// equivalent of `new TokenBucket(config.cpsBucketSize, config.cpsBucketRate)`
+    /// plus the live `config.overloadPanicEluThreshold` / `config.retryAfterBaseSec`
+    /// reads in `shouldAdmit`.
+    ///
+    /// Replaces the bucket wholesale (resetting it to full at the configured
+    /// capacity): it is a boot-time call before any admission decision, so there
+    /// is no in-flight token state to preserve.
+    pub fn configure_admission(&self, cfg: &crate::config::B2buaConfig) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.bucket = TokenBucket::new(cfg.cps_bucket_size, cfg.cps_bucket_rate);
+        inner.admission = AdmissionConfig {
+            panic_elu_threshold: cfg.overload_panic_elu_threshold,
+            retry_after_base_sec: cfg.retry_after_base_sec,
+        };
+    }
+
+    /// Decide whether to admit a new INVITE — Tier 3 of the overload model (port
+    /// of `OverloadController.shouldAdmit`). The caller MUST pass `is_emergency`
+    /// for an emergency Resource-Priority request (`sip_message::is_emergency_request`).
+    ///
+    /// Order (faithful to TS):
+    /// 1. **Emergency** → always admit, but `consume_forced` one token (the level
+    ///    may go negative) so the bucket reflects true CPS load. Emergency callers
+    ///    never see a reject and are NOT counted on `adm` (the caller must skip
+    ///    [`increment_non_emergency_admitted`](OverloadSignal::increment_non_emergency_admitted)
+    ///    for them — LBs cap non-emergency traffic only).
+    /// 2. **Hard CPS gate** — `try_consume`; on empty → reject `bucket_empty` with
+    ///    `Retry-After = bucket.retry_after_sec()`.
+    /// 3. **Panic-ELU backstop** — only after a token was consumed: if the
+    ///    EWMA-ELU exceeds the configured threshold → reject `panic_elu` with
+    ///    `Retry-After = retry_after_base_sec`. The LB-side AIMD is the primary
+    ///    loop; this catches an absent/misconfigured/overloaded LB.
+    /// 4. Otherwise **admit**.
+    ///
+    /// Note the token is consumed for an admit AND for a `panic_elu` reject (the
+    /// token is spent in step 2 before step 3 runs) — exactly as in the TS source.
+    pub fn should_admit(&self, is_emergency: bool) -> AdmitDecision {
+        let mut inner = self.inner.lock().unwrap();
+
+        if is_emergency {
+            // Always admit; still consume so the bucket tracks true CPS load.
+            inner.bucket.consume_forced();
+            return AdmitDecision::admitted();
+        }
+
+        // Hard CPS gate.
+        if !inner.bucket.try_consume() {
+            let retry = inner.bucket.retry_after_sec();
+            drop(inner);
+            self.reject_bucket_empty.fetch_add(1, Ordering::Relaxed);
+            return AdmitDecision::rejected(AdmitReason::BucketEmpty, retry);
+        }
+
+        // Panic-ELU backstop (a token has already been consumed above).
+        let elu = inner.elu_ewma.get();
+        if elu > inner.admission.panic_elu_threshold {
+            let retry = inner.admission.retry_after_base_sec;
+            drop(inner);
+            self.reject_panic_elu.fetch_add(1, Ordering::Relaxed);
+            return AdmitDecision::rejected(AdmitReason::PanicElu, retry);
+        }
+
+        AdmitDecision::admitted()
+    }
+
     /// Build the value of the `X-Overload` header for this worker's current
     /// state, e.g. `v=1; elu=0.732; gc=0.012; adm=12345`. EWMAs are read directly
     /// (clamped to `0..=1` by the sampler); the `adm` counter is read lock-free.
@@ -322,16 +584,23 @@ impl OverloadSignal {
         format!("v=1; elu={elu:.3}; gc={gc:.3}; adm={adm}")
     }
 
-    /// Snapshot of the published EWMAs + the `adm` counter (for `/status`).
+    /// Snapshot of the published EWMAs + the `adm` counter + the Tier-3 gate
+    /// tallies/level (for `/status`). Reading `token_bucket_level` refills the
+    /// bucket as a side effect (lazy refill), which is harmless — it is the same
+    /// refill the next `should_admit` would do.
     pub fn metrics(&self) -> OverloadMetrics {
-        let (elu_ewma, gc_fraction_ewma) = {
-            let inner = self.inner.lock().unwrap();
-            (inner.elu_ewma.get(), inner.gc_fraction_ewma.get())
+        let (elu_ewma, gc_fraction_ewma, token_bucket_level) = {
+            let mut inner = self.inner.lock().unwrap();
+            let level = inner.bucket.level();
+            (inner.elu_ewma.get(), inner.gc_fraction_ewma.get(), level)
         };
         OverloadMetrics {
             elu_ewma,
             gc_fraction_ewma,
             non_emergency_admitted_total: self.non_emergency_admitted.load(Ordering::Relaxed),
+            reject_bucket_empty_total: self.reject_bucket_empty.load(Ordering::Relaxed),
+            reject_panic_elu_total: self.reject_panic_elu.load(Ordering::Relaxed),
+            token_bucket_level,
         }
     }
 }
@@ -464,6 +733,151 @@ mod tests {
         let e1 = s.elu();
         assert!((0.0..=1.0).contains(&e1), "elu {e1} out of [0,1]");
         assert!(e1 > 0.0, "a late sample should read busy (> 0), got {e1}");
+    }
+
+    // ── Tier-3 admission gate (migration/09) ──────────────────────────────────
+    //
+    // The TS `OverloadController.shouldAdmit` / `TokenBucket` have no dedicated
+    // unit test in the source (the migration item's TS-test list is empty); these
+    // pin the ported behaviour directly. Where the bucket's time-based refill is
+    // exercised the test is `start_paused` and drives `tokio::time::advance`, since
+    // the Rust bucket rides `tokio::time::Instant` (CLAUDE.md: behaviour rides
+    // `tokio::time` — no separate fake clock to keep in sync).
+
+    /// Build a signal whose admission gate uses the given bucket/threshold knobs,
+    /// over a simulated sampler whose ELU the returned control sets. The EWMA is
+    /// seated by one `sample()` so `should_admit`'s panic-ELU read sees a real value.
+    fn admission_sig(
+        size: u32,
+        rate: u32,
+        panic_elu: f64,
+    ) -> (OverloadSignal, SimulatedLoadControl) {
+        let (sampler, ctl) = simulated();
+        let sig = OverloadSignal::new(Arc::new(sampler));
+        sig.configure_admission(&crate::config::B2buaConfig {
+            cps_bucket_size: size,
+            cps_bucket_rate: rate,
+            overload_panic_elu_threshold: panic_elu,
+            retry_after_base_sec: 5,
+            ..Default::default()
+        });
+        (sig, ctl)
+    }
+
+    /// `configure_admission` seeds a full bucket at the configured capacity and a
+    /// non-emergency INVITE is admitted while tokens remain (`bucket_empty` only
+    /// once drained). The TS constructor path: `new TokenBucket(size, rate)`.
+    #[tokio::test(start_paused = true)]
+    async fn admits_until_the_cps_bucket_is_drained_then_503s_bucket_empty() {
+        // Capacity 2, refill 0/s so the bucket can't top up between consumes.
+        let (sig, _ctl) = admission_sig(2, 0, 1.0);
+        // Two admits drain the burst capacity…
+        assert_eq!(sig.should_admit(false), AdmitDecision::admitted());
+        assert_eq!(sig.should_admit(false), AdmitDecision::admitted());
+        // …the third finds the bucket empty → reject `bucket_empty`.
+        let d = sig.should_admit(false);
+        assert!(!d.admit);
+        assert_eq!(d.reason, Some(AdmitReason::BucketEmpty));
+        // rate 0 + empty → the TS 60 s Retry-After fallback.
+        assert_eq!(d.retry_after_sec, 60);
+        // The reject is tallied; no admit was counted for it.
+        assert_eq!(sig.metrics().reject_bucket_empty_total, 1);
+    }
+
+    /// The bucket refills over wall time at `rate_per_sec` (lazy refill on the next
+    /// consume). Drained at capacity 1 / rate 1/s, a consume one second later
+    /// succeeds again — driven by `tokio::time::advance`, no real sleep.
+    #[tokio::test(start_paused = true)]
+    async fn the_bucket_refills_over_time() {
+        let (sig, _ctl) = admission_sig(1, 1, 1.0);
+        assert!(sig.should_admit(false).admit); // drains the lone token
+        assert!(!sig.should_admit(false).admit); // empty immediately after
+        // One second of refill at 1 token/s restores exactly one token.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(sig.should_admit(false).admit, "a refilled token should admit");
+    }
+
+    /// Emergency callers ALWAYS admit and are NEVER counted on `adm`, but still
+    /// consume a token — so the bucket can go negative and a subsequent
+    /// non-emergency caller is shed. Port of the TS emergency `consumeForced` path.
+    #[tokio::test(start_paused = true)]
+    async fn emergency_always_admits_consumes_and_can_overdraft_the_bucket() {
+        // Capacity 1, no refill: a single non-emergency token exists.
+        let (sig, _ctl) = admission_sig(1, 0, 1.0);
+        // Two emergency admits both succeed (the 2nd drives the level negative).
+        assert_eq!(sig.should_admit(true), AdmitDecision::admitted());
+        assert_eq!(sig.should_admit(true), AdmitDecision::admitted());
+        // Emergency admits are NOT counted on `adm` (the caller skips the bump;
+        // `should_admit` itself never touches the counter).
+        assert_eq!(sig.metrics().non_emergency_admitted_total, 0);
+        // The overdraft means the next NON-emergency caller finds the bucket empty.
+        let d = sig.should_admit(false);
+        assert!(!d.admit);
+        assert_eq!(d.reason, Some(AdmitReason::BucketEmpty));
+    }
+
+    /// Once a token is consumed, an EWMA-ELU above the panic threshold sheds the
+    /// (non-emergency) call with `panic_elu` + the configured Retry-After base.
+    /// Port of the slice-7 panic-ELU backstop in `shouldAdmit`.
+    #[tokio::test(start_paused = true)]
+    async fn panic_elu_backstop_503s_after_the_token_is_consumed() {
+        // Roomy bucket so the gate never trips on `bucket_empty`; panic at 0.75.
+        let (sig, ctl) = admission_sig(1000, 0, 0.75);
+        ctl.set_elu(0.9);
+        sig.sample(); // seat the EWMA at 0.9 (> 0.75)
+        let d = sig.should_admit(false);
+        assert!(!d.admit);
+        assert_eq!(d.reason, Some(AdmitReason::PanicElu));
+        assert_eq!(d.retry_after_sec, 5); // retry_after_base_sec
+        assert_eq!(sig.metrics().reject_panic_elu_total, 1);
+        // A token WAS consumed before the panic check (TS spends it in step 2).
+        // With ELU back below the threshold the next call admits normally.
+        ctl.set_elu(0.0);
+        sig.sample();
+        sig.sample(); // pull the EWMA below 0.75
+        assert!(sig.should_admit(false).admit);
+    }
+
+    /// The panic-ELU backstop is a NON-emergency control: an emergency caller is
+    /// admitted even when the worker's ELU is pegged (it bypasses both the bucket
+    /// gate's empty-check and the panic check — it only `consume_forced`s).
+    #[tokio::test(start_paused = true)]
+    async fn panic_elu_never_sheds_an_emergency_call() {
+        let (sig, ctl) = admission_sig(1000, 0, 0.75);
+        ctl.set_elu(1.0);
+        sig.sample(); // EWMA pegged at 1.0
+        assert_eq!(sig.should_admit(true), AdmitDecision::admitted());
+        assert_eq!(sig.metrics().reject_panic_elu_total, 0);
+    }
+
+    /// `configure_admission` is what makes the operator's `B2buaConfig` knobs take
+    /// effect: a capacity-0 bucket sheds the very first non-emergency INVITE.
+    #[tokio::test(start_paused = true)]
+    async fn configure_admission_applies_the_config_capacity() {
+        let (sig, _ctl) = admission_sig(0, 0, 1.0);
+        let d = sig.should_admit(false);
+        assert!(!d.admit, "a zero-capacity bucket admits nothing");
+        assert_eq!(d.reason, Some(AdmitReason::BucketEmpty));
+    }
+
+    /// The `AdmitReason` tags match the TS reason strings (logged/metric-keyed).
+    #[test]
+    fn admit_reason_tags_match_the_ts_strings() {
+        assert_eq!(AdmitReason::BucketEmpty.as_str(), "bucket_empty");
+        assert_eq!(AdmitReason::PanicElu.as_str(), "panic_elu");
+    }
+
+    /// `level()` floors the (possibly negative) overdraft at 0 for an observer,
+    /// and reads the configured capacity on a fresh bucket. Port of TS `level`.
+    #[tokio::test(start_paused = true)]
+    async fn token_bucket_level_floors_at_zero() {
+        let mut b = TokenBucket::new(3, 0);
+        assert_eq!(b.level(), 3.0);
+        b.consume_forced();
+        b.consume_forced();
+        b.consume_forced();
+        b.consume_forced(); // -1 internally
+        assert_eq!(b.level(), 0.0, "a negative overdraft reads as empty");
     }
 
     // --- test-local header helpers (mirror the TS regex + parseAdm) -----------

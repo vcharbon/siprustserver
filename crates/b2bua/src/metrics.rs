@@ -49,6 +49,12 @@ struct Inner {
     // cdr
     cdr_written: AtomicU64,
     cdr_dropped: AtomicU64,
+    // Tier-3 admission gate (migration/09): new INVITEs the worker shed with a
+    // stateless 503 because the hard CPS token bucket was empty OR the worker's
+    // EWMA-ELU exceeded the panic backstop. A climbing rate is the worker
+    // protecting itself from new-call overload (the LB's AIMD should have shed
+    // first; a non-zero local count flags the LB absent/misconfigured/overloaded).
+    overload_rejected: AtomicU64,
     // timer service (gauges): physical DelayQueue size (live entries + not-yet-
     // expired tombstones from cancelled/rescheduled timers) vs. the live
     // schedulable timer count. `queue_len - live` is the lingering-tombstone
@@ -216,6 +222,8 @@ impl B2buaMetrics {
     counter!(bump_unroutable_dropped, unroutable_dropped_total, unroutable_dropped);
     counter!(bump_cdr_written, cdr_written_total, cdr_written);
     counter!(bump_cdr_dropped, cdr_dropped_total, cdr_dropped);
+    // Tier-3 admission gate (migration/09).
+    counter!(bump_overload_rejected, overload_rejected_total, overload_rejected);
     // --- call reaper (ADR-0020) ---
     counter!(bump_handler_panic, handler_panics_total, handler_panics);
     counter!(bump_reaper_sweep, reaper_sweeps_total, reaper_sweeps);
@@ -452,6 +460,8 @@ impl B2buaMetrics {
         counter("b2bua_unroutable_dropped_total", "messages dropped: no route resolved", self.unroutable_dropped_total());
         counter("b2bua_cdr_written_total", "CDRs successfully written to the sink", self.cdr_written_total());
         counter("b2bua_cdr_dropped_total", "CDRs dropped (submit-queue overflow or sink failure)", self.cdr_dropped_total());
+        // ── Tier-3 admission gate (migration/09) ──
+        counter("b2bua_overload_rejected_total", "new INVITEs shed with a stateless 503 by the Tier-3 admission gate (CPS token bucket empty OR panic-ELU backstop tripped; a non-zero rate flags the LB's AIMD absent/misconfigured/overloaded)", self.overload_rejected_total());
         // ── call reaper (ADR-0020) ──
         counter("b2bua_handler_panics_total", "handler bodies that panicked (dispatcher-observed; each becomes a reaper strike instead of a silent call leak)", self.handler_panics_total());
         counter("b2bua_reaper_sweeps_total", "reaper sweep ticks executed", self.reaper_sweeps_total());

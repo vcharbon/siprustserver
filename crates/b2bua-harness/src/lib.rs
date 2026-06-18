@@ -357,6 +357,20 @@ impl B2buaSutBuilder {
             // tests advance a fixed 5 s after the probe, so the harness pins the
             // old 5 s grace to keep those steps valid (a scenario can `tune` it).
             config.keepalive_timeout_sec = 5;
+            // Tier-3 panic-ELU backstop (migration/09): DISABLE it in the harness
+            // baseline. The backstop reads the worker's own ELU via the
+            // `LiveLoadSampler`, whose busy-proxy is the wall time elapsed since
+            // the previous sample — and a paused-clock `Harness::advance` of, say,
+            // 1.5 s makes the very next 100 ms sampler tick land 1.5 s "late",
+            // which the proxy reads as a saturated loop (ELU ≈ 1.0). That clock
+            // artifact would then spuriously panic-503 the next new INVITE in any
+            // scenario that advances time between calls (it shed `limiter_refresh`'s
+            // second INVITE). The backstop is a *production* safety net for a real
+            // overloaded loop; its behaviour is pinned by the simulated-sampler
+            // unit tests (`overload::tests::panic_elu_*`), so disabling it here is
+            // semantics-preserving for the harness. A `tune` can re-enable it (and
+            // inject a `simulated()` sampler) to exercise it end-to-end.
+            config.overload_panic_elu_threshold = 1.1; // > clamped ELU max (1.0)
             // The caller's tune runs LAST so it can still override the keepalive
             // defaults above (preserving the prior ordering).
             tune(config);

@@ -302,6 +302,11 @@ impl B2buaCore {
         // track load. A test may inject one over the `simulated()` sampler (the
         // sampler-injection seam) to drive a known ELU through the running task.
         let overload = overload.unwrap_or_else(OverloadSignal::live);
+        // Tier-3 admission gate (migration/09): seed the CPS token bucket + the
+        // panic-ELU / Retry-After knobs from the now-final config (the harness
+        // `tune` seam ran in `spawn_b2bua_core` before this). Must happen before
+        // `config` is moved into the ctx below.
+        overload.configure_admission(&config);
         let ctx = Arc::new(RouterCtx {
             config,
             state,

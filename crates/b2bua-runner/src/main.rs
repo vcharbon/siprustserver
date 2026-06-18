@@ -387,6 +387,19 @@ async fn main() {
     let ack_timeout_sec: i64 =
         env_or("B2BUA_ACK_TIMEOUT_SEC", "32").parse().expect("B2BUA_ACK_TIMEOUT_SEC");
 
+    // Tier-3 admission gate (migration/09 — port of CPS_BUCKET_SIZE /
+    // CPS_BUCKET_RATE / OVERLOAD_PANIC_ELU_THRESHOLD / RETRY_AFTER_BASE_SEC). The
+    // hard CPS ceiling + panic-ELU backstop the worker enforces on new INVITEs.
+    let cps_bucket_size: u32 =
+        env_or("B2BUA_CPS_BUCKET_SIZE", "1000").parse().expect("B2BUA_CPS_BUCKET_SIZE");
+    let cps_bucket_rate: u32 =
+        env_or("B2BUA_CPS_BUCKET_RATE", "500").parse().expect("B2BUA_CPS_BUCKET_RATE");
+    let overload_panic_elu_threshold: f64 = env_or("B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD", "0.75")
+        .parse()
+        .expect("B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD");
+    let retry_after_base_sec: u32 =
+        env_or("B2BUA_RETRY_AFTER_BASE_SEC", "5").parse().expect("B2BUA_RETRY_AFTER_BASE_SEC");
+
     // Call limiter. Unset LIMITER_URL → NoopLimiter (today's non-limiting
     // behaviour). The refresh cadence MUST match the limiter's window seconds.
     let limiter_url = env_or("LIMITER_URL", "");
@@ -488,6 +501,10 @@ async fn main() {
         limiter_refresh_sec,
         setup_timeout_sec,
         ack_timeout_sec,
+        cps_bucket_size,
+        cps_bucket_rate,
+        overload_panic_elu_threshold,
+        retry_after_base_sec,
         ..Default::default()
     };
     // Forbid booting with a config that would silently break HA: too-short a
