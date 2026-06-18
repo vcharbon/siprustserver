@@ -112,6 +112,32 @@ impl ProxyCore {
         }
         let mf_next = mf - 1;
 
+        // ── §16.3 check 5: Proxy-Require ────────────────────────────────────
+        // This proxy supports no proxy extensions, so any option-tag in
+        // Proxy-Require is unsupported: reject with 420 (Bad Extension) and an
+        // Unsupported header listing the offending tags — the request MUST NOT
+        // be forwarded. ACK is exempt: a proxy never answers an ACK (it
+        // terminates a transaction; nothing upstream awaits a reply), so an ACK
+        // with an unsupported Proxy-Require is silently dropped, never 420'd.
+        if let Some(pr) = first_header_value(&req.headers, "proxy-require") {
+            let unsupported: Vec<String> = crate::headers::split_top_level_commas(pr)
+                .into_iter()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            if !unsupported.is_empty() {
+                if method == "ACK" {
+                    return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
+                }
+                let extra = [SipHeader {
+                    name: "Unsupported".into(),
+                    value: unsupported.join(", ").into(),
+                }];
+                self.reply(req, src, 420, "Bad Extension", &extra).await;
+                return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
+            }
+        }
+
         // ── Hop-by-hop ACK absorption (§17.1.1.3) ───────────────────────────
         if method == "ACK" && first_header_value(&req.headers, "route").is_none() {
             let key = call_id_cseq_key(&req.call_id, req.from.tag.as_deref(), req.cseq.seq);
