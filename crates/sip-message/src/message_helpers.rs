@@ -3,20 +3,40 @@
 //! existing headers rather than constructing new ones (construction lives in
 //! [`crate::generators`]).
 //!
-//! One byte-level dispatcher helper is ported ahead of slice 2 because the
-//! Tier-1 overload brake's emergency bypass depends on it (see the byte-helpers
-//! section at the bottom):
-//!   - [`buffer_has_emergency_marker`] — the cheap pre-parse signal the Tier-1
-//!     UDP brake uses to NEVER 503 an emergency packet.
+//! The Tier-1 overload-brake byte helpers are ported ahead of slice 2 — they
+//! are the allocation-free, pre-parse building blocks the future Tier-1 UDP
+//! `preIngress` hook composes (see the byte-helpers section at the bottom):
+//!   - [`buffer_has_emergency_marker`] — the cheap pre-parse signal the brake
+//!     consults to NEVER 503 an emergency packet (pulled ahead in migration/03);
+//!   - [`is_invite_request_buffer`] — does the datagram start with `INVITE `,
+//!     i.e. is it a new-INVITE request the brake may shed (migration/10);
+//!   - [`build_stateless_reject_503_buffer`] — byte-slices the five mandatory
+//!     RFC 3261 §8.2.6.2 header lines verbatim out of an inbound INVITE and
+//!     templates a stateless 503, with no parse / no txn / no To-tag
+//!     (migration/10);
+//!   - [`jittered_retry_after`] — jitter a `Retry-After` base by an injected
+//!     roll, the seam the hook feeds an RNG into (migration/10).
+//!
+//! Why these four sit in a pure crate while their *consumer* does not: the
+//! Tier-1 `preIngress` closure (the `UdpTransport.layer` glue in
+//! `src/sip/UdpTransport.ts`) depends on `AppConfig` + `MetricsRegistry` +
+//! the `sip-net` fabric — unported slices — so the closure is deferred to the
+//! network slice; these helpers are the pure bytes-in/bytes-out leaves it will
+//! reassemble (the `PreIngressHook`/`PreIngressAction::Reply` seam they plug
+//! into already exists in `sip-net`). The end-to-end brake coverage
+//! (`tests/sip/UdpTransport-brake.test.ts`) therefore stays deferred with that
+//! facade; this crate pins each helper's byte-level contract directly (see the
+//! `*_tests` modules below), including the three cases the brake integration
+//! relies on (a non-emergency INVITE past the threshold is 503'd; an emergency
+//! INVITE bypasses; a non-INVITE is never 503'd).
 //!
 //! Deferred to slice 2 (network/dispatch), NOT ported here:
 //!   - the identifier generators (`newTag`/`newBranch`/`newCallId`/`currentRng`)
 //!     — they read a fiber-local seeded RNG (Effect `Random`); the Rust port
 //!     will inject an RNG seam at the network layer.
-//!   - the remaining byte-level overload/dispatcher helpers
-//!     (`buildStatelessReject503Buffer`, `isInviteRequestBuffer`,
-//!     `bufferHasToTag`, `jitteredRetryAfter`) — Tier-1 UDP / dispatcher
-//!     concerns, ported with their consumers.
+//!   - the remaining byte-level dispatcher helper `bufferHasToTag` — an
+//!     in-dialog/initial-INVITE discriminator for the dispatcher fast-path, not
+//!     a Tier-1 brake input; ported with its dispatcher consumer.
 
 use std::collections::BTreeMap;
 
@@ -281,6 +301,222 @@ pub fn buffer_has_emergency_marker(raw: &[u8]) -> bool {
         None => &raw[rp_idx..],
     };
     EMERGENCY_RPH_TOKENS.iter().any(|tok| find_subslice(slice, tok).is_some())
+}
+
+/// Quick byte check: does the datagram start with `INVITE ` — i.e. is this a
+/// new-INVITE request line, decidable before any parse? Returns `false` for
+/// ACK/BYE/CANCEL/OPTIONS/… and for responses (`SIP/2.0 …`). Port of
+/// `isInviteRequestBuffer`: a fixed seven-byte prefix compare
+/// (`I N V I T E SP` = `0x49 0x4E 0x56 0x49 0x54 0x45 0x20`), so a too-short
+/// buffer is trivially not an INVITE.
+///
+/// Case-SENSITIVE, matching the TS: SIP method names are upper-case on the wire
+/// (RFC 3261 §7.1), and this runs in the brake's hot path where a canonical
+/// compare is the whole point — a lower-case `invite` is not a method token the
+/// brake sheds.
+pub fn is_invite_request_buffer(raw: &[u8]) -> bool {
+    raw.starts_with(b"INVITE ")
+}
+
+/// Compute a jittered `Retry-After` value (seconds).
+///
+/// Port of `jitteredRetryAfter`. The TS draws from `Math.random()` directly
+/// because its sole caller is the Tier-1 UDP overload pre-ingress hook, which
+/// runs outside any Effect fiber — overload-protection nondeterminism is
+/// explicitly out of scope for the seeded-`Random` plumbing. A *pure* crate
+/// cannot reach for a global RNG, so the randomness is **injected**: `roll`
+/// yields a fresh value in `[0, u64::MAX]` (e.g. `rand::random::<u64>()` at the
+/// network-layer call site, exactly where this module's other RNG seam lands).
+/// This keeps the function deterministic and unit-testable while preserving the
+/// TS arithmetic exactly.
+///
+/// Returns `base_sec` unchanged when `jitter_sec == 0` (the
+/// `retryAfterJitterSec: 0` config the brake tests pin), otherwise
+/// `base_sec + (roll mod (jitter_sec + 1))` — a uniform offset in the inclusive
+/// range `[0, jitter_sec]`, mirroring TS `Math.floor(Math.random() * (jitter +
+/// 1))`.
+pub fn jittered_retry_after(base_sec: u32, jitter_sec: u32, roll: impl FnOnce() -> u64) -> u32 {
+    if jitter_sec == 0 {
+        return base_sec;
+    }
+    // `jitter_sec + 1` fits in u64 (jitter_sec: u32); the modulus is in
+    // [0, jitter_sec] so the sum cannot exceed base_sec + jitter_sec.
+    let offset = (roll() % (u64::from(jitter_sec) + 1)) as u32;
+    base_sec + offset
+}
+
+/// Build a stateless **503 Service Unavailable** response by byte-slicing the
+/// mandatory header lines verbatim out of an inbound INVITE datagram — no SIP
+/// parse, no transaction allocation, no `To`-tag. Port of
+/// `buildStatelessReject503Buffer`: the Tier-1 (UDP `preIngress`) cheap-rejection
+/// path that sheds load before the parser ever runs.
+///
+/// Per RFC 3261 §8.2.6.2 the five headers a UAS MUST copy into a response are
+/// taken verbatim from the request (first occurrence of each; compact forms
+/// `v`/`f`/`t`/`i` accepted on input):
+///   - `Via` (topmost — the UAC matches the response on it),
+///   - `From` (echoed),
+///   - `To` (echoed **without** adding our own tag — see below),
+///   - `Call-ID`,
+///   - `CSeq`.
+///
+/// We deliberately add **no** `To`-tag. The UAC's resulting ACK therefore
+/// carries no dialog context, so it matches nothing in the transaction layer's
+/// dialog index and is dropped at the orphan-ACK rule — that is the
+/// cheap-rejection contract (and why this is distinct from the Tier-3
+/// `b2bua::router::build_stateless_overload_503`, which runs *after* a parse,
+/// reuses the full `generate_response` machinery, and DOES add a `To`-tag).
+///
+/// Returns `None` when the buffer does not look like a SIP **request** we can
+/// template (no header terminator, fewer than two lines, a non-request first
+/// line, or any of the five required headers missing) — the caller then drops
+/// the packet silently (`PreIngressAction::Accept`, letting the normal pipeline
+/// reject) rather than emitting a malformed reply.
+///
+/// Output header names are normalised to canonical casing; the value (after the
+/// first `:`) is copied byte-for-byte from the request line. The reply is
+/// CRLF-terminated regardless of whether the request used LF-only separators.
+pub fn build_stateless_reject_503_buffer(raw: &[u8], retry_after_sec: u32) -> Option<Vec<u8>> {
+    // Locate the header-section terminator: CRLFCRLF, or LFLF as a fallback
+    // (mirrors the TS `indexOf("\r\n\r\n")` then `indexOf("\n\n")`). The chosen
+    // terminator dictates the intra-section line separator.
+    let (header_end, line_sep): (usize, &[u8]) = match find_subslice(raw, b"\r\n\r\n") {
+        Some(end) => (end, b"\r\n"),
+        None => match find_subslice(raw, b"\n\n") {
+            Some(end) => (end, b"\n"),
+            None => return None,
+        },
+    };
+
+    // The header section is ASCII on the wire; lossy decode keeps the verbatim
+    // bytes for the value copy (header names/values the brake sees are ASCII).
+    let header_section = &raw[..header_end];
+    let lines: Vec<&[u8]> = split_on(header_section, line_sep);
+    if lines.len() < 2 {
+        return None;
+    }
+
+    // First line must be a request line — we only template responses to
+    // requests (a response first line is `SIP/2.0 <code> …`; the TS keys off the
+    // mere presence of "SIP/2.0", and a request line ends with it, so the same
+    // cheap substring test stands in for "looks like a SIP message"). Absent →
+    // bail (`?` discards the match index; we only care that it is present).
+    find_subslice(lines[0], b"SIP/2.0")?;
+
+    let mut via_line: Option<&[u8]> = None;
+    let mut from_line: Option<&[u8]> = None;
+    let mut to_line: Option<&[u8]> = None;
+    let mut call_id_line: Option<&[u8]> = None;
+    let mut cseq_line: Option<&[u8]> = None;
+
+    for line in &lines[1..] {
+        if line.is_empty() {
+            continue;
+        }
+        // A continuation line (RFC 3261 line folding — starts with SP/HTAB)
+        // belongs to the previous header; the verbatim single-line copy is the
+        // contract, so skip it (matches the TS `charCodeAt(0)` guard).
+        if line[0] == b' ' || line[0] == b'\t' {
+            continue;
+        }
+        let colon = match find_subslice(line, b":") {
+            Some(c) => c,
+            None => continue,
+        };
+        // Header-name match is case-INSENSITIVE (RFC 3261 §7.3.1; the TS lower-
+        // cases the trimmed name), unlike the case-sensitive *value* scans in
+        // the emergency classifiers. The `if ….is_none()` guard on each arm is
+        // the "first occurrence wins" contract (a later duplicate is ignored).
+        let name = trim_ascii(&line[..colon]).to_ascii_lowercase();
+        match name.as_slice() {
+            b"via" | b"v" if via_line.is_none() => via_line = Some(line),
+            b"from" | b"f" if from_line.is_none() => from_line = Some(line),
+            b"to" | b"t" if to_line.is_none() => to_line = Some(line),
+            b"call-id" | b"i" if call_id_line.is_none() => call_id_line = Some(line),
+            b"cseq" if cseq_line.is_none() => cseq_line = Some(line),
+            _ => {}
+        }
+
+        if via_line.is_some()
+            && from_line.is_some()
+            && to_line.is_some()
+            && call_id_line.is_some()
+            && cseq_line.is_some()
+        {
+            break;
+        }
+    }
+
+    let (via_line, from_line, to_line, call_id_line, cseq_line) =
+        match (via_line, from_line, to_line, call_id_line, cseq_line) {
+            (Some(v), Some(f), Some(t), Some(i), Some(c)) => (v, f, t, i, c),
+            _ => return None,
+        };
+
+    // Emit the response with canonical header names; the value (everything from
+    // the first `:` onward, including the colon and any surrounding whitespace)
+    // is copied byte-for-byte from the request line.
+    let mut out: Vec<u8> = Vec::with_capacity(raw.len() + 80);
+    out.extend_from_slice(b"SIP/2.0 503 Service Unavailable\r\n");
+    push_normalized_header(&mut out, b"Via", via_line);
+    push_normalized_header(&mut out, b"From", from_line);
+    push_normalized_header(&mut out, b"To", to_line);
+    push_normalized_header(&mut out, b"Call-ID", call_id_line);
+    push_normalized_header(&mut out, b"CSeq", cseq_line);
+    out.extend_from_slice(b"Reason: SIP;cause=503;text=\"overload\"\r\n");
+    out.extend_from_slice(b"Retry-After: ");
+    out.extend_from_slice(retry_after_sec.to_string().as_bytes());
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(b"Content-Length: 0\r\n\r\n");
+    Some(out)
+}
+
+/// Append `canonical_name` + the verbatim value tail of `line` (from its first
+/// `:` onward) + CRLF. Mirrors the TS `normalizeHeaderLine`: keep the inbound
+/// value bytes exactly (colon, spacing, params), swap only the header name for
+/// its canonical casing. `line` is a header line known to contain a `:`.
+fn push_normalized_header(out: &mut Vec<u8>, canonical_name: &[u8], line: &[u8]) {
+    let colon = find_subslice(line, b":").expect("caller passes a line containing ':'");
+    out.extend_from_slice(canonical_name);
+    out.extend_from_slice(&line[colon..]);
+    out.extend_from_slice(b"\r\n");
+}
+
+/// Split `data` on every occurrence of `sep`, returning the (possibly empty)
+/// pieces between separators — the byte analogue of TS `String.split(sep)`
+/// (so `"a||b".split("|")` ⇒ `["a", "", "b"]`, and a trailing separator yields a
+/// trailing empty piece). `sep` is always non-empty here.
+fn split_on<'a>(data: &'a [u8], sep: &[u8]) -> Vec<&'a [u8]> {
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    while let Some(rel) = find_subslice(&data[start..], sep) {
+        let at = start + rel;
+        pieces.push(&data[start..at]);
+        start = at + sep.len();
+    }
+    pieces.push(&data[start..]);
+    pieces
+}
+
+/// Trim leading/trailing ASCII whitespace from a byte slice (the byte analogue
+/// of `str::trim` over the header-name slice). Avoids a UTF-8 round-trip in the
+/// brake hot path. (`u8::is_ascii_whitespace` matches space, tab, LF, FF, CR.)
+fn trim_ascii(mut s: &[u8]) -> &[u8] {
+    while let [first, rest @ ..] = s {
+        if first.is_ascii_whitespace() {
+            s = rest;
+        } else {
+            break;
+        }
+    }
+    while let [rest @ .., last] = s {
+        if last.is_ascii_whitespace() {
+            s = rest;
+        } else {
+            break;
+        }
+    }
+    s
 }
 
 /// First index of `needle` within `haystack` (byte substring search), or
@@ -583,5 +819,519 @@ mod codec_tests {
         assert_eq!(decode_param("ab%"), "ab%");
         assert_eq!(decode_param("ab%4"), "ab%4");
         assert_eq!(decode_param("%zz"), "%zz");
+    }
+}
+
+#[cfg(test)]
+mod is_invite_request_buffer_tests {
+    //! Port of the `isInviteRequestBuffer` contract from
+    //! `src/sip/MessageHelpers.ts` (L397–409). No dedicated TS unit test — it is
+    //! exercised end-to-end by the Tier-1 brake (`UdpTransport-brake.test.ts`,
+    //! "non-INVITE requests are not 503'd by the brake", which relies on an
+    //! INVITE classifying true and an OPTIONS classifying false). These pin the
+    //! byte-prefix contract directly: the exact seven-byte `INVITE ` prefix,
+    //! case-sensitive, and false for every other method / response / short
+    //! buffer.
+
+    use super::is_invite_request_buffer;
+
+    #[test]
+    fn invite_request_line_is_an_invite() {
+        // The exact shape the brake's `buildInviteBuffer` produces.
+        let raw = b"INVITE sip:bob@127.0.0.1:5060 SIP/2.0\r\nVia: SIP/2.0/UDP x\r\n\r\n";
+        assert!(is_invite_request_buffer(raw));
+    }
+
+    #[test]
+    fn bare_invite_space_is_the_minimal_match() {
+        // Exactly the 7-byte prefix, nothing after — still an INVITE start.
+        assert!(is_invite_request_buffer(b"INVITE "));
+    }
+
+    #[test]
+    fn other_methods_are_not_invites() {
+        // The brake only sheds new INVITEs; ACK/BYE/CANCEL/OPTIONS pass.
+        for line in [
+            &b"OPTIONS sip:bob SIP/2.0\r\n"[..],
+            &b"ACK sip:bob SIP/2.0\r\n"[..],
+            &b"BYE sip:bob SIP/2.0\r\n"[..],
+            &b"CANCEL sip:bob SIP/2.0\r\n"[..],
+            &b"REGISTER sip:bob SIP/2.0\r\n"[..],
+        ] {
+            assert!(!is_invite_request_buffer(line), "{line:?} must not be an INVITE");
+        }
+    }
+
+    #[test]
+    fn response_is_not_an_invite_request() {
+        assert!(!is_invite_request_buffer(b"SIP/2.0 200 OK\r\n"));
+    }
+
+    #[test]
+    fn invite_without_trailing_space_does_not_match() {
+        // "INVITEX ..." is not the INVITE method token — the trailing space is
+        // load-bearing (it is byte 7 of the compare).
+        assert!(!is_invite_request_buffer(b"INVITEX sip:bob SIP/2.0\r\n"));
+    }
+
+    #[test]
+    fn lower_case_invite_does_not_match() {
+        // Case-sensitive: method tokens are upper-case on the wire.
+        assert!(!is_invite_request_buffer(b"invite sip:bob SIP/2.0\r\n"));
+    }
+
+    #[test]
+    fn too_short_buffers_are_not_invites() {
+        // Guards the `len < 7` early-out (here: the empty buffer and a 6-byte
+        // "INVITE" with no following space).
+        assert!(!is_invite_request_buffer(b""));
+        assert!(!is_invite_request_buffer(b"INVITE"));
+    }
+}
+
+#[cfg(test)]
+mod jittered_retry_after_tests {
+    //! Port of the `jitteredRetryAfter` contract from
+    //! `src/sip/MessageHelpers.ts` (L366–369). No dedicated TS unit test — it is
+    //! exercised by the Tier-1 brake with `retryAfterJitterSec: 0` (the
+    //! `UdpTransport-brake.test.ts` config), i.e. the zero-jitter identity path.
+    //! These pin both the identity path the brake relies on and the injected-roll
+    //! arithmetic the TS draws from `Math.random()`.
+
+    use super::jittered_retry_after;
+
+    #[test]
+    fn zero_jitter_returns_base_unchanged() {
+        // The exact `retryAfterJitterSec: 0` brake config: no randomness, the
+        // roll closure is never invoked.
+        let mut rolled = false;
+        let v = jittered_retry_after(2, 0, || {
+            rolled = true;
+            999
+        });
+        assert_eq!(v, 2);
+        assert!(!rolled, "zero jitter must not consult the roll source");
+    }
+
+    #[test]
+    fn roll_is_reduced_modulo_jitter_plus_one() {
+        // base=10, jitter=4 → offset ∈ [0, 4]; roll=7 ⇒ 7 % 5 = 2 ⇒ 12.
+        assert_eq!(jittered_retry_after(10, 4, || 7), 12);
+        // roll exactly at a multiple of (jitter+1) ⇒ offset 0 ⇒ base.
+        assert_eq!(jittered_retry_after(10, 4, || 5), 10);
+        // roll = jitter ⇒ max offset ⇒ base + jitter.
+        assert_eq!(jittered_retry_after(10, 4, || 4), 14);
+    }
+
+    #[test]
+    fn offset_is_bounded_to_zero_through_jitter_inclusive() {
+        // Mirrors TS `Math.floor(Math.random() * (jitter + 1))` ∈ [0, jitter]:
+        // for every residue r of (jitter+1), base+r stays within [base, base+jitter].
+        let (base, jitter) = (30u32, 6u32);
+        for roll in 0u64..50 {
+            let v = jittered_retry_after(base, jitter, || roll);
+            assert!(
+                (base..=base + jitter).contains(&v),
+                "roll={roll} produced {v}, outside [{base}, {}]",
+                base + jitter
+            );
+        }
+    }
+
+    #[test]
+    fn large_roll_does_not_overflow() {
+        // u64::MAX % (jitter+1) is still a small offset — no panic, in-range.
+        let v = jittered_retry_after(1, 9, || u64::MAX);
+        assert!((1..=10).contains(&v));
+    }
+}
+
+#[cfg(test)]
+mod build_stateless_reject_503_tests {
+    //! Port of the `buildStatelessReject503Buffer` contract from
+    //! `src/sip/MessageHelpers.ts` (L267–356). No dedicated TS unit test — it is
+    //! exercised end-to-end by the Tier-1 brake (`UdpTransport-brake.test.ts`,
+    //! "non-emergency INVITEs past the threshold receive a stateless 503", which
+    //! asserts the reply status line starts with `SIP/2.0 503`). These pin the
+    //! byte-slicing contract directly: the five mandatory headers copied verbatim
+    //! with canonical names, the deliberate absence of a To-tag, the
+    //! Reason/Retry-After/Content-Length trailer, the LF-only fallback, compact
+    //! header forms, and every `None` rejection branch.
+
+    use super::build_stateless_reject_503_buffer;
+
+    const FLOODER_IP: &str = "10.0.0.1";
+    const FLOODER_PORT: u16 = 5555;
+    const B2BUA_IP: &str = "127.0.0.1";
+    const B2BUA_PORT: u16 = 5060;
+
+    /// The exact non-emergency INVITE the brake's `buildInviteBuffer(i)` emits
+    /// (CRLF separators, canonical header names).
+    fn invite_buf(i: u32) -> Vec<u8> {
+        format!(
+            "INVITE sip:bob@{B2BUA_IP}:{B2BUA_PORT} SIP/2.0\r\n\
+Via: SIP/2.0/UDP {FLOODER_IP}:{FLOODER_PORT};branch=z9hG4bK-brake-{i}\r\n\
+From: <sip:alice@flooder.test>;tag=alice-tag-{i}\r\n\
+To: <sip:bob@b2bua.test>\r\n\
+Call-ID: brake-test-{i}@{FLOODER_IP}\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:alice@{FLOODER_IP}:{FLOODER_PORT}>\r\n\
+Max-Forwards: 70\r\n\
+Content-Length: 0\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// Split a built response into its lines (CRLF), as the brake's `statusLine`
+    /// helper would read the first one.
+    fn resp_lines(buf: &[u8]) -> Vec<String> {
+        String::from_utf8(buf.to_vec())
+            .unwrap()
+            .split("\r\n")
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn templates_a_503_from_a_well_formed_invite() {
+        let resp = build_stateless_reject_503_buffer(&invite_buf(0), 5).expect("should template");
+        let lines = resp_lines(&resp);
+
+        // Status line is exactly the brake's asserted `SIP/2.0 503 …`.
+        assert_eq!(lines[0], "SIP/2.0 503 Service Unavailable");
+        assert!(lines[0].starts_with("SIP/2.0 503"));
+
+        // The five required headers, canonical-named, value copied verbatim.
+        assert_eq!(
+            lines[1],
+            "Via: SIP/2.0/UDP 10.0.0.1:5555;branch=z9hG4bK-brake-0"
+        );
+        assert_eq!(lines[2], "From: <sip:alice@flooder.test>;tag=alice-tag-0");
+        assert_eq!(lines[3], "To: <sip:bob@b2bua.test>");
+        assert_eq!(lines[4], "Call-ID: brake-test-0@10.0.0.1");
+        assert_eq!(lines[5], "CSeq: 1 INVITE");
+
+        // Overload trailer.
+        assert_eq!(lines[6], "Reason: SIP;cause=503;text=\"overload\"");
+        assert_eq!(lines[7], "Retry-After: 5");
+        assert_eq!(lines[8], "Content-Length: 0");
+        // Header section terminated by a blank line (CRLFCRLF → trailing "", "").
+        assert_eq!(lines[9], "");
+        assert_eq!(lines[10], "");
+    }
+
+    #[test]
+    fn does_not_add_a_to_tag() {
+        // The cheap-rejection contract: the echoed To carries NO ;tag= (so the
+        // UAC's ACK has no dialog context and is dropped as an orphan ACK). The
+        // request's To had no tag, and we must not synthesise one.
+        let resp = build_stateless_reject_503_buffer(&invite_buf(1), 7).unwrap();
+        let to_line = resp_lines(&resp).into_iter().find(|l| l.starts_with("To:")).unwrap();
+        assert!(!to_line.contains(";tag="), "Tier-1 503 must not add a To-tag: {to_line:?}");
+    }
+
+    #[test]
+    fn retry_after_value_is_rendered() {
+        let resp = build_stateless_reject_503_buffer(&invite_buf(2), 30).unwrap();
+        assert!(resp_lines(&resp).iter().any(|l| l == "Retry-After: 30"));
+    }
+
+    #[test]
+    fn topmost_via_is_the_one_copied() {
+        // Two Via headers (a forwarded request); the response echoes only the
+        // first (topmost) — what the UAC matches on.
+        let raw = b"INVITE sip:bob@127.0.0.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP top.example:5060;branch=z9hG4bK-top\r\n\
+Via: SIP/2.0/UDP bottom.example:5060;branch=z9hG4bK-bot\r\n\
+From: <sip:a@x>;tag=ft\r\n\
+To: <sip:b@y>\r\n\
+Call-ID: cid@x\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n";
+        let resp = build_stateless_reject_503_buffer(raw, 5).unwrap();
+        let via = resp_lines(&resp).into_iter().find(|l| l.starts_with("Via:")).unwrap();
+        assert_eq!(via, "Via: SIP/2.0/UDP top.example:5060;branch=z9hG4bK-top");
+    }
+
+    #[test]
+    fn compact_header_forms_are_accepted_and_normalized() {
+        // Compact forms v/f/t/i on input → canonical names on output, value
+        // copied verbatim (including the original spacing after the colon).
+        let raw = b"INVITE sip:bob@127.0.0.1 SIP/2.0\r\n\
+v: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-c\r\n\
+f: <sip:a@x>;tag=cf\r\n\
+t: <sip:b@y>\r\n\
+i: compact-cid@x\r\n\
+CSeq: 7 INVITE\r\n\
+Content-Length: 0\r\n\r\n";
+        let resp = build_stateless_reject_503_buffer(raw, 5).unwrap();
+        let lines = resp_lines(&resp);
+        assert_eq!(lines[1], "Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-c");
+        assert_eq!(lines[2], "From: <sip:a@x>;tag=cf");
+        assert_eq!(lines[3], "To: <sip:b@y>");
+        assert_eq!(lines[4], "Call-ID: compact-cid@x");
+        assert_eq!(lines[5], "CSeq: 7 INVITE");
+    }
+
+    #[test]
+    fn header_name_match_is_case_insensitive() {
+        // Mixed-case inbound header names are still matched (RFC 3261 §7.3.1).
+        let raw = b"INVITE sip:bob SIP/2.0\r\n\
+VIA: SIP/2.0/UDP h:5060;branch=z9hG4bK-u\r\n\
+fRoM: <sip:a@x>;tag=u\r\n\
+To: <sip:b@y>\r\n\
+CALL-ID: u-cid@x\r\n\
+cSeQ: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n";
+        let resp = build_stateless_reject_503_buffer(raw, 5).unwrap();
+        let lines = resp_lines(&resp);
+        assert_eq!(lines[1], "Via: SIP/2.0/UDP h:5060;branch=z9hG4bK-u");
+        assert_eq!(lines[2], "From: <sip:a@x>;tag=u");
+        assert_eq!(lines[4], "Call-ID: u-cid@x");
+    }
+
+    #[test]
+    fn first_occurrence_of_each_header_wins() {
+        // Duplicate From: only the first is copied (the TS `if (x === undefined)`
+        // guard).
+        let raw = b"INVITE sip:bob SIP/2.0\r\n\
+Via: SIP/2.0/UDP h:5060;branch=z9hG4bK-1\r\n\
+From: <sip:first@x>;tag=one\r\n\
+From: <sip:second@x>;tag=two\r\n\
+To: <sip:b@y>\r\n\
+Call-ID: cid@x\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n";
+        let resp = build_stateless_reject_503_buffer(raw, 5).unwrap();
+        let from = resp_lines(&resp).into_iter().find(|l| l.starts_with("From:")).unwrap();
+        assert_eq!(from, "From: <sip:first@x>;tag=one");
+    }
+
+    #[test]
+    fn lf_only_separators_are_accepted_and_output_is_crlf() {
+        // LFLF fallback (lineSep = "\n"): the request uses bare LF, but the
+        // templated reply is always CRLF-terminated.
+        let raw = b"INVITE sip:bob SIP/2.0\n\
+Via: SIP/2.0/UDP h:5060;branch=z9hG4bK-lf\n\
+From: <sip:a@x>;tag=lf\n\
+To: <sip:b@y>\n\
+Call-ID: lf-cid@x\n\
+CSeq: 1 INVITE\n\
+Content-Length: 0\n\n";
+        let resp = build_stateless_reject_503_buffer(raw, 5).expect("LF-only should template");
+        // Output is CRLF regardless of input separator.
+        assert!(resp.starts_with(b"SIP/2.0 503 Service Unavailable\r\n"));
+        let lines = resp_lines(&resp);
+        assert_eq!(lines[1], "Via: SIP/2.0/UDP h:5060;branch=z9hG4bK-lf");
+        assert_eq!(lines[2], "From: <sip:a@x>;tag=lf");
+    }
+
+    #[test]
+    fn folded_continuation_line_is_skipped_not_misparsed() {
+        // A folded Via value (continuation line starts with SP) — the
+        // continuation is skipped as a header line; the first physical Via line
+        // is copied verbatim (the TS copies the single physical line, not the
+        // unfolded value).
+        let raw = b"INVITE sip:bob SIP/2.0\r\n\
+Via: SIP/2.0/UDP h:5060\r\n ;branch=z9hG4bK-folded\r\n\
+From: <sip:a@x>;tag=fold\r\n\
+To: <sip:b@y>\r\n\
+Call-ID: fold-cid@x\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n";
+        let resp = build_stateless_reject_503_buffer(raw, 5).unwrap();
+        let lines = resp_lines(&resp);
+        // The Via line copied is the first physical line; the continuation did
+        // not get mistaken for a new header (no header line is a bare " ;...").
+        assert_eq!(lines[1], "Via: SIP/2.0/UDP h:5060");
+        // From/To/etc. still found after the continuation.
+        assert_eq!(lines[2], "From: <sip:a@x>;tag=fold");
+    }
+
+    // ---- None / rejection branches -------------------------------------
+
+    #[test]
+    fn no_header_terminator_returns_none() {
+        // No CRLFCRLF and no LFLF anywhere → cannot find the header section.
+        let raw = b"INVITE sip:bob SIP/2.0\r\nVia: SIP/2.0/UDP h\r\nFrom: x";
+        assert!(build_stateless_reject_503_buffer(raw, 5).is_none());
+    }
+
+    #[test]
+    fn response_first_line_returns_none() {
+        // First line lacks a request shape but DOES contain SIP/2.0 — however a
+        // genuine *response* still gets templated only if it has the 5 headers;
+        // the realistic rejection is a first line with NO "SIP/2.0" token.
+        let raw = b"GARBAGE LINE NO VERSION\r\nVia: x\r\n\r\n";
+        assert!(build_stateless_reject_503_buffer(raw, 5).is_none());
+    }
+
+    #[test]
+    fn missing_required_header_returns_none() {
+        // Has Via/From/To/Call-ID but NO CSeq → not templatable.
+        let raw = b"INVITE sip:bob SIP/2.0\r\n\
+Via: SIP/2.0/UDP h:5060;branch=z9hG4bK-n\r\n\
+From: <sip:a@x>;tag=n\r\n\
+To: <sip:b@y>\r\n\
+Call-ID: n-cid@x\r\n\
+Content-Length: 0\r\n\r\n";
+        assert!(build_stateless_reject_503_buffer(raw, 5).is_none());
+    }
+
+    #[test]
+    fn header_section_with_only_a_request_line_returns_none() {
+        // CRLFCRLF immediately after the request line → lines = [requestLine],
+        // fewer than 2 lines → None (the TS `lines.length < 2` guard).
+        let raw = b"INVITE sip:bob SIP/2.0\r\n\r\n";
+        assert!(build_stateless_reject_503_buffer(raw, 5).is_none());
+    }
+
+    #[test]
+    fn empty_buffer_returns_none() {
+        assert!(build_stateless_reject_503_buffer(b"", 5).is_none());
+    }
+}
+
+#[cfg(test)]
+mod tier1_brake_helper_composition_tests {
+    //! The three named cases from `tests/sip/UdpTransport-brake.test.ts`,
+    //! re-expressed at the **helper-composition** level — the layer this
+    //! migration item owns. The end-to-end brake test drives a full
+    //! `UdpTransport` + simulated fabric (deferred with that facade, see the
+    //! module doc), but the *decision* each case asserts is exactly the boolean
+    //! the future `preIngress` closure computes from these pure helpers:
+    //!
+    //! ```ignore
+    //! if depth >= tier1_threshold
+    //!     && is_invite_request_buffer(raw)
+    //!     && !buffer_has_emergency_marker(raw)
+    //! { reply(build_stateless_reject_503_buffer(raw, jittered_retry_after(base, jitter, roll))) }
+    //! else { accept() }
+    //! ```
+    //!
+    //! Replaying that predicate here pins the brake's shed/bypass logic without
+    //! the network slice, so the three TS cases are accounted for now and the
+    //! facade port later only has to wire the (already-tested) pieces together.
+
+    use super::{
+        build_stateless_reject_503_buffer, buffer_has_emergency_marker, is_invite_request_buffer,
+        jittered_retry_after,
+    };
+
+    const B2BUA_IP: &str = "127.0.0.1";
+    const B2BUA_PORT: u16 = 5060;
+    const FLOODER_IP: &str = "10.0.0.1";
+    const FLOODER_PORT: u16 = 5555;
+    // testConfig: udpQueueMax = 5, udpQueueTier1ThresholdPct = 40 →
+    // tier1Threshold = floor(5 * 40 / 100) = 2; retryAfterBaseSec default,
+    // retryAfterJitterSec = 0.
+    const TIER1_THRESHOLD: usize = 2;
+    const RETRY_AFTER_BASE: u32 = 5;
+    const RETRY_AFTER_JITTER: u32 = 0;
+
+    /// Mirror of the brake's `buildInviteBuffer(i, { emergency })`.
+    fn invite_buf(i: u32, emergency: bool) -> Vec<u8> {
+        let mut s = format!(
+            "INVITE sip:bob@{B2BUA_IP}:{B2BUA_PORT} SIP/2.0\r\n\
+Via: SIP/2.0/UDP {FLOODER_IP}:{FLOODER_PORT};branch=z9hG4bK-brake-{i}\r\n\
+From: <sip:alice@flooder.test>;tag=alice-tag-{i}\r\n\
+To: <sip:bob@b2bua.test>\r\n\
+Call-ID: brake-test-{i}@{FLOODER_IP}\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:alice@{FLOODER_IP}:{FLOODER_PORT}>\r\n\
+Max-Forwards: 70\r\n"
+        );
+        if emergency {
+            s.push_str("Resource-Priority: esnet.0\r\n");
+        }
+        s.push_str("Content-Length: 0\r\n\r\n");
+        s.into_bytes()
+    }
+
+    /// Mirror of the brake's `buildOptionsBuffer(i)`.
+    fn options_buf(i: u32) -> Vec<u8> {
+        format!(
+            "OPTIONS sip:bob@{B2BUA_IP}:{B2BUA_PORT} SIP/2.0\r\n\
+Via: SIP/2.0/UDP {FLOODER_IP}:{FLOODER_PORT};branch=z9hG4bK-opts-{i}\r\n\
+From: <sip:alice@flooder.test>;tag=opt-{i}\r\n\
+To: <sip:bob@b2bua.test>\r\n\
+Call-ID: opts-{i}@{FLOODER_IP}\r\n\
+CSeq: 1 OPTIONS\r\n\
+Max-Forwards: 70\r\n\
+Content-Length: 0\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// The exact predicate the future Tier-1 `preIngress` hook evaluates. Returns
+    /// the 503 buffer to reply with, or `None` to accept/enqueue. `depth` is the
+    /// current inbound-queue depth the fabric passes the hook.
+    fn brake_decision(raw: &[u8], depth: usize) -> Option<Vec<u8>> {
+        if depth >= TIER1_THRESHOLD
+            && is_invite_request_buffer(raw)
+            && !buffer_has_emergency_marker(raw)
+        {
+            let retry_after = jittered_retry_after(RETRY_AFTER_BASE, RETRY_AFTER_JITTER, || 0);
+            // A malformed buffer that fails templating falls through to accept,
+            // exactly as the TS hook does (`if (respBuf !== null)`).
+            return build_stateless_reject_503_buffer(raw, retry_after);
+        }
+        None
+    }
+
+    #[test]
+    fn non_emergency_invites_past_the_threshold_receive_a_stateless_503() {
+        // Replays "non-emergency INVITEs past the threshold receive a stateless
+        // 503". Flood 10 INVITEs into an undrained queue: depths 0 and 1 are
+        // below threshold (accepted); depth 2 and every one after is rejected.
+        let flood = 10usize;
+        let mut rejects = 0;
+        for i in 0..flood {
+            // No drain → depth equals the count already accepted.
+            let depth = i.min(TIER1_THRESHOLD); // 0,1,2,2,2,... like the live queue
+            match brake_decision(&invite_buf(i as u32, false), depth) {
+                Some(resp) => {
+                    rejects += 1;
+                    // The reply the flooder would receive is a 503.
+                    assert!(resp.starts_with(b"SIP/2.0 503"));
+                }
+                None => assert!(i < TIER1_THRESHOLD, "INVITE {i} below threshold must be accepted"),
+            }
+        }
+        // floodCount - 2 rejects, matching `expectedRejects` in the TS.
+        assert_eq!(rejects, flood - TIER1_THRESHOLD);
+    }
+
+    #[test]
+    fn emergency_invites_bypass_the_brake_even_above_the_threshold() {
+        // Replays "emergency INVITEs bypass the brake even when above the
+        // threshold". Two non-emergency INVITEs fill to threshold, then an
+        // emergency INVITE at depth == threshold must NOT be rejected.
+        assert!(brake_decision(&invite_buf(0, false), 0).is_none()); // accepted
+        assert!(brake_decision(&invite_buf(1, false), 1).is_none()); // accepted
+        // At depth 2 (== threshold) a non-emergency INVITE WOULD be shed...
+        assert!(brake_decision(&invite_buf(99, false), 2).is_some());
+        // ...but the emergency INVITE bypasses via buffer_has_emergency_marker.
+        assert!(
+            brake_decision(&invite_buf(2, true), 2).is_none(),
+            "emergency INVITE must bypass the brake"
+        );
+    }
+
+    #[test]
+    fn non_invite_requests_are_not_503d_by_the_brake() {
+        // Replays "non-INVITE requests are not 503'd by the brake". With the
+        // queue saturated (depth >= threshold), an OPTIONS is still accepted —
+        // the brake only targets new INVITEs.
+        // Saturating INVITEs at/above threshold are shed...
+        for i in 2..5u32 {
+            assert!(brake_decision(&invite_buf(i, false), 2).is_some());
+        }
+        // ...the OPTIONS at the same saturated depth is NOT (isInviteRequestBuffer
+        // is false), so no 503 is templated for it.
+        assert!(
+            brake_decision(&options_buf(0), 2).is_none(),
+            "non-INVITE must not be 503'd"
+        );
     }
 }

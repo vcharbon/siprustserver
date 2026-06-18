@@ -109,7 +109,7 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
 | `Serializer.ts` | `serializer.rs` | ✅ ported (`serialize`/`sip_summary`/`message_summary`, Content-Length safety net) |
 | `SdpUtils.ts` + `SdpAnswerFromOffer.ts` | `sdp.rs` | ✅ ported (codec-profile extract, held-SDP, answer-from-offer, strict `validate_sdp_body`) |
 | `generators.ts` | `generators.rs` | ✅ ported (all 8 generators; `StackDialog`/`InviteClientTransactionHandle` are minimal local input shapes pending slice-2 `Dialog`/`TransactionLayer`) |
-| `SipFragUtils.ts`, `MessageHelpers.ts` | `sipfrag.rs`, `message_helpers.rs` | ✅ ported — sipfrag whole; MessageHelpers **pure half** (header accessors + structured readers) **plus the byte-level `bufferHasEmergencyMarker`** (pulled ahead of slice 2 — the Tier-1 brake's emergency-bypass signal). RNG identifier generators + the **remaining** byte-level overload/dispatcher helpers deferred to slice 2 (see un-ported list) |
+| `SipFragUtils.ts`, `MessageHelpers.ts` | `sipfrag.rs`, `message_helpers.rs` | ✅ ported — sipfrag whole; MessageHelpers **pure half** (header accessors + structured readers) **plus all four Tier-1 overload-brake byte helpers** — `bufferHasEmergencyMarker` (migration/03), then **migration/10** added the other three: `isInviteRequestBuffer` (`is_invite_request_buffer`), `buildStatelessReject503Buffer` (`build_stateless_reject_503_buffer` — distinct from the parsed Tier-3 `b2bua::router::build_stateless_overload_503`: byte-slices verbatim, adds no To-tag), and `jitteredRetryAfter` (`jittered_retry_after`, with the `Math.random()` source recast as an **injected `roll` closure** so the pure crate stays RNG-free). The Tier-1 `preIngress` *consumer* (the `UdpTransport.layer` glue) is still deferred to slice 2 with `AppConfig`/`MetricsRegistry`; the helper-level tests pin the three named `UdpTransport-brake.test.ts` cases. RNG identifier generators + the dispatcher-only `bufferHasToTag` remain deferred to slice 2 (see un-ported list). Source: sipjsserver @ `fffc4ac6`. |
 
 ### Tests to port
 | Source test | Rust home | Status |
@@ -147,15 +147,22 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
   Effect `Random` reference. That RNG seam belongs to the **network slice**
   (where determinism is plumbed); the Rust port will inject an RNG at that
   boundary. Deferred with the helpers themselves.
-- The byte-level overload/dispatcher helpers in `MessageHelpers.ts`
-  (`buildStatelessReject503Buffer`, `isInviteRequestBuffer`, `bufferHasToTag`,
-  `jitteredRetryAfter`) — Tier-1 UDP / dispatcher concerns, deferred to
-  **slice 2** with their consumers. `bufferHasEmergencyMarker` was pulled ahead
-  (it is the emergency-bypass signal the brake consults to never 503 an
-  emergency packet); its only existing coverage, the end-to-end
-  `tests/sip/UdpTransport-brake.test.ts`, stays deferred until the `UdpTransport`
-  facade lands, so the Rust port pins the byte-scan contract with dedicated unit
-  tests (`message_helpers::buffer_emergency_tests`).
+- The four **Tier-1 overload-brake byte helpers** in `MessageHelpers.ts`
+  (`bufferHasEmergencyMarker`, `isInviteRequestBuffer`,
+  `buildStatelessReject503Buffer`, `jitteredRetryAfter`) are now **all ported**
+  (migration/03 + migration/10) as pure `message_helpers.rs` functions — they
+  are the allocation-free, pre-parse leaves the future Tier-1 UDP `preIngress`
+  hook composes. Their *consumer* (the `UdpTransport.layer` brake closure, which
+  needs `AppConfig` + `MetricsRegistry` + the `sip-net` fabric) is still deferred
+  to **slice 2**, so the end-to-end coverage `tests/sip/UdpTransport-brake.test.ts`
+  stays deferred with that facade; the Rust port pins each helper's byte-level
+  contract directly (`message_helpers::{buffer_emergency_tests,
+  is_invite_request_buffer_tests, jittered_retry_after_tests,
+  build_stateless_reject_503_tests}`) **and** replays the three named brake cases
+  at the helper-composition layer (`message_helpers::tier1_brake_helper_composition_tests`).
+- The dispatcher-only byte helper `bufferHasToTag` (initial-INVITE vs in-dialog
+  discriminator for the dispatcher fast-path — NOT a Tier-1 brake input) remains
+  deferred to **slice 2** with its dispatcher consumer.
 - The `parser-extraction.test.ts` "custom vs JsSIP" cross-parser equivalence
   block and the `jssip`/`native` oracle columns in `parser-*.test.ts` — there
   is no JsSIP in the Rust stack ([ADR-0001](docs/adr/0001-port-custom-parser-rvoip-as-parity-oracle.md));
