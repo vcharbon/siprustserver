@@ -439,6 +439,15 @@ impl B2buaSut {
         &self.metrics
     }
 
+    /// The worker-side overload signal (migration/08) the running core publishes
+    /// on its OPTIONS-200 `X-Overload` header. A test reads its EWMAs after
+    /// advancing the paused clock (to prove the spawned 100 ms sampler task ran)
+    /// and advances the `adm` counter via
+    /// [`OverloadSignal::increment_non_emergency_admitted`].
+    pub fn overload(&self) -> &b2bua::overload::OverloadSignal {
+        self._core.overload()
+    }
+
     /// Ground-truth live call-map size (`inner.calls.len()`). An orphan-reject
     /// (481) does NOT inflate this — it never inserts a call — so it is the wrong
     /// lens for the orphan leak; use [`lock_count`](Self::lock_count) +

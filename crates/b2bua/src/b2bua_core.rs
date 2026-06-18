@@ -21,6 +21,7 @@ use crate::decision::CallDecisionEngine;
 use crate::dispatch::PerCallDispatcher;
 use crate::limiter::CallLimiter;
 use crate::metrics::B2buaMetrics;
+use crate::overload::OverloadSignal;
 use crate::repl::{ReplServer, ReplicatingCallStore, ReplicationSupervisor, Readiness};
 use crate::router::{self, RouterCtx};
 use crate::rules::{compose_rules, default_rules, ServiceDef};
@@ -36,6 +37,10 @@ pub struct B2buaCore {
     /// Readiness handle (the supervisor-backed one when replication is wired,
     /// else the always-ready legacy one). Kept so [`begin_draining`] can latch it.
     readiness: Readiness,
+    /// Worker-side overload signal (migration/08). Re-exposed via
+    /// [`overload`](Self::overload) so callers/tests can read the published
+    /// header and advance the `adm` counter; a periodic task drives its EWMAs.
+    overload: OverloadSignal,
     /// The running replication supervisor (kept alive so its pullers + reconcile
     /// loop are not dropped). `None` on the legacy/non-replicating path.
     supervisor: Option<ReplicationSupervisor>,
@@ -267,6 +272,10 @@ impl B2buaCore {
         // this list; `services` here is for `init`-seeded services (e.g. the
         // out-of-tree `announcement` capstone).
         let rules = compose_rules(&services, default_rules());
+        // Worker-side overload signal (migration/08). A live ELU/GC sampler backs
+        // it; the periodic task below drives `sample()` at the 100 ms cadence so
+        // the EWMAs published on every OPTIONS-200 `X-Overload` header track load.
+        let overload = OverloadSignal::live();
         let ctx = Arc::new(RouterCtx {
             config,
             state,
@@ -285,6 +294,7 @@ impl B2buaCore {
             // contributed kind registers here via `.with(...)` (ADR-0020 X7).
             obligations: Arc::new(crate::obligations::ObligationSet::core()),
             readiness: readiness.clone(),
+            overload: overload.clone(),
             reentry_tx,
         });
 
@@ -332,11 +342,32 @@ impl B2buaCore {
             }));
         }
 
+        // The worker-side overload sampler (migration/08). Rides
+        // `tokio::time::interval` (NOT the TS raw `setInterval`) so a paused-clock
+        // test advances it with `tokio::time::advance` like every other behaviour
+        // timer (CLAUDE.md: behaviour rides `tokio::time` directly). Each tick
+        // reads the ELU/GC sampler and feeds the EWMAs published on `X-Overload`.
+        // Aborted with the other tasks on a simulated `crash()`. This task owns no
+        // per-call state, so it needs no release path.
+        {
+            let overload = overload.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut tick = tokio::time::interval(OverloadSignal::SAMPLE_PERIOD);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                tick.tick().await; // skip the immediate first tick (TS first fire is +100 ms)
+                loop {
+                    tick.tick().await;
+                    overload.sample();
+                }
+            }));
+        }
+
         Self {
             ctx,
             metrics,
             cdr,
             readiness,
+            overload,
             supervisor,
             repl_store,
             tasks,
@@ -356,6 +387,14 @@ impl B2buaCore {
     /// gates to mark a rebooted worker alive in the proxy registry.
     pub fn supervisor(&self) -> Option<&ReplicationSupervisor> {
         self.supervisor.as_ref()
+    }
+
+    /// The worker-side overload signal (migration/08). Callers advance the `adm`
+    /// counter on a non-emergency new-dialog admit
+    /// ([`OverloadSignal::increment_non_emergency_admitted`]) and read the
+    /// published `X-Overload` header; a periodic task drives its EWMAs.
+    pub fn overload(&self) -> &OverloadSignal {
+        &self.overload
     }
 
     /// Readiness gate, routed through the SAME latched [`Readiness`] state

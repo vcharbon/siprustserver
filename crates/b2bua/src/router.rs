@@ -28,6 +28,7 @@ use crate::initial_invite::{build_initial_call, handle_initial_invite};
 use crate::limiter::CallLimiter;
 use crate::metrics::B2buaMetrics;
 use crate::obligations::ObligationSet;
+use crate::overload::OverloadSignal;
 use crate::repl::{Readiness, ReadinessState};
 use crate::rules::model::RuleAction;
 use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext, RuleDefinition, ServiceDef};
@@ -61,6 +62,11 @@ pub struct RouterCtx {
     /// Self-reported readiness driving the OPTIONS health responder (S7). The
     /// default/legacy path uses [`Readiness::always_ready`] → always 200.
     pub readiness: Readiness,
+    /// Worker-side overload signal stamped on every OPTIONS-200 reply as
+    /// `X-Overload: v=1; elu=…; gc=…; adm=…` (migration/08). The front proxy's
+    /// ELU-band AIMD (`sip_proxy::load_observer`) consumes it; the EWMAs advance
+    /// only while a sampler task drives [`OverloadSignal::sample`].
+    pub overload: OverloadSignal,
     /// Re-entrant event sink: fire-and-forget work (the async `/call/refer`
     /// round-trip) folds its result back into the router by sending a
     /// `CallEvent::InternalEvent` here, which `run` consumes via `on_event` —
@@ -698,7 +704,8 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     if let CallEvent::Sip { message, src } = &event {
         if let SipMessage::Request(req) = message.as_ref() {
             if req.method == "OPTIONS" && req.to.tag.is_none() {
-                let resp = build_options_health_response(&ctx.readiness, &ctx.id_gen, req);
+                let resp =
+                    build_options_health_response(&ctx.readiness, &ctx.overload, &ctx.id_gen, req);
                 let _ = ctx.txn.send_response(resp, *src).await;
                 return;
             }
@@ -742,12 +749,29 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
 /// always did; the 503 path needs it too, and `hydrate_response` rejects a
 /// tagless response otherwise). The status + `Reason` header text is the
 /// contract `sip-proxy::health::probe::classify_503` keys on:
-///   - `Ready`    → `200 OK`.
+///   - `Ready`    → `200 OK` + `X-Overload: v=1; elu=…; gc=…; adm=…`.
 ///   - `NotReady` → `503` + `Reason: SIP;cause=503;text="not-ready"`.
 ///   - `Draining` → `503` + `Reason: SIP;cause=503;text="draining"` +
 ///     `Retry-After: 0`.
+///
+/// The `X-Overload` worker load signal (migration/08) rides the **200 path
+/// only**: it is the live signal the proxy's ELU-band AIMD
+/// (`sip_proxy::load_observer::parse_x_overload_header`) consumes to steer (and,
+/// at `AboveCritical`, exclude) a *serving* worker. A 503 already removes the
+/// node from new-dialog selection, so stamping the band signal there is moot.
+///
+/// **Deliberate divergence from TS (tracked, not an omission):** `SipRouter.ts`
+/// also stamps `X-Overload` on the boot-drain 503, and the Rust proxy consumer
+/// (`probe.rs`) parses the header off *any* status — so on a draining worker the
+/// LB forgoes one fresh ELU sample per probe. We omit it because a draining node
+/// is excluded from new-dialog selection anyway and the consumer has no
+/// `noteRejectionPayload` fast-path (the AIMD rate-cap is deferred, ADR-0009).
+/// Revisit (and revisit `options_200_stamps_x_overload_503_does_not`, which pins
+/// this divergent behaviour) when the rate-cap consumer item is ported. See the
+/// `MIGRATION_STATUS.md` overload row for the full carry-forward list.
 pub(crate) fn build_options_health_response(
     readiness: &Readiness,
+    overload: &OverloadSignal,
     id_gen: &IdGen,
     req: &sip_message::SipRequest,
 ) -> sip_message::SipResponse {
@@ -764,10 +788,12 @@ pub(crate) fn build_options_health_response(
             "OK",
             // RFC 3261 §11.2: an OPTIONS 200 SHOULD advertise capabilities so the
             // querier learns method/extension/body support, not just liveness.
+            // Plus the worker load signal the proxy's AIMD band reads.
             vec![
                 hdr("Allow", sip_message::generators::B2BUA_ALLOW),
                 hdr("Accept", "application/sdp"),
                 hdr("Supported", sip_message::generators::B2BUA_SUPPORTED),
+                hdr("X-Overload", &overload.x_overload_header_value()),
             ],
         ),
         ReadinessState::NotReady => (

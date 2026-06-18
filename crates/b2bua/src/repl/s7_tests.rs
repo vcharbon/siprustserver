@@ -26,6 +26,7 @@ use sip_message::SipRequest;
 use sip_txn::IdGen;
 
 use super::{Readiness, ReadinessSource};
+use crate::overload::OverloadSignal;
 use crate::router::build_options_health_response;
 
 /// A flip-able readiness source (stand-in for the supervisor's two gates).
@@ -89,6 +90,14 @@ fn reason_of(resp: &sip_message::SipResponse) -> Option<String> {
     get_header(&resp.headers, "reason").map(|s| s.to_string())
 }
 
+/// A zero-state overload signal for the responder calls below. These tests pin
+/// the readiness *status* + `Reason` wire contract, not the `X-Overload` header
+/// (that is covered in `router::tests` / `overload::tests`); a fresh signal
+/// emits the constant `v=1; elu=0.000; gc=0.000; adm=0` on the 200 path.
+fn ov() -> OverloadSignal {
+    OverloadSignal::live()
+}
+
 /// The full transition the proxy probe observes as a node boots and drains.
 #[test]
 fn options_reports_not_ready_then_ready_then_draining() {
@@ -98,7 +107,7 @@ fn options_reports_not_ready_then_ready_then_draining() {
     let req = options_probe();
 
     // NotReady → 503 + Reason text contains "not-ready" (probe → NotReady).
-    let resp = build_options_health_response(&r, &id_gen, &req);
+    let resp = build_options_health_response(&r, &ov(), &id_gen, &req);
     assert_eq!(resp.status, 503);
     assert!(resp.to.tag.is_some(), "503 to out-of-dialog OPTIONS needs a To-tag");
     let reason = reason_of(&resp).expect("NotReady carries a Reason header");
@@ -109,14 +118,14 @@ fn options_reports_not_ready_then_ready_then_draining() {
 
     // Gate opens → 200 OK (probe → Alive). No Reason header.
     src.set(true, true);
-    let resp = build_options_health_response(&r, &id_gen, &req);
+    let resp = build_options_health_response(&r, &ov(), &id_gen, &req);
     assert_eq!(resp.status, 200);
     assert!(resp.to.tag.is_some(), "200 to out-of-dialog OPTIONS needs a To-tag");
     assert!(reason_of(&resp).is_none());
 
     // SIGTERM → Draining → 503 + Reason "draining" + Retry-After: 0.
     r.set_draining();
-    let resp = build_options_health_response(&r, &id_gen, &req);
+    let resp = build_options_health_response(&r, &ov(), &id_gen, &req);
     assert_eq!(resp.status, 503);
     assert!(resp.to.tag.is_some());
     let reason = reason_of(&resp).expect("Draining carries a Reason header");
@@ -140,17 +149,17 @@ fn options_latches_ready_across_blip_then_drains() {
     let id_gen = IdGen::seeded(7);
     let req = options_probe();
 
-    assert_eq!(build_options_health_response(&r, &id_gen, &req).status, 200);
+    assert_eq!(build_options_health_response(&r, &ov(), &id_gen, &req).status, 200);
 
     // Peer blip: no longer current/bootstrapped — must NOT revert to 503.
     src.set(false, false);
-    let resp = build_options_health_response(&r, &id_gen, &req);
+    let resp = build_options_health_response(&r, &ov(), &id_gen, &req);
     assert_eq!(resp.status, 200, "latched Ready must not flap to NotReady");
     assert!(reason_of(&resp).is_none());
 
     // Draining still wins over the latched Ready.
     r.set_draining();
-    let resp = build_options_health_response(&r, &id_gen, &req);
+    let resp = build_options_health_response(&r, &ov(), &id_gen, &req);
     assert_eq!(resp.status, 503);
     assert!(reason_of(&resp).unwrap().to_ascii_lowercase().contains("draining"));
 }
@@ -178,15 +187,65 @@ fn emitted_reason_aligns_with_proxy_classify_503() {
     let req = options_probe();
 
     let not_ready = Readiness::new(FlagSource::new(false, false));
-    let resp = build_options_health_response(&not_ready, &id_gen, &req);
+    let resp = build_options_health_response(&not_ready, &ov(), &id_gen, &req);
     assert_eq!(resp.status, 503);
     assert_eq!(classify_503(reason_of(&resp).as_deref()), Health::NotReady);
 
     let draining = Readiness::always_ready();
     draining.set_draining();
-    let resp = build_options_health_response(&draining, &id_gen, &req);
+    let resp = build_options_health_response(&draining, &ov(), &id_gen, &req);
     assert_eq!(resp.status, 503);
     assert_eq!(classify_503(reason_of(&resp).as_deref()), Health::Draining);
+}
+
+/// migration/08: the OPTIONS-200 self-report carries the worker load signal as
+/// `X-Overload: v=1; elu=…; gc=…; adm=…` (the schema
+/// `sip_proxy::load_observer::parse_x_overload_header` consumes — that real
+/// cross-crate parse is exercised end-to-end in `b2bua-harness`), and the `adm`
+/// counter the responder publishes tracks
+/// `OverloadSignal::increment_non_emergency_admitted`. The 503 paths do NOT
+/// carry it (a 503 already removes the node from new-dialog selection).
+#[test]
+fn options_200_stamps_x_overload_503_does_not() {
+    let id_gen = IdGen::seeded(0x08);
+    let req = options_probe();
+
+    // Ready → 200 with an X-Overload header in the exact zero-state v=1 schema.
+    let overload = OverloadSignal::live();
+    let ready = Readiness::always_ready();
+    let resp = build_options_health_response(&ready, &overload, &id_gen, &req);
+    assert_eq!(resp.status, 200);
+    let xo = get_header(&resp.headers, "x-overload")
+        .expect("OPTIONS 200 must advertise the worker load signal");
+    assert_eq!(xo, "v=1; elu=0.000; gc=0.000; adm=0");
+
+    // Advance the admit counter; the next 200's header reflects it as adm=2.
+    overload.increment_non_emergency_admitted();
+    overload.increment_non_emergency_admitted();
+    let resp = build_options_health_response(&ready, &overload, &id_gen, &req);
+    let xo = get_header(&resp.headers, "x-overload").unwrap();
+    assert_eq!(
+        xo, "v=1; elu=0.000; gc=0.000; adm=2",
+        "adm must track increment_non_emergency_admitted"
+    );
+
+    // NotReady (503) and Draining (503) carry NO X-Overload.
+    let not_ready = Readiness::new(FlagSource::new(false, false));
+    let resp = build_options_health_response(&not_ready, &overload, &id_gen, &req);
+    assert_eq!(resp.status, 503);
+    assert!(
+        get_header(&resp.headers, "x-overload").is_none(),
+        "a 503 (not-ready) self-report must not carry the band signal"
+    );
+
+    let draining = Readiness::always_ready();
+    draining.set_draining();
+    let resp = build_options_health_response(&draining, &overload, &id_gen, &req);
+    assert_eq!(resp.status, 503);
+    assert!(
+        get_header(&resp.headers, "x-overload").is_none(),
+        "a 503 (draining) self-report must not carry the band signal"
+    );
 }
 
 // ── Supervisor-fed transition (real ReplicationSupervisor, paused runtime) ──
@@ -255,7 +314,7 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
         vec![Peer::new("B", "B")],
         clock.clone(),
     )));
-    let resp = build_options_health_response(&readiness, &id_gen, &req);
+    let resp = build_options_health_response(&readiness, &ov(), &id_gen, &req);
     assert_eq!(resp.status, 503, "before catch-up: NotReady");
     assert!(reason_of(&resp).unwrap().to_ascii_lowercase().contains("not-ready"));
 
@@ -270,13 +329,13 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
     );
 
     // Gate now open → 200 OK; readiness latches.
-    let resp = build_options_health_response(&readiness, &id_gen, &req);
+    let resp = build_options_health_response(&readiness, &ov(), &id_gen, &req);
     assert_eq!(resp.status, 200);
     assert!(reason_of(&resp).is_none());
 
     // SIGTERM → 503 draining + Retry-After: 0.
     readiness.set_draining();
-    let resp = build_options_health_response(&readiness, &id_gen, &req);
+    let resp = build_options_health_response(&readiness, &ov(), &id_gen, &req);
     assert_eq!(resp.status, 503);
     assert!(reason_of(&resp).unwrap().to_ascii_lowercase().contains("draining"));
     assert_eq!(get_header(&resp.headers, "retry-after"), Some("0"));
@@ -349,7 +408,7 @@ async fn departed_unreachable_peer_does_not_wedge_readiness_not_ready() {
     // End to end through the readiness latch + OPTIONS responder: 200 OK.
     let readiness = Readiness::new(Arc::new(a_sup.clone()));
     let id_gen = IdGen::seeded(0xC0FFEE);
-    let resp = build_options_health_response(&readiness, &id_gen, &options_probe());
+    let resp = build_options_health_response(&readiness, &ov(), &id_gen, &options_probe());
     assert_eq!(resp.status, 200, "peerless-after-departure node serves Ready");
     assert!(reason_of(&resp).is_none());
 }

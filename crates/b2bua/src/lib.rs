@@ -30,6 +30,7 @@ pub mod limiter;
 pub mod limiter_http;
 pub mod metrics;
 pub mod obligations;
+pub mod overload;
 pub mod reaper;
 pub mod repl;
 pub mod router;
