@@ -57,6 +57,52 @@ fn policy_body_three_states_round_trip() {
     }
 }
 
+/// The `emergency` flag (`CallModel.ts` L628–635) is the data-layer prerequisite
+/// for the SipRouter `;emerg=1` / `;em=1` URI/Via marker stamping that lets the
+/// dispatcher byte-classifier route in-dialog packets into the emergency priority
+/// queue without parsing — so it MUST survive the failover/replication round-trip
+/// intact.
+///
+/// Wire position. The TS positional msgpack codec carries it at `FIELD_ORDER`
+/// **index 20** (`msgpack.ts` L37: `callRef`=0 … `_topology`=19, `emergency`=20);
+/// the protobuf codec encodes it whenever `!== undefined` (`protobuf.ts` L143),
+/// under id `optional bool emergency = 24` (`call.proto`). (The older bench
+/// definition in `tests/bench/call-codec/codec.ts` uses `id: 21`; the bench and
+/// the current proto diverge — cite the proto, not the bench.) Our codec here is
+/// `rmp-serde`'s positional/array encoding, so the field is carried by struct
+/// position, exactly like the TS msgpack codec.
+///
+/// States. The three round-tripped here are `None`, `Some(false)`, `Some(true)`:
+/// - In production only `true` or absent are ever written: the producer is
+///   `SipRouter.ts` L1215 `emergency: isEmergency || undefined`, which coerces a
+///   computed `false` to `undefined`. `Some(false)` is therefore exercised here
+///   purely for codec robustness, not because the system emits it.
+/// - `None` is safe to carry **only** because the project redeploys from scratch
+///   (no rolling-upgrade contract — see CLAUDE.md) and the field has always been
+///   present in the Rust `Call` struct. It is NOT a back-compat / "wire default"
+///   state: under this positional codec an `Option<bool>` that is mid-struct and
+///   lacks `#[serde(default)]` does **not** support old-body (field-absent)
+///   decode — a body emitted without the field fails to decode (the next field's
+///   marker lands where the bool is expected), and a `None` body is not
+///   byte-identical to a field-absent one (`None` serializes an explicit nil).
+///   Contrast `sm_cursors` below — the genuine back-compat field — which is the
+///   LAST field, carries `#[serde(default, skip_serializing_if)]`, and has an
+///   explicit field-absent decode assertion.
+///
+/// The TS source has no dedicated codec test for this field (it is covered only
+/// generically by the round-trip property); this pins its contract.
+#[test]
+fn emergency_three_states_round_trip() {
+    let codec = MsgpackCodec::new();
+    let mut call = representative_call();
+    for v in [None, Some(false), Some(true)] {
+        call.emergency = v;
+        let decoded = codec.decode(&codec.encode(&call)).unwrap();
+        assert_eq!(decoded.emergency, v, "emergency={v:?} must round-trip");
+        assert_eq!(decoded, call, "full value preserved with emergency={v:?}");
+    }
+}
+
 /// ADR-0016 slice 0 — `sm_cursors` is replication-compatible under the positional
 /// msgpack codec: a populated map round-trips, an empty map round-trips, and an
 /// **old-shape body** (encoded before the field existed) decodes to an empty map.
