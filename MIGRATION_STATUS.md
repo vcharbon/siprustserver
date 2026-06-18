@@ -592,7 +592,7 @@ classification only** (the AIMD rate-cap bucket is deferred).
 ### Tests ported
 | Source test | Rust home | Status |
 |---|---|---|
-| `load-balancer/{hmac-tampering,cookie-route-fallback,decode-forward-not-ready,decode-forward-respawn-window,unresolvable-id-falls-back,add-remove-resharding,initial-health,distribution,selectForNewDialog-overload(band part)}` | `tests/load_balancer.rs` | ✅ 11 |
+| `load-balancer/{hmac-tampering,cookie-route-fallback,decode-forward-not-ready,decode-forward-respawn-window,unresolvable-id-falls-back,add-remove-resharding,initial-health,distribution,selectForNewDialog-overload(band+emergency-bypass parts)}` | `tests/load_balancer.rs` | ✅ 12 |
 | RendezvousHash distribution + HMAC sign/verify + header surgery + registry parse + cancel-LRU + observer bands + metrics/logger/metrics-server | `src/**` `#[cfg(test)]` | ✅ 46 |
 | `transit-only/{invite-200-ack-bye, malformed-message-rejected, max-forwards(483)}` | `tests/transit_only.rs` (real `ProxyCore` SUT) | ✅ 3 |
 | `load-balancer/callid-routing-guard` + `distribution` (wire) | `tests/load_balancer_routing.rs` (real SUT) | ✅ 1 |
@@ -624,6 +624,30 @@ classification only** (the AIMD rate-cap bucket is deferred).
   proxy mechanics).
 - **`forbidden-import` lint** — superseded by Cargo crate-dependency boundaries
   (`sip-proxy` simply does not depend on the call/rule crates).
+
+### Item 07 — `LoadBalancer.selectForNewDialog` v3-cookie / CRITICAL-band / emergency
+
+The LoadBalancer v3 surface (`COOKIE_VERSION='3'`, the `e=<0|1>` emergency flag in
+`build_stickiness_input`, the `select_for_new_dialog` CRITICAL-band filter with its
+emergency/in-dialog bypass, and the `SelectOpts::emergency_override` shortcut) was
+**already in-tree** — introduced wholesale in the pre-migration commit `959f588`
+("sip proxy with LB") and cleaned up in `8a03a97`, not re-ported on a per-item
+branch. The item-07 deliverable on `migration/07-…` is therefore this attribution
+plus the previously-missing emergency-bypass round-trip coverage:
+- `emergency_cookie_round_trips_e1_and_is_emergency` — pins the `e=1` ENCODE
+  (RPH INVITE ⇒ `params['e']=="1"`) → DECODE (`is_emergency: true` on the
+  DecodeResult) contract that the in-tree code plumbs but nothing exercised.
+- `above_critical_band_filtered_for_non_emergency_only` now drives the bypass via
+  an on-wire `Resource-Priority: esnet.0` INVITE (`is_emergency_invite` on the
+  select path), in addition to the `emergency_override` opts path.
+- `hmac_tampering_rejected` restored the v3 wire-format assertions (`v==3`,
+  `e==0`, `w_pri`/`w_bak`/`kid`/`sig` present) and flips a single base64url char
+  (length-preserving) to hit the MAC verify-mismatch reject branch specifically.
+
+The two AIMD `selectForNewDialog-overload` cases (`RateCapExhausted` on empty
+bucket; emergency bypasses the AIMD bucket) remain un-ported with the rest of the
+AIMD token bucket (X6) — the Rust LB is band-only per ADR-0009 and never raises
+`RateCapExhausted`. They are picked up with the AIMD-bucket item, not item 07.
 
 ---
 

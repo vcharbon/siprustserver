@@ -29,9 +29,20 @@ fn addr(t: (&str, u16)) -> ProxyAddr {
 
 /// Build a request with a given method / Call-ID / optional To-tag (in-dialog).
 fn request(method: &str, call_id: &str, to_tag: Option<&str>) -> SipMessage {
+    request_with_rph(method, call_id, to_tag, None)
+}
+
+/// As [`request`], optionally stamping a `Resource-Priority` header (the on-wire
+/// emergency signal `is_emergency_invite` detects, mirroring the TS
+/// `buildInvite(callId, true)` which adds `Resource-Priority: esnet.0`).
+fn request_with_rph(method: &str, call_id: &str, to_tag: Option<&str>, rph: Option<&str>) -> SipMessage {
     let to = match to_tag {
         Some(t) => format!("<sip:bob@b>;tag={t}"),
         None => "<sip:bob@b>".to_string(),
+    };
+    let rph_line = match rph {
+        Some(v) => format!("Resource-Priority: {v}\r\n"),
+        None => String::new(),
     };
     let raw = format!(
         "{method} sip:bob@10.0.0.3:5070 SIP/2.0\r\n\
@@ -41,9 +52,15 @@ To: {to}\r\n\
 Call-ID: {call_id}\r\n\
 CSeq: 1 {method}\r\n\
 Max-Forwards: 70\r\n\
+{rph_line}\
 Content-Length: 0\r\n\r\n"
     );
     CustomParser::default().parse(raw.as_bytes()).unwrap()
+}
+
+/// An emergency INVITE (`Resource-Priority: esnet.0`), the on-wire signal.
+fn emergency_invite(call_id: &str) -> SipMessage {
+    request_with_rph("INVITE", call_id, None, Some("esnet.0"))
 }
 
 fn strategy(reg: SimulatedWorkerRegistry, clock: Clock) -> LoadBalancerStrategy {
@@ -78,13 +95,31 @@ async fn hmac_tampering_rejected() {
     let target = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
     let mut params = s.encode_stickiness(&target, &invite).unwrap();
 
-    // Flip a character in the signature → decode must Reject 403.
+    // Pin the v3 cookie wire format the proxy stamped (mirrors the TS RR-shape
+    // assertions: v=3, e=0, w_pri/w_bak/kid/sig present).
+    assert_eq!(params.get("v").unwrap(), "3");
+    assert_eq!(params.get("e").unwrap(), "0", "non-emergency INVITE ⇒ e=0");
+    assert!(!params.get("w_pri").unwrap().is_empty(), "w_pri present");
+    assert!(params.contains_key("w_bak"), "w_bak present (may be empty)");
+    assert!(!params.get("kid").unwrap().is_empty(), "kid present");
+    assert!(!params.get("sig").unwrap().is_empty(), "sig present");
+
+    // Flip ONE base64url char (length-preserving) so the truncated MAC stays
+    // 16 bytes — this exercises the verify-MISMATCH reject branch specifically,
+    // not the length!=16 "malformed" branch. Decode must Reject 403.
     let sig = params.get("sig").unwrap().clone();
-    let tampered: String = sig.chars().rev().collect();
+    let first = sig.chars().next().expect("non-empty sig");
+    let replacement = if first == 'A' { 'B' } else { 'A' };
+    let tampered: String = std::iter::once(replacement).chain(sig.chars().skip(1)).collect();
+    assert_eq!(tampered.len(), sig.len(), "single-char flip preserves length");
+    assert_ne!(tampered, sig, "flip actually changed the signature");
     params.insert("sig".into(), tampered);
     let bye = request("BYE", "call-tamper@h", Some("bobtag"));
     match s.decode_stickiness(&params, &bye).await {
-        DecodeResult::Reject { status, .. } => assert_eq!(status, 403),
+        DecodeResult::Reject { status, reason } => {
+            assert_eq!(status, 403);
+            assert!(reason.contains("mismatch"), "expected MAC-mismatch reject, got: {reason}");
+        }
         other => panic!("expected Reject 403, got {other:?}"),
     }
 }
@@ -103,6 +138,36 @@ async fn cookie_round_trips_to_alive_primary() {
     match s.decode_stickiness(&params, &bye).await {
         DecodeResult::Forward { target: t, .. } => assert_eq!(t, target),
         other => panic!("expected Forward to primary, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn emergency_cookie_round_trips_e1_and_is_emergency() {
+    // The literal item-07 surface: the v3 `e=1` emergency flag must survive an
+    // encode → decode round-trip. Mirrors the TS `e=1` contract (stickinessInput
+    // emergency arg; decodeStickiness isEmergencyDialog = emergencyFlag === '1').
+    let clock = Clock::test_at(0);
+    let reg = two_worker_registry(clock.clone());
+    let s = strategy(reg, clock);
+
+    // (a) ENCODE: an emergency INVITE (`Resource-Priority: esnet.0`) mints a
+    //     cookie whose encoded params carry `e=1` (and stays v=3).
+    let invite = emergency_invite("call-em-rt@h");
+    let target = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
+    let params = s.encode_stickiness(&target, &invite).unwrap();
+    assert_eq!(params.get("v").unwrap(), "3");
+    assert_eq!(params.get("e").unwrap(), "1", "emergency INVITE ⇒ e=1");
+
+    // (b) DECODE: an in-dialog request carrying that `e=1` cookie yields a
+    //     DecodeResult whose `is_emergency` flag is true (here a Forward to the
+    //     still-alive primary).
+    let bye = request("BYE", "call-em-rt@h", Some("bobtag"));
+    match s.decode_stickiness(&params, &bye).await {
+        DecodeResult::Forward { target: t, is_emergency } => {
+            assert_eq!(t, target);
+            assert!(is_emergency, "e=1 cookie must decode to is_emergency: true");
+        }
+        other => panic!("expected Forward(is_emergency=true) to primary, got {other:?}"),
     }
 }
 
@@ -258,7 +323,16 @@ async fn above_critical_band_filtered_for_non_emergency_only() {
         s.select_for_new_dialog(&invite, SelectOpts::default()).await,
         Err(SelectError::NoTarget { .. })
     ));
-    // Emergency bypasses the band filter.
+    // Emergency bypasses the band filter — two independent paths, one assertion each:
+    // (a) an on-wire `Resource-Priority: esnet.0` INVITE drives `is_emergency_invite`
+    //     on the select path directly (mirrors the TS `buildInvite(callId, true)`).
+    let rph_invite = emergency_invite("call-ov-rph@h");
+    assert_eq!(
+        s.select_for_new_dialog(&rph_invite, SelectOpts::default()).await.unwrap(),
+        addr(A1)
+    );
+    // (b) the explicit `emergency_override` opts shortcut (used by the dispatcher-marked
+    //     in-dialog path) bypasses the filter on a non-RPH INVITE.
     let emergency = SelectOpts { emergency_override: true };
     assert_eq!(s.select_for_new_dialog(&invite, emergency).await.unwrap(), addr(A1));
 }
