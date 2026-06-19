@@ -30,13 +30,18 @@
 //! relies on (a non-emergency INVITE past the threshold is 503'd; an emergency
 //! INVITE bypasses; a non-INVITE is never 503'd).
 //!
+//! The byte-level dispatcher helper [`buffer_has_to_tag`] joins the brake
+//! quartet above (migration/21): a pre-parse `To`-tag scan that distinguishes an
+//! **initial** request (no `To`-tag → a fresh INVITE the brake may shed) from an
+//! **in-dialog** one (`To`-tag present → ACK/BYE/re-INVITE the dispatcher
+//! fast-paths). Like the others it is a pure bytes-in/bool-out leaf; its
+//! eventual consumer (the UDP `preIngress` dispatcher fast-path) lives in the
+//! deferred network slice, so this crate pins its byte-level contract directly.
+//!
 //! Deferred to slice 2 (network/dispatch), NOT ported here:
 //!   - the identifier generators (`newTag`/`newBranch`/`newCallId`/`currentRng`)
 //!     — they read a fiber-local seeded RNG (Effect `Random`); the Rust port
 //!     will inject an RNG seam at the network layer.
-//!   - the remaining byte-level dispatcher helper `bufferHasToTag` — an
-//!     in-dialog/initial-INVITE discriminator for the dispatcher fast-path, not
-//!     a Tier-1 brake input; ported with its dispatcher consumer.
 
 use std::collections::BTreeMap;
 
@@ -316,6 +321,64 @@ pub fn buffer_has_emergency_marker(raw: &[u8]) -> bool {
 /// brake sheds.
 pub fn is_invite_request_buffer(raw: &[u8]) -> bool {
     raw.starts_with(b"INVITE ")
+}
+
+/// Cheap byte scan: does the datagram carry a `To`-tag (`;tag=` on the `To`
+/// header line)? Port of `bufferHasToTag`. The pre-parse discriminator the
+/// dispatcher fast-path uses to tell an **initial** request (no `To`-tag — a
+/// fresh INVITE) from an **in-dialog** one (`To`-tag present — ACK / BYE /
+/// re-INVITE inside an established dialog), decidable before any SIP parse.
+///
+/// Walks the header section line by line (CRLF-delimited) until it finds the
+/// `To` header, then scans that **one physical line** for `;tag=`:
+///   - the `To` header must sit at a **line start** (so a `;tag=` inside, say, a
+///     `History-Info` value cannot be mistaken for the dialog tag), matched
+///     case-SENSITIVELY against the canonical `To`/`t` (RFC 3261 §7.1 compact
+///     form `t`) followed by `:` or SP — the same canonical-casing contract as
+///     [`is_invite_request_buffer`] / the emergency classifiers;
+///   - the scan stops at the **first** `To` line it reaches: if that line has no
+///     `;tag=`, the result is `false` even though later lines are not inspected
+///     (a well-formed message has exactly one `To`);
+///   - the walk ends at the blank line that terminates the header section
+///     (`false`), and at an unterminated final line / missing CRLF (`false`) —
+///     so a `To`-tag must be on a properly CRLF-terminated `To` line to count.
+///
+/// Allocation-free; operates on raw bytes (no UTF-8 / parse cost).
+pub fn buffer_has_to_tag(raw: &[u8]) -> bool {
+    let mut idx = 0;
+    while idx < raw.len() {
+        let line_start = idx;
+        // No CRLF from here on → no terminated line left to inspect.
+        let line_end = match find_subslice(&raw[line_start..], b"\r\n") {
+            Some(rel) => line_start + rel,
+            None => return false,
+        };
+        // A zero-length line is the blank line that ends the header section.
+        if line_end == line_start {
+            return false;
+        }
+
+        // Match a `To`/`t` header at the line start, case-sensitively, in its
+        // canonical and compact forms. `.get()` keeps the lookahead in bounds:
+        // the TS reads `raw[lineStart + n]` and relies on JS returning
+        // `undefined` past the end (never equal to ':'/' '); the Rust analogue
+        // is a checked index that simply does not match.
+        let c0 = raw[line_start];
+        let is_to_line = if c0 == b'T' && raw.get(line_start + 1) == Some(&b'o') {
+            matches!(raw.get(line_start + 2), Some(&b':') | Some(&b' '))
+        } else if c0 == b't' {
+            matches!(raw.get(line_start + 1), Some(&b':') | Some(&b' '))
+        } else {
+            false
+        };
+        if is_to_line {
+            // Confine the `;tag=` scan to this one physical `To` line.
+            return find_subslice(&raw[line_start..line_end], b";tag=").is_some();
+        }
+
+        idx = line_end + 2;
+    }
+    false
 }
 
 /// Compute a jittered `Retry-After` value (seconds).
@@ -886,6 +949,180 @@ mod is_invite_request_buffer_tests {
         // "INVITE" with no following space).
         assert!(!is_invite_request_buffer(b""));
         assert!(!is_invite_request_buffer(b"INVITE"));
+    }
+}
+
+#[cfg(test)]
+mod buffer_has_to_tag_tests {
+    //! Port of the `bufferHasToTag` contract from `src/sip/MessageHelpers.ts`
+    //! (L444–473). No dedicated TS unit test exists — the source suite never
+    //! tests this byte helper directly (the `To`-tag / new-dialog distinction is
+    //! tested elsewhere only through the *parsed* path, e.g.
+    //! `ProxyCore.ts`'s `req.getHeader("to").tag` and the RFC cross-message
+    //! rules), and its future consumer (the UDP `preIngress` dispatcher
+    //! fast-path) lives in the deferred network slice. These tests therefore pin
+    //! the byte-scan contract the TS implementation encodes directly:
+    //!   - a `;tag=` on the `To` line ⇒ `true` (in-dialog); its absence ⇒
+    //!     `false` (initial request);
+    //!   - the `To` header must be at a **line start** — a `;tag=` inside a
+    //!     non-`To` header (e.g. `History-Info`) does NOT count;
+    //!   - case-SENSITIVE canonical `To`, plus the compact form `t`, each in the
+    //!     `<name>:` and `<name> ` shapes;
+    //!   - the scan stops at the **first** `To` line (a tagless `To` ⇒ `false`
+    //!     even if a later line carried `;tag=`);
+    //!   - the header-terminating blank line and an unterminated / CRLF-less
+    //!     buffer both stop the walk ⇒ `false`.
+
+    use super::buffer_has_to_tag;
+
+    /// Build a minimal INVITE datagram whose `To` header line is exactly `to`
+    /// (passed without the trailing CRLF, which this helper appends).
+    fn invite_with_to_line(to: &str) -> Vec<u8> {
+        format!(
+            "INVITE sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5555;branch=z9hG4bK-tt\r\n\
+From: <sip:alice@flooder.test>;tag=alice-tag\r\n\
+{to}\r\n\
+Call-ID: tt-call@10.0.0.1\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn to_tag_present_is_in_dialog() {
+        // The in-dialog shape: a `To` carrying `;tag=` (an ACK/BYE/re-INVITE).
+        let buf = invite_with_to_line("To: <sip:bob@b2bua.test>;tag=bob-dialog-tag");
+        assert!(buffer_has_to_tag(&buf));
+    }
+
+    #[test]
+    fn no_to_tag_is_initial_request() {
+        // The initial-INVITE shape: a bare `To` with no `;tag=`.
+        let buf = invite_with_to_line("To: <sip:bob@b2bua.test>");
+        assert!(!buffer_has_to_tag(&buf));
+    }
+
+    #[test]
+    fn compact_to_form_with_colon_is_recognised() {
+        // RFC 3261 §7.1 compact form `t:` at line start.
+        let buf = invite_with_to_line("t: <sip:bob@b2bua.test>;tag=compact-colon");
+        assert!(buffer_has_to_tag(&buf));
+    }
+
+    #[test]
+    fn compact_to_form_with_space_is_recognised() {
+        // `t ` (space instead of colon) — the second accepted separator.
+        let buf = invite_with_to_line("t <sip:bob@b2bua.test>;tag=compact-space");
+        assert!(buffer_has_to_tag(&buf));
+    }
+
+    #[test]
+    fn full_to_form_with_space_separator_is_recognised() {
+        // `To ` (space separator) on the full header name.
+        let buf = invite_with_to_line("To <sip:bob@b2bua.test>;tag=full-space");
+        assert!(buffer_has_to_tag(&buf));
+    }
+
+    #[test]
+    fn tag_inside_a_non_to_header_does_not_count() {
+        // A `;tag=` embedded in a non-`To` header (here History-Info) must NOT
+        // be mistaken for the dialog tag — the To must be at a line start. The
+        // actual `To` line carries no tag, so the result is `false`.
+        let raw = "INVITE sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5555;branch=z9hG4bK-hi\r\n\
+History-Info: <sip:carol@x>;index=1;tag=not-a-dialog-tag\r\n\
+From: <sip:alice@flooder.test>;tag=alice-tag\r\n\
+To: <sip:bob@b2bua.test>\r\n\
+Call-ID: hi-call@10.0.0.1\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n";
+        assert!(!buffer_has_to_tag(raw.as_bytes()));
+    }
+
+    #[test]
+    fn to_header_name_match_is_case_sensitive() {
+        // Canonical casing required: a lower-cased `to:` (which is not the
+        // compact `t` form either) is not matched as the To header, so its
+        // `;tag=` is never inspected ⇒ `false`.
+        let buf = invite_with_to_line("to: <sip:bob@b2bua.test>;tag=lowercased");
+        assert!(!buffer_has_to_tag(&buf));
+    }
+
+    #[test]
+    fn first_to_line_decides_even_when_tagless() {
+        // The scan returns on the FIRST To line it reaches. A tagless To here
+        // yields `false` even though a (malformed) second To line below carries
+        // a tag — the TS returns from the first To match unconditionally.
+        let raw = "INVITE sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5555;branch=z9hG4bK-dup\r\n\
+To: <sip:bob@b2bua.test>\r\n\
+To: <sip:bob@b2bua.test>;tag=second-to-tag\r\n\
+From: <sip:alice@flooder.test>;tag=alice-tag\r\n\
+Call-ID: dup-call@10.0.0.1\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n";
+        assert!(!buffer_has_to_tag(raw.as_bytes()));
+    }
+
+    #[test]
+    fn tag_only_in_body_after_header_terminator_does_not_count() {
+        // The walk stops at the blank line ending the header section, so a
+        // `To: ...;tag=` that appears only in the *body* is never reached.
+        let raw = "INVITE sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5555;branch=z9hG4bK-body\r\n\
+From: <sip:alice@flooder.test>;tag=alice-tag\r\n\
+Call-ID: body-call@10.0.0.1\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Type: text/plain\r\n\
+Content-Length: 28\r\n\r\n\
+To: <sip:x@y>;tag=in-the-body";
+        assert!(!buffer_has_to_tag(raw.as_bytes()));
+    }
+
+    #[test]
+    fn buffer_without_crlf_is_not_in_dialog() {
+        // No CRLF anywhere (lineEnd === -1 on the first iteration) ⇒ `false`,
+        // even though a `;tag=` is present — a To-tag must be on a properly
+        // CRLF-terminated To line.
+        assert!(!buffer_has_to_tag(b"To: <sip:bob>;tag=no-crlf"));
+    }
+
+    #[test]
+    fn unterminated_to_line_at_end_is_not_in_dialog() {
+        // The To line is the final line with no trailing CRLF: the walk reaches
+        // it but `find("\r\n")` from there is None ⇒ `false` (the TS `lineEnd
+        // === -1` guard inside the loop). The earlier lines ARE terminated.
+        let raw = b"INVITE sip:bob SIP/2.0\r\n\
+Via: SIP/2.0/UDP h;branch=z9hG4bK-u\r\n\
+To: <sip:bob@b2bua.test>;tag=unterminated";
+        assert!(!buffer_has_to_tag(raw));
+    }
+
+    #[test]
+    fn empty_buffer_is_not_in_dialog() {
+        assert!(!buffer_has_to_tag(b""));
+    }
+
+    #[test]
+    fn blank_line_first_is_not_in_dialog() {
+        // A leading CRLF makes the very first line zero-length (the header
+        // terminator) ⇒ `false` immediately.
+        assert!(!buffer_has_to_tag(b"\r\nTo: <sip:bob>;tag=after-blank\r\n\r\n"));
+    }
+
+    #[test]
+    fn to_at_buffer_end_without_separator_does_not_panic() {
+        // A truncated buffer that ends exactly at "To" / "t" exercises the
+        // bounds-checked lookahead (`raw.get(line_start + n)`): the TS relies on
+        // JS `undefined`; the Rust port must not index out of range. A
+        // CRLF-terminated bare "To" line carries no `;tag=` ⇒ `false`.
+        assert!(!buffer_has_to_tag(b"To\r\n"));
+        assert!(!buffer_has_to_tag(b"t\r\n"));
+        // And with no trailing CRLF at all (unterminated) ⇒ `false`.
+        assert!(!buffer_has_to_tag(b"To"));
+        assert!(!buffer_has_to_tag(b"T"));
     }
 }
 

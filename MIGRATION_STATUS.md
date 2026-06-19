@@ -109,7 +109,7 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
 | `Serializer.ts` | `serializer.rs` | ✅ ported (`serialize`/`sip_summary`/`message_summary`, Content-Length safety net) |
 | `SdpUtils.ts` + `SdpAnswerFromOffer.ts` | `sdp.rs` | ✅ ported (codec-profile extract, held-SDP, answer-from-offer, strict `validate_sdp_body`) |
 | `generators.ts` | `generators.rs` | ✅ ported (all 8 generators; `StackDialog`/`InviteClientTransactionHandle` are minimal local input shapes pending slice-2 `Dialog`/`TransactionLayer`) |
-| `SipFragUtils.ts`, `MessageHelpers.ts` | `sipfrag.rs`, `message_helpers.rs` | ✅ ported — sipfrag whole; MessageHelpers **pure half** (header accessors + structured readers) **plus all four Tier-1 overload-brake byte helpers** — `bufferHasEmergencyMarker` (migration/03), then **migration/10** added the other three: `isInviteRequestBuffer` (`is_invite_request_buffer`), `buildStatelessReject503Buffer` (`build_stateless_reject_503_buffer` — distinct from the parsed Tier-3 `b2bua::router::build_stateless_overload_503`: byte-slices verbatim, adds no To-tag), and `jitteredRetryAfter` (`jittered_retry_after`, with the `Math.random()` source recast as an **injected `roll` closure** so the pure crate stays RNG-free). The Tier-1 `preIngress` *consumer* (the `UdpTransport.layer` glue) is still deferred to slice 2 with `AppConfig`/`MetricsRegistry`; the helper-level tests pin the three named `UdpTransport-brake.test.ts` cases. RNG identifier generators + the dispatcher-only `bufferHasToTag` remain deferred to slice 2 (see un-ported list). Source: sipjsserver @ `fffc4ac6`. |
+| `SipFragUtils.ts`, `MessageHelpers.ts` | `sipfrag.rs`, `message_helpers.rs` | ✅ ported — sipfrag whole; MessageHelpers **pure half** (header accessors + structured readers) **plus all four Tier-1 overload-brake byte helpers** — `bufferHasEmergencyMarker` (migration/03), then **migration/10** added the other three: `isInviteRequestBuffer` (`is_invite_request_buffer`), `buildStatelessReject503Buffer` (`build_stateless_reject_503_buffer` — distinct from the parsed Tier-3 `b2bua::router::build_stateless_overload_503`: byte-slices verbatim, adds no To-tag), and `jitteredRetryAfter` (`jittered_retry_after`, with the `Math.random()` source recast as an **injected `roll` closure** so the pure crate stays RNG-free). The Tier-1 `preIngress` *consumer* (the `UdpTransport.layer` glue) is still deferred to slice 2 with `AppConfig`/`MetricsRegistry`; the helper-level tests pin the three named `UdpTransport-brake.test.ts` cases. **migration/21** added the fifth byte helper `bufferHasToTag` (`buffer_has_to_tag` — the initial-INVITE vs in-dialog `To`-tag discriminator); only the seeded-RNG identifier generators now remain deferred to slice 2 (see un-ported list). Source: sipjsserver @ `fffc4ac6`. |
 
 ### Tests to port
 | Source test | Rust home | Status |
@@ -129,6 +129,7 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
 | `sdp-utils.test.ts`, `sdp-answer-from-offer.test.ts` | `tests/sdp_utils.rs`, `tests/sdp_answer.rs` | ✅ 11 + 12 |
 | `generators.test.ts` | `tests/generators.rs` | ✅ 24 |
 | (pure MessageHelpers smoke) | `tests/message_helpers.rs` | ✅ 8 (no TS counterpart; locks the accessors generators depend on) |
+| (no TS counterpart — `bufferHasToTag` byte scan) | `src/message_helpers.rs::buffer_has_to_tag_tests` | ✅ 14 (migration/21; no dedicated TS unit test exists — pins the byte-level `To`-tag contract directly: tag present/absent, line-start anchoring, case-sensitive `To`/compact `t`, first-To-line decides, header-terminator + unterminated-buffer stops, bounds-checked lookahead) |
 | ABNF fuzz suite (`scripts/abnf-fuzz`) | `tests/abnf_fuzz.rs` + `xtask abnf-regen` | 🟡 driver + classifier ported & `xtask` regen implemented; **corpus generation pending `abnfgen`** (not installed). Test skips-with-log until the corpus is generated |
 | Parser micro-benchmark (`bench/sip-parser-bench.ts`) | `benches/sip_parser.rs` | ✅ measuring (INVITE ~5.3µs, 200 OK ~4.9µs) |
 | (smoke) walking-skeleton parse + refined views + 5 ADR-0007 rejections | `tests/parser_smoke.rs` | ✅ 9 passing |
@@ -163,8 +164,13 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
   at the helper-composition layer (`message_helpers::tier1_brake_helper_composition_tests`,
   migration/10) — the composition tests now have a wired-hook counterpart.
 - The dispatcher-only byte helper `bufferHasToTag` (initial-INVITE vs in-dialog
-  discriminator for the dispatcher fast-path — NOT a Tier-1 brake input) remains
-  deferred to **slice 2** with its dispatcher consumer.
+  discriminator for the dispatcher fast-path — NOT a Tier-1 brake input) is now
+  **ported** (migration/21) as the pure `message_helpers::buffer_has_to_tag`
+  byte scan, joining the four brake leaves above. Its byte-level contract is
+  pinned directly (`buffer_has_to_tag_tests`, 14 cases) since the TS source has
+  no dedicated unit test; its eventual *consumer* — the UDP `preIngress`
+  dispatcher fast-path — stays deferred to **slice 2** with the rest of the
+  network glue.
 - The `parser-extraction.test.ts` "custom vs JsSIP" cross-parser equivalence
   block and the `jssip`/`native` oracle columns in `parser-*.test.ts` — there
   is no JsSIP in the Rust stack ([ADR-0001](docs/adr/0001-port-custom-parser-rvoip-as-parity-oracle.md));
