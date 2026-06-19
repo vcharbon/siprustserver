@@ -101,6 +101,18 @@ rmp-serde = "1"
 # via `rmp-serde`; declared here directly so repl-net can drive it. See ADR-0011
 # X9 / ADR-0008 (positional msgpack ethos).
 rmp = "0.8"
+# Protobuf call-body codec wire schema (`crates/call/proto/call.proto`, the
+# named-deferred protobuf codec item — ADR-0011/0008). `prost` is the runtime
+# (`Message` encode/decode of the generated types); `prost-build` runs in
+# `crates/call/build.rs` to codegen Rust types from the schema. `prost-build`
+# 0.14 does NOT bundle `protoc` — it expects one on PATH — so `protox` (a
+# pure-Rust .proto compiler) produces the `FileDescriptorSet` that
+# `prost_build::Config::compile_fds` consumes. This keeps codegen reproducible
+# with no external toolchain. The protobuf *codec impl* (the `CallBodyCodec`
+# trait impl over these types) is a separate item that stacks on this schema.
+prost = "0.14"
+prost-build = "0.14"
+protox = "0.9"
 # Front proxy (`crates/sip-proxy`, slice 9). The routing cookie stamped on the
 # Record-Route is HMAC-SHA256 truncated to 128 bits (`hmac` + `sha2`),
 # base64url-encoded (`base64`); `subtle` is the constant-time compare

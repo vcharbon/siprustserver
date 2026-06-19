@@ -14,15 +14,20 @@
 //! - **`TimerService`** — live timer scheduling. The data model carries only
 //!   *serializable* [`model::TimerEntry`] intents; when CallState lands, firing
 //!   rides `sip-txn`'s `DelayQueue` driver, not a new wheel.
-//! - **The protobuf codec** and the **contract decorator wrappers**
-//!   (`paranoidInputs`/`parity`/`scopedAudit`). The [`codec::CallBodyCodec`]
-//!   trait keeps the seam; property checks live in the test suite.
+//! - **The protobuf codec impl** and the **contract decorator wrappers**
+//!   (`paranoidInputs`/`parity`/`scopedAudit`). The protobuf *wire schema +
+//!   codegen toolchain* lands here ([`proto`], the Rust analogue of the TS
+//!   `call.proto.gen.cjs`); the `CallBodyCodec` impl that maps [`model::Call`]
+//!   to/from [`proto::wire::Call`] is a separate stacked item. The
+//!   [`codec::CallBodyCodec`] trait keeps the seam; property checks live in the
+//!   test suite.
 
 pub mod callref;
 pub mod codec;
 pub mod features;
 pub mod helpers;
 pub mod model;
+pub mod proto;
 
 pub use callref::{
     call_index_keys, call_index_keys_from_unknown, call_ref_primary, derive_call_ref, parse_call_ref,
