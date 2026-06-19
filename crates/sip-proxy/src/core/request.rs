@@ -495,12 +495,19 @@ impl ProxyCore {
         self.metrics.record_message(Direction::Outbound, MessageResult::Responded);
     }
 
-    /// Map a `select_for_new_dialog` failure to its 503.
+    /// Map a `select_for_new_dialog` failure to its 503. Each variant carries a
+    /// distinct `Retry-After` + `Reason` text so the UAC (and dashboards) can
+    /// tell "no worker at all" from "this worker is being rate-capped".
     async fn reply_select_failure(&self, req: &SipRequest, src: SocketAddr, err: SelectError) -> RouteOutcome {
-        let SelectError::NoTarget { .. } = err;
+        let (retry_after, reason_text) = match &err {
+            SelectError::NoTarget { .. } => (5u32, "no_target_available".to_string()),
+            SelectError::RateCapExhausted { retry_after_sec, .. } => {
+                (*retry_after_sec, "worker_rate_capped".to_string())
+            }
+        };
         let extra = [
-            SipHeader { name: "Retry-After".into(), value: "5".into() },
-            SipHeader { name: "Reason".into(), value: "SIP;cause=503;text=\"no_target_available\"".into() },
+            SipHeader { name: "Retry-After".into(), value: retry_after.to_string() },
+            SipHeader { name: "Reason".into(), value: format!("SIP;cause=503;text=\"{reason_text}\"") },
         ];
         self.reply(req, src, 503, "Service Unavailable", &extra).await;
         RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }

@@ -168,6 +168,15 @@ pub struct ProxyMetrics {
     decode_forward_promoted: LabeledCounter, // keyed from-reason
     fresh_pod_forward: LabeledCounter, // keyed age-bucket
     overload_rejections: LabeledCounter, // keyed reason
+    /// Coarse (registry-aggregate) count of `WorkerLoadObserver::sweep_stale`
+    /// floor events — an Alive worker whose OPTIONS replies stopped carrying a
+    /// fresh `X-Overload` payload within `payload_stale_ms`, so AIMD halved its
+    /// cap. Non-zero while ELU is healthy means the HealthProbe cycle exceeds the
+    /// stale threshold (config invariant). The TS source pushes this per-`worker_id`
+    /// (`staleDecreaseCounter`); the per-worker-labelled surface is a deferred slice
+    /// (ProxyMetrics is registry-aggregate today), so this is the coarse stand-in
+    /// that keeps a silently-floored cap diagnosable.
+    overload_stale_decrease: AtomicU64,
     routing_duration_count: AtomicU64,
     routing_duration_sum_us: AtomicU64,
     record_route_inserted: AtomicU64,
@@ -257,6 +266,13 @@ impl ProxyMetrics {
 
     pub fn record_overload_rejection(&self, reason: &str) {
         self.overload_rejections.inc(reason);
+    }
+
+    /// Add `n` `sweep_stale` floor events (one per worker the sweep just
+    /// conservatively decreased) to the coarse aggregate counter. The runner's
+    /// 1 s sweep task calls this with the per-sweep floored count.
+    pub fn record_overload_stale_decrease(&self, n: u64) {
+        self.overload_stale_decrease.fetch_add(n, Ordering::Relaxed);
     }
 
     pub fn record_route_inserted(&self) {
@@ -353,6 +369,12 @@ impl ProxyMetrics {
     pub fn udp_tail_dropped_total(&self) -> u64 {
         self.udp_totals()[3]
     }
+    pub fn overload_stale_decrease_total(&self) -> u64 {
+        self.overload_stale_decrease.load(Ordering::Relaxed)
+    }
+    pub fn overload_rejection_count(&self, reason: &str) -> u64 {
+        self.overload_rejections.snapshot().get(reason).copied().unwrap_or(0)
+    }
 
     /// Render Prometheus text exposition (the `/metrics` body).
     pub fn prometheus_text(&self) -> String {
@@ -437,6 +459,15 @@ impl ProxyMetrics {
         g(&mut s, "sip_proxy_udp_tail_dropped_total", "Datagrams tail-dropped by the full inbound queue(s).", "counter", udp_drop);
         g(&mut s, "sip_proxy_worker_pool_empty", "1 iff no worker is Alive (routable) — the proxy can serve no new dialog.", "gauge", self.worker_pool_empty.load(Ordering::Relaxed));
 
+        // Overload-shed visibility (port of the TS AIMD counters). Without these a
+        // worker that gets silently rate-capped (`bucket_empty`), filtered out
+        // (`no_target_critical_filtered`), or floored on stale telemetry
+        // (`stale_decrease`) leaves no Prometheus trail — the 2026-05-25 root cause.
+        // `overload_rejections` is keyed by reason; `stale_decrease` is the coarse
+        // (registry-aggregate) stand-in for the TS per-`worker_id` push.
+        labeled(&mut s, "sip_proxy_overload_rejections_total", "New-dialog admissions rejected by the AIMD/band overload path, by reason.", "counter", "reason", &self.overload_rejections.snapshot());
+        g(&mut s, "sip_proxy_worker_stale_decrease_total", "WorkerLoadObserver sweep_stale floor events (AIMD cap halved — no fresh X-Overload within payload_stale_ms).", "counter", self.overload_stale_decrease.load(Ordering::Relaxed));
+
         s.push_str("# HELP sip_worker_health Worker count by health state.\n# TYPE sip_worker_health gauge\n");
         for (label, val) in [
             ("alive", &self.health.alive),
@@ -489,6 +520,24 @@ mod tests {
         assert!(txt.contains("sip_proxy_responses_total{method=\"INVITE\",code=\"200\"} 1"));
         assert!(txt.contains("sip_proxy_responses_total{method=\"INVITE\",code=\"487\"} 1"));
         assert!(txt.contains("sip_proxy_calls_total 1"));
+    }
+
+    #[test]
+    fn overload_shed_counters_render() {
+        // Both the keyed rejection counter and the coarse stale-decrease aggregate
+        // must surface in the exposition — a silently rate-capped or floored worker
+        // is otherwise invisible in Prometheus (the minor-comment fix).
+        let m = ProxyMetrics::new();
+        m.record_overload_rejection("bucket_empty");
+        m.record_overload_rejection("bucket_empty");
+        m.record_overload_rejection("no_target_critical_filtered");
+        m.record_overload_stale_decrease(3);
+        assert_eq!(m.overload_rejection_count("bucket_empty"), 2);
+        assert_eq!(m.overload_stale_decrease_total(), 3);
+        let txt = m.prometheus_text();
+        assert!(txt.contains("sip_proxy_overload_rejections_total{reason=\"bucket_empty\"} 2"));
+        assert!(txt.contains("sip_proxy_overload_rejections_total{reason=\"no_target_critical_filtered\"} 1"));
+        assert!(txt.contains("sip_proxy_worker_stale_decrease_total 3"));
     }
 
     #[test]

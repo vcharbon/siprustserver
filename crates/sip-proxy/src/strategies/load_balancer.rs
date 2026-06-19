@@ -2,9 +2,12 @@
 //!
 //! - `select_for_new_dialog`: Call-ID → snapshot the registry → filter `Alive`
 //!   (and, for non-emergency new dialogs, drop `above_critical`-band workers) →
-//!   `rendezvous_select` → address. `NoTarget` when the candidate set is empty.
-//!   **Band-only (ADR-0009):** the per-worker AIMD rate-cap token bucket is
-//!   deferred, so this never raises `RateCapExhausted`.
+//!   `rendezvous_select` → spend one token from the winner's per-worker AIMD
+//!   bucket → address. `NoTarget` when the candidate set is empty;
+//!   `RateCapExhausted` when the winner's bucket is empty (→ 503 + Retry-After).
+//!   Emergency / in-dialog requests bypass the bucket (they still record the
+//!   admit for the `share` signal); an unobserved worker is admitted
+//!   (bootstrap-friendly). Port of TS LoadBalancer.ts:335-348.
 //! - `encode_stickiness`: recover the target's `WorkerId` (= `w_pri`), pick the
 //!   second-best HRW winner among the remaining alive workers (= `w_bak`), and
 //!   sign `v=3|w_pri=…|w_bak=…|e=<0|1>|c=<callId>` (HMAC-SHA256 truncated to 128
@@ -168,7 +171,31 @@ impl RoutingStrategy for LoadBalancerStrategy {
             let winner = rendezvous_select(call_id, &keys).expect("non-empty candidates");
             keys.iter().position(|k| k.0 == winner.0).expect("winner is in keys")
         };
-        Ok(candidates[winner_idx].address.clone())
+        let winner = candidates[winner_idx];
+
+        // Per-worker AIMD token bucket (port of TS LoadBalancer.ts:335-348).
+        // Emergency and in-dialog requests bypass the bucket entirely —
+        // in-dialog: the call is already admitted, AIMD is a new-call knob; the
+        // bypass still records the admit so `own_admitted_rate`/`share` stays
+        // truthful. Otherwise spend a token: an empty bucket is the LB rate-capping
+        // this (alive, non-critical) worker so it can shed in-flight load → 503 +
+        // Retry-After. An unobserved worker has no bucket and is admitted
+        // (`try_consume_for` is bootstrap-friendly).
+        let now_ms = self.clock.now_ms();
+        if is_emergency || in_dialog {
+            self.observer.record_own_admitted(&winner.id);
+        } else if !self.observer.try_consume_for(&winner.id, now_ms) {
+            self.metrics.record_overload_rejection("bucket_empty");
+            // `retry_after_sec_for` gives a real per-bucket Retry-After (seconds
+            // until ≥1 token refills) — a deliberate refinement over the TS
+            // constant `retryAfterSec: 1` (LoadBalancer.ts:345), since the bucket
+            // already knows its own cap/fill rate. See load_observer.rs.
+            let retry_after_sec = self.observer.retry_after_sec_for(&winner.id, now_ms).max(1);
+            return Err(SelectError::RateCapExhausted { worker_id: winner.id.clone(), retry_after_sec });
+        } else {
+            self.observer.record_own_admitted(&winner.id);
+        }
+        Ok(winner.address.clone())
     }
 
     async fn decode_stickiness(&self, route_param: &RouteParams, msg: &SipMessage) -> DecodeResult {

@@ -314,7 +314,7 @@ async fn above_critical_band_filtered_for_non_emergency_only() {
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
     // Single worker, pinned above_critical.
     let reg = SimulatedWorkerRegistry::with_clock(vec![WorkerEntry::alive(W1, addr(A1))], clock.clone());
-    observer.apply_payload(W1, &OverloadPayload { elu: 0.95, gc: 0.0, adm: 0.0 });
+    observer.apply_payload(W1, &OverloadPayload { elu: 0.95, gc: 0.0, adm: 0.0 }, clock.now_ms());
     let s = strategy_with_observer(reg, clock, observer);
 
     // Non-emergency new dialog is filtered out → NoTarget.
@@ -335,6 +335,65 @@ async fn above_critical_band_filtered_for_non_emergency_only() {
     //     in-dialog path) bypasses the filter on a non-RPH INVITE.
     let emergency = SelectOpts { emergency_override: true };
     assert_eq!(s.select_for_new_dialog(&invite, emergency).await.unwrap(), addr(A1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn rate_cap_exhausted_when_winners_bucket_is_empty() {
+    // Wires the per-worker AIMD bucket into admission (TS LoadBalancer.ts:335-348):
+    // a non-emergency new dialog whose rendezvous winner has a drained bucket is
+    // rejected with `RateCapExhausted`, and re-INVITE / emergency on the SAME
+    // worker bypass the bucket and are still admitted.
+    //
+    // `start_paused` freezes `tokio::time`, so every `clock.now_ms()` — the drain
+    // loop's, AND the strategy's internal read inside `select_for_new_dialog` —
+    // returns the SAME instant (anchor 0 + 0 elapsed). The bucket therefore refills
+    // by a provable zero between the drain and the assert, matching the TS unit
+    // test's pinned `nowMs=0`. Under a plain (unpaused) `#[tokio::test]` the real
+    // monotonic clock ticks between the two and a token can trickle back under
+    // extreme scheduling delay — a latent CI flake this removes.
+    let clock = Clock::test_at(0);
+    let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
+    // Single worker so the rendezvous winner is deterministic; seed a cool
+    // payload (below_soft) so the bucket exists and is NOT band-filtered, then
+    // drain every token at the same instant.
+    let reg = SimulatedWorkerRegistry::with_clock(vec![WorkerEntry::alive(W1, addr(A1))], clock.clone());
+    observer.apply_payload(W1, &OverloadPayload { elu: 0.1, gc: 0.0, adm: 0.0 }, clock.now_ms());
+    while observer.try_consume_for(W1, clock.now_ms()) {}
+    let s = strategy_with_observer(reg, clock, observer);
+
+    // Non-emergency new dialog on the empty bucket → 503-bound RateCapExhausted
+    // with a finite, non-zero Retry-After (the real per-bucket value, >= 1).
+    let invite = request("INVITE", "call-rc@h", None);
+    match s.select_for_new_dialog(&invite, SelectOpts::default()).await {
+        Err(SelectError::RateCapExhausted { worker_id, retry_after_sec }) => {
+            assert_eq!(worker_id, W1);
+            assert!(retry_after_sec >= 1, "Retry-After must be a usable, non-zero value");
+        }
+        other => panic!("expected RateCapExhausted, got {other:?}"),
+    }
+
+    // In-dialog re-INVITE (To-tag present) bypasses the bucket — still admitted
+    // despite the empty bucket (AIMD is a new-call knob only).
+    let reinvite = request("INVITE", "call-rc@h", Some("bobtag"));
+    assert_eq!(s.select_for_new_dialog(&reinvite, SelectOpts::default()).await.unwrap(), addr(A1));
+
+    // Emergency new dialog also bypasses the bucket.
+    let emergency = request("INVITE", "call-rc-em@h", None);
+    let opts = SelectOpts { emergency_override: true };
+    assert_eq!(s.select_for_new_dialog(&emergency, opts).await.unwrap(), addr(A1));
+}
+
+#[tokio::test]
+async fn unobserved_worker_is_admitted_without_a_bucket() {
+    // Bootstrap-friendly: a worker the LB has never seen a payload from has no
+    // bucket, so `try_consume_for` admits it (no rate cap before first OPTIONS).
+    let clock = Clock::test_at(0);
+    let reg = two_worker_registry(clock.clone());
+    let s = strategy(reg, clock); // fresh observer, no payloads applied
+    let invite = request("INVITE", "call-boot@h", None);
+    // Succeeds (lands on one of the two alive workers) — no RateCapExhausted.
+    let target = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
+    assert!(target == addr(A1) || target == addr(A2));
 }
 
 #[tokio::test]

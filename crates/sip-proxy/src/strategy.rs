@@ -45,16 +45,21 @@ pub enum DecodeResult {
 }
 
 /// `select_for_new_dialog` failure. The core maps each to a distinct 503.
-/// (A `RateCapExhausted { worker_id, retry_after_sec }` variant — the per-worker
-/// AIMD bucket's 503 + `Retry-After` — was deleted as dead: the bucket is
-/// deferred (ADR-0009) and band-only selection never raised it. Re-add it with
-/// the real bucket.)
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SelectError {
     /// No alive target (empty registry, or all alive workers in `above_critical`
     /// band for a non-emergency request). → 503.
     #[error("no target available: {reason}")]
     NoTarget { reason: String },
+
+    /// A target was selected, but its per-worker AIMD token bucket
+    /// ([`crate::load_observer`]) is empty — the LB is rate-capping this worker
+    /// to let it shed in-flight load. → 503 + `Retry-After: retry_after_sec`.
+    /// Only raised for non-emergency new-dialog requests (emergency + in-dialog
+    /// bypass the bucket); never for an unknown/unobserved worker (bootstrap is
+    /// admit). Port of the TS `selectForNewDialog-overload` `bucket_empty` reject.
+    #[error("worker {worker_id} rate-capped (bucket empty); retry after {retry_after_sec}s")]
+    RateCapExhausted { worker_id: String, retry_after_sec: u32 },
 }
 
 /// Options for [`RoutingStrategy::select_for_new_dialog`].

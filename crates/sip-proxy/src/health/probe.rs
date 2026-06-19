@@ -274,9 +274,17 @@ impl HealthProbe {
         };
         self.control.set_health(&p.worker_id, health);
 
-        // Feed the AIMD observer with the self-reported overload payload.
+        // Feed the AIMD observer with the self-reported overload payload. The
+        // observer is decoupled from the clock (it takes `now_ms` explicitly,
+        // like the TS source), so hand it the same monotonic-anchored epoch-ms
+        // the probe timestamps with — under a paused runtime this advances in
+        // lockstep with `tokio::time` (CLAUDE.md).
         if let Some(payload) = parse_x_overload_header(get_header(&resp.headers, "x-overload")) {
-            self.observer.apply_payload(&p.worker_id, &payload);
+            self.observer.apply_payload(&p.worker_id, &payload, self.clock.now_ms());
+        } else {
+            // OPTIONS reply without a usable X-Overload header — no AIMD step,
+            // just the diagnostic counter (port of HealthProbe.ts:391).
+            self.observer.note_payload_missing(&p.worker_id, self.clock.now_ms());
         }
     }
 
