@@ -60,6 +60,11 @@ has zero buggy rejections and zero silent misparses.
 
 - **Redis sidecar for call cache → dropped.** Its only role was freeing memory
   from long-term storage; in Rust an internal memory buffer + tokio cleanup is
-  closer to the in-memory test layer and removes the dependency. Redis (or a
-  small dedicated Rust service) may still back the **call limiter** /
-  cross-worker shared state — decided when that layer is reached.
+  closer to the in-memory test layer and removes the dependency.
+- **Call-limiter cross-worker shared state → a dedicated in-memory Rust service,
+  not Redis** (decision now reached). The `call-limiter` crate ports the sliding-
+  window `WindowStore` (a faithful port of `CallLimiter.memory.ts` + the
+  `CallLimiter.redis.ts` Lua atomics) and `call-limiter-runner` serves it cluster-
+  wide over HTTP (a single ClusterIP replica, stateless, re-filled by refresh
+  timers on restart). Redis is **not** used; b2bua talks to it via the
+  `HttpCallLimiter` client and **fails open** when it is unreachable.
