@@ -128,6 +128,58 @@ pub struct LoadObserverConfig {
     pub options_interval_ms: i64,
 }
 
+impl LoadObserverConfig {
+    /// Band-classifier ordering + hysteresis-bounds guard (the ELU half of the
+    /// cross-component validator in `config-validation.ts`).
+    ///
+    /// This is the slice of that validator that protects the band classifier
+    /// **which is actually ported here** ([`WorkerLoadObserver::compute_band`]):
+    ///   - `elu_soft < elu_hard < elu_critical` — a reversed band threshold turns
+    ///     the controller inside-out (a low ELU lands in `AboveCritical` and the
+    ///     worker is filtered out of new-dialog selection at idle).
+    ///   - `band_hysteresis ∈ [0, min band gap)` — a hysteresis wider than the
+    ///     narrower of the two band gaps means `compute_band` can never exit the
+    ///     higher band (the hold-on-decrease arm always re-enters it), so the
+    ///     worker is trapped one band high even at zero ELU.
+    ///
+    /// Pure: appends a human-readable line per violation to `violations` (so a
+    /// caller can collect every config problem in one boot attempt) and returns
+    /// whether the band config is well-formed. The runner's boot preflight
+    /// (`sip-proxy-runner`) calls this as part of the full cross-component check;
+    /// it is also independently meaningful because the AIMD/cap half of the
+    /// observer config is fed straight to the (unported) admit ladder while
+    /// `compute_band` is live today.
+    ///
+    /// Mirrors the TS field-order so the messages line up with the source.
+    pub fn validate_bands(&self, violations: &mut Vec<String>) -> bool {
+        let start = violations.len();
+
+        // ELU band ordering. A reversed band threshold turns the controller
+        // inside-out (low ELU triggers above_critical).
+        if !(self.elu_soft < self.elu_hard && self.elu_hard < self.elu_critical) {
+            violations.push(format!(
+                "ELU band thresholds must satisfy elu_soft < elu_hard < elu_critical \
+                 (got elu_soft={}, elu_hard={}, elu_critical={}).",
+                self.elu_soft, self.elu_hard, self.elu_critical,
+            ));
+        }
+
+        // Hysteresis wider than a band gap means `compute_band` cannot exit the
+        // higher band even at zero ELU.
+        let min_band_gap = (self.elu_hard - self.elu_soft).min(self.elu_critical - self.elu_hard);
+        if self.band_hysteresis < 0.0 || self.band_hysteresis >= min_band_gap {
+            violations.push(format!(
+                "band_hysteresis ({}) must be in [0, min band gap) — min gap is {}. \
+                 A hysteresis wider than a band traps the controller in the higher \
+                 band even at zero ELU.",
+                self.band_hysteresis, min_band_gap,
+            ));
+        }
+
+        violations.len() == start
+    }
+}
+
 impl Default for LoadObserverConfig {
     /// Aggressive defaults, copied verbatim from `defaultWorkerLoadObserverConfig`.
     /// At 2 workers × ~50 CAPS sustained, `cap_initial_cps = 30` admits 30 cps per
@@ -977,5 +1029,88 @@ mod tests {
         assert!(!o.try_consume_for(W, 1000)); // drained
         // empty bucket, cap=10/s → (1-0)/10 = 0.1 → ceil = 1s.
         assert_eq!(o.retry_after_sec_for(W, 1000), 1);
+    }
+
+    // ── band-classifier config guard (validate_bands) ─────────────────────
+    // The ELU half of config-validation.ts that protects the ported
+    // `compute_band`. Pure, no clock — the same shape as the parse tests.
+
+    #[test]
+    fn validate_bands_accepts_shipped_defaults() {
+        let mut v = Vec::new();
+        assert!(LoadObserverConfig::default().validate_bands(&mut v));
+        assert!(v.is_empty());
+    }
+
+    /// Mirrors TS "rejects eluSoft >= eluHard".
+    #[test]
+    fn validate_bands_rejects_elu_soft_ge_elu_hard() {
+        let mut cfg = LoadObserverConfig::default();
+        cfg.elu_soft = 0.6;
+        cfg.elu_hard = 0.6;
+        let mut v = Vec::new();
+        assert!(!cfg.validate_bands(&mut v));
+        assert!(v.iter().any(|m| m.contains("elu_soft < elu_hard")));
+    }
+
+    /// Mirrors TS "rejects eluHard >= eluCritical".
+    #[test]
+    fn validate_bands_rejects_elu_hard_ge_elu_critical() {
+        let mut cfg = LoadObserverConfig::default();
+        cfg.elu_hard = 0.75;
+        cfg.elu_critical = 0.75;
+        let mut v = Vec::new();
+        assert!(!cfg.validate_bands(&mut v));
+    }
+
+    /// Mirrors TS "rejects hysteresis wider than a band gap". Default gaps are
+    /// hard−soft = 0.2 and critical−hard = 0.15 → min gap 0.15; hysteresis 0.25
+    /// traps the controller in the higher band.
+    #[test]
+    fn validate_bands_rejects_hysteresis_wider_than_a_band_gap() {
+        let mut cfg = LoadObserverConfig::default();
+        cfg.band_hysteresis = 0.25;
+        let mut v = Vec::new();
+        assert!(!cfg.validate_bands(&mut v));
+        assert!(v.iter().any(|m| m.contains("band_hysteresis")));
+    }
+
+    /// Hysteresis exactly equal to the min band gap is rejected (half-open
+    /// upper bound `[0, min gap)`): the exit threshold then coincides with the
+    /// lower band's enter threshold, so `compute_band` never leaves the band.
+    /// Uses thresholds whose gaps are exactly f64-representable so the boundary
+    /// is tested cleanly (0.75−0.6 is 0.15000000000000002 in f64, which would
+    /// make `band_hysteresis = 0.15` strictly *less* than the min gap and admit).
+    #[test]
+    fn validate_bands_rejects_hysteresis_equal_to_min_gap() {
+        let mut cfg = LoadObserverConfig::default();
+        cfg.elu_soft = 0.1;
+        cfg.elu_hard = 0.3; // hard−soft = 0.2
+        cfg.elu_critical = 0.5; // critical−hard = 0.2 → min gap = 0.2
+        cfg.band_hysteresis = 0.2;
+        let mut v = Vec::new();
+        assert!(!cfg.validate_bands(&mut v));
+    }
+
+    /// Mirrors TS "rejects negative hysteresis".
+    #[test]
+    fn validate_bands_rejects_negative_hysteresis() {
+        let mut cfg = LoadObserverConfig::default();
+        cfg.band_hysteresis = -0.01;
+        let mut v = Vec::new();
+        assert!(!cfg.validate_bands(&mut v));
+    }
+
+    /// A fully reversed ordering trips the ordering rule (it does not silently
+    /// pass). Both elu ordering and hysteresis errors can surface together.
+    #[test]
+    fn validate_bands_rejects_fully_reversed_ordering() {
+        let mut cfg = LoadObserverConfig::default();
+        cfg.elu_soft = 0.9;
+        cfg.elu_hard = 0.6;
+        cfg.elu_critical = 0.3;
+        let mut v = Vec::new();
+        assert!(!cfg.validate_bands(&mut v));
+        assert!(v.iter().any(|m| m.contains("elu_soft < elu_hard < elu_critical")));
     }
 }

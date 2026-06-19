@@ -104,6 +104,159 @@ fn parse_bool(key: &str, default: bool) -> bool {
     }
 }
 
+/// Subset of [`HealthProbeConfig`] timings the cross-component preflight needs.
+/// Kept as a bare pair (not the full config) so [`validate_config`] stays
+/// decoupled from probe-layer construction — mirrors the TS `ProbeTimingConfig`.
+#[derive(Debug, Clone, Copy)]
+struct ProbeTimingConfig {
+    interval_ms: u64,
+    timeout_ms: u64,
+}
+
+/// Cross-component config validation for the SIP front proxy (pure port of
+/// `src/sip-front-proxy/config-validation.ts`).
+///
+/// Some invariants live BETWEEN components (`HealthProbe` ↔ `WorkerLoadObserver`)
+/// and cannot be enforced by either component's own defaults in isolation: by the
+/// time the observer is built, the probe timings have already been handed to the
+/// probe layer and are no longer visible to it. This assembles the cross-cutting
+/// facts and rejects misconfigurations that have caused real outages. It is
+/// deliberately **pure** (no I/O, no logging, no `tokio`) so it is trivial to
+/// unit-test and so [`assert_valid_config`] can abort boot *before* a single
+/// socket is bound — a misconfigured pod MUST NOT come up unhealthy.
+///
+/// Background: on 2026-05-25 the deployed chart used `interval_ms=2000
+/// timeout_ms=1500` (cycle=3500 ms) but the observer shipped with
+/// `payload_stale_ms=3000`. The 1 s sweep caught `age > 3000` between probe-recv
+/// events on ~half of cycles, halving the per-worker admit cap each time; within
+/// ~20 s the cap collapsed to `cap_floor_cps=1` and never recovered — the cluster
+/// silently throttled every worker to 1 cps per LB. The `payload_stale_ms ≥ 2 ×
+/// probe_cycle` check below would have refused to start that pod.
+///
+/// Returns `Ok(())` when every invariant holds, else `Err(violations)` with one
+/// human-readable line per problem (operators see ALL problems on the first boot
+/// attempt, not one at a time).
+fn validate_config(
+    probe: ProbeTimingConfig,
+    observer: &LoadObserverConfig,
+) -> Result<(), Vec<String>> {
+    let mut violations: Vec<String> = Vec::new();
+
+    // Each timing individually positive — guards a typo (e.g. 0 ms timeout) that
+    // would otherwise produce confusing downstream behaviour. `u64` interval/
+    // timeout cannot be NaN/negative/infinite (unlike the TS `number`), so only
+    // the `== 0` arm of the TS positivity guard is reachable here.
+    if probe.interval_ms == 0 {
+        violations.push(format!(
+            "health_probe.interval_ms must be a positive number (got {}).",
+            probe.interval_ms,
+        ));
+    }
+    if probe.timeout_ms == 0 {
+        violations.push(format!(
+            "health_probe.timeout_ms must be a positive number (got {}).",
+            probe.timeout_ms,
+        ));
+    }
+    if observer.payload_stale_ms <= 0 {
+        violations.push(format!(
+            "worker_load_observer.payload_stale_ms must be positive (got {}).",
+            observer.payload_stale_ms,
+        ));
+    }
+
+    // PRIMARY INVARIANT — the bug from the 2026-05-25 RCA.
+    //
+    // `HealthProbe` runs sleep(interval) → fanOutOptions → sleep(timeout) → reap,
+    // so successive OPTIONS replies arrive `interval + timeout` apart. If
+    // `payload_stale_ms < probe_cycle`, `sweep_stale` fires during the gap,
+    // halves the cap, and the next probe-recv overwrites `last_action` so the
+    // event is invisible. The cap collapses to `cap_floor_cps` in ~5 cycles.
+    //
+    // `2×` provides one full cycle of safety margin for probe jitter (event-loop
+    // pressure, packet loss, retries). `1.5×` still races with the sweep phase;
+    // `2×` is the smallest value that survives a single dropped probe without
+    // triggering the floor cascade.
+    let probe_cycle_ms = probe.interval_ms.saturating_add(probe.timeout_ms);
+    let min_stale = 2u64.saturating_mul(probe_cycle_ms);
+    // payload_stale_ms is `> 0` past the positivity guard above; compare in i64.
+    if observer.payload_stale_ms > 0 && (observer.payload_stale_ms as u64) < min_stale {
+        violations.push(format!(
+            "worker_load_observer.payload_stale_ms ({} ms) must be at least 2× the \
+             HealthProbe cycle (interval_ms + timeout_ms = {} + {} = {} ms; minimum \
+             allowed payload_stale_ms = {} ms). Otherwise sweep_stale halves the \
+             per-worker admit cap on most probe cycles and the cluster silently \
+             throttles every worker to cap_floor_cps. See crates/sip-proxy-runner/\
+             src/main.rs (validate_config) for the calibration rationale.",
+            observer.payload_stale_ms,
+            probe.interval_ms,
+            probe.timeout_ms,
+            probe_cycle_ms,
+            min_stale,
+        ));
+    }
+
+    // Cap-band sanity. Cheap typo guards.
+    if observer.cap_floor_cps <= 0.0 {
+        violations.push(format!(
+            "cap_floor_cps must be > 0 (got {}).",
+            observer.cap_floor_cps,
+        ));
+    }
+    if observer.cap_floor_cps > observer.cap_initial_cps {
+        violations.push(format!(
+            "cap_floor_cps ({}) must be <= cap_initial_cps ({}).",
+            observer.cap_floor_cps, observer.cap_initial_cps,
+        ));
+    }
+    if observer.cap_initial_cps > observer.cap_ceiling_cps {
+        violations.push(format!(
+            "cap_initial_cps ({}) must be <= cap_ceiling_cps ({}).",
+            observer.cap_initial_cps, observer.cap_ceiling_cps,
+        ));
+    }
+
+    // ELU band ordering + hysteresis bounds. Owned by the band classifier
+    // (`compute_band`), so the rule lives next to it in `sip-proxy`'s
+    // `LoadObserverConfig::validate_bands` and is reused verbatim here.
+    observer.validate_bands(&mut violations);
+
+    // Cooldown must outlast at least one probe cycle. A shorter cooldown lets the
+    // AIMD ladder yo-yo on a single noisy probe; longer than one cycle is what
+    // the cooldown is *for*.
+    let cooldown_ms = observer.aimd_cooldown_ticks * observer.options_interval_ms as f64;
+    if cooldown_ms < probe_cycle_ms as f64 {
+        violations.push(format!(
+            "aimd cooldown ({} × {} = {} ms) must be >= one HealthProbe cycle ({} ms) \
+             so a single decrease isn't immediately followed by an increase tick.",
+            observer.aimd_cooldown_ticks,
+            observer.options_interval_ms,
+            cooldown_ms,
+            probe_cycle_ms,
+        ));
+    }
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations)
+    }
+}
+
+/// Boot-time assertion: panics (→ non-zero exit → `CrashLoopBackOff`) when the
+/// config is invalid, so a misconfigured pod exits instead of booting unhealthy.
+/// The message is structured for log scraping — each violation on its own line
+/// after a fixed prefix (port of the TS `assertValidProxyConfig`). Called from
+/// `main` before any socket bind.
+fn assert_valid_config(probe: ProbeTimingConfig, observer: &LoadObserverConfig) {
+    if let Err(violations) = validate_config(probe, observer) {
+        let header = "sip-front-proxy: refusing to start — invalid configuration:";
+        let bullets =
+            violations.iter().map(|v| format!("  - {v}")).collect::<Vec<_>>().join("\n");
+        panic!("{header}\n{bullets}");
+    }
+}
+
 /// Render the proxy-self gate's gauges/counters as Prometheus exposition,
 /// appended to the `/metrics` body (mirrors how `jemalloc_stats::prometheus_text`
 /// is appended). Only the real [`EluCpsGate`] has state to surface; with the
@@ -226,6 +379,26 @@ async fn main() {
     let recv_shards: usize = env_or("PROXY_RECV_SHARDS", "1").parse().expect("PROXY_RECV_SHARDS");
     assert!(recv_shards >= 1, "PROXY_RECV_SHARDS must be >= 1");
 
+    // Cross-component config preflight (port of config-validation.ts). Resolve
+    // the HealthProbe timings + the WorkerLoadObserver config here so the
+    // BETWEEN-component invariants (payload_stale_ms ≥ 2× probe cycle, cap floor/
+    // initial/ceiling ordering, ELU band ordering + hysteresis bounds, cooldown ≥
+    // one probe cycle) can be checked *before* the first socket bind. A violation
+    // panics → non-zero exit → CrashLoopBackOff, rather than letting a pod boot
+    // unhealthy (the 2026-05-25 RCA: a too-short payload_stale_ms silently floored
+    // every worker's admit cap to cap_floor_cps). These same values are reused for
+    // the observer/probe below — read once.
+    let probe_cfg = HealthProbeConfig {
+        interval_ms: parse_u64("HEALTH_INTERVAL_MS", 1_000),
+        timeout_ms: parse_u64("HEALTH_TIMEOUT_MS", 1_500),
+        threshold: parse_u64("HEALTH_THRESHOLD", 2) as u32,
+    };
+    let observer_cfg = LoadObserverConfig::default();
+    assert_valid_config(
+        ProbeTimingConfig { interval_ms: probe_cfg.interval_ms, timeout_ms: probe_cfg.timeout_ms },
+        &observer_cfg,
+    );
+
     let net = RealSignalingNetwork::new();
 
     // Main signaling endpoint(s) — one per recv shard. With N > 1 every bind
@@ -254,7 +427,7 @@ async fn main() {
         StaticHmacKeyProvider::new(HmacKey::new(hmac_kid, hmac_key.into_bytes()), None)
             .unwrap_or_else(|e| panic!("bad PROXY_HMAC_KEY: {e}")),
     );
-    let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
+    let observer = Arc::new(WorkerLoadObserver::new(observer_cfg));
     let metrics = Arc::new(ProxyMetrics::new());
     let clock = Clock::system();
     let id_gen = Arc::new(IdGen::from_entropy());
@@ -306,11 +479,7 @@ async fn main() {
         observer,
         clock.clone(),
         id_gen.clone(),
-        HealthProbeConfig {
-            interval_ms: parse_u64("HEALTH_INTERVAL_MS", 1_000),
-            timeout_ms: parse_u64("HEALTH_TIMEOUT_MS", 1_500),
-            threshold: parse_u64("HEALTH_THRESHOLD", 2) as u32,
-        },
+        probe_cfg,
     );
 
     // N recv-shard cores over the shared routing state: strategy/registry/
@@ -531,4 +700,229 @@ async fn wait_sigterm() {
 #[cfg(not(unix))]
 async fn wait_sigterm() {
     std::future::pending::<()>().await;
+}
+
+#[cfg(test)]
+mod tests {
+    //! Port of `tests/sip-front-proxy/config-validation.test.ts`.
+    //!
+    //! The validator is a pure boot-time guard (no clock, no `tokio`, no I/O), so
+    //! these are plain `#[test]`s driven with literal config values exactly as the
+    //! TS `vitest` suite is — no paused runtime needed (default lane, sub-ms).
+    use super::*;
+
+    /// The Helm chart's production-shape probe timings. Acts as the canonical
+    /// "real deployment" fixture: cycle = 2000 + 1500 = 3500 ms. If a test breaks
+    /// because the chart changes its defaults, that is the signal to revisit the
+    /// calibration (mirrors the TS `HELM_PROBE`).
+    const HELM_PROBE: ProbeTimingConfig = ProbeTimingConfig { interval_ms: 2000, timeout_ms: 1500 };
+
+    /// `defaultWorkerLoadObserverConfig` + the given overrides (TS `withObserver`).
+    fn with_observer(f: impl FnOnce(&mut LoadObserverConfig)) -> LoadObserverConfig {
+        let mut cfg = LoadObserverConfig::default();
+        f(&mut cfg);
+        cfg
+    }
+
+    fn msgs(probe: ProbeTimingConfig, observer: &LoadObserverConfig) -> Vec<String> {
+        validate_config(probe, observer).err().unwrap_or_default()
+    }
+
+    // ── happy path ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn shipped_defaults_pass_against_the_deployed_helm_probe_timings() {
+        assert!(validate_config(HELM_PROBE, &LoadObserverConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn happy_path_against_the_in_code_defaults_interval_1000() {
+        let probe = ProbeTimingConfig { interval_ms: 1000, timeout_ms: 1500 };
+        assert!(validate_config(probe, &LoadObserverConfig::default()).is_ok());
+    }
+
+    // ── primary invariant: payload_stale_ms vs probe cycle ──────────────────
+
+    #[test]
+    fn the_exact_rca_misconfiguration_is_rejected() {
+        // Helm 3500 ms cycle, observer 3000 ms stale.
+        let m = msgs(HELM_PROBE, &with_observer(|c| c.payload_stale_ms = 3000)).join("\n");
+        assert!(m.contains("payload_stale_ms"), "{m}");
+        assert!(m.contains("3500 ms"), "cycle reported: {m}");
+        assert!(m.contains("7000 ms"), "2x cycle reported: {m}");
+    }
+
+    #[test]
+    fn rejects_exactly_one_cycle_margin() {
+        // probe_cycle = 3500, stale = 3500 → still rejected (need 2×).
+        assert!(validate_config(HELM_PROBE, &with_observer(|c| c.payload_stale_ms = 3500)).is_err());
+    }
+
+    #[test]
+    fn accepts_exactly_2x_cycle_boundary() {
+        assert!(validate_config(HELM_PROBE, &with_observer(|c| c.payload_stale_ms = 7000)).is_ok());
+    }
+
+    #[test]
+    fn accepts_the_shipped_default_of_8000_ms() {
+        assert!(validate_config(HELM_PROBE, &with_observer(|c| c.payload_stale_ms = 8000)).is_ok());
+    }
+
+    // ── value-positivity guards ─────────────────────────────────────────────
+    // NOTE: the TS NaN / negative-interval / negative-timeout cases are
+    // unrepresentable here — probe timings are `u64`, so only the `== 0` arm of
+    // the TS positivity guard is reachable for interval/timeout. payload_stale_ms
+    // is `i64`, so its negative case IS exercised below.
+
+    #[test]
+    fn rejects_interval_ms_zero() {
+        let probe = ProbeTimingConfig { interval_ms: 0, timeout_ms: 1500 };
+        assert!(validate_config(probe, &LoadObserverConfig::default()).is_err());
+    }
+
+    #[test]
+    fn rejects_timeout_ms_zero() {
+        let probe = ProbeTimingConfig { interval_ms: 2000, timeout_ms: 0 };
+        assert!(validate_config(probe, &LoadObserverConfig::default()).is_err());
+    }
+
+    #[test]
+    fn rejects_payload_stale_ms_zero() {
+        assert!(validate_config(HELM_PROBE, &with_observer(|c| c.payload_stale_ms = 0)).is_err());
+    }
+
+    #[test]
+    fn rejects_payload_stale_ms_negative() {
+        assert!(validate_config(HELM_PROBE, &with_observer(|c| c.payload_stale_ms = -1)).is_err());
+    }
+
+    // ── cap-band sanity ─────────────────────────────────────────────────────
+
+    #[test]
+    fn rejects_cap_floor_gt_cap_initial() {
+        let m = msgs(
+            HELM_PROBE,
+            &with_observer(|c| {
+                c.cap_floor_cps = 50.0;
+                c.cap_initial_cps = 30.0;
+            }),
+        )
+        .join("\n");
+        assert!(m.contains("cap_floor_cps"), "{m}");
+    }
+
+    #[test]
+    fn rejects_cap_initial_gt_cap_ceiling() {
+        assert!(validate_config(
+            HELM_PROBE,
+            &with_observer(|c| {
+                c.cap_initial_cps = 500.0;
+                c.cap_ceiling_cps = 200.0;
+            }),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_cap_floor_zero() {
+        assert!(validate_config(HELM_PROBE, &with_observer(|c| c.cap_floor_cps = 0.0)).is_err());
+    }
+
+    // ── ELU band ordering and hysteresis (delegates to validate_bands) ──────
+
+    #[test]
+    fn rejects_elu_soft_ge_elu_hard() {
+        assert!(validate_config(
+            HELM_PROBE,
+            &with_observer(|c| {
+                c.elu_soft = 0.6;
+                c.elu_hard = 0.6;
+            }),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_elu_hard_ge_elu_critical() {
+        assert!(validate_config(
+            HELM_PROBE,
+            &with_observer(|c| {
+                c.elu_hard = 0.75;
+                c.elu_critical = 0.75;
+            }),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_hysteresis_wider_than_a_band_gap() {
+        // hard − soft = 0.6 − 0.4 = 0.2; hysteresis 0.25 traps the controller.
+        assert!(validate_config(HELM_PROBE, &with_observer(|c| c.band_hysteresis = 0.25)).is_err());
+    }
+
+    #[test]
+    fn rejects_negative_hysteresis() {
+        assert!(validate_config(HELM_PROBE, &with_observer(|c| c.band_hysteresis = -0.01)).is_err());
+    }
+
+    // ── cooldown sanity ─────────────────────────────────────────────────────
+
+    #[test]
+    fn rejects_cooldown_shorter_than_one_probe_cycle() {
+        // cooldown = 1 × 1000 = 1000 ms < cycle 3500 ms.
+        let m = msgs(
+            HELM_PROBE,
+            &with_observer(|c| {
+                c.aimd_cooldown_ticks = 1.0;
+                c.options_interval_ms = 1000;
+            }),
+        )
+        .join("\n");
+        assert!(m.contains("cooldown"), "{m}");
+    }
+
+    #[test]
+    fn accepts_cooldown_ge_one_probe_cycle() {
+        // cooldown = 4 × 1000 = 4000 ms >= 3500 ms cycle.
+        assert!(validate_config(
+            HELM_PROBE,
+            &with_observer(|c| {
+                c.aimd_cooldown_ticks = 4.0;
+                c.options_interval_ms = 1000;
+            }),
+        )
+        .is_ok());
+    }
+
+    // ── multiple simultaneous violations are all reported ───────────────────
+
+    #[test]
+    fn invalid_probe_and_invalid_observer_both_surface() {
+        let probe = ProbeTimingConfig { interval_ms: 0, timeout_ms: 1500 };
+        let violations = msgs(
+            probe,
+            &with_observer(|c| {
+                c.payload_stale_ms = 100;
+                c.cap_floor_cps = 99.0;
+                c.cap_initial_cps = 30.0;
+            }),
+        );
+        // Operators must see ALL problems on the first boot attempt, not play
+        // whack-a-mole one error at a time.
+        assert!(violations.len() > 1, "expected >1 violation, got {violations:?}");
+    }
+
+    // ── assert_valid_config — panics on violation ───────────────────────────
+
+    #[test]
+    #[should_panic(expected = "refusing to start")]
+    fn assert_valid_config_panics_with_the_refuse_to_start_header() {
+        assert_valid_config(HELM_PROBE, &with_observer(|c| c.payload_stale_ms = 3000));
+    }
+
+    #[test]
+    fn assert_valid_config_does_not_panic_on_a_valid_config() {
+        // No `#[should_panic]` ⇒ a panic here fails the test.
+        assert_valid_config(HELM_PROBE, &LoadObserverConfig::default());
+    }
 }
