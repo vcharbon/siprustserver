@@ -40,6 +40,7 @@
 //!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min, min 120)
 //!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 600; min 60 and >= keepalive)
 //!   B2BUA_SETUP_TIMEOUT_SEC a-leg total setup deadline, reroutes included (default 150, < the 158 s txn backstop; <= 0 disables)
+//!   WORKER_ALLOWED_TARGET_SUFFIXES b-leg target-admission allow-list, comma-separated (default .svc.cluster.local; `*` = allow all, rollback sentinel; non-IP non-matching hosts are 503'd pre-leg)
 //!
 //! ## Call limiter
 //!   LIMITER_URL             shared limiter base URL; unset → NoopLimiter (fail-open)
@@ -402,6 +403,17 @@ async fn main() {
         .expect("B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD");
     let retry_after_base_sec: u32 =
         env_or("B2BUA_RETRY_AFTER_BASE_SEC", "5").parse().expect("B2BUA_RETRY_AFTER_BASE_SEC");
+    // b-leg target-admission allow-list (port of the `AppConfig` env read for
+    // `workerAllowedTargetSuffixes`): comma-separated, trimmed, empties dropped.
+    // Default is the single K8s in-cluster DNS suffix `.svc.cluster.local`, so
+    // production pod FQDNs pass and a bogus host is 503'd pre-leg; `*` is the
+    // rollback sentinel (matches every host).
+    let worker_allowed_target_suffixes: Vec<String> =
+        env_or("WORKER_ALLOWED_TARGET_SUFFIXES", ".svc.cluster.local")
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
 
     // Tier-1 overload brake (this item — port of the `UdpTransport` `preIngress`
     // policy). At inbound-queue depth >= floor(B2BUA_QUEUE * pct / 100) a new,
@@ -577,6 +589,7 @@ async fn main() {
         cps_bucket_rate,
         overload_panic_elu_threshold,
         retry_after_base_sec,
+        worker_allowed_target_suffixes,
         ..Default::default()
     };
     // Forbid booting with a config that would silently break HA: too-short a

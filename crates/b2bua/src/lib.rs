@@ -37,6 +37,7 @@ pub mod router;
 pub mod rules;
 pub mod stack_identity;
 pub mod store;
+pub mod target_admission;
 pub mod tier1_brake;
 pub mod timers;
 

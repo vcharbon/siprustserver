@@ -899,6 +899,146 @@ mod media_primitives {
     }
 }
 
+// ── TargetAdmission: the rule-driven `create-leg` gate (migration/26) ────────
+//
+// Port of `tests/b2bua/action-executor-create-leg-admission.test.ts` (source pin
+// fffc4ac6). The `apply_route` decision-boundary gate is wired-tested e2e in
+// `b2bua-harness/tests/target_admission_gate.rs`; this pins the OTHER admission
+// site — the rule-path `ActionExecutor::CreateLeg` branch a service reaches in
+// production via REFER (`transfer-http-allow`) or the announcement service when
+// call-control hands back a bogus transfer/MRF host. Driving `ActionExecutor`
+// directly (the Rust analogue of the TS `executeActions(...)`) reaches the reject
+// branch that no existing harness create-leg exercises (every one routes to the
+// IP literal `127.0.0.1`, which classifies `IpLiteral` and never rejects).
+//
+// A rejected create-leg must emit NO b-leg outbound, terminate the call, and
+// write a `Reject` CDR carrying `admission_reject host=<host>` (the Rust analogue
+// of the TS `admission_reject` span event — `HandlerEffects` has no span channel).
+// IP literals and the `["*"]` wildcard admit regardless of the suffix list.
+mod create_leg_admission {
+    use super::*;
+    use call::{CallModelState, CdrEventType};
+
+    /// One `create-leg` action toward `host:port`, all overrides at their
+    /// default (mirrors the TS `{ type: "create-leg", destination, fromInvite }`).
+    fn create_leg(host: &str, port: u16) -> RuleAction {
+        RuleAction::CreateLeg {
+            destination: (host.into(), port),
+            new_ruri: None,
+            new_from: None,
+            new_to: None,
+            no_answer_timeout_sec: None,
+            callback_context: None,
+            body_override: None,
+            header_updates: vec![],
+            kind: None,
+        }
+    }
+
+    /// Run a single `create-leg` from the a-leg under `config`'s suffix list and
+    /// return the [`HandlerResult`]. A re-INVITE-shaped a-leg event is enough — the
+    /// gate only reads `destination` + the config, exactly like the TS test's ctx.
+    fn run_create_leg(config: &B2buaConfig, host: &str, port: u16) -> HandlerResult {
+        let call = test_call();
+        let reinvite = invite();
+        let event = CallEvent::Sip {
+            message: Box::new(SipMessage::Request(reinvite)),
+            src: "127.0.0.1:5060".parse().unwrap(),
+        };
+        let id_gen = IdGen::seeded(1);
+        let exec = ActionExecutor { config, id_gen: &id_gen, now_ms: 1_700_000_000_000 };
+        let ctx = RuleContext {
+            call: RuleCall::new(&call),
+            call_ref: &call.call_ref,
+            event: &event,
+            source_leg_id: "a",
+            direction: Direction::FromA,
+            now_ms: 1_700_000_000_000,
+            config,
+        };
+        exec.execute(&[create_leg(host, port)], &call, &ctx)
+    }
+
+    // TS case 1: a rule routing to a non-IP non-suffixed host is rejected — no
+    // b-leg outbound, the call is terminated, and a Reject CDR records the cause.
+    #[test]
+    fn create_leg_to_non_allow_listed_host_is_rejected() {
+        let config = B2buaConfig::default(); // default suffix list [".svc.cluster.local"]
+        let result = run_create_leg(&config, "kindlab", 5060);
+
+        assert!(
+            result.effects.outbound.is_empty(),
+            "a rejected create-leg must emit no b-leg outbound (host never reaches the send path)"
+        );
+        assert!(
+            result.call.b_legs.is_empty(),
+            "no b-leg state is allocated on admission reject"
+        );
+        assert_eq!(
+            result.call.state,
+            CallModelState::Terminated,
+            "the call is torn down (the Rust analogue of the TS terminate/remove-call effects)"
+        );
+        let reject = result
+            .call
+            .cdr_events
+            .iter()
+            .find(|e| e.event_type == CdrEventType::Reject)
+            .expect("admission reject writes a Reject CDR event");
+        assert_eq!(reject.status_code, Some(503));
+        assert_eq!(
+            reject.reason.as_deref(),
+            Some("admission_reject host=kindlab"),
+            "the Reject CDR carries the admission cause + host"
+        );
+    }
+
+    // TS case 2: a create-leg to an IP literal is admitted regardless of the suffix
+    // list — the b-leg INVITE is emitted and the call is NOT terminated.
+    #[test]
+    fn create_leg_to_ip_literal_is_admitted_regardless_of_suffix_list() {
+        let config = B2buaConfig::default(); // 10.0.1.5 ∉ [".svc.cluster.local"] but is an IP
+        let result = run_create_leg(&config, "10.0.1.5", 5060);
+
+        assert!(
+            !result.effects.outbound.is_empty(),
+            "an IP-literal create-leg is admitted: the b-leg INVITE is emitted"
+        );
+        assert_eq!(result.call.b_legs.len(), 1, "the b-leg is created");
+        assert_ne!(
+            result.call.state,
+            CallModelState::Terminated,
+            "an admitted create-leg does not terminate the call"
+        );
+        assert!(
+            !result.call.cdr_events.iter().any(|e| e.event_type == CdrEventType::Reject),
+            "no Reject CDR on an admitted create-leg"
+        );
+    }
+
+    // TS case 3: the `*` wildcard in the allow-list lets any host through — the
+    // non-IP `kindlab` is now admitted.
+    #[test]
+    fn create_leg_to_any_host_is_admitted_under_wildcard_allow_list() {
+        let config = B2buaConfig {
+            worker_allowed_target_suffixes: vec!["*".into()],
+            ..Default::default()
+        };
+        let result = run_create_leg(&config, "kindlab", 5060);
+
+        assert!(
+            !result.effects.outbound.is_empty(),
+            "the wildcard admits even a non-IP host: the b-leg INVITE is emitted"
+        );
+        assert_eq!(result.call.b_legs.len(), 1, "the b-leg is created under the wildcard");
+        assert_ne!(
+            result.call.state,
+            CallModelState::Terminated,
+            "a wildcard-admitted create-leg does not terminate the call"
+        );
+    }
+}
+
 // ── ADR-0020 X7: obligation-extraction equivalence gate ─────────────────────
 //
 // The limiter/CDR blocks of `invariants::enforce` were extracted verbatim into
