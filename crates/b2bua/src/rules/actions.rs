@@ -149,6 +149,35 @@ impl<'a> ActionExecutor<'a> {
                 header_updates,
                 kind,
             } => {
+                // Admission gate — same policy as `apply_route`. A rule-driven
+                // destination that doesn't pass the suffix allow-list is a config
+                // bug; surface it as a terminate so the call doesn't hang waiting
+                // for an answer that will never come (port of the `ActionExecutor.ts`
+                // create-leg admission block). No leg / outbound is built; the call
+                // is torn down and a `Reject` CDR records the cause (the Rust
+                // analogue of the TS `admission_reject` span event — there is no
+                // span-event channel in `HandlerEffects`).
+                if crate::target_admission::classify_admission(
+                    &destination.0,
+                    &self.config.worker_allowed_target_suffixes,
+                ) == crate::target_admission::AdmissionVerdict::Reject
+                {
+                    *call = add_cdr_event(
+                        call.clone(),
+                        CdrEvent {
+                            event_type: call::CdrEventType::Reject,
+                            timestamp: self.now_ms,
+                            leg_id: ctx.source_leg_id.to_string(),
+                            status_code: Some(503),
+                            reason: Some(format!(
+                                "admission_reject host={}",
+                                destination.0
+                            )),
+                        },
+                    );
+                    terminate_all(call);
+                    return;
+                }
                 let n = call.b_legs.len() + 1;
                 let leg_id = format!("b-{n}");
                 let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);

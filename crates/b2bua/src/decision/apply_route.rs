@@ -12,6 +12,7 @@ use crate::decision::{CallDecisionEngine, CallFailureRequest, CallTreatment, Fai
 use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
 use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry};
 use crate::rules::relay;
+use crate::target_admission::{classify_admission, AdmissionVerdict};
 
 use super::schemas::{BodyUpdate, RouteDecision};
 
@@ -42,6 +43,24 @@ pub async fn apply_route(
     // Seed per-service ext slices (service-layer activation gate).
     for (service_id, value) in route.service_ext {
         call = set_call_ext(call, &service_id, Some(value));
+    }
+
+    // ── Target admission: reject non-IP non-allow-listed destinations early ──
+    // Catches the case where call-control returns a bogus host (e.g. `kindlab`
+    // from a misconfigured fixture, or a `.svc.cluster.local` name the K8s runner
+    // constructs that has no live pod). Without this the host would flow to the
+    // send path and block on `getaddrinfo`/`EAI_AGAIN`; admission is the cheap
+    // early filter — emit `503` and terminate BEFORE any b-leg state / limiter
+    // INCR is allocated (port of `applyRoute.ts`'s admission block). `reject_call`
+    // is the Rust analogue of `buildAdmissionRejectResult` (503 + To-tag +
+    // terminate effects + Reject CDR). Done before the limiter loop so a rejected
+    // target never acquires a hold.
+    if classify_admission(&route.destination.host, &config.worker_allowed_target_suffixes)
+        == AdmissionVerdict::Reject
+    {
+        return crate::initial_invite::reject_call(
+            call, a_invite, 503, Some("Service Unavailable".into()), None, &[], id_gen, now_ms,
+        );
     }
 
     // Admission control: one BATCHED + TRANSACTIONAL admit for every limiter

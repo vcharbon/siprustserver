@@ -173,6 +173,20 @@ pub struct B2buaConfig {
     /// from the bucket's time-to-next-token. TS default **5**. Overridable via
     /// `B2BUA_RETRY_AFTER_BASE_SEC`.
     pub retry_after_base_sec: u32,
+    /// **b-leg target admission allow-list** (port of
+    /// `AppConfig.workerAllowedTargetSuffixes`). The decision boundary classifies
+    /// `route.destination.host` against this list (see `target_admission`): an IP
+    /// literal always passes; otherwise the host must end with one of these
+    /// suffixes (case-insensitive), else the gate emits a `503` and terminates the
+    /// call *before* any b-leg state is allocated. This stops a bogus host (a typo,
+    /// a `.svc.cluster.local` name the K8s runner constructs, a dev `/etc/hosts`
+    /// entry) from reaching the send path and blocking on `getaddrinfo`/`EAI_AGAIN`.
+    /// The literal `"*"` matches every host (a rollback sentinel — restores
+    /// pre-admission behaviour without a redeploy). TS env default
+    /// `".svc.cluster.local"` (the K8s in-cluster DNS suffix); an empty list
+    /// rejects every non-IP host. Overridable via `WORKER_ALLOWED_TARGET_SUFFIXES`
+    /// (comma-separated, trimmed, empties dropped).
+    pub worker_allowed_target_suffixes: Vec<String>,
 }
 
 impl Default for B2buaConfig {
@@ -217,6 +231,13 @@ impl Default for B2buaConfig {
             cps_bucket_rate: 500,
             overload_panic_elu_threshold: 0.75,
             retry_after_base_sec: 5,
+            // b-leg admission allow-list. TS env default is the single K8s
+            // in-cluster DNS suffix `.svc.cluster.local`; production traffic
+            // (pod FQDNs) always passes, bogus hostnames are 503'd pre-leg. The
+            // paused-clock test harness builds configs directly; a fixture that
+            // routes to a non-suffixed host (e.g. `bob` / a loopback name) must
+            // set `["*"]` or add its suffix to opt out of the gate.
+            worker_allowed_target_suffixes: vec![".svc.cluster.local".to_string()],
         }
     }
 }
