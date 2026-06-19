@@ -21,6 +21,27 @@
 //! transaction when the window expires, so per-probe state (here and in the
 //! transaction map) does not outlive `timeout_ms` by more than a turn.
 //!
+//! Late-reply recovery (the 2026-05-05 k8s endurance regression): the TS source
+//! kept a per-cycle `pendingByCallId[callId]` entry that its reap cleared at a
+//! short fixed deadline; under sustained traffic every valid-but-late 200 OK
+//! landed AFTER its entry was cleared, was silently discarded, and a worker that
+//! once crossed `threshold` stayed `Dead` for the rest of the run. That class of
+//! bug is structurally impossible here: a probe stays in `pending` keyed by its
+//! durable transaction Via branch, and a reply correlates by that branch in
+//! `handle_reply` for as long as the probe is still pending — which is governed
+//! by the **tick-gated reap**, not the timeout/interval ratio. The reap runs
+//! once per `interval_ms` tick and evicts only probes whose `deadline_ms <= now`
+//! at that tick, so a probe lingers in `pending` until the FIRST tick at-or-after
+//! its deadline (this is why a config with `timeout_ms < interval_ms` — e.g. the
+//! failover harness's 10 s/1.5 s — still correlates late replies rather than
+//! racing them). A reply arriving any number of ticks late therefore still
+//! correlates by branch and resets the miss counter — and a reply proving
+//! liveness also retires every other in-flight probe to the same worker so their
+//! later reap cannot count a spurious miss. A reply that lands after its branch
+//! has already been reaped, or that correlates to no `pending` probe at all (a
+//! forged/replayed branch), is dropped: it can never revive a worker. Locked by
+//! `tests/health_probe_late_reply.rs`.
+//!
 //! Identity hygiene (the dead-pod resurrection race): every pending probe
 //! carries the ADDRESS it was sent to, and a reply or miss only counts while
 //! the worker's *current* registry address still matches — a late 200 from a
