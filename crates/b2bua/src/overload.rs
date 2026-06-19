@@ -76,11 +76,17 @@ pub trait LoadSampler: Send + Sync {
 ///
 /// A faithful tokio-runtime ELU (per-worker busy/idle accounting via
 /// `tokio::runtime::RuntimeMetrics`) is a follow-up; the seam is here so swapping
-/// the impl needs no caller change.
+/// the impl needs no caller change. **Until it lands, the proxy band classifier
+/// (which keys on `elu` only) sees a ~constant placeholder, so its
+/// `AboveCritical` exclusion is effectively inert in production** — do not mistake
+/// this for a finished ELU implementation.
 //
 // TODO(migration/08): replace the elapsed-since-last-read busy proxy with
 // `tokio::runtime::Handle::current().metrics()` busy-duration accounting once we
-// settle on an ELU definition that matches the proxy band thresholds.
+// settle on an ELU definition that matches the proxy band thresholds. Tracked as
+// an explicit follow-up item in MIGRATION_STATUS.md ("Item 16" attribution note),
+// shared with the sip-proxy `self_gate.rs` LiveLoadSampler (same debt); the
+// proxy-side ELU-band AIMD it feeds must not be merged on top of this placeholder.
 pub struct LiveLoadSampler {
     /// Monotonic instant of the previous `elu()` read; the busy proxy is the
     /// elapsed wall time since it, capped at 1.0 over a nominal sample window.

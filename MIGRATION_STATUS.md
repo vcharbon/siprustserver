@@ -682,6 +682,50 @@ AIMD token bucket (X6) — the Rust LB is band-only per ADR-0009 and never raise
 
 ---
 
+### Item 16 — b2bua-side `LoadSampler` / ELU / event-loop sampler (NO standalone delta)
+
+The migration-16 item (`b2bua-side-loadsampler-elu-gc-event-loop`) names the
+worker-side load-sampling surface in `crates/b2bua/src/overload.rs` — the
+`LoadSampler` read seam, `LiveLoadSampler`, `SimulatedLoadSampler` + `simulated()`,
+`Ewma` (α=0.2), `OverloadSignal`, `x_overload_header_value()`,
+`increment_non_emergency_admitted()`, the 100 ms `tokio::time::interval` sampler
+task in `b2bua_core`, and the `b2bua-harness/tests/x_overload_signal.rs` end-to-end
+test. **That work was already ported under `migration/08`** (commits `9a02edb`
+"emit X-Overload worker load signal on the OPTIONS-200 self-report" and `c181f5f`
+"add the OverloadSignal sampler-injection seam + paused-clock it.live port"), and
+is fully described in the **Draining / readiness / overload** row above. Both
+commits are ancestors of every later branch tip, so
+`git diff migration/15-… migration/16-…` is **empty** and the `migration/16-…`
+label was created from HEAD with no commit of its own.
+
+Like `migration/05` (emergency markers, collapsed into `72b864c`) and item 07
+above, **branch `migration/16-…` therefore carries no standalone code delta** — it
+must NOT be merged as a fresh "LoadSampler port" (doing so would misattribute the
+migration/08 work). The item-16 deliverable is this attribution note plus the
+fidelity/coverage confirmation: the four named TS publish-surface cases are ported
+and green (`overload::tests::{header_value_follows_v1_schema,
+increment_non_emergency_admitted_advances_adm_in_header,
+ewmas_start_at_zero_before_the_sampler_fires,
+load_sampler_injection_drives_elu_ewma_once_sampled}`) with the end-to-end
+injected-value path in `x_overload_signal.rs::injected_sampler_drives_published_elu_through_the_running_task`
+— re-verified `cargo test -p b2bua --lib overload::` = 15/15 and
+`cargo test -p b2bua-harness --test x_overload_signal` = 3/3.
+
+**Tracked follow-up (carry-forward, was debt (1) on the overload row):** the real
+**tokio-`RuntimeMetrics` busy-ratio ELU** is its own future item.
+`LiveLoadSampler::elu()` is still the coarse "lateness of the sampler task"
+busy proxy (`clamp01((elapsed − window)/window)`), which reads ~0 on a healthy or
+paused-clock runtime; the proxy band classifier keys on `elu` only, so the
+`AboveCritical` exclusion is **effectively inert in production until a true ELU
+lands** (TODO(migration/08) in `overload.rs`). This is not yet load-bearing — the
+proxy-side ELU-band AIMD rate-cap that would consume it is itself deferred (X6) —
+but it must be tracked so that AIMD item is not silently driven by a ~constant
+placeholder. Swap to `tokio::runtime::Handle::current().metrics()` busy-duration
+accounting (shared with the `sip-proxy` `self_gate.rs` `LiveLoadSampler`, same
+debt) when an ELU definition matching the proxy band thresholds is settled.
+
+---
+
 ## Slice — B2BUA dispatch + rule engine (`crates/b2bua`)
 
 **Source release:** sipjsserver @ `fffc4ac69c8aeef26cf48fe73469503145c9732b`.
