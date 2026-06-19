@@ -14,13 +14,14 @@
 //! - **`TimerService`** — live timer scheduling. The data model carries only
 //!   *serializable* [`model::TimerEntry`] intents; when CallState lands, firing
 //!   rides `sip-txn`'s `DelayQueue` driver, not a new wheel.
-//! - **The protobuf codec impl** and the **contract decorator wrappers**
-//!   (`paranoidInputs`/`parity`/`scopedAudit`). The protobuf *wire schema +
-//!   codegen toolchain* lands here ([`proto`], the Rust analogue of the TS
-//!   `call.proto.gen.cjs`); the `CallBodyCodec` impl that maps [`model::Call`]
-//!   to/from [`proto::wire::Call`] is a separate stacked item. The
-//!   [`codec::CallBodyCodec`] trait keeps the seam; property checks live in the
-//!   test suite.
+//! - **The contract decorator wrappers** (`paranoidInputs`/`parity`/
+//!   `scopedAudit`). Both production codecs are present: the msgpack
+//!   ([`codec::MsgpackCodec`]) and protobuf ([`codec::ProtobufCodec`]) impls
+//!   behind the [`codec::CallBodyCodec`] seam, the latter mapping
+//!   [`model::Call`] to/from [`proto::wire::Call`] (the [`proto`] codegen of the
+//!   TS `call.proto.gen.cjs`). The `parity` cross-codec comparison decorator is
+//!   the remaining deferred piece; per-codec property checks live in the test
+//!   suite.
 
 pub mod callref;
 pub mod codec;
@@ -33,7 +34,7 @@ pub use callref::{
     call_index_keys, call_index_keys_from_unknown, call_ref_primary, derive_call_ref, parse_call_ref,
     ParsedCallRef,
 };
-pub use codec::{CallBodyCodec, CallDecodeError, MsgpackCodec};
+pub use codec::{CallBodyCodec, CallDecodeError, MsgpackCodec, ProtobufCodec};
 pub use model::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, B2buaDialogExt, ByeDisposition, Call,
     CallLimiterState, CallModelState, CallTopology, CdrEvent, CdrEventType, Dialog, Direction,
