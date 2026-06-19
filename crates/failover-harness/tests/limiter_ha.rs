@@ -12,10 +12,13 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallDecisionEngine, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
-use failover_harness::{FailoverHarness, ReplicatedB2buaSut, WorkerHealth};
+use failover_harness::{
+    assert_call_fully_over, FailoverHarness, ReplicatedB2buaSut, WorkerHealth,
+};
 use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use sip_clock::Clock;
+use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -525,4 +528,238 @@ async fn leaked_limiter_slot_recovers_via_ttl_when_primary_is_permanently_dead()
         1,
         "only Call B wrote a CDR — Call A's is lost (primary never reclaimed)",
     );
+}
+
+/// **Switchback-BYE decrement** — the Rust port of
+/// `tests/sip-front-proxy/failover/limiter-decrement-via-switchback-bye.test.ts`
+/// ("re-INVITE on backup → respawn → BYE on returned-primary decrements the
+/// cluster-shared limiter").
+///
+/// This is the bak→pri **switchback** discharge path, distinct from every other
+/// limiter-HA cell:
+///   - `hold_is_released_on_the_takeover_node_after_primary_crash` — the BYE is
+///     served on the **backup** while the primary stays dead (lossy reap releases).
+///   - `setup_stalled_call…` / the `decrement-after-respawn` shape — the primary
+///     reboots and reclaims, but NOTHING was served on the backup in between (no
+///     reverse-fold to merge).
+///
+/// Here the dialog is **served on the backup mid-outage** (a re-INVITE the backup
+/// takes over and reverse-propagates), THEN the primary returns and the terminal
+/// BYE lands back on the **reborn primary**, which discharges the reverse-folded
+/// call. The signal under test (TS `expectLimiterCount(0)`): the limiter
+/// `origin_window` stamped at the original admit must survive the whole
+/// bak→pri round-trip (admit on pri → takeover-fold on bak → reverse-flush back
+/// to pri → reclaim → BYE-discharge on pri). If the reclaim/switchback re-stamps
+/// the origin to the reborn primary's current epoch, the decrement targets a
+/// limiter key the original increment never wrote, the count stays a leaked 1, and
+/// the next call under the same id would 486. `current_total == 0` after the BYE
+/// proves the window was preserved across the switchback.
+///
+/// Mechanism in this harness (the no-probe analogue of the production k8s LB):
+/// `crash()` + `set_health(Dead)` makes the proxy fail the in-dialog re-INVITE
+/// over to the backup (`decode_forward_backup`); the backup self-releases its live
+/// takeover copy once the re-INVITE transaction completes (keeping only the
+/// reverse-flushed replica in `pri:{primary}`); `reboot()` + `set_address` +
+/// `set_health(Alive)` returns the primary, whose bootstrap-rehydrate + bulk
+/// reclaim re-materialises the reverse-folded call from its own `pri:` partition;
+/// the cookie's `w_pri` is alive again, so alice's BYE routes back to it
+/// (`decode_forward`) and the reborn primary discharges — one CDR, limiter to 0.
+#[tokio::test(start_paused = true)]
+async fn switchback_bye_on_returned_primary_decrements_the_shared_limiter() {
+    let mut fh = FailoverHarness::new("limiter-ha-switchback-bye", &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+
+    // Shared limiter server on its own simulated HTTP fabric (survives crashes).
+    let http = SimulatedHttpNetwork::new();
+    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
+    let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
+
+    let proxy = fh
+        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
+        .await;
+    let mut w_b1 = fh
+        .spawn_worker_limited(
+            "b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
+            limited_decision(), limiter_client(&http),
+        )
+        .await;
+    let mut w_b2 = fh
+        .spawn_worker_limited(
+            "b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
+            limited_decision(), limiter_client(&http),
+        )
+        .await;
+
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(w_b1.is_ready() && w_b2.is_ready(), "workers ready");
+
+    // ── Phase 0: establish on the HRW primary, slot consumed ──────────────────
+    // Hand-rolled (not `callflow::establish`): the cookie read + the crash/
+    // re-INVITE/reboot injections ARE the subject of this test.
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
+        .expect("b-leg carries the proxy cookie")
+        .to_string();
+    let primary_ord = pri_from_cookie(&rr);
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    // Replicate the confirmed call primary → backup; discover the cluster call_ref.
+    fh.advance(Duration::from_millis(500)).await;
+    assert_eq!(store.stats().current_total, 1, "call admitted: one limiter hold");
+
+    let backup_ref_src = if primary_ord == "b1" { &w_b2 } else { &w_b1 };
+    let mut call_ref = String::new();
+    for _ in 0..50 {
+        if let Some(rf) = backup_ref_src.scan_one_backed_up(&primary_ord).await {
+            call_ref = rf;
+            break;
+        }
+        fh.advance(Duration::from_millis(100)).await;
+    }
+    assert!(!call_ref.is_empty(), "backup holds the replicated call ref");
+
+    // ── Phase 1: crash primary, re-INVITE fails over to the backup ────────────
+    // The backup takes the (non-terminal) re-INVITE over, bumps the call's b-leg
+    // CSeq, and reverse-propagates the takeover state to pri:{primary}. The
+    // re-INVITE must NOT touch the limiter (no checkAndIncrement-on-reinvite path),
+    // so the shared counter stays 1.
+    {
+        let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
+            if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
+        primary.crash();
+        proxy.set_health(&primary_ord, WorkerHealth::Dead);
+        backup.simulate_peer_removed(&primary_ord);
+    }
+    fh.advance(Duration::from_millis(300)).await;
+
+    // Delayed-offer re-INVITE (mirrors the TS `_matrix.ts:178` shape): alice INVITE
+    // without a body, bob 200 carrying the offer, alice ACK carrying the answer.
+    let mut reinv = dialog.request(InDialogMethod::Invite, None).await;
+    let mut bob_uas = bob.receive("INVITE").await; // relayed to bob via the backup + proxy
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    reinv.expect(200).await; // ← external: the failed-over re-INVITE succeeds
+    dialog.ack(Some(ANSWER)).await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(500)).await;
+
+    let backup = if primary_ord == "b1" { &w_b2 } else { &w_b1 };
+    assert!(
+        backup.serves(&call_ref) || backup.is_synchronized_backup(&call_ref).await,
+        "the re-INVITE was taken over / is held by the backup after the crash",
+    );
+    assert_eq!(
+        store.stats().current_total, 1,
+        "the re-INVITE must NOT touch the shared limiter (still one hold)",
+    );
+
+    // The acting-backup self-releases its live takeover copy once the served
+    // re-INVITE server transaction reaches its terminal state (Timer H absorbs the
+    // 2xx-ACK retransmits, ~32 s), keeping only the reverse-flushed replica — so the
+    // reborn primary, not the backup, owns the call after switchback.
+    for _ in 0..80 {
+        fh.advance(Duration::from_millis(500)).await;
+        if backup.memory_clean() {
+            break;
+        }
+    }
+    assert!(
+        backup.memory_clean(),
+        "acting-backup released the live takeover copy after serving the re-INVITE",
+    );
+    assert!(
+        backup.is_synchronized_backup(&call_ref).await,
+        "the release kept the reverse-flushed replica (the call is recoverable, not lost)",
+    );
+
+    // ── Phase 2: respawn primary → switchback window ──────────────────────────
+    // Reboot EMPTY at a higher gen + new pod IP, re-learn the address, drive ready,
+    // mark Alive. The go-active bulk reclaim re-materialises the reverse-folded call
+    // from pri:{primary} so the returned primary serves it again.
+    {
+        let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
+            if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
+        fh.mark(&primary_ord, None, "reboot", "switchback: restart empty, higher gen, new pod IP");
+        let new_addr = primary.reboot().await;
+        proxy.set_address(&primary_ord, new_addr);
+        backup.simulate_peer_added(&primary_ord);
+        for _ in 0..120 {
+            fh.advance(Duration::from_millis(500)).await;
+            if primary.is_ready() {
+                break;
+            }
+        }
+        assert!(primary.is_ready(), "rebooted primary {primary_ord} became ready");
+        proxy.set_health(&primary_ord, WorkerHealth::Alive);
+        // ReclaimAll (smoothed) + puller reconnect window.
+        fh.advance(Duration::from_secs(10)).await;
+    }
+
+    let primary = if primary_ord == "b1" { &w_b1 } else { &w_b2 };
+    assert!(
+        primary.serves(&call_ref),
+        "the returned primary reclaimed the reverse-folded call and serves it again",
+    );
+    failover_harness::assert_single_owner(&[&w_b1, &w_b2], &call_ref);
+    assert_eq!(
+        store.stats().current_total, 1,
+        "the hold rode the switchback reclaim (still one) — the BYE has not run yet",
+    );
+
+    // ── Phase 3: BYE routes back to the returned primary (decode_forward) ─────
+    // The cookie's w_pri is alive again, so alice's BYE routes to the reborn
+    // primary — NOT the backup. It terminates the reclaimed call locally and emits
+    // the limiter decrement against the cluster-shared store using the call's
+    // PRESERVED origin_window (carried through admit→takeover-fold→reverse-flush→
+    // reclaim). If the switchback re-stamped the origin to the primary's new epoch,
+    // this decrement would miss and `current_total` would stay a leaked 1.
+    let creations_before = primary.metrics().creations_total();
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    let _ = &alice;
+
+    let drained = fh
+        .settle_terminal(async || {
+            store.stats().current_total == 0
+                && w_b1.memory_clean()
+                && w_b2.memory_clean()
+                && !w_b1.holds_any_trace(&call_ref).await
+                && !w_b2.holds_any_trace(&call_ref).await
+        })
+        .await;
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    assert!(
+        drained,
+        "the switchback BYE on the returned primary must drain the shared limiter to 0",
+    );
+
+    // THE regression guard (TS `expectLimiterCount(0)`): the decrement landed on the
+    // origin window, so the cluster-shared counter is back to 0.
+    assert_eq!(
+        store.stats().current_total, 0,
+        "switchback BYE decremented the shared limiter via the preserved origin_window",
+    );
+    // The discharge happened on the RETURNED PRIMARY (it created/reclaimed the call
+    // locally to serve the BYE), not via a backup lossy reap.
+    let primary = if primary_ord == "b1" { &w_b1 } else { &w_b2 };
+    assert!(
+        primary.metrics().creations_total() >= creations_before,
+        "the returned primary served the switchback BYE",
+    );
+    assert_eq!(
+        w_b1.metrics().repl_terminal_lost_total() + w_b2.metrics().repl_terminal_lost_total(),
+        0,
+        "switchback reclaimed within budget → no Model-Y lossy reap (the active BYE \
+         discharged, the deferral was never abandoned)",
+    );
+
+    // Universal teardown post-condition: exactly one CDR cluster-wide, limiter at 0,
+    // no resurrectable trace, memory clean. (TS `expectCdrCount == 1`.)
+    assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
 }
