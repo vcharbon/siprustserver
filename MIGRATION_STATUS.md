@@ -751,6 +751,60 @@ debt) when an ELU definition matching the proxy band thresholds is settled.
 
 ---
 
+### Item 18 — non-emergency admitted counter + `adm` publish (NO standalone delta)
+
+The migration-18 item (`non-emergency-admitted-counter-adm-publi`) names the
+worker's per-worker treated-rate signal: the `adm` admitted-call counter, its
+publish on the `X-Overload` header, and the increment on the admit path. **That
+work was already ported under earlier migration items** — there is nothing left
+to commit here:
+
+- **The publish surface** (commit `9a02edb`, item 08): `OverloadSignal`'s
+  `non_emergency_admitted: Arc<AtomicU64>` counter, `increment_non_emergency_admitted()`,
+  the `adm=` field emitted by `x_overload_header_value()` (`v=1; elu=…; gc=…; adm=…`),
+  and `non_emergency_admitted_total` on the `metrics()` snapshot — all in
+  `crates/b2bua/src/overload.rs`.
+- **The admit-path wiring** (commit `f02331c`, item 09): the increment is called
+  on the non-emergency new-dialog INVITE admit branch in `router::process`
+  (`router.rs:1123`, mirroring `TransactionLayer.ts:709-711`), so the LB's
+  per-worker treated-rate `adm` diff input is live. This is debt (2) on the
+  **Draining / readiness / overload** row, already marked ✅ RESOLVED there.
+
+Both commits are ancestors of every later branch tip, so
+`git diff migration/17-… migration/18-…` is **empty** (both tips are `bac571a`)
+and the `migration/18-…` label was created from HEAD with no commit of its own.
+
+Like `migration/05` (emergency markers, collapsed into `72b864c`), item 07, and
+item 16 above, **branch `migration/18-…` therefore carries no standalone code
+delta** — it must NOT be merged/PR'd as a fresh "adm counter port" (doing so
+would misattribute the migration/08 + migration/09 work). The item-18 deliverable
+is this attribution note plus the fidelity/coverage confirmation:
+
+- **Coverage** — the `adm` publish-and-advance path is pinned end-to-end:
+  `overload::tests::increment_non_emergency_admitted_advances_adm_in_header` (unit:
+  three increments advance `adm` in the header and `metrics()`);
+  `repl::s7_tests::options_200_stamps_x_overload_503_does_not` (the responder
+  *publishes* adm only on the 200 — it never increments — and a 503 carries no
+  header); the increment-vs-not semantic is pinned separately by the tier3
+  admit/emergency tests
+  `b2bua-harness/tests/tier3_admission_gate.rs::admitted_non_emergency_invite_advances_the_adm_counter`
+  (non-emergency admit through `router::process` advances `adm` 0→1, sheds nothing)
+  and `…::emergency_invite_bypasses_the_empty_bucket_and_establishes` (emergency
+  admits but is not counted); and `b2bua-harness/tests/x_overload_signal.rs`
+  (the counter advance flows out the running worker's published header into the
+  real proxy parser). Re-verified `cargo test -p b2bua --lib overload::` = 15/15.
+- **Fidelity (`adm` width, informational)** — the producer emits `adm` as a `u64`
+  (`overload.rs`: `format!("… adm={adm}")` over `AtomicU64::load`) and the consumer
+  parses it as `f64` (`sip-proxy/src/load_observer.rs:181`,
+  `let adm: f64 = params.get("adm")?.parse()`). This is **identical to the TS
+  source** — `OverloadController.ts` uses a JS `number` (f64) on both ends, "uint53-safe";
+  above 2^53 admits precision would degrade, but no worker reaches that in its
+  lifetime and the consumer only diffs successive samples for a rate. Faithful
+  port, no action — noted for completeness so a later reviewer does not "fix" the
+  type and diverge from the contract.
+
+---
+
 ## Slice — B2BUA dispatch + rule engine (`crates/b2bua`)
 
 **Source release:** sipjsserver @ `fffc4ac69c8aeef26cf48fe73469503145c9732b`.
