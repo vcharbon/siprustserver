@@ -649,6 +649,7 @@ dependencies = [
 name = "call"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "proptest",
  "rmp-serde",
  "serde",
