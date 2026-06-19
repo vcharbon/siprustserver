@@ -5,7 +5,8 @@
 //! dispatches to [`request`](self) / [`response`](self) handling. It owns the
 //! routing-policy seam ([`RoutingStrategy`]), the worker registry, the
 //! `(Call-ID|CSeq#)` LRU, an [`IdGen`] for Via branches, a [`Clock`], metrics,
-//! a logger, and the (stubbed) self-gate. The handlers mutate the raw header
+//! a logger, and the self-gate (the real ELU/CPS admission gate as of
+//! migration/14). The handlers mutate the raw header
 //! list and re-serialize — `sip-message::serialize` renders from `headers`, so
 //! Via/Record-Route/Route surgery takes effect directly.
 

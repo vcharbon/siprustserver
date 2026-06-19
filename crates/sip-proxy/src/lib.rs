@@ -14,9 +14,12 @@
 //!   routing matrix), the worker registry (static + simulated), OPTIONS health
 //!   probing toward the B2BUA, and the metrics layer (counters + a Prometheus
 //!   HTTP endpoint).
-//! - Stubbed: [`self_gate`] is an always-admit stand-in; overload protection
-//!   relies on OPTIONS-driven worker health/band + `sip-net`'s receive-buffer
-//!   tail-drop for now.
+//! - Ported (migration/14): [`self_gate`] is now the real ELU/CPS admission gate
+//!   ([`self_gate::EluCpsGate`] — EWMA-smoothed proxy ELU + per-class CPS token
+//!   bucket + load sampler), shedding external new-dialog non-emergency INVITEs
+//!   under self-overload. The always-admit [`self_gate::AlwaysAdmitGate`] remains
+//!   the no-protection default. It layers on the OPTIONS-driven worker health/band
+//!   classification and `sip-net`'s receive-buffer tail-drop.
 //! - Deferred: the SIP registrar/REGISTER path, the per-worker AIMD rate-cap
 //!   token bucket (band classification only here), and the kubernetes registry.
 

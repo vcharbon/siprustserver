@@ -609,7 +609,7 @@ classification only** (the AIMD rate-cap bucket is deferred).
 | `CancelBranchLru.ts` | `cancel_lru.rs` | ✅ `(Call-ID\|CSeq#)→{target,branch}` TTL cache + sweep |
 | `ProxyCore.ts` (`handleRequestImpl`/`handleResponseImpl`) | `core/{mod,request,response}.rs` | ✅ single-endpoint data path (Max-Forwards, ACK absorption, Route strip, worker-outbound, cookie decode, received/rport, Record-Route, Via push/pop, reverse-path failover, non-2xx ACK synthesis) |
 | `health/HealthProbe.ts` (`optionsKeepalive`) | `health/probe.rs` | ✅ fan-out/drain/reap tick loop, 200/503-reason/timeout→health, X-Overload→observer |
-| `ProxySelfGate.ts` | `self_gate.rs` | ✅ **always-admit stub** (real ELU/CPS gate deferred) |
+| `ProxySelfGate.ts` + `observability/LoadSampler.ts` (sipjsserver @ `ea64aede`) | `self_gate.rs` | ✅ **migration/14: real ELU/CPS gate ported** — `EluCpsGate` (port of TS `ProxySelfGate`): an `Ewma` (α=0.2) over a `LoadSampler` ELU read seam + a per-class `TokenBucket` (inlined, as in the TS source, since `sip-proxy` has no `b2bua` dep) shed external new-dialog non-emergency INVITEs. `try_admit_external` order is faithful: `elu_ewma > elu_critical` → reject `proxy_overload_elu` (Retry-After 1, **no token spent**) → `bucket.try_consume()` empty → reject `proxy_overload_cps` (Retry-After = `bucket.retry_after_sec()`, 60 s fallback at rate 0) → else admit. Defaults copied verbatim from `defaultProxySelfGateConfig` (`elu_critical 0.80`, `cps_bucket_size 50`, `cps_bucket_rate 100`, `elu_smoothing_alpha 0.2`, `sampler_interval 100 ms`). `LoadSampler` ported with `LiveLoadSampler` (same coarse busy-proxy ELU as the b2bua side — debt (1)) + `simulated()`/`SimulatedLoadControl` single-cell test double; `note_bypass(Emergency\|Internal)` + a `metrics()`/`ProxySelfGateMetrics` snapshot (elu_ewma/gc_fraction/cps_bucket_{level,max}/admitted/rejected_{elu,cps}/{internal,emergency}_bypassed). **Rides `tokio::time`, NOT the TS raw `setInterval`** (CLAUDE.md): the bucket refills on `tokio::time::Instant`, the EWMA is fed by an explicit `sample()` tick from a 100 ms `tokio::time::interval` task in `sip-proxy-runner` — so paused-clock tests drive both with `tokio::time::advance`. Wired into the runner: `PROXY_SELF_GATE` (default on) + `PROXY_SELF_GATE_{ELU_CRITICAL,CPS_SIZE,CPS_RATE}`, gate gauges/counters appended to `/metrics` (`sip_proxy_self_*`); the request path's branch (`core/request.rs`) + `note_bypass` were already wired against the prior stub. `AlwaysAdmitGate` retained as the no-protection default in `ProxyCoreBuilder`. 13 unit tests in `self_gate::tests` (the TS source has **no** `ProxySelfGate.test.ts`, so these pin the ported behaviour, including a `start_paused` running-sampler-task → shed loop). **Deliberate divergences:** (a) the EWMA-feed `sample()` is an explicit tick (not a self-arming `setInterval`), so the test fixture needs no real clock; (b) `LiveLoadSampler::elu()` is the coarse advance-saturated busy proxy shared with migration/08 (TODO: `RuntimeMetrics` busy-ratio); (c) the TS Effect `Metric` push-on-each-decision is replaced by a sampled `/metrics` render of the snapshot (matches the `ProxyMetrics` idiom). |
 | `observability/Metrics.ts` | `observability/metrics.rs` | ✅ atomics counters/gauges + Prometheus text |
 | `observability/MetricsServer.ts` | `observability/metrics_server.rs` | ✅ hand-rolled tokio `/metrics` HTTP |
 | `observability/Logger.ts` | `observability/logger.rs` | ✅ structured routing-decision log (trait + capturing/noop) |
@@ -630,9 +630,13 @@ classification only** (the AIMD rate-cap bucket is deferred).
   `CoreToExtRoutingStrategy`, `RegistrarProxyConfig`, `handleRequestRegistrarMode`,
   dual-endpoint `;net=` egress) — user scope. The single-endpoint path drops the
   dual-fabric branching entirely. Tests: all `registrar/**`, `registrar-503-on-drop`.
-- **`ProxySelfGate` real impl** (ELU EWMA + CPS bucket) — `self_gate.rs` is an
-  always-admit stub; overload protection = OPTIONS-driven worker health/band +
-  `sip-net` receive-buffer tail-drop. Test: `ingress-concurrency`.
+- ✅ **RESOLVED (migration/14)** — **`ProxySelfGate` real impl** (ELU EWMA + CPS
+  bucket) is now `self_gate.rs::EluCpsGate` (see the ported-modules row above). It
+  layers on the OPTIONS-driven worker health/band + `sip-net` receive-buffer
+  tail-drop. `ingress-concurrency` (the TS concurrency soak) is **not** ported —
+  it is a load/throughput soak, not a behaviour test, and the gate's behaviour is
+  pinned by the 13 `self_gate::tests` unit cases instead (the TS source has no
+  `ProxySelfGate.test.ts`).
 - **AIMD per-worker rate-cap token bucket** + `selectForNewDialog-overload` bucket
   cases — deferred (X6); band classification + the CRITICAL filter are ported and
   tested.

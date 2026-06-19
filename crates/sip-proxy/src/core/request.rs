@@ -1,6 +1,7 @@
 //! Request path — port of `handleRequestImpl` (ProxyCore.ts L623-1133),
 //! single-endpoint. Max-Forwards → 483; hop-by-hop ACK absorption; top-Route
-//! strip + worker-outbound classification; (stubbed) self-gate; target
+//! strip + worker-outbound classification; self-gate (ELU/CPS admission,
+//! migration/14); target
 //! selection (CANCEL LRU → loose-route next hop → worker-outbound R-URI →
 //! cookie decode → select); received/rport stamping; Record-Route insertion;
 //! Via push; LRU remember; serialize + forward.
@@ -250,7 +251,7 @@ impl ProxyCore {
             stripped_route_params = None;
         }
 
-        // ── Proxy-self gate (stubbed always-admit) ──────────────────────────
+        // ── Proxy-self gate (ELU/CPS admission, migration/14) ───────────────
         // A retransmission bypasses the gate entirely: its first copy was
         // already admitted and forwarded, so rejecting the re-sent copy would
         // 503 a setup that is already ringing downstream.

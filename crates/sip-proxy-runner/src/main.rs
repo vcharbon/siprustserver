@@ -11,7 +11,11 @@
 //!     from new-dialog selection). Health writes flow through the registry's
 //!     `control()` seam, so an unanswered worker is demoted (Dead/NotReady/
 //!     Draining) and routing reacts — for the static pool too.
-//!   - `AlwaysAdmitGate` self-gate (the real ELU/CPS gate is deferred).
+//!   - `EluCpsGate` self-gate (migration/14): EWMA-smoothed proxy-self ELU + a
+//!     per-class CPS token bucket shed external new-dialog non-emergency INVITEs
+//!     under self-overload (a stateless 503 + `Retry-After`/`Reason`). A 100 ms
+//!     `tokio::time::interval` task drives its load sampler. `PROXY_SELF_GATE=0`
+//!     reverts to the always-admit gate.
 //!   - Prometheus `/metrics` + `/healthz` + `/readyz` via the shared `probe-http`.
 //!
 //! Config via env (all optional):
@@ -32,6 +36,10 @@
 //!   PROXY_HMAC_KID   stickiness cookie key id              (default k0)
 //!   PROXY_HMAC_KEY   stickiness cookie secret (>=16 bytes) (default dev key)
 //!   HEALTH_INTERVAL_MS / HEALTH_TIMEOUT_MS / HEALTH_THRESHOLD  (probe tuning)
+//!   PROXY_SELF_GATE  1 → real ELU/CPS self-gate, 0 → always-admit (default 1)
+//!   PROXY_SELF_GATE_ELU_CRITICAL  ELU shed threshold       (default 0.80)
+//!   PROXY_SELF_GATE_CPS_SIZE      CPS bucket capacity      (default 50)
+//!   PROXY_SELF_GATE_CPS_RATE      CPS bucket refill /s     (default 100)
 
 // Use jemalloc instead of glibc malloc (mirrors b2bua-runner). glibc retains
 // freed arena chunks and ratchets RSS under sustained churn; jemalloc's decay
@@ -62,6 +70,7 @@ use sip_proxy::registry::static_reg::StaticWorkerRegistry;
 use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
 use topology::{K8sMembership, Membership};
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
+use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, ProxySelfGate, ProxySelfGateConfig};
 use sip_proxy::strategies::{LoadBalancerConfig, LoadBalancerStrategy};
 use sip_proxy::{ProxyAddr, ProxyCoreBuilder, RoutingStrategy};
 use sip_txn::IdGen;
@@ -79,6 +88,51 @@ fn resolve(addr: &str) -> SocketAddr {
 
 fn parse_u64(key: &str, default: u64) -> u64 {
     env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+fn parse_f64(key: &str, default: f64) -> f64 {
+    env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// `1`/`true`/`yes`/`on` → on; `0`/`false`/`no`/`off` → off; anything else uses
+/// `default`. Used for the `PROXY_SELF_GATE` toggle.
+fn parse_bool(key: &str, default: bool) -> bool {
+    match env::var(key).ok().as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("1" | "true" | "yes" | "on") => true,
+        Some("0" | "false" | "no" | "off") => false,
+        _ => default,
+    }
+}
+
+/// Render the proxy-self gate's gauges/counters as Prometheus exposition,
+/// appended to the `/metrics` body (mirrors how `jemalloc_stats::prometheus_text`
+/// is appended). Only the real [`EluCpsGate`] has state to surface; with the
+/// always-admit gate (`None`) this returns empty.
+fn self_gate_prometheus_text(gate: &Option<EluCpsGate>) -> String {
+    let Some(g) = gate else {
+        return String::new();
+    };
+    let m = g.metrics();
+    let mut s = String::new();
+    let gauge = |s: &mut String, name: &str, help: &str, val: f64| {
+        s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n{name} {val}\n"));
+    };
+    let counter = |s: &mut String, name: &str, help: &str, val: u64| {
+        s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n{name} {val}\n"));
+    };
+    gauge(&mut s, "sip_proxy_self_elu_ewma", "Proxy-self ELU EWMA (0..1). Crosses elu_critical -> 503.", m.elu_ewma);
+    gauge(&mut s, "sip_proxy_self_gc_fraction", "Proxy-self GC fraction (0..1). Informational only.", m.gc_fraction);
+    gauge(&mut s, "sip_proxy_self_cps_bucket_level", "Proxy-self CPS bucket level (tokens remaining).", m.cps_bucket_level);
+    gauge(&mut s, "sip_proxy_self_cps_bucket_max", "Proxy-self CPS bucket capacity (constant per config).", m.cps_bucket_max);
+    counter(&mut s, "sip_proxy_self_external_invites_admitted_total", "External new-dialog non-emergency INVITEs admitted by the proxy-self gate.", m.external_admitted_total);
+    // Per-reason rejection split (reason=proxy_overload_elu | proxy_overload_cps).
+    s.push_str("# HELP sip_proxy_self_external_invites_rejected_total External new-dialog non-emergency INVITEs rejected by the proxy-self gate.\n");
+    s.push_str("# TYPE sip_proxy_self_external_invites_rejected_total counter\n");
+    s.push_str(&format!("sip_proxy_self_external_invites_rejected_total{{reason=\"proxy_overload_elu\"}} {}\n", m.rejected_elu_total));
+    s.push_str(&format!("sip_proxy_self_external_invites_rejected_total{{reason=\"proxy_overload_cps\"}} {}\n", m.rejected_cps_total));
+    counter(&mut s, "sip_proxy_self_emergency_bypassed_total", "Emergency INVITEs that bypassed the proxy-self gate.", m.emergency_bypassed_total);
+    counter(&mut s, "sip_proxy_self_internal_bypassed_total", "Worker-originated INVITEs that bypassed the proxy-self gate.", m.internal_bypassed_total);
+    s
 }
 
 /// Build the worker pool registry + its health-write control seam.
@@ -205,6 +259,27 @@ async fn main() {
     let clock = Clock::system();
     let id_gen = Arc::new(IdGen::from_entropy());
 
+    // Proxy-self ELU/CPS admission gate (migration/14). On by default; the live
+    // ELU sampler is driven by the 100 ms task spawned below. `PROXY_SELF_GATE=0`
+    // reverts to the always-admit gate (then `self_gate` is `None`, no sampler
+    // task, no self-gate /metrics). Build the concrete `EluCpsGate` once so the
+    // sampler task + the /metrics exposition can read it; hand each core an
+    // `Arc<dyn ProxySelfGate>` view of the same gate.
+    let self_gate: Option<EluCpsGate> = if parse_bool("PROXY_SELF_GATE", true) {
+        Some(EluCpsGate::live_with(ProxySelfGateConfig {
+            elu_critical: parse_f64("PROXY_SELF_GATE_ELU_CRITICAL", 0.8),
+            cps_bucket_size: parse_u64("PROXY_SELF_GATE_CPS_SIZE", 50) as u32,
+            cps_bucket_rate: parse_u64("PROXY_SELF_GATE_CPS_RATE", 100) as u32,
+            ..ProxySelfGateConfig::default()
+        }))
+    } else {
+        None
+    };
+    let gate_dyn: Arc<dyn ProxySelfGate> = match &self_gate {
+        Some(g) => Arc::new(g.clone()),
+        None => Arc::new(AlwaysAdmitGate),
+    };
+
     // Worker pool + its health-write seam. Static PROXY_WORKERS (dev/local) or the
     // k8s EndpointSlice informer (ADR-0012 D4). Either way the OPTIONS probe writes
     // observed health through `health_control` so an unanswered worker is demoted
@@ -248,6 +323,7 @@ async fn main() {
                 .id_gen(id_gen.clone())
                 .metrics(metrics.clone())
                 .cancel_lru(cancel_lru.clone())
+                .self_gate(gate_dyn.clone())
                 .shard(shard)
                 .build(endpoint),
         );
@@ -315,14 +391,33 @@ async fn main() {
         });
     }
 
+    // Proxy-self gate sampler (migration/14). Rides `tokio::time::interval` (NOT
+    // the TS raw `setInterval`) so behaviour stays on one clock; each tick reads
+    // the ELU/GC load sampler and feeds the gate's EWMA. Only spawned when the
+    // real gate is enabled. Owns no per-call state, so it needs no release path;
+    // the live sampler's busy proxy keys on how late this task lands under load.
+    if let Some(g) = self_gate.clone() {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(g.sampler_interval());
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await; // skip the immediate first tick (TS first fire is +interval)
+            loop {
+                tick.tick().await;
+                g.sample();
+            }
+        });
+    }
+
     // Prometheus + readiness endpoint (shared `probe-http`). NOTE: `ProbeServer`
     // aborts its accept loop on Drop, so the handle must stay live for the whole
-    // process lifetime. The `/metrics` body appends the jemalloc mallctl
-    // exposition (footprint/purge/decay config) per scrape — same cfg as the
-    // allocator dep.
+    // process lifetime. The `/metrics` body appends the proxy-self gate gauges
+    // (migration/14) + the jemalloc mallctl exposition (footprint/purge/decay
+    // config) per scrape — the latter same cfg as the allocator dep.
+    let metrics_gate = self_gate.clone();
     let routes = probe_http::ProbeRoutes {
         metrics: Arc::new(move || {
             let mut t = metrics.prometheus_text();
+            t.push_str(&self_gate_prometheus_text(&metrics_gate));
             #[cfg(not(target_env = "msvc"))]
             t.push_str(&jemalloc_stats::prometheus_text());
             t

@@ -27,6 +27,13 @@ impl ProxySut {
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
+
+    /// Assemble from an already-spawned recv loop. Lets suites that wire a
+    /// custom `ProxyCore` (e.g. a non-default self-gate) reuse the same
+    /// abort-on-drop handle without re-implementing it.
+    pub fn from_task(addr: SocketAddr, metrics: Arc<ProxyMetrics>, task: JoinHandle<()>) -> Self {
+        Self { addr, metrics, task }
+    }
 }
 
 impl Drop for ProxySut {
