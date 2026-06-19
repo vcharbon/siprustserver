@@ -128,7 +128,10 @@ impl Tier1BrakeCounters {
     }
 
     /// Record one brake shed (the TS `dropsTier1Brake++; tier1RejectSent++`).
-    fn record_shed(&self) {
+    /// `pub` so the `UdpTransportMetrics` shape's tests can drive the counters
+    /// directly (and a future non-`preIngress` shed path could too); the
+    /// production write site remains [`build_tier1_brake_hook`].
+    pub fn record_shed(&self) {
         self.drops_tier1_brake.fetch_add(1, Ordering::Relaxed);
         self.tier1_reject_sent.fetch_add(1, Ordering::Relaxed);
     }

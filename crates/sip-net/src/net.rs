@@ -45,6 +45,40 @@ pub trait UdpEndpoint: Send + Sync {
     fn counters(&self) -> UdpEndpointCounters;
 }
 
+/// Forwarding impl so a single bound endpoint can be **shared**: one owner is
+/// boxed and moved into the consumer that drives the recv loop (e.g.
+/// `B2buaCore::spawn`, which takes `Box<dyn UdpEndpoint>`), while clones of the
+/// `Arc` feed read-only live getters elsewhere — notably the
+/// `UdpTransportMetrics` `queueDepth`/`dropsTailDrop` proxies, which (per the TS
+/// `UdpTransport` facade) close over the very endpoint the transport sends
+/// through. Every method delegates to the inner; sharing the recv side is safe
+/// because the underlying endpoints take `&self` and serialise internally
+/// (the simulated `PacketQueue` and the real socket are both `Send + Sync`).
+#[async_trait]
+impl UdpEndpoint for std::sync::Arc<dyn UdpEndpoint> {
+    async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
+        (**self).send_to(buf, dst).await
+    }
+    async fn recv(&self) -> Option<UdpPacket> {
+        (**self).recv().await
+    }
+    fn try_recv(&self) -> Option<UdpPacket> {
+        (**self).try_recv()
+    }
+    fn local_addr(&self) -> SocketAddr {
+        (**self).local_addr()
+    }
+    fn queue_depth(&self) -> usize {
+        (**self).queue_depth()
+    }
+    fn queue_max(&self) -> usize {
+        (**self).queue_max()
+    }
+    fn counters(&self) -> UdpEndpointCounters {
+        (**self).counters()
+    }
+}
+
 /// Abstraction over the SIP-signaling network (port of `SignalingNetworkApi`).
 #[async_trait]
 pub trait SignalingNetwork: Send + Sync {

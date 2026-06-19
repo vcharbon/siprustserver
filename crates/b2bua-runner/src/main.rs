@@ -89,7 +89,7 @@ use b2bua::config::B2buaConfig;
 use b2bua::decision::{CallLimiterEntry, ScriptedDecisionEngine};
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::limiter_http::HttpCallLimiter;
-use b2bua::metrics::B2buaMetrics;
+use b2bua::metrics::{B2buaMetrics, UdpTransportMetrics};
 use b2bua::repl::{PeerResolver, ReplicatingCallStore};
 use b2bua::store::InMemoryCallStore;
 use b2bua::tier1_brake::{
@@ -338,29 +338,6 @@ fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     s
 }
 
-/// Prometheus text for the Tier-1 overload brake (port of the
-/// `UdpTransportMetrics.dropsTier1Brake` / `tier1RejectSent` surface). Both are
-/// monotonic counters: `drops` = new non-emergency INVITEs the brake shed at the
-/// ingress; `reject_sent` = stateless 503s emitted back to the source. They climb
-/// in lockstep (every shed emits one 503); a non-zero rate means the worker's
-/// inbound queue crossed the Tier-1 mark and the brake is shedding ahead of the
-/// parser. Distinct from `b2bua_overload_rejected_total` (the Tier-3 admission
-/// gate, which sheds *after* a parse).
-fn tier1_brake_metrics_text(c: &Tier1BrakeCounters) -> String {
-    let mut s = String::new();
-    s.push_str(
-        "# HELP b2bua_udp_tier1_brake_drops_total New non-emergency INVITEs shed at the UDP ingress by the Tier-1 overload brake (queue depth crossed floor(queue_max*pct/100)); cheapest stateless-503 shed, ahead of the Tier-3 admission gate.\n",
-    );
-    s.push_str("# TYPE b2bua_udp_tier1_brake_drops_total counter\n");
-    s.push_str(&format!("b2bua_udp_tier1_brake_drops_total {}\n", c.drops_tier1_brake()));
-    s.push_str(
-        "# HELP b2bua_udp_tier1_reject_sent_total Stateless 503 (Service Unavailable + Retry-After) responses the Tier-1 brake emitted back to the source. Moves in lockstep with the drops counter.\n",
-    );
-    s.push_str("# TYPE b2bua_udp_tier1_reject_sent_total counter\n");
-    s.push_str(&format!("b2bua_udp_tier1_reject_sent_total {}\n", c.tier1_reject_sent()));
-    s
-}
-
 #[tokio::main]
 async fn main() {
     // Loud confirmation the jemalloc decay config (_RJEM_MALLOC_CONF) actually
@@ -479,13 +456,35 @@ async fn main() {
         entropy_roll(),
     );
 
-    // Real, non-recording transport: a plain tokio UDP socket.
+    // Real, non-recording transport: a plain tokio UDP socket. Bind into an
+    // `Arc` so the endpoint can be SHARED: the core takes ownership of one boxed
+    // clone (it drives the recv loop), while a second clone backs the
+    // `UdpTransportMetrics` live `queueDepth`/`dropsTailDrop` getters below — the
+    // same endpoint the transport sends through, exactly as the TS `UdpTransport`
+    // facade closes over `endpoint` for both `send` and `registry.udp`.
     let net = RealSignalingNetwork::new();
-    let endpoint = net
+    let endpoint: Arc<dyn sip_net::UdpEndpoint> = net
         .bind_udp(BindUdpOpts::new(listen_sa, queue_max).with_pre_ingress(brake_hook))
         .await
-        .unwrap_or_else(|e| panic!("bind {listen_sa} failed: {e:?}"));
+        .unwrap_or_else(|e| panic!("bind {listen_sa} failed: {e:?}"))
+        .into();
     let local = endpoint.local_addr();
+
+    // The `UdpTransport` facade's Prometheus-visible shape (port of
+    // `UdpTransportMetrics`): the brake counters + live queue depth / queue_max /
+    // tail-drop proxied off the bound endpoint. Buffered-send facets stay zero
+    // until the `BufferedUdpEndpoint` drainer is ported (see the shape's note).
+    // This SUPERSEDES the standalone `tier1_brake_metrics_text` on `/metrics`.
+    let udp_metrics = {
+        let ep_depth = endpoint.clone();
+        let ep_tail = endpoint.clone();
+        UdpTransportMetrics::new(
+            queue_max,
+            brake_counters.clone(),
+            Arc::new(move || ep_depth.queue_depth() as u64),
+            Arc::new(move || ep_tail.counters().tail_dropped),
+        )
+    };
     eprintln!(
         "b2bua-runner Tier-1 brake armed: stateless-503 new non-emergency INVITEs at \
          ingress depth >= {} (queue_max={queue_max}, tier1_pct={udp_tier1_pct})",
@@ -709,7 +708,10 @@ async fn main() {
         metrics: metrics.clone(),
     };
 
-    let core = Arc::new(B2buaCore::spawn(endpoint, deps));
+    // The core drives the recv loop on one boxed clone of the shared endpoint;
+    // the `udp_metrics` getters read another clone live (forwarding impl on
+    // `Arc<dyn UdpEndpoint>`).
+    let core = Arc::new(B2buaCore::spawn(Box::new(endpoint.clone()), deps));
     // `metrics` already holds the same handle the core exports (injected via deps).
 
     eprintln!(
@@ -725,12 +727,14 @@ async fn main() {
     let _probe = {
         let core_ready = core.clone();
         let txn_metrics = core.txn_metrics().clone();
-        let brake_metrics = brake_counters.clone();
+        // The full `UdpTransportMetrics` shape (brake counters + live queue
+        // depth/max/tail-drop), superseding the old standalone brake-only text.
+        let udp_metrics = udp_metrics.clone();
         let routes = probe_http::ProbeRoutes {
             metrics: Arc::new(move || {
                 let mut text = metrics.prometheus_text();
                 text.push_str(&txn_metrics_text(&txn_metrics));
-                text.push_str(&tier1_brake_metrics_text(&brake_metrics));
+                text.push_str(&udp_metrics.prometheus_text());
                 // jemalloc footprint/purge/decay-config counters (see the
                 // #[global_allocator] note). Same cfg as the allocator dep.
                 #[cfg(not(target_env = "msvc"))]

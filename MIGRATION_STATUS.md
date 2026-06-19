@@ -11,7 +11,7 @@ each maps to a workspace **crate**. Status legend:
 |---|---|---|---|
 | **Clock** (test-time / timestamp seam) | `crates/sip-clock` *(slice 0)* | Effect `Clock`/`TestClock` (`tests/harness/runner.ts`) | ✅ monotonic-anchored `Clock` (`system`/`test_at`/`now_ms`) + `testkit` chunked-advance helper; 5 tests green. Behaviour stays on `tokio::time` directly — this is timestamps only ([plan §2](docs/MIGRATION_PLAN_B2B.md)) |
 | **SIP message** (parse/serialize/validate) | `crates/sip-message` | `src/sip/` (message core) | ✅ parser + serializer + sdp + generators (incl. loose/strict in-dialog routing — `first_route_is_loose`/`strip_route_uri_to_request_uri`, RFC 3261 §16.12) + message-helpers/sipfrag ported; full test corpus green. rvoip oracle behind `rvoip-oracle`; ABNF corpus pending `abnfgen` |
-| **Network / UDP** (transport, SignalingNetwork) | `crates/sip-net` *(slice 2)* | `src/sip/{UdpTransport,SignalingNetwork,BufferedUdpEndpoint}.ts` | ✅ `SignalingNetwork` ported — trait (DI seam) + real (tokio `UdpSocket`) + simulated (in-memory fabric) + recording/`scopedAudit` & `paranoidInputs` contract decorators; 22 tests green. `UdpTransport` facade + `BufferedUdpEndpoint` + `ConnectivityGate` **deferred** (Slice 2 §un-ported) |
+| **Network / UDP** (transport, SignalingNetwork) | `crates/sip-net` *(slice 2)* | `src/sip/{UdpTransport,SignalingNetwork,BufferedUdpEndpoint}.ts` | ✅ `SignalingNetwork` ported — trait (DI seam) + real (tokio `UdpSocket`) + simulated (in-memory fabric) + recording/`scopedAudit` & `paranoidInputs` contract decorators; 22 tests green. `UdpTransport` facade's Tier-1 brake (migration/11) + `UdpTransportMetrics` shape & registry wiring (migration/17) ported into `crates/b2bua`; `BufferedUdpEndpoint` **producer** + `ConnectivityGate` still **deferred** (Slice 2 §un-ported) |
 | **Test/contract foundation** (Recorder, RunContext, 4 wrappers) | `crates/layer-harness` | `src/test-harness/framework/*` | ✅ Recorder + typed channels + projectors + RunContext/severity + recording helpers + 4-wrapper vocabulary ported (test-only, SIP-agnostic); 5 tests green. Recorder now stamps `at_ms` via an injected `sip-clock` `Clock` (deterministic report timestamps). [ADR-0004](docs/adr/0004-layer-harness-test-foundation.md) |
 | **Scenario harness + reports** (DSL, driver, SVG/txt/HTML) | `crates/scenario-harness` | `src/test-harness/framework/{dsl,interpreter,recorder,message-builder,*-report,svg-sequence-diagram}.ts` | ✅ **fluent dialog-aware DSL** (`Harness`/`Agent`/`invite`/`receive`/`respond`/`ack`/`bye`) auto-generating correct-by-default B2B messages via `sip-message::generators` + tracked `StackDialog` state, **plus** the thin scenarios-as-data DSL as a raw escape hatch; recording-first driver; SVG (clickable in HTML)/global.txt/per-endpoint/HTML renderers; trace **projected from the recording** (`sip-net::to_sip_entries`); virtual-time `advance` + 100 ms fake-net transit delay; UAC/UAS route-set construction from Record-Route + a loose-routing `Proxy` test agent (for the LB/front-proxy slice); 4 e2e tests green (incl. `proxy_record_route`). `or`/`parallel`/media/chaos **deferred**. [ADR-0006](docs/adr/0006-scenario-harness-recording-first.md) |
 | **Media** (RTP/RTCP framing, G.711, SDP O/A, paced transport) | `crates/media` + `crates/media-harness` *(slice S-media)* | `src/media/**`, `src/test-harness/media/audio/**` | ✅ transport-agnostic engine over `SignalingNetwork` (sim + real UDP); hand-rolled RFC 3550 framing **+ webrtc-rs `rtp` witness** cross-checked; G.711 PCMA/PCMU; RFC 3264/3262/5009 offer/answer engine (typed `SdpRule` refusals); paced sender + per-(remote,SSRC) demux + counts-only RTCP. Test-only `media-harness`: deterministic clips + MFCC (`rustfft`) classifier + `negotiate_call`. Slices 0/1/2/3a/3b green (41 tests; 3b drives real RTP through the real B2BUA via relayed SDP). RTCP report-block contents, jitter/loss stats, multiple m-lines, video **deferred** ([slice below](#slice--media-cratesmedia--cratesmedia-harness)) |
@@ -239,14 +239,39 @@ scope (later slices).
   cases are ported end-to-end through the real `PreIngressHook` seam + simulated
   fabric (`b2bua/tests/tier1_brake.rs`). The brake is factored into the `b2bua`
   crate (not a standalone `UdpTransport` facade) because the Rust runner binds
-  `bindUdp` directly — there is no Effect `Layer` facade to reassemble. The TS
-  `UdpTransportMetrics.queueDepth`/`dropsTailDrop`/`localAddress` proxies +
-  `BufferedUdpEndpoint` outbound drainer remain deferred (queue depth / tail-drop
-  are already on `UdpEndpointCounters`; `localAddress` is `endpoint.local_addr()`).
-  Source: sipjsserver @ `fffc4ac6`.
-- **`BufferedUdpEndpoint.ts`** (non-blocking per-peer outbound drainer) — same
-  reason; an outbound-path optimization layered on the endpoint, deferred with
-  `UdpTransport`.
+  `bindUdp` directly — there is no Effect `Layer` facade to reassemble.
+  **migration/17: the `UdpTransportMetrics` *shape* + registry wiring is now
+  ported** (`b2bua::metrics::UdpTransportMetrics` + `BufferedSendCounters` +
+  `LiveGauge`): the unified Prometheus surface the TS `registry.udp = metrics`
+  assignment exposes — `dropsTier1Brake`/`tier1RejectSent` (the `Tier1BrakeCounters`
+  it folds in), the **live** `queueDepth`/`queueMax`/`dropsTailDrop` getters proxied
+  off the bound `UdpEndpoint` (`queue_depth()` / `queue_max()` /
+  `counters().tail_dropped`, each an injected `LiveGauge = Arc<dyn Fn()->u64>` so the
+  shape is decoupled from the concrete endpoint type and reads the *instantaneous*
+  value like the TS `get queueDepth()`), plus the `bufferedSend` six-counter shape +
+  `bufferedSendPeerCount`. Rendered as `b2bua_udp_*` (`prometheus_text`) and **wired
+  into the production runner** (`b2bua-runner` binds into a shared
+  `Arc<dyn UdpEndpoint>` — new forwarding `impl UdpEndpoint for Arc<dyn UdpEndpoint>`
+  in `sip-net` lets the core own one boxed clone while the metrics getters read
+  another — and `/metrics` now renders the full shape, **superseding** the
+  brake-only `tier1_brake_metrics_text`). `localAddress` stays superseded by
+  `UdpEndpoint::local_addr()` (single source of truth, already used for
+  Via/Contact stamping). The metrics-*read* half of the three
+  `UdpTransport-brake.test.ts` cases (`udp.metrics.{dropsTier1Brake,tier1RejectSent,
+  queueDepth,dropsTailDrop}`) is ported end-to-end through the simulated fabric in
+  `b2bua/tests/udp_transport_metrics.rs` (the decision half is in
+  `tests/tier1_brake.rs`), plus 4 shape unit tests in `metrics::tests`. Source:
+  sipjsserver @ `fffc4ac6`.
+- **`BufferedUdpEndpoint.ts`** (non-blocking per-peer outbound drainer) — the
+  **producer** (the `wrapEndpoint` per-peer queue + drainer fiber + idle-LRU/cap
+  eviction) remains deferred; an outbound-path optimization layered on the
+  endpoint. migration/17 ports its **counter value-shape** only
+  (`b2bua::metrics::BufferedSendCounters`, the six `BufferedSendCounters` fields as
+  shareable atomics) so the `UdpTransportMetrics` surface is complete/stable — these
+  read zero (a flat declared series) until the drainer lands and writes through them
+  (`TODO(migration/BufferedUdpEndpoint)` in `metrics.rs` marks the wiring seam:
+  hand the drainer the same `BufferedSendCounters` handle + feed
+  `bufferedSendPeerCount` from its `peerCount()`).
 - **`ConnectivityGate.ts`** (per-fiber partition gating) — belongs with the k8s
   cluster reliability harness, not the base fabric.
 - **`SignalingNetwork.realTracing.ts`** — folded away: in this port recording is

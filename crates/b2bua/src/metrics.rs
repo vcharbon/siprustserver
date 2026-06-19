@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::tier1_brake::Tier1BrakeCounters;
+
 #[derive(Debug, Default)]
 struct Inner {
     // per-method request + per-(method,code) response counters (data-path
@@ -568,6 +570,319 @@ impl B2buaMetrics {
     }
 }
 
+// ---------------------------------------------------------------------------
+// UdpTransportMetrics — the `UdpTransport` facade's Prometheus-visible shape
+// ---------------------------------------------------------------------------
+
+/// BufferedUdpEndpoint counters — non-blocking outbound send (port of
+/// `BufferedUdpEndpoint.ts`'s `BufferedSendCounters`). Clone-cheap (one `Arc`);
+/// every field is a shared lock-free atomic so the per-peer drainer fiber's hot
+/// path stays cheap and the `/metrics` scrape reads them without a lock.
+///
+/// **Status:** the value *shape* (the six counters) is ported here so the
+/// [`UdpTransportMetrics`] surface StatusServer/Prometheus expects is complete
+/// and stable. The *producer* — the `wrapEndpoint` per-peer outbound drainer
+/// (idle-LRU eviction, drop-newest overflow, inner-send-error swallow) — is a
+/// distinct migration item that is **not yet ported** (MIGRATION_STATUS defers
+/// `BufferedUdpEndpoint.ts`; the Rust b2bua-runner sends straight through the
+/// raw `UdpEndpoint`). Until that lands these counters stay at zero — a flat,
+/// declared series rather than a missing one, exactly as an un-wrapped TS
+/// transport would render (`bufferedSendPerPeerQueueMax === 0` → wrapper
+/// disabled, counters all 0).
+///
+// TODO(migration/BufferedUdpEndpoint): when the per-peer outbound drainer is
+// ported, hand the drainer THIS handle (clone) as its `counters` sink — the
+// TS `wrapEndpoint(rawEndpoint, { counters: bufferedCounters, … })` wiring —
+// and feed `UdpTransportMetrics::bufferedSendPeerCount` from its `peerCount()`.
+#[derive(Debug, Clone, Default)]
+pub struct BufferedSendCounters {
+    inner: Arc<BufferedSendInner>,
+}
+
+#[derive(Debug, Default)]
+struct BufferedSendInner {
+    enqueued: AtomicU64,
+    dropped_queue_full: AtomicU64,
+    dropped_evicted_with_queue: AtomicU64,
+    inner_send_errors: AtomicU64,
+    reclaimed_idle: AtomicU64,
+    reclaimed_cap: AtomicU64,
+}
+
+impl BufferedSendCounters {
+    /// Fresh counters at zero (the TS `makeBufferedSendCounters()`).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Items accepted into a per-peer queue (`enqueued`).
+    pub fn enqueued(&self) -> u64 {
+        self.inner.enqueued.load(Ordering::Relaxed)
+    }
+    /// Items dropped because the target peer's queue was full — drop-newest,
+    /// matching kernel UDP (`droppedQueueFull`).
+    pub fn dropped_queue_full(&self) -> u64 {
+        self.inner.dropped_queue_full.load(Ordering::Relaxed)
+    }
+    /// Items still queued on a peer entry when it was evicted (idle/cap reclaim),
+    /// counted as dropped (`droppedEvictedWithQueue`).
+    pub fn dropped_evicted_with_queue(&self) -> u64 {
+        self.inner.dropped_evicted_with_queue.load(Ordering::Relaxed)
+    }
+    /// Inner `send` failures the drainer swallowed (SIP UDP retransmits cover
+    /// the loss) (`innerSendErrors`).
+    pub fn inner_send_errors(&self) -> u64 {
+        self.inner.inner_send_errors.load(Ordering::Relaxed)
+    }
+    /// Peer entries reclaimed for idleness (no successful drain within the TTL)
+    /// (`reclaimedIdle`).
+    pub fn reclaimed_idle(&self) -> u64 {
+        self.inner.reclaimed_idle.load(Ordering::Relaxed)
+    }
+    /// Peer entries evicted to make room under the max-peers ceiling
+    /// (`reclaimedCap`).
+    pub fn reclaimed_cap(&self) -> u64 {
+        self.inner.reclaimed_cap.load(Ordering::Relaxed)
+    }
+
+    // --- write side (used by the future BufferedUdpEndpoint drainer) ---
+    /// `enqueued++`.
+    pub fn record_enqueued(&self) {
+        self.inner.enqueued.fetch_add(1, Ordering::Relaxed);
+    }
+    /// `droppedQueueFull++`.
+    pub fn record_dropped_queue_full(&self) {
+        self.inner.dropped_queue_full.fetch_add(1, Ordering::Relaxed);
+    }
+    /// `droppedEvictedWithQueue += n` (a whole queue's worth at eviction).
+    pub fn add_dropped_evicted_with_queue(&self, n: u64) {
+        self.inner.dropped_evicted_with_queue.fetch_add(n, Ordering::Relaxed);
+    }
+    /// `innerSendErrors++`.
+    pub fn record_inner_send_error(&self) {
+        self.inner.inner_send_errors.fetch_add(1, Ordering::Relaxed);
+    }
+    /// `reclaimedIdle++`.
+    pub fn record_reclaimed_idle(&self) {
+        self.inner.reclaimed_idle.fetch_add(1, Ordering::Relaxed);
+    }
+    /// `reclaimedCap++`.
+    pub fn record_reclaimed_cap(&self) {
+        self.inner.reclaimed_cap.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A live-read source for an endpoint gauge (`queueDepth`, `dropsTailDrop`,
+/// `bufferedSendPeerCount`). `Arc<dyn Fn>` so the surface is decoupled from the
+/// concrete `UdpEndpoint` type (which is held as a `Box<dyn UdpEndpoint>` by the
+/// runner and is not `Clone`); the closure captures a clone of the shared
+/// counter/queue handle and reads it on demand. `Send + Sync` because the
+/// `/metrics` scrape may run on any task.
+pub type LiveGauge = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+/// The `UdpTransport` facade's Prometheus-visible shape — a faithful port of
+/// `UdpTransportMetrics` (`src/sip/UdpTransport.ts`). The TS interface is a bag
+/// of **live getters** (`get queueDepth() { return endpoint.queueDepth() }`,
+/// etc.): both the scrape endpoint and test reads want the *instantaneous*
+/// value, never a cached snapshot. This Rust port preserves that — every facet
+/// reads through on each access:
+///
+///   - `queue_depth` / `drops_tail_drop` → injected [`LiveGauge`]s backed by the
+///     underlying [`UdpEndpoint`] (`endpoint.queueDepth()` /
+///     `endpoint.counters().tail_dropped`).
+///   - `queue_max` → the bind's configured bound (a constant, copied once).
+///   - `drops_tier1_brake` / `tier1_reject_sent` → the shared
+///     [`Tier1BrakeCounters`] the `preIngress` hook mutates.
+///   - `buffered_send` → the [`BufferedSendCounters`] (zero until the
+///     `BufferedUdpEndpoint` drainer is ported — see that type's note).
+///   - `buffered_send_peer_count` → an injected [`LiveGauge`] for the wrapped
+///     endpoint's active per-peer drainer count (`peerCount()`); `|| 0` until
+///     the wrapper exists, matching the TS `wrappedEndpoint?.peerCount() ?? 0`.
+///
+/// Clone-cheap (all fields are `Arc`/`Copy`): the runner keeps one to render
+/// `/metrics` and may hand clones to other readers. This is the registry-side of
+/// the TS `registry.udp = metrics` assignment — the runner builds it from the
+/// bound endpoint + brake counters and concatenates [`Self::prometheus_text`]
+/// into the `/metrics` body.
+#[derive(Clone)]
+pub struct UdpTransportMetrics {
+    queue_depth: LiveGauge,
+    queue_max: usize,
+    drops_tail_drop: LiveGauge,
+    brake: Tier1BrakeCounters,
+    buffered_send: BufferedSendCounters,
+    buffered_send_peer_count: LiveGauge,
+}
+
+impl std::fmt::Debug for UdpTransportMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Closures aren't Debug — render the live values instead.
+        f.debug_struct("UdpTransportMetrics")
+            .field("queue_depth", &self.queue_depth())
+            .field("queue_max", &self.queue_max)
+            .field("drops_tier1_brake", &self.drops_tier1_brake())
+            .field("drops_tail_drop", &self.drops_tail_drop())
+            .field("tier1_reject_sent", &self.tier1_reject_sent())
+            .field("buffered_send", &self.buffered_send)
+            .field("buffered_send_peer_count", &self.buffered_send_peer_count())
+            .finish()
+    }
+}
+
+impl UdpTransportMetrics {
+    /// Build the shape from its live sources — the registry-side of the TS
+    /// `UdpTransport.layer` (`const metrics: UdpTransportMetrics = { … }`).
+    ///
+    ///   - `queue_max`: the bind's configured queue bound (`config.udpQueueMax`).
+    ///   - `brake`: the [`Tier1BrakeCounters`] the `preIngress` hook holds (so
+    ///     `drops_tier1_brake` / `tier1_reject_sent` read live).
+    ///   - `queue_depth` / `drops_tail_drop`: live getters over the bound
+    ///     endpoint (typically `move || endpoint.queue_depth()` and
+    ///     `move || endpoint.counters().tail_dropped` with a shared handle).
+    ///
+    /// Buffered-send facets default to empty/zero — use
+    /// [`with_buffered`](Self::with_buffered) once the `BufferedUdpEndpoint`
+    /// drainer is ported.
+    pub fn new(
+        queue_max: usize,
+        brake: Tier1BrakeCounters,
+        queue_depth: LiveGauge,
+        drops_tail_drop: LiveGauge,
+    ) -> Self {
+        Self {
+            queue_depth,
+            queue_max,
+            drops_tail_drop,
+            brake,
+            buffered_send: BufferedSendCounters::new(),
+            buffered_send_peer_count: Arc::new(|| 0),
+        }
+    }
+
+    /// Attach the buffered-send counters + live per-peer count (the TS
+    /// `bufferedSend` / `get bufferedSendPeerCount()`), once the
+    /// `BufferedUdpEndpoint` wrapper is ported and wired. Until then the default
+    /// from [`new`](Self::new) (empty counters, `|| 0`) is correct.
+    pub fn with_buffered(
+        mut self,
+        buffered_send: BufferedSendCounters,
+        buffered_send_peer_count: LiveGauge,
+    ) -> Self {
+        self.buffered_send = buffered_send;
+        self.buffered_send_peer_count = buffered_send_peer_count;
+        self
+    }
+
+    /// Live inbound-queue depth (`endpoint.queueDepth()`).
+    pub fn queue_depth(&self) -> u64 {
+        (self.queue_depth)()
+    }
+    /// The configured inbound-queue bound (`config.udpQueueMax`).
+    pub fn queue_max(&self) -> usize {
+        self.queue_max
+    }
+    /// New non-emergency INVITEs the Tier-1 brake shed (`dropsTier1Brake`).
+    pub fn drops_tier1_brake(&self) -> u64 {
+        self.brake.drops_tier1_brake()
+    }
+    /// Datagrams the full inbound queue tail-dropped (`dropsTailDrop`, live ←
+    /// `endpoint.counters.tailDropped`).
+    pub fn drops_tail_drop(&self) -> u64 {
+        (self.drops_tail_drop)()
+    }
+    /// Stateless 503s the brake emitted (`tier1RejectSent`).
+    pub fn tier1_reject_sent(&self) -> u64 {
+        self.brake.tier1_reject_sent()
+    }
+    /// The non-blocking outbound-send counters (`bufferedSend`).
+    pub fn buffered_send(&self) -> &BufferedSendCounters {
+        &self.buffered_send
+    }
+    /// Active per-peer drainer fibers (`bufferedSendPeerCount`).
+    pub fn buffered_send_peer_count(&self) -> u64 {
+        (self.buffered_send_peer_count)()
+    }
+
+    /// Render the shape as Prometheus text exposition for the `/metrics` body —
+    /// the registry-visible surface of the TS `registry.udp = metrics`
+    /// assignment. All series use the `b2bua_udp_*` namespace.
+    ///
+    /// Counters (monotonic): `tier1_brake_drops`, `tier1_reject_sent`,
+    /// `tail_dropped`, and the six `buffered_send_*`. Gauges (instantaneous):
+    /// `queue_depth`, `queue_max`, `buffered_send_peers`. The two brake counters
+    /// keep their existing standalone names (`b2bua_udp_tier1_brake_drops_total`
+    /// / `b2bua_udp_tier1_reject_sent_total`) so dashboards built against the
+    /// brake item keep working — this shape *supersedes* the runner's old
+    /// `tier1_brake_metrics_text` by rendering the same two lines plus the
+    /// queue/tail-drop/buffered facets.
+    pub fn prometheus_text(&self) -> String {
+        let mut s = String::with_capacity(1536);
+        let counter = |s: &mut String, name: &str, help: &str, v: u64| {
+            s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n{name} {v}\n"));
+        };
+        let gauge = |s: &mut String, name: &str, help: &str, v: u64| {
+            s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n{name} {v}\n"));
+        };
+
+        // ── Tier-1 brake (port of UdpTransportMetrics.dropsTier1Brake /
+        //    tier1RejectSent). Names unchanged from the brake item. ──
+        counter(
+            &mut s,
+            "b2bua_udp_tier1_brake_drops_total",
+            "New non-emergency INVITEs shed at the UDP ingress by the Tier-1 overload brake (queue depth crossed floor(queue_max*pct/100)); cheapest stateless-503 shed, ahead of the Tier-3 admission gate.",
+            self.drops_tier1_brake(),
+        );
+        counter(
+            &mut s,
+            "b2bua_udp_tier1_reject_sent_total",
+            "Stateless 503 (Service Unavailable + Retry-After) responses the Tier-1 brake emitted back to the source. Moves in lockstep with the drops counter.",
+            self.tier1_reject_sent(),
+        );
+
+        // ── Inbound queue state (port of UdpTransportMetrics.queueDepth /
+        //    queueMax / dropsTailDrop — live getters over the endpoint). A
+        //    tail-dropping queue otherwise shows 100% accepted (the blind spot
+        //    that hid the 2026-06-12 burst collapse on the proxy side). ──
+        gauge(
+            &mut s,
+            "b2bua_udp_queue_depth",
+            "Live inbound UDP queue depth (port of UdpTransportMetrics.queueDepth).",
+            self.queue_depth(),
+        );
+        gauge(
+            &mut s,
+            "b2bua_udp_queue_max",
+            "Configured inbound UDP queue bound (udpQueueMax).",
+            self.queue_max() as u64,
+        );
+        counter(
+            &mut s,
+            "b2bua_udp_tail_dropped_total",
+            "Datagrams tail-dropped by the full inbound queue (port of UdpTransportMetrics.dropsTailDrop).",
+            self.drops_tail_drop(),
+        );
+
+        // ── Buffered (non-blocking) outbound send (port of
+        //    UdpTransportMetrics.bufferedSend / bufferedSendPeerCount). Zero
+        //    until the BufferedUdpEndpoint drainer is ported — a flat declared
+        //    series, not a missing one. ──
+        let b = &self.buffered_send;
+        counter(&mut s, "b2bua_udp_buffered_send_enqueued_total", "Outbound datagrams accepted into a per-peer buffered-send queue.", b.enqueued());
+        counter(&mut s, "b2bua_udp_buffered_send_dropped_queue_full_total", "Outbound datagrams dropped because the target peer's buffered-send queue was full (drop-newest).", b.dropped_queue_full());
+        counter(&mut s, "b2bua_udp_buffered_send_dropped_evicted_total", "Outbound datagrams still queued when their peer entry was evicted (idle/cap reclaim).", b.dropped_evicted_with_queue());
+        counter(&mut s, "b2bua_udp_buffered_send_inner_errors_total", "Inner socket-send failures the per-peer drainer swallowed (SIP UDP retransmits cover the loss).", b.inner_send_errors());
+        counter(&mut s, "b2bua_udp_buffered_send_reclaimed_idle_total", "Per-peer buffered-send entries reclaimed for idleness (no successful drain within the TTL).", b.reclaimed_idle());
+        counter(&mut s, "b2bua_udp_buffered_send_reclaimed_cap_total", "Per-peer buffered-send entries evicted to stay under the max-peers ceiling.", b.reclaimed_cap());
+        gauge(
+            &mut s,
+            "b2bua_udp_buffered_send_peers",
+            "Active per-peer buffered-send drainer fibers (port of UdpTransportMetrics.bufferedSendPeerCount).",
+            self.buffered_send_peer_count(),
+        );
+        s
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,5 +952,152 @@ mod tests {
         let txt = m.prometheus_text();
         assert!(txt.contains("b2bua_sm_cursors{machine=\"global-call\",state=\"Active\"} 3"));
         assert!(!txt.contains("machine=\"transfer\""));
+    }
+
+    // -----------------------------------------------------------------------
+    // UdpTransportMetrics shape (port of `UdpTransport.ts` UdpTransportMetrics)
+    // -----------------------------------------------------------------------
+
+    /// A `UdpTransportMetrics` whose `queueDepth` / `dropsTailDrop` are backed by
+    /// caller-held atomics (standing in for a live `UdpEndpoint`), with the real
+    /// brake counters and (default) empty buffered-send. Mirrors the TS shape's
+    /// live getters without standing up a fabric — the fabric-proxy facet is
+    /// covered end-to-end in `tests/udp_transport_metrics.rs`.
+    fn shape() -> (UdpTransportMetrics, Tier1BrakeCounters, Arc<AtomicU64>, Arc<AtomicU64>) {
+        let brake = Tier1BrakeCounters::new();
+        let depth = Arc::new(AtomicU64::new(0));
+        let tail = Arc::new(AtomicU64::new(0));
+        let d = depth.clone();
+        let t = tail.clone();
+        let m = UdpTransportMetrics::new(
+            5, // queue_max — the brake test's QUEUE_MAX
+            brake.clone(),
+            Arc::new(move || d.load(Ordering::Relaxed)),
+            Arc::new(move || t.load(Ordering::Relaxed)),
+        );
+        (m, brake, depth, tail)
+    }
+
+    /// Every facet is a LIVE getter: a value changed in the underlying source is
+    /// seen by the metrics shape on the next read, never a stale snapshot. This
+    /// is the TS `get queueDepth() { return endpoint.queueDepth() }` contract.
+    #[test]
+    fn udp_transport_metrics_facets_are_live() {
+        let (m, brake, depth, tail) = shape();
+        // All zero initially.
+        assert_eq!(m.queue_depth(), 0);
+        assert_eq!(m.queue_max(), 5);
+        assert_eq!(m.drops_tier1_brake(), 0);
+        assert_eq!(m.drops_tail_drop(), 0);
+        assert_eq!(m.tier1_reject_sent(), 0);
+        assert_eq!(m.buffered_send_peer_count(), 0);
+
+        // Mutate the sources — the shape reflects them live.
+        depth.store(2, Ordering::Relaxed);
+        tail.store(7, Ordering::Relaxed);
+        brake.record_shed();
+        brake.record_shed();
+        brake.record_shed();
+        assert_eq!(m.queue_depth(), 2);
+        assert_eq!(m.drops_tail_drop(), 7);
+        // dropsTier1Brake / tier1RejectSent move in lockstep (one 503 per shed).
+        assert_eq!(m.drops_tier1_brake(), 3);
+        assert_eq!(m.tier1_reject_sent(), 3);
+    }
+
+    /// The metrics-shape facet of `UdpTransport-brake.test.ts`'s first case
+    /// ("non-emergency INVITEs past the threshold receive a stateless 503"):
+    /// after the brake sheds `floodCount - 2` INVITEs into an undrained queue,
+    /// `udp.metrics.{dropsTier1Brake,tier1RejectSent}` == the shed count and
+    /// `udp.metrics.queueDepth` == 2 (the two below-threshold INVITEs that were
+    /// enqueued). Here the brake counters are driven directly and the queue depth
+    /// gauge is set to the enqueued count; the fabric-driven version is in
+    /// `tests/udp_transport_metrics.rs`.
+    #[test]
+    fn udp_transport_metrics_matches_brake_test_shape() {
+        let (m, brake, depth, _tail) = shape();
+        let flood = 10u64;
+        // Two enqueued (depth 0,1 accepted), `flood - 2` shed at depth >= 2.
+        depth.store(2, Ordering::Relaxed);
+        for _ in 0..(flood - 2) {
+            brake.record_shed();
+        }
+        assert_eq!(m.drops_tier1_brake(), flood - 2);
+        assert_eq!(m.tier1_reject_sent(), flood - 2);
+        assert_eq!(m.queue_depth(), 2);
+    }
+
+    /// The render carries every field of the shape, with the right Prometheus
+    /// TYPE per field (counters for the monotonic sheds/tail-drops/buffered,
+    /// gauges for the instantaneous depth/max/peers), and keeps the brake item's
+    /// existing metric names so dashboards transfer.
+    #[test]
+    fn udp_transport_metrics_render() {
+        let (m, brake, depth, tail) = shape();
+        depth.store(3, Ordering::Relaxed);
+        tail.store(11, Ordering::Relaxed);
+        brake.record_shed();
+        let txt = m.prometheus_text();
+
+        // Brake counters — names unchanged from the standalone brake item.
+        assert!(txt.contains("b2bua_udp_tier1_brake_drops_total 1"));
+        assert!(txt.contains("b2bua_udp_tier1_reject_sent_total 1"));
+        // Live queue facets.
+        assert!(txt.contains("b2bua_udp_queue_depth 3"));
+        assert!(txt.contains("b2bua_udp_queue_max 5"));
+        assert!(txt.contains("b2bua_udp_tail_dropped_total 11"));
+        // Buffered-send facets render at zero (drainer not yet ported).
+        assert!(txt.contains("b2bua_udp_buffered_send_enqueued_total 0"));
+        assert!(txt.contains("b2bua_udp_buffered_send_dropped_queue_full_total 0"));
+        assert!(txt.contains("b2bua_udp_buffered_send_peers 0"));
+        // Prometheus TYPE lines: gauges vs counters.
+        assert!(txt.contains("# TYPE b2bua_udp_queue_depth gauge"));
+        assert!(txt.contains("# TYPE b2bua_udp_queue_max gauge"));
+        assert!(txt.contains("# TYPE b2bua_udp_buffered_send_peers gauge"));
+        assert!(txt.contains("# TYPE b2bua_udp_tail_dropped_total counter"));
+        assert!(txt.contains("# TYPE b2bua_udp_buffered_send_enqueued_total counter"));
+    }
+
+    /// The buffered-send counters carry the full TS `BufferedSendCounters` shape
+    /// (six fields) and are live + attachable via `with_buffered` — the seam the
+    /// future `BufferedUdpEndpoint` drainer writes through (and `peerCount()`
+    /// feeds `bufferedSendPeerCount`). Today nothing produces them, so the
+    /// default is all-zero; this pins the shape + the attach seam.
+    #[test]
+    fn buffered_send_counters_shape_and_attach() {
+        let (m0, ..) = shape();
+        // Default: empty counters, zero peer count (TS un-wrapped transport).
+        assert_eq!(m0.buffered_send().enqueued(), 0);
+        assert_eq!(m0.buffered_send_peer_count(), 0);
+
+        // Attach a populated counter set + a live peer-count source.
+        let bc = BufferedSendCounters::new();
+        bc.record_enqueued();
+        bc.record_enqueued();
+        bc.record_dropped_queue_full();
+        bc.add_dropped_evicted_with_queue(4);
+        bc.record_inner_send_error();
+        bc.record_reclaimed_idle();
+        bc.record_reclaimed_cap();
+        let peers = Arc::new(AtomicU64::new(2));
+        let p = peers.clone();
+        let m = m0.with_buffered(bc.clone(), Arc::new(move || p.load(Ordering::Relaxed)));
+
+        assert_eq!(m.buffered_send().enqueued(), 2);
+        assert_eq!(m.buffered_send().dropped_queue_full(), 1);
+        assert_eq!(m.buffered_send().dropped_evicted_with_queue(), 4);
+        assert_eq!(m.buffered_send().inner_send_errors(), 1);
+        assert_eq!(m.buffered_send().reclaimed_idle(), 1);
+        assert_eq!(m.buffered_send().reclaimed_cap(), 1);
+        assert_eq!(m.buffered_send_peer_count(), 2);
+
+        // The render now reflects the attached values, and is still live: a
+        // post-build mutation of the shared handle is visible.
+        peers.store(5, Ordering::Relaxed);
+        bc.record_enqueued();
+        let txt = m.prometheus_text();
+        assert!(txt.contains("b2bua_udp_buffered_send_enqueued_total 3"));
+        assert!(txt.contains("b2bua_udp_buffered_send_dropped_evicted_total 4"));
+        assert!(txt.contains("b2bua_udp_buffered_send_peers 5"));
     }
 }

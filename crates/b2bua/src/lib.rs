@@ -45,7 +45,7 @@ pub use b2bua_core::{B2buaCore, B2buaDeps, ReplicationSetup};
 pub use config::B2buaConfig;
 pub use effects::{HandlerEffects, HandlerResult};
 pub use event::CallEvent;
-pub use metrics::B2buaMetrics;
+pub use metrics::{B2buaMetrics, BufferedSendCounters, LiveGauge, UdpTransportMetrics};
 // The callflow-service authoring macros live in the public Rule SDK (ADR-0016
 // slice 6); re-export them so in-tree services keep using `b2bua::define_service!`
 // / `b2bua::sm_rule!`. (`$crate` inside the macro resolves to `b2bua_sdk`, where
