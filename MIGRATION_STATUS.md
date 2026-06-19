@@ -771,8 +771,9 @@ to commit here:
   **Draining / readiness / overload** row, already marked ✅ RESOLVED there.
 
 Both commits are ancestors of every later branch tip, so
-`git diff migration/17-… migration/18-…` is **empty** (both tips are `bac571a`)
-and the `migration/18-…` label was created from HEAD with no commit of its own.
+`git diff migration/17-… migration/18-…` shows **no code change** — the
+migration/08 + migration/09 commits are ancestors of both tips; the only delta
+on this branch is this attribution note itself (commit `a6882de`).
 
 Like `migration/05` (emergency markers, collapsed into `72b864c`), item 07, and
 item 16 above, **branch `migration/18-…` therefore carries no standalone code
