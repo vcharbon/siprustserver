@@ -11,6 +11,7 @@
 //! caller-side `paranoidInputs` precondition decorator. See the
 //! `effect-layer-test` SKILL for the wrapper philosophy.
 
+pub mod buffered;
 pub mod contracts;
 pub mod net;
 pub mod queue;
@@ -20,6 +21,10 @@ pub mod rfc_audit;
 pub mod simulated;
 pub mod types;
 
+pub use buffered::{
+    BufferedSendCounters, BufferedSendCountersSnapshot, BufferedUdpEndpoint,
+    BufferedUdpEndpointOpts, IdleLruStrategy, PeerEvictionStrategy, PeerMetadata, PendingWorkDelta,
+};
 pub use contracts::{
     with_all_contracts, CrossMessageAuditRule, ParanoidSignalingNetwork, PeerAuditRule,
     RecordingSignalingNetwork, ScopedAuditOptions, SendOutcome, SignalingAuditViolation,
