@@ -151,15 +151,17 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
   (`bufferHasEmergencyMarker`, `isInviteRequestBuffer`,
   `buildStatelessReject503Buffer`, `jitteredRetryAfter`) are now **all ported**
   (migration/03 + migration/10) as pure `message_helpers.rs` functions — they
-  are the allocation-free, pre-parse leaves the future Tier-1 UDP `preIngress`
-  hook composes. Their *consumer* (the `UdpTransport.layer` brake closure, which
-  needs `AppConfig` + `MetricsRegistry` + the `sip-net` fabric) is still deferred
-  to **slice 2**, so the end-to-end coverage `tests/sip/UdpTransport-brake.test.ts`
-  stays deferred with that facade; the Rust port pins each helper's byte-level
-  contract directly (`message_helpers::{buffer_emergency_tests,
+  are the allocation-free, pre-parse leaves the Tier-1 UDP `preIngress` hook
+  composes. Their *consumer* — the brake closure (`build_tier1_brake_hook`) — is
+  now **ported and wired into production** (migration/11; `b2bua::tier1_brake` +
+  `b2bua-runner` `.with_pre_ingress`), so the end-to-end `UdpTransport-brake.test.ts`
+  cases are ported too (`b2bua/tests/tier1_brake.rs`, through the real
+  `PreIngressHook` seam + simulated fabric). The Rust port also pins each helper's
+  byte-level contract directly (`message_helpers::{buffer_emergency_tests,
   is_invite_request_buffer_tests, jittered_retry_after_tests,
-  build_stateless_reject_503_tests}`) **and** replays the three named brake cases
-  at the helper-composition layer (`message_helpers::tier1_brake_helper_composition_tests`).
+  build_stateless_reject_503_tests}`) **and** replayed the three named brake cases
+  at the helper-composition layer (`message_helpers::tier1_brake_helper_composition_tests`,
+  migration/10) — the composition tests now have a wired-hook counterpart.
 - The dispatcher-only byte helper `bufferHasToTag` (initial-INVITE vs in-dialog
   discriminator for the dispatcher fast-path — NOT a Tier-1 brake input) remains
   deferred to **slice 2** with its dispatcher consumer.
@@ -227,11 +229,21 @@ scope (later slices).
 | Recording capture, paranoid defects, queue-leak (advisory), undeliverable (deferred-fail), peer-rule fail, real-run silencing | `sip-net/tests/contracts.rs` | ✅ 7 |
 
 ### Un-ported with justification
-- **`UdpTransport.ts`** (Tier-1 overload brake, `UdpTransportMetrics`,
-  `localAddress` source-of-truth) — a policy facade over `bindUdp` that depends
-  on `AppConfig` + `MetricsRegistry` (unported slices). The `PreIngressHook`
-  primitive the brake is built on **is** ported, so the facade is a thin
-  reassembly when those deps land.
+- **`UdpTransport.ts`** — the **Tier-1 overload brake `preIngress` policy is now
+  ported** (migration/11) as `b2bua::tier1_brake` (`build_tier1_brake_hook` +
+  `Tier1BrakeConfig` + `Tier1BrakeCounters`, the `dropsTier1Brake`/`tier1RejectSent`
+  surface) and **wired into the production caller** (`b2bua-runner` binds the
+  worker socket `.with_pre_ingress(hook)` and exports `b2bua_udp_tier1_*_total` on
+  `/metrics`) — closing the gap where the brake was absent in production (the
+  runner bound bare `BindUdpOpts::new`). The three `UdpTransport-brake.test.ts`
+  cases are ported end-to-end through the real `PreIngressHook` seam + simulated
+  fabric (`b2bua/tests/tier1_brake.rs`). The brake is factored into the `b2bua`
+  crate (not a standalone `UdpTransport` facade) because the Rust runner binds
+  `bindUdp` directly — there is no Effect `Layer` facade to reassemble. The TS
+  `UdpTransportMetrics.queueDepth`/`dropsTailDrop`/`localAddress` proxies +
+  `BufferedUdpEndpoint` outbound drainer remain deferred (queue depth / tail-drop
+  are already on `UdpEndpointCounters`; `localAddress` is `endpoint.local_addr()`).
+  Source: sipjsserver @ `fffc4ac6`.
 - **`BufferedUdpEndpoint.ts`** (non-blocking per-peer outbound drainer) — same
   reason; an outbound-path optimization layered on the endpoint, deferred with
   `UdpTransport`.

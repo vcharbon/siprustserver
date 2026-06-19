@@ -92,6 +92,9 @@ use b2bua::limiter_http::HttpCallLimiter;
 use b2bua::metrics::B2buaMetrics;
 use b2bua::repl::{PeerResolver, ReplicatingCallStore};
 use b2bua::store::InMemoryCallStore;
+use b2bua::tier1_brake::{
+    build_tier1_brake_hook, entropy_roll, Tier1BrakeConfig, Tier1BrakeCounters,
+};
 use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
 use call::Call;
 use http_net::RealHttpNetwork;
@@ -335,6 +338,29 @@ fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     s
 }
 
+/// Prometheus text for the Tier-1 overload brake (port of the
+/// `UdpTransportMetrics.dropsTier1Brake` / `tier1RejectSent` surface). Both are
+/// monotonic counters: `drops` = new non-emergency INVITEs the brake shed at the
+/// ingress; `reject_sent` = stateless 503s emitted back to the source. They climb
+/// in lockstep (every shed emits one 503); a non-zero rate means the worker's
+/// inbound queue crossed the Tier-1 mark and the brake is shedding ahead of the
+/// parser. Distinct from `b2bua_overload_rejected_total` (the Tier-3 admission
+/// gate, which sheds *after* a parse).
+fn tier1_brake_metrics_text(c: &Tier1BrakeCounters) -> String {
+    let mut s = String::new();
+    s.push_str(
+        "# HELP b2bua_udp_tier1_brake_drops_total New non-emergency INVITEs shed at the UDP ingress by the Tier-1 overload brake (queue depth crossed floor(queue_max*pct/100)); cheapest stateless-503 shed, ahead of the Tier-3 admission gate.\n",
+    );
+    s.push_str("# TYPE b2bua_udp_tier1_brake_drops_total counter\n");
+    s.push_str(&format!("b2bua_udp_tier1_brake_drops_total {}\n", c.drops_tier1_brake()));
+    s.push_str(
+        "# HELP b2bua_udp_tier1_reject_sent_total Stateless 503 (Service Unavailable + Retry-After) responses the Tier-1 brake emitted back to the source. Moves in lockstep with the drops counter.\n",
+    );
+    s.push_str("# TYPE b2bua_udp_tier1_reject_sent_total counter\n");
+    s.push_str(&format!("b2bua_udp_tier1_reject_sent_total {}\n", c.tier1_reject_sent()));
+    s
+}
+
 #[tokio::main]
 async fn main() {
     // Loud confirmation the jemalloc decay config (_RJEM_MALLOC_CONF) actually
@@ -400,6 +426,21 @@ async fn main() {
     let retry_after_base_sec: u32 =
         env_or("B2BUA_RETRY_AFTER_BASE_SEC", "5").parse().expect("B2BUA_RETRY_AFTER_BASE_SEC");
 
+    // Tier-1 overload brake (this item — port of the `UdpTransport` `preIngress`
+    // policy). At inbound-queue depth >= floor(B2BUA_QUEUE * pct / 100) a new,
+    // non-emergency INVITE is shed with a STATELESS 503 before the parser runs —
+    // the cheapest shed in the stack, ahead of the Tier-3 admission gate. TS
+    // `udpQueueTier1ThresholdPct` env default 70; `retryAfterJitterSec` default 5
+    // (the 503's Retry-After is `retry_after_base_sec` + U[0,jitter]). `pct = 0`
+    // sets the threshold to 0 (brake from the first INVITE — a deliberate
+    // emergency lever, not a default); `pct >= 100` effectively disables it (the
+    // queue tail-drops before depth can reach queue_max).
+    let udp_tier1_pct: u32 =
+        env_or("B2BUA_UDP_TIER1_PCT", "70").parse().expect("B2BUA_UDP_TIER1_PCT");
+    let retry_after_jitter_sec: u32 = env_or("B2BUA_RETRY_AFTER_JITTER_SEC", "5")
+        .parse()
+        .expect("B2BUA_RETRY_AFTER_JITTER_SEC");
+
     // Call limiter. Unset LIMITER_URL → NoopLimiter (today's non-limiting
     // behaviour). The refresh cadence MUST match the limiter's window seconds.
     let limiter_url = env_or("LIMITER_URL", "");
@@ -417,13 +458,45 @@ async fn main() {
     let (dest_host, dest_port) = split_host_port(&dest);
     let metrics_sa = resolve(&metrics_addr);
 
+    // Tier-1 overload brake: build the `preIngress` hook + its counters and
+    // install them on the worker socket. THIS is the production wiring the
+    // migration item is about — without it the brake (the cheapest stateless-503
+    // shed, ahead of Tier-3) is absent and a flooded ingress queue tail-drops new
+    // INVITEs silently instead of returning a routable 503 + Retry-After. The
+    // counters are retained for the `/metrics` scrape (port of the
+    // `UdpTransportMetrics.dropsTier1Brake` / `tier1RejectSent` surface).
+    let brake_counters = Tier1BrakeCounters::new();
+    let brake_hook = build_tier1_brake_hook(
+        Tier1BrakeConfig {
+            queue_max,
+            tier1_threshold_pct: udp_tier1_pct,
+            retry_after_base_sec,
+            retry_after_jitter_sec,
+        },
+        brake_counters.clone(),
+        // Dependency-free per-process jitter source (xorshift64*); only consulted
+        // when retry_after_jitter_sec > 0.
+        entropy_roll(),
+    );
+
     // Real, non-recording transport: a plain tokio UDP socket.
     let net = RealSignalingNetwork::new();
     let endpoint = net
-        .bind_udp(BindUdpOpts::new(listen_sa, queue_max))
+        .bind_udp(BindUdpOpts::new(listen_sa, queue_max).with_pre_ingress(brake_hook))
         .await
         .unwrap_or_else(|e| panic!("bind {listen_sa} failed: {e:?}"));
     let local = endpoint.local_addr();
+    eprintln!(
+        "b2bua-runner Tier-1 brake armed: stateless-503 new non-emergency INVITEs at \
+         ingress depth >= {} (queue_max={queue_max}, tier1_pct={udp_tier1_pct})",
+        Tier1BrakeConfig {
+            queue_max,
+            tier1_threshold_pct: udp_tier1_pct,
+            retry_after_base_sec,
+            retry_after_jitter_sec,
+        }
+        .threshold()
+    );
 
     // Advertised SIP host:port stamped on every outbound Via / Contact / b-leg
     // Call-ID (see `b2bua::stack_identity`). It MUST be an address the callee /
@@ -652,10 +725,12 @@ async fn main() {
     let _probe = {
         let core_ready = core.clone();
         let txn_metrics = core.txn_metrics().clone();
+        let brake_metrics = brake_counters.clone();
         let routes = probe_http::ProbeRoutes {
             metrics: Arc::new(move || {
                 let mut text = metrics.prometheus_text();
                 text.push_str(&txn_metrics_text(&txn_metrics));
+                text.push_str(&tier1_brake_metrics_text(&brake_metrics));
                 // jemalloc footprint/purge/decay-config counters (see the
                 // #[global_allocator] note). Same cfg as the allocator dep.
                 #[cfg(not(target_env = "msvc"))]
