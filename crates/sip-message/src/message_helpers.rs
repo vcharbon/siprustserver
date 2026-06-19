@@ -439,6 +439,15 @@ pub fn jittered_retry_after(base_sec: u32, jitter_sec: u32, roll: impl FnOnce() 
 /// Output header names are normalised to canonical casing; the value (after the
 /// first `:`) is copied byte-for-byte from the request line. The reply is
 /// CRLF-terminated regardless of whether the request used LF-only separators.
+///
+/// Header names/values are matched and copied as **raw bytes** (no high-bit
+/// masking). This is an intentional, harmless deviation from the TS, which
+/// `raw.subarray(0, headerEnd).toString("ascii")` decodes *before* splitting:
+/// Node's `"ascii"` decoder masks every byte with `& 0x7f`, so a high-bit byte
+/// in a header name could alias to an ASCII letter (`0xC9` → `0x49` `'I'`) and
+/// match. The raw-byte compare here never aliases — `0xC9` stays `0xC9`. For the
+/// valid 7-bit ASCII header names/values the brake ever sees the two agree (and
+/// the byte-exact behaviour is arguably the more correct of the two).
 pub fn build_stateless_reject_503_buffer(raw: &[u8], retry_after_sec: u32) -> Option<Vec<u8>> {
     // Locate the header-section terminator: CRLFCRLF, or LFLF as a fallback
     // (mirrors the TS `indexOf("\r\n\r\n")` then `indexOf("\n\n")`). The chosen
@@ -1395,10 +1404,15 @@ Content-Length: 0\r\n\r\n";
     }
 
     #[test]
-    fn response_first_line_returns_none() {
-        // First line lacks a request shape but DOES contain SIP/2.0 — however a
-        // genuine *response* still gets templated only if it has the 5 headers;
-        // the realistic rejection is a first line with NO "SIP/2.0" token.
+    fn first_line_without_sip_version_returns_none() {
+        // Pins the missing-`SIP/2.0`-token guard, NOT response-rejection: the
+        // function keys only off whether the first line contains the `SIP/2.0`
+        // substring (faithful to the TS `requestLine.includes("SIP/2.0")`). A
+        // first line with no version token (here `GARBAGE LINE NO VERSION`) is
+        // rejected. NB: a genuine response first line (`SIP/2.0 503 …`) DOES
+        // carry that substring, so this guard does not by itself reject inbound
+        // responses — same weakness as the TS; the brake only feeds it request
+        // datagrams.
         let raw = b"GARBAGE LINE NO VERSION\r\nVia: x\r\n\r\n";
         assert!(build_stateless_reject_503_buffer(raw, 5).is_none());
     }
