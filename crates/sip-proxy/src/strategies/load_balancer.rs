@@ -183,6 +183,12 @@ impl RoutingStrategy for LoadBalancerStrategy {
         // (`try_consume_for` is bootstrap-friendly).
         let now_ms = self.clock.now_ms();
         if is_emergency || in_dialog {
+            // Emergency bypasses BOTH the above_critical critical-filter (above)
+            // and this AIMD bucket — count emergency new-dialog bypasses so the
+            // skip is observable under flood (in-dialog is not a new-call admit).
+            if is_emergency && !in_dialog {
+                self.metrics.record_lb_emergency_bypass();
+            }
             self.observer.record_own_admitted(&winner.id);
         } else if !self.observer.try_consume_for(&winner.id, now_ms) {
             self.metrics.record_overload_rejection("bucket_empty");

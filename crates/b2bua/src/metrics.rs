@@ -794,6 +794,10 @@ impl UdpTransportMetrics {
     pub fn tier1_reject_sent(&self) -> u64 {
         self.brake.tier1_reject_sent()
     }
+    /// New emergency INVITEs that bypassed the Tier-1 brake above the threshold.
+    pub fn tier1_emergency_bypassed(&self) -> u64 {
+        self.brake.emergency_bypassed()
+    }
     /// The non-blocking outbound-send counters (`bufferedSend`).
     pub fn buffered_send(&self) -> &BufferedSendCounters {
         &self.buffered_send
@@ -837,6 +841,12 @@ impl UdpTransportMetrics {
             "b2bua_udp_tier1_reject_sent_total",
             "Stateless 503 (Service Unavailable + Retry-After) responses the Tier-1 brake emitted back to the source. Moves in lockstep with the drops counter.",
             self.tier1_reject_sent(),
+        );
+        counter(
+            &mut s,
+            "b2bua_udp_tier1_emergency_bypassed_total",
+            "New emergency INVITEs that crossed the Tier-1 threshold but BYPASSED the brake (always admitted). Emergency traffic skipping the gate under flood.",
+            self.tier1_emergency_bypassed(),
         );
 
         // ── Inbound queue state (port of UdpTransportMetrics.queueDepth /
@@ -1042,6 +1052,9 @@ mod tests {
         // Brake counters — names unchanged from the standalone brake item.
         assert!(txt.contains("b2bua_udp_tier1_brake_drops_total 1"));
         assert!(txt.contains("b2bua_udp_tier1_reject_sent_total 1"));
+        // Emergency-bypass visibility series (renders even at 0).
+        assert!(txt.contains("b2bua_udp_tier1_emergency_bypassed_total 0"));
+        assert!(txt.contains("# TYPE b2bua_udp_tier1_emergency_bypassed_total counter"));
         // Live queue facets.
         assert!(txt.contains("b2bua_udp_queue_depth 3"));
         assert!(txt.contains("b2bua_udp_queue_max 5"));

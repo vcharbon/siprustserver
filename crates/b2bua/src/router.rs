@@ -1118,8 +1118,12 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
             return;
         }
         // Counter published on X-Overload (`adm`). Emergency admits are NOT counted
-        // — the LB's AIMD caps non-emergency traffic only (TS contract).
-        if !is_emergency {
+        // on `adm` — the LB's AIMD caps non-emergency traffic only (TS contract) —
+        // but ARE tallied on their own `b2bua_emergency_admitted_total` counter so
+        // the emergency-admit branch is observable (it would otherwise be uncounted).
+        if is_emergency {
+            ctx.overload.increment_emergency_admitted();
+        } else {
             ctx.overload.increment_non_emergency_admitted();
         }
 

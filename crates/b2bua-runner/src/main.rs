@@ -740,6 +740,10 @@ async fn main() {
     let _probe = {
         let core_ready = core.clone();
         let txn_metrics = core.txn_metrics().clone();
+        // The worker-side overload signal (Tier-3 admission gate INPUTs +
+        // DECISIONs + emergency-admit counter). Reachable from the core; its
+        // `prometheus_text` is appended like the proxy-self gate's exposition.
+        let overload = core.overload().clone();
         // The full `UdpTransportMetrics` shape (brake counters + live queue
         // depth/max/tail-drop), superseding the old standalone brake-only text.
         let udp_metrics = udp_metrics.clone();
@@ -748,6 +752,8 @@ async fn main() {
                 let mut text = metrics.prometheus_text();
                 text.push_str(&txn_metrics_text(&txn_metrics));
                 text.push_str(&udp_metrics.prometheus_text());
+                // Worker-side overload INPUTs + DECISIONs + emergency-admit.
+                text.push_str(&overload.prometheus_text());
                 // jemalloc footprint/purge/decay-config counters (see the
                 // #[global_allocator] note). Same cfg as the allocator dep.
                 #[cfg(not(target_env = "msvc"))]

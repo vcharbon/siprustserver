@@ -416,6 +416,14 @@ pub struct OverloadMetrics {
     /// Current CPS token-bucket level, floored at 0 (port of the TS
     /// `tokenBucketLevel` gauge). A negative emergency overdraft reads as 0.
     pub token_bucket_level: f64,
+    /// Monotonic count of EMERGENCY new-dialog INVITEs this worker admitted
+    /// (Resource-Priority esnet/wps/q735 or an admitted `;emerg`/`;em` marker).
+    /// These ALWAYS admit (bypassing the bucket-empty + panic-ELU checks, only
+    /// `consume_forced`-ing a token) and are NOT counted on `adm`/the
+    /// non-emergency total — so without this counter the emergency-admit branch
+    /// was entirely uncounted. The sum `non_emergency_admitted_total +
+    /// emergency_admitted_total` is the worker's total admit rate.
+    pub emergency_admitted_total: u64,
 }
 
 struct OverloadInner {
@@ -448,6 +456,11 @@ pub struct OverloadSignal {
     /// admission gate bumps them without the EWMA lock.
     reject_bucket_empty: Arc<AtomicU64>,
     reject_panic_elu: Arc<AtomicU64>,
+    /// Emergency new-dialog INVITEs admitted (the `is_emergency` true path of
+    /// [`should_admit`](OverloadSignal::should_admit)). Bumped by the router on
+    /// the emergency-admit branch, sibling to `increment_non_emergency_admitted`.
+    /// Lock-free so the admit path never takes the EWMA lock for it.
+    emergency_admitted: Arc<AtomicU64>,
 }
 
 impl OverloadSignal {
@@ -470,6 +483,7 @@ impl OverloadSignal {
             non_emergency_admitted: Arc::new(AtomicU64::new(0)),
             reject_bucket_empty: Arc::new(AtomicU64::new(0)),
             reject_panic_elu: Arc::new(AtomicU64::new(0)),
+            emergency_admitted: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -503,6 +517,17 @@ impl OverloadSignal {
     /// successive samples. Port of TS `incrementNonEmergencyAdmitted`.
     pub fn increment_non_emergency_admitted(&self) {
         self.non_emergency_admitted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment the monotonic counter of EMERGENCY new-dialog INVITEs admitted
+    /// by this worker. Bumped on the emergency-admit branch of the router (the
+    /// `is_emergency` true path), sibling to
+    /// [`increment_non_emergency_admitted`](OverloadSignal::increment_non_emergency_admitted).
+    /// Emergency admits are NOT published on `adm` (the LB caps non-emergency
+    /// traffic only) — this counter is the only visibility into emergency-admit
+    /// volume, which would otherwise be uncounted.
+    pub fn increment_emergency_admitted(&self) {
+        self.emergency_admitted.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Configure the Tier-3 admission gate from the worker's [`B2buaConfig`].
@@ -607,7 +632,90 @@ impl OverloadSignal {
             reject_bucket_empty_total: self.reject_bucket_empty.load(Ordering::Relaxed),
             reject_panic_elu_total: self.reject_panic_elu.load(Ordering::Relaxed),
             token_bucket_level,
+            emergency_admitted_total: self.emergency_admitted.load(Ordering::Relaxed),
         }
+    }
+
+    /// Render the worker-side overload decision INPUTS + DECISIONS as Prometheus
+    /// text exposition (the migrated subset of the TS `OverloadController`
+    /// metrics — Tier-3 admission gate + the X-Overload signal). Appended to the
+    /// `/metrics` body by the runner (mirrors how the proxy-self gate's
+    /// `self_gate_prometheus_text` is appended). Only the migrated
+    /// inputs/decisions are emitted — the un-ported serving/draining OPTIONS
+    /// matrix, the retired shedder, GC/loop-lag p95 and routing-API latency are
+    /// intentionally absent.
+    ///
+    /// Series (all `b2bua_overload_*` / `b2bua_emergency_*`):
+    ///   - `b2bua_overload_admit_total` (counter) — total new-dialog INVITEs the
+    ///     gate admitted = non-emergency `adm` + emergency.
+    ///   - `b2bua_overload_reject_total{reason}` (counter) — `bucket_empty` +
+    ///     `panic_elu` split (the TS `rejectTotal` shape, minus the dead
+    ///     `shedder` bucket).
+    ///   - `b2bua_overload_non_emergency_admitted_total` (counter) — the `adm`
+    ///     published on X-Overload (kept as its own series; dashboards key on it).
+    ///   - `b2bua_emergency_admitted_total` (counter) — emergency-admit volume.
+    ///   - `b2bua_overload_token_bucket_level` (gauge) — current CPS bucket level.
+    ///   - `b2bua_overload_elu_ewma` / `b2bua_overload_gc_fraction` (gauges) —
+    ///     the decision INPUTS (the EWMAs published on X-Overload).
+    pub fn prometheus_text(&self) -> String {
+        let m = self.metrics();
+        let admit_total = m.non_emergency_admitted_total + m.emergency_admitted_total;
+        let mut s = String::with_capacity(1024);
+        let counter = |s: &mut String, name: &str, help: &str, v: u64| {
+            s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n{name} {v}\n"));
+        };
+        let gauge = |s: &mut String, name: &str, help: &str, v: f64| {
+            s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n{name} {v}\n"));
+        };
+        counter(
+            &mut s,
+            "b2bua_overload_admit_total",
+            "New-dialog INVITEs admitted by the Tier-3 overload gate (non-emergency adm + emergency).",
+            admit_total,
+        );
+        // Per-reason reject split (the TS rejectTotal shape; the retired shedder
+        // bucket is absent). Pairs with the aggregate b2bua_overload_rejected_total.
+        s.push_str("# HELP b2bua_overload_reject_total New-dialog INVITEs shed by the Tier-3 overload gate, by reason.\n");
+        s.push_str("# TYPE b2bua_overload_reject_total counter\n");
+        s.push_str(&format!(
+            "b2bua_overload_reject_total{{reason=\"bucket_empty\"}} {}\n",
+            m.reject_bucket_empty_total
+        ));
+        s.push_str(&format!(
+            "b2bua_overload_reject_total{{reason=\"panic_elu\"}} {}\n",
+            m.reject_panic_elu_total
+        ));
+        counter(
+            &mut s,
+            "b2bua_overload_non_emergency_admitted_total",
+            "Non-emergency new-dialog INVITEs admitted (the `adm` counter published on X-Overload).",
+            m.non_emergency_admitted_total,
+        );
+        counter(
+            &mut s,
+            "b2bua_emergency_admitted_total",
+            "Emergency new-dialog INVITEs admitted (always admitted, bypassing the bucket-empty + panic-ELU checks; NOT counted on `adm`).",
+            m.emergency_admitted_total,
+        );
+        gauge(
+            &mut s,
+            "b2bua_overload_token_bucket_level",
+            "Current CPS token-bucket level (tokens remaining; a negative emergency overdraft reads as 0).",
+            m.token_bucket_level,
+        );
+        gauge(
+            &mut s,
+            "b2bua_overload_elu_ewma",
+            "Decision INPUT: EWMA-smoothed Event Loop Utilization (0..1) published on X-Overload; the panic-ELU backstop fires above the threshold.",
+            m.elu_ewma,
+        );
+        gauge(
+            &mut s,
+            "b2bua_overload_gc_fraction",
+            "Decision INPUT: EWMA-smoothed GC pause fraction (0..1) published on X-Overload (structurally 0 on Rust — no managed GC).",
+            m.gc_fraction_ewma,
+        );
+        s
     }
 }
 
@@ -871,6 +979,51 @@ mod tests {
     fn admit_reason_tags_match_the_ts_strings() {
         assert_eq!(AdmitReason::BucketEmpty.as_str(), "bucket_empty");
         assert_eq!(AdmitReason::PanicElu.as_str(), "panic_elu");
+    }
+
+    /// `increment_emergency_admitted` advances the emergency-admit counter
+    /// (sibling to the non-emergency `adm`), and it is NOT counted on `adm`.
+    #[test]
+    fn increment_emergency_admitted_advances_its_own_counter() {
+        let (sampler, _ctl) = simulated();
+        let sig = OverloadSignal::new(Arc::new(sampler));
+        sig.increment_emergency_admitted();
+        sig.increment_emergency_admitted();
+        let m = sig.metrics();
+        assert_eq!(m.emergency_admitted_total, 2);
+        // Emergency admits never touch the non-emergency `adm` counter.
+        assert_eq!(m.non_emergency_admitted_total, 0);
+    }
+
+    /// The Prometheus render carries every migrated overload INPUT + DECISION
+    /// series with the right name/type after the counters/gauges advance.
+    #[tokio::test(start_paused = true)]
+    async fn prometheus_text_renders_inputs_and_decisions() {
+        let (sig, ctl) = admission_sig(1, 0, 0.75);
+        ctl.set_elu(0.42);
+        ctl.set_gc_fraction(0.0);
+        sig.sample(); // seat the ELU EWMA at 0.42
+        // One non-emergency admit (drains the lone token), one emergency admit
+        // (consume_forced → overdraft), then a non-emergency reject (bucket empty).
+        assert!(sig.should_admit(false).admit);
+        sig.increment_non_emergency_admitted();
+        assert!(sig.should_admit(true).admit);
+        sig.increment_emergency_admitted();
+        assert!(!sig.should_admit(false).admit); // bucket_empty reject
+
+        let txt = sig.prometheus_text();
+        // admit_total = non_emergency(1) + emergency(1) = 2.
+        assert!(txt.contains("b2bua_overload_admit_total 2"), "{txt}");
+        assert!(txt.contains("# TYPE b2bua_overload_admit_total counter"));
+        assert!(txt.contains("b2bua_overload_reject_total{reason=\"bucket_empty\"} 1"));
+        assert!(txt.contains("b2bua_overload_reject_total{reason=\"panic_elu\"} 0"));
+        assert!(txt.contains("b2bua_overload_non_emergency_admitted_total 1"));
+        assert!(txt.contains("b2bua_emergency_admitted_total 1"));
+        assert!(txt.contains("# TYPE b2bua_emergency_admitted_total counter"));
+        assert!(txt.contains("# TYPE b2bua_overload_token_bucket_level gauge"));
+        assert!(txt.contains("b2bua_overload_elu_ewma 0.42"));
+        assert!(txt.contains("# TYPE b2bua_overload_elu_ewma gauge"));
+        assert!(txt.contains("b2bua_overload_gc_fraction 0"));
     }
 
     /// `level()` floors the (possibly negative) overdraft at 0 for an observer,

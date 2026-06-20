@@ -177,6 +177,14 @@ pub struct ProxyMetrics {
     /// (ProxyMetrics is registry-aggregate today), so this is the coarse stand-in
     /// that keeps a silently-floored cap diagnosable.
     overload_stale_decrease: AtomicU64,
+    /// New-dialog INVITEs that BYPASSED the LB's overload gates because they are
+    /// emergency: they skip the `above_critical` critical-filter (kept as
+    /// candidates even when every alive worker is shedding) AND skip the
+    /// per-worker AIMD token bucket (`try_consume_for`). The visibility series for
+    /// emergency traffic skipping the load-balancer's overload path — non-zero
+    /// under flood means emergency calls are correctly routed while non-emergency
+    /// load is rate-capped. Counted at the LB select site (load_balancer.rs).
+    lb_emergency_bypassed: AtomicU64,
     routing_duration_count: AtomicU64,
     routing_duration_sum_us: AtomicU64,
     record_route_inserted: AtomicU64,
@@ -273,6 +281,13 @@ impl ProxyMetrics {
     /// 1 s sweep task calls this with the per-sweep floored count.
     pub fn record_overload_stale_decrease(&self, n: u64) {
         self.overload_stale_decrease.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Count one emergency new-dialog INVITE that bypassed the LB's overload
+    /// gates (critical-filter + AIMD bucket), for
+    /// `sip_proxy_lb_emergency_bypassed_total`.
+    pub fn record_lb_emergency_bypass(&self) {
+        self.lb_emergency_bypassed.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_route_inserted(&self) {
@@ -372,6 +387,9 @@ impl ProxyMetrics {
     pub fn overload_stale_decrease_total(&self) -> u64 {
         self.overload_stale_decrease.load(Ordering::Relaxed)
     }
+    pub fn lb_emergency_bypassed_total(&self) -> u64 {
+        self.lb_emergency_bypassed.load(Ordering::Relaxed)
+    }
     pub fn overload_rejection_count(&self, reason: &str) -> u64 {
         self.overload_rejections.snapshot().get(reason).copied().unwrap_or(0)
     }
@@ -467,6 +485,7 @@ impl ProxyMetrics {
         // (registry-aggregate) stand-in for the TS per-`worker_id` push.
         labeled(&mut s, "sip_proxy_overload_rejections_total", "New-dialog admissions rejected by the AIMD/band overload path, by reason.", "counter", "reason", &self.overload_rejections.snapshot());
         g(&mut s, "sip_proxy_worker_stale_decrease_total", "WorkerLoadObserver sweep_stale floor events (AIMD cap halved — no fresh X-Overload within payload_stale_ms).", "counter", self.overload_stale_decrease.load(Ordering::Relaxed));
+        g(&mut s, "sip_proxy_lb_emergency_bypassed_total", "Emergency new-dialog INVITEs that bypassed the LB overload gates (above_critical critical-filter + per-worker AIMD bucket). Emergency traffic skipping the load-balancer's overload path under flood.", "counter", self.lb_emergency_bypassed.load(Ordering::Relaxed));
 
         s.push_str("# HELP sip_worker_health Worker count by health state.\n# TYPE sip_worker_health gauge\n");
         for (label, val) in [
@@ -532,12 +551,18 @@ mod tests {
         m.record_overload_rejection("bucket_empty");
         m.record_overload_rejection("no_target_critical_filtered");
         m.record_overload_stale_decrease(3);
+        m.record_lb_emergency_bypass();
+        m.record_lb_emergency_bypass();
         assert_eq!(m.overload_rejection_count("bucket_empty"), 2);
         assert_eq!(m.overload_stale_decrease_total(), 3);
+        assert_eq!(m.lb_emergency_bypassed_total(), 2);
         let txt = m.prometheus_text();
         assert!(txt.contains("sip_proxy_overload_rejections_total{reason=\"bucket_empty\"} 2"));
         assert!(txt.contains("sip_proxy_overload_rejections_total{reason=\"no_target_critical_filtered\"} 1"));
         assert!(txt.contains("sip_proxy_worker_stale_decrease_total 3"));
+        // Emergency-bypass visibility series (the LB critical-filter + AIMD skip).
+        assert!(txt.contains("sip_proxy_lb_emergency_bypassed_total 2"));
+        assert!(txt.contains("# TYPE sip_proxy_lb_emergency_bypassed_total counter"));
     }
 
     #[test]

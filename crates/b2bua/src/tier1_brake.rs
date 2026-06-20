@@ -106,6 +106,11 @@ impl Tier1BrakeConfig {
 pub struct Tier1BrakeCounters {
     drops_tier1_brake: Arc<AtomicU64>,
     tier1_reject_sent: Arc<AtomicU64>,
+    /// New emergency INVITEs that crossed the Tier-1 threshold but BYPASSED the
+    /// brake (always admitted). Visibility into emergency traffic skipping the
+    /// gate — non-zero under flood means the brake is correctly letting emergency
+    /// calls through while shedding non-emergency load.
+    emergency_bypassed: Arc<AtomicU64>,
 }
 
 impl Tier1BrakeCounters {
@@ -127,6 +132,12 @@ impl Tier1BrakeCounters {
         self.tier1_reject_sent.load(Ordering::Relaxed)
     }
 
+    /// New emergency INVITEs that crossed the Tier-1 threshold but bypassed the
+    /// brake (always admitted). The emergency-bypass visibility counter.
+    pub fn emergency_bypassed(&self) -> u64 {
+        self.emergency_bypassed.load(Ordering::Relaxed)
+    }
+
     /// Record one brake shed (the TS `dropsTier1Brake++; tier1RejectSent++`).
     /// `pub` so the `UdpTransportMetrics` shape's tests can drive the counters
     /// directly (and a future non-`preIngress` shed path could too); the
@@ -134,6 +145,13 @@ impl Tier1BrakeCounters {
     pub fn record_shed(&self) {
         self.drops_tier1_brake.fetch_add(1, Ordering::Relaxed);
         self.tier1_reject_sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one emergency INVITE that crossed the threshold but bypassed the
+    /// brake. Written by [`build_tier1_brake_hook`] on the emergency-marker
+    /// branch (the brake's bypass-the-shed path).
+    pub fn record_emergency_bypass(&self) {
+        self.emergency_bypassed.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -213,10 +231,14 @@ pub fn build_tier1_brake_hook(
     let base = config.retry_after_base_sec;
     let jitter = config.retry_after_jitter_sec;
     Arc::new(move |raw: &[u8], _src, depth: usize| {
-        if depth >= threshold
-            && is_invite_request_buffer(raw)
-            && !buffer_has_emergency_marker(raw)
-        {
+        if depth >= threshold && is_invite_request_buffer(raw) {
+            if buffer_has_emergency_marker(raw) {
+                // Emergency INVITE above the threshold — bypass the brake (always
+                // admit) but count the bypass so emergency traffic skipping the
+                // gate is observable under flood.
+                counters.record_emergency_bypass();
+                return PreIngressAction::Accept;
+            }
             let retry_after = jittered_retry_after(base, jitter, || roll());
             if let Some(resp) = build_stateless_reject_503_buffer(raw, retry_after) {
                 counters.record_shed();
@@ -383,9 +405,11 @@ Content-Length: 0\r\n\r\n"
             "emergency INVITE must bypass the brake"
         );
         // The one non-emergency shed above is the only one counted; the two
-        // accepted + the emergency contribute nothing.
+        // accepted contribute nothing. The emergency INVITE that bypassed the
+        // brake at/above the threshold is counted on the emergency-bypass series.
         assert_eq!(counters.drops_tier1_brake(), 1);
         assert_eq!(counters.tier1_reject_sent(), 1);
+        assert_eq!(counters.emergency_bypassed(), 1);
     }
 
     /// Port of "non-INVITE requests are not 503'd by the brake". With the queue
