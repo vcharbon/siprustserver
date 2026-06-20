@@ -93,6 +93,7 @@ use b2bua::limiter_http::HttpCallLimiter;
 use b2bua::metrics::{B2buaMetrics, UdpTransportMetrics};
 use b2bua::repl::{PeerResolver, ReplicatingCallStore};
 use b2bua::store::InMemoryCallStore;
+use b2bua::target_admission::{classify_admission, AdmissionVerdict};
 use b2bua::tier1_brake::{
     build_tier1_brake_hook, entropy_roll, Tier1BrakeConfig, Tier1BrakeCounters,
 };
@@ -155,6 +156,41 @@ fn resolve(addr: &str) -> SocketAddr {
         .unwrap_or_else(|e| panic!("cannot resolve {addr:?}: {e}"))
         .next()
         .unwrap_or_else(|| panic!("no address resolved from {addr:?}"))
+}
+
+/// Boot-time coherence checks on runner-only inputs that [`B2buaConfig::validate`]
+/// can't see: the worker's default callee host vs. its OWN TargetAdmission
+/// allow-list, and the Tier-1 brake percentage. Returns the first violation; the
+/// runner refuses to boot on `Err`. Pure (no env / IO) so it is unit-testable.
+fn validate_runner_overrides(
+    dest_host: &str,
+    worker_allowed_target_suffixes: &[String],
+    udp_tier1_pct: u32,
+) -> Result<(), String> {
+    if !(1..=100).contains(&udp_tier1_pct) {
+        return Err(format!(
+            "B2BUA_UDP_TIER1_PCT={udp_tier1_pct} out of range 1..=100: the Tier-1 \
+             brake fires at ingress depth >= queue_max × pct/100, so 0 would shed \
+             every packet and >100 would never fire. Use 1..=100 (100 = brake only \
+             when the queue is full)"
+        ));
+    }
+    // The b-leg admission gate (apply_route) classifies the callee's
+    // `destination.host`; the static default (`B2BUA_DEST`) must itself be
+    // admissible, else EVERY default-routed call is 503'd before the b-leg and the
+    // worker can never serve one. Per-call `X-Api-Call` destinations are runtime
+    // and not checkable here, but a default that the worker's own allow-list
+    // rejects is an unambiguous misconfiguration we refuse to boot on.
+    if classify_admission(dest_host, worker_allowed_target_suffixes) == AdmissionVerdict::Reject {
+        return Err(format!(
+            "B2BUA_DEST host {dest_host:?} is rejected by its own TargetAdmission \
+             allow-list WORKER_ALLOWED_TARGET_SUFFIXES={worker_allowed_target_suffixes:?}: \
+             every default-routed call would be 503'd before the b-leg. Add a \
+             matching suffix (e.g. \".svc.cluster.local\"), use an IP literal, or \
+             set \"*\" to disable the gate"
+        ));
+    }
+    Ok(())
 }
 
 /// Split a `host:port` into its parts WITHOUT DNS resolution (the host may be a
@@ -601,6 +637,16 @@ async fn main() {
     config
         .validate()
         .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
+    // Runner-only coherence (not visible to `B2buaConfig::validate`): the default
+    // callee must be admissible under the worker's own allow-list, and the Tier-1
+    // brake percentage must be in range. Refuse to boot with a clear message
+    // rather than silently 503 every call / shed every packet.
+    validate_runner_overrides(
+        &dest_host,
+        &config.worker_allowed_target_suffixes,
+        udp_tier1_pct,
+    )
+    .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
 
     // Build the limiter client now that config is settled. A LIMITER_URL whose
     // host cannot be resolved at boot falls back to NoopLimiter (the worker still
@@ -866,4 +912,51 @@ async fn wait_sigterm() {
 #[cfg(not(unix))]
 async fn wait_sigterm() {
     std::future::pending::<()>().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn suffixes(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn ip_literal_dest_is_admissible_regardless_of_suffixes() {
+        // The default B2BUA_DEST (127.0.0.1) and any IP literal must boot even
+        // with an empty allow-list.
+        assert!(validate_runner_overrides("127.0.0.1", &suffixes(&[]), 70).is_ok());
+    }
+
+    #[test]
+    fn dest_matching_a_configured_suffix_boots() {
+        assert!(validate_runner_overrides(
+            "sipp-uas.sip-test.svc.cluster.local",
+            &suffixes(&[".svc.cluster.local"]),
+            70
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn dest_excluded_by_its_own_allow_list_refuses_boot() {
+        let e = validate_runner_overrides("bob", &suffixes(&[".svc.cluster.local"]), 70)
+            .expect_err("a default callee its own allow-list rejects must fail boot");
+        assert!(e.contains("B2BUA_DEST"), "msg was: {e}");
+    }
+
+    #[test]
+    fn star_wildcard_admits_any_dest() {
+        assert!(validate_runner_overrides("bob", &suffixes(&["*"]), 70).is_ok());
+    }
+
+    #[test]
+    fn tier1_pct_out_of_range_refuses_boot() {
+        assert!(validate_runner_overrides("127.0.0.1", &suffixes(&["*"]), 0).is_err());
+        assert!(validate_runner_overrides("127.0.0.1", &suffixes(&["*"]), 101).is_err());
+        // boundaries are in range
+        assert!(validate_runner_overrides("127.0.0.1", &suffixes(&["*"]), 1).is_ok());
+        assert!(validate_runner_overrides("127.0.0.1", &suffixes(&["*"]), 100).is_ok());
+    }
 }

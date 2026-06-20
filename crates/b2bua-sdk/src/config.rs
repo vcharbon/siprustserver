@@ -297,6 +297,37 @@ impl B2buaConfig {
                 self.reaper_idle_max_sec, self.keepalive_interval_sec
             ));
         }
+        // ── Worker overload protection (Tier-3 CPS bucket + panic-ELU backstop) ──
+        // The panic-ELU backstop 503s a new INVITE when the worker's own
+        // EWMA-smoothed Event-Loop Utilization exceeds this fraction. ELU is
+        // clamped to [0, 1], so a threshold <= 0 (or NaN) would trip for *every*
+        // call the instant load is non-zero — the worker could never admit an
+        // INVITE. (>= 1.0 is the documented "disable" and is allowed: the clamped
+        // ELU never exceeds 1.)
+        if !(self.overload_panic_elu_threshold.is_finite() && self.overload_panic_elu_threshold > 0.0)
+        {
+            return Err(format!(
+                "overload_panic_elu_threshold={} is not a positive fraction: ELU is \
+                 clamped to [0,1], so a value <= 0 (or NaN) would 503 every new \
+                 INVITE the instant load rises. Use a value in (0, 1] (>= 1.0 \
+                 disables the backstop)",
+                self.overload_panic_elu_threshold
+            ));
+        }
+        // The Tier-3 CPS bucket refills at `cps_bucket_rate` tokens/s up to
+        // `cps_bucket_size`. If the gate is enabled (size > 0) but the rate is 0,
+        // the bucket drains once and never refills — after the first burst EVERY
+        // new INVITE is 503'd forever. (size == 0 disables the hard CPS gate, so
+        // the rate is moot.)
+        if self.cps_bucket_size > 0 && self.cps_bucket_rate == 0 {
+            return Err(format!(
+                "cps_bucket_rate=0 with cps_bucket_size={} (CPS gate enabled): the \
+                 token bucket would drain once and never refill, 503-ing every new \
+                 INVITE after the first burst. Set a positive refill rate, or set \
+                 cps_bucket_size=0 to disable the hard CPS gate",
+                self.cps_bucket_size
+            ));
+        }
         Ok(())
     }
 
@@ -309,5 +340,64 @@ impl B2buaConfig {
             3 * self.keepalive_interval_sec
         };
         sec.saturating_mul(1000)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_validates() {
+        assert!(B2buaConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_nonpositive_or_nan_panic_elu() {
+        for bad in [0.0, -0.5, f64::NAN, f64::INFINITY] {
+            let c = B2buaConfig {
+                overload_panic_elu_threshold: bad,
+                ..Default::default()
+            };
+            let e = c
+                .validate()
+                .expect_err("non-positive/NaN panic-ELU must be rejected");
+            assert!(e.contains("overload_panic_elu_threshold"), "msg was: {e}");
+        }
+    }
+
+    #[test]
+    fn allows_panic_elu_at_or_above_one_as_disable() {
+        // `>= 1.0` is the documented way to disable the backstop (clamped ELU
+        // never exceeds 1) — must NOT be rejected.
+        for ok in [1.0, 1.5] {
+            let c = B2buaConfig {
+                overload_panic_elu_threshold: ok,
+                ..Default::default()
+            };
+            assert!(c.validate().is_ok(), "{ok} should validate");
+        }
+    }
+
+    #[test]
+    fn rejects_zero_cps_rate_when_gate_enabled() {
+        let c = B2buaConfig {
+            cps_bucket_size: 1000,
+            cps_bucket_rate: 0,
+            ..Default::default()
+        };
+        let e = c.validate().expect_err("zero refill with gate on must be rejected");
+        assert!(e.contains("cps_bucket_rate"), "msg was: {e}");
+    }
+
+    #[test]
+    fn allows_zero_cps_rate_when_gate_disabled() {
+        // size == 0 disables the hard CPS gate, so a 0 refill rate is moot.
+        let c = B2buaConfig {
+            cps_bucket_size: 0,
+            cps_bucket_rate: 0,
+            ..Default::default()
+        };
+        assert!(c.validate().is_ok());
     }
 }
