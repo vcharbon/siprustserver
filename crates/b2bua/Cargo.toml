@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "B2BUA core: per-call FIFO dispatch (SipRouter/PerCallDispatcher) + rule engine + in-memory call store (over a replication-aware CallStore seam) + decision-engine adapter + buffered CDR. Rust port of sipjsserver src/sip/{SipRouter,PerCallDispatcher}.ts, src/call/CallState.ts, src/b2bua/rules/, src/decision/."
 
+[lints]
+workspace = true
+
 [dependencies]
 tokio = { workspace = true }
 tokio-util = { workspace = true }

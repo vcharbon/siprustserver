@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Test-only harness for multi-node HA failover: composes the proxy SUT (real LoadBalancer), two replicating b2bua workers over the simulated repl fabric, alice/bob UAs, and a shared fake clock. Hosts the FailoverHarness engine, the CallScenario/safe-point DSL, and the transparent-failover test matrix (ADR-0013). Carries no production code."
 
+[lints]
+workspace = true
+
 [dependencies]
 b2bua = { path = "../b2bua" }
 # Shared b2bua/proxy spawn primitives live in b2bua-harness; failover-harness reuses them.

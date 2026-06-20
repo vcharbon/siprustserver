@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Test-only contract + recording machinery shared by every migration layer. Rust port of sipjsserver src/test-harness/framework (Recorder, RunContext, EventSequencer, three-tier severity, recording helpers, anomaly ledger). See the effect-layer-test SKILL."
 
+[lints]
+workspace = true
+
 [dependencies]
 # Recording timestamps + the bounded-quiescence poll in scoped-audit
 # finalizers go through tokio so they work under a paused test clock.

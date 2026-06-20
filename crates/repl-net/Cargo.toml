@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "HA replication wire layer (slice S2): the five positional-msgpack replication frames + single-frame codec + 4-byte length-prefix framing. Call-agnostic — bodies are opaque bytes. The transport seam itself is slice S3. See ADR-0011 X9 / docs/plan/on-proper-migration-of-lazy-pancake.md."
 
+[lints]
+workspace = true
+
 [dependencies]
 # Low-level msgpack: hand-write array_len + per-element writes for exact
 # positional control of the [tag, ...] frame layout (ADR-0008 ethos). A

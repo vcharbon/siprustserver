@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Standalone runnable SIP front proxy: binds a real UDP endpoint (non-recording RealSignalingNetwork), load-balances new dialogs across a static worker pool with HMAC-signed Record-Route stickiness, runs OPTIONS health probing, and serves Prometheus /metrics. For containerized localhost/k8s load tests (UAC -> proxy -> B2BUA workers -> UAS)."
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "sip-proxy-runner"
 path = "src/main.rs"

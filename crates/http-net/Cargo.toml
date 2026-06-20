@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Reusable unary HTTP transport seam (request/response, no streaming). Mirror of repl-net's transport: a SimulatedHttpNetwork in-memory fabric (dst-keyed pause/cutoff/error faults + transit delay) for paused-clock tests, a RecordingHttpNetwork decorator, and a feature-gated RealHttpNetwork (hyper + pooled reqwest) for production. Bodies are opaque bytes — JSON/serde lives in the consumer."
 
+[lints]
+workspace = true
+
 [features]
 # The real (hyper server + pooled reqwest client) transport. Off by default so
 # leaf test crates never compile the HTTP-framework tree; the runner turns it on.

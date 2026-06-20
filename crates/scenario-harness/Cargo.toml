@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Cross-layer scenario test harness + report renderers — Rust port of sipjsserver src/test-harness/framework. Drives named agents (alice/bob) over the recording-wrapped simulated SignalingNetwork and projects the recording into SVG / global.txt / per-endpoint views. TEST-ONLY."
 
+[lints]
+workspace = true
+
 [dependencies]
 tokio = { workspace = true }
 sip-message = { path = "../sip-message" }

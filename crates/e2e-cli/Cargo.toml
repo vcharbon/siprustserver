@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Headless E2E campaign runner over the e2e-core registry (ADR-0018 Phase H): `e2e run <campaign.json>` expands and runs the {case × shape × infra} matrix, prints a summary table, and exits non-zero on any failed check — the CI/CD gate. Also `e2e validate` (lint authored JSON) and `e2e schema` (regenerate the committed JSON Schemas)."
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "e2e"
 path = "src/main.rs"

@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Standalone runnable B2BUA process: binds a real UDP endpoint (non-recording RealSignalingNetwork) and routes every call to a fixed destination. For localhost SIPp load tests (UAC -> B2BUA -> UAS)."
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "b2bua-runner"
 path = "src/main.rs"

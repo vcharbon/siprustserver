@@ -6,6 +6,14 @@ license.workspace = true
 publish = false
 description = "Prometheus exposition of jemalloc's mallctl stats for the runner binaries that use tikv-jemallocator as their #[global_allocator]. Surfaces steady-state RSS (stats.resident vs stats.allocated — the fragmentation gap), the page-purge backlog + purge activity (the CPU cost of aggressive decay), and the *resolved* dirty/muzzy decay config so a soak can confirm _RJEM_MALLOC_CONF actually parsed (a typo fails silently in jemalloc). Read-only: it never sets the allocator — the binary does that."
 
+# This is the ONE crate that legitimately needs `unsafe`: the two `mallctl` FFI
+# calls in src/lib.rs. So it deliberately does NOT opt into the workspace
+# `forbid(unsafe_code)` lint (which can't be locally overridden). It pins `deny`
+# instead — every other crate's guarantee still holds here — and each of the two
+# call sites carries a narrow `#[allow(unsafe_code)]` with a SAFETY comment.
+[lints.rust]
+unsafe_code = "deny"
+
 # jemalloc has no MSVC target; on msvc this crate compiles to no-op stubs so the
 # `#[cfg(not(target_env = \"msvc\"))]` callers do not need a second cfg arm.
 [target.'cfg(not(target_env = "msvc"))'.dependencies]

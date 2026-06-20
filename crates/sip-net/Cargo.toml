@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "SIP signaling network layer (UDP transport + SignalingNetwork) — Rust port of sipjsserver src/sip/{SignalingNetwork,UdpTransport} core. Real (tokio), simulated (in-memory fabric), and a recording/audit decorator."
 
+[lints]
+workspace = true
+
 [dependencies]
 tokio = { workspace = true }
 async-trait = { workspace = true }

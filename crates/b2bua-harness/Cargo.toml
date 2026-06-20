@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Test-only harness: binds a real `b2bua` B2buaCore as a System-Under-Test on the scenario-harness simulated network for deterministic alice ↔ b2bua ↔ bob e2e tests. Carries no production code."
 
+[lints]
+workspace = true
+
 [dependencies]
 b2bua = { path = "../b2bua" }
 call = { path = "../call" }

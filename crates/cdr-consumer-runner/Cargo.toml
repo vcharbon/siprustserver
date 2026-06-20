@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Dedicated CDR consumer: drains the RabbitMQ CDR queue and exposes Prometheus metrics (total CDR count + summed call duration derived from each record's created_at/terminated_at). No SIP, no persistence — telemetry only."
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "cdr-consumer-runner"
 path = "src/main.rs"

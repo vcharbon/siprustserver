@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Pure SIP message layer (parse / serialize / strict-validate) — Rust port of sipjsserver src/sip message core."
 
+[lints]
+workspace = true
+
 [features]
 default = []
 # `rvoip-oracle` pulls in rvoip-sip-core as the parity-oracle second impl for

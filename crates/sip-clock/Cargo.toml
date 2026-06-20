@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Monotonic-anchored clock (slice 0 foundation) — Rust re-expression of the source's Effect Clock/TestClock. Behaviour (timers/deadlines) runs on tokio's monotonic time directly; this crate provides only the injectable wall-ish `now_ms()` timestamp source for logs + call records. See docs/MIGRATION_PLAN_B2B.md §2."
 
+[lints]
+workspace = true
+
 [dependencies]
 # Only the monotonic `tokio::time::Instant` is needed in prod (no test-util).
 tokio = { workspace = true }

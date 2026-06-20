@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "E2E test-management website (ADR-0018 Phase I): an axum + maud + htmx front-end over the e2e-core registry — list/launch campaigns, watch run progress live, inspect cells (SVG call diagram + check verdicts), view/author Test cases. One content-negotiated route set: every handler serves HTML to a browser and the mirrored JSON to the CLI/API."
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "e2e-web"
 path = "src/main.rs"

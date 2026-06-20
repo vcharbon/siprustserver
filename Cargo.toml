@@ -149,3 +149,15 @@ tokio-reactor-trait = "1"
 # does not strip, so symbols reach the running container.
 [profile.release]
 debug = "line-tables-only"
+
+# First-party code is unsafe-free by policy. Every member crate opts in with
+# `[lints] workspace = true`, turning a stray `unsafe` block into a hard compile
+# error rather than a silent perf shortcut nobody reviewed. `forbid` (stronger
+# than `deny`) cannot be locally re-enabled with `#[allow(unsafe_code)]`. The
+# ONE exception is `crates/jemalloc-stats`, whose two `mallctl` FFI calls are
+# irreducibly unsafe — it does NOT opt into this table and instead pins its own
+# `deny` + a narrow `#[allow(unsafe_code)]` on each documented call site. This
+# governs OUR source only; dependencies (tokio, jemalloc, …) use unsafe freely
+# and are unaffected. See ADR-discussion / jemalloc-stats/src/lib.rs SAFETY notes.
+[workspace.lints.rust]
+unsafe_code = "forbid"

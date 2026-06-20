@@ -50,7 +50,10 @@ mod imp {
     fn raw<T: Copy>(name: &[u8]) -> Option<T> {
         // Wrong width → jemalloc returns the real length and the crate errors;
         // we map that (and any other error) to None.
-        unsafe { tikv_jemalloc_ctl::raw::read::<T>(name).ok() }
+        #[allow(unsafe_code)] // irreducible mallctl FFI; see SAFETY above
+        unsafe {
+            tikv_jemalloc_ctl::raw::read::<T>(name).ok()
+        }
     }
 
     fn push_gauge(s: &mut String, name: &str, help: &str, v: impl std::fmt::Display) {
@@ -294,6 +297,7 @@ mod imp {
         // the filename pointer (NUL-terminated) as the new value. `c` must outlive
         // the call (the pointer borrows it), hence the explicit drop after.
         let ptr: *const std::os::raw::c_char = c.as_ptr();
+        #[allow(unsafe_code)] // irreducible mallctl FFI; `c` outlives the call (drop below)
         let res = unsafe {
             tikv_jemalloc_ctl::raw::write::<*const std::os::raw::c_char>(b"prof.dump\0", ptr)
         };

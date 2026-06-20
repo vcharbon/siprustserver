@@ -6,6 +6,9 @@ license.workspace = true
 publish = false
 description = "On-demand pprof-rs CPU flamegraph capture for the runner binaries (no perf, no privileges, no kernel PMU). Backs the /debug/flamegraph route on the b2bua-worker + front-proxy metrics servers so an endurance run can profile either tier live."
 
+[lints]
+workspace = true
+
 [dependencies]
 # SIGPROF-sampling in-process profiler -> inferno flamegraph SVG. `backtrace`
 # unwinding (the default) needs neither frame pointers nor DWARF CFI beyond the

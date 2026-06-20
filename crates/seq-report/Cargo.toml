@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Shared, dependency-free renderer for a UNIFIED sequence diagram: SIP messages, lifecycle events (crash/reboot/failover/partition), and replication frames interleaved on one time-ordered lane axis. Defines neutral input types (SeqDoc / SeqRow / Lane) plus pure render_html + render_global_txt over them; each harness owns a small projector that converts its recordings into a SeqDoc and calls in here. Deliberately depends on NOTHING else in the workspace (no sip-net / repl-net / ha-harness / scenario-harness / b2bua) so it stays cycle-free and reusable from every plane. Carries no production code."
 
+[lints]
+workspace = true
+
 [dependencies]
 # serde stays the ONLY dependency (external, cycle-free): the neutral SeqDoc is
 # the persisted diagram half of the E2E result.json (ADR-0018 Phase F).

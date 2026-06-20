@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Media layer — RTP/RTCP framing, G.711 codecs, SDP offer/answer negotiation, and a paced media transport that binds on SignalingNetwork. Rust port of sipjsserver src/media/. Transport-agnostic over sip-net (simulated fabric in tests, real UDP in prod); ships a hand-rolled RFC 3550 framing plus a webrtc-rs witness that cross-checks it."
 
+[lints]
+workspace = true
+
 [dependencies]
 tokio = { workspace = true }
 async-trait = { workspace = true }

@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Workspace automation tasks (e.g. ABNF corpus regeneration)."
 
+[lints]
+workspace = true
+
 [dependencies]
 # State-machine doc generation reads the composed service registry from the
 # runner (so it sees separate-crate services) and renders via b2bua's docgen.

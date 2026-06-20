@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "The deployed call-limiter process: serves the limiter HTTP API + /metrics + /healthz over the real (hyper) transport, runs the periodic TTL-sweep janitor, and reads window/active/ttl config from the environment. Stateless, no persistence — shared cluster-wide as a single replica."
 
+[lints]
+workspace = true
+
 [dependencies]
 http-net = { path = "../http-net", features = ["real"] }
 call-limiter = { path = "../call-limiter" }

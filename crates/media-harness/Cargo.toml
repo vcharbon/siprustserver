@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Test-only media harness — deterministic reference clips, the spectral (MFCC) audio classifier that proves media reached the right peer, and the negotiate_call offer/answer helper. Rust port of sipjsserver src/test-harness/media/ + tests/media support. Carries no production code (ADR-0004)."
 
+[lints]
+workspace = true
+
 [dependencies]
 media = { path = "../media" }
 sip-net = { path = "../sip-net" }

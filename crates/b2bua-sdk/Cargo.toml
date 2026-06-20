@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Public Rule SDK (ADR-0016 X6): the callflow-service authoring surface — the `define_service!`/`sm_rule!` macros, the rule-engine vocabulary (Match/RuleAction/RuleDefinition/RuleContext), CallEvent + B2buaConfig — carved into a lower crate so an out-of-tree service depends only on this, never on b2bua internals."
 
+[lints]
+workspace = true
+
 [dependencies]
 serde_json = { workspace = true }
 call = { path = "../call" }

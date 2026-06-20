@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "E2E test-management run-core (ADR-0018): the registry of compiled Callflow shapes + Infra shapes, and the seam that runs the SAME scenario over a fake (simulated, paused-clock, in-process LB+b2bua SUT) or a real (external kind cluster) Infra shape. Fronted later by the web site and the CI CLI."
 
+[lints]
+workspace = true
+
 [dependencies]
 scenario-harness = { path = "../scenario-harness" }
 seq-report = { path = "../seq-report" }
