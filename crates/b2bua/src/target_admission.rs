@@ -17,10 +17,12 @@
 //!   - IPv4/IPv6 literals always pass (no DNS needed) — `is_ip_literal`.
 //!   - A list containing the literal `"*"` matches every host (rollback
 //!     sentinel; restores pre-admission behaviour without a redeploy).
-//!   - Otherwise the host must end with one of the suffixes (case-insensitive).
-//!     The suffix is matched verbatim — operators write `.svc.cluster.local`
-//!     (with leading dot) to constrain to subdomains and avoid matching
-//!     `example.svc.cluster.local.evil.com`.
+//!   - Otherwise the host must end with one of the suffixes (case-insensitive)
+//!     **at a label boundary**. A dotted suffix (`.svc.cluster.local`, the
+//!     recommended form) matches any subdomain; a dotless suffix
+//!     (`svc.cluster.local`) matches the host exactly or as `<label>.<suffix>`,
+//!     but NOT a look-alike sibling label like `evil-svc.cluster.local`. Empty
+//!     entries never match (a blank list element does not silently allow all).
 
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -65,23 +67,38 @@ pub fn is_ip_literal(host: &str) -> bool {
     IpAddr::from_str(stripped).is_ok()
 }
 
-/// Returns true if any suffix in `suffixes` matches `host` (case-insensitive), or
-/// if the list contains the wildcard `"*"`. Port of TS `isAllowedSuffix`.
+/// Returns true if any suffix in `suffixes` matches `host` (case-insensitive) at a
+/// label boundary, or if the list contains the wildcard `"*"`. Port of TS
+/// `isAllowedSuffix`, hardened so a misconfigured dotless suffix cannot admit a
+/// look-alike sibling label.
 ///
-/// The wildcard is checked first (so `["*"]` matches even the empty host); an
-/// empty list rejects everything.
+/// The wildcard `"*"` matches every host (incl. the empty host). An empty list —
+/// and any blank `""` entry within a list — rejects (never matches), so a stray
+/// blank element (trailing comma / empty line) cannot silently disable the gate.
+///
+/// Label-boundary matching:
+///   - A suffix that starts with `.` (e.g. `.svc.cluster.local`) matches via plain
+///     tail comparison: the leading dot already pins the boundary, so only true
+///     subdomains match (`worker.svc.cluster.local`, never `xsvc.cluster.local`).
+///   - A dotless suffix (e.g. `svc.cluster.local`) matches the host exactly, or as
+///     `<label>.<suffix>` — but NOT `evil-svc.cluster.local`, which `ends_with`
+///     alone would wrongly admit.
 pub fn is_allowed_suffix(host: &str, suffixes: &[String]) -> bool {
+    let lower = host.to_lowercase();
     for s in suffixes {
         if s == "*" {
             return true;
         }
-    }
-    let lower = host.to_lowercase();
-    for s in suffixes {
-        if s == "*" {
+        if s.is_empty() {
             continue;
         }
-        if lower.ends_with(&s.to_lowercase()) {
+        let suf = s.to_lowercase();
+        let matched = if suf.starts_with('.') {
+            lower.ends_with(&suf)
+        } else {
+            lower == suf || lower.ends_with(&format!(".{suf}"))
+        };
+        if matched {
             return true;
         }
     }
@@ -202,6 +219,27 @@ mod tests {
         #[test]
         fn empty_list_rejects_everything() {
             assert!(!is_allowed_suffix("anything", &list(&[])));
+        }
+
+        #[test]
+        fn dotless_suffix_matches_only_at_a_label_boundary() {
+            // A misconfigured suffix written WITHOUT a leading dot must still only
+            // admit the host itself or a true subdomain — never a look-alike
+            // sibling label (the F6 hardening; `ends_with` alone would admit it).
+            let l = list(&["svc.cluster.local"]);
+            assert!(is_allowed_suffix("svc.cluster.local", &l)); // exact host
+            assert!(is_allowed_suffix("worker.svc.cluster.local", &l)); // subdomain
+            assert!(!is_allowed_suffix("evil-svc.cluster.local", &l)); // sibling label
+        }
+
+        #[test]
+        fn blank_entry_never_matches() {
+            // A stray empty element (trailing comma / blank line) must NOT make
+            // `ends_with("")` admit every host and silently disable the gate.
+            assert!(!is_allowed_suffix("kindlab", &list(&[""])));
+            assert!(!is_allowed_suffix("anything.example", &list(&["", ".svc.cluster.local"])));
+            // …but a real suffix alongside the blank still works.
+            assert!(is_allowed_suffix("a.svc.cluster.local", &list(&["", ".svc.cluster.local"])));
         }
     }
 

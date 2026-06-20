@@ -59,6 +59,17 @@ spec:
             - { name: B2BUA_LISTEN,  value: "0.0.0.0:5060" }
             - { name: B2BUA_ADVERTISE, value: "$(POD_IP)" }
             - { name: B2BUA_DEST,    value: "sipp-uas.sip-test.svc.cluster.local:5060" }
+            # b-leg TargetAdmission allow-list (target_admission.rs). A non-IP
+            # callee host that matches none of these suffixes is 503'd + terminated
+            # BEFORE the send path, so one unresolvable target can't stall the
+            # libuv/threadpool on getaddrinfo/EAI_AGAIN. Every callee this cluster
+            # routes to is a cluster FQDN — B2BUA_DEST and the uas-targets.csv pod
+            # FQDNs are all `*.svc.cluster.local`, and the outbound proxy is an IP
+            # literal (always admitted). Pinned here (not left to the binary
+            # default) so the policy is visible at the deploy layer; set to `*` to
+            # disable the gate as a rollback without a rebuild. Suffixes match at a
+            # label boundary, so a leading dot is the safe form.
+            - { name: WORKER_ALLOWED_TARGET_SUFFIXES, value: ".svc.cluster.local" }
             # ALL worker→callee (b-leg) SIP MUST traverse the front proxy. In a
             # real cluster a peer's internal pod IP is not routable peer-to-peer,
             # so every B2BUA-originated request — initial b-leg INVITE, in-dialog

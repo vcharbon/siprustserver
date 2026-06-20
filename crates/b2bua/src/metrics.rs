@@ -579,21 +579,18 @@ impl B2buaMetrics {
 /// every field is a shared lock-free atomic so the per-peer drainer fiber's hot
 /// path stays cheap and the `/metrics` scrape reads them without a lock.
 ///
-/// **Status:** the value *shape* (the six counters) is ported here so the
+/// **Status:** the value *shape* (the six counters) is retained here so the
 /// [`UdpTransportMetrics`] surface StatusServer/Prometheus expects is complete
-/// and stable. The *producer* — the `wrapEndpoint` per-peer outbound drainer
-/// (idle-LRU eviction, drop-newest overflow, inner-send-error swallow) — is a
-/// distinct migration item that is **not yet ported** (MIGRATION_STATUS defers
-/// `BufferedUdpEndpoint.ts`; the Rust b2bua-runner sends straight through the
-/// raw `UdpEndpoint`). Until that lands these counters stay at zero — a flat,
-/// declared series rather than a missing one, exactly as an un-wrapped TS
-/// transport would render (`bufferedSendPerPeerQueueMax === 0` → wrapper
-/// disabled, counters all 0).
-///
-// TODO(migration/BufferedUdpEndpoint): when the per-peer outbound drainer is
-// ported, hand the drainer THIS handle (clone) as its `counters` sink — the
-// TS `wrapEndpoint(rawEndpoint, { counters: bufferedCounters, … })` wiring —
-// and feed `UdpTransportMetrics::bufferedSendPeerCount` from its `peerCount()`.
+/// and stable. The *producer* — the `wrapEndpoint` per-peer outbound drainer —
+/// was **removed (won't port)**: it guarded against a blocking `getaddrinfo` in
+/// Node's `send`, which has no analogue in tokio (sends take an already-resolved
+/// `SocketAddr`, so there is nothing to quarantine), and per-peer queuing buys
+/// no isolation for real UDP. The b2bua-runner sends straight through the raw
+/// `UdpEndpoint`, so these counters are **permanently zero** — a flat, declared
+/// series rather than a missing one, exactly as an un-wrapped TS transport would
+/// render (`bufferedSendPerPeerQueueMax === 0` → wrapper disabled, counters 0).
+/// The fields are kept (vs. deleted) only to keep the metric/dashboard series
+/// stable; a later cleanup may drop them along with the dashboard panels.
 #[derive(Debug, Clone, Default)]
 pub struct BufferedSendCounters {
     inner: Arc<BufferedSendInner>,

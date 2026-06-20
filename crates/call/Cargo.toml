@@ -12,18 +12,6 @@ serde_json = { workspace = true }
 serde_bytes = { workspace = true }
 rmp-serde = { workspace = true }
 thiserror = { workspace = true }
-# Runtime for the protobuf call-body wire schema (proto/call.proto, codegen'd in
-# build.rs). Provides `Message` encode/decode on the generated types. The
-# protobuf *codec impl* is a later stacked item; this slice lands the schema +
-# codegen toolchain only. See ADR-0011/0008.
-prost = { workspace = true }
-
-[build-dependencies]
-# Codegen the protobuf wire types from proto/call.proto. `protox` compiles the
-# .proto to a FileDescriptorSet in pure Rust (no system `protoc`), which
-# `prost-build` turns into Rust types. See build.rs + the workspace dep notes.
-prost-build = { workspace = true }
-protox = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

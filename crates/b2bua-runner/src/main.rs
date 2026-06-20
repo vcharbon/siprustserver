@@ -484,8 +484,11 @@ async fn main() {
 
     // The `UdpTransport` facade's Prometheus-visible shape (port of
     // `UdpTransportMetrics`): the brake counters + live queue depth / queue_max /
-    // tail-drop proxied off the bound endpoint. Buffered-send facets stay zero
-    // until the `BufferedUdpEndpoint` drainer is ported (see the shape's note).
+    // tail-drop proxied off the bound endpoint. The buffered-send facets are
+    // permanently zero: `BufferedUdpEndpoint` was removed (won't port) — it was a
+    // Node-era guard against blocking `getaddrinfo` in `send`, which has no
+    // analogue in tokio (sends take an already-resolved `SocketAddr`), and the
+    // b2bua sends straight through this endpoint.
     // This SUPERSEDES the standalone `tier1_brake_metrics_text` on `/metrics`.
     let udp_metrics = {
         let ep_depth = endpoint.clone();
