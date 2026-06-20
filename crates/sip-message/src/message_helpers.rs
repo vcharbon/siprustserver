@@ -277,9 +277,19 @@ const EMERGENCY_RPH_TOKENS: [&[u8]; 3] = [b"esnet.0", b"wps.0", b"q735.0"];
 ///      custom param) that the B2BUA stamps once an emergency call is admitted
 ///      (see `b2bua::stack_identity`), which every subsequent in-dialog packet
 ///      then carries — a plain substring match anywhere in the buffer; then
-///   2. an **initial** INVITE's `Resource-Priority:` header (case-sensitive
-///      canonical name) whose value, within that same header line, contains one
-///      of the canonical emergency tokens [`EMERGENCY_RPH_TOKENS`].
+///   2. an **initial** INVITE's `Resource-Priority` header (case-sensitive
+///      canonical name) whose value contains one of the canonical emergency
+///      tokens [`EMERGENCY_RPH_TOKENS`]. The token scan is confined to that
+///      header *field* — tolerant of HCOLON whitespace before the colon
+///      (`Resource-Priority :`) and of obs-fold continuation lines (RFC 3261
+///      §7.3.1), and recognising both CRLF and bare-LF line endings — so a token
+///      on a *different* header line or in the body cannot spoof an emergency.
+///
+/// This deviates from the TS `indexOf("Resource-Priority:")` / `indexOf("\r\n")`
+/// scan, which misses a folded / whitespace-padded emergency header (a genuine
+/// emergency wrongly shed) and, for bare-LF datagrams, lets a body/later-header
+/// token spoof one. Correctness of the "NEVER 503 an emergency" contract wins
+/// over byte-for-byte source parity here.
 ///
 /// This is the exact signal the Tier-1 brake consults to NEVER 503 an emergency
 /// packet. It operates on bytes (no UTF-8/parse cost) and never allocates.
@@ -293,19 +303,58 @@ pub fn buffer_has_emergency_marker(raw: &[u8]) -> bool {
     }
 
     // Initial INVITE: Resource-Priority header (case-sensitive canonical name).
-    let rp_idx = match find_subslice(raw, b"Resource-Priority:") {
-        Some(idx) => idx,
-        None => return false,
-    };
-    // Confine the token scan to that header's own line: from the match to the
-    // next CRLF (or end of buffer if the line is unterminated), so a token in a
-    // later header / the body cannot spoof an emergency.
-    let line_end = find_subslice(&raw[rp_idx..], b"\r\n").map(|rel| rp_idx + rel);
-    let slice = match line_end {
-        Some(end) => &raw[rp_idx..end],
-        None => &raw[rp_idx..],
-    };
-    EMERGENCY_RPH_TOKENS.iter().any(|tok| find_subslice(slice, tok).is_some())
+    // Scan every occurrence of the canonical name — the first textual hit is not
+    // guaranteed to be the actual header (it could be a substring elsewhere) — and
+    // for each that forms a real header (optional LWS then a colon), confine the
+    // token scan to that header's *field* via [`header_field_end`].
+    const RP_NAME: &[u8] = b"Resource-Priority";
+    let mut from = 0;
+    while let Some(rel) = find_subslice(&raw[from..], RP_NAME) {
+        let name_at = from + rel;
+        let after_name = name_at + RP_NAME.len();
+        from = after_name; // always advances (RP_NAME is non-empty) → no infinite loop
+
+        // HCOLON: optional whitespace then a mandatory colon. Anything else means
+        // this textual hit was not the header name (skip it, keep scanning).
+        let mut j = after_name;
+        while j < raw.len() && (raw[j] == b' ' || raw[j] == b'\t') {
+            j += 1;
+        }
+        if j >= raw.len() || raw[j] != b':' {
+            continue;
+        }
+        let field = &raw[j + 1..header_field_end(raw, j + 1)];
+        if EMERGENCY_RPH_TOKENS.iter().any(|tok| find_subslice(field, tok).is_some()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Exclusive end index of the header field that begins at `start`, honouring
+/// obs-fold continuation lines (a CRLF/LF immediately followed by SP/HTAB
+/// continues the field — RFC 3261 §7.3.1) and recognising both CRLF and bare-LF
+/// line endings. The returned span is the field content only (a terminating CR
+/// is excluded), so [`buffer_has_emergency_marker`] scans the whole logical value
+/// — including a folded continuation — while a token on the *next* header line or
+/// in the body stays out of range.
+fn header_field_end(raw: &[u8], start: usize) -> usize {
+    let mut i = start;
+    while i < raw.len() {
+        if raw[i] == b'\n' {
+            // Line ended. A leading SP/HTAB on the next line folds it into this
+            // field; otherwise the field ends at this line terminator.
+            match raw.get(i + 1) {
+                Some(b' ') | Some(b'\t') => {
+                    i += 1;
+                    continue;
+                }
+                _ => return if i > start && raw[i - 1] == b'\r' { i - 1 } else { i },
+            }
+        }
+        i += 1;
+    }
+    raw.len()
 }
 
 /// Quick byte check: does the datagram start with `INVITE ` — i.e. is this a
@@ -848,6 +897,64 @@ Content-Length: 0\r\n\r\n";
     fn short_buffer_below_needle_length_is_not_emergency() {
         // Guards the `needle.len() > haystack.len()` early-out in find_subslice.
         assert!(!buffer_has_emergency_marker(b"INV"));
+    }
+
+    // --- robust Resource-Priority detection (port-deviation fixes) ----------
+    // The TS `indexOf("Resource-Priority:")` / `indexOf("\r\n")` scan sheds a
+    // genuine emergency whose header is whitespace-padded or obs-folded, and
+    // mis-confines on bare-LF datagrams. These pin the hardened contract.
+
+    #[test]
+    fn rph_whitespace_before_colon_still_flags() {
+        // HCOLON allows LWS before the colon (RFC 3261 §7.3.1): a real emergency
+        // INVITE so written must NOT be shed.
+        let buf = invite_buf(Some(("Resource-Priority ", "esnet.0")));
+        assert!(buffer_has_emergency_marker(&buf));
+        let buf = invite_buf(Some(("Resource-Priority\t", "wps.0")));
+        assert!(buffer_has_emergency_marker(&buf));
+    }
+
+    #[test]
+    fn rph_obs_fold_continuation_value_still_flags() {
+        // The value sits on a folded continuation line (CRLF + leading SP). The
+        // field scan must follow the fold and still find the canonical token.
+        let raw = b"INVITE sip:bob SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5555;branch=z9hG4bK-fold\r\n\
+Resource-Priority:\r\n esnet.0\r\n\
+Content-Length: 0\r\n\r\n";
+        assert!(buffer_has_emergency_marker(raw));
+    }
+
+    #[test]
+    fn lf_only_token_on_other_line_does_not_spoof() {
+        // Bare-LF datagram: the canonical token is on a Subject line, the RP
+        // header carries a non-emergency value. Line-confinement must hold (no
+        // false positive) — the guarantee the old `\r\n`-only scan silently broke.
+        let raw = b"INVITE sip:bob SIP/2.0\n\
+Via: SIP/2.0/UDP 10.0.0.1:5555;branch=z9hG4bK-lf\n\
+Subject: priority esnet.0 please\n\
+Resource-Priority: dsn.flash\n\
+Content-Length: 0\n\n";
+        assert!(!buffer_has_emergency_marker(raw));
+    }
+
+    #[test]
+    fn lf_only_emergency_rph_still_flags() {
+        // The matching positive: a bare-LF emergency INVITE is still recognised.
+        let raw = b"INVITE sip:bob SIP/2.0\n\
+Resource-Priority: q735.0\n\
+Content-Length: 0\n\n";
+        assert!(buffer_has_emergency_marker(raw));
+    }
+
+    #[test]
+    fn bare_name_without_colon_is_not_a_header() {
+        // The canonical name appearing without a following colon (e.g. echoed in
+        // a Subject) is not the header and must not be scanned as one.
+        let raw = b"INVITE sip:bob SIP/2.0\r\n\
+Subject: Resource-Priority esnet.0 mention\r\n\
+Content-Length: 0\r\n\r\n";
+        assert!(!buffer_has_emergency_marker(raw));
     }
 }
 
