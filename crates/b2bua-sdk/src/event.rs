@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 
 use call::TimerType;
 use sip_message::SipMessage;
-use sip_txn::TransactionEvent;
+use sip_txn::{TimeoutKind, TransactionEvent};
 
 /// One thing that happens to a call: an inbound SIP message, a fired timer, a
 /// CANCEL the txn layer already answered, a client-transaction timeout, or a
@@ -31,6 +31,14 @@ pub enum CallEvent {
         call_ref: Option<String>,
         leg_id: Option<String>,
         method: Option<String>,
+        /// The peer the timed-out request was sent to (forwarded from the txn
+        /// layer). `None` when the txn never stored a destination — the consumer
+        /// then skips per-peer failure attribution.
+        destination: Option<SocketAddr>,
+        /// Response-detection (Timer B/F) vs the long out-of-dialog INVITE
+        /// backstop (INVITE_INITIAL_TIMEOUT). Drives the per-peer metric's
+        /// `response_timeout` vs `transaction_timeout` split.
+        timeout_kind: TimeoutKind,
     },
     /// Re-entrant internal event (async result folded back into the call).
     InternalEvent {
@@ -58,11 +66,15 @@ impl CallEvent {
                 call_ref,
                 leg_id,
                 method,
+                destination,
+                kind,
             } => CallEvent::Timeout {
                 branch,
                 call_ref,
                 leg_id,
                 method,
+                destination,
+                timeout_kind: kind,
             },
             TransactionEvent::CallQuiesced { call_ref } => CallEvent::CallQuiesced { call_ref },
         }

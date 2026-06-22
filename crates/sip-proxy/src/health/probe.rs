@@ -73,6 +73,7 @@ use sip_txn::{IdGen, TransactionConfig, TransactionEvent, TransactionLayer, Tran
 use tokio::sync::mpsc;
 
 use crate::addr::ProxyAddr;
+use crate::observability::ProxyMetrics;
 use crate::load_observer::{parse_x_overload_header, WorkerLoadObserver};
 use crate::registry::control::WorkerRegistryControl;
 use crate::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
@@ -133,6 +134,13 @@ pub struct HealthProbe {
     clock: Clock,
     id_gen: Arc<IdGen>,
     config: HealthProbeConfig,
+    /// Optional `/metrics` sink for the per-peer failure family
+    /// (`sip_proxy_peer_failures_total`). Workers we probe are always INTERNAL
+    /// peers; a probe miss is a `response_timeout` against the worker's address.
+    /// Off (`None`) in tests/harnesses that don't scrape; set by the runner via
+    /// [`with_metrics`](Self::with_metrics) so the existing constructors and the
+    /// failover harness stay untouched.
+    metrics: Option<Arc<ProxyMetrics>>,
 }
 
 impl HealthProbe {
@@ -165,7 +173,16 @@ impl HealthProbe {
             clock,
             id_gen,
             config,
+            metrics: None,
         }
+    }
+
+    /// Attach a `/metrics` sink so probe misses (worker OPTIONS timeouts) record
+    /// `sip_proxy_peer_failures_total{scope="internal",kind="response_timeout"}`.
+    /// Opt-in (the runner calls it); harnesses/tests leave it off.
+    pub fn with_metrics(mut self, metrics: Arc<ProxyMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     fn now_ms(&self) -> u64 {
@@ -315,6 +332,18 @@ impl HealthProbe {
     fn count_miss(&self, p: PendingProbe, misses: &mut HashMap<String, u32>) {
         if !self.registry.resolve(&p.worker_id).is_some_and(|w| w.address == p.addr) {
             return;
+        }
+        // Per-peer attribution: a probe OPTIONS to a worker got no final response.
+        // The worker is, by construction, an INTERNAL (cluster) peer — it lives in
+        // the registry — so this is a `response_timeout` pinned to its address.
+        if let Some(metrics) = &self.metrics {
+            if let Some(dst) = p.addr.to_socket_addr() {
+                metrics.record_peer_failure(
+                    &dst,
+                    crate::observability::peer_failures::PeerScope::Internal,
+                    crate::observability::peer_failures::PeerFailureKind::ResponseTimeout,
+                );
+            }
         }
         let n = misses.entry(p.worker_id.clone()).or_insert(0);
         *n += 1;

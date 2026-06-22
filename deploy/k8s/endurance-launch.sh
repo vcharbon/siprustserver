@@ -82,6 +82,10 @@ log "Results: $RUN_DIR"
 mkdir -p "$RUN_DIR"
 
 # Launch the main endurance test.
+# IMPORTANT: do NOT append `|| true` to the backgrounded subshell — that would mask
+# endurance.sh's real exit code (the subshell would always exit 0), so a failed run
+# would report success. The subshell's exit status IS endurance.sh's, which we
+# capture below via `wait "$ENDURANCE_PID"`.
 log "Starting endurance.sh (baseline + chaos events)..."
 (
   DURATION="$DURATION" CHAOS_INTERVAL="$CHAOS_INTERVAL" \
@@ -90,7 +94,7 @@ log "Starting endurance.sh (baseline + chaos events)..."
   WORKER_REPLICAS="$WORKER_REPLICAS" SKIP_BUILD="$SKIP_BUILD" \
   SMOKE="${SMOKE:-0}" KEEP="$KEEP_CLUSTER" NO_CHAOS="${NO_CHAOS:-0}" \
   ./endurance.sh run
-) > "$RUN_DIR/endurance.log" 2>&1 || true &
+) > "$RUN_DIR/endurance.log" 2>&1 &
 
 ENDURANCE_PID=$!
 log "Endurance test running (pid $ENDURANCE_PID)"
@@ -113,9 +117,13 @@ log "Starting endurance monitor (watching events & errors)..."
 MONITOR_PID=$!
 log "Monitor running (pid $MONITOR_PID)"
 
-# Wait for endurance test to complete.
-wait "$ENDURANCE_PID" || true
-ENDURANCE_EXIT=$?
+# Wait for endurance test to complete and capture its REAL exit code.
+# `wait "$PID"` exits with the child's status; under `set -e` a non-zero status would
+# abort the launcher before we can run the summary, so guard the assignment with
+# `&&`/`||` to capture the code WITHOUT a bare `|| true` (which would clobber `$?` to
+# 0 and report a failed run as a success — the original bug).
+ENDURANCE_EXIT=0
+wait "$ENDURANCE_PID" && ENDURANCE_EXIT=0 || ENDURANCE_EXIT=$?
 log "Endurance test finished (exit=$ENDURANCE_EXIT)"
 
 # Stop collectors.
@@ -126,6 +134,10 @@ wait "$MONITOR_PID" 2>/dev/null || true
 
 # Collect final statistics.
 log "Collecting final statistics..."
+# Default to 0 so the unguarded `[ "$fails" -gt 0 ]` checks below never blow up under
+# `set -u` when no events.jsonl was ever produced (e.g. endurance died in wire-up —
+# exactly the early-failure case the launcher must NOT report as success).
+passes=0; fails=0; taints=0
 if [ -f "$EVENTS" ]; then
   passes="$(grep -c '"result":"pass"' "$EVENTS" 2>/dev/null || true)"
   fails="$(grep -c '"result":"fail"' "$EVENTS" 2>/dev/null || true)"
@@ -153,9 +165,19 @@ log "  metrics.log       — SIPp error metrics"
 log "  monitor-report.md — analysis findings"
 log "  dead-*            — dead pod diagnostics"
 
+# Overall run verdict: the run FAILED if endurance.sh exited non-zero (it died in
+# wire-up / preflight / traffic-start, or the chaos loop aborted) OR any chaos event
+# scored a fail. A non-zero endurance exit with zero recorded fails is the precise
+# early-failure case the old `|| true` masked — surface it explicitly.
+RUN_STATUS="SUCCESS"
+if [ "$ENDURANCE_EXIT" -ne 0 ] || [ "$fails" -gt 0 ]; then
+  RUN_STATUS="FAILED"
+fi
+
 # Create a summary file.
 {
   printf '# Endurance Run Summary\n\n'
+  printf '**Result:** %s (endurance.sh exit=%d, chaos fails=%d)\n' "$RUN_STATUS" "$ENDURANCE_EXIT" "$fails"
   printf '**Date:** %s\n' "$(date)"
   printf '**Mode:** %s (duration %ds, chaos interval %ds)\n' "$MODE" "$DURATION" "$CHAOS_INTERVAL"
   printf '**Baseline:** %dcps long, %dcps short, %dcps abuse, %dcps peak\n' "$LONG_CPS" "$SHORT_CPS" "$ABUSE_CAPS" "$PEAK_CAPS"
@@ -179,6 +201,17 @@ log "  dead-*            — dead pod diagnostics"
 ok "Summary: $RUN_DIR/SUMMARY.md"
 log "=== Enhanced Endurance Run Complete ==="
 
-if [ "$fails" -gt 0 ]; then
-  warn "Failures detected — review events.jsonl and monitor-report.md for findings"
+# Propagate the REAL outcome. A non-zero endurance exit (e.g. wire-up/preflight/
+# traffic-start failure) or any failed chaos event makes the LAUNCHER exit non-zero,
+# so callers/CI see the failure instead of a clean-looking empty success.
+if [ "$RUN_STATUS" = "FAILED" ]; then
+  if [ "$ENDURANCE_EXIT" -ne 0 ]; then
+    warn "RUN FAILED — endurance.sh exited $ENDURANCE_EXIT (see $RUN_DIR/endurance.log; the run may have died before any traffic/chaos started)"
+  fi
+  if [ "$fails" -gt 0 ]; then
+    warn "RUN FAILED — $fails failed chaos events; review events.jsonl and monitor-report.md"
+  fi
+  exit 1
 fi
+
+ok "RUN SUCCESS — endurance.sh exit 0, no failed chaos events"

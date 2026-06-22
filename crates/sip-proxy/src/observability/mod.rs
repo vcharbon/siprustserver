@@ -7,5 +7,6 @@
 //! while paying its per-packet record allocations).
 
 pub mod metrics;
+pub mod peer_failures;
 
 pub use metrics::ProxyMetrics;

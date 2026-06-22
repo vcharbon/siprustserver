@@ -183,6 +183,33 @@ pub fn apply_b_leg_egress(
     (req, (host, port))
 }
 
+/// Egress-aware wire destination for a leg's in-dialog request, WITHOUT mutating
+/// a request. Mirrors `apply_b_leg_egress`'s destination decision (keep in sync) —
+/// used for observability attribution (the keepalive-timeout peer metric), where
+/// we need the wire hop the unanswered OPTIONS used but must not synthesize a
+/// request to find it.
+pub fn leg_egress_dest(
+    config: &B2buaConfig,
+    leg_id: &str,
+    route_set: &[String],
+    base_dest: (String, u16),
+) -> (String, u16) {
+    if let Some(first) = route_set.first() {
+        if generators::first_route_is_loose(first) {
+            let uri = generators::strip_route_uri_to_request_uri(first);
+            return dest_of(&strip_uri(&uri));
+        }
+        return base_dest;
+    }
+    if leg_id == "a" {
+        return base_dest;
+    }
+    if let Some((host, port)) = config.b2b_outbound_proxy.clone() {
+        return (host, port);
+    }
+    base_dest
+}
+
 /// Build a fresh b-leg + its outbound INVITE effect (initial route + failover).
 #[allow(clippy::too_many_arguments)]
 pub fn build_b_leg(
@@ -624,6 +651,56 @@ Content-Length: 0\r\n\r\n",
         assert_eq!(top_route, "<sip:10.0.0.9:5060;lr>", "bootstrap preload must be a plain loose Route");
         assert!(!parse_uri_params(top_route).contains_key("outbound"), "no ;outbound on the bootstrap preload");
         assert_eq!(dest, ("10.0.0.9".to_string(), 5060), "wire destination is the outbound proxy");
+    }
+
+    // `leg_egress_dest` mirrors apply_b_leg_egress's destination decision WITHOUT
+    // mutating a request — used for keepalive-timeout peer attribution. It must
+    // agree with the BYE path on every branch: loose-route → top route host; empty
+    // route-set b-leg + outbound proxy → the proxy; a-leg / no proxy → base.
+    #[test]
+    fn leg_egress_dest_mirrors_apply_b_leg_egress() {
+        let base = ("10.244.2.7".to_string(), 5060);
+
+        // (1) Loose route on top → wire dest is the top route's host:port.
+        let route = "<sip:10.0.0.9:5060;outbound;lr>".to_string();
+        assert_eq!(
+            leg_egress_dest(&B2buaConfig::default(), "b-1", &[route.clone()], base.clone()),
+            ("10.0.0.9".to_string(), 5060),
+            "loose route → top route host:port",
+        );
+        // Agrees with the request-mutating path's destination.
+        let (_, mut_dest) = apply_b_leg_egress(
+            &B2buaConfig::default(),
+            "b-1",
+            &[route],
+            in_dialog_options("<sip:10.0.0.9:5060;outbound;lr>"),
+            base.clone(),
+        );
+        assert_eq!(mut_dest, ("10.0.0.9".to_string(), 5060));
+
+        // (2) Empty route set, b-leg, outbound proxy configured → the proxy.
+        let mut config = B2buaConfig::default();
+        config.b2b_outbound_proxy = Some(("10.0.0.9".to_string(), 5060));
+        assert_eq!(
+            leg_egress_dest(&config, "b-1", &[], base.clone()),
+            ("10.0.0.9".to_string(), 5060),
+            "empty route-set b-leg + outbound proxy → the proxy",
+        );
+
+        // (3) a-leg with empty route set → the base remote target (the proxy
+        // bootstrap is a b-leg-only concept).
+        assert_eq!(
+            leg_egress_dest(&config, "a", &[], base.clone()),
+            base.clone(),
+            "a-leg → base remote target (no proxy bootstrap on the a-leg)",
+        );
+
+        // (4) b-leg, empty route set, NO outbound proxy → the base.
+        assert_eq!(
+            leg_egress_dest(&B2buaConfig::default(), "b-1", &[], base.clone()),
+            base,
+            "no outbound proxy → base remote target",
+        );
     }
 }
 

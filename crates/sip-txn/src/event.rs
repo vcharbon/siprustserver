@@ -22,14 +22,23 @@ pub enum TransactionEvent {
     /// A CANCEL matched a server INVITE txn; the 200/487 were sent by this
     /// layer and the call should be torn down upstream.
     Cancelled { call_id: String, from_tag: String },
-    /// A client transaction's Timer B/F fired with no final response — the
-    /// transaction timed out.
+    /// A client transaction's Timer B/F (or the long INVITE_INITIAL_TIMEOUT
+    /// backstop) fired with no final response — the transaction timed out.
     Timeout {
         branch: String,
         call_ref: Option<String>,
         leg_id: Option<String>,
         /// SIP method of the timed-out transaction (INVITE / BYE / …).
         method: Option<String>,
+        /// The destination the timed-out request was sent to, forwarded from the
+        /// `Transaction`'s stored `destination`. `None` only when the txn never
+        /// recorded one (legacy/server paths) — consumers then skip per-peer
+        /// attribution rather than fabricate an address.
+        destination: Option<SocketAddr>,
+        /// Which timeout fired: the short response-detection timer (Timer B/F) vs
+        /// the long out-of-dialog INVITE backstop (INVITE_INITIAL_TIMEOUT). Lets
+        /// consumers split `response_timeout` from `transaction_timeout`.
+        kind: TimeoutKind,
     },
     /// **The last transaction for a *watched* call reached a terminal state** —
     /// every transaction attributed to `call_ref` has left the map (final response
@@ -106,6 +115,16 @@ impl EventQueueDropReason {
 pub enum TxnKind {
     Invite,
     NonInvite,
+}
+
+/// Which client-transaction timeout fired, so a consumer can split the metric.
+/// `Response` is the RFC 3261 §17.1 failure-detection timer (Timer B for INVITE,
+/// Timer F for non-INVITE — both 64×T1); `Transaction` is the long out-of-dialog
+/// INVITE backstop (`INVITE_INITIAL_TIMEOUT`, the call-setup ring window).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutKind {
+    Response,
+    Transaction,
 }
 
 use sip_message::SipRequest;

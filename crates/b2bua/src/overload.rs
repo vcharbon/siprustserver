@@ -22,15 +22,23 @@
 //! 200 reply closes the producer/consumer loop (the proxy's `AboveCritical`
 //! exclusion finally has a producer).
 //!
-//! ## Sampler: rides `tokio::time`, unlike the TS raw `setInterval`
+//! ## Sampler: faithful tokio busy-ratio (no longer a placeholder)
 //!
-//! The TS sampler is a raw `setInterval` deliberately off `TestClock`, which is
-//! *why* the TS `it.live` test had to run on real time to see injected values
-//! converge. The Rust sampler instead rides `tokio::time::interval`, so a
-//! paused-clock test drives it with `tokio::time::advance` like every other
-//! behaviour timer (CLAUDE.md: behaviour rides `tokio::time` directly). That
-//! removes the need for a real-clock test — the `it.live` case ports to a
-//! `start_paused` equivalent.
+//! The production [`LiveLoadSampler`] reads a true per-worker busy fraction off
+//! `tokio::runtime::RuntimeMetrics` (`worker_total_busy_duration`), so the `elu`
+//! it publishes is the real share of worker-thread time the runtime spent
+//! processing work between reads — the signal the proxy band classifier and the
+//! Tier-3 panic-ELU backstop both consume. (The earlier elapsed-since-last-read
+//! lag placeholder is gone.) This requires `--cfg tokio_unstable`, set
+//! workspace-wide in `/.cargo/config.toml`.
+//!
+//! The *periodic-sampler* cadence still rides `tokio::time::interval`, so a
+//! paused-clock test drives `sample()` with `tokio::time::advance` like every
+//! other behaviour timer (CLAUDE.md: behaviour rides `tokio::time` directly).
+//! The busy ratio itself measures **real** wall + busy time (monotonic, not
+//! `tokio::time`), so under a paused, idle runtime it reads ~0 — the
+//! end-to-end injected-value path is exercised with the `simulated()` sampler,
+//! and the real signal is validated on the cluster, not in unit tests.
 //!
 //! State is per-worker, in-memory, behind a single `Mutex` (the read path is the
 //! OPTIONS-200 hot path but it is one cheap lock + a `String` format).
@@ -64,67 +72,101 @@ pub trait LoadSampler: Send + Sync {
     fn gc_fraction(&self) -> f64;
 }
 
-/// Production [`LoadSampler`].
+/// Production [`LoadSampler`] — a **faithful** tokio runtime busy-ratio.
 ///
-/// **Platform caveat (TODO):** Rust has no Node `perf_hooks`
-/// `eventLoopUtilization()` and no managed GC, so there is no direct analogue of
-/// the TS live sampler. This impl reports an ELU derived from how busy the tokio
-/// worker is between samples (the fraction of wall time the sampling task was
-/// *not* sleeping is a coarse proxy for loop utilization) and a GC fraction of
-/// `0` (Rust has no stop-the-world GC pauses to attribute). The proxy-side band
-/// classifier keys on `elu` only, so a `gc` of `0` is correct, not a stub.
+/// Rust has no Node `perf_hooks` `eventLoopUtilization()`, but the multi-thread
+/// tokio runtime exposes per-worker cumulative busy time via
+/// [`RuntimeMetrics::worker_total_busy_duration`]
+/// (`tokio::runtime::Handle::current().metrics()`). The ELU we publish is the
+/// **busy fraction since the previous `elu()` read**:
 ///
-/// A faithful tokio-runtime ELU (per-worker busy/idle accounting via
-/// `tokio::runtime::RuntimeMetrics`) is a follow-up; the seam is here so swapping
-/// the impl needs no caller change. **Until it lands, the proxy band classifier
-/// (which keys on `elu` only) sees a ~constant placeholder, so its
-/// `AboveCritical` exclusion is effectively inert in production** — do not mistake
-/// this for a finished ELU implementation.
-//
-// TODO(migration/08): replace the elapsed-since-last-read busy proxy with
-// `tokio::runtime::Handle::current().metrics()` busy-duration accounting once we
-// settle on an ELU definition that matches the proxy band thresholds. Tracked as
-// an explicit follow-up item in MIGRATION_STATUS.md ("Item 16" attribution note),
-// shared with the sip-proxy `self_gate.rs` LiveLoadSampler (same debt); the
-// proxy-side ELU-band AIMD it feeds must not be merged on top of this placeholder.
+/// ```text
+///   elu = (Σ_w busy_total(w)_now − Σ_w busy_total(w)_prev)
+///         ─────────────────────────────────────────────────
+///                 num_workers × wall_elapsed_since_prev
+/// ```
+///
+/// i.e. the share of available worker-thread time the runtime actually spent
+/// processing work between two reads — a true loop-utilization analogue, clamped
+/// to `0..=1`. This is the signal the proxy band classifier and the Tier-3
+/// panic-ELU backstop both key on, so making it faithful makes every downstream
+/// shed responsive (the whole point of migration/32). The GC fraction stays
+/// structurally `0` — Rust has no stop-the-world GC pauses to attribute.
+///
+/// **Requires `--cfg tokio_unstable`** (set workspace-wide in
+/// `/.cargo/config.toml`). The same debt was previously shared with the sip-proxy
+/// `self_gate.rs` `LiveLoadSampler` (still a placeholder, out of this item's
+/// scope); this worker-side one is now real.
+///
+/// **Runtime handle.** Captured once at construction via
+/// [`Handle::try_current`]. The production sampler is built inside the runtime
+/// (`OverloadSignal::live` → `b2bua_core::spawn_with_overload`, an async
+/// context), so the handle is present and points at the worker runtime. When
+/// built **outside** any runtime (e.g. a bare `#[test]` that constructs
+/// `OverloadSignal::live()` only to read the zero-state header), `try_current`
+/// yields `None` and `elu()` reads a constant `0.0` — the correct "no signal"
+/// classification, and exactly what those tests expect.
 pub struct LiveLoadSampler {
-    /// Monotonic instant of the previous `elu()` read; the busy proxy is the
-    /// elapsed wall time since it, capped at 1.0 over a nominal sample window.
-    prev_elu_at: Mutex<tokio::time::Instant>,
-    /// Nominal sampler period (the 100 ms cadence) used to normalise the elapsed
-    /// proxy into a `0..=1` utilization.
-    sample_window: std::time::Duration,
+    /// The runtime handle captured at construction (`None` when built outside a
+    /// runtime). Reads `RuntimeMetrics` off it on every `elu()`.
+    handle: Option<tokio::runtime::Handle>,
+    /// Last `(instant, Σ worker busy total)` snapshot; the busy ratio is the
+    /// delta of the busy sum over the delta of `num_workers × wall_elapsed`.
+    prev: Mutex<BusySnapshot>,
+}
+
+/// A `(wall instant, summed worker busy time)` snapshot for the busy-ratio diff.
+struct BusySnapshot {
+    at: std::time::Instant,
+    busy_total: std::time::Duration,
 }
 
 impl LiveLoadSampler {
-    /// Build a live sampler normalising busy-time against `sample_window` (the
-    /// sampler cadence; pass [`OverloadSignal::SAMPLE_PERIOD`]).
-    pub fn new(sample_window: std::time::Duration) -> Self {
+    /// Build a live sampler over the current tokio runtime (if any). `sample_window`
+    /// is accepted for API compatibility with the previous placeholder + the
+    /// [`OverloadSignal::live`] call site, but is unused: the faithful busy ratio
+    /// normalises by the *actual* wall time between reads, not a nominal window.
+    pub fn new(_sample_window: std::time::Duration) -> Self {
+        let handle = tokio::runtime::Handle::try_current().ok();
+        let busy_total = handle.as_ref().map(Self::sum_busy).unwrap_or_default();
         Self {
-            prev_elu_at: Mutex::new(tokio::time::Instant::now()),
-            sample_window,
+            handle,
+            prev: Mutex::new(BusySnapshot { at: std::time::Instant::now(), busy_total }),
         }
+    }
+
+    /// Sum `worker_total_busy_duration` across all runtime workers (the cumulative
+    /// busy clock; monotonic, never reset). `cfg(tokio_unstable)` gates the broader
+    /// metrics surface — see the module/struct docs.
+    fn sum_busy(handle: &tokio::runtime::Handle) -> std::time::Duration {
+        let m = handle.metrics();
+        let n = m.num_workers();
+        (0..n).map(|w| m.worker_total_busy_duration(w)).sum()
     }
 }
 
 impl LoadSampler for LiveLoadSampler {
     fn elu(&self) -> f64 {
-        // Coarse busy proxy: elapsed since the previous read, normalised by the
-        // sample window. Under steady sampling this hovers near 1.0 when the loop
-        // is saturated (samples land late) and near the period when idle. This is
-        // a placeholder until a true RuntimeMetrics busy-ratio lands (see TODO).
-        let now = tokio::time::Instant::now();
-        let mut prev = self.prev_elu_at.lock().unwrap();
-        let elapsed = now.saturating_duration_since(*prev);
-        *prev = now;
-        let window = self.sample_window.as_secs_f64();
-        if window <= 0.0 {
+        // No runtime handle (built outside a runtime) → no signal → 0.0.
+        let Some(handle) = self.handle.as_ref() else {
+            return 0.0;
+        };
+        let now = std::time::Instant::now();
+        let busy_now = Self::sum_busy(handle);
+        let num_workers = handle.metrics().num_workers().max(1);
+
+        let mut prev = self.prev.lock().unwrap();
+        let wall = now.saturating_duration_since(prev.at).as_secs_f64();
+        // Busy clock is monotonic, but guard against a zero/negative wall window
+        // (two reads in the same instant) which would divide by ~0.
+        if wall <= 0.0 {
             return 0.0;
         }
-        // Lag beyond the nominal window is the "busy" signal; normalise so an
-        // on-time sample reads ~0 and a window-late sample reads ~1.
-        let lag = (elapsed.as_secs_f64() - window).max(0.0);
-        clamp01(lag / window)
+        let busy = busy_now.saturating_sub(prev.busy_total).as_secs_f64();
+        prev.at = now;
+        prev.busy_total = busy_now;
+        // Busy fraction of the available worker-thread time over the interval.
+        clamp01(busy / (num_workers as f64 * wall))
     }
 
     fn gc_fraction(&self) -> f64 {
@@ -835,18 +877,28 @@ mod tests {
     }
 
     /// The live sampler reports a `0..=1` ELU and a structurally-`0` GC fraction.
-    #[tokio::test(start_paused = true)]
+    ///
+    /// The faithful busy-ratio sampler measures REAL runtime busy time, not
+    /// `tokio::time` — so under a paused, idle runtime the busy fraction is ~0,
+    /// and forcing a non-zero value here is neither possible nor meaningful (the
+    /// real end-to-end signal is validated on the cluster, per the module docs).
+    /// This pins only the invariants that still hold: every `elu()` is a clamped
+    /// `0..=1` value and `gc_fraction()` is structurally `0`. Uses a multi-thread
+    /// runtime so `RuntimeMetrics::worker_total_busy_duration` has real workers to
+    /// sum (the default current-thread test runtime has one).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn live_sampler_reports_clamped_elu_and_zero_gc() {
         let s = LiveLoadSampler::new(Duration::from_millis(100));
-        // An immediate read (no elapsed beyond the window) is ~0 and in range.
+        // An immediate read is in range; GC fraction is structurally 0.
         let e0 = s.elu();
         assert!((0.0..=1.0).contains(&e0), "elu {e0} out of [0,1]");
         assert_eq!(s.gc_fraction(), 0.0);
-        // Advancing well past the window saturates the busy proxy toward 1.0.
-        tokio::time::advance(Duration::from_millis(500)).await;
+        // A later read (after real time passes + the runtime does some work) is
+        // still a clamped, in-range value — that is all the unit test asserts.
+        tokio::task::yield_now().await;
         let e1 = s.elu();
         assert!((0.0..=1.0).contains(&e1), "elu {e1} out of [0,1]");
-        assert!(e1 > 0.0, "a late sample should read busy (> 0), got {e1}");
+        assert_eq!(s.gc_fraction(), 0.0);
     }
 
     // ── Tier-3 admission gate (migration/09) ──────────────────────────────────

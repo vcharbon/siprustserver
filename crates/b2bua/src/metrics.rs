@@ -190,6 +190,9 @@ struct Inner {
 #[derive(Debug, Clone, Default)]
 pub struct B2buaMetrics {
     inner: Arc<Inner>,
+    /// Cardinality-bounded per-peer failure/timeout counters
+    /// (`b2bua_peer_failures_total{peer,scope,kind}`). Shared across clones.
+    per_peer: Arc<crate::peer_failures::PeerFailures>,
 }
 
 macro_rules! counter {
@@ -265,6 +268,18 @@ impl B2buaMetrics {
     pub fn record_response(&self, method: &str, code: u16) {
         let key = format!("{}|{}", method.to_ascii_uppercase(), code);
         *self.inner.responses.lock().unwrap().entry(key).or_insert(0) += 1;
+    }
+
+    /// Record one per-peer failure of `kind` against `peer` in `scope`
+    /// (`b2bua_peer_failures_total{peer,scope,kind}`; cardinality-bounded, see
+    /// [`crate::peer_failures::PeerFailures`]).
+    pub fn record_peer_failure(
+        &self,
+        peer: &std::net::SocketAddr,
+        scope: crate::peer_failures::PeerScope,
+        kind: crate::peer_failures::PeerFailureKind,
+    ) {
+        self.per_peer.record(peer, scope, kind);
     }
 
     // --- replication ---
@@ -566,6 +581,10 @@ impl B2buaMetrics {
             let (machine, state) = k.split_once('|').unwrap_or((k.as_str(), ""));
             s.push_str(&format!("b2bua_sm_cursors{{machine=\"{machine}\",state=\"{state}\"}} {v}\n"));
         }
+        // Per-peer failure/timeout family (cardinality-bounded; see
+        // crate::peer_failures). Appended last so its multi-line block follows
+        // the single-value gauges cleanly.
+        s.push_str(&self.per_peer.prometheus_text("b2bua_peer_failures_total"));
         s
     }
 }

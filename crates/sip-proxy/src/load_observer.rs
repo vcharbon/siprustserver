@@ -181,18 +181,34 @@ impl LoadObserverConfig {
 }
 
 impl Default for LoadObserverConfig {
-    /// Aggressive defaults, copied verbatim from `defaultWorkerLoadObserverConfig`.
+    /// Defaults derived from `defaultWorkerLoadObserverConfig`, made **modestly
+    /// more aggressive** for the emergency-under-CPU-starvation work (migration/32):
+    /// a loaded worker stops taking new non-emergency sooner so it reserves CPU
+    /// for emergency + already-established (in-dialog) calls. Concretely
+    /// `elu_hard` 0.6 → 0.5 (multiplicative-decrease band opens earlier) and
+    /// `elu_critical` 0.75 → 0.65 (a worker is dropped from non-emergency
+    /// new-dialog candidates earlier); `aimd_decrease_factor` stays aggressive
+    /// (×0.5 per decrease tick).
+    ///
+    /// **These are CALIBRATION STARTING POINTS, not final values.** They are to
+    /// be tuned empirically against the cluster overload sweep (the all-worker
+    /// 0.30-core `overloadall` case); the runner exposes every band/AIMD field as
+    /// an env var (`LB_ELU_*`, `LB_AIMD_*`, `LB_CAP_*`) so the sweep can retune
+    /// without a rebuild. Any change must keep `elu_soft < elu_hard < elu_critical`
+    /// and `band_hysteresis < min band gap` (here min gap = 0.5−0.4 = 0.1 >
+    /// 0.05) so `validate_bands` / the runner preflight accept the config.
+    ///
     /// At 2 workers × ~50 CAPS sustained, `cap_initial_cps = 30` admits 30 cps per
-    /// worker initially and AIMDs up while ELU stays low; a 200 CAPS burst drains
-    /// the bucket in ~1 s and the per-tick decreases collapse it further.
-    /// `payload_stale_ms` (8000) MUST exceed one full HealthProbe cycle
-    /// (`interval_ms + timeout_ms`) or `sweep_stale` halves the cap every cycle
-    /// down to the floor, silently — see the TS module note.
+    /// worker initially and AIMDs up while ELU stays low; a burst drains the
+    /// bucket and the per-tick decreases collapse it further. `payload_stale_ms`
+    /// (8000) MUST exceed one full HealthProbe cycle (`interval_ms + timeout_ms`)
+    /// or `sweep_stale` halves the cap every cycle down to the floor, silently —
+    /// see the TS module note.
     fn default() -> Self {
         Self {
             elu_soft: 0.4,
-            elu_hard: 0.6,
-            elu_critical: 0.75,
+            elu_hard: 0.5,
+            elu_critical: 0.65,
             band_hysteresis: 0.05,
             aimd_increase_step_cps: 2.0,
             aimd_decrease_factor: 0.5,
@@ -668,27 +684,33 @@ mod tests {
 
     // ── band derivation + hysteresis (kept; now over WorkerState) ─────────
 
+    /// Pinned to explicit thresholds (`bands_cfg`: soft 0.6 / hard 0.8 / critical
+    /// 0.95) so it exercises the band classifier regardless of operational-default
+    /// tuning — the migration/32 default-band move (hard 0.6→0.5, critical
+    /// 0.75→0.65) does not perturb it.
     #[test]
     fn band_thresholds() {
-        let o = obs();
+        let o = obs_with(bands_cfg);
         o.apply_payload("w", &payload(0.3), 1000);
         assert_eq!(o.band_for("w"), Some(EluBand::BelowSoft));
-        o.apply_payload("w", &payload(0.5), 2000);
+        o.apply_payload("w", &payload(0.7), 2000);
         assert_eq!(o.band_for("w"), Some(EluBand::SoftToHard));
-        o.apply_payload("w", &payload(0.7), 3000);
+        o.apply_payload("w", &payload(0.85), 3000);
         assert_eq!(o.band_for("w"), Some(EluBand::HardToCritical));
-        o.apply_payload("w", &payload(0.9), 4000);
+        o.apply_payload("w", &payload(0.97), 4000);
         assert_eq!(o.band_for("w"), Some(EluBand::AboveCritical));
     }
 
+    /// Hysteresis-hold in the increasing→holding direction, pinned to explicit
+    /// thresholds (`bands_cfg`) so it is independent of the default tuning.
     #[test]
     fn hysteresis_holds_higher_band_until_below_enter_minus_h() {
-        let o = obs();
-        o.apply_payload("w", &payload(0.9), 1000); // above_critical
-        // elu_critical=0.75, h=0.05 → stays above_critical until elu <= 0.70.
-        o.apply_payload("w", &payload(0.73), 2000);
+        let o = obs_with(bands_cfg); // critical = 0.95, h = 0.05 (default)
+        o.apply_payload("w", &payload(0.97), 1000); // above_critical
+        // stays above_critical until elu <= elu_critical − h = 0.90.
+        o.apply_payload("w", &payload(0.93), 2000);
         assert_eq!(o.band_for("w"), Some(EluBand::AboveCritical));
-        o.apply_payload("w", &payload(0.69), 3000);
+        o.apply_payload("w", &payload(0.89), 3000);
         assert_eq!(o.band_for("w"), Some(EluBand::HardToCritical));
     }
 
@@ -1042,6 +1064,25 @@ mod tests {
         assert!(v.is_empty());
     }
 
+    /// Pin the migration/32 more-aggressive default band thresholds (a loaded
+    /// worker sheds non-emergency sooner). These are calibration starting points;
+    /// the runner exposes them as env vars (`LB_ELU_*`) so the cluster sweep can
+    /// retune without a rebuild. The test guards an accidental revert and a
+    /// retuning that would break `validate_bands` (it asserts the ordering +
+    /// hysteresis-bound invariants hold for the shipped values).
+    #[test]
+    fn default_bands_are_the_aggressive_calibration_starting_points() {
+        let c = LoadObserverConfig::default();
+        assert_eq!(c.elu_soft, 0.4);
+        assert_eq!(c.elu_hard, 0.5, "elu_hard lowered 0.6 → 0.5 (migration/32)");
+        assert_eq!(c.elu_critical, 0.65, "elu_critical lowered 0.75 → 0.65 (migration/32)");
+        assert_eq!(c.aimd_decrease_factor, 0.5, "decrease stays aggressive (×0.5)");
+        // Invariants that keep validate_bands / the runner preflight happy.
+        assert!(c.elu_soft < c.elu_hard && c.elu_hard < c.elu_critical);
+        let min_gap = (c.elu_hard - c.elu_soft).min(c.elu_critical - c.elu_hard);
+        assert!(c.band_hysteresis < min_gap, "hysteresis {} must be < min gap {}", c.band_hysteresis, min_gap);
+    }
+
     /// Mirrors TS "rejects eluSoft >= eluHard".
     #[test]
     fn validate_bands_rejects_elu_soft_ge_elu_hard() {
@@ -1064,7 +1105,7 @@ mod tests {
     }
 
     /// Mirrors TS "rejects hysteresis wider than a band gap". Default gaps are
-    /// hard−soft = 0.2 and critical−hard = 0.15 → min gap 0.15; hysteresis 0.25
+    /// hard−soft = 0.1 and critical−hard = 0.15 → min gap 0.1; hysteresis 0.25
     /// traps the controller in the higher band.
     #[test]
     fn validate_bands_rejects_hysteresis_wider_than_a_band_gap() {

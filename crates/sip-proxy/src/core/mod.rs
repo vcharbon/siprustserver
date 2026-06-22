@@ -127,16 +127,45 @@ impl ProxyCore {
         if let Some(dst) = target.to_socket_addr() {
             if self.endpoint.send_to(bytes, dst).await.is_err() {
                 self.metrics.record_send_failure();
+                // Per-peer attribution (sip_proxy_peer_failures_total{...,
+                // kind="send_failure"}): classify against the registry (a known
+                // worker is internal/pinned, else external/LRU-bounded).
+                self.metrics.record_peer_failure(
+                    &dst,
+                    self.classify_peer(target),
+                    crate::observability::peer_failures::PeerFailureKind::SendFailure,
+                );
             }
             return;
         }
         self.named.send(bytes, target).await;
     }
 
+    /// Classify a forward target internal/external for the per-peer metric: a
+    /// destination that resolves to a known worker (registry) is the in-cluster
+    /// data path and is pinned; everything else (a UAC/UAS, a DNS-named callee)
+    /// is external and LRU-bounded.
+    fn classify_peer(&self, target: &ProxyAddr) -> crate::observability::peer_failures::PeerScope {
+        if self.registry.lookup_by_address(target).is_some() {
+            crate::observability::peer_failures::PeerScope::Internal
+        } else {
+            crate::observability::peer_failures::PeerScope::External
+        }
+    }
+
     /// Reply to the packet's source.
     async fn reply_to_source(&self, bytes: &[u8], src: SocketAddr) {
         if self.endpoint.send_to(bytes, src).await.is_err() {
             self.metrics.record_send_failure();
+            // The reply source is whoever sent us the packet (typically an
+            // upstream UAC/UAS — external); still classify via the registry in
+            // case it is a worker.
+            let target = ProxyAddr::from(src);
+            self.metrics.record_peer_failure(
+                &src,
+                self.classify_peer(&target),
+                crate::observability::peer_failures::PeerFailureKind::SendFailure,
+            );
         }
     }
 
@@ -357,5 +386,29 @@ mod sweeper_tests {
         assert_eq!(metrics.pending_invite_lru_size(), 0, "gauge must follow the reclaimed map down");
 
         task.abort();
+    }
+
+    /// Per-peer metric classification: a destination that resolves to a known
+    /// worker is INTERNAL (pinned); an unknown address (a UAC/UAS) is EXTERNAL
+    /// (LRU-bounded). Drives `sip_proxy_peer_failures_total{scope}`.
+    #[test]
+    fn classify_peer_internal_iff_known_worker() {
+        use crate::observability::peer_failures::PeerScope;
+        use crate::registry::WorkerEntry;
+
+        let worker = ProxyAddr::new("10.0.0.2", 5070);
+        let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![
+            WorkerEntry::alive("w0", worker.clone()),
+        ]));
+        let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(worker.clone()));
+        let core = ProxyCoreBuilder::new(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
+            .build(Box::new(PendingEndpoint));
+
+        assert_eq!(core.classify_peer(&worker), PeerScope::Internal, "a known worker is internal");
+        assert_eq!(
+            core.classify_peer(&ProxyAddr::new("203.0.113.9", 5060)),
+            PeerScope::External,
+            "an off-cluster address is external",
+        );
     }
 }

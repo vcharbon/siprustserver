@@ -29,7 +29,9 @@ use sip_net::UdpEndpoint;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::time::{delay_queue::Key, DelayQueue};
 
-use crate::event::{ClientTransactionHandle, EventQueueDropReason, TransactionEvent, TxnKind};
+use crate::event::{
+    ClientTransactionHandle, EventQueueDropReason, TimeoutKind, TransactionEvent, TxnKind,
+};
 use crate::metrics::{MetricsInner, TransactionMetrics};
 use crate::rng::IdGen;
 use crate::timers::{
@@ -765,7 +767,7 @@ impl Owner {
     }
 
     fn fire_timeout(&mut self, branch: &str) {
-        let (call_ref, leg_id, method) = match self.txns.get(branch) {
+        let (call_ref, leg_id, method, destination, timeout_kind) = match self.txns.get(branch) {
             Some(t) if t.state.is_active() => {
                 let method = t
                     .original_request
@@ -775,7 +777,16 @@ impl Owner {
                         TxnKind::Invite => Some("INVITE".to_string()),
                         TxnKind::NonInvite => None,
                     });
-                (t.call_ref.clone(), t.leg_id.clone(), method)
+                // Discriminate WHICH timer fired from the txn's armed window
+                // (`retransmit_max_ms`, set in `start_client_retransmit` from
+                // `client_timeout_ms`): the long out-of-dialog INVITE backstop is
+                // `INVITE_INITIAL_TIMEOUT`; Timer B/F is the short 64×T1 window.
+                let timeout_kind = if t.retransmit_max_ms == INVITE_INITIAL_TIMEOUT {
+                    TimeoutKind::Transaction
+                } else {
+                    TimeoutKind::Response
+                };
+                (t.call_ref.clone(), t.leg_id.clone(), method, t.destination, timeout_kind)
             }
             _ => return,
         };
@@ -787,6 +798,8 @@ impl Owner {
             call_ref,
             leg_id,
             method,
+            destination,
+            kind: timeout_kind,
         });
     }
 

@@ -257,6 +257,60 @@ fn assert_valid_config(probe: ProbeTimingConfig, observer: &LoadObserverConfig) 
     }
 }
 
+/// Read an `f64` env override: `Some(v)` iff the var is set AND parses to a
+/// finite number, else `None` (unset OR malformed — both leave the default).
+/// A malformed value is logged (so a typo is visible) but does NOT abort boot;
+/// the coherence preflight is what rejects an incoherent *combination*.
+fn env_f64_opt(key: &str) -> Option<f64> {
+    match env::var(key) {
+        Ok(raw) => match raw.trim().parse::<f64>() {
+            Ok(v) if v.is_finite() => Some(v),
+            _ => {
+                eprintln!("sip-proxy-runner: ignoring malformed {key}={raw:?} (not a finite number)");
+                None
+            }
+        },
+        Err(_) => None,
+    }
+}
+
+/// Apply the operator's band/AIMD/cap env overrides onto a base
+/// [`LoadObserverConfig`] (migration/32). Each `LB_*` var, when present and
+/// parseable, replaces one field; anything else leaves the shipped default. The
+/// result is NOT validated here — `assert_valid_config` does that (so an
+/// incoherent override set fails the boot preflight loudly). Every applied
+/// override is logged so the running config is visible in the pod log.
+///
+/// Exposed env vars (all `f64` cps/ratio):
+///   - `LB_ELU_SOFT` / `LB_ELU_HARD` / `LB_ELU_CRITICAL` — band thresholds.
+///   - `LB_BAND_HYSTERESIS` — band-boundary hysteresis.
+///   - `LB_AIMD_DECREASE_FACTOR` — multiplicative decrease (e.g. 0.5).
+///   - `LB_AIMD_INCREASE_STEP_CPS` — additive increase per tick.
+///   - `LB_CAP_CEILING_CPS` / `LB_CAP_FLOOR_CPS` — per-worker cap bounds.
+fn load_observer_cfg_from_env(mut cfg: LoadObserverConfig) -> LoadObserverConfig {
+    let mut applied: Vec<String> = Vec::new();
+    let mut set = |name: &str, field: &mut f64| {
+        if let Some(v) = env_f64_opt(name) {
+            *field = v;
+            applied.push(format!("{name}={v}"));
+        }
+    };
+    set("LB_ELU_SOFT", &mut cfg.elu_soft);
+    set("LB_ELU_HARD", &mut cfg.elu_hard);
+    set("LB_ELU_CRITICAL", &mut cfg.elu_critical);
+    set("LB_BAND_HYSTERESIS", &mut cfg.band_hysteresis);
+    set("LB_AIMD_DECREASE_FACTOR", &mut cfg.aimd_decrease_factor);
+    set("LB_AIMD_INCREASE_STEP_CPS", &mut cfg.aimd_increase_step_cps);
+    set("LB_CAP_CEILING_CPS", &mut cfg.cap_ceiling_cps);
+    set("LB_CAP_FLOOR_CPS", &mut cfg.cap_floor_cps);
+    if applied.is_empty() {
+        eprintln!("sip-proxy-runner: load-observer bands = shipped defaults (no LB_* overrides)");
+    } else {
+        eprintln!("sip-proxy-runner: load-observer band/AIMD overrides applied: {}", applied.join(" "));
+    }
+    cfg
+}
+
 /// Render the proxy-self gate's gauges/counters as Prometheus exposition,
 /// appended to the `/metrics` body (mirrors how `jemalloc_stats::prometheus_text`
 /// is appended). Only the real [`EluCpsGate`] has state to surface; with the
@@ -393,7 +447,14 @@ async fn main() {
         timeout_ms: parse_u64("HEALTH_TIMEOUT_MS", 1_500),
         threshold: parse_u64("HEALTH_THRESHOLD", 2) as u32,
     };
-    let observer_cfg = LoadObserverConfig::default();
+    // Operator env surface for the band/AIMD/cap knobs (migration/32). Overload
+    // calibration is iterative on the cluster, so these must be tunable WITHOUT a
+    // rebuild. Each override is applied only when its env var is set AND parses;
+    // a malformed value is ignored (the shipped default stays). An INCOHERENT
+    // result (reversed bands, hysteresis ≥ a band gap, cap ordering) is caught
+    // loudly by `assert_valid_config` below — it refuses to boot rather than
+    // silently mis-shedding (commit e0b17d7 coherence checks).
+    let observer_cfg = load_observer_cfg_from_env(LoadObserverConfig::default());
     assert_valid_config(
         ProbeTimingConfig { interval_ms: probe_cfg.interval_ms, timeout_ms: probe_cfg.timeout_ms },
         &observer_cfg,
@@ -480,7 +541,10 @@ async fn main() {
         clock.clone(),
         id_gen.clone(),
         probe_cfg,
-    );
+    )
+    // Per-peer probe-miss attribution (sip_proxy_peer_failures_total{
+    // scope="internal",kind="response_timeout"}): worker OPTIONS timeouts.
+    .with_metrics(metrics.clone());
 
     // N recv-shard cores over the shared routing state: strategy/registry/
     // metrics are `Arc`s, and the CANCEL/rtx LRU MUST be one instance across
@@ -924,5 +988,94 @@ mod tests {
     fn assert_valid_config_does_not_panic_on_a_valid_config() {
         // No `#[should_panic]` ⇒ a panic here fails the test.
         assert_valid_config(HELM_PROBE, &LoadObserverConfig::default());
+    }
+
+    // ── load_observer_cfg_from_env — LB_* operator overrides (migration/32) ──
+    //
+    // The process env is global, so these serialise behind one mutex and clean up
+    // every var they touch. They never spawn a runtime — pure CPU, default lane.
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    const LB_VARS: &[&str] = &[
+        "LB_ELU_SOFT",
+        "LB_ELU_HARD",
+        "LB_ELU_CRITICAL",
+        "LB_BAND_HYSTERESIS",
+        "LB_AIMD_DECREASE_FACTOR",
+        "LB_AIMD_INCREASE_STEP_CPS",
+        "LB_CAP_CEILING_CPS",
+        "LB_CAP_FLOOR_CPS",
+    ];
+
+    fn clear_lb_vars() {
+        for k in LB_VARS {
+            env::remove_var(k);
+        }
+    }
+
+    /// With no `LB_*` vars set, the config is the shipped default verbatim.
+    #[test]
+    fn env_overrides_absent_keep_the_shipped_defaults() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_lb_vars();
+        let cfg = load_observer_cfg_from_env(LoadObserverConfig::default());
+        let def = LoadObserverConfig::default();
+        assert_eq!(cfg.elu_soft, def.elu_soft);
+        assert_eq!(cfg.elu_hard, def.elu_hard);
+        assert_eq!(cfg.elu_critical, def.elu_critical);
+        assert_eq!(cfg.cap_ceiling_cps, def.cap_ceiling_cps);
+    }
+
+    /// Each present, parseable `LB_*` var replaces exactly its field; a coherent
+    /// override set still passes the boot preflight.
+    #[test]
+    fn env_overrides_present_replace_fields_and_stay_coherent() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_lb_vars();
+        env::set_var("LB_ELU_SOFT", "0.3");
+        env::set_var("LB_ELU_HARD", "0.45");
+        env::set_var("LB_ELU_CRITICAL", "0.6");
+        env::set_var("LB_BAND_HYSTERESIS", "0.05");
+        env::set_var("LB_AIMD_DECREASE_FACTOR", "0.4");
+        env::set_var("LB_CAP_CEILING_CPS", "150");
+        env::set_var("LB_CAP_FLOOR_CPS", "2");
+        let cfg = load_observer_cfg_from_env(LoadObserverConfig::default());
+        clear_lb_vars();
+        assert_eq!(cfg.elu_soft, 0.3);
+        assert_eq!(cfg.elu_hard, 0.45);
+        assert_eq!(cfg.elu_critical, 0.6);
+        assert_eq!(cfg.aimd_decrease_factor, 0.4);
+        assert_eq!(cfg.cap_ceiling_cps, 150.0);
+        assert_eq!(cfg.cap_floor_cps, 2.0);
+        // The result is coherent → the preflight accepts it.
+        assert_valid_config(HELM_PROBE, &cfg);
+    }
+
+    /// A malformed value is IGNORED (the default field is kept) — never aborts.
+    #[test]
+    fn env_overrides_malformed_value_is_ignored() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_lb_vars();
+        env::set_var("LB_ELU_CRITICAL", "not-a-number");
+        let cfg = load_observer_cfg_from_env(LoadObserverConfig::default());
+        clear_lb_vars();
+        assert_eq!(cfg.elu_critical, LoadObserverConfig::default().elu_critical);
+    }
+
+    /// An INCOHERENT override set (reversed bands) is NOT silently accepted: it
+    /// applies, then the boot preflight refuses to start.
+    #[test]
+    #[should_panic(expected = "refusing to start")]
+    fn env_overrides_incoherent_set_fails_the_preflight() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_lb_vars();
+        // elu_critical < elu_hard < elu_soft — fully reversed band ordering.
+        env::set_var("LB_ELU_SOFT", "0.8");
+        env::set_var("LB_ELU_HARD", "0.5");
+        env::set_var("LB_ELU_CRITICAL", "0.3");
+        let cfg = load_observer_cfg_from_env(LoadObserverConfig::default());
+        clear_lb_vars();
+        assert_valid_config(HELM_PROBE, &cfg); // panics: refusing to start
     }
 }

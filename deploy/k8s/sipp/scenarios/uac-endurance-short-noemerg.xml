@@ -1,24 +1,32 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
 <!--
-  Endurance background "short-hold" UAC — EMERGENCY half of the short stream
-  (role=short_em): INVITE → 200 → ACK → 30s hold → BYE. No call limiter, no
-  in-dialog OPTIONS (calls complete well before B2BUA's 900s keepalive timer).
+  Endurance background "short-hold" UAC — NON-EMERGENCY half of the short
+  stream (role=short_ne). Identical to uac-endurance-short.xml (the EMERGENCY
+  half, role=short_em) EXCEPT:
 
-  This half carries `Resource-Priority: esnet.0` (below), the canonical
-  emergency token `sip_message::is_emergency_request` recognises. The B2BUA
-  Tier-3 admission gate (overload.should_admit) therefore ALWAYS admits these,
-  even under cpu_starve overload — so they are NEVER shed. The non-emergency
-  half (uac-endurance-short-noemerg.xml, role=short_ne) has no such header and
-  IS sheddable. Run both at SHORT_CPS/2 each so the overload experiment can
-  prove emergency new calls survive while non-emergency new calls get 503'd.
+    * NO `Resource-Priority` header. The emergency sibling carries
+      `Resource-Priority: esnet.0`, which `sip_message::is_emergency_request`
+      recognises and the B2BUA Tier-3 admission gate (overload.should_admit)
+      ALWAYS admits. This stream has no such marker, so it is the traffic the
+      overload tiers are allowed to SHED first (stateless 503 overload) when a
+      worker is loaded — exactly the "new non-emergency calls may be rejected"
+      behaviour the cpu_starve overload experiment asserts.
 
-  Hold is hardcoded to 30000ms because sipp's `[$variable]` macro does
-  not expand inside `<pause milliseconds="...">` attributes — it only
-  works in `<send>` CDATA bodies. Endurance harness keeps the hold
-  literal here; the orchestrator does not pass -set hold_ms.
+    * It TOLERATES an overload reject. Under cpu_starve the worker's panic-ELU
+      backstop returns `503 Reason: SIP;cause=503;text="overload"` (also 480/486
+      from admission control); those branch to the `rejected` label and the call
+      ends cleanly, so a shed call is NOT counted as a SIPp failure (it would
+      otherwise sit to -recv_timeout). The SHED is measured SUT-side on
+      `b2bua_overload_rejected_total`, not as a SIPp short_ne failure — the gate
+      wants to see non-emergency calls rejected without that reading as breakage.
+
+  A call that is ADMITTED runs the normal INVITE / 200 / ACK / 30s hold / BYE so
+  established (in-dialog) short calls span the overload window and prove they are
+  NOT impacted. Hold is hardcoded 30000ms (sipp does not expand [$var] inside
+  <pause>), same as the emergency sibling.
 -->
-<scenario name="K8s UAC endurance short-hold — INVITE / 200 / hold / BYE">
+<scenario name="K8s UAC endurance short-hold NON-emergency — INVITE / 200|reject / hold / BYE">
 
   <send retrans="500">
     <![CDATA[
@@ -31,8 +39,7 @@
       X-Api-Call: {"destination":{"host":"[field0]","port":5060}}
       Contact: sip:sipp@[local_ip]:[local_port]
       Max-Forwards: 70
-      Subject: K8s endurance short-hold
-      Resource-Priority: esnet.0
+      Subject: K8s endurance short-hold non-emergency
       Content-Type: application/sdp
       Content-Length: [len]
 
@@ -48,6 +55,10 @@
 
   <recv response="100" optional="true"/>
   <recv response="180" optional="true"/>
+  <!-- Overload / admission-control rejects: terminate cleanly (not a failure). -->
+  <recv response="503" optional="true" next="rejected"/>
+  <recv response="480" optional="true" next="rejected"/>
+  <recv response="486" optional="true" next="rejected"/>
   <recv response="200" rtd="true" rrs="true"/>
 
   <send>
@@ -83,6 +94,8 @@
   </send>
 
   <recv response="200" crlf="true"/>
+
+  <label id="rejected"/>
 
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
   <CallLengthRepartition value="100, 1000, 10000, 30000, 60000"/>

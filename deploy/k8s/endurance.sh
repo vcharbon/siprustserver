@@ -15,7 +15,11 @@
 #                                                  reboot, incl. the split where one
 #                                                  re-INVITE lands on the backup and
 #                                                  the next on the reclaimed nominal)
-#     short   calls uac-endurance-short.xml       @ SHORT_CPS (30s hold)
+#     short   calls SPLIT 50/50 into emergency + non-emergency halves (30s hold):
+#               short_em uac-endurance-short.xml         @ SHORT_EM_CPS
+#                        (Resource-Priority esnet.0 ⇒ never shed by overload)
+#               short_ne uac-endurance-short-noemerg.xml @ SHORT_NE_CPS
+#                        (no RP ⇒ sheddable; tolerates the overload 503)
 #     abuse         uac-abuse-options-flood       @ ABUSE_CAPS (default 1cps)
 #     limiter calls uac-endurance-limiter-cap20.xml @ LIMITER_CPS (30s hold, sends
 #                   X-Api-Call cap=20 -> the limiter pins admitted conc. at ~20;
@@ -23,9 +27,18 @@
 #                   worker also carries an always-on global-stress:999999 entry, so
 #                   ALL streams traverse the limiter's admit/release/refresh chain.
 #   chaos cycle (every CHAOS_INTERVAL):
-#     orphan_kill -> kill_worker -> kill_proxy -> peak -> limiter_kill ->
-#     limiter_netcut -> (repeat). The two limiter events assert the cap
-#     RECONVERGES to ~20 within LIMITER_GRACE (10 min) after the fault.
+#     orphan_kill -> kill_worker -> kill_proxy -> peak -> cpu_starve ->
+#     limiter_kill -> limiter_netcut -> (repeat). The two limiter events assert
+#     the cap RECONVERGES to ~20 within LIMITER_GRACE (10 min) after the fault.
+#     cpu_starve is the OVERLOAD event: it shrinks ONE worker's CPU quota (via
+#     the kind node's cgroup, no restart) so its ELU crosses the panic threshold
+#     and the Tier-3 admission gate sheds NEW non-emergency INVITEs (503) while
+#     leaving emergency (Resource-Priority esnet.0) and all in-dialog traffic
+#     untouched. Unlike `peak` (which only overloaded the SIPp generators, never
+#     the platform), this actually engages the SUT's overload protection.
+#     Launch it standalone for tuning: `./chaos.sh cpustarve` (or `overload` to
+#     run it with a concurrent mini peak); knobs STARVE_TARGET/STARVE_SECS/
+#     STARVE_QUOTA_US/STARVE_PERIOD_US.
 #   involuntary (unscheduled, NOT the SUT):
 #     uas_crash -> a background watcher flags every SIPp-UAS exit-255 timer-wheel
 #     abort (a load-generator fault that wipes B-leg state) as its own red event
@@ -44,7 +57,11 @@
 #
 # Env knobs (defaults shown):
 #   DURATION=7200 CHAOS_INTERVAL=900 LONG_CPS=5 REINVITE_CPS=5 SHORT_CPS=100 ABUSE_CAPS=1
+#   SHORT_EM_CPS=SHORT_CPS/2 SHORT_NE_CPS=SHORT_CPS-SHORT_EM_CPS (emergency/non-emergency split)
 #   PEAK_CAPS=200 PEAK_SECS=30 WORKER_REPLICAS=2 PASS_THRESHOLD=90
+#   cpu_starve: STARVE_TARGET=b2bua-worker-0 STARVE_SECS=90 STARVE_QUOTA_US=30000
+#               STARVE_PERIOD_US=100000 STARVE_PEAK_CAPS=120 EMERG_LOSS_TOL=1
+#               (calibrated 2026-06-20 — 0.30 core + 120cps non-emergency peak)
 #   SMOKE=1 -> DURATION=600 CHAOS_INTERVAL=180
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -83,9 +100,36 @@ LONG_SHARD_CPS=$(( LONG_CPS / LONG_SHARDS )); [ "$LONG_SHARD_CPS" -lt 1 ] && LON
 LONG_SHARD_MAXCONC="${LONG_SHARD_MAXCONC:-800}"
 REINVITE_CPS="${REINVITE_CPS:-$LONG_CPS}"  # in-dialog re-INVITE stream, same volume as long
 SHORT_CPS="${SHORT_CPS:-100}"
+# The short stream is split HALF emergency / HALF non-emergency so the cpu_starve
+# overload experiment can prove the SUT sheds non-emergency NEW calls while never
+# touching emergency ones (and never touching ESTABLISHED in-dialog calls). The
+# two halves run as SEPARATE SIPp streams with DISTINCT roles so their outcomes
+# are measured apart:
+#   short_em  uac-endurance-short.xml          (Resource-Priority: esnet.0 ⇒
+#             emergency ⇒ overload.should_admit ALWAYS admits ⇒ never shed)
+#   short_ne  uac-endurance-short-noemerg.xml  (no Resource-Priority ⇒ sheddable;
+#             tolerates the overload 503/480/486 as a clean terminate, so a shed
+#             call is NOT a SIPp failure — the shed is read SUT-side on
+#             b2bua_overload_rejected_total instead)
+# Default each half to SHORT_CPS/2 so the aggregate offered short rate is unchanged.
+SHORT_EM_CPS="${SHORT_EM_CPS:-$(( SHORT_CPS / 2 ))}"; [ "$SHORT_EM_CPS" -lt 1 ] && SHORT_EM_CPS=1
+SHORT_NE_CPS="${SHORT_NE_CPS:-$(( SHORT_CPS - SHORT_EM_CPS ))}"; [ "$SHORT_NE_CPS" -lt 1 ] && SHORT_NE_CPS=1
 ABUSE_CAPS="${ABUSE_CAPS:-1}"
 PEAK_CAPS="${PEAK_CAPS:-200}"
 PEAK_SECS="${PEAK_SECS:-30}"
+# cpu_starve (OVERLOAD) event — CPU scarcity on ONE worker, NOT a traffic peak.
+# Defaulted here too (set -u) since cpu_starve_event references them bare; the
+# values are passed through to chaos.sh. CALIBRATED 2026-06-20 — see chaos.sh.
+# The event runs the `overload` COMBO (starve + a small non-emergency peak): at
+# the calibrated 0.30-core cap the worker's BASELINE demand (~0.22) sits UNDER the
+# cap, so starve-alone would not engage; the +STARVE_PEAK_CAPS non-emergency peak
+# lifts demand to ~0.33 (just over the cap) so the panic-ELU gate sheds the
+# non-emergency excess while emergency + in-dialog stay clean.
+STARVE_TARGET="${STARVE_TARGET:-b2bua-worker-0}"
+STARVE_SECS="${STARVE_SECS:-90}"
+STARVE_QUOTA_US="${STARVE_QUOTA_US:-30000}"
+STARVE_PERIOD_US="${STARVE_PERIOD_US:-100000}"
+STARVE_PEAK_CAPS="${STARVE_PEAK_CAPS:-120}"   # non-emergency peak the overload combo adds
 ORPHAN_CAPS="${ORPHAN_CAPS:-50}"
 ORPHAN_BUILD_SECS="${ORPHAN_BUILD_SECS:-20}"
 ORPHAN_REAP_WAIT="${ORPHAN_REAP_WAIT:-540}"  # must clear the FULL orphan-reap chain, not just the
@@ -109,6 +153,10 @@ LIMITER_TARGET="${LIMITER_TARGET:-$LIMITER_CAP}" # the cap the stream pins conc.
 # Front-proxy HA VIP + LB port (ADR-0012 D7): from the shared lib (subnet→VIP
 # derivation, all three runners agree). UAC streams target PROXY_VIP, not the Service.
 source "$HERE/lib/net-env.sh"
+# Proxy split (local=kind+127 bypass, non-local=through proxy). Gives wireup's
+# image rebuild the SAME proxy-forwarding `docker_build` run.sh uses, so the
+# endurance run can build images on a PROXIFIED host. Sourced AFTER net-env.sh.
+source "$HERE/lib/proxy-env.sh"
 source "$HERE/lib/kube-env.sh"   # pin every kubectl to context kind-$CLUSTER
 export LIMITER_CAP
 LIMITER_TOL="${LIMITER_TOL:-3}"        # allowed band around the cap (±). Was ±10:
@@ -208,11 +256,21 @@ launch_stream() {
   # the slip MORE likely). `short` holds ~3000 conc in one process (at the ceiling)
   # so it gets fattened; the rest stay modest to keep total CPU requests inside the
   # node budget alongside the 5 fattened UAS pods (req 4 each). Override via env.
+  # CPU REQUESTS trimmed for THIS cluster shape (2 load nodes, ~10 allocatable CPU
+  # each, already running other pods + the 5 UAS pods) — issue1: the old requests
+  # (short 4, short_em/ne 3, long 2, default 2) reserved more than the load nodes
+  # had spare and piled scheduling pressure on top of the UAS StatefulSet. We trim
+  # the RESERVATION only; the burst LIMITS are unchanged, so each CPU-bound SIPp
+  # timer wheel can still burst to catch up under load (the slip is prevented by the
+  # high limit, not the request floor). Override per-role via *_CPU_REQ env.
   local cpu_req cpu_lim mem_req mem_lim
   case "$role" in
-    short)  cpu_req="${SHORT_CPU_REQ:-4}"; cpu_lim="${SHORT_CPU_LIM:-16}"; mem_req="512Mi"; mem_lim="2Gi" ;;
-    long)   cpu_req="${LONG_CPU_REQ:-2}";  cpu_lim="${LONG_CPU_LIM:-12}"; mem_req="384Mi"; mem_lim="1536Mi" ;;
-    *)      cpu_req="2"; cpu_lim="8"; mem_req="384Mi"; mem_lim="1536Mi" ;;
+    # Both short halves (short_em/short_ne) hold ~half the old single-stream
+    # concurrency (SHORT_CPS/2 × 30s); req 3 -> 2 (limit 12 unchanged).
+    short_em|short_ne) cpu_req="${SHORT_CPU_REQ:-2}"; cpu_lim="${SHORT_CPU_LIM:-12}"; mem_req="512Mi"; mem_lim="2Gi" ;;
+    short)  cpu_req="${SHORT_CPU_REQ:-2}"; cpu_lim="${SHORT_CPU_LIM:-16}"; mem_req="512Mi"; mem_lim="2Gi" ;;
+    long)   cpu_req="${LONG_CPU_REQ:-1}";  cpu_lim="${LONG_CPU_LIM:-12}"; mem_req="384Mi"; mem_lim="1536Mi" ;;
+    *)      cpu_req="1"; cpu_lim="8"; mem_req="384Mi"; mem_lim="1536Mi" ;;
   esac
   export UAC_JOB_NAME="$job" SCENARIO="$scenario" CAPS="$cps" ROLE="$role" \
          MAX_CALLS=$(( cps * (DURATION + 600) )) \
@@ -234,7 +292,10 @@ baseline_specs() {
     echo "sipp-uac-long-$i uac-long-options.xml $LONG_SHARD_CPS long"
   done
   echo "sipp-uac-reinvite uac-reinvite.xml $REINVITE_CPS reinvite"
-  echo "sipp-uac-short uac-endurance-short.xml $SHORT_CPS short"
+  # Short split into emergency (short_em) + non-emergency (short_ne) halves — see
+  # SHORT_EM_CPS/SHORT_NE_CPS. Two roles so the overload gate measures them apart.
+  echo "sipp-uac-short-em uac-endurance-short.xml $SHORT_EM_CPS short_em"
+  echo "sipp-uac-short-ne uac-endurance-short-noemerg.xml $SHORT_NE_CPS short_ne"
   echo "sipp-uac-limiter uac-endurance-limiter-cap20.xml $LIMITER_CPS limiter"
 }
 
@@ -278,8 +339,8 @@ sip_chaos_event{type=\"uac_crash\",result=\"involuntary\"} 1"
 }
 
 # Sum baseline (long+short) cumulative outcome counters from the exporters.
-snap_success() { vmq 'sum(sipp_successful_calls_total{role=~"long|short"})'; }
-snap_failed()  { vmq 'sum(sipp_failed_calls_total{role=~"long|short"})'; }
+snap_success() { vmq 'sum(sipp_successful_calls_total{role=~"long|short_em|short_ne"})'; }
+snap_failed()  { vmq 'sum(sipp_failed_calls_total{role=~"long|short_em|short_ne"})'; }
 snap_conc()    { vmq 'sum(sipp_current_calls)'; }
 # Role-scoped variants. A reboot must be judged on LONG-hold survival SEPARATELY
 # from short-call success: long dialogs (OPTIONS-keepalive holds) span the reboot,
@@ -290,6 +351,22 @@ snap_conc()    { vmq 'sum(sipp_current_calls)'; }
 snap_failed_role()  { vmq "sum(sipp_failed_calls_total{role=\"$1\"})"; }
 snap_success_role() { vmq "sum(sipp_successful_calls_total{role=\"$1\"})"; }
 snap_created_role() { vmq "sum(sipp_calls_created_total{role=\"$1\"})"; }
+# Combined SHORT outcomes across BOTH halves (short_em + short_ne) — the reboot
+# short-survival gate judges the whole short population, not one priority class.
+snap_failed_short()  { vmq 'sum(sipp_failed_calls_total{role=~"short_em|short_ne"})'; }
+snap_success_short() { vmq 'sum(sipp_successful_calls_total{role=~"short_em|short_ne"})'; }
+# Per-priority-class deltas the cpu_starve overload gate keys on. The shed of a
+# non-emergency NEW call is read SUT-side (b2bua_overload_rejected_total), not as
+# a short_ne SIPp failure (it tolerates the 503); a short_em SIPp failure or ANY
+# emergency reject IS a regression (emergency must never be shed).
+snap_overload_rejected() { vmq 'sum(b2bua_overload_rejected_total)'; }
+snap_emergency_admitted() { vmq 'sum(b2bua_emergency_admitted_total)'; }
+# Panic-ELU rejects ONLY (the CPU-overload signal; excludes bucket_empty) and the
+# worst worker's published ELU EWMA — the two dials for tuning the cpu_starve
+# throttle. ELU must cross B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD (0.75) for the
+# panic-ELU sheds to start; if it does not, the throttle is too loose.
+snap_panic_rejected() { vmq 'sum(b2bua_overload_reject_total{reason="panic_elu"})'; }
+snap_elu_max()        { vmq 'max(b2bua_overload_elu_ewma)'; }
 # Role-scoped live concurrency (held dialogs right now). Used to size the AT-RISK
 # long population at kill time: when the long stream sits at its `-l` ceiling,
 # created_delta over the reboot window collapses to ~0, so created can't be the
@@ -613,7 +690,7 @@ reboot_event() {
   local lim1 res_limiter
   t0="$(date +%s)"
   s0="$(snap_success)"; f0="$(snap_failed)"; g0="$(snap_ghost)"; a0="$(snap_active)"; u0="$(snap_uas_restarts)"
-  ss0="$(snap_success_role short)"; sf0="$(snap_failed_role short)"
+  ss0="$(snap_success_short)"; sf0="$(snap_failed_short)"
   lf0="$(snap_failed_role long)";   lc0="$(snap_created_role long)"
   lconc0="$(snap_conc_role long)"   # AT-RISK held long dialogs at the kill instant
   if [ "${REBOOT_MODE:-alternate}" = "alternate" ]; then
@@ -641,7 +718,7 @@ reboot_event() {
   g1="$(snap_ghost)"
   for _ in 1 2 3 4 5; do sleep 12; s="$(snap_ghost)"; g1=$(python3 -c "print(min(float('$g1'),float('$s')))"); done
   s1="$(snap_success)"; f1="$(snap_failed)"; a1="$(snap_active)"; conc="$(snap_conc)"
-  ss1="$(snap_success_role short)"; sf1="$(snap_failed_role short)"
+  ss1="$(snap_success_short)"; sf1="$(snap_failed_short)"
   lf1="$(snap_failed_role long)";   lc1="$(snap_created_role long)"
   # (4) NO LIMITER PINNING (2026-06-12): calls caught mid-setup by the kill held
   # their cap20 slots while SIP-dead, pinning the limiter stream below the cap —
@@ -718,6 +795,106 @@ sip_chaos_limiter_conc{type=\"kill_worker\"} $lim1"
   long_aftermath_watch kill_worker "$idx" "$lf1" "$ldenom" "$u0"
 }
 
+# cpu_starve_event = the OVERLOAD verification. One worker is made CPU-scarce
+# (chaos.sh cpu_starve — NOT a traffic peak), which drives its ELU past the
+# panic threshold so the Tier-3 admission gate engages. Three invariants, judged
+# together (the experiment's explicit goals):
+#
+#   (1) IN-DIALOG UNAFFECTED — established long holds (and the 30s short holds
+#       spanning the window) keep resolving: long-loss ≤ LONG_LOSS_TOL and the
+#       ghost gap returns near baseline. In-dialog requests (re-INVITE/BYE/
+#       keepalive OPTIONS) are never gated, so a starve that tears down standing
+#       calls is a regression, not overload protection.
+#   (2) NEW NON-EMERGENCY MAY BE SHED — the gate is allowed (expected) to 503
+#       new non-emergency INVITEs. This is the signal the overload actually
+#       ENGAGED: b2bua_overload_rejected_total must rise. If it does NOT, the
+#       throttle was too loose to cross the ELU threshold → result n/a (calibrate
+#       STARVE_QUOTA_US down), not a pass.
+#   (3) NEW EMERGENCY NEVER SHED — short_em (Resource-Priority esnet.0) must NOT
+#       fail and emergency admits must keep climbing across the window. Emergency
+#       is force-admitted, so ANY short_em loss above EMERG_LOSS_TOL means the
+#       exemption broke — a hard fail.
+EMERG_LOSS_TOL="${EMERG_LOSS_TOL:-1}"   # max % of emergency short NEW calls allowed
+                                        # to fail in-window (force-admit ⇒ ~0)
+STARVE_GHOST_TOL="${STARVE_GHOST_TOL:-300}"
+cpu_starve_event() {
+  # $1=idx  $2=type label (cpu_starve | cpu_starve_all)  $3=chaos cmd (overload | overloadall)
+  local idx="$1" ty="${2:-cpu_starve}" cmd="${3:-overload}" tgt
+  local t0 g0 g1 s lf0 lc0 lconc0 lf1 lc1 ldf ldc ldenom lloss u0
+  local emf0 emc0 emf1 emc1 emdf emdc emloss rej0 rej1 rejd ea0 ea1 ead
+  local res_long res_leak res_emerg res_engaged result rise a0 a1
+  tgt="$STARVE_TARGET"; [ "$cmd" = "overloadall" ] && tgt="ALL-workers"
+  t0="$(date +%s)"
+  g0="$(snap_ghost)"; a0="$(snap_active)"; u0="$(snap_uas_restarts)"
+  lf0="$(snap_failed_role long)"; lc0="$(snap_created_role long)"; lconc0="$(snap_conc_role long)"
+  emf0="$(snap_failed_role short_em)"; emc0="$(snap_created_role short_em)"
+  rej0="$(snap_overload_rejected)"; ea0="$(snap_emergency_admitted)"
+  local pr0 pr1 prd elu1
+  pr0="$(snap_panic_rejected)"
+  log "CHAOS #$idx: $ty $tgt (ghost=$g0 overload_rejected=$rej0 panic_elu=$pr0 emergency_admitted=$ea0)"
+  push_metric "sip_chaos_run{type=\"$ty\",phase=\"inject\"} 1"
+  open_window "$ty"
+  # overload[all] = starve (one|all workers) + a small non-emergency peak (calibrated combo).
+  STARVE_TARGET="$STARVE_TARGET" STARVE_SECS="$STARVE_SECS" \
+    STARVE_QUOTA_US="$STARVE_QUOTA_US" STARVE_PERIOD_US="$STARVE_PERIOD_US" \
+    PEAK_CAPS="$STARVE_PEAK_CAPS" PEAK_SECS="$STARVE_SECS" \
+    ./chaos.sh "$cmd" >>"$RUNLOG" 2>&1 || true
+  sleep "$SETTLE"
+  ensure_baseline
+  # Ghost-gap FLOOR over a short window (robust to a one-scrape blip).
+  g1="$(snap_ghost)"
+  for _ in 1 2 3 4 5; do sleep 12; s="$(snap_ghost)"; g1=$(python3 -c "print(min(float('$g1'),float('$s')))"); done
+  a1="$(snap_active)"
+  lf1="$(snap_failed_role long)"; lc1="$(snap_created_role long)"
+  emf1="$(snap_failed_role short_em)"; emc1="$(snap_created_role short_em)"
+  rej1="$(snap_overload_rejected)"; ea1="$(snap_emergency_admitted)"
+  pr1="$(snap_panic_rejected)"; elu1="$(snap_elu_max)"
+  close_window "$ty"
+  prd=$(python3 -c "print(max(0,int(float('$pr1'))-int(float('$pr0'))))")
+  # In-dialog (long) survival.
+  ldf=$(python3 -c "print(max(0,int(float('$lf1'))-int(float('$lf0'))))")
+  ldc=$(python3 -c "print(max(0,int(float('$lc1'))-int(float('$lc0'))))")
+  ldenom=$(python3 -c "print(max(int(float('$lconc0')), $ldc, ${LONG_LOSS_DENOM_FLOOR:-100}))")
+  lloss=$(python3 -c "print(round(100.0*$ldf/$ldenom,1) if $ldenom else 0.0)")
+  rise=$(python3 -c "print(round(float('$g1')-float('$g0'),0))")
+  # Emergency NEW-call survival (short_em failed / created in-window).
+  emdf=$(python3 -c "print(max(0,int(float('$emf1'))-int(float('$emf0'))))")
+  emdc=$(python3 -c "print(max(0,int(float('$emc1'))-int(float('$emc0'))))")
+  emloss=$(python3 -c "print(round(100.0*$emdf/$emdc,1) if $emdc else 0.0)")
+  # Overload engagement + emergency-admit progress.
+  rejd=$(python3 -c "print(max(0,int(float('$rej1'))-int(float('$rej0'))))")
+  ead=$(python3 -c "print(max(0,int(float('$ea1'))-int(float('$ea0'))))")
+  res_long=$(python3 -c "print('pass' if float('$lloss')<=$LONG_LOSS_TOL else 'fail')")
+  res_leak=$(python3 -c "print('pass' if float('$rise')<=$STARVE_GHOST_TOL else 'fail')")
+  res_emerg=$(python3 -c "print('pass' if float('$emloss')<=$EMERG_LOSS_TOL else 'fail')")
+  res_engaged=$(python3 -c "print('yes' if $rejd>0 else 'no')")
+  if [ "$res_engaged" = "no" ]; then
+    result="n/a"   # overload never tripped — throttle too loose, calibrate STARVE_QUOTA_US down
+  elif [ "$res_long" = pass ] && [ "$res_leak" = pass ] && [ "$res_emerg" = pass ]; then
+    result="pass"
+  else
+    result="fail"
+  fi
+  result="$(taint_if_uas_crash "$result" "$u0" "$ty")"
+  push_metric "sip_chaos_event{type=\"$ty\",result=\"$result\"} 1
+sip_chaos_long_loss_pct{type=\"$ty\"} $lloss
+sip_chaos_emerg_loss_pct{type=\"$ty\"} $emloss
+sip_chaos_overload_rejected{type=\"$ty\"} $rejd
+sip_chaos_panic_elu_rejected{type=\"$ty\"} $prd
+sip_chaos_elu_max{type=\"$ty\"} ${elu1:-0}
+sip_chaos_emergency_admitted{type=\"$ty\"} $ead
+sip_chaos_ghost_rise{type=\"$ty\"} $rise"
+  printf '{"ts":%s,"event":%d,"type":"%s","target":"%s","long_loss_pct":%s,"long_failed":%d,"long_at_risk":%d,"emerg_loss_pct":%s,"emerg_failed":%d,"emerg_created":%d,"overload_rejected_delta":%d,"panic_elu_rejected_delta":%d,"elu_max":%s,"emergency_admitted_delta":%d,"ghost_rise":%s,"long_result":"%s","leak":"%s","emerg_result":"%s","engaged":"%s","result":"%s"}\n' \
+    "$t0" "$idx" "$ty" "$tgt" "$lloss" "$ldf" "$ldenom" "$emloss" "$emdf" "$emdc" "$rejd" "$prd" "${elu1:-0}" "$ead" "${rise%.*}" "$res_long" "$res_leak" "$res_emerg" "$res_engaged" "$result" >> "$EVENTS"
+  case "$result" in
+    pass)    ok   "CHAOS #$idx $ty: OVERLOAD engaged (rejected ${rejd} non-emergency; panic_elu ${prd}; ELU ${elu1}) + emergency safe (loss ${emloss}%, +${ead} admitted) + in-dialog safe (long-loss ${lloss}%, ghost rise ${rise}) — PASS" ;;
+    n/a)     warn "CHAOS #$idx $ty: overload did NOT engage (0 non-emergency rejected; ELU peaked ${elu1} vs 0.75 threshold) — throttle too loose, lower STARVE_QUOTA_US (current ${STARVE_QUOTA_US}/${STARVE_PERIOD_US}) — n/a" ;;
+    tainted) warn "CHAOS #$idx $ty: TAINTED by involuntary UAS crash — not attributable to the SUT (skip investigation)" ;;
+    *)       warn "CHAOS #$idx $ty: FAILURE — emergency loss ${emloss}%/${EMERG_LOSS_TOL}% ($res_emerg); in-dialog long-loss ${lloss}%/${LONG_LOSS_TOL}% ($res_long); leak ghost rise ${rise} ($res_leak) [overload engaged: rejected ${rejd}]" ;;
+  esac
+  long_aftermath_watch "$ty" "$idx" "$lf1" "$ldenom" "$u0"
+}
+
 # Record one chaos event: snapshot baseline outcomes, run it, settle, snapshot
 # again, compute the success% of calls that resolved across the window, push a
 # metric + append a JSONL row. Flags result=fail if below PASS_THRESHOLD.
@@ -734,6 +911,13 @@ chaos_event() {
   # kill_worker = a b2bua REBOOT: asserts the ADR-0014 invariants (survival +
   # no double-serve leak), not just baseline success% — see reboot_event.
   if [ "$type" = "kill_worker" ]; then reboot_event "$idx"; return; fi
+  # cpu_starve = OVERLOAD via CPU scarcity on ONE worker: asserts in-dialog survival
+  # + emergency never shed + non-emergency CAN be shed — see cpu_starve_event.
+  if [ "$type" = "cpu_starve" ]; then cpu_starve_event "$idx" cpu_starve overload; return; fi
+  # cpu_starve_all = the WORST case: ALL workers starved at once (no healthy peer to
+  # absorb traffic), so every emergency call lands on a starved worker. Same gate —
+  # emergency must STILL be ≈0-impact and only non-emergency shed.
+  if [ "$type" = "cpu_starve_all" ]; then cpu_starve_event "$idx" cpu_starve_all overloadall; return; fi
   local t0 s0 f0 s1 f1 ds df pct result conc u0
   local lf0 lc0 lconc0 lf1 lc1 ldf ldc ldenom lloss res_blend res_long
   t0="$(date +%s)"
@@ -817,8 +1001,188 @@ sip_chaos_resolved{type=\"$type\",outcome=\"failed\"} $df"
   long_aftermath_watch "$type" "$idx" "$lf1" "$ldenom" "$u0"
 }
 
+# --- deploy preflight + readiness gates (issue1) ---------------------------------
+# Normalise a k8s CPU quantity (e.g. "2", "500m", "1500m") to millicores (integer).
+cpu_to_millis() {  # $1 = quantity
+  python3 - "$1" <<'PY' 2>/dev/null || echo 0
+import sys, re
+q = (sys.argv[1] or "0").strip()
+if not q:
+    print(0); raise SystemExit
+m = re.match(r'^(\d+(?:\.\d+)?)(m?)$', q)
+if not m:
+    print(0); raise SystemExit
+v = float(m.group(1))
+print(int(round(v * (1 if m.group(2) == 'm' else 1000))))
+PY
+}
+
+# Capacity preflight: BEFORE the StatefulSet is applied, verify the 5 tier=load
+# sipp-uas replicas (each requesting UAS_CPU_REQ cores) actually fit on the tier=load
+# nodes given what is ALREADY scheduled there. Reads node allocatable CPU and the sum
+# of existing (non-terminated) pod CPU requests per tier=load node via kubectl/python.
+# DEGRADES TO A WARNING (returns 0) if it cannot compute (no jq dependency; tolerant
+# of odd numbers) so it never wedges a run on a parsing hiccup — it only HARD-FAILS
+# when it can confidently prove the pods will not fit.
+UAS_REPLICAS="${UAS_REPLICAS:-5}"          # must match manifests/10-sipp-uas.yaml replicas
+UAS_CPU_REQ_CORES="${UAS_CPU_REQ_CORES:-2}" # must match the UAS pod cpu request (millis below)
+capacity_preflight() {
+  local want_millis allocatable_millis used_millis headroom_millis
+  want_millis=$(( UAS_REPLICAS * $(cpu_to_millis "${UAS_CPU_REQ_CORES}") ))
+  # Allocatable CPU summed over tier=load nodes.
+  local nodes
+  nodes="$(kubectl get nodes -l tier=load -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)"
+  if [ -z "$nodes" ]; then
+    warn "capacity preflight: no tier=load nodes found (or kubectl unavailable) — skipping (degraded to warning)"
+    return 0
+  fi
+  allocatable_millis=0
+  local n a
+  while read -r n; do
+    [ -n "$n" ] || continue
+    a="$(kubectl get node "$n" -o jsonpath='{.status.allocatable.cpu}' 2>/dev/null)"
+    allocatable_millis=$(( allocatable_millis + $(cpu_to_millis "$a") ))
+  done <<< "$nodes"
+  # Existing requested CPU on those nodes (sum of container requests for pods bound
+  # to a tier=load node, excluding Succeeded/Failed). Computed entirely in python so
+  # a missing field never aborts the loop.
+  # The python script lives in a heredoc-to-VARIABLE (a SIMPLE `cat` substitution —
+  # the same safe shape cpu_to_millis uses), NOT inline in the pipeline below. A
+  # heredoc inside a `$( ... | ... || echo 0 )` pipeline trips bash's RUNTIME parser
+  # ("command substitution: syntax error near ||" — invisible to `bash -n`, so it
+  # only blows up once tier=load nodes exist and this path runs), AND the `<<'PY'`
+  # heredoc would override the pipe as stdin so the kubectl JSON never reached python
+  # (used would always be 0). With `python3 -c "$used_py"` the JSON pipes to stdin,
+  # the script comes from -c, and $nodes is argv[1].
+  local used_py
+  used_py="$(cat <<'PY'
+import sys, json, re
+load_nodes = set(filter(None, (l.strip() for l in sys.argv[1].splitlines())))
+def millis(q):
+    q = (q or "").strip()
+    m = re.match(r'^(\d+(?:\.\d+)?)(m?)$', q)
+    if not m: return 0
+    return int(round(float(m.group(1)) * (1 if m.group(2) == 'm' else 1000)))
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(0); raise SystemExit
+total = 0
+for p in d.get("items", []):
+    if p.get("spec", {}).get("nodeName") not in load_nodes:
+        continue
+    for c in p.get("spec", {}).get("containers", []):
+        total += millis(c.get("resources", {}).get("requests", {}).get("cpu"))
+print(total)
+PY
+)"
+  used_millis="$(kubectl get pods -A \
+      --field-selector=status.phase!=Succeeded,status.phase!=Failed \
+      -o json 2>/dev/null \
+    | python3 -c "$used_py" "$nodes" 2>/dev/null || echo 0)"
+  if [ "${allocatable_millis:-0}" -le 0 ]; then
+    warn "capacity preflight: could not read tier=load allocatable CPU — skipping (degraded to warning)"
+    return 0
+  fi
+  headroom_millis=$(( allocatable_millis - used_millis ))
+  log "capacity preflight: sipp-uas wants $(( want_millis / 1000 )) CPU (${UAS_REPLICAS}×${UAS_CPU_REQ_CORES}); tier=load allocatable $(( allocatable_millis / 1000 )) CPU, already requested $(( used_millis / 1000 )) CPU, headroom ~$(( headroom_millis / 1000 )) CPU"
+  if [ "$want_millis" -gt "$headroom_millis" ]; then
+    warn "sipp-uas requests $(( want_millis / 1000 )) CPU across tier=load but headroom is ~$(( headroom_millis / 1000 )) CPU — refusing to deploy (lower sipp-uas replicas/cpu request or free node capacity)"
+    kubectl get nodes -l tier=load -o wide 2>/dev/null | tee -a "$RUNLOG" || true
+    return 1
+  fi
+  return 0
+}
+
+# Hard readiness gate: refuse to continue after a partial deploy. Asserts the
+# required workloads are Ready before baseline traffic starts (issue1: wireup used
+# to fall through on a stuck rollout and baseline never produced traffic).
+assert_workloads_ready() {
+  local ok_all=1
+  # sipp-uas: ALL replicas Ready (the StatefulSet that wedged Pending on the 5th pod).
+  local desired ready
+  # Desired = .spec.replicas (the authoritative target); .status.replicas can lag
+  # mid-reconcile and read low, letting the gate pass before the STS is fully scaled.
+  desired="$(kubectl -n "$NS" get statefulset sipp-uas -o jsonpath='{.spec.replicas}' 2>/dev/null || echo)"
+  ready="$(kubectl -n "$NS" get statefulset sipp-uas -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
+  if [ -z "$desired" ] || [ "${ready:-0}" != "$desired" ]; then
+    warn "sipp-uas not fully ready (${ready:-0}/${desired:-?} replicas Ready)"
+    ok_all=0
+  fi
+  # b2bua workers: all replicas Ready.
+  local wdesired wready
+  wdesired="$(kubectl -n "$NS" get statefulset b2bua-worker -o jsonpath='{.spec.replicas}' 2>/dev/null || echo)"
+  wready="$(kubectl -n "$NS" get statefulset b2bua-worker -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
+  if [ -z "$wdesired" ] || [ "${wready:-0}" != "$wdesired" ]; then
+    warn "b2bua-worker not fully ready (${wready:-0}/${wdesired:-?} replicas Ready)"
+    ok_all=0
+  fi
+  # front proxy: at least one Ready replica.
+  local pready
+  pready="$(kubectl -n "$NS" get deploy sip-front-proxy -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
+  if [ "${pready:-0}" -lt 1 ]; then
+    warn "sip-front-proxy has no Ready replica"
+    ok_all=0
+  fi
+  if [ "$ok_all" -ne 1 ]; then
+    warn "deploy is PARTIAL — dumping pending pods + their reasons for diagnosis:"
+    kubectl -n "$NS" get pods -o wide 2>/dev/null | tee -a "$RUNLOG" || true
+    kubectl -n "$NS" get pods --field-selector=status.phase=Pending \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+      | while read -r pp; do
+          [ -n "$pp" ] || continue
+          echo "--- describe pod $pp (last events) ---" | tee -a "$RUNLOG"
+          kubectl -n "$NS" describe pod "$pp" 2>/dev/null | sed -n '/Events:/,$p' | tee -a "$RUNLOG" || true
+        done
+    return 1
+  fi
+  return 0
+}
+
+# Traffic-started assertion: within ~60s confirm at least one sipp-uac pod exists AND
+# calls are actually being created (sipp_calls_created_total increasing). Fails fast
+# with the specific reason so a "clean-looking" zero-traffic run is impossible.
+assert_traffic_started() {
+  local deadline=$(( $(date +%s) + 60 ))
+  local c0 saw_pod=0
+  c0="$(vmq 'sum(sipp_calls_created_total)')"
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if kubectl -n "$NS" get pods -l app=sipp-uac -o name 2>/dev/null | grep -q . ; then
+      saw_pod=1
+      local c1; c1="$(vmq 'sum(sipp_calls_created_total)')"
+      if python3 -c "exit(0 if float('$c1') > float('$c0') else 1)" 2>/dev/null; then
+        ok "traffic started: sipp-uac pods present and calls created ($c0 -> $c1)"
+        return 0
+      fi
+    fi
+    sleep 5
+  done
+  if [ "$saw_pod" -ne 1 ]; then
+    warn "no sipp-uac pod appeared within 60s of starting baseline — traffic NEVER started (check the UAC jobs / scheduling)"
+  else
+    warn "sipp-uac pods exist but sipp_calls_created_total did not increase within 60s — no calls being placed (check SIPp logs / proxy reachability)"
+    kubectl -n "$NS" logs -l app=sipp-uac -c sipp-uac --tail=40 2>/dev/null | tee -a "$RUNLOG" || true
+  fi
+  return 1
+}
+
 wireup() {
   mkdir -p "$RUN_DIR"
+  # Bootstrap the cluster if it is ABSENT. The endurance flow historically assumed
+  # an already-up cluster — wireup only `deploy`s — so from a COLD machine (no kind
+  # cluster) `kind load` + `./run.sh deploy` failed with "no nodes found for cluster
+  # / context does not exist" and the run produced ZERO traffic. `./run.sh up` creates
+  # the cluster + builds + loads the current-source images + brings up observability —
+  # exactly wireup's own build/load block — so when we bootstrap here we SKIP_BUILD the
+  # redundant rebuild below and go straight to deploy.
+  if ! kind get clusters 2>/dev/null | grep -qx "${CLUSTER:-sip-e2e}"; then
+    log "wireup: kind cluster '${CLUSTER:-sip-e2e}' absent — bootstrapping via ./run.sh up (build + load + obs)"
+    if ! ./run.sh up >>"$RUNLOG" 2>&1; then
+      warn "wireup: ./run.sh up failed to bring up cluster '${CLUSTER:-sip-e2e}' — see $RUNLOG"
+      return 1
+    fi
+    SKIP_BUILD=1   # up just built + loaded current source; skip the redundant rebuild
+  fi
   local SUT_IMAGE="${SUT_IMAGE:-siprustserver:dev}"
   local KEEPALIVED_IMAGE="${KEEPALIVED_IMAGE:-siprustserver-keepalived:dev}"
   local RABBITMQ_IMAGE="${RABBITMQ_IMAGE:-rabbitmq:3.13-management}"
@@ -830,9 +1194,12 @@ wireup() {
   # deploys exactly what a fresh cluster start would. (SKIP_BUILD=1 to reuse.)
   if [ "${SKIP_BUILD:-0}" != "1" ]; then
     log "wireup: building SUT image $SUT_IMAGE (current source) + keepalived + sipp:dev"
-    docker build -f "$REPO_ROOT/deploy/docker/Dockerfile" -t "$SUT_IMAGE" "$REPO_ROOT" >>"$RUNLOG" 2>&1
-    docker build -f "$REPO_ROOT/deploy/docker/Dockerfile.keepalived" -t "$KEEPALIVED_IMAGE" "$REPO_ROOT" >>"$RUNLOG" 2>&1
-    docker build -t sipp:dev "$SIPP_DIR" >>"$RUNLOG" 2>&1
+    log "wireup: proxy env (forwarded to docker build): $(proxy_env_summary)"
+    # docker_build (lib/proxy-env.sh) forwards the host proxy as build-args so the
+    # rebuild works on a PROXIFIED host; merged NO_PROXY keeps local fetches direct.
+    docker_build -f "$REPO_ROOT/deploy/docker/Dockerfile" -t "$SUT_IMAGE" "$REPO_ROOT" >>"$RUNLOG" 2>&1
+    docker_build -f "$REPO_ROOT/deploy/docker/Dockerfile.keepalived" -t "$KEEPALIVED_IMAGE" "$REPO_ROOT" >>"$RUNLOG" 2>&1
+    docker_build -t sipp:dev "$SIPP_DIR" >>"$RUNLOG" 2>&1
     log "wireup: pulling RabbitMQ image $RABBITMQ_IMAGE (CDR transport)"
     docker image inspect "$RABBITMQ_IMAGE" >/dev/null 2>&1 || docker pull "$RABBITMQ_IMAGE" >>"$RUNLOG" 2>&1
     log "wireup: loading images into kind"
@@ -840,6 +1207,13 @@ wireup() {
     kind load docker-image "$KEEPALIVED_IMAGE" --name "$CLUSTER" >>"$RUNLOG" 2>&1
     kind load docker-image sipp:dev --name "$CLUSTER" >>"$RUNLOG" 2>&1
     kind load docker-image "$RABBITMQ_IMAGE" --name "$CLUSTER" >>"$RUNLOG" 2>&1
+  fi
+  # Capacity preflight BEFORE deploy applies the sipp-uas StatefulSet: prove the 5
+  # tier=load replicas fit, else fail with a clear headroom message (issue1 — the 5th
+  # UAS pod stayed Pending on CPU and deploy timed out). Skippable for odd clusters
+  # via CAPACITY_PREFLIGHT=0; degrades to a warning if it cannot compute.
+  if [ "${CAPACITY_PREFLIGHT:-1}" = "1" ]; then
+    capacity_preflight || { warn "wireup: capacity preflight failed — refusing to deploy"; return 1; }
   fi
   log "wireup: deploy stack (repl on, ${WORKER_REPLICAS} workers) — same path as cluster start"
   REPL_ENABLE=1 WORKER_REPLICAS="$WORKER_REPLICAS" OBS_ENABLE="${OBS_ENABLE:-1}" ./run.sh deploy >>"$RUNLOG" 2>&1
@@ -857,11 +1231,19 @@ wireup() {
   fi
   log "wireup: (re)load observability dashboards/scrape"
   [ -x "$OBS_DIR/install.sh" ] && "$OBS_DIR/install.sh" --apply >>"$RUNLOG" 2>&1 || true
+  # HARD readiness gate: refuse to continue (and to start baseline traffic) after a
+  # partial deploy. The rollout-status waits above are `|| true`-soft, so without this
+  # a stuck StatefulSet (e.g. a Pending UAS pod) would fall through and the run would
+  # generate ZERO traffic while looking fine (issue1).
+  if ! assert_workloads_ready; then
+    warn "sipp-uas/b2bua/proxy not fully ready; refusing to start baseline traffic"
+    return 1
+  fi
   ok "wireup complete"
 }
 
 start_baseline() {
-  log "starting baseline streams: long@${LONG_CPS}(${LONG_SHARDS} shards×${LONG_SHARD_CPS}cps) reinvite@${REINVITE_CPS} short@${SHORT_CPS} abuse@${ABUSE_CAPS} limiter@${LIMITER_CPS}(cap ${LIMITER_TARGET})"
+  log "starting baseline streams: long@${LONG_CPS}(${LONG_SHARDS} shards×${LONG_SHARD_CPS}cps) reinvite@${REINVITE_CPS} short_em@${SHORT_EM_CPS}+short_ne@${SHORT_NE_CPS}(=${SHORT_CPS}) abuse@${ABUSE_CAPS} limiter@${LIMITER_CPS}(cap ${LIMITER_TARGET})"
   local job scenario cps role
   while read -r job scenario cps role; do
     [ -n "$job" ] && launch_stream "$job" "$scenario" "$cps" "$role"
@@ -886,7 +1268,13 @@ run() {
   mkdir -p "$RUN_DIR"; : > "$EVENTS"
   log "=== ENDURANCE RUN $TS (smoke=${SMOKE:-0}) dur=${DURATION}s interval=${CHAOS_INTERVAL}s ==="
   log "results: $RUN_DIR"
-  wireup
+  # wireup now hard-fails (returns non-zero) on a partial deploy / failed capacity
+  # preflight; propagate that as a run failure instead of barrelling on to start
+  # traffic that will never flow (issue1).
+  if ! wireup; then
+    warn "=== ENDURANCE RUN ABORTED: wire-up failed (deploy partial or capacity preflight failed) — no baseline traffic started ==="
+    exit 1
+  fi
   # Gate readiness before driving traffic.
   kubectl -n "$NS" wait --for=condition=ready pod -l app=b2bua-worker --timeout=120s >>"$RUNLOG" 2>&1 || true
   kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout=90s >>"$RUNLOG" 2>&1 || true
@@ -895,6 +1283,14 @@ run() {
   log "cluster-settle ${CLUSTER_SETTLE}s (let the proxy discover workers) before starting UAC streams"
   sleep "$CLUSTER_SETTLE"
   start_baseline
+  # Assert traffic ACTUALLY started (sipp-uac pods exist + calls are being created)
+  # within ~60s, so a silent zero-traffic run fails fast with the specific reason
+  # instead of soaking for two hours against nothing (issue1).
+  if ! assert_traffic_started; then
+    warn "=== ENDURANCE RUN ABORTED: baseline traffic did not start within 60s ==="
+    stop_streams || true
+    exit 1
+  fi
   # Watch for INVOLUNTARY SIPp-UAS crashes (exit-255 timer-wheel aborts) for the
   # whole run, so a load-generator fault is flagged + taints (not blamed on) the SUT.
   uas_crash_watcher & UAS_WATCH_PID=$!
@@ -908,7 +1304,7 @@ run() {
     cycle=(kill_worker)
     log "REBOOT_FOCUS=1 — chaos cycle is b2bua worker reboot only (graceful/crash alternating)"
   else
-    cycle=(orphan_kill kill_worker kill_proxy peak limiter_kill limiter_netcut)
+    cycle=(orphan_kill kill_worker kill_proxy peak cpu_starve cpu_starve_all limiter_kill limiter_netcut)
   fi
   local start now idx=0
   start="$(date +%s)"

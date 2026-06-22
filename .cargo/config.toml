@@ -1,0 +1,21 @@
+# Workspace-wide tokio_unstable enablement.
+#
+# The worker-side faithful ELU signal (`b2bua::overload::LiveLoadSampler`) reads
+# per-worker busy time via `tokio::runtime::RuntimeMetrics::worker_total_busy_duration`
+# (`tokio::runtime::Handle::current().metrics()`). On our x86_64 target with
+# tokio 1.52.3 that accessor is gated `cfg(target_has_atomic = "64")` and its
+# recording runs on tokio's STABLE path, so the signal already works without this
+# flag — but the broader RuntimeMetrics surface is `cfg(tokio_unstable)` and the
+# upstream contract is that RuntimeMetrics consumers set it; we enable it
+# workspace-wide for uniformity + future-proofing (e.g. if tokio moves the
+# accessor under the unstable gate).
+#
+# GOTCHA: `[build] rustflags` here is IGNORED if a `RUSTFLAGS` env var is set in
+# the build environment. No build path in this repo sets RUSTFLAGS (verified:
+# justfile, deploy/docker/Dockerfile, and the worker manifests all use a bare
+# `cargo build`/`cargo test`). The worker image (`b2bua-runner`) is built by
+# `deploy/docker/Dockerfile` with `cargo build` over a `COPY . .` build context
+# (`.dockerignore` does NOT exclude `.cargo/`), so this file is copied into the
+# image build and the flag reaches the worker binary.
+[build]
+rustflags = ["--cfg", "tokio_unstable"]

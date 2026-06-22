@@ -56,11 +56,16 @@ export LIMITER_CAP
 # no default syntax, so EVERY render site must export them — endurance.sh sizes
 # these per-role; the chaos/abuse/orphan/peak/failover streams here are transient
 # and low-concurrency, so a modest default is fine).
-export UAC_CPU_REQ="${UAC_CPU_REQ:-2}" UAC_CPU_LIM="${UAC_CPU_LIM:-8}" \
+# Request lowered 2 -> 1 (limit unchanged at 8): these chaos/abuse/orphan/peak
+# streams are transient and low-concurrency, so a 1-core RESERVATION is plenty and
+# the 2-core default added needless scheduling pressure on the 2-load-node cluster
+# (issue1). The burst limit (8) is untouched, so a brief peak is still uncapped.
+export UAC_CPU_REQ="${UAC_CPU_REQ:-1}" UAC_CPU_LIM="${UAC_CPU_LIM:-8}" \
        UAC_MEM_REQ="${UAC_MEM_REQ:-384Mi}" UAC_MEM_LIM="${UAC_MEM_LIM:-1536Mi}"
 
 log()  { printf '\033[1;36m>> %s\033[0m\n' "$*" >&2; }
 ok()   { printf '\033[1;32mPASS: %s\033[0m\n' "$*" >&2; }
+warn() { printf '\033[1;33mWARN: %s\033[0m\n' "$*" >&2; }
 fail() { printf '\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
 
 # Reuse run.sh for the heavy lifting (image build, cluster, base deploy) so the
@@ -158,21 +163,200 @@ kill_proxy() {
 # deletes it after PEAK_SECS.
 PEAK_CAPS="${PEAK_CAPS:-200}"
 PEAK_SECS="${PEAK_SECS:-30}"
+# A peak is a flood of NEW calls; for the overload experiment those should be
+# NON-emergency (sheddable) so a concurrent cpu_starve can actually 503 them —
+# emergency bursts (Resource-Priority esnet.0) are force-admitted and would just
+# add load without exercising the shed. Default to the non-emergency short
+# scenario; override PEAK_SCENARIO=uac-endurance-short.xml for an emergency flood.
+PEAK_SCENARIO="${PEAK_SCENARIO:-uac-endurance-short-noemerg.xml}"
 peak() {
   local job="sipp-uac-peak"
-  log "CHAOS: traffic peak ${PEAK_CAPS}cps for ${PEAK_SECS}s"
+  log "CHAOS: traffic peak ${PEAK_CAPS}cps for ${PEAK_SECS}s (scenario=$PEAK_SCENARIO)"
   push_metric "sip_chaos_event{type=\"peak\",phase=\"start\"} 1
 sip_chaos_active{type=\"peak\"} 1"
   export UAC_JOB_NAME="$job" CAPS="$PEAK_CAPS" \
          MAX_CALLS=$(( PEAK_CAPS * (PEAK_SECS + 10) )) \
          MAX_CONCURRENT="${MAX_CONCURRENT:-$(( PEAK_CAPS * 600 ))}" \
-         SCENARIO="uac-endurance-short.xml" ROLE="peak"
+         SCENARIO="$PEAK_SCENARIO" ROLE="peak"
   kubectl -n "$NS" delete job "$job" --ignore-not-found >/dev/null 2>&1 || true
   envsubst < manifests/40-sipp-uac-job.yaml | kubectl apply -f -
   sleep "$PEAK_SECS"
   kubectl -n "$NS" delete job "$job" --ignore-not-found >/dev/null 2>&1 || true
   push_metric "sip_chaos_event{type=\"peak\",result=\"pass\"} 1
 sip_chaos_active{type=\"peak\"} 0"
+}
+
+# CHAOS: cpu_starve — make ONE b2bua worker pod overloaded by SHRINKING the CPU
+# available to its container (NOT by piling on traffic). This is the faithful
+# "the platform itself is overloaded" lever: the old `peak` event just added
+# 200cps of NEW INVITEs, which saturated the SIPp generators long before it
+# stressed the platform, so the SUT's overload tiers never actually engaged. CPU
+# scarcity DOES engage them — the worker's ELU sampler (a 100ms tokio interval
+# whose reading is its own scheduling lag, crates/b2bua/src/overload.rs) lands
+# chronically late under a tight CPU quota, the published `elu` EWMA climbs past
+# B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD (0.75), and the Tier-3 admission gate
+# (overload.should_admit) starts returning the stateless `503 overload` for NEW
+# NON-emergency INVITEs while ALWAYS admitting emergency ones (Resource-Priority
+# esnet.0) and NEVER touching established in-dialog requests (re-INVITE/BYE/in-
+# dialog OPTIONS are not gated). That is exactly the trio the experiment asserts:
+#   (1) in-dialog calls unaffected, (2) new calls MAY be rejected, (3) but only
+#   non-emergency ones.
+#
+# Mechanism (cgroup v2, reversible, NO pod restart so no reclaim/failover noise):
+# resolve the target pod's node (a kind docker container) + its b2bua container
+# cgroup, write a tight `cpu.max` quota onto that container's cgroup for
+# STARVE_SECS, then restore the prior value (default "max" = unlimited; the
+# worker manifest sets no CPU limit). Driven from the host via `docker exec` into
+# the kind node — that is where /sys/fs/cgroup is writable as root; the container
+# itself mounts it read-only. Requires the kind provider (docker) on the host.
+#
+# Knobs (defaults): STARVE_TARGET=b2bua-worker-0  STARVE_SECS=60
+#   STARVE_QUOTA_US=40000  STARVE_PERIOD_US=100000   (40000/100000 = 0.4 CPU)
+# 0.4 CPU is the starting guess: enough sustained backlog (the worker wants
+# ~1-2 cores under the steady endurance load) to peg ELU high and trip the gate,
+# while still letting the cheap /ready GET answer within its ~4s failure budget
+# so the pod stays IN the LB (a pod that drops out reroutes new calls to the
+# healthy worker and the gate is never exercised). EXPECT TO CALIBRATE on the
+# first live run — too tight drops /ready (looks like a kill, not an overload);
+# too loose never crosses 0.75 ELU. Watch b2bua_overload_rejected_total rise and
+# the worker stay Ready; nudge STARVE_QUOTA_US until both hold.
+# Defaults CALIBRATED 2026-06-20 on the default endurance profile (long@5,
+# short 50em+50ne, reinvite@5, limiter@2; 2 workers on 24-core nodes). A worker
+# draws ~0.22 core at that baseline and ~0.33 under the +120cps non-emergency
+# peak the `overload` combo adds. 0.30 core (30000/100000) is JUST BELOW that
+# demand: ELU crosses 0.75 → the gate 503s the non-emergency EXCESS while the
+# worker keeps serving emergency + in-dialog (measured: ~42 non-emergency shed,
+# ~0 emergency loss, 0 in-dialog loss, worker stays Ready). LOWER caps over-starve
+# it (0.20 → ~3.6% emergency collateral; 0.08 → worker can't serve anything,
+# emergency + in-dialog both fail) — a fixed CPU cap is not relieved by shedding,
+# so too-tight starves emergency too. RE-CALIBRATE if the baseline load, worker
+# count, or node size changes (it is demand-relative, not absolute).
+STARVE_TARGET="${STARVE_TARGET:-b2bua-worker-0}"
+STARVE_SECS="${STARVE_SECS:-90}"
+STARVE_QUOTA_US="${STARVE_QUOTA_US:-30000}"
+STARVE_PERIOD_US="${STARVE_PERIOD_US:-100000}"
+
+# Echo "NODE CGROUP_DIR" for $STARVE_TARGET's b2bua container, or nothing on miss.
+# Resolves pod→node (node name == kind docker container name) and the container
+# id→cgroup scope dir under the node's /sys/fs/cgroup (driver-agnostic find on the
+# container id, so it works for both the systemd and cgroupfs cgroup drivers).
+_starve_locate() {
+  local pod="$1" node cid dir
+  node="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null)"
+  [ -n "$node" ] || { warn "cpu_starve: pod $pod has no node (not scheduled?)"; return 1; }
+  cid="$(kubectl -n "$NS" get pod "$pod" \
+        -o jsonpath='{.status.containerStatuses[?(@.name=="b2bua-worker")].containerID}' 2>/dev/null)"
+  cid="${cid##*/}"   # strip the containerd://… scheme
+  [ -n "$cid" ] || { warn "cpu_starve: no b2bua-worker container id for $pod"; return 1; }
+  # The leaf cgroup is the container's own scope (…<cid>.scope or …<cid>); pick the
+  # one that actually has a cpu.max knob.
+  dir="$(docker exec "$node" sh -c "find /sys/fs/cgroup -type d -name '*${cid}*' 2>/dev/null \
+        | while read -r d; do [ -f \"\$d/cpu.max\" ] && { echo \"\$d\"; break; }; done")"
+  [ -n "$dir" ] || { warn "cpu_starve: no cpu.max cgroup for container $cid on node $node"; return 1; }
+  echo "$node $dir"
+}
+
+# Throttle ONE pod's b2bua container cgroup to STARVE_QUOTA_US/STARVE_PERIOD_US.
+# Echoes a "node|dir|prev" restore tuple on success (nothing on failure) so the
+# caller can restore it later — this is what lets cpu_starve_all throttle every
+# worker, hold them ALL down for one window, then restore them together.
+_starve_apply() {  # $1=pod
+  local pod="$1" loc node dir prev
+  loc="$(_starve_locate "$pod")" || return 1
+  node="${loc%% *}"; dir="${loc#* }"
+  prev="$(docker exec "$node" cat "$dir/cpu.max" 2>/dev/null || echo max)"
+  if ! docker exec "$node" sh -c "echo '${STARVE_QUOTA_US} ${STARVE_PERIOD_US}' > '$dir/cpu.max'"; then
+    warn "cpu_starve: failed to write cpu.max for $pod (cgroup v2 + writable node fs required)"
+    return 1
+  fi
+  log "cpu_starve: $pod throttled ${STARVE_QUOTA_US}/${STARVE_PERIOD_US} (cgroup=$dir node=$node, was '$prev')"
+  echo "$node|$dir|$prev"
+}
+# Restore one "node|dir|prev" tuple (idempotent; falls back to 'max' = unlimited).
+# NOTE: the parses MUST be on separate statements, not one `local a=.. b=${a}`
+# line — under `set -u` the shell expands every RHS while building the `local`
+# arg list, BEFORE local assigns anything, so a same-line back-reference reads as
+# unbound and aborts the restore (which once left both workers stuck throttled).
+_starve_restore() {  # $1="node|dir|prev"
+  local tuple="$1" node dir prev
+  node="${tuple%%|*}"; tuple="${tuple#*|}"
+  dir="${tuple%%|*}"; prev="${tuple#*|}"
+  docker exec "$node" sh -c "echo '$prev' > '$dir/cpu.max'" >/dev/null 2>&1 \
+    || docker exec "$node" sh -c "echo max > '$dir/cpu.max'" >/dev/null 2>&1 || true
+  log "cpu_starve: restored $dir cpu.max='$prev' on $node"
+}
+
+cpu_starve() {
+  local pod="$STARVE_TARGET" tup
+  log "CHAOS: cpu_starve — throttle $pod to ${STARVE_QUOTA_US}/${STARVE_PERIOD_US} CPU for ${STARVE_SECS}s (overload via CPU scarcity, no restart)"
+  tup="$(_starve_apply "$pod")" || { warn "cpu_starve: could not throttle $pod — skipping"; return 1; }
+  push_metric "sip_chaos_event{type=\"cpu_starve\",phase=\"start\"} 1
+sip_chaos_active{type=\"cpu_starve\",pod=\"$pod\"} 1"
+  sleep "$STARVE_SECS"
+  _starve_restore "$tup"
+  push_metric "sip_chaos_event{type=\"cpu_starve\",result=\"pass\"} 1
+sip_chaos_active{type=\"cpu_starve\",pod=\"$pod\"} 0"
+}
+
+# CHAOS: cpu_starve_all — throttle EVERY b2bua worker to the same quota at once.
+# The WORST case for emergency protection: with a single worker starved (cpu_starve)
+# the healthy peer absorbs the LB-shed/re-routed traffic, so an emergency call
+# always has a clean worker to land on. Starving ALL workers removes that escape
+# hatch — every emergency call now lands on a starved, overloaded worker. This
+# verifies the SUT still admits + serves emergency (≈0 impact) and still sheds only
+# NON-emergency, even when the whole platform is overloaded with nowhere to fail
+# over. Same reversible cgroup mechanism, applied to all workers for ONE window.
+cpu_starve_all() {
+  local pods p tup tups=()
+  pods="$(kubectl -n "$NS" get pods -l app=b2bua-worker -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)"
+  [ -n "$pods" ] || { warn "cpu_starve_all: no b2bua-worker pods found"; return 1; }
+  log "CHAOS: cpu_starve_all — throttle ALL workers [$pods] to ${STARVE_QUOTA_US}/${STARVE_PERIOD_US} for ${STARVE_SECS}s (WORST case: no healthy peer)"
+  push_metric "sip_chaos_event{type=\"cpu_starve_all\",phase=\"start\"} 1
+sip_chaos_active{type=\"cpu_starve_all\"} 1"
+  for p in $pods; do
+    if tup="$(_starve_apply "$p")"; then tups+=("$tup"); else warn "cpu_starve_all: could not throttle $p (continuing)"; fi
+  done
+  if [ "${#tups[@]}" -eq 0 ]; then
+    warn "cpu_starve_all: no workers throttled — skipping"
+    push_metric "sip_chaos_active{type=\"cpu_starve_all\"} 0"; return 1
+  fi
+  # SAFETY: restore every throttled worker even if the hold is interrupted
+  # (Ctrl-C / kill) — a stranded cpu.max quota silently degrades the cluster.
+  _STARVE_TUPS=("${tups[@]}")
+  trap '_t="$?"; for __t in "${_STARVE_TUPS[@]:-}"; do [ -n "$__t" ] && _starve_restore "$__t"; done; trap - INT TERM EXIT; exit "$_t"' INT TERM
+  log "cpu_starve_all: ${#tups[@]} worker(s) throttled; holding ${STARVE_SECS}s"
+  sleep "$STARVE_SECS"
+  for tup in "${tups[@]}"; do _starve_restore "$tup"; done
+  trap - INT TERM
+  log "cpu_starve_all: restored ${#tups[@]} worker(s)"
+  push_metric "sip_chaos_event{type=\"cpu_starve_all\",result=\"pass\"} 1
+sip_chaos_active{type=\"cpu_starve_all\"} 0"
+}
+
+# CONVENIENCE: run a cpu_starve AND a concurrent mini traffic peak, so the worker
+# is both CPU-scarce and seeing extra new-call pressure — the "starve + mini
+# peek, mix proportions" experiment. PEAK_CAPS sizes the mini peak (keep it small,
+# e.g. 20-50, since the point is platform overload, not generator overload);
+# STARVE_* size the throttle. Both run for STARVE_SECS.
+overload_mix() {
+  local peak_secs="${PEAK_SECS:-$STARVE_SECS}"
+  log "CHAOS: overload_mix — cpu_starve($STARVE_TARGET) + mini peak ${PEAK_CAPS}cps, concurrently"
+  PEAK_SECS="$peak_secs" peak &
+  local peak_pid=$!
+  cpu_starve
+  wait "$peak_pid" 2>/dev/null || true
+}
+
+# overload_all = cpu_starve_all + concurrent non-emergency peak. The WORST-case
+# overload experiment: EVERY worker CPU-scarce AND extra new-call pressure, with
+# no healthy peer to absorb anything. Asserts emergency stays ≈0-impact platform-wide.
+overload_all() {
+  local peak_secs="${PEAK_SECS:-$STARVE_SECS}"
+  log "CHAOS: overload_all — cpu_starve_all + peak ${PEAK_CAPS}cps (every worker starved, no failover headroom)"
+  PEAK_SECS="$peak_secs" peak &
+  local peak_pid=$!
+  cpu_starve_all
+  wait "$peak_pid" 2>/dev/null || true
 }
 
 # Background ABUSE stream at ${ABUSE_CAPS}cps (default 1). Long-lived job running
@@ -388,6 +572,10 @@ case "$cmd" in
   kill)      kill_worker ;;
   proxykill) kill_proxy ;;
   peak)      peak ;;
+  cpustarve) cpu_starve ;;
+  cpustarveall) cpu_starve_all ;;
+  overload)  overload_mix ;;
+  overloadall) overload_all ;;
   orphankill) orphan_kill ;;
   limiterkill) limiter_kill ;;
   limiternetcut) limiter_netcut ;;
@@ -395,5 +583,5 @@ case "$cmd" in
   recover)   wait_brought_back; assert_rehydrated ;;
   assert)    assert_survival ;;
   down)      down ;;
-  *) fail "usage: $0 {failover|bringback|up|deploy|kill|proxykill|peak|orphankill|limiterkill|limiternetcut|abuse {up|down}|recover|assert|down}" ;;
+  *) fail "usage: $0 {failover|bringback|up|deploy|kill|proxykill|peak|cpustarve|cpustarveall|overload|overloadall|orphankill|limiterkill|limiternetcut|abuse {up|down}|recover|assert|down}" ;;
 esac

@@ -185,11 +185,18 @@ async fn timer_b_emits_timeout_event() {
     // Timer B fires at 64·T1 = 32 s with no final response.
     elapse_ms(35_000).await;
 
-    let method = stack.drain_events().into_iter().find_map(|e| match e {
-        TransactionEvent::Timeout { method, .. } => Some(method),
+    // The Timeout event carries the method, the destination it was sent to, and
+    // the discriminator (Timer B → Response) for the per-peer failure metric.
+    let timeout = stack.drain_events().into_iter().find_map(|e| match e {
+        TransactionEvent::Timeout { method, destination, kind, .. } => {
+            Some((method, destination, kind))
+        }
         _ => None,
     });
-    assert_eq!(method, Some(Some("INVITE".to_string())));
+    let (method, destination, kind) = timeout.expect("Timer B emits a Timeout event");
+    assert_eq!(method, Some("INVITE".to_string()));
+    assert_eq!(destination, Some(addr(PEER)), "Timeout forwards the txn destination");
+    assert_eq!(kind, sip_txn::TimeoutKind::Response, "an in-dialog re-INVITE Timer B is a Response timeout");
     assert_eq!(active(&stack), 0, "timed-out txn is removed");
 }
 
@@ -219,12 +226,14 @@ async fn initial_invite_outlives_the_no_answer_window() {
 
     // The 158 s backstop eventually fires (total elapsed ~165 s, below 180 s).
     elapse_ms(130_000).await;
-    assert!(
-        stack
-            .drain_events()
-            .iter()
-            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
-        "the initial-INVITE backstop fires below the 3-minute mark"
+    let kind = stack.drain_events().into_iter().find_map(|e| match e {
+        TransactionEvent::Timeout { kind, .. } => Some(kind),
+        _ => None,
+    });
+    assert_eq!(
+        kind,
+        Some(sip_txn::TimeoutKind::Transaction),
+        "the initial-INVITE backstop fires below the 3-minute mark and is a Transaction timeout"
     );
     assert_eq!(active(&stack), 0);
 }

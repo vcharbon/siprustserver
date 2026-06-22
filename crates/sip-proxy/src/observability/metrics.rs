@@ -211,6 +211,12 @@ pub struct ProxyMetrics {
     /// is otherwise silent (the proxy just black-holes every INVITE). Pairs with
     /// the `/readyz` gate; alert on `sip_proxy_worker_pool_empty == 1`.
     worker_pool_empty: AtomicU64,
+    /// Cardinality-bounded per-peer failure/timeout counters
+    /// (`sip_proxy_peer_failures_total{peer,scope,kind}`). Internal = resolves to
+    /// a known worker (registry); external = LRU-bounded
+    /// (`PEER_METRICS_EXTERNAL_CAP`, default 100). See
+    /// [`crate::observability::peer_failures::PeerFailures`].
+    per_peer: crate::observability::peer_failures::PeerFailures,
 }
 
 impl ProxyMetrics {
@@ -314,6 +320,18 @@ impl ProxyMetrics {
 
     pub fn record_send_failure(&self) {
         self.send_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one per-peer failure of `kind` against `peer` in `scope`
+    /// (`sip_proxy_peer_failures_total{peer,scope,kind}`; cardinality-bounded,
+    /// see [`crate::observability::peer_failures::PeerFailures`]).
+    pub fn record_peer_failure(
+        &self,
+        peer: &std::net::SocketAddr,
+        scope: crate::observability::peer_failures::PeerScope,
+        kind: crate::observability::peer_failures::PeerFailureKind,
+    ) {
+        self.per_peer.record(peer, scope, kind);
     }
 
     /// Publish one recv shard's endpoint receive-queue state (gauges) and
@@ -497,6 +515,11 @@ impl ProxyMetrics {
         ] {
             s.push_str(&format!("sip_worker_health{{health=\"{label}\"}} {}\n", val.load(Ordering::Relaxed)));
         }
+
+        // Per-peer failure/timeout family (cardinality-bounded; see
+        // crate::observability::peer_failures). Internal = known worker
+        // (registry), external = LRU-bounded.
+        s.push_str(&self.per_peer.prometheus_text("sip_proxy_peer_failures_total"));
         s
     }
 }

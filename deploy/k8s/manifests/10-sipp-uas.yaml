@@ -131,8 +131,15 @@ spec:
           # UAS × req 4 = 20 cores reserved on 48 allocatable — fits with the UAC
           # streams; bursts to 16 on a 24-core node are free headroom. Memory stays
           # generous (RSS is tiny; mem is not the constraint) only as a safety margin.
+          # CPU REQUEST lowered 4 -> 2 (limit unchanged at 16). The 5 replicas are
+          # pinned tier=load; on THIS cluster shape (2 load nodes, ~10 allocatable CPU
+          # each, already running other pods) 5×4=20 reserved CPU did not fit and the
+          # 5th UAS pod stayed Pending → deploy timed out (issue1). 5×2=10 fits with
+          # headroom for the UAC streams; the high burst limit (16) still lets each
+          # SIPp process catch up its timer wheel under load, which is what actually
+          # prevents the exit-255 slip (the request only reserves a floor).
           resources:
-            requests: { cpu: "4", memory: "1Gi" }
+            requests: { cpu: "2", memory: "1Gi" }
             limits:   { cpu: "16", memory: "4Gi" }
           volumeMounts:
             - { name: scenarios, mountPath: /scenarios }

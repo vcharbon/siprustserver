@@ -61,21 +61,63 @@ services:
       resources: { limits: { memory: 256m } }
 
   grafana:
-    image: grafana/grafana:11.4.0
-    container_name: grafana
+    # Distinct LOCAL tag (NOT the stock `grafana/grafana:11.4.0`): with both `image`
+    # and `build` set, compose only builds when the named image is absent — reusing
+    # the public tag would silently skip our plugin layer (the build never runs and
+    # the datasource plugin is missing). A bespoke tag forces the custom build, and
+    # install.sh passes `--build` so Dockerfile/plugin edits are always picked up.
+    image: ${GRAFANA_IMAGE:-sip-grafana-vlogs:11.4.0}
+    # Build a CUSTOM image that bakes the VictoriaLogs datasource plugin in at BUILD
+    # time (stack/grafana/Dockerfile). The stock image installed it at startup via
+    # GF_INSTALL_PLUGINS, which crash-looped on a host that cannot reach grafana.com
+    # (issue1). The plugin fetch is NON-LOCAL → forward the host proxy as build args
+    # (empty on a non-proxied host); compose reads ${HTTP_PROXY:-} etc. from the
+    # process env (install.sh exports them for the build). Runtime proxy is BLANKED
+    # below so datasource traffic to internal VM services never hits the proxy.
+    build:
+      context: ./grafana
+      dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        no_proxy: ${no_proxy:-}
+    # Non-colliding, overridable container name — a fixed `grafana` clashes with
+    # any other Grafana already running on this host (issue2 container conflict).
+    container_name: ${GRAFANA_CONTAINER_NAME:-grafanaSipRust}
     restart: unless-stopped
     networks: [default, kind]
+    # Bind/port overridable; default publishes on ALL interfaces so Grafana is
+    # reachable via the host IP (e.g. http://<host-ip>:3333), not just loopback.
     ports:
-      - "3333:3000"
+      - "${GRAFANA_BIND_ADDR:-0.0.0.0}:${GRAFANA_PORT:-3333}:3000"
     volumes:
       - ./data/grafana:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
+      # Listen on all interfaces so the published host-IP port is reachable.
+      - GF_SERVER_HTTP_ADDR=0.0.0.0
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
       - GF_AUTH_DISABLE_LOGIN_FORM=true
-      - GF_INSTALL_PLUGINS=victoriametrics-logs-datasource
+      # Proxy is BUILD-TIME only (plugin fetch from grafana.com — see build: above).
+      # At RUNTIME Grafana only talks to the internal victoriametrics/victorialogs/
+      # victoria-traces datasources on local docker networks, so its proxy env MUST
+      # be blank — otherwise it would funnel those internal requests through the
+      # external proxy (503s, datasource errors, "up but no data"; issue1). Blank all
+      # six (upper- AND lower-case) so an inherited host proxy can never leak in.
+      - HTTP_PROXY=
+      - HTTPS_PROXY=
+      - NO_PROXY=
+      - http_proxy=
+      - https_proxy=
+      - no_proxy=
+      # NOTE: the plugin is now baked into the image at build time (Dockerfile);
+      # the old runtime GF_INSTALL_PLUGINS=victoriametrics-logs-datasource was the
+      # crash-loop cause on a host that cannot reach grafana.com — removed.
       # Trim background work on a dev instance: no phone-home/update checks and
       # no alerting engine (we only ever look at dashboards live).
       - GF_ANALYTICS_REPORTING_ENABLED=false

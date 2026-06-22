@@ -48,6 +48,11 @@ REPO_ROOT="$(cd ../.. && pwd)"
 # host prerequisite checks (cgroups/sysctls) live in shared, env-overridable libs
 # so run.sh, endurance.sh and chaos.sh stay in lock-step.
 source "$HERE/lib/net-env.sh"
+# HTTP(S)-proxy wiring for PROXIFIED hosts: forwards the host proxy into docker
+# builds (external mirrors/apt/git) while keeping cluster-local + 127 traffic OFF
+# the proxy via a merged NO_PROXY. Sourced AFTER net-env.sh (needs SIP_SUBNET/
+# SIP_GATEWAY/PROXY_VIP). See lib/proxy-env.sh for the local-vs-non-local split.
+source "$HERE/lib/proxy-env.sh"
 source "$HERE/lib/host-checks.sh"
 # Pins every `kubectl` in this script to the kind cluster's own context (see lib)
 # — must be sourced AFTER CLUSTER is known to be overridable, but the wrapper
@@ -94,6 +99,9 @@ OBS_DIR="$REPO_ROOT/deploy/observability"
 
 log() { printf '\033[1;36m>> %s\033[0m\n' "$*" >&2; }
 die() { printf '\033[1;31m!! %s\033[0m\n' "$*" >&2; exit 1; }
+
+# docker_build() — proxy-forwarding `docker build` wrapper — is defined in
+# lib/proxy-env.sh (sourced above) so run.sh and endurance.sh share ONE definition.
 
 preflight() {
   for t in kind kubectl docker envsubst; do command -v "$t" >/dev/null || die "missing tool: $t"; done
@@ -155,12 +163,18 @@ up() {
   log "capping kind node memory (host-starvation backstop)"
   CLUSTER="$CLUSTER" "$REPO_ROOT/deploy/k8s/cap-kind-memory.sh" || true
 
+  # Log the effective proxy env ONCE before any build so the exact forwarded
+  # values (and the merged local NO_PROXY bypass) are transparent in the run log.
+  log "proxy env (forwarded to docker build): $(proxy_env_summary)"
   log "building SUT image $SUT_IMAGE"
-  docker build -f "$REPO_ROOT/deploy/docker/Dockerfile" -t "$SUT_IMAGE" "$REPO_ROOT"
+  docker_build -f "$REPO_ROOT/deploy/docker/Dockerfile" -t "$SUT_IMAGE" "$REPO_ROOT"
   log "building sipp:dev from vendored context ($SIPP_DIR)"
-  docker build -t sipp:dev "$SIPP_DIR"
+  docker_build -t sipp:dev "$SIPP_DIR"
   log "building keepalived sidecar image $KEEPALIVED_IMAGE (proxy VIP, ADR-0012 D7)"
-  docker build -f "$REPO_ROOT/deploy/docker/Dockerfile.keepalived" -t "$KEEPALIVED_IMAGE" "$REPO_ROOT"
+  docker_build -f "$REPO_ROOT/deploy/docker/Dockerfile.keepalived" -t "$KEEPALIVED_IMAGE" "$REPO_ROOT"
+  # RabbitMQ is a `docker pull` (not a build): pulls go through the docker daemon's
+  # own proxy config (~/.docker/config.json / systemd), NOT build-args — nothing to
+  # forward here. The merged NO_PROXY above keeps local lookups off the proxy.
   log "pulling RabbitMQ image $RABBITMQ_IMAGE (CDR transport)"
   docker image inspect "$RABBITMQ_IMAGE" >/dev/null 2>&1 || docker pull "$RABBITMQ_IMAGE"
   log "loading images into kind"
@@ -180,7 +194,12 @@ up() {
 obs() {
   [ "$OBS_ENABLE" = "1" ] || { log "OBS_ENABLE=0 — skipping observability"; return 0; }
   [ -x "$OBS_DIR/install.sh" ] || die "observability installer missing: $OBS_DIR/install.sh"
-  log "deploying observability (Grafana http://localhost:3333, VictoriaMetrics :8428)"
+  # Grafana now binds 0.0.0.0, so it is reachable via the host IP as well as
+  # loopback. Derive a best-effort host IP for the hint (don't hardcode one — WSL2
+  # mirrored networking means it is not a fixed/known address); fall back quietly.
+  local gport="${GRAFANA_PORT:-3333}" hostip
+  hostip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  log "deploying observability (Grafana http://127.0.0.1:${gport}${hostip:+ / http://$hostip:$gport}, VictoriaMetrics :8428)"
   "$OBS_DIR/install.sh" --bootstrap
 }
 
