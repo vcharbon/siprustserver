@@ -32,6 +32,7 @@ members = [
     "crates/e2e-core",
     "crates/e2e-cli",
     "crates/e2e-web",
+    "crates/loadgen",
     "xtask",
 ]
 

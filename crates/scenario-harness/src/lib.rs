@@ -33,6 +33,7 @@ pub mod agent;
 pub mod anchors;
 pub mod callflow;
 pub mod dsl;
+pub mod loadbind;
 pub mod report;
 pub mod run;
 
@@ -48,8 +49,11 @@ pub const SIMULATED_TRANSIT_DELAY_MS: u64 = 100;
 // The fluent, dialog-aware DSL (auto-generates correct-by-default B2B messages).
 // This is the primary surface — scenarios should not hand-author headers.
 pub use agent::{
-    Agent, ClientInvite, Dialog, Harness, InDialogTxn, Invite, Proxy, Respond, ServerTxn,
+    Agent, CancelHandle, ClientInvite, Dialog, Harness, InDialogTxn, Invite, Proxy, Respond,
+    ServerTxn, StepError,
 };
+// The Send agent factory for the load-test driver (`crates/loadgen`).
+pub use loadbind::AgentBinder;
 // The low-level scenarios-as-data DSL — for raw/torture cases that must send
 // exact (possibly malformed) bytes. `dsl::Agent` is the data-DSL agent handle;
 // the fluent `agent::Agent` (re-exported above) is the stateful UA.
