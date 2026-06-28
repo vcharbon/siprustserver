@@ -70,6 +70,11 @@ spec:
             # disable the gate as a rollback without a rebuild. Suffixes match at a
             # label boundary, so a leading dot is the safe form.
             - { name: WORKER_ALLOWED_TARGET_SUFFIXES, value: ".svc.cluster.local" }
+            # Opt-in transparent header relay: copy the loadgen correlation id
+            # from the a-leg INVITE onto every originated b-leg INVITE (callee +
+            # REFER transfer leg). Empty disables it; structural headers are never
+            # relayable, so this cannot corrupt the dialog.
+            - { name: B2BUA_RELAY_HEADERS, value: "X-Loadgen-Id" }
             # ALL worker→callee (b-leg) SIP MUST traverse the front proxy. In a
             # real cluster a peer's internal pod IP is not routable peer-to-peer,
             # so every B2BUA-originated request — initial b-leg INVITE, in-dialog

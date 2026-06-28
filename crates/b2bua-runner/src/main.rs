@@ -41,6 +41,7 @@
 //!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 600; min 60 and >= keepalive)
 //!   B2BUA_SETUP_TIMEOUT_SEC a-leg total setup deadline, reroutes included (default 150, < the 158 s txn backstop; <= 0 disables)
 //!   WORKER_ALLOWED_TARGET_SUFFIXES b-leg target-admission allow-list, comma-separated (default .svc.cluster.local; `*` = allow all, rollback sentinel; non-IP non-matching hosts are 503'd pre-leg)
+//!   B2BUA_RELAY_HEADERS opt-in transparent header relay, comma-separated names copied from the a-leg INVITE onto every originated b-leg INVITE (default empty = no relay; structural headers never relayable)
 //!
 //! ## Call limiter
 //!   LIMITER_URL             shared limiter base URL; unset → NoopLimiter (fail-open)
@@ -609,6 +610,15 @@ async fn main() {
         }
     };
 
+    // Opt-in transparent header relay: comma-separated header names copied
+    // verbatim from the a-leg INVITE onto every originated b-leg INVITE (callee
+    // + REFER transfer leg). Unset/empty = no relay (production default, no-op).
+    let relay_headers: Vec<String> = env_or("B2BUA_RELAY_HEADERS", "")
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
     let config = B2buaConfig {
         self_ordinal: ordinal.clone(),
         sip_local_ip: advertise_ip,
@@ -629,6 +639,7 @@ async fn main() {
         overload_panic_elu_threshold,
         retry_after_base_sec,
         worker_allowed_target_suffixes,
+        relay_headers,
         ..Default::default()
     };
     // Forbid booting with a config that would silently break HA: too-short a

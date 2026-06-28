@@ -284,6 +284,40 @@ pub fn build_b_leg(
         });
     }
 
+    // Opt-in transparent header relay (config.relay_headers, empty = no-op
+    // default). Copy each named a-leg INVITE header verbatim onto this b-leg
+    // INVITE. This single mint point covers BOTH originated legs: the normal
+    // callee leg (apply_route) and the REFER transfer-target leg (actions.rs
+    // passes `rebuild_a_leg_invite`, which rehydrates alice's full header
+    // snapshot) — so one copy here reaches bob AND charlie. Guards: never
+    // clobber a value already set via `header_updates` (case-insensitive), and
+    // never relay a structural header the generator owns (so a misconfig can't
+    // corrupt the dialog).
+    const RELAY_FORBIDDEN: &[&str] = &[
+        "via",
+        "from",
+        "to",
+        "contact",
+        "call-id",
+        "cseq",
+        "max-forwards",
+        "route",
+        "record-route",
+        "content-length",
+        "content-type",
+    ];
+    for name in &config.relay_headers {
+        if extra_headers.iter().any(|h| h.name.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        if RELAY_FORBIDDEN.iter().any(|f| name.eq_ignore_ascii_case(f)) {
+            continue;
+        }
+        if let Some(v) = get_header(&a_leg_invite.headers, name) {
+            extra_headers.push(MsgHeader { name: name.clone(), value: v.to_string() });
+        }
+    }
+
     let opts = GenerateOutOfDialogRequestOpts {
         request_uri: request_uri.clone(),
         call_id: b_call_id.clone(),
@@ -867,5 +901,103 @@ Content-Length: 0\r\n\r\n",
             !contact.contains(";emerg=1"),
             "non-emergency Contact must NOT carry ;emerg=1: {contact}"
         );
+    }
+
+    /// An a-leg INVITE carrying a relayable correlation header (`X-Loadgen-Id`)
+    /// plus a `To` (a structural header that must NEVER be relayed even if named).
+    fn a_leg_invite_with_relay_header() -> SipRequest {
+        parse(
+            "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-alice;lg=a\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@192.0.2.5:5060>;tag=alice-from-tag\r\n\
+To: <sip:bob@10.244.2.7:5060>\r\n\
+Contact: <sip:alice@192.0.2.5:5060>\r\n\
+Call-ID: alice-call-id@192.0.2.5\r\n\
+CSeq: 314 INVITE\r\n\
+X-Loadgen-Id: lg-abc123\r\n\
+Content-Length: 0\r\n\r\n",
+        )
+    }
+
+    /// Build the originated b-leg INVITE for the given relay config + R-URI and
+    /// return its parsed headers. `new_ruri` lets one helper drive BOTH the
+    /// normal callee leg (`None` → keeps the a-leg R-URI / bob) and the REFER
+    /// transfer leg (`Some(charlie)` → the rebuilt a-leg invite re-aimed).
+    fn relay_b_leg_headers(relay_headers: Vec<String>, new_ruri: Option<&str>) -> Vec<MsgHeader> {
+        let config = B2buaConfig { relay_headers, ..B2buaConfig::default() };
+        let (_leg, effect) = build_b_leg(
+            "w0|call-ref|xyz",
+            "b-1",
+            false,
+            &a_leg_invite_with_relay_header(),
+            ("10.244.2.7".to_string(), 5060),
+            new_ruri,
+            None,
+            None,
+            None,
+            &config,
+            &IdGen::seeded(0x4747),
+            None,
+            &[],
+            None,
+        );
+        match effect.body {
+            OutboundBody::Request(r) => r.headers,
+            OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
+        }
+    }
+
+    /// Opt-in transparent relay: a named a-leg header rides onto BOTH originated
+    /// legs (callee + REFER transfer target), the empty default is a strict no-op,
+    /// and a structural header named in the relay list is NEVER duplicated. Both
+    /// legs are asserted at the single `build_b_leg` mint point — charlie's leg
+    /// goes through the exact same fn with the rebuilt a-leg invite, so a second
+    /// call with a charlie R-URI faithfully simulates the REFER transfer leg.
+    #[test]
+    fn relay_headers_copy_to_both_legs_and_never_clobber_structural() {
+        let has = |hs: &[MsgHeader], name: &str, val: &str| {
+            hs.iter().any(|h| h.name.eq_ignore_ascii_case(name) && h.value == val)
+        };
+
+        // (a) NORMAL callee leg (bob): the named header is relayed verbatim.
+        let bob = relay_b_leg_headers(vec!["X-Loadgen-Id".into()], None);
+        assert!(
+            has(&bob, "X-Loadgen-Id", "lg-abc123"),
+            "callee leg must carry the relayed X-Loadgen-Id: {bob:?}"
+        );
+
+        // (b) REFER transfer leg (charlie): same mint point, R-URI re-aimed → the
+        // header still rides. Proves the single insertion point covers charlie.
+        let charlie = relay_b_leg_headers(
+            vec!["X-Loadgen-Id".into()],
+            Some("sip:charlie@10.244.2.9:5060"),
+        );
+        assert!(
+            has(&charlie, "X-Loadgen-Id", "lg-abc123"),
+            "REFER transfer leg must carry the relayed X-Loadgen-Id: {charlie:?}"
+        );
+
+        // (c) Default (empty list) is a strict no-op: the header is ABSENT.
+        let noop = relay_b_leg_headers(Vec::new(), None);
+        assert!(
+            !noop.iter().any(|h| h.name.eq_ignore_ascii_case("X-Loadgen-Id")),
+            "empty relay_headers must NOT copy the header: {noop:?}"
+        );
+
+        // (d) A structural header named in the list is NEVER relayed: the b-leg To
+        // is minted structurally by the generator (the generator owns it), so the
+        // relay path must skip it and NOT push a second copy. Naming "To" in the
+        // relay list yields exactly ONE To header — the structural one — proving
+        // the forbidden-set guard blocks the relay duplication that a misconfig
+        // would otherwise introduce.
+        let with_to = relay_b_leg_headers(
+            vec!["X-Loadgen-Id".into(), "To".into()],
+            None,
+        );
+        let to_count = with_to.iter().filter(|h| h.name.eq_ignore_ascii_case("To")).count();
+        assert_eq!(to_count, 1, "exactly one structural To header, never a relayed dup: {with_to:?}");
+        // The relayable header still rode alongside the rejected structural one.
+        assert!(has(&with_to, "X-Loadgen-Id", "lg-abc123"));
     }
 }

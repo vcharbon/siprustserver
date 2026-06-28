@@ -187,6 +187,16 @@ pub struct B2buaConfig {
     /// rejects every non-IP host. Overridable via `WORKER_ALLOWED_TARGET_SUFFIXES`
     /// (comma-separated, trimmed, empties dropped).
     pub worker_allowed_target_suffixes: Vec<String>,
+    /// **Opt-in transparent header relay.** Header names whose *value* is copied
+    /// verbatim from the a-leg INVITE onto every originated b-leg INVITE (the
+    /// normal callee leg AND the REFER transfer-target leg — both funnel through
+    /// the single `build_b_leg` mint point). Names are matched case-insensitively.
+    /// **Empty = no relay**, which is the production default and a strict no-op.
+    /// Structural headers the generator owns (Via/From/To/Contact/Call-ID/CSeq/
+    /// Max-Forwards/Route/Record-Route/Content-Length/Content-Type) are NEVER
+    /// relayable even if named here, so a misconfiguration cannot corrupt the
+    /// dialog. Overridable per worker via `B2BUA_RELAY_HEADERS` (comma-separated).
+    pub relay_headers: Vec<String>,
 }
 
 impl Default for B2buaConfig {
@@ -238,6 +248,9 @@ impl Default for B2buaConfig {
             // routes to a non-suffixed host (e.g. `bob` / a loopback name) must
             // set `["*"]` or add its suffix to opt out of the gate.
             worker_allowed_target_suffixes: vec![".svc.cluster.local".to_string()],
+            // Opt-in transparent header relay: empty = no relay (production
+            // default, strict no-op). Set names via `B2BUA_RELAY_HEADERS`.
+            relay_headers: Vec::new(),
         }
     }
 }
