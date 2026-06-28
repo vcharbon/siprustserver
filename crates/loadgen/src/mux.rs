@@ -9,17 +9,20 @@
 //! no fd / ephemeral-port exhaustion, and the SUT routes the callee leg to a
 //! **static** address (its own config), never a dynamic per-call one.
 //!
-//! # Correlation (SUT-agnostic)
+//! # Correlation (SUT-agnostic, header-only)
 //!
-//! Each call carries a random token. Demux precedence per inbound datagram:
+//! Each call carries one random token in a single transparent header
+//! (`X-Loadgen-Id`). Demux precedence per inbound datagram:
 //! 1. **known Call-ID** — our UAC dialog (Call-ID sniffed from our outbound
 //!    INVITE), or a UAS dialog *after* its first request (the SUT-minted Call-ID
 //!    we learned from the INVITE).
 //! 2. **correlation token** — an inbound *initial* request whose Call-ID we've
-//!    never seen, matched against the pending-UAS registry. The token travels via
-//!    a pluggable [`Correlation`] source: a transparent `X-Loadgen-Id` **header**
-//!    (the generic requirement — proxies forward it), or the **To URI user-part**
-//!    (preserved across a B2BUA that strips custom headers, e.g. ours).
+//!    never seen, matched against the pending-UAS registry by the
+//!    [`Correlation`] header value. A proxy / B2BUA that relays the header
+//!    forwards the token unchanged onto **every** originated leg, so a call's
+//!    callee (bob) and transfer-target (charlie) legs share one token. No
+//!    To-/Request-URI hijacking — that breaks against any SUT that routes on
+//!    those URIs.
 //!
 //! # Recording
 //!
@@ -63,70 +66,77 @@ pub enum Role {
     Callee,
 }
 
-/// One place a correlation token can live in a callee's first request.
-#[derive(Debug, Clone)]
-pub enum Source {
-    /// A transparent header (e.g. `X-Loadgen-Id`) — the generic requirement; a
-    /// proxy forwards it unchanged.
-    Header(String),
-    /// The To URI user-part — preserved across a B2BUA that strips custom headers
-    /// (our b2bua keeps the a-leg To URI on the b-leg).
-    ToUser,
-    /// The Request-URI user-part — the channel a REFER's Refer-To survives as on
-    /// the transfer-target INVITE.
-    RuriUser,
-}
-
-impl Source {
-    fn extract(&self, raw: &[u8]) -> Option<String> {
-        match self {
-            Source::Header(name) => header_value(raw, name),
-            Source::ToUser => header_value(raw, "to")
-                .or_else(|| header_value(raw, "t"))
-                .as_deref()
-                .and_then(uri_user),
-            Source::RuriUser => ruri(raw).and_then(|u| uri_user(&u)),
-        }
-    }
-}
-
-/// How the per-call correlation token is carried through the SUT — an ordered
-/// list of [`Source`]s, tried in turn (so one config covers a callee leg whose
-/// token rides the To and a transfer leg whose token rides the Request-URI).
+/// How the per-call correlation token is carried through the SUT: a single
+/// transparent header (e.g. `X-Loadgen-Id`). SUT-agnostic — a proxy/B2BUA that
+/// relays the header forwards the token unchanged onto every originated leg, so
+/// one call's bob and charlie legs share one token. No To-/R-URI hijacking.
 #[derive(Debug, Clone)]
 pub struct Correlation {
-    sources: Vec<Source>,
+    header: String,
 }
 
 impl Correlation {
-    /// A single transparent header (generic SUTs; proxies forward it).
+    /// A single transparent correlation header (proxies/B2BUAs forward it).
     pub fn header(name: impl Into<String>) -> Self {
-        Self { sources: vec![Source::Header(name.into())] }
+        Self { header: name.into() }
     }
-    /// Our B2BUA: it preserves the To URI on the b-leg and the Refer-To as the
-    /// transfer INVITE's Request-URI, so try both (no SUT change needed).
-    pub fn b2bua() -> Self {
-        Self { sources: vec![Source::ToUser, Source::RuriUser] }
+    /// The header name a scenario stamps the per-call token into.
+    pub fn header_name(&self) -> &str {
+        &self.header
     }
-    /// Custom source list.
-    pub fn sources(sources: Vec<Source>) -> Self {
-        Self { sources }
-    }
-    /// The channel a scenario should embed the token in (the first source).
-    pub fn primary(&self) -> &Source {
-        self.sources.first().expect("Correlation needs at least one source")
-    }
-    /// Every candidate token found in `raw` across the configured sources.
-    fn candidates(&self, raw: &[u8]) -> Vec<String> {
-        self.sources.iter().filter_map(|s| s.extract(raw)).collect()
+    /// The correlation token carried by `raw`, if the header is present.
+    fn token(&self, raw: &[u8]) -> Option<String> {
+        header_value(raw, &self.header)
     }
 }
+
+/// A read-only view of an inbound initial INVITE handed to a scenario-owned
+/// [`LegPicker`]. The mux uses it for **nothing** itself (it only correlates the
+/// call by token); it exists purely so a scenario can disambiguate which of its
+/// receivers should own a new leg, keying on whatever it likes (R-URI, To,
+/// `X-Api-Call`, a custom header). The scenario — not the mux — owns the meaning
+/// of these fields.
+pub struct LegInfo<'a> {
+    raw: &'a [u8],
+}
+
+impl LegInfo<'_> {
+    /// The raw datagram bytes.
+    pub fn raw(&self) -> &[u8] {
+        self.raw
+    }
+    /// Value of header `name` (case-insensitive), or `None`.
+    pub fn header(&self, name: &str) -> Option<String> {
+        header_value(self.raw, name)
+    }
+    /// The Request-URI (the full 2nd token of the request line).
+    pub fn ruri(&self) -> Option<String> {
+        ruri(self.raw)
+    }
+    /// The Request-URI user-part (e.g. `dave` from `sip:dave@host`).
+    pub fn ruri_user(&self) -> Option<String> {
+        self.ruri().as_deref().and_then(uri_user)
+    }
+    /// The To header user-part.
+    pub fn to_user(&self) -> Option<String> {
+        self.header("to").or_else(|| self.header("t")).as_deref().and_then(uri_user)
+    }
+}
+
+/// A scenario-owned callback that picks which receiver (by its label = the bound
+/// agent's name) should own a freshly-arrived leg, when **more than one**
+/// receiver shares a single socket for the same call. Invoked only on that
+/// ambiguity; a single-receiver socket never calls it. Returning a label that
+/// matches no receiver drops the leg as a `no_route` orphan.
+pub type LegPicker = Arc<dyn Fn(&LegInfo) -> String + Send + Sync>;
 
 /// A registry key owned by one endpoint (removed on its `Drop`).
 #[derive(Debug, Clone)]
 enum Key {
     CallId(String),
-    Token(String),
+    /// A receiver registered under `token`, identified by its `label` (agent
+    /// name) so `Drop` removes exactly this receiver from a possibly-shared slot.
+    Token { token: String, label: String },
 }
 
 /// Process-wide mux counters (Prometheus + report).
@@ -149,7 +159,9 @@ impl MuxStats {
     fn orphan(&self, reason: OrphanReason, raw: &[u8]) {
         match reason {
             OrphanReason::NoHeader => self.orphan_no_header.fetch_add(1, Ordering::Relaxed),
-            OrphanReason::UnknownToken => self.orphan_unknown_token.fetch_add(1, Ordering::Relaxed),
+            OrphanReason::UnknownToken | OrphanReason::NoRoute => {
+                self.orphan_unknown_token.fetch_add(1, Ordering::Relaxed)
+            }
             OrphanReason::Stray => self.orphan_stray.fetch_add(1, Ordering::Relaxed),
         };
         let mut g = self.samples.lock().unwrap();
@@ -169,6 +181,9 @@ enum OrphanReason {
     NoHeader,
     /// A token present but matching no pending call.
     UnknownToken,
+    /// A token matched a call, but its scenario-owned picker chose a label no
+    /// registered receiver carries (a scenario routing bug).
+    NoRoute,
     /// An unknown Call-ID that is not an initial INVITE (a late straggler).
     Stray,
 }
@@ -177,21 +192,38 @@ impl OrphanReason {
         match self {
             OrphanReason::NoHeader => "no_header",
             OrphanReason::UnknownToken => "unknown_token",
+            OrphanReason::NoRoute => "no_route",
             OrphanReason::Stray => "stray",
         }
     }
 }
 
-struct PendingEntry {
+/// One receiver bound on a socket: an inbox + its label (the agent name a
+/// [`LegPicker`] returns) + the keyset its `Drop` drains.
+struct ReceiverEntry {
+    label: String,
     queue: Arc<PacketQueue>,
     keyset: Arc<Mutex<Vec<Key>>>,
+}
+
+/// All receivers for one call on one socket, sharing the call token. Usually a
+/// single receiver; >1 only when a scenario binds several endpoints on the same
+/// port, in which case `picker` disambiguates each arriving leg.
+struct CallSlot {
+    receivers: Vec<ReceiverEntry>,
+    /// Scenario-owned disambiguation, used iff `receivers.len() > 1`.
+    picker: Option<LegPicker>,
+    /// Set once any leg has arrived — the reaper then leaves the slot alone
+    /// (a live call may outlast the pending deadline), so only never-arrived
+    /// legs are swept.
+    arrived: bool,
     deadline: Instant,
 }
 
 #[derive(Default)]
 struct SocketRegistry {
     by_call_id: HashMap<String, Arc<PacketQueue>>,
-    by_token: HashMap<String, PendingEntry>,
+    by_token: HashMap<String, CallSlot>,
 }
 
 /// One defined endpoint = one real socket + dispatcher + per-socket registry.
@@ -271,22 +303,36 @@ impl MuxCore {
     }
 
     /// Live registry size across all endpoints (leak canary — should track
-    /// in-flight calls).
+    /// in-flight calls). Counts every live receiver across all call slots plus
+    /// the promoted Call-IDs.
     pub fn registry_size(&self) -> usize {
         self.endpoints
             .values()
             .map(|e| {
                 let g = e.reg.lock().unwrap();
-                g.by_call_id.len() + g.by_token.len()
+                let receivers: usize = g.by_token.values().map(|s| s.receivers.len()).sum();
+                g.by_call_id.len() + receivers
             })
             .sum()
     }
 
-    /// Build a per-call [`SignalingNetwork`] view: `legs` maps each **callee**
-    /// endpoint address to that leg's correlation token (caller endpoints need no
-    /// token).
-    pub fn network(self: &Arc<Self>, legs: HashMap<SocketAddr, String>) -> MuxNetwork {
-        MuxNetwork { core: self.clone(), legs }
+    /// Build a per-call [`SignalingNetwork`] view from a [`CallRouting`] (the
+    /// single call token + each callee leg's label + any same-socket picker).
+    pub fn network(self: &Arc<Self>, routing: CallRouting) -> MuxNetwork {
+        // Per-callee-addr bind-order label queue: each `bind_udp(addr)` dispenses
+        // the next declared label for that addr (so several receivers can share a
+        // socket; the driver binds them in declaration order).
+        let mut labels: HashMap<SocketAddr, Vec<String>> = HashMap::new();
+        for (addr, label) in &routing.legs {
+            labels.entry(*addr).or_default().push(label.clone());
+        }
+        MuxNetwork {
+            core: self.clone(),
+            token: routing.token,
+            labels,
+            pickers: routing.pickers,
+            cursor: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Render the mux Prometheus series.
@@ -326,10 +372,46 @@ impl MuxCore {
     }
 }
 
+/// The per-call routing a scenario declares before its agents bind: the single
+/// correlation token every leg of the call carries, the callee legs in **bind
+/// order** (`(addr, label)`, label = the agent name a picker returns), and any
+/// per-socket [`LegPicker`] used to disambiguate several receivers sharing one
+/// socket. The mux never reads `X-Api-Call` or any URI to route legs — that is
+/// the scenario's job, expressed here (the picker) and in how it dials the SUT.
+#[derive(Clone, Default)]
+pub struct CallRouting {
+    token: String,
+    legs: Vec<(SocketAddr, String)>,
+    pickers: HashMap<SocketAddr, LegPicker>,
+}
+
+impl CallRouting {
+    /// Start a routing for a call with correlation token `token`.
+    pub fn new(token: impl Into<String>) -> Self {
+        Self { token: token.into(), legs: Vec::new(), pickers: HashMap::new() }
+    }
+    /// Declare a callee leg: an agent labelled `label` binds on `addr`. Declare
+    /// legs in the order the driver binds the agents (several on one `addr` form
+    /// a shared socket).
+    pub fn leg(mut self, addr: SocketAddr, label: impl Into<String>) -> Self {
+        self.legs.push((addr, label.into()));
+        self
+    }
+    /// Attach the scenario-owned picker for a socket that carries >1 receiver.
+    pub fn picker(mut self, addr: SocketAddr, picker: LegPicker) -> Self {
+        self.pickers.insert(addr, picker);
+        self
+    }
+}
+
 /// Per-call `SignalingNetwork` over the shared [`MuxCore`].
 pub struct MuxNetwork {
     core: Arc<MuxCore>,
-    legs: HashMap<SocketAddr, String>,
+    token: String,
+    /// Bind-order labels per callee addr (dispensed by `cursor`).
+    labels: HashMap<SocketAddr, Vec<String>>,
+    pickers: HashMap<SocketAddr, LegPicker>,
+    cursor: Mutex<HashMap<SocketAddr, usize>>,
 }
 
 #[async_trait]
@@ -342,26 +424,39 @@ impl SignalingNetwork for MuxNetwork {
         })?;
         let queue = Arc::new(PacketQueue::new(mux.queue_max));
         let keyset = Arc::new(Mutex::new(Vec::new()));
-        let token = self.legs.get(&opts.addr).cloned();
 
         if mux.role == Role::Callee {
-            let token = token.clone().ok_or_else(|| BindError {
-                reason: BindErrorReason::OsError,
-                addr: opts.addr,
-                message: format!("callee endpoint {} bound without a correlation token", opts.addr),
-            })?;
-            keyset.lock().unwrap().push(Key::Token(token.clone()));
-            mux.reg.lock().unwrap().by_token.insert(
-                token,
-                PendingEntry {
-                    queue: queue.clone(),
-                    keyset: keyset.clone(),
-                    // The callee leg should arrive within the call's recv window;
-                    // a generous multiple guards against a slow SUT while still
-                    // reaping a leg that never comes.
-                    deadline: Instant::now() + self.core.pending_ttl * 4,
-                },
-            );
+            // Dispense the next declared label for this addr (bind order), so
+            // several receivers can share a socket.
+            let label = {
+                let mut cur = self.cursor.lock().unwrap();
+                let n = cur.entry(opts.addr).or_insert(0);
+                let idx = *n;
+                *n += 1;
+                self.labels.get(&opts.addr).and_then(|v| v.get(idx)).cloned().ok_or_else(|| {
+                    BindError {
+                        reason: BindErrorReason::OsError,
+                        addr: opts.addr,
+                        message: format!(
+                            "callee endpoint {} bound without a declared leg (#{idx})",
+                            opts.addr
+                        ),
+                    }
+                })?
+            };
+            let token = self.token.clone();
+            keyset.lock().unwrap().push(Key::Token { token: token.clone(), label: label.clone() });
+            let mut g = mux.reg.lock().unwrap();
+            let pending_ttl = self.core.pending_ttl;
+            let slot = g.by_token.entry(token).or_insert_with(|| CallSlot {
+                receivers: Vec::new(),
+                picker: self.pickers.get(&opts.addr).cloned(),
+                arrived: false,
+                // The leg should arrive within the call's recv window; a generous
+                // multiple guards a slow SUT while still reaping a no-show.
+                deadline: Instant::now() + pending_ttl * 4,
+            });
+            slot.receivers.push(ReceiverEntry { label, queue: queue.clone(), keyset: keyset.clone() });
         }
 
         Ok(Box::new(MuxEndpoint {
@@ -452,8 +547,15 @@ impl Drop for MuxEndpoint {
                 Key::CallId(c) => {
                     g.by_call_id.remove(&c);
                 }
-                Key::Token(t) => {
-                    g.by_token.remove(&t);
+                // Remove only THIS receiver from a possibly-shared slot; drop the
+                // slot once its last receiver leaves.
+                Key::Token { token, label } => {
+                    if let Some(slot) = g.by_token.get_mut(&token) {
+                        slot.receivers.retain(|r| r.label != label);
+                        if slot.receivers.is_empty() {
+                            g.by_token.remove(&token);
+                        }
+                    }
                 }
             }
         }
@@ -476,37 +578,68 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
     let cid = call_id(raw);
     let mut g = mux.reg.lock().unwrap();
 
-    // 1. Known dialog.
+    // 1. Known dialog (Call-ID we minted or already promoted).
     if let Some(cid) = &cid {
         if let Some(q) = g.by_call_id.get(cid) {
             deliver(&mux.stats, q, pkt());
             return;
         }
     }
-    // 2. Correlation token → a pending callee leg (try each candidate source).
-    let candidates = mux.correlation.candidates(raw);
-    if !candidates.is_empty() {
-        for tok in &candidates {
-            if let Some(entry) = g.by_token.remove(tok) {
-                if let Some(cid) = &cid {
-                    g.by_call_id.insert(cid.clone(), entry.queue.clone());
-                    entry.keyset.lock().unwrap().push(Key::CallId(cid.clone()));
-                }
-                deliver(&mux.stats, &entry.queue, pkt());
+    // 2. A new leg of a known call: an INITIAL INVITE whose Call-ID we have not
+    //    seen, carrying our per-call token. Only an initial INVITE may spawn a
+    //    leg (an in-dialog request with an unknown Call-ID is a stray, never a
+    //    new dialog). The token entry is NON-consuming: it persists for the
+    //    call's lifetime so re-routes / multi-REFER / re-REFER (further legs of
+    //    the same call on this socket) each promote their own dialog.
+    if is_initial_invite(raw) {
+        let Some(tok) = mux.correlation.token(raw) else {
+            mux.stats.orphan(OrphanReason::NoHeader, raw);
+            return;
+        };
+        let Some(slot) = g.by_token.get_mut(&tok) else {
+            mux.stats.orphan(OrphanReason::UnknownToken, raw);
+            return;
+        };
+        // Receiver selection: the single-receiver socket delivers directly; a
+        // shared socket asks the scenario-owned picker (handed the parsed leg).
+        // The mux itself reads nothing but the call token — leg routing is the
+        // scenario's to own.
+        let idx = match slot.receivers.len() {
+            0 => {
+                mux.stats.orphan(OrphanReason::NoRoute, raw);
                 return;
             }
+            1 => 0,
+            _ => match &slot.picker {
+                Some(pick) => {
+                    let want = pick(&LegInfo { raw });
+                    match slot.receivers.iter().position(|r| r.label == want) {
+                        Some(i) => i,
+                        None => {
+                            mux.stats.orphan(OrphanReason::NoRoute, raw);
+                            return;
+                        }
+                    }
+                }
+                None => {
+                    // Several receivers but no picker to disambiguate — a
+                    // scenario bug, not a silent first-wins.
+                    mux.stats.orphan(OrphanReason::NoRoute, raw);
+                    return;
+                }
+            },
+        };
+        slot.arrived = true;
+        let queue = slot.receivers[idx].queue.clone();
+        if let Some(cid) = &cid {
+            slot.receivers[idx].keyset.lock().unwrap().push(Key::CallId(cid.clone()));
+            g.by_call_id.insert(cid.clone(), queue.clone());
         }
-        // A token was present but matched no pending call.
-        mux.stats.orphan(OrphanReason::UnknownToken, raw);
+        deliver(&mux.stats, &queue, pkt());
         return;
     }
-    // 3. Uncorrelatable (no token at all).
-    let reason = if is_initial_invite(raw) {
-        OrphanReason::NoHeader
-    } else {
-        OrphanReason::Stray
-    };
-    mux.stats.orphan(reason, raw);
+    // 3. Not a known dialog and not an initial INVITE → a late straggler.
+    mux.stats.orphan(OrphanReason::Stray, raw);
 }
 
 fn deliver(stats: &MuxStats, q: &PacketQueue, pkt: UdpPacket) {
@@ -517,7 +650,9 @@ fn deliver(stats: &MuxStats, q: &PacketQueue, pkt: UdpPacket) {
     }
 }
 
-/// Periodic sweep of pending callee legs whose INVITE never arrived.
+/// Periodic sweep of pending callee legs whose INVITE never arrived. A slot that
+/// has seen at least one leg (`arrived`) is left alone — a live call may outlast
+/// the pending deadline; its receivers are released on agent `Drop`, not here.
 async fn reap_loop(sockets: Vec<Arc<MuxSocket>>, stats: Arc<MuxStats>, ttl: Duration) {
     let mut tick = tokio::time::interval(ttl.max(Duration::from_secs(5)));
     loop {
@@ -528,12 +663,14 @@ async fn reap_loop(sockets: Vec<Arc<MuxSocket>>, stats: Arc<MuxStats>, ttl: Dura
             let expired: Vec<String> = g
                 .by_token
                 .iter()
-                .filter(|(_, e)| e.deadline <= now)
+                .filter(|(_, s)| !s.arrived && s.deadline <= now)
                 .map(|(k, _)| k.clone())
                 .collect();
             for k in expired {
-                if let Some(e) = g.by_token.remove(&k) {
-                    e.queue.close();
+                if let Some(s) = g.by_token.remove(&k) {
+                    for r in &s.receivers {
+                        r.queue.close();
+                    }
                     stats.pending_expired.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -561,12 +698,33 @@ fn first_line(raw: &[u8]) -> String {
 }
 
 /// The Request-URI (2nd token of the request line), or `None` for a response.
+/// Used only by the scenario-facing [`LegInfo`] (never by the mux's own demux).
 fn ruri(raw: &[u8]) -> Option<String> {
     let line = first_line(raw);
     if line.starts_with("SIP/2.0") {
         return None; // response
     }
     line.split_whitespace().nth(1).map(str::to_string)
+}
+
+/// The user-part of a SIP URI (handles `<sip:user@host>`, `sip:user@host`,
+/// name-addr with a display name). For [`LegInfo`] picker helpers only.
+fn uri_user(value: &str) -> Option<String> {
+    let v = value.trim();
+    let inner = match (v.find('<'), v.find('>')) {
+        (Some(a), Some(b)) if b > a + 1 => &v[a + 1..b],
+        _ => v,
+    };
+    let no_scheme = inner
+        .strip_prefix("sips:")
+        .or_else(|| inner.strip_prefix("sip:"))
+        .unwrap_or(inner);
+    let user = no_scheme.split('@').next()?;
+    if user.is_empty() || user.contains(' ') {
+        None
+    } else {
+        Some(user.to_string())
+    }
 }
 
 fn is_initial_invite(raw: &[u8]) -> bool {
@@ -587,26 +745,6 @@ fn header_value(raw: &[u8], name: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// The user-part of a SIP URI (handles `<sip:user@host>`, `sip:user@host`,
-/// name-addr with a display name).
-fn uri_user(value: &str) -> Option<String> {
-    let v = value.trim();
-    let inner = match (v.find('<'), v.find('>')) {
-        (Some(a), Some(b)) if b > a + 1 => &v[a + 1..b],
-        _ => v,
-    };
-    let no_scheme = inner
-        .strip_prefix("sips:")
-        .or_else(|| inner.strip_prefix("sip:"))
-        .unwrap_or(inner);
-    let user = no_scheme.split('@').next()?;
-    if user.is_empty() || user.contains(' ') {
-        None
-    } else {
-        Some(user.to_string())
-    }
 }
 
 fn call_id(raw: &[u8]) -> Option<String> {

@@ -42,11 +42,8 @@ struct Args {
     /// Base UDP port: uac=base, uas=base+1, refer=base+2.
     #[arg(long, default_value_t = 6000)]
     base_port: u16,
-    /// Correlation channel: `header` (transparent X-Loadgen-Id) or `to-user`
-    /// (token in the To URI user-part, preserved across a B2BUA).
-    #[arg(long, default_value = "header")]
-    correlation: String,
-    /// Correlation header name (when `--correlation header`).
+    /// Correlation header name: the transparent per-call token header the SUT
+    /// relays onto every leg (no To-/R-URI fallback — header-only is SUT-agnostic).
     #[arg(long, default_value = "X-Loadgen-Id")]
     correlation_header: String,
     /// Attach an X-Api-Call destination pin to route the b-leg to the static uas
@@ -96,13 +93,7 @@ async fn main() -> std::io::Result<()> {
             .collect()
     };
 
-    let correlation = match args.correlation.as_str() {
-        "header" => Correlation::header(args.correlation_header.clone()),
-        // Our B2BUA preserves the To URI on the b-leg and the Refer-To as the
-        // transfer INVITE's R-URI; try both (covers basic + REFER legs).
-        "to-user" | "b2bua" => Correlation::b2bua(),
-        other => panic!("unknown --correlation {other:?} (header|b2bua)"),
-    };
+    let correlation = Correlation::header(args.correlation_header.clone());
 
     let uac: SocketAddr = (args.bind_ip, args.base_port).into();
     let uas: SocketAddr = (args.bind_ip, args.base_port + 1).into();

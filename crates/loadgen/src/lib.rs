@@ -42,7 +42,7 @@ pub mod scope;
 pub use class::{CallOutcome, ResultClass};
 pub use ctx::{CallCtx, CallEnv};
 pub use driver::{serve_metrics, CallConfig, Driver, DriverCfg, MuxTransport};
-pub use mux::{Correlation, EndpointSpec, MuxCore, Role, Source};
+pub use mux::{CallRouting, Correlation, EndpointSpec, LegInfo, LegPicker, MuxCore, Role};
 pub use report::{Reporter, ReporterCfg};
 pub use scenarios::{by_id, default_scenarios, LoadScenario, ScenarioId};
 pub use scope::CallScope;

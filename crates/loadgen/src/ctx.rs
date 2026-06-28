@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use scenario_harness::{Agent, Invite};
 
-use crate::mux::{Correlation, Source};
+use crate::mux::Correlation;
 
 /// Everything a [`LoadScenario`](crate::scenarios::LoadScenario) needs to drive
 /// one call: the agents the runner bound on the mux + the correlation/routing
@@ -22,13 +22,13 @@ pub struct CallEnv<'a> {
     /// The address the initial INVITE routes *through* — the SUT (in-process
     /// b2bua addr, or the real front-proxy VIP).
     pub via: SocketAddr,
-    /// How the per-call correlation token is carried through the SUT to the
-    /// callee leg (a transparent header, or the To URI user-part).
+    /// How the per-call correlation token is carried through the SUT (a single
+    /// transparent header). The SUT relays it onto every originated leg, so
+    /// bob and charlie share this one token.
     pub correlation: Correlation,
-    /// The callee (bob) leg's correlation token.
-    pub callee_token: String,
-    /// The transfer-target (charlie) leg's correlation token.
-    pub refer_token: String,
+    /// The call's correlation token — stamped on alice's INVITE and (via the
+    /// SUT's header relay) carried onto every downstream leg.
+    pub token: String,
     /// Optional `X-Api-Call` destination pin (our-b2bua routing adapter): the
     /// static `uas`/`refer` socket the SUT should send the callee leg to. `None`
     /// when the SUT routes the callee by its own (static) config.
@@ -44,9 +44,9 @@ pub struct CallEnv<'a> {
 
 impl CallEnv<'_> {
     /// Apply the per-call correlation token (and optional routing pin) to the
-    /// initial INVITE so the callee leg can be matched back to this call.
+    /// initial INVITE so every leg of this call can be matched back to it.
     pub fn prepare_invite<'b>(&self, inv: Invite<'b>) -> Invite<'b> {
-        let mut inv = embed_token(inv, &self.correlation, &self.callee_token, self.bob);
+        let mut inv = inv.with_header(self.correlation.header_name(), &self.token);
         if let Some(pin) = self.route_pin {
             inv = inv.with_header("X-Api-Call", &api_pin(pin));
         }
@@ -65,21 +65,13 @@ impl CallEnv<'_> {
         ))
     }
 
-    /// A `<sip:<refer_token>@host:port>` Refer-To carrying charlie's correlation
-    /// token in the user-part (so the transfer INVITE correlates). `None` if no
-    /// charlie leg.
+    /// A `<sip:transfer@host:port>` Refer-To pointing at charlie's **address**
+    /// (so the SUT routes the transfer there). Correlation rides the relayed
+    /// `X-Loadgen-Id` header, not this URI, so the user-part is cosmetic. `None`
+    /// if no charlie leg.
     pub fn refer_to(&self) -> Option<String> {
         let c = self.charlie?;
-        Some(format!("<sip:{}@{}>", self.refer_token, c.addr()))
-    }
-}
-
-/// Embed `token` into an INVITE in the correlation's primary channel.
-fn embed_token<'b>(inv: Invite<'b>, c: &Correlation, token: &str, bob: &Agent) -> Invite<'b> {
-    match c.primary() {
-        Source::Header(name) => inv.with_header(name, token),
-        Source::ToUser => inv.to(format!("sip:{token}@{}", bob.addr().ip())),
-        Source::RuriUser => inv.ruri(format!("sip:{token}@{}", bob.addr())),
+        Some(format!("<sip:transfer@{}>", c.addr()))
     }
 }
 

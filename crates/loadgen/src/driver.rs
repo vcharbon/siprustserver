@@ -7,7 +7,6 @@
 //! (CANCEL/BYE) however it ended, classifies the result, and records it —
 //! optionally projecting a sampled callflow (recording layered on the mux).
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +20,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
-use crate::mux::{Correlation, MuxCore};
+use crate::mux::{CallRouting, Correlation, MuxCore};
 use crate::report::{RenderedSample, Reporter};
 use crate::scenarios::LoadScenario;
 use crate::scope::CallScope;
@@ -198,16 +197,19 @@ async fn run_one(
     reporter.inc_inflight();
     let id = scenario.id();
 
-    let callee_token = mint_token();
-    let refer_token = mint_token();
-    let mut legs: HashMap<SocketAddr, String> = HashMap::new();
-    legs.insert(transport.uas_addr, callee_token.clone());
+    // One correlation token per CALL: alice stamps it on her INVITE and the SUT
+    // relays it (the transparent header) onto every downstream leg, so bob and
+    // charlie share it. Each callee leg is declared on its own socket; the mux
+    // demuxes by (socket, token) — a single receiver per socket here, so no
+    // picker is needed (the scenario-owned picker is for >1 receiver per socket).
+    let token = mint_token();
+    let mut routing = CallRouting::new(token.clone()).leg(transport.uas_addr, "bob");
     if scenario.needs_charlie() {
-        legs.insert(transport.refer_addr, refer_token.clone());
+        routing = routing.leg(transport.refer_addr, "charlie");
     }
 
     let record = reporter.should_record(id);
-    let mux_net = transport.core.network(legs);
+    let mux_net = transport.core.network(routing);
     let binder = AgentBinder::mux(Arc::new(mux_net), transport.recv_timeout, record);
     binder.seed_ids(next_seed(seed_base));
 
@@ -225,8 +227,7 @@ async fn run_one(
         charlie: charlie.as_ref(),
         via: call.via,
         correlation: transport.correlation.clone(),
-        callee_token,
-        refer_token,
+        token,
         route_pin: call.route_pin,
         refer_pin: call.refer_pin,
         refer_key: call.refer_key.clone(),

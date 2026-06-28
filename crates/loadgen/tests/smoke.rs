@@ -13,8 +13,9 @@ use b2bua_harness::{settle_until, B2buaSut};
 use layer_harness::TransportKind;
 use loadgen::scenarios::{establish, LoadScenario, ScenarioId};
 use loadgen::{
-    by_id, default_scenarios, CallConfig, CallCtx, CallEnv, CallScope, Correlation, Driver,
-    DriverCfg, EndpointSpec, MuxCore, MuxTransport, ResultClass, Reporter, ReporterCfg, Role,
+    by_id, default_scenarios, CallConfig, CallCtx, CallEnv, CallRouting, CallScope, Correlation,
+    Driver, DriverCfg, EndpointSpec, LegInfo, MuxCore, MuxTransport, ResultClass, Reporter,
+    ReporterCfg, Role,
 };
 use scenario_harness::{Harness, StepError};
 use sip_clock::Clock;
@@ -45,7 +46,11 @@ async fn setup(
     h.disarm_cseq_gate(); // infra harness; loadgen runs its own per-call audit
 
     let (uac, uas, refer) = (base, base + 1, base + 2);
+    // Make the in-process b2bua transparent to the loadgen correlation header
+    // (the production `B2BUA_RELAY_HEADERS=X-Loadgen-Id`), so the token alice
+    // stamps reaches BOTH the b-leg (bob) and the REFER transfer leg (charlie).
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", uas)
+        .tune(|c| c.relay_headers = vec!["X-Loadgen-Id".to_string()])
         .start(&h, "b2bua", &format!("127.0.0.1:{}", base + 3))
         .await;
 
@@ -93,11 +98,11 @@ fn cfg(via: SocketAddr, refer_pin: Option<SocketAddr>, cps: f64, secs: u64, mif:
 }
 
 /// Basic call, CONCURRENT (max_in_flight > 1) through ONE shared uas socket —
-/// proves dialogs are demuxed (no mixing) by the To-user correlation token, with
-/// no orphans, no registry leak, an OK callflow sample, and a reaped SUT.
+/// proves dialogs are demuxed (no mixing) by the relayed `X-Loadgen-Id` token,
+/// with no orphans, no registry leak, an OK callflow sample, and a reaped SUT.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_mux_smoke_basic_concurrent() {
-    let (_h, b2bua, core, transport) = setup(6400, Correlation::b2bua(), 5).await;
+    let (_h, b2bua, core, transport) = setup(6400, Correlation::header("X-Loadgen-Id"), 5).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
 
     let driver = Driver::new(
@@ -129,7 +134,7 @@ async fn loadgen_mux_smoke_basic_concurrent() {
 /// All four scenarios (refer last) through the mux → each produces OK, no leak.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_mux_smoke_all_scenarios() {
-    let (_h, b2bua, core, transport) = setup(6410, Correlation::b2bua(), 5).await;
+    let (_h, b2bua, core, transport) = setup(6410, Correlation::header("X-Loadgen-Id"), 5).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
     let refer_pin = Some(transport.refer_addr);
 
@@ -172,7 +177,7 @@ impl LoadScenario for FailMidCall {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_mux_teardown_no_leak() {
-    let (_h, b2bua, core, transport) = setup(6420, Correlation::b2bua(), 5).await;
+    let (_h, b2bua, core, transport) = setup(6420, Correlation::header("X-Loadgen-Id"), 5).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
 
     let driver = Driver::new(
@@ -229,4 +234,69 @@ async fn loadgen_mux_orphan_observability() {
     let samples = core.stats().samples();
     assert!(samples.iter().any(|s| s.contains("no_header")), "no no_header sample: {samples:?}");
     assert!(samples.iter().any(|s| s.contains("unknown_token")), "no unknown_token sample: {samples:?}");
+}
+
+/// The leg-routing **injection API**: two receivers ("charlie", "dave") share
+/// ONE socket under one call token. Call correlation (the token) finds the call;
+/// a scenario-owned picker — handed the parsed leg — disambiguates which
+/// receiver owns each arriving INVITE, here keyed on the Request-URI user. Proves
+/// the "several endpoints on the same port" path the mux itself stays agnostic
+/// to. (This is the primitive a future multi-REFER / re-route scenario builds on.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loadgen_mux_picker_disambiguates_shared_socket() {
+    use sip_net::BindUdpOpts;
+    let uas = addr(6441);
+    let core = MuxCore::bind(
+        vec![EndpointSpec { addr: uas, role: Role::Callee }],
+        Correlation::header("X-Loadgen-Id"),
+        256,
+        10,
+        RECV,
+    )
+    .await
+    .unwrap();
+
+    // One call token; two receivers on the same socket; a scenario-owned picker
+    // routing by R-URI user-part to the matching receiver label.
+    let token = "lgSHARED".to_string();
+    let routing = CallRouting::new(token.clone())
+        .leg(uas, "charlie")
+        .leg(uas, "dave")
+        .picker(uas, Arc::new(|leg: &LegInfo| leg.ruri_user().unwrap_or_default()));
+    let net = core.network(routing);
+
+    // Bind in declaration order: first bind = "charlie", second = "dave".
+    let ep_charlie = net.bind_udp(BindUdpOpts::new(uas, 256)).await.unwrap();
+    let ep_dave = net.bind_udp(BindUdpOpts::new(uas, 256)).await.unwrap();
+
+    let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let invite = |who: &str, cid: &str| {
+        format!(
+            "INVITE sip:{who}@127.0.0.1 SIP/2.0\r\nCall-ID: {cid}@h\r\nX-Loadgen-Id: {token}\r\n\
+             To: <sip:{who}@127.0.0.1>\r\nFrom: <sip:a@h>;tag=1\r\nCSeq: 1 INVITE\r\n\r\n"
+        )
+    };
+    // Deliberately send dave's leg FIRST to prove routing is by the picker, not
+    // arrival order.
+    sender.send_to(invite("dave", "c-dave").as_bytes(), uas).await.unwrap();
+    sender.send_to(invite("charlie", "c-charlie").as_bytes(), uas).await.unwrap();
+
+    let got_charlie = tokio::time::timeout(RECV, ep_charlie.recv()).await.unwrap().unwrap();
+    let got_dave = tokio::time::timeout(RECV, ep_dave.recv()).await.unwrap().unwrap();
+    assert!(
+        String::from_utf8_lossy(&got_charlie.raw).contains("sip:charlie@"),
+        "charlie receiver got the wrong leg"
+    );
+    assert!(
+        String::from_utf8_lossy(&got_dave.raw).contains("sip:dave@"),
+        "dave receiver got the wrong leg"
+    );
+    assert_eq!(core.stats().delivered.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(core.stats().orphan_no_header.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(core.stats().orphan_unknown_token.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+    // Both receivers gone → the shared slot is fully reclaimed.
+    drop(ep_charlie);
+    drop(ep_dave);
+    assert_eq!(core.registry_size(), 0, "shared-socket slot leaked after both receivers dropped");
 }
