@@ -77,26 +77,32 @@ impl LoadScenario for Refer {
         ctx.checkpoint("time_to_charlie_200");
         let _charlie_dialog = charlie_uas.dialog();
 
-        // The B2BUA now ACKs charlie and emits the remaining NOTIFYs (180,
-        // terminated) to bob and a c-realign re-INVITE to charlie — all racing on
-        // two sockets in any order. Absorb them with a short settle (200-OK every
-        // straggler) rather than asserting an exact sequence: a load tool must be
-        // robust to interleaving, not a strict conformance oracle (that is
-        // `refer_allow.rs`'s job).
-        // Absorb every post-transfer straggler on ALL legs (200-OK each): the
-        // remaining NOTIFYs + c-realign on B/C, AND the **a-leg realign re-INVITE**
-        // the B2BUA sends to alice after the transfer (which would otherwise queue
-        // and break alice's BYE response read).
-        let settle = std::time::Duration::from_millis(120);
-        env.alice.quiesce(settle).await;
+        // Let the B2BUA MERGE the transfer media before tearing down. The merge
+        // is ORDERED: the B2BUA first re-INVITEs CHARLIE (the c-realign, carrying
+        // alice's SDP); only once charlie answers 200 does it re-INVITE ALICE (the
+        // a-realign). So drain charlie/bob FIRST to settle the c-realign + the
+        // remaining NOTIFYs, THEN drain ALICE last and longer so her a-realign
+        // re-INVITE arrives and is 200'd + ACKed BEFORE we BYE.
+        //
+        // Why the ordering matters (and the old "drain alice first" was wrong):
+        // alice's a-realign only fires AFTER the c-realign, i.e. well after an
+        // early alice drain has closed. If alice BYEs before the a-realign lands,
+        // that in-dialog 2xx is left un-ACKed on the closing dialog — a benign
+        // race, but it legitimately trips the §13.3.1.4 "answered 2xx never
+        // ACKed/BYE'd" audit. Completing the a-realign in order keeps the audit
+        // clean WITHOUT weakening it.
+        let settle = std::time::Duration::from_millis(150);
         env.bob.quiesce(settle).await;
         charlie.quiesce(settle).await;
+        // Alice last: a generous window that outlasts the c-realign → a-realign
+        // chain so her realign 200 (and the B2BUA's ACK of it) complete pre-BYE.
+        env.alice.quiesce(std::time::Duration::from_millis(600)).await;
 
-        // A↔B still bridged; tear down via A BYE → the B2BUA BYEs every leg.
+        // A↔B↔C merged; tear down via A BYE → the B2BUA BYEs every leg.
         let mut alice_bye = alice_dialog.bye().await;
         scope.set_confirmed(alice_dialog.clone());
         // The relayed b-leg BYEs to B and C race the 200; absorb them, then read
-        // alice's own 200 (tolerating a late realign INVITE / NOTIFY).
+        // alice's own 200 (tolerating a stray late NOTIFY / re-INVITE).
         env.bob.quiesce(settle).await;
         charlie.quiesce(settle).await;
         alice_bye.try_expect_tolerating(200, &["BYE", "NOTIFY", "INVITE"]).await?;
