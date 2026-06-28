@@ -72,6 +72,58 @@ Key flags: `--cps`, `--duration`, `--max-in-flight`, `--target`, `--bind-ip`,
 (repeatable; omit for the default mix), `--out-dir`, `--metrics-addr`
 (default `0.0.0.0:9300`), `--sample-cap`. Run `--help` for the full list.
 
+### Realistic timers + the long recorded call
+
+For a run that looks like real traffic (not a tight back-to-back loop), set the
+dwell knobs — all default to `0`/off so the smoke suite stays fast:
+
+- `--ring-delay-ms` — the callee dwells between `180` and `200` (e.g. `5000` = a
+  5 s ring). Applies to every scenario that establishes.
+- `--talk-time-ms` — post-connect talk held before BYE on a basic call.
+- `--reinvite-gap-ms` — spacing held **before and after** the re-INVITE.
+- `--long-hold-secs` — the hold of the `long_call` scenario (default 1200 = 20 min).
+
+`long_call` is the small **recorded long-tail**: it establishes, fires **exactly
+one** in-dialog OPTIONS ping (the marker the recorder captures), then holds the
+dialog open for `--long-hold-secs` — answering the SUT's own in-dialog keepalive
+OPTIONS on **both** legs so the call is not torn down — then BYEs. Give it a small
+weight (≈2 %) in the mix:
+
+```bash
+./target/release/loadgen --target … --bind-ip … --route-pin-to-uas \
+  --cps 20 \
+  --ring-delay-ms 5000 --talk-time-ms 8000 --reinvite-gap-ms 5000 --long-hold-secs 1200 \
+  --scenario basic_call=16 --scenario reinvite=4 --scenario long_call=0.4 \
+  --background-record-every 1 --sample-cap 50 --report-interval-secs 60
+```
+
+`--background-record-every 1` = **full recording** (every call's flow is captured;
+stored samples stay bounded by `--sample-cap` per bucket). The cost is per-call
+recording memory, so the binary also exports `loadgen_process_resident_memory_bytes`
+— watch it (and `loadgen_inflight` / `loadgen_mux_registry_size`) on the Grafana
+*Loadgen* dashboard. `--report-interval-secs N` re-writes the on-disk report every
+N s so it is browsable mid-run.
+
+### In the endurance run (parallel to SIPp)
+
+The endurance harness runs `loadgen` as an **in-cluster Job alongside the SIPp
+baseline** — same image (`siprustserver:dev`, now carrying the `loadgen` binary),
+scraped via the same pod annotations. It is wired in `deploy/k8s`:
+
+- `manifests/45-loadgen-job.yaml` — the Job (binds the mux on the pod IP, pins the
+  b-leg back to itself, 20 cps base, the timers above, full recording).
+- `endurance.sh` — `LOADGEN_*` knobs (default `LOADGEN_CPS=20`); the stream starts
+  in `start_baseline`, is supervised by `ensure_loadgen`, stopped in `stop_streams`,
+  and its HTML report is copied out at the end (and anytime via
+  `./endurance.sh fetch-loadgen`) into `results/endurance-*/loadgen-report/`.
+- `deploy/observability/.../dashboards/loadgen.json` — the Grafana panels
+  (completion rate by class/scenario, e2e + checkpoint latency, RSS + leak
+  canaries), aligned to the chaos-window annotations.
+
+Disable it for a SIPp-only run with `LOADGEN_ENABLE=0`. REFER is off by default in
+the endurance mix (`LOADGEN_W_REFER=0`) because it needs cluster REFER auth; raise
+the weight to include it.
+
 ---
 
 ## Where the results are (and *why* calls failed)

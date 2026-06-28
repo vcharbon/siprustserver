@@ -10,6 +10,8 @@
 #   - b2bua-runner         (B2BUA worker)
 #   - call-limiter-runner  (shared sliding-window call limiter)
 #   - cdr-consumer-runner  (drains the RabbitMQ CDR queue -> Prometheus metrics)
+#   - loadgen              (multiplexed SIP load generator — the endurance
+#                           functional-perf stream that runs alongside SIPp)
 #
 # Build context is the repo root:
 #   docker build -f deploy/docker/Dockerfile -t siprustserver:dev .
@@ -48,11 +50,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release \
         -p sip-proxy-runner -p b2bua-runner \
         -p call-limiter-runner -p cdr-consumer-runner \
+        -p loadgen \
  && mkdir -p /out \
  && cp target/release/sip-proxy-runner \
        target/release/b2bua-runner \
        target/release/call-limiter-runner \
-       target/release/cdr-consumer-runner /out/
+       target/release/cdr-consumer-runner \
+       target/release/loadgen /out/
 
 FROM debian:bookworm-slim AS runtime
 # ca-certificates for TLS; iproute2 (`tc`) so the chaos suite can inject netem
@@ -67,6 +71,7 @@ COPY --from=builder /out/sip-proxy-runner    /usr/local/bin/sip-proxy-runner
 COPY --from=builder /out/b2bua-runner        /usr/local/bin/b2bua-runner
 COPY --from=builder /out/call-limiter-runner /usr/local/bin/call-limiter-runner
 COPY --from=builder /out/cdr-consumer-runner  /usr/local/bin/cdr-consumer-runner
+COPY --from=builder /out/loadgen              /usr/local/bin/loadgen
 # Default to the worker; manifests override `command` for the proxy.
 ENTRYPOINT []
 CMD ["/usr/local/bin/b2bua-runner"]

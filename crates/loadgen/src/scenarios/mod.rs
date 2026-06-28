@@ -19,6 +19,7 @@ use crate::scope::CallScope;
 
 pub mod basic_call;
 pub mod failures;
+pub mod long_call;
 pub mod options_hold;
 pub mod refer;
 pub mod reinvite;
@@ -95,6 +96,12 @@ pub async fn establish(
     };
     uas.respond(180, "Ringing").await;
     call.try_expect(180).await?;
+    // Realistic ring: dwell the early dialog before answering. Alice is parked
+    // (not awaiting a receive) for the duration, so this just ages the early
+    // dialog on the SUT; it stays well inside Timer C (180 s). `0` in tests.
+    if !env.ring_delay.is_zero() {
+        tokio::time::sleep(env.ring_delay).await;
+    }
     uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
     call.try_expect(200).await?;
     ctx.checkpoint("time_to_200");
@@ -172,6 +179,7 @@ pub fn by_id(id: &str) -> Option<Arc<dyn LoadScenario>> {
         "reinvite" => Some(Arc::new(reinvite::Reinvite)),
         "refer" => Some(Arc::new(refer::Refer)),
         "options_hold" => Some(Arc::new(options_hold::OptionsHold)),
+        "long_call" => Some(Arc::new(long_call::LongCall)),
         "basic_call_em" => Some(AsEmergency::wrap("basic_call_em", Arc::new(basic_call::BasicCall))),
         "reinvite_em" => Some(AsEmergency::wrap("reinvite_em", Arc::new(reinvite::Reinvite))),
         "invite_reject" => Some(Arc::new(failures::InviteReject)),

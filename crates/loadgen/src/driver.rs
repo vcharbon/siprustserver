@@ -16,7 +16,6 @@ use std::time::Duration;
 use futures::FutureExt;
 use scenario_harness::AgentBinder;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio::time::MissedTickBehavior;
 
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
@@ -52,6 +51,14 @@ pub struct CallConfig {
     pub refer_key: String,
     pub options_hold: Duration,
     pub options_cadence: Duration,
+    /// Realistic ring time (callee 180→200 dwell). `0` = answer immediately.
+    pub ring_delay: Duration,
+    /// Post-connect talk time before BYE (basic call). `0` = hang up immediately.
+    pub talk_time: Duration,
+    /// Spacing held before and after a re-INVITE. `0` = back-to-back.
+    pub reinvite_gap: Duration,
+    /// Total hold of a long recorded call, split either side of its OPTIONS ping.
+    pub long_hold: Duration,
     /// After a *failed* call's a-leg is torn down, how long to drain-and-200 the
     /// in-process callee legs so the SUT closes its relayed b-leg promptly.
     pub teardown_quiesce: Duration,
@@ -154,13 +161,43 @@ impl Driver {
 
     /// Run the load for the configured duration, then drain in-flight calls.
     pub async fn run(&self) {
-        let mut ticker = tokio::time::interval(Duration::from_secs_f64(1.0 / self.cps));
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let deadline = tokio::time::Instant::now() + self.duration;
+        // Fixed-grid CPS governor. The nth call is scheduled at the ABSOLUTE slot
+        // `start + n*period`, anchored at the run start. We sleep until that
+        // instant; if it is already in the past — we fell behind on wake/scheduling
+        // jitter — the remaining delay is <= 0, so we DO NOT sleep (never a negative
+        // or zero sleep) and fire immediately, catching the slip back up. This holds
+        // the long-run offered rate at exactly `cps`.
+        //
+        // The previous `tokio::time::interval` + `MissedTickBehavior::Delay`
+        // re-anchored the next deadline to each (late) wake instead of catching up,
+        // so a few-ms per-tick scheduling latency was permanently shed every cycle —
+        // ~8% under endurance load (20 cps offered as ~18.4). The grid below cannot
+        // accumulate that drift. A catch-up burst (after a long stall) is naturally
+        // bounded by the max-in-flight semaphore — the excess is shed+counted, never
+        // an unbounded spawn storm.
+        let period = Duration::from_secs_f64(1.0 / self.cps);
+        let start = tokio::time::Instant::now();
         let mut rng = self.seed;
+        let mut n: u64 = 0;
 
-        while tokio::time::Instant::now() < deadline {
-            ticker.tick().await;
+        loop {
+            // Offset of the nth slot from `start`. Computed in Duration space and
+            // compared to `self.duration` (not as an Instant) so a huge n can never
+            // overflow `Instant` arithmetic — once the slot reaches the window end
+            // we stop (total offered ≈ cps × duration).
+            let offset = match u32::try_from(n).ok().and_then(|k| period.checked_mul(k)) {
+                Some(off) if off < self.duration => off,
+                _ => break,
+            };
+            let target = start + offset;
+
+            // Sleep ONLY while ahead of the slot; on/behind it (delay <= 0) fire now.
+            let now = tokio::time::Instant::now();
+            if target > now {
+                tokio::time::sleep_until(target).await;
+            }
+            n += 1;
+
             let scenario = self.pick(&mut rng);
             let permit = match self.sem.clone().try_acquire_owned() {
                 Ok(p) => p,
@@ -234,6 +271,10 @@ async fn run_one(
         refer_key: call.refer_key.clone(),
         options_hold: call.options_hold,
         options_cadence: call.options_cadence,
+        ring_delay: call.ring_delay,
+        talk_time: call.talk_time,
+        reinvite_gap: call.reinvite_gap,
+        long_hold: call.long_hold,
     };
     let scope = CallScope::new();
     let ctx = CallCtx::new();

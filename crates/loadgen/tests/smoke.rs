@@ -106,6 +106,12 @@ fn cfg(via: SocketAddr, refer_pin: Option<SocketAddr>, cps: f64, secs: u64, mif:
             refer_key: "refer-allow-c".to_string(),
             options_hold: Duration::from_millis(120),
             options_cadence: Duration::from_millis(40),
+            // Realistic-timer knobs default to fast values in tests (the default
+            // lane stays sub-60 s); the endurance run sets the real durations.
+            ring_delay: Duration::from_millis(0),
+            talk_time: Duration::from_millis(0),
+            reinvite_gap: Duration::from_millis(0),
+            long_hold: Duration::from_millis(120),
             teardown_quiesce: Duration::from_millis(200),
         },
     }
@@ -169,6 +175,48 @@ async fn loadgen_mux_smoke_all_scenarios() {
     }
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// The realistic-timer paths (ring dwell, post-connect talk, re-INVITE spacing)
+/// and the `long_call` scenario (one OPTIONS ping, then a hold during which BOTH
+/// legs answer the SUT's relayed in-dialog keepalives) all complete OK and leave
+/// no leak. Timers are set short (tens of ms) so the default lane stays fast; the
+/// point is to exercise the sleep/quiesce branches, not real durations.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_mux_smoke_timed_and_long_call() {
+    let (_h, b2bua, core, transport) = setup(6470, Correlation::header("X-Loadgen-Id"), 5).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
+
+    let mut cfg = cfg(b2bua.addr, None, 40.0, 2, 16, 0x71A1ED);
+    cfg.call.ring_delay = Duration::from_millis(30);
+    cfg.call.talk_time = Duration::from_millis(30);
+    cfg.call.reinvite_gap = Duration::from_millis(20);
+    cfg.call.long_hold = Duration::from_millis(150);
+
+    let driver = Driver::new(
+        cfg,
+        vec![
+            (by_id("basic_call").unwrap(), 2.0),
+            (by_id("reinvite").unwrap(), 1.0),
+            (by_id("long_call").unwrap(), 1.0),
+        ],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    for id in ["basic_call", "reinvite", "long_call"] {
+        assert!(
+            reporter.count(id, &ResultClass::Ok) > 0,
+            "scenario {id} produced no OK calls with realistic timers:\n{}",
+            reporter.render_prometheus()
+        );
+    }
+    // The long_call recorded its single OPTIONS-ping checkpoint.
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (timed/long-call)");
     settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }

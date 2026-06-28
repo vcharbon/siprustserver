@@ -1,0 +1,125 @@
+# Rust load generator (crates/loadgen) — the FUNCTIONAL-PERF stream that runs in
+# PARALLEL with the SIPp baseline during an endurance run. Unlike SIPp it reuses
+# the real scenario-harness choreography (basic call, re-INVITE, REFER, OPTIONS
+# keepalive) with realistic timers (5 s ring, talk time, re-INVITE spacing) and a
+# small tail of multi-minute "long" calls that each fire one OPTIONS ping so the
+# recorder captures a representative long flow. It is BOTH the UAC and the UAS:
+# one process multiplexes every dialog over a few static sockets (uac=base,
+# uas=base+1, refer=base+2), so the b2bua routes the b-leg back to THIS pod.
+#
+# Wiring that makes it work in-cluster (already provisioned on the worker):
+#   - the worker relays the per-call correlation header (B2BUA_RELAY_HEADERS=
+#     X-Loadgen-Id, 20-worker.yaml) onto every originated leg, so each demuxes back;
+#   - --route-pin-to-uas stamps X-Api-Call:{"destination":{host:POD_IP,port:base+1}}
+#     so the worker routes the callee leg to this pod's uas socket (honored per
+#     b2bua-runner: per-call X-Api-Call destinations override B2BUA_DEST);
+#   - the b-leg still traverses the front proxy (B2BUA_OUTBOUND_PROXY), exactly
+#     like SIPp traffic, so it is on the same LB path.
+#
+# Reporting & output (easy to access — see endurance.sh `fetch-loadgen`):
+#   - live Prometheus /metrics on :9300 (loadgen_*), scraped by vmagent via the
+#     pod annotations exactly like the proxy/worker/SIPp pods → Grafana "Loadgen"
+#     dashboard;
+#   - an on-disk HTML callflow report under /report on a shared emptyDir,
+#     re-snapshotted every ${LOADGEN_REPORT_INTERVAL}s so it is browsable mid-run;
+#     the endurance harness `kubectl cp`s it into the run's results dir.
+#
+# MEMORY: full recording (--background-record-every 1) keeps a per-call recording
+# buffer for the call's lifetime; stored samples stay bounded by --sample-cap per
+# (scenario,class). Watch loadgen_process_resident_memory_bytes + loadgen_inflight
+# on the dashboard; the pod limit OOM-kills a runaway into its own pod (backoffLimit
+# relaunch) instead of starving the node.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${LOADGEN_JOB_NAME}
+  namespace: sip-test
+  labels: { app: loadgen }
+spec:
+  # Match the SIPp streams: a small retry budget so a transient abort is recreated
+  # in place rather than dropping the stream out of steady state for the run.
+  backoffLimit: 4
+  ttlSecondsAfterFinished: 120
+  template:
+    metadata:
+      labels: { app: loadgen }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9300"
+        prometheus.io/path: "/metrics"
+    spec:
+      restartPolicy: Never
+      nodeSelector: { tier: load }
+      containers:
+        - name: loadgen
+          image: ${LOADGEN_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/loadgen"]
+          args:
+            - "--target"
+            - "${PROXY_TARGET}:${SIP_PORT}"
+            # Bind the mux endpoints on the pod IP so the relayed b-leg (and REFER
+            # leg) reach this pod; the worker pins the callee to POD_IP:base+1.
+            - "--bind-ip"
+            - "$(POD_IP)"
+            - "--route-pin-to-uas"
+            - "--correlation-header"
+            - "X-Loadgen-Id"
+            - "--cps"
+            - "${LOADGEN_CPS}"
+            - "--duration"
+            - "${LOADGEN_DURATION}"
+            - "--max-in-flight"
+            - "${LOADGEN_MAX_INFLIGHT}"
+            # Realistic timers (ms / s). 5 s ring, 8 s talk, ±5 s re-INVITE spacing,
+            # and a 20-minute hold for the long_call tail.
+            - "--ring-delay-ms"
+            - "${LOADGEN_RING_MS}"
+            - "--talk-time-ms"
+            - "${LOADGEN_TALK_MS}"
+            - "--reinvite-gap-ms"
+            - "${LOADGEN_GAP_MS}"
+            - "--long-hold-secs"
+            - "${LOADGEN_LONG_HOLD_SECS}"
+            # Generous per-receive timeout: tolerate a loaded SUT's relay latency
+            # (the default 5 s false-timed-out every call under the 120 cps baseline)
+            # and let the checkpoint histograms MEASURE it instead of failing it.
+            - "--recv-timeout-ms"
+            - "${LOADGEN_RECV_TIMEOUT_MS}"
+            # Scenario mix. long_call is the small (~2%) recorded tail; REFER is
+            # wired on (the cluster b2bua authorizes refer_key "refer-allow-c").
+            # Set LOADGEN_W_REFER=0 to drop it.
+            - "--scenario"
+            - "basic_call=${LOADGEN_W_BASIC}"
+            - "--scenario"
+            - "reinvite=${LOADGEN_W_REINVITE}"
+            - "--scenario"
+            - "refer=${LOADGEN_W_REFER}"
+            - "--scenario"
+            - "long_call=${LOADGEN_W_LONG}"
+            # Full recording, bounded stored samples, mid-run report snapshots.
+            - "--background-record-every"
+            - "${LOADGEN_RECORD_EVERY}"
+            - "--sample-cap"
+            - "${LOADGEN_SAMPLE_CAP}"
+            - "--out-dir"
+            - "/report"
+            - "--report-interval-secs"
+            - "${LOADGEN_REPORT_INTERVAL}"
+            - "--metrics-addr"
+            - "0.0.0.0:9300"
+          env:
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            # jemalloc is NOT linked here (loadgen is not a runner); the Rust system
+            # allocator is fine for a bounded-memory generator.
+          ports:
+            - { name: metrics, containerPort: 9300, protocol: TCP }
+          resources:
+            requests: { cpu: "${LOADGEN_CPU_REQ}", memory: "${LOADGEN_MEM_REQ}" }
+            limits:   { cpu: "${LOADGEN_CPU_LIM}", memory: "${LOADGEN_MEM_LIM}" }
+          volumeMounts:
+            - { name: report, mountPath: /report }
+      volumes:
+        - name: report
+          emptyDir: {}

@@ -32,6 +32,11 @@ impl LoadScenario for Reinvite {
     ) -> Result<(), StepError> {
         let mut dialog = establish(env, scope, ctx).await?;
 
+        // Realistic spacing: dwell the confirmed dialog before renegotiating.
+        if !env.reinvite_gap.is_zero() {
+            tokio::time::sleep(env.reinvite_gap).await;
+        }
+
         // Delayed-offer re-INVITE: alice sends bodyless, bob answers with SDP.
         let mut reinv = dialog.request(InDialogMethod::Invite, None).await;
         scope.set_confirmed(dialog.clone());
@@ -42,6 +47,11 @@ impl LoadScenario for Reinvite {
 
         dialog.ack(Some(REANSWER)).await;
         env.bob.try_receive("ACK").await?;
+
+        // Post-renegotiation dwell before teardown.
+        if !env.reinvite_gap.is_zero() {
+            tokio::time::sleep(env.reinvite_gap).await;
+        }
 
         hangup(env, scope, &mut dialog, ctx).await
     }

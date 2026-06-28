@@ -40,7 +40,7 @@
 //! counted (`mux_orphan_total{reason}`) + bounded-sampled + dropped — never
 //! queued, never silent.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -155,6 +155,13 @@ pub struct MuxStats {
     pub delivered: AtomicU64,
     sample_cap: usize,
     samples: Mutex<Vec<String>>,
+    /// Per-`(reason, CSeq-method)` orphan breakdown. A post-failover orphan burst
+    /// is the SUT stray-sending in-dialog requests (a reclaim BYE, a re-armed
+    /// keepalive OPTIONS) for a call the generator already finished; splitting the
+    /// count by the CSeq method lets the NEXT reboot be triaged from `/metrics`
+    /// alone — "stray BYE: N, stray OPTIONS: M" — without a packet capture. Off the
+    /// hot path (orphans only, never a delivered datagram), so a `Mutex<map>` is fine.
+    orphan_by_method: Mutex<BTreeMap<(&'static str, &'static str), u64>>,
 }
 
 impl MuxStats {
@@ -169,9 +176,13 @@ impl MuxStats {
             }
             OrphanReason::Stray => self.orphan_stray.fetch_add(1, Ordering::Relaxed),
         };
+        let method = cseq_method(raw);
+        *self.orphan_by_method.lock().unwrap().entry((reason.label(), method)).or_default() += 1;
         let mut g = self.samples.lock().unwrap();
         if g.len() < self.sample_cap {
-            g.push(format!("[{}] {}", reason.label(), first_line(raw)));
+            // Lead the sample with the CSeq (method + number) so a sampled orphan is
+            // self-describing for troubleshooting, then the request/response line.
+            g.push(format!("[{}] {} | {}", reason.label(), cseq_value(raw), first_line(raw)));
         }
     }
     /// Bounded orphan samples (the "notify" surface).
@@ -344,20 +355,24 @@ impl MuxCore {
     pub fn render_prometheus(&self) -> String {
         let s = &self.stats;
         let mut out = String::new();
-        out.push_str("# HELP loadgen_mux_orphan_total Inbound datagrams that matched no call.\n");
+        // Orphans are labelled by reason AND CSeq method (`sum by(reason)` still
+        // aggregates to the per-reason total for existing queries). Always emit the
+        // three reason×none zero-series so a fresh run has the series present.
+        out.push_str("# HELP loadgen_mux_orphan_total Inbound datagrams that matched no call, by reason and CSeq method.\n");
         out.push_str("# TYPE loadgen_mux_orphan_total counter\n");
-        out.push_str(&format!(
-            "loadgen_mux_orphan_total{{reason=\"no_header\"}} {}\n",
-            s.orphan_no_header.load(Ordering::Relaxed)
-        ));
-        out.push_str(&format!(
-            "loadgen_mux_orphan_total{{reason=\"unknown_token\"}} {}\n",
-            s.orphan_unknown_token.load(Ordering::Relaxed)
-        ));
-        out.push_str(&format!(
-            "loadgen_mux_orphan_total{{reason=\"stray\"}} {}\n",
-            s.orphan_stray.load(Ordering::Relaxed)
-        ));
+        let by = s.orphan_by_method.lock().unwrap();
+        if by.is_empty() {
+            for r in ["no_header", "unknown_token", "stray"] {
+                out.push_str(&format!("loadgen_mux_orphan_total{{reason=\"{r}\",method=\"none\"}} 0\n"));
+            }
+        } else {
+            for ((reason, method), n) in by.iter() {
+                out.push_str(&format!(
+                    "loadgen_mux_orphan_total{{reason=\"{reason}\",method=\"{method}\"}} {n}\n"
+                ));
+            }
+        }
+        drop(by);
         out.push_str("# HELP loadgen_mux_registry_size Live demux entries (leak canary).\n");
         out.push_str("# TYPE loadgen_mux_registry_size gauge\n");
         out.push_str(&format!("loadgen_mux_registry_size {}\n", self.registry_size()));
@@ -713,6 +728,47 @@ fn as_str(raw: &[u8]) -> std::borrow::Cow<'_, str> {
 
 fn first_line(raw: &[u8]) -> String {
     as_str(raw).lines().next().unwrap_or("").trim().to_string()
+}
+
+/// The CSeq line value (`<num> <METHOD>`) of a datagram, for an orphan sample.
+/// Empty if absent. Works for requests and responses (CSeq echoes the method).
+fn cseq_value(raw: &[u8]) -> String {
+    for line in as_str(raw).lines() {
+        let l = line.trim();
+        if l.len() >= 5 && l[..5].eq_ignore_ascii_case("cseq:") {
+            return format!("CSeq: {}", l[5..].trim());
+        }
+    }
+    String::new()
+}
+
+/// The CSeq method, mapped to a BOUNDED static label so it is a safe (low-
+/// cardinality) Prometheus label. `none` when absent, `other` for an unrecognized
+/// method — so a stray BYE / OPTIONS burst after a reboot is visible per-method.
+fn cseq_method(raw: &[u8]) -> &'static str {
+    for line in as_str(raw).lines() {
+        let l = line.trim();
+        if l.len() >= 5 && l[..5].eq_ignore_ascii_case("cseq:") {
+            let m = l[5..].trim().split_whitespace().nth(1).unwrap_or("");
+            return match m.to_ascii_uppercase().as_str() {
+                "INVITE" => "INVITE",
+                "ACK" => "ACK",
+                "BYE" => "BYE",
+                "CANCEL" => "CANCEL",
+                "OPTIONS" => "OPTIONS",
+                "REFER" => "REFER",
+                "NOTIFY" => "NOTIFY",
+                "PRACK" => "PRACK",
+                "UPDATE" => "UPDATE",
+                "INFO" => "INFO",
+                "SUBSCRIBE" => "SUBSCRIBE",
+                "MESSAGE" => "MESSAGE",
+                "" => "none",
+                _ => "other",
+            };
+        }
+    }
+    "none"
 }
 
 /// The Request-URI (2nd token of the request line), or `None` for a response.

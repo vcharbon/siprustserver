@@ -23,6 +23,12 @@ impl LoadScenario for BasicCall {
         ctx: &CallCtx,
     ) -> Result<(), StepError> {
         let mut dialog = establish(env, scope, ctx).await?;
+        // Realistic post-connect talk time before teardown. The hold is short
+        // (well under the SUT's in-dialog keepalive interval), so no leg pumping
+        // is needed; the long_call scenario covers the keepalive-answering path.
+        if !env.talk_time.is_zero() {
+            tokio::time::sleep(env.talk_time).await;
+        }
         hangup(env, scope, &mut dialog, ctx).await
     }
 }

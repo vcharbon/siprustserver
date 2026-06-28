@@ -188,6 +188,55 @@ else
   CHAOS_INTERVAL="${CHAOS_INTERVAL:-900}"
 fi
 
+# --- Rust load generator (crates/loadgen) — the functional-perf stream that runs
+# in PARALLEL with the SIPp baseline. Realistic timers + a small recorded long-call
+# tail; full recording by default with bounded stored samples (watch its RSS on the
+# Loadgen dashboard). Set LOADGEN_ENABLE=0 to run a SIPp-only endurance.
+LOADGEN_ENABLE="${LOADGEN_ENABLE:-1}"
+LOADGEN_JOB_NAME="${LOADGEN_JOB_NAME:-loadgen}"
+LOADGEN_IMAGE="${LOADGEN_IMAGE:-siprustserver:dev}"
+LOADGEN_CPS="${LOADGEN_CPS:-20}"                 # base offered rate of the rust stream
+# Span the whole window (+ a margin so the generator never stops offering before the
+# run ends); stop_streams deletes the Job at the end regardless.
+LOADGEN_DURATION="${LOADGEN_DURATION:-$(( DURATION + 300 ))}"
+# Realistic timers (chosen 2026-06-28): 5 s ring, 8 s talk, ±5 s re-INVITE spacing,
+# 20-minute hold for the long_call tail.
+LOADGEN_RING_MS="${LOADGEN_RING_MS:-5000}"
+LOADGEN_TALK_MS="${LOADGEN_TALK_MS:-8000}"
+LOADGEN_GAP_MS="${LOADGEN_GAP_MS:-5000}"
+# Per-receive wall-clock timeout. The DEFAULT (5000 ms) is too tight against a
+# fully-loaded SUT — under the 120 cps baseline the b-leg response relay latency
+# exceeds 5 s and EVERY loadgen call false-timed-out (while SIPp, at -recv_timeout
+# 600000, tolerated the same latency). It must also exceed the 5 s ring so a slow
+# answer is measured (via the checkpoint histograms), not declared a timeout. 30 s
+# gives ample margin while still flagging a genuinely stuck call.
+LOADGEN_RECV_TIMEOUT_MS="${LOADGEN_RECV_TIMEOUT_MS:-30000}"
+# Long-call hold = 6 min, DELIBERATELY de-aligned from the worker keepalive
+# interval (B2BUA_KEEPALIVE_SEC=300 = 5 min, 20-worker.yaml). At a 5-min multiple
+# (the old 1200 s = 20 min) the teardown BYE landed exactly on a keepalive OPTIONS
+# fire → "bob expected BYE, got OPTIONS" wrong_method. 360 s crosses ONE keepalive
+# (the recording OPTIONS) and tears down ~60 s clear of the next fire. The scenario
+# teardown is also OPTIONS-tolerant now, so jitter cannot reintroduce the collision.
+LOADGEN_LONG_HOLD_SECS="${LOADGEN_LONG_HOLD_SECS:-360}"
+# Scenario weights. REFER is wired on (the cluster b2bua authorizes the loadgen
+# refer_key "refer-allow-c" via ScriptedDecisionEngine::route_all_to_with_limiter
+# → on_refer(default_call_refer), and the worker relays X-Loadgen-Id onto the C
+# leg). long_call ≈ 2% of the mix (16+4+2+0.4 = 22.4 ⇒ 0.4/22.4 ≈ 1.8%).
+LOADGEN_W_BASIC="${LOADGEN_W_BASIC:-16}"
+LOADGEN_W_REINVITE="${LOADGEN_W_REINVITE:-4}"
+LOADGEN_W_REFER="${LOADGEN_W_REFER:-2}"
+LOADGEN_W_LONG="${LOADGEN_W_LONG:-0.4}"
+# Max in-flight ceiling: room for the steady short calls (~20cps × ~25 s ≈ 500) PLUS
+# the long tail (~0.4cps × 1200 s ≈ 480) with generous headroom.
+LOADGEN_MAX_INFLIGHT="${LOADGEN_MAX_INFLIGHT:-4000}"
+# Full recording (1 = every call) with bounded stored samples per (scenario,class);
+# mid-run report snapshot cadence (seconds).
+LOADGEN_RECORD_EVERY="${LOADGEN_RECORD_EVERY:-1}"
+LOADGEN_SAMPLE_CAP="${LOADGEN_SAMPLE_CAP:-50}"
+LOADGEN_REPORT_INTERVAL="${LOADGEN_REPORT_INTERVAL:-60}"
+LOADGEN_CPU_REQ="${LOADGEN_CPU_REQ:-1}"; LOADGEN_CPU_LIM="${LOADGEN_CPU_LIM:-6}"
+LOADGEN_MEM_REQ="${LOADGEN_MEM_REQ:-512Mi}"; LOADGEN_MEM_LIM="${LOADGEN_MEM_LIM:-2Gi}"
+
 TS="$(date +%Y%m%d-%H%M%S)"
 RUN_DIR="$HERE/results/endurance-$TS"
 EVENTS="$RUN_DIR/events.jsonl"
@@ -1242,13 +1291,72 @@ wireup() {
   ok "wireup complete"
 }
 
+# --- Rust loadgen stream (runs in PARALLEL with the SIPp baseline) ------------
+# Apply the loadgen Job from the shared manifest. All LOADGEN_* knobs + the shared
+# PROXY_TARGET/SIP_PORT are exported for envsubst.
+launch_loadgen() {
+  [ "$LOADGEN_ENABLE" = "1" ] || { log "LOADGEN_ENABLE=0 — skipping rust loadgen stream"; return 0; }
+  export LOADGEN_JOB_NAME LOADGEN_IMAGE LOADGEN_CPS LOADGEN_DURATION LOADGEN_MAX_INFLIGHT \
+         LOADGEN_RING_MS LOADGEN_TALK_MS LOADGEN_GAP_MS LOADGEN_LONG_HOLD_SECS LOADGEN_RECV_TIMEOUT_MS \
+         LOADGEN_W_BASIC LOADGEN_W_REINVITE LOADGEN_W_REFER LOADGEN_W_LONG \
+         LOADGEN_RECORD_EVERY LOADGEN_SAMPLE_CAP LOADGEN_REPORT_INTERVAL \
+         LOADGEN_CPU_REQ LOADGEN_CPU_LIM LOADGEN_MEM_REQ LOADGEN_MEM_LIM \
+         PROXY_TARGET SIP_PORT
+  kubectl -n "$NS" delete job "$LOADGEN_JOB_NAME" --ignore-not-found >/dev/null 2>&1 || true
+  envsubst < manifests/45-loadgen-job.yaml | kubectl apply -f - >/dev/null
+  log "loadgen started: ${LOADGEN_CPS}cps (basic=${LOADGEN_W_BASIC} reinvite=${LOADGEN_W_REINVITE} long=${LOADGEN_W_LONG} refer=${LOADGEN_W_REFER}), ring=${LOADGEN_RING_MS}ms talk=${LOADGEN_TALK_MS}ms gap=${LOADGEN_GAP_MS}ms long_hold=${LOADGEN_LONG_HOLD_SECS}s, full-rec=$([ "$LOADGEN_RECORD_EVERY" = 1 ] && echo on || echo 1/${LOADGEN_RECORD_EVERY})"
+}
+
+# Recreate the loadgen Job if it vanished/failed (same supervision the SIPp
+# baseline gets via ensure_baseline). A loadgen self-abort loses only its own
+# calls, so — like a UAC stream crash — it never taints a chaos window.
+ensure_loadgen() {
+  [ "$LOADGEN_ENABLE" = "1" ] || return 0
+  local active
+  active="$(kubectl -n "$NS" get job "$LOADGEN_JOB_NAME" -o jsonpath='{.status.active}' 2>/dev/null || echo)"
+  if [ "${active:-0}" != "1" ]; then
+    warn "loadgen job not active — relaunching"
+    push_metric "sip_endurance_stream_restart{stream=\"loadgen\"} 1"
+    launch_loadgen
+  fi
+}
+
+stop_loadgen() {
+  [ "$LOADGEN_ENABLE" = "1" ] || return 0
+  kubectl -n "$NS" delete job "$LOADGEN_JOB_NAME" --ignore-not-found >/dev/null 2>&1 || true
+}
+
+# Copy the loadgen on-disk HTML callflow report out of the running pod into the
+# run's results dir (index.html + callflows/), so it is easy to open locally. The
+# generator re-snapshots it every LOADGEN_REPORT_INTERVAL s, so this works mid-run
+# AND at the end. Also logs the OK ratio from live metrics.
+fetch_loadgen_report() {
+  [ "$LOADGEN_ENABLE" = "1" ] || return 0
+  local pod dest
+  pod="$(kubectl -n "$NS" get pod -l app=loadgen -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo)"
+  if [ -z "$pod" ]; then warn "fetch-loadgen: no loadgen pod found"; return 0; fi
+  dest="$RUN_DIR/loadgen-report"
+  mkdir -p "$dest"
+  if kubectl -n "$NS" cp "$pod:/report" "$dest" >>"$RUNLOG" 2>&1; then
+    ok "loadgen report copied to $dest (open $dest/index.html)"
+  else
+    warn "fetch-loadgen: kubectl cp from $pod:/report failed (report may not be snapshotted yet)"
+  fi
+  # Live OK ratio from the loadgen series (best-effort; 0 if VM unreachable).
+  local ok_n tot_n
+  ok_n="$(vmq 'sum(loadgen_calls_total{class="ok"})')"
+  tot_n="$(vmq 'sum(loadgen_calls_total)')"
+  log "loadgen totals: ok=${ok_n%.*} total=${tot_n%.*} rss=$(vmq 'max(loadgen_process_resident_memory_bytes)') inflight=$(vmq 'max(loadgen_inflight)')"
+}
+
 start_baseline() {
-  log "starting baseline streams: long@${LONG_CPS}(${LONG_SHARDS} shards×${LONG_SHARD_CPS}cps) reinvite@${REINVITE_CPS} short_em@${SHORT_EM_CPS}+short_ne@${SHORT_NE_CPS}(=${SHORT_CPS}) abuse@${ABUSE_CAPS} limiter@${LIMITER_CPS}(cap ${LIMITER_TARGET})"
+  log "starting baseline streams: long@${LONG_CPS}(${LONG_SHARDS} shards×${LONG_SHARD_CPS}cps) reinvite@${REINVITE_CPS} short_em@${SHORT_EM_CPS}+short_ne@${SHORT_NE_CPS}(=${SHORT_CPS}) abuse@${ABUSE_CAPS} limiter@${LIMITER_CPS}(cap ${LIMITER_TARGET}) loadgen@${LOADGEN_CPS}"
   local job scenario cps role
   while read -r job scenario cps role; do
     [ -n "$job" ] && launch_stream "$job" "$scenario" "$cps" "$role"
   done < <(baseline_specs)
   ABUSE_CAPS="$ABUSE_CAPS" ./chaos.sh abuse up >>"$RUNLOG" 2>&1 || true
+  launch_loadgen
   push_metric "sip_endurance_run{phase=\"start\"} 1"
 }
 
@@ -1261,6 +1369,7 @@ stop_streams() {
         kubectl -n "$NS" delete job "$job" --ignore-not-found >/dev/null 2>&1 || true
       done
   ./chaos.sh abuse down >>"$RUNLOG" 2>&1 || true
+  stop_loadgen
   push_metric "sip_endurance_run{phase=\"stop\"} 1"
 }
 
@@ -1319,6 +1428,7 @@ run() {
       now="$(date +%s)"
       [ $(( now - start )) -ge "$DURATION" ] && break
       ensure_baseline
+      ensure_loadgen
       sleep "$CHAOS_INTERVAL"
     done
   else
@@ -1329,6 +1439,7 @@ run() {
     now="$(date +%s)"
     [ $(( now - start )) -ge "$DURATION" ] && break
     ensure_baseline
+    ensure_loadgen
     chaos_event "${cycle[$(( idx % ${#cycle[@]} ))]}" "$idx"
     idx=$(( idx + 1 ))
     # Remaining sleep until the next interval boundary.
@@ -1346,6 +1457,9 @@ run() {
   local fs ff
   fs="$(snap_success)"; ff="$(snap_failed)"
   log "final baseline totals: success=$fs failed=$ff"
+  # Pull the loadgen HTML callflow report out before tearing anything down, so the
+  # rust functional-perf output is captured alongside events.jsonl regardless of KEEP.
+  fetch_loadgen_report
   if [ "${KEEP:-0}" = "1" ]; then
     log "KEEP=1 — leaving streams running"
   else
@@ -1361,5 +1475,12 @@ case "$cmd" in
   run)    run ;;
   wireup) wireup ;;
   stop)   stop_streams ;;
-  *) printf 'usage: %s {run|wireup|stop}\n' "$0" >&2; exit 1 ;;
+  # Copy the loadgen HTML callflow report out of the running pod ANYTIME (it is
+  # re-snapshotted every LOADGEN_REPORT_INTERVAL s). Writes under the LATEST
+  # results/endurance-* run dir if one exists, else a fresh timestamped dir.
+  fetch-loadgen)
+    LATEST="$(ls -dt "$HERE"/results/endurance-* 2>/dev/null | head -1 || true)"
+    RUN_DIR="${LATEST:-$RUN_DIR}"; RUNLOG="$RUN_DIR/run.log"; mkdir -p "$RUN_DIR"
+    fetch_loadgen_report ;;
+  *) printf 'usage: %s {run|wireup|stop|fetch-loadgen}\n' "$0" >&2; exit 1 ;;
 esac

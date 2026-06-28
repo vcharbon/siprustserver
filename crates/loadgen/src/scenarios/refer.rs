@@ -44,6 +44,10 @@ impl LoadScenario for Refer {
         let mut bob_uas = env.bob.try_receive("INVITE").await?;
         bob_uas.respond(180, "Ringing").await;
         call.try_expect(180).await?;
+        // Realistic ring before answer (consistent with the other scenarios' 5 s).
+        if !env.ring_delay.is_zero() {
+            tokio::time::sleep(env.ring_delay).await;
+        }
         bob_uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
         call.try_expect(200).await?;
         ctx.checkpoint("time_to_200");
@@ -51,6 +55,13 @@ impl LoadScenario for Refer {
         scope.set_confirmed(alice_dialog.clone());
         env.bob.try_receive("ACK").await?;
         let mut bob_dialog = bob_uas.dialog();
+
+        // Talk a few seconds in the established A↔B call before Bob transfers (a
+        // real attendant speaks first, and it keeps the REFER off the connect
+        // boundary). Uses the re-INVITE spacing knob (the endurance run sets 5 s).
+        if !env.reinvite_gap.is_zero() {
+            tokio::time::sleep(env.reinvite_gap).await;
+        }
 
         // REFER → 202. Refer-To carries charlie's correlation token in the
         // user-part; the optional X-Api-Call pins the transfer to the static

@@ -69,8 +69,31 @@ struct Args {
     options_hold: u64,
     #[arg(long, default_value_t = 5)]
     options_cadence: u64,
+    /// Realistic ring time (ms): callee dwell between 180 and 200. 0 = immediate.
+    #[arg(long, default_value_t = 0)]
+    ring_delay_ms: u64,
+    /// Post-connect talk time (ms) held before BYE on a basic call. 0 = immediate.
+    #[arg(long, default_value_t = 0)]
+    talk_time_ms: u64,
+    /// Spacing (ms) held before and after a re-INVITE. 0 = back-to-back.
+    #[arg(long, default_value_t = 0)]
+    reinvite_gap_ms: u64,
+    /// Total hold (seconds) of the `long_call` scenario, around its OPTIONS ping.
+    #[arg(long, default_value_t = 1200)]
+    long_hold_secs: u64,
     #[arg(long, default_value = "refer-allow-c")]
     refer_key: String,
+    /// Record roughly 1 call in N's flow (the sampling-gate background fraction).
+    /// `1` = full recording (every call); higher values record less. Stored
+    /// samples stay bounded by `--sample-cap` per bucket; the cost of full
+    /// recording is per-call recording memory, so watch `loadgen_process_*` /
+    /// `loadgen_inflight` when it is on.
+    #[arg(long, default_value_t = 64)]
+    background_record_every: u64,
+    /// Periodically re-write the on-disk report every N seconds during the run
+    /// (so it is browsable mid-run, not only at exit). 0 = only at the end.
+    #[arg(long, default_value_t = 0)]
+    report_interval_secs: u64,
     /// Scenario weights, repeatable: `--scenario basic_call=4 --scenario refer=1`.
     #[arg(long = "scenario")]
     scenarios: Vec<String>,
@@ -127,7 +150,9 @@ async fn main() -> std::io::Result<()> {
 
     let reporter = Arc::new(Reporter::new(ReporterCfg {
         sample_cap: args.sample_cap,
-        ..Default::default()
+        // 1 = full recording (every call); the default (64) keeps the converging
+        // background sampling gate.
+        background_record_every: args.background_record_every,
     }));
 
     let seed = std::time::SystemTime::now()
@@ -148,17 +173,28 @@ async fn main() -> std::io::Result<()> {
             refer_key: args.refer_key.clone(),
             options_hold: Duration::from_secs(args.options_hold),
             options_cadence: Duration::from_secs(args.options_cadence),
+            ring_delay: Duration::from_millis(args.ring_delay_ms),
+            talk_time: Duration::from_millis(args.talk_time_ms),
+            reinvite_gap: Duration::from_millis(args.reinvite_gap_ms),
+            long_hold: Duration::from_secs(args.long_hold_secs),
             teardown_quiesce: Duration::from_millis(250),
         },
     };
 
     let driver = Driver::new(cfg, scenarios, reporter.clone(), transport);
 
-    // Live /metrics: reporter series + mux series.
+    // Live /metrics: reporter series + mux series + a process-memory canary
+    // (RSS) so the endurance dashboard can watch the load generator itself while
+    // full recording is on.
     let metrics_reporter = reporter.clone();
     let metrics_core = core.clone();
     let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || {
-        format!("{}{}", metrics_reporter.render_prometheus(), metrics_core.render_prometheus())
+        format!(
+            "{}{}{}",
+            metrics_reporter.render_prometheus(),
+            metrics_core.render_prometheus(),
+            process_memory_metrics(),
+        )
     });
     let metrics_addr = args.metrics_addr;
     tokio::spawn(async move {
@@ -166,6 +202,24 @@ async fn main() -> std::io::Result<()> {
             eprintln!("[loadgen] /metrics server stopped: {e}");
         }
     });
+
+    // Periodically snapshot the on-disk report so it is browsable mid-run (the
+    // endurance harness copies it out without waiting for the job to finish).
+    if args.report_interval_secs > 0 {
+        let snap_reporter = reporter.clone();
+        let out = args.out_dir.clone();
+        let every = Duration::from_secs(args.report_interval_secs);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(every);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                if let Err(e) = snap_reporter.finalize(&out) {
+                    eprintln!("[loadgen] periodic report snapshot failed: {e}");
+                }
+            }
+        });
+    }
 
     eprintln!(
         "[loadgen] {} cps for {}s, max_in_flight={}, target={}, uas={}, /metrics on {}",
@@ -183,4 +237,25 @@ async fn main() -> std::io::Result<()> {
     println!("{}", reporter.render_prometheus());
     println!("{}", core.render_prometheus());
     Ok(())
+}
+
+/// A process resident-memory canary in Prometheus format, read from
+/// `/proc/self/statm` (field 2 = resident pages × page size). The load generator
+/// holds per-call recording buffers while full recording is on, so the endurance
+/// dashboard watches this to catch a recording-memory blow-up early. Returns an
+/// empty string off Linux / if the file is unreadable (best effort).
+fn process_memory_metrics() -> String {
+    let rss = std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1).map(|w| w.to_string()))
+        .and_then(|pages| pages.parse::<u64>().ok())
+        .map(|pages| pages.saturating_mul(4096));
+    match rss {
+        Some(bytes) => format!(
+            "# HELP loadgen_process_resident_memory_bytes Load generator RSS.\n\
+             # TYPE loadgen_process_resident_memory_bytes gauge\n\
+             loadgen_process_resident_memory_bytes {bytes}\n"
+        ),
+        None => String::new(),
+    }
 }
