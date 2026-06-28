@@ -2,16 +2,14 @@
 //! load flow (mirrors `uac-endurance-short.xml`).
 
 use async_trait::async_trait;
-use scenario_harness::StepError;
 
-use super::{establish, hangup, LoadScenario, ScenarioId};
-use crate::ctx::{CallCtx, CallEnv};
-use crate::scope::CallScope;
+use crate::realcall::{establish, hangup, CallCtx, CallEnv, CallScope, RealCallScenario, ScenarioId};
+use crate::StepError;
 
 pub struct BasicCall;
 
 #[async_trait]
-impl LoadScenario for BasicCall {
+impl RealCallScenario for BasicCall {
     fn id(&self) -> ScenarioId {
         "basic_call"
     }

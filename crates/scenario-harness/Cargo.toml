@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 tokio = { workspace = true }
+async-trait = { workspace = true }
 sip-message = { path = "../sip-message" }
 sip-net = { path = "../sip-net" }
 layer-harness = { path = "../layer-harness" }

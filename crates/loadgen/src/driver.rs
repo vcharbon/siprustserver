@@ -263,7 +263,7 @@ async fn run_one(
         bob: &bob,
         charlie: charlie.as_ref(),
         via: call.via,
-        correlation: transport.correlation.clone(),
+        correlation_header: transport.correlation.header_name().to_string(),
         token,
         emergency: scenario.emergency(),
         route_pin: call.route_pin,

@@ -34,6 +34,7 @@ pub mod anchors;
 pub mod callflow;
 pub mod dsl;
 pub mod loadbind;
+pub mod realcall;
 pub mod report;
 pub mod run;
 
@@ -64,3 +65,10 @@ pub use anchors::{AnchorKeys, AnchorMsgKind, AnchorTag};
 pub use callflow::{establish, hangup, Call, ANSWER_SDP, OFFER_SDP};
 pub use dsl::{AgentId, Match, Scenario, Step};
 pub use run::{run, ExpectOutcome, RunReport};
+// The portable real-call scenarios shared by the load generator and the
+// in-process functional leak gate (`realcall::run_asserting` for happy-path
+// flows, `realcall::run_collecting` for the voluntarily-failing ones).
+pub use realcall::{
+    run_asserting, run_collecting, AsEmergency, CallCtx, CallEnv, CallScope, RealCallScenario,
+    ScenarioId,
+};

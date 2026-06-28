@@ -6,17 +6,15 @@
 //! made fallible and lenient (NOTIFY bodies are answered, not deep-asserted).
 
 use async_trait::async_trait;
-use scenario_harness::{StepError, ANSWER_SDP, OFFER_SDP};
 use sip_message::generators::InDialogMethod;
 
-use super::{LoadScenario, ScenarioId};
-use crate::ctx::{CallCtx, CallEnv};
-use crate::scope::CallScope;
+use crate::realcall::{CallCtx, CallEnv, CallScope, RealCallScenario, ScenarioId};
+use crate::{StepError, ANSWER_SDP, OFFER_SDP};
 
 pub struct Refer;
 
 #[async_trait]
-impl LoadScenario for Refer {
+impl RealCallScenario for Refer {
     fn id(&self) -> ScenarioId {
         "refer"
     }

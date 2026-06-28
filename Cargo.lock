@@ -3533,6 +3533,7 @@ dependencies = [
 name = "scenario-harness"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "layer-harness",
  "seq-report",
  "sip-clock",

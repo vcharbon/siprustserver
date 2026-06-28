@@ -10,19 +10,17 @@
 //! toward both peers (`B2BUA_KEEPALIVE_SEC`), and the recorder's long-flow path.
 
 use async_trait::async_trait;
-use scenario_harness::StepError;
 use sip_message::generators::InDialogMethod;
 
 use std::time::Duration;
 
-use super::{establish, LoadScenario, ScenarioId};
-use crate::ctx::{CallCtx, CallEnv};
-use crate::scope::CallScope;
+use crate::realcall::{establish, CallCtx, CallEnv, CallScope, RealCallScenario, ScenarioId};
+use crate::StepError;
 
 pub struct LongCall;
 
 #[async_trait]
-impl LoadScenario for LongCall {
+impl RealCallScenario for LongCall {
     fn id(&self) -> ScenarioId {
         "long_call"
     }

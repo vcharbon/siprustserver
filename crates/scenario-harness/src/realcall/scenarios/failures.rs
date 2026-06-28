@@ -1,7 +1,7 @@
 //! Voluntarily-FAILING scenarios — calls that deliberately do not reach a clean
 //! BYE, one per distinct teardown path, so the post-call cleanup matrix is
 //! covered without an endurance run. Each ends in a different
-//! [`CallScope`](crate::scope::CallScope) state so the driver's teardown
+//! [`CallScope`] state so the driver's teardown
 //! exercises every reclamation branch (CANCEL an early dialog, BYE a confirmed
 //! one, no-op a final-rejected one) and the SUT must still fully reap:
 //!
@@ -11,16 +11,14 @@
 //! | [`AbandonRinging`]    | caller quits on 180 | Early         | CANCEL   |
 //! | [`ReferCharlieReject`]| transfer target 603 | Confirmed     | BYE A↔B  |
 //!
-//! ([`FailMidCall`](crate::scenarios) — establish then drop — covers the plain
-//! Confirmed→BYE path in the smoke suite.)
+//! (`FailMidCall` — establish then drop — covers the plain Confirmed→BYE path in
+//! the smoke suite.)
 
 use async_trait::async_trait;
-use scenario_harness::{StepError, ANSWER_SDP, OFFER_SDP};
 use sip_message::generators::InDialogMethod;
 
-use super::{LoadScenario, ScenarioId};
-use crate::ctx::{CallCtx, CallEnv};
-use crate::scope::CallScope;
+use crate::realcall::{CallCtx, CallEnv, CallScope, RealCallScenario, ScenarioId};
+use crate::{StepError, ANSWER_SDP, OFFER_SDP};
 
 /// The callee rejects the INVITE with a `486 Busy Here`. The final response
 /// completes the INVITE transaction (the stack auto-ACKs the non-2xx), so there
@@ -29,7 +27,7 @@ use crate::scope::CallScope;
 pub struct InviteReject;
 
 #[async_trait]
-impl LoadScenario for InviteReject {
+impl RealCallScenario for InviteReject {
     fn id(&self) -> ScenarioId {
         "invite_reject"
     }
@@ -62,7 +60,7 @@ impl LoadScenario for InviteReject {
 pub struct AbandonRinging;
 
 #[async_trait]
-impl LoadScenario for AbandonRinging {
+impl RealCallScenario for AbandonRinging {
     fn id(&self) -> ScenarioId {
         "abandon_ringing"
     }
@@ -107,7 +105,7 @@ impl LoadScenario for AbandonRinging {
 pub struct ReferCharlieReject;
 
 #[async_trait]
-impl LoadScenario for ReferCharlieReject {
+impl RealCallScenario for ReferCharlieReject {
     fn id(&self) -> ScenarioId {
         "refer_charlie_reject"
     }

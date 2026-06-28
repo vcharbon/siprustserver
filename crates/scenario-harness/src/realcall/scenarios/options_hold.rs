@@ -3,20 +3,24 @@
 //! OPTIONS-hold replacement, mirrors `uac-long-options.xml`). Exercises
 //! concurrency ceilings and the keepalive path.
 
-use std::time::Instant;
-
 use async_trait::async_trait;
-use scenario_harness::StepError;
+// `tokio::time::Instant` (NOT `std::time::Instant`) so the hold loop is
+// clock-portable: under a `#[tokio::test(start_paused)]` functional run the
+// `tokio::time::sleep`s auto-advance virtual time, and only the tokio clock
+// follows them — `std::time::Instant` would stay frozen and the loop would never
+// reach `options_hold`, spinning until the SUT keepalive collided. Identical to
+// `std::time::Instant` under the real clock the load fleet runs on (and matches
+// the load driver, which already times on `tokio::time::Instant`).
+use tokio::time::Instant;
 use sip_message::generators::InDialogMethod;
 
-use super::{establish, hangup, LoadScenario, ScenarioId};
-use crate::ctx::{CallCtx, CallEnv};
-use crate::scope::CallScope;
+use crate::realcall::{establish, hangup, CallCtx, CallEnv, CallScope, RealCallScenario, ScenarioId};
+use crate::StepError;
 
 pub struct OptionsHold;
 
 #[async_trait]
-impl LoadScenario for OptionsHold {
+impl RealCallScenario for OptionsHold {
     fn id(&self) -> ScenarioId {
         "options_hold"
     }

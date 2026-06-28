@@ -1,0 +1,246 @@
+//! Functional leak gate over the **shared** real-call scenarios.
+//!
+//! These are the SAME `scenario_harness::realcall` scenarios the load generator
+//! drives at 20–100 cps against the real cluster — here run ONCE, in-process,
+//! against a real `B2buaCore`, on a paused clock. `run_asserting` panics on any
+//! deviation (the strict analogue of the load driver's count-and-classify), then
+//! we assert the SUT leaked no call state. So a scenario that leaks a dialog,
+//! holds a limiter token, or mis-tears-down is caught deterministically in CI —
+//! no cluster, no soak — and the realistic 180→200 / re-INVITE / pre-BYE dwells
+//! are exercised for free (the sleeps auto-advance under `start_paused`).
+//!
+//! This is the proof that one scenario definition feeds both lanes — every
+//! migrated scenario is covered here: the happy-path flows (`run_asserting`) AND
+//! the voluntarily-failing ones (`run_collecting`, where a FAILED call that still
+//! cleans up is the leak gate's most valuable assertion). As more flows migrate
+//! into `realcall::scenarios`, add a case here per flow.
+
+use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
+use scenario_harness::realcall::scenarios::{
+    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, Refer, ReferCharlieReject,
+    Reinvite,
+};
+use scenario_harness::realcall::{run_asserting, run_collecting, CallEnv};
+use scenario_harness::{Agent, RealCallScenario};
+
+// The REFER backend the b2bua's scripted `/call/refer` authorizes (see
+// `ScriptedDecisionEngine::route_all_with_refer` → `default_call_refer`); the
+// refer scenarios' `X-Api-Call` must carry this `refer_key` to be allowed.
+const REFER_KEY: &str = "refer-allow-c";
+/// Canonical charlie (transfer-target) port — distinct from alice/bob/b2bua.
+const CHARLIE_PORT: u16 = 5090;
+
+/// Pump both callee legs (bob + charlie) with a best-effort drain-and-200 until
+/// they go quiet, CONCURRENTLY. Used after a multi-leg (REFER) teardown so a
+/// relayed b-leg BYE that lands just after the scenario's own short drain window
+/// is still answered, letting the SUT reap its downstream legs without waiting
+/// out a retransmit timer. A 1 s window comfortably outlasts the relayed BYE's
+/// transit + the first retransmit under the harness fabric. Concurrent (not
+/// sequential) so a BYE to one leg is not missed while we drain the other.
+async fn drain_callees(bob: &Agent, charlie: &Agent) {
+    let window = std::time::Duration::from_secs(1);
+    tokio::join!(bob.quiesce(window), charlie.quiesce(window));
+}
+
+// ── Happy-path leak gate (alice/bob only) ──────────────────────────────────
+
+/// Drive a shared real-call scenario through an in-process B2BUA and assert it
+/// left no call state behind.
+async fn assert_no_leak(name: &str, scenario: &dyn RealCallScenario) {
+    let scene = B2buaScene::new(name).await;
+    let env = CallEnv::for_functional(
+        &scene.alice,
+        &scene.bob,
+        None,
+        scene.b2bua.addr,
+        "X-Loadgen-Id",
+        format!("{name}-tok"),
+    );
+
+    run_asserting(scenario, &env).await;
+
+    // No leak: the a-leg BYE released the SUT's call state and limiter token.
+    settle_until(|| scene.b2bua.active_calls() == 0).await;
+    scene.b2bua.assert_fully_reaped();
+
+    // Gate the RFC 3261/3262/3264 audit over the recorded trace (consumes scene).
+    let report = scene.finish().await;
+    assert!(report.passed(), "RFC audit failed for `{name}`");
+}
+
+#[tokio::test(start_paused = true)]
+async fn realcall_basic_call_no_leak() {
+    assert_no_leak("realcall-basic", &BasicCall).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn realcall_reinvite_no_leak() {
+    assert_no_leak("realcall-reinvite", &Reinvite).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn realcall_options_hold_no_leak() {
+    // Default `for_functional` options_hold (2 s) / cadence (1 s) drives a couple
+    // of in-dialog OPTIONS pings the SUT relays to bob, then a BYE — no leak.
+    assert_no_leak("realcall-options-hold", &OptionsHold).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn realcall_long_call_no_leak() {
+    // Default `for_functional` long_hold (2 s) holds the call past its single
+    // in-dialog OPTIONS ping then BYEs. The harness keepalive interval is 30 s
+    // and the dwell is seconds, so no SUT keepalive fires — the BYE lands clean.
+    assert_no_leak("realcall-long-call", &LongCall).await;
+}
+
+// ── Refer (blind transfer) leak gate — needs a third (charlie) leg ──────────
+
+/// A refer-capable scene: alice/bob at the canonical ports, the b2bua built via
+/// `route_all_with_refer`, plus a charlie (transfer-target) agent bound on the
+/// same harness fabric. Returns the scene and charlie; the caller builds the
+/// `CallEnv` with `Some(&charlie)` and the refer pin pointing at charlie's addr.
+async fn refer_scene(name: &str) -> (B2buaScene, Agent) {
+    let scene = B2buaScene::with_b2bua(name, |bob_port| {
+        B2buaSut::route_all_with_refer("127.0.0.1", bob_port)
+    })
+    .await;
+    let charlie = scene
+        .h
+        .agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}"))
+        .await;
+    (scene, charlie)
+}
+
+/// Build a `CallEnv` for a refer scenario: binds charlie as the transfer target
+/// and wires the REFER `X-Api-Call` authorization. `refer_pin` → charlie's addr
+/// and `refer_key` → the key the scripted `/call/refer` allows, so `env`'s
+/// `refer_api_call()` emits `{"refer_key":"refer-allow-c","destination":{…}}` —
+/// the exact JSON the existing `refer_allow` test hand-writes. `refer_to()`
+/// points the Refer-To at charlie's address.
+fn refer_env<'a>(name: &str, scene: &'a B2buaScene, charlie: &'a Agent) -> CallEnv<'a> {
+    let mut env = CallEnv::for_functional(
+        &scene.alice,
+        &scene.bob,
+        Some(charlie),
+        scene.b2bua.addr,
+        "X-Loadgen-Id",
+        format!("{name}-tok"),
+    );
+    env.refer_key = REFER_KEY.to_string();
+    env.refer_pin = Some(charlie.addr());
+    env
+}
+
+#[tokio::test(start_paused = true)]
+async fn realcall_refer_no_leak() {
+    let name = "realcall-refer";
+    let (scene, charlie) = refer_scene(name).await;
+    let env = refer_env(name, &scene, &charlie);
+
+    run_asserting(&Refer, &env).await;
+
+    // After alice BYEs, the SUT relays a BYE to BOTH downstream legs (bob + charlie)
+    // and reaps the call only once each answers `200`. The scenario's own 150 ms
+    // post-BYE drain answers charlie's promptly, but the relayed bob BYE can land
+    // just after that window closes (the merge ordering leaves bob's BYE last), so
+    // pump both legs again here until they go quiet — answering the straggler BYE
+    // so the SUT closes its b-leg instead of waiting out a retransmit timer.
+    drain_callees(&scene.bob, &charlie).await;
+
+    // The transfer completed and alice BYE'd: the SUT BYE'd every leg (B + C) and
+    // left no call state behind.
+    settle_until(|| scene.b2bua.active_calls() == 0).await;
+    scene.b2bua.assert_fully_reaped();
+
+    // Waive the §13.2.1/§20.37 SHOULD audit: the media-realign re-INVITEs the SUT
+    // sends to alice/charlie are answered by the test PEERS via the harness's
+    // best-effort auto-200 (`Agent::quiesce` → `generate_response`), which does not
+    // stamp Allow/Supported — a known test-PEER response-generation gap, not a SUT
+    // or scenario bug (the SUT's own 200s carry both; the alice/bob-only flows pass
+    // the audit unwaived). The existing hand-rolled `refer_allow` tests sidestep it
+    // by not gating `passed()`; waiving the one rule lets us keep the hard gate.
+    scene.h.allow_violation(
+        "rfc3261.allowSupportedOnInvite",
+        "realign re-INVITEs are 200'd by the harness peer auto-responder, which \
+         omits Allow/Supported (test-peer gap, not a SUT defect)",
+    );
+    let report = scene.finish().await;
+    assert!(report.passed(), "RFC audit failed for `{name}`");
+}
+
+// ── Voluntarily-failing leak gate — a FAILED call must still clean up ────────
+
+/// Drive a scenario that FAILS by design and assert the SUT still fully reaped
+/// it. The whole point of these flows is that a failed call leaves no leaked
+/// dialog/limiter/lock behind, so we use `run_collecting` (which RETURNS the
+/// `Err` instead of `panic!`ing on it), assert the run failed as expected, then
+/// assert the no-leak invariant. No RFC gate: a deliberately-truncated flow
+/// (a CANCELed handshake, a non-2xx final, a declined transfer) legitimately
+/// does not satisfy the §13.3.1.4 / cross-message happy-path audit — the leak
+/// invariant IS the assertion here, so we gate on that alone.
+async fn assert_expected_failure_no_leak(name: &str, scenario: &dyn RealCallScenario, env: &CallEnv<'_>) {
+    let result = run_collecting(scenario, env).await;
+    assert!(
+        result.is_err(),
+        "voluntarily-failing scenario `{name}` unexpectedly succeeded"
+    );
+}
+
+/// As [`assert_expected_failure_no_leak`] but for the alice/bob-only failing
+/// scenarios (binds the scene, runs, asserts failure + no leak). The refer
+/// failing case ([`ReferCharlieReject`]) needs the charlie scene, so it is wired
+/// separately below.
+async fn failing_no_leak(name: &str, scenario: &dyn RealCallScenario) {
+    let scene = B2buaScene::new(name).await;
+    let env = CallEnv::for_functional(
+        &scene.alice,
+        &scene.bob,
+        None,
+        scene.b2bua.addr,
+        "X-Loadgen-Id",
+        format!("{name}-tok"),
+    );
+
+    assert_expected_failure_no_leak(name, scenario, &env).await;
+
+    settle_until(|| scene.b2bua.active_calls() == 0).await;
+    scene.b2bua.assert_fully_reaped();
+    // No RFC gate (see `assert_expected_failure_no_leak`): just drop the scene so
+    // the recorded trace is rendered without a happy-path verdict.
+    let _ = scene.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn realcall_invite_reject_no_leak() {
+    // Bob 486s the INVITE: the final completes the transaction (auto-ACKed), so
+    // there is nothing to CANCEL/BYE — the SUT must reap the rejected call.
+    failing_no_leak("realcall-invite-reject", &InviteReject).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn realcall_abandon_ringing_no_leak() {
+    // Alice abandons after 180: the scenario drives the full CANCEL handshake
+    // (CANCEL → bob 200/487) so the SUT reaps both legs immediately.
+    failing_no_leak("realcall-abandon-ringing", &AbandonRinging).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn realcall_refer_charlie_reject_no_leak() {
+    // A↔B establish, B REFERs to C, C 603-declines: the transfer fails but A↔B
+    // stays up, so the scope-driven teardown BYEs the still-live A↔B and the SUT
+    // reaps the born-and-rejected transfer leg. Needs the charlie/refer scene.
+    let name = "realcall-refer-charlie-reject";
+    let (scene, charlie) = refer_scene(name).await;
+    let env = refer_env(name, &scene, &charlie);
+
+    assert_expected_failure_no_leak(name, &ReferCharlieReject, &env).await;
+
+    // The scope-driven teardown BYEs the still-live A↔B; pump bob (and charlie,
+    // harmless — its leg was already declined) so the relayed b-leg BYE is answered
+    // and the SUT reaps promptly (see the refer happy-path note on the late BYE).
+    drain_callees(&scene.bob, &charlie).await;
+
+    settle_until(|| scene.b2bua.active_calls() == 0).await;
+    scene.b2bua.assert_fully_reaped();
+    let _ = scene.finish().await;
+}

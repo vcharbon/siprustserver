@@ -2,12 +2,10 @@
 //! renegotiation, then BYE (mirrors `uac-reinvite.xml`).
 
 use async_trait::async_trait;
-use scenario_harness::StepError;
 use sip_message::generators::InDialogMethod;
 
-use super::{establish, hangup, LoadScenario, ScenarioId};
-use crate::ctx::{CallCtx, CallEnv};
-use crate::scope::CallScope;
+use crate::realcall::{establish, hangup, CallCtx, CallEnv, CallScope, RealCallScenario, ScenarioId};
+use crate::StepError;
 
 /// SDP the callee answers the delayed re-INVITE offer with.
 const REOFFER: &str =
@@ -19,7 +17,7 @@ const REANSWER: &str =
 pub struct Reinvite;
 
 #[async_trait]
-impl LoadScenario for Reinvite {
+impl RealCallScenario for Reinvite {
     fn id(&self) -> ScenarioId {
         "reinvite"
     }
