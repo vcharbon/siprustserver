@@ -365,7 +365,7 @@ async fn loadgen_mux_emergency_split_under_overload() {
     // lifecycle `assert_fully_reaped`, exactly as the authoritative
     // `tier3_admission_gate` test does).
     assert!(
-        b2bua.metrics().overload_rejected_total() as u64 >= ne_503,
+        b2bua.metrics().overload_rejected_total() >= ne_503,
         "every non-emergency shed must be a stateless overload reject:\n{}",
         reporter.render_prometheus()
     );

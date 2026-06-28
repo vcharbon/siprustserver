@@ -133,7 +133,7 @@ pub struct AsEmergency {
 }
 
 impl AsEmergency {
-    pub fn new(id: ScenarioId, inner: Arc<dyn LoadScenario>) -> Arc<dyn LoadScenario> {
+    pub fn wrap(id: ScenarioId, inner: Arc<dyn LoadScenario>) -> Arc<dyn LoadScenario> {
         Arc::new(Self { id, inner })
     }
 }
@@ -172,8 +172,8 @@ pub fn by_id(id: &str) -> Option<Arc<dyn LoadScenario>> {
         "reinvite" => Some(Arc::new(reinvite::Reinvite)),
         "refer" => Some(Arc::new(refer::Refer)),
         "options_hold" => Some(Arc::new(options_hold::OptionsHold)),
-        "basic_call_em" => Some(AsEmergency::new("basic_call_em", Arc::new(basic_call::BasicCall))),
-        "reinvite_em" => Some(AsEmergency::new("reinvite_em", Arc::new(reinvite::Reinvite))),
+        "basic_call_em" => Some(AsEmergency::wrap("basic_call_em", Arc::new(basic_call::BasicCall))),
+        "reinvite_em" => Some(AsEmergency::wrap("reinvite_em", Arc::new(reinvite::Reinvite))),
         "invite_reject" => Some(Arc::new(failures::InviteReject)),
         "abandon_ringing" => Some(Arc::new(failures::AbandonRinging)),
         "refer_charlie_reject" => Some(Arc::new(failures::ReferCharlieReject)),

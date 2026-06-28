@@ -270,15 +270,18 @@ async fn run_one(
     let checkpoints = ctx.take_checkpoints();
 
     let sample = if reporter.wants_sample(id, &class) {
+        let detail = outcome.detail();
+        // Thread the failure reason into the rendered callflow so a sampled NOK
+        // page explains WHY (header banner + an explicit anomaly), not just "FAIL".
         let html = if binder.is_recording() {
-            binder.render_html(id, class.is_ok())
+            binder.render_html(id, class.is_ok(), detail.as_deref())
         } else {
             None
         };
         if html.is_some() || !class.is_ok() {
             Some(RenderedSample {
                 html,
-                detail: outcome.detail(),
+                detail,
                 e2e_ms: e2e.as_secs_f64() * 1000.0,
             })
         } else {

@@ -190,15 +190,18 @@ impl AgentBinder {
     /// SAME path the harness report uses (`to_sip_entries` → `sip_doc` →
     /// `seq_report::render_html`), so a sampled load call's flow renders exactly
     /// like a functional-test callflow.
-    pub fn render_html(&self, title: &str, passed: bool) -> Option<String> {
-        let doc = self.seq_doc(title, passed)?;
+    /// `detail` is the call's failure reason (the [`StepError`]/outcome string);
+    /// when present on a NOT-passed call it is surfaced in the rendered page so
+    /// the sampled callflow explains WHY it failed, not merely that it did.
+    pub fn render_html(&self, title: &str, passed: bool, detail: Option<&str>) -> Option<String> {
+        let doc = self.seq_doc(title, passed, detail)?;
         Some(seq_report::render_html(&doc))
     }
 
     /// Render this call's recorded trace as an SVG sequence diagram (`None` if not
     /// sampled).
     pub fn render_svg(&self, title: &str, passed: bool) -> Option<String> {
-        let doc = self.seq_doc(title, passed)?;
+        let doc = self.seq_doc(title, passed, None)?;
         Some(seq_report::render_svg(&doc))
     }
 
@@ -216,13 +219,27 @@ impl AgentBinder {
         }
     }
 
-    fn seq_doc(&self, title: &str, passed: bool) -> Option<seq_report::SeqDoc> {
+    fn seq_doc(&self, title: &str, passed: bool, detail: Option<&str>) -> Option<seq_report::SeqDoc> {
         let (recording, recorder) = (self.recording.as_ref()?, self.recorder.as_ref()?);
         let events = recording.channel().snapshot();
         let entries = sip_net::to_sip_entries(&events);
         let scenario = recorder.snapshot();
+        // On a failure, surface the reason both as the doc description (the header
+        // banner next to the FAIL status) and as an explicit anomaly in the list,
+        // so the sampled NOK callflow says WHY, not just that it failed.
+        let reason = detail.filter(|_| !passed);
+        let extra: Vec<seq_report::Anomaly> = match reason {
+            Some(d) => vec![seq_report::Anomaly {
+                check: "call-result".to_string(),
+                detail: d.to_string(),
+                lane: None,
+                endpoint: None,
+                advisory: Some(false),
+            }],
+            None => Vec::new(),
+        };
         Some(crate::report::project::sip_doc(
-            title, None, &entries, &scenario, passed, &[],
+            title, reason, &entries, &scenario, passed, &extra,
         ))
     }
 }
