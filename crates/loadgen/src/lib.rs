@@ -44,5 +44,5 @@ pub use ctx::{CallCtx, CallEnv};
 pub use driver::{serve_metrics, CallConfig, Driver, DriverCfg, MuxTransport};
 pub use mux::{CallRouting, Correlation, EndpointSpec, LegInfo, LegPicker, MuxCore, Role};
 pub use report::{Reporter, ReporterCfg};
-pub use scenarios::{by_id, default_scenarios, LoadScenario, ScenarioId};
+pub use scenarios::{by_id, default_scenarios, failure_scenarios, LoadScenario, ScenarioId};
 pub use scope::CallScope;

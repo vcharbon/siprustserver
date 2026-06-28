@@ -228,6 +228,7 @@ async fn run_one(
         via: call.via,
         correlation: transport.correlation.clone(),
         token,
+        emergency: scenario.emergency(),
         route_pin: call.route_pin,
         refer_pin: call.refer_pin,
         refer_key: call.refer_key.clone(),

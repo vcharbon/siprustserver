@@ -164,3 +164,57 @@ transparently (the registry is already shared). Out of scope now per the
 3. Reaper + orphan observability + reporter series.
 4. Update smoke tests (correlation, no-leak/orphan, OK callflow via recording).
 5. (deferred) real cluster.
+
+---
+
+## As-built addenda (2026-06-28)
+
+The locked design above stands; these refine it from the build.
+
+### Correlation: header-ONLY, two layers (call vs leg)
+
+The "Call-ID fallback / multi-source" framing is replaced by a clean split:
+
+- **Call correlation = ONE per-call token** in the transparent header
+  (`X-Loadgen-Id`). It answers only *"which call is this?"*. The To-/Request-URI
+  hijacking is **removed** (it breaks against any SUT that routes on those URIs).
+  Because a relaying SUT copies the header onto *every* originated leg, a call's
+  bob and charlie legs **share one token** (the old two-token scheme is gone).
+- **Leg routing = scenario-owned.** The mux demuxes purely by `(socket, token)`
+  and reads **nothing else** — never `X-Api-Call` (that header is the scenario's
+  way of driving our fake-B2BUA backend, not a mux input). When >1 receiver
+  shares a socket, the mux calls a **scenario-supplied `LegPicker`**, handed a
+  parsed `LegInfo` (R-URI, headers, …), to pick the receiver. A single-receiver
+  socket never calls it.
+
+The token entry is **non-consuming** (persists for the call, freed on agent
+`Drop`/reaper) and leg-spawn is gated on an initial INVITE, so re-routing /
+multi-REFER / re-REFER (further legs of one call on a socket) each promote their
+own dialog. `CallRouting{token, legs:[(addr,label)], pickers}` is the per-call
+declaration the driver builds before binding.
+
+### SUT transparency (the only SUT obligation)
+
+Implemented as an opt-in B2BUA header relay: `B2buaConfig.relay_headers`
+(`B2BUA_RELAY_HEADERS=X-Loadgen-Id`), copied in `build_b_leg` — the single mint
+point both the callee leg (bob) and the REFER transfer leg (charlie) flow
+through, so the token reaches both. Default empty = no production change.
+
+### Emergency / overload split
+
+`Resource-Priority: esnet.0` marks an emergency call (force-admitted; never
+shed). `establish` is **shed-aware**: it races bob's inbound INVITE against
+alice's response, so an overload 503 surfaces as `WrongStatus{503}` →
+`status_503` (and marks the scope terminated — a final ended the txn, so no
+spurious CANCEL). `AsEmergency` wraps any scenario under a distinct id. Report
+shows the OK vs 503 split with first-N samples per class.
+
+### Voluntarily-failing scenarios (post-call-cleanup coverage, no endurance)
+
+`failures.rs`: `InviteReject` (486 final → no teardown), `AbandonRinging`
+(quit on 180 → CANCEL an early dialog), `ReferCharlieReject` (603 → BYE a
+still-confirmed call whose transfer leg was rejected). With `FailMidCall`
+(confirmed→BYE) they cover the teardown matrix; `loadgen_post_call_cleanup_no_leak`
+asserts the SUT fully reaps (no live call / lock / stamp) after the mix. This
+caught a real B2BUA leak: the Tier-3 overload-shed `return`ed under the held
+per-call lock without the orphan-teardown, stranding a `locks`-map entry.

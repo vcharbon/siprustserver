@@ -29,6 +29,9 @@ pub struct CallEnv<'a> {
     /// The call's correlation token — stamped on alice's INVITE and (via the
     /// SUT's header relay) carried onto every downstream leg.
     pub token: String,
+    /// Emergency call: stamps `Resource-Priority: esnet.0` on the INVITE so the
+    /// SUT force-admits it (never shed by the Tier-3 / panic-ELU overload gate).
+    pub emergency: bool,
     /// Optional `X-Api-Call` destination pin (our-b2bua routing adapter): the
     /// static `uas`/`refer` socket the SUT should send the callee leg to. `None`
     /// when the SUT routes the callee by its own (static) config.
@@ -47,6 +50,10 @@ impl CallEnv<'_> {
     /// initial INVITE so every leg of this call can be matched back to it.
     pub fn prepare_invite<'b>(&self, inv: Invite<'b>) -> Invite<'b> {
         let mut inv = inv.with_header(self.correlation.header_name(), &self.token);
+        if self.emergency {
+            // Emergency namespace marker the b2bua's overload brake never sheds.
+            inv = inv.with_header("Resource-Priority", "esnet.0");
+        }
         if let Some(pin) = self.route_pin {
             inv = inv.with_header("X-Api-Call", &api_pin(pin));
         }

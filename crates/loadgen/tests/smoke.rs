@@ -13,9 +13,9 @@ use b2bua_harness::{settle_until, B2buaSut};
 use layer_harness::TransportKind;
 use loadgen::scenarios::{establish, LoadScenario, ScenarioId};
 use loadgen::{
-    by_id, default_scenarios, CallConfig, CallCtx, CallEnv, CallRouting, CallScope, Correlation,
-    Driver, DriverCfg, EndpointSpec, LegInfo, MuxCore, MuxTransport, ResultClass, Reporter,
-    ReporterCfg, Role,
+    by_id, default_scenarios, failure_scenarios, CallConfig, CallCtx, CallEnv, CallRouting,
+    CallScope, Correlation, Driver, DriverCfg, EndpointSpec, LegInfo, MuxCore, MuxTransport,
+    ResultClass, Reporter, ReporterCfg, Role,
 };
 use scenario_harness::{Harness, StepError};
 use sip_clock::Clock;
@@ -35,6 +35,17 @@ async fn setup(
     correlation: Correlation,
     sample_cap: u32,
 ) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+    setup_with(base, correlation, sample_cap, |_| {}).await
+}
+
+/// `setup` with an extra `B2buaConfig` mutator (e.g. to exhaust the CPS bucket
+/// for an overload-shed test). The relay-header tune is always applied first.
+async fn setup_with(
+    base: u16,
+    correlation: Correlation,
+    sample_cap: u32,
+    extra_tune: impl FnOnce(&mut b2bua_sdk::B2buaConfig) + 'static,
+) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
     let net: Arc<dyn SignalingNetwork> = Arc::new(RealSignalingNetwork::new());
     let h = Harness::with_network_and_clock(
         "mux-smoke",
@@ -50,7 +61,10 @@ async fn setup(
     // (the production `B2BUA_RELAY_HEADERS=X-Loadgen-Id`), so the token alice
     // stamps reaches BOTH the b-leg (bob) and the REFER transfer leg (charlie).
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", uas)
-        .tune(|c| c.relay_headers = vec!["X-Loadgen-Id".to_string()])
+        .tune(move |c| {
+            c.relay_headers = vec!["X-Loadgen-Id".to_string()];
+            extra_tune(c);
+        })
         .start(&h, "b2bua", &format!("127.0.0.1:{}", base + 3))
         .await;
 
@@ -299,4 +313,110 @@ async fn loadgen_mux_picker_disambiguates_shared_socket() {
     drop(ep_charlie);
     drop(ep_dave);
     assert_eq!(core.registry_size(), 0, "shared-socket slot leaked after both receivers dropped");
+}
+
+/// Emergency / non-emergency split under overload. The b2bua's CPS bucket is
+/// exhausted (size 0, no refill), so EVERY non-emergency new INVITE is shed with
+/// a stateless 503 while an emergency (`Resource-Priority: esnet.0`) call is
+/// force-admitted. Proves the loadgen REPORTING the user wants: non-emergency
+/// calls are classified `status_503` (the NOK side), emergency calls are all
+/// `ok` with ZERO loss, and the report keeps first-N samples for BOTH classes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_mux_emergency_split_under_overload() {
+    let (_h, b2bua, core, transport) = setup_with(
+        6450,
+        Correlation::header("X-Loadgen-Id"),
+        5,
+        |c| {
+            c.cps_bucket_size = 0; // exhausted bucket → shed every non-emergency
+            c.cps_bucket_rate = 0; // …and never refill (deterministic).
+        },
+    )
+    .await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
+
+    // Mix sheddable non-emergency basic calls with force-admitted emergency ones.
+    let driver = Driver::new(
+        cfg(b2bua.addr, None, 60.0, 3, 16, 0xE5E7),
+        vec![
+            (by_id("basic_call").unwrap(), 1.0),
+            (by_id("basic_call_em").unwrap(), 1.0),
+        ],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    // Non-emergency: shed → classified status_503, and NONE got through.
+    let ne_503 = reporter.count("basic_call", &ResultClass::WrongStatus(503));
+    let ne_ok = reporter.count("basic_call", &ResultClass::Ok);
+    assert!(ne_503 > 0, "expected non-emergency 503 sheds:\n{}", reporter.render_prometheus());
+    assert_eq!(ne_ok, 0, "a non-emergency call slipped past the exhausted bucket");
+
+    // Emergency: force-admitted → all OK, and ZERO shed (the hard invariant).
+    let em_ok = reporter.count("basic_call_em", &ResultClass::Ok);
+    let em_503 = reporter.count("basic_call_em", &ResultClass::WrongStatus(503));
+    assert!(em_ok > 0, "expected emergency calls to establish:\n{}", reporter.render_prometheus());
+    assert_eq!(em_503, 0, "an emergency call was shed — must never happen");
+
+    // The b2bua exercised the gate: one stateless reject per shed (the gate
+    // `return`s before `build_initial_call`, so a shed births no call — this is
+    // why we assert the targeted leak canaries below rather than the call-
+    // lifecycle `assert_fully_reaped`, exactly as the authoritative
+    // `tier3_admission_gate` test does).
+    assert!(
+        b2bua.metrics().overload_rejected_total() as u64 >= ne_503,
+        "every non-emergency shed must be a stateless overload reject:\n{}",
+        reporter.render_prometheus()
+    );
+
+    // The report keeps samples for BOTH the OK and the 503 class.
+    assert!(reporter.sample_count("basic_call", &ResultClass::WrongStatus(503)) > 0, "no 503 sample kept");
+    assert!(reporter.sample_count("basic_call_em", &ResultClass::Ok) > 0, "no OK sample kept");
+
+    // No RESOURCE leak from the sheds OR the emergency teardowns: no live call,
+    // no stranded per-call lock, no mux registry residue. (A stateless reject
+    // legitimately leaves `creations != removals`; it leaves no resource.)
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak under overload");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    assert_eq!(b2bua.active_calls(), 0, "live call leak under overload");
+    assert_eq!(b2bua.lock_count(), 0, "stranded per-call lock under overload");
+}
+
+/// Post-call cleanup across EVERY failure-teardown path, without an endurance
+/// run. A mix of voluntarily-failing scenarios — callee 486 (final reject, no
+/// teardown), abandon-on-180 (CANCEL an early dialog), and a declined REFER
+/// (BYE a still-confirmed call whose transfer leg was rejected) — interleaved
+/// with happy calls. Each failure mode is reported under its NOK class, and the
+/// SUT must FULLY reap afterwards: no live call, no stranded per-call lock, no
+/// stamp residue (`assert_fully_reaped`), and no mux registry leak. A regression
+/// here is a real post-call-cleanup gap (the leak class endurance otherwise
+/// catches days later).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_post_call_cleanup_no_leak() {
+    let (_h, b2bua, core, transport) = setup(6460, Correlation::header("X-Loadgen-Id"), 5).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 3 }));
+    let refer_pin = Some(transport.refer_addr);
+
+    let mut scenarios = failure_scenarios();
+    scenarios.push((by_id("basic_call").unwrap(), 2.0)); // some happy traffic in the mix
+    let driver = Driver::new(cfg(b2bua.addr, refer_pin, 50.0, 3, 12, 0xFA17), scenarios, reporter.clone(), transport);
+    driver.run().await;
+
+    // Each failure mode produced its NOK bucket, and the happy path its OK.
+    assert!(
+        reporter.count("invite_reject", &ResultClass::WrongStatus(486)) > 0,
+        "no 486 final-reject recorded:\n{}",
+        reporter.render_prometheus()
+    );
+    assert!(reporter.count("abandon_ringing", &ResultClass::Timeout) > 0, "no abandoned-early call recorded");
+    assert!(reporter.count("refer_charlie_reject", &ResultClass::Unexpected) > 0, "no declined-transfer recorded");
+    assert!(reporter.count("basic_call", &ResultClass::Ok) > 0, "no happy call completed");
+
+    // Post-call cleanup is COMPLETE across every failure-teardown path.
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak after a failing-call mix");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
 }

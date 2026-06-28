@@ -18,6 +18,7 @@ use crate::ctx::{CallCtx, CallEnv};
 use crate::scope::CallScope;
 
 pub mod basic_call;
+pub mod failures;
 pub mod options_hold;
 pub mod refer;
 pub mod reinvite;
@@ -33,6 +34,11 @@ pub trait LoadScenario: Send + Sync {
     fn id(&self) -> ScenarioId;
     /// Whether this scenario needs a third (transfer-target) leg bound.
     fn needs_charlie(&self) -> bool {
+        false
+    }
+    /// Whether this call is an emergency (Resource-Priority `esnet.0`) — the SUT
+    /// force-admits it under overload, so it must never be shed. Default: no.
+    fn emergency(&self) -> bool {
         false
     }
     /// Drive one call. Return `Ok` on the happy path or a [`StepError`] on an
@@ -58,7 +64,35 @@ pub async fn establish(
     let mut call = env.prepare_invite(inv).send().await;
     scope.set_early(call.cancel_handle());
 
-    let mut uas = env.bob.try_receive("INVITE").await?;
+    // The call may be ADMITTED (the SUT forwards our INVITE to bob) or SHED
+    // (under overload the SUT replies a final — e.g. 503 — directly to alice, and
+    // bob never sees it; an emergency call is force-admitted and never shed). We
+    // cannot know which up front, so race bob's inbound INVITE against alice's
+    // response. `try_expect(180)` skips the auto-100 Trying and surfaces a shed
+    // final as `WrongStatus { got: 503 }`, which the driver buckets as
+    // `status_503`. (Only an admitted call reaches bob; an admitted call's own
+    // 180 arrives only after we answer bob below, so the second arm resolving is
+    // unambiguously the SUT's own final to alice.)
+    let mut uas = tokio::select! {
+        biased;
+        bob = env.bob.try_receive("INVITE") => bob?,
+        shed = call.try_expect(180) => {
+            let e = shed.err().unwrap_or_else(|| StepError::UnexpectedKind {
+                who: "alice".to_string(),
+                detail: "early 180 before bob saw the INVITE".to_string(),
+            });
+            // A real FINAL response (e.g. 503 overload shed) completes the INVITE
+            // transaction — there is nothing to CANCEL/BYE, and CANCELing an
+            // already-answered INVITE just churns the SUT. Mark the scope
+            // terminated so teardown is a no-op. A bare timeout (no response)
+            // leaves the scope Early so teardown still CANCELs a possibly-live
+            // INVITE.
+            if matches!(e, StepError::WrongStatus { .. }) {
+                scope.mark_terminated();
+            }
+            return Err(e);
+        }
+    };
     uas.respond(180, "Ringing").await;
     call.try_expect(180).await?;
     uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
@@ -89,6 +123,37 @@ pub async fn hangup(
     Ok(())
 }
 
+/// Wraps any scenario as an EMERGENCY call: identical flow, but it stamps
+/// `Resource-Priority: esnet.0` (so the SUT force-admits it under overload) and
+/// reports under a distinct id, so the report cleanly splits the force-admitted
+/// emergency traffic from the sheddable non-emergency traffic.
+pub struct AsEmergency {
+    id: ScenarioId,
+    inner: Arc<dyn LoadScenario>,
+}
+
+impl AsEmergency {
+    pub fn new(id: ScenarioId, inner: Arc<dyn LoadScenario>) -> Arc<dyn LoadScenario> {
+        Arc::new(Self { id, inner })
+    }
+}
+
+#[async_trait]
+impl LoadScenario for AsEmergency {
+    fn id(&self) -> ScenarioId {
+        self.id
+    }
+    fn needs_charlie(&self) -> bool {
+        self.inner.needs_charlie()
+    }
+    fn emergency(&self) -> bool {
+        true
+    }
+    async fn run(&self, env: &CallEnv<'_>, scope: &CallScope, ctx: &CallCtx) -> Result<(), StepError> {
+        self.inner.run(env, scope, ctx).await
+    }
+}
+
 /// All v1 scenarios with default weights (basic-heavy, like real traffic).
 pub fn default_scenarios() -> Vec<(Arc<dyn LoadScenario>, f64)> {
     vec![
@@ -99,13 +164,29 @@ pub fn default_scenarios() -> Vec<(Arc<dyn LoadScenario>, f64)> {
     ]
 }
 
-/// Resolve a scenario by id (for CLI `--scenario name=weight`).
+/// Resolve a scenario by id (for CLI `--scenario name=weight`). The `*_em`
+/// variants are emergency (Resource-Priority `esnet.0`) calls of the same flow.
 pub fn by_id(id: &str) -> Option<Arc<dyn LoadScenario>> {
     match id {
         "basic_call" => Some(Arc::new(basic_call::BasicCall)),
         "reinvite" => Some(Arc::new(reinvite::Reinvite)),
         "refer" => Some(Arc::new(refer::Refer)),
         "options_hold" => Some(Arc::new(options_hold::OptionsHold)),
+        "basic_call_em" => Some(AsEmergency::new("basic_call_em", Arc::new(basic_call::BasicCall))),
+        "reinvite_em" => Some(AsEmergency::new("reinvite_em", Arc::new(reinvite::Reinvite))),
+        "invite_reject" => Some(Arc::new(failures::InviteReject)),
+        "abandon_ringing" => Some(Arc::new(failures::AbandonRinging)),
+        "refer_charlie_reject" => Some(Arc::new(failures::ReferCharlieReject)),
         _ => None,
     }
+}
+
+/// The voluntarily-failing scenarios (one per post-call-cleanup teardown path),
+/// for a no-leak cleanup-coverage test without an endurance run.
+pub fn failure_scenarios() -> Vec<(Arc<dyn LoadScenario>, f64)> {
+    vec![
+        (Arc::new(failures::InviteReject), 1.0),
+        (Arc::new(failures::AbandonRinging), 1.0),
+        (Arc::new(failures::ReferCharlieReject), 1.0),
+    ]
 }

@@ -29,6 +29,8 @@ sip-net = { path = "../sip-net" }
 # Fake-network smoke test: an in-process B2buaCore SUT on a shared simulated
 # network, driven by the load driver, asserting no call is leaked after teardown.
 b2bua-harness = { path = "../b2bua-harness" }
+# `B2buaConfig` field tunes (exhaust the CPS bucket) for the overload-shed test.
+b2bua-sdk = { path = "../b2bua-sdk" }
 scenario-harness = { path = "../scenario-harness" }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
 # `TransportKind::Fake` for `Harness::with_network_and_clock` (shared-net SUT).
