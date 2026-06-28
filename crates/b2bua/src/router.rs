@@ -1185,6 +1185,23 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
             // `reason`/`retry_after_sec` are carried on the 503 itself (Reason +
             // Retry-After) for the caller and any wire trace.
             ctx.metrics.bump_overload_rejected();
+            // ORPHAN TEARDOWN (leak fix — same class the None-branch below fixes).
+            // This shed is *stateless at the call layer*: no `build_initial_call`/
+            // `create`, so no dialog/CDR/limiter/replicated state is born. BUT the
+            // event was dispatched into a fresh per-call queue (one `bump_creation`
+            // — the `peek().is_some()` retransmit guard above guarantees this is a
+            // brand-new call_ref, so `dispatch` allocated the queue + worker) and
+            // `process` took the per-call lock above. Nothing will ever emit
+            // `RemoveCall`, so the `locks`-map entry, the unmatched creation, and
+            // the idle worker would all strand — under sustained overload this
+            // ratchets `store_locks`/`b2bua_active_calls` exactly like the orphan
+            // storm. Reclaim through the one teardown executor (`ReleaseKind::Orphan`
+            // — `discard_orphan` only frees the lock entry, NO store mutation, so no
+            // spurious reverse-propagated delete for a call we never held) so the
+            // worker exits and `removals` balances `creations`. Drop our guard first
+            // (mirrors the None-branch precedent ~30 lines below).
+            drop(_guard);
+            release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return;
         }
         // Counter published on X-Overload (`adm`). Emergency admits are NOT counted

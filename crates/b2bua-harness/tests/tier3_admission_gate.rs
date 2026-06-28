@@ -76,6 +76,46 @@ async fn cps_bucket_empty_503s_a_new_invite_statelessly() {
     let _r = h.finish().await;
 }
 
+/// A stateless Tier-3 shed must leave NO per-call state stranded. The shed runs
+/// AFTER `process` took the per-call lock (and after `dispatch` allocated the
+/// per-call queue + `bump_creation` for this brand-new call_ref), so a bare
+/// `return` would strand the `locks`-map entry + the unmatched creation + the
+/// idle worker — the same lock-leak class the None-branch orphan-teardown fixes,
+/// ratcheting `store_locks`/`creations−removals` under sustained overload. This
+/// pins the reclamation: after the shed drains, the worker is fully reaped
+/// (`creations == removals`, `lock_count == 0`, no live call). The sibling
+/// `cps_bucket_empty_503s_a_new_invite_statelessly` asserts `active_calls == 0`
+/// but NOT the lock/creation balance — which is precisely what this leak escaped.
+#[tokio::test]
+async fn tier3_shed_strands_no_per_call_lock() {
+    let h = Harness::with_transit_delay("b2bua-tier3-shed-no-lock-leak", 0)
+        .describe("a stateless Tier-3 overload shed reaps its per-call queue/lock (no leak)");
+    let alice = h.agent("alice", "127.0.0.1:5066").await;
+    let _bob = h.agent("bob", "127.0.0.1:5076").await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5076)
+        .tune(|c| {
+            c.cps_bucket_size = 0;
+            c.cps_bucket_rate = 0;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5086")
+        .await;
+
+    // First non-emergency INVITE is shed deterministically (empty bucket).
+    let mut call = alice.invite(&_bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    call.expect(503).await;
+
+    // Let the shed's orphan teardown drain: the per-call worker takes the poison
+    // and bumps `removal`, balancing the dispatch-time `creation`.
+    settle_until(|| b2bua.metrics().overload_rejected_total() == 1).await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+
+    // The strongest oracle: creations == removals, no live call, NO stranded lock,
+    // no stamp residue. A pre-fix bare `return` fails this on `lock_count`/creations.
+    b2bua.assert_fully_reaped();
+
+    let _r = h.finish().await;
+}
+
 /// An **emergency** INVITE (carrying an emergency Resource-Priority) bypasses the
 /// empty bucket: it is admitted, routed to bob, and the call establishes — even
 /// though a non-emergency INVITE against the same worker would be shed. Proves the
