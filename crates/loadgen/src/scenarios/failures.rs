@@ -43,11 +43,12 @@ impl LoadScenario for InviteReject {
         uas.respond(486, "Busy Here").await;
 
         // Expect the (never-arriving) 200; the relayed 486 surfaces as
-        // `WrongStatus { got: 486 }`. A real FINAL ended the transaction, so mark
-        // the scope terminated — CANCELing an already-rejected INVITE just churns
-        // the SUT (mirrors `establish`'s shed handling).
+        // `WrongStatus { got: 486 }`. A real FINAL (≥ 200) ended the transaction,
+        // so mark the scope terminated — CANCELing an already-rejected INVITE just
+        // churns the SUT (mirrors `establish`'s shed handling). A non-180
+        // provisional would NOT qualify, leaving the scope Early to CANCEL.
         let r = call.try_expect(200).await;
-        if matches!(r, Err(StepError::WrongStatus { .. })) {
+        if matches!(&r, Err(StepError::WrongStatus { got, .. }) if *got >= 200) {
             scope.mark_terminated();
         }
         r.map(|_| ())

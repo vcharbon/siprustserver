@@ -81,13 +81,13 @@ pub async fn establish(
                 who: "alice".to_string(),
                 detail: "early 180 before bob saw the INVITE".to_string(),
             });
-            // A real FINAL response (e.g. 503 overload shed) completes the INVITE
-            // transaction — there is nothing to CANCEL/BYE, and CANCELing an
-            // already-answered INVITE just churns the SUT. Mark the scope
-            // terminated so teardown is a no-op. A bare timeout (no response)
-            // leaves the scope Early so teardown still CANCELs a possibly-live
-            // INVITE.
-            if matches!(e, StepError::WrongStatus { .. }) {
+            // A real FINAL response (status ≥ 200, e.g. a 503 overload shed)
+            // completes the INVITE transaction — there is nothing to CANCEL/BYE,
+            // and CANCELing an already-answered INVITE just churns the SUT. Mark
+            // the scope terminated so teardown is a no-op. A non-180 PROVISIONAL
+            // (183 early media) is NOT a final — leave the scope Early so a still-
+            // pending INVITE is CANCELed; likewise a bare timeout (no response).
+            if matches!(&e, StepError::WrongStatus { got, .. } if *got >= 200) {
                 scope.mark_terminated();
             }
             return Err(e);

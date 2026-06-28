@@ -128,6 +128,11 @@ impl LegInfo<'_> {
 /// receiver shares a single socket for the same call. Invoked only on that
 /// ambiguity; a single-receiver socket never calls it. Returning a label that
 /// matches no receiver drops the leg as a `no_route` orphan.
+///
+/// Contract: the picker is called **while the mux holds the socket registry
+/// lock**, so it MUST be pure-ish — it must not re-enter the mux (e.g. call
+/// `registry_size`/bind/drop on the same core: self-deadlock). A panic is
+/// contained (the leg becomes a `no_route` orphan), not propagated.
 pub type LegPicker = Arc<dyn Fn(&LegInfo) -> String + Send + Sync>;
 
 /// A registry key owned by one endpoint (removed on its `Drop`).
@@ -454,6 +459,11 @@ impl SignalingNetwork for MuxNetwork {
                 arrived: false,
                 // The leg should arrive within the call's recv window; a generous
                 // multiple guards a slow SUT while still reaping a no-show.
+                // INVARIANT: this deadline (`pending_ttl * 4`) must exceed one
+                // callee `recv_timeout`, or the reaper could close a LIVE (but
+                // not-yet-`arrived`) receiver's queue out from under a pending
+                // `try_receive`. The harness sets `pending_ttl == recv_timeout`,
+                // so the 4× margin holds; keep `pending_ttl >= recv_timeout`.
                 deadline: Instant::now() + pending_ttl * 4,
             });
             slot.receivers.push(ReceiverEntry { label, queue: queue.clone(), keyset: keyset.clone() });
@@ -612,8 +622,16 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
             1 => 0,
             _ => match &slot.picker {
                 Some(pick) => {
-                    let want = pick(&LegInfo { raw });
-                    match slot.receivers.iter().position(|r| r.label == want) {
+                    // The picker runs while we hold `mux.reg`; isolate it under
+                    // `catch_unwind` so a panicking scenario callback degrades to
+                    // a `no_route` orphan instead of POISONING the socket's
+                    // registry mutex (which would cascade every subsequent
+                    // route/bind/drop on this endpoint). It must also not re-enter
+                    // the mux (it would self-deadlock on `reg`).
+                    let picked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        pick(&LegInfo { raw })
+                    }));
+                    match picked.ok().and_then(|want| slot.receivers.iter().position(|r| r.label == want)) {
                         Some(i) => i,
                         None => {
                             mux.stats.orphan(OrphanReason::NoRoute, raw);
