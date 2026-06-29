@@ -219,6 +219,41 @@ non-INVITE clears at Timer J; a failed leg at Timer B/F.
   backup transaction. `(p,b)` *detects* it (reject), but the backup's mutation
   already hit the wire → that one call may CSeq-regress and drop. Unavoidable
   without cross-node coordination; fails by cleanly dropping one call.
+- **Forked-b-leg confirm lost on the kill instant** (the "confirm-race"). When a
+  b-leg forks (≥2 early dialogs) and the primary crashes in the *narrow window*
+  between processing the winning `200 OK` (which collapses the fork to the winner
+  in memory and queues the confirm flush) and that flush replicating, the backup
+  retains the pre-confirm `Early` snapshot carrying *both* forks. The winner's
+  identity is then unrecoverable from replicated state alone: the a-face tag is a
+  single consolidated value and the `stored_a_tag → winner` mapping is created
+  *at the 200* (force-tag-consistency), so it died with the un-flushed confirm;
+  the early snapshot names only the first (losing) fork. A reclaimed/taken-over
+  copy therefore stays `Early` and may emit a phantom `CANCEL` (or a CSeq-desync'd
+  BYE) at teardown for that one call. The stranded `Early` call is bounded — the
+  SetupTimeout reaper sweeps it (~150 s); it is not a leak.
+
+  **What is accepted, and the LIMIT of it.** Accepted: *only a call whose dialog
+  state was changing within the kill window* — concretely, a call **confirming at
+  the instant of the kill** (its confirm and the crash fall inside the ~ms flush
+  window). This is the deliberate price of causal-only, flush-on-confirm
+  replication (no synchronous confirm-replicate on the call-setup hot path).
+
+  **NOT accepted — the protected set, which this trade-off must never touch:**
+  - **Established calls** — any call confirmed more than the acceptance window
+    (default 200 ms) before the kill has already flushed its collapsed `Confirmed`
+    state, so it reclaims clean. A confirmed call dropping on a kill is a **bug**,
+    not this trade-off.
+  - **Ringing calls** — a still-`Early` (not-yet-confirming) call has no winner to
+    lose; it must survive the failover or fail gracefully as an ordinary early
+    dialog. Breaking one is a **bug**, not this trade-off.
+  - Any failure whose dialog-state change was **outside** the acceptance window
+    (e.g. a brand-new call created seconds after the reboot that desyncs) is a
+    **distinct, genuine bug** — this acceptance does NOT cover it.
+
+  We do **not** fix the confirm-race (the only real fix — reactive takeover +
+  re-confirm on a b-leg `2xx` *response*, since the backup currently takes over
+  only on a *request* — is disproportionate to a single call confirming exactly on
+  the kill). Instead it is **classified, not masked**: see *Consequences for tests*.
 
 ## Consequences for tests
 
@@ -229,6 +264,23 @@ over), *memory is clean* (no per-call state left), and *exactly one owner* /
 assert_call_fully_released}`, `ReplicatedB2buaSut::{serves, is_synchronized_backup,
 memory_clean, holds_any_trace}`). External behaviour (Alice/Bob: responses, CSeq
 order, call survival, clean teardown) is unchanged by this refactor.
+
+**Chaos-aware classification of the confirm-race (the accepted trade-off above).**
+The endurance load generator (`crates/loadgen`) is *chaos-aware*: the chaos driver
+flags it at each fault instant (`POST /chaos`), and every call carries dialog-state
+**phase markers** (`connected`, `reinvited`, `transferred`, …). A failed call is
+auto-bucketed `chaos="near"` (accepted) **iff** a dialog-state transition fell
+within the **acceptance window** of a fault — or the call was still mid-setup at
+the fault — exactly encoding the accepted-vs-protected boundary above. The window
+is a single knob, `--chaos-phase-tolerance-ms` (default **200 ms**,
+`LOADGEN_CHAOS_PHASE_TOL_MS` in endurance). A **stably-established** call that
+fails far from any fault stays `chaos="clear"` — the protected set. Only
+timing-independent classes (`Panic`, `Unparseable`) are never excused. So the
+confirm-race is **counted but not triaged** (`class=rfc_audit_fail,chaos="near"`),
+while a genuine bug — an established call dropping, or a post-reboot fresh call
+desyncing far from the kill — surfaces in `chaos="clear"` and must be investigated.
+This is classification, never suppression: the `near` bucket is fully retained and
+queryable.
 
 ## Terminal reconcile, deferred discharge & resurrection guard
 

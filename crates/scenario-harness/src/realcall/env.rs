@@ -150,22 +150,46 @@ fn api_pin(addr: SocketAddr) -> String {
     )
 }
 
-/// Per-call timing recorder. Holds the call's start instant and the named
+/// Per-call timing recorder. Holds the call's start instant, the named
 /// **checkpoints** ("keywords") a scenario marks at points whose latency we want
-/// to track (e.g. `time_to_200`). `Mutex` (not `RefCell`) so it is `Sync` — the
-/// `async-trait` scenario future borrows `&CallCtx` across awaits.
+/// to track (e.g. `time_to_200`), and the **phase markers** a scenario stamps as
+/// it advances (connected, re-invited, transferred, post-PRACK, …) so a NOK
+/// sample can say WHICH phase was live and the chaos correlation can be
+/// phase-aware. `Mutex` (not `RefCell`) so it is `Sync` — the `async-trait`
+/// scenario future borrows `&CallCtx` across awaits.
 pub struct CallCtx {
     t0: Instant,
     checkpoints: Mutex<Vec<(&'static str, Duration)>>,
+    phases: Mutex<Vec<(&'static str, Instant)>>,
 }
 
 impl CallCtx {
     pub fn new() -> Self {
-        Self { t0: Instant::now(), checkpoints: Mutex::new(Vec::new()) }
+        Self { t0: Instant::now(), checkpoints: Mutex::new(Vec::new()), phases: Mutex::new(Vec::new()) }
     }
 
     pub fn checkpoint(&self, name: &'static str) {
         self.checkpoints.lock().unwrap().push((name, self.t0.elapsed()));
+    }
+
+    /// The instant the call started (its first INVITE) — the lower bound of the
+    /// lifetime window the chaos correlation classifies against.
+    pub fn start_instant(&self) -> Instant {
+        self.t0
+    }
+
+    /// Mark that the call reached a named lifecycle phase (e.g. `"connected"`,
+    /// `"reinvited"`, `"transferred"`, `"pracked"`), stamping the instant. Cheap
+    /// and unconditional; the driver folds these into the NOK sample banner and
+    /// uses them for phase-aware chaos correlation. `name` is `'static` to keep
+    /// cardinality bounded (a fixed phase vocabulary, like checkpoints).
+    pub fn phase(&self, name: &'static str) {
+        self.phases.lock().unwrap().push((name, Instant::now()));
+    }
+
+    /// The recorded phase markers `(name, instant)`, in order reached.
+    pub fn phases(&self) -> Vec<(&'static str, Instant)> {
+        self.phases.lock().unwrap().clone()
     }
 
     pub fn elapsed(&self) -> Duration {

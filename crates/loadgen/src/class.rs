@@ -61,6 +61,28 @@ impl ResultClass {
     pub fn is_ok(&self) -> bool {
         matches!(self, ResultClass::Ok)
     }
+
+    /// Whether a failure of this class may be auto-excused as `chaos="near"`
+    /// (acceptable kill collateral) when the **per-phase** rule also holds (a
+    /// dialog-state transition occurred within the phase tolerance of the fault).
+    ///
+    /// The accepted constraint (2026-06-29): *a call whose dialog state changed
+    /// within ~200 ms of the kill may take a small impact — established and
+    /// ringing calls are what we protect.* So a SIP **protocol** symptom of a
+    /// concurrent-with-the-kill state change (a `RfcAuditFail` CSeq desync, a
+    /// `WrongMethod` phantom CANCEL, an `Unexpected` 481) IS excusable — those are
+    /// exactly the forked-b-leg confirm-race collateral, which only ever hits a
+    /// call confirming *at* the kill (established calls flushed their state and
+    /// reclaim clean). The per-phase classifier gates it on the near-kill
+    /// transition, so a *stably-established* call that fails far from any kill
+    /// still lands in `clear`.
+    ///
+    /// Only the **timing-independent** classes are never excused, because their
+    /// cause is unrelated to dialog timing and should always be seen: `Panic` (a
+    /// code panic) and `Unparseable` (wire corruption).
+    pub fn chaos_excusable(&self) -> bool {
+        !matches!(self, ResultClass::Panic | ResultClass::Unparseable)
+    }
 }
 
 impl std::fmt::Display for ResultClass {

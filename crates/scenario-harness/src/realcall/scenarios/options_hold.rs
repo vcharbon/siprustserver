@@ -44,6 +44,7 @@ impl RealCallScenario for OptionsHold {
             opt.try_expect(200).await?;
             if first {
                 ctx.checkpoint("time_to_options_200");
+                ctx.phase("keepalive_ack");
                 first = false;
             }
         }

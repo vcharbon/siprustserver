@@ -234,6 +234,17 @@ LOADGEN_MAX_INFLIGHT="${LOADGEN_MAX_INFLIGHT:-4000}"
 LOADGEN_RECORD_EVERY="${LOADGEN_RECORD_EVERY:-1}"
 LOADGEN_SAMPLE_CAP="${LOADGEN_SAMPLE_CAP:-50}"
 LOADGEN_REPORT_INTERVAL="${LOADGEN_REPORT_INTERVAL:-60}"
+# Chaos correlation window (ms): a call within this of an injected fault (flagged
+# via loadgen_chaos_flag → POST /chaos) is bucketed chaos="near". 500ms semantic
+# window + headroom for port-forward/delete skew; the dominant signal is anyway
+# call-lifetime overlap, not this edge tolerance.
+LOADGEN_CHAOS_TOL_MS="${LOADGEN_CHAOS_TOL_MS:-1500}"
+# Per-phase (dialog-state-transition) tolerance: a fault landing within this of a
+# transition (connected/reinvited/transferred) or mid-setup = acceptable collateral
+# (the state had no time to propagate; SIP retransmission recovers it). A stably-
+# connected call across the fault stays chaos="clear" (genuine). 200ms per the
+# "sub-RTT confirm-vs-flush" analysis; raise if propagation skew is larger.
+LOADGEN_CHAOS_PHASE_TOL_MS="${LOADGEN_CHAOS_PHASE_TOL_MS:-200}"
 LOADGEN_CPU_REQ="${LOADGEN_CPU_REQ:-1}"; LOADGEN_CPU_LIM="${LOADGEN_CPU_LIM:-6}"
 LOADGEN_MEM_REQ="${LOADGEN_MEM_REQ:-512Mi}"; LOADGEN_MEM_LIM="${LOADGEN_MEM_LIM:-2Gi}"
 
@@ -264,6 +275,32 @@ close_window() { # $1 = chaos type
   [ -n "$WINDOW_HB_PID" ] && kill "$WINDOW_HB_PID" >/dev/null 2>&1 || true
   WINDOW_HB_PID=""
   push_metric "sip_chaos_window{type=\"$1\"} 0"
+}
+
+# Flag the rust loadgen's chaos endpoint at the fault instant so it auto-splits
+# calls whose lifetime overlaps this fault into chaos="near" (likely acceptable
+# kill collateral, not triaged by hand) vs chaos="clear" (a genuine SUT defect) —
+# see crates/loadgen/src/chaos.rs. The loadgen timestamps the marker on its OWN
+# clock (same as its calls), so the overlap is exact — no Call-ID ms-base
+# reconciliation. Best-effort: a one-shot port-forward + POST that NEVER fails the
+# run. Call it in the BACKGROUND right at the kill so its port-forward setup
+# overlaps the delete (the marker lands ≈ the kill instant). The dominant signal
+# is call-lifetime overlap (a call alive at the kill contains the marker
+# regardless of the ±tolerance), so a second of port-forward skew is harmless.
+loadgen_chaos_flag() {  # $1 = chaos type, $2 = target (optional)
+  [ "${LOADGEN_ENABLE:-1}" = "1" ] || return 0
+  local type="$1" target="${2:-}" pod pf i
+  pod="$(kubectl -n "$NS" get pod -l app=loadgen --field-selector=status.phase=Running \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+  [ -n "$pod" ] || { warn "loadgen_chaos_flag: no running loadgen pod (skip $type)"; return 0; }
+  kubectl -n "$NS" port-forward "$pod" 19300:9300 >/dev/null 2>&1 &
+  pf=$!
+  for i in $(seq 1 10); do
+    curl -s --max-time 2 -X POST "http://127.0.0.1:19300/chaos?type=${type}&target=${target}" \
+      >/dev/null 2>&1 && { log "loadgen_chaos_flag: flagged ${type}(${target})"; break; }
+    sleep 0.3
+  done
+  kill "$pf" 2>/dev/null || true
 }
 
 # vmq <promql> -> scalar value of the first result (0 if none / unreachable).
@@ -752,6 +789,9 @@ reboot_event() {
   log "CHAOS #$idx: kill_worker REBOOT $tgt mode=$mode (success=$s0 failed=$f0 ghost=$g0 active=$a0)"
   push_metric "sip_chaos_run{type=\"kill_worker\",phase=\"inject\"} 1"
   open_window kill_worker
+  # Flag the loadgen at the kill instant (background: its port-forward setup
+  # overlaps the delete) so post-reboot calls are auto-split near/clear.
+  loadgen_chaos_flag kill_worker "$tgt" &
   KILL_GRACE="$grace" KILL_TARGET="$tgt" WORKER_REPLICAS="$WORKER_REPLICAS" \
     ./chaos.sh kill >>"$RUNLOG" 2>&1 || true
   # The StatefulSet recreates the pod (same name, NEW IP); the proxy rediscovers it
@@ -1299,7 +1339,7 @@ launch_loadgen() {
   export LOADGEN_JOB_NAME LOADGEN_IMAGE LOADGEN_CPS LOADGEN_DURATION LOADGEN_MAX_INFLIGHT \
          LOADGEN_RING_MS LOADGEN_TALK_MS LOADGEN_GAP_MS LOADGEN_LONG_HOLD_SECS LOADGEN_RECV_TIMEOUT_MS \
          LOADGEN_W_BASIC LOADGEN_W_REINVITE LOADGEN_W_REFER LOADGEN_W_LONG \
-         LOADGEN_RECORD_EVERY LOADGEN_SAMPLE_CAP LOADGEN_REPORT_INTERVAL \
+         LOADGEN_RECORD_EVERY LOADGEN_SAMPLE_CAP LOADGEN_REPORT_INTERVAL LOADGEN_CHAOS_TOL_MS LOADGEN_CHAOS_PHASE_TOL_MS \
          LOADGEN_CPU_REQ LOADGEN_CPU_LIM LOADGEN_MEM_REQ LOADGEN_MEM_LIM \
          PROXY_TARGET SIP_PORT
   kubectl -n "$NS" delete job "$LOADGEN_JOB_NAME" --ignore-not-found >/dev/null 2>&1 || true

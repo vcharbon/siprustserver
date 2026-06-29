@@ -128,21 +128,40 @@ the weight to include it.
 
 ## Where the results are (and *why* calls failed)
 
-The report is written to `--out-dir`, bucketed per `(scenario × result-class)`:
+The report is written to `--out-dir`, bucketed per `(scenario × result-class × chaos)`:
 
-- **`index.html`** — counts table (`scenario | class | count | sample-links`),
+- **`index.html`** — counts table (`scenario | class | chaos | count | sample-links`),
   OK rows green, failing rows red; plus latency percentiles and checkpoints.
-- **`callflows/<scenario>/<class>/<i>.html`** — the per-call **SIP sequence
+- **`callflows/<scenario>/<class>/<chaos>/<i>.html`** — the per-call **SIP sequence
   diagram** for sampled calls. For a failing call the page shows `FAIL` **and the
   reason** (the `StepError` / outcome) as the header banner and a `call-result`
   anomaly — e.g. *"alice expected 200, got 486 Busy Here"*,
-  *"transfer declined by charlie (603)"*. The failure `<class>` is the directory
-  name: `status_503`, `status_486`, `timeout`, `unexpected`, `rfc_audit_fail`,
-  `panic`, `transport`, `unparseable`.
+  *"transfer declined by charlie (603)"*; a sampled NOK also lists the lifecycle
+  `[phases: connected@…ms, reinvited@…ms]` it reached. The failure `<class>` is a
+  directory name: `status_503`, `status_486`, `timeout`, `unexpected`,
+  `rfc_audit_fail`, `panic`, `transport`, `unparseable`.
 - **`summary.md`** — the same counts in markdown.
 - **Live:** `curl <metrics-addr>/metrics` during a run for the per-`(scenario,
-  class)` counters plus the `loadgen_mux_orphan_total` / `loadgen_mux_registry_size`
-  canaries.
+  class, chaos)` counters plus the `loadgen_mux_orphan_total` /
+  `loadgen_mux_registry_size` canaries and `loadgen_chaos_markers_total`.
+
+### Chaos correlation (near vs clear)
+
+When a fault is injected during a run, the chaos driver flags the loadgen at the
+kill instant via **`POST /chaos?type=<kind>&target=<who>`** (same socket as
+`/metrics`; the endurance harness does this in `loadgen_chaos_flag`). Each
+finished call is then auto-classified on the `chaos` label:
+
+- **`chaos="near"`** — the call's lifetime overlapped an injected fault within
+  `--chaos-tolerance-ms` (default 500). Likely acceptable kill collateral
+  (in-setup at the kill → 408, etc.) — **counted, but not hand-triaged.**
+- **`chaos="clear"`** — no fault overlapped. A genuine SUT signal.
+
+The loadgen timestamps the marker on its **own** clock (the same one its calls
+use), so the overlap is exact — no Call-ID/tag ms-base reconciliation. A
+post-reboot call (created seconds after the worker came back) is `clear`, so a
+reclaim-path defect stays visible. **Triage `loadgen_calls_total{class="rfc_audit_fail",chaos="clear"}`**
+and the `callflows/<sc>/<class>/clear/` flows; revisit `near` only if wanted.
 
 Sampling is bounded: a small fraction of calls record their trace (`--sample-cap`
 per bucket); the rest are counted only. A non-sampled failure still gets a stub

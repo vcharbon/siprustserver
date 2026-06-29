@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use loadgen::{
-    by_id, default_scenarios, serve_metrics, CallConfig, Correlation, Driver, DriverCfg,
+    by_id, default_scenarios, serve_metrics, CallConfig, ChaosLog, Correlation, Driver, DriverCfg,
     EndpointSpec, LoadScenario, MuxCore, MuxTransport, Reporter, ReporterCfg, Role,
 };
 
@@ -62,9 +62,20 @@ struct Args {
     /// Output directory for the on-disk report.
     #[arg(long, default_value = "./loadgen-report")]
     out_dir: PathBuf,
-    /// Address to serve the Prometheus /metrics endpoint on.
+    /// Address to serve the Prometheus /metrics endpoint (GET) and the chaos-flag
+    /// endpoint (`POST /chaos?type=<kind>&target=<who>`) on.
     #[arg(long, default_value = "0.0.0.0:9300")]
     metrics_addr: SocketAddr,
+    /// Coarse chaos correlation tolerance (ms): the call-lifetime fallback window.
+    #[arg(long, default_value_t = 500)]
+    chaos_tolerance_ms: u64,
+    /// Per-phase chaos tolerance (ms): a call is bucketed `chaos="near"` when an
+    /// injected fault lands within this of a dialog-state transition (connected/
+    /// reinvited/transferred/…) or mid-setup — the "state had no time to propagate,
+    /// SIP retransmission recovers it" window = acceptable kill collateral. A call
+    /// stably connected across the fault stays `chaos="clear"` (a genuine signal).
+    #[arg(long, default_value_t = 200)]
+    chaos_phase_tolerance_ms: u64,
     #[arg(long, default_value_t = 60)]
     options_hold: u64,
     #[arg(long, default_value_t = 5)]
@@ -181,24 +192,34 @@ async fn main() -> std::io::Result<()> {
         },
     };
 
-    let driver = Driver::new(cfg, scenarios, reporter.clone(), transport);
+    // Chaos correlation: the marker log the `POST /chaos` endpoint feeds and the
+    // driver classifies each finished call against (near/clear).
+    let chaos = Arc::new(
+        ChaosLog::new(Duration::from_millis(args.chaos_tolerance_ms))
+            .with_phase_tolerance(Duration::from_millis(args.chaos_phase_tolerance_ms)),
+    );
 
-    // Live /metrics: reporter series + mux series + a process-memory canary
-    // (RSS) so the endurance dashboard can watch the load generator itself while
-    // full recording is on.
+    let driver = Driver::new(cfg, scenarios, reporter.clone(), transport).with_chaos(chaos.clone());
+
+    // Live /metrics: reporter series + mux series + chaos markers + a
+    // process-memory canary (RSS) so the endurance dashboard can watch the load
+    // generator itself while full recording is on.
     let metrics_reporter = reporter.clone();
     let metrics_core = core.clone();
+    let metrics_chaos = chaos.clone();
     let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || {
         format!(
-            "{}{}{}",
+            "{}{}{}{}",
             metrics_reporter.render_prometheus(),
             metrics_core.render_prometheus(),
+            metrics_chaos.render_prometheus(),
             process_memory_metrics(),
         )
     });
     let metrics_addr = args.metrics_addr;
+    let server_chaos = chaos.clone();
     tokio::spawn(async move {
-        if let Err(e) = serve_metrics(metrics_addr, render).await {
+        if let Err(e) = serve_metrics(metrics_addr, render, Some(server_chaos)).await {
             eprintln!("[loadgen] /metrics server stopped: {e}");
         }
     });

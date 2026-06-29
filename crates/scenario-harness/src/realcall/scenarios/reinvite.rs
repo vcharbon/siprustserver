@@ -42,6 +42,7 @@ impl RealCallScenario for Reinvite {
         bob_uas.respond(200, "OK").with_sdp(REOFFER).await;
         reinv.try_expect(200).await?;
         ctx.checkpoint("time_to_reinvite_200");
+        ctx.phase("reinvited");
 
         dialog.ack(Some(REANSWER)).await;
         env.bob.try_receive("ACK").await?;

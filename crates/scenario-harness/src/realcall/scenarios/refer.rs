@@ -78,12 +78,14 @@ impl RealCallScenario for Refer {
         // race). 200-OK it and keep waiting for the 202.
         refer.try_expect_tolerating(202, &["NOTIFY"]).await?;
         ctx.checkpoint("time_to_202");
+        ctx.phase("referred");
 
         // Charlie answers the transfer INVITE (held SDP).
         let mut charlie_uas = charlie.try_receive("INVITE").await?;
         charlie_uas.respond(180, "Ringing").await;
         charlie_uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
         ctx.checkpoint("time_to_charlie_200");
+        ctx.phase("transferred");
         let _charlie_dialog = charlie_uas.dialog();
 
         // Let the B2BUA MERGE the transfer media before tearing down. The merge

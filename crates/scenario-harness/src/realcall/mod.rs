@@ -154,6 +154,7 @@ pub async fn establish(
     let dialog = call.ack().await;
     scope.set_confirmed(dialog.clone());
     env.bob.try_receive("ACK").await?;
+    ctx.phase("connected");
     Ok(dialog)
 }
 
@@ -172,6 +173,7 @@ pub async fn hangup(
     bye.try_expect(200).await?;
     scope.mark_terminated();
     ctx.checkpoint("time_to_bye_200");
+    ctx.phase("bye_200");
     Ok(())
 }
 

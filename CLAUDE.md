@@ -47,6 +47,19 @@ Before `#[ignore]`-ing a slow paused-clock test, cut the churn at its source
 semantics-preserving wherever the test pumps for a condition instead of
 counting ticks.
 
+## Chaos collateral acceptance (endurance triage)
+
+A failover/kill failure is NOT automatically a SUT bug. The accepted boundary
+(ADR-0014 "Accepted trade-offs" / "Consequences for tests"): a call whose **dialog
+state changed within the acceptance window (default 200 ms,
+`LOADGEN_CHAOS_PHASE_TOL_MS`) of a kill** may take a small impact — that is the
+forked-b-leg confirm-race (a call confirming AT the kill). What we **protect** is
+**ringing** and **established** calls; a confirmed call dropping, or a failure whose
+state change was outside the window, is a genuine bug. The loadgen is chaos-aware
+and auto-buckets accepted collateral as `chaos="near"` vs genuine `chaos="clear"`
+(`POST /chaos` + per-call phase markers); triage `chaos="clear"`. See ADR-0014 and
+`crates/loadgen/README.md`.
+
 ## Test-time clock & timers (read before touching timer or paused-clock code)
 
 Behaviour rides `tokio::time` directly (monotonic) — there is **no** separate

@@ -11,12 +11,13 @@ use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::FutureExt;
 use scenario_harness::AgentBinder;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::chaos::{ChaosLog, ChaosTag};
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
 use crate::mux::{CallRouting, Correlation, MuxCore};
@@ -85,6 +86,9 @@ pub struct Driver {
     sem: Arc<Semaphore>,
     transport: Arc<MuxTransport>,
     call: Arc<CallConfig>,
+    /// Optional chaos-marker log: when set, each finished call is classified
+    /// near/clear against the injected-fault markers (the chaos correlation).
+    chaos: Option<Arc<ChaosLog>>,
 }
 
 /// Process-wide per-call id-seed source: a unique 100k-wide window per call so a
@@ -140,7 +144,15 @@ impl Driver {
             sem: Arc::new(Semaphore::new(cfg.max_in_flight)),
             transport,
             call: Arc::new(cfg.call),
+            chaos: None,
         }
+    }
+
+    /// Attach a [`ChaosLog`] so finished calls are tagged near/clear against the
+    /// injected-fault markers (fed by the `POST /chaos` endpoint).
+    pub fn with_chaos(mut self, chaos: Arc<ChaosLog>) -> Self {
+        self.chaos = Some(chaos);
+        self
     }
 
     pub fn reporter(&self) -> &Arc<Reporter> {
@@ -212,6 +224,7 @@ impl Driver {
                 self.transport.clone(),
                 self.call.clone(),
                 self.seed,
+                self.chaos.clone(),
                 permit,
             ));
         }
@@ -229,6 +242,7 @@ async fn run_one(
     transport: Arc<MuxTransport>,
     call: Arc<CallConfig>,
     seed_base: u64,
+    chaos: Option<Arc<ChaosLog>>,
     _permit: OwnedSemaphorePermit,
 ) {
     reporter.inc_inflight();
@@ -310,8 +324,27 @@ async fn run_one(
     let e2e = ctx.elapsed();
     let checkpoints = ctx.take_checkpoints();
 
-    let sample = if reporter.wants_sample(id, &class) {
-        let detail = outcome.detail();
+    // Classify the call near/clear against the injected-fault markers using the
+    // per-phase rule: `Near` iff a fault landed on a dialog-state transition
+    // (±phase_tolerance — no time to propagate, SIP retransmission recovers it) or
+    // mid-setup. A call stably connected across the fault stays `Clear`. No log →
+    // always Clear (the smoke tests + a chaos-less run).
+    //
+    // BUT a protocol-defect class (RfcAuditFail/WrongMethod/Unexpected/…) is NEVER
+    // excused even if a transition coincided with the kill: the post-reboot reclaim
+    // bug CONNECTS near the kill yet desyncs at teardown, so excusing it on the
+    // near-kill connect would HIDE it (proven 2026-06-29 — neither self-heal path
+    // recovers). Only transient/transport failures (the real kill collateral) are
+    // eligible. See `ResultClass::chaos_excusable`.
+    let chaos_tag = match chaos.as_ref() {
+        Some(c) if class.chaos_excusable() => {
+            c.classify_call(ctx.start_instant(), Instant::now(), &ctx.phases())
+        }
+        _ => ChaosTag::Clear,
+    };
+
+    let sample = if reporter.wants_sample(id, &class, chaos_tag) {
+        let detail = phase_annotated_detail(outcome.detail(), &ctx);
         // Thread the failure reason into the rendered callflow so a sampled NOK
         // page explains WHY (header banner + an explicit anomaly), not just "FAIL".
         let html = if binder.is_recording() {
@@ -332,26 +365,64 @@ async fn run_one(
         None
     };
 
-    reporter.record(id, &outcome, e2e, &checkpoints, sample);
+    reporter.record(id, &outcome, e2e, &checkpoints, sample, chaos_tag);
     reporter.dec_inflight();
 }
 
-/// A minimal Prometheus `/metrics` HTTP server (hand-rolled HTTP/1.1 over
-/// `TcpListener` — no hyper dependency). Serves `render()` to any GET. Runs until
-/// the task is cancelled.
+/// Append the call's lifecycle phase trail (`connected@1234ms`, `reinvited@…`) to
+/// a NOK sample's one-line detail, so a sampled failing flow says WHICH phase it
+/// reached before it failed (and, with the chaos correlation, near which fault).
+/// `None`/empty detail (an OK call) is left untouched.
+fn phase_annotated_detail(detail: Option<String>, ctx: &CallCtx) -> Option<String> {
+    let detail = detail?;
+    let phases = ctx.phases();
+    if phases.is_empty() {
+        return Some(detail);
+    }
+    let start = ctx.start_instant();
+    let trail = phases
+        .iter()
+        .map(|(name, at)| format!("{name}@{}ms", at.saturating_duration_since(start).as_millis()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("{detail} [phases: {trail}]"))
+}
+
+/// A minimal HTTP/1.1 server (hand-rolled over `TcpListener` — no hyper
+/// dependency). A GET serves `render()` (the Prometheus `/metrics` surface). When
+/// a [`ChaosLog`] is attached, a `POST /chaos?type=<kind>&target=<who>` records a
+/// fault marker at receipt instant (the chaos driver flags it at the kill) so
+/// finished calls get auto-classified near/clear. Runs until the task is
+/// cancelled.
 pub async fn serve_metrics(
     addr: SocketAddr,
     render: Arc<dyn Fn() -> String + Send + Sync>,
+    chaos: Option<Arc<ChaosLog>>,
 ) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind(addr).await?;
     loop {
         let (mut sock, _) = listener.accept().await?;
         let render = render.clone();
+        let chaos = chaos.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
-            let _ = sock.read(&mut buf).await;
-            let body = render();
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let (method, path, query) = parse_request_line(&buf[..n]);
+
+            let body = if method == "POST" && path == "/chaos" {
+                if let Some(log) = &chaos {
+                    let kind = query_get(&query, "type").unwrap_or_else(|| "unknown".to_string());
+                    let target = query_get(&query, "target");
+                    log.record(kind.clone(), target.clone());
+                    format!("ok: recorded chaos marker type={kind} target={target:?}\n")
+                } else {
+                    "ok: no chaos log attached\n".to_string()
+                }
+            } else {
+                render()
+            };
+
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -359,4 +430,29 @@ pub async fn serve_metrics(
             let _ = sock.write_all(resp.as_bytes()).await;
         });
     }
+}
+
+/// Parse the first request line into `(METHOD, path, query)`. Best-effort: a
+/// malformed/empty request yields `("", "", "")` and falls through to the render
+/// path. The query is the raw `a=b&c=d` after `?` (empty if none).
+fn parse_request_line(buf: &[u8]) -> (String, String, String) {
+    let text = String::from_utf8_lossy(buf);
+    let line = text.lines().next().unwrap_or("");
+    let mut parts = line.split_whitespace();
+    let method = parts.next().unwrap_or("").to_string();
+    let target = parts.next().unwrap_or("");
+    let (path, query) = match target.split_once('?') {
+        Some((p, q)) => (p.to_string(), q.to_string()),
+        None => (target.to_string(), String::new()),
+    };
+    (method, path, query)
+}
+
+/// Pull `key`'s value out of a raw `a=b&c=d` query string (no percent-decoding —
+/// the chaos flags carry simple alnum/`-` values: `kill_worker`, `b2bua-worker-1`).
+fn query_get(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|kv| {
+        let (k, v) = kv.split_once('=')?;
+        (k == key && !v.is_empty()).then(|| v.to_string())
+    })
 }

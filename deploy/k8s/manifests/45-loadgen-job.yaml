@@ -108,6 +108,13 @@ spec:
             - "${LOADGEN_REPORT_INTERVAL}"
             - "--metrics-addr"
             - "0.0.0.0:9300"
+            # Chaos correlation: a call whose lifetime is within this of an
+            # injected fault (flagged via POST /chaos at the kill) is bucketed
+            # chaos="near" (likely acceptable kill collateral), else "clear".
+            - "--chaos-tolerance-ms"
+            - "${LOADGEN_CHAOS_TOL_MS}"
+            - "--chaos-phase-tolerance-ms"
+            - "${LOADGEN_CHAOS_PHASE_TOL_MS}"
           env:
             - name: POD_IP
               valueFrom: { fieldRef: { fieldPath: status.podIP } }

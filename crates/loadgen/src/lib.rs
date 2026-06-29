@@ -31,6 +31,7 @@
 //!
 //! [`Agent`]: scenario_harness::Agent
 
+pub mod chaos;
 pub mod class;
 pub mod ctx;
 pub mod driver;
@@ -39,6 +40,7 @@ pub mod report;
 pub mod scenarios;
 pub mod scope;
 
+pub use chaos::{ChaosLog, ChaosTag};
 pub use class::{CallOutcome, ResultClass};
 pub use ctx::{CallCtx, CallEnv};
 pub use driver::{serve_metrics, CallConfig, Driver, DriverCfg, MuxTransport};

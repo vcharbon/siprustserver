@@ -41,6 +41,7 @@ impl RealCallScenario for LongCall {
         env.bob.try_receive("OPTIONS").await?.respond(200, "OK").await;
         opt.try_expect(200).await?;
         ctx.checkpoint("time_to_options_200");
+        ctx.phase("keepalive_ack");
 
         // Hold the call open for the full duration, answering the SUT's own
         // in-dialog keepalive OPTIONS (and any in-dialog request) on BOTH legs

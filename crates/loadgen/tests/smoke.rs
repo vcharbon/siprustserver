@@ -147,7 +147,8 @@ async fn loadgen_mux_smoke_basic_concurrent() {
     // The on-disk report renders an OK callflow.
     let out = std::env::temp_dir().join(format!("loadgen-mux-{}", std::process::id()));
     reporter.finalize(&out).unwrap();
-    assert!(out.join("callflows/basic_call/ok/0.html").exists(), "no OK callflow HTML");
+    // No chaos markers in the smoke run → every call is the `clear` sub-bucket.
+    assert!(out.join("callflows/basic_call/ok/clear/0.html").exists(), "no OK callflow HTML");
     let _ = std::fs::remove_dir_all(&out);
 }
 
@@ -296,6 +297,51 @@ async fn loadgen_mux_orphan_observability() {
     let samples = core.stats().samples();
     assert!(samples.iter().any(|s| s.contains("no_header")), "no no_header sample: {samples:?}");
     assert!(samples.iter().any(|s| s.contains("unknown_token")), "no unknown_token sample: {samples:?}");
+}
+
+/// The chaos-flag endpoint: a `POST /chaos?type=…&target=…` records one marker
+/// on the loadgen's HTTP server (the same socket as GET `/metrics`), and a GET
+/// still returns the render body. This is the hook the chaos driver hits at the
+/// kill instant so finished calls get auto-classified near/clear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loadgen_chaos_post_records_marker() {
+    use loadgen::{serve_metrics, ChaosLog};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let chaos = Arc::new(ChaosLog::new(Duration::from_millis(500)));
+    let bind = addr(6490);
+    let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(|| "render-body-marker\n".to_string());
+    let srv_chaos = chaos.clone();
+    tokio::spawn(async move {
+        let _ = serve_metrics(bind, render, Some(srv_chaos)).await;
+    });
+
+    // Retry-connect until the server is bound.
+    let mut stream = loop {
+        match tokio::net::TcpStream::connect(bind).await {
+            Ok(s) => break s,
+            Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    };
+    stream
+        .write_all(b"POST /chaos?type=kill_worker&target=b2bua-worker-1 HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    let _ = stream.read_to_end(&mut buf).await;
+    assert!(
+        String::from_utf8_lossy(&buf).contains("recorded chaos marker"),
+        "POST /chaos should ack: {}",
+        String::from_utf8_lossy(&buf)
+    );
+    assert_eq!(chaos.total(), 1, "exactly one marker recorded");
+
+    // A GET still serves the render body.
+    let mut s2 = tokio::net::TcpStream::connect(bind).await.unwrap();
+    s2.write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
+    let mut b2 = Vec::new();
+    let _ = s2.read_to_end(&mut b2).await;
+    assert!(String::from_utf8_lossy(&b2).contains("render-body-marker"), "GET should render");
 }
 
 /// The leg-routing **injection API**: two receivers ("charlie", "dave") share
