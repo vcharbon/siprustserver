@@ -101,6 +101,14 @@ launch_calls() {
 kill_worker() {
   local grace="${KILL_GRACE:-0}"
   log "CHAOS: killing $KILL_TARGET mid-hold (grace=${grace}s)"
+  # Capture the kill wall-clock (Unix epoch ms) at the instant of the delete and
+  # publish it to KILL_TS_FILE (if set). The loadgen back-dates its chaos marker
+  # to this timestamp, so the marker tracks the REAL kill instant rather than the
+  # POST-receipt time — robust to any port-forward / plumbing latency on the flag
+  # path. See loadgen_chaos_flag (endurance.sh) + ChaosLog::record_at.
+  local kill_ms
+  kill_ms="$(date +%s%3N)"
+  [ -n "${KILL_TS_FILE:-}" ] && printf '%s' "$kill_ms" > "$KILL_TS_FILE" 2>/dev/null || true
   if [ "$grace" -gt 0 ]; then
     # Graceful: the worker drains (flushes its changelog to the backup +
     # self-503s via B2BUA_DRAIN_GRACE_MS) so in-dialog BYEs land on a hydrated

@@ -390,10 +390,12 @@ fn phase_annotated_detail(detail: Option<String>, ctx: &CallCtx) -> Option<Strin
 
 /// A minimal HTTP/1.1 server (hand-rolled over `TcpListener` — no hyper
 /// dependency). A GET serves `render()` (the Prometheus `/metrics` surface). When
-/// a [`ChaosLog`] is attached, a `POST /chaos?type=<kind>&target=<who>` records a
-/// fault marker at receipt instant (the chaos driver flags it at the kill) so
-/// finished calls get auto-classified near/clear. Runs until the task is
-/// cancelled.
+/// a [`ChaosLog`] is attached, a `POST /chaos?type=<kind>&target=<who>[&ts=<ms>]`
+/// records a fault marker so finished calls get auto-classified near/clear. With
+/// `ts` (Unix epoch ms of the actual kill, supplied by the chaos driver) the
+/// marker is back-dated to the kill instant — robust to port-forward latency on
+/// the flag path; without it the marker lands at receipt instant. Runs until the
+/// task is cancelled.
 pub async fn serve_metrics(
     addr: SocketAddr,
     render: Arc<dyn Fn() -> String + Send + Sync>,
@@ -414,8 +416,19 @@ pub async fn serve_metrics(
                 if let Some(log) = &chaos {
                     let kind = query_get(&query, "type").unwrap_or_else(|| "unknown".to_string());
                     let target = query_get(&query, "target");
-                    log.record(kind.clone(), target.clone());
-                    format!("ok: recorded chaos marker type={kind} target={target:?}\n")
+                    // `ts` (Unix epoch ms, captured by the chaos script at the
+                    // instant of the kill) back-dates the marker so PF latency does
+                    // not shift it; without it we fall back to the receipt instant.
+                    match query_get(&query, "ts").and_then(|s| s.parse::<u64>().ok()) {
+                        Some(ts) => {
+                            log.record_at(kind.clone(), target.clone(), ts);
+                            format!("ok: recorded chaos marker type={kind} target={target:?} ts={ts}\n")
+                        }
+                        None => {
+                            log.record(kind.clone(), target.clone());
+                            format!("ok: recorded chaos marker type={kind} target={target:?}\n")
+                        }
+                    }
                 } else {
                     "ok: no chaos log attached\n".to_string()
                 }

@@ -336,6 +336,30 @@ async fn loadgen_chaos_post_records_marker() {
     );
     assert_eq!(chaos.total(), 1, "exactly one marker recorded");
 
+    // A POST carrying `ts` (Unix epoch ms of the kill) is back-dated: the ack
+    // echoes the ts and a second marker is recorded. The driver supplies this so
+    // port-forward latency on the flag path can't shift the marker off the kill.
+    let kill_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        - 1500;
+    let mut s_ts = tokio::net::TcpStream::connect(bind).await.unwrap();
+    s_ts.write_all(
+        format!("POST /chaos?type=kill_worker&target=b2bua-worker-1&ts={kill_ms} HTTP/1.1\r\nHost: x\r\n\r\n")
+            .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut bt = Vec::new();
+    let _ = s_ts.read_to_end(&mut bt).await;
+    assert!(
+        String::from_utf8_lossy(&bt).contains(&format!("ts={kill_ms}")),
+        "POST /chaos with ts should ack the timestamp: {}",
+        String::from_utf8_lossy(&bt)
+    );
+    assert_eq!(chaos.total(), 2, "the ts-bearing marker is recorded too");
+
     // A GET still serves the render body.
     let mut s2 = tokio::net::TcpStream::connect(bind).await.unwrap();
     s2.write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();

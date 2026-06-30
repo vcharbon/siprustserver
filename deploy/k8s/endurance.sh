@@ -284,20 +284,38 @@ close_window() { # $1 = chaos type
 # clock (same as its calls), so the overlap is exact — no Call-ID ms-base
 # reconciliation. Best-effort: a one-shot port-forward + POST that NEVER fails the
 # run. Call it in the BACKGROUND right at the kill so its port-forward setup
-# overlaps the delete (the marker lands ≈ the kill instant). The dominant signal
-# is call-lifetime overlap (a call alive at the kill contains the marker
-# regardless of the ±tolerance), so a second of port-forward skew is harmless.
-loadgen_chaos_flag() {  # $1 = chaos type, $2 = target (optional)
+# overlaps the delete.
+#
+# CRITICAL — marker accuracy: the POST lands over the port-forward ~1.5 s after
+# the kill, so recording it at receipt mis-buckets calls whose `connected`
+# transition coincided with the kill (the transition falls outside the 200 ms
+# phase window and reads chaos="clear" — a false genuine signal). When $3 names a
+# kill-timestamp file (written by chaos.sh kill_worker at the actual delete
+# instant, Unix epoch ms), we wait for it, pass it as `&ts=` and the loadgen
+# back-dates the marker to the REAL kill — robust to ANY plumbing latency. The PF
+# setup still overlaps the delete; only the POST waits for the ts. Falls back to a
+# no-ts POST (receipt instant) if the file never appears.
+loadgen_chaos_flag() {  # $1 = chaos type, $2 = target (optional), $3 = kill-ts file (optional)
   [ "${LOADGEN_ENABLE:-1}" = "1" ] || return 0
-  local type="$1" target="${2:-}" pod pf i
+  local type="$1" target="${2:-}" ts_file="${3:-}" pod pf i kill_ms="" qs
   pod="$(kubectl -n "$NS" get pod -l app=loadgen --field-selector=status.phase=Running \
         -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
   [ -n "$pod" ] || { warn "loadgen_chaos_flag: no running loadgen pod (skip $type)"; return 0; }
   kubectl -n "$NS" port-forward "$pod" 19300:9300 >/dev/null 2>&1 &
   pf=$!
+  # Wait (briefly) for chaos.sh to publish the actual kill instant, so `ts` is the
+  # real delete time, not the POST-receipt time. PF setup above already overlaps.
+  if [ -n "$ts_file" ]; then
+    for i in $(seq 1 20); do
+      [ -s "$ts_file" ] && { kill_ms="$(cat "$ts_file" 2>/dev/null)"; break; }
+      sleep 0.25
+    done
+  fi
+  qs="type=${type}&target=${target}"
+  [ -n "$kill_ms" ] && qs="${qs}&ts=${kill_ms}"
   for i in $(seq 1 10); do
-    curl -s --max-time 2 -X POST "http://127.0.0.1:19300/chaos?type=${type}&target=${target}" \
-      >/dev/null 2>&1 && { log "loadgen_chaos_flag: flagged ${type}(${target})"; break; }
+    curl -s --max-time 2 -X POST "http://127.0.0.1:19300/chaos?${qs}" \
+      >/dev/null 2>&1 && { log "loadgen_chaos_flag: flagged ${type}(${target}) ts=${kill_ms:-<receipt>}"; break; }
     sleep 0.3
   done
   kill "$pf" 2>/dev/null || true
@@ -790,15 +808,21 @@ reboot_event() {
   push_metric "sip_chaos_run{type=\"kill_worker\",phase=\"inject\"} 1"
   open_window kill_worker
   # Flag the loadgen at the kill instant (background: its port-forward setup
-  # overlaps the delete) so post-reboot calls are auto-split near/clear.
-  loadgen_chaos_flag kill_worker "$tgt" &
-  KILL_GRACE="$grace" KILL_TARGET="$tgt" WORKER_REPLICAS="$WORKER_REPLICAS" \
+  # overlaps the delete) so post-reboot calls are auto-split near/clear. chaos.sh
+  # writes the REAL delete-instant timestamp to $kill_ts_file; loadgen_chaos_flag
+  # waits for it and back-dates the marker, so port-forward latency can't shift it
+  # (mis-bucketing kill-coincident transitions as chaos="clear").
+  local kill_ts_file; kill_ts_file="$(mktemp "${TMPDIR:-/tmp}/endur-kill-ts.XXXXXX")"
+  : > "$kill_ts_file"
+  loadgen_chaos_flag kill_worker "$tgt" "$kill_ts_file" &
+  KILL_GRACE="$grace" KILL_TARGET="$tgt" WORKER_REPLICAS="$WORKER_REPLICAS" KILL_TS_FILE="$kill_ts_file" \
     ./chaos.sh kill >>"$RUNLOG" 2>&1 || true
   # The StatefulSet recreates the pod (same name, NEW IP); the proxy rediscovers it
   # via the EndpointSlice informer (ADR-0012 D4) — no proxy redeploy. The /ready
   # probe only flips once the fresh worker has reclaimed its primary partition, so
   # "Ready again" is the reclaim gate.
   kubectl -n "$NS" wait --for=condition=ready "pod/$tgt" --timeout=180s >>"$RUNLOG" 2>&1 || true
+  rm -f "$kill_ts_file" 2>/dev/null || true  # loadgen_chaos_flag has consumed it by now
   log "kill_worker: $tgt rebooted (Ready); settling ${REBOOT_SETTLE}s for reclaim + backup self-release"
   sleep "$REBOOT_SETTLE"
   ensure_baseline

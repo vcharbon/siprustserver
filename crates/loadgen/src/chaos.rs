@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The near/clear dimension a finished call carries alongside its
 /// `(scenario, result-class)` bucket.
@@ -99,8 +99,36 @@ impl ChaosLog {
     /// Record a fault marker at `Instant::now()` (the moment the chaos driver
     /// flagged it). Bounded: the oldest marker drops once past `cap`.
     pub fn record(&self, kind: impl Into<String>, target: Option<String>) {
+        self.push(Instant::now(), kind.into(), target);
+    }
+
+    /// Record a fault marker **back-dated to the kill wall-clock** `kill_unix_ms`
+    /// (Unix epoch milliseconds, captured by the chaos script at the instant of
+    /// the `kubectl delete pod`). The marker landed over a port-forward, so the
+    /// POST is received some delay after the kill; back-dating to the supplied
+    /// timestamp makes the marker robust to ANY plumbing latency (PF retries,
+    /// extra hops) rather than recording the receipt instant.
+    ///
+    /// `delay = max(0, now_wall − kill_unix_ms)` is computed against this process's
+    /// `SystemTime` at receipt, then subtracted from `Instant::now()`. Pods share
+    /// the host kernel clock under kind, so host `date` and this `SystemTime`
+    /// agree to well within the 200 ms phase window. Falls back to [`record`] if
+    /// either wall-clock read is unusable (clock skew into the future, etc.).
+    pub fn record_at(&self, kind: impl Into<String>, target: Option<String>, kill_unix_ms: u64) {
+        let now_wall_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let delay_ms = now_wall_ms.saturating_sub(kill_unix_ms);
+        let at = Instant::now()
+            .checked_sub(Duration::from_millis(delay_ms))
+            .unwrap_or_else(Instant::now);
+        self.push(at, kind.into(), target);
+    }
+
+    fn push(&self, at: Instant, kind: String, target: Option<String>) {
         let mut g = self.events.lock().unwrap();
-        g.push_back(ChaosEvent { at: Instant::now(), kind: kind.into(), target });
+        g.push_back(ChaosEvent { at, kind, target });
         while g.len() > self.cap {
             g.pop_front();
         }
@@ -258,6 +286,51 @@ mod tests {
             log.classify_call(kill + Duration::from_millis(900), kill + Duration::from_secs(5), &phases_post),
             ChaosTag::Clear
         );
+    }
+
+    #[test]
+    fn record_at_back_dates_to_the_kill_so_a_transition_at_the_kill_is_near() {
+        // The marker arrives ~1.5 s after the kill (the PF latency the live run
+        // saw). Without back-dating, a `connected` transition AT the kill would
+        // sit 1.5 s before the (late) marker — outside the 200 ms phase window —
+        // and mis-bucket `Clear`. record_at must place the marker back at the kill.
+        let log = ChaosLog::new(Duration::from_secs(5)).with_phase_tolerance(Duration::from_millis(200));
+
+        // Pretend "now" is 1.5 s after a kill: the kill's Unix ms is now − 1500.
+        let now_wall_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let kill_unix_ms = now_wall_ms - 1500;
+        let kill_instant = Instant::now() - Duration::from_millis(1500);
+
+        log.record_at("kill_worker", Some("b2bua-worker-1".into()), kill_unix_ms);
+
+        // A call whose `connected` transition coincided with the kill (1.5 s ago):
+        // with the marker back-dated it is within the 200 ms phase window → Near.
+        let phases = [("connected", kill_instant)];
+        assert_eq!(
+            log.classify_call(kill_instant - Duration::from_secs(1), Instant::now(), &phases),
+            ChaosTag::Near
+        );
+
+        // Sanity: a plain `record` (receipt instant, no back-dating) would have
+        // placed the marker ~now, 1.5 s after that transition → mis-bucketed Clear.
+        let late = ChaosLog::new(Duration::from_secs(5)).with_phase_tolerance(Duration::from_millis(200));
+        late.record("kill_worker", None);
+        assert_eq!(
+            late.classify_call(kill_instant - Duration::from_secs(1), Instant::now(), &phases),
+            ChaosTag::Clear
+        );
+    }
+
+    #[test]
+    fn record_at_with_future_kill_ts_falls_back_to_now_not_panic() {
+        // Clock skew: the supplied kill ts is in the future. saturating_sub keeps
+        // delay at 0 → marker at ~now (no panic, no underflow).
+        let log = ChaosLog::new(Duration::from_millis(500));
+        let now_wall_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        log.record_at("kill_worker", None, now_wall_ms + 10_000);
+        assert_eq!(log.total(), 1);
+        let now = Instant::now();
+        assert_eq!(log.classify(now - Duration::from_millis(100), now), ChaosTag::Near);
     }
 
     #[test]
