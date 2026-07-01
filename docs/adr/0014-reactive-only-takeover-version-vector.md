@@ -258,3 +258,41 @@ three rules (the primary is the sole discharge authority; see ADR-0020 X3):
    **tombstoned** (`ReplicatingCallStore`): `put_call` rejects a re-creating `Put`
    within the window (apply-side delete-wins), so a late reverse-flush cannot
    resurrect a just-discharged call.
+
+## Amendment — skew re-anchoring at the replication boundary (accuracy only)
+
+Replicated `call::TimerEntry.fire_at` is an ABSOLUTE epoch-ms deadline minted on
+the ORIGIN node's `Clock`. Each pod anchors its wall clock once at start
+(`sip_clock::Clock::system`, monotonic-derived), so two pods anchored on opposite
+sides of a host NTP **step** disagree permanently; on failover/reclaim the takeover
+node rebuilt the timer as `(fire_at − local now_ms).max(0)` — unbounded trust in
+the dead node's clock. Under medium skew this reaped a healthy RINGING/established
+call at takeover or extended a policy cap by the skew, and for a keepalive fired an
+immediate OPTIONS the instant the backup took over, racing the failed-over
+transaction (the endurance-20260630 `reinvite/unexpected "got OPTIONS expected
+200"` artifact).
+
+**Fix (accuracy/performance ONLY — correctness stays `(p,b)`-causal):** the
+replication `Data` frame now carries an `origin_now_ms` stamp (the sender's
+`Clock::now_ms()` at flush-send time); the receiving store persists
+`skew_offset_ms = receiver_now_ms − origin_now_ms` alongside `expiry_at_ms` (the
+same receiver-side re-anchor idiom already used for `body_ttl_ms` — timers were the
+one deadline class left absolute). One router seam,
+`sanitize_restored_timers`, runs EVERY hydration path (bulk reclaim, reactive
+takeover, on-demand reclaim, reverse-flush straggler): re-anchor every restored
+`fire_at` by `skew_offset_ms` (a sub-second deadband ignores pure replication
+latency), drop the stale `KeepaliveTimeout`, apply a defensive floor for any path
+that lacked an offset, then cohort-smooth. The offset includes one transit
+latency — acceptable at in-cluster ms scale. This bounds restore skew to
+~replication latency instead of the raw inter-node clock disagreement.
+
+This introduces **no** wall-clock-dependent correctness rule, settle window, or
+handback: `(p,b)` reconciliation remains the sole correctness mechanism, and the
+`timers.rs` epoch+lockstep-`Key` driver is untouched (no skew/smoothing logic in
+the driver). A periodic `clock_wall_divergence_ms` gauge + rate-limited warn makes
+a live host step observable; `Clock::system` now fails loudly on a pre-epoch clock
+rather than silently anchoring to 1970. Infra discipline still applies (slewing
+chrony, host kept awake) — the SUT now bounds the residual, it does not license
+drift. The failover harness gained a per-node clock-anchor-offset knob
+(`FailoverHarness::with_worker_clock_offset`) that injects deterministic inter-node
+wall skew on the single monotonic timeline, closing the single-clock fidelity gap.
