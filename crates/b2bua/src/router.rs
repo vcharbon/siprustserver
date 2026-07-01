@@ -2354,4 +2354,111 @@ mod reclaim_timer_tests {
         smooth_keepalives(&mut newer, "w1|b|b", now, l_max, speedup, None);
         assert_eq!(newer[0].fire_at, now + 10_000, "less-overdue drains later, bounded by speedup");
     }
+
+    // ── clock-skew hardening: the restore-hygiene seam ──────────────────────
+
+    /// Test #3 — smooth_keepalives / l_max classification over SKEW-CORRECTED
+    /// offsets. A reclaimer anchored +45 s AHEAD of the origin reads a keepalive
+    /// that is genuinely FUTURE-dated (fire_at = origin_now + 300 s) as if it were
+    /// past-due, because the raw `fire_at` is in the reclaimer's past-frame. WITHOUT
+    /// re-anchoring, `smooth_keepalives` would classify it past-due and compress it
+    /// into the catch-up band (the 2026-06-12 OPTIONS burst). The seam re-anchors
+    /// first (+45 s), so it is correctly seen as future-dated and de-correlated into
+    /// `[now, fire_at]` — never crushed to `now`.
+    #[test]
+    fn seam_reanchor_keeps_future_cohort_out_of_the_catchup_band() {
+        // The reclaimer's clock frame.
+        let now = 1_000_000;
+        // Origin minted the keepalive 300 s out on ITS clock, which is 45 s BEHIND
+        // the reclaimer → the reclaimer received it with skew_offset = +45_000, and
+        // the raw fire_at (origin frame) reads as `now - 45_000 + 300_000` once we
+        // subtract the offset back out. Model the raw (pre-correction) fire_at:
+        let skew = 45_000; // receiver_now − origin_now
+        let raw_fire_at = now - skew + 300_000; // origin-frame deadline as stored
+        // Before correction this is `now + 255_000` → looks 45 s "closer" but still
+        // future; a LARGER skew would flip it past-due. Use a skew big enough to
+        // flip it: origin minted it only 30 s out.
+        let raw_fire_at_flip = now - skew + 30_000; // = now - 15_000 → PAST-DUE raw!
+        let mut timers = vec![keepalive(raw_fire_at_flip)];
+        // l_max computed over the CORRECTED deadline (as reclaim_all now does):
+        // corrected = raw + skew = now + 30_000 (future) → not past-due → l_max 0.
+        let smoothing = Some(Smoothing { now_ms: now, l_max: 0, speedup: 10, cap_ms: None });
+        sanitize_restored_timers(&mut timers, "w1|c|c", now, Some(skew), 300_000, smoothing);
+        let fa = timers[0].fire_at;
+        assert!(
+            fa >= now,
+            "corrected future keepalive is NOT crushed to a past-due catch-up slot: {fa} < {now}",
+        );
+        assert!(
+            fa <= now + 30_000,
+            "de-correlated within [now, corrected deadline], not the raw past-due frame: {fa}",
+        );
+        // Control: the SAME raw timers WITHOUT re-anchoring (offset None) would be
+        // seen past-due and smoothed toward the catch-up band at `now`.
+        let mut raw_timers = vec![keepalive(raw_fire_at_flip)];
+        smooth_keepalives(&mut raw_timers, "w1|c|c", now, 15_000, 10, None);
+        assert!(
+            raw_timers[0].fire_at <= now,
+            "uncorrected: the future keepalive IS mis-compressed to the catch-up band",
+        );
+        let _ = raw_fire_at;
+    }
+
+    /// Test #4 — the defensive floor. When the offset is UNKNOWN (`None`, a path
+    /// that could not re-anchor), a keepalive past-due by ≥ 1× interval is re-based
+    /// to within one interval of `now` (not fired immediately, which would race a
+    /// failed-over transaction). Deterministic per (call_ref, timer id).
+    #[test]
+    fn defensive_floor_rebases_deep_past_due_keepalive_within_one_interval() {
+        let now = 1_000_000;
+        let interval = 300_000;
+        // Past-due by 2× interval — deep skew/backlog pathology.
+        let make = || vec![keepalive(now - 2 * interval)];
+
+        let mut t = make();
+        // Unknown offset (None) → floor engages; no smoothing.
+        sanitize_restored_timers(&mut t, "w1|d|d", now, None, interval, None);
+        let fa = t[0].fire_at;
+        assert!(
+            (now..now + interval).contains(&fa),
+            "deep-past-due keepalive re-based into [now, now+interval): {fa}",
+        );
+        assert!(fa > now, "not fired immediately at now (which would race the failed-over txn)");
+
+        // Determinism: same (call_ref, id) → same slot (idempotent reboot re-pass).
+        let mut t2 = make();
+        sanitize_restored_timers(&mut t2, "w1|d|d", now, None, interval, None);
+        assert_eq!(t2[0].fire_at, fa, "floor is deterministic per call_ref/id");
+        // Distinct call_ref → (very likely) a different slot.
+        let mut t3 = make();
+        sanitize_restored_timers(&mut t3, "w1|different|x", now, None, interval, None);
+        // (Not asserting inequality hard — hash collisions are possible — but the
+        // slot must still be within the interval.)
+        assert!((now..now + interval).contains(&t3[0].fire_at));
+
+        // KNOWN offset (Some, even 0) → floor SKIPPED: a well-anchored past-due
+        // keepalive fires promptly (single-clock transparency).
+        let mut t4 = make();
+        sanitize_restored_timers(&mut t4, "w1|d|d", now, Some(0), interval, None);
+        assert_eq!(
+            t4[0].fire_at,
+            now - 2 * interval,
+            "known offset trusts the deadline — past-due fires promptly, floor does NOT engage",
+        );
+    }
+
+    /// The re-anchor itself: a known offset shifts every timer's absolute deadline
+    /// into the local clock frame; a sub-deadband offset is a no-op (latency, not
+    /// skew — keeps the single-clock harness transparent).
+    #[test]
+    fn reanchor_applies_above_deadband_and_ignores_below() {
+        let mut t = vec![keepalive(1_000_000), keepalive_timeout("a", 900_000)];
+        reanchor_timers(&mut t, 30_000); // +30 s real skew
+        assert_eq!(t[0].fire_at, 1_030_000);
+        assert_eq!(t[1].fire_at, 930_000, "ALL timer classes re-anchored, not just keepalive");
+
+        let mut small = vec![keepalive(1_000_000)];
+        reanchor_timers(&mut small, 200); // 200 ms — below the 1 s deadband
+        assert_eq!(small[0].fire_at, 1_000_000, "sub-deadband latency offset is a no-op");
+    }
 }

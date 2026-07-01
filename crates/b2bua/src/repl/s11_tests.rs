@@ -161,6 +161,89 @@ async fn drop_local_sheds_live_copy_but_keeps_backup_element() {
 }
 
 // ---------------------------------------------------------------------------
+// (2b) clock-skew hardening — test #5: origin_now_ms → skew_offset_ms
+//      computation + persistence + reaching hydration.
+// ---------------------------------------------------------------------------
+/// Seed a call with an explicit `origin_now_ms` (the sender's wall clock at
+/// flush-send time), exactly as the puller does when applying an inbound Data
+/// frame. The receiving store computes `skew_offset_ms = receiver_now − origin`.
+async fn put_with_origin(
+    store: &ReplicatingCallStore,
+    role: PartitionRole,
+    primary: &str,
+    call: &Call,
+    origin_now_ms: i64,
+) {
+    let body = MsgpackCodec::new().encode(call);
+    let gen = call.topology.as_ref().map(|t| t.gen).unwrap_or(1);
+    store
+        .put_call(
+            role,
+            primary,
+            &call.call_ref,
+            body,
+            &[],
+            60_000,
+            gen,
+            0,
+            &PutOpts { origin_now_ms: Some(origin_now_ms), ..PutOpts::default() },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
+    // Receiver clock anchored at 100_000; origin stamped 70_000 → the origin is
+    // 30 s BEHIND us, so a timer it minted must be pushed +30 s into our frame.
+    let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(100_000)));
+    let state = call_state("w0", repl.clone());
+
+    // A reclaimable pri:w0 call (rebooted-primary reclaim source).
+    let call = build_initial_call(&invite("w0", "w1", "cid-skew"), src(), &config_for("w0"), 0);
+    let r = call.call_ref.clone();
+    put_with_origin(&repl, PRI, "w0", &call, 70_000).await;
+
+    // Persisted on the store, keyed by callRef, alongside expiry.
+    assert_eq!(
+        repl.skew_offset_ms(&r),
+        Some(30_000),
+        "skew_offset = receiver_now(100_000) − origin(70_000)",
+    );
+
+    // Reaches hydration: reclaim_scan pairs each call with its offset.
+    let scanned = state.reclaim_scan().await;
+    assert_eq!(scanned.len(), 1);
+    assert_eq!(scanned[0].0.call_ref, r);
+    assert_eq!(scanned[0].1, 30_000, "reclaim_scan surfaces the skew offset to the router");
+
+    // And the on-demand reclaim read-path surfaces it too.
+    let (peeked, skew) = state.peek_reclaimable(&r).await.expect("reclaimable");
+    assert_eq!(peeked.call_ref, r);
+    assert_eq!(skew, 30_000, "peek_reclaimable surfaces the skew offset");
+
+    // A backup-partition takeover hydrate surfaces it via the 3-tuple.
+    let repl_b = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(100_000)));
+    let state_b = call_state("w1", repl_b.clone());
+    let call_b = build_initial_call(&invite("w0", "w1", "cid-skew-b"), src(), &config_for("w0"), 0);
+    let rb = call_b.call_ref.clone();
+    put_with_origin(&repl_b, BAK, "w0", &call_b, 55_000).await; // origin 45 s behind
+    let (_c, fresh, skew_b) = state_b.hydrate_from_replica(&rb).await.expect("hydrate bak:w0");
+    assert!(fresh);
+    assert_eq!(skew_b, 45_000, "hydrate_from_replica surfaces the skew offset (100_000 − 55_000)");
+
+    // A locally-originated write (no origin stamp) carries NO offset.
+    let repl_local = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(100_000)));
+    let call_l = build_initial_call(&invite("w0", "w1", "cid-local"), src(), &config_for("w0"), 0);
+    put(&repl_local, PRI, "w0", &call_l).await;
+    assert_eq!(
+        repl_local.skew_offset_ms(&call_l.call_ref),
+        None,
+        "a local write records no skew offset (deadline already in our frame)",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // (3) active reclaim read-paths + idempotent materialisation.
 // ---------------------------------------------------------------------------
 #[tokio::test]
