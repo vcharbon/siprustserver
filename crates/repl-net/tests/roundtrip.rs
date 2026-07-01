@@ -54,6 +54,7 @@ fn roundtrip_data_body_some_multi_index() {
         call_gen: 17,
         call_bgen: 5,
         body_ttl_ms: 30_000,
+        origin_now_ms: 0,
         indexes: vec!["idx:a".into(), "idx:b".into(), "idx:c".into()],
         body: Some(Arc::from(&b"\x00\x01\x02encoded-call\xff"[..])),
     });
@@ -70,6 +71,7 @@ fn roundtrip_data_body_none_delete_negatives() {
         call_gen: -1,
         call_bgen: -7,
         body_ttl_ms: i64::MIN,
+        origin_now_ms: 0,
         indexes: vec![],
         body: None,
     });
@@ -86,6 +88,7 @@ fn roundtrip_data_empty_body_is_some_not_none() {
         call_gen: 0,
         call_bgen: 0,
         body_ttl_ms: 0,
+        origin_now_ms: 0,
         indexes: vec!["only".into()],
         body: Some(Arc::from(&[][..])),
     };
@@ -108,6 +111,7 @@ fn roundtrip_data_large_body() {
         call_gen: i64::MAX,
         call_bgen: i64::MIN,
         body_ttl_ms: i64::MAX,
+        origin_now_ms: 0,
         indexes: vec![String::new()], // empty-string index
         body: Some(Arc::from(big.as_slice())),
     });
@@ -169,7 +173,7 @@ fn err_unknown_enum_discriminant_partition() {
 fn err_unknown_enum_discriminant_op() {
     // Data with op = 5.
     let mut bytes = Vec::new();
-    rmp::encode::write_array_len(&mut bytes, 11).unwrap();
+    rmp::encode::write_array_len(&mut bytes, 12).unwrap();
     rmp::encode::write_uint(&mut bytes, 1).unwrap(); // tag Data
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // gen
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // counter
@@ -179,6 +183,7 @@ fn err_unknown_enum_discriminant_op() {
     rmp::encode::write_sint(&mut bytes, 0).unwrap(); // call_gen (p)
     rmp::encode::write_sint(&mut bytes, 0).unwrap(); // call_bgen (b)
     rmp::encode::write_sint(&mut bytes, 0).unwrap(); // body_ttl_ms
+    rmp::encode::write_sint(&mut bytes, 0).unwrap(); // origin_now_ms
     rmp::encode::write_array_len(&mut bytes, 0).unwrap(); // indexes
     rmp::encode::write_nil(&mut bytes).unwrap(); // body
     match decode_frame(&bytes) {
@@ -214,6 +219,7 @@ fn err_truncated_payload() {
         call_gen: 1,
         call_bgen: 0,
         body_ttl_ms: 0,
+        origin_now_ms: 0,
         indexes: vec![],
         body: Some(Arc::from(&b"abc"[..])),
     });
@@ -356,7 +362,7 @@ fn watermark_gen_is_high_word() {
 #[test]
 fn err_data_inflated_indexes_count_is_typed_error_not_oom() {
     let mut b = Vec::new();
-    rmp::encode::write_array_len(&mut b, 11).unwrap(); // DATA arity
+    rmp::encode::write_array_len(&mut b, 12).unwrap(); // DATA arity
     rmp::encode::write_uint(&mut b, 1).unwrap(); // tag Data
     rmp::encode::write_uint(&mut b, 0).unwrap(); // gen
     rmp::encode::write_uint(&mut b, 0).unwrap(); // counter
@@ -366,6 +372,7 @@ fn err_data_inflated_indexes_count_is_typed_error_not_oom() {
     rmp::encode::write_sint(&mut b, 0).unwrap(); // call_gen (p)
     rmp::encode::write_sint(&mut b, 0).unwrap(); // call_bgen (b)
     rmp::encode::write_sint(&mut b, 0).unwrap(); // body_ttl_ms
+    rmp::encode::write_sint(&mut b, 0).unwrap(); // origin_now_ms
     b.push(0xdd); // msgpack array32 marker
     b.extend_from_slice(&u32::MAX.to_be_bytes()); // hostile element count, no elements
     match decode_frame(&b) {

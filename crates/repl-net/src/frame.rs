@@ -157,7 +157,7 @@ pub enum Frame {
         /// Watermark to resume from; `(0,0)` ⇒ bootstrap-then-tail.
         since: Watermark,
     },
-    /// `[1, gen, counter, op, partition, call_ref, call_gen, call_bgen, body_ttl_ms, indexes, body]`
+    /// `[1, gen, counter, op, partition, call_ref, call_gen, call_bgen, body_ttl_ms, origin_now_ms, indexes, body]`
     ///
     /// Server → client: one changelog entry. `body` is opaque msgpack `bin`
     /// (the `Arc<[u8]>` read straight from the store) or `nil` for
@@ -181,6 +181,17 @@ pub enum Frame {
         call_bgen: i64,
         /// Body TTL in ms; `i64`, may be negative on the wire.
         body_ttl_ms: i64,
+        /// **Origin wall clock** at flush-send time — the SENDER's shared
+        /// `Clock::now_ms()` when this frame was built (clock-skew hardening).
+        /// The receiver re-anchors it as `skew_offset_ms = receiver_now_ms −
+        /// origin_now_ms` and persists that offset so a failover/reclaim can
+        /// correct the ABSOLUTE `TimerEntry.fire_at` deadlines (which were minted
+        /// on the origin node's clock) against the two nodes' wall-clock skew.
+        /// This mirrors the receiver-side `body_ttl_ms → expiry_for` re-anchor
+        /// idiom — timers were the one deadline class left absolute. `i64`, may be
+        /// negative on the wire; `0` on a delete/bootstrap frame that carries no
+        /// re-anchorable timers.
+        origin_now_ms: i64,
         /// Index keys for this call.
         indexes: Vec<String>,
         /// Opaque encoded call body, or `None` for delete/expired.

@@ -236,6 +236,7 @@ async fn backup_held_counts_update_first_replica() {
     let fwd = PutOpts {
         peer: Some("w1".into()),
         direction: Some(PropagateDirection::Forward),
+        ..PutOpts::default()
     };
     w0.store
         .put_call(PartitionRole::Primary, "w0", &call_ref, b"v1".to_vec(), &[], 30_000, 1, 0, &fwd)

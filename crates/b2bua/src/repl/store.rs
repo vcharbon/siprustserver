@@ -55,6 +55,14 @@ struct CallMeta {
     backup: Option<String>,
     /// Absolute body-expiry deadline (lazy TTL); `None` when `ttl_ms <= 0`.
     expiry_at_ms: Option<i64>,
+    /// Receive-time **wall-clock skew offset** `receiver_now_ms − origin_now_ms`
+    /// (clock-skew hardening), computed on an inbound replica `Put` from
+    /// `PutOpts.origin_now_ms`. A later failover/reclaim re-anchors the call's
+    /// ABSOLUTE `TimerEntry.fire_at` deadlines (minted on the ORIGIN node's clock)
+    /// by adding this offset, bounding restore skew to ~replication latency. `None`
+    /// on a locally-originated write (no cross-node skew to correct). The offset
+    /// includes one transit latency — acceptable at in-cluster ms scale.
+    skew_offset_ms: Option<i64>,
 }
 
 /// A [`CallStore`] that replicates mutations through an in-memory backing store
@@ -159,6 +167,15 @@ impl ReplicatingCallStore {
             .unwrap()
             .get(call_ref)
             .map(|m| (m.meta.call_gen, m.meta.call_bgen))
+    }
+
+    /// The persisted receive-time clock-skew offset for a callRef
+    /// (`receiver_now_ms − origin_now_ms`, clock-skew hardening), or `None` when
+    /// the ref is absent / was written locally (no cross-node skew). The router's
+    /// failover/reclaim hydration reads this to re-anchor the call's absolute
+    /// timer deadlines before re-arming them. Pure read (one brief lock).
+    pub fn skew_offset_ms(&self, call_ref: &str) -> Option<i64> {
+        self.meta.lock().unwrap().get(call_ref).and_then(|m| m.skew_offset_ms)
     }
 
     /// Snapshot the LIVE callRef KEYS stored in `(role, primary)` under a BRIEF
@@ -370,6 +387,11 @@ impl CallStore for ReplicatingCallStore {
         // Apply the backstop TTL for ttl_ms <= 0 so a missed-delete replica still
         // self-evicts (the wire-carried `body_ttl_ms` keeps the original ttl_ms).
         let expiry_at_ms = self.expiry_for(now, ttl_ms);
+        // Receive-time clock-skew offset (clock-skew hardening): the SAME `now`
+        // reading that anchors `expiry_at_ms` minus the origin node's send-time
+        // wall clock. Persisted so a later failover/reclaim re-anchors this call's
+        // absolute timer deadlines. `None` on a locally-originated write.
+        let skew_offset_ms = opts.origin_now_ms.map(|origin| now - origin);
 
         // Update per-ref metadata atomically (single critical section).
         {
@@ -380,6 +402,10 @@ impl CallStore for ReplicatingCallStore {
                 (Some(PropagateDirection::Forward), Some(p)) => Some(p.clone()),
                 _ => meta.get(call_ref).and_then(|m| m.backup.clone()),
             };
+            // Preserve a prior skew offset when this write carries none (e.g. a
+            // local refresh of a replica that first arrived with an offset).
+            let skew_offset_ms =
+                skew_offset_ms.or_else(|| meta.get(call_ref).and_then(|m| m.skew_offset_ms));
             meta.insert(
                 call_ref.to_string(),
                 CallMeta {
@@ -393,6 +419,7 @@ impl CallStore for ReplicatingCallStore {
                     primary: primary.to_string(),
                     backup,
                     expiry_at_ms,
+                    skew_offset_ms,
                 },
             );
         }

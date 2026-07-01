@@ -55,6 +55,25 @@
 //! monotonic drift from true wall over its uptime. Skew shifts the rearmed
 //! deadline earlier/later by the disagreement; a past-due `fire_at` clamps to a
 //! zero delay and fires immediately. See docs/MIGRATION_PLAN_B2B.md §2.
+//!
+//! ## Skew re-anchoring at the replication boundary (clock-skew hardening, landed)
+//!
+//! The raw cross-node trust above is now **bounded to ~replication latency**. The
+//! replication `Data` frame carries an `origin_now_ms` stamp (the sender's
+//! `now_ms()` at flush-send time); the receiving store persists
+//! `skew_offset_ms = receiver_now_ms − origin_now_ms` alongside the body's
+//! `expiry_at_ms` (the SAME re-anchor idiom already used for `body_ttl_ms`). On
+//! failover/reclaim the B2BUA router's single restore-hygiene seam
+//! (`router::sanitize_restored_timers`) adds that offset back to every rehydrated
+//! `TimerEntry.fire_at` before re-arming it, so the deadline lands in the LIVE
+//! node's clock frame regardless of a host NTP step that anchored the two pods on
+//! opposite sides. A small deadband ignores sub-second offsets (dominated by
+//! transit latency, not real skew). This is **accuracy only** — `(p,b)`-causal
+//! reconciliation (ADR-0014) remains the sole correctness mechanism; the boundary
+//! re-anchor introduces no wall-clock-dependent rule, settle window, or handback.
+//! A periodic `clock_wall_divergence_ms` gauge makes a live host step observable
+//! before it corrupts a restore. Keep the infra discipline too (slewing chrony,
+//! host kept awake) — the SUT now bounds the residual, it does not license drift.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::Instant;

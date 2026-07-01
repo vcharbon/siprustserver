@@ -142,15 +142,23 @@ impl TimerService {
     /// - Re-arm is idempotent: any later rule-emitted `ScheduleTimer` for the same
     ///   `(call_ref, id)` supersedes the restored entry via the driver's epoch bump.
     ///
-    /// **Wall-time reliance.** Because `fire_at` came from the *dead* node's clock
-    /// and is compared against *this* node's `now_ms()`, the reconstructed deadline
-    /// is only as accurate as the two nodes' wall clocks agree (keep them NTP-
-    /// disciplined). This is the one place `now_ms()` is a behavioural, cross-node
-    /// input — see the HA note in `sip-clock`'s crate docs. Under the simulated
-    /// clock there is a single process and one paused `tokio::time` timeline, so
-    /// `fire_at` and `now_ms()` ride the *same* `Instant` with zero skew: the
-    /// past-due path is exercised deterministically, but the cross-node skew
-    /// dimension is NOT covered by the harness.
+    /// **Wall-time reliance (now bounded at the replication boundary).** `fire_at`
+    /// came from the *dead* node's clock and is compared against *this* node's
+    /// `now_ms()`, so the reconstructed deadline is only as accurate as the two
+    /// nodes' wall clocks agree. That residual is now **corrected before restore**:
+    /// the router's `sanitize_restored_timers` seam re-anchors every rehydrated
+    /// `fire_at` by the `skew_offset_ms` the replication boundary persisted
+    /// (`receiver_now − origin_now`), so this driver receives deadlines already in
+    /// its own clock frame and its `fire_at − now_ms` math bounds skew to
+    /// ~replication latency instead of trusting the dead node's clock unboundedly.
+    /// The driver itself stays clock-skew-agnostic — NO re-anchor/smoothing logic
+    /// lives here (ADR-0014); all of it is in the router hydration seam. This is the
+    /// one place `now_ms()` is a behavioural, cross-node input — see the HA note in
+    /// `sip-clock`'s crate docs. Under the simulated clock there is a single process
+    /// and one paused `tokio::time` timeline, so `fire_at` and `now_ms()` ride the
+    /// *same* `Instant` with zero real skew (the harness exercises the past-due path
+    /// deterministically; the failover harness's per-node clock-anchor-offset knob
+    /// now injects deterministic inter-node skew to exercise the re-anchor seam).
     pub async fn restore(&self, entries: Vec<TimerEntry>, call_ref: String) {
         for entry in entries {
             self.schedule(entry, call_ref.clone()).await;

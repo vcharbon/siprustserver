@@ -286,6 +286,9 @@ impl ReplServer {
         for group in keys.chunks(BOOTSTRAP_CHUNK) {
             let mut frames = Vec::with_capacity(group.len());
             for key in group {
+                // Send-time origin stamp for skew re-anchoring on the receiver
+                // (mirrors `drain_since`); one clock reading per bootstrap frame.
+                let origin_now_ms = self.changelog.now_ms();
                 let body = self.source.read_body(role, primary, key).await;
                 match (body, self.source.read_meta(key)) {
                     (Some(body), Some(meta)) => frames.push(Frame::Data {
@@ -296,6 +299,7 @@ impl ReplServer {
                         call_gen: meta.call_gen,
                         call_bgen: meta.call_bgen,
                         body_ttl_ms: meta.body_ttl_ms,
+                        origin_now_ms,
                         indexes: meta.indexes,
                         body: Some(body),
                     }),

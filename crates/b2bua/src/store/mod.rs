@@ -228,9 +228,14 @@ impl CallState {
     /// this node's in-memory `TimerService` — those timers are runtime fibers,
     /// not replicated state, so a freshly-hydrated call arrives with no live
     /// timers and would otherwise never be probed or reaped (the failover leak).
-    pub async fn hydrate_from_replica(&self, call_ref: &str) -> Option<(Call, bool)> {
+    /// The third tuple element is the call's persisted receive-time clock-skew
+    /// offset (`0` when already-resident / none): the reactive-takeover path
+    /// re-anchors the fresh call's absolute timer deadlines by it before re-arming
+    /// (clock-skew hardening). An already-resident call returns `0` — its timers
+    /// are already live on this node's clock and are not re-armed.
+    pub async fn hydrate_from_replica(&self, call_ref: &str) -> Option<(Call, bool, i64)> {
         if let Some(c) = self.peek(call_ref) {
-            return Some((c, false));
+            return Some((c, false, 0));
         }
         let repl = self.repl_store.as_ref()?;
         // The call's natural primary (from the encoded ref); on the acting-backup
@@ -243,11 +248,12 @@ impl CallState {
         }
         let body = repl.get_call(role, &primary, call_ref).await.ok().flatten()?;
         let call = self.codec.decode(&body).ok()?;
+        let skew = repl.skew_offset_ms(call_ref).unwrap_or(0);
         let now_ms = self.clock.now_ms();
         let mut inner = self.inner.lock().unwrap();
         // Re-check under the lock (a concurrent hydrate may have won the race).
         if let Some(c) = inner.calls.get(call_ref) {
-            return Some((c.clone(), false));
+            return Some((c.clone(), false, 0));
         }
         Self::reindex(&mut inner, &call);
         inner.calls.insert(call_ref.to_string(), call.clone());
@@ -258,7 +264,7 @@ impl CallState {
         // A failed-over in-dialog request just loaded its dialog from a backup
         // replica — the acting-backup takeover actually fired.
         self.metrics.bump_repl_takeover_hydrated();
-        Some((call, true))
+        Some((call, true, skew))
     }
 
     /// Replace the in-memory call and refresh its routing index.
@@ -436,7 +442,11 @@ impl CallState {
     /// re-arms its timers when it goes Ready (the bulk reclaim sweep that makes a
     /// rebooted primary actually re-*serve*, not just re-*store*). Empty when no
     /// replicating store is wired.
-    pub async fn reclaim_scan(&self) -> Vec<Call> {
+    /// Each entry pairs the decoded call with its persisted receive-time
+    /// clock-skew offset (`0` when the body was written locally / carries none) —
+    /// the router re-anchors the call's absolute timer deadlines by this offset
+    /// before re-arming them (clock-skew hardening).
+    pub async fn reclaim_scan(&self) -> Vec<(Call, i64)> {
         let Some(repl) = self.repl_store.as_ref() else {
             return Vec::new();
         };
@@ -444,7 +454,14 @@ impl CallState {
             .scan_calls(PartitionRole::Primary, &self.self_ordinal)
             .await
             .unwrap_or_default();
-        bodies.iter().filter_map(|b| self.codec.decode(b).ok()).collect()
+        bodies
+            .iter()
+            .filter_map(|b| self.codec.decode(b).ok())
+            .map(|c| {
+                let skew = repl.skew_offset_ms(&c.call_ref).unwrap_or(0);
+                (c, skew)
+            })
+            .collect()
     }
 
     /// **Active-reclaim reactive read-path** (ADR-0011 X11): decode a single
@@ -456,8 +473,22 @@ impl CallState {
     /// active-replica TTL = `reboot_budget` elapsed without a refresh), so it must
     /// NOT be re-served — let `get_call`'s lazy eviction reap it. The reverse-flush
     /// reconcile path wants the opposite (see [`peek_reclaimable_raw`]).
-    pub async fn peek_reclaimable(&self, call_ref: &str) -> Option<Call> {
+    /// Returns the decoded call plus its persisted receive-time clock-skew offset
+    /// (`0` when none) so the on-demand reclaim path re-anchors its timers before
+    /// re-arming them (clock-skew hardening).
+    pub async fn peek_reclaimable(&self, call_ref: &str) -> Option<(Call, i64)> {
         self.peek_reclaimable_inner(call_ref, true).await
+    }
+
+    /// The persisted receive-time clock-skew offset for a callRef (`0` when the
+    /// ref is absent, has no replicating store, or was written locally). The
+    /// reverse-flush reconcile straggler path reads this to re-anchor a call whose
+    /// body it fetched through the non-offset `peek_reclaimable_raw` read.
+    pub fn skew_offset_ms(&self, call_ref: &str) -> i64 {
+        self.repl_store
+            .as_ref()
+            .and_then(|r| r.skew_offset_ms(call_ref))
+            .unwrap_or(0)
     }
 
     /// Like [`peek_reclaimable`](Self::peek_reclaimable) but a **non-evicting**
@@ -466,10 +497,10 @@ impl CallState {
     /// physically delete it, stranding the CDR the reconcile is about to write. Used
     /// by the reverse-flush reconcile.
     pub async fn peek_reclaimable_raw(&self, call_ref: &str) -> Option<Call> {
-        self.peek_reclaimable_inner(call_ref, false).await
+        self.peek_reclaimable_inner(call_ref, false).await.map(|(c, _)| c)
     }
 
-    async fn peek_reclaimable_inner(&self, call_ref: &str, evict: bool) -> Option<Call> {
+    async fn peek_reclaimable_inner(&self, call_ref: &str, evict: bool) -> Option<(Call, i64)> {
         let repl = self.repl_store.as_ref()?;
         let (role, primary) = partition_of(&self.self_ordinal, call_ref);
         if role != PartitionRole::Primary {
@@ -480,7 +511,9 @@ impl CallState {
         } else {
             repl.peek_body_raw(role, &primary, call_ref).await?
         };
-        self.codec.decode(&body).ok()
+        let call = self.codec.decode(&body).ok()?;
+        let skew = repl.skew_offset_ms(call_ref).unwrap_or(0);
+        Some((call, skew))
     }
 
     /// **Model-Y orphaned-deferred-terminal read-path.** Decode every **expired**

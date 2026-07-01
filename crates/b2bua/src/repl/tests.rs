@@ -26,6 +26,7 @@ fn fwd(peer: &str) -> PutOpts {
     PutOpts {
         peer: Some(peer.to_string()),
         direction: Some(PropagateDirection::Forward),
+        ..PutOpts::default()
     }
 }
 
@@ -33,6 +34,7 @@ fn rev(peer: &str) -> PutOpts {
     PutOpts {
         peer: Some(peer.to_string()),
         direction: Some(PropagateDirection::Reverse),
+        ..PutOpts::default()
     }
 }
 
