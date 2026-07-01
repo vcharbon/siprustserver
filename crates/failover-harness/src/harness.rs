@@ -624,6 +624,18 @@ pub struct FailoverHarness {
     event_seq: Arc<layer_harness::EventSequencer>,
     /// The SIP harness handle (shared so workers can re-bind on reboot).
     harness: Arc<HarnessHandle>,
+    /// **Per-node wall-clock anchor offset (ms)** for clock-skew hardening tests.
+    /// The harness rides ONE monotonic `tokio::time` timeline, but each node's
+    /// `Clock` can carry a DIFFERENT wall anchor: a node with offset `+30_000`
+    /// reads `now_ms()` 30 s ahead of a node at offset `0`, while behaviour timers
+    /// stay on the shared monotonic clock. That is exactly deterministic inter-node
+    /// wall skew under a paused runtime — the one thing the single-clock harness
+    /// could not previously reproduce (CLAUDE.md "single-clock fidelity gap"). A
+    /// node's clock is `Clock::test_at(offset)` (the harness base anchor is 0);
+    /// every clock consumer for that node (b2bua core, changelog/store, membership)
+    /// uses it, so a replica it flushes stamps `origin_now_ms` in ITS frame and the
+    /// receiver computes the true cross-node offset. Default 0 (no skew).
+    worker_clock_offsets: HashMap<String, i64>,
 }
 
 /// `127.0.0.1:9400+n` — a stable per-ordinal repl listen address.
@@ -689,6 +701,29 @@ impl FailoverHarness {
             markers: Vec::new(),
             event_seq,
             harness: Arc::new(HarnessHandle::new(harness)),
+            worker_clock_offsets: HashMap::new(),
+        }
+    }
+
+    /// Set a worker's **wall-clock anchor offset** (ms) for a clock-skew test —
+    /// see [`worker_clock_offsets`](Self::worker_clock_offsets). Call BEFORE
+    /// [`spawn_worker`](Self::spawn_worker) for `ordinal` (the offset is read at
+    /// spawn and carried across reboots). A positive offset anchors the node AHEAD
+    /// of true time (skew-ahead), negative BEHIND. Returns `self` for chaining.
+    pub fn with_worker_clock_offset(mut self, ordinal: &str, offset_ms: i64) -> Self {
+        self.worker_clock_offsets.insert(ordinal.to_string(), offset_ms);
+        self
+    }
+
+    /// This node's `Clock` — the shared monotonic timeline with the node's own
+    /// wall anchor applied (0 offset ⇒ the harness base clock). Under a paused
+    /// runtime with no advance yet at spawn, every node's `anchor_instant` is the
+    /// same tokio `Instant`, so `Clock::test_at(offset)` yields `now_ms() = offset
+    /// + shared_elapsed` — deterministic inter-node skew on one monotonic clock.
+    fn worker_clock(&self, ordinal: &str) -> Clock {
+        match self.worker_clock_offsets.get(ordinal).copied() {
+            Some(offset) if offset != 0 => Clock::test_at(offset),
+            _ => self.clock.clone(),
         }
     }
 
@@ -875,6 +910,11 @@ impl FailoverHarness {
             ttls: DEFAULT_TTLS,
         };
 
+        // This node's own wall clock (shared monotonic timeline + per-node anchor
+        // offset). Every clock consumer for the node uses it, so a replica it
+        // flushes stamps `origin_now_ms` from ITS wall clock and the receiver
+        // computes the true cross-node skew offset (clock-skew hardening harness).
+        let node_clock = self.worker_clock(ordinal);
         let cdr = InMemoryCdrWriter::new();
         let mut sut = ReplicatedB2buaSut {
             ordinal: ordinal.to_string(),
@@ -888,16 +928,16 @@ impl FailoverHarness {
             dest: (dest.0.to_string(), dest.1),
             outbound_proxy: Some((outbound_proxy.0.to_string(), outbound_proxy.1)),
             wiring,
-            clock: self.clock.clone(),
+            clock: node_clock.clone(),
             core: None,
-            store: Arc::new(ReplicatingCallStore::new(1, self.clock.clone())),
+            store: Arc::new(ReplicatingCallStore::new(1, node_clock.clone())),
             // Placeholder; replaced by the real handle setup() builds, just below.
-            membership: Arc::new(SimulatedMembership::with_clock(vec![], self.clock.clone())),
+            membership: Arc::new(SimulatedMembership::with_clock(vec![], node_clock.clone())),
             harness: self.harness.clone(),
             decision,
             limiter,
         };
-        let (setup, store, membership) = sut.wiring.setup(1, &self.clock);
+        let (setup, store, membership) = sut.wiring.setup(1, &node_clock);
         sut.store = store;
         sut.membership = membership;
         let core = sut.spawn_core(Some(setup)).await;
