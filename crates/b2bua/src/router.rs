@@ -2447,6 +2447,56 @@ mod reclaim_timer_tests {
         );
     }
 
+    /// Test #2 — SetupTimeout (a non-keepalive policy deadline) under skew. A
+    /// ringing call partway through its setup window fails over; the restored
+    /// SetupTimeout must land at its TRUE remaining time in the takeover node's
+    /// clock frame, NOT reaped early (skew-ahead) nor extended by the skew
+    /// (skew-behind). The seam re-anchors ALL timer classes, so this holds for the
+    /// SetupTimeout ledger timer exactly as for the keepalive — the class that got
+    /// NO restore hygiene at all before this change.
+    #[test]
+    fn setup_timeout_is_reanchored_not_reaped_early_or_extended() {
+        // Origin minted SetupTimeout 150 s out at ring-start; the call is 100 s in,
+        // so 50 s of setup window remains (origin-frame fire_at = origin_ring + 150).
+        // Model the restored entry as it arrives on the takeover node, whose `now`
+        // is 100 s past the (origin-frame) ring start.
+        let setup = |fire_at: i64| TimerEntry {
+            id: format!("{:?}", TimerType::SetupTimeout),
+            timer_type: TimerType::SetupTimeout,
+            fire_at,
+            leg_id: None,
+        };
+
+        // ── skew-AHEAD (+40 s): the takeover node's clock is 40 s ahead of the
+        //    origin. Raw fire_at (origin frame) = now_local − 40_000 + 50_000 (still
+        //    50 s of true window). WITHOUT re-anchor it would read 10 s out (reaped
+        //    40 s early); WITH +40 s re-anchor it lands at the true 50 s. ──────────
+        let now = 1_000_000;
+        let skew_ahead = 40_000;
+        let raw_fire_at = now - skew_ahead + 50_000; // origin-frame deadline
+        let mut t = vec![setup(raw_fire_at)];
+        sanitize_restored_timers(&mut t, "w1|s|s", now, Some(skew_ahead), 300_000, None);
+        assert_eq!(
+            t[0].fire_at,
+            now + 50_000,
+            "skew-ahead: SetupTimeout lands at the TRUE remaining 50 s, not reaped 40 s early",
+        );
+
+        // ── skew-BEHIND (−40 s): the takeover node's clock is 40 s behind the
+        //    origin. Raw fire_at (origin frame) = now_local + 40_000 + 50_000.
+        //    WITHOUT re-anchor it would read 90 s out (extended by the skew); WITH
+        //    −40 s re-anchor it lands at the true 50 s. ─────────────────────────────
+        let skew_behind = -40_000;
+        let raw_fire_at_b = now - skew_behind + 50_000; // = now + 90_000 (origin frame)
+        let mut tb = vec![setup(raw_fire_at_b)];
+        sanitize_restored_timers(&mut tb, "w1|s|s", now, Some(skew_behind), 300_000, None);
+        assert_eq!(
+            tb[0].fire_at,
+            now + 50_000,
+            "skew-behind: SetupTimeout lands at the TRUE remaining 50 s, not extended by 40 s",
+        );
+    }
+
     /// The re-anchor itself: a known offset shifts every timer's absolute deadline
     /// into the local clock frame; a sub-deadband offset is a no-op (latency, not
     /// skew — keeps the single-clock harness transparent).
