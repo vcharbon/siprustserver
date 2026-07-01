@@ -64,6 +64,17 @@ struct Inner {
     // (e.g. the per-call 1 h GlobalDuration) even while active_calls is flat.
     timer_queue_len: AtomicU64,
     timer_live: AtomicU64,
+    // Clock-skew divergence (clock-skew hardening): the SIGNED gap between a fresh
+    // raw `SystemTime` reading and this node's monotonic-anchored `Clock::now_ms()`
+    // (`raw_wall − now_ms`), sampled ~every 30 s. `now_ms` does not follow a host
+    // NTP STEP (it rides the monotonic clock), so a large sudden magnitude names
+    // the exact event that skews replicated timer deadlines across pods (the
+    // endurance-20260630 failover artifact) — turning a days-later mystery into a
+    // live signal. Stored as the two's-complement bits of an i64 (Prometheus has
+    // no signed atomic); the render reinterprets. NOT a re-anchor trigger — the
+    // behavioural correction is the replication-boundary re-anchor, not a clock
+    // rewrite (timestamps stay monotonic).
+    clock_wall_divergence_ms: AtomicU64,
     // replication (peer-to-peer HA; separate namespace `b2bua_repl_*`). These
     // localise an HA failure to a layer: `flush_propagated` rising on the PRIMARY
     // proves it is attempting to replicate (the proxy cookie stamped
@@ -369,6 +380,19 @@ impl B2buaMetrics {
         self.inner.timer_live.load(Ordering::Relaxed)
     }
 
+    /// Publish the sampled clock-skew divergence (`raw_wall − now_ms`, signed ms)
+    /// for `clock_wall_divergence_ms`. Stored as the i64's bit pattern (no signed
+    /// atomic); [`clock_wall_divergence_ms`](Self::clock_wall_divergence_ms) reads
+    /// it back.
+    pub fn set_clock_wall_divergence_ms(&self, divergence_ms: i64) {
+        self.inner
+            .clock_wall_divergence_ms
+            .store(divergence_ms as u64, Ordering::Relaxed);
+    }
+    pub fn clock_wall_divergence_ms(&self) -> i64 {
+        self.inner.clock_wall_divergence_ms.load(Ordering::Relaxed) as i64
+    }
+
     /// Push the call-store map lengths (memory-attribution gauges). Sampled
     /// periodically by the runner under the store's own lock. `calls` is the
     /// true live call-map size; the rest are its sibling indexes + per-call
@@ -537,6 +561,13 @@ impl B2buaMetrics {
         s.push_str(&format!("b2bua_timer_queue_len {}\n", self.timer_queue_len()));
         s.push_str("# HELP b2bua_timer_live live (schedulable) timers; b2bua_timer_queue_len minus this is the lingering-tombstone backlog\n# TYPE b2bua_timer_live gauge\n");
         s.push_str(&format!("b2bua_timer_live {}\n", self.timer_live()));
+        // Clock-skew divergence (signed ms): raw SystemTime − monotonic-anchored
+        // Clock::now_ms, sampled ~30s. A large sudden magnitude is a host NTP STEP
+        // (now_ms doesn't follow it) — the event that skews replicated timer
+        // deadlines across pods (endurance-20260630). Observability only; the fix
+        // is the replication-boundary re-anchor, never a clock rewrite.
+        s.push_str("# HELP b2bua_clock_wall_divergence_ms signed gap (raw SystemTime − monotonic-anchored Clock::now_ms); a large sudden magnitude is a host NTP step that skews cross-node replicated timer deadlines\n# TYPE b2bua_clock_wall_divergence_ms gauge\n");
+        s.push_str(&format!("b2bua_clock_wall_divergence_ms {}\n", self.clock_wall_divergence_ms()));
         // Memory-attribution gauges: per-map sizes so a RSS climb can be pinned
         // to a specific map even when active_calls is flat. b2bua_store_calls is
         // the TRUE live call-map length — a gap vs b2bua_active_calls localises a
@@ -925,6 +956,22 @@ mod tests {
         assert!(txt.contains("b2bua_requests_total{method=\"BYE\"} 1"));
         assert!(txt.contains("b2bua_responses_total{method=\"INVITE\",code=\"200\"} 1"));
         assert!(txt.contains("b2bua_responses_total{method=\"BYE\",code=\"200\"} 1"));
+    }
+
+    #[test]
+    fn clock_wall_divergence_gauge_round_trips_signed_and_renders() {
+        let m = B2buaMetrics::new();
+        // Unset → 0 (flat gauge).
+        assert_eq!(m.clock_wall_divergence_ms(), 0);
+        assert!(m.prometheus_text().contains("b2bua_clock_wall_divergence_ms 0"));
+        // A forward host step (positive) round-trips.
+        m.set_clock_wall_divergence_ms(300_000);
+        assert_eq!(m.clock_wall_divergence_ms(), 300_000);
+        assert!(m.prometheus_text().contains("b2bua_clock_wall_divergence_ms 300000"));
+        // A backward step (negative) survives the u64-bit-pattern storage.
+        m.set_clock_wall_divergence_ms(-45_000);
+        assert_eq!(m.clock_wall_divergence_ms(), -45_000);
+        assert!(m.prometheus_text().contains("b2bua_clock_wall_divergence_ms -45000"));
     }
 
     #[test]
