@@ -112,7 +112,8 @@ preflight() {
 
 up() {
   preflight
-  check_host   # cgroups + sysctls (advisory; PREFLIGHT_STRICT=1 to enforce)
+  check_host   # cgroups + sysctls + clock (advisory; PREFLIGHT_STRICT=1 to enforce)
+  sync_clock_at_bringup  # one accurate wall-clock base before any pod anchors (WSL2)
 
   # NON-DESTRUCTIVE by default. A cluster left over from a failed/aborted run must
   # SURVIVE so it can be analysed — destruction is explicit (`./run.sh down`). If

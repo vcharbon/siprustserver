@@ -60,6 +60,27 @@ and auto-buckets accepted collateral as `chaos="near"` vs genuine `chaos="clear"
 (`POST /chaos` + per-call phase markers); triage `chaos="clear"`. See ADR-0014 and
 `crates/loadgen/README.md`.
 
+**Host clock-skew artifact (NOT a SUT bug), WSL2 endurance only.** A failed-over
+call whose backup fires an in-dialog keepalive OPTIONS onto a leg **~one keepalive
+interval early** (e.g. a keepalive at T+10 s on a 300 s cadence, racing the
+failed-over re-INVITE that triggered the takeover) is a **host clock-skew**
+artifact, not a failover bug. Each pod anchors its wall clock once at start
+(`sip_clock::Clock::system`) and all kind nodes share the WSL2 host clock, so when
+that clock STEPS (WSL2 post-sleep drift "corrected" by systemd-timesyncd's SNTP
+step) pods anchored either side of the step diverge permanently;
+`TimerService::restore` rebuilds a taken-over call's timers as `(fire_at_from_dead_
+node − our now_ms)`, so the offset makes a future keepalive PAST-DUE → it fires the
+instant the backup takes over. The b2bua's restore is meant to absorb only
+ms–seconds of skew — a ~interval-sized past-due fire means the HOST clock jumped.
+Fix is infra, never the SUT: keep the host awake for the whole run + use slewing
+chrony, not stepping timesyncd (`deploy/k8s/lib/host-checks.sh::check_clock`
+warns; `run.sh up` resyncs once before pods anchor). Root case: endurance-20260630
+`reinvite/unexpected/clear/0.html`. This is the production twin of the
+paused-clock harness's known single-clock fidelity gap (`b2bua/src/timers.rs`
+"Wall-time reliance": the harness rides ONE clock, zero cross-node skew, so it
+cannot reproduce this — see `failover.rs::reboot_reclaim_exactly_one_owner…`,
+which does kill→re-INVITE-on-backup with STRICT receives and passes).
+
 ## Test-time clock & timers (read before touching timer or paused-clock code)
 
 Behaviour rides `tokio::time` directly (monotonic) — there is **no** separate

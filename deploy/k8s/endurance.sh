@@ -211,6 +211,17 @@ LOADGEN_GAP_MS="${LOADGEN_GAP_MS:-5000}"
 # answer is measured (via the checkpoint histograms), not declared a timeout. 30 s
 # gives ample margin while still flagging a genuinely stuck call.
 LOADGEN_RECV_TIMEOUT_MS="${LOADGEN_RECV_TIMEOUT_MS:-30000}"
+# Per-datagram simulated packet loss the loadgen injects on its own mux legs and
+# recovers on real SIP timers (--auto-retransmit, always on in the job). 1/1000 so
+# P(3 lost in a row) ~ 1e-9 — invisible to the completion rate, but it continuously
+# exercises retransmission against a lossy fabric. The non-PRACK 18x is exempt
+# (best-effort); its delivery is gated as a cross-call ratio (>99%, see
+# LOADGEN_RINGING_TOL below). Set 0 for a lossless run.
+LOADGEN_DROP_RATE="${LOADGEN_DROP_RATE:-0.001}"
+# 18x-delivery gate: the fraction of answered loadgen calls whose caller received
+# its ringing provisional must stay above this (a lone 1/1000 miss is fine; a
+# systemic drop is a bug). Checked at end-of-run from the loadgen metrics.
+LOADGEN_RINGING_TOL="${LOADGEN_RINGING_TOL:-0.99}"
 # Long-call hold = 6 min, DELIBERATELY de-aligned from the worker keepalive
 # interval (B2BUA_KEEPALIVE_SEC=300 = 5 min, 20-worker.yaml). At a 5-min multiple
 # (the old 1200 s = 20 min) the teardown BYE landed exactly on a keepalive OPTIONS
@@ -1256,7 +1267,14 @@ assert_workloads_ready() {
 # calls are actually being created (sipp_calls_created_total increasing). Fails fast
 # with the specific reason so a "clean-looking" zero-traffic run is impossible.
 assert_traffic_started() {
-  local deadline=$(( $(date +%s) + 60 ))
+  # 150s (was 60s): on a COLD start the sipp stat-exporter sidecars (:9035) and
+  # loadgen (:9300) are slow to answer vmagent's scrape under the bring-up CPU
+  # storm, so `sipp_calls_created_total` can take >60s to land in VM even though
+  # calls are already flowing (2026-06-30: aborted with b2bua_active_calls=3774
+  # and the metric climbing 4674→6809 moments later — a pure scrape-lag false
+  # negative). 150s covers the cold stat-exporter ramp; a genuine zero-traffic
+  # run still fails (issue1), just after a longer, lag-tolerant window.
+  local deadline=$(( $(date +%s) + 150 ))
   local c0 saw_pod=0
   c0="$(vmq 'sum(sipp_calls_created_total)')"
   while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -1362,6 +1380,7 @@ launch_loadgen() {
   [ "$LOADGEN_ENABLE" = "1" ] || { log "LOADGEN_ENABLE=0 — skipping rust loadgen stream"; return 0; }
   export LOADGEN_JOB_NAME LOADGEN_IMAGE LOADGEN_CPS LOADGEN_DURATION LOADGEN_MAX_INFLIGHT \
          LOADGEN_RING_MS LOADGEN_TALK_MS LOADGEN_GAP_MS LOADGEN_LONG_HOLD_SECS LOADGEN_RECV_TIMEOUT_MS \
+         LOADGEN_DROP_RATE \
          LOADGEN_W_BASIC LOADGEN_W_REINVITE LOADGEN_W_REFER LOADGEN_W_LONG \
          LOADGEN_RECORD_EVERY LOADGEN_SAMPLE_CAP LOADGEN_REPORT_INTERVAL LOADGEN_CHAOS_TOL_MS LOADGEN_CHAOS_PHASE_TOL_MS \
          LOADGEN_CPU_REQ LOADGEN_CPU_LIM LOADGEN_MEM_REQ LOADGEN_MEM_LIM \
@@ -1411,6 +1430,24 @@ fetch_loadgen_report() {
   ok_n="$(vmq 'sum(loadgen_calls_total{class="ok"})')"
   tot_n="$(vmq 'sum(loadgen_calls_total)')"
   log "loadgen totals: ok=${ok_n%.*} total=${tot_n%.*} rss=$(vmq 'max(loadgen_process_resident_memory_bytes)') inflight=$(vmq 'max(loadgen_inflight)')"
+
+  # 18x-delivery gate: the non-PRACK ringing is best-effort (a lost 18x is expected,
+  # NOT a failed call — see crates/loadgen), so we do not fail per call; instead the
+  # cross-call ratio received/expected must stay above LOADGEN_RINGING_TOL. A value
+  # well below is a SYSTEMIC 18x regression (a real bug).
+  local rung exp_n ratio
+  rung="$(vmq 'sum(loadgen_ringing_received_total)')"; rung="${rung%.*}"
+  exp_n="$(vmq 'sum(loadgen_ringing_expected_total)')"; exp_n="${exp_n%.*}"
+  if [ -n "$exp_n" ] && [ "${exp_n:-0}" -gt 0 ] 2>/dev/null; then
+    ratio="$(awk "BEGIN{printf \"%.4f\", ${rung:-0}/${exp_n}}")"
+    if awk "BEGIN{exit !(${ratio} >= ${LOADGEN_RINGING_TOL})}"; then
+      ok "loadgen 18x delivery: ${rung}/${exp_n} (${ratio} >= ${LOADGEN_RINGING_TOL})"
+    else
+      warn "loadgen 18x delivery BELOW gate: ${rung}/${exp_n} (${ratio} < ${LOADGEN_RINGING_TOL}) — systemic 18x regression, INVESTIGATE"
+    fi
+  else
+    log "loadgen 18x delivery: no answered calls sampled yet"
+  fi
 }
 
 start_baseline() {
@@ -1506,6 +1543,15 @@ run() {
     ensure_loadgen
     chaos_event "${cycle[$(( idx % ${#cycle[@]} ))]}" "$idx"
     idx=$(( idx + 1 ))
+    # Preserve the loadgen callflow report EVERY cycle, not just at teardown: the
+    # generator re-snapshots /report every LOADGEN_REPORT_INTERVAL s, and the Job
+    # pod can exit (its own duration, an OOM, or a chaos-adjacent restart) BEFORE
+    # the end-of-run fetch — which loses the sampled NOK callflows with the pod's
+    # emptyDir (observed endurance-20260701: "fetch-loadgen: no loadgen pod found"
+    # → zero callflows for the run's residual failures). A failed cp (pod already
+    # gone) warns and leaves the last good copy intact, so this only ever upgrades
+    # the on-disk snapshot. Cheap (one kubectl cp per CHAOS_INTERVAL).
+    fetch_loadgen_report
     # Remaining sleep until the next interval boundary.
     local elapsed_since=$(( $(date +%s) - now ))
     local rest=$(( CHAOS_INTERVAL - elapsed_since ))
