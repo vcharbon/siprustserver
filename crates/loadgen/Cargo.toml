@@ -24,6 +24,10 @@ clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 # The mux is a SignalingNetwork; recording layers on top via AgentBinder.
 sip-net = { path = "../sip-net" }
+# One process-wide monotonic-anchored Clock (created once at startup) stamps every
+# call recording, chaos marker, and packet arrival — so loadgen never reads raw
+# SystemTime on its own timeline (the marker and frame axes stay in lockstep).
+sip-clock = { path = "../sip-clock" }
 
 [dev-dependencies]
 # Fake-network smoke test: an in-process B2buaCore SUT on a shared simulated

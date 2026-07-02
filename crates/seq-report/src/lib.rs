@@ -185,6 +185,17 @@ pub struct SeqDoc {
     pub rows: Vec<SeqRow>,
     /// Recorded findings to list under the diagram.
     pub anomalies: Vec<Anomaly>,
+    /// Wall-clock epoch (ms) corresponding to the timeline base ([`base_ms`]).
+    /// `Some` only when `at_ms` is real wall-clock-aligned time (the load driver's
+    /// `Clock::system()` recording) — the renderers then show an ABSOLUTE UTC
+    /// time alongside the relative `T+…` stamp, so a flow correlates to external
+    /// events (e.g. a chaos kill instant). `None` for virtual-clock docs (the
+    /// paused-runtime harness/failover views), which stay relative-only.
+    ///
+    /// `#[serde(default)]` so docs persisted before this field deserialize as
+    /// `None` (relative-only), preserving the prior behaviour.
+    #[serde(default)]
+    pub epoch_base_ms: Option<i64>,
 }
 
 impl SeqDoc {
@@ -213,6 +224,28 @@ impl SeqDoc {
     pub(crate) fn base_ms(&self) -> i64 {
         self.rows.iter().map(|r| r.at_ms).min().unwrap_or(0)
     }
+
+    /// The absolute wall-clock epoch (ms) for a row's `at_ms`, when this doc is
+    /// wall-clock-aligned ([`epoch_base_ms`] set); `None` otherwise. Maps a
+    /// timeline offset back onto real time: `epoch_base + (at_ms - base)`.
+    pub(crate) fn epoch_at(&self, at_ms: i64) -> Option<i64> {
+        self.epoch_base_ms.map(|e| e + (at_ms - self.base_ms()))
+    }
+}
+
+/// Format a wall-clock epoch (ms) as an ABSOLUTE `HH:MM:SS.mmmZ` UTC time-of-day
+/// — the absolute companion to [`format_relative`]. UTC (suffix `Z`) so it is
+/// unambiguous regardless of the reader's timezone; dependency-free (no chrono).
+/// Used by the renderers when a doc is wall-clock-aligned so a callflow's frames
+/// (and any chaos-marker band) carry a real time that correlates to external
+/// events. Date is omitted — a single callflow never spans midnight.
+pub fn format_epoch_utc(epoch_ms: i64) -> String {
+    let ms = epoch_ms.rem_euclid(1000);
+    let secs_of_day = epoch_ms.div_euclid(1000).rem_euclid(86_400);
+    let h = secs_of_day / 3600;
+    let m = (secs_of_day % 3600) / 60;
+    let s = secs_of_day % 60;
+    format!("{h:02}:{m:02}:{s:02}.{ms:03}Z")
 }
 
 /// Format a virtual-clock offset (ms, relative to the first row) as `T+SEC.mmms`
@@ -284,6 +317,7 @@ mod tests {
                 },
             ],
             anomalies: vec![],
+            epoch_base_ms: None,
         }
     }
 
@@ -325,6 +359,7 @@ mod tests {
                 },
             ],
             anomalies: vec![],
+            epoch_base_ms: None,
         };
         let txt = render_global_txt(&doc);
         let reboot = txt.find("reboot b2").expect("reboot band present");
@@ -382,6 +417,36 @@ mod tests {
         // match its prefix rather than an exact `>Replication<`.)
         assert!(html.contains(">SIP<") && html.contains(">Replication"));
         assert!(html.contains("Lifecycle"));
+    }
+
+    #[test]
+    fn format_epoch_utc_renders_time_of_day_with_millis() {
+        // 1970-01-01 + (12h34m56.789s) → 12:34:56.789Z.
+        let ms = ((12 * 3600 + 34 * 60 + 56) * 1000 + 789) as i64;
+        assert_eq!(format_epoch_utc(ms), "12:34:56.789Z");
+        // Wraps within the day (only time-of-day is shown).
+        assert_eq!(format_epoch_utc(ms + 86_400_000), "12:34:56.789Z");
+    }
+
+    #[test]
+    fn wall_clock_doc_shows_absolute_utc_reference() {
+        // A wall-clock-aligned doc renders the absolute-UTC anchor in the header
+        // AND an absolute time next to each row's relative stamp. A virtual-clock
+        // doc (epoch_base_ms = None) shows neither (relative-only, unchanged).
+        let mut doc = mixed_doc();
+        // Anchor the base (at_ms 0) to a known epoch ms.
+        let t0 = ((8 * 3600 + 48 * 60 + 29) * 1000 + 135) as i64; // 08:48:29.135Z
+        doc.epoch_base_ms = Some(t0);
+        let html = render_html(&doc);
+        assert!(html.contains("Timeline t0"), "header states the absolute anchor");
+        assert!(html.contains("08:48:29.135Z"), "absolute UTC anchor shown");
+        // The repl row at at_ms=200 → t0 + 200ms = 08:48:29.335Z somewhere.
+        assert!(html.contains("08:48:29.335Z"), "per-row absolute time shown");
+
+        // Without the anchor, no absolute time leaks in (relative-only, unchanged).
+        let plain = render_html(&mixed_doc());
+        assert!(!plain.contains("Timeline t0"));
+        assert!(!plain.contains("08:48:29"));
     }
 
     #[test]

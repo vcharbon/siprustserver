@@ -14,8 +14,8 @@ use layer_harness::TransportKind;
 use loadgen::scenarios::{establish, LoadScenario, ScenarioId};
 use loadgen::{
     by_id, default_scenarios, failure_scenarios, CallConfig, CallCtx, CallEnv, CallRouting,
-    CallScope, Correlation, Driver, DriverCfg, EndpointSpec, LegInfo, MuxCore, MuxTransport,
-    ResultClass, Reporter, ReporterCfg, Role,
+    CallScope, CallTuning, Correlation, Driver, DriverCfg, EndpointSpec, LegInfo, MuxCore,
+    MuxTransport, ResultClass, Reporter, ReporterCfg, Role,
 };
 use scenario_harness::{Harness, StepError};
 use sip_clock::Clock;
@@ -35,7 +35,19 @@ async fn setup(
     correlation: Correlation,
     sample_cap: u32,
 ) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
-    setup_with(base, correlation, sample_cap, |_| {}).await
+    setup_with(base, correlation, sample_cap, RECV, |_| {}).await
+}
+
+/// [`setup`] with an explicit per-recv timeout — the lossy tests widen it (like
+/// the production loadgen's 5 s) so compounded two-hop retransmit recovery has
+/// headroom.
+async fn setup_recv(
+    base: u16,
+    correlation: Correlation,
+    sample_cap: u32,
+    recv: Duration,
+) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+    setup_with(base, correlation, sample_cap, recv, |_| {}).await
 }
 
 /// `setup` with an extra `B2buaConfig` mutator (e.g. to exhaust the CPS bucket
@@ -44,6 +56,7 @@ async fn setup_with(
     base: u16,
     correlation: Correlation,
     sample_cap: u32,
+    recv: Duration,
     extra_tune: impl FnOnce(&mut b2bua_sdk::B2buaConfig) + 'static,
 ) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
     let net: Arc<dyn SignalingNetwork> = Arc::new(RealSignalingNetwork::new());
@@ -52,7 +65,7 @@ async fn setup_with(
         net,
         Clock::system(),
         TransportKind::Live,
-        RECV,
+        recv,
     );
     h.disarm_cseq_gate(); // infra harness; loadgen runs its own per-call audit
 
@@ -77,7 +90,8 @@ async fn setup_with(
         correlation.clone(),
         256,
         sample_cap as usize,
-        RECV,
+        recv,
+        Clock::system(),
     )
     .await
     .unwrap();
@@ -88,7 +102,8 @@ async fn setup_with(
         uas_addr: addr(uas),
         refer_addr: addr(refer),
         correlation,
-        recv_timeout: RECV,
+        recv_timeout: recv,
+        clock: Clock::system(),
     });
     (h, b2bua, core, transport)
 }
@@ -114,6 +129,8 @@ fn cfg(via: SocketAddr, refer_pin: Option<SocketAddr>, cps: f64, secs: u64, mif:
             long_hold: Duration::from_millis(120),
             teardown_quiesce: Duration::from_millis(200),
         },
+        default_tuning: CallTuning::default(),
+        tuning: std::collections::HashMap::new(),
     }
 }
 
@@ -270,6 +287,7 @@ async fn loadgen_mux_orphan_observability() {
         256,
         10,
         RECV,
+        Clock::system(),
     )
     .await
     .unwrap();
@@ -308,7 +326,7 @@ async fn loadgen_chaos_post_records_marker() {
     use loadgen::{serve_metrics, ChaosLog};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let chaos = Arc::new(ChaosLog::new(Duration::from_millis(500)));
+    let chaos = Arc::new(ChaosLog::new(Clock::system()));
     let bind = addr(6490);
     let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(|| "render-body-marker\n".to_string());
     let srv_chaos = chaos.clone();
@@ -384,6 +402,7 @@ async fn loadgen_mux_picker_disambiguates_shared_socket() {
         256,
         10,
         RECV,
+        Clock::system(),
     )
     .await
     .unwrap();
@@ -445,6 +464,7 @@ async fn loadgen_mux_emergency_split_under_overload() {
         6450,
         Correlation::header("X-Loadgen-Id"),
         5,
+        RECV,
         |c| {
             c.cps_bucket_size = 0; // exhausted bucket → shed every non-emergency
             c.cps_bucket_rate = 0; // …and never refill (deterministic).
@@ -537,4 +557,187 @@ async fn loadgen_post_call_cleanup_no_leak() {
     assert_eq!(core.registry_size(), 0, "mux registry leak after a failing-call mix");
     settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
+}
+
+// ---------------------------------------------------------------------------
+// Simulated packet loss + auto-retransmit (robustness knobs)
+// ---------------------------------------------------------------------------
+
+/// Baseline: with a lossy fabric and NO auto-retransmit, dropped datagrams break
+/// calls — establishing that the loss model actually bites (so the recovery test
+/// below is not vacuous) AND that a lost call still tears down with no leak.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_packet_drop_without_retransmit_breaks_calls() {
+    let (_h, b2bua, core, transport) = setup(6480, Correlation::header("X-Loadgen-Id"), 3).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    let mut c = cfg(b2bua.addr, None, 10.0, 1, 8, 0xD40F);
+    // ~12%/datagram loss, no recovery: over a ~10-message call P(all delivered)
+    // ≈ 0.9^10 ≈ 0.35, so the majority of calls must fail.
+    c.default_tuning = CallTuning { drop_rate: 0.12, retransmit: false };
+    let driver = Driver::new(c, vec![(by_id("basic_call").unwrap(), 1.0)], reporter.clone(), transport);
+    driver.run().await;
+
+    let drops = core.stats().dropped_out.load(std::sync::atomic::Ordering::Relaxed)
+        + core.stats().dropped_in.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(drops > 0, "the loss model dropped nothing — the knob is not wired");
+    assert!(
+        reporter.count("basic_call", &ResultClass::Timeout) > 0,
+        "no call failed despite {drops} dropped datagrams:\n{}",
+        reporter.render_prometheus()
+    );
+
+    // The loadgen's OWN mux state is always reclaimed once the call task ends,
+    // even for a failed lossy call. (SUT-side reap is NOT asserted here: with no
+    // retransmit the teardown BYE/CANCEL can itself be dropped, so the b2bua only
+    // reaps on its own transaction timers, well past this settle window — that is
+    // the very fragility the retransmit test proves is fixed.)
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak under loss");
+}
+
+/// The point of the feature: a heavy ~10%/datagram loss (which breaks the
+/// majority of calls with no retransmit, above) is RECOVERED with auto-retransmit
+/// on — per SIP timers (Timer A/E requests, 2xx-until-ACK answers, re-ACK,
+/// reactive re-answer, duplicate absorption) — so calls overwhelmingly SUCCEED
+/// despite drops actually happening. The recv window is widened (like the
+/// production 5 s) so compounded two-hop recovery has headroom under CI CPU load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_auto_retransmit_recovers_packet_drop() {
+    let (_h, b2bua, core, transport) =
+        setup_recv(6490, Correlation::header("X-Loadgen-Id"), 3, Duration::from_secs(6)).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    let mut c = cfg(b2bua.addr, None, 12.0, 2, 8, 0x5EED);
+    c.default_tuning = CallTuning { drop_rate: 0.10, retransmit: true };
+    let driver = Driver::new(c, vec![(by_id("basic_call").unwrap(), 1.0)], reporter.clone(), transport);
+    driver.run().await;
+
+    let drops = core.stats().dropped_out.load(std::sync::atomic::Ordering::Relaxed)
+        + core.stats().dropped_in.load(std::sync::atomic::Ordering::Relaxed);
+    let ok = reporter.count("basic_call", &ResultClass::Ok);
+    let timeouts = reporter.count("basic_call", &ResultClass::Timeout);
+    assert!(drops > 0, "loss model dropped nothing — recovery test is vacuous");
+    assert!(ok >= 6, "too few OK calls despite retransmit: ok={ok}\n{}", reporter.render_prometheus());
+    // Retransmit recovers each lost datagram inside the (wide) recv window, so OK
+    // dominates overwhelmingly — the SAME loss that broke the majority of the
+    // no-retransmit calls above. A comfortable 4:1 margin absorbs the rare tail
+    // (a datagram lost on every retry) plus CI scheduling jitter.
+    assert!(
+        ok >= timeouts * 4,
+        "retransmit did not dominate: ok={ok} timeouts={timeouts} drops={drops}\n{}",
+        reporter.render_prometheus()
+    );
+
+    // The 18x-delivery gate is wired: calls reached the answer step, and a dropped
+    // non-PRACK ringing (NOT recovered — provisionals are best-effort) is tolerated,
+    // so `received <= expected` and those calls still counted as OK above.
+    let (rung, rung_expected) = reporter.ringing_totals();
+    assert!(rung_expected > 0, "no calls reached the ring→answer step");
+    assert!(rung <= rung_expected, "ringing received {rung} > expected {rung_expected}");
+    let metrics = reporter.render_prometheus();
+    assert!(
+        metrics.contains("loadgen_ringing_expected_total")
+            && metrics.contains("loadgen_ringing_received_total"),
+        "ringing gate metrics missing from /metrics"
+    );
+
+    // The loadgen's mux state is clean regardless. (SUT full-reap is not asserted:
+    // a rare timed-out call's teardown is best-effort single-shot and its resender
+    // is cancelled at call-end, so the b2bua reaps that straggler on its own timers
+    // — the successful majority reap promptly because hangup awaits the BYE 200.)
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak under loss+retransmit");
+}
+
+/// The cross-call **18x-delivery gate mechanism**: with NO loss the ringing
+/// counter must read exactly 100% (`received == expected`) — a deterministic proof
+/// that the strict ordering holds (the 180 always precedes the 200, never stranded
+/// or reordered) and the counter is wired to `/metrics`. The real >99%-UNDER-LOSS
+/// gate needs scale (one 1/1000 miss breaches 99% at N=40), so it is asserted by
+/// the 600-call `loadgen_inprocess_endurance_lossy` slow-lane test below.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_ringing_gate_counts_every_ring() {
+    let (_h, b2bua, core, transport) = setup(6500, Correlation::header("X-Loadgen-Id"), 3).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    // No loss → every 18x is delivered; retransmit on to exercise that path too.
+    let mut c = cfg(b2bua.addr, None, 40.0, 2, 16, 0x9A17);
+    c.default_tuning = CallTuning { drop_rate: 0.0, retransmit: true };
+    let driver = Driver::new(c, vec![(by_id("basic_call").unwrap(), 1.0)], reporter.clone(), transport);
+    driver.run().await;
+
+    let (rung, expected) = reporter.ringing_totals();
+    assert!(expected >= 20, "too few answered calls: {expected}");
+    // 100% — no reordering / stranded-180 artifacts (the strict-ordering guarantee).
+    assert_eq!(rung, expected, "some 18x uncounted with zero loss: {rung}/{expected}");
+    let metrics = reporter.render_prometheus();
+    assert!(
+        metrics.contains("loadgen_ringing_expected_total")
+            && metrics.contains("loadgen_ringing_received_total"),
+        "ringing gate metrics missing from /metrics"
+    );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+/// **In-process endurance** — a sustained real-clock run of the mix against the
+/// in-process b2bua with the production 1/1000 loss + auto-retransmit, to shake
+/// out the retransmit engine, the 18x gate, and no-leak under load BEFORE the
+/// cluster endurance. Slow lane (`just test-slow` / `--ignored`); the default lane
+/// keeps the short probabilistic tests above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "real-clock ~25s — in-process endurance, slow lane (just test-slow)"]
+async fn loadgen_inprocess_endurance_lossy() {
+    let (_h, b2bua, core, transport) =
+        setup_recv(6520, Correlation::header("X-Loadgen-Id"), 5, Duration::from_secs(5)).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 16 }));
+    let refer_pin = Some(transport.refer_addr);
+
+    // The default mix (basic-heavy), production loss + retransmit, 25 s at 25 cps.
+    let mut c = cfg(b2bua.addr, refer_pin, 25.0, 25, 64, 0xE0D0E);
+    c.default_tuning = CallTuning { drop_rate: 0.001, retransmit: true };
+    let driver = Driver::new(c, default_scenarios(), reporter.clone(), transport);
+    driver.run().await;
+
+    let total: u64 = ["basic_call", "reinvite", "options_hold", "refer"]
+        .iter()
+        .map(|id| reporter.count(id, &ResultClass::Ok))
+        .sum();
+    assert!(total > 300, "too few OK calls over the run: {total}\n{}", reporter.render_prometheus());
+    // 18x delivery holds the >99% gate under sustained production loss.
+    let (rung, expected) = reporter.ringing_totals();
+    assert!(expected > 300, "too few answered calls: {expected}");
+    assert!(
+        rung * 100 >= expected * 99,
+        "18x gate breached over the run: {rung}/{expected}\n{}",
+        reporter.render_prometheus()
+    );
+    // No LOADGEN leak: the mux state is always reclaimed exactly (call task end).
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak over the endurance run");
+    // SUT reap: a SUCCESSFUL call always reaps; but a FAILED call under injected
+    // loss can have its best-effort teardown (CANCEL/BYE, single-shot — its mux
+    // resender is cancelled at call end) LOST, leaving the SUT to reap that dialog
+    // on its own (longer) timers, past this settle. So the un-reaped SUT state must
+    // be bounded by the (rare) failure count — a SUCCESSFUL call leaking would be a
+    // real bug (leaked > failed).
+    settle_until(|| {
+        b2bua.metrics().creations_total() == b2bua.metrics().removals_total()
+    })
+    .await;
+    let failed = reporter.total_calls().saturating_sub(total);
+    let leaked = b2bua.metrics().creations_total().saturating_sub(b2bua.metrics().removals_total());
+    assert!(
+        leaked <= failed as u64,
+        "SUT leaked {leaked} calls but only {failed} failed under loss — a SUCCESSFUL call leaked:\n{}",
+        reporter.render_prometheus()
+    );
+    assert!(
+        b2bua.active_calls() as u64 <= failed as u64,
+        "SUT holds {} live calls vs {failed} failed",
+        b2bua.active_calls()
+    );
 }

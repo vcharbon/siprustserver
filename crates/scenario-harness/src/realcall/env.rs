@@ -161,11 +161,22 @@ pub struct CallCtx {
     t0: Instant,
     checkpoints: Mutex<Vec<(&'static str, Duration)>>,
     phases: Mutex<Vec<(&'static str, Instant)>>,
+    /// Whether the caller received the `18x` ringing provisional before the answer.
+    /// `None` until the call reaches the ring→answer step; `Some(true)` if the 18x
+    /// arrived, `Some(false)` if it was legitimately lost (a NON-PRACK provisional
+    /// is best-effort, not a call failure — the driver aggregates the rate into a
+    /// cross-call gate instead of failing the individual call).
+    ringing: Mutex<Option<bool>>,
 }
 
 impl CallCtx {
     pub fn new() -> Self {
-        Self { t0: Instant::now(), checkpoints: Mutex::new(Vec::new()), phases: Mutex::new(Vec::new()) }
+        Self {
+            t0: Instant::now(),
+            checkpoints: Mutex::new(Vec::new()),
+            phases: Mutex::new(Vec::new()),
+            ringing: Mutex::new(None),
+        }
     }
 
     pub fn checkpoint(&self, name: &'static str) {
@@ -190,6 +201,20 @@ impl CallCtx {
     /// The recorded phase markers `(name, instant)`, in order reached.
     pub fn phases(&self) -> Vec<(&'static str, Instant)> {
         self.phases.lock().unwrap().clone()
+    }
+
+    /// Record whether this call's caller saw its `18x` ringing provisional
+    /// (`true`) or it was lost (`false`) — a non-PRACK provisional is best-effort,
+    /// so a miss is EXPECTED, not a failure. The driver folds this into the
+    /// cross-call `loadgen_ringing_{expected,received}_total` gate (>99%).
+    pub fn mark_ringing(&self, received: bool) {
+        *self.ringing.lock().unwrap() = Some(received);
+    }
+
+    /// The recorded ringing outcome: `None` if the call never reached the answer
+    /// step, else `Some(received)`.
+    pub fn ringing(&self) -> Option<bool> {
+        *self.ringing.lock().unwrap()
     }
 
     pub fn elapsed(&self) -> Duration {

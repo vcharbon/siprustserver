@@ -135,6 +135,12 @@ pub struct Reporter {
     inflight: AtomicU64,
     started: AtomicU64,
     record_counter: AtomicU64,
+    /// Calls that reached the ring→answer step (the 18x-delivery denominator).
+    ringing_expected: AtomicU64,
+    /// Of those, how many saw their `18x` ringing provisional (numerator). A
+    /// dropped non-PRACK 18x is EXPECTED (not a failure), so this is tracked as a
+    /// cross-call rate gated at >99% rather than failing the individual call.
+    ringing_received: AtomicU64,
 }
 
 impl Reporter {
@@ -145,7 +151,29 @@ impl Reporter {
             inflight: AtomicU64::new(0),
             started: AtomicU64::new(0),
             record_counter: AtomicU64::new(0),
+            ringing_expected: AtomicU64::new(0),
+            ringing_received: AtomicU64::new(0),
         }
+    }
+
+    /// Fold one call's ringing outcome into the cross-call 18x-delivery gate:
+    /// `None` = the call never reached the answer step (not counted); `Some(true)`
+    /// = the 18x arrived; `Some(false)` = it was legitimately lost.
+    pub fn record_ringing(&self, ringing: Option<bool>) {
+        if let Some(received) = ringing {
+            self.ringing_expected.fetch_add(1, Ordering::Relaxed);
+            if received {
+                self.ringing_received.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// `(received, expected)` for the cross-call 18x-delivery gate.
+    pub fn ringing_totals(&self) -> (u64, u64) {
+        (
+            self.ringing_received.load(Ordering::Relaxed),
+            self.ringing_expected.load(Ordering::Relaxed),
+        )
     }
 
     pub fn inc_inflight(&self) {
@@ -253,6 +281,21 @@ impl Reporter {
         out.push_str("# HELP loadgen_started_total Calls started.\n");
         out.push_str("# TYPE loadgen_started_total counter\n");
         out.push_str(&format!("loadgen_started_total {}\n", self.started.load(Ordering::Relaxed)));
+        // 18x-delivery gate: a non-PRACK ringing provisional is best-effort, so a
+        // miss is EXPECTED. `received/expected` should stay > 0.99; a systemic 18x
+        // regression drops it well below and IS a bug (unlike one dropped 18x).
+        out.push_str("# HELP loadgen_ringing_expected_total Calls that reached the ring→answer step (18x denominator).\n");
+        out.push_str("# TYPE loadgen_ringing_expected_total counter\n");
+        out.push_str(&format!(
+            "loadgen_ringing_expected_total {}\n",
+            self.ringing_expected.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP loadgen_ringing_received_total Of those, calls whose caller received the 18x ringing provisional.\n");
+        out.push_str("# TYPE loadgen_ringing_received_total counter\n");
+        out.push_str(&format!(
+            "loadgen_ringing_received_total {}\n",
+            self.ringing_received.load(Ordering::Relaxed)
+        ));
         out.push_str("# HELP loadgen_e2e_seconds End-to-end call latency quantiles.\n");
         out.push_str("# TYPE loadgen_e2e_seconds gauge\n");
         for (scenario, h) in &g.e2e {

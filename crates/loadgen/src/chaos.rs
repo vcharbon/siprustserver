@@ -10,15 +10,20 @@
 //! Call-ID/tag ms-counter sits on an unknown base (~41 days off Unix), so "this
 //! call connected near the kill" could not be proven against the kill wall-clock.
 //! Flagging the loadgen at the kill instant sidesteps it entirely — the loadgen
-//! timestamps BOTH the markers and the calls on its own monotonic clock, so the
-//! overlap is exact. The near bucket is still counted (never discarded), just
-//! split apart so the analysis can focus on the `clear` failures without hand-
-//! triaging every kill-collateral call.
+//! timestamps BOTH the markers and the calls on **one** monotonic-anchored
+//! [`Clock`] (the process-wide `Clock::system()` shared with the recorders), so
+//! the overlap is exact AND a marker renders on the very axis the frames do —
+//! even if the host wall clock STEPS mid-run (the WSL2 endurance hazard), the
+//! marker and the frames drift together. The near bucket is still counted (never
+//! discarded), just split apart so the analysis can focus on the `clear` failures
+//! without hand-triaging every kill-collateral call.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use sip_clock::Clock;
 
 /// The near/clear dimension a finished call carries alongside its
 /// `(scenario, result-class)` bucket.
@@ -45,11 +50,17 @@ impl ChaosTag {
 
 struct ChaosEvent {
     at: Instant,
+    /// Epoch ms of the fault **on the loadgen [`Clock`] axis** — the kill instant
+    /// for a back-dated marker ([`record_at`](ChaosLog::record_at)), else the
+    /// receipt instant. Used to render the marker on a callflow's timeline: the
+    /// recorders stamp frames off the SAME shared `Clock`, so frame and marker
+    /// share one axis and stay aligned even across a host wall-clock step. The
+    /// `at` Instant remains the classifier's monotonic key.
+    wall_ms: i64,
     kind: String,
     /// The faulted target (e.g. `b2bua-worker-1`). Recorded now for the planned
     /// v2 refinement — narrowing `Near` to calls whose Record-Route `w_pri`
     /// cookie names the killed worker — but the v1 classifier is time-window only.
-    #[allow(dead_code)]
     target: Option<String>,
 }
 
@@ -57,23 +68,28 @@ struct ChaosEvent {
 pub struct ChaosLog {
     events: Mutex<VecDeque<ChaosEvent>>,
     cap: usize,
-    tolerance: Duration,
     phase_tolerance: Duration,
+    /// The process-wide monotonic-anchored clock shared with the call recorders,
+    /// so a marker's rendered `wall_ms` lands on the SAME axis as the frames.
+    clock: Clock,
     total: AtomicU64,
 }
 
 impl ChaosLog {
-    /// A log that classifies a call `Near` when an injected fault falls within
-    /// `tolerance` of the call's lifetime. Retains the last 256 markers (kills
-    /// are infrequent — every chaos interval — so this spans many cycles).
-    /// `phase_tolerance` defaults to 200 ms (the finer window the per-phase
-    /// classifier uses); set it with [`with_phase_tolerance`](Self::with_phase_tolerance).
-    pub fn new(tolerance: Duration) -> Self {
+    /// A log that classifies a call `Near` when an injected fault falls on a
+    /// fragile moment of its lifetime (see [`classify_call`](Self::classify_call)).
+    /// Retains the last 256 markers (kills are infrequent — every chaos interval —
+    /// so this spans many cycles). `phase_tolerance` defaults to 200 ms; set it
+    /// with [`with_phase_tolerance`](Self::with_phase_tolerance).
+    ///
+    /// `clock` must be the same `Clock` the call recorders use, so a marker's
+    /// rendered `wall_ms` shares the frames' timeline axis.
+    pub fn new(clock: Clock) -> Self {
         Self {
             events: Mutex::new(VecDeque::new()),
             cap: 256,
-            tolerance,
             phase_tolerance: Duration::from_millis(200),
+            clock,
             total: AtomicU64::new(0),
         }
     }
@@ -81,72 +97,76 @@ impl ChaosLog {
     /// Set the per-phase tolerance: how close a *dialog-state transition* must be
     /// to a fault for the call to count as `Near` on the transition rule. This is
     /// the "the state change didn't have time to propagate" window (a transition
-    /// killed within it is normal distributed-systems behavior, not a SUT defect),
-    /// and is deliberately tighter than the coarse call-lifetime [`tolerance`](Self::tolerance).
+    /// killed within it is normal distributed-systems behavior, not a SUT defect).
     pub fn with_phase_tolerance(mut self, phase_tolerance: Duration) -> Self {
         self.phase_tolerance = phase_tolerance;
         self
-    }
-
-    pub fn tolerance(&self) -> Duration {
-        self.tolerance
     }
 
     pub fn phase_tolerance(&self) -> Duration {
         self.phase_tolerance
     }
 
-    /// Record a fault marker at `Instant::now()` (the moment the chaos driver
-    /// flagged it). Bounded: the oldest marker drops once past `cap`.
+    /// Record a fault marker at now (the moment the chaos driver flagged it),
+    /// stamped off the shared [`Clock`] so it shares the frames' axis. Bounded:
+    /// the oldest marker drops once past `cap`.
     pub fn record(&self, kind: impl Into<String>, target: Option<String>) {
-        self.push(Instant::now(), kind.into(), target);
+        self.push(Instant::now(), self.clock.now_ms(), kind.into(), target);
     }
 
-    /// Record a fault marker **back-dated to the kill wall-clock** `kill_unix_ms`
-    /// (Unix epoch milliseconds, captured by the chaos script at the instant of
-    /// the `kubectl delete pod`). The marker landed over a port-forward, so the
-    /// POST is received some delay after the kill; back-dating to the supplied
-    /// timestamp makes the marker robust to ANY plumbing latency (PF retries,
-    /// extra hops) rather than recording the receipt instant.
+    /// Record a fault marker **back-dated to the kill instant** `kill_unix_ms`
+    /// (Unix epoch milliseconds, captured by the chaos script's `date` at the
+    /// `kubectl delete pod`). The marker landed over a port-forward, so the POST
+    /// arrives some delay after the kill; back-dating makes the marker robust to
+    /// ANY plumbing latency (PF retries, extra hops) rather than recording receipt.
     ///
-    /// `delay = max(0, now_wall − kill_unix_ms)` is computed against this process's
-    /// `SystemTime` at receipt, then subtracted from `Instant::now()`. Pods share
-    /// the host kernel clock under kind, so host `date` and this `SystemTime`
-    /// agree to well within the 200 ms phase window. Falls back to [`record`] if
-    /// either wall-clock read is unusable (clock skew into the future, etc.).
+    /// `kill_unix_ms` is an EXTERNAL wall-clock (Unix) timestamp, so measuring how
+    /// long ago it was needs a real wall read — this is the one documented place
+    /// loadgen reads [`SystemTime`] directly (per `sip_clock`: read `SystemTime`
+    /// only to reconcile an external wall clock). We then map that delay back onto
+    /// the shared `Clock` axis so the STORED `wall_ms` still aligns with the
+    /// frames even if the host clock has stepped since the loadgen anchored:
+    /// `delay = max(0, wall_now − kill)`, `at = Instant::now() − delay`,
+    /// `wall_ms = clock.now_ms() − delay`. `saturating_sub` keeps a future-dated
+    /// kill (clock skew) at delay 0 → marker at ~now, no panic.
     pub fn record_at(&self, kind: impl Into<String>, target: Option<String>, kill_unix_ms: u64) {
-        let now_wall_ms = SystemTime::now()
+        let wall_now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let delay_ms = now_wall_ms.saturating_sub(kill_unix_ms);
+        let delay_ms = wall_now_ms.saturating_sub(kill_unix_ms);
         let at = Instant::now()
             .checked_sub(Duration::from_millis(delay_ms))
             .unwrap_or_else(Instant::now);
-        self.push(at, kind.into(), target);
+        let wall_ms = self.clock.now_ms() - delay_ms as i64;
+        self.push(at, wall_ms, kind.into(), target);
     }
 
-    fn push(&self, at: Instant, kind: String, target: Option<String>) {
+    fn push(&self, at: Instant, wall_ms: i64, kind: String, target: Option<String>) {
         let mut g = self.events.lock().unwrap();
-        g.push_back(ChaosEvent { at, kind, target });
+        g.push_back(ChaosEvent { at, wall_ms, kind, target });
         while g.len() > self.cap {
             g.pop_front();
         }
         self.total.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Coarse classifier: `Near` iff any marker fell within `tolerance` of the
-    /// call's lifetime `[start, end]`. Used as the fallback / by the simple tests;
-    /// the driver prefers [`classify_call`](Self::classify_call).
-    pub fn classify(&self, start: Instant, end: Instant) -> ChaosTag {
-        let lo = start.checked_sub(self.tolerance).unwrap_or(start);
-        let hi = end + self.tolerance;
+    /// Recent fault markers as `(wall_clock_epoch_ms, label)` for callflow
+    /// rendering — the renderer drops each onto a sampled flow's wall-clock
+    /// timeline (filtered to that call's window) as a Lifecycle band, so a NOK
+    /// page shows exactly when the kill landed relative to the call's frames.
+    /// Label is `chaos <kind>(<target>)`, e.g. `chaos kill_worker(b2bua-worker-0)`.
+    pub fn markers(&self) -> Vec<(i64, String)> {
         let g = self.events.lock().unwrap();
-        if g.iter().any(|e| e.at >= lo && e.at <= hi) {
-            ChaosTag::Near
-        } else {
-            ChaosTag::Clear
-        }
+        g.iter()
+            .map(|e| {
+                let label = match &e.target {
+                    Some(t) => format!("chaos {}({t})", e.kind),
+                    None => format!("chaos {}", e.kind),
+                };
+                (e.wall_ms, label)
+            })
+            .collect()
     }
 
     /// Per-phase classifier — the precise "was this failure explained by a fault
@@ -222,37 +242,19 @@ impl ChaosLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sip_clock::Clock;
 
-    #[test]
-    fn overlap_within_tolerance_is_near_outside_is_clear() {
-        let log = ChaosLog::new(Duration::from_millis(500));
-        let base = Instant::now();
-        // A marker at `base`.
-        log.record("kill_worker", Some("b2bua-worker-1".into()));
-
-        // A call whose window straddles the marker → Near.
-        assert_eq!(log.classify(base - Duration::from_secs(1), base + Duration::from_secs(1)), ChaosTag::Near);
-        // A call that ended 300ms before the marker (< 500ms tol) → Near.
-        assert_eq!(
-            log.classify(base - Duration::from_secs(2), base - Duration::from_millis(300)),
-            ChaosTag::Near
-        );
-        // A call that ended 800ms before the marker (> 500ms tol) → Clear.
-        assert_eq!(
-            log.classify(base - Duration::from_secs(2), base - Duration::from_millis(800)),
-            ChaosTag::Clear
-        );
-        // A call that started 800ms after the marker (the post-reboot fresh call
-        // the CSeq-desync bug rides) → Clear: it must NOT be excused.
-        assert_eq!(
-            log.classify(base + Duration::from_millis(800), base + Duration::from_secs(2)),
-            ChaosTag::Clear
-        );
+    // A Clock for the tests: real-anchored (a live-network log). The classifier
+    // tests key off the monotonic `at` Instant, so the Clock value is irrelevant
+    // there; only the `markers()` wall-clock tests read it back. `#[tokio::test]`
+    // (not paused) so `Clock::system()` has a runtime for its `tokio` Instant.
+    fn test_log() -> ChaosLog {
+        ChaosLog::new(Clock::system())
     }
 
-    #[test]
-    fn per_phase_classifier_excuses_transitions_and_setup_but_not_stable_calls() {
-        let log = ChaosLog::new(Duration::from_secs(5)).with_phase_tolerance(Duration::from_millis(200));
+    #[tokio::test]
+    async fn per_phase_classifier_excuses_transitions_and_setup_but_not_stable_calls() {
+        let log = test_log().with_phase_tolerance(Duration::from_millis(200));
         let kill = Instant::now();
         log.record("kill_worker", None);
 
@@ -288,13 +290,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn record_at_back_dates_to_the_kill_so_a_transition_at_the_kill_is_near() {
+    #[tokio::test]
+    async fn record_at_back_dates_to_the_kill_so_a_transition_at_the_kill_is_near() {
         // The marker arrives ~1.5 s after the kill (the PF latency the live run
         // saw). Without back-dating, a `connected` transition AT the kill would
         // sit 1.5 s before the (late) marker — outside the 200 ms phase window —
         // and mis-bucket `Clear`. record_at must place the marker back at the kill.
-        let log = ChaosLog::new(Duration::from_secs(5)).with_phase_tolerance(Duration::from_millis(200));
+        let log = test_log().with_phase_tolerance(Duration::from_millis(200));
 
         // Pretend "now" is 1.5 s after a kill: the kill's Unix ms is now − 1500.
         let now_wall_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
@@ -313,7 +315,7 @@ mod tests {
 
         // Sanity: a plain `record` (receipt instant, no back-dating) would have
         // placed the marker ~now, 1.5 s after that transition → mis-bucketed Clear.
-        let late = ChaosLog::new(Duration::from_secs(5)).with_phase_tolerance(Duration::from_millis(200));
+        let late = test_log().with_phase_tolerance(Duration::from_millis(200));
         late.record("kill_worker", None);
         assert_eq!(
             late.classify_call(kill_instant - Duration::from_secs(1), Instant::now(), &phases),
@@ -321,29 +323,60 @@ mod tests {
         );
     }
 
-    #[test]
-    fn record_at_with_future_kill_ts_falls_back_to_now_not_panic() {
+    #[tokio::test]
+    async fn record_at_with_future_kill_ts_falls_back_to_now_not_panic() {
         // Clock skew: the supplied kill ts is in the future. saturating_sub keeps
         // delay at 0 → marker at ~now (no panic, no underflow).
-        let log = ChaosLog::new(Duration::from_millis(500));
+        let log = test_log();
         let now_wall_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
         log.record_at("kill_worker", None, now_wall_ms + 10_000);
         assert_eq!(log.total(), 1);
+        // The marker landed at ~now (delay clamped to 0), so a call whose window
+        // brackets now (no `connected` phase) is Near on the interrupted-setup rule.
         let now = Instant::now();
-        assert_eq!(log.classify(now - Duration::from_millis(100), now), ChaosTag::Near);
+        assert_eq!(
+            log.classify_call(now - Duration::from_millis(100), now + Duration::from_millis(100), &[]),
+            ChaosTag::Near
+        );
     }
 
-    #[test]
-    fn empty_log_is_always_clear() {
-        let log = ChaosLog::new(Duration::from_millis(500));
+    #[tokio::test]
+    async fn markers_carry_back_dated_wall_clock_and_label() {
+        let log = test_log();
+        let now_wall_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let kill_unix_ms = now_wall_ms - 1500;
+        log.record_at("kill_worker", Some("b2bua-worker-0".into()), kill_unix_ms);
+        log.record("kill_proxy", None); // no-ts fallback → receipt (now) on the Clock axis
+
+        let m = log.markers();
+        assert_eq!(m.len(), 2);
+        // The back-dated marker sits ~1.5 s in the past (near the kill), stamped on
+        // the shared Clock axis (≈ the Unix kill instant when the clock hasn't
+        // stepped), labelled with kind + target — what the callflow band renders.
+        assert!(
+            (m[0].0 - kill_unix_ms as i64).abs() < 500,
+            "back-dated wall_ms ({}) is ~the kill instant ({kill_unix_ms})",
+            m[0].0
+        );
+        assert_eq!(m[0].1, "chaos kill_worker(b2bua-worker-0)");
+        assert_eq!(m[1].1, "chaos kill_proxy");
+        // The no-ts marker is stamped at receipt (~now), ~1.5 s AFTER the back-dated
+        // one — proving record_at actually back-dated rather than stamping now.
+        assert!(m[1].0 >= kill_unix_ms as i64, "no-ts marker stamped at receipt (now)");
+        assert!(m[1].0 - m[0].0 >= 1_000, "no-ts receipt is ~1.5 s after the back-dated kill");
+    }
+
+    #[tokio::test]
+    async fn empty_log_is_always_clear() {
+        let log = test_log();
         let now = Instant::now();
-        assert_eq!(log.classify(now, now), ChaosTag::Clear);
+        assert_eq!(log.classify_call(now, now, &[]), ChaosTag::Clear);
         assert_eq!(log.total(), 0);
     }
 
-    #[test]
-    fn ring_is_bounded_but_total_is_monotonic() {
-        let log = ChaosLog::new(Duration::from_millis(10));
+    #[tokio::test]
+    async fn ring_is_bounded_but_total_is_monotonic() {
+        let log = test_log();
         for _ in 0..300 {
             log.record("kill_worker", None);
         }

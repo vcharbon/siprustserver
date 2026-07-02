@@ -116,6 +116,17 @@ pub fn render_html(doc: &SeqDoc) -> String {
         .map(|d| format!("<p class=\"desc\">{}</p>", escape(d)))
         .unwrap_or_default();
 
+    // When the doc is wall-clock-aligned, state the absolute anchor so every
+    // relative `T+…` stamp maps to a real UTC instant (the "proper reference"
+    // for correlating a callflow to external events like a chaos kill).
+    let timeref = match doc.epoch_base_ms {
+        Some(_) => format!(
+            "<p class=\"desc\">Timeline t0 = <b>{}</b> (UTC) — all <span class=\"ts\">T+…</span> are relative to this; absolute UTC shown per message.</p>",
+            crate::format_epoch_utc(doc.epoch_at(base).unwrap_or(base))
+        ),
+        None => String::new(),
+    };
+
     format!(
         r#"<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -170,6 +181,7 @@ pub fn render_html(doc: &SeqDoc) -> String {
     <h1>Unified sequence: {title}</h1>
     <p>Status: <span class="status">{status}</span> &middot; {anomaly_count} anomalies recorded</p>
     {desc}
+    {timeref}
     <div class="legend">
       <span><i class="swatch" style="border-top-color:{SIP_COLOR}"></i>SIP</span>
       <span><i class="swatch" style="border-top-color:{REPL_COLOR};border-top-style:dashed"></i>Replication (dashed; hue = per-socket connection)</span>
@@ -296,6 +308,17 @@ pub fn render_embed(doc: &SeqDoc) -> String {
     )
 }
 
+/// The per-row timestamp label: relative `T+…`, plus the absolute UTC instant
+/// when the doc is wall-clock-aligned (so a frame — or a chaos-marker band —
+/// carries a real time that correlates to external events).
+fn ts_label(doc: &SeqDoc, at_ms: i64, base: i64) -> String {
+    let rel = format_relative(at_ms - base);
+    match doc.epoch_at(at_ms) {
+        Some(e) => format!("{rel} · {}", crate::format_epoch_utc(e)),
+        None => rel,
+    }
+}
+
 fn svg_markup(
     doc: &SeqDoc,
     rows: &[&SeqRow],
@@ -343,7 +366,7 @@ fn svg_markup(
     // ties a diagram `.seq-msg` to its `#evt-{ord}` payload.
     for (ord, row) in rows.iter().enumerate() {
         let y = TOP_PAD + (ord as i64) * ROW_GAP + ROW_GAP / 2;
-        let ts = format_relative(row.at_ms - base);
+        let ts = ts_label(doc, row.at_ms, base);
         match row.kind {
             RowKind::Lifecycle => {
                 // Full-width band — not clickable, carries no payload.
@@ -469,7 +492,7 @@ fn svg_markup(
 fn render_payloads(doc: &SeqDoc, rows: &[&SeqRow], base: i64) -> String {
     let mut out = String::new();
     for (ord, row) in rows.iter().enumerate() {
-        let ts = format_relative(row.at_ms - base);
+        let ts = ts_label(doc, row.at_ms, base);
         match row.kind {
             RowKind::Lifecycle => {}
             RowKind::Sip { delivered } | RowKind::Repl { delivered } => {

@@ -70,7 +70,59 @@ Key flags: `--cps`, `--duration`, `--max-in-flight`, `--target`, `--bind-ip`,
 `--base-port` (uac=base, uas=base+1, refer=base+2), `--correlation-header`
 (default `X-Loadgen-Id`), `--route-pin-to-uas`, `--scenario name=weight`
 (repeatable; omit for the default mix), `--out-dir`, `--metrics-addr`
-(default `0.0.0.0:9300`), `--sample-cap`. Run `--help` for the full list.
+(default `0.0.0.0:9300`), `--sample-cap`, `--drop-rate` / `--drop` /
+`--auto-retransmit` (see *Packet loss + auto-retransmit* below). Run `--help` for
+the full list.
+
+### Packet loss + auto-retransmit (robustness testing)
+
+Two default-off knobs let you exercise the SUT (and the loadgen itself) against a
+lossy fabric — an un-tuned run is byte-for-byte the historic behaviour.
+
+- **`--drop-rate <f>`** (or **`--drop`** = the `0.001` default, 1/1000 so
+  `P(3 drops in a row) ≈ 1e-9`): each datagram this call's mux endpoints send OR
+  receive is independently dropped with probability `f`. Dropped datagrams are
+  counted in `loadgen_drop_total{dir="out|in"}`. **Without** retransmit a single
+  drop fails the call (the harness UAs are scripted, fire-and-forget), so this
+  measures how loss-fragile a raw run is.
+- **`--auto-retransmit`**: turns on a per-call SIP transaction engine in the mux
+  that recovers loss on real timers — **requests** (INVITE Timer A, non-INVITE
+  Timer E) retransmitted until answered; **INVITE answers** (2xx) retransmitted
+  (Timer G) until the ACK; **our ACK** re-sent on a retransmitted 2xx; **non-INVITE
+  answers** re-sent when the peer retransmits the request; and the resulting
+  **inbound duplicates absorbed** so the strict scripted `expect` never chokes.
+  Retransmits are themselves subject to `--drop-rate`, so recovery is geometric
+  (the point of the 1/1000 default). This is the loadgen's own safety net; the SUT
+  still does its own retransmission independently.
+
+Both are **per-scenario overridable** inside a `--scenario` spec, after the weight:
+
+```bash
+# global 1/1000 loss + recovery, but hammer reinvite at 2/1000 with recovery,
+# and leave options_hold lossless:
+./target/release/loadgen --target … --bind-ip … --drop --auto-retransmit \
+  --scenario basic_call=4 \
+  --scenario reinvite=2,drop=0.002,retransmit \
+  --scenario options_hold=1,drop=0
+```
+
+Note: recovery needs headroom in `--recv-timeout-ms` (default 5000) — a datagram
+must be retransmitted and answered inside one recv window, and a two-hop path
+(alice→SUT→bob) can need recovery on **both** hops, so keep the timeout wide when
+running a heavy loss rate.
+
+**The `18x` ringing provisional is exempt from recovery** — it is a NON-PRACK,
+best-effort message (RFC 3261 §13.2.2.4: the dialog/ACK rides the 2xx, a lost 180
+does not fail the call). So a dropped `18x` is *expected*, not a failed call: the
+caller tolerates its absence and proceeds to the `200`. Instead of failing the
+call, the driver tracks the **cross-call delivery rate** and exports it:
+
+- `loadgen_ringing_expected_total` — calls that reached the ring→answer step.
+- `loadgen_ringing_received_total` — of those, how many saw their `18x`.
+
+`received / expected` should stay **> 99%** (at the 1/1000 default it is ~99.8%);
+a value well below that is a *systemic* 18x regression (a real bug), unlike one
+dropped 180. The endurance harness gates on this ratio.
 
 ### Realistic timers + the long recorded call
 
@@ -152,15 +204,21 @@ kill instant via **`POST /chaos?type=<kind>&target=<who>`** (same socket as
 `/metrics`; the endurance harness does this in `loadgen_chaos_flag`). Each
 finished call is then auto-classified on the `chaos` label:
 
-- **`chaos="near"`** — the call's lifetime overlapped an injected fault within
-  `--chaos-tolerance-ms` (default 500). Likely acceptable kill collateral
-  (in-setup at the kill → 408, etc.) — **counted, but not hand-triaged.**
-- **`chaos="clear"`** — no fault overlapped. A genuine SUT signal.
+- **`chaos="near"`** — an injected fault landed on a *fragile moment* of the
+  call: within `--chaos-phase-tolerance-ms` (default 200) of a dialog-state
+  transition (connected/reinvited/transferred/…), or mid-setup before it
+  connected. The state had no time to propagate and SIP retransmission normally
+  recovers it → likely acceptable kill collateral (in-setup at the kill → 408,
+  etc.) — **counted, but not hand-triaged.**
+- **`chaos="clear"`** — the call was stably connected across the fault (or none
+  overlapped). A genuine SUT signal.
 
-The loadgen timestamps the marker on its **own** clock (the same one its calls
-use), so the overlap is exact — no Call-ID/tag ms-base reconciliation. A
-post-reboot call (created seconds after the worker came back) is `clear`, so a
-reclaim-path defect stays visible. **Triage `loadgen_calls_total{class="rfc_audit_fail",chaos="clear"}`**
+The loadgen timestamps the marker on its **own** clock — the single process-wide
+`Clock::system()` the calls also record on — so the overlap is exact (no
+Call-ID/tag ms-base reconciliation) and the marker renders on the very axis the
+frames do, even if the host wall clock steps mid-run. A post-reboot call (created
+seconds after the worker came back) is `clear`, so a reclaim-path defect stays
+visible. **Triage `loadgen_calls_total{class="rfc_audit_fail",chaos="clear"}`**
 and the `callflows/<sc>/<class>/clear/` flows; revisit `near` only if wanted.
 
 Sampling is bounded: a small fraction of calls record their trace (`--sample-cap`

@@ -7,6 +7,7 @@
 //! (CANCEL/BYE) however it ended, classifies the result, and records it —
 //! optionally projecting a sampled callflow (recording layered on the mux).
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use futures::FutureExt;
 use scenario_harness::AgentBinder;
+use sip_clock::Clock;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::chaos::{ChaosLog, ChaosTag};
@@ -38,6 +40,10 @@ pub struct MuxTransport {
     pub correlation: Correlation,
     /// Per-recv wall-clock timeout.
     pub recv_timeout: Duration,
+    /// The one process-wide clock every per-call binder records on (created once
+    /// at startup, shared with the chaos log), so all call timelines — and the
+    /// chaos markers — sit on a single monotonic-anchored axis.
+    pub clock: Clock,
 }
 
 /// Static per-call routing config (shared `Arc` across all calls).
@@ -65,6 +71,21 @@ pub struct CallConfig {
     pub teardown_quiesce: Duration,
 }
 
+/// Robustness knobs applied per call, resolved per scenario (a global default
+/// overridden by any per-scenario entry). Both default off, so an un-tuned run is
+/// byte-for-byte the historic behaviour.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CallTuning {
+    /// Simulated packet-drop probability on this call's mux legs (0 = off). Each
+    /// datagram is independently dropped; the SUT (and, when enabled,
+    /// auto-retransmit) is what recovers the call.
+    pub drop_rate: f64,
+    /// Whether the harness auto-retransmits per real SIP timers (Timer A/E for
+    /// requests, 2xx-until-ACK for answers) on this call — so a rare drop is
+    /// recovered instead of failing the call.
+    pub retransmit: bool,
+}
+
 /// Driver construction config.
 pub struct DriverCfg {
     pub cps: f64,
@@ -72,6 +93,12 @@ pub struct DriverCfg {
     pub max_in_flight: usize,
     pub seed: u64,
     pub call: CallConfig,
+    /// The robustness knobs applied to every call unless a per-scenario entry
+    /// overrides them.
+    pub default_tuning: CallTuning,
+    /// Per-scenario-id overrides of [`Self::default_tuning`] (keyed by the
+    /// scenario's stable id / CLI name).
+    pub tuning: HashMap<String, CallTuning>,
 }
 
 /// The load driver.
@@ -86,6 +113,8 @@ pub struct Driver {
     sem: Arc<Semaphore>,
     transport: Arc<MuxTransport>,
     call: Arc<CallConfig>,
+    default_tuning: CallTuning,
+    tuning: HashMap<String, CallTuning>,
     /// Optional chaos-marker log: when set, each finished call is classified
     /// near/clear against the injected-fault markers (the chaos correlation).
     chaos: Option<Arc<ChaosLog>>,
@@ -144,8 +173,16 @@ impl Driver {
             sem: Arc::new(Semaphore::new(cfg.max_in_flight)),
             transport,
             call: Arc::new(cfg.call),
+            default_tuning: cfg.default_tuning,
+            tuning: cfg.tuning,
             chaos: None,
         }
+    }
+
+    /// Resolve the [`CallTuning`] for a scenario: its per-id override if any, else
+    /// the global default.
+    fn tuning_for(&self, id: &str) -> CallTuning {
+        self.tuning.get(id).copied().unwrap_or(self.default_tuning)
     }
 
     /// Attach a [`ChaosLog`] so finished calls are tagged near/clear against the
@@ -218,12 +255,14 @@ impl Driver {
                     continue;
                 }
             };
+            let tuning = self.tuning_for(scenario.id());
             tokio::spawn(run_one(
                 scenario,
                 self.reporter.clone(),
                 self.transport.clone(),
                 self.call.clone(),
                 self.seed,
+                tuning,
                 self.chaos.clone(),
                 permit,
             ));
@@ -236,12 +275,14 @@ impl Driver {
 
 /// One call, start to finish. `Send + 'static`, so it runs on the shared
 /// multi-threaded runtime.
+#[allow(clippy::too_many_arguments)] // per-call context threaded explicitly (no shared struct)
 async fn run_one(
     scenario: Arc<dyn LoadScenario>,
     reporter: Arc<Reporter>,
     transport: Arc<MuxTransport>,
     call: Arc<CallConfig>,
     seed_base: u64,
+    tuning: CallTuning,
     chaos: Option<Arc<ChaosLog>>,
     _permit: OwnedSemaphorePermit,
 ) {
@@ -260,8 +301,18 @@ async fn run_one(
     }
 
     let record = reporter.should_record(id);
-    let mux_net = transport.core.network(routing);
-    let binder = AgentBinder::mux(Arc::new(mux_net), transport.recv_timeout, record);
+    // Simulated packet loss + auto-retransmit both ride the mux transport (the mux
+    // dispatcher is the background pump that reacts to inbound datagrams). The loss
+    // RNG is seeded off the call seed so a run is reproducible; 0 rate is a no-op,
+    // and retransmit off leaves the transport untouched.
+    let mux_net = transport.core.network_tuned(
+        routing,
+        tuning.drop_rate,
+        tuning.retransmit,
+        next_seed(seed_base),
+    );
+    let binder =
+        AgentBinder::mux(Arc::new(mux_net), transport.clock.clone(), transport.recv_timeout, record);
     binder.seed_ids(next_seed(seed_base));
 
     let alice = binder.agent("alice", &transport.uac_addr.to_string()).await;
@@ -323,6 +374,9 @@ async fn run_one(
     let class = ResultClass::from(&outcome);
     let e2e = ctx.elapsed();
     let checkpoints = ctx.take_checkpoints();
+    // Fold this call's 18x outcome into the cross-call ringing-delivery gate (a
+    // dropped non-PRACK 18x is expected, so it is a rate, not a per-call failure).
+    reporter.record_ringing(ctx.ringing());
 
     // Classify the call near/clear against the injected-fault markers using the
     // per-phase rule: `Near` iff a fault landed on a dialog-state transition
@@ -348,7 +402,11 @@ async fn run_one(
         // Thread the failure reason into the rendered callflow so a sampled NOK
         // page explains WHY (header banner + an explicit anomaly), not just "FAIL".
         let html = if binder.is_recording() {
-            binder.render_html(id, class.is_ok(), detail.as_deref())
+            // Pass the chaos markers so a sampled NOK flow renders the kill
+            // instant(s) in its window as Lifecycle bands (absolute UTC, on the
+            // call's wall-clock timeline) — see `ChaosLog::markers`.
+            let markers = chaos.as_ref().map(|c| c.markers()).unwrap_or_default();
+            binder.render_html(id, class.is_ok(), detail.as_deref(), &markers)
         } else {
             None
         };

@@ -20,9 +20,10 @@ use std::time::Duration;
 
 use clap::Parser;
 use loadgen::{
-    by_id, default_scenarios, serve_metrics, CallConfig, ChaosLog, Correlation, Driver, DriverCfg,
-    EndpointSpec, LoadScenario, MuxCore, MuxTransport, Reporter, ReporterCfg, Role,
+    by_id, default_scenarios, serve_metrics, CallConfig, CallTuning, ChaosLog, Correlation, Driver,
+    DriverCfg, EndpointSpec, LoadScenario, MuxCore, MuxTransport, Reporter, ReporterCfg, Role,
 };
+use sip_clock::Clock;
 
 #[derive(Parser)]
 #[command(name = "loadgen", about = "SIP load generator (multiplexed SIPp substitute)")]
@@ -66,9 +67,6 @@ struct Args {
     /// endpoint (`POST /chaos?type=<kind>&target=<who>`) on.
     #[arg(long, default_value = "0.0.0.0:9300")]
     metrics_addr: SocketAddr,
-    /// Coarse chaos correlation tolerance (ms): the call-lifetime fallback window.
-    #[arg(long, default_value_t = 500)]
-    chaos_tolerance_ms: u64,
     /// Per-phase chaos tolerance (ms): a call is bucketed `chaos="near"` when an
     /// injected fault lands within this of a dialog-state transition (connected/
     /// reinvited/transferred/…) or mid-setup — the "state had no time to propagate,
@@ -106,25 +104,103 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     report_interval_secs: u64,
     /// Scenario weights, repeatable: `--scenario basic_call=4 --scenario refer=1`.
+    /// A spec may carry per-scenario robustness overrides after the weight:
+    /// `--scenario basic_call=4,drop=0.002,retransmit` (drop rate + auto-retransmit
+    /// just for that scenario, overriding the global `--drop-rate`/`--auto-retransmit`).
     #[arg(long = "scenario")]
     scenarios: Vec<String>,
+    /// Simulated packet-drop probability applied to every call's mux legs (0 =
+    /// off). Each datagram (in and out) is independently dropped; the SUT's
+    /// transaction layer and, with `--auto-retransmit`, the harness recover it.
+    /// Per-scenario override: `--scenario basic_call=4,drop=0.002`.
+    #[arg(long, default_value_t = 0.0)]
+    drop_rate: f64,
+    /// Shorthand for `--drop-rate 0.001` (the default 1/1000 loss, so P(3 drops in
+    /// a row) ≈ 1e-9). Ignored when `--drop-rate` is set > 0.
+    #[arg(long, default_value_t = false)]
+    drop: bool,
+    /// Auto-retransmit lost signaling per real SIP timers (Timer A/E for requests,
+    /// 2xx-until-ACK for answers) so a rare drop is recovered instead of failing
+    /// the call. Per-scenario override: `--scenario basic_call=4,retransmit`.
+    #[arg(long, default_value_t = false)]
+    auto_retransmit: bool,
+}
+
+/// Resolve the global default [`CallTuning`] from the loss/retransmit flags:
+/// `--drop-rate` wins; else `--drop` means the 1/1000 default; else no loss.
+fn default_tuning(args: &Args) -> CallTuning {
+    let drop_rate = if args.drop_rate > 0.0 {
+        args.drop_rate
+    } else if args.drop {
+        0.001
+    } else {
+        0.0
+    };
+    CallTuning { drop_rate, retransmit: args.auto_retransmit }
+}
+
+/// Parse one `--scenario` spec (`name[=weight][,drop=<f>][,retransmit[=<bool>]]`)
+/// into its resolved scenario, weight, and per-scenario [`CallTuning`] (starting
+/// from `base` and overridden by the trailing tokens).
+fn parse_scenario_spec(
+    spec: &str,
+    base: CallTuning,
+) -> (String, Arc<dyn LoadScenario>, f64, CallTuning) {
+    let mut parts = spec.split(',');
+    let head = parts.next().unwrap_or(spec);
+    let (name, weight) = head
+        .split_once('=')
+        .map(|(n, w)| (n, w.parse::<f64>().unwrap_or(1.0)))
+        .unwrap_or((head, 1.0));
+    let s = by_id(name).unwrap_or_else(|| panic!("unknown scenario {name:?}"));
+    let mut t = base;
+    for tok in parts {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        match tok.split_once('=') {
+            Some(("drop", v)) => {
+                t.drop_rate = v.parse().unwrap_or_else(|_| panic!("bad drop rate in {spec:?}"))
+            }
+            Some(("retransmit", v)) => {
+                t.retransmit =
+                    v.parse().unwrap_or_else(|_| panic!("bad retransmit bool in {spec:?}"))
+            }
+            None if tok == "retransmit" => t.retransmit = true,
+            None if tok == "drop" => {
+                if t.drop_rate <= 0.0 {
+                    t.drop_rate = 0.001
+                }
+            }
+            _ => panic!("unknown scenario tuning token {tok:?} in {spec:?}"),
+        }
+    }
+    (name.to_string(), s, weight, t)
 }
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> std::io::Result<()> {
     let args = Args::parse();
 
+    // ONE process-wide monotonic-anchored clock, created here and shared with the
+    // mux, every per-call binder, and the chaos log — so all call timelines and
+    // the chaos markers ride a single axis (and loadgen reads no raw SystemTime on
+    // its own timeline). See `sip_clock::Clock`.
+    let clock = Clock::system();
+
+    let base_tuning = default_tuning(&args);
+    let mut tuning: std::collections::HashMap<String, CallTuning> = std::collections::HashMap::new();
     let scenarios: Vec<(Arc<dyn LoadScenario>, f64)> = if args.scenarios.is_empty() {
+        // No explicit scenario set → the default mix; the global tuning applies to
+        // all of them via `DriverCfg::default_tuning` (no per-id overrides).
         default_scenarios()
     } else {
         args.scenarios
             .iter()
             .map(|spec| {
-                let (name, weight) = spec
-                    .split_once('=')
-                    .map(|(n, w)| (n, w.parse::<f64>().unwrap_or(1.0)))
-                    .unwrap_or((spec.as_str(), 1.0));
-                let s = by_id(name).unwrap_or_else(|| panic!("unknown scenario {name:?}"));
+                let (name, s, weight, t) = parse_scenario_spec(spec, base_tuning);
+                tuning.insert(name, t);
                 (s, weight)
             })
             .collect()
@@ -147,6 +223,7 @@ async fn main() -> std::io::Result<()> {
         256,
         args.sample_cap as usize,
         recv_timeout,
+        clock.clone(),
     )
     .await?;
 
@@ -157,6 +234,7 @@ async fn main() -> std::io::Result<()> {
         refer_addr: refer,
         correlation,
         recv_timeout,
+        clock: clock.clone(),
     });
 
     let reporter = Arc::new(Reporter::new(ReporterCfg {
@@ -166,11 +244,8 @@ async fn main() -> std::io::Result<()> {
         background_record_every: args.background_record_every,
     }));
 
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(1)
-        .max(1);
+    // Per-run RNG seed off the shared clock (varies per run; no raw SystemTime).
+    let seed = (clock.now_ms() as u64).max(1);
 
     let cfg = DriverCfg {
         cps: args.cps,
@@ -190,12 +265,15 @@ async fn main() -> std::io::Result<()> {
             long_hold: Duration::from_secs(args.long_hold_secs),
             teardown_quiesce: Duration::from_millis(250),
         },
+        default_tuning: base_tuning,
+        tuning,
     };
 
     // Chaos correlation: the marker log the `POST /chaos` endpoint feeds and the
-    // driver classifies each finished call against (near/clear).
+    // driver classifies each finished call against (near/clear). Shares the run's
+    // clock so a marker's wall-clock lands on the same axis as the sampled frames.
     let chaos = Arc::new(
-        ChaosLog::new(Duration::from_millis(args.chaos_tolerance_ms))
+        ChaosLog::new(clock.clone())
             .with_phase_tolerance(Duration::from_millis(args.chaos_phase_tolerance_ms)),
     );
 

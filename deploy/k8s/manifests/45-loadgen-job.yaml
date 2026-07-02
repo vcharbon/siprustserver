@@ -86,6 +86,15 @@ spec:
             # and let the checkpoint histograms MEASURE it instead of failing it.
             - "--recv-timeout-ms"
             - "${LOADGEN_RECV_TIMEOUT_MS}"
+            # Robustness: inject a small per-datagram packet loss and recover it on
+            # real SIP timers, so the run continuously exercises retransmission (and
+            # the b2bua's own) against a lossy fabric. The non-PRACK 18x is exempt
+            # from recovery (best-effort) — its delivery is tracked as a cross-call
+            # gate (loadgen_ringing_{received,expected}_total, > 99%). Set
+            # LOADGEN_DROP_RATE=0 for a lossless run.
+            - "--drop-rate"
+            - "${LOADGEN_DROP_RATE}"
+            - "--auto-retransmit"
             # Scenario mix. long_call is the small (~2%) recorded tail; REFER is
             # wired on (the cluster b2bua authorizes refer_key "refer-allow-c").
             # Set LOADGEN_W_REFER=0 to drop it.
@@ -108,11 +117,10 @@ spec:
             - "${LOADGEN_REPORT_INTERVAL}"
             - "--metrics-addr"
             - "0.0.0.0:9300"
-            # Chaos correlation: a call whose lifetime is within this of an
-            # injected fault (flagged via POST /chaos at the kill) is bucketed
-            # chaos="near" (likely acceptable kill collateral), else "clear".
-            - "--chaos-tolerance-ms"
-            - "${LOADGEN_CHAOS_TOL_MS}"
+            # Chaos correlation: a call whose dialog-state transition (or setup)
+            # falls within this of an injected fault (flagged via POST /chaos at
+            # the kill) is bucketed chaos="near" (likely acceptable kill
+            # collateral), else "clear".
             - "--chaos-phase-tolerance-ms"
             - "${LOADGEN_CHAOS_PHASE_TOL_MS}"
           env:

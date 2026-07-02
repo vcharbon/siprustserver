@@ -245,11 +245,6 @@ LOADGEN_MAX_INFLIGHT="${LOADGEN_MAX_INFLIGHT:-4000}"
 LOADGEN_RECORD_EVERY="${LOADGEN_RECORD_EVERY:-1}"
 LOADGEN_SAMPLE_CAP="${LOADGEN_SAMPLE_CAP:-50}"
 LOADGEN_REPORT_INTERVAL="${LOADGEN_REPORT_INTERVAL:-60}"
-# Chaos correlation window (ms): a call within this of an injected fault (flagged
-# via loadgen_chaos_flag → POST /chaos) is bucketed chaos="near". 500ms semantic
-# window + headroom for port-forward/delete skew; the dominant signal is anyway
-# call-lifetime overlap, not this edge tolerance.
-LOADGEN_CHAOS_TOL_MS="${LOADGEN_CHAOS_TOL_MS:-1500}"
 # Per-phase (dialog-state-transition) tolerance: a fault landing within this of a
 # transition (connected/reinvited/transferred) or mid-setup = acceptable collateral
 # (the state had no time to propagate; SIP retransmission recovers it). A stably-
@@ -1382,7 +1377,7 @@ launch_loadgen() {
          LOADGEN_RING_MS LOADGEN_TALK_MS LOADGEN_GAP_MS LOADGEN_LONG_HOLD_SECS LOADGEN_RECV_TIMEOUT_MS \
          LOADGEN_DROP_RATE \
          LOADGEN_W_BASIC LOADGEN_W_REINVITE LOADGEN_W_REFER LOADGEN_W_LONG \
-         LOADGEN_RECORD_EVERY LOADGEN_SAMPLE_CAP LOADGEN_REPORT_INTERVAL LOADGEN_CHAOS_TOL_MS LOADGEN_CHAOS_PHASE_TOL_MS \
+         LOADGEN_RECORD_EVERY LOADGEN_SAMPLE_CAP LOADGEN_REPORT_INTERVAL LOADGEN_CHAOS_PHASE_TOL_MS \
          LOADGEN_CPU_REQ LOADGEN_CPU_LIM LOADGEN_MEM_REQ LOADGEN_MEM_LIM \
          PROXY_TARGET SIP_PORT
   kubectl -n "$NS" delete job "$LOADGEN_JOB_NAME" --ignore-not-found >/dev/null 2>&1 || true

@@ -18,6 +18,25 @@ use sip_net::RecordedSipEntry;
 
 use super::wire::{facets, wire_text};
 
+/// Wall-clock + chaos-marker overlay for a rendered callflow.
+///
+/// Empty ([`TimelineOverlay::default`]) on the paused-clock harness path (the
+/// recording's `at_ms` is virtual time there, and there are no externally-flagged
+/// faults). The load driver supplies a populated overlay: its recording rides
+/// `Clock::system()` so `at_ms` is real wall-clock epoch ms (`wall_clock = true`
+/// → the doc renders absolute UTC), and `markers` are the injected-fault instants
+/// flagged via `POST /chaos` (rendered as `Lifecycle` bands so a NOK flow shows
+/// exactly when the kill landed relative to its frames).
+#[derive(Default, Clone)]
+pub struct TimelineOverlay {
+    /// `true` when `RecordedSipEntry::sent_ms` is real wall-clock epoch ms, so
+    /// the rendered doc carries an absolute-UTC reference next to each `T+…`.
+    pub wall_clock: bool,
+    /// Injected-fault markers as `(wall_clock_epoch_ms, label)`. Filtered to the
+    /// call's timeline window and emitted as `RowKind::Lifecycle` bands.
+    pub markers: Vec<(i64, String)>,
+}
+
 /// Build a single-plane (SIP) [`SeqDoc`] from a run's recording.
 ///
 /// `extra_anomalies` are folded into the doc on top of the recorder's structural
@@ -33,9 +52,72 @@ pub fn sip_doc(
     passed: bool,
     extra_anomalies: &[Anomaly],
 ) -> SeqDoc {
+    sip_doc_with_overlay(
+        scenario_name,
+        description,
+        entries,
+        scenario,
+        passed,
+        extra_anomalies,
+        &TimelineOverlay::default(),
+    )
+}
+
+/// [`sip_doc`] plus a wall-clock/chaos [`TimelineOverlay`] — the load-driver entry
+/// point. Adds an absolute-UTC reference (when `overlay.wall_clock`) and renders
+/// each in-window chaos marker as a `Lifecycle` band positioned at the kill
+/// instant on the call's own timeline.
+pub fn sip_doc_with_overlay(
+    scenario_name: &str,
+    description: Option<&str>,
+    entries: &[RecordedSipEntry],
+    scenario: &RecordedScenario,
+    passed: bool,
+    extra_anomalies: &[Anomaly],
+    overlay: &TimelineOverlay,
+) -> SeqDoc {
     let lanes = project_lanes(&scenario.lanes, entries);
     let base = entries.iter().map(|e| e.sent_ms as i64).min().unwrap_or(0);
-    let rows = entries.iter().map(|e| project_entry(e, base)).collect();
+    let mut rows: Vec<SeqRow> = entries.iter().map(|e| project_entry(e, base)).collect();
+
+    // Overlay the injected-fault markers as Lifecycle bands. Only those within
+    // the call's timeline (± a small margin so a kill just before setup or just
+    // after the last frame still shows) are rendered, so an unrelated kill from
+    // another call's window doesn't clutter this flow. A marker is positioned by
+    // borrowing the `seq` of the last frame at/▸before it (so the shared
+    // `(seq, at_ms)` sort drops the band exactly between the surrounding frames).
+    if !overlay.markers.is_empty() && !entries.is_empty() {
+        const MARGIN_MS: i64 = 2_000;
+        let last = entries
+            .iter()
+            .map(|e| e.received_ms.unwrap_or(e.sent_ms) as i64)
+            .max()
+            .unwrap_or(base);
+        let (lo, hi) = (base - MARGIN_MS, last + MARGIN_MS);
+        for (wall_ms, label) in &overlay.markers {
+            let at = *wall_ms;
+            if at < lo || at > hi {
+                continue;
+            }
+            // seq of the last frame at/before the marker (0 if it precedes all).
+            let seq = entries
+                .iter()
+                .filter(|e| (e.sent_ms as i64) <= at)
+                .map(|e| e.seq)
+                .max()
+                .unwrap_or(0);
+            rows.push(SeqRow {
+                at_ms: at,
+                seq,
+                from: String::new(),
+                to: None,
+                label: label.clone(),
+                detail: None,
+                conn: None,
+                kind: RowKind::Lifecycle,
+            });
+        }
+    }
     let anomalies: Vec<Anomaly> = scenario
         .anomalies
         .iter()
@@ -60,7 +142,7 @@ pub fn sip_doc(
     // carry the same finding.
     let mut deduped: Vec<Anomaly> = Vec::with_capacity(anomalies.len() + extra_anomalies.len());
     let mut seen = std::collections::HashSet::new();
-    for a in extra_anomalies.iter().cloned().chain(anomalies.into_iter()) {
+    for a in extra_anomalies.iter().cloned().chain(anomalies) {
         if seen.insert((a.check.clone(), a.detail.clone(), a.lane.clone())) {
             deduped.push(a);
         }
@@ -90,6 +172,11 @@ pub fn sip_doc(
     // construction). Advisory findings are informational and do not flip it.
     let gating = anomalies.iter().any(|a| a.is_gating());
 
+    // When the recording rides the system wall clock (`at_ms` is real epoch ms),
+    // anchor the doc to it so the renderers show absolute UTC. `at_ms == base`
+    // already IS the epoch, so the anchor is simply `base`.
+    let epoch_base_ms = overlay.wall_clock.then_some(base);
+
     SeqDoc {
         title: scenario_name.to_string(),
         description: description.map(str::to_string),
@@ -97,6 +184,7 @@ pub fn sip_doc(
         lanes,
         rows,
         anomalies,
+        epoch_base_ms,
     }
 }
 
@@ -166,5 +254,81 @@ fn project_entry(e: &RecordedSipEntry, base: i64) -> SeqRow {
         kind: RowKind::Sip {
             delivered: e.delivered,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use layer_harness::TransportKind;
+
+    fn entry(from: &str, to: &str, raw: &str, sent_ms: u64, seq: u64) -> RecordedSipEntry {
+        RecordedSipEntry {
+            from: from.parse().unwrap(),
+            to: to.parse().unwrap(),
+            raw: raw.as_bytes().to_vec(),
+            sent_ms,
+            received_ms: Some(sent_ms + 1),
+            delivered: true,
+            seq,
+        }
+    }
+
+    fn scenario() -> RecordedScenario {
+        RecordedScenario {
+            transport_kind: TransportKind::Live,
+            lanes: vec![],
+            anomalies: vec![],
+        }
+    }
+
+    #[test]
+    fn overlay_renders_in_window_marker_as_lifecycle_band_with_wall_epoch() {
+        // Two frames at wall-clock ms t0 and t0+10s.
+        let t0 = 1_782_802_100_000i64;
+        let entries = vec![
+            entry("10.0.0.1:5060", "10.0.0.2:5060", "INVITE sip:bob@x SIP/2.0\r\n", t0 as u64, 1),
+            entry("10.0.0.1:5060", "10.0.0.2:5060", "BYE sip:bob@x SIP/2.0\r\n", (t0 + 10_000) as u64, 9),
+        ];
+        // One kill inside the call window (t0 + 4s), one far outside (t0 + 60s).
+        let overlay = TimelineOverlay {
+            wall_clock: true,
+            markers: vec![
+                (t0 + 4_000, "chaos kill_worker(b2bua-worker-0)".to_string()),
+                (t0 + 60_000, "chaos kill_worker(other-window)".to_string()),
+            ],
+        };
+        let doc = sip_doc_with_overlay("reinvite", None, &entries, &scenario(), false, &[], &overlay);
+
+        // Wall-clock anchor set → renders absolute UTC.
+        assert_eq!(doc.epoch_base_ms, Some(t0));
+        // Exactly one Lifecycle band — the in-window kill; the far one is dropped.
+        let bands: Vec<&SeqRow> =
+            doc.rows.iter().filter(|r| r.kind == RowKind::Lifecycle).collect();
+        assert_eq!(bands.len(), 1, "only the in-window marker becomes a band");
+        assert_eq!(bands[0].at_ms, t0 + 4_000);
+        assert!(bands[0].label.contains("kill_worker(b2bua-worker-0)"));
+        // Positioned after the INVITE (seq 1) and before the BYE (seq 9) so the
+        // shared (seq, at_ms) sort drops it between them.
+        assert_eq!(bands[0].seq, 1, "borrows the preceding frame's seq");
+
+        // The rendered HTML carries both the absolute anchor and the band label.
+        let html = seq_report::render_html(&doc);
+        assert!(html.contains("Timeline t0"));
+        assert!(html.contains("kill_worker(b2bua-worker-0)"));
+    }
+
+    #[test]
+    fn no_overlay_is_relative_only() {
+        let entries = vec![entry(
+            "10.0.0.1:5060",
+            "10.0.0.2:5060",
+            "INVITE sip:bob@x SIP/2.0\r\n",
+            1_782_802_100_000,
+            1,
+        )];
+        let doc = sip_doc("basic_call", None, &entries, &scenario(), true, &[]);
+        assert_eq!(doc.epoch_base_ms, None, "default path stays virtual/relative");
+        assert!(!doc.rows.iter().any(|r| r.kind == RowKind::Lifecycle));
     }
 }

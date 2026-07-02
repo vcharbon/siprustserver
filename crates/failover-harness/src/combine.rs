@@ -191,6 +191,9 @@ pub fn combine_doc(
         lanes,
         rows,
         anomalies,
+        // Paused-clock failover view: `at_ms` is virtual time, so no absolute-UTC
+        // anchor (relative `T+…` only).
+        epoch_base_ms: None,
     }
 }
 

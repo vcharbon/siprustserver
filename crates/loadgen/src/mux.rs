@@ -40,13 +40,14 @@
 //! counted (`mux_orphan_total{reason}`) + bounded-sampled + dropped — never
 //! queued, never silent.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use sip_clock::Clock;
 use sip_net::queue::PacketQueue;
 use sip_net::{
     BindError, BindErrorReason, BindUdpOpts, SendError, SignalingNetwork, UdpEndpoint,
@@ -87,6 +88,37 @@ impl Correlation {
     /// The correlation token carried by `raw`, if the header is present.
     fn token(&self, raw: &[u8]) -> Option<String> {
         header_value(raw, &self.header)
+    }
+}
+
+/// A simulated packet-loss model for one call's mux endpoint. Each datagram
+/// (outbound on `send_to`, inbound on `recv`/`try_recv`) is independently dropped
+/// with probability `rate` — a per-call knob so a scenario can be stress-tested
+/// against a lossy fabric (default 1/1000 when enabled, so P(3 consecutive
+/// drops)=1e-9). `rate <= 0.0` disables it: `drops()` short-circuits with no RNG
+/// churn, so an un-tuned call pays nothing. The RNG is a per-endpoint xorshift
+/// seeded off the call seed, advanced with a relaxed atomic (a rare same-value
+/// race under concurrent send/recv is statistically irrelevant for a loss model).
+struct DropModel {
+    rate: f64,
+    state: AtomicU64,
+}
+
+impl DropModel {
+    fn new(rate: f64, seed: u64) -> Self {
+        Self { rate, state: AtomicU64::new(seed | 1) }
+    }
+    /// Whether THIS datagram is dropped. `false` (no RNG advance) when disabled.
+    fn drops(&self) -> bool {
+        if self.rate <= 0.0 {
+            return false;
+        }
+        let mut x = self.state.load(Ordering::Relaxed);
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state.store(x, Ordering::Relaxed);
+        (x as f64 / u64::MAX as f64) < self.rate
     }
 }
 
@@ -153,6 +185,13 @@ pub struct MuxStats {
     pub pending_expired: AtomicU64,
     pub inbox_drop: AtomicU64,
     pub delivered: AtomicU64,
+    /// Datagrams the per-call [`DropModel`] deliberately discarded, split by
+    /// direction — the simulated packet loss the SUT + auto-retransmit are tested
+    /// against. `out` = never hit the wire (dropped in `send_to`); `in` =
+    /// delivered to the inbox but discarded on `recv` (models a network loss just
+    /// before the app reads it).
+    pub dropped_out: AtomicU64,
+    pub dropped_in: AtomicU64,
     sample_cap: usize,
     samples: Mutex<Vec<String>>,
     /// Per-`(reason, CSeq-method)` orphan breakdown. A post-failover orphan burst
@@ -214,12 +253,25 @@ impl OrphanReason {
     }
 }
 
+/// Everything the inbound [`route`] path needs to hand a datagram to one call: its
+/// inbox, its simulated-loss model (applied above the retransmit engine), and its
+/// optional retransmit engine (present iff `--auto-retransmit` is on for the call).
+#[derive(Clone)]
+struct Delivery {
+    queue: Arc<PacketQueue>,
+    drop: Arc<DropModel>,
+    txns: Option<Arc<CallTxns>>,
+}
+
 /// One receiver bound on a socket: an inbox + its label (the agent name a
-/// [`LegPicker`] returns) + the keyset its `Drop` drains.
+/// [`LegPicker`] returns) + the keyset its `Drop` drains + the loss/retransmit
+/// state the inbound path applies once the leg arrives.
 struct ReceiverEntry {
     label: String,
     queue: Arc<PacketQueue>,
     keyset: Arc<Mutex<Vec<Key>>>,
+    drop: Arc<DropModel>,
+    txns: Option<Arc<CallTxns>>,
 }
 
 /// All receivers for one call on one socket, sharing the call token. Usually a
@@ -238,7 +290,7 @@ struct CallSlot {
 
 #[derive(Default)]
 struct SocketRegistry {
-    by_call_id: HashMap<String, Arc<PacketQueue>>,
+    by_call_id: HashMap<String, Delivery>,
     by_token: HashMap<String, CallSlot>,
 }
 
@@ -251,6 +303,9 @@ struct MuxSocket {
     correlation: Correlation,
     queue_max: usize,
     stats: Arc<MuxStats>,
+    /// The shared loadgen clock — stamps inbound `UdpPacket::arrival_ms` (ordering
+    /// hint only; `seq` is the authority) so the mux reads no raw `SystemTime`.
+    clock: Clock,
     _dispatcher: JoinHandle<()>,
 }
 
@@ -278,12 +333,14 @@ impl MuxCore {
         queue_max: usize,
         orphan_sample_cap: usize,
         pending_ttl: Duration,
+        clock: Clock,
     ) -> std::io::Result<Arc<Self>> {
         let stats = Arc::new(MuxStats::new(orphan_sample_cap));
         let mut endpoints = HashMap::new();
         for spec in specs {
             let socket = Arc::new(UdpSocket::bind(spec.addr).await?);
             let local = socket.local_addr()?;
+            let clock = clock.clone();
             let mux = Arc::new_cyclic(|weak: &std::sync::Weak<MuxSocket>| {
                 let dispatcher = tokio::spawn(dispatch_loop(weak.clone(), socket.clone()));
                 MuxSocket {
@@ -294,6 +351,7 @@ impl MuxCore {
                     correlation: correlation.clone(),
                     queue_max,
                     stats: stats.clone(),
+                    clock,
                     _dispatcher: dispatcher,
                 }
             });
@@ -334,7 +392,28 @@ impl MuxCore {
 
     /// Build a per-call [`SignalingNetwork`] view from a [`CallRouting`] (the
     /// single call token + each callee leg's label + any same-socket picker).
+    /// No simulated packet loss and no auto-retransmit (the historic behaviour).
     pub fn network(self: &Arc<Self>, routing: CallRouting) -> MuxNetwork {
+        self.network_tuned(routing, 0.0, false, 0)
+    }
+
+    /// [`network`](Self::network) with per-call robustness knobs:
+    /// - `drop_rate` (0 = off): each datagram this call's endpoints send/receive is
+    ///   independently dropped, so a scenario is exercised against a lossy fabric.
+    /// - `retransmit`: when set, the mux runs a per-call SIP transaction engine
+    ///   that retransmits lost signaling on real timers (Timer A/E for requests,
+    ///   Timer G 2xx-until-ACK for answers) and absorbs the resulting duplicates,
+    ///   so a rare drop is recovered instead of failing the call.
+    ///
+    /// `seed` seeds each endpoint's loss RNG (derive it from the per-call id seed
+    /// for reproducibility).
+    pub fn network_tuned(
+        self: &Arc<Self>,
+        routing: CallRouting,
+        drop_rate: f64,
+        retransmit: bool,
+        seed: u64,
+    ) -> MuxNetwork {
         // Per-callee-addr bind-order label queue: each `bind_udp(addr)` dispenses
         // the next declared label for that addr (so several receivers can share a
         // socket; the driver binds them in declaration order).
@@ -348,6 +427,9 @@ impl MuxCore {
             labels,
             pickers: routing.pickers,
             cursor: Mutex::new(HashMap::new()),
+            drop_rate,
+            retransmit,
+            drop_seed: AtomicU64::new(seed | 1),
         }
     }
 
@@ -388,6 +470,16 @@ impl MuxCore {
         out.push_str("# HELP loadgen_mux_delivered_total Datagrams demuxed to a call.\n");
         out.push_str("# TYPE loadgen_mux_delivered_total counter\n");
         out.push_str(&format!("loadgen_mux_delivered_total {}\n", s.delivered.load(Ordering::Relaxed)));
+        out.push_str("# HELP loadgen_drop_total Datagrams dropped by the simulated packet-loss model, by direction.\n");
+        out.push_str("# TYPE loadgen_drop_total counter\n");
+        out.push_str(&format!(
+            "loadgen_drop_total{{dir=\"out\"}} {}\n",
+            s.dropped_out.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "loadgen_drop_total{{dir=\"in\"}} {}\n",
+            s.dropped_in.load(Ordering::Relaxed)
+        ));
         out
     }
 }
@@ -432,6 +524,23 @@ pub struct MuxNetwork {
     labels: HashMap<SocketAddr, Vec<String>>,
     pickers: HashMap<SocketAddr, LegPicker>,
     cursor: Mutex<HashMap<SocketAddr, usize>>,
+    /// Per-call simulated packet-loss rate applied to every endpoint bound on
+    /// this network (0 = off). Each endpoint gets its own RNG seeded off
+    /// `drop_seed` so alice/bob/charlie drop independently.
+    drop_rate: f64,
+    /// Whether each endpoint runs the per-call SIP retransmit engine.
+    retransmit: bool,
+    drop_seed: AtomicU64,
+}
+
+impl MuxNetwork {
+    /// The next per-endpoint loss RNG seed (golden-ratio stride so alice/bob/
+    /// charlie of the same call get well-separated, non-zero seeds).
+    fn next_drop_seed(&self) -> u64 {
+        self.drop_seed
+            .fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed)
+            .wrapping_add(0x9E37_79B9_7F4A_7C15)
+    }
 }
 
 #[async_trait]
@@ -444,6 +553,13 @@ impl SignalingNetwork for MuxNetwork {
         })?;
         let queue = Arc::new(PacketQueue::new(mux.queue_max));
         let keyset = Arc::new(Mutex::new(Vec::new()));
+        // One loss model + (optional) retransmit engine per endpoint, shared
+        // between this endpoint (outbound) and the registry entry the inbound
+        // `route` path consults, so both directions and the resend tasks agree.
+        let drop = Arc::new(DropModel::new(self.drop_rate, self.next_drop_seed()));
+        let txns = self
+            .retransmit
+            .then(|| Arc::new(CallTxns::new(mux.socket.clone(), drop.clone(), mux.stats.clone())));
 
         if mux.role == Role::Callee {
             // Dispense the next declared label for this addr (bind order), so
@@ -481,7 +597,13 @@ impl SignalingNetwork for MuxNetwork {
                 // so the 4× margin holds; keep `pending_ttl >= recv_timeout`.
                 deadline: Instant::now() + pending_ttl * 4,
             });
-            slot.receivers.push(ReceiverEntry { label, queue: queue.clone(), keyset: keyset.clone() });
+            slot.receivers.push(ReceiverEntry {
+                label,
+                queue: queue.clone(),
+                keyset: keyset.clone(),
+                drop: drop.clone(),
+                txns: txns.clone(),
+            });
         }
 
         Ok(Box::new(MuxEndpoint {
@@ -492,6 +614,8 @@ impl SignalingNetwork for MuxNetwork {
             keyset,
             caller_registered: AtomicBool::new(false),
             queue_max: mux.queue_max,
+            drop,
+            txns,
         }))
     }
 
@@ -521,20 +645,51 @@ struct MuxEndpoint {
     keyset: Arc<Mutex<Vec<Key>>>,
     caller_registered: AtomicBool,
     queue_max: usize,
+    /// Simulated per-call packet loss (disabled by default), shared with this
+    /// call's [`CallTxns`] so retransmits are lossy too. Outbound loss is applied
+    /// here in `send_to`; inbound loss is applied in [`route`] (above the retransmit
+    /// engine, so a lost inbound datagram is truly gone and the peer's retransmit
+    /// re-delivers it fresh).
+    drop: Arc<DropModel>,
+    /// Per-call SIP retransmit engine (present only when `--auto-retransmit` is on
+    /// for this call). Records outbound requests/answers and drives their timers.
+    txns: Option<Arc<CallTxns>>,
 }
 
 #[async_trait]
 impl UdpEndpoint for MuxEndpoint {
     async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
         // A caller learns its own dialog key from its first outbound request
-        // (the INVITE) and registers it so responses/in-dialog demux back.
+        // (the INVITE) and registers it so responses/in-dialog demux back. This is
+        // local bookkeeping, so it happens even when the datagram is then dropped
+        // on the wire below (a real UAC that loses its INVITE still owns the dialog).
         if self.role == Role::Caller && !self.caller_registered.load(Ordering::Relaxed) {
             if let Some(cid) = call_id(buf) {
                 let mut g = self.mux.reg.lock().unwrap();
-                g.by_call_id.insert(cid.clone(), self.queue.clone());
+                g.by_call_id.insert(
+                    cid.clone(),
+                    Delivery {
+                        queue: self.queue.clone(),
+                        drop: self.drop.clone(),
+                        txns: self.txns.clone(),
+                    },
+                );
                 self.keyset.lock().unwrap().push(Key::CallId(cid));
                 self.caller_registered.store(true, Ordering::Relaxed);
             }
+        }
+        // Record the outbound message in the retransmit engine BEFORE the loss
+        // check: a dropped request is exactly what the resender must recover, and
+        // the resender re-applies the same loss model on every retry.
+        if let Some(txns) = &self.txns {
+            txns.on_outbound(buf, dst);
+        }
+        // Simulated loss: report success (the txn believes it sent) but never put
+        // the datagram on the wire — the SUT never sees it, so only auto-retransmit
+        // recovers the call.
+        if self.drop.drops() {
+            self.mux.stats.dropped_out.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
         }
         self.mux
             .socket
@@ -584,7 +739,13 @@ impl Drop for MuxEndpoint {
                 }
             }
         }
+        drop(g);
         self.queue.close();
+        // Stop this call's resender tasks now (call ended) rather than letting them
+        // run to their transaction timeout — bounded task lifetime under load.
+        if let Some(txns) = &self.txns {
+            txns.shutdown();
+        }
     }
 }
 
@@ -599,14 +760,18 @@ async fn dispatch_loop(mux: std::sync::Weak<MuxSocket>, socket: Arc<UdpSocket>) 
 }
 
 fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
-    let pkt = || UdpPacket { raw: raw.to_vec(), src, arrival_ms: now_ms() };
     let cid = call_id(raw);
     let mut g = mux.reg.lock().unwrap();
 
-    // 1. Known dialog (Call-ID we minted or already promoted).
+    // 1. Known dialog (Call-ID we minted or already promoted). Clone the
+    //    `Delivery` out and RELEASE the registry lock before running the loss
+    //    check + retransmit engine (which may send on the socket) — never hold
+    //    `reg` across a send.
     if let Some(cid) = &cid {
-        if let Some(q) = g.by_call_id.get(cid) {
-            deliver(&mux.stats, q, pkt());
+        if let Some(d) = g.by_call_id.get(cid) {
+            let d = d.clone();
+            drop(g);
+            handle_inbound(mux, &d, raw, src);
             return;
         }
     }
@@ -663,16 +828,41 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
             },
         };
         slot.arrived = true;
-        let queue = slot.receivers[idx].queue.clone();
+        // Snapshot this receiver's delivery state, then (under the same lock)
+        // promote token→Call-ID so in-dialog traffic demuxes directly.
+        let delivery = {
+            let recv = &slot.receivers[idx];
+            Delivery { queue: recv.queue.clone(), drop: recv.drop.clone(), txns: recv.txns.clone() }
+        };
         if let Some(cid) = &cid {
             slot.receivers[idx].keyset.lock().unwrap().push(Key::CallId(cid.clone()));
-            g.by_call_id.insert(cid.clone(), queue.clone());
+            g.by_call_id.insert(cid.clone(), delivery.clone());
         }
-        deliver(&mux.stats, &queue, pkt());
+        drop(g);
+        handle_inbound(mux, &delivery, raw, src);
         return;
     }
     // 3. Not a known dialog and not an initial INVITE → a late straggler.
     mux.stats.orphan(OrphanReason::Stray, raw);
+}
+
+/// Hand one resolved-to-a-call datagram to the app: apply simulated inbound loss
+/// (above the retransmit engine, so a lost datagram is truly gone and the peer's
+/// retransmit re-delivers it fresh), then let the retransmit engine dedup /
+/// stop-resenders / re-answer; a datagram the engine ABSORBS (a duplicate the app
+/// must not see) is not enqueued.
+fn handle_inbound(mux: &MuxSocket, d: &Delivery, raw: &[u8], src: SocketAddr) {
+    if d.drop.drops() {
+        mux.stats.dropped_in.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    if let Some(txns) = &d.txns {
+        if !txns.on_inbound(raw, src) {
+            return; // duplicate absorbed (engine did any re-ACK / re-answer)
+        }
+    }
+    let arrival_ms = mux.clock.now_ms().max(0) as u64;
+    deliver(&mux.stats, &d.queue, UdpPacket { raw: raw.to_vec(), src, arrival_ms });
 }
 
 fn deliver(stats: &MuxStats, q: &PacketQueue, pkt: UdpPacket) {
@@ -715,13 +905,6 @@ async fn reap_loop(sockets: Vec<Arc<MuxSocket>>, stats: Arc<MuxStats>, ttl: Dura
 // Minimal SIP scanners (ASCII headers; cheap, no full parse on the hot path)
 // ---------------------------------------------------------------------------
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 fn as_str(raw: &[u8]) -> std::borrow::Cow<'_, str> {
     String::from_utf8_lossy(raw)
 }
@@ -749,7 +932,7 @@ fn cseq_method(raw: &[u8]) -> &'static str {
     for line in as_str(raw).lines() {
         let l = line.trim();
         if l.len() >= 5 && l[..5].eq_ignore_ascii_case("cseq:") {
-            let m = l[5..].trim().split_whitespace().nth(1).unwrap_or("");
+            let m = l[5..].split_whitespace().nth(1).unwrap_or("");
             return match m.to_ascii_uppercase().as_str() {
                 "INVITE" => "INVITE",
                 "ACK" => "ACK",
@@ -823,4 +1006,326 @@ fn header_value(raw: &[u8], name: &str) -> Option<String> {
 
 fn call_id(raw: &[u8]) -> Option<String> {
     header_value(raw, "call-id").or_else(|| header_value(raw, "i"))
+}
+
+/// Whether `raw` is a SIP response (status line) vs a request.
+fn is_response(raw: &[u8]) -> bool {
+    first_line(raw).starts_with("SIP/2.0")
+}
+
+/// The response status code (`200` from `SIP/2.0 200 OK`), or `None` for a request.
+fn resp_status(raw: &[u8]) -> Option<u16> {
+    let line = first_line(raw);
+    if !line.starts_with("SIP/2.0") {
+        return None;
+    }
+    line.split_whitespace().nth(1).and_then(|s| s.parse().ok())
+}
+
+/// The request method (`INVITE` from the request line), or `None` for a response.
+fn req_method(raw: &[u8]) -> Option<String> {
+    let line = first_line(raw);
+    if line.starts_with("SIP/2.0") {
+        return None;
+    }
+    line.split_whitespace().next().map(str::to_string)
+}
+
+/// The CSeq sequence number (the `<num>` of `CSeq: <num> <METHOD>`).
+fn cseq_num(raw: &[u8]) -> Option<u32> {
+    for line in as_str(raw).lines() {
+        let l = line.trim();
+        if l.len() >= 5 && l[..5].eq_ignore_ascii_case("cseq:") {
+            return l[5..].split_whitespace().next().and_then(|s| s.parse().ok());
+        }
+    }
+    None
+}
+
+/// The `branch` parameter of the TOP-most Via header (RFC 3261 §17 transaction
+/// key), or `None` if absent. Only the first Via matters — it is OUR via on a
+/// request we sent and is echoed by the UAS onto the matching response.
+fn via_branch(raw: &[u8]) -> Option<String> {
+    for line in as_str(raw).lines() {
+        if line.is_empty() {
+            break; // end of headers
+        }
+        let Some((h, v)) = line.split_once(':') else { continue };
+        let h = h.trim();
+        if h.eq_ignore_ascii_case("via") || h.eq_ignore_ascii_case("v") {
+            // First Via wins (topmost). Extract `branch=` up to the next param sep.
+            let pos = v.find("branch=")?;
+            let rest = &v[pos + "branch=".len()..];
+            let end = rest.find([';', ',', ' ', '\t']).unwrap_or(rest.len());
+            let b = rest[..end].trim();
+            return (!b.is_empty()).then(|| b.to_string());
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Retransmit engine (per call, present only when --auto-retransmit is on)
+// ---------------------------------------------------------------------------
+
+/// RFC 3261 default transaction timers driving the engine.
+const T1: Duration = Duration::from_millis(500); // first retransmit interval
+const T2: Duration = Duration::from_secs(4); // non-INVITE / 2xx backoff cap
+const TXN_TIMEOUT: Duration = Duration::from_secs(32); // Timer B/F/H = 64·T1
+
+/// Stop-control shared between a spawned resender task and the [`CallTxns`] engine
+/// that owns it. The engine flips `stop` (and wakes the task) when the transaction
+/// is acknowledged or the call ends; the flag is authoritative (the wake is only a
+/// latency optimisation — a lost `Notify` wake is caught by the post-sleep check).
+struct ResendCtl {
+    stop: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl ResendCtl {
+    fn new() -> Arc<Self> {
+        Arc::new(Self { stop: AtomicBool::new(false), notify: tokio::sync::Notify::new() })
+    }
+    fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.notify.notify_waiters();
+    }
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+}
+
+/// Spawn a resender: retransmit `bytes` to `dst` on the SIP timer schedule until
+/// `ctl` is stopped or the transaction times out. `invite` selects the backoff —
+/// INVITE Timer A doubles unbounded (until Timer B); non-INVITE Timer E / 2xx
+/// Timer G doubles but caps at T2. Each retransmit re-applies the loss model, so a
+/// retransmit can itself be dropped (the point of the robustness test).
+fn spawn_resender(
+    ctl: Arc<ResendCtl>,
+    socket: Arc<UdpSocket>,
+    drop: Arc<DropModel>,
+    stats: Arc<MuxStats>,
+    bytes: Vec<u8>,
+    dst: SocketAddr,
+    invite: bool,
+) {
+    tokio::spawn(async move {
+        let mut interval = T1;
+        let deadline = tokio::time::Instant::now() + TXN_TIMEOUT;
+        loop {
+            tokio::select! {
+                _ = ctl.notify.notified() => return,
+                _ = tokio::time::sleep(interval) => {}
+            }
+            if ctl.stopped() || tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            if drop.drops() {
+                stats.dropped_out.fetch_add(1, Ordering::Relaxed);
+            } else {
+                let _ = socket.send_to(&bytes, dst).await;
+            }
+            interval = if invite {
+                interval.saturating_mul(2)
+            } else {
+                interval.saturating_mul(2).min(T2)
+            };
+        }
+    });
+}
+
+/// Per-call SIP transaction engine: records what the harness sends, retransmits it
+/// on real timers until acknowledged, and absorbs the duplicate traffic that
+/// recovery produces so the strict scripted agent never sees a retransmit.
+///
+/// Covered directions (the "full bidirectional" robustness contract):
+/// - **our requests** (INVITE / BYE / OPTIONS / REFER / CANCEL / re-INVITE):
+///   retransmitted (Timer A/E) until the matching response arrives.
+/// - **our INVITE answers** (2xx): retransmitted (Timer G) until the ACK arrives —
+///   recovers a lost 2xx OR a lost ACK.
+/// - **our non-INVITE answers**: re-sent reactively when the peer retransmits the
+///   request (its response was lost).
+/// - **our ACK to a 2xx**: re-sent when a retransmitted 2xx arrives (our ACK was lost).
+/// - **inbound duplicates**: absorbed, so the scripted agent's strict `expect`
+///   never chokes on a retransmit.
+struct CallTxns {
+    socket: Arc<UdpSocket>,
+    drop: Arc<DropModel>,
+    stats: Arc<MuxStats>,
+    inner: Mutex<TxnInner>,
+}
+
+#[derive(Default)]
+struct TxnInner {
+    /// Our in-flight client transactions, keyed by the request's top-Via branch →
+    /// its resender (stopped when the response arrives).
+    client: HashMap<String, Arc<ResendCtl>>,
+    /// Our proactive 2xx (INVITE server txn) resenders, keyed by (Call-ID, CSeq
+    /// number) so the inbound ACK — which carries a *different* branch — can stop them.
+    invite_2xx: HashMap<(String, u32), Arc<ResendCtl>>,
+    /// The last response we sent per server txn (request branch → bytes+dst), for a
+    /// reactive re-answer when the peer retransmits the request.
+    server: HashMap<String, (Vec<u8>, SocketAddr)>,
+    /// ACKs we sent, keyed by (Call-ID, CSeq number), for re-ACK on a duplicate 2xx.
+    acks: HashMap<(String, u32), (Vec<u8>, SocketAddr)>,
+    /// Inbound `(branch, discriminator)` already delivered — duplicate detection.
+    seen_in: HashSet<(String, String)>,
+    /// Call ended: stop tracking and reject new resenders.
+    closed: bool,
+}
+
+impl CallTxns {
+    fn new(socket: Arc<UdpSocket>, drop: Arc<DropModel>, stats: Arc<MuxStats>) -> Self {
+        Self { socket, drop, stats, inner: Mutex::new(TxnInner::default()) }
+    }
+
+    /// Best-effort non-blocking send for the reactive resends (re-ACK / re-answer)
+    /// that run on the inbound (sync) path — re-applies the loss model.
+    fn send(&self, bytes: &[u8], dst: SocketAddr) {
+        if self.drop.drops() {
+            self.stats.dropped_out.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let _ = self.socket.try_send_to(bytes, dst);
+    }
+
+    /// Record an outbound datagram and arm any retransmission it needs.
+    fn on_outbound(&self, raw: &[u8], dst: SocketAddr) {
+        let mut g = self.inner.lock().unwrap();
+        if g.closed {
+            return;
+        }
+        if is_response(raw) {
+            let Some(branch) = via_branch(raw) else { return };
+            g.server.insert(branch, (raw.to_vec(), dst));
+            // Proactive 2xx-until-ACK for an INVITE answer (Timer G).
+            let is_2xx = resp_status(raw).is_some_and(|s| (200..300).contains(&s));
+            if is_2xx && cseq_method(raw) == "INVITE" {
+                if let (Some(cid), Some(cseq)) = (call_id(raw), cseq_num(raw)) {
+                    if let std::collections::hash_map::Entry::Vacant(e) = g.invite_2xx.entry((cid, cseq)) {
+                        let ctl = ResendCtl::new();
+                        e.insert(ctl.clone());
+                        spawn_resender(
+                            ctl,
+                            self.socket.clone(),
+                            self.drop.clone(),
+                            self.stats.clone(),
+                            raw.to_vec(),
+                            dst,
+                            false,
+                        );
+                    }
+                }
+            }
+            return;
+        }
+        // Request.
+        let method = req_method(raw).unwrap_or_default();
+        if method == "ACK" {
+            // ACK is not a retransmitting transaction; remember it for re-ACK.
+            if let (Some(cid), Some(cseq)) = (call_id(raw), cseq_num(raw)) {
+                g.acks.insert((cid, cseq), (raw.to_vec(), dst));
+            }
+            return;
+        }
+        let Some(branch) = via_branch(raw) else { return };
+        if let Some(old) = g.client.remove(&branch) {
+            old.stop();
+        }
+        let invite = method == "INVITE";
+        let ctl = ResendCtl::new();
+        g.client.insert(branch, ctl.clone());
+        spawn_resender(
+            ctl,
+            self.socket.clone(),
+            self.drop.clone(),
+            self.stats.clone(),
+            raw.to_vec(),
+            dst,
+            invite,
+        );
+    }
+
+    /// Process an inbound datagram. Returns `true` to deliver it to the app,
+    /// `false` to ABSORB it (a duplicate the strict agent must not see — any
+    /// re-ACK / re-answer has already been sent here).
+    fn on_inbound(&self, raw: &[u8], _src: SocketAddr) -> bool {
+        let mut g = self.inner.lock().unwrap();
+        if g.closed {
+            return true;
+        }
+        let branch = via_branch(raw).unwrap_or_default();
+        if is_response(raw) {
+            let status = resp_status(raw).unwrap_or(0);
+            let is_invite = cseq_method(raw) == "INVITE";
+            // Stop our client resender: INVITE Timer A stops on the FIRST provisional
+            // (incl. `100 Trying`, RFC 3261 §17.1.1.2); non-INVITE only on a final.
+            // We deliberately do NOT keep retransmitting the INVITE to force the UAS
+            // to resend a lost 18x — a non-PRACK provisional is best-effort and may
+            // be lost (the caller tolerates it via `try_expect_answer`, and the
+            // driver gates the cross-call 18x delivery rate instead).
+            let stop = if is_invite { status >= 100 } else { status >= 200 };
+            if stop {
+                if let Some(ctl) = g.client.remove(&branch) {
+                    ctl.stop();
+                }
+            }
+            let key = (branch, format!("r{status}"));
+            if g.seen_in.contains(&key) {
+                // Duplicate response. A retransmitted INVITE 2xx means our ACK was
+                // lost → re-ACK it.
+                if (200..300).contains(&status) && is_invite {
+                    if let (Some(cid), Some(cseq)) = (call_id(raw), cseq_num(raw)) {
+                        if let Some((ack, dst)) = g.acks.get(&(cid, cseq)).cloned() {
+                            self.send(&ack, dst);
+                        }
+                    }
+                }
+                return false;
+            }
+            g.seen_in.insert(key);
+            return true;
+        }
+        // Inbound request.
+        let method = req_method(raw).unwrap_or_default();
+        if method == "ACK" {
+            // The ACK confirms our INVITE 2xx → stop its proactive resender.
+            if let (Some(cid), Some(cseq)) = (call_id(raw), cseq_num(raw)) {
+                if let Some(ctl) = g.invite_2xx.remove(&(cid, cseq)) {
+                    ctl.stop();
+                }
+            }
+            let key = (branch, "qACK".to_string());
+            if g.seen_in.contains(&key) {
+                return false; // duplicate ACK
+            }
+            g.seen_in.insert(key);
+            return true;
+        }
+        let key = (branch.clone(), format!("q{method}"));
+        if g.seen_in.contains(&key) {
+            // The peer retransmitted this request → our response was lost; re-send it.
+            if let Some((resp, dst)) = g.server.get(&branch).cloned() {
+                self.send(&resp, dst);
+            }
+            return false;
+        }
+        g.seen_in.insert(key);
+        true
+    }
+
+    /// Stop every resender and drop tracked state (call ended).
+    fn shutdown(&self) {
+        let mut g = self.inner.lock().unwrap();
+        g.closed = true;
+        for (_, ctl) in g.client.drain() {
+            ctl.stop();
+        }
+        for (_, ctl) in g.invite_2xx.drain() {
+            ctl.stop();
+        }
+        g.server.clear();
+        g.acks.clear();
+        g.seen_in.clear();
+    }
 }

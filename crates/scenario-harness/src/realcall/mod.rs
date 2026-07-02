@@ -140,7 +140,20 @@ pub async fn establish(
         }
     };
     uas.respond(180, "Ringing").await;
-    call.try_expect(180).await?;
+    // The 180 is a NON-PRACK provisional: best-effort, so it MAY be lost
+    // end-to-end — that is EXPECTED, not a call failure (RFC 3261 §13.2.2.4: the
+    // dialog/ACK rides the 2xx). So a TIMEOUT waiting for it is tolerated (the 18x
+    // was lost → proceed to the answer) and only COUNTED; the driver gates the
+    // cross-call 18x delivery rate (>99%) instead of failing the call. A genuinely
+    // wrong message (not a timeout) is still an error. We keep the strict ordering
+    // — the UAS answers only AFTER this resolves — so a late/reordered 180 can
+    // never strand in the caller's inbox (which would break the later BYE).
+    let saw_ringing = match call.try_expect(180).await {
+        Ok(_) => true,
+        Err(StepError::Timeout { .. }) => false,
+        Err(e) => return Err(e),
+    };
+    ctx.mark_ringing(saw_ringing);
     // Realistic ring: dwell the early dialog before answering. Alice is parked
     // (not awaiting a receive) for the duration, so this just ages the early
     // dialog on the SUT; it stays well inside Timer C (180 s).
