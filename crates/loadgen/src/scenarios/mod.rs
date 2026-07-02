@@ -20,8 +20,8 @@ pub use scenario_harness::realcall::{
 // All scenarios now live in the shared crate; re-export so the registries below
 // (and any `scenarios::BasicCall` user) resolve.
 pub use scenario_harness::realcall::scenarios::{
-    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, Refer, ReferCharlieReject,
-    Reinvite,
+    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate, Refer,
+    ReferCharlieReject, Reinvite,
 };
 
 /// All v1 scenarios with default weights (basic-heavy, like real traffic).
@@ -43,6 +43,7 @@ pub fn by_id(id: &str) -> Option<Arc<dyn LoadScenario>> {
         "refer" => Some(Arc::new(Refer)),
         "options_hold" => Some(Arc::new(OptionsHold)),
         "long_call" => Some(Arc::new(LongCall)),
+        "prack_update" => Some(Arc::new(PrackUpdate)),
         "basic_call_em" => Some(AsEmergency::wrap("basic_call_em", Arc::new(BasicCall))),
         "reinvite_em" => Some(AsEmergency::wrap("reinvite_em", Arc::new(Reinvite))),
         "invite_reject" => Some(Arc::new(InviteReject)),

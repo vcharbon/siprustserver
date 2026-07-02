@@ -928,6 +928,33 @@ impl Agent {
         }
     }
 
+    /// Begin a generic **out-of-dialog** request of any [`OutOfDialogMethod`]
+    /// (OPTIONS, MESSAGE, SUBSCRIBE, …) addressed to `peer` — the any-method
+    /// sibling of [`invite`](Agent::invite). The mechanical SIP layer (Via +
+    /// fresh branch, From-tag, Call-ID, CSeq, Contact, Max-Forwards,
+    /// Content-Type/Length) is auto-filled exactly like the INVITE path; the
+    /// caller supplies only headers/body. Returns a builder; finish with the
+    /// fallible [`OutOfDialogRequest::try_send`] (load lane) or the panicking
+    /// [`OutOfDialogRequest::send`] (functional tests).
+    ///
+    /// For a dialog-CREATING INVITE keep using [`invite`](Agent::invite) — this
+    /// builder tracks no dialog state (a non-INVITE out-of-dialog transaction
+    /// creates none).
+    pub fn request<'a>(&'a self, method: OutOfDialogMethod, peer: &'a Agent) -> OutOfDialogRequest<'a> {
+        OutOfDialogRequest {
+            caller: self,
+            peer,
+            method,
+            body: None,
+            content_type: None,
+            extra_headers: vec![],
+            wire_dst: None,
+            from_uri: None,
+            to_uri: None,
+            request_uri: None,
+        }
+    }
+
     /// Receive the next request and assert its method. Returns a UAS-side
     /// transaction handle for sending responses.
     pub async fn receive(&self, method: &str) -> ServerTxn {
@@ -1296,6 +1323,112 @@ impl<'a> Invite<'a> {
     }
 }
 
+/// Builder for a generic out-of-dialog request (any [`OutOfDialogMethod`]) —
+/// see [`Agent::request`]. Mirrors [`Invite`]'s knobs (extra headers, optional
+/// body, `through` wire routing, From/To/R-URI overrides) with a **fallible**
+/// send for the load lane.
+pub struct OutOfDialogRequest<'a> {
+    caller: &'a Agent,
+    peer: &'a Agent,
+    method: OutOfDialogMethod,
+    body: Option<Vec<u8>>,
+    /// Content-Type for a non-empty body (defaults to `application/sdp`).
+    content_type: Option<String>,
+    extra_headers: Vec<SipHeader>,
+    /// Wire destination override (send via a proxy/SUT; R-URI still targets peer).
+    wire_dst: Option<SocketAddr>,
+    from_uri: Option<String>,
+    to_uri: Option<String>,
+    request_uri: Option<String>,
+}
+
+impl<'a> OutOfDialogRequest<'a> {
+    /// Attach an SDP body (`Content-Type: application/sdp`).
+    pub fn with_sdp(mut self, sdp: &str) -> Self {
+        self.body = Some(sdp.as_bytes().to_vec());
+        self.content_type = None;
+        self
+    }
+
+    /// Attach an arbitrary body with an explicit Content-Type.
+    pub fn with_body(mut self, content_type: &str, body: impl Into<Vec<u8>>) -> Self {
+        self.body = Some(body.into());
+        self.content_type = Some(content_type.to_string());
+        self
+    }
+
+    /// Attach an arbitrary extra header. Repeatable; order preserved.
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.extra_headers.push(SipHeader { name: name.to_string(), value: value.to_string() });
+        self
+    }
+
+    /// Send the request to `proxy` instead of directly to the peer (the
+    /// Request-URI still targets the peer) — the same wire routing as
+    /// [`Invite::through`].
+    pub fn through(mut self, proxy: SocketAddr) -> Self {
+        self.wire_dst = Some(proxy);
+        self
+    }
+
+    /// Override the From URI.
+    pub fn from(mut self, uri: impl Into<String>) -> Self {
+        self.from_uri = Some(uri.into());
+        self
+    }
+
+    /// Override the To URI.
+    pub fn to(mut self, uri: impl Into<String>) -> Self {
+        self.to_uri = Some(uri.into());
+        self
+    }
+
+    /// Override the Request-URI.
+    pub fn ruri(mut self, uri: impl Into<String>) -> Self {
+        self.request_uri = Some(uri.into());
+        self
+    }
+
+    /// Generate the request (all mechanical headers filled in), send it
+    /// **fallibly**, and return the client transaction to
+    /// [`try_expect`](InDialogTxn::try_expect) the response on. A transport
+    /// failure surfaces as [`StepError::Transport`], never a panic.
+    pub async fn try_send(self) -> Result<InDialogTxn, StepError> {
+        let caller = self.caller;
+        let peer = self.peer;
+        let wire_dst = self.wire_dst.unwrap_or(peer.addr);
+        let request_uri = self
+            .request_uri
+            .unwrap_or_else(|| format!("sip:{}@{}:{}", peer.name, peer.addr.ip(), peer.addr.port()));
+        let opts = GenerateOutOfDialogRequestOpts {
+            request_uri,
+            call_id: format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip()),
+            from_uri: self.from_uri.unwrap_or_else(|| caller.uri.clone()),
+            from_tag: caller.tag(),
+            to_uri: self.to_uri.unwrap_or_else(|| peer.uri.clone()),
+            to_tag: None,
+            cseq: 1,
+            via: Some(caller.via()),
+            contact: Some(caller.contact()),
+            max_forwards: Some(70),
+            body: self.body.unwrap_or_default(),
+            content_type: self.content_type,
+            extra_headers: self.extra_headers,
+        };
+        let req = generate_out_of_dialog_request(self.method, &opts);
+        caller.try_send(&SipMessage::Request(req), wire_dst).await?;
+        Ok(InDialogTxn { agent: caller.clone() })
+    }
+
+    /// Panicking [`try_send`](Self::try_send) for functional tests.
+    pub async fn send(self) -> InDialogTxn {
+        match self.try_send().await {
+            Ok(txn) => txn,
+            Err(e) => panic!("{e}"),
+        }
+    }
+}
+
 /// UAC-side INVITE client transaction + the dialog it is establishing.
 pub struct ClientInvite {
     agent: Agent,
@@ -1405,6 +1538,26 @@ impl ClientInvite {
     pub fn send_request(&mut self, method: InDialogMethod) -> InDialogRequest<'_> {
         InDialogRequest::new(self.agent.clone(), &mut self.dialog, self.fallback_addr, method)
             .with_fork_cseq(&mut self.fork_cseq)
+    }
+
+    /// PRACK the reliable provisional `reliable_1xx` (RFC 3262 §7.2), fallibly:
+    /// builds the `RAck` (`<RSeq> <CSeq-num> <CSeq-method>`) from the response's
+    /// own RSeq + CSeq and sends the PRACK on the early dialog. Returns the PRACK
+    /// client transaction to [`try_expect(200)`](InDialogTxn::try_expect) on. A
+    /// response with no (or an unparseable) `RSeq` is not PRACK-able — that
+    /// surfaces as [`StepError::UnexpectedKind`], never a panic.
+    pub async fn try_prack(
+        &mut self,
+        reliable_1xx: &SipResponse,
+    ) -> Result<InDialogTxn, StepError> {
+        let rack = rack_for(reliable_1xx).ok_or_else(|| StepError::UnexpectedKind {
+            who: self.agent.name.clone(),
+            detail: format!(
+                "cannot PRACK the {} {}: no parseable RSeq header (not a reliable provisional)",
+                reliable_1xx.status, reliable_1xx.reason
+            ),
+        })?;
+        self.send_request(InDialogMethod::Prack).with_rack(&rack).try_send().await
     }
 
     /// Generate and send the ACK for the 2xx (CSeq reused from the INVITE per
@@ -1619,8 +1772,20 @@ impl<'a> InDialogRequest<'a> {
         self
     }
 
-    /// Generate and send the request; returns its client transaction.
-    pub async fn send(mut self) -> InDialogTxn {
+    /// Generate and send the request; returns its client transaction. Panics on
+    /// a transport failure — use [`try_send`](Self::try_send) in the load lane.
+    pub async fn send(self) -> InDialogTxn {
+        match self.try_send().await {
+            Ok(txn) => txn,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    /// Fallible [`send`](Self::send) — the generic any-method in-dialog send for
+    /// the load lane: a transport failure surfaces as [`StepError::Transport`]
+    /// instead of a panic. The mechanical layer (Via/branch, CSeq bump, tags,
+    /// route set) is identical.
+    pub async fn try_send(mut self) -> Result<InDialogTxn, StepError> {
         let opts = GenerateInDialogRequestOpts {
             via: Some(self.agent.via()),
             contact: Some(self.agent.contact()),
@@ -1659,10 +1824,10 @@ impl<'a> InDialogRequest<'a> {
             self.dialog.local_cseq = res.dialog.local_cseq;
         }
         let dst = next_hop(self.dialog, self.fallback);
-        self.agent.send(&SipMessage::Request(res.request), dst).await;
-        InDialogTxn {
+        self.agent.try_send(&SipMessage::Request(res.request), dst).await?;
+        Ok(InDialogTxn {
             agent: self.agent.clone(),
-        }
+        })
     }
 }
 
@@ -1806,8 +1971,25 @@ impl<'a> Respond<'a> {
         self
     }
 
-    /// Generate and send the response.
+    /// Mark this provisional RELIABLE (RFC 3262 §3): stamps `Require: 100rel` +
+    /// `RSeq: <rseq>` so the peer must PRACK it. Only meaningful on a 101–199
+    /// response to a dialog-creating INVITE whose sender opted in
+    /// (`Supported`/`Require: 100rel`).
+    pub fn reliable(self, rseq: u32) -> Self {
+        self.with_header("Require", "100rel").with_header("RSeq", &rseq.to_string())
+    }
+
+    /// Generate and send the response. Panics on a transport failure — use
+    /// [`try_send`](Self::try_send) in the load lane.
     pub async fn send(self) {
+        if let Err(e) = self.try_send().await {
+            panic!("{e}");
+        }
+    }
+
+    /// Fallible [`send`](Self::send) for the load lane: a transport failure
+    /// surfaces as [`StepError::Transport`] instead of a panic.
+    pub async fn try_send(self) -> Result<(), StepError> {
         let txn = self.txn;
         // An explicit per-fork To-tag overrides (and does not disturb) the txn's
         // sticky auto-minted tag, so distinct early dialogs keep distinct tags.
@@ -1864,7 +2046,7 @@ impl<'a> Respond<'a> {
         // request's topmost Via sent-by. With a proxy in the path that Via is
         // the proxy's, so the response correctly traverses it back.
         let dst = top_via_addr(&txn.request).unwrap_or(txn.agent.addr);
-        txn.agent.send(&SipMessage::Response(resp), dst).await;
+        txn.agent.try_send(&SipMessage::Response(resp), dst).await
     }
 }
 
@@ -2146,6 +2328,14 @@ fn unwrap_angle(value: &str) -> String {
 /// the dialog remote target.
 fn first_contact_uri(resp: &SipResponse) -> Option<String> {
     get_header(&resp.headers, "contact").map(unwrap_angle)
+}
+
+/// The `RAck` value acknowledging a reliable provisional (RFC 3262 §7.2):
+/// `<RSeq> <CSeq-num> <CSeq-method>`, all read off the 1xx itself. `None` when
+/// the response carries no parseable `RSeq` (it is not a reliable provisional).
+fn rack_for(reliable_1xx: &SipResponse) -> Option<String> {
+    let rseq: u64 = get_header(&reliable_1xx.headers, "rseq")?.trim().parse().ok()?;
+    Some(format!("{rseq} {} {}", reliable_1xx.cseq.seq, reliable_1xx.cseq.method))
 }
 
 /// Resolve a SIP URI to a socket address (default port 5060, IPv4 fixtures

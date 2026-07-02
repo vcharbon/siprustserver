@@ -17,8 +17,8 @@
 
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use scenario_harness::realcall::scenarios::{
-    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, Refer, ReferCharlieReject,
-    Reinvite,
+    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate, Refer,
+    ReferCharlieReject, Reinvite,
 };
 use scenario_harness::realcall::{run_asserting, run_collecting, CallEnv};
 use scenario_harness::{Agent, RealCallScenario};
@@ -83,6 +83,16 @@ async fn realcall_options_hold_no_leak() {
     // Default `for_functional` options_hold (2 s) / cadence (1 s) drives a couple
     // of in-dialog OPTIONS pings the SUT relays to bob, then a BYE — no leak.
     assert_no_leak("realcall-options-hold", &OptionsHold).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn realcall_prack_update_no_leak() {
+    // RFC 3262 + 3311 through the SUT: reliable 183 (Require:100rel/RSeq) →
+    // PRACK/200 → 200/ACK → in-dialog UPDATE/200 → BYE. The b2bua relays the
+    // reliable provisional, the PRACK and the UPDATE end-to-end with no special
+    // config; the report gate below enforces the full RFC 3261/3262/3264 audit
+    // with NO allow_violation.
+    assert_no_leak("realcall-prack-update", &PrackUpdate).await;
 }
 
 #[tokio::test(start_paused = true)]

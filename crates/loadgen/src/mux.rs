@@ -1159,6 +1159,25 @@ fn cseq_num(raw: &[u8]) -> Option<u32> {
     None
 }
 
+/// Whether a `Require` header lists the `100rel` option-tag (comma-folded,
+/// case-insensitive) — the reliable-provisional marker (RFC 3262 §3). `Require`
+/// has no compact form.
+fn require_has_100rel(raw: &[u8]) -> bool {
+    header_value(raw, "require")
+        .is_some_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("100rel")))
+}
+
+/// The `RSeq` value of a reliable provisional (RFC 3262 §3), or `None`.
+fn rseq_of(raw: &[u8]) -> Option<u64> {
+    header_value(raw, "rseq")?.trim().parse().ok()
+}
+
+/// The RAck response-num (its FIRST token = the acknowledged 1xx's RSeq,
+/// RFC 3262 §7.2) of a PRACK, or `None`.
+fn rack_rseq(raw: &[u8]) -> Option<u64> {
+    header_value(raw, "rack")?.split_whitespace().next()?.parse().ok()
+}
+
 /// The `branch` parameter of the TOP-most Via header (RFC 3261 §17 transaction
 /// key), or `None` if absent. Only the first Via matters — it is OUR via on a
 /// request we sent and is echoed by the UAS onto the matching response.
@@ -1255,11 +1274,22 @@ fn spawn_resender(
 /// on real timers until acknowledged, and absorbs the duplicate traffic that
 /// recovery produces so the strict scripted agent never sees a retransmit.
 ///
+/// The engine is METHOD-GENERIC: requests are keyed by their top-Via branch and
+/// classified only INVITE vs non-INVITE (Timer A vs Timer E backoff), so PRACK /
+/// UPDATE / INFO / any future method ride the same client-txn, reactive-re-answer
+/// and duplicate-absorption paths with no per-method code.
+///
 /// Covered directions (the "full bidirectional" robustness contract):
-/// - **our requests** (INVITE / BYE / OPTIONS / REFER / CANCEL / re-INVITE):
-///   retransmitted (Timer A/E) until the matching response arrives.
+/// - **our requests** (INVITE / BYE / OPTIONS / REFER / CANCEL / re-INVITE /
+///   PRACK / UPDATE / …): retransmitted (Timer A/E) until the matching response
+///   arrives.
 /// - **our INVITE answers** (2xx): retransmitted (Timer G) until the ACK arrives —
 ///   recovers a lost 2xx OR a lost ACK.
+/// - **our RELIABLE provisionals** (1xx with `Require: 100rel` + `RSeq`,
+///   RFC 3262 §3): retransmitted until the matching PRACK (RAck response-num =
+///   the 1xx's RSeq) arrives — a reliable 1xx is guaranteed-delivery, unlike the
+///   best-effort plain 18x (deliberately NOT retransmitted; the driver gates its
+///   delivery rate instead).
 /// - **our non-INVITE answers**: re-sent reactively when the peer retransmits the
 ///   request (its response was lost).
 /// - **our ACK to a 2xx**: re-sent when a retransmitted 2xx arrives (our ACK was lost).
@@ -1280,6 +1310,10 @@ struct TxnInner {
     /// Our proactive 2xx (INVITE server txn) resenders, keyed by (Call-ID, CSeq
     /// number) so the inbound ACK — which carries a *different* branch — can stop them.
     invite_2xx: HashMap<(String, u32), Arc<ResendCtl>>,
+    /// Our proactive RELIABLE-1xx resenders (RFC 3262 §3: retransmit until
+    /// PRACKed), keyed by (Call-ID, RSeq) so the inbound PRACK — whose RAck
+    /// response-num carries that RSeq but whose branch is its own — can stop them.
+    reliable_1xx: HashMap<(String, u64), Arc<ResendCtl>>,
     /// The last response we sent per server txn (request branch → bytes+dst), for a
     /// reactive re-answer when the peer retransmits the request.
     server: HashMap<String, (Vec<u8>, SocketAddr)>,
@@ -1315,11 +1349,39 @@ impl CallTxns {
         if is_response(raw) {
             let Some(branch) = via_branch(raw) else { return };
             g.server.insert(branch, (raw.to_vec(), dst));
+            let status = resp_status(raw).unwrap_or(0);
             // Proactive 2xx-until-ACK for an INVITE answer (Timer G).
-            let is_2xx = resp_status(raw).is_some_and(|s| (200..300).contains(&s));
-            if is_2xx && cseq_method(raw) == "INVITE" {
+            if (200..300).contains(&status) && cseq_method(raw) == "INVITE" {
                 if let (Some(cid), Some(cseq)) = (call_id(raw), cseq_num(raw)) {
                     if let std::collections::hash_map::Entry::Vacant(e) = g.invite_2xx.entry((cid, cseq)) {
+                        let ctl = ResendCtl::new();
+                        e.insert(ctl.clone());
+                        spawn_resender(
+                            ctl,
+                            self.socket.clone(),
+                            self.drop.clone(),
+                            self.stats.clone(),
+                            raw.to_vec(),
+                            dst,
+                            false,
+                        );
+                    }
+                }
+            }
+            // Proactive reliable-1xx-until-PRACK (RFC 3262 §3): a provisional we
+            // send with `Require: 100rel` + `RSeq` is guaranteed-delivery — the UAS
+            // retransmits it until the matching PRACK. Without this, a dropped
+            // reliable 183 is unrecoverable: the peer's INVITE resender already
+            // stopped on the SUT's 100 Trying, so nobody would resend anything.
+            // (A plain 18x stays best-effort by design.)
+            if (101..200).contains(&status)
+                && cseq_method(raw) == "INVITE"
+                && require_has_100rel(raw)
+            {
+                if let (Some(cid), Some(rseq)) = (call_id(raw), rseq_of(raw)) {
+                    if let std::collections::hash_map::Entry::Vacant(e) =
+                        g.reliable_1xx.entry((cid, rseq))
+                    {
                         let ctl = ResendCtl::new();
                         e.insert(ctl.clone());
                         spawn_resender(
@@ -1419,6 +1481,16 @@ impl CallTxns {
             g.seen_in.insert(key);
             return true;
         }
+        if method == "PRACK" {
+            // The PRACK acknowledges our reliable 1xx (RAck response-num = its
+            // RSeq, RFC 3262 §7.2) → stop that proactive resender. Idempotent, so
+            // it runs before the duplicate check below.
+            if let (Some(cid), Some(rseq)) = (call_id(raw), rack_rseq(raw)) {
+                if let Some(ctl) = g.reliable_1xx.remove(&(cid, rseq)) {
+                    ctl.stop();
+                }
+            }
+        }
         let key = (branch.clone(), format!("q{method}"));
         if g.seen_in.contains(&key) {
             // The peer retransmitted this request → our response was lost; re-send it.
@@ -1439,6 +1511,9 @@ impl CallTxns {
             ctl.stop();
         }
         for (_, ctl) in g.invite_2xx.drain() {
+            ctl.stop();
+        }
+        for (_, ctl) in g.reliable_1xx.drain() {
             ctl.stop();
         }
         g.server.clear();
@@ -1566,5 +1641,133 @@ mod tests {
         // To-user only), and a userless To yields no token.
         let userless = invite("<sip:10.0.0.9:5070>", "X-Loadgen-Id: lg999\r\n");
         assert_eq!(c.token(&userless), None);
+    }
+
+    // -- CallTxns retransmit engine: method-generic regression --------------
+    //
+    // The engine must stay method-generic (Timer E for ANY non-INVITE request,
+    // duplicate absorption keyed by (branch, method)) and cover the RFC 3262
+    // reliable-1xx-until-PRACK server obligation. These tests drive `CallTxns`
+    // directly over a loopback UDP pair on the real clock (T1 = 500 ms, so each
+    // stays a few seconds).
+
+    use std::net::SocketAddr;
+    use tokio::net::UdpSocket as TokioUdp;
+    use tokio::time::{timeout, Duration as TokioDuration};
+
+    async fn txn_rig() -> (Arc<CallTxns>, TokioUdp, SocketAddr) {
+        let sock = Arc::new(TokioUdp::bind("127.0.0.1:0").await.unwrap());
+        let peer = TokioUdp::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+        let txns = Arc::new(CallTxns::new(
+            sock,
+            Arc::new(DropModel::new(0.0, 1)),
+            Arc::new(MuxStats::new(4)),
+        ));
+        (txns, peer, peer_addr)
+    }
+
+    async fn recv_one(peer: &TokioUdp, window_ms: u64) -> Option<String> {
+        let mut buf = vec![0u8; 2048];
+        match timeout(TokioDuration::from_millis(window_ms), peer.recv_from(&mut buf)).await {
+            Ok(Ok((n, _))) => Some(String::from_utf8_lossy(&buf[..n]).to_string()),
+            _ => None,
+        }
+    }
+
+    fn update_req(branch: &str) -> Vec<u8> {
+        format!(
+            "UPDATE sip:b@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
+             Call-ID: ct1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag=2\r\nCSeq: 2 UPDATE\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    fn resp(status: u16, branch: &str, cseq: &str, extra: &str) -> Vec<u8> {
+        format!(
+            "SIP/2.0 {status} X\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
+             Call-ID: ct1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag=2\r\nCSeq: {cseq}\r\n{extra}\r\n"
+        )
+        .into_bytes()
+    }
+
+    fn prack_req(branch: &str, rack: &str) -> Vec<u8> {
+        format!(
+            "PRACK sip:b@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch={branch}\r\n\
+             Call-ID: ct1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag=2\r\nCSeq: 2 PRACK\r\n\
+             RAck: {rack}\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// Timer E is METHOD-GENERIC: an outbound UPDATE (a non-INVITE the engine has
+    /// no per-method code for) is retransmitted after ~T1 and the resender stops
+    /// on its final response; a duplicate of that response is then absorbed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn calltxns_timer_e_is_method_generic_for_update() {
+        let (txns, peer, peer_addr) = txn_rig().await;
+
+        txns.on_outbound(&update_req("z9hG4bK-u1"), peer_addr);
+        let got = recv_one(&peer, 2_000).await.expect("Timer E retransmit of the UPDATE");
+        assert!(got.starts_with("UPDATE "), "retransmit is the UPDATE: {got}");
+
+        // The 200 (UPDATE) stops the resender…
+        let ok = resp(200, "z9hG4bK-u1", "2 UPDATE", "");
+        assert!(txns.on_inbound(&ok, peer_addr), "first 200 (UPDATE) is delivered");
+        // …and its duplicate is absorbed (method-generic dedup).
+        assert!(!txns.on_inbound(&ok, peer_addr), "duplicate 200 (UPDATE) absorbed");
+        assert!(
+            recv_one(&peer, 1_500).await.is_none(),
+            "UPDATE resender must stop on the final response"
+        );
+        txns.shutdown();
+    }
+
+    /// Duplicate absorption + reactive re-answer are method-generic: a
+    /// retransmitted inbound PRACK is absorbed and our recorded 200 (PRACK) is
+    /// re-sent (the peer's copy was evidently lost).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn calltxns_absorbs_duplicate_prack_and_reanswers() {
+        let (txns, peer, peer_addr) = txn_rig().await;
+
+        let prack = prack_req("z9hG4bK-p1", "1 1 INVITE");
+        assert!(txns.on_inbound(&prack, peer_addr), "first PRACK is delivered");
+        txns.on_outbound(&resp(200, "z9hG4bK-p1", "2 PRACK", ""), peer_addr);
+
+        assert!(!txns.on_inbound(&prack, peer_addr), "duplicate PRACK absorbed");
+        let got = recv_one(&peer, 1_000).await.expect("reactive re-answer to the dup PRACK");
+        assert!(got.starts_with("SIP/2.0 200"), "re-answer is our 200 (PRACK): {got}");
+        txns.shutdown();
+    }
+
+    /// RFC 3262 §3: a RELIABLE provisional we send (Require:100rel + RSeq) is
+    /// retransmitted until the matching PRACK (RAck response-num = its RSeq)
+    /// arrives — the gap that made a dropped reliable 183 unrecoverable (the
+    /// peer's INVITE resender already stopped on the 100 Trying). A plain 18x
+    /// stays best-effort (never proactively retransmitted).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn calltxns_retransmits_reliable_1xx_until_prack() {
+        let (txns, peer, peer_addr) = txn_rig().await;
+
+        // A plain 180 arms NO resender (best-effort by design).
+        txns.on_outbound(&resp(180, "z9hG4bK-i1", "1 INVITE", ""), peer_addr);
+        assert!(
+            recv_one(&peer, 1_200).await.is_none(),
+            "a non-reliable 18x must not be proactively retransmitted"
+        );
+
+        // A reliable 183 IS retransmitted until its PRACK.
+        let r183 = resp(183, "z9hG4bK-i1", "1 INVITE", "Require: 100rel\r\nRSeq: 1\r\n");
+        txns.on_outbound(&r183, peer_addr);
+        let got = recv_one(&peer, 2_000).await.expect("reliable 183 retransmit");
+        assert!(got.starts_with("SIP/2.0 183"), "retransmit is the reliable 183: {got}");
+
+        // The matching PRACK stops it (and is delivered to the app).
+        assert!(txns.on_inbound(&prack_req("z9hG4bK-p2", "1 1 INVITE"), peer_addr));
+        assert!(
+            recv_one(&peer, 1_500).await.is_none(),
+            "reliable-183 resender must stop on the matching PRACK"
+        );
+        txns.shutdown();
     }
 }

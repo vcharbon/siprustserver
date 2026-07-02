@@ -305,6 +305,55 @@ async fn loadgen_mux_smoke_timed_and_long_call() {
     b2bua.assert_fully_reaped();
 }
 
+/// PRACK + UPDATE mix against the in-process SUT: the `prack_update` scenario
+/// (INVITE(100rel) → reliable 183(RSeq) → PRACK → 200(PRACK) → 200(INVITE) →
+/// ACK → UPDATE → 200 → BYE) runs concurrently with basic calls through the mux
+/// with CLEAN result classes — every call OK (so zero timeout / wrong-status /
+/// rfc_audit_fail; the sampled half of the calls IS RFC-audited via the
+/// recording binder), no orphans, no mux/SUT leak.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_mux_smoke_prack_update_mix() {
+    let (_h, b2bua, core, transport) = setup(6560, Correlation::header("X-Loadgen-Id"), 5).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
+
+    let driver = Driver::new(
+        cfg(b2bua.addr, None, 60.0, 2, 16, 0x93AC5),
+        vec![
+            (by_id("prack_update").unwrap(), 2.0),
+            (by_id("basic_call").unwrap(), 1.0),
+        ],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    let ok_prack = reporter.count("prack_update", &ResultClass::Ok);
+    let ok_basic = reporter.count("basic_call", &ResultClass::Ok);
+    assert!(ok_prack > 5, "too few OK prack_update calls: {}", reporter.render_prometheus());
+    assert!(ok_basic > 0, "no OK basic calls in the mix: {}", reporter.render_prometheus());
+    // CLEAN result classes: every finished call is OK — in particular zero
+    // rfc_audit_fail (the recorded/sampled calls pass the RFC 3261/3262/3264
+    // audit with no waiver) and zero timeouts (no dialog mixing on PRACK/UPDATE).
+    assert_eq!(
+        reporter.total_calls(),
+        ok_prack + ok_basic,
+        "non-OK result classes in the prack_update mix:\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        core.stats().orphan_no_header.load(std::sync::atomic::Ordering::Relaxed) +
+            core.stats().orphan_unknown_token.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "unexpected orphans (PRACK/UPDATE demux gap?)"
+    );
+    assert!(reporter.sample_count("prack_update", &ResultClass::Ok) > 0, "no OK prack_update sample");
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (prack_update)");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
 /// A scenario that establishes then bails without hanging up — the driver's
 /// teardown must release the dialog (no SUT leak) AND the mux entries must be
 /// reclaimed (no registry leak).

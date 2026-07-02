@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::agent::{ClientInvite, ServerTxn};
 use crate::{Dialog, StepError, ANSWER_SDP, OFFER_SDP};
 
 mod env;
@@ -109,36 +110,7 @@ pub async fn establish(
     let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP).through(env.via);
     let mut call = env.prepare_invite(inv).send().await;
     scope.set_early(call.cancel_handle());
-
-    // The call may be ADMITTED (the SUT forwards our INVITE to bob) or SHED
-    // (under overload the SUT replies a final — e.g. 503 — directly to alice, and
-    // bob never sees it; an emergency call is force-admitted and never shed). We
-    // cannot know which up front, so race bob's inbound INVITE against alice's
-    // response. `try_expect(180)` skips the auto-100 Trying and surfaces a shed
-    // final as `WrongStatus { got: 503 }`, which the driver buckets as
-    // `status_503`. (Only an admitted call reaches bob; an admitted call's own
-    // 180 arrives only after we answer bob below, so the second arm resolving is
-    // unambiguously the SUT's own final to alice.)
-    let mut uas = tokio::select! {
-        biased;
-        bob = env.bob.try_receive("INVITE") => bob?,
-        shed = call.try_expect(180) => {
-            let e = shed.err().unwrap_or_else(|| StepError::UnexpectedKind {
-                who: "alice".to_string(),
-                detail: "early 180 before bob saw the INVITE".to_string(),
-            });
-            // A real FINAL response (status ≥ 200, e.g. a 503 overload shed)
-            // completes the INVITE transaction — there is nothing to CANCEL/BYE,
-            // and CANCELing an already-answered INVITE just churns the SUT. Mark
-            // the scope terminated so teardown is a no-op. A non-180 PROVISIONAL
-            // (183 early media) is NOT a final — leave the scope Early so a still-
-            // pending INVITE is CANCELed; likewise a bare timeout (no response).
-            if matches!(&e, StepError::WrongStatus { got, .. } if *got >= 200) {
-                scope.mark_terminated();
-            }
-            return Err(e);
-        }
-    };
+    let mut uas = admitted_uas(env, scope, &mut call, 180).await?;
     uas.respond(180, "Ringing").await;
     // The 180 is a NON-PRACK provisional: best-effort, so it MAY be lost
     // end-to-end — that is EXPECTED, not a call failure (RFC 3261 §13.2.2.4: the
@@ -161,6 +133,104 @@ pub async fn establish(
         tokio::time::sleep(env.ring_delay).await;
     }
     uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
+    call.try_expect(200).await?;
+    ctx.checkpoint("time_to_200");
+
+    let dialog = call.ack().await;
+    scope.set_confirmed(dialog.clone());
+    env.bob.try_receive("ACK").await?;
+    ctx.phase("connected");
+    Ok(dialog)
+}
+
+/// The call may be ADMITTED (the SUT forwards our INVITE to bob) or SHED
+/// (under overload the SUT replies a final — e.g. 503 — directly to alice, and
+/// bob never sees it; an emergency call is force-admitted and never shed). We
+/// cannot know which up front, so race bob's inbound INVITE against alice's
+/// response. `try_expect(expect_1xx)` skips the auto-100 Trying and surfaces a
+/// shed final as `WrongStatus { got: 503 }`, which the driver buckets as
+/// `status_503`. (Only an admitted call reaches bob; an admitted call's own
+/// provisional arrives only after the scenario answers bob, so the second arm
+/// resolving is unambiguously the SUT's own final to alice.) Shared by
+/// [`establish`] (awaits a 180 next) and [`establish_100rel`] (a reliable 183).
+async fn admitted_uas(
+    env: &CallEnv<'_>,
+    scope: &CallScope,
+    call: &mut ClientInvite,
+    expect_1xx: u16,
+) -> Result<ServerTxn, StepError> {
+    tokio::select! {
+        biased;
+        bob = env.bob.try_receive("INVITE") => bob,
+        shed = call.try_expect(expect_1xx) => {
+            let e = shed.err().unwrap_or_else(|| StepError::UnexpectedKind {
+                who: "alice".to_string(),
+                detail: format!("early {expect_1xx} before bob saw the INVITE"),
+            });
+            // A real FINAL response (status ≥ 200, e.g. a 503 overload shed)
+            // completes the INVITE transaction — there is nothing to CANCEL/BYE,
+            // and CANCELing an already-answered INVITE just churns the SUT. Mark
+            // the scope terminated so teardown is a no-op. A non-matching
+            // PROVISIONAL is NOT a final — leave the scope Early so a still-
+            // pending INVITE is CANCELed; likewise a bare timeout (no response).
+            if matches!(&e, StepError::WrongStatus { got, .. } if *got >= 200) {
+                scope.mark_terminated();
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Shared RFC 3262 establishment — the reliable-provisional analogue of
+/// [`establish`]:
+///
+/// ```text
+///   INVITE(offer, Supported:100rel) → 183(Require:100rel, RSeq, answer)
+///     → PRACK(RAck) → 200(PRACK) → 200(INVITE) → ACK
+/// ```
+///
+/// The caller opts into 100rel on the INVITE (RFC 3262 §3); bob answers with a
+/// RELIABLE 183 carrying the SDP answer; alice PRACKs it (RAck derived from the
+/// 183's own RSeq/CSeq via [`ClientInvite::try_prack`]); bob 200s the PRACK and
+/// only then answers the INVITE (RFC 3262 MUST-014 ordering). Unlike the basic
+/// 180, a lost reliable 183 is a FAILURE (reliability is its point), so no
+/// timeout tolerance here. Registers the early CANCEL handle then the confirmed
+/// dialog in `scope`, marks `time_to_200` and the `pracked`/`connected` phases.
+pub async fn establish_100rel(
+    env: &CallEnv<'_>,
+    scope: &CallScope,
+    ctx: &CallCtx,
+) -> Result<Dialog, StepError> {
+    let inv = env
+        .alice
+        .invite(env.bob)
+        .with_sdp(OFFER_SDP)
+        .with_header("Supported", "100rel")
+        .through(env.via);
+    let mut call = env.prepare_invite(inv).send().await;
+    scope.set_early(call.cancel_handle());
+    let mut uas = admitted_uas(env, scope, &mut call, 183).await?;
+
+    // Bob answers RELIABLY: 183 + Require:100rel + RSeq:1 + the SDP answer.
+    uas.respond(183, "Session Progress").reliable(1).with_sdp(ANSWER_SDP).try_send().await?;
+    let p183 = call.try_expect(183).await?;
+    // A RELIABLE provisional is guaranteed-delivery (the UAS retransmits it until
+    // PRACKed), so its arrival counts toward the cross-call 18x gate.
+    ctx.mark_ringing(true);
+
+    // Alice PRACKs the reliable 183 on the early dialog; bob 200s it.
+    let mut prack = call.try_prack(&p183).await?;
+    let mut prack_uas = env.bob.try_receive("PRACK").await?;
+    prack_uas.respond(200, "OK").try_send().await?;
+    prack.try_expect(200).await?;
+    ctx.checkpoint("time_to_prack_200");
+    ctx.phase("pracked");
+
+    // Realistic ring: dwell the PRACKed early dialog before answering.
+    if !env.ring_delay.is_zero() {
+        tokio::time::sleep(env.ring_delay).await;
+    }
+    uas.respond(200, "OK").with_sdp(ANSWER_SDP).try_send().await?;
     call.try_expect(200).await?;
     ctx.checkpoint("time_to_200");
 
