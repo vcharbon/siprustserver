@@ -10,6 +10,17 @@
         "null"
       ]
     },
+    "bindings": {
+      "description": "Optional **binding pool** (the parameters axis): a walkable pool of\n[`Input`] overlays with per-call `${seq}`/`${seq:N}`/`${rand:N}`\nexpansion, so ONE case drives a different identity per call (see\n[`crate::bindings`]). Absent = single-Input behaviour, unchanged.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BindingPool"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "checkSets": {
       "description": "Ids of shared [`CheckSet`]s this case pulls in.",
       "type": "array",
@@ -52,6 +63,42 @@
     "compatibleShapes"
   ],
   "$defs": {
+    "BindingMode": {
+      "description": "How the pool is walked call-to-call.",
+      "oneOf": [
+        {
+          "description": "Sequential walk: call *n* uses entry `n % entries.len()` (wraps).",
+          "type": "string",
+          "const": "seq"
+        },
+        {
+          "description": "Random walk: each call picks a uniformly random entry (seeded,\ndeterministic per run; repeats freely).",
+          "type": "string",
+          "const": "random"
+        }
+      ]
+    },
+    "BindingPool": {
+      "description": "The authored `bindings` field of a Test case: a pool of [`Input`] overlays.\nEach call resolves ONE entry (per [`BindingMode`]), merges it over the case's\nbase `input` (entry fields win; extras merge key-by-key), then expands the\ntokens — see the module docs.",
+      "type": "object",
+      "properties": {
+        "entries": {
+          "description": "The Input overlays (core From/To/R-URI + extras). Must be non-empty.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Input"
+          }
+        },
+        "mode": {
+          "$ref": "#/$defs/BindingMode",
+          "default": "seq"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "entries"
+      ]
+    },
     "Check": {
       "description": "One field assertion over the anchored message. The field grammar\n(ADR-0019): URI-bearing headers expose `.userInfo/.host/.port/.displayName/`\n`.tag/.param(x)` (e.g. `from.userInfo`); any other header gets\npresent/absent/regex over its raw value (`header(X-Foo)`); the payload is\n`body`; the transport endpoints are `source.ip/.port` / `dest.ip/.port`.",
       "type": "object",

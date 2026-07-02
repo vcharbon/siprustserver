@@ -20,6 +20,7 @@ use schemars::{JsonSchema, Schema, schema_for};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::bindings::{BindingPool, validate_bindings};
 use crate::endpoint::EndpointConfig;
 use crate::shape::{Anchor, CoreInput, ShapeSpec};
 
@@ -140,6 +141,12 @@ pub struct TestCase {
     pub compatible_shapes: Vec<String>,
     #[serde(default)]
     pub input: Input,
+    /// Optional **binding pool** (the parameters axis): a walkable pool of
+    /// [`Input`] overlays with per-call `${seq}`/`${seq:N}`/`${rand:N}`
+    /// expansion, so ONE case drives a different identity per call (see
+    /// [`crate::bindings`]). Absent = single-Input behaviour, unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bindings: Option<BindingPool>,
     /// Ids of shared [`CheckSet`]s this case pulls in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub check_sets: Vec<String>,
@@ -354,6 +361,24 @@ pub fn validate_case<S: ShapeSpec + ?Sized>(
         }
     }
 
+    // The binding pool (when present) validates like the base input: non-empty,
+    // and every entry's expansion tokens parse (a typo'd `${…}` fails at load,
+    // never mid-run). The base input is linted too — tokens are legal there as
+    // well (absent bindings = single expanded Input).
+    for problem in validate_bindings(&case.input, case.bindings.as_ref()) {
+        problems.push(format!("test case {case_id:?}: {problem}"));
+    }
+
+    // Does EVERY per-call resolution provide `field`? True if the base input
+    // provides it (an entry only overlays, never removes), else only if every
+    // pool entry provides it (each call uses exactly one entry).
+    let provides_every_call = |field: &str| -> bool {
+        case.input.provides(field)
+            || case.bindings.as_ref().is_some_and(|pool| {
+                !pool.entries.is_empty() && pool.entries.iter().all(|e| e.provides(field))
+            })
+    };
+
     // Per compatible shape: resolution, required input, published anchors.
     for shape_id in &case.compatible_shapes {
         let Some(shape) = shapes.get(shape_id) else {
@@ -364,10 +389,10 @@ pub fn validate_case<S: ShapeSpec + ?Sized>(
             continue;
         };
         for field in shape.required_input() {
-            if !case.input.provides(field) {
+            if !provides_every_call(field) {
                 problems.push(format!(
                     "test case {case_id:?} is incompatible with shape {shape_id:?}: required \
-                     input field {field:?} is missing"
+                     input field {field:?} is missing (from the input or a bindings entry)"
                 ));
             }
         }

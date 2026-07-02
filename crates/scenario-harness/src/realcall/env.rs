@@ -36,6 +36,31 @@ pub enum CorrelationStamp {
     ToUser,
 }
 
+/// The per-call **core identity** overrides — the load-side twin of the e2e
+/// Test case's `core` From/To/R-URI input (`e2e_model::CoreInput`; duplicated
+/// here as a data-only struct because `e2e-model` depends on this crate, not
+/// the reverse). Resolved per call from a binding pool by the load driver;
+/// `None` keeps the agent-derived default. Folded into the wire INVITE by
+/// [`CallEnv::outgoing_invite`].
+#[derive(Debug, Clone, Default)]
+pub struct CoreIdentity {
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub ruri: Option<String>,
+}
+
+impl CoreIdentity {
+    /// A short human-readable `from=… to=… ruri=…` rendering of the SET fields
+    /// (`None` if none is set) — the sampled-callflow banner fragment.
+    pub fn summary(&self) -> Option<String> {
+        let parts: Vec<String> = [("from", &self.from), ("to", &self.to), ("ruri", &self.ruri)]
+            .into_iter()
+            .filter_map(|(k, v)| v.as_ref().map(|v| format!("{k}={v}")))
+            .collect();
+        (!parts.is_empty()).then(|| parts.join(" "))
+    }
+}
+
 /// Everything a [`RealCallScenario`](super::RealCallScenario) needs to drive one
 /// call: the agents (bound on the mux or a functional harness) + the
 /// correlation/routing knobs + the realistic-timing dwells. Built fresh per call
@@ -61,6 +86,11 @@ pub struct CallEnv<'a> {
     /// Emergency call: stamps `Resource-Priority: esnet.0` on the INVITE so the
     /// SUT force-admits it (never shed by the Tier-3 / panic-ELU overload gate).
     pub emergency: bool,
+    /// The per-call **core identity** (the resolved binding's From/To/R-URI
+    /// overrides — the e2e Test case's `core` on the load surface). Defaults
+    /// keep the agent-derived identities; see [`Self::outgoing_invite`] for
+    /// where it folds in (and what supersedes it).
+    pub core: CoreIdentity,
     /// How THIS run's layout realizes a logical INVITE on its wire — the
     /// environment-axis seam shared with the e2e framework (same
     /// [`EgressPolicy`] the Infra shapes declare). The callee resolver is
@@ -124,6 +154,7 @@ impl<'a> CallEnv<'a> {
             },
             token,
             emergency: false,
+            core: CoreIdentity::default(),
             egress: EgressPolicy::Transparent,
             // Realistic dwell defaults (free under a paused clock).
             options_hold: Duration::from_secs(2),
@@ -157,16 +188,34 @@ impl<'a> CallEnv<'a> {
     /// Realize the logical initial INVITE on THIS run's wire — mirrors e2e-core
     /// `InfraRuntime::outgoing_invite`. `callees` is the ordered candidate list
     /// (primary first; every current scenario passes `["bob"]`). It (1) routes
-    /// through the SUT ingress ([`Self::via`]), (2) applies the per-call
-    /// identity — the correlation stamp + the emergency marker, which stay
-    /// orthogonal to routing (the load analogue of the e2e Test case's `core`
-    /// From/To/R-URI overrides) — then (3) applies the layout's
+    /// through the SUT ingress ([`Self::via`]), (2) applies the resolved
+    /// [`CoreIdentity`] From/To/R-URI overrides (the e2e Test case's `core` on
+    /// the load surface), (3) applies the per-call run identity — the
+    /// correlation stamp + the emergency marker, which stay orthogonal to
+    /// routing AND supersede the authored core where they collide (a To-user
+    /// correlation stamp overrides an authored `to`: correlation is
+    /// load-bearing demux infrastructure) — then (4) applies the layout's
     /// [`EgressRewrite`](crate::egress::EgressRewrite), which has the final say
-    /// (e.g. an `X-Api-Call` destination pin on the real cluster).
+    /// (e.g. an `X-Api-Call` destination pin / AOR R-URI on the real cluster).
     pub fn outgoing_invite<'b>(&self, callees: &[&str], inv: Invite<'b>) -> Invite<'b> {
-        let inv = self.apply_identity(inv.through(self.via));
+        let inv = self.apply_identity(self.apply_core(inv.through(self.via)));
         let targets: Vec<CalleeTarget> = callees.iter().map(|r| self.callee(r)).collect();
         self.egress.rewrite_for(&targets).apply(inv)
+    }
+
+    /// Fold the resolved binding's core From/To/R-URI overrides into the INVITE
+    /// (mirrors the `input.core` fold-in of `InfraRuntime::outgoing_invite`).
+    fn apply_core<'b>(&self, mut inv: Invite<'b>) -> Invite<'b> {
+        if let Some(from) = &self.core.from {
+            inv = inv.from(from);
+        }
+        if let Some(to) = &self.core.to {
+            inv = inv.to(to);
+        }
+        if let Some(ruri) = &self.core.ruri {
+            inv = inv.ruri(ruri);
+        }
+        inv
     }
 
     /// The per-call identity: the correlation stamp + the emergency marker.

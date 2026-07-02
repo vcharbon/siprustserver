@@ -73,6 +73,6 @@ pub use run::{run, ExpectOutcome, RunReport};
 // in-process functional leak gate (`realcall::run_asserting` for happy-path
 // flows, `realcall::run_collecting` for the voluntarily-failing ones).
 pub use realcall::{
-    run_asserting, run_collecting, AsEmergency, CallCtx, CallEnv, CallScope, RealCallScenario,
-    ScenarioId,
+    run_asserting, run_collecting, AsEmergency, CallCtx, CallEnv, CallScope, CoreIdentity,
+    RealCallScenario, ScenarioId,
 };

@@ -242,6 +242,83 @@ recording memory, so the binary also exports `loadgen_process_resident_memory_by
 *Loadgen* dashboard. `--report-interval-secs N` re-writes the on-disk report every
 N s so it is browsable mid-run.
 
+### The parameters axis: binding pools (`--case` / `case=`)
+
+The dwell flags above are **global**; identities default to the agent URIs. To
+drive **per-call identities and per-call dwells from data**, attach an authored
+`e2e-model` **Test case** (the same JSON documents the ADR-0018/0019 framework
+runs; schema: `e2e/schemas/test-case.schema.json`) to a mix entry:
+
+```bash
+# one case for the whole mix:
+./target/release/loadgen --target … --bind-ip … --case e2e/cases/load-basic-pooled.json
+
+# or per mix entry (overrides the global --case for that entry):
+./target/release/loadgen --target … --bind-ip … \
+  --scenario basic_call=4,case=e2e/cases/load-basic-pooled.json \
+  --scenario reinvite=1
+```
+
+A case may carry a **binding pool** — `bindings: { mode, entries }` — where each
+entry is an `Input` **overlay** (core `from`/`to`/`ruri` + `extras`) merged over
+the case's base `input` (entry fields win). Per call the driver resolves ONE
+entry — `"mode": "seq"` walks the pool in order, `"random"` picks per seeded
+RNG; both **wrap**, so identities repeat once the pool is exhausted (by
+design: a finite subscriber pool). String fields (core AND extras) may embed
+expansion tokens resolved per call:
+
+- `${seq}` — the monotone per-run call counter;
+- `${seq:N}` — the counter zero-padded/truncated to its last `N` digits
+  (`7` → `0007`, `123456` → `3456` for `N=4`);
+- `${rand:N}` — `N` fresh random digits (deterministic per run seed).
+
+The worked example, `e2e/cases/load-basic-pooled.json`:
+
+```json
+{
+  "id": "load-basic-pooled",
+  "compatibleShapes": ["basic-call"],
+  "input": {
+    "extras": { "ring_delay_ms": 25, "talk_time_ms": 10 }
+  },
+  "bindings": {
+    "mode": "seq",
+    "entries": [
+      { "core": { "from": "sip:+3310${seq:4}@pool.example",
+                  "to":   "sip:+3390${seq:4}@callee.example" } },
+      { "core": { "from": "sip:+4420${rand:6}@pool.example" } }
+    ]
+  }
+}
+```
+
+Call 0 dials `From: sip:+33100000@pool.example` → `To: sip:+33900000@…`, call 1
+`From: sip:+4420<6 random digits>@…` (falling back to the base/default To), call
+2 wraps to entry 0 with `+33100002`, and so on. What the resolution drives:
+
+- the resolved **core `from`/`to`/`ruri`** ride the same egress
+  `outgoing_invite` path as an e2e Test case's `core` (folded in before the
+  layout's egress rewrite, which keeps the final say — an AOR R-URI or
+  `X-Api-Call` pin still wins; a `to-user` correlation stamp overrides an
+  authored `to`, since correlation is load-bearing demux infrastructure);
+- **recognized extras become per-call dwells**, overriding the global flags
+  knob-by-knob: `ring_delay_ms`, `talk_time_ms`, `reinvite_gap_ms`,
+  `long_hold_secs`, `options_cadence_ms` (unset knobs keep the global value).
+  Unrecognized extras are left alone (they are the open per-shape parameter
+  map). This kills the "dwells are global" limitation — `CallConfig` keeps the
+  global defaults, the case refines them per call;
+- sampled callflow pages show the **resolved binding** in the header banner
+  (`binding: case=load-basic-pooled seq=17 entry=1 from=… to=…`), so a stored
+  flow says WHICH identity dialed. Prometheus/bucket labels stay
+  **scenario-keyed** — a pool never becomes label cardinality.
+
+A malformed token (`${bogus}`, `${seq:}`, an unclosed `${…`) or an empty pool
+fails **at startup** (the same load-time validation `validate_case` applies on
+the e2e surface), never silently mid-run. Absent `bindings`, the case's single
+`input` is used for every call (tokens still expand), and with no `--case` at
+all the historic flag-only behaviour is byte-for-byte unchanged. Smoke
+coverage: `loadgen_pooled_case_identities_and_dwell_overrides`.
+
 ### In the endurance run (parallel to SIPp)
 
 The endurance harness runs `loadgen` as an **in-cluster Job alongside the SIPp

@@ -200,9 +200,12 @@ impl AgentBinder {
     /// SAME path the harness report uses (`to_sip_entries` → `sip_doc` →
     /// `seq_report::render_html`), so a sampled load call's flow renders exactly
     /// like a functional-test callflow.
-    /// `detail` is the call's failure reason (the [`StepError`]/outcome string);
-    /// when present on a NOT-passed call it is surfaced in the rendered page so
-    /// the sampled callflow explains WHY it failed, not merely that it did.
+    /// `banner` is an always-shown per-call context line (the resolved binding —
+    /// the actual From/To used — on the load surface); it renders in the page
+    /// header on PASS and FAIL alike. `detail` is the call's failure reason (the
+    /// [`StepError`]/outcome string); when present on a NOT-passed call it is
+    /// surfaced in the rendered page so the sampled callflow explains WHY it
+    /// failed, not merely that it did.
     /// `chaos_markers` are injected-fault instants as `(wall_clock_epoch_ms,
     /// label)` — the load driver passes the recent `POST /chaos` markers so a
     /// sampled NOK flow renders each one (that falls in this call's window) as a
@@ -212,17 +215,18 @@ impl AgentBinder {
         &self,
         title: &str,
         passed: bool,
+        banner: Option<&str>,
         detail: Option<&str>,
         chaos_markers: &[(i64, String)],
     ) -> Option<String> {
-        let doc = self.seq_doc(title, passed, detail, chaos_markers)?;
+        let doc = self.seq_doc(title, passed, banner, detail, chaos_markers)?;
         Some(seq_report::render_html(&doc))
     }
 
     /// Render this call's recorded trace as an SVG sequence diagram (`None` if not
     /// sampled).
     pub fn render_svg(&self, title: &str, passed: bool) -> Option<String> {
-        let doc = self.seq_doc(title, passed, None, &[])?;
+        let doc = self.seq_doc(title, passed, None, None, &[])?;
         Some(seq_report::render_svg(&doc))
     }
 
@@ -244,6 +248,7 @@ impl AgentBinder {
         &self,
         title: &str,
         passed: bool,
+        banner: Option<&str>,
         detail: Option<&str>,
         chaos_markers: &[(i64, String)],
     ) -> Option<seq_report::SeqDoc> {
@@ -255,6 +260,13 @@ impl AgentBinder {
         // banner next to the FAIL status) and as an explicit anomaly in the list,
         // so the sampled NOK callflow says WHY, not just that it failed.
         let reason = detail.filter(|_| !passed);
+        // The description = the always-shown banner (the resolved binding) plus,
+        // on a failure, the reason — both in the header, PASS or FAIL.
+        let description = match (banner, reason) {
+            (Some(b), Some(r)) => Some(format!("{b} — {r}")),
+            (Some(b), None) => Some(b.to_string()),
+            (None, r) => r.map(str::to_string),
+        };
         let extra: Vec<seq_report::Anomaly> = match reason {
             Some(d) => vec![seq_report::Anomaly {
                 check: "call-result".to_string(),
@@ -273,7 +285,13 @@ impl AgentBinder {
             markers: chaos_markers.to_vec(),
         };
         Some(crate::report::project::sip_doc_with_overlay(
-            title, reason, &entries, &scenario, passed, &extra, &overlay,
+            title,
+            description.as_deref(),
+            &entries,
+            &scenario,
+            passed,
+            &extra,
+            &overlay,
         ))
     }
 }

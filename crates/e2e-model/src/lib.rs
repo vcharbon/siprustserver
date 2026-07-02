@@ -14,12 +14,14 @@
 //! two is [`shape::ShapeSpec`]: the load-time metadata slice of a Callflow
 //! shape that `validate_case` consumes without knowing how the shape runs.
 
+pub mod bindings;
 pub mod checks;
 pub mod egress;
 pub mod endpoint;
 pub mod model;
 pub mod shape;
 
+pub use bindings::{BindingMode, BindingPool, BindingResolver, ResolvedBinding, validate_bindings};
 pub use checks::{Bindings, CheckVerdict, all_passed, evaluate_blocks, evaluate_case};
 pub use egress::{
     ApiCall, ApiCallDestination, ApiCallRoute, CalleeTarget, EgressPolicy, EgressRewrite,

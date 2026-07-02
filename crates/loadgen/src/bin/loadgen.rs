@@ -14,7 +14,7 @@
 //! existing test suites, and how to add scenarios.
 
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,8 +22,8 @@ use clap::Parser;
 use e2e_model::{load_endpoint_config, EndpointConfig};
 use loadgen::{
     by_id, default_scenarios, serve_metrics, CallConfig, CallTuning, ChaosLog, Correlation, Driver,
-    DriverCfg, EndpointSpec, LoadScenario, MuxCore, MuxTransport, Reporter, ReporterCfg, Role,
-    ScenarioInputs,
+    DriverCfg, EndpointSpec, LoadCase, LoadScenario, MixEntry, MuxCore, MuxTransport, Reporter,
+    ReporterCfg, Role, ScenarioInputs,
 };
 use sip_clock::Clock;
 
@@ -141,9 +141,20 @@ struct Args {
     /// Scenario weights, repeatable: `--scenario basic_call=4 --scenario refer=1`.
     /// A spec may carry per-scenario robustness overrides after the weight:
     /// `--scenario basic_call=4,drop=0.002,retransmit` (drop rate + auto-retransmit
-    /// just for that scenario, overriding the global `--drop-rate`/`--auto-retransmit`).
+    /// just for that scenario, overriding the global `--drop-rate`/`--auto-retransmit`),
+    /// and/or `case=<path.json>` to attach an authored Test case (binding pool →
+    /// per-call identities + per-call dwell overrides) to that mix entry,
+    /// overriding the global `--case`.
     #[arg(long = "scenario")]
     scenarios: Vec<String>,
+    /// Global default Test case attached to every mix entry that has no
+    /// per-entry `case=` override: an authored `e2e-model` Test-case JSON whose
+    /// optional `bindings` pool drives per-call From/To/R-URI (with
+    /// `${seq}`/`${seq:N}`/`${rand:N}` expansion) and whose recognized extras
+    /// (`ring_delay_ms`, `talk_time_ms`, `reinvite_gap_ms`, `long_hold_secs`,
+    /// `options_cadence_ms`) override the global dwell flags per call.
+    #[arg(long)]
+    case: Option<PathBuf>,
     /// Simulated packet-drop probability applied to every call's mux legs (0 =
     /// off). Each datagram (in and out) is independently dropped; the SUT's
     /// transaction layer and, with `--auto-retransmit`, the harness recover it.
@@ -216,15 +227,18 @@ fn endpoint_config(args: &Args) -> EndpointConfig {
     }
 }
 
-/// Parse one `--scenario` spec (`name[=weight][,drop=<f>][,retransmit[=<bool>]]`)
+/// Parse one `--scenario` spec
+/// (`name[=weight][,drop=<f>][,retransmit[=<bool>]][,case=<path.json>]`)
 /// into its resolved scenario (constructed from the per-run `inputs`), weight,
-/// and per-scenario [`CallTuning`] (starting from `base` and overridden by the
-/// trailing tokens).
+/// per-scenario [`CallTuning`] (starting from `base` and overridden by the
+/// trailing tokens), and the per-entry Test case attached with `case=` (loaded
+/// with `case_seed`), if any.
 fn parse_scenario_spec(
     spec: &str,
     base: CallTuning,
     inputs: &ScenarioInputs,
-) -> (String, Arc<dyn LoadScenario>, f64, CallTuning) {
+    case_seed: u64,
+) -> (String, Arc<dyn LoadScenario>, f64, CallTuning, Option<Arc<LoadCase>>) {
     let mut parts = spec.split(',');
     let head = parts.next().unwrap_or(spec);
     let (name, weight) = head
@@ -233,6 +247,7 @@ fn parse_scenario_spec(
         .unwrap_or((head, 1.0));
     let s = by_id(name, inputs).unwrap_or_else(|| panic!("unknown scenario {name:?}"));
     let mut t = base;
+    let mut case = None;
     for tok in parts {
         let tok = tok.trim();
         if tok.is_empty() {
@@ -246,6 +261,9 @@ fn parse_scenario_spec(
                 t.retransmit =
                     v.parse().unwrap_or_else(|_| panic!("bad retransmit bool in {spec:?}"))
             }
+            Some(("case", path)) => {
+                case = Some(Arc::new(LoadCase::load(Path::new(path), case_seed)));
+            }
             None if tok == "retransmit" => t.retransmit = true,
             None if tok == "drop" => {
                 if t.drop_rate <= 0.0 {
@@ -255,7 +273,7 @@ fn parse_scenario_spec(
             _ => panic!("unknown scenario tuning token {tok:?} in {spec:?}"),
         }
     }
-    (name.to_string(), s, weight, t)
+    (name.to_string(), s, weight, t, case)
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -268,22 +286,35 @@ async fn main() -> std::io::Result<()> {
     // its own timeline). See `sip_clock::Clock`.
     let clock = Clock::system();
 
+    // Per-run RNG seed off the shared clock (varies per run; no raw SystemTime).
+    // Also seeds the Test-case binding resolvers (`${rand:N}` + random pool walk).
+    let seed = (clock.now_ms() as u64).max(1);
+
     let base_tuning = default_tuning(&args);
     // Per-run scenario inputs (SUT auth data, not topology): consumed at
     // scenario CONSTRUCTION (e.g. the refer scenarios' `refer_key`).
     let inputs = ScenarioInputs { refer_key: args.refer_key.clone() };
+    // The global default Test case (`--case`): ONE shared resolver — so its
+    // `${seq}` counter is monotone across the whole run — attached to every mix
+    // entry without its own `case=` override.
+    let global_case: Option<Arc<LoadCase>> =
+        args.case.as_deref().map(|p| Arc::new(LoadCase::load(p, seed)));
     let mut tuning: std::collections::HashMap<String, CallTuning> = std::collections::HashMap::new();
-    let scenarios: Vec<(Arc<dyn LoadScenario>, f64)> = if args.scenarios.is_empty() {
+    let scenarios: Vec<MixEntry> = if args.scenarios.is_empty() {
         // No explicit scenario set → the default mix; the global tuning applies to
         // all of them via `DriverCfg::default_tuning` (no per-id overrides).
         default_scenarios(&inputs)
+            .into_iter()
+            .map(|(scenario, weight)| MixEntry { scenario, weight, case: global_case.clone() })
+            .collect()
     } else {
         args.scenarios
             .iter()
             .map(|spec| {
-                let (name, s, weight, t) = parse_scenario_spec(spec, base_tuning, &inputs);
+                let (name, scenario, weight, t, case) =
+                    parse_scenario_spec(spec, base_tuning, &inputs, seed);
                 tuning.insert(name, t);
-                (s, weight)
+                MixEntry { scenario, weight, case: case.or_else(|| global_case.clone()) }
             })
             .collect()
     };
@@ -339,9 +370,6 @@ async fn main() -> std::io::Result<()> {
         // background sampling gate.
         background_record_every: args.background_record_every,
     }));
-
-    // Per-run RNG seed off the shared clock (varies per run; no raw SystemTime).
-    let seed = (clock.now_ms() as u64).max(1);
 
     let cfg = DriverCfg {
         cps: args.cps,

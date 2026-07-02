@@ -19,6 +19,7 @@ use scenario_harness::{AgentBinder, EgressPolicy};
 use sip_clock::Clock;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::case::LoadCase;
 use crate::chaos::{ChaosLog, ChaosTag};
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
@@ -102,6 +103,22 @@ pub struct DriverCfg {
     pub tuning: HashMap<String, CallTuning>,
 }
 
+/// One scenario mix entry: the scenario, its pick weight, and an optional
+/// attached Test case (`--scenario name=w,case=<path.json>` / the global
+/// `--case`) whose binding pool drives per-call identities and dwells. Plain
+/// `(scenario, weight)` tuples convert (`case: None` — the historic mix).
+pub struct MixEntry {
+    pub scenario: Arc<dyn LoadScenario>,
+    pub weight: f64,
+    pub case: Option<Arc<LoadCase>>,
+}
+
+impl From<(Arc<dyn LoadScenario>, f64)> for MixEntry {
+    fn from((scenario, weight): (Arc<dyn LoadScenario>, f64)) -> Self {
+        MixEntry { scenario, weight, case: None }
+    }
+}
+
 /// The load driver.
 pub struct Driver {
     cps: f64,
@@ -109,7 +126,7 @@ pub struct Driver {
     max_in_flight: usize,
     seed: u64,
     reporter: Arc<Reporter>,
-    scenarios: Vec<(Arc<dyn LoadScenario>, f64)>,
+    scenarios: Vec<MixEntry>,
     total_weight: f64,
     sem: Arc<Semaphore>,
     transport: Arc<MuxTransport>,
@@ -155,14 +172,15 @@ fn panic_msg(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 impl Driver {
-    pub fn new(
+    pub fn new<M: Into<MixEntry>>(
         cfg: DriverCfg,
-        scenarios: Vec<(Arc<dyn LoadScenario>, f64)>,
+        scenarios: Vec<M>,
         reporter: Arc<Reporter>,
         transport: Arc<MuxTransport>,
     ) -> Self {
+        let scenarios: Vec<MixEntry> = scenarios.into_iter().map(Into::into).collect();
         assert!(!scenarios.is_empty(), "loadgen needs at least one scenario");
-        let total_weight = scenarios.iter().map(|(_, w)| *w).sum();
+        let total_weight = scenarios.iter().map(|e| e.weight).sum();
         Self {
             cps: cfg.cps,
             duration: cfg.duration,
@@ -197,16 +215,16 @@ impl Driver {
         &self.reporter
     }
 
-    fn pick(&self, rng: &mut u64) -> Arc<dyn LoadScenario> {
+    fn pick(&self, rng: &mut u64) -> &MixEntry {
         let r = (xorshift(rng) as f64 / u64::MAX as f64) * self.total_weight;
         let mut acc = 0.0;
-        for (s, w) in &self.scenarios {
-            acc += *w;
+        for entry in &self.scenarios {
+            acc += entry.weight;
             if r <= acc {
-                return s.clone();
+                return entry;
             }
         }
-        self.scenarios.last().unwrap().0.clone()
+        self.scenarios.last().unwrap()
     }
 
     /// Run the load for the configured duration, then drain in-flight calls.
@@ -248,7 +266,8 @@ impl Driver {
             }
             n += 1;
 
-            let scenario = self.pick(&mut rng);
+            let entry = self.pick(&mut rng);
+            let (scenario, case) = (entry.scenario.clone(), entry.case.clone());
             let permit = match self.sem.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
@@ -259,6 +278,7 @@ impl Driver {
             let tuning = self.tuning_for(scenario.id());
             tokio::spawn(run_one(
                 scenario,
+                case,
                 self.reporter.clone(),
                 self.transport.clone(),
                 self.call.clone(),
@@ -279,6 +299,7 @@ impl Driver {
 #[allow(clippy::too_many_arguments)] // per-call context threaded explicitly (no shared struct)
 async fn run_one(
     scenario: Arc<dyn LoadScenario>,
+    case: Option<Arc<LoadCase>>,
     reporter: Arc<Reporter>,
     transport: Arc<MuxTransport>,
     call: Arc<CallConfig>,
@@ -289,6 +310,16 @@ async fn run_one(
 ) {
     reporter.inc_inflight();
     let id = scenario.id();
+
+    // Resolve THIS call's binding from the attached Test case (pool walk +
+    // token expansion): the core From/To/R-URI to fold into the outgoing
+    // INVITE, the per-call dwell overrides over the global CallConfig
+    // defaults, and the sampled-page banner. No case → all defaults.
+    let resolved = case.as_ref().map(|c| c.resolve());
+    let (core, dwells, banner) = match resolved {
+        Some(r) => (r.core, r.dwells, Some(r.banner)),
+        None => (Default::default(), Default::default(), None),
+    };
 
     // One correlation token per CALL: alice stamps it on her INVITE (per the
     // run's correlation strategy — relayed header or To-user) and the SUT
@@ -333,13 +364,16 @@ async fn run_one(
         stamp: transport.correlation.stamp(&token),
         token,
         emergency: scenario.emergency(),
+        core,
         egress: call.egress.clone(),
         options_hold: call.options_hold,
-        options_cadence: call.options_cadence,
-        ring_delay: call.ring_delay,
-        talk_time: call.talk_time,
-        reinvite_gap: call.reinvite_gap,
-        long_hold: call.long_hold,
+        // Per-call dwells: the resolved case extras override the global
+        // CallConfig defaults knob-by-knob (unset knobs keep the default).
+        options_cadence: dwells.options_cadence.unwrap_or(call.options_cadence),
+        ring_delay: dwells.ring_delay.unwrap_or(call.ring_delay),
+        talk_time: dwells.talk_time.unwrap_or(call.talk_time),
+        reinvite_gap: dwells.reinvite_gap.unwrap_or(call.reinvite_gap),
+        long_hold: dwells.long_hold.unwrap_or(call.long_hold),
     };
     let scope = CallScope::new();
     let ctx = CallCtx::new();
@@ -406,7 +440,10 @@ async fn run_one(
             // instant(s) in its window as Lifecycle bands (absolute UTC, on the
             // call's wall-clock timeline) — see `ChaosLog::markers`.
             let markers = chaos.as_ref().map(|c| c.markers()).unwrap_or_default();
-            binder.render_html(id, class.is_ok(), detail.as_deref(), &markers)
+            // The banner (the resolved binding — the actual From/To used) shows
+            // in the page header on PASS and FAIL alike; the failure detail
+            // stays FAIL-only. Metrics labels stay scenario-keyed.
+            binder.render_html(id, class.is_ok(), banner.as_deref(), detail.as_deref(), &markers)
         } else {
             None
         };

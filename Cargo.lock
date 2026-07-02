@@ -2336,6 +2336,7 @@ dependencies = [
  "layer-harness",
  "regex",
  "scenario-harness",
+ "serde_json",
  "sip-clock",
  "sip-message",
  "sip-net",

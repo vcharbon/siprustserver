@@ -31,6 +31,7 @@
 //!
 //! [`Agent`]: scenario_harness::Agent
 
+pub mod case;
 pub mod chaos;
 pub mod class;
 pub mod ctx;
@@ -40,10 +41,11 @@ pub mod report;
 pub mod scenarios;
 pub mod scope;
 
+pub use case::{DwellOverrides, LoadCase, ResolvedCall};
 pub use chaos::{ChaosLog, ChaosTag};
 pub use class::{CallOutcome, ResultClass};
-pub use ctx::{CallCtx, CallEnv, CorrelationStamp};
-pub use driver::{serve_metrics, CallConfig, CallTuning, Driver, DriverCfg, MuxTransport};
+pub use ctx::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp};
+pub use driver::{serve_metrics, CallConfig, CallTuning, Driver, DriverCfg, MixEntry, MuxTransport};
 pub use mux::{CallRouting, Correlation, EndpointSpec, LegInfo, LegPicker, MuxCore, Role};
 pub use report::{Reporter, ReporterCfg};
 pub use scenarios::{

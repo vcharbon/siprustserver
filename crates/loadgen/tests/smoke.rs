@@ -11,11 +11,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use b2bua_harness::{settle_until, B2buaSut};
 use layer_harness::TransportKind;
-use loadgen::scenarios::{establish, LoadScenario, ScenarioId};
+use loadgen::scenarios::{establish, BasicCall, LoadScenario, ScenarioId};
 use loadgen::{
     by_id, default_scenarios, failure_scenarios, CallConfig, CallCtx, CallEnv, CallRouting,
     CallScope, CallTuning, Correlation, Driver, DriverCfg, EgressPolicy, EndpointSpec, LegInfo,
-    MuxCore, MuxTransport, ResultClass, Reporter, ReporterCfg, Role, ScenarioInputs,
+    LoadCase, MixEntry, MuxCore, MuxTransport, ResultClass, Reporter, ReporterCfg, Role,
+    ScenarioInputs,
 };
 use scenario_harness::{Harness, StepError};
 use sip_clock::Clock;
@@ -859,4 +860,122 @@ async fn loadgen_inprocess_endurance_lossy() {
         "SUT holds {} live calls vs {failed} failed",
         b2bua.active_calls()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Test-case-driven binding pools (the parameters axis)
+// ---------------------------------------------------------------------------
+
+/// A basic call that OBSERVES its per-call resolution (the resolved core From
+/// and the effective dwells) before delegating to the shared choreography — the
+/// probe for the binding-pool wiring below.
+struct ObservedBasic {
+    froms: Arc<std::sync::Mutex<Vec<String>>>,
+    dwells: Arc<std::sync::Mutex<Vec<(Duration, Duration)>>>,
+}
+
+#[async_trait]
+impl LoadScenario for ObservedBasic {
+    fn id(&self) -> ScenarioId {
+        "pooled_basic"
+    }
+    async fn run(&self, env: &CallEnv<'_>, scope: &CallScope, ctx: &CallCtx) -> Result<(), scenario_harness::StepError> {
+        self.froms
+            .lock()
+            .unwrap()
+            .push(env.core.from.clone().expect("every pool entry sets `from`"));
+        self.dwells.lock().unwrap().push((env.ring_delay, env.talk_time));
+        BasicCall.run(env, scope, ctx).await
+    }
+}
+
+/// The pooled Test case end to end: the committed example
+/// `e2e/cases/load-basic-pooled.json` attached to a mix entry drives
+/// (a) DIFFERENT From identities across calls (the seq/rand pool walk with
+/// `${seq:4}`/`${rand:6}` expansion, folded into the wire INVITE through the
+/// egress `outgoing_invite` path), (b) GREEN result classes throughout, and
+/// (c) the per-call dwell overrides (`ring_delay_ms: 25`, `talk_time_ms: 10`
+/// from the case extras) over the global defaults (0/0). The sampled callflow
+/// page shows the resolved binding in its header banner, while the report
+/// buckets stay scenario-keyed (no per-binding cardinality).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_pooled_case_identities_and_dwell_overrides() {
+    let (_h, b2bua, core, transport) = setup(6600, Correlation::header("X-Loadgen-Id"), 5).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
+
+    let case_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../e2e/cases/load-basic-pooled.json");
+    let case = Arc::new(LoadCase::load(&case_path, 0x10AD));
+
+    let froms = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let dwells = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let scenario: Arc<dyn LoadScenario> =
+        Arc::new(ObservedBasic { froms: froms.clone(), dwells: dwells.clone() });
+
+    // Global dwells stay 0 (the `cfg` default), so an observed 25 ms ring /
+    // 10 ms talk can ONLY come from the case extras.
+    let driver = Driver::new(
+        cfg(b2bua.addr, 50.0, 2, 16, 0xB1D5),
+        vec![MixEntry { scenario, weight: 1.0, case: Some(case) }],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    // (b) Green classes: every completed call is OK (no timeout / wrong-status /
+    // rfc_audit_fail on the sampled+audited half).
+    let ok = reporter.count("pooled_basic", &ResultClass::Ok);
+    assert!(ok > 5, "too few OK pooled calls:\n{}", reporter.render_prometheus());
+    assert_eq!(
+        reporter.total_calls(),
+        ok,
+        "non-OK result classes with a pooled case:\n{}",
+        reporter.render_prometheus()
+    );
+
+    // (a) Different From identities across calls: the seq-mode pool alternates
+    // its two entries and every resolution expands fresh digits.
+    let froms = froms.lock().unwrap().clone();
+    let distinct: std::collections::BTreeSet<&String> = froms.iter().collect();
+    assert!(
+        distinct.len() >= froms.len().saturating_sub(1),
+        "pool identities repeated unexpectedly early: {froms:?}"
+    );
+    assert!(distinct.len() > 1, "all calls used one identity: {froms:?}");
+    for f in &froms {
+        assert!(
+            f.starts_with("sip:+3310") && f.ends_with("@pool.example")
+                || f.starts_with("sip:+4420") && f.ends_with("@pool.example"),
+            "unexpected resolved From {f:?}"
+        );
+    }
+
+    // (c) The per-call dwell overrides beat the global (zero) defaults.
+    let dwells = dwells.lock().unwrap().clone();
+    assert!(!dwells.is_empty());
+    for (ring, talk) in &dwells {
+        assert_eq!(*ring, Duration::from_millis(25), "ring_delay_ms extras override not applied");
+        assert_eq!(*talk, Duration::from_millis(10), "talk_time_ms extras override not applied");
+    }
+
+    // The sampled OK callflow page carries the resolved binding in its header
+    // banner (case id + the actual From used), and the recorded wire INVITE
+    // itself shows the expanded identity — proof the core rode the egress
+    // outgoing-invite path onto the wire, not just into the env.
+    let out = std::env::temp_dir().join(format!("loadgen-pooled-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    reporter.finalize(&out).unwrap();
+    let page = out.join("callflows/pooled_basic/ok/clear/0.html");
+    let html = std::fs::read_to_string(&page)
+        .unwrap_or_else(|e| panic!("no OK sample page at {}: {e}", page.display()));
+    assert!(html.contains("binding: case=load-basic-pooled"), "banner missing from sample page");
+    assert!(html.contains("from=sip:+"), "resolved From missing from the banner");
+    assert!(html.contains("@pool.example"), "expanded identity not on the recorded wire INVITE");
+    let _ = std::fs::remove_dir_all(&out);
+
+    // No leak, as everywhere: mux registry reclaimed, SUT fully reaped.
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (pooled case)");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
 }

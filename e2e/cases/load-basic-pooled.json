@@ -1,0 +1,30 @@
+{
+  "$schema": "../schemas/test-case.schema.json",
+  "id": "load-basic-pooled",
+  "description": "Pooled load identities: a basic call whose From/To walk a binding pool with per-call ${seq}/${rand:N} expansion, and whose extras override the run's global dwells per call (ring 25 ms, talk 10 ms). Attach with `loadgen --scenario basic_call=4,case=e2e/cases/load-basic-pooled.json` (or the global `--case`).",
+  "compatibleShapes": [
+    "basic-call"
+  ],
+  "input": {
+    "extras": {
+      "ring_delay_ms": 25,
+      "talk_time_ms": 10
+    }
+  },
+  "bindings": {
+    "mode": "seq",
+    "entries": [
+      {
+        "core": {
+          "from": "sip:+3310${seq:4}@pool.example",
+          "to": "sip:+3390${seq:4}@callee.example"
+        }
+      },
+      {
+        "core": {
+          "from": "sip:+4420${rand:6}@pool.example"
+        }
+      }
+    ]
+  }
+}
