@@ -46,5 +46,11 @@ pub use ctx::{CallCtx, CallEnv, CorrelationStamp};
 pub use driver::{serve_metrics, CallConfig, CallTuning, Driver, DriverCfg, MuxTransport};
 pub use mux::{CallRouting, Correlation, EndpointSpec, LegInfo, LegPicker, MuxCore, Role};
 pub use report::{Reporter, ReporterCfg};
-pub use scenarios::{by_id, default_scenarios, failure_scenarios, LoadScenario, ScenarioId};
+pub use scenarios::{
+    by_id, default_scenarios, failure_scenarios, LoadScenario, ScenarioId, ScenarioInputs,
+};
 pub use scope::CallScope;
+// The environment axis shared with the e2e framework: the egress policy a run's
+// `CallConfig`/`CallEnv` carries (authored via `e2e_model::EndpointConfig.egress`,
+// domain types hosted in `scenario_harness::egress`).
+pub use scenario_harness::egress::{ApiCall, CalleeTarget, EgressPolicy, EgressRewrite};

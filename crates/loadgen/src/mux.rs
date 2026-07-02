@@ -76,7 +76,8 @@ pub enum Role {
 /// How the per-call correlation token is carried through the SUT — the per-run
 /// pluggable strategy, with two halves:
 /// - **stamp** ([`Correlation::stamp`]): how the token is written into the
-///   outgoing INVITE (applied at the scenario's `prepare_invite` seam).
+///   outgoing INVITE (applied inside `CallEnv::outgoing_invite`, the per-call
+///   identity half — orthogonal to the egress rewrite).
 /// - **extract** (private `token()`, used by the demux `route` path): how the
 ///   token is recovered from a received leg.
 ///

@@ -14,6 +14,7 @@ use std::net::SocketAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::egress::{ApiCall, CalleeTarget, EgressPolicy};
 use crate::{Agent, Invite};
 
 /// How the per-call correlation token is **written into the outgoing INVITE** —
@@ -60,13 +61,14 @@ pub struct CallEnv<'a> {
     /// Emergency call: stamps `Resource-Priority: esnet.0` on the INVITE so the
     /// SUT force-admits it (never shed by the Tier-3 / panic-ELU overload gate).
     pub emergency: bool,
-    /// Optional `X-Api-Call` destination pin (our-b2bua routing adapter): the
-    /// static `uas`/`refer` socket the SUT should send the callee leg to. `None`
-    /// when the SUT routes the callee by its own (static) config.
-    pub route_pin: Option<SocketAddr>,
-    pub refer_pin: Option<SocketAddr>,
-    /// The `X-Api-Call` `refer_key` the SUT's REFER backend authorizes.
-    pub refer_key: String,
+    /// How THIS run's layout realizes a logical INVITE on its wire — the
+    /// environment-axis seam shared with the e2e framework (same
+    /// [`EgressPolicy`] the Infra shapes declare). The callee resolver is
+    /// [`Self::callee`] (role → the bound agent's socket, URI'd by the policy);
+    /// scenarios never branch on the policy — they call
+    /// [`Self::outgoing_invite`], which consults it. Replaces the hand-rolled
+    /// `X-Api-Call` route/refer pins.
+    pub egress: EgressPolicy,
     /// Long-hold duration for the OPTIONS-keepalive scenario.
     pub options_hold: Duration,
     /// In-dialog OPTIONS keepalive cadence.
@@ -88,12 +90,14 @@ pub struct CallEnv<'a> {
 
 impl<'a> CallEnv<'a> {
     /// A [`CallEnv`] for the **in-process functional leak gate** — agents bound on
-    /// a [`Harness`](crate::Harness), routing through `via` (the bound SUT). No
-    /// `X-Api-Call` pin (the functional B2BUA routes the callee by its own config),
-    /// and **realistic non-zero timing** by default so the dwell between
-    /// 180→200, around the re-INVITE, and before the BYE is actually exercised.
-    /// Under `#[tokio::test(start_paused)]` those sleeps auto-advance, so they cost
-    /// ~zero wall-clock while still aging the dialog on the SUT.
+    /// a [`Harness`](crate::Harness), routing through `via` (the bound SUT).
+    /// [`EgressPolicy::Transparent`] (the functional B2BUA's scripted decision
+    /// engine routes the callee by its own config, so the logical INVITE is the
+    /// wire INVITE), and **realistic non-zero timing** by default so the dwell
+    /// between 180→200, around the re-INVITE, and before the BYE is actually
+    /// exercised. Under `#[tokio::test(start_paused)]` those sleeps
+    /// auto-advance, so they cost ~zero wall-clock while still aging the dialog
+    /// on the SUT.
     ///
     /// `token` is the per-call correlation value (mint a fresh one per call);
     /// `correlation_header` is the transparent header it rides (e.g.
@@ -120,9 +124,7 @@ impl<'a> CallEnv<'a> {
             },
             token,
             emergency: false,
-            route_pin: None,
-            refer_pin: None,
-            refer_key: String::new(),
+            egress: EgressPolicy::Transparent,
             // Realistic dwell defaults (free under a paused clock).
             options_hold: Duration::from_secs(2),
             options_cadence: Duration::from_secs(1),
@@ -133,9 +135,44 @@ impl<'a> CallEnv<'a> {
         }
     }
 
-    /// Apply the per-call correlation stamp (and optional routing pin) to the
-    /// initial INVITE so every leg of this call can be matched back to it.
-    pub fn prepare_invite<'b>(&self, inv: Invite<'b>) -> Invite<'b> {
+    /// Resolve a logical callee **role** (`"bob"`, `"charlie"`) to how THIS
+    /// run's layout addresses it — the callee half of the egress seam, mirroring
+    /// e2e-core `InfraRuntime::callee`. The resolver is the bound agents
+    /// themselves (the load mux's static endpoints / the functional harness
+    /// agents): the role maps to that agent's socket, and the [`EgressPolicy`]
+    /// decides the topology-correct URI (registered AOR / `sip:<role>@<addr>`).
+    /// Panics on an unknown role or an unbound charlie (like the e2e resolver
+    /// panics on a role missing from the Endpoint config).
+    pub fn callee(&self, role: &str) -> CalleeTarget {
+        let addr = match role {
+            "bob" => self.bob.addr(),
+            "charlie" => {
+                self.charlie.expect("CallEnv: callee role \"charlie\" is not bound").addr()
+            }
+            other => panic!("CallEnv has no agent for callee role {other:?}"),
+        };
+        CalleeTarget { role: role.to_string(), uri: self.egress.callee_uri(role, addr), addr }
+    }
+
+    /// Realize the logical initial INVITE on THIS run's wire — mirrors e2e-core
+    /// `InfraRuntime::outgoing_invite`. `callees` is the ordered candidate list
+    /// (primary first; every current scenario passes `["bob"]`). It (1) routes
+    /// through the SUT ingress ([`Self::via`]), (2) applies the per-call
+    /// identity — the correlation stamp + the emergency marker, which stay
+    /// orthogonal to routing (the load analogue of the e2e Test case's `core`
+    /// From/To/R-URI overrides) — then (3) applies the layout's
+    /// [`EgressRewrite`](crate::egress::EgressRewrite), which has the final say
+    /// (e.g. an `X-Api-Call` destination pin on the real cluster).
+    pub fn outgoing_invite<'b>(&self, callees: &[&str], inv: Invite<'b>) -> Invite<'b> {
+        let inv = self.apply_identity(inv.through(self.via));
+        let targets: Vec<CalleeTarget> = callees.iter().map(|r| self.callee(r)).collect();
+        self.egress.rewrite_for(&targets).apply(inv)
+    }
+
+    /// The per-call identity: the correlation stamp + the emergency marker.
+    /// Deliberately separate from the egress rewrite — correlation is a run
+    /// strategy, not topology.
+    fn apply_identity<'b>(&self, inv: Invite<'b>) -> Invite<'b> {
         let mut inv = match &self.stamp {
             CorrelationStamp::Header { name, value } => inv.with_header(name, value),
             // The token IS the To user-part; the host part stays the callee's
@@ -148,45 +185,52 @@ impl<'a> CallEnv<'a> {
             // Emergency namespace marker the b2bua's overload brake never sheds.
             inv = inv.with_header("Resource-Priority", "esnet.0");
         }
-        if let Some(pin) = self.route_pin {
-            inv = inv.with_header("X-Api-Call", &api_pin(pin));
-        }
         inv
     }
 
-    /// The `X-Api-Call` REFER-authorization JSON pinning the transfer to the
-    /// `refer` endpoint (our-b2bua adapter). `None` if no charlie leg or no pin.
-    pub fn refer_api_call(&self) -> Option<String> {
-        let pin = self.refer_pin?;
-        Some(format!(
-            r#"{{"refer_key":"{}","destination":{{"host":"{}","port":{}}}}}"#,
-            self.refer_key,
-            pin.ip(),
-            pin.port()
-        ))
+    /// The `X-Api-Call` REFER-authorization header value for a blind transfer to
+    /// charlie under `refer_key` — [`ApiCall::refer`] over the seam-resolved
+    /// charlie target ([`Self::callee`]), exactly what the e2e
+    /// `transfer-refer-media` shape emits. `refer_key` is per-run SUT auth data
+    /// (the scenario input), not topology — hence a parameter, not an env field.
+    /// `None` if no charlie leg is bound.
+    pub fn refer_authorization(&self, refer_key: &str) -> Option<String> {
+        let target = self.refer_target()?;
+        Some(
+            ApiCall::refer(refer_key, target.addr.ip().to_string(), target.addr.port())
+                .to_header(),
+        )
     }
 
-    /// A `<sip:…@host:port>` Refer-To pointing at charlie's **address** (so the
-    /// SUT routes the transfer there). With a header stamp the user-part is
-    /// cosmetic (`transfer` — correlation rides the relayed header); with the
-    /// To-user stamp it is the TOKEN, since the SUT's transfer INVITE derives
-    /// its To from this URI. `None` if no charlie.
+    /// Charlie (the transfer target) resolved through the same egress seam as
+    /// any callee. `None` if no charlie leg is bound.
+    pub fn refer_target(&self) -> Option<CalleeTarget> {
+        self.charlie?;
+        Some(self.callee("charlie"))
+    }
+
+    /// The `<sip:…>` Refer-To addressing charlie **through the egress seam**
+    /// (its host part is the policy-resolved URI's: the registered AOR domain or
+    /// charlie's address). The user-part is chosen by the correlation strategy:
+    /// cosmetic (`transfer`) with a header stamp, the TOKEN with the To-user
+    /// stamp — the SUT's transfer INVITE derives its To/R-URI from this URI,
+    /// which is how the C leg correlates. `None` if no charlie.
     pub fn refer_to(&self) -> Option<String> {
-        let c = self.charlie?;
+        let target = self.refer_target()?;
         let user = match &self.stamp {
             CorrelationStamp::ToUser => self.token.as_str(),
             CorrelationStamp::Header { .. } => "transfer",
         };
-        Some(format!("<sip:{user}@{}>", c.addr()))
+        // Splice the correlation user-part into the policy-resolved URI
+        // (`sip:charlie@<rest>` → `sip:<user>@<rest>`), keeping the topology-
+        // correct host part.
+        let rest = target
+            .uri
+            .split_once('@')
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_else(|| target.addr.to_string());
+        Some(format!("<sip:{user}@{rest}>"))
     }
-}
-
-fn api_pin(addr: SocketAddr) -> String {
-    format!(
-        r#"{{"destination":{{"host":"{}","port":{}}}}}"#,
-        addr.ip(),
-        addr.port()
-    )
 }
 
 /// Per-call timing recorder. Holds the call's start instant, the named

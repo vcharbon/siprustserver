@@ -14,8 +14,8 @@ use layer_harness::TransportKind;
 use loadgen::scenarios::{establish, LoadScenario, ScenarioId};
 use loadgen::{
     by_id, default_scenarios, failure_scenarios, CallConfig, CallCtx, CallEnv, CallRouting,
-    CallScope, CallTuning, Correlation, Driver, DriverCfg, EndpointSpec, LegInfo, MuxCore,
-    MuxTransport, ResultClass, Reporter, ReporterCfg, Role,
+    CallScope, CallTuning, Correlation, Driver, DriverCfg, EgressPolicy, EndpointSpec, LegInfo,
+    MuxCore, MuxTransport, ResultClass, Reporter, ReporterCfg, Role, ScenarioInputs,
 };
 use scenario_harness::{Harness, StepError};
 use sip_clock::Clock;
@@ -134,7 +134,14 @@ async fn setup_inner(
     (h, b2bua, core, transport)
 }
 
-fn cfg(via: SocketAddr, refer_pin: Option<SocketAddr>, cps: f64, secs: u64, mif: usize, seed: u64) -> DriverCfg {
+/// The default per-run scenario inputs — `refer_key` = "refer-allow-c", the key
+/// the in-process SUT's scripted `/call/refer` backend (`route_all_with_refer`)
+/// authorizes.
+fn inputs() -> ScenarioInputs {
+    ScenarioInputs::default()
+}
+
+fn cfg(via: SocketAddr, cps: f64, secs: u64, mif: usize, seed: u64) -> DriverCfg {
     DriverCfg {
         cps,
         duration: Duration::from_secs(secs),
@@ -142,9 +149,10 @@ fn cfg(via: SocketAddr, refer_pin: Option<SocketAddr>, cps: f64, secs: u64, mif:
         seed,
         call: CallConfig {
             via,
-            route_pin: None, // route_all_* routes the b-leg by config, no pin needed
-            refer_pin,
-            refer_key: "refer-allow-c".to_string(),
+            // route_all_* routes the b-leg by config — the transparent layout
+            // (the refer scenarios resolve charlie through the same seam and
+            // authorize via their per-run `refer_key`).
+            egress: EgressPolicy::Transparent,
             options_hold: Duration::from_millis(120),
             options_cadence: Duration::from_millis(40),
             // Realistic-timer knobs default to fast values in tests (the default
@@ -169,8 +177,8 @@ async fn loadgen_mux_smoke_basic_concurrent() {
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
 
     let driver = Driver::new(
-        cfg(b2bua.addr, None, 60.0, 2, 16, 0xB451C),
-        vec![(by_id("basic_call").unwrap(), 1.0)],
+        cfg(b2bua.addr, 60.0, 2, 16, 0xB451C),
+        vec![(by_id("basic_call", &inputs()).unwrap(), 1.0)],
         reporter.clone(),
         transport,
     );
@@ -207,8 +215,8 @@ async fn loadgen_to_user_correlation_without_relayed_header() {
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
 
     let driver = Driver::new(
-        cfg(b2bua.addr, None, 60.0, 2, 16, 0x70C4),
-        vec![(by_id("basic_call").unwrap(), 1.0)],
+        cfg(b2bua.addr, 60.0, 2, 16, 0x70C4),
+        vec![(by_id("basic_call", &inputs()).unwrap(), 1.0)],
         reporter.clone(),
         transport,
     );
@@ -240,11 +248,9 @@ async fn loadgen_to_user_correlation_without_relayed_header() {
 async fn loadgen_mux_smoke_all_scenarios() {
     let (_h, b2bua, core, transport) = setup(6410, Correlation::header("X-Loadgen-Id"), 5).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
-    let refer_pin = Some(transport.refer_addr);
-
     let driver = Driver::new(
-        cfg(b2bua.addr, refer_pin, 60.0, 4, 8, 0xA11),
-        default_scenarios(),
+        cfg(b2bua.addr, 60.0, 4, 8, 0xA11),
+        default_scenarios(&inputs()),
         reporter.clone(),
         transport,
     );
@@ -273,7 +279,7 @@ async fn loadgen_mux_smoke_timed_and_long_call() {
     let (_h, b2bua, core, transport) = setup(6470, Correlation::header("X-Loadgen-Id"), 5).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
 
-    let mut cfg = cfg(b2bua.addr, None, 40.0, 2, 16, 0x71A1ED);
+    let mut cfg = cfg(b2bua.addr, 40.0, 2, 16, 0x71A1ED);
     cfg.call.ring_delay = Duration::from_millis(30);
     cfg.call.talk_time = Duration::from_millis(30);
     cfg.call.reinvite_gap = Duration::from_millis(20);
@@ -282,9 +288,9 @@ async fn loadgen_mux_smoke_timed_and_long_call() {
     let driver = Driver::new(
         cfg,
         vec![
-            (by_id("basic_call").unwrap(), 2.0),
-            (by_id("reinvite").unwrap(), 1.0),
-            (by_id("long_call").unwrap(), 1.0),
+            (by_id("basic_call", &inputs()).unwrap(), 2.0),
+            (by_id("reinvite", &inputs()).unwrap(), 1.0),
+            (by_id("long_call", &inputs()).unwrap(), 1.0),
         ],
         reporter.clone(),
         transport,
@@ -317,10 +323,10 @@ async fn loadgen_mux_smoke_prack_update_mix() {
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
 
     let driver = Driver::new(
-        cfg(b2bua.addr, None, 60.0, 2, 16, 0x93AC5),
+        cfg(b2bua.addr, 60.0, 2, 16, 0x93AC5),
         vec![
-            (by_id("prack_update").unwrap(), 2.0),
-            (by_id("basic_call").unwrap(), 1.0),
+            (by_id("prack_update", &inputs()).unwrap(), 2.0),
+            (by_id("basic_call", &inputs()).unwrap(), 1.0),
         ],
         reporter.clone(),
         transport,
@@ -376,7 +382,7 @@ async fn loadgen_mux_teardown_no_leak() {
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
 
     let driver = Driver::new(
-        cfg(b2bua.addr, None, 40.0, 2, 8, 0xDEAD),
+        cfg(b2bua.addr, 40.0, 2, 8, 0xDEAD),
         vec![(Arc::new(FailMidCall) as Arc<dyn LoadScenario>, 1.0)],
         reporter.clone(),
         transport,
@@ -590,10 +596,10 @@ async fn loadgen_mux_emergency_split_under_overload() {
 
     // Mix sheddable non-emergency basic calls with force-admitted emergency ones.
     let driver = Driver::new(
-        cfg(b2bua.addr, None, 60.0, 3, 16, 0xE5E7),
+        cfg(b2bua.addr, 60.0, 3, 16, 0xE5E7),
         vec![
-            (by_id("basic_call").unwrap(), 1.0),
-            (by_id("basic_call_em").unwrap(), 1.0),
+            (by_id("basic_call", &inputs()).unwrap(), 1.0),
+            (by_id("basic_call_em", &inputs()).unwrap(), 1.0),
         ],
         reporter.clone(),
         transport,
@@ -650,11 +656,10 @@ async fn loadgen_mux_emergency_split_under_overload() {
 async fn loadgen_post_call_cleanup_no_leak() {
     let (_h, b2bua, core, transport) = setup(6460, Correlation::header("X-Loadgen-Id"), 5).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 3 }));
-    let refer_pin = Some(transport.refer_addr);
 
-    let mut scenarios = failure_scenarios();
-    scenarios.push((by_id("basic_call").unwrap(), 2.0)); // some happy traffic in the mix
-    let driver = Driver::new(cfg(b2bua.addr, refer_pin, 50.0, 3, 12, 0xFA17), scenarios, reporter.clone(), transport);
+    let mut scenarios = failure_scenarios(&inputs());
+    scenarios.push((by_id("basic_call", &inputs()).unwrap(), 2.0)); // some happy traffic in the mix
+    let driver = Driver::new(cfg(b2bua.addr, 50.0, 3, 12, 0xFA17), scenarios, reporter.clone(), transport);
     driver.run().await;
 
     // Each failure mode produced its NOK bucket, and the happy path its OK.
@@ -686,11 +691,11 @@ async fn loadgen_packet_drop_without_retransmit_breaks_calls() {
     let (_h, b2bua, core, transport) = setup(6480, Correlation::header("X-Loadgen-Id"), 3).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
-    let mut c = cfg(b2bua.addr, None, 10.0, 1, 8, 0xD40F);
+    let mut c = cfg(b2bua.addr, 10.0, 1, 8, 0xD40F);
     // ~12%/datagram loss, no recovery: over a ~10-message call P(all delivered)
     // ≈ 0.9^10 ≈ 0.35, so the majority of calls must fail.
     c.default_tuning = CallTuning { drop_rate: 0.12, retransmit: false };
-    let driver = Driver::new(c, vec![(by_id("basic_call").unwrap(), 1.0)], reporter.clone(), transport);
+    let driver = Driver::new(c, vec![(by_id("basic_call", &inputs()).unwrap(), 1.0)], reporter.clone(), transport);
     driver.run().await;
 
     let drops = core.stats().dropped_out.load(std::sync::atomic::Ordering::Relaxed)
@@ -723,9 +728,9 @@ async fn loadgen_auto_retransmit_recovers_packet_drop() {
         setup_recv(6490, Correlation::header("X-Loadgen-Id"), 3, Duration::from_secs(6)).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
-    let mut c = cfg(b2bua.addr, None, 12.0, 2, 8, 0x5EED);
+    let mut c = cfg(b2bua.addr, 12.0, 2, 8, 0x5EED);
     c.default_tuning = CallTuning { drop_rate: 0.10, retransmit: true };
-    let driver = Driver::new(c, vec![(by_id("basic_call").unwrap(), 1.0)], reporter.clone(), transport);
+    let driver = Driver::new(c, vec![(by_id("basic_call", &inputs()).unwrap(), 1.0)], reporter.clone(), transport);
     driver.run().await;
 
     let drops = core.stats().dropped_out.load(std::sync::atomic::Ordering::Relaxed)
@@ -777,9 +782,9 @@ async fn loadgen_ringing_gate_counts_every_ring() {
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     // No loss → every 18x is delivered; retransmit on to exercise that path too.
-    let mut c = cfg(b2bua.addr, None, 40.0, 2, 16, 0x9A17);
+    let mut c = cfg(b2bua.addr, 40.0, 2, 16, 0x9A17);
     c.default_tuning = CallTuning { drop_rate: 0.0, retransmit: true };
-    let driver = Driver::new(c, vec![(by_id("basic_call").unwrap(), 1.0)], reporter.clone(), transport);
+    let driver = Driver::new(c, vec![(by_id("basic_call", &inputs()).unwrap(), 1.0)], reporter.clone(), transport);
     driver.run().await;
 
     let (rung, expected) = reporter.ringing_totals();
@@ -809,12 +814,11 @@ async fn loadgen_inprocess_endurance_lossy() {
     let (_h, b2bua, core, transport) =
         setup_recv(6520, Correlation::header("X-Loadgen-Id"), 5, Duration::from_secs(5)).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 16 }));
-    let refer_pin = Some(transport.refer_addr);
 
     // The default mix (basic-heavy), production loss + retransmit, 25 s at 25 cps.
-    let mut c = cfg(b2bua.addr, refer_pin, 25.0, 25, 64, 0xE0D0E);
+    let mut c = cfg(b2bua.addr, 25.0, 25, 64, 0xE0D0E);
     c.default_tuning = CallTuning { drop_rate: 0.001, retransmit: true };
-    let driver = Driver::new(c, default_scenarios(), reporter.clone(), transport);
+    let driver = Driver::new(c, default_scenarios(&inputs()), reporter.clone(), transport);
     driver.run().await;
 
     let total: u64 = ["basic_call", "reinvite", "options_hold", "refer"]

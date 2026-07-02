@@ -11,7 +11,18 @@ use sip_message::generators::InDialogMethod;
 use crate::realcall::{CallCtx, CallEnv, CallScope, RealCallScenario, ScenarioId};
 use crate::{StepError, ANSWER_SDP, OFFER_SDP};
 
-pub struct Refer;
+pub struct Refer {
+    /// The `X-Api-Call.refer_key` the SUT's REFER backend authorizes — per-run
+    /// SUT auth data fed in at construction (the CLI's `--refer-key`), NOT
+    /// topology (the transfer *target* resolves through the env's egress seam).
+    pub refer_key: String,
+}
+
+impl Refer {
+    pub fn new(refer_key: impl Into<String>) -> Self {
+        Self { refer_key: refer_key.into() }
+    }
+}
 
 #[async_trait]
 impl RealCallScenario for Refer {
@@ -35,8 +46,8 @@ impl RealCallScenario for Refer {
         })?;
 
         // A↔B established (capture bob's UAS dialog to originate the REFER).
-        let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP).through(env.via);
-        let mut call = env.prepare_invite(inv).send().await;
+        let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP);
+        let mut call = env.outgoing_invite(&["bob"], inv).send().await;
         scope.set_early(call.cancel_handle());
 
         let mut bob_uas = env.bob.try_receive("INVITE").await?;
@@ -61,15 +72,17 @@ impl RealCallScenario for Refer {
             tokio::time::sleep(env.reinvite_gap).await;
         }
 
-        // REFER → 202. Refer-To carries charlie's correlation token in the
-        // user-part; the optional X-Api-Call pins the transfer to the static
-        // `refer` endpoint (our-b2bua adapter).
+        // REFER → 202. The transfer target resolves through the SAME egress seam
+        // as any callee (`env.refer_to()` = charlie via `callee("charlie")`, with
+        // the correlation token as the user-part); the X-Api-Call authorizes the
+        // transfer under this run's `refer_key` (mirrors the e2e
+        // `transfer-refer-media` shape's `ApiCall::refer`).
         let refer_to = env.refer_to().ok_or_else(|| StepError::UnexpectedKind {
             who: "refer".to_string(),
             detail: "no charlie for Refer-To".to_string(),
         })?;
         let mut refer = bob_dialog.send_request(InDialogMethod::Refer).with_header("Refer-To", &refer_to);
-        if let Some(api) = env.refer_api_call() {
+        if let Some(api) = env.refer_authorization(&self.refer_key) {
             refer = refer.with_header("X-Api-Call", &api);
         }
         let mut refer = refer.send().await;

@@ -19,9 +19,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
+use e2e_model::{load_endpoint_config, EndpointConfig};
 use loadgen::{
     by_id, default_scenarios, serve_metrics, CallConfig, CallTuning, ChaosLog, Correlation, Driver,
     DriverCfg, EndpointSpec, LoadScenario, MuxCore, MuxTransport, Reporter, ReporterCfg, Role,
+    ScenarioInputs,
 };
 use sip_clock::Clock;
 
@@ -37,13 +39,23 @@ struct Args {
     /// Max concurrent in-flight calls (offered load above this is dropped+counted).
     #[arg(long, default_value_t = 2000)]
     max_in_flight: usize,
-    /// The SUT address the INVITE routes through (front-proxy VIP).
+    /// Path to an authored `EndpointConfig` JSON (the shared e2e-model
+    /// environment axis): roles `alice` (UAC bind), `bob` (UAS bind), `charlie`
+    /// (REFER-target bind), `lb` (the SUT ingress the INVITE routes through),
+    /// plus `recvTimeoutMs` and the optional `egress` policy (`"transparent"` |
+    /// `"api-call-pin"` | `{"registrar-aor":{"domain":…}}`). When set it is the
+    /// single source of addressing/egress truth; `--target`/`--bind-ip`/
+    /// `--base-port`/`--route-pin-to-uas`/`--recv-timeout-ms` stay as shorthand
+    /// that synthesizes an equivalent config when it is absent.
+    #[arg(long)]
+    endpoint_config: Option<PathBuf>,
+    /// Shorthand: the SUT address the INVITE routes through (front-proxy VIP).
     #[arg(long, default_value = "172.20.255.250:5060")]
     target: SocketAddr,
-    /// Local host IP to bind the mux endpoints on (reachable from the SUT).
+    /// Shorthand: local host IP to bind the mux endpoints on (reachable from the SUT).
     #[arg(long, default_value = "127.0.0.1")]
     bind_ip: IpAddr,
-    /// Base UDP port: uac=base, uas=base+1, refer=base+2.
+    /// Shorthand: base UDP port: alice/uac=base, bob/uas=base+1, charlie/refer=base+2.
     #[arg(long, default_value_t = 6000)]
     base_port: u16,
     /// Correlation strategy: how the per-call token travels through the SUT.
@@ -68,11 +80,13 @@ struct Args {
     /// the placeholder matched as unreserved URI chars).
     #[arg(long)]
     correlation_extract: Option<String>,
-    /// Attach an X-Api-Call destination pin to route the b-leg to the static uas
-    /// endpoint (our-b2bua adapter). Off → the SUT routes the callee itself.
+    /// Shorthand for the `api-call-pin` egress policy: attach an X-Api-Call
+    /// destination pin routing the b-leg to the static uas endpoint (our-b2bua
+    /// adapter). Off → `transparent` (the SUT routes the callee itself).
+    /// Ignored when `--endpoint-config` is set (its `egress` field wins).
     #[arg(long, default_value_t = false)]
     route_pin_to_uas: bool,
-    /// Per-recv wall-clock timeout (ms).
+    /// Shorthand: per-recv wall-clock timeout (ms).
     #[arg(long, default_value_t = 5000)]
     recv_timeout_ms: u64,
     /// Max stored callflow samples per (scenario, result-class).
@@ -108,6 +122,9 @@ struct Args {
     /// Total hold (seconds) of the `long_call` scenario, around its OPTIONS ping.
     #[arg(long, default_value_t = 1200)]
     long_hold_secs: u64,
+    /// The `X-Api-Call.refer_key` the SUT's REFER backend authorizes — per-run
+    /// SUT auth data fed into the refer scenarios' construction (NOT topology;
+    /// the transfer target resolves through the egress seam).
     #[arg(long, default_value = "refer-allow-c")]
     refer_key: String,
     /// Record roughly 1 call in N's flow (the sampling-gate background fraction).
@@ -157,12 +174,56 @@ fn default_tuning(args: &Args) -> CallTuning {
     CallTuning { drop_rate, retransmit: args.auto_retransmit }
 }
 
+/// The `infraShape` id the flag-synthesized [`EndpointConfig`] carries. A loaded
+/// `--endpoint-config` may use any id (loadgen is not a compiled e2e Infra
+/// shape) — only the alice/bob/charlie/lb role set is required.
+const LOADGEN_SHAPE: &str = "loadgen-mux";
+
+/// Resolve the run's [`EndpointConfig`] — the ONE environment-axis document:
+/// the authored file when `--endpoint-config` is given, else an **equivalent**
+/// config synthesized from the shorthand flags (`--target` → role `lb`,
+/// `--bind-ip`/`--base-port` → alice/bob/charlie binds, `--recv-timeout-ms`,
+/// and `--route-pin-to-uas` → the `api-call-pin` egress policy).
+fn endpoint_config(args: &Args) -> EndpointConfig {
+    if let Some(path) = &args.endpoint_config {
+        let cfg = load_endpoint_config(path)
+            .unwrap_or_else(|e| panic!("--endpoint-config {}: {e}", path.display()));
+        for role in ["alice", "bob", "charlie", "lb"] {
+            assert!(
+                cfg.roles.contains_key(role),
+                "--endpoint-config {} is missing role {role:?} (loadgen needs alice/bob/charlie binds + the lb ingress)",
+                path.display()
+            );
+        }
+        return cfg;
+    }
+    let roles: std::collections::BTreeMap<String, SocketAddr> = [
+        ("alice".to_string(), (args.bind_ip, args.base_port).into()),
+        ("bob".to_string(), (args.bind_ip, args.base_port + 1).into()),
+        ("charlie".to_string(), (args.bind_ip, args.base_port + 2).into()),
+        ("lb".to_string(), args.target),
+    ]
+    .into();
+    EndpointConfig {
+        schema: None,
+        infra_shape: LOADGEN_SHAPE.to_string(),
+        roles,
+        recv_timeout_ms: args.recv_timeout_ms,
+        transit_delay_ms: 0,
+        egress: args
+            .route_pin_to_uas
+            .then_some(e2e_model::EgressPolicySpec::ApiCallPin),
+    }
+}
+
 /// Parse one `--scenario` spec (`name[=weight][,drop=<f>][,retransmit[=<bool>]]`)
-/// into its resolved scenario, weight, and per-scenario [`CallTuning`] (starting
-/// from `base` and overridden by the trailing tokens).
+/// into its resolved scenario (constructed from the per-run `inputs`), weight,
+/// and per-scenario [`CallTuning`] (starting from `base` and overridden by the
+/// trailing tokens).
 fn parse_scenario_spec(
     spec: &str,
     base: CallTuning,
+    inputs: &ScenarioInputs,
 ) -> (String, Arc<dyn LoadScenario>, f64, CallTuning) {
     let mut parts = spec.split(',');
     let head = parts.next().unwrap_or(spec);
@@ -170,7 +231,7 @@ fn parse_scenario_spec(
         .split_once('=')
         .map(|(n, w)| (n, w.parse::<f64>().unwrap_or(1.0)))
         .unwrap_or((head, 1.0));
-    let s = by_id(name).unwrap_or_else(|| panic!("unknown scenario {name:?}"));
+    let s = by_id(name, inputs).unwrap_or_else(|| panic!("unknown scenario {name:?}"));
     let mut t = base;
     for tok in parts {
         let tok = tok.trim();
@@ -208,16 +269,19 @@ async fn main() -> std::io::Result<()> {
     let clock = Clock::system();
 
     let base_tuning = default_tuning(&args);
+    // Per-run scenario inputs (SUT auth data, not topology): consumed at
+    // scenario CONSTRUCTION (e.g. the refer scenarios' `refer_key`).
+    let inputs = ScenarioInputs { refer_key: args.refer_key.clone() };
     let mut tuning: std::collections::HashMap<String, CallTuning> = std::collections::HashMap::new();
     let scenarios: Vec<(Arc<dyn LoadScenario>, f64)> = if args.scenarios.is_empty() {
         // No explicit scenario set → the default mix; the global tuning applies to
         // all of them via `DriverCfg::default_tuning` (no per-id overrides).
-        default_scenarios()
+        default_scenarios(&inputs)
     } else {
         args.scenarios
             .iter()
             .map(|spec| {
-                let (name, s, weight, t) = parse_scenario_spec(spec, base_tuning);
+                let (name, s, weight, t) = parse_scenario_spec(spec, base_tuning, &inputs);
                 tuning.insert(name, t);
                 (s, weight)
             })
@@ -235,10 +299,15 @@ async fn main() -> std::io::Result<()> {
         other => panic!("unknown --correlate {other:?} (expected `header` or `to-user`)"),
     };
 
-    let uac: SocketAddr = (args.bind_ip, args.base_port).into();
-    let uas: SocketAddr = (args.bind_ip, args.base_port + 1).into();
-    let refer: SocketAddr = (args.bind_ip, args.base_port + 2).into();
-    let recv_timeout = Duration::from_millis(args.recv_timeout_ms);
+    // The ONE environment-axis document (authored file or flag-synthesized):
+    // endpoint binds + SUT ingress + recv bound + egress policy.
+    let endpoint = endpoint_config(&args);
+    let uac = endpoint.addr("alice");
+    let uas = endpoint.addr("bob");
+    let refer = endpoint.addr("charlie");
+    let via = endpoint.addr("lb");
+    let egress = endpoint.egress_policy();
+    let recv_timeout = endpoint.recv_timeout();
 
     let core = MuxCore::bind(
         vec![
@@ -280,10 +349,8 @@ async fn main() -> std::io::Result<()> {
         max_in_flight: args.max_in_flight,
         seed,
         call: CallConfig {
-            via: args.target,
-            route_pin: args.route_pin_to_uas.then_some(uas),
-            refer_pin: args.route_pin_to_uas.then_some(refer),
-            refer_key: args.refer_key.clone(),
+            via,
+            egress: egress.clone(),
             options_hold: Duration::from_secs(args.options_hold),
             options_cadence: Duration::from_secs(args.options_cadence),
             ring_delay: Duration::from_millis(args.ring_delay_ms),
@@ -348,8 +415,8 @@ async fn main() -> std::io::Result<()> {
     }
 
     eprintln!(
-        "[loadgen] {} cps for {}s, max_in_flight={}, target={}, uas={}, /metrics on {}",
-        args.cps, args.duration, args.max_in_flight, args.target, uas, args.metrics_addr
+        "[loadgen] {} cps for {}s, max_in_flight={}, target={via}, uas={uas}, egress={egress:?}, /metrics on {}",
+        args.cps, args.duration, args.max_in_flight, args.metrics_addr
     );
     driver.run().await;
 

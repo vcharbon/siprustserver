@@ -43,7 +43,9 @@ nothing external.
 
 Build the binary and point it at the front-proxy VIP. The mux endpoints bind on a
 host IP **reachable from the cluster pods** (the kind bridge gateway, *not*
-`127.0.0.1`), and `--route-pin-to-uas` tells our B2BUA to send the callee leg
+`127.0.0.1`), and `--route-pin-to-uas` selects the `api-call-pin` **egress
+policy** (the same `EgressPolicy` the e2e framework's layouts declare): the
+INVITE carries an `X-Api-Call` destination pin so our B2BUA sends the callee leg
 back to the host `uas` socket:
 
 ```bash
@@ -73,11 +75,44 @@ Prerequisites for the real cluster (one-time):
 Key flags: `--cps`, `--duration`, `--max-in-flight`, `--target`, `--bind-ip`,
 `--base-port` (uac=base, uas=base+1, refer=base+2), `--correlate` /
 `--correlation-header` / `--correlation-template` / `--correlation-extract`
-(see *Correlation strategies*), `--route-pin-to-uas`, `--scenario name=weight`
-(repeatable; omit for the default mix), `--out-dir`, `--metrics-addr`
-(default `0.0.0.0:9300`), `--sample-cap`, `--drop-rate` / `--drop` /
-`--auto-retransmit` (see *Packet loss + auto-retransmit* below). Run `--help` for
-the full list.
+(see *Correlation strategies*), `--route-pin-to-uas`, `--refer-key` (the
+`X-Api-Call.refer_key` the SUT's REFER backend authorizes — per-run SUT auth
+data fed into the refer scenarios), `--scenario name=weight` (repeatable; omit
+for the default mix), `--out-dir`, `--metrics-addr` (default `0.0.0.0:9300`),
+`--sample-cap`, `--drop-rate` / `--drop` / `--auto-retransmit` (see *Packet loss
++ auto-retransmit* below). Run `--help` for the full list.
+
+### The environment axis: `--endpoint-config`
+
+Addressing + egress can come from **one authored document** instead of the flags:
+`--endpoint-config <file>` loads an `e2e-model` `EndpointConfig` (the same JSON
+the ADR-0018 e2e framework binds its Infra shapes with; schema:
+`e2e/schemas/endpoint-config.schema.json`). loadgen reads the roles `alice`
+(UAC bind), `bob` (UAS bind), `charlie` (REFER-target bind), `lb` (the SUT
+ingress), `recvTimeoutMs`, and the optional **`egress` policy**:
+
+```json
+{
+  "infraShape": "loadgen-mux",
+  "roles": {
+    "alice":   "172.20.0.1:6000",
+    "bob":     "172.20.0.1:6001",
+    "charlie": "172.20.0.1:6002",
+    "lb":      "172.20.255.250:5060"
+  },
+  "recvTimeoutMs": 5000,
+  "egress": "api-call-pin"
+}
+```
+
+`egress` is `"transparent"` (default — the SUT routes the callee itself),
+`"api-call-pin"` (attach the proprietary `X-Api-Call` destination pin; what
+`--route-pin-to-uas` selects), or `{"registrar-aor": {"domain": …}}` (dial the
+callee's registered AOR). The flags (`--target`/`--bind-ip`/`--base-port`/
+`--route-pin-to-uas`/`--recv-timeout-ms`) stay as **shorthand that synthesizes
+an equivalent EndpointConfig** when no file is given. Note: the e2e framework's
+compiled infra layouts keep declaring their own policy and override this field;
+loadgen standalone is its reader.
 
 ### Correlation strategies
 
@@ -119,8 +154,9 @@ extracted token matching no pending call counts `reason="unknown_token"`.
 
 In code the strategy is `loadgen::Correlation` (`header(name)`,
 `header_templated(name, template, extract)`, `to_user()`); the stamp half is
-applied by `CallEnv::prepare_invite` via `CorrelationStamp`, the extract half by
-the mux demux. Both strategies are covered by unit tests (`mux::tests`) and the
+applied inside `CallEnv::outgoing_invite` via `CorrelationStamp` (the per-call
+identity half, orthogonal to the egress rewrite), the extract half by the mux
+demux. Both strategies are covered by unit tests (`mux::tests`) and the
 smoke suite (`loadgen_to_user_correlation_without_relayed_header` proves a full
 call correlates with **no** relay configured on the SUT).
 
@@ -327,8 +363,14 @@ page with its one-line reason.
    ```
 
    - `env` gives you the bound agents (`env.alice` UAC, `env.bob` UAS, optional
-     `env.charlie`), `env.via` (the SUT to route through), `env.prepare_invite`
-     (stamps the correlation token + optional routing pin), and the REFER helpers.
+     `env.charlie`), `env.via` (the SUT ingress) and `env.outgoing_invite(&["bob"],
+     inv)` — the egress seam that realizes the logical INVITE on this run's wire
+     (correlation stamp + emergency marker + the run's `EgressPolicy` rewrite,
+     mirroring e2e-core `InfraRuntime::outgoing_invite`) — plus `env.callee(role)`
+     to resolve any callee target and the REFER helpers (`env.refer_to()`,
+     `env.refer_authorization(refer_key)`). Per-run SUT auth data (the refer
+     scenarios' `refer_key`) is fed at CONSTRUCTION via `ScenarioInputs`, not the
+     env.
    - **Register your dialog state in `scope`** as the call progresses
      (`set_early` once the INVITE is out, `set_confirmed` once it answers,
      `mark_terminated` once you tear it down) so a mid-flow failure is still
@@ -336,7 +378,8 @@ page with its one-line reason.
    - `ctx.checkpoint("name")` records a latency checkpoint (shows in the report).
 
 2. Register it in `src/scenarios/mod.rs`: add `pub mod <name>;`, a `by_id` arm
-   (`"my_flow" => Some(Arc::new(<name>::MyFlow))`), and — if it should run in the
+   (`"my_flow" => Some(Arc::new(<name>::MyFlow))` — construct from the per-run
+   `ScenarioInputs` if it needs SUT auth data), and — if it should run in the
    default mix — a weight in `default_scenarios()`. An **emergency variant** is
    free: `AsEmergency::wrap("my_flow_em", Arc::new(<name>::MyFlow))`.
 

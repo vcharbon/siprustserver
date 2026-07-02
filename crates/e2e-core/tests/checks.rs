@@ -93,6 +93,7 @@ async fn run_fake() -> (RunReport, Input, SocketAddr) {
         roles,
         recv_timeout_ms: 2_000,
         transit_delay_ms: 0,
+        egress: None,
     };
     let input = case_input("127.0.0.1:5070");
     let mut rt = FakeLsbcB2bua.build("checks/fake", &cfg).await;
@@ -121,6 +122,7 @@ async fn run_real(base: u16) -> (RunReport, Input, SocketAddr) {
         roles,
         recv_timeout_ms: 5_000,
         transit_delay_ms: 0,
+        egress: None,
     };
     let input = case_input(&format!("127.0.0.1:{}", base + 10));
     let mut rt = RealLoopbackDirect.build("checks/real", &cfg).await;

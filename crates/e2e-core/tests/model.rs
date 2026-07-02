@@ -34,6 +34,7 @@ fn fake_cfg() -> EndpointConfig {
         roles,
         recv_timeout_ms: 2_000,
         transit_delay_ms: 0,
+        egress: None,
     }
 }
 

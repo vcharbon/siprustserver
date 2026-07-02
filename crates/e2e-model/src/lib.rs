@@ -24,7 +24,7 @@ pub use checks::{Bindings, CheckVerdict, all_passed, evaluate_blocks, evaluate_c
 pub use egress::{
     ApiCall, ApiCallDestination, ApiCallRoute, CalleeTarget, EgressPolicy, EgressRewrite,
 };
-pub use endpoint::EndpointConfig;
+pub use endpoint::{EgressPolicySpec, EndpointConfig};
 pub use model::{
     Campaign, Check, CheckBlock, CheckOp, CheckSet, Concurrency, Input, ModelError, TestCase,
     load_campaign, load_check_set, load_check_sets, load_endpoint_config, load_test_case,

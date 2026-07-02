@@ -107,8 +107,8 @@ pub async fn establish(
     scope: &CallScope,
     ctx: &CallCtx,
 ) -> Result<Dialog, StepError> {
-    let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP).through(env.via);
-    let mut call = env.prepare_invite(inv).send().await;
+    let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP);
+    let mut call = env.outgoing_invite(&["bob"], inv).send().await;
     scope.set_early(call.cancel_handle());
     let mut uas = admitted_uas(env, scope, &mut call, 180).await?;
     uas.respond(180, "Ringing").await;
@@ -205,9 +205,8 @@ pub async fn establish_100rel(
         .alice
         .invite(env.bob)
         .with_sdp(OFFER_SDP)
-        .with_header("Supported", "100rel")
-        .through(env.via);
-    let mut call = env.prepare_invite(inv).send().await;
+        .with_header("Supported", "100rel");
+    let mut call = env.outgoing_invite(&["bob"], inv).send().await;
     scope.set_early(call.cancel_handle());
     let mut uas = admitted_uas(env, scope, &mut call, 183).await?;
 

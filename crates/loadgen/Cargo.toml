@@ -13,6 +13,10 @@ workspace = true
 # The Send agent factory + fallible try_* choreography + best-effort teardown
 # helpers live here (the load-bearing reuse of the functional harness).
 scenario-harness = { path = "../scenario-harness" }
+# The shared axis data model (loadgen⇄e2e fusion): the CLI loads an authored
+# `EndpointConfig` (`--endpoint-config`), whose optional `egress` field carries
+# the run's egress policy (the environment axis).
+e2e-model = { path = "../e2e-model" }
 sip-message = { path = "../sip-message" }
 tokio = { workspace = true }
 # catch_unwind over a scenario future → a panic becomes a counted failure, never

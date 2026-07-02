@@ -33,6 +33,7 @@ pub mod agent;
 pub mod anchors;
 pub mod callflow;
 pub mod dsl;
+pub mod egress;
 pub mod loadbind;
 pub mod realcall;
 pub mod report;
@@ -64,6 +65,9 @@ pub use anchors::{AnchorKeys, AnchorMsgKind, AnchorTag};
 // / `callflow::hangup` / `callflow::Call` without re-typing the handshake.
 pub use callflow::{establish, hangup, Call, ANSWER_SDP, OFFER_SDP};
 pub use dsl::{AgentId, Match, Scenario, Step};
+// The layout-owned egress model (shared with the e2e framework via
+// `e2e_model::egress`): how a topology realizes a logical INVITE on its wire.
+pub use egress::{ApiCall, CalleeTarget, EgressPolicy, EgressRewrite};
 pub use run::{run, ExpectOutcome, RunReport};
 // The portable real-call scenarios shared by the load generator and the
 // in-process functional leak gate (`realcall::run_asserting` for happy-path

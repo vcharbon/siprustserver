@@ -5,7 +5,7 @@
 //! flow serves the load fleet AND the in-process functional leak gate. This
 //! module is the **load registry**: it re-exports the shared pieces and the
 //! migrated scenario structs and owns the weight/`by_id` tables the driver and
-//! CLI consume.
+//! CLI consume, constructing each scenario from the per-run [`ScenarioInputs`].
 
 use std::sync::Arc;
 
@@ -24,23 +24,43 @@ pub use scenario_harness::realcall::scenarios::{
     ReferCharlieReject, Reinvite,
 };
 
+/// Per-run **scenario inputs** — SUT auth data (and any future non-topology
+/// per-run value) fed into scenario *construction*. Deliberately NOT part of
+/// [`CallEnv`]: the env carries the environment axis (agents, egress seam,
+/// timing), while these are what the e2e model calls a Test case's input/extras.
+#[derive(Clone, Debug)]
+pub struct ScenarioInputs {
+    /// The `X-Api-Call.refer_key` the SUT's REFER backend authorizes (the CLI's
+    /// `--refer-key`); consumed by the refer scenarios.
+    pub refer_key: String,
+}
+
+impl Default for ScenarioInputs {
+    fn default() -> Self {
+        // The scripted `/call/refer` backend's canonical allow key (the same
+        // default as the CLI's `--refer-key`).
+        Self { refer_key: "refer-allow-c".to_string() }
+    }
+}
+
 /// All v1 scenarios with default weights (basic-heavy, like real traffic).
-pub fn default_scenarios() -> Vec<(Arc<dyn LoadScenario>, f64)> {
+pub fn default_scenarios(inputs: &ScenarioInputs) -> Vec<(Arc<dyn LoadScenario>, f64)> {
     vec![
         (Arc::new(BasicCall), 4.0),
         (Arc::new(Reinvite), 2.0),
-        (Arc::new(Refer), 1.0),
+        (Arc::new(Refer::new(&inputs.refer_key)), 1.0),
         (Arc::new(OptionsHold), 1.0),
     ]
 }
 
-/// Resolve a scenario by id (for CLI `--scenario name=weight`). The `*_em`
-/// variants are emergency (Resource-Priority `esnet.0`) calls of the same flow.
-pub fn by_id(id: &str) -> Option<Arc<dyn LoadScenario>> {
+/// Resolve a scenario by id (for CLI `--scenario name=weight`), constructed from
+/// the per-run `inputs`. The `*_em` variants are emergency (Resource-Priority
+/// `esnet.0`) calls of the same flow.
+pub fn by_id(id: &str, inputs: &ScenarioInputs) -> Option<Arc<dyn LoadScenario>> {
     match id {
         "basic_call" => Some(Arc::new(BasicCall)),
         "reinvite" => Some(Arc::new(Reinvite)),
-        "refer" => Some(Arc::new(Refer)),
+        "refer" => Some(Arc::new(Refer::new(&inputs.refer_key))),
         "options_hold" => Some(Arc::new(OptionsHold)),
         "long_call" => Some(Arc::new(LongCall)),
         "prack_update" => Some(Arc::new(PrackUpdate)),
@@ -48,17 +68,19 @@ pub fn by_id(id: &str) -> Option<Arc<dyn LoadScenario>> {
         "reinvite_em" => Some(AsEmergency::wrap("reinvite_em", Arc::new(Reinvite))),
         "invite_reject" => Some(Arc::new(InviteReject)),
         "abandon_ringing" => Some(Arc::new(AbandonRinging)),
-        "refer_charlie_reject" => Some(Arc::new(ReferCharlieReject)),
+        "refer_charlie_reject" => {
+            Some(Arc::new(ReferCharlieReject::new(&inputs.refer_key)))
+        }
         _ => None,
     }
 }
 
 /// The voluntarily-failing scenarios (one per post-call-cleanup teardown path),
 /// for a no-leak cleanup-coverage test without an endurance run.
-pub fn failure_scenarios() -> Vec<(Arc<dyn LoadScenario>, f64)> {
+pub fn failure_scenarios(inputs: &ScenarioInputs) -> Vec<(Arc<dyn LoadScenario>, f64)> {
     vec![
         (Arc::new(InviteReject), 1.0),
         (Arc::new(AbandonRinging), 1.0),
-        (Arc::new(ReferCharlieReject), 1.0),
+        (Arc::new(ReferCharlieReject::new(&inputs.refer_key)), 1.0),
     ]
 }

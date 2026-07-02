@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::FutureExt;
-use scenario_harness::AgentBinder;
+use scenario_harness::{AgentBinder, EgressPolicy};
 use sip_clock::Clock;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -50,12 +50,13 @@ pub struct MuxTransport {
 pub struct CallConfig {
     /// The address the initial INVITE routes through (SUT / VIP).
     pub via: SocketAddr,
-    /// Optional `X-Api-Call` destination pin → the static `uas` endpoint
-    /// (our-b2bua routing adapter). `None` when the SUT routes the callee itself.
-    pub route_pin: Option<SocketAddr>,
-    /// Optional `X-Api-Call` REFER destination pin → the static `refer` endpoint.
-    pub refer_pin: Option<SocketAddr>,
-    pub refer_key: String,
+    /// How this run's layout realizes a logical INVITE on the wire — the
+    /// environment axis shared with the e2e framework (`EndpointConfig.egress`):
+    /// [`EgressPolicy::Transparent`] when the SUT routes the callee itself,
+    /// [`EgressPolicy::ApiCallPin`] to pin the b-leg back to the static `uas`
+    /// endpoint (`--route-pin-to-uas`). Replaces the hand-rolled
+    /// route/refer `X-Api-Call` pins.
+    pub egress: EgressPolicy,
     pub options_hold: Duration,
     pub options_cadence: Duration,
     /// Realistic ring time (callee 180→200 dwell). `0` = answer immediately.
@@ -332,9 +333,7 @@ async fn run_one(
         stamp: transport.correlation.stamp(&token),
         token,
         emergency: scenario.emergency(),
-        route_pin: call.route_pin,
-        refer_pin: call.refer_pin,
-        refer_key: call.refer_key.clone(),
+        egress: call.egress.clone(),
         options_hold: call.options_hold,
         options_cadence: call.options_cadence,
         ring_delay: call.ring_delay,

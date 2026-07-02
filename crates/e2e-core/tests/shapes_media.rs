@@ -39,6 +39,7 @@ fn fake_cfg() -> EndpointConfig {
         roles,
         recv_timeout_ms: 2_000,
         transit_delay_ms: 0,
+        egress: None,
     }
 }
 
@@ -97,6 +98,7 @@ async fn media_call_over_real_infra_classifies_both_ways() {
         roles,
         recv_timeout_ms: 5_000,
         transit_delay_ms: 0,
+        egress: None,
     };
     let mut rt = RealLoopbackDirect.build("media/real", &cfg).await;
     BasicCallMedia.run(&mut rt, &model::Input::default()).await;
@@ -197,6 +199,7 @@ async fn register_layout_routes_basic_call_by_registered_binding() {
         .collect(),
         recv_timeout_ms: 2_000,
         transit_delay_ms: 0,
+        egress: None,
     };
     let mut rt = FakeRegisterProxy.build("register/fake", &cfg).await;
     let lb_vip = rt.lb_vip;
@@ -239,6 +242,7 @@ async fn register_layout_basic_call_media_both_directions() {
         .collect(),
         recv_timeout_ms: 2_000,
         transit_delay_ms: 0,
+        egress: None,
     };
     let mut rt = FakeRegisterProxy.build("register-media/fake", &cfg).await;
     BasicCallMedia.run(&mut rt, &model::Input::default()).await;

@@ -10,6 +10,17 @@
         "null"
       ]
     },
+    "egress": {
+      "description": "Optional authored **egress policy** — how a run realizes a logical INVITE\non this topology's wire (`\"transparent\"` | `\"api-call-pin\"` |\n`{\"registrar-aor\":{\"domain\":…}}`). The e2e framework's compiled Infra\nshapes keep declaring their own policy and OVERRIDE this field; the load\ngenerator standalone (`loadgen --endpoint-config`) reads it (absent =\ntransparent). See [`EndpointConfig::egress_policy`].",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EgressPolicySpec"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "infraShape": {
       "description": "The Infra shape these addresses bind (e.g. `fake-lsbc-b2bua`).",
       "type": "string"
@@ -39,5 +50,43 @@
     "infraShape",
     "roles",
     "recvTimeoutMs"
-  ]
+  ],
+  "$defs": {
+    "EgressPolicySpec": {
+      "description": "The authored (JSON) form of the egress policy — the serde/schemars-facing\nspec that converts into the shared domain [`EgressPolicy`]\n(`scenario_harness::egress`, re-exported as [`crate::egress::EgressPolicy`]).\nExternally tagged kebab-case, so the values are exactly `\"transparent\"`,\n`\"api-call-pin\"`, and `{\"registrar-aor\":{\"domain\":…}}`.",
+      "oneOf": [
+        {
+          "description": "No rewrite: the SUT's own routing reaches the callee.",
+          "type": "string",
+          "const": "transparent"
+        },
+        {
+          "description": "Pin the b-leg callee via the proprietary `X-Api-Call` header (the real\ncluster / our-b2bua adapter).",
+          "type": "string",
+          "const": "api-call-pin"
+        },
+        {
+          "description": "Dial the (primary) callee's registered AOR on `domain` (register front\nproxy).",
+          "type": "object",
+          "properties": {
+            "registrar-aor": {
+              "type": "object",
+              "properties": {
+                "domain": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "domain"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "registrar-aor"
+          ]
+        }
+      ]
+    }
+  }
 }
