@@ -6,14 +6,34 @@
 //! whether the agents were bound by the load `AgentBinder` (mux network, real
 //! cluster) or by a functional [`Harness`](crate::Harness) (simulated network,
 //! in-process `B2buaCore`). The only coupling is the `scenario_harness` agent
-//! DSL; the correlation header is carried as a plain header NAME (the load mux
-//! demuxes on it; a functional run simply relays it like any other header).
+//! DSL; correlation is carried as a data-only [`CorrelationStamp`] (the load
+//! mux's strategy owns how the token is extracted back; a functional run simply
+//! carries the stamp like any other INVITE content).
 
 use std::net::SocketAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::{Agent, Invite};
+
+/// How the per-call correlation token is **written into the outgoing INVITE** —
+/// the STAMP half of the pluggable correlation strategy (the EXTRACT half lives
+/// in the load mux, which recovers the token from a received leg). Data-only, so
+/// it stays SUT- and transport-agnostic: a functional run applies it exactly
+/// like the load driver does.
+#[derive(Debug, Clone)]
+pub enum CorrelationStamp {
+    /// Stamp `value` (the token already rendered through the strategy's value
+    /// template) into the transparent header `name`. Requires the SUT to RELAY
+    /// the header onto every originated leg (our b2bua:
+    /// `B2BUA_RELAY_HEADERS=<name>`).
+    Header { name: String, value: String },
+    /// Embed the token as the To-header user-part (`sip:<token>@<callee>`) —
+    /// a SIP-correct B2BUA copies the To URI onto its originated leg, so this
+    /// survives a third-party SUT that strips unknown headers (zero SUT
+    /// cooperation).
+    ToUser,
+}
 
 /// Everything a [`RealCallScenario`](super::RealCallScenario) needs to drive one
 /// call: the agents (bound on the mux or a functional harness) + the
@@ -29,13 +49,13 @@ pub struct CallEnv<'a> {
     /// The address the initial INVITE routes *through* — the SUT (in-process
     /// b2bua addr, or the real front-proxy VIP).
     pub via: SocketAddr,
-    /// The header NAME the per-call correlation token is carried in (a single
-    /// transparent header the SUT relays onto every originated leg, so bob and
-    /// charlie share the one token). The load mux demuxes on `(socket, token)`;
-    /// a functional run just relays it.
-    pub correlation_header: String,
-    /// The call's correlation token — stamped on alice's INVITE and (via the
-    /// SUT's header relay) carried onto every downstream leg.
+    /// How the per-call correlation token is written into the initial INVITE
+    /// (relayed header vs To-user; see [`CorrelationStamp`]). The load mux
+    /// demuxes on `(socket, token)` with the matching extract half; a functional
+    /// run just carries it.
+    pub stamp: CorrelationStamp,
+    /// The call's correlation token — stamped on alice's INVITE (per
+    /// [`Self::stamp`]) and carried by the SUT onto every downstream leg.
     pub token: String,
     /// Emergency call: stamps `Resource-Priority: esnet.0` on the INVITE so the
     /// SUT force-admits it (never shed by the Tier-3 / panic-ELU overload gate).
@@ -86,13 +106,19 @@ impl<'a> CallEnv<'a> {
         correlation_header: impl Into<String>,
         token: impl Into<String>,
     ) -> Self {
+        let token = token.into();
         Self {
             alice,
             bob,
             charlie,
             via,
-            correlation_header: correlation_header.into(),
-            token: token.into(),
+            // The functional gate keeps the historic plain relayed-header stamp
+            // (value = the bare token).
+            stamp: CorrelationStamp::Header {
+                name: correlation_header.into(),
+                value: token.clone(),
+            },
+            token,
             emergency: false,
             route_pin: None,
             refer_pin: None,
@@ -107,10 +133,17 @@ impl<'a> CallEnv<'a> {
         }
     }
 
-    /// Apply the per-call correlation token (and optional routing pin) to the
+    /// Apply the per-call correlation stamp (and optional routing pin) to the
     /// initial INVITE so every leg of this call can be matched back to it.
     pub fn prepare_invite<'b>(&self, inv: Invite<'b>) -> Invite<'b> {
-        let mut inv = inv.with_header(&self.correlation_header, &self.token);
+        let mut inv = match &self.stamp {
+            CorrelationStamp::Header { name, value } => inv.with_header(name, value),
+            // The token IS the To user-part; the host part stays the callee's
+            // address (cosmetic — the SUT routes on the R-URI / its config).
+            CorrelationStamp::ToUser => {
+                inv.to(format!("sip:{}@{}", self.token, self.bob.addr()))
+            }
+        };
         if self.emergency {
             // Emergency namespace marker the b2bua's overload brake never sheds.
             inv = inv.with_header("Resource-Priority", "esnet.0");
@@ -133,12 +166,18 @@ impl<'a> CallEnv<'a> {
         ))
     }
 
-    /// A `<sip:transfer@host:port>` Refer-To pointing at charlie's **address**
-    /// (so the SUT routes the transfer there). Correlation rides the relayed
-    /// header, not this URI, so the user-part is cosmetic. `None` if no charlie.
+    /// A `<sip:…@host:port>` Refer-To pointing at charlie's **address** (so the
+    /// SUT routes the transfer there). With a header stamp the user-part is
+    /// cosmetic (`transfer` — correlation rides the relayed header); with the
+    /// To-user stamp it is the TOKEN, since the SUT's transfer INVITE derives
+    /// its To from this URI. `None` if no charlie.
     pub fn refer_to(&self) -> Option<String> {
         let c = self.charlie?;
-        Some(format!("<sip:transfer@{}>", c.addr()))
+        let user = match &self.stamp {
+            CorrelationStamp::ToUser => self.token.as_str(),
+            CorrelationStamp::Header { .. } => "transfer",
+        };
+        Some(format!("<sip:{user}@{}>", c.addr()))
     }
 }
 

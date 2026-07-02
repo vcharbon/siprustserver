@@ -59,6 +59,29 @@ async fn setup_with(
     recv: Duration,
     extra_tune: impl FnOnce(&mut b2bua_sdk::B2buaConfig) + 'static,
 ) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+    setup_inner(base, correlation, sample_cap, recv, true, extra_tune).await
+}
+
+/// [`setup`] WITHOUT the correlation-header relay tune on the SUT — the
+/// third-party-SUT shape (a B2BUA that strips/ignores unknown headers, breaking
+/// header correlation entirely). Only a strategy needing zero SUT cooperation
+/// (`Correlation::to_user`) can correlate the callee leg here.
+async fn setup_no_relay(
+    base: u16,
+    correlation: Correlation,
+    sample_cap: u32,
+) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+    setup_inner(base, correlation, sample_cap, RECV, false, |_| {}).await
+}
+
+async fn setup_inner(
+    base: u16,
+    correlation: Correlation,
+    sample_cap: u32,
+    recv: Duration,
+    relay_header: bool,
+    extra_tune: impl FnOnce(&mut b2bua_sdk::B2buaConfig) + 'static,
+) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
     let net: Arc<dyn SignalingNetwork> = Arc::new(RealSignalingNetwork::new());
     let h = Harness::with_network_and_clock(
         "mux-smoke",
@@ -73,9 +96,12 @@ async fn setup_with(
     // Make the in-process b2bua transparent to the loadgen correlation header
     // (the production `B2BUA_RELAY_HEADERS=X-Loadgen-Id`), so the token alice
     // stamps reaches BOTH the b-leg (bob) and the REFER transfer leg (charlie).
+    // `relay_header = false` models a third-party SUT that relays nothing.
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", uas)
         .tune(move |c| {
-            c.relay_headers = vec!["X-Loadgen-Id".to_string()];
+            if relay_header {
+                c.relay_headers = vec!["X-Loadgen-Id".to_string()];
+            }
             extra_tune(c);
         })
         .start(&h, "b2bua", &format!("127.0.0.1:{}", base + 3))
@@ -167,6 +193,46 @@ async fn loadgen_mux_smoke_basic_concurrent() {
     // No chaos markers in the smoke run → every call is the `clear` sub-bucket.
     assert!(out.join("callflows/basic_call/ok/clear/0.html").exists(), "no OK callflow HTML");
     let _ = std::fs::remove_dir_all(&out);
+}
+
+/// TO-USER correlation end-to-end: the token rides the To-header user-part, so
+/// a full call correlates WITHOUT the SUT relaying any loadgen header — the
+/// in-process b2bua here has NO `relay_headers` configured (the third-party-SUT
+/// shape under which header correlation yields zero OK calls). Concurrent basic
+/// calls all complete OK, with zero correlation orphans and no mux/SUT leak.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_to_user_correlation_without_relayed_header() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (_h, b2bua, core, transport) = setup_no_relay(6540, Correlation::to_user(), 5).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
+
+    let driver = Driver::new(
+        cfg(b2bua.addr, None, 60.0, 2, 16, 0x70C4),
+        vec![(by_id("basic_call").unwrap(), 1.0)],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    assert!(
+        reporter.count("basic_call", &ResultClass::Ok) > 5,
+        "too few OK calls via to-user correlation: {}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        reporter.count("basic_call", &ResultClass::Timeout),
+        0,
+        "timeouts — to-user correlation failed to route the callee leg?"
+    );
+    // Zero correlation orphans: every callee leg carried an extractable To-user
+    // token AND that token matched its pending call.
+    assert_eq!(core.stats().orphan_no_header.load(Relaxed), 0, "uncorrelatable callee legs");
+    assert_eq!(core.stats().orphan_unknown_token.load(Relaxed), 0, "to-user token matched no call");
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (to-user)");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
 }
 
 /// All four scenarios (refer last) through the mux → each produces OK, no leak.

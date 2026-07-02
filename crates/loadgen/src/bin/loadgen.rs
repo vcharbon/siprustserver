@@ -46,10 +46,28 @@ struct Args {
     /// Base UDP port: uac=base, uas=base+1, refer=base+2.
     #[arg(long, default_value_t = 6000)]
     base_port: u16,
-    /// Correlation header name: the transparent per-call token header the SUT
-    /// relays onto every leg (no To-/R-URI fallback — header-only is SUT-agnostic).
+    /// Correlation strategy: how the per-call token travels through the SUT.
+    /// `header` (default): a transparent header the SUT must RELAY onto every
+    /// leg (`--correlation-header`/`--correlation-template`; our b2bua:
+    /// `B2BUA_RELAY_HEADERS`). `to-user`: the token IS the To-header user-part —
+    /// survives any SIP-correct B2BUA with zero SUT cooperation.
+    #[arg(long, default_value = "header")]
+    correlate: String,
+    /// Correlation header name (the `header` strategy): the transparent
+    /// per-call token header the SUT relays onto every leg.
     #[arg(long, default_value = "X-Loadgen-Id")]
     correlation_header: String,
+    /// Correlation header VALUE template with a `${token}` placeholder, so the
+    /// token can ride a structured header — e.g. `"${token};encoding=hex"` for
+    /// User-to-User, `"icid-value=${token}"` for P-Charging-Vector. Default:
+    /// the bare token (byte-for-byte the historic behaviour).
+    #[arg(long, default_value = "${token}")]
+    correlation_template: String,
+    /// Override the token-extraction regex (FIRST capture group = the token).
+    /// Default: derived from `--correlation-template` (literal parts escaped,
+    /// the placeholder matched as unreserved URI chars).
+    #[arg(long)]
+    correlation_extract: Option<String>,
     /// Attach an X-Api-Call destination pin to route the b-leg to the static uas
     /// endpoint (our-b2bua adapter). Off → the SUT routes the callee itself.
     #[arg(long, default_value_t = false)]
@@ -206,7 +224,16 @@ async fn main() -> std::io::Result<()> {
             .collect()
     };
 
-    let correlation = Correlation::header(args.correlation_header.clone());
+    let correlation = match args.correlate.as_str() {
+        "header" => Correlation::header_templated(
+            args.correlation_header.clone(),
+            args.correlation_template.clone(),
+            args.correlation_extract.as_deref(),
+        )
+        .unwrap_or_else(|e| panic!("bad correlation config: {e}")),
+        "to-user" | "to_user" => Correlation::to_user(),
+        other => panic!("unknown --correlate {other:?} (expected `header` or `to-user`)"),
+    };
 
     let uac: SocketAddr = (args.bind_ip, args.base_port).into();
     let uas: SocketAddr = (args.bind_ip, args.base_port + 1).into();

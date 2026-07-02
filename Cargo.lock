@@ -2333,6 +2333,7 @@ dependencies = [
  "clap",
  "futures",
  "layer-harness",
+ "regex",
  "scenario-harness",
  "sip-clock",
  "sip-message",

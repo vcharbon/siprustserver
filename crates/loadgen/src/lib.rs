@@ -42,7 +42,7 @@ pub mod scope;
 
 pub use chaos::{ChaosLog, ChaosTag};
 pub use class::{CallOutcome, ResultClass};
-pub use ctx::{CallCtx, CallEnv};
+pub use ctx::{CallCtx, CallEnv, CorrelationStamp};
 pub use driver::{serve_metrics, CallConfig, CallTuning, Driver, DriverCfg, MuxTransport};
 pub use mux::{CallRouting, Correlation, EndpointSpec, LegInfo, LegPicker, MuxCore, Role};
 pub use report::{Reporter, ReporterCfg};

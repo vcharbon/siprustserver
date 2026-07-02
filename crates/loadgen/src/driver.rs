@@ -289,11 +289,12 @@ async fn run_one(
     reporter.inc_inflight();
     let id = scenario.id();
 
-    // One correlation token per CALL: alice stamps it on her INVITE and the SUT
-    // relays it (the transparent header) onto every downstream leg, so bob and
-    // charlie share it. Each callee leg is declared on its own socket; the mux
-    // demuxes by (socket, token) — a single receiver per socket here, so no
-    // picker is needed (the scenario-owned picker is for >1 receiver per socket).
+    // One correlation token per CALL: alice stamps it on her INVITE (per the
+    // run's correlation strategy — relayed header or To-user) and the SUT
+    // carries it onto every downstream leg, so bob and charlie share it. Each
+    // callee leg is declared on its own socket; the mux demuxes by (socket,
+    // token) — a single receiver per socket here, so no picker is needed (the
+    // scenario-owned picker is for >1 receiver per socket).
     let token = mint_token();
     let mut routing = CallRouting::new(token.clone()).leg(transport.uas_addr, "bob");
     if scenario.needs_charlie() {
@@ -328,7 +329,7 @@ async fn run_one(
         bob: &bob,
         charlie: charlie.as_ref(),
         via: call.via,
-        correlation_header: transport.correlation.header_name().to_string(),
+        stamp: transport.correlation.stamp(&token),
         token,
         emergency: scenario.emergency(),
         route_pin: call.route_pin,

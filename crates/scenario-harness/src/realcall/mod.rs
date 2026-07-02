@@ -21,7 +21,7 @@ mod env;
 mod scope;
 pub mod scenarios;
 
-pub use env::{CallCtx, CallEnv};
+pub use env::{CallCtx, CallEnv, CorrelationStamp};
 pub use scope::CallScope;
 
 /// Stable scenario name — the Prometheus `scenario` label and report dir name.

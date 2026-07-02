@@ -9,8 +9,10 @@ the OK flows and, for failures, *why* they failed.
 
 It multiplexes every dialog over a **few static UDP sockets** (one per defined
 endpoint: `uac`, `uas`, `refer`), so call rate is not bounded by fds/ephemeral
-ports. Calls are correlated **header-only**: each call carries one random token
-in `X-Loadgen-Id`, which a transparent SUT relays onto every downstream leg.
+ports. Calls are correlated by one random per-call token; **how the token
+travels through the SUT is a pluggable per-run strategy** (`--correlate`): a
+relayed header (default `X-Loadgen-Id`, needs SUT cooperation) or the To-header
+user-part (works against any SIP-correct B2BUA). See *Correlation strategies*.
 
 ---
 
@@ -58,21 +60,69 @@ cargo build --release -p loadgen
 
 Prerequisites for the real cluster (one-time):
 
-- The B2BUA must be **transparent to the correlation header**: deploy it with
-  `B2BUA_RELAY_HEADERS=X-Loadgen-Id` (already set in
-  `deploy/k8s/manifests/20-worker.yaml`). Without it the callee leg never
-  correlates and you'll see `loadgen_mux_orphan_total` climb / zero OK calls.
+- With the default `header` correlation, the B2BUA must be **transparent to the
+  correlation header**: deploy it with `B2BUA_RELAY_HEADERS=X-Loadgen-Id`
+  (already set in `deploy/k8s/manifests/20-worker.yaml`). Without it the callee
+  leg never correlates and you'll see `loadgen_mux_orphan_total` climb / zero OK
+  calls — or switch to `--correlate to-user`, which needs no SUT cooperation
+  (see *Correlation strategies* below).
 - `--bind-ip` = the kind bridge gateway:
   `docker network inspect kind -f '{{(index .IPAM.Config 0).Gateway}}'` (e.g.
   `172.20.0.1`). See the `cluster-nat-inventory` notes for the NAT details.
 
 Key flags: `--cps`, `--duration`, `--max-in-flight`, `--target`, `--bind-ip`,
-`--base-port` (uac=base, uas=base+1, refer=base+2), `--correlation-header`
-(default `X-Loadgen-Id`), `--route-pin-to-uas`, `--scenario name=weight`
+`--base-port` (uac=base, uas=base+1, refer=base+2), `--correlate` /
+`--correlation-header` / `--correlation-template` / `--correlation-extract`
+(see *Correlation strategies*), `--route-pin-to-uas`, `--scenario name=weight`
 (repeatable; omit for the default mix), `--out-dir`, `--metrics-addr`
 (default `0.0.0.0:9300`), `--sample-cap`, `--drop-rate` / `--drop` /
 `--auto-retransmit` (see *Packet loss + auto-retransmit* below). Run `--help` for
 the full list.
+
+### Correlation strategies
+
+Every call mints one random token; the mux demuxes an inbound **initial** leg
+(a Call-ID it has never seen) back to its call by recovering that token. A
+strategy has two halves — **stamp** (how the token is written into the outgoing
+INVITE) and **extract** (how it is recovered from a received leg) — picked
+per run with `--correlate`; all mux endpoints share the one strategy:
+
+- **`--correlate header`** (default) — the token rides one transparent header
+  the SUT must **relay** onto every leg it originates (our b2bua:
+  `B2BUA_RELAY_HEADERS`). Untuned this is byte-for-byte the historic behaviour:
+  `X-Loadgen-Id: <token>`, extraction = the whole header value.
+  - `--correlation-header <name>` picks the header.
+  - `--correlation-template <tpl>` shapes the VALUE around a `${token}`
+    placeholder, so the token can ride a **structured** header a third-party
+    SUT already relays, e.g.
+    `--correlation-header User-to-User --correlation-template '${token};encoding=hex'`
+    (RFC 7433 UUI) or
+    `--correlation-header P-Charging-Vector --correlation-template 'icid-value=${token}'`
+    (PCV).
+  - Extraction is a regex whose **first capture group** is the token — derived
+    from the template automatically (literal parts escaped, the placeholder
+    matched as unreserved URI chars, trailing params tolerated); override it
+    with `--correlation-extract '<regex>'` when the SUT rewrites the value
+    shape.
+- **`--correlate to-user`** — the token IS the To-header **user-part**
+  (`To: <sip:lg…@host>`); extraction reads the To user of the arriving INVITE.
+  A SIP-correct B2BUA copies the To URI onto its originated leg, so this
+  correlates against a **third-party SUT with zero cooperation** (one that
+  strips unknown headers breaks `header` correlation entirely). The trade-off:
+  the To user is now loadgen-owned, so don't combine it with a SUT that routes
+  or rewrites on the To user. (The REFER scenario's `Refer-To` user becomes the
+  token too, so the transfer leg keeps correlating.)
+
+Correlation failures are observable either way: an arriving initial INVITE with
+no extractable token counts `loadgen_mux_orphan_total{reason="no_header"}`; an
+extracted token matching no pending call counts `reason="unknown_token"`.
+
+In code the strategy is `loadgen::Correlation` (`header(name)`,
+`header_templated(name, template, extract)`, `to_user()`); the stamp half is
+applied by `CallEnv::prepare_invite` via `CorrelationStamp`, the extract half by
+the mux demux. Both strategies are covered by unit tests (`mux::tests`) and the
+smoke suite (`loadgen_to_user_correlation_without_relayed_header` proves a full
+call correlates with **no** relay configured on the SUT).
 
 ### Packet loss + auto-retransmit (robustness testing)
 
@@ -313,7 +363,8 @@ drive the callee's `200`+`487` in-scenario (see `AbandonRinging`).
 Add a `#[tokio::test(flavor = "multi_thread")]` to `tests/smoke.rs`: call
 `setup(base_port, Correlation::header("X-Loadgen-Id"), sample_cap)` (or
 `setup_with(.., |c| …)` to tune the in-process B2BUA, e.g. exhaust the CPS bucket
-for an overload test), build a `Driver` over your scenario list, `driver.run()`,
+for an overload test; `setup_no_relay(..)` for the third-party-SUT shape with no
+header relay), build a `Driver` over your scenario list, `driver.run()`,
 then assert on `reporter.count(id, &class)` and the leak canaries
 (`core.registry_size() == 0`, `b2bua.active_calls() == 0`,
 `b2bua.assert_fully_reaped()`). Model it on

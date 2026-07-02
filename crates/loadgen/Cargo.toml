@@ -22,6 +22,9 @@ async-trait = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 # Per-call random correlation token (UUIDv4) threaded through the SUT.
 uuid = { version = "1", features = ["v4"] }
+# Correlation-token extraction from templated header values (first capture
+# group = the token); see `mux::Correlation::header_templated`.
+regex = { workspace = true }
 # The mux is a SignalingNetwork; recording layers on top via AgentBinder.
 sip-net = { path = "../sip-net" }
 # One process-wide monotonic-anchored Clock (created once at startup) stamps every
