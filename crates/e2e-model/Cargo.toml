@@ -1,0 +1,24 @@
+[package]
+name = "e2e-model"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The dependency-light E2E axis DATA MODEL (ADR-0018/0019): authored Test cases / Check sets / Campaigns / Endpoint configs, the canonical anchor vocabulary + load-time compatibility validation, the layout-owned egress-rewrite model, and the post-call check evaluator. Shared by the e2e run surfaces (e2e-core/cli/web) and the load generator. Deliberately light: NO SUT crates (b2bua, sip-proxy, call, sip-txn) — only serde/schemars/regex plus the message/recording surface the evaluator reads."
+
+[lints]
+workspace = true
+
+[dependencies]
+# The recorded-report surface the check evaluator reads (`RunReport`,
+# `AnchorTag`) and the `Invite` builder the egress rewrite applies to. The
+# load generator already depends on scenario-harness, so this keeps the model
+# crate shareable across both run surfaces.
+scenario-harness = { path = "../scenario-harness" }
+sip-message = { path = "../sip-message" }
+# `RecordedSipEntry` only (the evaluator resolves anchors over the recording).
+sip-net = { path = "../sip-net" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+regex = { workspace = true }

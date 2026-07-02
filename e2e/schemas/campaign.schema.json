@@ -49,7 +49,7 @@
   ],
   "$defs": {
     "Concurrency": {
-      "description": "Per-[`InfraKind`](crate::infra::InfraKind) run-executor concurrency caps:\nfake cells fan out wide; real cells share one external cluster.",
+      "description": "Per-infra-kind run-executor concurrency caps (`InfraKind` in `e2e-core`):\nfake cells fan out wide; real cells share one external cluster.",
       "type": "object",
       "properties": {
         "fake": {

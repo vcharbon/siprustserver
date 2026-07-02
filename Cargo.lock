@@ -1150,6 +1150,7 @@ dependencies = [
  "b2bua",
  "b2bua-harness",
  "call",
+ "e2e-model",
  "layer-harness",
  "media",
  "media-harness",
@@ -1165,6 +1166,19 @@ dependencies = [
  "sip-proxy",
  "sip-txn",
  "tokio",
+]
+
+[[package]]
+name = "e2e-model"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "scenario-harness",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sip-message",
+ "sip-net",
 ]
 
 [[package]]

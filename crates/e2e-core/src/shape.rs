@@ -2,74 +2,21 @@
 //! (ADR-0019). A shape is a compiled-Rust message-sequence template parameterised
 //! over [`Input`], publishing the anchors it produces. The *same* shape runs over
 //! any [`InfraShape`](crate::infra::InfraShape).
+//!
+//! The pure vocabulary ([`Anchor`], the [`Input`] core) moved to the
+//! dependency-light `e2e-model` crate; the run trait stays here because it
+//! drives an [`InfraRuntime`]. The bridge below folds `dyn CallflowShape` onto
+//! [`e2e_model::ShapeSpec`] so the moved `validate_case` consumes the compiled
+//! registry unchanged.
 
 use async_trait::async_trait;
 
 use crate::infra::InfraRuntime;
 
-/// The canonical, project-wide Message-anchor vocabulary. A Callflow shape
-/// publishes the subset it produces; a Check binds to `<agent>.<anchor>`
-/// (ADR-0019). Extend deliberately — adding a common anchor is a project-wide act.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Anchor {
-    InitialInvite,
-    ReInvite,
-    FirstProvisional,
-    Answer,
-    Ack,
-    Bye,
-    Refer,
-    Prack,
-}
-
-impl Anchor {
-    /// The canonical surface name used in authored JSON (`bob1.initialInvite`).
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Anchor::InitialInvite => "initialInvite",
-            Anchor::ReInvite => "reInvite",
-            Anchor::FirstProvisional => "firstProvisional",
-            Anchor::Answer => "answer",
-            Anchor::Ack => "ack",
-            Anchor::Bye => "bye",
-            Anchor::Refer => "refer",
-            Anchor::Prack => "prack",
-        }
-    }
-
-    pub const ALL: &'static [Anchor] = &[
-        Anchor::InitialInvite,
-        Anchor::ReInvite,
-        Anchor::FirstProvisional,
-        Anchor::Answer,
-        Anchor::Ack,
-        Anchor::Bye,
-        Anchor::Refer,
-        Anchor::Prack,
-    ];
-
-    /// Parse a surface name back into the vocabulary (`None` = not a canonical
-    /// anchor — a load-time validation error, never a silent pass).
-    pub fn parse(name: &str) -> Option<Anchor> {
-        Anchor::ALL.iter().copied().find(|a| a.as_str() == name)
-    }
-}
-
-/// The shared input CORE a Test case supplies to a shape: From / To / R-URI
-/// overrides (the numbers), each optional. This is both the runtime input and
-/// the `core` of the authored JSON [`Input`](crate::model::Input) — headers /
-/// timers join when the harness builder can honour them (no silent fields).
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[schemars(rename = "CoreInput")]
-pub struct Input {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub to: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ruri: Option<String>,
-}
+pub use e2e_model::shape::Anchor;
+/// The shared input CORE a Test case supplies to a shape (moved to
+/// `e2e-model` as `CoreInput`; the historical `shape::Input` name is kept).
+pub use e2e_model::shape::CoreInput as Input;
 
 /// Whether a Callflow shape exchanges RTP audio alongside the signaling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,4 +76,16 @@ pub trait CallflowShape {
     /// panic in-line (the harness philosophy); the run-core isolates the panic per
     /// cell.
     async fn run(&self, rt: &mut InfraRuntime, input: &crate::model::Input);
+}
+
+/// The bridge onto the moved model: a compiled `dyn CallflowShape` *is* the
+/// load-time metadata `e2e_model::validate_case` consumes, so the registry
+/// (`BTreeMap<String, Box<dyn CallflowShape>>`) passes through unchanged.
+impl<'a> e2e_model::ShapeSpec for dyn CallflowShape + 'a {
+    fn anchors(&self) -> &[Anchor] {
+        CallflowShape::anchors(self)
+    }
+    fn required_input(&self) -> &[&str] {
+        CallflowShape::required_input(self)
+    }
 }
