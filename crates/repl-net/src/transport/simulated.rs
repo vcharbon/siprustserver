@@ -796,6 +796,7 @@ mod tests {
             call_gen: 7,
             call_bgen: 0,
             body_ttl_ms: 1000,
+            origin_now_ms: 0,
             indexes: vec!["idx".into()],
             body: Some(StdArc::from(body)),
         }

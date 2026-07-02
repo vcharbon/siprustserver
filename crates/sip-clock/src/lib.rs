@@ -55,6 +55,25 @@
 //! monotonic drift from true wall over its uptime. Skew shifts the rearmed
 //! deadline earlier/later by the disagreement; a past-due `fire_at` clamps to a
 //! zero delay and fires immediately. See docs/MIGRATION_PLAN_B2B.md §2.
+//!
+//! ## Skew re-anchoring at the replication boundary (clock-skew hardening, landed)
+//!
+//! The raw cross-node trust above is now **bounded to ~replication latency**. The
+//! replication `Data` frame carries an `origin_now_ms` stamp (the sender's
+//! `now_ms()` at flush-send time); the receiving store persists
+//! `skew_offset_ms = receiver_now_ms − origin_now_ms` alongside the body's
+//! `expiry_at_ms` (the SAME re-anchor idiom already used for `body_ttl_ms`). On
+//! failover/reclaim the B2BUA router's single restore-hygiene seam
+//! (`router::sanitize_restored_timers`) adds that offset back to every rehydrated
+//! `TimerEntry.fire_at` before re-arming it, so the deadline lands in the LIVE
+//! node's clock frame regardless of a host NTP step that anchored the two pods on
+//! opposite sides. A small deadband ignores sub-second offsets (dominated by
+//! transit latency, not real skew). This is **accuracy only** — `(p,b)`-causal
+//! reconciliation (ADR-0014) remains the sole correctness mechanism; the boundary
+//! re-anchor introduces no wall-clock-dependent rule, settle window, or handback.
+//! A periodic `clock_wall_divergence_ms` gauge makes a live host step observable
+//! before it corrupts a restore. Keep the infra discipline too (slewing chrony,
+//! host kept awake) — the SUT now bounds the residual, it does not license drift.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::Instant;
@@ -79,10 +98,18 @@ impl Clock {
     /// this anchor, so the returned timestamp is wall-clock-aligned at startup
     /// and monotonic (never decreasing) thereafter.
     pub fn system() -> Self {
+        // FAIL LOUDLY on a pre-epoch clock instead of silently anchoring to 1970
+        // (the old `unwrap_or(0)`): a node that anchored at 0 would compute a
+        // ~55-year skew offset against every healthy peer, so every replicated
+        // timer it reclaimed would be reaped or deferred by decades — a silent,
+        // catastrophic corruption. A `SystemTime` before 1970 in production is a
+        // grossly-misconfigured host clock; crashing at boot is the correct,
+        // visible failure (k8s restarts the pod; the operator sees CrashLoopBackOff
+        // instead of a mysterious cluster-wide reclaim storm days later).
         let anchor_wall_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
+            .expect("system wall clock is before the UNIX epoch (grossly misconfigured host clock) — refusing to anchor Clock to a pre-1970 time")
+            .as_millis() as i64;
         Self {
             anchor_wall_ms,
             anchor_instant: Instant::now(),
@@ -108,6 +135,38 @@ impl Clock {
     pub fn now_ms(&self) -> i64 {
         self.anchor_wall_ms + self.anchor_instant.elapsed().as_millis() as i64
     }
+
+    /// **Divergence** between a freshly-read raw wall clock and this monotonic-
+    /// anchored `now_ms()`: `raw_wall_ms − now_ms()` (clock-skew hardening
+    /// observability). This is the **pure, testable seam** behind the periodic
+    /// `clock_wall_divergence_ms` gauge — inject the wall reading so the test does
+    /// not depend on `SystemTime`.
+    ///
+    /// It measures how far this `Clock`'s anchored timeline has drifted from true
+    /// wall time since it was anchored — either the anchor's own monotonic drift
+    /// over long uptime, OR (the case that matters) a **host NTP step**: when the
+    /// host clock jumps, `now_ms()` (monotonic-derived) does NOT follow, so a fresh
+    /// `SystemTime::now()` reading and `now_ms()` diverge by the step size. A
+    /// large, sudden magnitude names exactly the event that skews replicated timer
+    /// deadlines across pods (the endurance-20260630 artifact), turning a
+    /// days-later failover mystery into a live signal. Do NOT re-anchor `Clock`
+    /// from this — timestamps must stay monotonic; the behavioural correction is
+    /// the Stage 1/2 replication-boundary re-anchor, not a clock rewrite.
+    pub fn wall_divergence_ms(&self, raw_wall_ms: i64) -> i64 {
+        raw_wall_ms - self.now_ms()
+    }
+}
+
+/// Read the raw system wall clock in epoch ms (NOT monotonic-anchored) for the
+/// `clock_wall_divergence_ms` sampler — the one place that deliberately reads
+/// `SystemTime` to compare against a [`Clock`]. Returns `0` on a pre-epoch clock
+/// (the sampler is observability-only; unlike [`Clock::system`] it must never
+/// panic a running worker).
+pub fn raw_system_wall_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Test helpers mirroring the source's virtual-time advance loop
@@ -210,6 +269,44 @@ mod tests {
             assert!(now >= last, "{now} < {last}");
             last = now;
         }
+    }
+
+    // ── Stage 3: clock-skew divergence observability seam ──
+
+    #[tokio::test(start_paused = true)]
+    async fn wall_divergence_is_raw_minus_now() {
+        // The pure seam: inject the raw wall reading, so the test is deterministic
+        // and never touches SystemTime. now_ms == anchor under a paused clock.
+        let clock = Clock::test_at(1_000_000);
+        // Raw wall AHEAD of our anchored now_ms by 300 s (a host step forward).
+        assert_eq!(clock.wall_divergence_ms(1_300_000), 300_000);
+        // Raw wall BEHIND (a step backward) → negative divergence.
+        assert_eq!(clock.wall_divergence_ms(700_000), -300_000);
+        // Agreement → zero.
+        assert_eq!(clock.wall_divergence_ms(1_000_000), 0);
+
+        // now_ms advances with tokio time, but a STEPPED raw reading does not follow
+        // it — so the divergence tracks the step, which is the whole point.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        // now_ms is now 1_010_000; a raw wall that stayed at 1_000_000 (monotonic
+        // Clock kept moving, host clock did not) reads as −10_000 divergence.
+        assert_eq!(clock.wall_divergence_ms(1_000_000), -10_000);
+    }
+
+    #[test]
+    fn system_panics_on_pre_epoch_clock() {
+        // We cannot force SystemTime backwards, but we CAN assert the guard: the
+        // pre-epoch branch is `duration_since(UNIX_EPOCH).expect(...)`. Model it
+        // directly — a pre-epoch SystemTime yields `Err` from `duration_since`, and
+        // our constructor `.expect()`s it. This documents/locks the fail-loud
+        // contract that replaced the silent `unwrap_or(0)`.
+        let pre_epoch = UNIX_EPOCH - std::time::Duration::from_secs(1);
+        let result = std::panic::catch_unwind(|| {
+            pre_epoch
+                .duration_since(UNIX_EPOCH)
+                .expect("system wall clock is before the UNIX epoch (grossly misconfigured host clock) — refusing to anchor Clock to a pre-1970 time")
+        });
+        assert!(result.is_err(), "a pre-epoch clock must panic, not anchor to 0");
     }
 
     #[tokio::test(start_paused = true)]

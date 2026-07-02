@@ -36,11 +36,23 @@ fn frame_strat() -> impl Strategy<Value = Frame> {
         any::<i64>(),
         any::<i64>(),
         any::<i64>(),
+        any::<i64>(),
         proptest::collection::vec(".*", 0..5),
         proptest::option::of(proptest::collection::vec(any::<u8>(), 0..256)),
     )
         .prop_map(
-            |(at, op, partition, call_ref, call_gen, call_bgen, body_ttl_ms, indexes, body)| {
+            |(
+                at,
+                op,
+                partition,
+                call_ref,
+                call_gen,
+                call_bgen,
+                body_ttl_ms,
+                origin_now_ms,
+                indexes,
+                body,
+            )| {
                 Frame::Data {
                     at,
                     op,
@@ -49,6 +61,7 @@ fn frame_strat() -> impl Strategy<Value = Frame> {
                     call_gen,
                     call_bgen,
                     body_ttl_ms,
+                    origin_now_ms,
                     indexes,
                     body: body.map(|b| Arc::from(b.as_slice())),
                 }

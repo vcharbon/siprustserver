@@ -251,6 +251,7 @@ mod tests {
             call_gen: 42,
             call_bgen: 0,
             body_ttl_ms: 30_000,
+            origin_now_ms: 0,
             indexes: vec!["a".into(), "b".into()],
             body: Some(StdArc::from(&b"the-encoded-call-body-bytes"[..])),
         };

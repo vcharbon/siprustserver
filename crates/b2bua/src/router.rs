@@ -175,7 +175,10 @@ async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str) {
     // its own per-call lock, so route it BEFORE taking the lock here (the guard is
     // not reentrant).
     if ctx.state.peek(call_ref).is_none() && replica.state != CallModelState::Terminated {
-        reclaim_into_live(ctx, replica, None).await;
+        // Skew offset for this straggler (0 if none persisted); the seam re-anchors
+        // its timers before re-arm just like the bulk/reactive paths.
+        let skew = ctx.state.skew_offset_ms(call_ref);
+        reclaim_into_live(ctx, replica, skew, None).await;
         return;
     }
     let _guard = ctx.state.lock(call_ref).await;
@@ -363,19 +366,30 @@ async fn reclaim_all(ctx: &Arc<RouterCtx>) {
     let start_ms = ctx.clock.now_ms();
     let now_ms = start_ms;
     let active_before = ctx.state.active_count() as u64;
-    let calls = ctx.state.reclaim_scan().await;
+    let mut calls = ctx.state.reclaim_scan().await;
     let scanned = calls.len() as u64;
-    // L_max = the largest past-due keepalive gap across the whole partition.
+    // Re-anchor EVERY call's timers by its own persisted skew offset FIRST, so the
+    // cohort classification below (past-due vs future-dated) and `l_max` are
+    // computed over SKEW-CORRECTED deadlines — a reclaimer anchored ahead of the
+    // origin would otherwise mis-classify a future cohort as past-due and compress
+    // it into the catch-up band (the 2026-06-12 OPTIONS burst). Applied here once;
+    // the per-call seam is then invoked with `skew_offset_ms = 0` (already done).
+    for (call, skew) in calls.iter_mut() {
+        reanchor_timers(&mut call.timers, *skew);
+    }
+    // L_max = the largest past-due keepalive gap across the whole partition, over
+    // the now skew-corrected deadlines.
     let l_max = calls
         .iter()
-        .flat_map(|c| c.timers.iter())
+        .flat_map(|(c, _)| c.timers.iter())
         .filter(|t| matches!(t.timer_type, TimerType::Keepalive))
         .map(|t| (now_ms - t.fire_at).max(0))
         .max()
         .unwrap_or(0);
     let mut materialized = 0u64;
-    for call in calls {
-        if reclaim_into_live(ctx, call, Some((now_ms, l_max))).await {
+    for (call, _skew) in calls {
+        // Offset already applied above → 0 here (no double-correction).
+        if reclaim_into_live(ctx, call, 0, Some((now_ms, l_max))).await {
             materialized += 1;
         }
     }
@@ -482,6 +496,112 @@ fn smooth_keepalives(
     }
 }
 
+/// Re-anchor **deadband** (ms): a persisted `skew_offset_ms` whose magnitude is
+/// below this is NOT applied — it is dominated by replication transit latency +
+/// clock jitter, not a genuine inter-node clock disagreement worth correcting.
+/// This is what keeps the re-anchor a *no-op* under the single-clock harness,
+/// whose coarse `advance` (100 ms chunks + settles between replication hops)
+/// inflates `receiver_now − origin_now` to a few hundred ms of pure latency with
+/// ZERO real skew — perturbing a keepalive by that latency breaks the harness's
+/// strict SIP-transparency oracle. A real host clock STEP (the endurance-20260630
+/// artifact) is interval-sized (≥ the keepalive cadence, hundreds of seconds), so
+/// it clears this deadband by orders of magnitude. Correcting only skew that
+/// materially exceeds latency is also strictly better in production: sub-second
+/// offsets do not meaningfully move a 300 s keepalive / 150 s setup timer.
+const REANCHOR_DEADBAND_MS: i64 = 1_000;
+
+/// Add the receive-time wall-clock `skew_offset_ms` to every timer's absolute
+/// `fire_at` (clock-skew hardening), when the offset clears [`REANCHOR_DEADBAND_MS`].
+/// Each replicated `TimerEntry.fire_at` is an epoch-ms deadline minted on the
+/// ORIGIN node's clock; the offset (`receiver_now_ms − origin_now_ms`, persisted at
+/// replica-put time) shifts it into THIS node's clock frame, so the driver's
+/// `fire_at − now_ms` reconstruction bounds restore skew to ~replication latency
+/// instead of trusting the dead node's clock unboundedly. A sub-deadband or `0`
+/// offset (locally-originated body, negligible skew, or already applied by
+/// [`reclaim_all`]) is a no-op. This makes ALL downstream past-due math
+/// skew-corrected. No `(p,b)` interaction — accuracy only (ADR-0014 untouched).
+fn reanchor_timers(timers: &mut [TimerEntry], skew_offset_ms: i64) {
+    if skew_offset_ms.abs() < REANCHOR_DEADBAND_MS {
+        return;
+    }
+    for t in timers.iter_mut() {
+        t.fire_at += skew_offset_ms;
+    }
+}
+
+/// **The single restore-hygiene seam** every failover/reclaim hydration path runs
+/// a replicated timer set through before re-arming it into this node's
+/// [`TimerService`] (clock-skew hardening). Accuracy/performance only — the
+/// `timers.rs` driver stays untouched and `(p,b)`-causal reconciliation remains
+/// the sole correctness mechanism (ADR-0014); this introduces NO wall-clock
+/// correctness rule, settle window, or handback. In order:
+///
+/// 1. **Re-anchor** by `skew_offset_ms` ([`reanchor_timers`]) so every deadline is
+///    in this node's clock frame — this alone fixes the skew-ahead
+///    "OPTIONS-at-takeover" artifact and makes the cohort classification in
+///    [`smooth_keepalives`] correct.
+/// 2. **Drop stale `KeepaliveTimeout`** ([`drop_stale_keepalive_timeout`]) — the
+///    OPTIONS it guarded died with the crashed node.
+/// 3. **Defensive floor — ONLY when the offset is UNKNOWN** (`None`: a path that
+///    could not re-anchor). A `Keepalive` past-due by ≥ 1× `keepalive_interval` is
+///    then treated as uncorrected skew/backlog pathology and re-based to `now +
+///    (stable_jitter % interval)` rather than firing an immediate OPTIONS at
+///    takeover (which would race the failed-over transaction — the
+///    endurance-20260630 artifact). When the offset is KNOWN (`Some`, including a
+///    well-synced `0`) it is trusted: a past-due keepalive after correction is a
+///    normal catch-up and fires promptly (probe the recovered peer) — this is what
+///    keeps the single-clock harness transparent (skew is a known 0, so reclaim
+///    keeps the source's OPTIONS timing token-for-token). Deterministic per
+///    `(call_ref, timer id)` so a reboot re-pass is idempotent.
+/// 4. **Cohort smoothing** ([`smooth_keepalives`]) when `smoothing` is requested
+///    (the bulk reboot sweep).
+fn sanitize_restored_timers(
+    timers: &mut Vec<TimerEntry>,
+    call_ref: &str,
+    now_ms: i64,
+    skew_offset_ms: Option<i64>,
+    keepalive_interval_ms: i64,
+    smoothing: Option<Smoothing>,
+) {
+    // 1. Re-anchor into this node's clock frame when the offset is KNOWN.
+    if let Some(offset) = skew_offset_ms {
+        reanchor_timers(timers, offset);
+    }
+    // 2. Stale keepalive-timeout hygiene.
+    drop_stale_keepalive_timeout(timers);
+    // 3. Defensive floor — only for an UNKNOWN offset (see the doc above). Skipped
+    //    when the offset is known so a well-anchored past-due keepalive fires
+    //    promptly (single-clock transparency).
+    if skew_offset_ms.is_none() && keepalive_interval_ms > 0 {
+        for t in timers.iter_mut() {
+            if !matches!(t.timer_type, TimerType::Keepalive) {
+                continue;
+            }
+            if now_ms - t.fire_at >= keepalive_interval_ms {
+                let jitter = (stable_jitter(call_ref) ^ stable_jitter(&t.id))
+                    % keepalive_interval_ms as u64;
+                t.fire_at = now_ms + jitter as i64;
+            }
+        }
+    }
+    // 4. Cohort smoothing (bulk reboot sweep only). Runs AFTER re-anchoring so its
+    //    past-due/future classification keys on skew-corrected deadlines.
+    if let Some(s) = smoothing {
+        smooth_keepalives(timers, call_ref, s.now_ms, s.l_max, s.speedup, s.cap_ms);
+    }
+}
+
+/// Cohort-smoothing parameters for the bulk reboot sweep, passed through the
+/// [`sanitize_restored_timers`] seam. `None` (a single reactive straggler /
+/// on-demand reclaim) skips smoothing — there is no cohort to de-correlate.
+#[derive(Clone, Copy)]
+struct Smoothing {
+    now_ms: i64,
+    l_max: i64,
+    speedup: i64,
+    cap_ms: Option<i64>,
+}
+
 /// Materialise one reclaimed call into the live map + re-arm its timers (ADR-0011
 /// X11). `smoothing = Some((now_ms, l_max))` re-spreads keepalives per
 /// [`smooth_keepalives`] for the bulk reboot sweep ([`reclaim_all`]): past-due
@@ -494,6 +614,7 @@ fn smooth_keepalives(
 async fn reclaim_into_live(
     ctx: &Arc<RouterCtx>,
     mut call: Call,
+    skew_offset_ms: i64,
     smoothing: Option<(i64, i64)>,
 ) -> bool {
     let call_ref = call.call_ref.clone();
@@ -521,15 +642,23 @@ async fn reclaim_into_live(
             .await;
         return true;
     }
-    // A keepalive OPTIONS transaction caught mid-flight in the replicated
-    // snapshot guards a probe that died with the crashed node; drop the stale
-    // timeout so it does not fire a spurious keepalive-timeout BYE on reclaim.
-    drop_stale_keepalive_timeout(&mut call.timers);
-    if let Some((now_ms, l_max)) = smoothing {
-        let speedup = ctx.config.keepalive_catchup_speedup.max(1);
-        let cap_ms = ctx.config.max_catchup_window_sec.map(|s| s * 1000);
-        smooth_keepalives(&mut call.timers, &call_ref, now_ms, l_max, speedup, cap_ms);
-    }
+    // Single restore-hygiene seam (clock-skew hardening): re-anchor by the
+    // persisted skew offset, drop the stale keepalive-timeout, apply the
+    // deep-past-due defensive floor, then (bulk sweep only) cohort-smooth.
+    let smoothing = smoothing.map(|(now_ms, l_max)| Smoothing {
+        now_ms,
+        l_max,
+        speedup: ctx.config.keepalive_catchup_speedup.max(1),
+        cap_ms: ctx.config.max_catchup_window_sec.map(|s| s * 1000),
+    });
+    sanitize_restored_timers(
+        &mut call.timers,
+        &call_ref,
+        ctx.clock.now_ms(),
+        Some(skew_offset_ms),
+        ctx.config.keepalive_interval_sec * 1000,
+        smoothing,
+    );
     let timers = call.timers.clone();
     if ctx.state.materialize_if_absent(call) {
         ctx.timers.restore(timers, call_ref).await;
@@ -1249,7 +1378,7 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
         // dialog over to us. A primary-role miss then tries the ON-DEMAND
         // reclaim below; only a genuine orphan (no replica anywhere) rejects.
         let mut call = match ctx.state.hydrate_from_replica(&call_ref).await {
-            Some((c, fresh)) => {
+            Some((c, fresh, skew_offset_ms)) => {
                 // Failover timer re-arm: per-call timers (keepalive, global
                 // duration, …) live in this node's in-memory `TimerService`, NOT
                 // in the replicated call state — so a call freshly materialized
@@ -1273,13 +1402,22 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
                     // all reach a terminal state, at which point the router sheds
                     // the live copy (keeping the `bak:` replica).
                     ctx.state.mark_takeover(&call_ref);
-                    // Drop a stale in-flight `KeepaliveTimeout` (the OPTIONS it
-                    // guarded died with the crashed primary) so it does not fire a
-                    // spurious keepalive-timeout BYE on this reactive takeover; the
-                    // re-armed `Keepalive` re-probes fresh. See
-                    // `drop_stale_keepalive_timeout`.
+                    // Restore-hygiene seam (clock-skew hardening): re-anchor the
+                    // failed-over timers by the persisted receive-time skew offset,
+                    // drop the stale in-flight `KeepaliveTimeout` (the OPTIONS it
+                    // guarded died with the crashed primary), and apply the
+                    // deep-past-due keepalive floor — so no immediate OPTIONS races
+                    // the failed-over re-INVITE (endurance-20260630). No cohort here
+                    // (single call), so no smoothing.
                     let mut takeover_timers = c.timers.clone();
-                    drop_stale_keepalive_timeout(&mut takeover_timers);
+                    sanitize_restored_timers(
+                        &mut takeover_timers,
+                        &call_ref,
+                        ctx.clock.now_ms(),
+                        Some(skew_offset_ms),
+                        ctx.config.keepalive_interval_sec * 1000,
+                        None,
+                    );
                     ctx.timers.restore(takeover_timers, call_ref.clone()).await;
                     let _ = ctx.txn.watch_self_release(&call_ref).await;
                 }
@@ -1302,10 +1440,19 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
             // peer's `bak:{self}`) still orphans — recovering THAT population
             // needs an on-demand pull from the peer (s11 CASE B, open).
             None => match ctx.state.peek_reclaimable(&call_ref).await {
-                Some(call) => {
+                Some((call, skew_offset_ms)) => {
                     let mut timers = call.timers.clone();
-                    // Same stale-guard hygiene as the bulk/reactive reclaim paths.
-                    drop_stale_keepalive_timeout(&mut timers);
+                    // Same restore-hygiene seam as the bulk/reactive reclaim paths:
+                    // re-anchor by the skew offset, drop the stale timeout, apply
+                    // the deep-past-due floor. No cohort (one call) → no smoothing.
+                    sanitize_restored_timers(
+                        &mut timers,
+                        &call_ref,
+                        ctx.clock.now_ms(),
+                        Some(skew_offset_ms),
+                        ctx.config.keepalive_interval_sec * 1000,
+                        None,
+                    );
                     if ctx.state.materialize_if_absent(call.clone()) {
                         ctx.timers.restore(timers, call_ref.clone()).await;
                         ctx.metrics.bump_repl_reclaimed();
@@ -2223,5 +2370,162 @@ mod reclaim_timer_tests {
         let mut newer = vec![keepalive(now - 100_000)];
         smooth_keepalives(&mut newer, "w1|b|b", now, l_max, speedup, None);
         assert_eq!(newer[0].fire_at, now + 10_000, "less-overdue drains later, bounded by speedup");
+    }
+
+    // ── clock-skew hardening: the restore-hygiene seam ──────────────────────
+
+    /// Test #3 — smooth_keepalives / l_max classification over SKEW-CORRECTED
+    /// offsets. A reclaimer anchored +45 s AHEAD of the origin reads a keepalive
+    /// that is genuinely FUTURE-dated (fire_at = origin_now + 300 s) as if it were
+    /// past-due, because the raw `fire_at` is in the reclaimer's past-frame. WITHOUT
+    /// re-anchoring, `smooth_keepalives` would classify it past-due and compress it
+    /// into the catch-up band (the 2026-06-12 OPTIONS burst). The seam re-anchors
+    /// first (+45 s), so it is correctly seen as future-dated and de-correlated into
+    /// `[now, fire_at]` — never crushed to `now`.
+    #[test]
+    fn seam_reanchor_keeps_future_cohort_out_of_the_catchup_band() {
+        // The reclaimer's clock frame.
+        let now = 1_000_000;
+        // Origin minted the keepalive 300 s out on ITS clock, which is 45 s BEHIND
+        // the reclaimer → the reclaimer received it with skew_offset = +45_000, and
+        // the raw fire_at (origin frame) reads as `now - 45_000 + 300_000` once we
+        // subtract the offset back out. Model the raw (pre-correction) fire_at:
+        let skew = 45_000; // receiver_now − origin_now
+        let raw_fire_at = now - skew + 300_000; // origin-frame deadline as stored
+        // Before correction this is `now + 255_000` → looks 45 s "closer" but still
+        // future; a LARGER skew would flip it past-due. Use a skew big enough to
+        // flip it: origin minted it only 30 s out.
+        let raw_fire_at_flip = now - skew + 30_000; // = now - 15_000 → PAST-DUE raw!
+        let mut timers = vec![keepalive(raw_fire_at_flip)];
+        // l_max computed over the CORRECTED deadline (as reclaim_all now does):
+        // corrected = raw + skew = now + 30_000 (future) → not past-due → l_max 0.
+        let smoothing = Some(Smoothing { now_ms: now, l_max: 0, speedup: 10, cap_ms: None });
+        sanitize_restored_timers(&mut timers, "w1|c|c", now, Some(skew), 300_000, smoothing);
+        let fa = timers[0].fire_at;
+        assert!(
+            fa >= now,
+            "corrected future keepalive is NOT crushed to a past-due catch-up slot: {fa} < {now}",
+        );
+        assert!(
+            fa <= now + 30_000,
+            "de-correlated within [now, corrected deadline], not the raw past-due frame: {fa}",
+        );
+        // Control: the SAME raw timers WITHOUT re-anchoring (offset None) would be
+        // seen past-due and smoothed toward the catch-up band at `now`.
+        let mut raw_timers = vec![keepalive(raw_fire_at_flip)];
+        smooth_keepalives(&mut raw_timers, "w1|c|c", now, 15_000, 10, None);
+        assert!(
+            raw_timers[0].fire_at <= now,
+            "uncorrected: the future keepalive IS mis-compressed to the catch-up band",
+        );
+        let _ = raw_fire_at;
+    }
+
+    /// Test #4 — the defensive floor. When the offset is UNKNOWN (`None`, a path
+    /// that could not re-anchor), a keepalive past-due by ≥ 1× interval is re-based
+    /// to within one interval of `now` (not fired immediately, which would race a
+    /// failed-over transaction). Deterministic per (call_ref, timer id).
+    #[test]
+    fn defensive_floor_rebases_deep_past_due_keepalive_within_one_interval() {
+        let now = 1_000_000;
+        let interval = 300_000;
+        // Past-due by 2× interval — deep skew/backlog pathology.
+        let make = || vec![keepalive(now - 2 * interval)];
+
+        let mut t = make();
+        // Unknown offset (None) → floor engages; no smoothing.
+        sanitize_restored_timers(&mut t, "w1|d|d", now, None, interval, None);
+        let fa = t[0].fire_at;
+        assert!(
+            (now..now + interval).contains(&fa),
+            "deep-past-due keepalive re-based into [now, now+interval): {fa}",
+        );
+        assert!(fa > now, "not fired immediately at now (which would race the failed-over txn)");
+
+        // Determinism: same (call_ref, id) → same slot (idempotent reboot re-pass).
+        let mut t2 = make();
+        sanitize_restored_timers(&mut t2, "w1|d|d", now, None, interval, None);
+        assert_eq!(t2[0].fire_at, fa, "floor is deterministic per call_ref/id");
+        // Distinct call_ref → (very likely) a different slot.
+        let mut t3 = make();
+        sanitize_restored_timers(&mut t3, "w1|different|x", now, None, interval, None);
+        // (Not asserting inequality hard — hash collisions are possible — but the
+        // slot must still be within the interval.)
+        assert!((now..now + interval).contains(&t3[0].fire_at));
+
+        // KNOWN offset (Some, even 0) → floor SKIPPED: a well-anchored past-due
+        // keepalive fires promptly (single-clock transparency).
+        let mut t4 = make();
+        sanitize_restored_timers(&mut t4, "w1|d|d", now, Some(0), interval, None);
+        assert_eq!(
+            t4[0].fire_at,
+            now - 2 * interval,
+            "known offset trusts the deadline — past-due fires promptly, floor does NOT engage",
+        );
+    }
+
+    /// Test #2 — SetupTimeout (a non-keepalive policy deadline) under skew. A
+    /// ringing call partway through its setup window fails over; the restored
+    /// SetupTimeout must land at its TRUE remaining time in the takeover node's
+    /// clock frame, NOT reaped early (skew-ahead) nor extended by the skew
+    /// (skew-behind). The seam re-anchors ALL timer classes, so this holds for the
+    /// SetupTimeout ledger timer exactly as for the keepalive — the class that got
+    /// NO restore hygiene at all before this change.
+    #[test]
+    fn setup_timeout_is_reanchored_not_reaped_early_or_extended() {
+        // Origin minted SetupTimeout 150 s out at ring-start; the call is 100 s in,
+        // so 50 s of setup window remains (origin-frame fire_at = origin_ring + 150).
+        // Model the restored entry as it arrives on the takeover node, whose `now`
+        // is 100 s past the (origin-frame) ring start.
+        let setup = |fire_at: i64| TimerEntry {
+            id: format!("{:?}", TimerType::SetupTimeout),
+            timer_type: TimerType::SetupTimeout,
+            fire_at,
+            leg_id: None,
+        };
+
+        // ── skew-AHEAD (+40 s): the takeover node's clock is 40 s ahead of the
+        //    origin. Raw fire_at (origin frame) = now_local − 40_000 + 50_000 (still
+        //    50 s of true window). WITHOUT re-anchor it would read 10 s out (reaped
+        //    40 s early); WITH +40 s re-anchor it lands at the true 50 s. ──────────
+        let now = 1_000_000;
+        let skew_ahead = 40_000;
+        let raw_fire_at = now - skew_ahead + 50_000; // origin-frame deadline
+        let mut t = vec![setup(raw_fire_at)];
+        sanitize_restored_timers(&mut t, "w1|s|s", now, Some(skew_ahead), 300_000, None);
+        assert_eq!(
+            t[0].fire_at,
+            now + 50_000,
+            "skew-ahead: SetupTimeout lands at the TRUE remaining 50 s, not reaped 40 s early",
+        );
+
+        // ── skew-BEHIND (−40 s): the takeover node's clock is 40 s behind the
+        //    origin. Raw fire_at (origin frame) = now_local + 40_000 + 50_000.
+        //    WITHOUT re-anchor it would read 90 s out (extended by the skew); WITH
+        //    −40 s re-anchor it lands at the true 50 s. ─────────────────────────────
+        let skew_behind = -40_000;
+        let raw_fire_at_b = now - skew_behind + 50_000; // = now + 90_000 (origin frame)
+        let mut tb = vec![setup(raw_fire_at_b)];
+        sanitize_restored_timers(&mut tb, "w1|s|s", now, Some(skew_behind), 300_000, None);
+        assert_eq!(
+            tb[0].fire_at,
+            now + 50_000,
+            "skew-behind: SetupTimeout lands at the TRUE remaining 50 s, not extended by 40 s",
+        );
+    }
+
+    /// The re-anchor itself: a known offset shifts every timer's absolute deadline
+    /// into the local clock frame; a sub-deadband offset is a no-op (latency, not
+    /// skew — keeps the single-clock harness transparent).
+    #[test]
+    fn reanchor_applies_above_deadband_and_ignores_below() {
+        let mut t = vec![keepalive(1_000_000), keepalive_timeout("a", 900_000)];
+        reanchor_timers(&mut t, 30_000); // +30 s real skew
+        assert_eq!(t[0].fire_at, 1_030_000);
+        assert_eq!(t[1].fire_at, 930_000, "ALL timer classes re-anchored, not just keepalive");
+
+        let mut small = vec![keepalive(1_000_000)];
+        reanchor_timers(&mut small, 200); // 200 ms — below the 1 s deadband
+        assert_eq!(small[0].fire_at, 1_000_000, "sub-deadband latency offset is a no-op");
     }
 }

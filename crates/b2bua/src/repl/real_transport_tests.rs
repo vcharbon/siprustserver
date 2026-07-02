@@ -73,6 +73,7 @@ fn forward_to(peer: &str) -> PutOpts {
     PutOpts {
         peer: Some(peer.to_string()),
         direction: Some(PropagateDirection::Forward),
+        ..PutOpts::default()
     }
 }
 

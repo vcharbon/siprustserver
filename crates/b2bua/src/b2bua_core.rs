@@ -393,6 +393,49 @@ impl B2buaCore {
             }));
         }
 
+        // Clock-skew divergence sampler (clock-skew hardening observability). Every
+        // ~30 s, read the RAW system wall clock and compare it to this node's
+        // monotonic-anchored `Clock::now_ms` — `now_ms` does NOT follow a host NTP
+        // step, so the gap names exactly the event that skews cross-node replicated
+        // timer deadlines (endurance-20260630). Publishes `clock_wall_divergence_ms`
+        // and rate-limits a warn to stderr when the magnitude crosses 500 ms.
+        // Observability only: does NOT re-anchor the clock (timestamps stay
+        // monotonic; the behavioural fix is the replication-boundary re-anchor).
+        // Rides `tokio::time::interval` so a paused-clock test advances it too;
+        // aborted with the other tasks on a simulated `crash()`.
+        {
+            let clock = ctx.clock.clone();
+            let metrics = metrics.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_secs(30));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                tick.tick().await; // skip the immediate first tick
+                let mut warned_recently = false;
+                loop {
+                    tick.tick().await;
+                    let divergence =
+                        clock.wall_divergence_ms(sip_clock::raw_system_wall_ms());
+                    metrics.set_clock_wall_divergence_ms(divergence);
+                    if divergence.abs() > 500 {
+                        // Rate-limit: warn on the RISING edge only, so a sustained
+                        // step logs once, not every 30 s.
+                        if !warned_recently {
+                            eprintln!(
+                                "b2bua clock-skew WARNING: wall-clock divergence {divergence} ms \
+                                 (raw SystemTime − monotonic Clock::now_ms) — likely a host NTP \
+                                 step; cross-node replicated timer deadlines may skew. Fix is INFRA \
+                                 (slewing chrony + host kept awake), NOT the SUT."
+                            );
+                            warned_recently = true;
+                        }
+                    } else {
+                        warned_recently = false;
+                    }
+                }
+            }));
+        }
+
         Self {
             ctx,
             metrics,

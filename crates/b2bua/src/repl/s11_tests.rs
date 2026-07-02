@@ -140,7 +140,7 @@ async fn drop_local_sheds_live_copy_but_keeps_backup_element() {
     let r = call.call_ref.clone();
     put(&repl, BAK, "w0", &call).await;
 
-    let (_c, fresh) = state.hydrate_from_replica(&r).await.expect("hydrate from bak:w0");
+    let (_c, fresh, _skew) = state.hydrate_from_replica(&r).await.expect("hydrate from bak:w0");
     assert!(fresh, "first hydrate materialises a fresh takeover copy");
     state.mark_takeover(&r);
     assert!(state.peek(&r).is_some(), "takeover copy is live");
@@ -161,6 +161,89 @@ async fn drop_local_sheds_live_copy_but_keeps_backup_element() {
 }
 
 // ---------------------------------------------------------------------------
+// (2b) clock-skew hardening — test #5: origin_now_ms → skew_offset_ms
+//      computation + persistence + reaching hydration.
+// ---------------------------------------------------------------------------
+/// Seed a call with an explicit `origin_now_ms` (the sender's wall clock at
+/// flush-send time), exactly as the puller does when applying an inbound Data
+/// frame. The receiving store computes `skew_offset_ms = receiver_now − origin`.
+async fn put_with_origin(
+    store: &ReplicatingCallStore,
+    role: PartitionRole,
+    primary: &str,
+    call: &Call,
+    origin_now_ms: i64,
+) {
+    let body = MsgpackCodec::new().encode(call);
+    let gen = call.topology.as_ref().map(|t| t.gen).unwrap_or(1);
+    store
+        .put_call(
+            role,
+            primary,
+            &call.call_ref,
+            body,
+            &[],
+            60_000,
+            gen,
+            0,
+            &PutOpts { origin_now_ms: Some(origin_now_ms), ..PutOpts::default() },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
+    // Receiver clock anchored at 100_000; origin stamped 70_000 → the origin is
+    // 30 s BEHIND us, so a timer it minted must be pushed +30 s into our frame.
+    let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(100_000)));
+    let state = call_state("w0", repl.clone());
+
+    // A reclaimable pri:w0 call (rebooted-primary reclaim source).
+    let call = build_initial_call(&invite("w0", "w1", "cid-skew"), src(), &config_for("w0"), 0);
+    let r = call.call_ref.clone();
+    put_with_origin(&repl, PRI, "w0", &call, 70_000).await;
+
+    // Persisted on the store, keyed by callRef, alongside expiry.
+    assert_eq!(
+        repl.skew_offset_ms(&r),
+        Some(30_000),
+        "skew_offset = receiver_now(100_000) − origin(70_000)",
+    );
+
+    // Reaches hydration: reclaim_scan pairs each call with its offset.
+    let scanned = state.reclaim_scan().await;
+    assert_eq!(scanned.len(), 1);
+    assert_eq!(scanned[0].0.call_ref, r);
+    assert_eq!(scanned[0].1, 30_000, "reclaim_scan surfaces the skew offset to the router");
+
+    // And the on-demand reclaim read-path surfaces it too.
+    let (peeked, skew) = state.peek_reclaimable(&r).await.expect("reclaimable");
+    assert_eq!(peeked.call_ref, r);
+    assert_eq!(skew, 30_000, "peek_reclaimable surfaces the skew offset");
+
+    // A backup-partition takeover hydrate surfaces it via the 3-tuple.
+    let repl_b = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(100_000)));
+    let state_b = call_state("w1", repl_b.clone());
+    let call_b = build_initial_call(&invite("w0", "w1", "cid-skew-b"), src(), &config_for("w0"), 0);
+    let rb = call_b.call_ref.clone();
+    put_with_origin(&repl_b, BAK, "w0", &call_b, 55_000).await; // origin 45 s behind
+    let (_c, fresh, skew_b) = state_b.hydrate_from_replica(&rb).await.expect("hydrate bak:w0");
+    assert!(fresh);
+    assert_eq!(skew_b, 45_000, "hydrate_from_replica surfaces the skew offset (100_000 − 55_000)");
+
+    // A locally-originated write (no origin stamp) carries NO offset.
+    let repl_local = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(100_000)));
+    let call_l = build_initial_call(&invite("w0", "w1", "cid-local"), src(), &config_for("w0"), 0);
+    put(&repl_local, PRI, "w0", &call_l).await;
+    assert_eq!(
+        repl_local.skew_offset_ms(&call_l.call_ref),
+        None,
+        "a local write records no skew offset (deadline already in our frame)",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // (3) active reclaim read-paths + idempotent materialisation.
 // ---------------------------------------------------------------------------
 #[tokio::test]
@@ -176,15 +259,15 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
     // Bulk sweep sees it.
     let scanned = state.reclaim_scan().await;
     assert_eq!(scanned.len(), 1);
-    assert_eq!(scanned[0].call_ref, r);
+    assert_eq!(scanned[0].0.call_ref, r);
 
     // Materialise into the live map: first inserts, second is a no-op.
-    assert!(state.materialize_if_absent(scanned[0].clone()), "first materialise inserts");
+    assert!(state.materialize_if_absent(scanned[0].0.clone()), "first materialise inserts");
     assert!(state.peek(&r).is_some(), "now live + routable");
-    assert!(!state.materialize_if_absent(scanned[0].clone()), "second materialise is a no-op");
+    assert!(!state.materialize_if_absent(scanned[0].0.clone()), "second materialise is a no-op");
 
     // Reactive read-path returns the same call; a backup-role ref never reclaims.
-    assert_eq!(state.peek_reclaimable(&r).await.map(|c| c.call_ref), Some(r.clone()));
+    assert_eq!(state.peek_reclaimable(&r).await.map(|(c, _)| c.call_ref), Some(r.clone()));
     assert!(
         state.peek_reclaimable("w5|other|t").await.is_none(),
         "a ref whose primary isn't us is not reclaimable here"
@@ -269,7 +352,7 @@ async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
     // reverse-flush ReclaimCall push, router.rs:121 — never from an arriving
     // request) WOULD recover it. This is what the recommended fix wires in.
     assert_eq!(
-        state.peek_reclaimable(&r).await.map(|c| c.call_ref),
+        state.peek_reclaimable(&r).await.map(|(c, _)| c.call_ref),
         Some(r.clone()),
         "the call sits fully reclaimable in pri:w0 on THIS node"
     );
@@ -352,7 +435,7 @@ async fn reclaimed_call_is_visible_to_backup_bootstrap() {
     // denormalised backup from `topology.bak`.
     let scanned = state.reclaim_scan().await;
     assert_eq!(scanned.len(), 1);
-    assert!(state.materialize_if_absent(scanned[0].clone()), "first materialise inserts");
+    assert!(state.materialize_if_absent(scanned[0].0.clone()), "first materialise inserts");
 
     // The reclaimed call is now visible to w1's Backup-flow bootstrap — a peer
     // re-pulling what it must back up receives it immediately, not one keepalive late.
@@ -398,7 +481,7 @@ async fn churn_during_reclaim_keeps_state_consistent() {
     let reclaim = {
         let state = state.clone();
         tokio::spawn(async move {
-            for call in state.reclaim_scan().await {
+            for (call, _skew) in state.reclaim_scan().await {
                 let cr = call.call_ref.clone();
                 let _g = state.lock(&cr).await;
                 state.materialize_if_absent(call);

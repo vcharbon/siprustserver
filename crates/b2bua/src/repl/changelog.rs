@@ -246,6 +246,14 @@ impl Changelog {
         Watermark::new(self.gen, self.inner.lock().unwrap().counter)
     }
 
+    /// This node's shared wall clock (`Clock::now_ms()`), for stamping the
+    /// `origin_now_ms` on a bootstrap `Data` frame — the send-time reading the
+    /// receiver re-anchors against (clock-skew hardening). Uses the SAME clock the
+    /// changelog TTL math and `drain_since` stamp read.
+    pub fn now_ms(&self) -> i64 {
+        self.clock.now_ms()
+    }
+
     /// Register a serve task for `peer`, keeping its log reap-immune until the
     /// returned [`ServeGuard`] drops. Creates the peer log if absent.
     pub fn serving(&self, peer: &str) -> ServeGuard {
@@ -356,7 +364,13 @@ impl Changelog {
                 frames.push(delete_frame(at, partition, call_ref));
                 continue;
             }
-            // Body read at send time — lock already dropped.
+            // Body read at send time — lock already dropped. Stamp the SENDER's
+            // wall clock at send time so the receiver can re-anchor the body's
+            // absolute timer deadlines against inter-node clock skew (clock-skew
+            // hardening; mirrors the receiver-side `body_ttl_ms → expiry_for`
+            // re-anchor). Flushes are built and sent promptly, so a per-frame
+            // send-time reading is the right origin instant.
+            let origin_now_ms = self.clock.now_ms();
             let body = source.read_body(role, primary, &call_ref).await;
             match (body, source.read_meta(&call_ref)) {
                 (Some(body), Some(meta)) => frames.push(Frame::Data {
@@ -367,6 +381,7 @@ impl Changelog {
                     call_gen: meta.call_gen,
                     call_bgen: meta.call_bgen,
                     body_ttl_ms: meta.body_ttl_ms,
+                    origin_now_ms,
                     indexes: meta.indexes,
                     body: Some(body),
                 }),
@@ -427,6 +442,9 @@ impl Changelog {
 }
 
 /// Build a `Delete` `Data` frame (nil body, zero meta) at `at`/`partition`.
+///
+/// `origin_now_ms` is `0`: a delete carries no re-anchorable timers, so the
+/// receiver-side skew offset is never read for it.
 fn delete_frame(at: Watermark, partition: Partition, call_ref: String) -> Frame {
     Frame::Data {
         at,
@@ -436,6 +454,7 @@ fn delete_frame(at: Watermark, partition: Partition, call_ref: String) -> Frame 
         call_gen: 0,
         call_bgen: 0,
         body_ttl_ms: 0,
+        origin_now_ms: 0,
         indexes: Vec::new(),
         body: None,
     }

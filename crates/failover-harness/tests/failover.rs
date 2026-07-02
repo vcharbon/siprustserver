@@ -1295,6 +1295,133 @@ async fn combined_report_carries_sip_and_replication() {
 }
 
 // ===========================================================================
+// CLOCK-SKEW HARDENING — test #1: the endurance-20260630 twin.
+//
+// A keepalive scheduled NEAR its deadline on the primary; the primary is killed;
+// a failed-over re-INVITE takes the call over on a backup anchored +30 s AHEAD.
+// WITHOUT the skew re-anchor the backup restores the keepalive `fire_at` (minted
+// on the dead primary's clock) as PAST-DUE by ~the skew → it fires an immediate
+// OPTIONS the instant it takes over, racing the failed-over re-INVITE (the
+// endurance-20260630 `reinvite/unexpected "got OPTIONS expected 200"` artifact).
+// WITH the re-anchor the deadline is shifted into the backup's clock frame, so it
+// is correctly future-dated and NO OPTIONS fires at takeover; the keepalive fires
+// at ~its true remaining time.
+//
+// This test MUST FAIL before the fix (an OPTIONS reaches bob at takeover) and pass
+// after. It rides the harness's per-node clock-anchor-offset knob — the single
+// paused clock with a +30 s wall anchor on the backup is deterministic inter-node
+// skew (the fidelity gap the single-clock harness previously could not reproduce).
+// ===========================================================================
+#[tokio::test(start_paused = true)]
+async fn skew_ahead_backup_no_immediate_options_at_takeover() {
+    // Backup anchored +30 s ahead of the origin. HRW (deterministic per Call-ID)
+    // picks b2 as this call's primary, so b1 is the backup that takes over — we
+    // offset b1 by +30 s to make it the skew-AHEAD backup. (If a future HRW change
+    // flips the primary, swap the offset to b2 and the assert below.)
+    let mut fh = FailoverHarness::new("skew-ahead-takeover", &["b1", "b2"])
+        .with_worker_clock_offset("b1", 30_000);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let b1_lane = fh.agent("b1-lane", B1).await;
+    let b2_lane = fh.agent("b2-lane", B2).await;
+    drop((b1_lane, b2_lane));
+
+    let proxy = fh
+        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
+        .await;
+    let mut w_b1 = fh
+        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    let mut w_b2 = fh
+        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
+
+    // ── establish alice ⇄ bob ────────────────────────────────────────────────
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
+        .expect("b-leg INVITE carries the cookie");
+    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    assert_eq!(
+        pri_ord, "b2",
+        "this test needs b2 primary so the +30 s backup (b1) is the takeover node",
+    );
+    // Name locals by role: `b1` = primary, `b2` = backup (b1-worker is the backup).
+    let (b1, b2) = (&mut w_b2, &mut w_b1); // primary = w_b2, backup = w_b1 (+30 s)
+    let primary_ord = b1.ordinal().to_string();
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(500)).await;
+
+    let call_ref = find_backed_up_ref(b2, &primary_ord).await;
+    assert!(b1.serves(&call_ref), "primary serves the established call");
+    assert!(b2.is_synchronized_backup(&call_ref).await, "backup holds the replica");
+
+    // ── age the call into the skew-sensitive window: elapsed ∈ (~271 s, 300 s).
+    //    The keepalive (300 s cadence) is still genuinely FUTURE, but a +30 s
+    //    backup reading the raw origin-frame deadline sees it as PAST-DUE — exactly
+    //    the condition where the uncorrected restore fires an immediate OPTIONS at
+    //    takeover and the corrected one does not. 285 s sits solidly in it. No
+    //    keepalive is due yet (< 300 s), so nothing fires during this advance. ────
+    let tol = ["INVITE", "ACK", "UPDATE", "INFO", "BYE"];
+    fh.advance(Duration::from_secs(285)).await;
+    assert!(
+        bob.try_receive_tolerating("OPTIONS", &tol).await.is_none(),
+        "no keepalive is due before 300 s — the call is quiet up to the kill",
+    );
+
+    // ── kill the primary; fail a NON-terminating re-INVITE over to the +30 s
+    //    backup (the reactive takeover path that re-arms the keepalive). ─────────
+    b1.crash();
+    proxy.set_health(&primary_ord, WorkerHealth::Dead);
+    fh.advance(Duration::from_millis(300)).await;
+    let mut reinv = dialog.request(InDialogMethod::Invite, None).await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    reinv.expect(200).await; // the failed-over re-INVITE succeeds
+    dialog.ack(Some(ANSWER)).await;
+    bob.receive("ACK").await;
+
+    // ── THE GATE: strictly NO keepalive OPTIONS reaches bob in the window right
+    //    after takeover. Pre-fix the +30 s-past-due restored keepalive fires an
+    //    immediate OPTIONS here (racing the re-INVITE we just served — the
+    //    endurance artifact); post-fix the re-anchor makes it future-dated. Give
+    //    it a few seconds of settle — well short of the ~1 s TRUE remaining time,
+    //    which we cross next. ───────────────────────────────────────────────────
+    for _ in 0..3 {
+        fh.advance(Duration::from_millis(200)).await;
+        assert!(
+            bob.try_receive_tolerating("OPTIONS", &tol).await.is_none(),
+            "SKEW BUG: an immediate keepalive OPTIONS fired at takeover, racing the \
+             failed-over re-INVITE (endurance-20260630) — the restored deadline was \
+             not re-anchored into the backup's clock frame",
+        );
+    }
+
+    // ── the keepalive fires at ~its TRUE remaining time: it re-armed on the
+    //    reactive takeover to a fresh interval (~300 s out in the backup frame),
+    //    so pump toward it and confirm it eventually probes both legs (the call is
+    //    kept alive, not silently un-probed). ─────────────────────────────────────
+    let mut saw_options = false;
+    let fired = fh
+        .pump_until(Duration::from_secs(2), Duration::from_secs(340), async || {
+            if let Some(mut txn) = bob.try_receive_tolerating("OPTIONS", &tol).await {
+                txn.respond(200, "OK").await;
+                saw_options = true;
+            }
+            saw_options
+        })
+        .await;
+    assert!(fired && saw_options, "the re-armed keepalive DOES eventually probe bob (call kept alive)");
+
+    drop((w_b1, w_b2, proxy));
+}
+
+// ===========================================================================
 // helpers
 // ===========================================================================
 

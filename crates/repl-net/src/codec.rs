@@ -98,10 +98,11 @@ fn write_frame(buf: &mut Vec<u8>, frame: &Frame) {
             call_gen,
             call_bgen,
             body_ttl_ms,
+            origin_now_ms,
             indexes,
             body,
         } => {
-            encode::write_array_len(buf, 11).unwrap();
+            encode::write_array_len(buf, 12).unwrap();
             encode::write_uint(buf, tag::DATA).unwrap();
             encode::write_uint(buf, at.gen).unwrap();
             encode::write_uint(buf, at.counter).unwrap();
@@ -111,6 +112,7 @@ fn write_frame(buf: &mut Vec<u8>, frame: &Frame) {
             encode::write_sint(buf, *call_gen).unwrap();
             encode::write_sint(buf, *call_bgen).unwrap();
             encode::write_sint(buf, *body_ttl_ms).unwrap();
+            encode::write_sint(buf, *origin_now_ms).unwrap();
             encode::write_array_len(buf, indexes.len() as u32).unwrap();
             for idx in indexes {
                 encode::write_str(buf, idx).unwrap();
@@ -189,7 +191,7 @@ fn decode_pull_request(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError
 }
 
 fn decode_data(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
-    expect_len(len, 11, "Data")?;
+    expect_len(len, 12, "Data")?;
     let gen = read_u64(rd, "gen")?;
     let counter = read_u64(rd, "counter")?;
     let op = Op::from_u8(read_u8(rd, "op")?)?;
@@ -198,6 +200,7 @@ fn decode_data(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
     let call_gen = read_i64(rd, "call_gen")?;
     let call_bgen = read_i64(rd, "call_bgen")?;
     let body_ttl_ms = read_i64(rd, "body_ttl_ms")?;
+    let origin_now_ms = read_i64(rd, "origin_now_ms")?;
     let idx_len = read_array_len(rd, "indexes")?;
     // Clamp the pre-allocation to the bytes still in the buffer: every msgpack
     // element costs >= 1 byte, so a legitimate count can never exceed `rd.len()`.
@@ -216,6 +219,7 @@ fn decode_data(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
         call_gen,
         call_bgen,
         body_ttl_ms,
+        origin_now_ms,
         indexes,
         body,
     })

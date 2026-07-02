@@ -260,6 +260,7 @@ mod tests {
             call_gen: 1,
             call_bgen: 0,
             body_ttl_ms: 5000,
+            origin_now_ms: 0,
             indexes: vec!["i".into()],
             body: Some(StdArc::from(&b"body"[..])),
         };

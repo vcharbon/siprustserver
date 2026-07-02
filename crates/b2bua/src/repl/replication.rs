@@ -116,6 +116,9 @@ impl ReplicationPlan {
             Some((peer, direction)) => PutOpts {
                 peer: Some(peer.clone()),
                 direction: Some(*direction),
+                // A local flush of THIS node's own call — its timer deadlines are
+                // already on this node's clock, so no receive-time skew to record.
+                ..PutOpts::default()
             },
             None => PutOpts::default(),
         }

@@ -568,6 +568,7 @@ impl Puller {
                     call_gen,
                     call_bgen,
                     body_ttl_ms,
+                    origin_now_ms,
                     indexes,
                     body,
                 }) => {
@@ -581,7 +582,7 @@ impl Puller {
                     let applied = self
                         .apply_to_store(
                             op, partition, &call_ref, call_gen, call_bgen, body_ttl_ms,
-                            &indexes, body, mode,
+                            origin_now_ms, &indexes, body, mode,
                         )
                         .await;
                     if !bootstrapped {
@@ -693,6 +694,7 @@ impl Puller {
         call_gen: i64,
         call_bgen: i64,
         body_ttl_ms: i64,
+        origin_now_ms: i64,
         indexes: &[String],
         body: Option<Arc<[u8]>>,
         mode: ApplyMode,
@@ -742,7 +744,13 @@ impl Puller {
                             call_gen,
                             call_bgen,
                             // Apply locally only — do NOT re-propagate (peer:None).
-                            &PutOpts::default(),
+                            // Carry the origin wall clock so the store can persist
+                            // the receive-time skew offset for later timer
+                            // re-anchoring on failover/reclaim (clock-skew hardening).
+                            &PutOpts {
+                                origin_now_ms: Some(origin_now_ms),
+                                ..PutOpts::default()
+                            },
                         )
                         .await;
                     // Inbound replica admitted — record the op per stream+endpoint:
@@ -841,6 +849,7 @@ mod tests {
                     call_gen: 1,
                     call_bgen: 0,
                     body_ttl_ms: 0,
+                    origin_now_ms: 0,
                     indexes: Vec::new(),
                     body: Some(Arc::from(format!("body{i}").into_bytes().into_boxed_slice())),
                 });

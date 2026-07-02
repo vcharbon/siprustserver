@@ -165,3 +165,30 @@ Hazards (each has bitten us at least once; some twice across both codebases):
   delaying a probe risks the UAC keepalive timeout. This is **performance only** —
   no correctness role, no timing assumption. Keep the epoch/`Key` driver in
   `timers.rs` untouched; never move smoothing into it.
+## Clock-skew hardening (replicated timer re-anchoring; ADR-0014 amendment)
+
+Replicated `TimerEntry.fire_at` is an ABSOLUTE epoch-ms deadline minted on the
+ORIGIN node's `Clock`. Pods anchor wall time once at start (`Clock::system`,
+monotonic-derived), so two pods on opposite sides of a host NTP **step** disagree
+permanently; on failover the takeover node rebuilt the timer as `(fire_at −
+now_ms).max(0)` — unbounded trust in the dead node's clock. Under skew that reaped
+a healthy RINGING/established call at takeover, extended a policy cap, or fired an
+immediate keepalive OPTIONS racing the failed-over transaction (endurance-20260630
+`reinvite/unexpected "got OPTIONS expected 200"`).
+
+**SUT now bounds restore skew to ~replication latency** (accuracy only —
+`(p,b)` reconciliation stays the sole correctness mechanism; the `timers.rs` driver
+is untouched). The `Data` frame carries `origin_now_ms` (sender `Clock::now_ms()` at
+flush); the receiver persists `skew_offset_ms = receiver_now − origin` next to
+`expiry_at_ms`; the ONE router seam `sanitize_restored_timers` re-anchors every
+restored `fire_at` by it on EVERY hydration path (bulk/reactive/on-demand/
+reverse-flush), with a sub-second deadband ignoring pure latency, then drops the
+stale `KeepaliveTimeout`, applies a defensive floor (unknown-offset paths only), and
+cohort-smooths. **Never move re-anchor/smoothing into the driver.** Observability:
+`clock_wall_divergence_ms` gauge + rate-limited warn (>500 ms); `Clock::system`
+panics on a pre-epoch clock. The infra advice (WSL2 host clock-skew note: slewing
+chrony, host kept awake) STILL STANDS — the SUT bounds the residual, it does not
+license drift. The failover harness's `with_worker_clock_offset` injects
+deterministic inter-node skew on the one monotonic timeline (closing the
+single-clock fidelity gap): `failover.rs::skew_ahead_backup_no_immediate_options_
+at_takeover` is the endurance-20260630 twin (fails pre-fix, passes after).
