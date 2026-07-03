@@ -85,7 +85,7 @@ async fn schema_doc(
     if key == "test-case" {
         let registry = e2e_core::shapes::registry();
         let shape = q.get("shape").and_then(|id| registry.get(id));
-        let schema = e2e_core::schema_gen::test_case_schema(shape.map(|b| b.as_ref()));
+        let schema = e2e_core::schema_gen::test_case_schema(shape);
         return Ok(Json(schema).into_response());
     }
     let schema = model::schemas()
@@ -106,10 +106,10 @@ async fn shapes_index() -> Response {
         .map(|(id, s)| {
             serde_json::json!({
                 "id": id,
-                "agents": s.agents(),
-                "anchors": s.anchors().iter().map(|a| a.as_str()).collect::<Vec<_>>(),
-                "selectors": e2e_core::schema_gen::selectors_for(s.as_ref()),
-                "media": matches!(s.media(), e2e_core::MediaMode::Exchange),
+                "agents": s.body.agents(),
+                "anchors": s.descriptor.anchors.iter().map(|a| a.as_str()).collect::<Vec<_>>(),
+                "selectors": e2e_core::schema_gen::selectors_for(s),
+                "media": matches!(s.body.media(), e2e_core::MediaMode::Exchange),
             })
         })
         .collect();

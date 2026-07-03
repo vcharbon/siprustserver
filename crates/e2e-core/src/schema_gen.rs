@@ -24,15 +24,18 @@ use serde_json::{Value, json};
 
 use crate::model::{CheckBlock, CheckSet, TestCase};
 use crate::selector;
-use crate::shape::{Anchor, CallflowShape};
+use crate::shape::Anchor;
+use crate::shapes::ShapeEntry;
+use e2e_model::shape::ShapeSpec;
 
 /// The `<agent>.<anchor>` selectors a shape supports — the cartesian product of
-/// its [`CallflowShape::agents`] roster and [`CallflowShape::anchors`], in
-/// agent-major order (`alice.initialInvite`, `alice.answer`, …, `bob1.*`).
-pub fn selectors_for(shape: &dyn CallflowShape) -> Vec<String> {
+/// its body's [`agents`](crate::shape::CallflowShape::agents) roster and its
+/// descriptor's anchors, in agent-major order (`alice.initialInvite`,
+/// `alice.answer`, …, `bob1.*`).
+pub fn selectors_for(shape: &ShapeEntry) -> Vec<String> {
     let mut out = Vec::new();
-    for agent in shape.agents() {
-        for anchor in shape.anchors() {
+    for agent in shape.body.agents() {
+        for anchor in shape.descriptor.anchors {
             out.push(format!("{agent}.{}", anchor.as_str()));
         }
     }
@@ -62,7 +65,7 @@ fn op_value_rules() -> Value {
 ///   `.vscode` fallback and the editor's "pick a shape" placeholder).
 /// - `Some(shape)` — additionally pin `CheckBlock.on` to `selectors_for(shape)`,
 ///   so only that shape's `<agent>.<anchor>` selectors complete and validate.
-pub fn test_case_schema(shape: Option<&dyn CallflowShape>) -> Value {
+pub fn test_case_schema(shape: Option<&ShapeEntry>) -> Value {
     let mut root = serde_json::to_value(schema_for!(TestCase))
         .expect("TestCase schema serialises to JSON");
 
@@ -90,9 +93,9 @@ pub fn test_case_schema(shape: Option<&dyn CallflowShape>) -> Value {
                         "description": format!(
                             "<agent>.<anchor> selector for shape {:?}. The shape drives \
                              agents [{}] and publishes anchors [{}].",
-                            shape.id(),
-                            shape.agents().join(", "),
-                            shape.anchors().iter().map(Anchor::as_str).collect::<Vec<_>>().join(", "),
+                            shape.descriptor.id,
+                            shape.body.agents().join(", "),
+                            shape.descriptor.anchors.iter().map(Anchor::as_str).collect::<Vec<_>>().join(", "),
                         ),
                         "type": "string",
                         "enum": selectors,
@@ -109,8 +112,8 @@ pub fn test_case_schema(shape: Option<&dyn CallflowShape>) -> Value {
 /// Replace the open `Input.extras` map with the shape's typed params schema (its
 /// own nested `$defs` are hoisted into the root so `$ref`s still resolve). A
 /// shape with no params leaves `extras` an open object.
-fn splice_params(defs: &mut serde_json::Map<String, Value>, shape: &dyn CallflowShape) {
-    let Some(mut params) = shape.params_schema() else { return };
+fn splice_params(defs: &mut serde_json::Map<String, Value>, shape: &ShapeEntry) {
+    let Some(mut params) = shape.descriptor.params_schema.clone() else { return };
     if let Some(obj) = params.as_object_mut() {
         // Hoist the params schema's own $defs into the root $defs (same `#/$defs/`
         // ref path), and drop the standalone-document keys before inlining.
@@ -137,7 +140,7 @@ fn splice_params(defs: &mut serde_json::Map<String, Value>, shape: &dyn Callflow
 /// loader's anchor-only check thanks to the roster, never looser.
 pub fn compatible_shapes(
     case: &TestCase,
-    shapes: &BTreeMap<String, Box<dyn CallflowShape>>,
+    shapes: &BTreeMap<String, ShapeEntry>,
     check_sets: &BTreeMap<String, CheckSet>,
 ) -> Vec<String> {
     // Gather every block the case binds (inline + via referenced check sets).
@@ -150,11 +153,14 @@ pub fn compatible_shapes(
 
     let mut out = Vec::new();
     for (id, shape) in shapes {
-        let inputs_ok = shape.required_input().iter().all(|f| case.input.provides(f));
-        let roster = shape.agents();
+        let spec = &shape.descriptor;
+        let inputs_ok =
+            ShapeSpec::required_input(spec).iter().all(|f| case.input.provides(f));
+        let roster = shape.body.agents();
         let supported = blocks.iter().all(|b| match b.selector() {
             Some((agent, name)) => {
-                let anchor_ok = Anchor::parse(name).is_some_and(|a| shape.anchors().contains(&a));
+                let anchor_ok =
+                    Anchor::parse(name).is_some_and(|a| spec.anchors.contains(&a));
                 let agent_ok = roster.is_empty() || roster.contains(&agent);
                 anchor_ok && agent_ok
             }
@@ -176,7 +182,7 @@ mod tests {
     fn selectors_are_agent_major_product() {
         let reg = registry();
         let basic = reg.get("basic-call").unwrap();
-        let sels = selectors_for(basic.as_ref());
+        let sels = selectors_for(basic);
         assert_eq!(
             sels,
             vec![
@@ -205,8 +211,8 @@ mod tests {
     #[test]
     fn shape_lens_pins_on_enum() {
         let reg = registry();
-        let prack = reg.get("rerouting-prack").unwrap();
-        let schema = test_case_schema(Some(prack.as_ref()));
+        let prack = reg.get("rerouting_prack").unwrap();
+        let schema = test_case_schema(Some(prack));
         let on = &schema["$defs"]["CheckBlock"]["properties"]["on"];
         let enums: Vec<&str> =
             on["enum"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
@@ -221,7 +227,7 @@ mod tests {
         let reg = registry();
         // rerouting declares typed params → extras becomes a typed object.
         let rerouting = reg.get("rerouting").unwrap();
-        let schema = test_case_schema(Some(rerouting.as_ref()));
+        let schema = test_case_schema(Some(rerouting));
         let extras = &schema["$defs"]["Input"]["properties"]["extras"];
         assert!(extras["properties"]["rejectStatus"].is_object(), "rejectStatus suggested");
         assert!(extras["properties"]["rejectReason"].is_object(), "rejectReason suggested");
@@ -229,7 +235,7 @@ mod tests {
 
         // basic-call declares none → extras stays an open map.
         let basic = reg.get("basic-call").unwrap();
-        let base = test_case_schema(Some(basic.as_ref()));
+        let base = test_case_schema(Some(basic));
         assert_eq!(base["$defs"]["Input"]["properties"]["extras"]["additionalProperties"], json!(true));
     }
 
@@ -252,6 +258,6 @@ mod tests {
         // bob1 — so the case widens well beyond basic-call.
         assert!(compat.contains(&"basic-call".to_string()));
         assert!(compat.contains(&"rerouting".to_string()));
-        assert!(compat.contains(&"rerouting-prack".to_string()));
+        assert!(compat.contains(&"rerouting_prack".to_string()));
     }
 }

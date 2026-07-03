@@ -19,6 +19,7 @@ pub mod checks;
 pub mod egress;
 pub mod endpoint;
 pub mod model;
+pub mod registry;
 pub mod shape;
 
 pub use bindings::{BindingMode, BindingPool, BindingResolver, ResolvedBinding, validate_bindings};
@@ -32,4 +33,7 @@ pub use model::{
     load_campaign, load_check_set, load_check_sets, load_endpoint_config, load_test_case,
     schemas, validate_case,
 };
-pub use shape::{Anchor, CoreInput, ShapeSpec};
+pub use registry::{
+    LoadFactory, ReroutingParams, ScenarioInputs, ShapeDescriptor, ShapeRegistry,
+};
+pub use shape::{Anchor, CoreInput, ShapeCatalog, ShapeSpec};

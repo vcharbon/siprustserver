@@ -5,53 +5,28 @@
 //! and whose Endpoint config binds a `bob2` role.
 
 use async_trait::async_trait;
-use schemars::{JsonSchema, schema_for};
-use serde::Deserialize;
 
 use crate::infra::InfraRuntime;
 use crate::model::Input;
 use crate::shape::{Anchor, CallflowShape};
 
+// The typed authoring parameters live next to the shape's descriptor — its ONE
+// declaration — in `e2e_model::registry` (which also splices their schema over
+// the Test case's `extras`); re-exported here so `shapes::rerouting::ReroutingParams`
+// keeps resolving.
+pub use e2e_model::ReroutingParams;
+
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 
-const ANCHORS: &[Anchor] = &[Anchor::InitialInvite, Anchor::Answer, Anchor::Ack, Anchor::Bye];
-
-/// Authoring parameters for the `rerouting` shape — the typed `input.extras` the
-/// editor suggests. All optional (defaults reproduce the canonical 486 flow), so
-/// a case that sets none behaves exactly as before.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
-pub struct ReroutingParams {
-    /// SIP status bob1 rejects the first b-leg with, triggering the SUT's
-    /// failover to bob2. Any 4xx–6xx the decision engine treats as a reroute
-    /// trigger (default `486` Busy Here; e.g. `503` Service Unavailable).
-    pub reject_status: u16,
-    /// Reason phrase paired with `rejectStatus` (default `"Busy Here"`).
-    pub reject_reason: String,
-}
-
-impl Default for ReroutingParams {
-    fn default() -> Self {
-        ReroutingParams { reject_status: 486, reject_reason: "Busy Here".to_string() }
-    }
-}
-
+/// The functional body of the `rerouting` shape (descriptor + params schema in
+/// `e2e_model::registry`).
 pub struct Rerouting;
 
 #[async_trait(?Send)]
 impl CallflowShape for Rerouting {
-    fn id(&self) -> &str {
-        "rerouting"
-    }
-    fn anchors(&self) -> &[Anchor] {
-        ANCHORS
-    }
     fn agents(&self) -> &[&str] {
         &["alice", "bob1", "bob2"]
-    }
-    fn params_schema(&self) -> Option<serde_json::Value> {
-        Some(serde_json::to_value(schema_for!(ReroutingParams)).expect("ReroutingParams schema"))
     }
 
     async fn run(&self, rt: &mut InfraRuntime, input: &Input) {

@@ -21,9 +21,9 @@ use std::time::Duration;
 use clap::Parser;
 use e2e_model::{load_endpoint_config, EndpointConfig};
 use loadgen::{
-    by_id, default_scenarios, serve_metrics, CallConfig, CallTuning, ChaosLog, Correlation, Driver,
-    DriverCfg, EndpointSpec, LoadCase, LoadScenario, MixEntry, MuxCore, MuxTransport, Reporter,
-    ReporterCfg, Role, ScenarioInputs,
+    serve_metrics, CallConfig, CallTuning, ChaosLog, Correlation, Driver, DriverCfg, EndpointSpec,
+    LoadCase, MixEntry, MuxCore, MuxTransport, Reporter, ReporterCfg, Role, ScenarioInputs,
+    ShapeRegistry,
 };
 use sip_clock::Clock;
 
@@ -229,25 +229,35 @@ fn endpoint_config(args: &Args) -> EndpointConfig {
 
 /// Parse one `--scenario` spec
 /// (`name[=weight][,drop=<f>][,retransmit[=<bool>]][,case=<path.json>]`)
-/// into its resolved scenario (constructed from the per-run `inputs`), weight,
+/// into its resolved [`MixEntry`] (the shape looked up in the unified
+/// `registry`, its load body constructed from the per-run `inputs`) plus the
 /// per-scenario [`CallTuning`] (starting from `base` and overridden by the
-/// trailing tokens), and the per-entry Test case attached with `case=` (loaded
-/// with `case_seed`), if any.
+/// trailing tokens); the Test case attached with `case=` is loaded with
+/// `case_seed`.
 fn parse_scenario_spec(
     spec: &str,
     base: CallTuning,
+    registry: &ShapeRegistry,
     inputs: &ScenarioInputs,
     case_seed: u64,
-) -> (String, Arc<dyn LoadScenario>, f64, CallTuning, Option<Arc<LoadCase>>) {
+) -> (MixEntry, CallTuning) {
     let mut parts = spec.split(',');
     let head = parts.next().unwrap_or(spec);
     let (name, weight) = head
         .split_once('=')
         .map(|(n, w)| (n, w.parse::<f64>().unwrap_or(1.0)))
         .unwrap_or((head, 1.0));
-    let s = by_id(name, inputs).unwrap_or_else(|| panic!("unknown scenario {name:?}"));
+    let mut entry = MixEntry::by_id(registry, name, inputs, weight).unwrap_or_else(|| {
+        panic!(
+            "unknown load scenario {name:?} (known: {:?})",
+            registry
+                .iter()
+                .filter(|d| d.load.is_some())
+                .map(|d| d.id)
+                .collect::<Vec<_>>()
+        )
+    });
     let mut t = base;
-    let mut case = None;
     for tok in parts {
         let tok = tok.trim();
         if tok.is_empty() {
@@ -262,7 +272,7 @@ fn parse_scenario_spec(
                     v.parse().unwrap_or_else(|_| panic!("bad retransmit bool in {spec:?}"))
             }
             Some(("case", path)) => {
-                case = Some(Arc::new(LoadCase::load(Path::new(path), case_seed)));
+                entry.case = Some(Arc::new(LoadCase::load(Path::new(path), case_seed)));
             }
             None if tok == "retransmit" => t.retransmit = true,
             None if tok == "drop" => {
@@ -273,7 +283,7 @@ fn parse_scenario_spec(
             _ => panic!("unknown scenario tuning token {tok:?} in {spec:?}"),
         }
     }
-    (name.to_string(), s, weight, t, case)
+    (entry, t)
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -291,6 +301,10 @@ async fn main() -> std::io::Result<()> {
     let seed = (clock.now_ms() as u64).max(1);
 
     let base_tuning = default_tuning(&args);
+    // The unified, OPEN shape registry (one id space shared with the e2e run
+    // surface): every shipped shape's ONE declaration — load attributes, mix
+    // weights and body factory included.
+    let registry = ShapeRegistry::with_defaults();
     // Per-run scenario inputs (SUT auth data, not topology): consumed at
     // scenario CONSTRUCTION (e.g. the refer scenarios' `refer_key`).
     let inputs = ScenarioInputs { refer_key: args.refer_key.clone() };
@@ -303,18 +317,20 @@ async fn main() -> std::io::Result<()> {
     let scenarios: Vec<MixEntry> = if args.scenarios.is_empty() {
         // No explicit scenario set → the default mix; the global tuning applies to
         // all of them via `DriverCfg::default_tuning` (no per-id overrides).
-        default_scenarios(&inputs)
+        MixEntry::default_mix(&registry, &inputs)
             .into_iter()
-            .map(|(scenario, weight)| MixEntry { scenario, weight, case: global_case.clone() })
+            .map(|entry| entry.with_case(global_case.clone()))
             .collect()
     } else {
         args.scenarios
             .iter()
             .map(|spec| {
-                let (name, scenario, weight, t, case) =
-                    parse_scenario_spec(spec, base_tuning, &inputs, seed);
-                tuning.insert(name, t);
-                MixEntry { scenario, weight, case: case.or_else(|| global_case.clone()) }
+                let (entry, t) = parse_scenario_spec(spec, base_tuning, &registry, &inputs, seed);
+                tuning.insert(entry.id.to_string(), t);
+                match entry.case.is_some() {
+                    true => entry,
+                    false => entry.with_case(global_case.clone()),
+                }
             })
             .collect()
     };

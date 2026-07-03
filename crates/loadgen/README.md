@@ -454,11 +454,19 @@ page with its one-line reason.
      cleaned up by the driver — this is what keeps the SUT leak-free.
    - `ctx.checkpoint("name")` records a latency checkpoint (shows in the report).
 
-2. Register it in `src/scenarios/mod.rs`: add `pub mod <name>;`, a `by_id` arm
-   (`"my_flow" => Some(Arc::new(<name>::MyFlow))` — construct from the per-run
-   `ScenarioInputs` if it needs SUT auth data), and — if it should run in the
-   default mix — a weight in `default_scenarios()`. An **emergency variant** is
-   free: `AsEmergency::wrap("my_flow_em", Arc::new(<name>::MyFlow))`.
+2. Declare it ONCE in the unified, open shape registry
+   (`e2e_model::registry::default_shapes`, or `ShapeRegistry::register` from a
+   third-party crate): a `ShapeDescriptor::new("my_flow")` carrying the load
+   attributes (`.needs_charlie()` / `.needs_bob2()` / `.emergency()`), an
+   optional `.default_weight(w)` for the default mix, and the body factory —
+   `.load_shared(Arc::new(MyFlow))`, or `.load_with(|inputs| …)` when it needs
+   per-run SUT auth data (`ScenarioInputs`). The driver resolves it via
+   `MixEntry::by_id` / `--scenario my_flow=…`. An **emergency variant** is
+   free: a second descriptor (`"my_flow_em"`) with `.emergency()` reusing the
+   same body — the report id comes from the descriptor. A shape that ALSO has
+   an e2e functional body attaches it by the same id in
+   `e2e-core/src/shapes/mod.rs::default_bodies` (see `rerouting_prack`, the
+   first dual-body shape).
 
 ### Add a *voluntarily-failing* scenario (post-call-cleanup coverage)
 

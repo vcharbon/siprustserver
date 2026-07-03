@@ -11,12 +11,10 @@
 //! "real call" expressible against `try_*` with no byte-exact assertions. The
 //! raw-bytes torture cases (`dsl::Scenario`) are deliberately NOT here.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 
 use crate::agent::{ClientInvite, ServerTxn};
-use crate::{Dialog, StepError, ANSWER_SDP, OFFER_SDP};
+use crate::{Agent, Dialog, StepError, ANSWER_SDP, OFFER_SDP};
 
 mod env;
 mod scope;
@@ -31,19 +29,18 @@ pub type ScenarioId = &'static str;
 /// A real-call scenario: one full call through the SUT. Implementations are
 /// `Send + Sync` and stateless (all per-call state is in the args), so the same
 /// instance can be shared across the load fleet and reused by a functional test.
+///
+/// The scenario is the shape's **load body** — pure choreography. Its load-side
+/// ATTRIBUTES (needs-charlie / needs-bob2 / emergency / mix weights) live on the
+/// shape's ONE declaration, the `e2e_model::ShapeDescriptor`, which the load
+/// driver consults per mix entry — never here, so a body reused under several
+/// ids (e.g. the emergency variants) is declared once.
 #[async_trait]
 pub trait RealCallScenario: Send + Sync {
-    /// Stable identifier (label / report dir).
+    /// The body's intrinsic name (panic messages, direct functional use). The
+    /// registry/report id is the DESCRIPTOR's — they coincide except when one
+    /// body serves several descriptors (`basic_call` vs `basic_call_em`).
     fn id(&self) -> ScenarioId;
-    /// Whether this scenario needs a third (transfer-target) leg bound.
-    fn needs_charlie(&self) -> bool {
-        false
-    }
-    /// Whether this call is an emergency (Resource-Priority `esnet.0`) — the SUT
-    /// force-admits it under overload, so it must never be shed. Default: no.
-    fn emergency(&self) -> bool {
-        false
-    }
     /// Drive one call. Return `Ok` on the happy path or a [`StepError`] on an
     /// expected failure; the driver/leak-gate tears the call down regardless.
     async fn run(
@@ -153,7 +150,7 @@ pub async fn establish(
 /// provisional arrives only after the scenario answers bob, so the second arm
 /// resolving is unambiguously the SUT's own final to alice.) Shared by
 /// [`establish`] (awaits a 180 next) and [`establish_100rel`] (a reliable 183).
-async fn admitted_uas(
+pub(crate) async fn admitted_uas(
     env: &CallEnv<'_>,
     scope: &CallScope,
     call: &mut ClientInvite,
@@ -208,18 +205,45 @@ pub async fn establish_100rel(
         .with_header("Supported", "100rel");
     let mut call = env.outgoing_invite(&["bob"], inv).send().await;
     scope.set_early(call.cancel_handle());
-    let mut uas = admitted_uas(env, scope, &mut call, 183).await?;
+    let uas = admitted_uas(env, scope, &mut call, 183).await?;
+    complete_100rel(env, scope, ctx, call, uas, env.bob).await
+}
 
-    // Bob answers RELIABLY: 183 + Require:100rel + RSeq:1 + the SDP answer.
+/// The RELIABLE-provisional half of [`establish_100rel`], parameterised over the
+/// answering callee — shared with the rerouting flow, where the leg that answers
+/// (`bob2`, after the primary's rejection drove the SUT's failover) is not the
+/// one the INVITE was aimed at:
+///
+/// ```text
+///   183(Require:100rel, RSeq, answer) → PRACK(RAck) → 200(PRACK)
+///     → 200(INVITE) → ACK
+/// ```
+///
+/// `callee` answers with a RELIABLE 183 carrying the SDP answer; alice PRACKs it
+/// (RAck derived from the 183's own RSeq/CSeq via [`ClientInvite::try_prack`]);
+/// the callee 200s the PRACK and only then answers the INVITE (RFC 3262 MUST-014
+/// ordering). Unlike the basic 180, a lost reliable 183 is a FAILURE
+/// (reliability is its point), so no timeout tolerance here. Registers the
+/// confirmed dialog in `scope`, marks `time_to_prack_200`/`time_to_200` and the
+/// `pracked`/`connected` phases.
+pub async fn complete_100rel(
+    env: &CallEnv<'_>,
+    scope: &CallScope,
+    ctx: &CallCtx,
+    mut call: ClientInvite,
+    mut uas: ServerTxn,
+    callee: &Agent,
+) -> Result<Dialog, StepError> {
+    // The callee answers RELIABLY: 183 + Require:100rel + RSeq:1 + the answer.
     uas.respond(183, "Session Progress").reliable(1).with_sdp(ANSWER_SDP).try_send().await?;
     let p183 = call.try_expect(183).await?;
     // A RELIABLE provisional is guaranteed-delivery (the UAS retransmits it until
     // PRACKed), so its arrival counts toward the cross-call 18x gate.
     ctx.mark_ringing(true);
 
-    // Alice PRACKs the reliable 183 on the early dialog; bob 200s it.
+    // Alice PRACKs the reliable 183 on the early dialog; the callee 200s it.
     let mut prack = call.try_prack(&p183).await?;
-    let mut prack_uas = env.bob.try_receive("PRACK").await?;
+    let mut prack_uas = callee.try_receive("PRACK").await?;
     prack_uas.respond(200, "OK").try_send().await?;
     prack.try_expect(200).await?;
     ctx.checkpoint("time_to_prack_200");
@@ -235,57 +259,40 @@ pub async fn establish_100rel(
 
     let dialog = call.ack().await;
     scope.set_confirmed(dialog.clone());
-    env.bob.try_receive("ACK").await?;
+    callee.try_receive("ACK").await?;
     ctx.phase("connected");
     Ok(dialog)
 }
 
 /// Shared BYE/200 teardown — the fallible analogue of `callflow::hangup`. On
 /// success marks the scope terminated (so the driver's teardown is a no-op) and
-/// records `time_to_bye_200`.
+/// records `time_to_bye_200`. The SUT relays the BYE to `env.bob`; a flow whose
+/// live downstream leg is another agent (the rerouted `bob2`) uses
+/// [`hangup_on`].
 pub async fn hangup(
     env: &CallEnv<'_>,
     scope: &CallScope,
     dialog: &mut Dialog,
     ctx: &CallCtx,
 ) -> Result<(), StepError> {
+    hangup_on(env, scope, dialog, ctx, env.bob).await
+}
+
+/// [`hangup`] parameterised over the callee whose leg receives the relayed BYE
+/// (the WINNING leg of a rerouted call).
+pub async fn hangup_on(
+    _env: &CallEnv<'_>,
+    scope: &CallScope,
+    dialog: &mut Dialog,
+    ctx: &CallCtx,
+    callee: &Agent,
+) -> Result<(), StepError> {
     let mut bye = dialog.bye().await;
     scope.set_confirmed(dialog.clone()); // refresh CSeq so any teardown BYE stays valid
-    env.bob.try_receive("BYE").await?.respond(200, "OK").await;
+    callee.try_receive("BYE").await?.respond(200, "OK").await;
     bye.try_expect(200).await?;
     scope.mark_terminated();
     ctx.checkpoint("time_to_bye_200");
     ctx.phase("bye_200");
     Ok(())
-}
-
-/// Wraps any scenario as an EMERGENCY call: identical flow, but it stamps
-/// `Resource-Priority: esnet.0` (so the SUT force-admits it under overload) and
-/// reports under a distinct id, so the report cleanly splits the force-admitted
-/// emergency traffic from the sheddable non-emergency traffic.
-pub struct AsEmergency {
-    id: ScenarioId,
-    inner: Arc<dyn RealCallScenario>,
-}
-
-impl AsEmergency {
-    pub fn wrap(id: ScenarioId, inner: Arc<dyn RealCallScenario>) -> Arc<dyn RealCallScenario> {
-        Arc::new(Self { id, inner })
-    }
-}
-
-#[async_trait]
-impl RealCallScenario for AsEmergency {
-    fn id(&self) -> ScenarioId {
-        self.id
-    }
-    fn needs_charlie(&self) -> bool {
-        self.inner.needs_charlie()
-    }
-    fn emergency(&self) -> bool {
-        true
-    }
-    async fn run(&self, env: &CallEnv<'_>, scope: &CallScope, ctx: &CallCtx) -> Result<(), StepError> {
-        self.inner.run(env, scope, ctx).await
-    }
 }

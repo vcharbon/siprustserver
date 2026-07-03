@@ -3,7 +3,7 @@
   "id": "rerouting-prack-identity",
   "description": "Rerouting plus a reliable provisional on the winning leg: bob2 answers 183 Require:100rel/RSeq, alice PRACKs, then the call completes. The reliability markers must survive the SUT relay.",
   "compatibleShapes": [
-    "rerouting-prack"
+    "rerouting_prack"
   ],
   "input": {
     "core": {

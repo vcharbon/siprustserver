@@ -82,3 +82,48 @@ pub trait ShapeSpec {
         &[]
     }
 }
+
+/// A **catalog of shapes by id** — the lookup surface
+/// [`validate_case`](crate::model::validate_case) consumes, so the one
+/// validation serves every registry representation: the unified
+/// [`ShapeRegistry`](crate::registry::ShapeRegistry) (descriptors), `e2e-core`'s
+/// descriptor+functional-body map, and any plain test fixture map.
+pub trait ShapeCatalog {
+    /// The load-time metadata of shape `id`, if registered.
+    fn spec(&self, id: &str) -> Option<&dyn ShapeSpec>;
+    /// Every registered id (for precise unknown-id errors), sorted.
+    fn ids(&self) -> Vec<String>;
+}
+
+/// Present a registry entry's load-time metadata view. Implemented for boxed
+/// specs (test fixtures) and — downstream — for `e2e-core`'s
+/// descriptor+functional-body entry, so ANY `BTreeMap<String, impl AsShapeSpec>`
+/// is a [`ShapeCatalog`] despite the orphan rule.
+pub trait AsShapeSpec {
+    fn as_spec(&self) -> &dyn ShapeSpec;
+}
+
+impl<S: ShapeSpec> AsShapeSpec for Box<S> {
+    fn as_spec(&self) -> &dyn ShapeSpec {
+        self.as_ref()
+    }
+}
+
+/// Any ordered map of spec-bearing entries is a catalog.
+impl<E: AsShapeSpec> ShapeCatalog for std::collections::BTreeMap<String, E> {
+    fn spec(&self, id: &str) -> Option<&dyn ShapeSpec> {
+        self.get(id).map(AsShapeSpec::as_spec)
+    }
+    fn ids(&self) -> Vec<String> {
+        self.keys().cloned().collect()
+    }
+}
+
+impl ShapeCatalog for crate::registry::ShapeRegistry {
+    fn spec(&self, id: &str) -> Option<&dyn ShapeSpec> {
+        self.get(id).map(|d| d as &dyn ShapeSpec)
+    }
+    fn ids(&self) -> Vec<String> {
+        crate::registry::ShapeRegistry::ids(self)
+    }
+}

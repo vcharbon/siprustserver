@@ -30,10 +30,6 @@ impl RealCallScenario for Refer {
         "refer"
     }
 
-    fn needs_charlie(&self) -> bool {
-        true
-    }
-
     async fn run(
         &self,
         env: &CallEnv<'_>,

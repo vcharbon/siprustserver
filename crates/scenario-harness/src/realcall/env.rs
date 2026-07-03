@@ -70,6 +70,11 @@ pub struct CallEnv<'a> {
     pub alice: &'a Agent,
     /// The downstream UAS the SUT routes the callee leg to.
     pub bob: &'a Agent,
+    /// The SECOND callee receiver (rerouting scenarios only): the failover
+    /// target the SUT re-targets after `bob` rejects. On the load mux it shares
+    /// bob's socket (the driver's leg picker demuxes by R-URI user); on a
+    /// functional harness it is its own bound agent.
+    pub bob2: Option<&'a Agent>,
     /// The transfer target leg (REFER scenario only).
     pub charlie: Option<&'a Agent>,
     /// The address the initial INVITE routes *through* — the SUT (in-process
@@ -144,6 +149,7 @@ impl<'a> CallEnv<'a> {
         Self {
             alice,
             bob,
+            bob2: None,
             charlie,
             via,
             // The functional gate keeps the historic plain relayed-header stamp
@@ -177,12 +183,20 @@ impl<'a> CallEnv<'a> {
     pub fn callee(&self, role: &str) -> CalleeTarget {
         let addr = match role {
             "bob" => self.bob.addr(),
+            "bob2" => self.bob2.expect("CallEnv: callee role \"bob2\" is not bound").addr(),
             "charlie" => {
                 self.charlie.expect("CallEnv: callee role \"charlie\" is not bound").addr()
             }
             other => panic!("CallEnv has no agent for callee role {other:?}"),
         };
         CalleeTarget { role: role.to_string(), uri: self.egress.callee_uri(role, addr), addr }
+    }
+
+    /// Bind the second callee receiver (`bob2`) — the rerouting scenarios'
+    /// failover target. Builder-style so `for_functional` call sites stay put.
+    pub fn with_bob2(mut self, bob2: &'a Agent) -> Self {
+        self.bob2 = Some(bob2);
+        self
     }
 
     /// Realize the logical initial INVITE on THIS run's wire — mirrors e2e-core

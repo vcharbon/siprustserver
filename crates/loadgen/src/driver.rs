@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use e2e_model::{ScenarioInputs, ShapeDescriptor, ShapeRegistry};
 use futures::FutureExt;
 use scenario_harness::{AgentBinder, EgressPolicy};
 use sip_clock::Clock;
@@ -23,7 +24,7 @@ use crate::case::LoadCase;
 use crate::chaos::{ChaosLog, ChaosTag};
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
-use crate::mux::{CallRouting, Correlation, MuxCore};
+use crate::mux::{CallRouting, Correlation, LegInfo, MuxCore};
 use crate::report::{RenderedSample, Reporter};
 use crate::scenarios::LoadScenario;
 use crate::scope::CallScope;
@@ -103,19 +104,103 @@ pub struct DriverCfg {
     pub tuning: HashMap<String, CallTuning>,
 }
 
-/// One scenario mix entry: the scenario, its pick weight, and an optional
-/// attached Test case (`--scenario name=w,case=<path.json>` / the global
-/// `--case`) whose binding pool drives per-call identities and dwells. Plain
-/// `(scenario, weight)` tuples convert (`case: None` — the historic mix).
+/// One scenario mix entry: the shape's **report/metrics id** + load attributes
+/// (from its [`ShapeDescriptor`] — the shape's ONE declaration), the load body,
+/// its pick weight, and an optional attached Test case
+/// (`--scenario name=w,case=<path.json>` / the global `--case`) whose binding
+/// pool drives per-call identities and dwells.
+///
+/// Build from the unified registry ([`MixEntry::by_id`] /
+/// [`MixEntry::default_mix`] / [`MixEntry::failure_mix`]); plain
+/// `(scenario, weight)` tuples still convert for hand-rolled test bodies
+/// (attributes default off, id from the body).
+#[derive(Clone)]
 pub struct MixEntry {
+    /// The report/metrics id — the DESCRIPTOR's id (may differ from the body's
+    /// intrinsic `id()` when one body serves several shapes, e.g. `basic_call_em`).
+    pub id: crate::scenarios::ScenarioId,
     pub scenario: Arc<dyn LoadScenario>,
     pub weight: f64,
     pub case: Option<Arc<LoadCase>>,
+    /// Bind a third (transfer-target) callee leg for this shape's calls.
+    pub needs_charlie: bool,
+    /// Bind a SECOND callee receiver (`bob2`) sharing the callee socket,
+    /// demuxed by the R-URI-user leg picker (the rerouting shapes).
+    pub needs_bob2: bool,
+    /// Stamp `Resource-Priority: esnet.0` (the SUT force-admits under overload).
+    pub emergency: bool,
 }
 
 impl From<(Arc<dyn LoadScenario>, f64)> for MixEntry {
     fn from((scenario, weight): (Arc<dyn LoadScenario>, f64)) -> Self {
-        MixEntry { scenario, weight, case: None }
+        MixEntry {
+            id: scenario.id(),
+            scenario,
+            weight,
+            case: None,
+            needs_charlie: false,
+            needs_bob2: false,
+            emergency: false,
+        }
+    }
+}
+
+impl MixEntry {
+    /// Build a mix entry from a shape's descriptor (minting its load body from
+    /// the per-run `inputs`). `None` when the shape has no load body
+    /// (functional-only).
+    pub fn from_shape(
+        shape: &ShapeDescriptor,
+        inputs: &ScenarioInputs,
+        weight: f64,
+    ) -> Option<Self> {
+        let scenario = shape.load_scenario(inputs)?;
+        Some(MixEntry {
+            id: shape.id,
+            scenario,
+            weight,
+            case: None,
+            needs_charlie: shape.needs_charlie,
+            needs_bob2: shape.needs_bob2,
+            emergency: shape.emergency,
+        })
+    }
+
+    /// Resolve a shape by id in the registry (the CLI's `--scenario name=weight`).
+    /// `None` for an unknown id or a functional-only shape.
+    pub fn by_id(
+        registry: &ShapeRegistry,
+        id: &str,
+        inputs: &ScenarioInputs,
+        weight: f64,
+    ) -> Option<Self> {
+        registry.get(id).and_then(|d| Self::from_shape(d, inputs, weight))
+    }
+
+    /// The shipped DEFAULT mix (every shape with a `default_weight`,
+    /// basic-heavy like real traffic).
+    pub fn default_mix(registry: &ShapeRegistry, inputs: &ScenarioInputs) -> Vec<Self> {
+        registry
+            .default_mix()
+            .into_iter()
+            .filter_map(|d| Self::from_shape(d, inputs, d.default_weight.unwrap_or(1.0)))
+            .collect()
+    }
+
+    /// The voluntarily-failing mix (one shape per post-call-cleanup teardown
+    /// path), for the no-leak cleanup-coverage test.
+    pub fn failure_mix(registry: &ShapeRegistry, inputs: &ScenarioInputs) -> Vec<Self> {
+        registry
+            .failure_mix()
+            .into_iter()
+            .filter_map(|d| Self::from_shape(d, inputs, d.failure_weight.unwrap_or(1.0)))
+            .collect()
+    }
+
+    /// Attach a Test case (binding pool → per-call identities + dwells).
+    pub fn with_case(mut self, case: Option<Arc<LoadCase>>) -> Self {
+        self.case = case;
+        self
     }
 }
 
@@ -266,19 +351,17 @@ impl Driver {
             }
             n += 1;
 
-            let entry = self.pick(&mut rng);
-            let (scenario, case) = (entry.scenario.clone(), entry.case.clone());
+            let entry = self.pick(&mut rng).clone();
             let permit = match self.sem.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
-                    self.reporter.inc_shed(scenario.id());
+                    self.reporter.inc_shed(entry.id);
                     continue;
                 }
             };
-            let tuning = self.tuning_for(scenario.id());
+            let tuning = self.tuning_for(entry.id);
             tokio::spawn(run_one(
-                scenario,
-                case,
+                entry,
                 self.reporter.clone(),
                 self.transport.clone(),
                 self.call.clone(),
@@ -298,8 +381,7 @@ impl Driver {
 /// multi-threaded runtime.
 #[allow(clippy::too_many_arguments)] // per-call context threaded explicitly (no shared struct)
 async fn run_one(
-    scenario: Arc<dyn LoadScenario>,
-    case: Option<Arc<LoadCase>>,
+    entry: MixEntry,
     reporter: Arc<Reporter>,
     transport: Arc<MuxTransport>,
     call: Arc<CallConfig>,
@@ -309,7 +391,7 @@ async fn run_one(
     _permit: OwnedSemaphorePermit,
 ) {
     reporter.inc_inflight();
-    let id = scenario.id();
+    let MixEntry { id, scenario, case, needs_charlie, needs_bob2, emergency, weight: _ } = entry;
 
     // Resolve THIS call's binding from the attached Test case (pool walk +
     // token expansion): the core From/To/R-URI to fold into the outgoing
@@ -323,13 +405,20 @@ async fn run_one(
 
     // One correlation token per CALL: alice stamps it on her INVITE (per the
     // run's correlation strategy — relayed header or To-user) and the SUT
-    // carries it onto every downstream leg, so bob and charlie share it. Each
-    // callee leg is declared on its own socket; the mux demuxes by (socket,
-    // token) — a single receiver per socket here, so no picker is needed (the
-    // scenario-owned picker is for >1 receiver per socket).
+    // carries it onto every downstream leg, so every callee leg shares it. Each
+    // callee leg is declared on its own socket and the mux demuxes by (socket,
+    // token) — except a rerouting shape's `bob2`, which SHARES bob's socket:
+    // there the scenario-owned leg picker disambiguates by the R-URI user (the
+    // egress candidate list names each route's callee in its `new_ruri`, so the
+    // rerouted b-leg arrives addressed `sip:bob2@…`).
     let token = mint_token();
     let mut routing = CallRouting::new(token.clone()).leg(transport.uas_addr, "bob");
-    if scenario.needs_charlie() {
+    if needs_bob2 {
+        routing = routing
+            .leg(transport.uas_addr, "bob2")
+            .picker(transport.uas_addr, Arc::new(|leg: &LegInfo| leg.ruri_user().unwrap_or_default()));
+    }
+    if needs_charlie {
         routing = routing.leg(transport.refer_addr, "charlie");
     }
 
@@ -349,8 +438,15 @@ async fn run_one(
     binder.seed_ids(next_seed(seed_base));
 
     let alice = binder.agent("alice", &transport.uac_addr.to_string()).await;
+    // Bind order is load-bearing on a shared socket: the mux assigns receivers
+    // in leg-declaration order, so bob (leg 1) binds before bob2 (leg 2).
     let bob = binder.agent("bob", &transport.uas_addr.to_string()).await;
-    let charlie = if scenario.needs_charlie() {
+    let bob2 = if needs_bob2 {
+        Some(binder.agent("bob2", &transport.uas_addr.to_string()).await)
+    } else {
+        None
+    };
+    let charlie = if needs_charlie {
         Some(binder.agent("charlie", &transport.refer_addr.to_string()).await)
     } else {
         None
@@ -359,11 +455,12 @@ async fn run_one(
     let env = CallEnv {
         alice: &alice,
         bob: &bob,
+        bob2: bob2.as_ref(),
         charlie: charlie.as_ref(),
         via: call.via,
         stamp: transport.correlation.stamp(&token),
         token,
-        emergency: scenario.emergency(),
+        emergency,
         core,
         egress: call.egress.clone(),
         options_hold: call.options_hold,
@@ -385,6 +482,9 @@ async fn run_one(
     let failed = !matches!(result, Ok(Ok(())));
     if failed && !call.teardown_quiesce.is_zero() {
         bob.quiesce(call.teardown_quiesce).await;
+        if let Some(b2) = &bob2 {
+            b2.quiesce(call.teardown_quiesce).await;
+        }
         if let Some(c) = &charlie {
             c.quiesce(call.teardown_quiesce).await;
         }

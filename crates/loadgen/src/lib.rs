@@ -21,8 +21,11 @@
 //!
 //! # Pieces
 //!
-//! - [`scenarios`] — the [`LoadScenario`](scenarios::LoadScenario) trait + the
-//!   v1 set, fallible ports of the `b2bua-harness` functional tests.
+//! - [`scenarios`] — re-exports the shared [`LoadScenario`](scenarios::LoadScenario)
+//!   trait, the scenario bodies (`scenario_harness::realcall`), and the unified
+//!   open shape registry ([`ShapeRegistry`](e2e_model::ShapeRegistry)) whose
+//!   per-shape [`ShapeDescriptor`](e2e_model::ShapeDescriptor)s the driver's
+//!   [`MixEntry`](driver::MixEntry) is built from.
 //! - [`driver`] — the CPS governor + max-in-flight semaphore + per-call
 //!   `catch_unwind` boundary + [`scope`]-based teardown.
 //! - [`report`] — bounded-memory counters, latency histograms, sampling gate,
@@ -48,9 +51,7 @@ pub use ctx::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp};
 pub use driver::{serve_metrics, CallConfig, CallTuning, Driver, DriverCfg, MixEntry, MuxTransport};
 pub use mux::{CallRouting, Correlation, EndpointSpec, LegInfo, LegPicker, MuxCore, Role};
 pub use report::{Reporter, ReporterCfg};
-pub use scenarios::{
-    by_id, default_scenarios, failure_scenarios, LoadScenario, ScenarioId, ScenarioInputs,
-};
+pub use scenarios::{LoadScenario, ScenarioId, ScenarioInputs, ShapeDescriptor, ShapeRegistry};
 pub use scope::CallScope;
 // The environment axis shared with the e2e framework: the egress policy a run's
 // `CallConfig`/`CallEnv` carries (authored via `e2e_model::EndpointConfig.egress`,

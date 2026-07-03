@@ -9,7 +9,8 @@ transport, clock and timeouts differ.
 Compiled shapes: `basic-call`, `basic-call-media` (real RTP both ways + the
 "alice hears bob" spectral-classifier check, per-agent `.wav` artifacts),
 `rerouting` (bob1 rejects → the SUT fails over to bob2, ADR-0017),
-`rerouting-prack` (+ reliable 183/PRACK on the winning leg), and
+`rerouting_prack` (+ reliable 183/PRACK on the winning leg; a *dual-body* shape
+— the same registry declaration also carries the loadgen body), and
 `transfer-refer-media` (blind transfer via REFER: bob1 REFERs the call to bob2,
 the SUT drives the C-leg + NOTIFYs + both realign re-INVITEs, then alice and
 bob2 re-exchange audio — "alice hears bob2" proves media survived the transfer).

@@ -150,7 +150,7 @@ fn run_cell(spec: &CellSpec) -> CellSummary {
 
         let mut rt = infra.build(&dir_name, &spec.cfg).await;
         let lb_vip = rt.lb_vip;
-        shape.run(&mut rt, &spec.case.input).await;
+        shape.body.run(&mut rt, &spec.case.input).await;
         let captures = rt.take_media();
         // A gating RFC violation fails the cell WITH the report intact (the
         // findings ride the result's rfc rows as `advisory: false`).

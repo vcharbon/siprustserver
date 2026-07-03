@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bindings::{BindingPool, validate_bindings};
 use crate::endpoint::EndpointConfig;
-use crate::shape::{Anchor, CoreInput, ShapeSpec};
+use crate::shape::{Anchor, CoreInput, ShapeCatalog};
 
 /// The input a Test case feeds a shape: the shared **core** (From / To / R-URI
 /// overrides — always optional) plus per-shape **extras** (an open map until a
@@ -298,13 +298,13 @@ pub fn load_check_sets(dir: &Path) -> Result<BTreeMap<String, CheckSet>, ModelEr
 /// canonical and published by the shape. Plus shape/check-set resolution and
 /// op/value coherence. Returns **all** problems, not just the first.
 ///
-/// Generic over [`ShapeSpec`] — the load-time metadata slice of a shape — so
-/// the registry of full `dyn CallflowShape` trait objects (e2e-core, which
-/// bridges them onto `ShapeSpec`) and any lighter shape catalog validate
-/// through the one implementation.
-pub fn validate_case<S: ShapeSpec + ?Sized>(
+/// Generic over [`ShapeCatalog`] — the by-id lookup of a shape's load-time
+/// metadata ([`crate::shape::ShapeSpec`]) — so the unified descriptor registry
+/// (`ShapeRegistry`), e2e-core's descriptor+functional-body map, and any test
+/// fixture map validate through the one implementation.
+pub fn validate_case<C: ShapeCatalog + ?Sized>(
     case: &TestCase,
-    shapes: &BTreeMap<String, Box<S>>,
+    shapes: &C,
     check_sets: &BTreeMap<String, CheckSet>,
 ) -> Result<(), ModelError> {
     let mut problems = Vec::new();
@@ -381,10 +381,10 @@ pub fn validate_case<S: ShapeSpec + ?Sized>(
 
     // Per compatible shape: resolution, required input, published anchors.
     for shape_id in &case.compatible_shapes {
-        let Some(shape) = shapes.get(shape_id) else {
+        let Some(shape) = shapes.spec(shape_id) else {
             problems.push(format!(
                 "test case {case_id:?}: unknown Callflow shape {shape_id:?} (known: [{}])",
-                keys(shapes)
+                shapes.ids().iter().map(|k| format!("{k:?}")).collect::<Vec<_>>().join(", ")
             ));
             continue;
         };

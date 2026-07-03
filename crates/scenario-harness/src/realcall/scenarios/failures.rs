@@ -120,10 +120,6 @@ impl RealCallScenario for ReferCharlieReject {
         "refer_charlie_reject"
     }
 
-    fn needs_charlie(&self) -> bool {
-        true
-    }
-
     async fn run(&self, env: &CallEnv<'_>, scope: &CallScope, ctx: &CallCtx) -> Result<(), StepError> {
         let charlie = env.charlie.ok_or_else(|| StepError::UnexpectedKind {
             who: "refer_charlie_reject".to_string(),

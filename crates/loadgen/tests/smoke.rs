@@ -13,10 +13,9 @@ use b2bua_harness::{settle_until, B2buaSut};
 use layer_harness::TransportKind;
 use loadgen::scenarios::{establish, BasicCall, LoadScenario, ScenarioId};
 use loadgen::{
-    by_id, default_scenarios, failure_scenarios, CallConfig, CallCtx, CallEnv, CallRouting,
-    CallScope, CallTuning, Correlation, Driver, DriverCfg, EgressPolicy, EndpointSpec, LegInfo,
-    LoadCase, MixEntry, MuxCore, MuxTransport, ResultClass, Reporter, ReporterCfg, Role,
-    ScenarioInputs,
+    CallConfig, CallCtx, CallEnv, CallRouting, CallScope, CallTuning, Correlation, Driver,
+    DriverCfg, EgressPolicy, EndpointSpec, LegInfo, LoadCase, MixEntry, MuxCore, MuxTransport,
+    ResultClass, Reporter, ReporterCfg, Role, ScenarioInputs, ShapeRegistry,
 };
 use scenario_harness::{Harness, StepError};
 use sip_clock::Clock;
@@ -27,6 +26,13 @@ const RECV: Duration = Duration::from_secs(2);
 
 fn addr(p: u16) -> SocketAddr {
     format!("127.0.0.1:{p}").parse().unwrap()
+}
+
+/// Resolve one shape from the unified registry into a weighted mix entry (the
+/// smoke tests' shorthand over `MixEntry::by_id` + the default inputs).
+fn mix(id: &str, weight: f64) -> MixEntry {
+    MixEntry::by_id(&ShapeRegistry::with_defaults(), id, &inputs(), weight)
+        .unwrap_or_else(|| panic!("unknown load shape {id:?}"))
 }
 
 /// Stand up a real-network b2bua SUT + a mux core over a port base. The b2bua
@@ -75,12 +81,47 @@ async fn setup_no_relay(
     setup_inner(base, correlation, sample_cap, RECV, false, |_| {}).await
 }
 
+/// [`setup`] whose SUT honors the full inbound `X-Api-Call` control surface
+/// (destination pin + ADR-0017 `routes` failover plan walked on b-leg
+/// rejection) — the deployed-cluster engine shape the `api-call-pin` egress
+/// policy addresses. The rerouting smoke test runs over this.
+async fn setup_api_call(
+    base: u16,
+    correlation: Correlation,
+    sample_cap: u32,
+) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+    setup_shaped(base, correlation, sample_cap, RECV, true, B2buaSut::route_api_call, |_| {}).await
+}
+
 async fn setup_inner(
     base: u16,
     correlation: Correlation,
     sample_cap: u32,
     recv: Duration,
     relay_header: bool,
+    extra_tune: impl FnOnce(&mut b2bua_sdk::B2buaConfig) + 'static,
+) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+    setup_shaped(
+        base,
+        correlation,
+        sample_cap,
+        recv,
+        relay_header,
+        B2buaSut::route_all_with_refer,
+        extra_tune,
+    )
+    .await
+}
+
+/// The one setup core: `make_sut(dest_host, dest_port)` picks the SUT's
+/// decision-engine shape (plain route-all+refer vs the X-Api-Call plan walker).
+async fn setup_shaped(
+    base: u16,
+    correlation: Correlation,
+    sample_cap: u32,
+    recv: Duration,
+    relay_header: bool,
+    make_sut: fn(&str, u16) -> b2bua_harness::B2buaSutBuilder,
     extra_tune: impl FnOnce(&mut b2bua_sdk::B2buaConfig) + 'static,
 ) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
     let net: Arc<dyn SignalingNetwork> = Arc::new(RealSignalingNetwork::new());
@@ -98,7 +139,7 @@ async fn setup_inner(
     // (the production `B2BUA_RELAY_HEADERS=X-Loadgen-Id`), so the token alice
     // stamps reaches BOTH the b-leg (bob) and the REFER transfer leg (charlie).
     // `relay_header = false` models a third-party SUT that relays nothing.
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", uas)
+    let b2bua = make_sut("127.0.0.1", uas)
         .tune(move |c| {
             if relay_header {
                 c.relay_headers = vec!["X-Loadgen-Id".to_string()];
@@ -179,7 +220,7 @@ async fn loadgen_mux_smoke_basic_concurrent() {
 
     let driver = Driver::new(
         cfg(b2bua.addr, 60.0, 2, 16, 0xB451C),
-        vec![(by_id("basic_call", &inputs()).unwrap(), 1.0)],
+        vec![mix("basic_call", 1.0)],
         reporter.clone(),
         transport,
     );
@@ -217,7 +258,7 @@ async fn loadgen_to_user_correlation_without_relayed_header() {
 
     let driver = Driver::new(
         cfg(b2bua.addr, 60.0, 2, 16, 0x70C4),
-        vec![(by_id("basic_call", &inputs()).unwrap(), 1.0)],
+        vec![mix("basic_call", 1.0)],
         reporter.clone(),
         transport,
     );
@@ -251,7 +292,7 @@ async fn loadgen_mux_smoke_all_scenarios() {
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
     let driver = Driver::new(
         cfg(b2bua.addr, 60.0, 4, 8, 0xA11),
-        default_scenarios(&inputs()),
+        MixEntry::default_mix(&ShapeRegistry::with_defaults(), &inputs()),
         reporter.clone(),
         transport,
     );
@@ -289,9 +330,9 @@ async fn loadgen_mux_smoke_timed_and_long_call() {
     let driver = Driver::new(
         cfg,
         vec![
-            (by_id("basic_call", &inputs()).unwrap(), 2.0),
-            (by_id("reinvite", &inputs()).unwrap(), 1.0),
-            (by_id("long_call", &inputs()).unwrap(), 1.0),
+            mix("basic_call", 2.0),
+            mix("reinvite", 1.0),
+            mix("long_call", 1.0),
         ],
         reporter.clone(),
         transport,
@@ -326,8 +367,8 @@ async fn loadgen_mux_smoke_prack_update_mix() {
     let driver = Driver::new(
         cfg(b2bua.addr, 60.0, 2, 16, 0x93AC5),
         vec![
-            (by_id("prack_update", &inputs()).unwrap(), 2.0),
-            (by_id("basic_call", &inputs()).unwrap(), 1.0),
+            mix("prack_update", 2.0),
+            mix("basic_call", 1.0),
         ],
         reporter.clone(),
         transport,
@@ -357,6 +398,74 @@ async fn loadgen_mux_smoke_prack_update_mix() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak (prack_update)");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// The DUAL-BODY `rerouting_prack` shape's LOAD body against the in-process
+/// SUT — the first shape served by BOTH run surfaces from ONE registry
+/// declaration (the functional body runs in e2e-core over the fake infra; this
+/// is the load half). Under the `api-call-pin` egress the ordered candidate
+/// list [bob, bob2] rides an `X-Api-Call` `routes` failover plan (ADR-0017):
+///
+///   INVITE(Supported:100rel, routes plan) → bob 486 → the SUT walks the plan
+///   to bob2 — SAME socket, demuxed by the driver's R-URI-user leg picker —
+///   → reliable 183(RSeq) → PRACK → 200(PRACK) → 200 → ACK → BYE
+///
+/// Runs concurrently with basic calls (their single-candidate pin on the same
+/// egress) with CLEAN result classes — every call OK, so zero timeout /
+/// wrong-status / rfc_audit_fail (the sampled half of the calls IS RFC-audited
+/// via the recording binder: the RFC 3261/3262/3264 gate passes with no
+/// waiver) — zero orphans (the picker routed every rerouted leg), and no
+/// mux/SUT leak.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_mux_smoke_rerouting_prack_mix() {
+    let (_h, b2bua, core, transport) =
+        setup_api_call(6620, Correlation::header("X-Loadgen-Id"), 5).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
+
+    // The environment axis: the pinned layout (the real cluster's shape) — the
+    // egress realizes [bob, bob2] as the routes failover plan.
+    let mut c = cfg(b2bua.addr, 60.0, 2, 16, 0x4E404);
+    c.call.egress = EgressPolicy::ApiCallPin;
+
+    let driver = Driver::new(
+        c,
+        vec![mix("rerouting_prack", 2.0), mix("basic_call", 1.0)],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    let ok_rr = reporter.count("rerouting_prack", &ResultClass::Ok);
+    let ok_basic = reporter.count("basic_call", &ResultClass::Ok);
+    assert!(ok_rr > 5, "too few OK rerouting_prack calls: {}", reporter.render_prometheus());
+    assert!(ok_basic > 0, "no OK basic calls in the mix: {}", reporter.render_prometheus());
+    // CLEAN result classes: every finished call is OK — in particular zero
+    // rfc_audit_fail (the recorded/sampled calls pass the RFC audit unwaived)
+    // and zero timeouts (no misrouted failover leg).
+    assert_eq!(
+        reporter.total_calls(),
+        ok_rr + ok_basic,
+        "non-OK result classes in the rerouting_prack mix:\n{}",
+        reporter.render_prometheus()
+    );
+    // Zero orphans: every rerouted b-leg carried the relayed token AND the
+    // R-URI-user picker resolved it to a registered receiver (`no_route` counts
+    // under `orphan_unknown_token`).
+    assert_eq!(
+        core.stats().orphan_no_header.load(std::sync::atomic::Ordering::Relaxed)
+            + core.stats().orphan_unknown_token.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "unexpected orphans (failover-leg demux gap?)"
+    );
+    assert!(
+        reporter.sample_count("rerouting_prack", &ResultClass::Ok) > 0,
+        "no OK rerouting_prack sample"
+    );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (rerouting_prack)");
     settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }
@@ -599,8 +708,8 @@ async fn loadgen_mux_emergency_split_under_overload() {
     let driver = Driver::new(
         cfg(b2bua.addr, 60.0, 3, 16, 0xE5E7),
         vec![
-            (by_id("basic_call", &inputs()).unwrap(), 1.0),
-            (by_id("basic_call_em", &inputs()).unwrap(), 1.0),
+            mix("basic_call", 1.0),
+            mix("basic_call_em", 1.0),
         ],
         reporter.clone(),
         transport,
@@ -658,8 +767,8 @@ async fn loadgen_post_call_cleanup_no_leak() {
     let (_h, b2bua, core, transport) = setup(6460, Correlation::header("X-Loadgen-Id"), 5).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 3 }));
 
-    let mut scenarios = failure_scenarios(&inputs());
-    scenarios.push((by_id("basic_call", &inputs()).unwrap(), 2.0)); // some happy traffic in the mix
+    let mut scenarios = MixEntry::failure_mix(&ShapeRegistry::with_defaults(), &inputs());
+    scenarios.push(mix("basic_call", 2.0)); // some happy traffic in the mix
     let driver = Driver::new(cfg(b2bua.addr, 50.0, 3, 12, 0xFA17), scenarios, reporter.clone(), transport);
     driver.run().await;
 
@@ -696,7 +805,7 @@ async fn loadgen_packet_drop_without_retransmit_breaks_calls() {
     // ~12%/datagram loss, no recovery: over a ~10-message call P(all delivered)
     // ≈ 0.9^10 ≈ 0.35, so the majority of calls must fail.
     c.default_tuning = CallTuning { drop_rate: 0.12, retransmit: false };
-    let driver = Driver::new(c, vec![(by_id("basic_call", &inputs()).unwrap(), 1.0)], reporter.clone(), transport);
+    let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     driver.run().await;
 
     let drops = core.stats().dropped_out.load(std::sync::atomic::Ordering::Relaxed)
@@ -731,7 +840,7 @@ async fn loadgen_auto_retransmit_recovers_packet_drop() {
 
     let mut c = cfg(b2bua.addr, 12.0, 2, 8, 0x5EED);
     c.default_tuning = CallTuning { drop_rate: 0.10, retransmit: true };
-    let driver = Driver::new(c, vec![(by_id("basic_call", &inputs()).unwrap(), 1.0)], reporter.clone(), transport);
+    let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     driver.run().await;
 
     let drops = core.stats().dropped_out.load(std::sync::atomic::Ordering::Relaxed)
@@ -785,7 +894,7 @@ async fn loadgen_ringing_gate_counts_every_ring() {
     // No loss → every 18x is delivered; retransmit on to exercise that path too.
     let mut c = cfg(b2bua.addr, 40.0, 2, 16, 0x9A17);
     c.default_tuning = CallTuning { drop_rate: 0.0, retransmit: true };
-    let driver = Driver::new(c, vec![(by_id("basic_call", &inputs()).unwrap(), 1.0)], reporter.clone(), transport);
+    let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     driver.run().await;
 
     let (rung, expected) = reporter.ringing_totals();
@@ -819,7 +928,7 @@ async fn loadgen_inprocess_endurance_lossy() {
     // The default mix (basic-heavy), production loss + retransmit, 25 s at 25 cps.
     let mut c = cfg(b2bua.addr, 25.0, 25, 64, 0xE0D0E);
     c.default_tuning = CallTuning { drop_rate: 0.001, retransmit: true };
-    let driver = Driver::new(c, default_scenarios(&inputs()), reporter.clone(), transport);
+    let driver = Driver::new(c, MixEntry::default_mix(&ShapeRegistry::with_defaults(), &inputs()), reporter.clone(), transport);
     driver.run().await;
 
     let total: u64 = ["basic_call", "reinvite", "options_hold", "refer"]
@@ -916,7 +1025,7 @@ async fn loadgen_pooled_case_identities_and_dwell_overrides() {
     // 10 ms talk can ONLY come from the case extras.
     let driver = Driver::new(
         cfg(b2bua.addr, 50.0, 2, 16, 0xB1D5),
-        vec![MixEntry { scenario, weight: 1.0, case: Some(case) }],
+        vec![MixEntry::from((scenario, 1.0)).with_case(Some(case))],
         reporter.clone(),
         transport,
     );
