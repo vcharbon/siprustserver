@@ -17,6 +17,9 @@ sip-net = { path = "../sip-net" }
 sip-txn = { path = "../sip-txn" }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
 scenario-harness = { path = "../scenario-harness" }
+# `TransportKind::Live` for the `dev_sut` playground binary's real-loopback
+# `Harness::with_network_and_clock` (same wiring the loadgen smoke suite uses).
+layer-harness = { path = "../layer-harness" }
 tokio = { workspace = true }
 # The shared `spawn_proxy_core` LB-SUT primitive (in `src/lib.rs`) is reused by
 # both this crate's `tests/common/mod.rs` (single-worker `spawn_lb_proxy`) and

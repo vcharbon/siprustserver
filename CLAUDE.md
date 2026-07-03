@@ -47,6 +47,21 @@ Before `#[ignore]`-ing a slow paused-clock test, cut the churn at its source
 semantics-preserving wherever the test pumps for a condition instead of
 counting ticks.
 
+## Agent & build concurrency (WSL2 resource limits)
+
+**Never run more than ONE agent (subagent / workflow stage) at a time that
+compiles or runs tests.** One `cargo build`/`cargo test` already parallelizes
+across all cores; two concurrent ones — or a build/test racing a running load
+generator or SUT process — took the whole WSL VM down (20 GB VM,
+`vm.overcommit_memory=1` → OOM freeze, 2026-07-03). Sequence compiling/testing
+agents strictly (`await` each before the next; parallelism is fine only for
+non-compiling work: reads, docs, analysis). Inside an agent the same rule holds:
+one cargo command at a time, and never a build/test concurrent with a load run.
+Cap heavy commands on this box:
+`systemd-run --user --scope -q -p MemoryMax=12G -p CPUQuota=1200% nice -n 10
+cargo build … --jobs 6`; long-lived test processes (SUT, loadgen, e2e-web) get
+their own small scopes (e.g. `-p MemoryMax=2G -p CPUQuota=400%`).
+
 ## Chaos collateral acceptance (endurance triage)
 
 A failover/kill failure is NOT automatically a SUT bug. The accepted boundary
@@ -192,3 +207,56 @@ license drift. The failover harness's `with_worker_clock_offset` injects
 deterministic inter-node skew on the one monotonic timeline (closing the
 single-clock fidelity gap): `failover.rs::skew_ahead_backup_no_immediate_options_
 at_takeover` is the endurance-20260630 twin (fails pre-fix, passes after).
+
+## Initial-INVITE final-response guarantee (ADR-0022 — read before touching the decision seam or `invariants::enforce`)
+
+Once sip-txn auto-sends **100 Trying** for an initial INVITE (born with the
+server txn, BEFORE the router/decision run), the caller MUST get a final: accept
++ forward, or a **503** (no dialog) within the decision deadline. Two mechanisms,
+do not remove either:
+
+- **`DeadlineDecisionEngine`** (`decision/mod.rs`) wraps the injected engine at
+  `B2buaCore::spawn_with_overload` (after the `tune` seam, so nothing bypasses it).
+  Bounds `new_call` + `call_failure` — the caller-blocking calls — with
+  `call_control_timeout_ms` (default 5000, `B2BUA_CALL_CONTROL_TIMEOUT_MS`, `<=0`
+  disables). **NOT `call_refer`** (its 202 is already out; bounded by
+  `refer_subscription_expiry_sec`/`refer_overall_safety_sec` — a documented
+  divergence from TS `callControlReferTimeoutMs`, and the reason the
+  `refer_gating`/`refer_reject` hang tests still model a 60s subscription expiry).
+  The `<=0` escape hatch is what `reaper.rs::wedged_setup_is_aborted_and_reaped`
+  uses to exercise the abort-escalation ladder against a genuinely wedged await.
+- **`invariants::enforce` unanswered-a-leg synthesis.** On `→ terminated`, if the
+  a-leg entered the turn `Trying|Early` and nothing answered it, the ONE funnel
+  appends a 503 (`reason="unanswered_at_termination"`). Closes the reaper /
+  panic / txn-sweep silent paths in one place (subsumes the message-cap fix).
+
+**Critical HA split — the `answer_unanswered_a_leg` flag is a correctness knob,
+not cosmetics.** `true` on live-serving funnels (rules, initial-INVITE,
+limiter-refresh, reaper `discharge_as_own`): the node holds the live server txn,
+the caller waits on US → answer. `false` on the two HA discharge helpers for
+already-terminal reclaimed/folded bodies (`discharge_materialized_terminal`,
+`discharge_folded_terminal`): a reclaiming/takeover node has NO live server txn
+for that a-leg (the serving node answered, or its txn died with it ≥
+`reboot_budget` ago), and ADR-0014 reclaim-discharge is `(p,b)`-causal and NEVER
+touches the SIP wire. Passing `true` there would put a spurious final on a wire
+the node doesn't own → the double-serve class ADR-0014 structurally removed. Same
+boundary as ADR-0020 X3: the node with the live txn answers; the node holding
+only terminal state settles silently.
+
+**Full-queue completeness (ADR-0022 X6).** The per-call global cap
+(`per_call_queue_cap`) is the one full-queue path that fires BEFORE a call exists
+— `dispatch` would silently drop a new call_ref's body. `router::on_event` sheds a
+new initial INVITE at cap with a stateless 503 (`would_drop_new_at_cap` +
+`build_stateless_overload_503`) before dispatch; in-dialog at-cap events keep the
+silent drop (orphan → 481/resend). So NO INVITE that heard a 100 is ever silent,
+at any scale. Tier-1 ingress brake (≥70% UDP queue) + Tier-3 CPS gate shed far
+earlier with proper 503s; the sip-txn events channel never drops the INVITE
+Message (`emit_critical`→deferred).
+
+**LB proxy (ADR-0022 X4) is transaction-less BY DESIGN and needs no timer.** It
+never emits a 100 and absorbs the worker's 100 (`core/response.rs`), so a caller
+behind the LB keeps its own Timer B armed and the CALLER owns downstream-blackhole
+give-up (local 408 at 64·T1). Do NOT add a Timer C / proxy-synthesized final —
+`stateless_final_response_contract.rs` pins both the never-100 and blackhole-silence
+halves. All proxy-INTERNAL errors already answer immediately (483/420/400/403,
+503+Retry-After for shed).

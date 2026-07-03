@@ -116,6 +116,8 @@ fn invariants_append_cleanup_on_terminated() {
         &b2bua::obligations::ObligationSet::core(),
         &before,
         HandlerResult::new(call),
+        0,
+        true,
     );
 
     assert!(
@@ -130,6 +132,55 @@ fn invariants_append_cleanup_on_terminated() {
         matches!(result.effects.critical.last(), Some(CriticalStateEffect::RemoveCall)),
         "remove-call runs last"
     );
+    // ADR-0022: `before` entered the turn with the a-leg still Trying and the
+    // turn answered nothing — the funnel appends the forgotten final (503) and
+    // records it on the CDR.
+    assert!(
+        result.effects.outbound.iter().any(|e| {
+            e.leg_id.as_deref() == Some("a")
+                && matches!(&e.body, b2bua::effects::OutboundBody::Response(r) if r.status == 503)
+        }),
+        "unanswered a-leg gets the synthesized 503"
+    );
+    assert!(
+        result.call.cdr_events.iter().any(|e| {
+            e.reason.as_deref() == Some("unanswered_at_termination") && e.status_code == Some(503)
+        }),
+        "the synthesized final is on the CDR"
+    );
+}
+
+#[test]
+fn no_synthesized_final_when_the_turn_already_answered() {
+    // The reject path: same terminated transition, but THIS turn carries a
+    // final to the a-leg (as `reject_call` / `RespondToALeg` do) — the funnel
+    // must not double-answer.
+    let mut call = test_call();
+    let before = call.clone();
+    call.state = CallModelState::Terminated;
+    call.a_leg.state = LegState::Terminated;
+    let a_invite = b2bua::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
+    let mut result = HandlerResult::new(call);
+    result.effects.outbound.push(b2bua::rules::relay::response_to_a_leg(
+        &a_invite, 486, "Busy Here", Some("totag-x".into()), None, vec![], None, None, vec![],
+    ));
+    let result = invariants::enforce(
+        &b2bua::obligations::ObligationSet::core(),
+        &before,
+        result,
+        0,
+        true,
+    );
+    let finals_to_a = result
+        .effects
+        .outbound
+        .iter()
+        .filter(|e| {
+            e.leg_id.as_deref() == Some("a")
+                && matches!(&e.body, b2bua::effects::OutboundBody::Response(r) if r.status >= 200)
+        })
+        .count();
+    assert_eq!(finals_to_a, 1, "exactly the rule's own final — no synthesized duplicate");
 }
 
 // ── ADR-0016 slice 2: global call machine projection ────────────────────────
@@ -1182,7 +1233,11 @@ mod enforce_equivalence {
             let result = HandlerResult { call: after, effects };
 
             let old = old_enforce(&before, result.clone());
-            let new = invariants::enforce(&ObligationSet::core(), &before, result);
+            // `answer_unanswered_a_leg = false`: this property pins the verbatim
+            // limiter/CDR extraction against the pre-ObligationSet `old_enforce`;
+            // the ADR-0022 unanswered-a-leg final is additive and covered by its
+            // own tests above.
+            let new = invariants::enforce(&ObligationSet::core(), &before, result, 0, false);
 
             prop_assert_eq!(&old.call, &new.call, "call (incl. cleared timers) must match");
             prop_assert_eq!(

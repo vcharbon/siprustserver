@@ -3,4 +3,6 @@
 //! Kept as a module path so existing `crate::ctx::{CallEnv, CallCtx}` imports
 //! resolve unchanged.
 
-pub use scenario_harness::realcall::{CallCtx, CallEnv};
+pub use scenario_harness::realcall::{
+    CallCtx, CallEnv, Challenge, ChallengeResponder, CoreIdentity, CorrelationStamp,
+};

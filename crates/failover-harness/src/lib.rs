@@ -23,7 +23,7 @@ pub mod runner;
 pub mod scenario;
 
 pub use combine::{combine_doc, WorkerAxis};
-pub use harness::{FailoverHarness, ProxySut, ReplicatedB2buaSut};
+pub use harness::{FailoverHarness, ProxySut, ReplicatedB2buaSut, RULE_CSEQ_IN_DIALOG_ORDER};
 pub use runner::run_cell;
 pub use scenario::{Cell, DialogState, Event, Fault, Party, Recovery};
 

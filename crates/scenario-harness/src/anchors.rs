@@ -8,6 +8,12 @@
 //! the receiving agent's address, and resolution re-finds the matching
 //! [`sip_net::RecordedSipEntry`] post-call. Retransmitted copies share the same
 //! keys and identical bytes, so "first delivered match" is well-defined.
+//!
+//! A tag may also label a message the agent **sent** ([`AnchorTag::sent`]) —
+//! for a request no test agent ever receives because its receiver is the SUT
+//! itself (the load surface's REFER: bob → SUT, the SUT builds the C leg).
+//! Resolution then matches on the recorded entry's *sender* instead of its
+//! receiver.
 
 use std::net::SocketAddr;
 
@@ -74,14 +80,22 @@ pub struct AnchorTag {
     pub agent: String,
     /// The canonical anchor name (`initialInvite`).
     pub anchor: String,
-    /// The tagging agent's bound address — the recorded entry's receiver.
-    pub rx_addr: SocketAddr,
+    /// The tagging agent's bound address — the recorded entry's receiver
+    /// (or its **sender**, when [`sent`](Self::sent) is set).
+    pub agent_addr: SocketAddr,
     pub keys: AnchorKeys,
+    /// `false` (the default): the agent RECEIVED the tagged message, so
+    /// resolution matches recorded entries delivered *to* `agent_addr`.
+    /// `true`: the agent SENT it (e.g. a REFER whose only receiver is the
+    /// external SUT), so resolution matches entries sent *from* `agent_addr`.
+    pub sent: bool,
 }
 
 impl AnchorTag {
     /// Does a recorded message (re-parsed from raw bytes) match this tag's
-    /// identity keys? The caller has already filtered on `to == rx_addr`.
+    /// identity keys? The caller has already filtered on the entry address
+    /// (`to == agent_addr`, or `from == agent_addr` for a [`sent`](Self::sent)
+    /// tag).
     pub fn matches(&self, msg: &SipMessage) -> bool {
         AnchorKeys::from(msg) == self.keys
     }

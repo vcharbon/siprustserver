@@ -227,15 +227,21 @@ async fn wedged_setup_is_aborted_and_reaped() {
         .tune(|c| {
             c.reaper_idle_max_sec = 60;
             c.reaper_sweep_interval_sec = 30;
+            // Disable the ADR-0022 decision deadline: this test exercises the
+            // reaper's abort-escalation ladder, which needs a GENUINELY wedged
+            // decision await (with the deadline on, NeverDecide would simply
+            // 503 at 5 s and the ladder would never engage — that fast path is
+            // `decision_deadline.rs`'s subject).
+            c.call_control_timeout_ms = 0;
         })
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
     let _ = bob; // never reached: the decision wedges before any b-leg exists
 
     // The INVITE parks the per-call worker (and its lock) inside the
-    // never-resolving decision await. The txn layer's 100 Trying is all alice
-    // ever hears.
-    let _call = alice.invite(&bob).with_sdp(OFFER_SDP).through(b2bua.addr).send().await;
+    // never-resolving decision await. Until the reap lands, the txn layer's
+    // 100 Trying is all alice hears.
+    let mut call = alice.invite(&bob).with_sdp(OFFER_SDP).through(b2bua.addr).send().await;
 
     // Sweeps: verdicts at 90/120 s queue behind the parked body; the 150 s
     // sweep (attempt 3) aborts the in-flight body — the lock releases, the
@@ -249,6 +255,15 @@ async fn wedged_setup_is_aborted_and_reaped() {
     assert!(
         reasons.iter().any(|r| r == "reaper-stale" || r == "handler-panic"),
         "the CDR names the forced reap: {reasons:?}"
+    );
+    // ADR-0022: the reap is no longer silent toward the caller — the
+    // `→ terminated` funnel answers the still-unanswered a-leg INVITE with a
+    // 503 through its (still-live, < 193 s) server txn. Late, but alice is
+    // released instead of stranded on 100-then-silence.
+    call.expect(503).await;
+    assert!(
+        reasons.iter().any(|r| r == "unanswered_at_termination"),
+        "the CDR records the synthesized final: {reasons:?}"
     );
     settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();

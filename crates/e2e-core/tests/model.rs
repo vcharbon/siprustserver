@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use e2e_core::model::{self, ModelError};
-use e2e_core::{BasicCall, CallflowShape, EndpointConfig, FakeLsbcB2bua, InfraShape, shapes};
+use e2e_core::{EndpointConfig, FakeLsbcB2bua, InfraShape, ShapeDescriptor, ShapeRegistry, shapes};
 
 fn workspace_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -34,6 +34,7 @@ fn fake_cfg() -> EndpointConfig {
         roles,
         recv_timeout_ms: 2_000,
         transit_delay_ms: 0,
+        egress: None,
     }
 }
 
@@ -54,7 +55,7 @@ async fn authored_json_case_loads_validates_and_runs() {
     let shape = shapes.get(case.compatible_shapes[0].as_str()).unwrap();
     let mut rt = FakeLsbcB2bua.build("basic-call/fake/json-case", &fake_cfg()).await;
     let lb_vip = rt.lb_vip;
-    shape.run(&mut rt, &case.input).await;
+    shape.body.run(&mut rt, &case.input).await;
     let (report, rfc_gate) = rt.finish().await;
     assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
 
@@ -144,27 +145,14 @@ fn every_validation_problem_is_reported() {
     assert!(all.contains("op Absent takes no value"), "{all}");
 }
 
-/// A shape's `required_input` gates compatibility on the case's input.
+/// A shape's `required_input` (on its DESCRIPTOR — the one declaration) gates
+/// compatibility on the case's input.
 #[test]
 fn missing_required_input_is_incompatible() {
-    struct NeedsTarget;
-    #[async_trait::async_trait(?Send)]
-    impl CallflowShape for NeedsTarget {
-        fn id(&self) -> &str {
-            "needs-target"
-        }
-        fn anchors(&self) -> &[e2e_core::Anchor] {
-            &[]
-        }
-        fn required_input(&self) -> &[&str] {
-            &["from", "rerouteTarget"]
-        }
-        async fn run(&self, _rt: &mut e2e_core::InfraRuntime, _input: &e2e_core::model::Input) {
-            unreachable!("validation-only shape")
-        }
-    }
-    let mut shapes: BTreeMap<String, Box<dyn CallflowShape>> = BTreeMap::new();
-    shapes.insert("needs-target".into(), Box::new(NeedsTarget));
+    let mut shapes = ShapeRegistry::empty();
+    shapes.register(
+        ShapeDescriptor::new("needs-target").required_input(&["from", "rerouteTarget"]),
+    );
 
     let case = parse_case(
         r#"{
@@ -229,12 +217,13 @@ fn committed_schemas_are_current() {
     }
 }
 
-/// BasicCall publishes what the committed case binds (sanity on the contract
-/// between the Rust shape and the canonical vocabulary).
+/// The basic-call descriptor publishes what the committed case binds (sanity on
+/// the contract between the registered shape and the canonical vocabulary).
 #[test]
 fn basic_call_publishes_the_documented_anchors() {
     use e2e_core::Anchor;
-    let anchors = BasicCall.anchors();
+    let reg = shapes::registry();
+    let anchors = reg.get("basic-call").unwrap().descriptor.anchors;
     for a in [Anchor::InitialInvite, Anchor::Answer, Anchor::Ack, Anchor::Bye] {
         assert!(anchors.contains(&a), "basic-call must publish {:?}", a.as_str());
     }

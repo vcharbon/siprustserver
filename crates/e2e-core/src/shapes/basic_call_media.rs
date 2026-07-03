@@ -19,13 +19,13 @@ use crate::media::MediaCapture;
 use crate::model::Input;
 use crate::shape::{Anchor, CallflowShape, MediaMode};
 
-const ANCHORS: &[Anchor] = &[Anchor::InitialInvite, Anchor::Answer, Anchor::Ack, Anchor::Bye];
-
 /// How long both sides talk before the BYE. The reference clips are 2 s;
 /// classification needs ≥100 ms of voiced audio, so 1.5 s gives a wide margin
 /// while keeping the real-clock variant fast.
 const TALK_MS: u64 = 1_500;
 
+/// The functional body of the `basic-call-media` shape (descriptor in
+/// `e2e_model::registry`).
 pub struct BasicCallMedia;
 
 fn sdp(name: &str, ip: &str, port: u16) -> String {
@@ -36,12 +36,6 @@ fn sdp(name: &str, ip: &str, port: u16) -> String {
 
 #[async_trait(?Send)]
 impl CallflowShape for BasicCallMedia {
-    fn id(&self) -> &str {
-        "basic-call-media"
-    }
-    fn anchors(&self) -> &[Anchor] {
-        ANCHORS
-    }
     fn agents(&self) -> &[&str] {
         &["alice", "bob1"]
     }

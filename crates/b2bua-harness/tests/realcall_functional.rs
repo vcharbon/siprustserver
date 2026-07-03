@@ -17,8 +17,8 @@
 
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use scenario_harness::realcall::scenarios::{
-    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, Refer, ReferCharlieReject,
-    Reinvite,
+    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate, Refer,
+    ReferCharlieReject, Reinvite,
 };
 use scenario_harness::realcall::{run_asserting, run_collecting, CallEnv};
 use scenario_harness::{Agent, RealCallScenario};
@@ -86,6 +86,16 @@ async fn realcall_options_hold_no_leak() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn realcall_prack_update_no_leak() {
+    // RFC 3262 + 3311 through the SUT: reliable 183 (Require:100rel/RSeq) →
+    // PRACK/200 → 200/ACK → in-dialog UPDATE/200 → BYE. The b2bua relays the
+    // reliable provisional, the PRACK and the UPDATE end-to-end with no special
+    // config; the report gate below enforces the full RFC 3261/3262/3264 audit
+    // with NO allow_violation.
+    assert_no_leak("realcall-prack-update", &PrackUpdate).await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn realcall_long_call_no_leak() {
     // Default `for_functional` long_hold (2 s) holds the call past its single
     // in-dialog OPTIONS ping then BYEs. The harness keepalive interval is 30 s
@@ -111,24 +121,23 @@ async fn refer_scene(name: &str) -> (B2buaScene, Agent) {
     (scene, charlie)
 }
 
-/// Build a `CallEnv` for a refer scenario: binds charlie as the transfer target
-/// and wires the REFER `X-Api-Call` authorization. `refer_pin` → charlie's addr
-/// and `refer_key` → the key the scripted `/call/refer` allows, so `env`'s
-/// `refer_api_call()` emits `{"refer_key":"refer-allow-c","destination":{…}}` —
-/// the exact JSON the existing `refer_allow` test hand-writes. `refer_to()`
-/// points the Refer-To at charlie's address.
+/// Build a `CallEnv` for a refer scenario: binds charlie as the transfer
+/// target. The env carries NO refer wiring anymore — the transfer target
+/// resolves through the egress seam (`env.callee("charlie")` → charlie's bound
+/// socket under the functional `Transparent` policy), and the `refer_key` is
+/// per-run SUT auth data fed into the scenario's construction
+/// (`Refer::new(REFER_KEY)`), so `env.refer_authorization(REFER_KEY)` emits
+/// `{"refer_key":"refer-allow-c","destination":{…}}` — the same payload the
+/// existing `refer_allow` test hand-writes.
 fn refer_env<'a>(name: &str, scene: &'a B2buaScene, charlie: &'a Agent) -> CallEnv<'a> {
-    let mut env = CallEnv::for_functional(
+    CallEnv::for_functional(
         &scene.alice,
         &scene.bob,
         Some(charlie),
         scene.b2bua.addr,
         "X-Loadgen-Id",
         format!("{name}-tok"),
-    );
-    env.refer_key = REFER_KEY.to_string();
-    env.refer_pin = Some(charlie.addr());
-    env
+    )
 }
 
 #[tokio::test(start_paused = true)]
@@ -137,7 +146,7 @@ async fn realcall_refer_no_leak() {
     let (scene, charlie) = refer_scene(name).await;
     let env = refer_env(name, &scene, &charlie);
 
-    run_asserting(&Refer, &env).await;
+    run_asserting(&Refer::new(REFER_KEY), &env).await;
 
     // After alice BYEs, the SUT relays a BYE to BOTH downstream legs (bob + charlie)
     // and reaps the call only once each answers `200`. The scenario's own 150 ms
@@ -233,7 +242,7 @@ async fn realcall_refer_charlie_reject_no_leak() {
     let (scene, charlie) = refer_scene(name).await;
     let env = refer_env(name, &scene, &charlie);
 
-    assert_expected_failure_no_leak(name, &ReferCharlieReject, &env).await;
+    assert_expected_failure_no_leak(name, &ReferCharlieReject::new(REFER_KEY), &env).await;
 
     // The scope-driven teardown BYEs the still-live A↔B; pump bob (and charlie,
     // harmless — its leg was already declined) so the relayed b-leg BYE is answered

@@ -33,6 +33,7 @@ pub mod agent;
 pub mod anchors;
 pub mod callflow;
 pub mod dsl;
+pub mod egress;
 pub mod loadbind;
 pub mod realcall;
 pub mod report;
@@ -50,11 +51,12 @@ pub const SIMULATED_TRANSIT_DELAY_MS: u64 = 100;
 // The fluent, dialog-aware DSL (auto-generates correct-by-default B2B messages).
 // This is the primary surface — scenarios should not hand-author headers.
 pub use agent::{
-    Agent, CancelHandle, ClientInvite, Dialog, Harness, InDialogTxn, Invite, Proxy, Respond,
-    ServerTxn, StepError,
+    Agent, CancelHandle, ClientInvite, Dialog, Harness, InDialogRequest, InDialogTxn, Invite,
+    OutOfDialogRequest, Proxy, Respond, ServerTxn, StepError,
 };
-// The Send agent factory for the load-test driver (`crates/loadgen`).
-pub use loadbind::AgentBinder;
+// The Send agent factory for the load-test driver (`crates/loadgen`), plus the
+// dependency-light check-verdict projection a sampled page renders.
+pub use loadbind::{AgentBinder, CheckNote};
 // The low-level scenarios-as-data DSL — for raw/torture cases that must send
 // exact (possibly malformed) bytes. `dsl::Agent` is the data-DSL agent handle;
 // the fluent `agent::Agent` (re-exported above) is the stateful UA.
@@ -64,11 +66,14 @@ pub use anchors::{AnchorKeys, AnchorMsgKind, AnchorTag};
 // / `callflow::hangup` / `callflow::Call` without re-typing the handshake.
 pub use callflow::{establish, hangup, Call, ANSWER_SDP, OFFER_SDP};
 pub use dsl::{AgentId, Match, Scenario, Step};
+// The layout-owned egress model (shared with the e2e framework via
+// `e2e_model::egress`): how a topology realizes a logical INVITE on its wire.
+pub use egress::{ApiCall, CalleeTarget, EgressPolicy, EgressRewrite};
 pub use run::{run, ExpectOutcome, RunReport};
 // The portable real-call scenarios shared by the load generator and the
 // in-process functional leak gate (`realcall::run_asserting` for happy-path
 // flows, `realcall::run_collecting` for the voluntarily-failing ones).
 pub use realcall::{
-    run_asserting, run_collecting, AsEmergency, CallCtx, CallEnv, CallScope, RealCallScenario,
-    ScenarioId,
+    run_asserting, run_collecting, CallCtx, CallEnv, CallScope, Challenge, ChallengeResponder,
+    CoreIdentity, RealCallScenario, ScenarioId,
 };

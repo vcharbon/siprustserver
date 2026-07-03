@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoadProfile",
+  "description": "The complete declarative load-run spec. Every field carries a `#[serde(default)]`\nso a partial profile is legal (its omitted fields fall back to the same\ndefaults the CLI flags carry), and the driver/CLI layer applies the\nflag-overrides-profile precedence on top.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "backgroundRecordEvery": {
+      "description": "Record roughly 1 call in N's flow (the background sampling fraction);\n`1` = full recording.",
+      "type": "integer",
+      "format": "uint64",
+      "default": 64,
+      "minimum": 0
+    },
+    "cps": {
+      "description": "Offered call rate (calls per second). The governor's *initial* target;\n`POST /rate` re-targets it live.",
+      "type": "number",
+      "format": "double",
+      "default": 10.0
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "durationSecs": {
+      "description": "How long to offer load, in seconds.",
+      "type": "integer",
+      "format": "uint64",
+      "default": 60,
+      "minimum": 0
+    },
+    "maxInFlight": {
+      "description": "Max concurrent in-flight calls (offered load above this is dropped+counted).",
+      "type": "integer",
+      "format": "uint",
+      "default": 2000,
+      "minimum": 0
+    },
+    "mix": {
+      "description": "The scenario MIX: which shapes run, their pick weights, and per-scenario\nattachments/overrides. Empty = the registry's shipped default mix.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MixSpec"
+      }
+    },
+    "recvTimeoutMs": {
+      "description": "Per-`recv` wall-clock wait bound (ms) handed to every agent.",
+      "type": "integer",
+      "format": "uint64",
+      "default": 5000,
+      "minimum": 0
+    },
+    "reportIntervalSecs": {
+      "description": "Re-write the on-disk report every N seconds during the run (`0` = only at\nthe end).",
+      "type": "integer",
+      "format": "uint64",
+      "default": 0,
+      "minimum": 0
+    },
+    "robustness": {
+      "description": "The GLOBAL loss/retransmit defaults applied to every mix entry that has no\nper-scenario override.",
+      "$ref": "#/$defs/Robustness",
+      "default": {
+        "dropRate": 0.0,
+        "retransmit": false
+      }
+    },
+    "sampleCap": {
+      "description": "Max stored callflow samples per `(scenario × result-class)` bucket.",
+      "type": "integer",
+      "format": "uint32",
+      "default": 10,
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "MixSpec": {
+      "description": "One scenario-mix entry: the shape id + its pick weight, an optional attached\nTest case (its binding pool drives per-call identities/dwells), and optional\nper-scenario loss/retransmit overrides of the profile's global [`Robustness`].",
+      "type": "object",
+      "properties": {
+        "case": {
+          "description": "Path to an authored Test-case JSON attached to THIS mix entry (overrides\nthe run's global `--case`). Relative paths resolve against the process CWD.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dropRate": {
+          "description": "Per-scenario drop-rate override (absent = inherit the global\n[`Robustness::drop_rate`]).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "retransmit": {
+          "description": "Per-scenario retransmit override (absent = inherit the global\n[`Robustness::retransmit`]).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "shape": {
+          "description": "The shape's stable id (its `ShapeDescriptor` id / CLI `--scenario` name).",
+          "type": "string"
+        },
+        "weight": {
+          "description": "Pick weight (relative). Defaults to `1.0`.",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "shape"
+      ]
+    },
+    "Robustness": {
+      "description": "The GLOBAL loss/retransmit defaults (a mix entry inherits these unless it\noverrides them). Both default off, so an un-tuned profile is byte-for-byte the\nhistoric behaviour.",
+      "type": "object",
+      "properties": {
+        "dropRate": {
+          "description": "Simulated packet-drop probability on every call's mux legs (`0` = off).",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "retransmit": {
+          "description": "Auto-retransmit lost signaling per real SIP timers, so a rare drop is\nrecovered instead of failing the call.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

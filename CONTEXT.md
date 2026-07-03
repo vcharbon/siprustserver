@@ -61,10 +61,12 @@ INVITE/180/200/ACK dance (`establish`/`hangup`/`Call`), parameterised only on th
 address the caller routes *through* (a `B2buaSut` addr single-SUT, a proxy VIP for
 HA). It is the one home for the handshake both harnesses used to hand-roll. This
 is **distinct** from the ADR-0018 **"Callflow shape"** — a registered,
-parameterised *template* (data) in the e2e test-management framework that the
-executor runs over compatible Infra shapes. The choreography is code you call;
-the shape is a declared artifact you register. (Both differ again from
-failover-harness's ADR-0013 **CallScenario** safe-point DSL.)
+parameterised *template* (since ADR-0021 declared as a **Shape descriptor** in
+the unified registry, shared with the load fleet) that the executor runs over
+compatible Infra shapes. The choreography is code you call; the shape is a
+declared artifact you register. (Both differ again from failover-harness's
+ADR-0013 **CallScenario** safe-point DSL, and from the fallible
+`scenario_harness::realcall` choreography the load fleet drives.)
 _Avoid_: naming the choreography "CallScenario" or "Callflow shape".
 
 ### Typed messages
@@ -471,9 +473,13 @@ that a fused `#[tokio::test]` currently interleaves and this layer pulls apart.
 A compiled-Rust, registered message-sequence template (basic call, re-routing,
 re-routing + PRACK) parameterised over a declared **input-data schema** and the
 **checks** it supports. Built on the fluent `Harness`/`Agent` DSL. Selected — not
-authored — from the website; a new shape is Rust + redeploy.
-_Avoid_: "scenario" (triple-overloaded — the Rust `Scenario` struct, the TS
-instance, and the JSON **Test case** all collide); "framework".
+authored — from the website; a new shape is Rust + redeploy. Since ADR-0021 a
+shape is declared exactly once, as a **Shape descriptor** in the unified open
+`ShapeRegistry` (`e2e-model`), and may carry a **functional body**, a **load
+body**, or both — see "Loadgen fusion vocabulary".
+_Avoid_: "scenario" (quadruple-overloaded — the Rust `Scenario` struct, the TS
+instance, the JSON **Test case**, and loadgen's `--scenario` selector all
+collide; a registered shape is a **shape**); "framework".
 
 **Infra shape**:
 A compiled-Rust topology + clock a Callflow shape runs under — **fake** (Alice/
@@ -504,8 +510,11 @@ invariant exists to forbid (see the `force-b-leg-through-lb-proxy` finding).
 A committed JSON file = input data (From/To/R-URI, timers, specific header
 content) + **checks** + the **list of compatible Callflow shapes** it can drive
 (validated against each shape's declared input schema at load). The unit a user
-authors from the website.
-_Avoid_: "scenario" (the overloaded word this replaces).
+authors from the website. Since ADR-0021 the same document also feeds the load
+fleet (attached to a mix entry via `--case` / `case=`), optionally carrying a
+**binding pool** and `allowViolations`.
+_Avoid_: "scenario" (the overloaded word this replaces — loadgen's `--scenario`
+flag selects a registered **shape** by id, never a Test case).
 
 **Endpoint config**:
 A JSON file binding an **Infra shape**'s logical roles (alice, bob1, sut…) to
@@ -558,3 +567,86 @@ b2b / HA); here a campaign is a test *batch*.
 One executed (**Test case**, **Callflow shape**, **Infra shape**) cell and its
 recorded artifacts (SVG call diagram, wire trace, **check** verdicts, RFC audit,
 received RTP). Generated, not committed.
+
+## Loadgen fusion vocabulary
+
+The language of the loadgen × e2e fusion
+([ADR-0021](./docs/adr/0021-loadgen-e2e-fusion.md)): **one axis data model**
+(`crates/e2e-model` — Test case, checks, Endpoint config, shape descriptors,
+Load profile) feeding **two deliberately distinct run surfaces** — the
+functional per-cell executor (`e2e-core`: `!Send`, paused-clock capable,
+panic-on-deviation) and the load fleet (`loadgen`: `Send`, wall-clock, fallible,
+rate-driven). The axes above (Test case, Endpoint config, Check, Message anchor)
+carry over unchanged; these are the fusion-specific terms.
+
+**Shape descriptor** (`e2e_model::ShapeDescriptor`):
+The ONE declaration of a **Callflow shape** in the unified open `ShapeRegistry`:
+its stable id (**one id space** across both surfaces — the Test-case selector,
+load report directory, metrics label, and functional-body attachment key are the
+same string; a duplicate id panics at registration), its published **Message
+anchors** and required input, an optional authoring params schema, the load
+attributes the driver consults per call (`needs_charlie`/`needs_bob2`/
+`emergency`, default/failure mix weights), and the optional **load body**
+factory. Third-party crates `register()` their own on top of `with_defaults()`.
+_Avoid_: "scenario" for a registered shape (say **shape**; `--scenario name=w`
+selects one by id but does not name the concept); declaring a shape's
+id/attributes in more than one place (the silent drift the two former closed
+registries — `e2e-core`'s map and loadgen's match tables — used to invite).
+
+**Functional body** vs **Load body** (a **dual-body shape** carries both):
+The two run-surface implementations a **Shape descriptor** may carry. The
+*functional* body is the `!Send` `CallflowShape` that `e2e-core` `attach()`es by
+id (it drives an `InfraRuntime`, which cannot live in the light model crate;
+strict — a deviation panics the cell). The *load* body is the `Send + Sync`
+`RealCallScenario` minted by the descriptor's `LoadFactory` from per-run
+`ScenarioInputs` (fallible `try_*` surface — a deviation is a counted
+`StepError`). `rerouting_prack` is the first dual-body shape.
+_Avoid_: merging the two body types or their engines (the thread/clock/
+failure-model split is load-bearing — ADR-0021); "LoadScenario" as the trait
+name in new code (a re-export alias of `RealCallScenario`).
+
+**Binding pool**:
+A **Test case**'s optional `bindings: { mode, entries }` — a **wrap-allowed**
+pool of `Input` overlays (core From/To/R-URI + extras), one entry resolved per
+call (`seq` walk or seeded `random`) and merged over the case's base input, with
+`${seq}` / `${seq:N}` / `${rand:N}` expansion tokens — so ONE authored case
+dials a finite subscriber population (identities repeat past the pool by
+design). Recognized extras become per-call dwell overrides. Malformed tokens and
+empty pools fail at startup (`validate_case`), never silently mid-run.
+_Avoid_: leaking pool identities into Prometheus labels (buckets stay
+scenario-keyed — a pool never becomes label cardinality); "user database" (it is
+an overlay pool, not a store).
+
+**Correlation strategy** (`loadgen::Correlation`):
+The pluggable per-run answer to "how does the per-call token travel through the
+SUT so the mux can demux an arriving initial leg": two halves — **stamp**
+(written into the outgoing INVITE by `CorrelationStamp` inside
+`CallEnv::outgoing_invite`) and **extract** (recovered by the mux demux).
+Strategies: `header` (the relayed `X-Loadgen-Id`; needs `B2BUA_RELAY_HEADERS`),
+`header_templated` (the token rides a structured header a third-party SUT
+already relays — RFC 7433 UUI, PCV `icid-value`), `to_user` (the token IS the
+To user-part — zero SUT cooperation).
+_Avoid_: assuming SUT cooperation (the assumption `to_user` removes); conflating
+it with the **egress rewrite** (identity vs addressing — orthogonal halves of
+`outgoing_invite`).
+
+**Load profile**:
+The authored JSON run spec for the load fleet (`--load-profile`, schema
+`load-profile.schema.json`): rate/duration/concurrency, sampling + report
+cadence, global loss/retransmit robustness, and the shape **mix** (id, weight,
+attached case, per-entry overrides). The load analogue of a **Campaign**: a
+Campaign expands a functional {case × shape × infra} matrix; a Load profile
+parameterizes one sustained run. Profile supplies defaults; an explicit CLI flag
+overrides. The rate is live-retargetable (`POST /rate`, re-anchoring governor).
+_Avoid_: "campaign" for a load run; putting addressing/egress in it (that is the
+environment axis — **Endpoint config**).
+
+**check_fail** (result class):
+The load report/metrics class an otherwise-OK **sampled** call reclassifies to
+when an attached Test case's check fails (verdicts, pass AND fail, render on the
+sampled callflow page). Checks and `allowViolations` run on sampled calls only —
+the unsampled majority binds no recording, which is what keeps memory flat — so
+this is a **per-sample oracle, not a per-call gate**, exactly like the RFC
+audit; raise coverage via `--sample-cap` / `--background-record-every 1`.
+_Avoid_: reading `check_fail` counts as full-population totals; using checks as
+a per-call SLA gate (population gating stays with result classes + metrics).

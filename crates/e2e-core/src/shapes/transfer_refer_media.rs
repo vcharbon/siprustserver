@@ -27,20 +27,13 @@ use crate::media::MediaCapture;
 use crate::model::Input;
 use crate::shape::{Anchor, CallflowShape, MediaMode};
 
-const ANCHORS: &[Anchor] = &[
-    Anchor::InitialInvite,
-    Anchor::Answer,
-    Anchor::Ack,
-    Anchor::Refer,
-    Anchor::ReInvite,
-    Anchor::Bye,
-];
-
 /// How long A and bob2 talk after the transfer completes, before the BYE. The
 /// reference clips are 2 s; the classifier needs ≥100 ms of voiced audio, so
 /// 1.5 s is a wide margin that stays fast on the real clock.
 const TALK_MS: u64 = 1_500;
 
+/// The functional body of the `transfer-refer-media` shape (descriptor in
+/// `e2e_model::registry`).
 pub struct TransferReferMedia;
 
 /// A sendrecv PCMA/PCMU offer/answer describing `port` on `ip`. `sendrecv` keeps
@@ -54,12 +47,6 @@ fn sdp(name: &str, ip: &str, port: u16) -> String {
 
 #[async_trait(?Send)]
 impl CallflowShape for TransferReferMedia {
-    fn id(&self) -> &str {
-        "transfer-refer-media"
-    }
-    fn anchors(&self) -> &[Anchor] {
-        ANCHORS
-    }
     fn agents(&self) -> &[&str] {
         &["alice", "bob1", "bob2"]
     }

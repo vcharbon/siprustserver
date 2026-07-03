@@ -11,18 +11,12 @@ use crate::shape::{Anchor, CallflowShape};
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 
-const ANCHORS: &[Anchor] = &[Anchor::InitialInvite, Anchor::Answer, Anchor::Ack, Anchor::Bye];
-
+/// The functional body of the `basic-call` shape (its descriptor — id, anchors
+/// — is declared once in `e2e_model::registry`).
 pub struct BasicCall;
 
 #[async_trait(?Send)]
 impl CallflowShape for BasicCall {
-    fn id(&self) -> &str {
-        "basic-call"
-    }
-    fn anchors(&self) -> &[Anchor] {
-        ANCHORS
-    }
     fn agents(&self) -> &[&str] {
         &["alice", "bob1"]
     }

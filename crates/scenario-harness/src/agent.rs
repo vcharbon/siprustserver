@@ -47,14 +47,16 @@ use std::time::Duration;
 use layer_harness::{Channel, NetworkTag, Recorder, RunContext, TransportKind};
 use sip_clock::Clock;
 use sip_message::generators::{
-    generate_ack_for_2xx, generate_cancel, generate_in_dialog_request,
+    generate_ack_for_2xx, generate_ack_for_non_2xx, generate_cancel, generate_in_dialog_request,
     generate_out_of_dialog_request,
     generate_response, strip_route_uri_to_request_uri, ContactSpec, GenerateAckFor2xxOpts,
     GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts, GenerateResponseOpts,
     InDialogMethod, InviteClientTransactionHandle, OutOfDialogMethod, SipTransport, StackDialog,
     ViaSpec, B2BUA_ALLOW, B2BUA_SUPPORTED,
 };
-use sip_message::message_helpers::{get_header, get_headers};
+use sip_message::message_helpers::{get_header, get_headers, set_header};
+
+use crate::realcall::auth::{parse_challenge, ChallengeResponder};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{serialize, SipHeader, SipMessage, SipParser, SipRequest, SipResponse};
 use sip_net::{
@@ -366,8 +368,9 @@ impl Harness {
         self.anchors.borrow_mut().push(crate::anchors::AnchorTag {
             agent: agent.name().to_string(),
             anchor: anchor.into(),
-            rx_addr: agent.addr(),
+            agent_addr: agent.addr(),
             keys: keys.into(),
+            sent: false,
         });
     }
 
@@ -805,6 +808,16 @@ impl Agent {
             custom_params: vec![],
         }
     }
+    /// A fresh top `Via` header value (new branch) — a new client transaction
+    /// (RFC 3261 §8.1.1.7) for a resend (e.g. the §22.2 authenticated INVITE).
+    fn via_header(&self) -> String {
+        format!(
+            "SIP/2.0/UDP {}:{};branch={}",
+            self.addr.ip(),
+            self.addr.port(),
+            self.branch()
+        )
+    }
     fn contact(&self) -> ContactSpec {
         ContactSpec {
             user: self.name.clone(),
@@ -920,6 +933,33 @@ impl Agent {
             caller: self,
             peer,
             sdp: None,
+            extra_headers: vec![],
+            wire_dst: None,
+            from_uri: None,
+            to_uri: None,
+            request_uri: None,
+        }
+    }
+
+    /// Begin a generic **out-of-dialog** request of any [`OutOfDialogMethod`]
+    /// (OPTIONS, MESSAGE, SUBSCRIBE, …) addressed to `peer` — the any-method
+    /// sibling of [`invite`](Agent::invite). The mechanical SIP layer (Via +
+    /// fresh branch, From-tag, Call-ID, CSeq, Contact, Max-Forwards,
+    /// Content-Type/Length) is auto-filled exactly like the INVITE path; the
+    /// caller supplies only headers/body. Returns a builder; finish with the
+    /// fallible [`OutOfDialogRequest::try_send`] (load lane) or the panicking
+    /// [`OutOfDialogRequest::send`] (functional tests).
+    ///
+    /// For a dialog-CREATING INVITE keep using [`invite`](Agent::invite) — this
+    /// builder tracks no dialog state (a non-INVITE out-of-dialog transaction
+    /// creates none).
+    pub fn request<'a>(&'a self, method: OutOfDialogMethod, peer: &'a Agent) -> OutOfDialogRequest<'a> {
+        OutOfDialogRequest {
+            caller: self,
+            peer,
+            method,
+            body: None,
+            content_type: None,
             extra_headers: vec![],
             wire_dst: None,
             from_uri: None,
@@ -1296,6 +1336,204 @@ impl<'a> Invite<'a> {
     }
 }
 
+/// Builder for a generic out-of-dialog request (any [`OutOfDialogMethod`]) —
+/// see [`Agent::request`]. Mirrors [`Invite`]'s knobs (extra headers, optional
+/// body, `through` wire routing, From/To/R-URI overrides) with a **fallible**
+/// send for the load lane.
+pub struct OutOfDialogRequest<'a> {
+    caller: &'a Agent,
+    peer: &'a Agent,
+    method: OutOfDialogMethod,
+    body: Option<Vec<u8>>,
+    /// Content-Type for a non-empty body (defaults to `application/sdp`).
+    content_type: Option<String>,
+    extra_headers: Vec<SipHeader>,
+    /// Wire destination override (send via a proxy/SUT; R-URI still targets peer).
+    wire_dst: Option<SocketAddr>,
+    from_uri: Option<String>,
+    to_uri: Option<String>,
+    request_uri: Option<String>,
+}
+
+impl<'a> OutOfDialogRequest<'a> {
+    /// Attach an SDP body (`Content-Type: application/sdp`).
+    pub fn with_sdp(mut self, sdp: &str) -> Self {
+        self.body = Some(sdp.as_bytes().to_vec());
+        self.content_type = None;
+        self
+    }
+
+    /// Attach an arbitrary body with an explicit Content-Type.
+    pub fn with_body(mut self, content_type: &str, body: impl Into<Vec<u8>>) -> Self {
+        self.body = Some(body.into());
+        self.content_type = Some(content_type.to_string());
+        self
+    }
+
+    /// Attach an arbitrary extra header. Repeatable; order preserved.
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.extra_headers.push(SipHeader { name: name.to_string(), value: value.to_string() });
+        self
+    }
+
+    /// Send the request to `proxy` instead of directly to the peer (the
+    /// Request-URI still targets the peer) — the same wire routing as
+    /// [`Invite::through`].
+    pub fn through(mut self, proxy: SocketAddr) -> Self {
+        self.wire_dst = Some(proxy);
+        self
+    }
+
+    /// Override the From URI.
+    pub fn from(mut self, uri: impl Into<String>) -> Self {
+        self.from_uri = Some(uri.into());
+        self
+    }
+
+    /// Override the To URI.
+    pub fn to(mut self, uri: impl Into<String>) -> Self {
+        self.to_uri = Some(uri.into());
+        self
+    }
+
+    /// Override the Request-URI.
+    pub fn ruri(mut self, uri: impl Into<String>) -> Self {
+        self.request_uri = Some(uri.into());
+        self
+    }
+
+    /// Generate the request (all mechanical headers filled in), send it
+    /// **fallibly**, and return the client transaction to
+    /// [`try_expect`](InDialogTxn::try_expect) the response on. A transport
+    /// failure surfaces as [`StepError::Transport`], never a panic.
+    pub async fn try_send(self) -> Result<InDialogTxn, StepError> {
+        let caller = self.caller;
+        let peer = self.peer;
+        let wire_dst = self.wire_dst.unwrap_or(peer.addr);
+        let request_uri = self
+            .request_uri
+            .unwrap_or_else(|| format!("sip:{}@{}:{}", peer.name, peer.addr.ip(), peer.addr.port()));
+        let opts = GenerateOutOfDialogRequestOpts {
+            request_uri,
+            call_id: format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip()),
+            from_uri: self.from_uri.unwrap_or_else(|| caller.uri.clone()),
+            from_tag: caller.tag(),
+            to_uri: self.to_uri.unwrap_or_else(|| peer.uri.clone()),
+            to_tag: None,
+            cseq: 1,
+            via: Some(caller.via()),
+            contact: Some(caller.contact()),
+            max_forwards: Some(70),
+            body: self.body.unwrap_or_default(),
+            content_type: self.content_type,
+            extra_headers: self.extra_headers,
+        };
+        let req = generate_out_of_dialog_request(self.method, &opts);
+        caller.try_send(&SipMessage::Request(req), wire_dst).await?;
+        Ok(InDialogTxn { agent: caller.clone() })
+    }
+
+    /// Panicking [`try_send`](Self::try_send) for functional tests.
+    pub async fn send(self) -> InDialogTxn {
+        match self.try_send().await {
+            Ok(txn) => txn,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    /// **RFC 3261 §22.2 authenticated send** — the out-of-dialog twin of the
+    /// INVITE choreography's auth retry (see [`crate::realcall::auth`]), for a
+    /// future REGISTER / OPTIONS shape against a challenging registrar. Sends the
+    /// request, awaits its `expect` final; if it is a `401`/`407` and `responder`
+    /// is `Some`, adds the credential (a non-INVITE final needs no ACK,
+    /// RFC 3261 §17.1.2.2), bumps the CSeq, and resends ONCE with a fresh Via
+    /// branch, then awaits again. `responder == None` (the default) makes this a
+    /// plain send-and-await with no retry — a `401`/`407` surfaces as
+    /// `WrongStatus`, exactly as `try_send` + `try_expect` would.
+    pub async fn try_send_authed(
+        self,
+        responder: Option<&dyn ChallengeResponder>,
+        expect: u16,
+    ) -> Result<SipResponse, StepError> {
+        let caller = self.caller.clone();
+        let peer = self.peer;
+        let wire_dst = self.wire_dst.unwrap_or(peer.addr);
+        let request_uri = self
+            .request_uri
+            .clone()
+            .unwrap_or_else(|| format!("sip:{}@{}:{}", peer.name, peer.addr.ip(), peer.addr.port()));
+        let mut opts = GenerateOutOfDialogRequestOpts {
+            request_uri: request_uri.clone(),
+            call_id: format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip()),
+            from_uri: self.from_uri.clone().unwrap_or_else(|| caller.uri.clone()),
+            from_tag: caller.tag(),
+            to_uri: self.to_uri.clone().unwrap_or_else(|| peer.uri.clone()),
+            to_tag: None,
+            cseq: 1,
+            via: Some(caller.via()),
+            contact: Some(caller.contact()),
+            max_forwards: Some(70),
+            body: self.body.clone().unwrap_or_default(),
+            content_type: self.content_type.clone(),
+            extra_headers: self.extra_headers.clone(),
+        };
+        let method = self.method;
+
+        // At most ONE authenticated resend.
+        let mut auth_retries_left: u8 = if responder.is_some() { 1 } else { 0 };
+        loop {
+            let req = generate_out_of_dialog_request(method, &opts);
+            caller.try_send(&SipMessage::Request(req), wire_dst).await?;
+            // Raw-receive so a 401/407 keeps its challenge header (a real digest
+            // responder reads `nonce`/`realm` off it); a matching final returns
+            // straight away, an unsolicited 100 is absorbed.
+            let resp = recv_response_raw(&caller).await?;
+            if resp.status == expect {
+                return Ok(resp);
+            }
+            let is_challenge = matches!(resp.status, 401 | 407);
+            // Not a retriable challenge (or no retry budget): surface the
+            // deviation exactly as `try_expect(expect)` would.
+            if !(is_challenge && auth_retries_left > 0 && responder.is_some()) {
+                return Err(StepError::WrongStatus {
+                    who: caller.name.clone(),
+                    expected: expect,
+                    got: resp.status,
+                    reason: resp.reason.clone(),
+                });
+            }
+            let responder = responder.expect("guarded above");
+            let challenge = parse_challenge(&resp).unwrap_or(crate::realcall::auth::Challenge {
+                status: resp.status,
+                header_value: String::new(),
+            });
+            // Responder declines → surface the challenge as a plain deviation.
+            let Some(credential) =
+                responder.respond(&challenge, method.as_str(), &request_uri)
+            else {
+                return Err(StepError::WrongStatus {
+                    who: caller.name.clone(),
+                    expected: expect,
+                    got: resp.status,
+                    reason: resp.reason.clone(),
+                });
+            };
+            // A non-INVITE final needs no ACK (§17.1.2.2). Resend with the
+            // credential, a bumped CSeq, and a fresh Via branch (a new
+            // transaction, §22.2).
+            opts.cseq += 1;
+            opts.via = Some(caller.via());
+            opts.extra_headers
+                .retain(|h| !h.name.eq_ignore_ascii_case(challenge.credential_header()));
+            opts.extra_headers.push(SipHeader {
+                name: challenge.credential_header().to_string(),
+                value: credential,
+            });
+            auth_retries_left -= 1;
+        }
+    }
+}
+
 /// UAC-side INVITE client transaction + the dialog it is establishing.
 pub struct ClientInvite {
     agent: Agent,
@@ -1338,6 +1576,27 @@ impl ClientInvite {
         Ok(resp)
     }
 
+    /// Receive the next response to this INVITE **without asserting its status**
+    /// (an unsolicited `100 Trying` is still absorbed). Unlike
+    /// [`try_expect`](Self::try_expect) this surfaces a `401`/`407` challenge as an
+    /// `Ok(response)` the auth retry point can inspect, rather than collapsing it
+    /// to `WrongStatus`. It does NOT learn dialog state (a non-2xx final seeds no
+    /// dialog); the caller learns from a 2xx via [`try_expect`].
+    pub(crate) async fn try_recv_response(&mut self) -> Result<SipResponse, StepError> {
+        loop {
+            match self.agent.try_recv().await? {
+                SipMessage::Response(r) if r.status == 100 => continue,
+                SipMessage::Response(r) => return Ok(r),
+                SipMessage::Request(r) => {
+                    return Err(StepError::UnexpectedKind {
+                        who: self.agent.name.clone(),
+                        detail: format!("got a {} request, expected a response", r.method),
+                    })
+                }
+            }
+        }
+    }
+
     /// Learn the remote tag / target / route set from a response — the dialog
     /// bookkeeping shared by [`expect`](Self::expect) and
     /// [`try_expect`](Self::try_expect).
@@ -1365,6 +1624,90 @@ impl ClientInvite {
                 self.dialog.route_set = rr.iter().rev().map(|s| s.to_string()).collect();
             }
         }
+    }
+
+    /// The Request-URI this INVITE targets (its wire R-URI) — the request-line
+    /// input a credential is computed over ([`ChallengeResponder::respond`]).
+    pub fn ruri(&self) -> &str {
+        &self.original_invite.uri
+    }
+
+    /// **RFC 3261 §22.2 authentication retry** — the ONE auth adapter point wired
+    /// into the INVITE choreography (see [`crate::realcall::auth`]). Given the
+    /// `401`/`407` `challenge` this INVITE just drew and a configured `responder`:
+    ///
+    /// 1. ACK the challenge response (RFC 3261 §17.1.1.3: a non-2xx final to an
+    ///    INVITE MUST be ACKed to complete the client transaction) via
+    ///    [`generate_ack_for_non_2xx`], echoing the INVITE's Via/Route;
+    /// 2. ask the `responder` for the credential header value;
+    /// 3. resend THIS INVITE with the credential header added, its CSeq bumped by
+    ///    one, and a fresh Via branch (a new client transaction), and re-point
+    ///    `self` (its `original_invite`/`cancel_handle`/`ack` targets) at the
+    ///    retried transaction.
+    ///
+    /// Returns `Ok(true)` when it resent (the caller then awaits the retried
+    /// transaction's response), `Ok(false)` when the responder DECLINED (no
+    /// resend — the caller surfaces the original challenge as `status_401/407`),
+    /// or `Err` on a transport failure. The default (no responder) never reaches
+    /// here, so today's classification is unchanged.
+    pub(crate) async fn ack_and_resend_with_auth(
+        &mut self,
+        challenge: &SipResponse,
+        responder: &dyn ChallengeResponder,
+    ) -> Result<bool, StepError> {
+        // 1. Complete the challenged INVITE transaction (§17.1.1.3). The ACK for a
+        //    non-2xx reuses the INVITE's Via/branch + CSeq number, so it matches
+        //    the same transaction the challenge answered.
+        let ack = generate_ack_for_non_2xx(&self.original_invite, challenge);
+        self.agent.try_send(&SipMessage::Request(ack), self.wire_dst).await?;
+
+        // 2. Ask the pluggable adapter for a credential. A missing/parsed-off
+        //    challenge still fires the responder (a static fixture ignores it);
+        //    `None` = decline → no retry.
+        let parsed = parse_challenge(challenge).unwrap_or(crate::realcall::auth::Challenge {
+            status: challenge.status,
+            header_value: String::new(),
+        });
+        let method = self.original_invite.method.to_string();
+        let Some(credential) = responder.respond(&parsed, &method, self.ruri()) else {
+            return Ok(false);
+        };
+
+        // 3. Rebuild THIS INVITE as a new transaction: bump CSeq, fresh Via
+        //    branch, add the credential header (RFC 3261 §22.2). Serialization is
+        //    driven by the header list + first line + body, so rewriting the
+        //    header vector (and re-parsing to keep the structured fields in step
+        //    for the later ACK/CANCEL) is a faithful resend.
+        let new_cseq = self.original_invite.cseq.seq + 1;
+        let mut headers = self.original_invite.headers.clone();
+        headers = set_header(&headers, "Via", &self.agent.via_header());
+        headers = set_header(&headers, "CSeq", &format!("{new_cseq} {method}"));
+        // Drop any prior credential of the same header (a second challenge round
+        // would replace it) then add this one.
+        headers.retain(|h| !h.name.eq_ignore_ascii_case(parsed.credential_header()));
+        headers.push(SipHeader {
+            name: parsed.credential_header().to_string(),
+            value: credential,
+        });
+
+        let bytes = sip_message::serialize_request_parts(&self.original_invite, &headers);
+        let resent = CustomParser::new().parse(&bytes).map_err(|e| StepError::Unparseable {
+            who: self.agent.name.clone(),
+            detail: format!("rebuilt authed INVITE did not parse: {e}"),
+        })?;
+        let SipMessage::Request(resent) = resent else {
+            return Err(StepError::UnexpectedKind {
+                who: self.agent.name.clone(),
+                detail: "rebuilt authed INVITE parsed as a response".to_string(),
+            });
+        };
+
+        self.agent.try_send(&SipMessage::Request(resent.clone()), self.wire_dst).await?;
+        // Re-point the transaction state at the retried INVITE: the CANCEL / ACK /
+        // dialog CSeq must all follow the new transaction, not the challenged one.
+        self.original_invite = resent;
+        self.dialog.local_cseq = new_cseq;
+        Ok(true)
     }
 
     /// A cheap, `Send + 'static` handle that can CANCEL this still-pending INVITE
@@ -1405,6 +1748,26 @@ impl ClientInvite {
     pub fn send_request(&mut self, method: InDialogMethod) -> InDialogRequest<'_> {
         InDialogRequest::new(self.agent.clone(), &mut self.dialog, self.fallback_addr, method)
             .with_fork_cseq(&mut self.fork_cseq)
+    }
+
+    /// PRACK the reliable provisional `reliable_1xx` (RFC 3262 §7.2), fallibly:
+    /// builds the `RAck` (`<RSeq> <CSeq-num> <CSeq-method>`) from the response's
+    /// own RSeq + CSeq and sends the PRACK on the early dialog. Returns the PRACK
+    /// client transaction to [`try_expect(200)`](InDialogTxn::try_expect) on. A
+    /// response with no (or an unparseable) `RSeq` is not PRACK-able — that
+    /// surfaces as [`StepError::UnexpectedKind`], never a panic.
+    pub async fn try_prack(
+        &mut self,
+        reliable_1xx: &SipResponse,
+    ) -> Result<InDialogTxn, StepError> {
+        let rack = rack_for(reliable_1xx).ok_or_else(|| StepError::UnexpectedKind {
+            who: self.agent.name.clone(),
+            detail: format!(
+                "cannot PRACK the {} {}: no parseable RSeq header (not a reliable provisional)",
+                reliable_1xx.status, reliable_1xx.reason
+            ),
+        })?;
+        self.send_request(InDialogMethod::Prack).with_rack(&rack).try_send().await
     }
 
     /// Generate and send the ACK for the 2xx (CSeq reused from the INVITE per
@@ -1619,14 +1982,38 @@ impl<'a> InDialogRequest<'a> {
         self
     }
 
-    /// Generate and send the request; returns its client transaction.
-    pub async fn send(mut self) -> InDialogTxn {
+    /// Generate and send the request; returns its client transaction. Panics on
+    /// a transport failure — use [`try_send`](Self::try_send) in the load lane.
+    pub async fn send(self) -> InDialogTxn {
+        match self.try_send().await {
+            Ok(txn) => txn,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    /// Fallible [`send`](Self::send) — the generic any-method in-dialog send for
+    /// the load lane: a transport failure surfaces as [`StepError::Transport`]
+    /// instead of a panic. The mechanical layer (Via/branch, CSeq bump, tags,
+    /// route set) is identical.
+    pub async fn try_send(mut self) -> Result<InDialogTxn, StepError> {
+        self.try_send_inner().await.map(|(txn, _)| txn)
+    }
+
+    /// [`try_send`](Self::try_send) that also returns the request as sent —
+    /// for tagging a message ANCHOR on a request no test agent receives (the
+    /// REFER whose receiver is the SUT; see `CallCtx::anchor_sent`). The common
+    /// path pays nothing for it (`try_send` discards the clone-free original).
+    pub async fn try_send_with_request(mut self) -> Result<(InDialogTxn, SipRequest), StepError> {
+        self.try_send_inner().await
+    }
+
+    async fn try_send_inner(&mut self) -> Result<(InDialogTxn, SipRequest), StepError> {
         let opts = GenerateInDialogRequestOpts {
             via: Some(self.agent.via()),
             contact: Some(self.agent.contact()),
             body: self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
-            rack: self.rack,
-            extra_headers: self.extra_headers,
+            rack: self.rack.take(),
+            extra_headers: std::mem::take(&mut self.extra_headers),
             ..Default::default()
         };
         // Per-fork addressing: generate against a dialog view with the chosen
@@ -1659,10 +2046,16 @@ impl<'a> InDialogRequest<'a> {
             self.dialog.local_cseq = res.dialog.local_cseq;
         }
         let dst = next_hop(self.dialog, self.fallback);
-        self.agent.send(&SipMessage::Request(res.request), dst).await;
-        InDialogTxn {
-            agent: self.agent.clone(),
-        }
+        // Send the wrapped request, then hand the original back (no clone).
+        let msg = SipMessage::Request(res.request);
+        self.agent.try_send(&msg, dst).await?;
+        let SipMessage::Request(request) = msg else { unreachable!() };
+        Ok((
+            InDialogTxn {
+                agent: self.agent.clone(),
+            },
+            request,
+        ))
     }
 }
 
@@ -1806,8 +2199,25 @@ impl<'a> Respond<'a> {
         self
     }
 
-    /// Generate and send the response.
+    /// Mark this provisional RELIABLE (RFC 3262 §3): stamps `Require: 100rel` +
+    /// `RSeq: <rseq>` so the peer must PRACK it. Only meaningful on a 101–199
+    /// response to a dialog-creating INVITE whose sender opted in
+    /// (`Supported`/`Require: 100rel`).
+    pub fn reliable(self, rseq: u32) -> Self {
+        self.with_header("Require", "100rel").with_header("RSeq", &rseq.to_string())
+    }
+
+    /// Generate and send the response. Panics on a transport failure — use
+    /// [`try_send`](Self::try_send) in the load lane.
     pub async fn send(self) {
+        if let Err(e) = self.try_send().await {
+            panic!("{e}");
+        }
+    }
+
+    /// Fallible [`send`](Self::send) for the load lane: a transport failure
+    /// surfaces as [`StepError::Transport`] instead of a panic.
+    pub async fn try_send(self) -> Result<(), StepError> {
         let txn = self.txn;
         // An explicit per-fork To-tag overrides (and does not disturb) the txn's
         // sticky auto-minted tag, so distinct early dialogs keep distinct tags.
@@ -1864,7 +2274,7 @@ impl<'a> Respond<'a> {
         // request's topmost Via sent-by. With a proxy in the path that Via is
         // the proxy's, so the response correctly traverses it back.
         let dst = top_via_addr(&txn.request).unwrap_or(txn.agent.addr);
-        txn.agent.send(&SipMessage::Response(resp), dst).await;
+        txn.agent.try_send(&SipMessage::Response(resp), dst).await
     }
 }
 
@@ -2030,6 +2440,25 @@ async fn expect_response(agent: &Agent, status: u16) -> SipResponse {
 /// (wrong status, unexpected request, timeout) instead of `panic!`ing. Absorbs
 /// an unsolicited 100 Trying (RFC 3261 §8.1.3.2) the same way `expect_response`
 /// does.
+/// Receive the next response WITHOUT asserting its status (an unsolicited `100
+/// Trying` is absorbed) — the raw-await the out-of-dialog auth retry
+/// ([`OutOfDialogRequest::try_send_authed`]) uses so a `401`/`407` keeps its
+/// challenge header. An inbound request where a response is expected is an error.
+async fn recv_response_raw(agent: &Agent) -> Result<SipResponse, StepError> {
+    loop {
+        match agent.try_recv().await? {
+            SipMessage::Response(r) if r.status == 100 => continue,
+            SipMessage::Response(r) => return Ok(r),
+            SipMessage::Request(r) => {
+                return Err(StepError::UnexpectedKind {
+                    who: agent.name.clone(),
+                    detail: format!("got a {} request, expected a response", r.method),
+                })
+            }
+        }
+    }
+}
+
 async fn try_expect_response(agent: &Agent, status: u16) -> Result<SipResponse, StepError> {
     loop {
         match agent.try_recv().await? {
@@ -2148,6 +2577,14 @@ fn first_contact_uri(resp: &SipResponse) -> Option<String> {
     get_header(&resp.headers, "contact").map(unwrap_angle)
 }
 
+/// The `RAck` value acknowledging a reliable provisional (RFC 3262 §7.2):
+/// `<RSeq> <CSeq-num> <CSeq-method>`, all read off the 1xx itself. `None` when
+/// the response carries no parseable `RSeq` (it is not a reliable provisional).
+fn rack_for(reliable_1xx: &SipResponse) -> Option<String> {
+    let rseq: u64 = get_header(&reliable_1xx.headers, "rseq")?.trim().parse().ok()?;
+    Some(format!("{rseq} {} {}", reliable_1xx.cseq.seq, reliable_1xx.cseq.method))
+}
+
 /// Resolve a SIP URI to a socket address (default port 5060, IPv4 fixtures
 /// only). Handles `sip:user@host:port`, the userless `sip:host:port;lr` form
 /// of a Route/Record-Route URI, and a bare `host:port`.
@@ -2193,4 +2630,286 @@ fn top_via_addr(req: &SipRequest) -> Option<SocketAddr> {
     let after_transport = via.split_whitespace().nth(1)?;
     let sent_by = after_transport.split(';').next()?.trim();
     hostport_to_addr(sent_by)
+}
+
+#[cfg(test)]
+mod auth_seam_tests {
+    //! The deferred-by-design [`ChallengeResponder`] retry plumbing (RFC 3261
+    //! §22.2), exercised on the fallible INVITE surface. A FAKE responder (a
+    //! static credential) proves the ACK→resend→credential→bumped-CSeq path; a
+    //! run with NO responder proves the classification is unchanged (a `401`
+    //! stays a `WrongStatus`).
+
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::realcall::auth::{Challenge, ChallengeResponder};
+    use crate::realcall::{CallCtx, CallEnv, CallScope};
+
+    const OFFER: &str = "v=0\r\no=a 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+
+    /// A static-credential responder: returns a fixed `Authorization` value for
+    /// any challenge (the deferred seam's simplest possible implementation — real
+    /// digest would hash `challenge.header_value` + `method`/`ruri`). Records what
+    /// it was asked so the test can assert the request-line inputs reached it.
+    struct FakeResponder {
+        credential: String,
+        seen: std::sync::Mutex<Vec<(u16, String, String)>>,
+    }
+    impl ChallengeResponder for FakeResponder {
+        fn respond(&self, challenge: &Challenge, method: &str, ruri: &str) -> Option<String> {
+            self.seen.lock().unwrap().push((
+                challenge.status,
+                method.to_string(),
+                ruri.to_string(),
+            ));
+            Some(self.credential.clone())
+        }
+    }
+
+    /// Direct plumbing: alice INVITEs a UAS that `401`s once (with a
+    /// `WWW-Authenticate` challenge) then admits. The retry ACKs the challenge,
+    /// adds the responder's `Authorization`, bumps the CSeq, resends, and the call
+    /// completes — proving [`ClientInvite::ack_and_resend_with_auth`] end to end.
+    #[tokio::test(start_paused = true)]
+    async fn auth_retry_acks_resends_with_credential_and_bumped_cseq() {
+        let h = Harness::new("auth-retry-plumbing");
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let server = h.agent("server", "127.0.0.1:5070").await;
+
+        let responder = FakeResponder {
+            credential: "Digest username=\"alice\", realm=\"sip\", nonce=\"abc\", response=\"deadbeef\""
+                .to_string(),
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+
+        // Alice's INVITE #1 goes straight to the server.
+        let mut call = alice.invite(&server).with_sdp(OFFER).send().await;
+
+        // The server challenges with a 401 + WWW-Authenticate.
+        let mut chal = server.try_receive("INVITE").await.unwrap();
+        assert_eq!(chal.request().cseq.seq, 1, "first INVITE is CSeq 1");
+        chal.respond(401, "Unauthorized")
+            .with_header("WWW-Authenticate", "Digest realm=\"sip\", nonce=\"abc\"")
+            .try_send()
+            .await
+            .unwrap();
+
+        // Alice sees the 401 (raw, un-asserted) and drives the retry.
+        let resp = call.try_recv_response().await.unwrap();
+        assert_eq!(resp.status, 401);
+        let resent = call.ack_and_resend_with_auth(&resp, &responder).await.unwrap();
+        assert!(resent, "responder returned a credential → a resend happened");
+
+        // The responder saw the challenge status + the request-line inputs.
+        {
+            let seen = responder.seen.lock().unwrap();
+            assert_eq!(seen.len(), 1);
+            assert_eq!(seen[0].0, 401);
+            assert_eq!(seen[0].1, "INVITE");
+            assert!(seen[0].2.starts_with("sip:server@"), "ruri passed through: {}", seen[0].2);
+        }
+
+        // The server first sees the ACK for the 401 (RFC 3261 §17.1.1.3)…
+        let ack = server.try_receive("ACK").await.unwrap();
+        assert_eq!(ack.request().cseq.seq, 1, "the non-2xx ACK reuses the INVITE CSeq");
+
+        // …then the resent, authenticated INVITE #2: CSeq bumped, Authorization added.
+        let mut admit = server.try_receive("INVITE").await.unwrap();
+        assert_eq!(admit.request().cseq.seq, 2, "the retried INVITE bumps the CSeq (§22.2)");
+        assert!(
+            get_header(&admit.request().headers, "authorization")
+                .is_some_and(|v| v.starts_with("Digest ")),
+            "the retried INVITE carries the responder's Authorization",
+        );
+
+        // The server admits; alice completes the call.
+        admit.respond(180, "Ringing").try_send().await.unwrap();
+        call.try_expect(180).await.unwrap();
+        admit.respond(200, "OK").with_sdp(OFFER).try_send().await.unwrap();
+        call.try_expect(200).await.unwrap();
+        let mut dialog = call.ack().await;
+        server.try_receive("ACK").await.unwrap();
+
+        // Teardown.
+        let mut bye = dialog.bye().await;
+        server.try_receive("BYE").await.unwrap().respond(200, "OK").try_send().await.unwrap();
+        bye.try_expect(200).await.unwrap();
+
+        let _ = h.finish().await;
+    }
+
+    /// The full `admitted_uas` seam WITH a responder: a challenging middlebox
+    /// (`via`) `401`s the first INVITE, then relays the authenticated resend to
+    /// bob, whom `admitted_uas` returns as admitted — the retry is invisible to
+    /// the choreography above it.
+    #[tokio::test(start_paused = true)]
+    async fn admitted_uas_retries_through_a_challenging_middlebox() {
+        let h = Harness::new("auth-retry-admitted");
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let mbox_ = h.agent("mbox", "127.0.0.1:5080").await; // the challenger `via`
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let responder: Arc<dyn ChallengeResponder> = Arc::new(FakeResponder {
+            credential: "Digest username=\"alice\", realm=\"sip\", response=\"x\"".to_string(),
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+
+        // The middlebox: 401 the first INVITE, then relay the authed resend to bob.
+        let mbox_addr = mbox_.addr();
+        let bob_addr = bob.addr();
+        let relay = tokio::spawn(async move {
+            let mut c = mbox_.try_receive("INVITE").await.unwrap();
+            c.respond(401, "Unauthorized")
+                .with_header("WWW-Authenticate", "Digest realm=\"sip\", nonce=\"n1\"")
+                .try_send()
+                .await
+                .unwrap();
+            mbox_.try_receive("ACK").await.unwrap();
+            let authed = mbox_.try_receive("INVITE").await.unwrap();
+            assert!(
+                get_header(&authed.request().headers, "authorization").is_some(),
+                "the relayed INVITE is the authenticated one",
+            );
+            // Relay the raw authed INVITE onward to bob (pub(crate) send — in-crate).
+            mbox_
+                .try_send(&SipMessage::Request(authed.request().clone()), bob_addr)
+                .await
+                .unwrap();
+        });
+
+        let env = CallEnv::for_functional(&alice, &bob, None, mbox_addr, "X-Test-Id", "tok")
+            .with_challenge_responder(responder.clone());
+        let scope = CallScope::new();
+        let ctx = CallCtx::new();
+
+        // admitted_uas must ride through the 401 and return bob (admitted).
+        let mut call = env.outgoing_invite(&["bob"], alice.invite(&bob).with_sdp(OFFER)).send().await;
+        scope.set_early(call.cancel_handle());
+        let uas = crate::realcall::admitted_uas(&env, &scope, &mut call, 180).await;
+        let uas = uas.expect("admitted_uas returns bob after the auth retry");
+        assert_eq!(uas.request().method, "INVITE");
+        assert!(
+            get_header(&uas.request().headers, "authorization").is_some(),
+            "bob receives the authenticated INVITE",
+        );
+        let _ = ctx; // (anchors unused here)
+
+        relay.await.unwrap();
+        let _ = h.finish().await;
+    }
+
+    /// NO responder → the classification is unchanged: `admitted_uas` surfaces the
+    /// `401` as a `WrongStatus { got: 401 }` (the driver buckets it `status_401`)
+    /// and marks the scope terminated (the challenged INVITE transaction is
+    /// complete — nothing to CANCEL).
+    #[tokio::test(start_paused = true)]
+    async fn admitted_uas_without_responder_classifies_401_unchanged() {
+        let h = Harness::new("auth-no-responder");
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let mbox_ = h.agent("mbox", "127.0.0.1:5080").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let mbox_addr = mbox_.addr();
+        let chal = tokio::spawn(async move {
+            let mut c = mbox_.try_receive("INVITE").await.unwrap();
+            c.respond(401, "Unauthorized")
+                .with_header("WWW-Authenticate", "Digest realm=\"sip\", nonce=\"n1\"")
+                .try_send()
+                .await
+                .unwrap();
+        });
+
+        // No responder (the default).
+        let env = CallEnv::for_functional(&alice, &bob, None, mbox_addr, "X-Test-Id", "tok");
+        assert!(env.challenge_responder.is_none(), "default is no responder");
+        let scope = CallScope::new();
+
+        let mut call = env.outgoing_invite(&["bob"], alice.invite(&bob).with_sdp(OFFER)).send().await;
+        scope.set_early(call.cancel_handle());
+        match crate::realcall::admitted_uas(&env, &scope, &mut call, 180).await {
+            Err(StepError::WrongStatus { got: 401, expected: 180, .. }) => {}
+            Err(other) => panic!("expected WrongStatus 180/401, got {other:?}"),
+            Ok(_) => panic!("a 401 with no responder must not admit"),
+        }
+
+        chal.await.unwrap();
+        let _ = h.finish().await;
+    }
+
+    /// The out-of-dialog twin ([`OutOfDialogRequest::try_send_authed`], the future
+    /// REGISTER seam): a server `401`s the first OPTIONS then `200`s the
+    /// credentialed resend. No ACK (a non-INVITE final needs none, §17.1.2.2); the
+    /// resend bumps the CSeq and carries the responder's `Authorization`.
+    #[tokio::test(start_paused = true)]
+    async fn out_of_dialog_try_send_authed_retries_once() {
+        let h = Harness::new("auth-ood-retry");
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let server = h.agent("server", "127.0.0.1:5070").await;
+
+        let responder: Arc<dyn ChallengeResponder> = Arc::new(FakeResponder {
+            credential: "Digest username=\"alice\", realm=\"sip\", response=\"y\"".to_string(),
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+
+        let server_rx = server.clone();
+        let srv = tokio::spawn(async move {
+            let server = server_rx;
+            // First OPTIONS → 401.
+            let mut c = server.try_receive("OPTIONS").await.unwrap();
+            assert_eq!(c.request().cseq.seq, 1);
+            assert!(get_header(&c.request().headers, "authorization").is_none());
+            c.respond(401, "Unauthorized")
+                .with_header("WWW-Authenticate", "Digest realm=\"sip\", nonce=\"n\"")
+                .try_send()
+                .await
+                .unwrap();
+            // Credentialed resend → 200. CSeq bumped, Authorization present.
+            let mut c2 = server.try_receive("OPTIONS").await.unwrap();
+            assert_eq!(c2.request().cseq.seq, 2, "the authed resend bumps the CSeq");
+            assert!(
+                get_header(&c2.request().headers, "authorization").is_some(),
+                "the resend carries the Authorization",
+            );
+            c2.respond(200, "OK").try_send().await.unwrap();
+        });
+
+        let resp = alice
+            .request(OutOfDialogMethod::Options, &server)
+            .try_send_authed(Some(responder.as_ref()), 200)
+            .await
+            .expect("the authenticated OPTIONS resolves to 200");
+        assert_eq!(resp.status, 200);
+
+        srv.await.unwrap();
+        let _ = h.finish().await;
+    }
+
+    /// The out-of-dialog path with NO responder: the `401` surfaces as a plain
+    /// `WrongStatus` (no retry), unchanged from `try_send` + `try_expect`.
+    #[tokio::test(start_paused = true)]
+    async fn out_of_dialog_without_responder_surfaces_401() {
+        let h = Harness::new("auth-ood-no-responder");
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let server = h.agent("server", "127.0.0.1:5070").await;
+
+        let server_rx = server.clone();
+        let srv = tokio::spawn(async move {
+            let mut c = server_rx.try_receive("OPTIONS").await.unwrap();
+            c.respond(401, "Unauthorized").try_send().await.unwrap();
+        });
+
+        match alice
+            .request(OutOfDialogMethod::Options, &server)
+            .try_send_authed(None, 200)
+            .await
+        {
+            Err(StepError::WrongStatus { got: 401, expected: 200, .. }) => {}
+            Err(other) => panic!("expected WrongStatus 200/401, got {other:?}"),
+            Ok(r) => panic!("expected a 401 deviation, got {}", r.status),
+        }
+
+        srv.await.unwrap();
+        let _ = h.finish().await;
+    }
 }

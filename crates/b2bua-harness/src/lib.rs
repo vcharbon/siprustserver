@@ -413,6 +413,19 @@ impl B2buaSut {
         )))
     }
 
+    /// Builder for a B2BUA whose engine honors the full inbound `X-Api-Call`
+    /// control surface — the deployed-cluster engine shape: a single
+    /// `destination` pin, an ADR-0017 `routes` failover plan walked on b-leg
+    /// rejection (`/call/failure` pops the next route), and REFER
+    /// authorization; plan-less traffic falls back to routing to `dest`. This
+    /// is the SUT the loadgen rerouting scenarios exercise under the
+    /// `api-call-pin` egress policy.
+    pub fn route_api_call(dest_host: &str, dest_port: u16) -> B2buaSutBuilder {
+        Self::builder(Arc::new(ScriptedDecisionEngine::route_all_to_with_limiter(
+            dest_host, dest_port, None,
+        )))
+    }
+
     /// Builder for a B2BUA that routes every call to `dest` with the
     /// `relayFirst18xTo180` feature active under `strategy` (suppress / fake-prack).
     pub fn route_all_to_with_18x(

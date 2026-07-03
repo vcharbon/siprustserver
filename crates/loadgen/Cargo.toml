@@ -13,6 +13,10 @@ workspace = true
 # The Send agent factory + fallible try_* choreography + best-effort teardown
 # helpers live here (the load-bearing reuse of the functional harness).
 scenario-harness = { path = "../scenario-harness" }
+# The shared axis data model (loadgen⇄e2e fusion): the CLI loads an authored
+# `EndpointConfig` (`--endpoint-config`), whose optional `egress` field carries
+# the run's egress policy (the environment axis).
+e2e-model = { path = "../e2e-model" }
 sip-message = { path = "../sip-message" }
 tokio = { workspace = true }
 # catch_unwind over a scenario future → a panic becomes a counted failure, never
@@ -22,6 +26,12 @@ async-trait = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 # Per-call random correlation token (UUIDv4) threaded through the SUT.
 uuid = { version = "1", features = ["v4"] }
+# Correlation-token extraction from templated header values (first capture
+# group = the token); see `mux::Correlation::header_templated`.
+regex = { workspace = true }
+# Reading a resolved Test case's open `extras` map (the per-call dwell
+# overrides ride `serde_json::Value`s; see `case::DwellOverrides`).
+serde_json = { workspace = true }
 # The mux is a SignalingNetwork; recording layers on top via AgentBinder.
 sip-net = { path = "../sip-net" }
 # One process-wide monotonic-anchored Clock (created once at startup) stamps every

@@ -1,0 +1,21 @@
+{
+  "$schema": "../schemas/load-profile.schema.json",
+  "description": "Endurance baseline: basic-heavy realistic mix at 20 cps for an hour, production 1/1000 loss with auto-retransmit, full recording. Mirrors the README 'realistic timers' example. Override any field with an explicit CLI flag (e.g. --cps 40) or replace the whole mix with --scenario.",
+  "cps": 20,
+  "durationSecs": 3600,
+  "maxInFlight": 8000,
+  "sampleCap": 50,
+  "backgroundRecordEvery": 1,
+  "reportIntervalSecs": 60,
+  "recvTimeoutMs": 5000,
+  "robustness": {
+    "dropRate": 0.001,
+    "retransmit": true
+  },
+  "mix": [
+    { "shape": "basic_call", "weight": 16, "case": "e2e/cases/load-basic-pooled.json" },
+    { "shape": "reinvite", "weight": 4 },
+    { "shape": "options_hold", "weight": 1 },
+    { "shape": "long_call", "weight": 0.4 }
+  ]
+}

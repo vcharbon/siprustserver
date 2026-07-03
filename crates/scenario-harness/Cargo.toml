@@ -12,6 +12,11 @@ workspace = true
 [dependencies]
 tokio = { workspace = true }
 async-trait = { workspace = true }
+# The typed `X-Api-Call` control header of the shared egress model
+# (`egress::ApiCall`) serializes through serde, so every emitter builds the
+# same JSON instead of hand-formatting it.
+serde = { workspace = true }
+serde_json = { workspace = true }
 sip-message = { path = "../sip-message" }
 sip-net = { path = "../sip-net" }
 layer-harness = { path = "../layer-harness" }

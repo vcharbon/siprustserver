@@ -2,7 +2,9 @@
 
 ## Status
 
-accepted — amended 2026-06-14 (layout-owned **egress rewrite**; see Decision).
+accepted — amended 2026-06-14 (layout-owned **egress rewrite**; see Decision);
+amended 2026-07-03 (the shape registry is now the unified **open**
+`ShapeRegistry` in `e2e-model`, shared with the load surface — ADR-0021).
 
 ## Context
 
@@ -65,8 +67,10 @@ proxy — retiring the bespoke `register-call*` shapes — and is the seam any f
 "rewrite the outgoing INVITE per topology" need (other proprietary headers,
 forced routes) extends.
 
-Execution is an **in-process registry** in a shared **`e2e-core`** crate (shape
-id → parameterised fn). Two thin front-ends consume it: an **`e2e-web`** Axum +
+Execution is an **in-process registry** (shape id → parameterised fn) — since
+ADR-0021 the unified open `ShapeRegistry` in **`e2e-model`**, whose descriptors
+**`e2e-core`** attaches its functional bodies to. Two thin front-ends consume
+it: an **`e2e-web`** Axum +
 Maud + htmx server (authoring, launching, display) and an **`e2e-cli`** binary for
 CI/CD that runs a campaign headless and **exits non-zero on any failed check or
 non-advisory RFC violation**. A launch is an **async Run Job** with a per-infra

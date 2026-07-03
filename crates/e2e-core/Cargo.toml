@@ -10,6 +10,11 @@ description = "E2E test-management run-core (ADR-0018): the registry of compiled
 workspace = true
 
 [dependencies]
+# The axis DATA MODEL (authored docs + loaders + validation, egress model,
+# check evaluator) — extracted so the load generator can share it without
+# pulling the SUT crates. Everything is re-exported under the original
+# `e2e_core::{model,checks,egress,shape,infra}::…` paths.
+e2e-model = { path = "../e2e-model" }
 scenario-harness = { path = "../scenario-harness" }
 seq-report = { path = "../seq-report" }
 media = { path = "../media" }

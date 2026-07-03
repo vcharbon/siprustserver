@@ -187,6 +187,25 @@ pub struct B2buaConfig {
     /// rejects every non-IP host. Overridable via `WORKER_ALLOWED_TARGET_SUFFIXES`
     /// (comma-separated, trimmed, empties dropped).
     pub worker_allowed_target_suffixes: Vec<String>,
+    /// **Decision-backend deadline** (ms) — the hard per-round-trip bound on a
+    /// caller-blocking `CallDecisionEngine` call (`new_call` and `call_failure`;
+    /// `call_refer` is bounded by the refer subscription/safety timers instead —
+    /// see [`crate::…`] `DeadlineDecisionEngine`), enforced by the CORE
+    /// (`b2bua::decision::DeadlineDecisionEngine` wraps whatever engine the host
+    /// injects at `B2buaCore::spawn`). This is the load-bearing half of the
+    /// initial-INVITE guarantee (ADR-0022): sip-txn auto-answers 100 Trying
+    /// before the router ever sees the INVITE, so the caller is already waiting
+    /// — a decision backend that hangs must NOT strand them. On expiry the call
+    /// takes the ordinary decision-error path (503 to the caller for
+    /// `new_call`; the per-site `Err` fallback for failure/refer). The TS
+    /// system enforced this INSIDE its `HttpReferenceAdapter`
+    /// (`callControlNewCallTimeoutMs`/`callControlFailureTimeoutMs`, both
+    /// default 5000); the Rust port moves it into the core as ONE knob so a
+    /// third-party adapter cannot forget it. Default **5000**. `<= 0` disables
+    /// (escape hatch for tests that need a genuinely wedged decision await —
+    /// the reaper ladder still cleans up, see `reaper.rs`). Overridable via
+    /// `B2BUA_CALL_CONTROL_TIMEOUT_MS`.
+    pub call_control_timeout_ms: i64,
     /// **Opt-in transparent header relay.** Header names whose *value* is copied
     /// verbatim from the a-leg INVITE onto every originated b-leg INVITE (the
     /// normal callee leg AND the REFER transfer-target leg — both funnel through
@@ -248,6 +267,9 @@ impl Default for B2buaConfig {
             // routes to a non-suffixed host (e.g. `bob` / a loopback name) must
             // set `["*"]` or add its suffix to opt out of the gate.
             worker_allowed_target_suffixes: vec![".svc.cluster.local".to_string()],
+            // Decision-backend deadline: TS CALL_CONTROL_*_TIMEOUT_MS parity
+            // (both were 5000). One knob for all three methods (ADR-0022).
+            call_control_timeout_ms: 5_000,
             // Opt-in transparent header relay: empty = no relay (production
             // default, strict no-op). Set names via `B2BUA_RELAY_HEADERS`.
             relay_headers: Vec::new(),

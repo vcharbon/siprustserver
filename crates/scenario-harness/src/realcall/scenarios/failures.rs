@@ -33,8 +33,8 @@ impl RealCallScenario for InviteReject {
     }
 
     async fn run(&self, env: &CallEnv<'_>, scope: &CallScope, _ctx: &CallCtx) -> Result<(), StepError> {
-        let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP).through(env.via);
-        let mut call = env.prepare_invite(inv).send().await;
+        let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP);
+        let mut call = env.outgoing_invite(&["bob"], inv).send().await;
         scope.set_early(call.cancel_handle());
 
         let mut uas = env.bob.try_receive("INVITE").await?;
@@ -66,8 +66,8 @@ impl RealCallScenario for AbandonRinging {
     }
 
     async fn run(&self, env: &CallEnv<'_>, scope: &CallScope, ctx: &CallCtx) -> Result<(), StepError> {
-        let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP).through(env.via);
-        let mut call = env.prepare_invite(inv).send().await;
+        let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP);
+        let mut call = env.outgoing_invite(&["bob"], inv).send().await;
         scope.set_early(call.cancel_handle()); // safety net until the handshake completes
 
         let mut bob_uas = env.bob.try_receive("INVITE").await?;
@@ -102,16 +102,22 @@ impl RealCallScenario for AbandonRinging {
 /// transfer and leaves the scope Confirmed, so the driver's teardown BYEs the
 /// still-live A↔B — exercising cleanup of a call whose transfer leg was born and
 /// rejected. Reported as `unexpected` (the NOK declined-transfer case).
-pub struct ReferCharlieReject;
+pub struct ReferCharlieReject {
+    /// The `X-Api-Call.refer_key` the SUT's REFER backend authorizes (per-run
+    /// SUT auth data, like [`super::Refer`]'s).
+    pub refer_key: String,
+}
+
+impl ReferCharlieReject {
+    pub fn new(refer_key: impl Into<String>) -> Self {
+        Self { refer_key: refer_key.into() }
+    }
+}
 
 #[async_trait]
 impl RealCallScenario for ReferCharlieReject {
     fn id(&self) -> ScenarioId {
         "refer_charlie_reject"
-    }
-
-    fn needs_charlie(&self) -> bool {
-        true
     }
 
     async fn run(&self, env: &CallEnv<'_>, scope: &CallScope, ctx: &CallCtx) -> Result<(), StepError> {
@@ -121,8 +127,8 @@ impl RealCallScenario for ReferCharlieReject {
         })?;
 
         // A↔B established.
-        let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP).through(env.via);
-        let mut call = env.prepare_invite(inv).send().await;
+        let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP);
+        let mut call = env.outgoing_invite(&["bob"], inv).send().await;
         scope.set_early(call.cancel_handle());
         let mut bob_uas = env.bob.try_receive("INVITE").await?;
         bob_uas.respond(180, "Ringing").await;
@@ -141,7 +147,7 @@ impl RealCallScenario for ReferCharlieReject {
             detail: "no charlie for Refer-To".to_string(),
         })?;
         let mut refer = bob_dialog.send_request(InDialogMethod::Refer).with_header("Refer-To", &refer_to);
-        if let Some(api) = env.refer_api_call() {
+        if let Some(api) = env.refer_authorization(&self.refer_key) {
             refer = refer.with_header("X-Api-Call", &api);
         }
         let mut refer = refer.send().await;

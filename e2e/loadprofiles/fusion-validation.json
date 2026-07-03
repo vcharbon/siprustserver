@@ -1,0 +1,21 @@
+{
+  "$schema": "../schemas/load-profile.schema.json",
+  "description": "loadgen×e2e fusion final-validation profile: the WHOLE fusion surface in one run — a mix of basic_call + reinvite + prack_update + rerouting_prack, pooled Test-case identities (${seq}/${rand:N}) with a referenced Check set and an allowViolations waiver, production 1/1000 loss WITH auto-retransmit, and a 1/64 background recording gate (each sampled call is RFC-audited and its checks evaluated; the unsampled majority is counted only, keeping memory flat). This is a MODEST correctness validation, not a capacity run — resource-disciplined caps below. Drive it against the dev_sut playground with `--route-pin-to-uas` (api-call-pin egress, needed by rerouting_prack) and `--correlate to-user` (zero-SUT-cooperation correlation, NO header relay). ~10 cps for 60 s; POST /rate re-targets the rate live.",
+  "cps": 10,
+  "durationSecs": 60,
+  "maxInFlight": 200,
+  "sampleCap": 5,
+  "backgroundRecordEvery": 64,
+  "reportIntervalSecs": 15,
+  "recvTimeoutMs": 5000,
+  "robustness": {
+    "dropRate": 0.001,
+    "retransmit": true
+  },
+  "mix": [
+    { "shape": "basic_call", "weight": 8, "case": "e2e/cases/fusion-basic-pooled.json" },
+    { "shape": "reinvite", "weight": 3 },
+    { "shape": "prack_update", "weight": 3 },
+    { "shape": "rerouting_prack", "weight": 3, "case": "e2e/cases/fusion-rerouting-prack.json" }
+  ]
+}

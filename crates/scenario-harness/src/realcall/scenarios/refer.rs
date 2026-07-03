@@ -11,16 +11,23 @@ use sip_message::generators::InDialogMethod;
 use crate::realcall::{CallCtx, CallEnv, CallScope, RealCallScenario, ScenarioId};
 use crate::{StepError, ANSWER_SDP, OFFER_SDP};
 
-pub struct Refer;
+pub struct Refer {
+    /// The `X-Api-Call.refer_key` the SUT's REFER backend authorizes — per-run
+    /// SUT auth data fed in at construction (the CLI's `--refer-key`), NOT
+    /// topology (the transfer *target* resolves through the env's egress seam).
+    pub refer_key: String,
+}
+
+impl Refer {
+    pub fn new(refer_key: impl Into<String>) -> Self {
+        Self { refer_key: refer_key.into() }
+    }
+}
 
 #[async_trait]
 impl RealCallScenario for Refer {
     fn id(&self) -> ScenarioId {
         "refer"
-    }
-
-    fn needs_charlie(&self) -> bool {
-        true
     }
 
     async fn run(
@@ -35,23 +42,27 @@ impl RealCallScenario for Refer {
         })?;
 
         // A↔B established (capture bob's UAS dialog to originate the REFER).
-        let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP).through(env.via);
-        let mut call = env.prepare_invite(inv).send().await;
+        let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP);
+        let mut call = env.outgoing_invite(&["bob"], inv).send().await;
         scope.set_early(call.cancel_handle());
 
         let mut bob_uas = env.bob.try_receive("INVITE").await?;
+        ctx.anchor(env.bob, "initialInvite", bob_uas.request());
         bob_uas.respond(180, "Ringing").await;
-        call.try_expect(180).await?;
+        let ring = call.try_expect(180).await?;
+        ctx.anchor(env.alice, "firstProvisional", &ring);
         // Realistic ring before answer (consistent with the other scenarios' 5 s).
         if !env.ring_delay.is_zero() {
             tokio::time::sleep(env.ring_delay).await;
         }
         bob_uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
-        call.try_expect(200).await?;
+        let answer = call.try_expect(200).await?;
+        ctx.anchor(env.alice, "answer", &answer);
         ctx.checkpoint("time_to_200");
         let mut alice_dialog = call.ack().await;
         scope.set_confirmed(alice_dialog.clone());
-        env.bob.try_receive("ACK").await?;
+        let ack = env.bob.try_receive("ACK").await?;
+        ctx.anchor(env.bob, "ack", ack.request());
         let mut bob_dialog = bob_uas.dialog();
 
         // Talk a few seconds in the established A↔B call before Bob transfers (a
@@ -61,18 +72,23 @@ impl RealCallScenario for Refer {
             tokio::time::sleep(env.reinvite_gap).await;
         }
 
-        // REFER → 202. Refer-To carries charlie's correlation token in the
-        // user-part; the optional X-Api-Call pins the transfer to the static
-        // `refer` endpoint (our-b2bua adapter).
+        // REFER → 202. The transfer target resolves through the SAME egress seam
+        // as any callee (`env.refer_to()` = charlie via `callee("charlie")`, with
+        // the correlation token as the user-part); the X-Api-Call authorizes the
+        // transfer under this run's `refer_key` (mirrors the e2e
+        // `transfer-refer-media` shape's `ApiCall::refer`).
         let refer_to = env.refer_to().ok_or_else(|| StepError::UnexpectedKind {
             who: "refer".to_string(),
             detail: "no charlie for Refer-To".to_string(),
         })?;
         let mut refer = bob_dialog.send_request(InDialogMethod::Refer).with_header("Refer-To", &refer_to);
-        if let Some(api) = env.refer_api_call() {
+        if let Some(api) = env.refer_authorization(&self.refer_key) {
             refer = refer.with_header("X-Api-Call", &api);
         }
-        let mut refer = refer.send().await;
+        // The REFER's only receiver is the SUT itself (it builds the C leg), so
+        // it is anchored as a SENT message on bob's lane.
+        let (mut refer, refer_req) = refer.try_send_with_request().await?;
+        ctx.anchor_sent(env.bob, "refer", &refer_req);
         // The 202 and the first NOTIFY race on bob's socket; tolerate a NOTIFY
         // arriving first (UDP reordering — and the fake fabric's equal-transit
         // race). 200-OK it and keep waiting for the 202.
@@ -82,6 +98,7 @@ impl RealCallScenario for Refer {
 
         // Charlie answers the transfer INVITE (held SDP).
         let mut charlie_uas = charlie.try_receive("INVITE").await?;
+        ctx.anchor(charlie, "initialInvite", charlie_uas.request());
         charlie_uas.respond(180, "Ringing").await;
         charlie_uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
         ctx.checkpoint("time_to_charlie_200");

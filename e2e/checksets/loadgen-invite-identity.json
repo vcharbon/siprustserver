@@ -1,0 +1,20 @@
+{
+  "$schema": "../schemas/check-set.schema.json",
+  "id": "loadgen-invite-identity",
+  "description": "Loadgen-native caller-identity preservation through the in-process B2BUA SUT. Binds the anchors the loadgen mux tags (agent `bob`, not the e2e `bob1`): the b-leg INVITE bob receives carries a From tag and Max-Forwards, and the answer alice receives is properly tagged. To-user correlation rewrites the To user-part with the per-call token, so this set deliberately asserts NOTHING about the To URI — only the From tag, Max-Forwards, and the answer To-tag, all of which survive any SIP-correct B2BUA.",
+  "blocks": [
+    {
+      "on": "bob.initialInvite",
+      "checks": [
+        { "field": "from.tag", "op": "exists" },
+        { "field": "header(Max-Forwards)", "op": "exists" }
+      ]
+    },
+    {
+      "on": "alice.answer",
+      "checks": [
+        { "field": "to.tag", "op": "exists" }
+      ]
+    }
+  ]
+}

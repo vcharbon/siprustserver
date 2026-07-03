@@ -39,6 +39,7 @@ impl RealCallScenario for Reinvite {
         let mut reinv = dialog.request(InDialogMethod::Invite, None).await;
         scope.set_confirmed(dialog.clone());
         let mut bob_uas = env.bob.try_receive("INVITE").await?;
+        ctx.anchor(env.bob, "reInvite", bob_uas.request());
         bob_uas.respond(200, "OK").with_sdp(REOFFER).await;
         reinv.try_expect(200).await?;
         ctx.checkpoint("time_to_reinvite_200");

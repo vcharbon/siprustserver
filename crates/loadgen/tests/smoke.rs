@@ -11,11 +11,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use b2bua_harness::{settle_until, B2buaSut};
 use layer_harness::TransportKind;
-use loadgen::scenarios::{establish, LoadScenario, ScenarioId};
+use loadgen::scenarios::{establish, BasicCall, LoadScenario, ScenarioId};
 use loadgen::{
-    by_id, default_scenarios, failure_scenarios, CallConfig, CallCtx, CallEnv, CallRouting,
-    CallScope, CallTuning, Correlation, Driver, DriverCfg, EndpointSpec, LegInfo, MuxCore,
-    MuxTransport, ResultClass, Reporter, ReporterCfg, Role,
+    CallConfig, CallCtx, CallEnv, CallRouting, CallScope, CallTuning, Correlation, Driver,
+    DriverCfg, EgressPolicy, EndpointSpec, LegInfo, LoadCase, MixEntry, MuxCore, MuxTransport,
+    ResultClass, Reporter, ReporterCfg, Role, ScenarioInputs, ShapeRegistry,
 };
 use scenario_harness::{Harness, StepError};
 use sip_clock::Clock;
@@ -26,6 +26,13 @@ const RECV: Duration = Duration::from_secs(2);
 
 fn addr(p: u16) -> SocketAddr {
     format!("127.0.0.1:{p}").parse().unwrap()
+}
+
+/// Resolve one shape from the unified registry into a weighted mix entry (the
+/// smoke tests' shorthand over `MixEntry::by_id` + the default inputs).
+fn mix(id: &str, weight: f64) -> MixEntry {
+    MixEntry::by_id(&ShapeRegistry::with_defaults(), id, &inputs(), weight)
+        .unwrap_or_else(|| panic!("unknown load shape {id:?}"))
 }
 
 /// Stand up a real-network b2bua SUT + a mux core over a port base. The b2bua
@@ -59,6 +66,64 @@ async fn setup_with(
     recv: Duration,
     extra_tune: impl FnOnce(&mut b2bua_sdk::B2buaConfig) + 'static,
 ) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+    setup_inner(base, correlation, sample_cap, recv, true, extra_tune).await
+}
+
+/// [`setup`] WITHOUT the correlation-header relay tune on the SUT — the
+/// third-party-SUT shape (a B2BUA that strips/ignores unknown headers, breaking
+/// header correlation entirely). Only a strategy needing zero SUT cooperation
+/// (`Correlation::to_user`) can correlate the callee leg here.
+async fn setup_no_relay(
+    base: u16,
+    correlation: Correlation,
+    sample_cap: u32,
+) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+    setup_inner(base, correlation, sample_cap, RECV, false, |_| {}).await
+}
+
+/// [`setup`] whose SUT honors the full inbound `X-Api-Call` control surface
+/// (destination pin + ADR-0017 `routes` failover plan walked on b-leg
+/// rejection) — the deployed-cluster engine shape the `api-call-pin` egress
+/// policy addresses. The rerouting smoke test runs over this.
+async fn setup_api_call(
+    base: u16,
+    correlation: Correlation,
+    sample_cap: u32,
+) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+    setup_shaped(base, correlation, sample_cap, RECV, true, B2buaSut::route_api_call, |_| {}).await
+}
+
+async fn setup_inner(
+    base: u16,
+    correlation: Correlation,
+    sample_cap: u32,
+    recv: Duration,
+    relay_header: bool,
+    extra_tune: impl FnOnce(&mut b2bua_sdk::B2buaConfig) + 'static,
+) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+    setup_shaped(
+        base,
+        correlation,
+        sample_cap,
+        recv,
+        relay_header,
+        B2buaSut::route_all_with_refer,
+        extra_tune,
+    )
+    .await
+}
+
+/// The one setup core: `make_sut(dest_host, dest_port)` picks the SUT's
+/// decision-engine shape (plain route-all+refer vs the X-Api-Call plan walker).
+async fn setup_shaped(
+    base: u16,
+    correlation: Correlation,
+    sample_cap: u32,
+    recv: Duration,
+    relay_header: bool,
+    make_sut: fn(&str, u16) -> b2bua_harness::B2buaSutBuilder,
+    extra_tune: impl FnOnce(&mut b2bua_sdk::B2buaConfig) + 'static,
+) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
     let net: Arc<dyn SignalingNetwork> = Arc::new(RealSignalingNetwork::new());
     let h = Harness::with_network_and_clock(
         "mux-smoke",
@@ -73,9 +138,12 @@ async fn setup_with(
     // Make the in-process b2bua transparent to the loadgen correlation header
     // (the production `B2BUA_RELAY_HEADERS=X-Loadgen-Id`), so the token alice
     // stamps reaches BOTH the b-leg (bob) and the REFER transfer leg (charlie).
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", uas)
+    // `relay_header = false` models a third-party SUT that relays nothing.
+    let b2bua = make_sut("127.0.0.1", uas)
         .tune(move |c| {
-            c.relay_headers = vec!["X-Loadgen-Id".to_string()];
+            if relay_header {
+                c.relay_headers = vec!["X-Loadgen-Id".to_string()];
+            }
             extra_tune(c);
         })
         .start(&h, "b2bua", &format!("127.0.0.1:{}", base + 3))
@@ -108,7 +176,14 @@ async fn setup_with(
     (h, b2bua, core, transport)
 }
 
-fn cfg(via: SocketAddr, refer_pin: Option<SocketAddr>, cps: f64, secs: u64, mif: usize, seed: u64) -> DriverCfg {
+/// The default per-run scenario inputs — `refer_key` = "refer-allow-c", the key
+/// the in-process SUT's scripted `/call/refer` backend (`route_all_with_refer`)
+/// authorizes.
+fn inputs() -> ScenarioInputs {
+    ScenarioInputs::default()
+}
+
+fn cfg(via: SocketAddr, cps: f64, secs: u64, mif: usize, seed: u64) -> DriverCfg {
     DriverCfg {
         cps,
         duration: Duration::from_secs(secs),
@@ -116,9 +191,10 @@ fn cfg(via: SocketAddr, refer_pin: Option<SocketAddr>, cps: f64, secs: u64, mif:
         seed,
         call: CallConfig {
             via,
-            route_pin: None, // route_all_* routes the b-leg by config, no pin needed
-            refer_pin,
-            refer_key: "refer-allow-c".to_string(),
+            // route_all_* routes the b-leg by config — the transparent layout
+            // (the refer scenarios resolve charlie through the same seam and
+            // authorize via their per-run `refer_key`).
+            egress: EgressPolicy::Transparent,
             options_hold: Duration::from_millis(120),
             options_cadence: Duration::from_millis(40),
             // Realistic-timer knobs default to fast values in tests (the default
@@ -143,8 +219,8 @@ async fn loadgen_mux_smoke_basic_concurrent() {
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
 
     let driver = Driver::new(
-        cfg(b2bua.addr, None, 60.0, 2, 16, 0xB451C),
-        vec![(by_id("basic_call").unwrap(), 1.0)],
+        cfg(b2bua.addr, 60.0, 2, 16, 0xB451C),
+        vec![mix("basic_call", 1.0)],
         reporter.clone(),
         transport,
     );
@@ -169,16 +245,54 @@ async fn loadgen_mux_smoke_basic_concurrent() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// TO-USER correlation end-to-end: the token rides the To-header user-part, so
+/// a full call correlates WITHOUT the SUT relaying any loadgen header — the
+/// in-process b2bua here has NO `relay_headers` configured (the third-party-SUT
+/// shape under which header correlation yields zero OK calls). Concurrent basic
+/// calls all complete OK, with zero correlation orphans and no mux/SUT leak.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_to_user_correlation_without_relayed_header() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (_h, b2bua, core, transport) = setup_no_relay(6540, Correlation::to_user(), 5).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
+
+    let driver = Driver::new(
+        cfg(b2bua.addr, 60.0, 2, 16, 0x70C4),
+        vec![mix("basic_call", 1.0)],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    assert!(
+        reporter.count("basic_call", &ResultClass::Ok) > 5,
+        "too few OK calls via to-user correlation: {}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        reporter.count("basic_call", &ResultClass::Timeout),
+        0,
+        "timeouts — to-user correlation failed to route the callee leg?"
+    );
+    // Zero correlation orphans: every callee leg carried an extractable To-user
+    // token AND that token matched its pending call.
+    assert_eq!(core.stats().orphan_no_header.load(Relaxed), 0, "uncorrelatable callee legs");
+    assert_eq!(core.stats().orphan_unknown_token.load(Relaxed), 0, "to-user token matched no call");
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (to-user)");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
 /// All four scenarios (refer last) through the mux → each produces OK, no leak.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_mux_smoke_all_scenarios() {
     let (_h, b2bua, core, transport) = setup(6410, Correlation::header("X-Loadgen-Id"), 5).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
-    let refer_pin = Some(transport.refer_addr);
-
     let driver = Driver::new(
-        cfg(b2bua.addr, refer_pin, 60.0, 4, 8, 0xA11),
-        default_scenarios(),
+        cfg(b2bua.addr, 60.0, 4, 8, 0xA11),
+        MixEntry::default_mix(&ShapeRegistry::with_defaults(), &inputs()),
         reporter.clone(),
         transport,
     );
@@ -207,7 +321,7 @@ async fn loadgen_mux_smoke_timed_and_long_call() {
     let (_h, b2bua, core, transport) = setup(6470, Correlation::header("X-Loadgen-Id"), 5).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
 
-    let mut cfg = cfg(b2bua.addr, None, 40.0, 2, 16, 0x71A1ED);
+    let mut cfg = cfg(b2bua.addr, 40.0, 2, 16, 0x71A1ED);
     cfg.call.ring_delay = Duration::from_millis(30);
     cfg.call.talk_time = Duration::from_millis(30);
     cfg.call.reinvite_gap = Duration::from_millis(20);
@@ -216,9 +330,9 @@ async fn loadgen_mux_smoke_timed_and_long_call() {
     let driver = Driver::new(
         cfg,
         vec![
-            (by_id("basic_call").unwrap(), 2.0),
-            (by_id("reinvite").unwrap(), 1.0),
-            (by_id("long_call").unwrap(), 1.0),
+            mix("basic_call", 2.0),
+            mix("reinvite", 1.0),
+            mix("long_call", 1.0),
         ],
         reporter.clone(),
         transport,
@@ -235,6 +349,123 @@ async fn loadgen_mux_smoke_timed_and_long_call() {
     // The long_call recorded its single OPTIONS-ping checkpoint.
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak (timed/long-call)");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// PRACK + UPDATE mix against the in-process SUT: the `prack_update` scenario
+/// (INVITE(100rel) → reliable 183(RSeq) → PRACK → 200(PRACK) → 200(INVITE) →
+/// ACK → UPDATE → 200 → BYE) runs concurrently with basic calls through the mux
+/// with CLEAN result classes — every call OK (so zero timeout / wrong-status /
+/// rfc_audit_fail; the sampled half of the calls IS RFC-audited via the
+/// recording binder), no orphans, no mux/SUT leak.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_mux_smoke_prack_update_mix() {
+    let (_h, b2bua, core, transport) = setup(6560, Correlation::header("X-Loadgen-Id"), 5).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
+
+    let driver = Driver::new(
+        cfg(b2bua.addr, 60.0, 2, 16, 0x93AC5),
+        vec![
+            mix("prack_update", 2.0),
+            mix("basic_call", 1.0),
+        ],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    let ok_prack = reporter.count("prack_update", &ResultClass::Ok);
+    let ok_basic = reporter.count("basic_call", &ResultClass::Ok);
+    assert!(ok_prack > 5, "too few OK prack_update calls: {}", reporter.render_prometheus());
+    assert!(ok_basic > 0, "no OK basic calls in the mix: {}", reporter.render_prometheus());
+    // CLEAN result classes: every finished call is OK — in particular zero
+    // rfc_audit_fail (the recorded/sampled calls pass the RFC 3261/3262/3264
+    // audit with no waiver) and zero timeouts (no dialog mixing on PRACK/UPDATE).
+    assert_eq!(
+        reporter.total_calls(),
+        ok_prack + ok_basic,
+        "non-OK result classes in the prack_update mix:\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        core.stats().orphan_no_header.load(std::sync::atomic::Ordering::Relaxed) +
+            core.stats().orphan_unknown_token.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "unexpected orphans (PRACK/UPDATE demux gap?)"
+    );
+    assert!(reporter.sample_count("prack_update", &ResultClass::Ok) > 0, "no OK prack_update sample");
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (prack_update)");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// The DUAL-BODY `rerouting_prack` shape's LOAD body against the in-process
+/// SUT — the first shape served by BOTH run surfaces from ONE registry
+/// declaration (the functional body runs in e2e-core over the fake infra; this
+/// is the load half). Under the `api-call-pin` egress the ordered candidate
+/// list [bob, bob2] rides an `X-Api-Call` `routes` failover plan (ADR-0017):
+///
+///   INVITE(Supported:100rel, routes plan) → bob 486 → the SUT walks the plan
+///   to bob2 — SAME socket, demuxed by the driver's R-URI-user leg picker —
+///   → reliable 183(RSeq) → PRACK → 200(PRACK) → 200 → ACK → BYE
+///
+/// Runs concurrently with basic calls (their single-candidate pin on the same
+/// egress) with CLEAN result classes — every call OK, so zero timeout /
+/// wrong-status / rfc_audit_fail (the sampled half of the calls IS RFC-audited
+/// via the recording binder: the RFC 3261/3262/3264 gate passes with no
+/// waiver) — zero orphans (the picker routed every rerouted leg), and no
+/// mux/SUT leak.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_mux_smoke_rerouting_prack_mix() {
+    let (_h, b2bua, core, transport) =
+        setup_api_call(6620, Correlation::header("X-Loadgen-Id"), 5).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
+
+    // The environment axis: the pinned layout (the real cluster's shape) — the
+    // egress realizes [bob, bob2] as the routes failover plan.
+    let mut c = cfg(b2bua.addr, 60.0, 2, 16, 0x4E404);
+    c.call.egress = EgressPolicy::ApiCallPin;
+
+    let driver = Driver::new(
+        c,
+        vec![mix("rerouting_prack", 2.0), mix("basic_call", 1.0)],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    let ok_rr = reporter.count("rerouting_prack", &ResultClass::Ok);
+    let ok_basic = reporter.count("basic_call", &ResultClass::Ok);
+    assert!(ok_rr > 5, "too few OK rerouting_prack calls: {}", reporter.render_prometheus());
+    assert!(ok_basic > 0, "no OK basic calls in the mix: {}", reporter.render_prometheus());
+    // CLEAN result classes: every finished call is OK — in particular zero
+    // rfc_audit_fail (the recorded/sampled calls pass the RFC audit unwaived)
+    // and zero timeouts (no misrouted failover leg).
+    assert_eq!(
+        reporter.total_calls(),
+        ok_rr + ok_basic,
+        "non-OK result classes in the rerouting_prack mix:\n{}",
+        reporter.render_prometheus()
+    );
+    // Zero orphans: every rerouted b-leg carried the relayed token AND the
+    // R-URI-user picker resolved it to a registered receiver (`no_route` counts
+    // under `orphan_unknown_token`).
+    assert_eq!(
+        core.stats().orphan_no_header.load(std::sync::atomic::Ordering::Relaxed)
+            + core.stats().orphan_unknown_token.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "unexpected orphans (failover-leg demux gap?)"
+    );
+    assert!(
+        reporter.sample_count("rerouting_prack", &ResultClass::Ok) > 0,
+        "no OK rerouting_prack sample"
+    );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (rerouting_prack)");
     settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }
@@ -261,7 +492,7 @@ async fn loadgen_mux_teardown_no_leak() {
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
 
     let driver = Driver::new(
-        cfg(b2bua.addr, None, 40.0, 2, 8, 0xDEAD),
+        cfg(b2bua.addr, 40.0, 2, 8, 0xDEAD),
         vec![(Arc::new(FailMidCall) as Arc<dyn LoadScenario>, 1.0)],
         reporter.clone(),
         transport,
@@ -331,7 +562,7 @@ async fn loadgen_chaos_post_records_marker() {
     let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(|| "render-body-marker\n".to_string());
     let srv_chaos = chaos.clone();
     tokio::spawn(async move {
-        let _ = serve_metrics(bind, render, Some(srv_chaos)).await;
+        let _ = serve_metrics(bind, render, Some(srv_chaos), None).await;
     });
 
     // Retry-connect until the server is bound.
@@ -475,10 +706,10 @@ async fn loadgen_mux_emergency_split_under_overload() {
 
     // Mix sheddable non-emergency basic calls with force-admitted emergency ones.
     let driver = Driver::new(
-        cfg(b2bua.addr, None, 60.0, 3, 16, 0xE5E7),
+        cfg(b2bua.addr, 60.0, 3, 16, 0xE5E7),
         vec![
-            (by_id("basic_call").unwrap(), 1.0),
-            (by_id("basic_call_em").unwrap(), 1.0),
+            mix("basic_call", 1.0),
+            mix("basic_call_em", 1.0),
         ],
         reporter.clone(),
         transport,
@@ -535,11 +766,10 @@ async fn loadgen_mux_emergency_split_under_overload() {
 async fn loadgen_post_call_cleanup_no_leak() {
     let (_h, b2bua, core, transport) = setup(6460, Correlation::header("X-Loadgen-Id"), 5).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 3 }));
-    let refer_pin = Some(transport.refer_addr);
 
-    let mut scenarios = failure_scenarios();
-    scenarios.push((by_id("basic_call").unwrap(), 2.0)); // some happy traffic in the mix
-    let driver = Driver::new(cfg(b2bua.addr, refer_pin, 50.0, 3, 12, 0xFA17), scenarios, reporter.clone(), transport);
+    let mut scenarios = MixEntry::failure_mix(&ShapeRegistry::with_defaults(), &inputs());
+    scenarios.push(mix("basic_call", 2.0)); // some happy traffic in the mix
+    let driver = Driver::new(cfg(b2bua.addr, 50.0, 3, 12, 0xFA17), scenarios, reporter.clone(), transport);
     driver.run().await;
 
     // Each failure mode produced its NOK bucket, and the happy path its OK.
@@ -571,11 +801,11 @@ async fn loadgen_packet_drop_without_retransmit_breaks_calls() {
     let (_h, b2bua, core, transport) = setup(6480, Correlation::header("X-Loadgen-Id"), 3).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
-    let mut c = cfg(b2bua.addr, None, 10.0, 1, 8, 0xD40F);
+    let mut c = cfg(b2bua.addr, 10.0, 1, 8, 0xD40F);
     // ~12%/datagram loss, no recovery: over a ~10-message call P(all delivered)
     // ≈ 0.9^10 ≈ 0.35, so the majority of calls must fail.
     c.default_tuning = CallTuning { drop_rate: 0.12, retransmit: false };
-    let driver = Driver::new(c, vec![(by_id("basic_call").unwrap(), 1.0)], reporter.clone(), transport);
+    let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     driver.run().await;
 
     let drops = core.stats().dropped_out.load(std::sync::atomic::Ordering::Relaxed)
@@ -608,9 +838,9 @@ async fn loadgen_auto_retransmit_recovers_packet_drop() {
         setup_recv(6490, Correlation::header("X-Loadgen-Id"), 3, Duration::from_secs(6)).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
-    let mut c = cfg(b2bua.addr, None, 12.0, 2, 8, 0x5EED);
+    let mut c = cfg(b2bua.addr, 12.0, 2, 8, 0x5EED);
     c.default_tuning = CallTuning { drop_rate: 0.10, retransmit: true };
-    let driver = Driver::new(c, vec![(by_id("basic_call").unwrap(), 1.0)], reporter.clone(), transport);
+    let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     driver.run().await;
 
     let drops = core.stats().dropped_out.load(std::sync::atomic::Ordering::Relaxed)
@@ -662,9 +892,9 @@ async fn loadgen_ringing_gate_counts_every_ring() {
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     // No loss → every 18x is delivered; retransmit on to exercise that path too.
-    let mut c = cfg(b2bua.addr, None, 40.0, 2, 16, 0x9A17);
+    let mut c = cfg(b2bua.addr, 40.0, 2, 16, 0x9A17);
     c.default_tuning = CallTuning { drop_rate: 0.0, retransmit: true };
-    let driver = Driver::new(c, vec![(by_id("basic_call").unwrap(), 1.0)], reporter.clone(), transport);
+    let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     driver.run().await;
 
     let (rung, expected) = reporter.ringing_totals();
@@ -694,12 +924,11 @@ async fn loadgen_inprocess_endurance_lossy() {
     let (_h, b2bua, core, transport) =
         setup_recv(6520, Correlation::header("X-Loadgen-Id"), 5, Duration::from_secs(5)).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 16 }));
-    let refer_pin = Some(transport.refer_addr);
 
     // The default mix (basic-heavy), production loss + retransmit, 25 s at 25 cps.
-    let mut c = cfg(b2bua.addr, refer_pin, 25.0, 25, 64, 0xE0D0E);
+    let mut c = cfg(b2bua.addr, 25.0, 25, 64, 0xE0D0E);
     c.default_tuning = CallTuning { drop_rate: 0.001, retransmit: true };
-    let driver = Driver::new(c, default_scenarios(), reporter.clone(), transport);
+    let driver = Driver::new(c, MixEntry::default_mix(&ShapeRegistry::with_defaults(), &inputs()), reporter.clone(), transport);
     driver.run().await;
 
     let total: u64 = ["basic_call", "reinvite", "options_hold", "refer"]
@@ -740,4 +969,337 @@ async fn loadgen_inprocess_endurance_lossy() {
         "SUT holds {} live calls vs {failed} failed",
         b2bua.active_calls()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Test-case-driven binding pools (the parameters axis)
+// ---------------------------------------------------------------------------
+
+/// A basic call that OBSERVES its per-call resolution (the resolved core From
+/// and the effective dwells) before delegating to the shared choreography — the
+/// probe for the binding-pool wiring below.
+struct ObservedBasic {
+    froms: Arc<std::sync::Mutex<Vec<String>>>,
+    dwells: Arc<std::sync::Mutex<Vec<(Duration, Duration)>>>,
+}
+
+#[async_trait]
+impl LoadScenario for ObservedBasic {
+    fn id(&self) -> ScenarioId {
+        "pooled_basic"
+    }
+    async fn run(&self, env: &CallEnv<'_>, scope: &CallScope, ctx: &CallCtx) -> Result<(), scenario_harness::StepError> {
+        self.froms
+            .lock()
+            .unwrap()
+            .push(env.core.from.clone().expect("every pool entry sets `from`"));
+        self.dwells.lock().unwrap().push((env.ring_delay, env.talk_time));
+        BasicCall.run(env, scope, ctx).await
+    }
+}
+
+/// The pooled Test case end to end: the committed example
+/// `e2e/cases/load-basic-pooled.json` attached to a mix entry drives
+/// (a) DIFFERENT From identities across calls (the seq/rand pool walk with
+/// `${seq:4}`/`${rand:6}` expansion, folded into the wire INVITE through the
+/// egress `outgoing_invite` path), (b) GREEN result classes throughout, and
+/// (c) the per-call dwell overrides (`ring_delay_ms: 25`, `talk_time_ms: 10`
+/// from the case extras) over the global defaults (0/0). The sampled callflow
+/// page shows the resolved binding in its header banner, while the report
+/// buckets stay scenario-keyed (no per-binding cardinality).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_pooled_case_identities_and_dwell_overrides() {
+    let (_h, b2bua, core, transport) = setup(6600, Correlation::header("X-Loadgen-Id"), 5).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
+
+    let case_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../e2e/cases/load-basic-pooled.json");
+    let case = Arc::new(LoadCase::load(&case_path, &Default::default(), 0x10AD));
+
+    let froms = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let dwells = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let scenario: Arc<dyn LoadScenario> =
+        Arc::new(ObservedBasic { froms: froms.clone(), dwells: dwells.clone() });
+
+    // Global dwells stay 0 (the `cfg` default), so an observed 25 ms ring /
+    // 10 ms talk can ONLY come from the case extras.
+    let driver = Driver::new(
+        cfg(b2bua.addr, 50.0, 2, 16, 0xB1D5),
+        vec![MixEntry::from((scenario, 1.0)).with_case(Some(case))],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    // (b) Green classes: every completed call is OK (no timeout / wrong-status /
+    // rfc_audit_fail on the sampled+audited half).
+    let ok = reporter.count("pooled_basic", &ResultClass::Ok);
+    assert!(ok > 5, "too few OK pooled calls:\n{}", reporter.render_prometheus());
+    assert_eq!(
+        reporter.total_calls(),
+        ok,
+        "non-OK result classes with a pooled case:\n{}",
+        reporter.render_prometheus()
+    );
+
+    // (a) Different From identities across calls: the seq-mode pool alternates
+    // its two entries and every resolution expands fresh digits.
+    let froms = froms.lock().unwrap().clone();
+    let distinct: std::collections::BTreeSet<&String> = froms.iter().collect();
+    assert!(
+        distinct.len() >= froms.len().saturating_sub(1),
+        "pool identities repeated unexpectedly early: {froms:?}"
+    );
+    assert!(distinct.len() > 1, "all calls used one identity: {froms:?}");
+    for f in &froms {
+        assert!(
+            f.starts_with("sip:+3310") && f.ends_with("@pool.example")
+                || f.starts_with("sip:+4420") && f.ends_with("@pool.example"),
+            "unexpected resolved From {f:?}"
+        );
+    }
+
+    // (c) The per-call dwell overrides beat the global (zero) defaults.
+    let dwells = dwells.lock().unwrap().clone();
+    assert!(!dwells.is_empty());
+    for (ring, talk) in &dwells {
+        assert_eq!(*ring, Duration::from_millis(25), "ring_delay_ms extras override not applied");
+        assert_eq!(*talk, Duration::from_millis(10), "talk_time_ms extras override not applied");
+    }
+
+    // The sampled OK callflow page carries the resolved binding in its header
+    // banner (case id + the actual From used), and the recorded wire INVITE
+    // itself shows the expanded identity — proof the core rode the egress
+    // outgoing-invite path onto the wire, not just into the env.
+    let out = std::env::temp_dir().join(format!("loadgen-pooled-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    reporter.finalize(&out).unwrap();
+    let page = out.join("callflows/pooled_basic/ok/clear/0.html");
+    let html = std::fs::read_to_string(&page)
+        .unwrap_or_else(|e| panic!("no OK sample page at {}: {e}", page.display()));
+    assert!(html.contains("binding: case=load-basic-pooled"), "banner missing from sample page");
+    assert!(html.contains("from=sip:+"), "resolved From missing from the banner");
+    assert!(html.contains("@pool.example"), "expanded identity not on the recorded wire INVITE");
+    let _ = std::fs::remove_dir_all(&out);
+
+    // No leak, as everywhere: mux registry reclaimed, SUT fully reaped.
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (pooled case)");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+// ---------------------------------------------------------------------------
+// Test-case checks + allow_violations on sampled load calls
+// ---------------------------------------------------------------------------
+
+/// Build an in-memory Test case (the loader-free seam) for the check tests.
+fn check_case(json: &str) -> e2e_model::TestCase {
+    serde_json::from_str(json).unwrap()
+}
+
+/// (a)+(d) A pooled case whose checks PASS — via a referenced Check set AND an
+/// inline block — keeps every call OK, and the sampled OK page shows the
+/// verdicts (PASS lines) next to the flow. The Check-set block keys on
+/// `bob.initialInvite`, so this also proves send-side ANCHORS resolve on the
+/// load surface: the anchor finds the relayed b-leg INVITE in the recording
+/// and `${input.from}` binds to THIS call's pool-resolved identity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_case_checks_pass_and_render_verdicts() {
+    let (_h, b2bua, core, transport) = setup(6700, Correlation::header("X-Loadgen-Id"), 5).await;
+    // Record EVERY call (background_record_every = 1): checks are a per-sample
+    // oracle, so full recording makes the assertion deterministic.
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
+
+    let set: e2e_model::CheckSet = serde_json::from_str(
+        r#"{ "id": "load-invite-identity", "blocks": [
+              { "on": "bob.initialInvite", "checks": [
+                  { "field": "from.uri", "op": "eq", "value": "${input.from}" },
+                  { "field": "from.tag", "op": "exists" },
+                  { "field": "header(X-Loadgen-Id)", "op": "exists" } ] } ] }"#,
+    )
+    .unwrap();
+    let sets: std::collections::BTreeMap<String, e2e_model::CheckSet> =
+        [("load-invite-identity".to_string(), set)].into();
+    let case = check_case(
+        r#"{ "id": "checked-pool", "compatibleShapes": ["basic_call"],
+             "bindings": { "mode": "seq", "entries": [
+               { "core": { "from": "sip:+331${seq:4}@pool.example" } } ] },
+             "checkSets": ["load-invite-identity"],
+             "checks": [ { "on": "alice.answer", "checks": [
+                 { "field": "to.tag", "op": "exists" } ] } ] }"#,
+    );
+    let case = Arc::new(LoadCase::new(case, &sets, 0xC4EC).unwrap());
+
+    let driver = Driver::new(
+        cfg(b2bua.addr, 50.0, 2, 16, 0xC4EC5),
+        vec![mix("basic_call", 1.0).with_case(Some(case))],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    // Passing checks never reclassify: every completed call stays OK.
+    let ok = reporter.count("basic_call", &ResultClass::Ok);
+    assert!(ok > 5, "too few OK checked calls:\n{}", reporter.render_prometheus());
+    assert_eq!(
+        reporter.total_calls(),
+        ok,
+        "a passing-checks run must stay all-OK:\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(reporter.count("basic_call", &ResultClass::CheckFail), 0);
+
+    // The sampled OK page renders the verdicts — PASS and the resolved value.
+    let out = std::env::temp_dir().join(format!("loadgen-checks-ok-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    reporter.finalize(&out).unwrap();
+    let html =
+        std::fs::read_to_string(out.join("callflows/basic_call/ok/clear/0.html")).unwrap();
+    assert!(html.contains("check bob.initialInvite from.uri"), "verdict line missing:\n{html}");
+    assert!(html.contains("PASS"), "PASS verdicts must render on the OK page");
+    assert!(html.contains("check alice.answer to.tag"), "inline-block verdict missing");
+    let _ = std::fs::remove_dir_all(&out);
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (checked case)");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// (b) A deliberately FAILING check reclassifies an otherwise-OK call to the
+/// NEW `check_fail` class — counted in Prometheus like any class — and the
+/// sampled page shows the FAIL verdict (expected vs got).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_failing_check_reclassifies_to_check_fail() {
+    let (_h, b2bua, core, transport) = setup(6720, Correlation::header("X-Loadgen-Id"), 5).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
+
+    let case = check_case(
+        r#"{ "id": "impossible", "compatibleShapes": ["basic_call"],
+             "checks": [ { "on": "bob.initialInvite", "checks": [
+                 { "field": "from.userInfo", "op": "eq", "value": "nobody-ever" } ] } ] }"#,
+    );
+    let case = Arc::new(LoadCase::new(case, &Default::default(), 0xFA11).unwrap());
+
+    let driver = Driver::new(
+        cfg(b2bua.addr, 40.0, 2, 16, 0xFA115),
+        vec![mix("basic_call", 1.0).with_case(Some(case))],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    // Every call records (background 1) → every otherwise-OK call reclassifies.
+    let failed = reporter.count("basic_call", &ResultClass::CheckFail);
+    assert!(failed > 5, "no check_fail calls:\n{}", reporter.render_prometheus());
+    assert_eq!(reporter.count("basic_call", &ResultClass::Ok), 0, "a failing check must never stay OK");
+    assert!(
+        reporter.render_prometheus().contains("class=\"check_fail\""),
+        "check_fail must surface as a Prometheus class:\n{}",
+        reporter.render_prometheus()
+    );
+
+    // The sampled NOK page carries the FAIL verdict with the mismatch detail.
+    let out = std::env::temp_dir().join(format!("loadgen-checks-fail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    reporter.finalize(&out).unwrap();
+    let html = std::fs::read_to_string(out.join("callflows/basic_call/check_fail/clear/0.html"))
+        .unwrap();
+    assert!(html.contains("check bob.initialInvite from.userInfo"), "verdict missing:\n{html}");
+    assert!(html.contains("FAIL"), "FAIL verdict must render");
+    assert!(html.contains("nobody-ever"), "expected-value detail must render");
+    let _ = std::fs::remove_dir_all(&out);
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (check_fail)");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// A scenario that legitimately deviates from RFC 3261 §15.1: its BYE carries a
+/// Contact header (BYE terminates the dialog, target refresh is meaningless),
+/// deterministically tripping the non-advisory `rfc3261.noContactOnBye` audit
+/// rule on every sampled call.
+struct ByeWithContact;
+
+#[async_trait]
+impl LoadScenario for ByeWithContact {
+    fn id(&self) -> ScenarioId {
+        "bye_with_contact"
+    }
+    async fn run(
+        &self,
+        env: &CallEnv<'_>,
+        scope: &CallScope,
+        ctx: &CallCtx,
+    ) -> Result<(), scenario_harness::StepError> {
+        use sip_message::generators::InDialogMethod;
+        let mut dialog = establish(env, scope, ctx).await?;
+        let mut bye = dialog
+            .send_request(InDialogMethod::Bye)
+            .with_header("Contact", "<sip:alice@127.0.0.1>")
+            .try_send()
+            .await?;
+        scope.set_confirmed(dialog.clone());
+        env.bob.try_receive("BYE").await?.respond(200, "OK").await;
+        bye.try_expect(200).await?;
+        scope.mark_terminated();
+        Ok(())
+    }
+}
+
+/// (c) `allowViolations` waives a NAMED RFC audit rule per call. Baseline: the
+/// deviating scenario (BYE + Contact) reclassifies every sampled call to
+/// `rfc_audit_fail`. With a case carrying
+/// `allowViolations: ["rfc3261.noContactOnBye"]` the SAME flow stays OK —
+/// the load-surface analogue of `Harness::allow_violation`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_allow_violations_waives_named_rfc_rule() {
+    let (_h, b2bua, core, transport) = setup(6740, Correlation::header("X-Loadgen-Id"), 5).await;
+
+    // Baseline: no case → the full audit reclassifies to rfc_audit_fail.
+    let baseline = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
+    let driver = Driver::new(
+        cfg(b2bua.addr, 40.0, 2, 16, 0xA0D17),
+        vec![(Arc::new(ByeWithContact) as Arc<dyn LoadScenario>, 1.0)],
+        baseline.clone(),
+        transport.clone(),
+    );
+    driver.run().await;
+    assert!(
+        baseline.count("bye_with_contact", &ResultClass::RfcAuditFail) > 5,
+        "the deviation must trip the audit without a waiver:\n{}",
+        baseline.render_prometheus()
+    );
+    assert_eq!(baseline.count("bye_with_contact", &ResultClass::Ok), 0);
+
+    // Waived: the case exempts exactly that rule → the same flow stays OK.
+    let case = check_case(
+        r#"{ "id": "waived-bye", "compatibleShapes": ["basic_call"],
+             "allowViolations": ["rfc3261.noContactOnBye"] }"#,
+    );
+    let case = Arc::new(LoadCase::new(case, &Default::default(), 0x30B).unwrap());
+    let waived = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
+    let driver = Driver::new(
+        cfg(b2bua.addr, 40.0, 2, 16, 0xA0D18),
+        vec![MixEntry::from((Arc::new(ByeWithContact) as Arc<dyn LoadScenario>, 1.0))
+            .with_case(Some(case))],
+        waived.clone(),
+        transport,
+    );
+    driver.run().await;
+    let ok = waived.count("bye_with_contact", &ResultClass::Ok);
+    assert!(ok > 5, "waived calls must stay OK:\n{}", waived.render_prometheus());
+    assert_eq!(
+        waived.count("bye_with_contact", &ResultClass::RfcAuditFail),
+        0,
+        "the named rule must be exempt:\n{}",
+        waived.render_prometheus()
+    );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (allow_violations)");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
 }

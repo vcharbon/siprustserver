@@ -30,6 +30,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// One Test-case check verdict projected into a sampled callflow page — the
+/// dependency-light mirror of the e2e check engine's `CheckVerdict` (the engine
+/// lives in `e2e-model`, which depends on this crate, so the binder renders
+/// from this data shape instead). Rendered in the page's anomaly list, PASS and
+/// FAIL alike (`passed` maps onto the anomaly's advisory flag).
+#[derive(Debug, Clone)]
+pub struct CheckNote {
+    /// `check <on> <field>` — the anomaly's rule id column.
+    pub name: String,
+    /// The verdict's human-readable detail (what matched / why it failed).
+    pub detail: String,
+    pub passed: bool,
+}
+
 use layer_harness::{NetworkTag, Recorder, RunContext, TransportKind};
 use sip_clock::Clock;
 use sip_net::{
@@ -200,42 +214,65 @@ impl AgentBinder {
     /// SAME path the harness report uses (`to_sip_entries` → `sip_doc` →
     /// `seq_report::render_html`), so a sampled load call's flow renders exactly
     /// like a functional-test callflow.
-    /// `detail` is the call's failure reason (the [`StepError`]/outcome string);
-    /// when present on a NOT-passed call it is surfaced in the rendered page so
-    /// the sampled callflow explains WHY it failed, not merely that it did.
+    /// `banner` is an always-shown per-call context line (the resolved binding —
+    /// the actual From/To used — on the load surface); it renders in the page
+    /// header on PASS and FAIL alike. `detail` is the call's failure reason (the
+    /// [`StepError`]/outcome string); when present on a NOT-passed call it is
+    /// surfaced in the rendered page so the sampled callflow explains WHY it
+    /// failed, not merely that it did.
     /// `chaos_markers` are injected-fault instants as `(wall_clock_epoch_ms,
     /// label)` — the load driver passes the recent `POST /chaos` markers so a
     /// sampled NOK flow renders each one (that falls in this call's window) as a
     /// Lifecycle band, making it obvious whether the kill landed during the call.
     /// Pass `&[]` when there is no chaos correlation.
+    /// `checks` are the call's Test-case check verdicts (PASS and FAIL), each
+    /// rendered as an entry in the page's anomaly list; pass `&[]` when the call
+    /// carries no case checks.
     pub fn render_html(
         &self,
         title: &str,
         passed: bool,
+        banner: Option<&str>,
         detail: Option<&str>,
         chaos_markers: &[(i64, String)],
+        checks: &[CheckNote],
     ) -> Option<String> {
-        let doc = self.seq_doc(title, passed, detail, chaos_markers)?;
+        let doc = self.seq_doc(title, passed, banner, detail, chaos_markers, checks)?;
         Some(seq_report::render_html(&doc))
     }
 
     /// Render this call's recorded trace as an SVG sequence diagram (`None` if not
     /// sampled).
     pub fn render_svg(&self, title: &str, passed: bool) -> Option<String> {
-        let doc = self.seq_doc(title, passed, None, &[])?;
+        let doc = self.seq_doc(title, passed, None, None, &[], &[])?;
         Some(seq_report::render_svg(&doc))
     }
 
     /// The non-advisory RFC 3261/3262/3264 findings over this call's recorded
     /// trace (empty if clean or the call was not sampled) — the load-driver
     /// analogue of the harness hard gate, surfaced as data instead of a panic so
-    /// the driver can classify an otherwise-OK call as RFC-dirty.
-    pub fn rfc_findings(&self) -> Vec<sip_net::RfcFinding> {
+    /// the driver can classify an otherwise-OK call as RFC-dirty. `allow` is the
+    /// per-call waived rule-name set (the Test case's `allowViolations` — the
+    /// load-surface analogue of [`Harness::allow_violation`]): findings from
+    /// those rules are exempt, exactly like the harness hard gate skips waived
+    /// rules. Pass an empty set for the historic behaviour.
+    pub fn rfc_findings(&self, allow: &HashSet<String>) -> Vec<sip_net::RfcFinding> {
         match &self.recording {
             Some(rec) => sip_net::evaluate_rfc_findings(&rec.channel().snapshot())
                 .into_iter()
-                .filter(|f| !f.advisory)
+                .filter(|f| !f.advisory && !allow.contains(&f.rule))
                 .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The wire trace of this call's recording, projected exactly like
+    /// `RunReport::entries` (empty when the call was not sampled) — the entries
+    /// half of what the e2e check engine evaluates over (the anchors half rides
+    /// the per-call `CallCtx`).
+    pub fn recorded_entries(&self) -> Vec<sip_net::RecordedSipEntry> {
+        match &self.recording {
+            Some(rec) => sip_net::to_sip_entries(&rec.channel().snapshot()),
             None => Vec::new(),
         }
     }
@@ -244,8 +281,10 @@ impl AgentBinder {
         &self,
         title: &str,
         passed: bool,
+        banner: Option<&str>,
         detail: Option<&str>,
         chaos_markers: &[(i64, String)],
+        checks: &[CheckNote],
     ) -> Option<seq_report::SeqDoc> {
         let (recording, recorder) = (self.recording.as_ref()?, self.recorder.as_ref()?);
         let events = recording.channel().snapshot();
@@ -255,7 +294,14 @@ impl AgentBinder {
         // banner next to the FAIL status) and as an explicit anomaly in the list,
         // so the sampled NOK callflow says WHY, not just that it failed.
         let reason = detail.filter(|_| !passed);
-        let extra: Vec<seq_report::Anomaly> = match reason {
+        // The description = the always-shown banner (the resolved binding) plus,
+        // on a failure, the reason — both in the header, PASS or FAIL.
+        let description = match (banner, reason) {
+            (Some(b), Some(r)) => Some(format!("{b} — {r}")),
+            (Some(b), None) => Some(b.to_string()),
+            (None, r) => r.map(str::to_string),
+        };
+        let mut extra: Vec<seq_report::Anomaly> = match reason {
             Some(d) => vec![seq_report::Anomaly {
                 check: "call-result".to_string(),
                 detail: d.to_string(),
@@ -265,6 +311,21 @@ impl AgentBinder {
             }],
             None => Vec::new(),
         };
+        // Test-case check verdicts, PASS and FAIL alike, so a sampled page shows
+        // the case's oracle next to the flow (a passed check is advisory-styled).
+        for c in checks {
+            extra.push(seq_report::Anomaly {
+                check: c.name.clone(),
+                detail: if c.passed {
+                    format!("PASS: {}", c.detail)
+                } else {
+                    format!("FAIL: {}", c.detail)
+                },
+                lane: None,
+                endpoint: None,
+                advisory: Some(c.passed),
+            });
+        }
         // The load binder records on `Clock::system()`, so `sent_ms` is real
         // wall-clock epoch ms → `wall_clock: true` renders absolute UTC and the
         // chaos markers (also epoch ms) drop onto the timeline at the kill instant.
@@ -273,7 +334,13 @@ impl AgentBinder {
             markers: chaos_markers.to_vec(),
         };
         Some(crate::report::project::sip_doc_with_overlay(
-            title, reason, &entries, &scenario, passed, &extra, &overlay,
+            title,
+            description.as_deref(),
+            &entries,
+            &scenario,
+            passed,
+            &extra,
+            &overlay,
         ))
     }
 }

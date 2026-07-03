@@ -491,7 +491,7 @@ impl B2buaMetrics {
         };
         counter("b2bua_message_cap_terminated_total", "calls terminated for exceeding max_messages_per_call (cap-defense; a climbing rate names a runaway-traffic call class)", self.message_cap_terminated_total());
         counter("b2bua_dispatch_queue_drops_total", "events dropped: per-call queue full", self.queue_drops_total());
-        counter("b2bua_dispatch_cap_drops_total", "events dropped: global call cap reached", self.cap_drops_total());
+        counter("b2bua_dispatch_cap_drops_total", "events hitting the global call cap: a new initial INVITE is shed with a stateless 503 (ADR-0022), an in-dialog orphan is silently dropped", self.cap_drops_total());
         counter("b2bua_dispatch_saturation_total", "global handler concurrency saturation hits", self.saturation_total());
         counter("b2bua_call_creations_total", "B2BUA calls this worker began serving (one per call_ref / dialog; NOT transactions or SIP messages). Matched 1:1 with removals.", creations);
         counter("b2bua_call_removals_total", "B2BUA calls this worker stopped serving (one per call_ref teardown). Matched 1:1 with creations.", removals);

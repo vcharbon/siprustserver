@@ -26,6 +26,7 @@ fn fake_cfg() -> EndpointConfig {
         roles,
         recv_timeout_ms: 2_000,
         transit_delay_ms: 0,
+        egress: None,
     }
 }
 
@@ -98,6 +99,7 @@ async fn basic_call_over_real_infra() {
         roles,
         recv_timeout_ms: 5_000,
         transit_delay_ms: 0,
+        egress: None,
     };
 
     let mut rt = RealLoopbackDirect

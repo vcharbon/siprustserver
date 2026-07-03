@@ -9,8 +9,10 @@ the OK flows and, for failures, *why* they failed.
 
 It multiplexes every dialog over a **few static UDP sockets** (one per defined
 endpoint: `uac`, `uas`, `refer`), so call rate is not bounded by fds/ephemeral
-ports. Calls are correlated **header-only**: each call carries one random token
-in `X-Loadgen-Id`, which a transparent SUT relays onto every downstream leg.
+ports. Calls are correlated by one random per-call token; **how the token
+travels through the SUT is a pluggable per-run strategy** (`--correlate`): a
+relayed header (default `X-Loadgen-Id`, needs SUT cooperation) or the To-header
+user-part (works against any SIP-correct B2BUA). See *Correlation strategies*.
 
 ---
 
@@ -41,7 +43,9 @@ nothing external.
 
 Build the binary and point it at the front-proxy VIP. The mux endpoints bind on a
 host IP **reachable from the cluster pods** (the kind bridge gateway, *not*
-`127.0.0.1`), and `--route-pin-to-uas` tells our B2BUA to send the callee leg
+`127.0.0.1`), and `--route-pin-to-uas` selects the `api-call-pin` **egress
+policy** (the same `EgressPolicy` the e2e framework's layouts declare): the
+INVITE carries an `X-Api-Call` destination pin so our B2BUA sends the callee leg
 back to the host `uas` socket:
 
 ```bash
@@ -58,21 +62,179 @@ cargo build --release -p loadgen
 
 Prerequisites for the real cluster (one-time):
 
-- The B2BUA must be **transparent to the correlation header**: deploy it with
-  `B2BUA_RELAY_HEADERS=X-Loadgen-Id` (already set in
-  `deploy/k8s/manifests/20-worker.yaml`). Without it the callee leg never
-  correlates and you'll see `loadgen_mux_orphan_total` climb / zero OK calls.
+- With the default `header` correlation, the B2BUA must be **transparent to the
+  correlation header**: deploy it with `B2BUA_RELAY_HEADERS=X-Loadgen-Id`
+  (already set in `deploy/k8s/manifests/20-worker.yaml`). Without it the callee
+  leg never correlates and you'll see `loadgen_mux_orphan_total` climb / zero OK
+  calls — or switch to `--correlate to-user`, which needs no SUT cooperation
+  (see *Correlation strategies* below).
 - `--bind-ip` = the kind bridge gateway:
   `docker network inspect kind -f '{{(index .IPAM.Config 0).Gateway}}'` (e.g.
   `172.20.0.1`). See the `cluster-nat-inventory` notes for the NAT details.
 
 Key flags: `--cps`, `--duration`, `--max-in-flight`, `--target`, `--bind-ip`,
-`--base-port` (uac=base, uas=base+1, refer=base+2), `--correlation-header`
-(default `X-Loadgen-Id`), `--route-pin-to-uas`, `--scenario name=weight`
-(repeatable; omit for the default mix), `--out-dir`, `--metrics-addr`
-(default `0.0.0.0:9300`), `--sample-cap`, `--drop-rate` / `--drop` /
-`--auto-retransmit` (see *Packet loss + auto-retransmit* below). Run `--help` for
-the full list.
+`--base-port` (uac=base, uas=base+1, refer=base+2), `--correlate` /
+`--correlation-header` / `--correlation-template` / `--correlation-extract`
+(see *Correlation strategies*), `--route-pin-to-uas`, `--refer-key` (the
+`X-Api-Call.refer_key` the SUT's REFER backend authorizes — per-run SUT auth
+data fed into the refer scenarios), `--scenario name=weight` (repeatable; omit
+for the default mix), `--out-dir`, `--metrics-addr` (default `0.0.0.0:9300`),
+`--sample-cap`, `--drop-rate` / `--drop` / `--auto-retransmit` (see *Packet loss
++ auto-retransmit* below), `--load-profile` (see *The run-spec axis* below). Run
+`--help` for the full list.
+
+### The run-spec axis: `--load-profile`
+
+Instead of a long flag line, the whole run can come from **one authored
+document** — a `LoadProfile` JSON (schema:
+`e2e/schemas/load-profile.schema.json`) — the load analogue of an e2e *Campaign*.
+It carries every run knob (`cps`, `durationSecs`, `maxInFlight`, `sampleCap`,
+`backgroundRecordEvery`, `reportIntervalSecs`, `recvTimeoutMs`), the global
+`robustness` (`dropRate` + `retransmit`) defaults, and the scenario **`mix`**
+(each entry: `shape` id, `weight`, an optional attached `case`, and per-scenario
+`dropRate`/`retransmit` overrides):
+
+```bash
+./target/release/loadgen \
+  --target 172.20.255.250:5060 --bind-ip 172.20.0.1 --route-pin-to-uas \
+  --load-profile e2e/loadprofiles/endurance-baseline.json
+```
+
+```jsonc
+// e2e/loadprofiles/endurance-baseline.json
+{
+  "cps": 20, "durationSecs": 3600, "maxInFlight": 8000,
+  "sampleCap": 50, "backgroundRecordEvery": 1, "reportIntervalSecs": 60,
+  "recvTimeoutMs": 5000,
+  "robustness": { "dropRate": 0.001, "retransmit": true },
+  "mix": [
+    { "shape": "basic_call", "weight": 16, "case": "e2e/cases/load-basic-pooled.json" },
+    { "shape": "reinvite",      "weight": 4  },
+    { "shape": "options_hold",  "weight": 1  },
+    { "shape": "long_call",     "weight": 0.4 }
+  ]
+}
+```
+
+**Precedence — flag overrides profile.** The profile supplies *defaults*; an
+**explicitly-passed CLI flag overrides** the profile's value for that knob (so a
+profile pins a repeatable baseline and a one-off `--cps 40` tweaks it without
+editing the file). A partial profile is legal — every omitted field falls back to
+the same default the flag carries. Addressing/egress stays the environment axis
+(`--endpoint-config` or the `--target`/`--bind-ip`/… shorthand); an authored
+`--endpoint-config` file's `recvTimeoutMs` wins over the profile's. An explicit
+`--scenario` (or `--case`) replaces the profile's whole `mix`. A malformed
+profile (bad rate, empty/typo'd shape id, drop rate outside `[0,1]`) fails **at
+startup**, never silently mid-run.
+
+### Live rate control (`POST /rate`)
+
+The offered rate is **re-targetable at runtime** — no restart — over the same
+HTTP socket as `/metrics` and `/chaos`:
+
+- **`POST /rate?cps=<float>`** — set the target call rate. The value is validated
+  and **clamped to `>= 0`** (a negative/`NaN`/`inf` clamps to `0`); a missing or
+  unparseable `cps` is a `400`. The response echoes the applied value
+  (`ok: target cps=<applied>`).
+- **`GET /rate`** — the current target cps.
+- **`cps=0` PAUSES** new-call admission (in-flight calls run to completion
+  untouched); a later `POST /rate?cps=N` **resumes** cleanly.
+- The current target is exported as the **`loadgen_target_cps`** gauge (`0` while
+  paused).
+
+```bash
+curl -X POST 'http://<metrics-addr>/rate?cps=40'   # ramp up to 40 cps
+curl -X POST 'http://<metrics-addr>/rate?cps=0'    # pause admission
+curl       'http://<metrics-addr>/rate'            # → current target
+```
+
+The governor is a **re-anchoring fixed-grid** scheduler (`loadgen::Governor`): it
+reads the rate on every slot, so a change takes effect within one slot. On a
+change it re-anchors its grid (fresh start instant + slot counter) — a **cut**
+therefore fires **no catch-up burst** (the old, faster grid's backlog of past-due
+slots is discarded, the new grid starts *now*), and a **raise** takes effect
+within one slot of the shorter period. A transient catch-up (after a stall) is
+still bounded by `--max-in-flight` (the excess is shed+counted). Coverage:
+`crates/loadgen/tests/governor.rs` (cadence, cut-without-burst, pause/resume) and
+the `post_rate_retargets_the_running_server` HTTP smoke test.
+
+### The environment axis: `--endpoint-config`
+
+Addressing + egress can come from **one authored document** instead of the flags:
+`--endpoint-config <file>` loads an `e2e-model` `EndpointConfig` (the same JSON
+the ADR-0018 e2e framework binds its Infra shapes with; schema:
+`e2e/schemas/endpoint-config.schema.json`). loadgen reads the roles `alice`
+(UAC bind), `bob` (UAS bind), `charlie` (REFER-target bind), `lb` (the SUT
+ingress), `recvTimeoutMs`, and the optional **`egress` policy**:
+
+```json
+{
+  "infraShape": "loadgen-mux",
+  "roles": {
+    "alice":   "172.20.0.1:6000",
+    "bob":     "172.20.0.1:6001",
+    "charlie": "172.20.0.1:6002",
+    "lb":      "172.20.255.250:5060"
+  },
+  "recvTimeoutMs": 5000,
+  "egress": "api-call-pin"
+}
+```
+
+`egress` is `"transparent"` (default — the SUT routes the callee itself),
+`"api-call-pin"` (attach the proprietary `X-Api-Call` destination pin; what
+`--route-pin-to-uas` selects), or `{"registrar-aor": {"domain": …}}` (dial the
+callee's registered AOR). The flags (`--target`/`--bind-ip`/`--base-port`/
+`--route-pin-to-uas`/`--recv-timeout-ms`) stay as **shorthand that synthesizes
+an equivalent EndpointConfig** when no file is given. Note: the e2e framework's
+compiled infra layouts keep declaring their own policy and override this field;
+loadgen standalone is its reader.
+
+### Correlation strategies
+
+Every call mints one random token; the mux demuxes an inbound **initial** leg
+(a Call-ID it has never seen) back to its call by recovering that token. A
+strategy has two halves — **stamp** (how the token is written into the outgoing
+INVITE) and **extract** (how it is recovered from a received leg) — picked
+per run with `--correlate`; all mux endpoints share the one strategy:
+
+- **`--correlate header`** (default) — the token rides one transparent header
+  the SUT must **relay** onto every leg it originates (our b2bua:
+  `B2BUA_RELAY_HEADERS`). Untuned this is byte-for-byte the historic behaviour:
+  `X-Loadgen-Id: <token>`, extraction = the whole header value.
+  - `--correlation-header <name>` picks the header.
+  - `--correlation-template <tpl>` shapes the VALUE around a `${token}`
+    placeholder, so the token can ride a **structured** header a third-party
+    SUT already relays, e.g.
+    `--correlation-header User-to-User --correlation-template '${token};encoding=hex'`
+    (RFC 7433 UUI) or
+    `--correlation-header P-Charging-Vector --correlation-template 'icid-value=${token}'`
+    (PCV).
+  - Extraction is a regex whose **first capture group** is the token — derived
+    from the template automatically (literal parts escaped, the placeholder
+    matched as unreserved URI chars, trailing params tolerated); override it
+    with `--correlation-extract '<regex>'` when the SUT rewrites the value
+    shape.
+- **`--correlate to-user`** — the token IS the To-header **user-part**
+  (`To: <sip:lg…@host>`); extraction reads the To user of the arriving INVITE.
+  A SIP-correct B2BUA copies the To URI onto its originated leg, so this
+  correlates against a **third-party SUT with zero cooperation** (one that
+  strips unknown headers breaks `header` correlation entirely). The trade-off:
+  the To user is now loadgen-owned, so don't combine it with a SUT that routes
+  or rewrites on the To user. (The REFER scenario's `Refer-To` user becomes the
+  token too, so the transfer leg keeps correlating.)
+
+Correlation failures are observable either way: an arriving initial INVITE with
+no extractable token counts `loadgen_mux_orphan_total{reason="no_header"}`; an
+extracted token matching no pending call counts `reason="unknown_token"`.
+
+In code the strategy is `loadgen::Correlation` (`header(name)`,
+`header_templated(name, template, extract)`, `to_user()`); the stamp half is
+applied inside `CallEnv::outgoing_invite` via `CorrelationStamp` (the per-call
+identity half, orthogonal to the egress rewrite), the extract half by the mux
+demux. Both strategies are covered by unit tests (`mux::tests`) and the
+smoke suite (`loadgen_to_user_correlation_without_relayed_header` proves a full
+call correlates with **no** relay configured on the SUT).
 
 ### Packet loss + auto-retransmit (robustness testing)
 
@@ -156,6 +318,122 @@ recording memory, so the binary also exports `loadgen_process_resident_memory_by
 *Loadgen* dashboard. `--report-interval-secs N` re-writes the on-disk report every
 N s so it is browsable mid-run.
 
+### The parameters axis: binding pools (`--case` / `case=`)
+
+The dwell flags above are **global**; identities default to the agent URIs. To
+drive **per-call identities and per-call dwells from data**, attach an authored
+`e2e-model` **Test case** (the same JSON documents the ADR-0018/0019 framework
+runs; schema: `e2e/schemas/test-case.schema.json`) to a mix entry:
+
+```bash
+# one case for the whole mix:
+./target/release/loadgen --target … --bind-ip … --case e2e/cases/load-basic-pooled.json
+
+# or per mix entry (overrides the global --case for that entry):
+./target/release/loadgen --target … --bind-ip … \
+  --scenario basic_call=4,case=e2e/cases/load-basic-pooled.json \
+  --scenario reinvite=1
+```
+
+A case may carry a **binding pool** — `bindings: { mode, entries }` — where each
+entry is an `Input` **overlay** (core `from`/`to`/`ruri` + `extras`) merged over
+the case's base `input` (entry fields win). Per call the driver resolves ONE
+entry — `"mode": "seq"` walks the pool in order, `"random"` picks per seeded
+RNG; both **wrap**, so identities repeat once the pool is exhausted (by
+design: a finite subscriber pool). String fields (core AND extras) may embed
+expansion tokens resolved per call:
+
+- `${seq}` — the monotone per-run call counter;
+- `${seq:N}` — the counter zero-padded/truncated to its last `N` digits
+  (`7` → `0007`, `123456` → `3456` for `N=4`);
+- `${rand:N}` — `N` fresh random digits (deterministic per run seed).
+
+The worked example, `e2e/cases/load-basic-pooled.json`:
+
+```json
+{
+  "id": "load-basic-pooled",
+  "compatibleShapes": ["basic-call"],
+  "input": {
+    "extras": { "ring_delay_ms": 25, "talk_time_ms": 10 }
+  },
+  "bindings": {
+    "mode": "seq",
+    "entries": [
+      { "core": { "from": "sip:+3310${seq:4}@pool.example",
+                  "to":   "sip:+3390${seq:4}@callee.example" } },
+      { "core": { "from": "sip:+4420${rand:6}@pool.example" } }
+    ]
+  }
+}
+```
+
+Call 0 dials `From: sip:+33100000@pool.example` → `To: sip:+33900000@…`, call 1
+`From: sip:+4420<6 random digits>@…` (falling back to the base/default To), call
+2 wraps to entry 0 with `+33100002`, and so on. What the resolution drives:
+
+- the resolved **core `from`/`to`/`ruri`** ride the same egress
+  `outgoing_invite` path as an e2e Test case's `core` (folded in before the
+  layout's egress rewrite, which keeps the final say — an AOR R-URI or
+  `X-Api-Call` pin still wins; a `to-user` correlation stamp overrides an
+  authored `to`, since correlation is load-bearing demux infrastructure);
+- **recognized extras become per-call dwells**, overriding the global flags
+  knob-by-knob: `ring_delay_ms`, `talk_time_ms`, `reinvite_gap_ms`,
+  `long_hold_secs`, `options_cadence_ms` (unset knobs keep the global value).
+  Unrecognized extras are left alone (they are the open per-shape parameter
+  map). This kills the "dwells are global" limitation — `CallConfig` keeps the
+  global defaults, the case refines them per call;
+- sampled callflow pages show the **resolved binding** in the header banner
+  (`binding: case=load-basic-pooled seq=17 entry=1 from=… to=…`), so a stored
+  flow says WHICH identity dialed. Prometheus/bucket labels stay
+  **scenario-keyed** — a pool never becomes label cardinality.
+
+A malformed token (`${bogus}`, `${seq:}`, an unclosed `${…`) or an empty pool
+fails **at startup** (the same load-time validation `validate_case` applies on
+the e2e surface), never silently mid-run. Absent `bindings`, the case's single
+`input` is used for every call (tokens still expand), and with no `--case` at
+all the historic flag-only behaviour is byte-for-byte unchanged. Smoke
+coverage: `loadgen_pooled_case_identities_and_dwell_overrides`.
+
+### Test-case checks on sampled calls (`checks` / `checkSets`)
+
+An attached case's **checks** — inline `checks` blocks and referenced
+`checkSets` (loaded from `--check-sets-dir`, default `e2e/checksets`, the same
+store the e2e runner reads) — are evaluated over a call's recorded trace by
+the ONE shared check engine (`e2e_model::checks`). `${input.*}` binds to THIS
+call's **resolved (pool-expanded) input**, `${infra.lbVip}` to the run's
+`--target`. Any failed check reclassifies an otherwise-OK call to the
+**`check_fail`** class (its own Prometheus `class` label + sample directory);
+the sampled callflow page lists every verdict, **PASS and FAIL alike**, next to
+the flow.
+
+**Honest scope — checks run on SAMPLED calls only.** The unsampled majority
+binds no recording (that's what keeps memory flat at load), so there is nothing
+to evaluate: checks are a **per-sample oracle, not a per-call gate** — exactly
+like the RFC audit. Raise coverage with `--sample-cap` and/or
+`--background-record-every 1` (full recording; watch
+`loadgen_process_resident_memory_bytes`).
+
+Anchors: check selectors are `<agent>.<anchor>` over the LOAD agent names —
+`alice`, `bob`, `bob2` (rerouting), `charlie` (refer) — not the e2e surface's
+`bob1`. The shared choreography publishes `initialInvite` /
+`firstProvisional` / `answer` / `ack` on establishment (+ `prack` on the
+100rel flows), `bye` on hangup, `reInvite` on the reinvite shape, and `refer`
+(the REFER bob sends TO the SUT — matched on the sent side, since no test
+agent receives it). A shape's published set is declared on its
+`ShapeDescriptor` in `e2e-model::registry`. The basic 180 is best-effort, so
+key `firstProvisional` from an `optional: true` block unless a lost 18x should
+fail the sample.
+
+A case may also carry **`allowViolations`: `["rfc3261.noContactOnBye", …]`** —
+the authored analogue of `Harness::allow_violation` for a flow that
+legitimately deviates. The named RFC audit rules are exempted per call, so the
+finding no longer reclassifies the sampled call to `rfc_audit_fail`. Absent /
+empty = today's full audit, byte-for-byte. Smoke coverage:
+`loadgen_case_checks_pass_and_render_verdicts`,
+`loadgen_failing_check_reclassifies_to_check_fail`,
+`loadgen_allow_violations_waives_named_rfc_rule`.
+
 ### In the endurance run (parallel to SIPp)
 
 The endurance harness runs `loadgen` as an **in-cluster Job alongside the SIPp
@@ -191,11 +469,15 @@ The report is written to `--out-dir`, bucketed per `(scenario × result-class ×
   *"transfer declined by charlie (603)"*; a sampled NOK also lists the lifecycle
   `[phases: connected@…ms, reinvited@…ms]` it reached. The failure `<class>` is a
   directory name: `status_503`, `status_486`, `timeout`, `unexpected`,
-  `rfc_audit_fail`, `panic`, `transport`, `unparseable`.
+  `rfc_audit_fail`, `check_fail`, `panic`, `transport`, `unparseable`. A call
+  with an attached Test case also lists its check verdicts (PASS and FAIL).
 - **`summary.md`** — the same counts in markdown.
 - **Live:** `curl <metrics-addr>/metrics` during a run for the per-`(scenario,
   class, chaos)` counters plus the `loadgen_mux_orphan_total` /
-  `loadgen_mux_registry_size` canaries and `loadgen_chaos_markers_total`.
+  `loadgen_mux_registry_size` canaries, `loadgen_chaos_markers_total`, and
+  `loadgen_target_cps` (the current offered-rate target). The same socket serves
+  `POST /rate?cps=<float>` / `GET /rate` (live rate control — see *Live rate
+  control* above) and `POST /chaos` (chaos correlation — below).
 
 ### Chaos correlation (near vs clear)
 
@@ -251,19 +533,24 @@ page with its one-line reason.
 
 ## How to add a test case
 
-### Add a load scenario
+### Add a load scenario (a body + a descriptor — no match arms anywhere)
 
-1. Create `src/scenarios/<name>.rs` with a unit struct implementing
-   `LoadScenario`:
+1. Write the **load body** — a unit struct implementing `RealCallScenario`
+   (`scenario_harness::realcall`; re-exported as
+   `loadgen::scenarios::LoadScenario`). The shipped bodies live in
+   `crates/scenario-harness/src/realcall/scenarios/<name>.rs` so the SAME flow
+   serves the load fleet and the in-process functional leak gate; a third-party
+   crate implements the trait wherever it likes. Load attributes
+   (charlie/bob2/emergency) are **not** on the trait — they live on the
+   descriptor (step 2):
 
    ```rust
    pub struct MyFlow;
 
    #[async_trait]
-   impl LoadScenario for MyFlow {
-       fn id(&self) -> ScenarioId { "my_flow" }      // report dir + metrics label
-       // fn needs_charlie(&self) -> bool { true }    // bind a transfer-target leg
-       // fn emergency(&self) -> bool { true }        // stamp Resource-Priority: esnet.0
+   impl RealCallScenario for MyFlow {
+       fn id(&self) -> ScenarioId { "my_flow" }   // the body's intrinsic name; the
+                                                  // report/metrics id is the DESCRIPTOR's
 
        async fn run(&self, env: &CallEnv<'_>, scope: &CallScope, ctx: &CallCtx)
            -> Result<(), StepError>
@@ -277,24 +564,46 @@ page with its one-line reason.
    ```
 
    - `env` gives you the bound agents (`env.alice` UAC, `env.bob` UAS, optional
-     `env.charlie`), `env.via` (the SUT to route through), `env.prepare_invite`
-     (stamps the correlation token + optional routing pin), and the REFER helpers.
+     `env.charlie`), `env.via` (the SUT ingress) and `env.outgoing_invite(&["bob"],
+     inv)` — the egress seam that realizes the logical INVITE on this run's wire
+     (correlation stamp + emergency marker + the run's `EgressPolicy` rewrite,
+     mirroring e2e-core `InfraRuntime::outgoing_invite`) — plus `env.callee(role)`
+     to resolve any callee target and the REFER helpers (`env.refer_to()`,
+     `env.refer_authorization(refer_key)`). Per-run SUT auth data (the refer
+     scenarios' `refer_key`) is fed at CONSTRUCTION via `ScenarioInputs`, not the
+     env.
    - **Register your dialog state in `scope`** as the call progresses
      (`set_early` once the INVITE is out, `set_confirmed` once it answers,
      `mark_terminated` once you tear it down) so a mid-flow failure is still
      cleaned up by the driver — this is what keeps the SUT leak-free.
    - `ctx.checkpoint("name")` records a latency checkpoint (shows in the report).
 
-2. Register it in `src/scenarios/mod.rs`: add `pub mod <name>;`, a `by_id` arm
-   (`"my_flow" => Some(Arc::new(<name>::MyFlow))`), and — if it should run in the
-   default mix — a weight in `default_scenarios()`. An **emergency variant** is
-   free: `AsEmergency::wrap("my_flow_em", Arc::new(<name>::MyFlow))`.
+2. Declare it ONCE in the unified, open shape registry
+   (`e2e_model::registry::default_shapes`, or `ShapeRegistry::register` from a
+   third-party crate): a `ShapeDescriptor::new("my_flow")` carrying the load
+   attributes (`.needs_charlie()` / `.needs_bob2()` / `.emergency()`), an
+   optional `.default_weight(w)` for the default mix, the published
+   `.anchors(…)` (so Test-case checks can bind), and the body factory —
+   `.load_shared(Arc::new(MyFlow))`, or `.load_with(|inputs| …)` when it needs
+   per-run SUT auth data (`ScenarioInputs`). That is the whole wiring: the
+   driver resolves the descriptor from the registry (`MixEntry::by_id` /
+   `--scenario my_flow=…`, `MixEntry::default_mix` / `failure_mix` for the
+   shipped tables) — there is no `match` table left to extend, and a duplicate
+   id panics at registration. An **emergency variant** is free: a second
+   descriptor (`"my_flow_em"`) with `.emergency()` reusing the same body — the
+   report id comes from the descriptor. A shape that ALSO has an e2e functional
+   body attaches it by the same id in
+   `e2e-core/src/shapes/mod.rs::default_bodies` (see `rerouting_prack`, the
+   first dual-body shape; ADR-0021).
 
 ### Add a *voluntarily-failing* scenario (post-call-cleanup coverage)
 
-Failure scenarios live in `src/scenarios/failures.rs`, one per teardown path, so
-the no-leak coverage test exercises every reclamation branch **without an
-endurance run**:
+Failure scenario bodies live in
+`crates/scenario-harness/src/realcall/scenarios/failures.rs`, one per teardown
+path, and are registered like any other shape but with `.failure_weight(w)`
+instead of `.default_weight(w)` — that flag is what puts them in the registry's
+`failure_mix`, which the no-leak coverage test runs so every reclamation branch
+is exercised **without an endurance run**:
 
 | ends in scope state | teardown the driver runs | example |
 |---|---|---|
@@ -313,7 +622,8 @@ drive the callee's `200`+`487` in-scenario (see `AbandonRinging`).
 Add a `#[tokio::test(flavor = "multi_thread")]` to `tests/smoke.rs`: call
 `setup(base_port, Correlation::header("X-Loadgen-Id"), sample_cap)` (or
 `setup_with(.., |c| …)` to tune the in-process B2BUA, e.g. exhaust the CPS bucket
-for an overload test), build a `Driver` over your scenario list, `driver.run()`,
+for an overload test; `setup_no_relay(..)` for the third-party-SUT shape with no
+header relay), build a `Driver` over your scenario list, `driver.run()`,
 then assert on `reporter.count(id, &class)` and the leak canaries
 (`core.registry_size() == 0`, `b2bua.active_calls() == 0`,
 `b2bua.assert_fully_reaped()`). Model it on
@@ -328,3 +638,123 @@ disambiguates which receiver gets the leg. Declare it via `CallRouting`
 `loadgen_mux_picker_disambiguates_shared_socket` for a worked example. This is
 the seam a future multi-REFER / re-route scenario builds on; the mux itself never
 reads `X-Api-Call` or any URI — leg routing is the scenario's to own.
+
+---
+
+## Extension points (deferred by design)
+
+Three capabilities a production SIP load tool eventually needs are **wired as
+seams but not implemented** — the point is that adding each one later touches a
+single adapter, not the call choreography. The choreography
+(`scenario_harness::realcall`) is transport- and auth-agnostic today; these notes
+say exactly where each extension slots in.
+
+### Authentication (RFC 3261 §22) — the `ChallengeResponder` seam
+
+Auth is **not implemented**: a challenging SUT's `401 Unauthorized` /
+`407 Proxy Authentication Required` classifies as `status_401` / `status_407` and
+the call is counted as a deviation. The retry **hook**, however, already exists,
+so adding digest is one object:
+
+- **The adapter.** `scenario_harness::realcall::auth::ChallengeResponder`
+  (re-exported as `loadgen::ChallengeResponder`):
+
+  ```rust
+  fn respond(&self, challenge: &Challenge, method: &str, ruri: &str) -> Option<String>;
+  ```
+
+  It returns the credential-header value (`Authorization` for a `401`,
+  `Proxy-Authorization` for a `407` — `Challenge::credential_header()`), or `None`
+  to decline. `Challenge` carries the challenge `status` and the raw
+  `WWW-Authenticate` / `Proxy-Authenticate` `header_value` (a future RFC 2617 /
+  7616 digest computer parses `realm`/`nonce`/`qop`/`algorithm` off it).
+
+- **Where it is wired (the ONE retry point).** On the fallible INVITE path
+  (`realcall::establish` / `establish_100rel`, via `admitted_uas`) and on the
+  out-of-dialog builder (`OutOfDialogRequest::try_send_authed` — the future
+  REGISTER/OPTIONS path). On a `401`/`407` **with** a responder the choreography
+  ACKs the challenge (RFC 3261 §17.1.1.3 for INVITE; nothing for a non-INVITE,
+  §17.1.2.2), asks the responder for a credential, and resends the request with
+  the credential header + a **bumped CSeq** + a fresh Via branch, exactly **once**
+  (a challenge to the resend is a plain `status_401/407`). **Without** a responder
+  the behaviour is byte-for-byte today's — no retry.
+
+- **How to plug one in.** Set it on the run's `CallEnv`
+  (`CallEnv::with_challenge_responder(Arc::new(MyDigest{…}))`) or, on the load
+  fleet, on the `MixEntry` (`MixEntry::with_challenge_responder(Some(resp))`,
+  folded into every call's `CallEnv` by the driver). The default is `None`. There
+  is **no CLI flag yet** — this is a library-consumer seam; a `--auth` flag minting
+  a digest responder is a small follow-up that touches only the binary's arg
+  parsing.
+
+  Usage sketch:
+
+  ```rust
+  struct Digest { user: String, pass: String }
+  impl ChallengeResponder for Digest {
+      fn respond(&self, c: &Challenge, method: &str, ruri: &str) -> Option<String> {
+          // parse realm/nonce/qop off c.header_value, hash A1/A2 over method+ruri,
+          // return Some("Digest username=…, realm=…, nonce=…, uri=…, response=…")
+      }
+  }
+  let mix = MixEntry::by_id(&reg, "basic-call", &inputs, 1.0)?
+      .with_challenge_responder(Some(Arc::new(Digest { .. })));
+  ```
+
+  Regression tests for the plumbing (fake static-credential responder + the
+  no-responder classification) live in `scenario-harness`
+  (`agent::auth_seam_tests`).
+
+### Transport: TCP / TLS (NO code today — where it would slot)
+
+The engine is **UDP-only**. Every endpoint is a `tokio::net::UdpSocket` opened in
+`loadgen::mux::MuxCore::bind` (one per `EndpointSpec`, pumped by `dispatch_loop`),
+the agents' Via advertises `SIP/2.0/UDP` (`scenario_harness::agent::Agent::via`,
+hardcoded `SipTransport::Udp`), and the retransmit engine
+(`mux.rs::CallTxns`) implements the UDP timers (Timer A/E request resends, Timer G
+2xx-until-ACK) that a reliable transport would not need. This is deliberate: the
+SUT under test is UDP, the multiplex-over-few-sockets design (its whole reason for
+existing — call rate not bounded by fds/ephemeral ports) is a UDP idiom, and a
+paused-clock deterministic fabric is simplest over datagrams.
+
+Adding TCP/TLS is a **socket-layer** change, isolated to two files — the
+choreography above `mux` never sees the transport:
+
+1. **`EndpointSpec` gains a transport kind** (`Udp | Tcp | Tls{…}`), and
+   `MuxCore::bind` opens a `TcpListener` (accept loop → per-connection read task)
+   instead of a `UdpSocket` for a TCP/TLS spec. The inbound side already
+   frames+parses whole SIP messages per datagram; over a stream it must instead
+   **length-frame** on `Content-Length` (RFC 3261 §7.5) before handing each
+   message to the same dispatcher. TLS is a `tokio-rustls` acceptor/connector
+   wrapping that stream — no message-layer change.
+2. **The Via + `Contact` transport token** (`Agent::via`,
+   `Agent::contact`) becomes per-endpoint instead of the constant
+   `SipTransport::Udp`, so a TCP leg advertises `SIP/2.0/TCP` and routes replies
+   over the connection.
+
+The retransmit engine then keys off the transport: over TCP/TLS the request/2xx
+resend timers are **disabled** (the stream is reliable), so `CallTxns`
+(`mux.rs::CallTxns::on_outbound`, which arms the Timer A/E/G resend controls)
+gains a `reliable` flag that short-circuits arming them. Nothing in `realcall` or
+the shapes changes — they build logical messages; the mux realizes them on the
+wire.
+
+### REGISTER (a future shape)
+
+There is no REGISTER **load shape** yet, but the pieces are in place:
+
+- The functional harness already speaks REGISTER (`Agent::register`) and a
+  **registrar mimic** exists in `e2e-core` (the `fake-register-proxy` the portable
+  `basic-call`-over-registrar E2E runs against), so a load shape has a SUT to
+  register against.
+- The out-of-dialog builder (`Agent::request(OutOfDialogMethod::Register, …)`)
+  plus `OutOfDialogRequest::try_send_authed` give REGISTER its **authenticated**
+  send for free — a registrar almost always challenges, and the
+  `ChallengeResponder` seam above is exactly the adapter it needs (`401` →
+  credential → resend, once).
+- A `register-refresh` shape would be a `RealCallScenario` that REGISTERs
+  (binding its AOR), holds for the binding lifetime with periodic refreshes, then
+  de-registers (Expires: 0) — declared once as a `ShapeDescriptor` like every
+  other shape, with the AOR/credentials driven from the Test-case binding pool
+  (`--case`). The `RegistrarAor` egress policy already models "route the INVITE to
+  the registered AOR" for the call side.

@@ -31,5 +31,8 @@ pub use infra::{
 pub use model::{Campaign, Check, CheckBlock, CheckOp, CheckSet, ModelError, TestCase};
 pub use shape::{Anchor, CallflowShape, Input, MediaMode};
 pub use shapes::{
-    BasicCall, BasicCallMedia, Rerouting, ReroutingPrack, TransferReferMedia,
+    BasicCall, BasicCallMedia, Rerouting, ReroutingPrack, ShapeEntry, TransferReferMedia,
 };
+// The unified, OPEN shape registry (ONE declaration per shape, shared with the
+// load surface) this crate's functional bodies attach to.
+pub use e2e_model::{ScenarioInputs, ShapeDescriptor, ShapeRegistry};

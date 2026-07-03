@@ -11,17 +11,18 @@
 //! "real call" expressible against `try_*` with no byte-exact assertions. The
 //! raw-bytes torture cases (`dsl::Scenario`) are deliberately NOT here.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 
-use crate::{Dialog, StepError, ANSWER_SDP, OFFER_SDP};
+use crate::agent::{ClientInvite, ServerTxn};
+use crate::{Agent, Dialog, StepError, ANSWER_SDP, OFFER_SDP};
 
+pub mod auth;
 mod env;
 mod scope;
 pub mod scenarios;
 
-pub use env::{CallCtx, CallEnv};
+pub use auth::{Challenge, ChallengeResponder};
+pub use env::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp};
 pub use scope::CallScope;
 
 /// Stable scenario name — the Prometheus `scenario` label and report dir name.
@@ -30,19 +31,18 @@ pub type ScenarioId = &'static str;
 /// A real-call scenario: one full call through the SUT. Implementations are
 /// `Send + Sync` and stateless (all per-call state is in the args), so the same
 /// instance can be shared across the load fleet and reused by a functional test.
+///
+/// The scenario is the shape's **load body** — pure choreography. Its load-side
+/// ATTRIBUTES (needs-charlie / needs-bob2 / emergency / mix weights) live on the
+/// shape's ONE declaration, the `e2e_model::ShapeDescriptor`, which the load
+/// driver consults per mix entry — never here, so a body reused under several
+/// ids (e.g. the emergency variants) is declared once.
 #[async_trait]
 pub trait RealCallScenario: Send + Sync {
-    /// Stable identifier (label / report dir).
+    /// The body's intrinsic name (panic messages, direct functional use). The
+    /// registry/report id is the DESCRIPTOR's — they coincide except when one
+    /// body serves several descriptors (`basic_call` vs `basic_call_em`).
     fn id(&self) -> ScenarioId;
-    /// Whether this scenario needs a third (transfer-target) leg bound.
-    fn needs_charlie(&self) -> bool {
-        false
-    }
-    /// Whether this call is an emergency (Resource-Priority `esnet.0`) — the SUT
-    /// force-admits it under overload, so it must never be shed. Default: no.
-    fn emergency(&self) -> bool {
-        false
-    }
     /// Drive one call. Return `Ok` on the happy path or a [`StepError`] on an
     /// expected failure; the driver/leak-gate tears the call down regardless.
     async fn run(
@@ -106,39 +106,13 @@ pub async fn establish(
     scope: &CallScope,
     ctx: &CallCtx,
 ) -> Result<Dialog, StepError> {
-    let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP).through(env.via);
-    let mut call = env.prepare_invite(inv).send().await;
+    let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP);
+    let mut call = env.outgoing_invite(&["bob"], inv).send().await;
     scope.set_early(call.cancel_handle());
-
-    // The call may be ADMITTED (the SUT forwards our INVITE to bob) or SHED
-    // (under overload the SUT replies a final — e.g. 503 — directly to alice, and
-    // bob never sees it; an emergency call is force-admitted and never shed). We
-    // cannot know which up front, so race bob's inbound INVITE against alice's
-    // response. `try_expect(180)` skips the auto-100 Trying and surfaces a shed
-    // final as `WrongStatus { got: 503 }`, which the driver buckets as
-    // `status_503`. (Only an admitted call reaches bob; an admitted call's own
-    // 180 arrives only after we answer bob below, so the second arm resolving is
-    // unambiguously the SUT's own final to alice.)
-    let mut uas = tokio::select! {
-        biased;
-        bob = env.bob.try_receive("INVITE") => bob?,
-        shed = call.try_expect(180) => {
-            let e = shed.err().unwrap_or_else(|| StepError::UnexpectedKind {
-                who: "alice".to_string(),
-                detail: "early 180 before bob saw the INVITE".to_string(),
-            });
-            // A real FINAL response (status ≥ 200, e.g. a 503 overload shed)
-            // completes the INVITE transaction — there is nothing to CANCEL/BYE,
-            // and CANCELing an already-answered INVITE just churns the SUT. Mark
-            // the scope terminated so teardown is a no-op. A non-180 PROVISIONAL
-            // (183 early media) is NOT a final — leave the scope Early so a still-
-            // pending INVITE is CANCELed; likewise a bare timeout (no response).
-            if matches!(&e, StepError::WrongStatus { got, .. } if *got >= 200) {
-                scope.mark_terminated();
-            }
-            return Err(e);
-        }
-    };
+    let mut uas = admitted_uas(env, scope, &mut call, 180).await?;
+    // Canonical anchors (ADR-0019) on the shared choreography: a no-op unless
+    // the driver sampled this call (see `CallCtx::anchor`).
+    ctx.anchor(env.bob, "initialInvite", uas.request());
     uas.respond(180, "Ringing").await;
     // The 180 is a NON-PRACK provisional: best-effort, so it MAY be lost
     // end-to-end — that is EXPECTED, not a call failure (RFC 3261 §13.2.2.4: the
@@ -149,7 +123,10 @@ pub async fn establish(
     // — the UAS answers only AFTER this resolves — so a late/reordered 180 can
     // never strand in the caller's inbox (which would break the later BYE).
     let saw_ringing = match call.try_expect(180).await {
-        Ok(_) => true,
+        Ok(ring) => {
+            ctx.anchor(env.alice, "firstProvisional", &ring);
+            true
+        }
         Err(StepError::Timeout { .. }) => false,
         Err(e) => return Err(e),
     };
@@ -161,62 +138,226 @@ pub async fn establish(
         tokio::time::sleep(env.ring_delay).await;
     }
     uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
-    call.try_expect(200).await?;
+    let answer = call.try_expect(200).await?;
+    ctx.anchor(env.alice, "answer", &answer);
     ctx.checkpoint("time_to_200");
 
     let dialog = call.ack().await;
     scope.set_confirmed(dialog.clone());
-    env.bob.try_receive("ACK").await?;
+    let ack = env.bob.try_receive("ACK").await?;
+    ctx.anchor(env.bob, "ack", ack.request());
+    ctx.phase("connected");
+    Ok(dialog)
+}
+
+/// The call may be ADMITTED (the SUT forwards our INVITE to bob) or SHED
+/// (under overload the SUT replies a final — e.g. 503 — directly to alice, and
+/// bob never sees it; an emergency call is force-admitted and never shed). We
+/// cannot know which up front, so race bob's inbound INVITE against alice's
+/// response. `try_expect(expect_1xx)` skips the auto-100 Trying and surfaces a
+/// shed final as `WrongStatus { got: 503 }`, which the driver buckets as
+/// `status_503`. (Only an admitted call reaches bob; an admitted call's own
+/// provisional arrives only after the scenario answers bob, so the second arm
+/// resolving is unambiguously the SUT's own final to alice.) Shared by
+/// [`establish`] (awaits a 180 next) and [`establish_100rel`] (a reliable 183).
+pub(crate) async fn admitted_uas(
+    env: &CallEnv<'_>,
+    scope: &CallScope,
+    call: &mut ClientInvite,
+    expect_1xx: u16,
+) -> Result<ServerTxn, StepError> {
+    // At most ONE authenticated resend (RFC 3261 §22.2): a challenge to the
+    // resent INVITE surfaces as a plain `status_401/407` deviation, never an
+    // unbounded loop.
+    let mut auth_retries_left: u8 = if env.challenge_responder.is_some() { 1 } else { 0 };
+    loop {
+        let raced = tokio::select! {
+            biased;
+            bob = env.bob.try_receive("INVITE") => return bob,
+            resp = call.try_recv_response() => resp,
+        };
+        // The alice arm resolved first: either the SUT's own final to alice (a
+        // shed 503 / a 401-407 challenge / any other final) or an early
+        // provisional that should not have preceded bob's INVITE.
+        let resp = match raced {
+            Ok(r) => r,
+            // A bare timeout / closed queue (no response) leaves the scope Early
+            // so the still-pending INVITE is CANCELed at teardown.
+            Err(e) => return Err(e),
+        };
+
+        // §22.2 challenge with a configured responder: ACK the challenge, add the
+        // credential, resend once, then re-race (bob may now see the authed
+        // INVITE, or another final may come back).
+        if matches!(resp.status, 401 | 407) && auth_retries_left > 0 {
+            if let Some(responder) = env.challenge_responder.as_deref() {
+                if call.ack_and_resend_with_auth(&resp, responder).await? {
+                    // The resent INVITE is a fresh transaction still pending — keep
+                    // the scope Early (its CANCEL handle already covers the resent
+                    // INVITE, which `ack_and_resend_with_auth` re-pointed).
+                    auth_retries_left -= 1;
+                    continue;
+                }
+                // Responder declined — fall through and surface the challenge as a
+                // plain deviation (status_401/407), exactly as with no responder.
+            }
+        }
+
+        // No retry: reproduce the historic `try_expect(expect_1xx)`
+        // classification byte-for-byte. A real FINAL (status ≥ 200) completes the
+        // INVITE transaction — nothing to CANCEL/BYE — so mark the scope
+        // terminated (teardown is a no-op) and surface `WrongStatus` (the driver
+        // buckets it `status_<code>`, e.g. `status_401` / `status_503`). A 1xx
+        // that raced ahead of bob is NOT a final: leave the scope Early (the
+        // pending INVITE is CANCELed). The `expect_1xx` provisional itself maps to
+        // `UnexpectedKind` (as `try_expect` returning `Ok` did); any OTHER 1xx to
+        // `WrongStatus` — exactly the two prior branches.
+        if resp.status >= 200 {
+            scope.mark_terminated();
+            return Err(StepError::WrongStatus {
+                who: env.alice.name().to_string(),
+                expected: expect_1xx,
+                got: resp.status,
+                reason: resp.reason.clone(),
+            });
+        }
+        if resp.status == expect_1xx {
+            return Err(StepError::UnexpectedKind {
+                who: env.alice.name().to_string(),
+                detail: format!("early {expect_1xx} before bob saw the INVITE"),
+            });
+        }
+        return Err(StepError::WrongStatus {
+            who: env.alice.name().to_string(),
+            expected: expect_1xx,
+            got: resp.status,
+            reason: resp.reason.clone(),
+        });
+    }
+}
+
+/// Shared RFC 3262 establishment — the reliable-provisional analogue of
+/// [`establish`]:
+///
+/// ```text
+///   INVITE(offer, Supported:100rel) → 183(Require:100rel, RSeq, answer)
+///     → PRACK(RAck) → 200(PRACK) → 200(INVITE) → ACK
+/// ```
+///
+/// The caller opts into 100rel on the INVITE (RFC 3262 §3); bob answers with a
+/// RELIABLE 183 carrying the SDP answer; alice PRACKs it (RAck derived from the
+/// 183's own RSeq/CSeq via [`ClientInvite::try_prack`]); bob 200s the PRACK and
+/// only then answers the INVITE (RFC 3262 MUST-014 ordering). Unlike the basic
+/// 180, a lost reliable 183 is a FAILURE (reliability is its point), so no
+/// timeout tolerance here. Registers the early CANCEL handle then the confirmed
+/// dialog in `scope`, marks `time_to_200` and the `pracked`/`connected` phases.
+pub async fn establish_100rel(
+    env: &CallEnv<'_>,
+    scope: &CallScope,
+    ctx: &CallCtx,
+) -> Result<Dialog, StepError> {
+    let inv = env
+        .alice
+        .invite(env.bob)
+        .with_sdp(OFFER_SDP)
+        .with_header("Supported", "100rel");
+    let mut call = env.outgoing_invite(&["bob"], inv).send().await;
+    scope.set_early(call.cancel_handle());
+    let uas = admitted_uas(env, scope, &mut call, 183).await?;
+    ctx.anchor(env.bob, "initialInvite", uas.request());
+    complete_100rel(env, scope, ctx, call, uas, env.bob).await
+}
+
+/// The RELIABLE-provisional half of [`establish_100rel`], parameterised over the
+/// answering callee — shared with the rerouting flow, where the leg that answers
+/// (`bob2`, after the primary's rejection drove the SUT's failover) is not the
+/// one the INVITE was aimed at:
+///
+/// ```text
+///   183(Require:100rel, RSeq, answer) → PRACK(RAck) → 200(PRACK)
+///     → 200(INVITE) → ACK
+/// ```
+///
+/// `callee` answers with a RELIABLE 183 carrying the SDP answer; alice PRACKs it
+/// (RAck derived from the 183's own RSeq/CSeq via [`ClientInvite::try_prack`]);
+/// the callee 200s the PRACK and only then answers the INVITE (RFC 3262 MUST-014
+/// ordering). Unlike the basic 180, a lost reliable 183 is a FAILURE
+/// (reliability is its point), so no timeout tolerance here. Registers the
+/// confirmed dialog in `scope`, marks `time_to_prack_200`/`time_to_200` and the
+/// `pracked`/`connected` phases.
+pub async fn complete_100rel(
+    env: &CallEnv<'_>,
+    scope: &CallScope,
+    ctx: &CallCtx,
+    mut call: ClientInvite,
+    mut uas: ServerTxn,
+    callee: &Agent,
+) -> Result<Dialog, StepError> {
+    // The callee answers RELIABLY: 183 + Require:100rel + RSeq:1 + the answer.
+    uas.respond(183, "Session Progress").reliable(1).with_sdp(ANSWER_SDP).try_send().await?;
+    let p183 = call.try_expect(183).await?;
+    ctx.anchor(env.alice, "firstProvisional", &p183);
+    // A RELIABLE provisional is guaranteed-delivery (the UAS retransmits it until
+    // PRACKed), so its arrival counts toward the cross-call 18x gate.
+    ctx.mark_ringing(true);
+
+    // Alice PRACKs the reliable 183 on the early dialog; the callee 200s it.
+    let mut prack = call.try_prack(&p183).await?;
+    let mut prack_uas = callee.try_receive("PRACK").await?;
+    ctx.anchor(callee, "prack", prack_uas.request());
+    prack_uas.respond(200, "OK").try_send().await?;
+    prack.try_expect(200).await?;
+    ctx.checkpoint("time_to_prack_200");
+    ctx.phase("pracked");
+
+    // Realistic ring: dwell the PRACKed early dialog before answering.
+    if !env.ring_delay.is_zero() {
+        tokio::time::sleep(env.ring_delay).await;
+    }
+    uas.respond(200, "OK").with_sdp(ANSWER_SDP).try_send().await?;
+    let answer = call.try_expect(200).await?;
+    ctx.anchor(env.alice, "answer", &answer);
+    ctx.checkpoint("time_to_200");
+
+    let dialog = call.ack().await;
+    scope.set_confirmed(dialog.clone());
+    let ack = callee.try_receive("ACK").await?;
+    ctx.anchor(callee, "ack", ack.request());
     ctx.phase("connected");
     Ok(dialog)
 }
 
 /// Shared BYE/200 teardown — the fallible analogue of `callflow::hangup`. On
 /// success marks the scope terminated (so the driver's teardown is a no-op) and
-/// records `time_to_bye_200`.
+/// records `time_to_bye_200`. The SUT relays the BYE to `env.bob`; a flow whose
+/// live downstream leg is another agent (the rerouted `bob2`) uses
+/// [`hangup_on`].
 pub async fn hangup(
     env: &CallEnv<'_>,
     scope: &CallScope,
     dialog: &mut Dialog,
     ctx: &CallCtx,
 ) -> Result<(), StepError> {
+    hangup_on(env, scope, dialog, ctx, env.bob).await
+}
+
+/// [`hangup`] parameterised over the callee whose leg receives the relayed BYE
+/// (the WINNING leg of a rerouted call).
+pub async fn hangup_on(
+    _env: &CallEnv<'_>,
+    scope: &CallScope,
+    dialog: &mut Dialog,
+    ctx: &CallCtx,
+    callee: &Agent,
+) -> Result<(), StepError> {
     let mut bye = dialog.bye().await;
     scope.set_confirmed(dialog.clone()); // refresh CSeq so any teardown BYE stays valid
-    env.bob.try_receive("BYE").await?.respond(200, "OK").await;
+    let mut bye_uas = callee.try_receive("BYE").await?;
+    ctx.anchor(callee, "bye", bye_uas.request());
+    bye_uas.respond(200, "OK").await;
     bye.try_expect(200).await?;
     scope.mark_terminated();
     ctx.checkpoint("time_to_bye_200");
     ctx.phase("bye_200");
     Ok(())
-}
-
-/// Wraps any scenario as an EMERGENCY call: identical flow, but it stamps
-/// `Resource-Priority: esnet.0` (so the SUT force-admits it under overload) and
-/// reports under a distinct id, so the report cleanly splits the force-admitted
-/// emergency traffic from the sheddable non-emergency traffic.
-pub struct AsEmergency {
-    id: ScenarioId,
-    inner: Arc<dyn RealCallScenario>,
-}
-
-impl AsEmergency {
-    pub fn wrap(id: ScenarioId, inner: Arc<dyn RealCallScenario>) -> Arc<dyn RealCallScenario> {
-        Arc::new(Self { id, inner })
-    }
-}
-
-#[async_trait]
-impl RealCallScenario for AsEmergency {
-    fn id(&self) -> ScenarioId {
-        self.id
-    }
-    fn needs_charlie(&self) -> bool {
-        self.inner.needs_charlie()
-    }
-    fn emergency(&self) -> bool {
-        true
-    }
-    async fn run(&self, env: &CallEnv<'_>, scope: &CallScope, ctx: &CallCtx) -> Result<(), StepError> {
-        self.inner.run(env, scope, ctx).await
-    }
 }

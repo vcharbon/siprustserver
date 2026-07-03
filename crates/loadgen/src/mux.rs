@@ -9,20 +9,24 @@
 //! no fd / ephemeral-port exhaustion, and the SUT routes the callee leg to a
 //! **static** address (its own config), never a dynamic per-call one.
 //!
-//! # Correlation (SUT-agnostic, header-only)
+//! # Correlation (pluggable strategy, per run)
 //!
-//! Each call carries one random token in a single transparent header
-//! (`X-Loadgen-Id`). Demux precedence per inbound datagram:
+//! Each call carries one random token; HOW the token travels through the SUT is
+//! a per-run [`Correlation`] strategy with two halves — **stamp** (how the
+//! scenario writes it into the outgoing INVITE; see
+//! [`CorrelationStamp`]) and **extract** (how the mux recovers it from a
+//! received leg). Two strategies ship: a **relayed header** (templated value in
+//! e.g. `X-Loadgen-Id`, requires the SUT to relay the header) and **To-user**
+//! (the token IS the To user-part — survives any SIP-correct B2BUA with zero
+//! SUT cooperation). Demux precedence per inbound datagram:
 //! 1. **known Call-ID** — our UAC dialog (Call-ID sniffed from our outbound
 //!    INVITE), or a UAS dialog *after* its first request (the SUT-minted Call-ID
 //!    we learned from the INVITE).
 //! 2. **correlation token** — an inbound *initial* request whose Call-ID we've
-//!    never seen, matched against the pending-UAS registry by the
-//!    [`Correlation`] header value. A proxy / B2BUA that relays the header
-//!    forwards the token unchanged onto **every** originated leg, so a call's
-//!    callee (bob) and transfer-target (charlie) legs share one token. No
-//!    To-/Request-URI hijacking — that breaks against any SUT that routes on
-//!    those URIs.
+//!    never seen, matched against the pending-UAS registry by the token the
+//!    strategy extracts. The SUT carries the token unchanged onto **every**
+//!    originated leg (header relay, or the copied To URI), so a call's callee
+//!    (bob) and transfer-target (charlie) legs share one token.
 //!
 //! # Recording
 //!
@@ -47,6 +51,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use regex::Regex;
+use scenario_harness::realcall::CorrelationStamp;
 use sip_clock::Clock;
 use sip_net::queue::PacketQueue;
 use sip_net::{
@@ -67,27 +73,137 @@ pub enum Role {
     Callee,
 }
 
-/// How the per-call correlation token is carried through the SUT: a single
-/// transparent header (e.g. `X-Loadgen-Id`). SUT-agnostic — a proxy/B2BUA that
-/// relays the header forwards the token unchanged onto every originated leg, so
-/// one call's bob and charlie legs share one token. No To-/R-URI hijacking.
+/// How the per-call correlation token is carried through the SUT — the per-run
+/// pluggable strategy, with two halves:
+/// - **stamp** ([`Correlation::stamp`]): how the token is written into the
+///   outgoing INVITE (applied inside `CallEnv::outgoing_invite`, the per-call
+///   identity half — orthogonal to the egress rewrite).
+/// - **extract** (private `token()`, used by the demux `route` path): how the
+///   token is recovered from a received leg.
+///
+/// Strategies:
+/// - [`Correlation::header`] / [`Correlation::header_templated`] — the token
+///   rides a single transparent header (e.g. `X-Loadgen-Id`) the SUT RELAYS
+///   onto every originated leg (our b2bua: `B2BUA_RELAY_HEADERS`). The value
+///   shape is templated (`${token}` placeholder) so the token can ride
+///   structured headers (`"${token};encoding=hex"` for User-to-User,
+///   `"icid-value=${token}"` for P-Charging-Vector); extraction is a regex
+///   whose FIRST capture group is the token (derived from the template, or
+///   overridden).
+/// - [`Correlation::to_user`] — the token IS the To-header user-part. A
+///   SIP-correct B2BUA copies the To URI onto its originated leg, so this
+///   survives a third-party SUT that strips unknown headers (zero cooperation).
 #[derive(Debug, Clone)]
 pub struct Correlation {
-    header: String,
+    strategy: Strategy,
 }
 
+#[derive(Debug, Clone)]
+enum Strategy {
+    Header {
+        name: String,
+        /// Header VALUE template with a `${token}` placeholder.
+        template: String,
+        /// Extraction regex (first capture group = the token). `None` only for
+        /// the untemplated `"${token}"` default → the whole (trimmed) header
+        /// value is the token, byte-for-byte the historic behaviour.
+        extract: Option<Regex>,
+    },
+    ToUser,
+}
+
+/// What a token looks like inside a structured header value when deriving the
+/// extraction regex from a template: unreserved URI characters (covers the
+/// minted `lg<uuid-simple>` tokens and any hex/uuid/alnum token).
+const TOKEN_PATTERN: &str = "[A-Za-z0-9._~-]+";
+
 impl Correlation {
-    /// A single transparent correlation header (proxies/B2BUAs forward it).
+    /// A single transparent correlation header carrying the bare token
+    /// (byte-for-byte the historic default: stamp = the token itself, extract =
+    /// the whole header value).
     pub fn header(name: impl Into<String>) -> Self {
-        Self { header: name.into() }
+        Self {
+            strategy: Strategy::Header {
+                name: name.into(),
+                template: "${token}".to_string(),
+                extract: None,
+            },
+        }
     }
-    /// The header name a scenario stamps the per-call token into.
-    pub fn header_name(&self) -> &str {
-        &self.header
+
+    /// A relayed correlation header with a templated VALUE: `template` must
+    /// contain a `${token}` placeholder (e.g. `"${token};encoding=hex"`,
+    /// `"icid-value=${token}"`). `extract` optionally overrides the extraction
+    /// regex — its FIRST capture group is the token; when `None` the regex is
+    /// derived from the template (literal parts escaped, the placeholder
+    /// replaced by an unreserved-chars capture group). Errors on a template
+    /// without the placeholder, an invalid regex, or an override with no
+    /// capture group.
+    pub fn header_templated(
+        name: impl Into<String>,
+        template: impl Into<String>,
+        extract: Option<&str>,
+    ) -> Result<Self, String> {
+        let template = template.into();
+        let Some((prefix, suffix)) = template.split_once("${token}") else {
+            return Err(format!(
+                "correlation template {template:?} has no ${{token}} placeholder"
+            ));
+        };
+        let extract = match extract {
+            Some(re) => {
+                let re = Regex::new(re).map_err(|e| format!("bad correlation extract regex: {e}"))?;
+                if re.captures_len() < 2 {
+                    return Err(format!(
+                        "correlation extract regex {:?} needs a capture group (group 1 = the token)",
+                        re.as_str()
+                    ));
+                }
+                Some(re)
+            }
+            // Plain "${token}" → whole-value extraction (historic behaviour,
+            // no charset assumption on the token).
+            None if prefix.is_empty() && suffix.is_empty() => None,
+            None => Some(
+                Regex::new(&format!(
+                    "{}({TOKEN_PATTERN}){}",
+                    regex::escape(prefix),
+                    regex::escape(suffix)
+                ))
+                .expect("derived correlation regex is always valid"),
+            ),
+        };
+        Ok(Self { strategy: Strategy::Header { name: name.into(), template, extract } })
     }
-    /// The correlation token carried by `raw`, if the header is present.
+
+    /// Token embedded as the To-header user-part — zero SUT cooperation needed.
+    pub fn to_user() -> Self {
+        Self { strategy: Strategy::ToUser }
+    }
+
+    /// The STAMP half: how a scenario writes `token` into the outgoing INVITE.
+    pub fn stamp(&self, token: &str) -> CorrelationStamp {
+        match &self.strategy {
+            Strategy::Header { name, template, .. } => CorrelationStamp::Header {
+                name: name.clone(),
+                value: template.replace("${token}", token),
+            },
+            Strategy::ToUser => CorrelationStamp::ToUser,
+        }
+    }
+
+    /// The EXTRACT half: the correlation token carried by `raw`, if present.
     fn token(&self, raw: &[u8]) -> Option<String> {
-        header_value(raw, &self.header)
+        match &self.strategy {
+            Strategy::Header { name, extract, .. } => {
+                let value = header_value(raw, name)?;
+                match extract {
+                    None => Some(value),
+                    Some(re) => re.captures(&value)?.get(1).map(|m| m.as_str().to_string()),
+                }
+            }
+            Strategy::ToUser => LegInfo { raw }.to_user(),
+        }
     }
 }
 
@@ -965,7 +1081,9 @@ fn ruri(raw: &[u8]) -> Option<String> {
 }
 
 /// The user-part of a SIP URI (handles `<sip:user@host>`, `sip:user@host`,
-/// name-addr with a display name). For [`LegInfo`] picker helpers only.
+/// name-addr with a display name). A userless URI (`sip:host`) yields `None` —
+/// load-bearing for the To-user correlation strategy, which must not mint a
+/// bogus host-shaped token. For [`LegInfo`] helpers + token extraction.
 fn uri_user(value: &str) -> Option<String> {
     let v = value.trim();
     let inner = match (v.find('<'), v.find('>')) {
@@ -976,7 +1094,7 @@ fn uri_user(value: &str) -> Option<String> {
         .strip_prefix("sips:")
         .or_else(|| inner.strip_prefix("sip:"))
         .unwrap_or(inner);
-    let user = no_scheme.split('@').next()?;
+    let (user, _host) = no_scheme.split_once('@')?;
     if user.is_empty() || user.contains(' ') {
         None
     } else {
@@ -1040,6 +1158,25 @@ fn cseq_num(raw: &[u8]) -> Option<u32> {
         }
     }
     None
+}
+
+/// Whether a `Require` header lists the `100rel` option-tag (comma-folded,
+/// case-insensitive) — the reliable-provisional marker (RFC 3262 §3). `Require`
+/// has no compact form.
+fn require_has_100rel(raw: &[u8]) -> bool {
+    header_value(raw, "require")
+        .is_some_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("100rel")))
+}
+
+/// The `RSeq` value of a reliable provisional (RFC 3262 §3), or `None`.
+fn rseq_of(raw: &[u8]) -> Option<u64> {
+    header_value(raw, "rseq")?.trim().parse().ok()
+}
+
+/// The RAck response-num (its FIRST token = the acknowledged 1xx's RSeq,
+/// RFC 3262 §7.2) of a PRACK, or `None`.
+fn rack_rseq(raw: &[u8]) -> Option<u64> {
+    header_value(raw, "rack")?.split_whitespace().next()?.parse().ok()
 }
 
 /// The `branch` parameter of the TOP-most Via header (RFC 3261 §17 transaction
@@ -1138,11 +1275,22 @@ fn spawn_resender(
 /// on real timers until acknowledged, and absorbs the duplicate traffic that
 /// recovery produces so the strict scripted agent never sees a retransmit.
 ///
+/// The engine is METHOD-GENERIC: requests are keyed by their top-Via branch and
+/// classified only INVITE vs non-INVITE (Timer A vs Timer E backoff), so PRACK /
+/// UPDATE / INFO / any future method ride the same client-txn, reactive-re-answer
+/// and duplicate-absorption paths with no per-method code.
+///
 /// Covered directions (the "full bidirectional" robustness contract):
-/// - **our requests** (INVITE / BYE / OPTIONS / REFER / CANCEL / re-INVITE):
-///   retransmitted (Timer A/E) until the matching response arrives.
+/// - **our requests** (INVITE / BYE / OPTIONS / REFER / CANCEL / re-INVITE /
+///   PRACK / UPDATE / …): retransmitted (Timer A/E) until the matching response
+///   arrives.
 /// - **our INVITE answers** (2xx): retransmitted (Timer G) until the ACK arrives —
 ///   recovers a lost 2xx OR a lost ACK.
+/// - **our RELIABLE provisionals** (1xx with `Require: 100rel` + `RSeq`,
+///   RFC 3262 §3): retransmitted until the matching PRACK (RAck response-num =
+///   the 1xx's RSeq) arrives — a reliable 1xx is guaranteed-delivery, unlike the
+///   best-effort plain 18x (deliberately NOT retransmitted; the driver gates its
+///   delivery rate instead).
 /// - **our non-INVITE answers**: re-sent reactively when the peer retransmits the
 ///   request (its response was lost).
 /// - **our ACK to a 2xx**: re-sent when a retransmitted 2xx arrives (our ACK was lost).
@@ -1163,6 +1311,10 @@ struct TxnInner {
     /// Our proactive 2xx (INVITE server txn) resenders, keyed by (Call-ID, CSeq
     /// number) so the inbound ACK — which carries a *different* branch — can stop them.
     invite_2xx: HashMap<(String, u32), Arc<ResendCtl>>,
+    /// Our proactive RELIABLE-1xx resenders (RFC 3262 §3: retransmit until
+    /// PRACKed), keyed by (Call-ID, RSeq) so the inbound PRACK — whose RAck
+    /// response-num carries that RSeq but whose branch is its own — can stop them.
+    reliable_1xx: HashMap<(String, u64), Arc<ResendCtl>>,
     /// The last response we sent per server txn (request branch → bytes+dst), for a
     /// reactive re-answer when the peer retransmits the request.
     server: HashMap<String, (Vec<u8>, SocketAddr)>,
@@ -1198,11 +1350,39 @@ impl CallTxns {
         if is_response(raw) {
             let Some(branch) = via_branch(raw) else { return };
             g.server.insert(branch, (raw.to_vec(), dst));
+            let status = resp_status(raw).unwrap_or(0);
             // Proactive 2xx-until-ACK for an INVITE answer (Timer G).
-            let is_2xx = resp_status(raw).is_some_and(|s| (200..300).contains(&s));
-            if is_2xx && cseq_method(raw) == "INVITE" {
+            if (200..300).contains(&status) && cseq_method(raw) == "INVITE" {
                 if let (Some(cid), Some(cseq)) = (call_id(raw), cseq_num(raw)) {
                     if let std::collections::hash_map::Entry::Vacant(e) = g.invite_2xx.entry((cid, cseq)) {
+                        let ctl = ResendCtl::new();
+                        e.insert(ctl.clone());
+                        spawn_resender(
+                            ctl,
+                            self.socket.clone(),
+                            self.drop.clone(),
+                            self.stats.clone(),
+                            raw.to_vec(),
+                            dst,
+                            false,
+                        );
+                    }
+                }
+            }
+            // Proactive reliable-1xx-until-PRACK (RFC 3262 §3): a provisional we
+            // send with `Require: 100rel` + `RSeq` is guaranteed-delivery — the UAS
+            // retransmits it until the matching PRACK. Without this, a dropped
+            // reliable 183 is unrecoverable: the peer's INVITE resender already
+            // stopped on the SUT's 100 Trying, so nobody would resend anything.
+            // (A plain 18x stays best-effort by design.)
+            if (101..200).contains(&status)
+                && cseq_method(raw) == "INVITE"
+                && require_has_100rel(raw)
+            {
+                if let (Some(cid), Some(rseq)) = (call_id(raw), rseq_of(raw)) {
+                    if let std::collections::hash_map::Entry::Vacant(e) =
+                        g.reliable_1xx.entry((cid, rseq))
+                    {
                         let ctl = ResendCtl::new();
                         e.insert(ctl.clone());
                         spawn_resender(
@@ -1302,6 +1482,16 @@ impl CallTxns {
             g.seen_in.insert(key);
             return true;
         }
+        if method == "PRACK" {
+            // The PRACK acknowledges our reliable 1xx (RAck response-num = its
+            // RSeq, RFC 3262 §7.2) → stop that proactive resender. Idempotent, so
+            // it runs before the duplicate check below.
+            if let (Some(cid), Some(rseq)) = (call_id(raw), rack_rseq(raw)) {
+                if let Some(ctl) = g.reliable_1xx.remove(&(cid, rseq)) {
+                    ctl.stop();
+                }
+            }
+        }
         let key = (branch.clone(), format!("q{method}"));
         if g.seen_in.contains(&key) {
             // The peer retransmitted this request → our response was lost; re-send it.
@@ -1324,8 +1514,261 @@ impl CallTxns {
         for (_, ctl) in g.invite_2xx.drain() {
             ctl.stop();
         }
+        for (_, ctl) in g.reliable_1xx.drain() {
+            ctl.stop();
+        }
         g.server.clear();
         g.acks.clear();
         g.seen_in.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal initial INVITE carrying the given To header + optional extra
+    /// header line, for extraction tests.
+    fn invite(to: &str, extra: &str) -> Vec<u8> {
+        format!(
+            "INVITE sip:x@127.0.0.1 SIP/2.0\r\nCall-ID: c1@h\r\n{extra}To: {to}\r\n\
+             From: <sip:a@h>;tag=1\r\nCSeq: 1 INVITE\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    fn stamp_header(c: &Correlation, token: &str) -> (String, String) {
+        match c.stamp(token) {
+            CorrelationStamp::Header { name, value } => (name, value),
+            other => panic!("expected a Header stamp, got {other:?}"),
+        }
+    }
+
+    /// The untuned default: plain header stamp/extract is byte-for-byte today's
+    /// behaviour — stamp value == the bare token, extract == the whole (trimmed)
+    /// header value, whatever its charset.
+    #[test]
+    fn plain_header_default_is_historic_behaviour() {
+        let c = Correlation::header("X-Loadgen-Id");
+        let (name, value) = stamp_header(&c, "lgdeadbeef");
+        assert_eq!((name.as_str(), value.as_str()), ("X-Loadgen-Id", "lgdeadbeef"));
+
+        let raw = invite("<sip:bob@127.0.0.1>", "X-Loadgen-Id: lgdeadbeef\r\n");
+        assert_eq!(c.token(&raw).as_deref(), Some("lgdeadbeef"));
+
+        // Whole-value semantics: a value outside the derived-token charset is
+        // still returned verbatim (no regex narrowing on the untuned default).
+        let odd = invite("<sip:bob@127.0.0.1>", "X-Loadgen-Id: weird/value+x\r\n");
+        assert_eq!(c.token(&odd).as_deref(), Some("weird/value+x"));
+
+        // And header_templated with the bare "${token}" template is the same.
+        let c2 = Correlation::header_templated("X-Loadgen-Id", "${token}", None).unwrap();
+        assert_eq!(c2.token(&odd).as_deref(), Some("weird/value+x"));
+    }
+
+    /// UUI-shaped template (RFC 7433 User-to-User): the token rides
+    /// `User-to-User: <token>;encoding=hex`; the derived regex recovers it.
+    #[test]
+    fn uui_shaped_template_renders_and_extracts() {
+        let c =
+            Correlation::header_templated("User-to-User", "${token};encoding=hex", None).unwrap();
+        let (name, value) = stamp_header(&c, "lg0a1b2c");
+        assert_eq!((name.as_str(), value.as_str()), ("User-to-User", "lg0a1b2c;encoding=hex"));
+
+        let raw = invite("<sip:bob@127.0.0.1>", "User-to-User: lg0a1b2c;encoding=hex\r\n");
+        assert_eq!(c.token(&raw).as_deref(), Some("lg0a1b2c"));
+
+        // A leg without the header yields no token (orphan path).
+        assert_eq!(c.token(&invite("<sip:bob@127.0.0.1>", "")), None);
+    }
+
+    /// PCV-shaped template (P-Charging-Vector `icid-value=`): rendered inside a
+    /// param list; the derived regex recovers the token even when the SUT
+    /// appends further params after it.
+    #[test]
+    fn pcv_shaped_template_renders_and_extracts() {
+        let c =
+            Correlation::header_templated("P-Charging-Vector", "icid-value=${token}", None)
+                .unwrap();
+        let (name, value) = stamp_header(&c, "lgfeed01");
+        assert_eq!(
+            (name.as_str(), value.as_str()),
+            ("P-Charging-Vector", "icid-value=lgfeed01")
+        );
+
+        let relayed = invite(
+            "<sip:bob@127.0.0.1>",
+            "P-Charging-Vector: icid-value=lgfeed01;icid-generated-at=10.0.0.1\r\n",
+        );
+        assert_eq!(c.token(&relayed).as_deref(), Some("lgfeed01"));
+    }
+
+    /// The CLI extraction override: an explicit regex (first capture group =
+    /// the token) beats the derived one; invalid overrides are rejected.
+    #[test]
+    fn explicit_extract_override() {
+        let c = Correlation::header_templated(
+            "User-to-User",
+            "${token};encoding=hex",
+            Some(r"^\s*([0-9a-fx]+)\s*;"),
+        )
+        .unwrap();
+        let raw = invite("<sip:bob@127.0.0.1>", "User-to-User: 0xabc ;encoding=hex\r\n");
+        assert_eq!(c.token(&raw).as_deref(), Some("0xabc"));
+
+        // No capture group → config error, not a silent mis-extraction.
+        assert!(Correlation::header_templated("H", "${token}", Some("nogroup")).is_err());
+        // Invalid regex → error.
+        assert!(Correlation::header_templated("H", "${token}", Some("(")).is_err());
+        // Template without the placeholder → error.
+        assert!(Correlation::header_templated("H", "no-placeholder", None).is_err());
+    }
+
+    /// To-user strategy: stamp is [`CorrelationStamp::ToUser`]; extraction
+    /// recovers the token from the To user-part (via [`LegInfo::to_user`]) in
+    /// both name-addr and bare-URI shapes — no loadgen header involved.
+    #[test]
+    fn to_user_strategy_extracts_from_to_header() {
+        let c = Correlation::to_user();
+        assert!(matches!(c.stamp("lg123"), CorrelationStamp::ToUser));
+
+        let name_addr = invite("\"Bee\" <sip:lg123abc@10.0.0.9:5070>", "");
+        assert_eq!(c.token(&name_addr).as_deref(), Some("lg123abc"));
+
+        let bare = invite("sip:lg456def@10.0.0.9", "");
+        assert_eq!(c.token(&bare).as_deref(), Some("lg456def"));
+
+        // A relayed loadgen header is IGNORED by this strategy (extract is
+        // To-user only), and a userless To yields no token.
+        let userless = invite("<sip:10.0.0.9:5070>", "X-Loadgen-Id: lg999\r\n");
+        assert_eq!(c.token(&userless), None);
+    }
+
+    // -- CallTxns retransmit engine: method-generic regression --------------
+    //
+    // The engine must stay method-generic (Timer E for ANY non-INVITE request,
+    // duplicate absorption keyed by (branch, method)) and cover the RFC 3262
+    // reliable-1xx-until-PRACK server obligation. These tests drive `CallTxns`
+    // directly over a loopback UDP pair on the real clock (T1 = 500 ms, so each
+    // stays a few seconds).
+
+    use std::net::SocketAddr;
+    use tokio::net::UdpSocket as TokioUdp;
+    use tokio::time::{timeout, Duration as TokioDuration};
+
+    async fn txn_rig() -> (Arc<CallTxns>, TokioUdp, SocketAddr) {
+        let sock = Arc::new(TokioUdp::bind("127.0.0.1:0").await.unwrap());
+        let peer = TokioUdp::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+        let txns = Arc::new(CallTxns::new(
+            sock,
+            Arc::new(DropModel::new(0.0, 1)),
+            Arc::new(MuxStats::new(4)),
+        ));
+        (txns, peer, peer_addr)
+    }
+
+    async fn recv_one(peer: &TokioUdp, window_ms: u64) -> Option<String> {
+        let mut buf = vec![0u8; 2048];
+        match timeout(TokioDuration::from_millis(window_ms), peer.recv_from(&mut buf)).await {
+            Ok(Ok((n, _))) => Some(String::from_utf8_lossy(&buf[..n]).to_string()),
+            _ => None,
+        }
+    }
+
+    fn update_req(branch: &str) -> Vec<u8> {
+        format!(
+            "UPDATE sip:b@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
+             Call-ID: ct1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag=2\r\nCSeq: 2 UPDATE\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    fn resp(status: u16, branch: &str, cseq: &str, extra: &str) -> Vec<u8> {
+        format!(
+            "SIP/2.0 {status} X\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
+             Call-ID: ct1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag=2\r\nCSeq: {cseq}\r\n{extra}\r\n"
+        )
+        .into_bytes()
+    }
+
+    fn prack_req(branch: &str, rack: &str) -> Vec<u8> {
+        format!(
+            "PRACK sip:b@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch={branch}\r\n\
+             Call-ID: ct1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag=2\r\nCSeq: 2 PRACK\r\n\
+             RAck: {rack}\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// Timer E is METHOD-GENERIC: an outbound UPDATE (a non-INVITE the engine has
+    /// no per-method code for) is retransmitted after ~T1 and the resender stops
+    /// on its final response; a duplicate of that response is then absorbed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn calltxns_timer_e_is_method_generic_for_update() {
+        let (txns, peer, peer_addr) = txn_rig().await;
+
+        txns.on_outbound(&update_req("z9hG4bK-u1"), peer_addr);
+        let got = recv_one(&peer, 2_000).await.expect("Timer E retransmit of the UPDATE");
+        assert!(got.starts_with("UPDATE "), "retransmit is the UPDATE: {got}");
+
+        // The 200 (UPDATE) stops the resender…
+        let ok = resp(200, "z9hG4bK-u1", "2 UPDATE", "");
+        assert!(txns.on_inbound(&ok, peer_addr), "first 200 (UPDATE) is delivered");
+        // …and its duplicate is absorbed (method-generic dedup).
+        assert!(!txns.on_inbound(&ok, peer_addr), "duplicate 200 (UPDATE) absorbed");
+        assert!(
+            recv_one(&peer, 1_500).await.is_none(),
+            "UPDATE resender must stop on the final response"
+        );
+        txns.shutdown();
+    }
+
+    /// Duplicate absorption + reactive re-answer are method-generic: a
+    /// retransmitted inbound PRACK is absorbed and our recorded 200 (PRACK) is
+    /// re-sent (the peer's copy was evidently lost).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn calltxns_absorbs_duplicate_prack_and_reanswers() {
+        let (txns, peer, peer_addr) = txn_rig().await;
+
+        let prack = prack_req("z9hG4bK-p1", "1 1 INVITE");
+        assert!(txns.on_inbound(&prack, peer_addr), "first PRACK is delivered");
+        txns.on_outbound(&resp(200, "z9hG4bK-p1", "2 PRACK", ""), peer_addr);
+
+        assert!(!txns.on_inbound(&prack, peer_addr), "duplicate PRACK absorbed");
+        let got = recv_one(&peer, 1_000).await.expect("reactive re-answer to the dup PRACK");
+        assert!(got.starts_with("SIP/2.0 200"), "re-answer is our 200 (PRACK): {got}");
+        txns.shutdown();
+    }
+
+    /// RFC 3262 §3: a RELIABLE provisional we send (Require:100rel + RSeq) is
+    /// retransmitted until the matching PRACK (RAck response-num = its RSeq)
+    /// arrives — the gap that made a dropped reliable 183 unrecoverable (the
+    /// peer's INVITE resender already stopped on the 100 Trying). A plain 18x
+    /// stays best-effort (never proactively retransmitted).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn calltxns_retransmits_reliable_1xx_until_prack() {
+        let (txns, peer, peer_addr) = txn_rig().await;
+
+        // A plain 180 arms NO resender (best-effort by design).
+        txns.on_outbound(&resp(180, "z9hG4bK-i1", "1 INVITE", ""), peer_addr);
+        assert!(
+            recv_one(&peer, 1_200).await.is_none(),
+            "a non-reliable 18x must not be proactively retransmitted"
+        );
+
+        // A reliable 183 IS retransmitted until its PRACK.
+        let r183 = resp(183, "z9hG4bK-i1", "1 INVITE", "Require: 100rel\r\nRSeq: 1\r\n");
+        txns.on_outbound(&r183, peer_addr);
+        let got = recv_one(&peer, 2_000).await.expect("reliable 183 retransmit");
+        assert!(got.starts_with("SIP/2.0 183"), "retransmit is the reliable 183: {got}");
+
+        // The matching PRACK stops it (and is delivered to the app).
+        assert!(txns.on_inbound(&prack_req("z9hG4bK-p2", "1 1 INVITE"), peer_addr));
+        assert!(
+            recv_one(&peer, 1_500).await.is_none(),
+            "reliable-183 resender must stop on the matching PRACK"
+        );
+        txns.shutdown();
     }
 }

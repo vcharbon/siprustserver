@@ -20,6 +20,11 @@ pub enum CallOutcome {
     Panic(String),
     /// The call otherwise succeeded but its sampled trace failed the RFC audit.
     RfcAuditFail(String),
+    /// The call otherwise succeeded but its attached Test case's checks failed
+    /// over the sampled trace (the e2e check engine's verdicts); the string
+    /// lists the failed checks. Sampled calls only — checks are a per-sample
+    /// oracle, like the RFC audit.
+    CheckFail(String),
 }
 
 /// A low-cardinality bucket for a call result. `Display`/[`label`](Self::label)
@@ -38,6 +43,7 @@ pub enum ResultClass {
     Transport,
     Unparseable,
     RfcAuditFail,
+    CheckFail,
     Panic,
 }
 
@@ -53,6 +59,7 @@ impl ResultClass {
             ResultClass::Transport => "transport".to_string(),
             ResultClass::Unparseable => "unparseable".to_string(),
             ResultClass::RfcAuditFail => "rfc_audit_fail".to_string(),
+            ResultClass::CheckFail => "check_fail".to_string(),
             ResultClass::Panic => "panic".to_string(),
         }
     }
@@ -79,7 +86,9 @@ impl ResultClass {
     ///
     /// Only the **timing-independent** classes are never excused, because their
     /// cause is unrelated to dialog timing and should always be seen: `Panic` (a
-    /// code panic) and `Unparseable` (wire corruption).
+    /// code panic) and `Unparseable` (wire corruption). `CheckFail` IS excusable
+    /// like the other protocol/content symptoms — a call rerouted mid-kill can
+    /// legitimately show a different wire shape than the case's oracle expects.
     pub fn chaos_excusable(&self) -> bool {
         !matches!(self, ResultClass::Panic | ResultClass::Unparseable)
     }
@@ -96,6 +105,7 @@ impl From<&CallOutcome> for ResultClass {
         match o {
             CallOutcome::Ok => ResultClass::Ok,
             CallOutcome::RfcAuditFail(_) => ResultClass::RfcAuditFail,
+            CallOutcome::CheckFail(_) => ResultClass::CheckFail,
             CallOutcome::Panic(_) => ResultClass::Panic,
             CallOutcome::Step(e) => match e {
                 StepError::Timeout { .. } | StepError::QueueClosed { .. } => ResultClass::Timeout,
@@ -117,6 +127,7 @@ impl CallOutcome {
             CallOutcome::Step(e) => Some(e.to_string()),
             CallOutcome::Panic(m) => Some(format!("panic: {m}")),
             CallOutcome::RfcAuditFail(d) => Some(format!("rfc audit: {d}")),
+            CallOutcome::CheckFail(d) => Some(format!("case checks: {d}")),
         }
     }
 }

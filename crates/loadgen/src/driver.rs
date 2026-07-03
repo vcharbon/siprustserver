@@ -14,15 +14,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use e2e_model::{ScenarioInputs, ShapeDescriptor, ShapeRegistry};
 use futures::FutureExt;
-use scenario_harness::AgentBinder;
+use scenario_harness::{AgentBinder, EgressPolicy};
 use sip_clock::Clock;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::case::LoadCase;
 use crate::chaos::{ChaosLog, ChaosTag};
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
-use crate::mux::{CallRouting, Correlation, MuxCore};
+use crate::mux::{CallRouting, Correlation, LegInfo, MuxCore};
+use crate::rate::{Governor, RateHandle};
 use crate::report::{RenderedSample, Reporter};
 use crate::scenarios::LoadScenario;
 use crate::scope::CallScope;
@@ -50,12 +53,13 @@ pub struct MuxTransport {
 pub struct CallConfig {
     /// The address the initial INVITE routes through (SUT / VIP).
     pub via: SocketAddr,
-    /// Optional `X-Api-Call` destination pin → the static `uas` endpoint
-    /// (our-b2bua routing adapter). `None` when the SUT routes the callee itself.
-    pub route_pin: Option<SocketAddr>,
-    /// Optional `X-Api-Call` REFER destination pin → the static `refer` endpoint.
-    pub refer_pin: Option<SocketAddr>,
-    pub refer_key: String,
+    /// How this run's layout realizes a logical INVITE on the wire — the
+    /// environment axis shared with the e2e framework (`EndpointConfig.egress`):
+    /// [`EgressPolicy::Transparent`] when the SUT routes the callee itself,
+    /// [`EgressPolicy::ApiCallPin`] to pin the b-leg back to the static `uas`
+    /// endpoint (`--route-pin-to-uas`). Replaces the hand-rolled
+    /// route/refer `X-Api-Call` pins.
+    pub egress: EgressPolicy,
     pub options_hold: Duration,
     pub options_cadence: Duration,
     /// Realistic ring time (callee 180→200 dwell). `0` = answer immediately.
@@ -101,14 +105,134 @@ pub struct DriverCfg {
     pub tuning: HashMap<String, CallTuning>,
 }
 
+/// One scenario mix entry: the shape's **report/metrics id** + load attributes
+/// (from its [`ShapeDescriptor`] — the shape's ONE declaration), the load body,
+/// its pick weight, and an optional attached Test case
+/// (`--scenario name=w,case=<path.json>` / the global `--case`) whose binding
+/// pool drives per-call identities and dwells.
+///
+/// Build from the unified registry ([`MixEntry::by_id`] /
+/// [`MixEntry::default_mix`] / [`MixEntry::failure_mix`]); plain
+/// `(scenario, weight)` tuples still convert for hand-rolled test bodies
+/// (attributes default off, id from the body).
+#[derive(Clone)]
+pub struct MixEntry {
+    /// The report/metrics id — the DESCRIPTOR's id (may differ from the body's
+    /// intrinsic `id()` when one body serves several shapes, e.g. `basic_call_em`).
+    pub id: crate::scenarios::ScenarioId,
+    pub scenario: Arc<dyn LoadScenario>,
+    pub weight: f64,
+    pub case: Option<Arc<LoadCase>>,
+    /// Bind a third (transfer-target) callee leg for this shape's calls.
+    pub needs_charlie: bool,
+    /// Bind a SECOND callee receiver (`bob2`) sharing the callee socket,
+    /// demuxed by the R-URI-user leg picker (the rerouting shapes).
+    pub needs_bob2: bool,
+    /// Stamp `Resource-Priority: esnet.0` (the SUT force-admits under overload).
+    pub emergency: bool,
+    /// **Deferred-by-design auth adapter** (see
+    /// `scenario_harness::realcall::auth`). `None` (the default) = no RFC 3261
+    /// §22.2 retry; a `401`/`407` classifies as `status_401`/`status_407`. Set it
+    /// (via [`MixEntry::with_challenge_responder`]) to point the fleet at a
+    /// challenging registrar/proxy once digest lands — no CLI flag mints one yet.
+    pub challenge_responder: Option<Arc<dyn scenario_harness::realcall::ChallengeResponder>>,
+}
+
+impl From<(Arc<dyn LoadScenario>, f64)> for MixEntry {
+    fn from((scenario, weight): (Arc<dyn LoadScenario>, f64)) -> Self {
+        MixEntry {
+            id: scenario.id(),
+            scenario,
+            weight,
+            case: None,
+            needs_charlie: false,
+            needs_bob2: false,
+            emergency: false,
+            challenge_responder: None,
+        }
+    }
+}
+
+impl MixEntry {
+    /// Build a mix entry from a shape's descriptor (minting its load body from
+    /// the per-run `inputs`). `None` when the shape has no load body
+    /// (functional-only).
+    pub fn from_shape(
+        shape: &ShapeDescriptor,
+        inputs: &ScenarioInputs,
+        weight: f64,
+    ) -> Option<Self> {
+        let scenario = shape.load_scenario(inputs)?;
+        Some(MixEntry {
+            id: shape.id,
+            scenario,
+            weight,
+            case: None,
+            needs_charlie: shape.needs_charlie,
+            needs_bob2: shape.needs_bob2,
+            emergency: shape.emergency,
+            challenge_responder: None,
+        })
+    }
+
+    /// Resolve a shape by id in the registry (the CLI's `--scenario name=weight`).
+    /// `None` for an unknown id or a functional-only shape.
+    pub fn by_id(
+        registry: &ShapeRegistry,
+        id: &str,
+        inputs: &ScenarioInputs,
+        weight: f64,
+    ) -> Option<Self> {
+        registry.get(id).and_then(|d| Self::from_shape(d, inputs, weight))
+    }
+
+    /// The shipped DEFAULT mix (every shape with a `default_weight`,
+    /// basic-heavy like real traffic).
+    pub fn default_mix(registry: &ShapeRegistry, inputs: &ScenarioInputs) -> Vec<Self> {
+        registry
+            .default_mix()
+            .into_iter()
+            .filter_map(|d| Self::from_shape(d, inputs, d.default_weight.unwrap_or(1.0)))
+            .collect()
+    }
+
+    /// The voluntarily-failing mix (one shape per post-call-cleanup teardown
+    /// path), for the no-leak cleanup-coverage test.
+    pub fn failure_mix(registry: &ShapeRegistry, inputs: &ScenarioInputs) -> Vec<Self> {
+        registry
+            .failure_mix()
+            .into_iter()
+            .filter_map(|d| Self::from_shape(d, inputs, d.failure_weight.unwrap_or(1.0)))
+            .collect()
+    }
+
+    /// Attach a Test case (binding pool → per-call identities + dwells).
+    pub fn with_case(mut self, case: Option<Arc<LoadCase>>) -> Self {
+        self.case = case;
+        self
+    }
+
+    /// Attach the deferred-by-design auth adapter (see the field docs). The load
+    /// driver folds it into every call's `CallEnv`; the default is `None`.
+    pub fn with_challenge_responder(
+        mut self,
+        responder: Option<Arc<dyn scenario_harness::realcall::ChallengeResponder>>,
+    ) -> Self {
+        self.challenge_responder = responder;
+        self
+    }
+}
+
 /// The load driver.
 pub struct Driver {
-    cps: f64,
+    /// The live-tunable offered rate (milli-cps under the hood). Seeded from
+    /// `cfg.cps`; `POST /rate` re-targets it and the governor re-anchors its grid.
+    rate: RateHandle,
     duration: Duration,
     max_in_flight: usize,
     seed: u64,
     reporter: Arc<Reporter>,
-    scenarios: Vec<(Arc<dyn LoadScenario>, f64)>,
+    scenarios: Vec<MixEntry>,
     total_weight: f64,
     sem: Arc<Semaphore>,
     transport: Arc<MuxTransport>,
@@ -154,16 +278,17 @@ fn panic_msg(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 impl Driver {
-    pub fn new(
+    pub fn new<M: Into<MixEntry>>(
         cfg: DriverCfg,
-        scenarios: Vec<(Arc<dyn LoadScenario>, f64)>,
+        scenarios: Vec<M>,
         reporter: Arc<Reporter>,
         transport: Arc<MuxTransport>,
     ) -> Self {
+        let scenarios: Vec<MixEntry> = scenarios.into_iter().map(Into::into).collect();
         assert!(!scenarios.is_empty(), "loadgen needs at least one scenario");
-        let total_weight = scenarios.iter().map(|(_, w)| *w).sum();
+        let total_weight = scenarios.iter().map(|e| e.weight).sum();
         Self {
-            cps: cfg.cps,
+            rate: RateHandle::new(cfg.cps),
             duration: cfg.duration,
             max_in_flight: cfg.max_in_flight,
             seed: cfg.seed.max(1),
@@ -196,68 +321,50 @@ impl Driver {
         &self.reporter
     }
 
-    fn pick(&self, rng: &mut u64) -> Arc<dyn LoadScenario> {
+    /// A clone of the live rate handle — hand it to the `/rate` HTTP surface (and
+    /// read the current target for the `loadgen_target_cps` gauge). Re-targeting it
+    /// re-anchors the governor's grid on the next slot.
+    pub fn rate_handle(&self) -> RateHandle {
+        self.rate.clone()
+    }
+
+    fn pick(&self, rng: &mut u64) -> &MixEntry {
         let r = (xorshift(rng) as f64 / u64::MAX as f64) * self.total_weight;
         let mut acc = 0.0;
-        for (s, w) in &self.scenarios {
-            acc += *w;
+        for entry in &self.scenarios {
+            acc += entry.weight;
             if r <= acc {
-                return s.clone();
+                return entry;
             }
         }
-        self.scenarios.last().unwrap().0.clone()
+        self.scenarios.last().unwrap()
     }
 
     /// Run the load for the configured duration, then drain in-flight calls.
+    ///
+    /// The spawn cadence is the [`Governor`] — a re-anchoring fixed-grid CPS
+    /// scheduler that reads the shared [`RateHandle`] on every slot, so
+    /// `POST /rate` re-targets it live (a rate change re-anchors the grid so a cut
+    /// fires no catch-up burst and a raise takes effect within one slot; `cps == 0`
+    /// pauses new-call admission while in-flight calls run untouched). A catch-up
+    /// burst is bounded by the max-in-flight semaphore — the excess is shed+counted,
+    /// never an unbounded spawn storm.
     pub async fn run(&self) {
-        // Fixed-grid CPS governor. The nth call is scheduled at the ABSOLUTE slot
-        // `start + n*period`, anchored at the run start. We sleep until that
-        // instant; if it is already in the past — we fell behind on wake/scheduling
-        // jitter — the remaining delay is <= 0, so we DO NOT sleep (never a negative
-        // or zero sleep) and fire immediately, catching the slip back up. This holds
-        // the long-run offered rate at exactly `cps`.
-        //
-        // The previous `tokio::time::interval` + `MissedTickBehavior::Delay`
-        // re-anchored the next deadline to each (late) wake instead of catching up,
-        // so a few-ms per-tick scheduling latency was permanently shed every cycle —
-        // ~8% under endurance load (20 cps offered as ~18.4). The grid below cannot
-        // accumulate that drift. A catch-up burst (after a long stall) is naturally
-        // bounded by the max-in-flight semaphore — the excess is shed+counted, never
-        // an unbounded spawn storm.
-        let period = Duration::from_secs_f64(1.0 / self.cps);
-        let start = tokio::time::Instant::now();
         let mut rng = self.seed;
-        let mut n: u64 = 0;
+        let mut governor = Governor::new(self.rate.clone(), self.duration);
 
-        loop {
-            // Offset of the nth slot from `start`. Computed in Duration space and
-            // compared to `self.duration` (not as an Instant) so a huge n can never
-            // overflow `Instant` arithmetic — once the slot reaches the window end
-            // we stop (total offered ≈ cps × duration).
-            let offset = match u32::try_from(n).ok().and_then(|k| period.checked_mul(k)) {
-                Some(off) if off < self.duration => off,
-                _ => break,
-            };
-            let target = start + offset;
-
-            // Sleep ONLY while ahead of the slot; on/behind it (delay <= 0) fire now.
-            let now = tokio::time::Instant::now();
-            if target > now {
-                tokio::time::sleep_until(target).await;
-            }
-            n += 1;
-
-            let scenario = self.pick(&mut rng);
+        while governor.next_slot().await.is_some() {
+            let entry = self.pick(&mut rng).clone();
             let permit = match self.sem.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
-                    self.reporter.inc_shed(scenario.id());
+                    self.reporter.inc_shed(entry.id);
                     continue;
                 }
             };
-            let tuning = self.tuning_for(scenario.id());
+            let tuning = self.tuning_for(entry.id);
             tokio::spawn(run_one(
-                scenario,
+                entry,
                 self.reporter.clone(),
                 self.transport.clone(),
                 self.call.clone(),
@@ -277,7 +384,7 @@ impl Driver {
 /// multi-threaded runtime.
 #[allow(clippy::too_many_arguments)] // per-call context threaded explicitly (no shared struct)
 async fn run_one(
-    scenario: Arc<dyn LoadScenario>,
+    entry: MixEntry,
     reporter: Arc<Reporter>,
     transport: Arc<MuxTransport>,
     call: Arc<CallConfig>,
@@ -287,16 +394,44 @@ async fn run_one(
     _permit: OwnedSemaphorePermit,
 ) {
     reporter.inc_inflight();
-    let id = scenario.id();
+    let MixEntry {
+        id,
+        scenario,
+        case,
+        needs_charlie,
+        needs_bob2,
+        emergency,
+        challenge_responder,
+        weight: _,
+    } = entry;
 
-    // One correlation token per CALL: alice stamps it on her INVITE and the SUT
-    // relays it (the transparent header) onto every downstream leg, so bob and
-    // charlie share it. Each callee leg is declared on its own socket; the mux
-    // demuxes by (socket, token) — a single receiver per socket here, so no
-    // picker is needed (the scenario-owned picker is for >1 receiver per socket).
+    // Resolve THIS call's binding from the attached Test case (pool walk +
+    // token expansion): the core From/To/R-URI to fold into the outgoing
+    // INVITE, the per-call dwell overrides over the global CallConfig
+    // defaults, the sampled-page banner, and the resolved input the case's
+    // checks bind `${input.*}` against. No case → all defaults.
+    let resolved = case.as_ref().map(|c| c.resolve());
+    let (core, dwells, banner, resolved_input) = match resolved {
+        Some(r) => (r.core, r.dwells, Some(r.banner), Some(r.input)),
+        None => (Default::default(), Default::default(), None, None),
+    };
+
+    // One correlation token per CALL: alice stamps it on her INVITE (per the
+    // run's correlation strategy — relayed header or To-user) and the SUT
+    // carries it onto every downstream leg, so every callee leg shares it. Each
+    // callee leg is declared on its own socket and the mux demuxes by (socket,
+    // token) — except a rerouting shape's `bob2`, which SHARES bob's socket:
+    // there the scenario-owned leg picker disambiguates by the R-URI user (the
+    // egress candidate list names each route's callee in its `new_ruri`, so the
+    // rerouted b-leg arrives addressed `sip:bob2@…`).
     let token = mint_token();
     let mut routing = CallRouting::new(token.clone()).leg(transport.uas_addr, "bob");
-    if scenario.needs_charlie() {
+    if needs_bob2 {
+        routing = routing
+            .leg(transport.uas_addr, "bob2")
+            .picker(transport.uas_addr, Arc::new(|leg: &LegInfo| leg.ruri_user().unwrap_or_default()));
+    }
+    if needs_charlie {
         routing = routing.leg(transport.refer_addr, "charlie");
     }
 
@@ -316,33 +451,53 @@ async fn run_one(
     binder.seed_ids(next_seed(seed_base));
 
     let alice = binder.agent("alice", &transport.uac_addr.to_string()).await;
+    // Bind order is load-bearing on a shared socket: the mux assigns receivers
+    // in leg-declaration order, so bob (leg 1) binds before bob2 (leg 2).
     let bob = binder.agent("bob", &transport.uas_addr.to_string()).await;
-    let charlie = if scenario.needs_charlie() {
+    let bob2 = if needs_bob2 {
+        Some(binder.agent("bob2", &transport.uas_addr.to_string()).await)
+    } else {
+        None
+    };
+    let charlie = if needs_charlie {
         Some(binder.agent("charlie", &transport.refer_addr.to_string()).await)
     } else {
         None
     };
 
+    // A SAMPLED call collects message anchors (ADR-0019) so the attached Test
+    // case's checks can resolve `<agent>.<anchor>` over its recorded trace;
+    // on the unsampled majority tagging stays a single atomic load.
+    let ctx = CallCtx::new();
+    if record {
+        ctx.enable_anchor_collection();
+    }
+
     let env = CallEnv {
         alice: &alice,
         bob: &bob,
+        bob2: bob2.as_ref(),
         charlie: charlie.as_ref(),
         via: call.via,
-        correlation_header: transport.correlation.header_name().to_string(),
+        stamp: transport.correlation.stamp(&token),
         token,
-        emergency: scenario.emergency(),
-        route_pin: call.route_pin,
-        refer_pin: call.refer_pin,
-        refer_key: call.refer_key.clone(),
+        emergency,
+        core,
+        egress: call.egress.clone(),
+        // Deferred-by-design auth adapter (default None): the mix entry's
+        // responder, folded into every call so the §22.2 retry is a one-object
+        // opt-in, not a choreography change.
+        challenge_responder: challenge_responder.clone(),
         options_hold: call.options_hold,
-        options_cadence: call.options_cadence,
-        ring_delay: call.ring_delay,
-        talk_time: call.talk_time,
-        reinvite_gap: call.reinvite_gap,
-        long_hold: call.long_hold,
+        // Per-call dwells: the resolved case extras override the global
+        // CallConfig defaults knob-by-knob (unset knobs keep the default).
+        options_cadence: dwells.options_cadence.unwrap_or(call.options_cadence),
+        ring_delay: dwells.ring_delay.unwrap_or(call.ring_delay),
+        talk_time: dwells.talk_time.unwrap_or(call.talk_time),
+        reinvite_gap: dwells.reinvite_gap.unwrap_or(call.reinvite_gap),
+        long_hold: dwells.long_hold.unwrap_or(call.long_hold),
     };
     let scope = CallScope::new();
-    let ctx = CallCtx::new();
 
     let result = AssertUnwindSafe(scenario.run(&env, &scope, &ctx)).catch_unwind().await;
 
@@ -351,14 +506,24 @@ async fn run_one(
     let failed = !matches!(result, Ok(Ok(())));
     if failed && !call.teardown_quiesce.is_zero() {
         bob.quiesce(call.teardown_quiesce).await;
+        if let Some(b2) = &bob2 {
+            b2.quiesce(call.teardown_quiesce).await;
+        }
         if let Some(c) = &charlie {
             c.quiesce(call.teardown_quiesce).await;
         }
     }
 
+    // The per-call audit policy: the attached case's `allowViolations` exempt
+    // those rule names from the RFC hard gate (the load analogue of
+    // `Harness::allow_violation`); no case / empty list = the full audit.
+    static NO_WAIVERS: std::sync::LazyLock<std::collections::HashSet<String>> =
+        std::sync::LazyLock::new(std::collections::HashSet::new);
+    let allow = case.as_ref().map(|c| c.allow_violations()).unwrap_or(&NO_WAIVERS);
+
     let outcome = match result {
         Ok(Ok(())) => {
-            let findings = binder.rfc_findings();
+            let findings = binder.rfc_findings(allow);
             if findings.is_empty() {
                 CallOutcome::Ok
             } else {
@@ -370,6 +535,44 @@ async fn run_one(
         Ok(Err(e)) => CallOutcome::Step(e),
         Err(payload) => CallOutcome::Panic(panic_msg(payload)),
     };
+
+    // Test-case CHECKS — evaluated on SAMPLED, otherwise-OK calls only (the
+    // per-sample oracle; a non-sampled call has no recording to check, and a
+    // failed/RFC-dirty call already explains itself). The verdicts (pass AND
+    // fail) render on the sampled callflow page; any failed check reclassifies
+    // the call to `check_fail`.
+    let verdicts: Vec<e2e_model::CheckVerdict> = match (&outcome, case.as_ref(), &resolved_input) {
+        (CallOutcome::Ok, Some(c), Some(input)) if record && c.has_checks() => {
+            c.evaluate(&binder.recorded_entries(), &ctx.take_anchors(), input, call.via)
+        }
+        _ => Vec::new(),
+    };
+    // Fold this sampled call's aggregate check verdict into the per-scenario
+    // check-verdict tally (the `checks` summary of the machine-readable index):
+    // only when checks were actually evaluated, so a case-less or unsampled call
+    // never skews it.
+    if !verdicts.is_empty() {
+        reporter.record_checks(id, verdicts.iter().all(|v| v.passed));
+    }
+    let outcome = if verdicts.iter().any(|v| !v.passed) {
+        let failed = verdicts
+            .iter()
+            .filter(|v| !v.passed)
+            .map(|v| format!("{} {}: {}", v.on, v.field, v.detail))
+            .collect::<Vec<_>>()
+            .join("; ");
+        CallOutcome::CheckFail(failed)
+    } else {
+        outcome
+    };
+    let check_notes: Vec<scenario_harness::CheckNote> = verdicts
+        .iter()
+        .map(|v| scenario_harness::CheckNote {
+            name: format!("check {} {}", v.on, v.field),
+            detail: v.detail.clone(),
+            passed: v.passed,
+        })
+        .collect();
 
     let class = ResultClass::from(&outcome);
     let e2e = ctx.elapsed();
@@ -406,7 +609,18 @@ async fn run_one(
             // instant(s) in its window as Lifecycle bands (absolute UTC, on the
             // call's wall-clock timeline) — see `ChaosLog::markers`.
             let markers = chaos.as_ref().map(|c| c.markers()).unwrap_or_default();
-            binder.render_html(id, class.is_ok(), detail.as_deref(), &markers)
+            // The banner (the resolved binding — the actual From/To used) shows
+            // in the page header on PASS and FAIL alike; the failure detail
+            // stays FAIL-only; the case's check verdicts render pass AND fail.
+            // Metrics labels stay scenario-keyed.
+            binder.render_html(
+                id,
+                class.is_ok(),
+                banner.as_deref(),
+                detail.as_deref(),
+                &markers,
+                &check_notes,
+            )
         } else {
             None
         };
@@ -447,17 +661,26 @@ fn phase_annotated_detail(detail: Option<String>, ctx: &CallCtx) -> Option<Strin
 }
 
 /// A minimal HTTP/1.1 server (hand-rolled over `TcpListener` — no hyper
-/// dependency). A GET serves `render()` (the Prometheus `/metrics` surface). When
-/// a [`ChaosLog`] is attached, a `POST /chaos?type=<kind>&target=<who>[&ts=<ms>]`
-/// records a fault marker so finished calls get auto-classified near/clear. With
-/// `ts` (Unix epoch ms of the actual kill, supplied by the chaos driver) the
-/// marker is back-dated to the kill instant — robust to port-forward latency on
-/// the flag path; without it the marker lands at receipt instant. Runs until the
-/// task is cancelled.
+/// dependency). Routes:
+///
+/// - **`GET /metrics`** (and any other GET) → `render()`, the Prometheus surface.
+/// - **`POST /chaos?type=<kind>&target=<who>[&ts=<ms>]`** (when a [`ChaosLog`] is
+///   attached) → records a fault marker so finished calls get auto-classified
+///   near/clear. With `ts` (Unix epoch ms of the actual kill, supplied by the
+///   chaos driver) the marker is back-dated to the kill instant — robust to
+///   port-forward latency on the flag path; without it it lands at receipt instant.
+/// - **`POST /rate?cps=<float>`** (when a [`RateHandle`] is attached) → re-targets
+///   the offered call rate live (clamped to `>= 0`; `0` pauses new-call admission).
+///   The governor re-anchors its grid on the next slot. Responds with the applied
+///   value.
+/// - **`GET /rate`** → the current target cps.
+///
+/// Runs until the task is cancelled.
 pub async fn serve_metrics(
     addr: SocketAddr,
     render: Arc<dyn Fn() -> String + Send + Sync>,
     chaos: Option<Arc<ChaosLog>>,
+    rate: Option<RateHandle>,
 ) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -465,13 +688,14 @@ pub async fn serve_metrics(
         let (mut sock, _) = listener.accept().await?;
         let render = render.clone();
         let chaos = chaos.clone();
+        let rate = rate.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
             let n = sock.read(&mut buf).await.unwrap_or(0);
             let (method, path, query) = parse_request_line(&buf[..n]);
 
-            let body = if method == "POST" && path == "/chaos" {
-                if let Some(log) = &chaos {
+            let (status, body) = if method == "POST" && path == "/chaos" {
+                let body = if let Some(log) = &chaos {
                     let kind = query_get(&query, "type").unwrap_or_else(|| "unknown".to_string());
                     let target = query_get(&query, "target");
                     // `ts` (Unix epoch ms, captured by the chaos script at the
@@ -489,13 +713,34 @@ pub async fn serve_metrics(
                     }
                 } else {
                     "ok: no chaos log attached\n".to_string()
+                };
+                ("200 OK", body)
+            } else if path == "/rate" {
+                match &rate {
+                    None => ("404 Not Found", "no rate handle attached\n".to_string()),
+                    Some(h) if method == "POST" => match query_get(&query, "cps")
+                        .map(|s| s.parse::<f64>())
+                    {
+                        Some(Ok(cps)) => {
+                            let applied = h.set(cps);
+                            ("200 OK", format!("ok: target cps={applied}\n"))
+                        }
+                        // A missing or malformed `cps` is a client error (never a
+                        // silent no-op that leaves the rate wherever it was).
+                        _ => (
+                            "400 Bad Request",
+                            "expected POST /rate?cps=<float>\n".to_string(),
+                        ),
+                    },
+                    // GET /rate → the current target.
+                    Some(h) => ("200 OK", format!("{}\n", h.cps())),
                 }
             } else {
-                render()
+                ("200 OK", render())
             };
 
             let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             let _ = sock.write_all(resp.as_bytes()).await;

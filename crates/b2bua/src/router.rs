@@ -252,6 +252,11 @@ async fn discharge_materialized_terminal(
         &ctx.obligations,
         &before,
         crate::rules::invariants::finalize(discharged),
+        now_ms,
+        // Already-terminal reclaimed body: whoever served it to terminal
+        // answered on the wire (or its caller died with the crashed node).
+        // Reclaim-discharge stays OFF the SIP wire (ADR-0022 / ADR-0014).
+        false,
     );
     process_result(ctx, call_ref, result, now_ms).await;
 }
@@ -275,6 +280,10 @@ async fn discharge_folded_terminal(
         &ctx.obligations,
         before,
         crate::rules::invariants::finalize(crate::effects::HandlerResult::new(terminal)),
+        now_ms,
+        // Folded already-terminal body: same off-the-wire contract as
+        // `discharge_materialized_terminal` above.
+        false,
     );
     process_result(ctx, call_ref, result, now_ms).await;
 }
@@ -743,6 +752,10 @@ async fn discharge_as_own(ctx: &Arc<RouterCtx>, call_ref: &str, now_ms: i64) {
         &ctx.obligations,
         &before,
         crate::rules::invariants::finalize(crate::reaper::discharge_result(call, now_ms)),
+        now_ms,
+        // LIVE call the rules path failed on twice — if its a-leg is still
+        // unanswered the caller is waiting on OUR server txn: answer it.
+        true,
     );
     process_result(ctx, call_ref, result, now_ms).await;
 }
@@ -879,6 +892,34 @@ async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
             return;
         }
     };
+
+    // ── Full-guarantee cap shed (ADR-0022) ────────────────────────────────────
+    // At the per-call global cap, `dispatch` would SILENTLY drop a brand-new
+    // call_ref's body before any call/txn context exists — leaving a caller who
+    // already heard sip-txn's auto-100 on "100-then-silence" (the one full-queue
+    // path neither the decision deadline nor the terminated-unanswered synthesis
+    // can reach, because no call is ever born). Shed a NEW initial INVITE here
+    // with a stateless 503 instead (mirrors the Tier-3 admission gate: stateless,
+    // no per-call resources, sent through the INVITE server txn that carries the
+    // 100). In-dialog events for an at-cap new call_ref stay on the silent
+    // `dispatch` cap-drop (an in-dialog request with no live call is an orphan the
+    // protocol resends / the peer 481s; only the initial INVITE owes a final).
+    if res.initial_invite && ctx.dispatcher.would_drop_new_at_cap(&call_ref) {
+        if let CallEvent::Sip { message, src } = &event {
+            if let SipMessage::Request(req) = message.as_ref() {
+                let resp = build_stateless_overload_503(
+                    &ctx.id_gen,
+                    req,
+                    ctx.config.retry_after_base_sec,
+                );
+                let _ = ctx.txn.send_response(resp, *src).await;
+            }
+        }
+        // Count it on the same cap counter (the cap WAS reached); the caller now
+        // gets a 503 rather than silence.
+        ctx.metrics.bump_cap_drop();
+        return;
+    }
 
     let ctx2 = ctx.clone();
     ctx.dispatcher.dispatch(
@@ -1365,11 +1406,11 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
                 &ctx.id_gen,
                 now_ms,
             );
-            crate::rules::invariants::enforce(&ctx.obligations, &call, crate::rules::invariants::finalize(rejected))
+            crate::rules::invariants::enforce(&ctx.obligations, &call, crate::rules::invariants::finalize(rejected), now_ms, true)
         } else {
             let result =
                 handle_initial_invite(call.clone(), ctx.decision.as_ref(), ctx.limiter.as_ref(), &ctx.config, &ctx.id_gen, &ctx.services, now_ms).await;
-            crate::rules::invariants::enforce(&ctx.obligations, &call, crate::rules::invariants::finalize(result))
+            crate::rules::invariants::enforce(&ctx.obligations, &call, crate::rules::invariants::finalize(result), now_ms, true)
         }
     } else {
         // In-dialog: peek the in-memory map, falling back to the acting-backup
@@ -1495,7 +1536,7 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
         ) {
             let before = call.clone();
             let res = handle_limiter_refresh(ctx, call, now_ms).await;
-            crate::rules::invariants::enforce(&ctx.obligations, &before, crate::rules::invariants::finalize(res))
+            crate::rules::invariants::enforce(&ctx.obligations, &before, crate::rules::invariants::finalize(res), now_ms, true)
         } else {
             // ── MAX_MESSAGES_PER_CALL cap-defense ──────────────────────────
             // Port of the TS `SipRouter` per-event `messageCount` bump + cap

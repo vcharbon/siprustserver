@@ -336,3 +336,154 @@ async fn unknown_resources_are_404() {
     }
     std::fs::remove_dir_all(&e2e).ok();
 }
+
+// ---------------------------------------------------------------------------
+// Load runs
+// ---------------------------------------------------------------------------
+
+/// The load-result.json for one fixture run: a genuine check_fail reinvite (with
+/// a sampled callflow page) beside an OK basic_call, plus latency, a check
+/// tally, and canaries. Kept as authored JSON so the test also exercises the
+/// wire shape the loadgen writes.
+fn fixture_load_result() -> serde_json::Value {
+    serde_json::json!({
+        "meta": {
+            "startedMs": 1_700_000_000_000i64,
+            "finishedMs": 1_700_000_060_000i64,
+            "finished": true,
+            "target": "172.20.255.250:5060",
+            "cps": 20.0,
+            "durationSecs": 60,
+            "maxInFlight": 2000,
+            "egress": "transparent",
+            "profile": "endurance baseline"
+        },
+        "counts": [
+            { "scenario": "basic_call", "class": "ok", "chaos": "clear", "count": 1180, "ok": true },
+            { "scenario": "reinvite", "class": "check_fail", "chaos": "clear", "count": 1, "ok": false }
+        ],
+        "latency": [
+            { "scenario": "basic_call", "n": 1180, "meanMs": 12.5, "p50Ms": 10.0, "p90Ms": 25.0, "p99Ms": 40.0, "maxMs": 88.0 }
+        ],
+        "checkpoints": [
+            { "scenario": "basic_call", "checkpoint": "ringing", "n": 1180, "p50Ms": 3.0, "p90Ms": 8.0, "p99Ms": 15.0 }
+        ],
+        "checks": [
+            { "scenario": "reinvite", "passed": 7, "failed": 1 }
+        ],
+        "canaries": {
+            "orphans": 0, "shed": 4, "drops": 11, "ringingExpected": 1185, "ringingReceived": 1184
+        },
+        "samples": [
+            { "scenario": "reinvite", "class": "check_fail", "chaos": "clear",
+              "pages": ["callflows/reinvite/check_fail/clear/0.html"] }
+        ]
+    })
+}
+
+/// A load-runs root with one run dir (`endurance-1`) holding a load-result.json
+/// and its one sampled callflow page. Returns `(root, app)`.
+fn load_run_app(tag: &str) -> (PathBuf, Router) {
+    let root = std::env::temp_dir().join(format!("e2e-web-load-{tag}-{}", std::process::id()));
+    std::fs::remove_dir_all(&root).ok();
+    let run = root.join("endurance-1");
+    let flow_dir = run.join("callflows/reinvite/check_fail/clear");
+    std::fs::create_dir_all(&flow_dir).unwrap();
+    std::fs::write(
+        run.join("load-result.json"),
+        serde_json::to_string_pretty(&fixture_load_result()).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        flow_dir.join("0.html"),
+        "<html><body><h3>reinvite check_fail sample</h3></body></html>",
+    )
+    .unwrap();
+    // A partial run (no load-result.json yet) must NOT appear in the listing.
+    std::fs::create_dir_all(root.join("half-baked")).unwrap();
+
+    let e2e = std::env::temp_dir().join(format!("e2e-web-load-e2e-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&e2e).unwrap();
+    let app = e2e_web::router_with_load_runs(e2e, root.join("nope-runs"), root.clone());
+    (root, app)
+}
+
+/// The list + detail + JSON-negotiation path for load runs: the index lists the
+/// run (skipping the index-less dir); the detail HTML renders the counts table,
+/// latency, checks, canaries + a sample link; and the same detail route mirrors
+/// the persisted load-result.json under `Accept: application/json`.
+#[tokio::test(flavor = "multi_thread")]
+async fn load_runs_list_detail_and_json() {
+    let (root, app) = load_run_app("listdetail");
+
+    // Index HTML: the run is linked; the half-baked dir is not.
+    let (st, html) = get(&app, "/load", false).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(html.contains("/load/endurance-1"), "run linked: {html}");
+    assert!(!html.contains("half-baked"), "index-less dir hidden");
+
+    // Index JSON mirrors {run, totalCalls, clearFailures, finished}.
+    let (st, json) = get(&app, "/load", true).await;
+    assert_eq!(st, StatusCode::OK);
+    let docs: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    let doc = docs.iter().find(|d| d["run"] == "endurance-1").expect("run in index");
+    assert_eq!(doc["totalCalls"], 1181);
+    assert_eq!(doc["clearFailures"], 1);
+    assert_eq!(doc["finished"], true);
+
+    // Detail HTML: counts table + latency + checks + canaries + sample link.
+    let (st, html) = get(&app, "/load/endurance-1", false).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(html.contains("check_fail"), "counts table: {html}");
+    assert!(html.contains("172.20.255.250:5060"), "target echoed");
+    assert!(html.contains("Latency"), "latency section");
+    assert!(html.contains("Canaries"), "canaries section");
+    assert!(
+        html.contains("/load/endurance-1/files/callflows/reinvite/check_fail/clear/0.html"),
+        "sample page linked: {html}"
+    );
+
+    // Detail JSON IS the persisted load-result.json, verbatim.
+    let (st, json) = get(&app, "/load/endurance-1", true).await;
+    assert_eq!(st, StatusCode::OK);
+    let from_api: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let on_disk: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("endurance-1/load-result.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(from_api, on_disk, "detail JSON is the load-result.json");
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// A sampled callflow page is served statically from the run dir; a missing run
+/// 404s; and a traversal attempt is rejected (never reads outside the run dir).
+#[tokio::test(flavor = "multi_thread")]
+async fn load_run_files_serve_and_reject_traversal() {
+    let (root, app) = load_run_app("files");
+
+    // The sampled page renders.
+    let (st, html) =
+        get(&app, "/load/endurance-1/files/callflows/reinvite/check_fail/clear/0.html", false).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(html.contains("reinvite check_fail sample"), "served the callflow page");
+
+    // A missing run 404s (both flavors).
+    let (st, _) = get(&app, "/load/does-not-exist", true).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    // Traversal attempts never escape the run dir.
+    for uri in [
+        "/load/endurance-1/files/../../load-result.json",
+        "/load/endurance-1/files/../half-baked",
+        "/load/endurance-1/files/callflows/../../../load-result.json",
+    ] {
+        let (st, _) = get(&app, uri, false).await;
+        assert!(
+            st == StatusCode::BAD_REQUEST || st == StatusCode::NOT_FOUND,
+            "traversal {uri} must be refused, got {st}"
+        );
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+}

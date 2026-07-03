@@ -1,0 +1,53 @@
+{
+  "$schema": "../schemas/test-case.schema.json",
+  "id": "fusion-basic-pooled",
+  "description": "Final-validation basic-call case for the loadgen×e2e fusion: pooled per-call identities (From/To walk a binding pool with ${seq:N}/${rand:N} expansion), per-call dwell overrides (ring 25 ms, talk 10 ms), a referenced Check set (loadgen-invite-identity) plus an inline check, and an allowViolations waiver. Drive it against the dev_sut playground with `--correlate to-user`. Every field it asserts survives any SIP-correct B2BUA and does NOT touch the To URI (To-user correlation rewrites the To user-part with the per-call token).",
+  "compatibleShapes": [
+    "basic-call"
+  ],
+  "input": {
+    "extras": {
+      "ring_delay_ms": 25,
+      "talk_time_ms": 10
+    }
+  },
+  "bindings": {
+    "mode": "seq",
+    "entries": [
+      {
+        "core": {
+          "from": "sip:+3310${seq:4}@pool.example",
+          "to": "sip:+3390${seq:4}@callee.example"
+        }
+      },
+      {
+        "core": {
+          "from": "sip:+4420${rand:6}@pool.example"
+        }
+      }
+    ]
+  },
+  "checkSets": [
+    "loadgen-invite-identity"
+  ],
+  "checks": [
+    {
+      "on": "bob.initialInvite",
+      "checks": [
+        {
+          "field": "header(Max-Forwards)",
+          "op": "regex",
+          "value": "^[0-9]+$"
+        },
+        {
+          "field": "header(CSeq)",
+          "op": "regex",
+          "value": "INVITE"
+        }
+      ]
+    }
+  ],
+  "allowViolations": [
+    "rfc3261.rport"
+  ]
+}
