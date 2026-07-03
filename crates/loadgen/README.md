@@ -626,3 +626,123 @@ disambiguates which receiver gets the leg. Declare it via `CallRouting`
 `loadgen_mux_picker_disambiguates_shared_socket` for a worked example. This is
 the seam a future multi-REFER / re-route scenario builds on; the mux itself never
 reads `X-Api-Call` or any URI — leg routing is the scenario's to own.
+
+---
+
+## Extension points (deferred by design)
+
+Three capabilities a production SIP load tool eventually needs are **wired as
+seams but not implemented** — the point is that adding each one later touches a
+single adapter, not the call choreography. The choreography
+(`scenario_harness::realcall`) is transport- and auth-agnostic today; these notes
+say exactly where each extension slots in.
+
+### Authentication (RFC 3261 §22) — the `ChallengeResponder` seam
+
+Auth is **not implemented**: a challenging SUT's `401 Unauthorized` /
+`407 Proxy Authentication Required` classifies as `status_401` / `status_407` and
+the call is counted as a deviation. The retry **hook**, however, already exists,
+so adding digest is one object:
+
+- **The adapter.** `scenario_harness::realcall::auth::ChallengeResponder`
+  (re-exported as `loadgen::ChallengeResponder`):
+
+  ```rust
+  fn respond(&self, challenge: &Challenge, method: &str, ruri: &str) -> Option<String>;
+  ```
+
+  It returns the credential-header value (`Authorization` for a `401`,
+  `Proxy-Authorization` for a `407` — `Challenge::credential_header()`), or `None`
+  to decline. `Challenge` carries the challenge `status` and the raw
+  `WWW-Authenticate` / `Proxy-Authenticate` `header_value` (a future RFC 2617 /
+  7616 digest computer parses `realm`/`nonce`/`qop`/`algorithm` off it).
+
+- **Where it is wired (the ONE retry point).** On the fallible INVITE path
+  (`realcall::establish` / `establish_100rel`, via `admitted_uas`) and on the
+  out-of-dialog builder (`OutOfDialogRequest::try_send_authed` — the future
+  REGISTER/OPTIONS path). On a `401`/`407` **with** a responder the choreography
+  ACKs the challenge (RFC 3261 §17.1.1.3 for INVITE; nothing for a non-INVITE,
+  §17.1.2.2), asks the responder for a credential, and resends the request with
+  the credential header + a **bumped CSeq** + a fresh Via branch, exactly **once**
+  (a challenge to the resend is a plain `status_401/407`). **Without** a responder
+  the behaviour is byte-for-byte today's — no retry.
+
+- **How to plug one in.** Set it on the run's `CallEnv`
+  (`CallEnv::with_challenge_responder(Arc::new(MyDigest{…}))`) or, on the load
+  fleet, on the `MixEntry` (`MixEntry::with_challenge_responder(Some(resp))`,
+  folded into every call's `CallEnv` by the driver). The default is `None`. There
+  is **no CLI flag yet** — this is a library-consumer seam; a `--auth` flag minting
+  a digest responder is a small follow-up that touches only the binary's arg
+  parsing.
+
+  Usage sketch:
+
+  ```rust
+  struct Digest { user: String, pass: String }
+  impl ChallengeResponder for Digest {
+      fn respond(&self, c: &Challenge, method: &str, ruri: &str) -> Option<String> {
+          // parse realm/nonce/qop off c.header_value, hash A1/A2 over method+ruri,
+          // return Some("Digest username=…, realm=…, nonce=…, uri=…, response=…")
+      }
+  }
+  let mix = MixEntry::by_id(&reg, "basic-call", &inputs, 1.0)?
+      .with_challenge_responder(Some(Arc::new(Digest { .. })));
+  ```
+
+  Regression tests for the plumbing (fake static-credential responder + the
+  no-responder classification) live in `scenario-harness`
+  (`agent::auth_seam_tests`).
+
+### Transport: TCP / TLS (NO code today — where it would slot)
+
+The engine is **UDP-only**. Every endpoint is a `tokio::net::UdpSocket` opened in
+`loadgen::mux::MuxCore::bind` (one per `EndpointSpec`, pumped by `dispatch_loop`),
+the agents' Via advertises `SIP/2.0/UDP` (`scenario_harness::agent::Agent::via`,
+hardcoded `SipTransport::Udp`), and the retransmit engine
+(`mux.rs::CallTxns`) implements the UDP timers (Timer A/E request resends, Timer G
+2xx-until-ACK) that a reliable transport would not need. This is deliberate: the
+SUT under test is UDP, the multiplex-over-few-sockets design (its whole reason for
+existing — call rate not bounded by fds/ephemeral ports) is a UDP idiom, and a
+paused-clock deterministic fabric is simplest over datagrams.
+
+Adding TCP/TLS is a **socket-layer** change, isolated to two files — the
+choreography above `mux` never sees the transport:
+
+1. **`EndpointSpec` gains a transport kind** (`Udp | Tcp | Tls{…}`), and
+   `MuxCore::bind` opens a `TcpListener` (accept loop → per-connection read task)
+   instead of a `UdpSocket` for a TCP/TLS spec. The inbound side already
+   frames+parses whole SIP messages per datagram; over a stream it must instead
+   **length-frame** on `Content-Length` (RFC 3261 §7.5) before handing each
+   message to the same dispatcher. TLS is a `tokio-rustls` acceptor/connector
+   wrapping that stream — no message-layer change.
+2. **The Via + `Contact` transport token** (`Agent::via`,
+   `Agent::contact`) becomes per-endpoint instead of the constant
+   `SipTransport::Udp`, so a TCP leg advertises `SIP/2.0/TCP` and routes replies
+   over the connection.
+
+The retransmit engine then keys off the transport: over TCP/TLS the request/2xx
+resend timers are **disabled** (the stream is reliable), so `CallTxns`
+(`mux.rs::CallTxns::on_outbound`, which arms the Timer A/E/G resend controls)
+gains a `reliable` flag that short-circuits arming them. Nothing in `realcall` or
+the shapes changes — they build logical messages; the mux realizes them on the
+wire.
+
+### REGISTER (a future shape)
+
+There is no REGISTER **load shape** yet, but the pieces are in place:
+
+- The functional harness already speaks REGISTER (`Agent::register`) and a
+  **registrar mimic** exists in `e2e-core` (the `fake-register-proxy` the portable
+  `basic-call`-over-registrar E2E runs against), so a load shape has a SUT to
+  register against.
+- The out-of-dialog builder (`Agent::request(OutOfDialogMethod::Register, …)`)
+  plus `OutOfDialogRequest::try_send_authed` give REGISTER its **authenticated**
+  send for free — a registrar almost always challenges, and the
+  `ChallengeResponder` seam above is exactly the adapter it needs (`401` →
+  credential → resend, once).
+- A `register-refresh` shape would be a `RealCallScenario` that REGISTERs
+  (binding its AOR), holds for the binding lifetime with periodic refreshes, then
+  de-registers (Expires: 0) — declared once as a `ShapeDescriptor` like every
+  other shape, with the AOR/credentials driven from the Test-case binding pool
+  (`--case`). The `RegistrarAor` egress policy already models "route the INVITE to
+  the registered AOR" for the call side.

@@ -130,6 +130,12 @@ pub struct MixEntry {
     pub needs_bob2: bool,
     /// Stamp `Resource-Priority: esnet.0` (the SUT force-admits under overload).
     pub emergency: bool,
+    /// **Deferred-by-design auth adapter** (see
+    /// `scenario_harness::realcall::auth`). `None` (the default) = no RFC 3261
+    /// §22.2 retry; a `401`/`407` classifies as `status_401`/`status_407`. Set it
+    /// (via [`MixEntry::with_challenge_responder`]) to point the fleet at a
+    /// challenging registrar/proxy once digest lands — no CLI flag mints one yet.
+    pub challenge_responder: Option<Arc<dyn scenario_harness::realcall::ChallengeResponder>>,
 }
 
 impl From<(Arc<dyn LoadScenario>, f64)> for MixEntry {
@@ -142,6 +148,7 @@ impl From<(Arc<dyn LoadScenario>, f64)> for MixEntry {
             needs_charlie: false,
             needs_bob2: false,
             emergency: false,
+            challenge_responder: None,
         }
     }
 }
@@ -164,6 +171,7 @@ impl MixEntry {
             needs_charlie: shape.needs_charlie,
             needs_bob2: shape.needs_bob2,
             emergency: shape.emergency,
+            challenge_responder: None,
         })
     }
 
@@ -201,6 +209,16 @@ impl MixEntry {
     /// Attach a Test case (binding pool → per-call identities + dwells).
     pub fn with_case(mut self, case: Option<Arc<LoadCase>>) -> Self {
         self.case = case;
+        self
+    }
+
+    /// Attach the deferred-by-design auth adapter (see the field docs). The load
+    /// driver folds it into every call's `CallEnv`; the default is `None`.
+    pub fn with_challenge_responder(
+        mut self,
+        responder: Option<Arc<dyn scenario_harness::realcall::ChallengeResponder>>,
+    ) -> Self {
+        self.challenge_responder = responder;
         self
     }
 }
@@ -376,7 +394,16 @@ async fn run_one(
     _permit: OwnedSemaphorePermit,
 ) {
     reporter.inc_inflight();
-    let MixEntry { id, scenario, case, needs_charlie, needs_bob2, emergency, weight: _ } = entry;
+    let MixEntry {
+        id,
+        scenario,
+        case,
+        needs_charlie,
+        needs_bob2,
+        emergency,
+        challenge_responder,
+        weight: _,
+    } = entry;
 
     // Resolve THIS call's binding from the attached Test case (pool walk +
     // token expansion): the core From/To/R-URI to fold into the outgoing
@@ -457,6 +484,10 @@ async fn run_one(
         emergency,
         core,
         egress: call.egress.clone(),
+        // Deferred-by-design auth adapter (default None): the mix entry's
+        // responder, folded into every call so the §22.2 retry is a one-object
+        // opt-in, not a choreography change.
+        challenge_responder: challenge_responder.clone(),
         options_hold: call.options_hold,
         // Per-call dwells: the resolved case extras override the global
         // CallConfig defaults knob-by-knob (unset knobs keep the default).

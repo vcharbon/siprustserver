@@ -12,11 +12,12 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::anchors::{AnchorKeys, AnchorTag};
 use crate::egress::{ApiCall, CalleeTarget, EgressPolicy};
+use crate::realcall::auth::ChallengeResponder;
 use crate::{Agent, Invite};
 
 /// How the per-call correlation token is **written into the outgoing INVITE** —
@@ -106,6 +107,14 @@ pub struct CallEnv<'a> {
     /// [`Self::outgoing_invite`], which consults it. Replaces the hand-rolled
     /// `X-Api-Call` route/refer pins.
     pub egress: EgressPolicy,
+    /// **Deferred-by-design auth adapter** (see [`crate::realcall::auth`]).
+    /// `None` (the default) = the choreography never retries, so a `401`/`407`
+    /// classifies as `status_401`/`status_407` exactly as today.
+    /// `Some(responder)` wires the RFC 3261 §22.2 retry: on a challenge the INVITE
+    /// choreography (and the authenticated out-of-dialog builder) ACK, ask the
+    /// responder for a credential, and resend once. A library-consumer seam — no
+    /// CLI flag mints one yet.
+    pub challenge_responder: Option<Arc<dyn ChallengeResponder>>,
     /// Long-hold duration for the OPTIONS-keepalive scenario.
     pub options_hold: Duration,
     /// In-dialog OPTIONS keepalive cadence.
@@ -164,6 +173,9 @@ impl<'a> CallEnv<'a> {
             emergency: false,
             core: CoreIdentity::default(),
             egress: EgressPolicy::Transparent,
+            // Auth is deferred: no responder → no §22.2 retry (a 401/407 is a
+            // counted deviation). A consumer wires one via `with_challenge_responder`.
+            challenge_responder: None,
             // Realistic dwell defaults (free under a paused clock).
             options_hold: Duration::from_secs(2),
             options_cadence: Duration::from_secs(1),
@@ -198,6 +210,17 @@ impl<'a> CallEnv<'a> {
     /// failover target. Builder-style so `for_functional` call sites stay put.
     pub fn with_bob2(mut self, bob2: &'a Agent) -> Self {
         self.bob2 = Some(bob2);
+        self
+    }
+
+    /// Attach a [`ChallengeResponder`] — the deferred-by-design auth adapter (see
+    /// [`crate::realcall::auth`]). Builder-style; the default is `None` (no
+    /// retry). The load driver plugs one via its own `MixEntry`/`CallEnv` wiring.
+    pub fn with_challenge_responder(
+        mut self,
+        responder: Arc<dyn ChallengeResponder>,
+    ) -> Self {
+        self.challenge_responder = Some(responder);
         self
     }
 

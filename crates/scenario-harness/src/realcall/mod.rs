@@ -16,10 +16,12 @@ use async_trait::async_trait;
 use crate::agent::{ClientInvite, ServerTxn};
 use crate::{Agent, Dialog, StepError, ANSWER_SDP, OFFER_SDP};
 
+pub mod auth;
 mod env;
 mod scope;
 pub mod scenarios;
 
+pub use auth::{Challenge, ChallengeResponder};
 pub use env::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp};
 pub use scope::CallScope;
 
@@ -164,25 +166,73 @@ pub(crate) async fn admitted_uas(
     call: &mut ClientInvite,
     expect_1xx: u16,
 ) -> Result<ServerTxn, StepError> {
-    tokio::select! {
-        biased;
-        bob = env.bob.try_receive("INVITE") => bob,
-        shed = call.try_expect(expect_1xx) => {
-            let e = shed.err().unwrap_or_else(|| StepError::UnexpectedKind {
-                who: "alice".to_string(),
+    // At most ONE authenticated resend (RFC 3261 §22.2): a challenge to the
+    // resent INVITE surfaces as a plain `status_401/407` deviation, never an
+    // unbounded loop.
+    let mut auth_retries_left: u8 = if env.challenge_responder.is_some() { 1 } else { 0 };
+    loop {
+        let raced = tokio::select! {
+            biased;
+            bob = env.bob.try_receive("INVITE") => return bob,
+            resp = call.try_recv_response() => resp,
+        };
+        // The alice arm resolved first: either the SUT's own final to alice (a
+        // shed 503 / a 401-407 challenge / any other final) or an early
+        // provisional that should not have preceded bob's INVITE.
+        let resp = match raced {
+            Ok(r) => r,
+            // A bare timeout / closed queue (no response) leaves the scope Early
+            // so the still-pending INVITE is CANCELed at teardown.
+            Err(e) => return Err(e),
+        };
+
+        // §22.2 challenge with a configured responder: ACK the challenge, add the
+        // credential, resend once, then re-race (bob may now see the authed
+        // INVITE, or another final may come back).
+        if matches!(resp.status, 401 | 407) && auth_retries_left > 0 {
+            if let Some(responder) = env.challenge_responder.as_deref() {
+                if call.ack_and_resend_with_auth(&resp, responder).await? {
+                    // The resent INVITE is a fresh transaction still pending — keep
+                    // the scope Early (its CANCEL handle already covers the resent
+                    // INVITE, which `ack_and_resend_with_auth` re-pointed).
+                    auth_retries_left -= 1;
+                    continue;
+                }
+                // Responder declined — fall through and surface the challenge as a
+                // plain deviation (status_401/407), exactly as with no responder.
+            }
+        }
+
+        // No retry: reproduce the historic `try_expect(expect_1xx)`
+        // classification byte-for-byte. A real FINAL (status ≥ 200) completes the
+        // INVITE transaction — nothing to CANCEL/BYE — so mark the scope
+        // terminated (teardown is a no-op) and surface `WrongStatus` (the driver
+        // buckets it `status_<code>`, e.g. `status_401` / `status_503`). A 1xx
+        // that raced ahead of bob is NOT a final: leave the scope Early (the
+        // pending INVITE is CANCELed). The `expect_1xx` provisional itself maps to
+        // `UnexpectedKind` (as `try_expect` returning `Ok` did); any OTHER 1xx to
+        // `WrongStatus` — exactly the two prior branches.
+        if resp.status >= 200 {
+            scope.mark_terminated();
+            return Err(StepError::WrongStatus {
+                who: env.alice.name().to_string(),
+                expected: expect_1xx,
+                got: resp.status,
+                reason: resp.reason.clone(),
+            });
+        }
+        if resp.status == expect_1xx {
+            return Err(StepError::UnexpectedKind {
+                who: env.alice.name().to_string(),
                 detail: format!("early {expect_1xx} before bob saw the INVITE"),
             });
-            // A real FINAL response (status ≥ 200, e.g. a 503 overload shed)
-            // completes the INVITE transaction — there is nothing to CANCEL/BYE,
-            // and CANCELing an already-answered INVITE just churns the SUT. Mark
-            // the scope terminated so teardown is a no-op. A non-matching
-            // PROVISIONAL is NOT a final — leave the scope Early so a still-
-            // pending INVITE is CANCELed; likewise a bare timeout (no response).
-            if matches!(&e, StepError::WrongStatus { got, .. } if *got >= 200) {
-                scope.mark_terminated();
-            }
-            Err(e)
         }
+        return Err(StepError::WrongStatus {
+            who: env.alice.name().to_string(),
+            expected: expect_1xx,
+            got: resp.status,
+            reason: resp.reason.clone(),
+        });
     }
 }
 
