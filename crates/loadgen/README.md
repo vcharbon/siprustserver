@@ -533,19 +533,24 @@ page with its one-line reason.
 
 ## How to add a test case
 
-### Add a load scenario
+### Add a load scenario (a body + a descriptor — no match arms anywhere)
 
-1. Create `src/scenarios/<name>.rs` with a unit struct implementing
-   `LoadScenario`:
+1. Write the **load body** — a unit struct implementing `RealCallScenario`
+   (`scenario_harness::realcall`; re-exported as
+   `loadgen::scenarios::LoadScenario`). The shipped bodies live in
+   `crates/scenario-harness/src/realcall/scenarios/<name>.rs` so the SAME flow
+   serves the load fleet and the in-process functional leak gate; a third-party
+   crate implements the trait wherever it likes. Load attributes
+   (charlie/bob2/emergency) are **not** on the trait — they live on the
+   descriptor (step 2):
 
    ```rust
    pub struct MyFlow;
 
    #[async_trait]
-   impl LoadScenario for MyFlow {
-       fn id(&self) -> ScenarioId { "my_flow" }      // report dir + metrics label
-       // fn needs_charlie(&self) -> bool { true }    // bind a transfer-target leg
-       // fn emergency(&self) -> bool { true }        // stamp Resource-Priority: esnet.0
+   impl RealCallScenario for MyFlow {
+       fn id(&self) -> ScenarioId { "my_flow" }   // the body's intrinsic name; the
+                                                  // report/metrics id is the DESCRIPTOR's
 
        async fn run(&self, env: &CallEnv<'_>, scope: &CallScope, ctx: &CallCtx)
            -> Result<(), StepError>
@@ -577,21 +582,28 @@ page with its one-line reason.
    (`e2e_model::registry::default_shapes`, or `ShapeRegistry::register` from a
    third-party crate): a `ShapeDescriptor::new("my_flow")` carrying the load
    attributes (`.needs_charlie()` / `.needs_bob2()` / `.emergency()`), an
-   optional `.default_weight(w)` for the default mix, and the body factory —
+   optional `.default_weight(w)` for the default mix, the published
+   `.anchors(…)` (so Test-case checks can bind), and the body factory —
    `.load_shared(Arc::new(MyFlow))`, or `.load_with(|inputs| …)` when it needs
-   per-run SUT auth data (`ScenarioInputs`). The driver resolves it via
-   `MixEntry::by_id` / `--scenario my_flow=…`. An **emergency variant** is
-   free: a second descriptor (`"my_flow_em"`) with `.emergency()` reusing the
-   same body — the report id comes from the descriptor. A shape that ALSO has
-   an e2e functional body attaches it by the same id in
+   per-run SUT auth data (`ScenarioInputs`). That is the whole wiring: the
+   driver resolves the descriptor from the registry (`MixEntry::by_id` /
+   `--scenario my_flow=…`, `MixEntry::default_mix` / `failure_mix` for the
+   shipped tables) — there is no `match` table left to extend, and a duplicate
+   id panics at registration. An **emergency variant** is free: a second
+   descriptor (`"my_flow_em"`) with `.emergency()` reusing the same body — the
+   report id comes from the descriptor. A shape that ALSO has an e2e functional
+   body attaches it by the same id in
    `e2e-core/src/shapes/mod.rs::default_bodies` (see `rerouting_prack`, the
-   first dual-body shape).
+   first dual-body shape; ADR-0021).
 
 ### Add a *voluntarily-failing* scenario (post-call-cleanup coverage)
 
-Failure scenarios live in `src/scenarios/failures.rs`, one per teardown path, so
-the no-leak coverage test exercises every reclamation branch **without an
-endurance run**:
+Failure scenario bodies live in
+`crates/scenario-harness/src/realcall/scenarios/failures.rs`, one per teardown
+path, and are registered like any other shape but with `.failure_weight(w)`
+instead of `.default_weight(w)` — that flag is what puts them in the registry's
+`failure_mix`, which the no-leak coverage test runs so every reclamation branch
+is exercised **without an endurance run**:
 
 | ends in scope state | teardown the driver runs | example |
 |---|---|---|
