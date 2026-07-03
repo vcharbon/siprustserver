@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bindings::{BindingPool, validate_bindings};
 use crate::endpoint::EndpointConfig;
+use crate::loadprofile::LoadProfile;
 use crate::shape::{Anchor, CoreInput, ShapeCatalog};
 
 /// The input a Test case feeds a shape: the shared **core** (From / To / R-URI
@@ -212,6 +213,7 @@ pub fn schemas() -> Vec<(&'static str, Schema)> {
         ("test-case", schema_for!(TestCase)),
         ("check-set", schema_for!(CheckSet)),
         ("campaign", schema_for!(Campaign)),
+        ("load-profile", schema_for!(LoadProfile)),
     ]
 }
 
@@ -271,6 +273,13 @@ pub fn load_campaign(path: &Path) -> Result<Campaign, ModelError> {
 
 pub fn load_endpoint_config(path: &Path) -> Result<EndpointConfig, ModelError> {
     load_json(path)
+}
+
+/// Load a [`LoadProfile`] JSON (the loadgen run spec), validating it at load
+/// (rates/durations, drop probabilities, coherent mix). See
+/// [`LoadProfile::load`].
+pub fn load_load_profile(path: &Path) -> Result<LoadProfile, ModelError> {
+    LoadProfile::load(path)
 }
 
 /// Load every `*.json` Check set in a directory, keyed by its `id`. A missing

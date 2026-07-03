@@ -25,6 +25,7 @@ use crate::chaos::{ChaosLog, ChaosTag};
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
 use crate::mux::{CallRouting, Correlation, LegInfo, MuxCore};
+use crate::rate::{Governor, RateHandle};
 use crate::report::{RenderedSample, Reporter};
 use crate::scenarios::LoadScenario;
 use crate::scope::CallScope;
@@ -206,7 +207,9 @@ impl MixEntry {
 
 /// The load driver.
 pub struct Driver {
-    cps: f64,
+    /// The live-tunable offered rate (milli-cps under the hood). Seeded from
+    /// `cfg.cps`; `POST /rate` re-targets it and the governor re-anchors its grid.
+    rate: RateHandle,
     duration: Duration,
     max_in_flight: usize,
     seed: u64,
@@ -267,7 +270,7 @@ impl Driver {
         assert!(!scenarios.is_empty(), "loadgen needs at least one scenario");
         let total_weight = scenarios.iter().map(|e| e.weight).sum();
         Self {
-            cps: cfg.cps,
+            rate: RateHandle::new(cfg.cps),
             duration: cfg.duration,
             max_in_flight: cfg.max_in_flight,
             seed: cfg.seed.max(1),
@@ -300,6 +303,13 @@ impl Driver {
         &self.reporter
     }
 
+    /// A clone of the live rate handle — hand it to the `/rate` HTTP surface (and
+    /// read the current target for the `loadgen_target_cps` gauge). Re-targeting it
+    /// re-anchors the governor's grid on the next slot.
+    pub fn rate_handle(&self) -> RateHandle {
+        self.rate.clone()
+    }
+
     fn pick(&self, rng: &mut u64) -> &MixEntry {
         let r = (xorshift(rng) as f64 / u64::MAX as f64) * self.total_weight;
         let mut acc = 0.0;
@@ -313,44 +323,19 @@ impl Driver {
     }
 
     /// Run the load for the configured duration, then drain in-flight calls.
+    ///
+    /// The spawn cadence is the [`Governor`] — a re-anchoring fixed-grid CPS
+    /// scheduler that reads the shared [`RateHandle`] on every slot, so
+    /// `POST /rate` re-targets it live (a rate change re-anchors the grid so a cut
+    /// fires no catch-up burst and a raise takes effect within one slot; `cps == 0`
+    /// pauses new-call admission while in-flight calls run untouched). A catch-up
+    /// burst is bounded by the max-in-flight semaphore — the excess is shed+counted,
+    /// never an unbounded spawn storm.
     pub async fn run(&self) {
-        // Fixed-grid CPS governor. The nth call is scheduled at the ABSOLUTE slot
-        // `start + n*period`, anchored at the run start. We sleep until that
-        // instant; if it is already in the past — we fell behind on wake/scheduling
-        // jitter — the remaining delay is <= 0, so we DO NOT sleep (never a negative
-        // or zero sleep) and fire immediately, catching the slip back up. This holds
-        // the long-run offered rate at exactly `cps`.
-        //
-        // The previous `tokio::time::interval` + `MissedTickBehavior::Delay`
-        // re-anchored the next deadline to each (late) wake instead of catching up,
-        // so a few-ms per-tick scheduling latency was permanently shed every cycle —
-        // ~8% under endurance load (20 cps offered as ~18.4). The grid below cannot
-        // accumulate that drift. A catch-up burst (after a long stall) is naturally
-        // bounded by the max-in-flight semaphore — the excess is shed+counted, never
-        // an unbounded spawn storm.
-        let period = Duration::from_secs_f64(1.0 / self.cps);
-        let start = tokio::time::Instant::now();
         let mut rng = self.seed;
-        let mut n: u64 = 0;
+        let mut governor = Governor::new(self.rate.clone(), self.duration);
 
-        loop {
-            // Offset of the nth slot from `start`. Computed in Duration space and
-            // compared to `self.duration` (not as an Instant) so a huge n can never
-            // overflow `Instant` arithmetic — once the slot reaches the window end
-            // we stop (total offered ≈ cps × duration).
-            let offset = match u32::try_from(n).ok().and_then(|k| period.checked_mul(k)) {
-                Some(off) if off < self.duration => off,
-                _ => break,
-            };
-            let target = start + offset;
-
-            // Sleep ONLY while ahead of the slot; on/behind it (delay <= 0) fire now.
-            let now = tokio::time::Instant::now();
-            if target > now {
-                tokio::time::sleep_until(target).await;
-            }
-            n += 1;
-
+        while governor.next_slot().await.is_some() {
             let entry = self.pick(&mut rng).clone();
             let permit = match self.sem.clone().try_acquire_owned() {
                 Ok(p) => p,
@@ -638,17 +623,26 @@ fn phase_annotated_detail(detail: Option<String>, ctx: &CallCtx) -> Option<Strin
 }
 
 /// A minimal HTTP/1.1 server (hand-rolled over `TcpListener` — no hyper
-/// dependency). A GET serves `render()` (the Prometheus `/metrics` surface). When
-/// a [`ChaosLog`] is attached, a `POST /chaos?type=<kind>&target=<who>[&ts=<ms>]`
-/// records a fault marker so finished calls get auto-classified near/clear. With
-/// `ts` (Unix epoch ms of the actual kill, supplied by the chaos driver) the
-/// marker is back-dated to the kill instant — robust to port-forward latency on
-/// the flag path; without it the marker lands at receipt instant. Runs until the
-/// task is cancelled.
+/// dependency). Routes:
+///
+/// - **`GET /metrics`** (and any other GET) → `render()`, the Prometheus surface.
+/// - **`POST /chaos?type=<kind>&target=<who>[&ts=<ms>]`** (when a [`ChaosLog`] is
+///   attached) → records a fault marker so finished calls get auto-classified
+///   near/clear. With `ts` (Unix epoch ms of the actual kill, supplied by the
+///   chaos driver) the marker is back-dated to the kill instant — robust to
+///   port-forward latency on the flag path; without it it lands at receipt instant.
+/// - **`POST /rate?cps=<float>`** (when a [`RateHandle`] is attached) → re-targets
+///   the offered call rate live (clamped to `>= 0`; `0` pauses new-call admission).
+///   The governor re-anchors its grid on the next slot. Responds with the applied
+///   value.
+/// - **`GET /rate`** → the current target cps.
+///
+/// Runs until the task is cancelled.
 pub async fn serve_metrics(
     addr: SocketAddr,
     render: Arc<dyn Fn() -> String + Send + Sync>,
     chaos: Option<Arc<ChaosLog>>,
+    rate: Option<RateHandle>,
 ) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -656,13 +650,14 @@ pub async fn serve_metrics(
         let (mut sock, _) = listener.accept().await?;
         let render = render.clone();
         let chaos = chaos.clone();
+        let rate = rate.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
             let n = sock.read(&mut buf).await.unwrap_or(0);
             let (method, path, query) = parse_request_line(&buf[..n]);
 
-            let body = if method == "POST" && path == "/chaos" {
-                if let Some(log) = &chaos {
+            let (status, body) = if method == "POST" && path == "/chaos" {
+                let body = if let Some(log) = &chaos {
                     let kind = query_get(&query, "type").unwrap_or_else(|| "unknown".to_string());
                     let target = query_get(&query, "target");
                     // `ts` (Unix epoch ms, captured by the chaos script at the
@@ -680,13 +675,34 @@ pub async fn serve_metrics(
                     }
                 } else {
                     "ok: no chaos log attached\n".to_string()
+                };
+                ("200 OK", body)
+            } else if path == "/rate" {
+                match &rate {
+                    None => ("404 Not Found", "no rate handle attached\n".to_string()),
+                    Some(h) if method == "POST" => match query_get(&query, "cps")
+                        .map(|s| s.parse::<f64>())
+                    {
+                        Some(Ok(cps)) => {
+                            let applied = h.set(cps);
+                            ("200 OK", format!("ok: target cps={applied}\n"))
+                        }
+                        // A missing or malformed `cps` is a client error (never a
+                        // silent no-op that leaves the rate wherever it was).
+                        _ => (
+                            "400 Bad Request",
+                            "expected POST /rate?cps=<float>\n".to_string(),
+                        ),
+                    },
+                    // GET /rate → the current target.
+                    Some(h) => ("200 OK", format!("{}\n", h.cps())),
                 }
             } else {
-                render()
+                ("200 OK", render())
             };
 
             let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             let _ = sock.write_all(resp.as_bytes()).await;

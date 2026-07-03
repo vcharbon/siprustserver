@@ -18,6 +18,7 @@ pub mod bindings;
 pub mod checks;
 pub mod egress;
 pub mod endpoint;
+pub mod loadprofile;
 pub mod model;
 pub mod registry;
 pub mod shape;
@@ -31,10 +32,11 @@ pub use egress::{
     ApiCall, ApiCallDestination, ApiCallRoute, CalleeTarget, EgressPolicy, EgressRewrite,
 };
 pub use endpoint::{EgressPolicySpec, EndpointConfig};
+pub use loadprofile::{LoadProfile, MixSpec, Robustness};
 pub use model::{
     Campaign, Check, CheckBlock, CheckOp, CheckSet, Concurrency, Input, ModelError, TestCase,
     collect_case_blocks, load_campaign, load_check_set, load_check_sets, load_endpoint_config,
-    load_test_case, schemas, validate_case,
+    load_load_profile, load_test_case, schemas, validate_case,
 };
 pub use registry::{
     LoadFactory, ReroutingParams, ScenarioInputs, ShapeDescriptor, ShapeRegistry,

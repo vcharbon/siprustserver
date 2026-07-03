@@ -80,7 +80,83 @@ Key flags: `--cps`, `--duration`, `--max-in-flight`, `--target`, `--bind-ip`,
 data fed into the refer scenarios), `--scenario name=weight` (repeatable; omit
 for the default mix), `--out-dir`, `--metrics-addr` (default `0.0.0.0:9300`),
 `--sample-cap`, `--drop-rate` / `--drop` / `--auto-retransmit` (see *Packet loss
-+ auto-retransmit* below). Run `--help` for the full list.
++ auto-retransmit* below), `--load-profile` (see *The run-spec axis* below). Run
+`--help` for the full list.
+
+### The run-spec axis: `--load-profile`
+
+Instead of a long flag line, the whole run can come from **one authored
+document** — a `LoadProfile` JSON (schema:
+`e2e/schemas/load-profile.schema.json`) — the load analogue of an e2e *Campaign*.
+It carries every run knob (`cps`, `durationSecs`, `maxInFlight`, `sampleCap`,
+`backgroundRecordEvery`, `reportIntervalSecs`, `recvTimeoutMs`), the global
+`robustness` (`dropRate` + `retransmit`) defaults, and the scenario **`mix`**
+(each entry: `shape` id, `weight`, an optional attached `case`, and per-scenario
+`dropRate`/`retransmit` overrides):
+
+```bash
+./target/release/loadgen \
+  --target 172.20.255.250:5060 --bind-ip 172.20.0.1 --route-pin-to-uas \
+  --load-profile e2e/loadprofiles/endurance-baseline.json
+```
+
+```jsonc
+// e2e/loadprofiles/endurance-baseline.json
+{
+  "cps": 20, "durationSecs": 3600, "maxInFlight": 8000,
+  "sampleCap": 50, "backgroundRecordEvery": 1, "reportIntervalSecs": 60,
+  "recvTimeoutMs": 5000,
+  "robustness": { "dropRate": 0.001, "retransmit": true },
+  "mix": [
+    { "shape": "basic_call", "weight": 16, "case": "e2e/cases/load-basic-pooled.json" },
+    { "shape": "reinvite",      "weight": 4  },
+    { "shape": "options_hold",  "weight": 1  },
+    { "shape": "long_call",     "weight": 0.4 }
+  ]
+}
+```
+
+**Precedence — flag overrides profile.** The profile supplies *defaults*; an
+**explicitly-passed CLI flag overrides** the profile's value for that knob (so a
+profile pins a repeatable baseline and a one-off `--cps 40` tweaks it without
+editing the file). A partial profile is legal — every omitted field falls back to
+the same default the flag carries. Addressing/egress stays the environment axis
+(`--endpoint-config` or the `--target`/`--bind-ip`/… shorthand); an authored
+`--endpoint-config` file's `recvTimeoutMs` wins over the profile's. An explicit
+`--scenario` (or `--case`) replaces the profile's whole `mix`. A malformed
+profile (bad rate, empty/typo'd shape id, drop rate outside `[0,1]`) fails **at
+startup**, never silently mid-run.
+
+### Live rate control (`POST /rate`)
+
+The offered rate is **re-targetable at runtime** — no restart — over the same
+HTTP socket as `/metrics` and `/chaos`:
+
+- **`POST /rate?cps=<float>`** — set the target call rate. The value is validated
+  and **clamped to `>= 0`** (a negative/`NaN`/`inf` clamps to `0`); a missing or
+  unparseable `cps` is a `400`. The response echoes the applied value
+  (`ok: target cps=<applied>`).
+- **`GET /rate`** — the current target cps.
+- **`cps=0` PAUSES** new-call admission (in-flight calls run to completion
+  untouched); a later `POST /rate?cps=N` **resumes** cleanly.
+- The current target is exported as the **`loadgen_target_cps`** gauge (`0` while
+  paused).
+
+```bash
+curl -X POST 'http://<metrics-addr>/rate?cps=40'   # ramp up to 40 cps
+curl -X POST 'http://<metrics-addr>/rate?cps=0'    # pause admission
+curl       'http://<metrics-addr>/rate'            # → current target
+```
+
+The governor is a **re-anchoring fixed-grid** scheduler (`loadgen::Governor`): it
+reads the rate on every slot, so a change takes effect within one slot. On a
+change it re-anchors its grid (fresh start instant + slot counter) — a **cut**
+therefore fires **no catch-up burst** (the old, faster grid's backlog of past-due
+slots is discarded, the new grid starts *now*), and a **raise** takes effect
+within one slot of the shorter period. A transient catch-up (after a stall) is
+still bounded by `--max-in-flight` (the excess is shed+counted). Coverage:
+`crates/loadgen/tests/governor.rs` (cadence, cut-without-burst, pause/resume) and
+the `post_rate_retargets_the_running_server` HTTP smoke test.
 
 ### The environment axis: `--endpoint-config`
 
@@ -398,7 +474,10 @@ The report is written to `--out-dir`, bucketed per `(scenario × result-class ×
 - **`summary.md`** — the same counts in markdown.
 - **Live:** `curl <metrics-addr>/metrics` during a run for the per-`(scenario,
   class, chaos)` counters plus the `loadgen_mux_orphan_total` /
-  `loadgen_mux_registry_size` canaries and `loadgen_chaos_markers_total`.
+  `loadgen_mux_registry_size` canaries, `loadgen_chaos_markers_total`, and
+  `loadgen_target_cps` (the current offered-rate target). The same socket serves
+  `POST /rate?cps=<float>` / `GET /rate` (live rate control — see *Live rate
+  control* above) and `POST /chaos` (chaos correlation — below).
 
 ### Chaos correlation (near vs clear)
 

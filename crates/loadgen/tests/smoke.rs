@@ -562,7 +562,7 @@ async fn loadgen_chaos_post_records_marker() {
     let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(|| "render-body-marker\n".to_string());
     let srv_chaos = chaos.clone();
     tokio::spawn(async move {
-        let _ = serve_metrics(bind, render, Some(srv_chaos)).await;
+        let _ = serve_metrics(bind, render, Some(srv_chaos), None).await;
     });
 
     // Retry-connect until the server is bound.
