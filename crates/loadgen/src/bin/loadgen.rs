@@ -21,9 +21,9 @@ use std::time::Duration;
 use clap::Parser;
 use e2e_model::{load_endpoint_config, EndpointConfig};
 use loadgen::{
-    serve_metrics, CallConfig, CallTuning, ChaosLog, Correlation, Driver, DriverCfg, EndpointSpec,
-    LoadCase, MixEntry, MuxCore, MuxTransport, RateHandle, Reporter, ReporterCfg, Role,
-    ScenarioInputs, ShapeRegistry,
+    serve_metrics, Canaries, CallConfig, CallTuning, ChaosLog, Correlation, Driver, DriverCfg,
+    EndpointSpec, LoadCase, LoadRunMeta, MixEntry, MuxCore, MuxTransport, RateHandle, Reporter,
+    ReporterCfg, Role, ScenarioInputs, ShapeRegistry,
 };
 use sip_clock::Clock;
 
@@ -586,10 +586,36 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
+    // The run-metadata template for the machine-readable `load-result.json`: the
+    // echoed knobs (timing filled per-write). Shared with the periodic snapshot
+    // task; each write clones it and stamps `finished`/`finished_ms`.
+    let started_ms = clock.now_ms();
+    let meta_base = LoadRunMeta {
+        started_ms,
+        finished_ms: started_ms,
+        finished: false,
+        target: via.to_string(),
+        cps,
+        duration_secs: duration,
+        max_in_flight: max_in_flight as u64,
+        egress: Some(egress_label(&egress)),
+        profile: profile.description.clone(),
+    };
+    let meta_for = |clock: &Clock, finished: bool| LoadRunMeta {
+        finished_ms: clock.now_ms(),
+        finished,
+        ..meta_base.clone()
+    };
+
     // Periodically snapshot the on-disk report so it is browsable mid-run (the
-    // endurance harness copies it out without waiting for the job to finish).
+    // endurance harness copies it out without waiting for the job to finish). Each
+    // snapshot rewrites index.html/summary.md AND the machine-readable
+    // load-result.json (still `finished:false`), listing the same sample pages.
     if report_interval_secs > 0 {
         let snap_reporter = reporter.clone();
+        let snap_core = core.clone();
+        let snap_clock = clock.clone();
+        let snap_meta = meta_base.clone();
         let out = args.out_dir.clone();
         let every = Duration::from_secs(report_interval_secs);
         tokio::spawn(async move {
@@ -597,7 +623,14 @@ async fn main() -> std::io::Result<()> {
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tick.tick().await;
-                if let Err(e) = snap_reporter.finalize(&out) {
+                let meta = LoadRunMeta {
+                    finished_ms: snap_clock.now_ms(),
+                    finished: false,
+                    ..snap_meta.clone()
+                };
+                if let Err(e) =
+                    snap_reporter.finalize_run(&out, meta, mux_canaries(&snap_core))
+                {
                     eprintln!("[loadgen] periodic report snapshot failed: {e}");
                 }
             }
@@ -610,7 +643,7 @@ async fn main() -> std::io::Result<()> {
     );
     driver.run().await;
 
-    reporter.finalize(&args.out_dir)?;
+    reporter.finalize_run(&args.out_dir, meta_for(&clock, true), mux_canaries(&core))?;
     eprintln!(
         "[loadgen] done: {} calls; registry_size={}; report at {}",
         reporter.total_calls(),
@@ -620,6 +653,31 @@ async fn main() -> std::io::Result<()> {
     println!("{}", reporter.render_prometheus());
     println!("{}", core.render_prometheus());
     Ok(())
+}
+
+/// A short, stable label for the run's egress policy (the `meta.egress` field of
+/// the machine-readable index): `transparent` / `api-call-pin` / `registrar-aor`.
+fn egress_label(egress: &loadgen::EgressPolicy) -> String {
+    use loadgen::EgressPolicy;
+    match egress {
+        EgressPolicy::Transparent => "transparent".to_string(),
+        EgressPolicy::ApiCallPin => "api-call-pin".to_string(),
+        EgressPolicy::RegistrarAor { domain } => format!("registrar-aor:{domain}"),
+    }
+}
+
+/// The mux-owned run canaries (orphans + simulated-loss drops) for the
+/// machine-readable index. The reporter fills in its own shed + ringing halves
+/// in `build_index`, so these two totals are all the caller supplies.
+fn mux_canaries(core: &MuxCore) -> Canaries {
+    use std::sync::atomic::Ordering;
+    let s = core.stats();
+    let orphans = s.orphan_no_header.load(Ordering::Relaxed)
+        + s.orphan_unknown_token.load(Ordering::Relaxed)
+        + s.orphan_stray.load(Ordering::Relaxed);
+    let drops =
+        s.dropped_out.load(Ordering::Relaxed) + s.dropped_in.load(Ordering::Relaxed);
+    Canaries { orphans, drops, ..Canaries::default() }
 }
 
 /// The current offered-rate target as a Prometheus gauge (`loadgen_target_cps`),

@@ -32,17 +32,42 @@ use e2e_core::run::{self, JobHandle};
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 use tower_http::services::ServeDir;
 
+/// The directory name under the functional runs root reserved for load runs
+/// (`e2e/runs/load`). The functional runs index skips it, and the `Load runs`
+/// section scans it. Documented on `--out-dir`: point the loadgen there and its
+/// runs appear.
+const LOAD_RUNS_DIR: &str = "load";
+
 /// Shared app state: the authored-files dir, the runs root, and the live jobs.
 pub struct AppState {
     pub e2e_dir: PathBuf,
     pub runs_root: PathBuf,
+    /// Where load-generator run directories live (each holds a `load-result.json`
+    /// + its `callflows/…` pages). Defaults to `<runs_root>/load`.
+    pub load_runs_root: PathBuf,
     /// Live (spawned this process) jobs, keyed `"<campaign>/<ts>"`. Finished
     /// runs are served from disk; entries here only add live progress.
     jobs: Mutex<HashMap<String, JobHandle>>,
 }
 
 pub fn router(e2e_dir: PathBuf, runs_root: PathBuf) -> Router {
-    let state = Arc::new(AppState { e2e_dir, runs_root, jobs: Mutex::new(HashMap::new()) });
+    let load_runs_root = runs_root.join(LOAD_RUNS_DIR);
+    router_with_load_runs(e2e_dir, runs_root, load_runs_root)
+}
+
+/// Router variant with an explicit load-runs root (the CLI `--load-runs-root`;
+/// tests point it at a fixture dir).
+pub fn router_with_load_runs(
+    e2e_dir: PathBuf,
+    runs_root: PathBuf,
+    load_runs_root: PathBuf,
+) -> Router {
+    let state = Arc::new(AppState {
+        e2e_dir,
+        runs_root,
+        load_runs_root,
+        jobs: Mutex::new(HashMap::new()),
+    });
     Router::new()
         .route("/", get(|| async { Redirect::to("/campaigns") }))
         .route("/campaigns", get(campaigns_index))
@@ -52,6 +77,11 @@ pub fn router(e2e_dir: PathBuf, runs_root: PathBuf) -> Router {
         .route("/runs/{campaign}/{ts}", get(run_status))
         .route("/runs/{campaign}/{ts}/cells/{cell}", get(cell_detail))
         .route("/runs/{campaign}/{ts}/cells/{cell}/files/{name}", get(cell_file))
+        // Load runs (rendered from each run's `load-result.json`; launching stays
+        // a CLI action). List + content-negotiated detail + static sample pages.
+        .route("/load", get(load_runs_index))
+        .route("/load/{run}", get(load_run_detail))
+        .route("/load/{run}/files/{*path}", get(load_run_file))
         .route("/cases", get(cases_index))
         .route("/cases/{id}", get(case_view).post(case_save))
         // The registry's shapes (for the editor's shape-lens picker) and the
@@ -277,6 +307,7 @@ fn page(title: &str, body: Markup) -> Html<String> {
                 nav {
                     a href="/campaigns" { "Campaigns" } " · "
                     a href="/runs" { "Runs" } " · "
+                    a href="/load" { "Load runs" } " · "
                     a href="/cases" { "Test cases" }
                 }
                 h1 { (title) }
@@ -540,6 +571,11 @@ async fn runs_index(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Resp
     let mut runs: Vec<(String, String)> = Vec::new();
     if let Ok(campaigns) = std::fs::read_dir(&st.runs_root) {
         for c in campaigns.flatten() {
+            // The `load/` subdir is the load-runs root (its own `Load runs`
+            // section), not a functional campaign — skip it here.
+            if c.file_name() == std::ffi::OsStr::new(LOAD_RUNS_DIR) {
+                continue;
+            }
             if let Ok(tss) = std::fs::read_dir(c.path()) {
                 for t in tss.flatten() {
                     runs.push((
@@ -742,6 +778,329 @@ async fn cell_detail(
         },
     )
     .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Load runs (rendered from each run's machine-readable `load-result.json`)
+// ---------------------------------------------------------------------------
+
+/// A single run-name path segment, rejected if it could escape the load-runs
+/// root (no separators, no `..`, non-empty). Load run dir names are simple
+/// (`loadgen-report`, `endurance-20260630`), so this is strict, not clever.
+fn safe_segment(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+}
+
+/// Read a load run's `load-result.json` into the model index. `None` when the
+/// run dir or its index file is missing / unparseable.
+fn read_load_index(st: &AppState, run: &str) -> Option<model::LoadRunIndex> {
+    if !safe_segment(run) {
+        return None;
+    }
+    let path = st.load_runs_root.join(run).join("load-result.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// List load runs newest-first. A load run is any immediate subdirectory of the
+/// load-runs root that holds a `load-result.json`. HTML lists them (link +
+/// started time + call/failure tallies); JSON mirrors `{run, startedMs,
+/// finished, totalCalls, clearFailures}`.
+async fn load_runs_index(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let mut runs: Vec<(String, model::LoadRunIndex)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&st.load_runs_root) {
+        for e in entries.flatten() {
+            if !e.path().is_dir() {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().to_string();
+            if let Some(idx) = read_load_index(&st, &name) {
+                runs.push((name, idx));
+            }
+        }
+    }
+    // Newest-first by start time (ties broken by name for determinism).
+    runs.sort_by(|a, b| {
+        b.1.meta.started_ms.cmp(&a.1.meta.started_ms).then_with(|| a.0.cmp(&b.0))
+    });
+
+    if wants_json(&headers) {
+        let docs: Vec<_> = runs
+            .iter()
+            .map(|(name, idx)| {
+                serde_json::json!({
+                    "run": name,
+                    "startedMs": idx.meta.started_ms,
+                    "finished": idx.meta.finished,
+                    "totalCalls": idx.total_calls(),
+                    "clearFailures": idx.clear_failures(),
+                })
+            })
+            .collect();
+        return Json(docs).into_response();
+    }
+    page(
+        "Load runs",
+        html! {
+            p .muted {
+                "Load-generator runs, rendered from each run's " code { "load-result.json" } ". "
+                "Point the loadgen's " code { "--out-dir" } " at "
+                code { "e2e/runs/load/<run>" } " and it appears here. Launching stays a CLI action."
+            }
+            @if runs.is_empty() {
+                p .pending { "No load runs found under " code { (st.load_runs_root.display()) } "." }
+            } @else {
+                table {
+                    tr { th { "run" } th { "started" } th { "calls" } th { "genuine failures" } th { "state" } }
+                    @for (name, idx) in &runs {
+                        tr {
+                            td { a href={ "/load/" (name) } { (name) } }
+                            td { (fmt_epoch_ms(idx.meta.started_ms)) }
+                            td { (idx.total_calls()) }
+                            td {
+                                @if idx.clear_failures() == 0 { span .pass { "0" } }
+                                @else { span .fail { (idx.clear_failures()) } }
+                            }
+                            td {
+                                @if idx.meta.finished { "finished" }
+                                @else { span .pending { "running…" } }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    )
+    .into_response()
+}
+
+/// A load run's detail. Content-negotiated: JSON is the persisted
+/// `load-result.json` verbatim (so the HTML can never drift); HTML renders the
+/// counts table, latency + checkpoint summaries, the check-verdict tally, the
+/// canaries, and links to the sampled callflow pages.
+async fn load_run_detail(
+    State(st): State<Arc<AppState>>,
+    UrlPath(run): UrlPath<String>,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    let idx = read_load_index(&st, &run).ok_or_else(|| not_found(format!("load run {run:?}")))?;
+    if wants_json(&headers) {
+        // The mirrored JSON IS the persisted load-result.json.
+        return Ok(Json(idx).into_response());
+    }
+    let m = &idx.meta;
+    Ok(page(
+        &format!("Load run {run}"),
+        html! {
+            p .muted {
+                "target " code { (m.target) }
+                " · " (format!("{:.0}", m.cps)) " cps"
+                " · " (m.duration_secs) "s"
+                " · max-in-flight " (m.max_in_flight)
+                @if let Some(egress) = &m.egress { " · egress " code { (egress) } }
+                @if let Some(profile) = &m.profile { " · profile " (profile) }
+            }
+            p {
+                "Started " (fmt_epoch_ms(m.started_ms)) " · "
+                @if m.finished { "finished " (fmt_epoch_ms(m.finished_ms)) }
+                @else { span .pending { "running (snapshot at " (fmt_epoch_ms(m.finished_ms)) ")" } }
+                " · " b { (idx.total_calls()) } " call(s), "
+                @if idx.clear_failures() == 0 { span .pass { "0 genuine failures" } }
+                @else { span .fail { (idx.clear_failures()) " genuine failure(s)" } }
+            }
+
+            h2 { "Results by scenario × class × chaos" }
+            p .muted {
+                "chaos=" b { "clear" } " are the genuine results to triage; chaos=" b { "near" }
+                " are within the tolerance of an injected fault (accepted kill collateral)."
+            }
+            table {
+                tr { th { "scenario" } th { "class" } th { "chaos" } th { "count" } th { "samples" } }
+                @for row in &idx.counts {
+                    tr {
+                        td { (row.scenario) }
+                        td {
+                            @if row.ok { span .pass { (row.class) } }
+                            @else { span .fail { (row.class) } }
+                        }
+                        td {
+                            @if row.chaos == "near" { span .crash { "near" } }
+                            @else { (row.chaos) }
+                        }
+                        td { (row.count) }
+                        td { (sample_links(&run, &idx, &row.scenario, &row.class, &row.chaos)) }
+                    }
+                }
+            }
+
+            h2 { "Latency (ms)" }
+            table {
+                tr { th { "scenario" } th { "n" } th { "mean" } th { "p50" } th { "p90" } th { "p99" } th { "max" } }
+                @for row in &idx.latency {
+                    tr {
+                        td { (row.scenario) }
+                        td { (row.n) }
+                        td { (format!("{:.1}", row.mean_ms)) }
+                        td { (format!("{:.1}", row.p50_ms)) }
+                        td { (format!("{:.1}", row.p90_ms)) }
+                        td { (format!("{:.1}", row.p99_ms)) }
+                        td { (format!("{:.1}", row.max_ms)) }
+                    }
+                }
+            }
+
+            @if !idx.checkpoints.is_empty() {
+                h2 { "Checkpoints (ms)" }
+                table {
+                    tr { th { "scenario" } th { "checkpoint" } th { "n" } th { "p50" } th { "p90" } th { "p99" } }
+                    @for row in &idx.checkpoints {
+                        tr {
+                            td { (row.scenario) }
+                            td { (row.checkpoint) }
+                            td { (row.n) }
+                            td { (format!("{:.1}", row.p50_ms)) }
+                            td { (format!("{:.1}", row.p90_ms)) }
+                            td { (format!("{:.1}", row.p99_ms)) }
+                        }
+                    }
+                }
+            }
+
+            @if !idx.checks.is_empty() {
+                h2 { "Test-case checks (sampled calls)" }
+                table {
+                    tr { th { "scenario" } th { "passed" } th { "failed" } }
+                    @for row in &idx.checks {
+                        tr {
+                            td { (row.scenario) }
+                            td { span .pass { (row.passed) } }
+                            td {
+                                @if row.failed == 0 { (row.failed) }
+                                @else { span .fail { (row.failed) } }
+                            }
+                        }
+                    }
+                }
+            }
+
+            h2 { "Canaries" }
+            table {
+                tr { th { "signal" } th { "value" } }
+                (canary_row("orphans (stray-sends)", idx.canaries.orphans))
+                (canary_row("shed (max-in-flight)", idx.canaries.shed))
+                (canary_row("simulated drops", idx.canaries.drops))
+                tr {
+                    td { "18x delivery ratio" }
+                    td {
+                        @let ratio = idx.canaries.ringing_ratio();
+                        @if ratio >= 0.99 { span .pass { (format!("{:.4}", ratio)) } }
+                        @else { span .fail { (format!("{:.4}", ratio)) } }
+                        " (" (idx.canaries.ringing_received) "/" (idx.canaries.ringing_expected) ")"
+                    }
+                }
+            }
+        },
+    )
+    .into_response())
+}
+
+/// A canary table row: green when 0, red otherwise (orphans/shed/drops are all
+/// "should be ~0 in a clean run" signals).
+fn canary_row(label: &str, value: u64) -> Markup {
+    html! {
+        tr {
+            td { (label) }
+            td {
+                @if value == 0 { span .pass { "0" } }
+                @else { span .fail { (value) } }
+            }
+        }
+    }
+}
+
+/// The sample-page links for a `(scenario, class, chaos)` count row: the stored
+/// callflow pages, each served through `/load/{run}/files/…`.
+fn sample_links(run: &str, idx: &model::LoadRunIndex, scenario: &str, class: &str, chaos: &str) -> Markup {
+    let group = idx
+        .samples
+        .iter()
+        .find(|g| g.scenario == scenario && g.class == class && g.chaos == chaos);
+    html! {
+        @if let Some(group) = group {
+            @for (i, page) in group.pages.iter().enumerate() {
+                a href={ "/load/" (run) "/files/" (page) } { (i) }
+                " "
+            }
+        }
+    }
+}
+
+/// Serve a file from a load run's directory (the sampled callflow HTML pages).
+/// The `{*path}` wildcard is validated segment-by-segment (no `..`, no absolute
+/// escape) and resolved under the run dir, so it can never read outside it.
+async fn load_run_file(
+    State(st): State<Arc<AppState>>,
+    UrlPath((run, rel)): UrlPath<(String, String)>,
+) -> Result<Response, HttpError> {
+    if !safe_segment(&run) {
+        return Err((StatusCode::BAD_REQUEST, "bad run name".to_string()));
+    }
+    // Every path segment must be a plain name — reject traversal / absolute /
+    // empty parts before touching the filesystem.
+    if rel.is_empty()
+        || rel.starts_with('/')
+        || rel.contains('\\')
+        || rel.contains('\0')
+        || rel.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
+        return Err((StatusCode::BAD_REQUEST, "bad file path".to_string()));
+    }
+    let run_dir = st.load_runs_root.join(&run);
+    let mut path = run_dir.clone();
+    for seg in rel.split('/') {
+        path.push(seg);
+    }
+    // Defence in depth: the resolved path must still be under the run dir.
+    if !path.starts_with(&run_dir) {
+        return Err((StatusCode::BAD_REQUEST, "path escapes run dir".to_string()));
+    }
+    let bytes = std::fs::read(&path).map_err(|_| not_found(format!("file {rel:?}")))?;
+    let content_type = if rel.ends_with(".html") {
+        "text/html; charset=utf-8"
+    } else if rel.ends_with(".json") {
+        "application/json"
+    } else if rel.ends_with(".svg") {
+        "image/svg+xml"
+    } else {
+        "application/octet-stream"
+    };
+    Ok(([(header::CONTENT_TYPE, content_type)], bytes).into_response())
+}
+
+/// Format a Unix epoch-ms timestamp as `YYYY-MM-DD HH:MM:SSZ` (UTC), with no
+/// chrono dependency — a plain civil-date calc off the epoch-day.
+fn fmt_epoch_ms(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (h, m, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    format!("{year:04}-{month:02}-{d:02} {h:02}:{m:02}:{s:02}Z")
 }
 
 /// Serve a cell's sibling artifact (the `.wav` recordings). File names are

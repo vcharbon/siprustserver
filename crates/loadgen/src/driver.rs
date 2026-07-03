@@ -516,6 +516,13 @@ async fn run_one(
         }
         _ => Vec::new(),
     };
+    // Fold this sampled call's aggregate check verdict into the per-scenario
+    // check-verdict tally (the `checks` summary of the machine-readable index):
+    // only when checks were actually evaluated, so a case-less or unsampled call
+    // never skews it.
+    if !verdicts.is_empty() {
+        reporter.record_checks(id, verdicts.iter().all(|v| v.passed));
+    }
     let outcome = if verdicts.iter().any(|v| !v.passed) {
         let failed = verdicts
             .iter()

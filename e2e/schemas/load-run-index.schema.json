@@ -1,0 +1,333 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoadRunIndex",
+  "description": "One load run's complete result, as persisted to `load-result.json`.",
+  "type": "object",
+  "properties": {
+    "canaries": {
+      "description": "The run's health canaries — the cross-call signals a triager scans first.",
+      "$ref": "#/$defs/Canaries"
+    },
+    "checkpoints": {
+      "description": "Per-`(scenario, checkpoint)` named-checkpoint latency summary (ms).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CheckpointRow"
+      }
+    },
+    "checks": {
+      "description": "Per-scenario Test-case check-verdict tally over the SAMPLED calls (the\nper-sample oracle): how many sampled calls passed all their checks vs\nfailed at least one. Empty when no case with checks was attached.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CheckSummaryRow"
+      }
+    },
+    "counts": {
+      "description": "Per-`(scenario, class, chaos)` completed-call counts (the report's main\ntable). `class == \"ok\"` is the success bucket; `chaos == \"near\"` is\naccepted kill collateral, `chaos == \"clear\"` is a genuine result.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CountRow"
+      }
+    },
+    "latency": {
+      "description": "Per-scenario end-to-end latency summary (ms).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/LatencyRow"
+      }
+    },
+    "meta": {
+      "description": "Run metadata: when it ran and the echoed knobs it ran with.",
+      "$ref": "#/$defs/LoadRunMeta"
+    },
+    "samples": {
+      "description": "Links to the stored sampled callflow pages, grouped by their\n`(scenario, class, chaos)` bucket. Paths are RELATIVE to the run dir.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SampleGroup"
+      }
+    }
+  },
+  "required": [
+    "meta",
+    "counts",
+    "latency",
+    "canaries"
+  ],
+  "$defs": {
+    "Canaries": {
+      "description": "The run's cross-call health canaries — the first things a triager scans.",
+      "type": "object",
+      "properties": {
+        "drops": {
+          "description": "Datagrams discarded by the simulated packet-loss model (0 when loss off).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "orphans": {
+          "description": "Inbound datagrams that matched no live call (a post-failover stray-send\nburst is the classic SUT reclaim bug; should be ~0 in a clean run).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "ringingExpected": {
+          "description": "Calls that reached the ring→answer step (the 18x-delivery denominator).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "ringingReceived": {
+          "description": "Of those, how many saw the 18x ringing provisional (numerator). A dropped\nnon-PRACK 18x is expected, so this is a RATE gated at >99%, not a per-call\nfailure.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "shed": {
+          "description": "Offered calls dropped at the max-in-flight cap (offered load we shed).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "orphans",
+        "shed",
+        "drops",
+        "ringingExpected",
+        "ringingReceived"
+      ]
+    },
+    "CheckSummaryRow": {
+      "description": "Per-scenario Test-case check-verdict tally over the sampled calls.",
+      "type": "object",
+      "properties": {
+        "failed": {
+          "description": "Sampled calls with at least one failing check (the `check_fail` class).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "passed": {
+          "description": "Sampled calls whose every attached check passed.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "scenario": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scenario",
+        "passed",
+        "failed"
+      ]
+    },
+    "CheckpointRow": {
+      "description": "Per-`(scenario, checkpoint)` named-checkpoint latency summary (milliseconds).",
+      "type": "object",
+      "properties": {
+        "checkpoint": {
+          "type": "string"
+        },
+        "n": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p50Ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "p90Ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "p99Ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "scenario": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scenario",
+        "checkpoint",
+        "n",
+        "p50Ms",
+        "p90Ms",
+        "p99Ms"
+      ]
+    },
+    "CountRow": {
+      "description": "One `(scenario, class, chaos)` completed-call count.",
+      "type": "object",
+      "properties": {
+        "chaos": {
+          "description": "Chaos proximity: `clear` (genuine) or `near` (accepted kill collateral).",
+          "type": "string"
+        },
+        "class": {
+          "description": "The result class label (`ok`, `timeout`, `status_486`, `check_fail`, …).",
+          "type": "string"
+        },
+        "count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "ok": {
+          "description": "`true` iff `class == \"ok\"` (drives the OK-green / NOK-red split).",
+          "type": "boolean"
+        },
+        "scenario": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scenario",
+        "class",
+        "chaos",
+        "count",
+        "ok"
+      ]
+    },
+    "LatencyRow": {
+      "description": "Per-scenario end-to-end latency summary (all values in milliseconds).",
+      "type": "object",
+      "properties": {
+        "maxMs": {
+          "type": "number",
+          "format": "double"
+        },
+        "meanMs": {
+          "type": "number",
+          "format": "double"
+        },
+        "n": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p50Ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "p90Ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "p99Ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "scenario": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scenario",
+        "n",
+        "meanMs",
+        "p50Ms",
+        "p90Ms",
+        "p99Ms",
+        "maxMs"
+      ]
+    },
+    "LoadRunMeta": {
+      "description": "Run metadata: timing and the echoed run knobs.",
+      "type": "object",
+      "properties": {
+        "cps": {
+          "description": "Offered call rate the run was configured for (calls/s).",
+          "type": "number",
+          "format": "double"
+        },
+        "durationSecs": {
+          "description": "Configured run duration, seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "egress": {
+          "description": "The egress policy label the run realized its b-leg with\n(`transparent` / `api-call-pin` / `registrar-aor`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finished": {
+          "description": "`false` while a periodic snapshot is written mid-run; `true` in the doc\nwritten at run end.",
+          "type": "boolean"
+        },
+        "finishedMs": {
+          "description": "Wall-clock finish (the moment this doc was written), Unix epoch ms.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "maxInFlight": {
+          "description": "Max concurrent in-flight calls (offered load above this was shed).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "profile": {
+          "description": "Optional load-profile description echoed from the run's `--load-profile`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startedMs": {
+          "description": "Wall-clock start, Unix epoch milliseconds.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "target": {
+          "description": "The SUT ingress the INVITEs were routed through (the `lb`/VIP address).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "startedMs",
+        "finishedMs",
+        "finished",
+        "target",
+        "cps",
+        "durationSecs",
+        "maxInFlight"
+      ]
+    },
+    "SampleGroup": {
+      "description": "The stored sampled callflow pages for one `(scenario, class, chaos)` bucket.",
+      "type": "object",
+      "properties": {
+        "chaos": {
+          "type": "string"
+        },
+        "class": {
+          "type": "string"
+        },
+        "pages": {
+          "description": "Run-dir-relative paths to each sample's rendered callflow HTML page\n(e.g. `callflows/reinvite/check_fail/clear/0.html`).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scenario": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scenario",
+        "class",
+        "chaos",
+        "pages"
+      ]
+    }
+  }
+}

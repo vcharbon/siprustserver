@@ -53,6 +53,13 @@ pub use driver::{serve_metrics, CallConfig, CallTuning, Driver, DriverCfg, MixEn
 pub use mux::{CallRouting, Correlation, EndpointSpec, LegInfo, LegPicker, MuxCore, Role};
 pub use rate::{Governor, RateHandle};
 pub use report::{Reporter, ReporterCfg};
+// The machine-readable run index (`load-result.json`) the reporter writes — the
+// axis data model shared with the e2e website. Re-exported so the CLI/tests use
+// one path (`loadgen::LoadRunIndex`) without a direct e2e-model dependency.
+pub use e2e_model::{
+    Canaries, CheckSummaryRow, CheckpointRow, CountRow, LatencyRow, LoadRunIndex, LoadRunMeta,
+    SampleGroup,
+};
 pub use scenarios::{LoadScenario, ScenarioId, ScenarioInputs, ShapeDescriptor, ShapeRegistry};
 pub use scope::CallScope;
 // The environment axis shared with the e2e framework: the egress policy a run's

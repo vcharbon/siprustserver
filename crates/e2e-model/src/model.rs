@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::bindings::{BindingPool, validate_bindings};
 use crate::endpoint::EndpointConfig;
 use crate::loadprofile::LoadProfile;
+use crate::loadrun::LoadRunIndex;
 use crate::shape::{Anchor, CoreInput, ShapeCatalog};
 
 /// The input a Test case feeds a shape: the shared **core** (From / To / R-URI
@@ -214,6 +215,7 @@ pub fn schemas() -> Vec<(&'static str, Schema)> {
         ("check-set", schema_for!(CheckSet)),
         ("campaign", schema_for!(Campaign)),
         ("load-profile", schema_for!(LoadProfile)),
+        ("load-run-index", schema_for!(LoadRunIndex)),
     ]
 }
 

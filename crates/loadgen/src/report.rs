@@ -18,6 +18,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use e2e_model::{
+    Canaries, CheckSummaryRow, CheckpointRow, CountRow, LatencyRow, LoadRunIndex, LoadRunMeta,
+    SampleGroup,
+};
+
 use crate::chaos::ChaosTag;
 use crate::class::{CallOutcome, ResultClass};
 use crate::scenarios::ScenarioId;
@@ -126,6 +131,10 @@ struct Inner {
     checkpoints: BTreeMap<(ScenarioId, &'static str), Hist>,
     sample_taken: BTreeMap<Bucket, u32>,
     samples: BTreeMap<Bucket, Vec<RenderedSample>>,
+    /// Per-scenario Test-case check-verdict tally over the SAMPLED calls:
+    /// `(passed_all, failed_any)`. Fed only for calls whose attached case had
+    /// checks that were actually evaluated (sampled OK/check-fail calls).
+    check_verdicts: BTreeMap<ScenarioId, (u64, u64)>,
 }
 
 /// The bounded-memory load-test reporter. Cloneable handle via `Arc`.
@@ -165,6 +174,20 @@ impl Reporter {
             if received {
                 self.ringing_received.fetch_add(1, Ordering::Relaxed);
             }
+        }
+    }
+
+    /// Fold one SAMPLED call's Test-case check verdict into the per-scenario
+    /// check-verdict tally: `all_passed` true bumps the passed count, false the
+    /// failed count. Call only when the attached case's checks were actually
+    /// evaluated (so an unsampled or case-less call never skews the tally).
+    pub fn record_checks(&self, scenario: ScenarioId, all_passed: bool) {
+        let mut g = self.inner.lock().unwrap();
+        let e = g.check_verdicts.entry(scenario).or_default();
+        if all_passed {
+            e.0 += 1;
+        } else {
+            e.1 += 1;
         }
     }
 
@@ -432,6 +455,125 @@ impl Reporter {
         Ok(())
     }
 
+    // -- Machine-readable index (load-result.json) -------------------------
+
+    /// Build the [`LoadRunIndex`] — the machine-readable projection of the
+    /// current reporter state — folding in the caller-supplied run `meta` (timing
+    /// and echoed knobs, which the reporter is clock- and config-free about) and
+    /// the external `canaries` (mux orphans/drops the reporter doesn't own). The
+    /// sample-page paths it lists are EXACTLY the run-dir-relative paths that
+    /// [`finalize`](Self::finalize) writes, so the two never disagree.
+    pub fn build_index(&self, meta: LoadRunMeta, mut canaries: Canaries) -> LoadRunIndex {
+        let g = self.inner.lock().unwrap();
+
+        let counts = g
+            .counts
+            .iter()
+            .map(|((scenario, class, chaos), n)| CountRow {
+                scenario: scenario.to_string(),
+                class: class.clone(),
+                chaos: chaos.label().to_string(),
+                count: *n,
+                ok: class == "ok",
+            })
+            .collect();
+
+        let latency = g
+            .e2e
+            .iter()
+            .map(|(scenario, h)| LatencyRow {
+                scenario: scenario.to_string(),
+                n: h.total,
+                mean_ms: h.mean_ms(),
+                p50_ms: h.quantile_ms(0.5),
+                p90_ms: h.quantile_ms(0.9),
+                p99_ms: h.quantile_ms(0.99),
+                max_ms: h.max,
+            })
+            .collect();
+
+        let checkpoints = g
+            .checkpoints
+            .iter()
+            .map(|((scenario, name), h)| CheckpointRow {
+                scenario: scenario.to_string(),
+                checkpoint: name.to_string(),
+                n: h.total,
+                p50_ms: h.quantile_ms(0.5),
+                p90_ms: h.quantile_ms(0.9),
+                p99_ms: h.quantile_ms(0.99),
+            })
+            .collect();
+
+        let checks = g
+            .check_verdicts
+            .iter()
+            .map(|(scenario, (passed, failed))| CheckSummaryRow {
+                scenario: scenario.to_string(),
+                passed: *passed,
+                failed: *failed,
+            })
+            .collect();
+
+        // The stored-sample links, keyed by their `(scenario, class, chaos)`
+        // bucket — the SAME layout `finalize` writes to disk.
+        let samples = g
+            .samples
+            .iter()
+            .map(|((scenario, class, chaos), stored)| {
+                let chaos_label = chaos.label();
+                let pages = (0..stored.len())
+                    .map(|i| format!("callflows/{scenario}/{class}/{chaos_label}/{i}.html"))
+                    .collect();
+                SampleGroup {
+                    scenario: scenario.to_string(),
+                    class: class.clone(),
+                    chaos: chaos_label.to_string(),
+                    pages,
+                }
+            })
+            .collect();
+
+        // The reporter owns shed + the 18x ringing gate; the caller supplies the
+        // mux-owned orphans/drops. Fill the reporter half here so a caller can pass
+        // `Canaries::default()` and still get correct shed/ringing.
+        canaries.shed = g.shed.values().sum();
+        canaries.ringing_expected = self.ringing_expected.load(Ordering::Relaxed);
+        canaries.ringing_received = self.ringing_received.load(Ordering::Relaxed);
+
+        LoadRunIndex { meta, counts, latency, checkpoints, checks, canaries, samples }
+    }
+
+    /// Write `load-result.json` (the [`LoadRunIndex`]) into `out_dir`. Called on
+    /// every periodic report rewrite and at run end, right after
+    /// [`finalize`](Self::finalize), so the machine-readable index sits next to
+    /// `index.html` and lists the same sample pages that were just written.
+    pub fn write_index(
+        &self,
+        out_dir: &Path,
+        meta: LoadRunMeta,
+        canaries: Canaries,
+    ) -> std::io::Result<()> {
+        std::fs::create_dir_all(out_dir)?;
+        let index = self.build_index(meta, canaries);
+        let json = serde_json::to_string_pretty(&index)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(out_dir.join("load-result.json"), json + "\n")
+    }
+
+    /// One-shot: write the HTML/markdown report AND the machine-readable
+    /// `load-result.json` for one snapshot (periodic or final). The bin calls this
+    /// so both artifacts stay in lockstep.
+    pub fn finalize_run(
+        &self,
+        out_dir: &Path,
+        meta: LoadRunMeta,
+        canaries: Canaries,
+    ) -> std::io::Result<()> {
+        self.finalize(out_dir)?;
+        self.write_index(out_dir, meta, canaries)
+    }
+
     // -- Test/inspection accessors -----------------------------------------
 
     /// Total count for a `(scenario, class)` bucket, summed across both chaos
@@ -529,6 +671,72 @@ mod tests {
             out.join("callflows/reinvite/rfc_audit_fail/clear/0.html").exists(),
             "clear sub-bucket dir missing"
         );
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// `finalize_run` writes `load-result.json` next to `index.html`; it parses
+    /// back as a `LoadRunIndex`, its counts/canaries/check-verdicts mirror the
+    /// reporter state, and every sample page it names actually exists on disk (the
+    /// index and the HTML report never disagree).
+    #[test]
+    fn writes_and_parses_the_machine_readable_index() {
+        let r = Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 0 });
+        let mk = |d: &str| Some(RenderedSample { html: None, detail: Some(d.to_string()), e2e_ms: 2.0 });
+
+        // One OK basic call, one genuine check-fail reinvite (sampled), plus the
+        // cross-call ringing gate + a sampled check tally.
+        r.record("basic_call", &CallOutcome::Ok, Duration::from_millis(3), &[("ringing", Duration::from_millis(1))], mk("ok"), ChaosTag::Clear);
+        r.record("reinvite", &CallOutcome::CheckFail("from.userInfo mismatch".into()), Duration::from_millis(5), &[], mk("check fail"), ChaosTag::Clear);
+        r.record_ringing(Some(true));
+        r.record_ringing(Some(false));
+        r.record_checks("reinvite", true);
+        r.record_checks("reinvite", false);
+        r.inc_shed("basic_call");
+
+        let out = std::env::temp_dir().join(format!("loadgen-index-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let meta = LoadRunMeta {
+            started_ms: 1_000,
+            finished_ms: 61_000,
+            finished: true,
+            target: "10.0.0.1:5060".to_string(),
+            cps: 20.0,
+            duration_secs: 60,
+            max_in_flight: 100,
+            egress: Some("transparent".to_string()),
+            profile: Some("smoke".to_string()),
+        };
+        let canaries = Canaries { orphans: 0, drops: 7, ..Canaries::default() };
+        r.finalize_run(&out, meta.clone(), canaries).unwrap();
+
+        let path = out.join("load-result.json");
+        assert!(path.exists(), "load-result.json missing next to index.html");
+        assert!(out.join("index.html").exists(), "index.html still written");
+        let idx: LoadRunIndex =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        assert_eq!(idx.meta, meta, "run metadata echoed verbatim");
+        assert_eq!(idx.total_calls(), 2);
+        assert_eq!(idx.failed_calls(), 1, "the check_fail reinvite");
+        assert!(idx.counts.iter().any(|c| c.scenario == "basic_call" && c.class == "ok" && c.ok));
+        assert!(idx.counts.iter().any(|c| c.scenario == "reinvite" && c.class == "check_fail" && !c.ok));
+
+        // Canaries: reporter-owned shed/ringing filled in; caller-owned drops kept.
+        assert_eq!(idx.canaries.shed, 1);
+        assert_eq!(idx.canaries.drops, 7);
+        assert_eq!((idx.canaries.ringing_received, idx.canaries.ringing_expected), (1, 2));
+
+        // Per-scenario check-verdict tally.
+        let cs = idx.checks.iter().find(|c| c.scenario == "reinvite").expect("reinvite check row");
+        assert_eq!((cs.passed, cs.failed), (1, 1));
+
+        // Every listed sample page exists on disk (the paths match what finalize wrote).
+        assert!(!idx.samples.is_empty(), "at least one sample group");
+        for group in &idx.samples {
+            for page in &group.pages {
+                assert!(out.join(page).exists(), "index names a missing sample page: {page}");
+            }
+        }
         let _ = std::fs::remove_dir_all(&out);
     }
 }

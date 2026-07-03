@@ -19,6 +19,7 @@ pub mod checks;
 pub mod egress;
 pub mod endpoint;
 pub mod loadprofile;
+pub mod loadrun;
 pub mod model;
 pub mod registry;
 pub mod shape;
@@ -33,6 +34,10 @@ pub use egress::{
 };
 pub use endpoint::{EgressPolicySpec, EndpointConfig};
 pub use loadprofile::{LoadProfile, MixSpec, Robustness};
+pub use loadrun::{
+    Canaries, CheckSummaryRow, CheckpointRow, CountRow, LatencyRow, LoadRunIndex, LoadRunMeta,
+    SampleGroup,
+};
 pub use model::{
     Campaign, Check, CheckBlock, CheckOp, CheckSet, Concurrency, Input, ModelError, TestCase,
     collect_case_blocks, load_campaign, load_check_set, load_check_sets, load_endpoint_config,

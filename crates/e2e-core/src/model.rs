@@ -8,3 +8,10 @@
 //! compiled shape registry works exactly as before.
 
 pub use e2e_model::model::*;
+// The machine-readable Load run index (`load-result.json`) — the loadgen OUTPUT
+// doc the e2e website renders beside functional Campaign runs. Re-exported on the
+// same `e2e_core::model::…` path as the authored input docs.
+pub use e2e_model::loadrun::{
+    Canaries, CheckSummaryRow, CheckpointRow, CountRow, LatencyRow, LoadRunIndex, LoadRunMeta,
+    SampleGroup,
+};
