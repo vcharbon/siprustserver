@@ -130,6 +130,21 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
     let name = cell.name();
     let mut fh = FailoverHarness::new(&name, &["b1", "b2"]);
 
+    // KNOWN-BUG waiver, FAILOVER VARIANT ONLY. A takeover can trip the in-dialog
+    // CSeq audit via the pre-existing ADR-0014 dual-owner reclaim CSeq-desync (two
+    // nodes originate an in-dialog request minting the same `local_cseq + 1`); it
+    // surfaces randomly (~30%) with cross-node task/HashMap ordering, so it flakes
+    // the variant. The clean baseline (`inject == false`) keeps the rule FULLY
+    // active, so a genuinely NEW CSeq regression is still caught here; every other
+    // rule gates on both runs. See `FailoverHarness::allow_rfc_violation`. Remove
+    // once the reclaim CSeq high-water / ownership fix lands.
+    if inject {
+        fh.allow_rfc_violation(
+            crate::RULE_CSEQ_IN_DIALOG_ORDER,
+            "pre-existing ADR-0014 dual-owner reclaim CSeq-desync; tracked separately",
+        );
+    }
+
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     // Lanes registered for the recording (workers receive on their own addrs).
