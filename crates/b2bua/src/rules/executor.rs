@@ -74,7 +74,7 @@ pub fn execute_rules(
             let result = exec.execute(&outcome.actions, call, ctx);
             check_declared_transition(rule, &before.sm_cursors, &result.call.sm_cursors);
             let result = invariants::finalize(result);
-            return invariants::enforce(obligations, &before, result);
+            return invariants::enforce(obligations, &before, result, exec.now_ms, true);
         }
     }
     HandlerResult::new(call.clone())

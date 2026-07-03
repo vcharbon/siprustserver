@@ -137,6 +137,20 @@ impl PerCallDispatcher {
         self.queues.lock().unwrap().contains_key(call_ref)
     }
 
+    /// Would [`dispatch`](Self::dispatch) silently cap-drop a **brand-new**
+    /// call_ref right now? True iff no queue exists for it AND the live-queue
+    /// map is at the global cap. Lets the router shed a new initial INVITE with
+    /// a stateless 503 *before* dispatch (ADR-0022 full-guarantee close) instead
+    /// of the silent `bump_cap_drop` — the caller already heard the auto-100.
+    /// One lock (vs `has_queue` + `queue_count`). Race-safe from the single-task
+    /// router: only the router inserts, so between this check and the dispatch
+    /// the count can only *fall* (a worker finishing) — never rise — so a
+    /// `false` here guarantees the following dispatch is accepted.
+    pub fn would_drop_new_at_cap(&self, call_ref: &str) -> bool {
+        let map = self.queues.lock().unwrap();
+        !map.contains_key(call_ref) && map.len() >= self.cap
+    }
+
     pub fn queue_count(&self) -> usize {
         self.queues.lock().unwrap().len()
     }

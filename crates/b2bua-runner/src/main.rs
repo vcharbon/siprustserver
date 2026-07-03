@@ -40,6 +40,7 @@
 //!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min, min 120)
 //!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 600; min 60 and >= keepalive)
 //!   B2BUA_SETUP_TIMEOUT_SEC a-leg total setup deadline, reroutes included (default 150, < the 158 s txn backstop; <= 0 disables)
+//!   B2BUA_CALL_CONTROL_TIMEOUT_MS decision-backend deadline per round-trip (default 5000; <= 0 disables — ADR-0022)
 //!   WORKER_ALLOWED_TARGET_SUFFIXES b-leg target-admission allow-list, comma-separated (default .svc.cluster.local; `*` = allow all, rollback sentinel; non-IP non-matching hosts are 503'd pre-leg)
 //!   B2BUA_RELAY_HEADERS opt-in transparent header relay, comma-separated names copied from the a-leg INVITE onto every originated b-leg INVITE (default empty = no relay; structural headers never relayable)
 //!
@@ -421,6 +422,12 @@ async fn main() {
     // unlike the sip-txn 158 s backstop). Keep below 158; <= 0 disables.
     let setup_timeout_sec: i64 =
         env_or("B2BUA_SETUP_TIMEOUT_SEC", "150").parse().expect("B2BUA_SETUP_TIMEOUT_SEC");
+    // Decision-backend deadline (ms) per round-trip; the core wraps the injected
+    // engine so a hung/3rd-party adapter can never strand a caller past this
+    // bound (ADR-0022). <= 0 disables.
+    let call_control_timeout_ms: i64 = env_or("B2BUA_CALL_CONTROL_TIMEOUT_MS", "5000")
+        .parse()
+        .expect("B2BUA_CALL_CONTROL_TIMEOUT_MS");
 
     // ACK-timeout grace (seconds, RFC 3261 §13.3.1.4): the 2xx-without-ACK
     // give-up window (RFC 64·T1 = 32 s). Below this the un-ACKed answered call is
@@ -633,6 +640,7 @@ async fn main() {
         reboot_budget_sec,
         limiter_refresh_sec,
         setup_timeout_sec,
+        call_control_timeout_ms,
         ack_timeout_sec,
         cps_bucket_size,
         cps_bucket_rate,

@@ -307,6 +307,14 @@ impl B2buaCore {
         // `tune` seam ran in `spawn_b2bua_core` before this). Must happen before
         // `config` is moved into the ctx below.
         overload.configure_admission(&config);
+        // Decision-backend deadline (ADR-0022): bound EVERY engine round-trip so
+        // a hung (possibly third-party) adapter cannot wedge a per-call worker
+        // past `call_control_timeout_ms` — the caller already heard the txn
+        // layer's auto-100 and must get its final. Wrapped HERE, after the
+        // harness `tune` seam finalized the config, so no injection path (tests
+        // included) bypasses it. `<= 0` disables (the reaper-wedge escape hatch).
+        let decision =
+            crate::decision::DeadlineDecisionEngine::wrap(decision, config.call_control_timeout_ms);
         let ctx = Arc::new(RouterCtx {
             config,
             state,
