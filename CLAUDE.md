@@ -47,6 +47,21 @@ Before `#[ignore]`-ing a slow paused-clock test, cut the churn at its source
 semantics-preserving wherever the test pumps for a condition instead of
 counting ticks.
 
+## Agent & build concurrency (WSL2 resource limits)
+
+**Never run more than ONE agent (subagent / workflow stage) at a time that
+compiles or runs tests.** One `cargo build`/`cargo test` already parallelizes
+across all cores; two concurrent ones — or a build/test racing a running load
+generator or SUT process — took the whole WSL VM down (20 GB VM,
+`vm.overcommit_memory=1` → OOM freeze, 2026-07-03). Sequence compiling/testing
+agents strictly (`await` each before the next; parallelism is fine only for
+non-compiling work: reads, docs, analysis). Inside an agent the same rule holds:
+one cargo command at a time, and never a build/test concurrent with a load run.
+Cap heavy commands on this box:
+`systemd-run --user --scope -q -p MemoryMax=12G -p CPUQuota=1200% nice -n 10
+cargo build … --jobs 6`; long-lived test processes (SUT, loadgen, e2e-web) get
+their own small scopes (e.g. `-p MemoryMax=2G -p CPUQuota=400%`).
+
 ## Chaos collateral acceptance (endurance triage)
 
 A failover/kill failure is NOT automatically a SUT bug. The accepted boundary
