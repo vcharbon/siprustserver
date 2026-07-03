@@ -319,6 +319,45 @@ the e2e surface), never silently mid-run. Absent `bindings`, the case's single
 all the historic flag-only behaviour is byte-for-byte unchanged. Smoke
 coverage: `loadgen_pooled_case_identities_and_dwell_overrides`.
 
+### Test-case checks on sampled calls (`checks` / `checkSets`)
+
+An attached case's **checks** — inline `checks` blocks and referenced
+`checkSets` (loaded from `--check-sets-dir`, default `e2e/checksets`, the same
+store the e2e runner reads) — are evaluated over a call's recorded trace by
+the ONE shared check engine (`e2e_model::checks`). `${input.*}` binds to THIS
+call's **resolved (pool-expanded) input**, `${infra.lbVip}` to the run's
+`--target`. Any failed check reclassifies an otherwise-OK call to the
+**`check_fail`** class (its own Prometheus `class` label + sample directory);
+the sampled callflow page lists every verdict, **PASS and FAIL alike**, next to
+the flow.
+
+**Honest scope — checks run on SAMPLED calls only.** The unsampled majority
+binds no recording (that's what keeps memory flat at load), so there is nothing
+to evaluate: checks are a **per-sample oracle, not a per-call gate** — exactly
+like the RFC audit. Raise coverage with `--sample-cap` and/or
+`--background-record-every 1` (full recording; watch
+`loadgen_process_resident_memory_bytes`).
+
+Anchors: check selectors are `<agent>.<anchor>` over the LOAD agent names —
+`alice`, `bob`, `bob2` (rerouting), `charlie` (refer) — not the e2e surface's
+`bob1`. The shared choreography publishes `initialInvite` /
+`firstProvisional` / `answer` / `ack` on establishment (+ `prack` on the
+100rel flows), `bye` on hangup, `reInvite` on the reinvite shape, and `refer`
+(the REFER bob sends TO the SUT — matched on the sent side, since no test
+agent receives it). A shape's published set is declared on its
+`ShapeDescriptor` in `e2e-model::registry`. The basic 180 is best-effort, so
+key `firstProvisional` from an `optional: true` block unless a lost 18x should
+fail the sample.
+
+A case may also carry **`allowViolations`: `["rfc3261.noContactOnBye", …]`** —
+the authored analogue of `Harness::allow_violation` for a flow that
+legitimately deviates. The named RFC audit rules are exempted per call, so the
+finding no longer reclassifies the sampled call to `rfc_audit_fail`. Absent /
+empty = today's full audit, byte-for-byte. Smoke coverage:
+`loadgen_case_checks_pass_and_render_verdicts`,
+`loadgen_failing_check_reclassifies_to_check_fail`,
+`loadgen_allow_violations_waives_named_rfc_rule`.
+
 ### In the endurance run (parallel to SIPp)
 
 The endurance harness runs `loadgen` as an **in-cluster Job alongside the SIPp
@@ -354,7 +393,8 @@ The report is written to `--out-dir`, bucketed per `(scenario × result-class ×
   *"transfer declined by charlie (603)"*; a sampled NOK also lists the lifecycle
   `[phases: connected@…ms, reinvited@…ms]` it reached. The failure `<class>` is a
   directory name: `status_503`, `status_486`, `timeout`, `unexpected`,
-  `rfc_audit_fail`, `panic`, `transport`, `unparseable`.
+  `rfc_audit_fail`, `check_fail`, `panic`, `transport`, `unparseable`. A call
+  with an attached Test case also lists its check verdicts (PASS and FAIL).
 - **`summary.md`** — the same counts in markdown.
 - **Live:** `curl <metrics-addr>/metrics` during a run for the per-`(scenario,
   class, chaos)` counters plus the `loadgen_mux_orphan_total` /

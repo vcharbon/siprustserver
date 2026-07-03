@@ -61,6 +61,7 @@ impl RealCallScenario for ReroutingPrack {
         // final, like every establishment) and REJECTS it, triggering the SUT's
         // failover to the next candidate.
         let mut uas1 = admitted_uas(env, scope, &mut call, 183).await?;
+        ctx.anchor(env.bob, "initialInvite", uas1.request());
         uas1.respond(486, "Busy Here").await;
         // Drain the SUT's ACK for the 486 (RFC 3261 §17.1.1.3 — the failed
         // b-leg INVITE client txn ACKs its non-2xx) so bob's leg closes clean.
@@ -68,6 +69,7 @@ impl RealCallScenario for ReroutingPrack {
 
         // The SUT fails over: bob2 gets the rerouted b-leg…
         let uas2 = bob2.try_receive("INVITE").await?;
+        ctx.anchor(bob2, "initialInvite", uas2.request());
         ctx.phase("rerouted");
 
         // …and answers RELIABLY; the shared 183/PRACK/200/ACK dance completes

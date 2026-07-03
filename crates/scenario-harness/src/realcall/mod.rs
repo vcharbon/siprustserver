@@ -108,6 +108,9 @@ pub async fn establish(
     let mut call = env.outgoing_invite(&["bob"], inv).send().await;
     scope.set_early(call.cancel_handle());
     let mut uas = admitted_uas(env, scope, &mut call, 180).await?;
+    // Canonical anchors (ADR-0019) on the shared choreography: a no-op unless
+    // the driver sampled this call (see `CallCtx::anchor`).
+    ctx.anchor(env.bob, "initialInvite", uas.request());
     uas.respond(180, "Ringing").await;
     // The 180 is a NON-PRACK provisional: best-effort, so it MAY be lost
     // end-to-end — that is EXPECTED, not a call failure (RFC 3261 §13.2.2.4: the
@@ -118,7 +121,10 @@ pub async fn establish(
     // — the UAS answers only AFTER this resolves — so a late/reordered 180 can
     // never strand in the caller's inbox (which would break the later BYE).
     let saw_ringing = match call.try_expect(180).await {
-        Ok(_) => true,
+        Ok(ring) => {
+            ctx.anchor(env.alice, "firstProvisional", &ring);
+            true
+        }
         Err(StepError::Timeout { .. }) => false,
         Err(e) => return Err(e),
     };
@@ -130,12 +136,14 @@ pub async fn establish(
         tokio::time::sleep(env.ring_delay).await;
     }
     uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
-    call.try_expect(200).await?;
+    let answer = call.try_expect(200).await?;
+    ctx.anchor(env.alice, "answer", &answer);
     ctx.checkpoint("time_to_200");
 
     let dialog = call.ack().await;
     scope.set_confirmed(dialog.clone());
-    env.bob.try_receive("ACK").await?;
+    let ack = env.bob.try_receive("ACK").await?;
+    ctx.anchor(env.bob, "ack", ack.request());
     ctx.phase("connected");
     Ok(dialog)
 }
@@ -206,6 +214,7 @@ pub async fn establish_100rel(
     let mut call = env.outgoing_invite(&["bob"], inv).send().await;
     scope.set_early(call.cancel_handle());
     let uas = admitted_uas(env, scope, &mut call, 183).await?;
+    ctx.anchor(env.bob, "initialInvite", uas.request());
     complete_100rel(env, scope, ctx, call, uas, env.bob).await
 }
 
@@ -237,6 +246,7 @@ pub async fn complete_100rel(
     // The callee answers RELIABLY: 183 + Require:100rel + RSeq:1 + the answer.
     uas.respond(183, "Session Progress").reliable(1).with_sdp(ANSWER_SDP).try_send().await?;
     let p183 = call.try_expect(183).await?;
+    ctx.anchor(env.alice, "firstProvisional", &p183);
     // A RELIABLE provisional is guaranteed-delivery (the UAS retransmits it until
     // PRACKed), so its arrival counts toward the cross-call 18x gate.
     ctx.mark_ringing(true);
@@ -244,6 +254,7 @@ pub async fn complete_100rel(
     // Alice PRACKs the reliable 183 on the early dialog; the callee 200s it.
     let mut prack = call.try_prack(&p183).await?;
     let mut prack_uas = callee.try_receive("PRACK").await?;
+    ctx.anchor(callee, "prack", prack_uas.request());
     prack_uas.respond(200, "OK").try_send().await?;
     prack.try_expect(200).await?;
     ctx.checkpoint("time_to_prack_200");
@@ -254,12 +265,14 @@ pub async fn complete_100rel(
         tokio::time::sleep(env.ring_delay).await;
     }
     uas.respond(200, "OK").with_sdp(ANSWER_SDP).try_send().await?;
-    call.try_expect(200).await?;
+    let answer = call.try_expect(200).await?;
+    ctx.anchor(env.alice, "answer", &answer);
     ctx.checkpoint("time_to_200");
 
     let dialog = call.ack().await;
     scope.set_confirmed(dialog.clone());
-    callee.try_receive("ACK").await?;
+    let ack = callee.try_receive("ACK").await?;
+    ctx.anchor(callee, "ack", ack.request());
     ctx.phase("connected");
     Ok(dialog)
 }
@@ -289,7 +302,9 @@ pub async fn hangup_on(
 ) -> Result<(), StepError> {
     let mut bye = dialog.bye().await;
     scope.set_confirmed(dialog.clone()); // refresh CSeq so any teardown BYE stays valid
-    callee.try_receive("BYE").await?.respond(200, "OK").await;
+    let mut bye_uas = callee.try_receive("BYE").await?;
+    ctx.anchor(callee, "bye", bye_uas.request());
+    bye_uas.respond(200, "OK").await;
     bye.try_expect(200).await?;
     scope.mark_terminated();
     ctx.checkpoint("time_to_bye_200");

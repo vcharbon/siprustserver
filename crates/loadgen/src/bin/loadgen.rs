@@ -150,11 +150,20 @@ struct Args {
     /// Global default Test case attached to every mix entry that has no
     /// per-entry `case=` override: an authored `e2e-model` Test-case JSON whose
     /// optional `bindings` pool drives per-call From/To/R-URI (with
-    /// `${seq}`/`${seq:N}`/`${rand:N}` expansion) and whose recognized extras
+    /// `${seq}`/`${seq:N}`/`${rand:N}` expansion), whose recognized extras
     /// (`ring_delay_ms`, `talk_time_ms`, `reinvite_gap_ms`, `long_hold_secs`,
-    /// `options_cadence_ms`) override the global dwell flags per call.
+    /// `options_cadence_ms`) override the global dwell flags per call, whose
+    /// `checks`/`checkSets` are evaluated over every SAMPLED call's recording
+    /// (failing checks reclassify to `check_fail`), and whose
+    /// `allowViolations` exempt the named RFC audit rules per call.
     #[arg(long)]
     case: Option<PathBuf>,
+    /// Directory of shared `e2e-model` Check-set JSONs a Test case may
+    /// reference via `checkSets` (the same store the e2e runner reads). A
+    /// missing directory is an empty store; a case referencing an unknown set
+    /// id fails at startup.
+    #[arg(long, default_value = "e2e/checksets")]
+    check_sets_dir: PathBuf,
     /// Simulated packet-drop probability applied to every call's mux legs (0 =
     /// off). Each datagram (in and out) is independently dropped; the SUT's
     /// transaction layer and, with `--auto-retransmit`, the harness recover it.
@@ -239,6 +248,7 @@ fn parse_scenario_spec(
     base: CallTuning,
     registry: &ShapeRegistry,
     inputs: &ScenarioInputs,
+    check_sets: &std::collections::BTreeMap<String, e2e_model::CheckSet>,
     case_seed: u64,
 ) -> (MixEntry, CallTuning) {
     let mut parts = spec.split(',');
@@ -272,7 +282,7 @@ fn parse_scenario_spec(
                     v.parse().unwrap_or_else(|_| panic!("bad retransmit bool in {spec:?}"))
             }
             Some(("case", path)) => {
-                entry.case = Some(Arc::new(LoadCase::load(Path::new(path), case_seed)));
+                entry.case = Some(Arc::new(LoadCase::load(Path::new(path), check_sets, case_seed)));
             }
             None if tok == "retransmit" => t.retransmit = true,
             None if tok == "drop" => {
@@ -308,11 +318,15 @@ async fn main() -> std::io::Result<()> {
     // Per-run scenario inputs (SUT auth data, not topology): consumed at
     // scenario CONSTRUCTION (e.g. the refer scenarios' `refer_key`).
     let inputs = ScenarioInputs { refer_key: args.refer_key.clone() };
+    // The shared Check-set store a case's `checkSets` resolve against (the
+    // same directory the e2e runner reads; missing dir = empty store).
+    let check_sets = e2e_model::load_check_sets(&args.check_sets_dir)
+        .unwrap_or_else(|e| panic!("--check-sets-dir {}: {e}", args.check_sets_dir.display()));
     // The global default Test case (`--case`): ONE shared resolver — so its
     // `${seq}` counter is monotone across the whole run — attached to every mix
     // entry without its own `case=` override.
     let global_case: Option<Arc<LoadCase>> =
-        args.case.as_deref().map(|p| Arc::new(LoadCase::load(p, seed)));
+        args.case.as_deref().map(|p| Arc::new(LoadCase::load(p, &check_sets, seed)));
     let mut tuning: std::collections::HashMap<String, CallTuning> = std::collections::HashMap::new();
     let scenarios: Vec<MixEntry> = if args.scenarios.is_empty() {
         // No explicit scenario set → the default mix; the global tuning applies to
@@ -325,7 +339,8 @@ async fn main() -> std::io::Result<()> {
         args.scenarios
             .iter()
             .map(|spec| {
-                let (entry, t) = parse_scenario_spec(spec, base_tuning, &registry, &inputs, seed);
+                let (entry, t) =
+                    parse_scenario_spec(spec, base_tuning, &registry, &inputs, &check_sets, seed);
                 tuning.insert(entry.id.to_string(), t);
                 match entry.case.is_some() {
                     true => entry,

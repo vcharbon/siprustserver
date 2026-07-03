@@ -47,18 +47,22 @@ impl RealCallScenario for Refer {
         scope.set_early(call.cancel_handle());
 
         let mut bob_uas = env.bob.try_receive("INVITE").await?;
+        ctx.anchor(env.bob, "initialInvite", bob_uas.request());
         bob_uas.respond(180, "Ringing").await;
-        call.try_expect(180).await?;
+        let ring = call.try_expect(180).await?;
+        ctx.anchor(env.alice, "firstProvisional", &ring);
         // Realistic ring before answer (consistent with the other scenarios' 5 s).
         if !env.ring_delay.is_zero() {
             tokio::time::sleep(env.ring_delay).await;
         }
         bob_uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
-        call.try_expect(200).await?;
+        let answer = call.try_expect(200).await?;
+        ctx.anchor(env.alice, "answer", &answer);
         ctx.checkpoint("time_to_200");
         let mut alice_dialog = call.ack().await;
         scope.set_confirmed(alice_dialog.clone());
-        env.bob.try_receive("ACK").await?;
+        let ack = env.bob.try_receive("ACK").await?;
+        ctx.anchor(env.bob, "ack", ack.request());
         let mut bob_dialog = bob_uas.dialog();
 
         // Talk a few seconds in the established A↔B call before Bob transfers (a
@@ -81,7 +85,10 @@ impl RealCallScenario for Refer {
         if let Some(api) = env.refer_authorization(&self.refer_key) {
             refer = refer.with_header("X-Api-Call", &api);
         }
-        let mut refer = refer.send().await;
+        // The REFER's only receiver is the SUT itself (it builds the C leg), so
+        // it is anchored as a SENT message on bob's lane.
+        let (mut refer, refer_req) = refer.try_send_with_request().await?;
+        ctx.anchor_sent(env.bob, "refer", &refer_req);
         // The 202 and the first NOTIFY race on bob's socket; tolerate a NOTIFY
         // arriving first (UDP reordering — and the fake fabric's equal-transit
         // race). 200-OK it and keep waiting for the 202.
@@ -91,6 +98,7 @@ impl RealCallScenario for Refer {
 
         // Charlie answers the transfer INVITE (held SDP).
         let mut charlie_uas = charlie.try_receive("INVITE").await?;
+        ctx.anchor(charlie, "initialInvite", charlie_uas.request());
         charlie_uas.respond(180, "Ringing").await;
         charlie_uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
         ctx.checkpoint("time_to_charlie_200");

@@ -153,6 +153,14 @@ pub struct TestCase {
     /// Case-local check blocks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckBlock>,
+    /// RFC audit rule names (e.g. `rfc3261.noContactOnBye`) this case is
+    /// ALLOWED to violate — the authored analogue of the harness
+    /// `allow_violation` waiver, for a case whose flow legitimately deviates
+    /// (a deliberate non-compliance fixture). On the load surface a sampled
+    /// call's audit exempts these rules, so the finding no longer reclassifies
+    /// the call to `rfc_audit_fail`. Empty (the default) = full audit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_violations: Vec<String>,
 }
 
 /// Per-infra-kind run-executor concurrency caps (`InfraKind` in `e2e-core`):
@@ -314,52 +322,10 @@ pub fn validate_case<C: ShapeCatalog + ?Sized>(
         problems.push(format!("test case {case_id:?}: compatibleShapes is empty"));
     }
 
-    // Resolve the referenced Check sets; collect every block the case binds.
-    let mut blocks: Vec<&CheckBlock> = case.checks.iter().collect();
-    for set_id in &case.check_sets {
-        match check_sets.get(set_id) {
-            Some(set) => blocks.extend(set.blocks.iter()),
-            None => problems.push(format!(
-                "test case {case_id:?}: unknown check set {set_id:?} (known: [{}])",
-                keys(check_sets)
-            )),
-        }
-    }
-
-    // Shape-independent block lints: selector form, canonical anchor, op/value.
-    for block in &blocks {
-        match block.selector() {
-            Some((_agent, anchor_name)) => {
-                if Anchor::parse(anchor_name).is_none() {
-                    problems.push(format!(
-                        "test case {case_id:?}: check {:?} uses anchor {anchor_name:?} which is \
-                         not in the canonical vocabulary [{}]",
-                        block.on,
-                        Anchor::ALL.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(", ")
-                    ));
-                }
-            }
-            None => problems.push(format!(
-                "test case {case_id:?}: check selector {:?} must be `<agent>.<anchor>`",
-                block.on
-            )),
-        }
-        for check in &block.checks {
-            let needs_value = matches!(check.op, CheckOp::Regex | CheckOp::Eq);
-            if needs_value && check.value.is_none() {
-                problems.push(format!(
-                    "test case {case_id:?}: check {:?} field {:?} op {:?} requires a value",
-                    block.on, check.field, check.op
-                ));
-            }
-            if !needs_value && check.value.is_some() {
-                problems.push(format!(
-                    "test case {case_id:?}: check {:?} field {:?} op {:?} takes no value",
-                    block.on, check.field, check.op
-                ));
-            }
-        }
-    }
+    // Resolve the referenced Check sets, collect every block the case binds,
+    // and run the shape-independent lints (shared with the load surface).
+    let (blocks, block_problems) = collect_case_blocks(case, check_sets);
+    problems.extend(block_problems);
 
     // The binding pool (when present) validates like the base input: non-empty,
     // and every entry's expansion tokens parse (a typo'd `${…}` fails at load,
@@ -411,6 +377,66 @@ pub fn validate_case<C: ShapeCatalog + ?Sized>(
     }
 
     if problems.is_empty() { Ok(()) } else { Err(ModelError::Invalid(problems)) }
+}
+
+/// Resolve a case's referenced Check sets and collect EVERY block it binds
+/// (inline + sets), together with the **shape-independent** lints: unknown
+/// check-set ids, selector form, canonical anchor names, op/value coherence.
+/// The shape-DEPENDENT half (published anchors, required input) stays in
+/// [`validate_case`]; the load surface — which picks its scenario by flag, not
+/// `compatibleShapes` — validates an attached case through this alone.
+pub fn collect_case_blocks<'a>(
+    case: &'a TestCase,
+    check_sets: &'a BTreeMap<String, CheckSet>,
+) -> (Vec<&'a CheckBlock>, Vec<String>) {
+    let case_id = &case.id;
+    let mut problems = Vec::new();
+    let mut blocks: Vec<&CheckBlock> = case.checks.iter().collect();
+    for set_id in &case.check_sets {
+        match check_sets.get(set_id) {
+            Some(set) => blocks.extend(set.blocks.iter()),
+            None => problems.push(format!(
+                "test case {case_id:?}: unknown check set {set_id:?} (known: [{}])",
+                keys(check_sets)
+            )),
+        }
+    }
+
+    // Shape-independent block lints: selector form, canonical anchor, op/value.
+    for block in &blocks {
+        match block.selector() {
+            Some((_agent, anchor_name)) => {
+                if Anchor::parse(anchor_name).is_none() {
+                    problems.push(format!(
+                        "test case {case_id:?}: check {:?} uses anchor {anchor_name:?} which is \
+                         not in the canonical vocabulary [{}]",
+                        block.on,
+                        Anchor::ALL.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(", ")
+                    ));
+                }
+            }
+            None => problems.push(format!(
+                "test case {case_id:?}: check selector {:?} must be `<agent>.<anchor>`",
+                block.on
+            )),
+        }
+        for check in &block.checks {
+            let needs_value = matches!(check.op, CheckOp::Regex | CheckOp::Eq);
+            if needs_value && check.value.is_none() {
+                problems.push(format!(
+                    "test case {case_id:?}: check {:?} field {:?} op {:?} requires a value",
+                    block.on, check.field, check.op
+                ));
+            }
+            if !needs_value && check.value.is_some() {
+                problems.push(format!(
+                    "test case {case_id:?}: check {:?} field {:?} op {:?} takes no value",
+                    block.on, check.field, check.op
+                ));
+            }
+        }
+    }
+    (blocks, problems)
 }
 
 fn keys<V>(map: &BTreeMap<String, V>) -> String {

@@ -11,9 +11,11 @@
 //! carries the stamp like any other INVITE content).
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::anchors::{AnchorKeys, AnchorTag};
 use crate::egress::{ApiCall, CalleeTarget, EgressPolicy};
 use crate::{Agent, Invite};
 
@@ -313,6 +315,14 @@ pub struct CallCtx {
     /// is best-effort, not a call failure — the driver aggregates the rate into a
     /// cross-call gate instead of failing the individual call).
     ringing: Mutex<Option<bool>>,
+    /// Message-anchor collection — the load surface's analogue of
+    /// [`Harness::tag_anchor`](crate::Harness::tag_anchor) (ADR-0019). OFF by
+    /// default: [`anchor`](Self::anchor) is then a single relaxed atomic load
+    /// (~free on the unsampled load majority and in the functional leak gate).
+    /// The load driver enables it on a SAMPLED (recording) call so the e2e
+    /// check engine can resolve `<agent>.<anchor>` over the recorded trace.
+    collect_anchors: AtomicBool,
+    anchors: Mutex<Vec<AnchorTag>>,
 }
 
 impl CallCtx {
@@ -322,7 +332,56 @@ impl CallCtx {
             checkpoints: Mutex::new(Vec::new()),
             phases: Mutex::new(Vec::new()),
             ringing: Mutex::new(None),
+            collect_anchors: AtomicBool::new(false),
+            anchors: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Turn message-anchor collection ON for this call (see the field docs).
+    /// The load driver calls this exactly when the call is sampled (recording),
+    /// so anchors always have a recorded trace to resolve against.
+    pub fn enable_anchor_collection(&self) {
+        self.collect_anchors.store(true, Ordering::Relaxed);
+    }
+
+    /// Label a message `agent` just RECEIVED with a canonical anchor name
+    /// (ADR-0019) — the load-surface analogue of `Harness::tag_anchor` /
+    /// e2e-core's `InfraRuntime::anchor`. A no-op (one relaxed atomic load,
+    /// `keys` never converted) unless anchor collection was enabled. `name` is
+    /// `'static` to keep the vocabulary fixed, like phases/checkpoints.
+    pub fn anchor(&self, agent: &Agent, name: &'static str, keys: impl Into<AnchorKeys>) {
+        self.push_anchor(agent, name, keys, false);
+    }
+
+    /// Label a message `agent` just SENT — for a request whose only receiver is
+    /// the external SUT (the REFER anchor). See [`AnchorTag::sent`].
+    pub fn anchor_sent(&self, agent: &Agent, name: &'static str, keys: impl Into<AnchorKeys>) {
+        self.push_anchor(agent, name, keys, true);
+    }
+
+    fn push_anchor(
+        &self,
+        agent: &Agent,
+        name: &'static str,
+        keys: impl Into<AnchorKeys>,
+        sent: bool,
+    ) {
+        if !self.collect_anchors.load(Ordering::Relaxed) {
+            return;
+        }
+        self.anchors.lock().unwrap().push(AnchorTag {
+            agent: agent.name().to_string(),
+            anchor: name.to_string(),
+            agent_addr: agent.addr(),
+            keys: keys.into(),
+            sent,
+        });
+    }
+
+    /// Drain the collected `(agent, anchor)` labels, in tag order (empty unless
+    /// [`enable_anchor_collection`](Self::enable_anchor_collection) was called).
+    pub fn take_anchors(&self) -> Vec<AnchorTag> {
+        std::mem::take(&mut *self.anchors.lock().unwrap())
     }
 
     pub fn checkpoint(&self, name: &'static str) {

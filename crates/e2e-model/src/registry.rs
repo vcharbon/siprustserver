@@ -70,7 +70,10 @@ pub struct ShapeDescriptor {
     /// Stable shape id — one id space across both run surfaces.
     pub id: &'static str,
     /// The canonical anchors this shape publishes (per-agent at runtime).
-    /// Load-only shapes publish none (anchors are a check-engine concept).
+    /// BOTH bodies publish: a functional body tags via `InfraRuntime::anchor`
+    /// (agents `alice`/`bob1`/`bob2`); a load body via `CallCtx::anchor` in the
+    /// shared choreography (agents `alice`/`bob`/`bob2`/`charlie`, tagged only
+    /// on a sampled call).
     pub anchors: &'static [Anchor],
     /// Input core/extra field names this shape *requires* (beyond the always-
     /// optional core overrides).
@@ -299,6 +302,39 @@ impl Default for ReroutingParams {
 
 /// The anchor set of a plain full-call shape.
 const CALL_ANCHORS: &[Anchor] = &[Anchor::InitialInvite, Anchor::Answer, Anchor::Ack, Anchor::Bye];
+/// The anchor set the shared LOAD establishment publishes (`realcall::establish`
+/// + `hangup`): the plain set plus the 180 (tagged only when it arrived — a
+/// non-PRACK provisional is best-effort, so key it from an `optional` block).
+const LOAD_CALL_ANCHORS: &[Anchor] = &[
+    Anchor::InitialInvite,
+    Anchor::FirstProvisional,
+    Anchor::Answer,
+    Anchor::Ack,
+    Anchor::Bye,
+];
+/// The load `reinvite` shape: the shared establishment plus the re-INVITE.
+const LOAD_REINVITE_ANCHORS: &[Anchor] = &[
+    Anchor::InitialInvite,
+    Anchor::FirstProvisional,
+    Anchor::ReInvite,
+    Anchor::Answer,
+    Anchor::Ack,
+    Anchor::Bye,
+];
+/// The load `refer` shape: hand-rolled establishment + the REFER (a SENT
+/// anchor on bob — its only receiver is the SUT) + charlie's transfer INVITE
+/// (`charlie.initialInvite`). Its teardown is scenario-owned (no bye anchor).
+const LOAD_REFER_ANCHORS: &[Anchor] = &[
+    Anchor::InitialInvite,
+    Anchor::FirstProvisional,
+    Anchor::Answer,
+    Anchor::Ack,
+    Anchor::Refer,
+];
+/// The load `long_call` shape: the shared establishment only — its tolerant
+/// teardown absorbs bob's BYE in a quiesce (no bye anchor).
+const LOAD_ESTABLISH_ANCHORS: &[Anchor] =
+    &[Anchor::InitialInvite, Anchor::FirstProvisional, Anchor::Answer, Anchor::Ack];
 /// The `rerouting_prack` anchor set: rerouting + the reliable-provisional dance.
 const PRACK_ANCHORS: &[Anchor] = &[
     Anchor::InitialInvite,
@@ -328,20 +364,38 @@ const TRANSFER_ANCHORS: &[Anchor] = &[
 fn default_shapes() -> Vec<ShapeDescriptor> {
     vec![
         // ── Load: the happy-path real-call scenarios ─────────────────────────
-        ShapeDescriptor::new("basic_call").default_weight(4.0).load_shared(Arc::new(BasicCall)),
-        ShapeDescriptor::new("reinvite").default_weight(2.0).load_shared(Arc::new(Reinvite)),
+        ShapeDescriptor::new("basic_call")
+            .anchors(LOAD_CALL_ANCHORS)
+            .default_weight(4.0)
+            .load_shared(Arc::new(BasicCall)),
+        ShapeDescriptor::new("reinvite")
+            .anchors(LOAD_REINVITE_ANCHORS)
+            .default_weight(2.0)
+            .load_shared(Arc::new(Reinvite)),
         ShapeDescriptor::new("refer")
+            .anchors(LOAD_REFER_ANCHORS)
             .default_weight(1.0)
             .needs_charlie()
             .load_with(|inputs| Arc::new(Refer::new(&inputs.refer_key))),
         ShapeDescriptor::new("options_hold")
+            .anchors(LOAD_CALL_ANCHORS)
             .default_weight(1.0)
             .load_shared(Arc::new(OptionsHold)),
-        ShapeDescriptor::new("long_call").load_shared(Arc::new(LongCall)),
-        ShapeDescriptor::new("prack_update").load_shared(Arc::new(PrackUpdate)),
+        ShapeDescriptor::new("long_call")
+            .anchors(LOAD_ESTABLISH_ANCHORS)
+            .load_shared(Arc::new(LongCall)),
+        ShapeDescriptor::new("prack_update")
+            .anchors(PRACK_ANCHORS)
+            .load_shared(Arc::new(PrackUpdate)),
         // ── Load: the emergency variants (same flows, force-admitted) ────────
-        ShapeDescriptor::new("basic_call_em").emergency().load_shared(Arc::new(BasicCall)),
-        ShapeDescriptor::new("reinvite_em").emergency().load_shared(Arc::new(Reinvite)),
+        ShapeDescriptor::new("basic_call_em")
+            .anchors(LOAD_CALL_ANCHORS)
+            .emergency()
+            .load_shared(Arc::new(BasicCall)),
+        ShapeDescriptor::new("reinvite_em")
+            .anchors(LOAD_REINVITE_ANCHORS)
+            .emergency()
+            .load_shared(Arc::new(Reinvite)),
         // ── Load: the voluntarily-failing cleanup-coverage set ───────────────
         ShapeDescriptor::new("invite_reject")
             .failure_weight(1.0)

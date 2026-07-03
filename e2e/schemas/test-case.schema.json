@@ -10,6 +10,13 @@
         "null"
       ]
     },
+    "allowViolations": {
+      "description": "RFC audit rule names (e.g. `rfc3261.noContactOnBye`) this case is\nALLOWED to violate — the authored analogue of the harness\n`allow_violation` waiver, for a case whose flow legitimately deviates\n(a deliberate non-compliance fixture). On the load surface a sampled\ncall's audit exempts these rules, so the finding no longer reclassifies\nthe call to `rfc_audit_fail`. Empty (the default) = full audit.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "bindings": {
       "description": "Optional **binding pool** (the parameters axis): a walkable pool of\n[`Input`] overlays with per-call `${seq}`/`${seq:N}`/`${rand:N}`\nexpansion, so ONE case drives a different identity per call (see\n[`crate::bindings`]). Absent = single-Input behaviour, unchanged.",
       "anyOf": [

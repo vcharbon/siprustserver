@@ -62,6 +62,20 @@ pub fn evaluate_case(
     report: &RunReport,
     bindings: &Bindings<'_>,
 ) -> Vec<CheckVerdict> {
+    evaluate_case_over(case, check_sets, &report.entries(), report.anchors(), bindings)
+}
+
+/// [`evaluate_case`] over a raw `(entries, anchors)` pair instead of a
+/// [`RunReport`] — the ONE engine both run surfaces share: the e2e executor
+/// passes its report's projection; the load driver passes a sampled call's
+/// `AgentBinder::recorded_entries()` + `CallCtx::take_anchors()`.
+pub fn evaluate_case_over(
+    case: &TestCase,
+    check_sets: &BTreeMap<String, CheckSet>,
+    entries: &[RecordedSipEntry],
+    anchors: &[AnchorTag],
+    bindings: &Bindings<'_>,
+) -> Vec<CheckVerdict> {
     let mut verdicts = Vec::new();
     let mut blocks: Vec<&CheckBlock> = case.checks.iter().collect();
     for set_id in &case.check_sets {
@@ -78,7 +92,7 @@ pub fn evaluate_case(
             }),
         }
     }
-    verdicts.extend(evaluate_blocks(&blocks, report, bindings));
+    verdicts.extend(evaluate_blocks_over(&blocks, entries, anchors, bindings));
     verdicts
 }
 
@@ -94,10 +108,20 @@ pub fn evaluate_blocks(
     report: &RunReport,
     bindings: &Bindings<'_>,
 ) -> Vec<CheckVerdict> {
+    evaluate_blocks_over(blocks, &report.entries(), report.anchors(), bindings)
+}
+
+/// [`evaluate_blocks`] over a raw `(entries, anchors)` pair (see
+/// [`evaluate_case_over`]).
+pub fn evaluate_blocks_over(
+    blocks: &[&CheckBlock],
+    entries: &[RecordedSipEntry],
+    anchors: &[AnchorTag],
+    bindings: &Bindings<'_>,
+) -> Vec<CheckVerdict> {
     // Sort like the renderers: capture order is (sent_ms, seq).
-    let mut entries = report.entries();
+    let mut entries = entries.to_vec();
     entries.sort_by(|a, b| a.sent_ms.cmp(&b.sent_ms).then(a.seq.cmp(&b.seq)));
-    let anchors = report.anchors();
 
     let mut verdicts = Vec::new();
     for block in blocks {
@@ -126,7 +150,8 @@ pub fn evaluate_blocks(
 }
 
 /// `<agent>.<anchor>` → the recorded message: the tag the shape attached, then
-/// the first delivered entry to that agent matching the tag's identity keys.
+/// the first delivered entry to that agent matching the tag's identity keys
+/// (or FROM it, for a `sent` tag — a message whose only receiver is the SUT).
 fn resolve<'e>(
     block: &CheckBlock,
     anchors: &[AnchorTag],
@@ -148,7 +173,8 @@ fn resolve<'e>(
     };
     let parser = CustomParser::new();
     for e in entries {
-        if !e.delivered || e.to != tag.rx_addr {
+        let addr_hit = if tag.sent { e.from == tag.agent_addr } else { e.to == tag.agent_addr };
+        if !e.delivered || !addr_hit {
             continue;
         }
         if let Ok(msg) = parser.parse(&e.raw) {
@@ -158,8 +184,10 @@ fn resolve<'e>(
         }
     }
     Err(format!(
-        "anchor {:?} was tagged but no delivered recorded message to {} matches its keys",
-        block.on, tag.rx_addr
+        "anchor {:?} was tagged but no delivered recorded message {} {} matches its keys",
+        block.on,
+        if tag.sent { "from" } else { "to" },
+        tag.agent_addr
     ))
 }
 

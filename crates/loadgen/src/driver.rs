@@ -396,11 +396,12 @@ async fn run_one(
     // Resolve THIS call's binding from the attached Test case (pool walk +
     // token expansion): the core From/To/R-URI to fold into the outgoing
     // INVITE, the per-call dwell overrides over the global CallConfig
-    // defaults, and the sampled-page banner. No case → all defaults.
+    // defaults, the sampled-page banner, and the resolved input the case's
+    // checks bind `${input.*}` against. No case → all defaults.
     let resolved = case.as_ref().map(|c| c.resolve());
-    let (core, dwells, banner) = match resolved {
-        Some(r) => (r.core, r.dwells, Some(r.banner)),
-        None => (Default::default(), Default::default(), None),
+    let (core, dwells, banner, resolved_input) = match resolved {
+        Some(r) => (r.core, r.dwells, Some(r.banner), Some(r.input)),
+        None => (Default::default(), Default::default(), None, None),
     };
 
     // One correlation token per CALL: alice stamps it on her INVITE (per the
@@ -452,6 +453,14 @@ async fn run_one(
         None
     };
 
+    // A SAMPLED call collects message anchors (ADR-0019) so the attached Test
+    // case's checks can resolve `<agent>.<anchor>` over its recorded trace;
+    // on the unsampled majority tagging stays a single atomic load.
+    let ctx = CallCtx::new();
+    if record {
+        ctx.enable_anchor_collection();
+    }
+
     let env = CallEnv {
         alice: &alice,
         bob: &bob,
@@ -473,7 +482,6 @@ async fn run_one(
         long_hold: dwells.long_hold.unwrap_or(call.long_hold),
     };
     let scope = CallScope::new();
-    let ctx = CallCtx::new();
 
     let result = AssertUnwindSafe(scenario.run(&env, &scope, &ctx)).catch_unwind().await;
 
@@ -490,9 +498,16 @@ async fn run_one(
         }
     }
 
+    // The per-call audit policy: the attached case's `allowViolations` exempt
+    // those rule names from the RFC hard gate (the load analogue of
+    // `Harness::allow_violation`); no case / empty list = the full audit.
+    static NO_WAIVERS: std::sync::LazyLock<std::collections::HashSet<String>> =
+        std::sync::LazyLock::new(std::collections::HashSet::new);
+    let allow = case.as_ref().map(|c| c.allow_violations()).unwrap_or(&NO_WAIVERS);
+
     let outcome = match result {
         Ok(Ok(())) => {
-            let findings = binder.rfc_findings();
+            let findings = binder.rfc_findings(allow);
             if findings.is_empty() {
                 CallOutcome::Ok
             } else {
@@ -504,6 +519,37 @@ async fn run_one(
         Ok(Err(e)) => CallOutcome::Step(e),
         Err(payload) => CallOutcome::Panic(panic_msg(payload)),
     };
+
+    // Test-case CHECKS — evaluated on SAMPLED, otherwise-OK calls only (the
+    // per-sample oracle; a non-sampled call has no recording to check, and a
+    // failed/RFC-dirty call already explains itself). The verdicts (pass AND
+    // fail) render on the sampled callflow page; any failed check reclassifies
+    // the call to `check_fail`.
+    let verdicts: Vec<e2e_model::CheckVerdict> = match (&outcome, case.as_ref(), &resolved_input) {
+        (CallOutcome::Ok, Some(c), Some(input)) if record && c.has_checks() => {
+            c.evaluate(&binder.recorded_entries(), &ctx.take_anchors(), input, call.via)
+        }
+        _ => Vec::new(),
+    };
+    let outcome = if verdicts.iter().any(|v| !v.passed) {
+        let failed = verdicts
+            .iter()
+            .filter(|v| !v.passed)
+            .map(|v| format!("{} {}: {}", v.on, v.field, v.detail))
+            .collect::<Vec<_>>()
+            .join("; ");
+        CallOutcome::CheckFail(failed)
+    } else {
+        outcome
+    };
+    let check_notes: Vec<scenario_harness::CheckNote> = verdicts
+        .iter()
+        .map(|v| scenario_harness::CheckNote {
+            name: format!("check {} {}", v.on, v.field),
+            detail: v.detail.clone(),
+            passed: v.passed,
+        })
+        .collect();
 
     let class = ResultClass::from(&outcome);
     let e2e = ctx.elapsed();
@@ -542,8 +588,16 @@ async fn run_one(
             let markers = chaos.as_ref().map(|c| c.markers()).unwrap_or_default();
             // The banner (the resolved binding — the actual From/To used) shows
             // in the page header on PASS and FAIL alike; the failure detail
-            // stays FAIL-only. Metrics labels stay scenario-keyed.
-            binder.render_html(id, class.is_ok(), banner.as_deref(), detail.as_deref(), &markers)
+            // stays FAIL-only; the case's check verdicts render pass AND fail.
+            // Metrics labels stay scenario-keyed.
+            binder.render_html(
+                id,
+                class.is_ok(),
+                banner.as_deref(),
+                detail.as_deref(),
+                &markers,
+                &check_notes,
+            )
         } else {
             None
         };

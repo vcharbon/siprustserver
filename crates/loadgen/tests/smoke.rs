@@ -1014,7 +1014,7 @@ async fn loadgen_pooled_case_identities_and_dwell_overrides() {
 
     let case_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../e2e/cases/load-basic-pooled.json");
-    let case = Arc::new(LoadCase::load(&case_path, 0x10AD));
+    let case = Arc::new(LoadCase::load(&case_path, &Default::default(), 0x10AD));
 
     let froms = Arc::new(std::sync::Mutex::new(Vec::new()));
     let dwells = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1085,6 +1085,221 @@ async fn loadgen_pooled_case_identities_and_dwell_overrides() {
     // No leak, as everywhere: mux registry reclaimed, SUT fully reaped.
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak (pooled case)");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+// ---------------------------------------------------------------------------
+// Test-case checks + allow_violations on sampled load calls
+// ---------------------------------------------------------------------------
+
+/// Build an in-memory Test case (the loader-free seam) for the check tests.
+fn check_case(json: &str) -> e2e_model::TestCase {
+    serde_json::from_str(json).unwrap()
+}
+
+/// (a)+(d) A pooled case whose checks PASS — via a referenced Check set AND an
+/// inline block — keeps every call OK, and the sampled OK page shows the
+/// verdicts (PASS lines) next to the flow. The Check-set block keys on
+/// `bob.initialInvite`, so this also proves send-side ANCHORS resolve on the
+/// load surface: the anchor finds the relayed b-leg INVITE in the recording
+/// and `${input.from}` binds to THIS call's pool-resolved identity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_case_checks_pass_and_render_verdicts() {
+    let (_h, b2bua, core, transport) = setup(6700, Correlation::header("X-Loadgen-Id"), 5).await;
+    // Record EVERY call (background_record_every = 1): checks are a per-sample
+    // oracle, so full recording makes the assertion deterministic.
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
+
+    let set: e2e_model::CheckSet = serde_json::from_str(
+        r#"{ "id": "load-invite-identity", "blocks": [
+              { "on": "bob.initialInvite", "checks": [
+                  { "field": "from.uri", "op": "eq", "value": "${input.from}" },
+                  { "field": "from.tag", "op": "exists" },
+                  { "field": "header(X-Loadgen-Id)", "op": "exists" } ] } ] }"#,
+    )
+    .unwrap();
+    let sets: std::collections::BTreeMap<String, e2e_model::CheckSet> =
+        [("load-invite-identity".to_string(), set)].into();
+    let case = check_case(
+        r#"{ "id": "checked-pool", "compatibleShapes": ["basic_call"],
+             "bindings": { "mode": "seq", "entries": [
+               { "core": { "from": "sip:+331${seq:4}@pool.example" } } ] },
+             "checkSets": ["load-invite-identity"],
+             "checks": [ { "on": "alice.answer", "checks": [
+                 { "field": "to.tag", "op": "exists" } ] } ] }"#,
+    );
+    let case = Arc::new(LoadCase::new(case, &sets, 0xC4EC).unwrap());
+
+    let driver = Driver::new(
+        cfg(b2bua.addr, 50.0, 2, 16, 0xC4EC5),
+        vec![mix("basic_call", 1.0).with_case(Some(case))],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    // Passing checks never reclassify: every completed call stays OK.
+    let ok = reporter.count("basic_call", &ResultClass::Ok);
+    assert!(ok > 5, "too few OK checked calls:\n{}", reporter.render_prometheus());
+    assert_eq!(
+        reporter.total_calls(),
+        ok,
+        "a passing-checks run must stay all-OK:\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(reporter.count("basic_call", &ResultClass::CheckFail), 0);
+
+    // The sampled OK page renders the verdicts — PASS and the resolved value.
+    let out = std::env::temp_dir().join(format!("loadgen-checks-ok-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    reporter.finalize(&out).unwrap();
+    let html =
+        std::fs::read_to_string(out.join("callflows/basic_call/ok/clear/0.html")).unwrap();
+    assert!(html.contains("check bob.initialInvite from.uri"), "verdict line missing:\n{html}");
+    assert!(html.contains("PASS"), "PASS verdicts must render on the OK page");
+    assert!(html.contains("check alice.answer to.tag"), "inline-block verdict missing");
+    let _ = std::fs::remove_dir_all(&out);
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (checked case)");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// (b) A deliberately FAILING check reclassifies an otherwise-OK call to the
+/// NEW `check_fail` class — counted in Prometheus like any class — and the
+/// sampled page shows the FAIL verdict (expected vs got).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_failing_check_reclassifies_to_check_fail() {
+    let (_h, b2bua, core, transport) = setup(6720, Correlation::header("X-Loadgen-Id"), 5).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
+
+    let case = check_case(
+        r#"{ "id": "impossible", "compatibleShapes": ["basic_call"],
+             "checks": [ { "on": "bob.initialInvite", "checks": [
+                 { "field": "from.userInfo", "op": "eq", "value": "nobody-ever" } ] } ] }"#,
+    );
+    let case = Arc::new(LoadCase::new(case, &Default::default(), 0xFA11).unwrap());
+
+    let driver = Driver::new(
+        cfg(b2bua.addr, 40.0, 2, 16, 0xFA115),
+        vec![mix("basic_call", 1.0).with_case(Some(case))],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    // Every call records (background 1) → every otherwise-OK call reclassifies.
+    let failed = reporter.count("basic_call", &ResultClass::CheckFail);
+    assert!(failed > 5, "no check_fail calls:\n{}", reporter.render_prometheus());
+    assert_eq!(reporter.count("basic_call", &ResultClass::Ok), 0, "a failing check must never stay OK");
+    assert!(
+        reporter.render_prometheus().contains("class=\"check_fail\""),
+        "check_fail must surface as a Prometheus class:\n{}",
+        reporter.render_prometheus()
+    );
+
+    // The sampled NOK page carries the FAIL verdict with the mismatch detail.
+    let out = std::env::temp_dir().join(format!("loadgen-checks-fail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    reporter.finalize(&out).unwrap();
+    let html = std::fs::read_to_string(out.join("callflows/basic_call/check_fail/clear/0.html"))
+        .unwrap();
+    assert!(html.contains("check bob.initialInvite from.userInfo"), "verdict missing:\n{html}");
+    assert!(html.contains("FAIL"), "FAIL verdict must render");
+    assert!(html.contains("nobody-ever"), "expected-value detail must render");
+    let _ = std::fs::remove_dir_all(&out);
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (check_fail)");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// A scenario that legitimately deviates from RFC 3261 §15.1: its BYE carries a
+/// Contact header (BYE terminates the dialog, target refresh is meaningless),
+/// deterministically tripping the non-advisory `rfc3261.noContactOnBye` audit
+/// rule on every sampled call.
+struct ByeWithContact;
+
+#[async_trait]
+impl LoadScenario for ByeWithContact {
+    fn id(&self) -> ScenarioId {
+        "bye_with_contact"
+    }
+    async fn run(
+        &self,
+        env: &CallEnv<'_>,
+        scope: &CallScope,
+        ctx: &CallCtx,
+    ) -> Result<(), scenario_harness::StepError> {
+        use sip_message::generators::InDialogMethod;
+        let mut dialog = establish(env, scope, ctx).await?;
+        let mut bye = dialog
+            .send_request(InDialogMethod::Bye)
+            .with_header("Contact", "<sip:alice@127.0.0.1>")
+            .try_send()
+            .await?;
+        scope.set_confirmed(dialog.clone());
+        env.bob.try_receive("BYE").await?.respond(200, "OK").await;
+        bye.try_expect(200).await?;
+        scope.mark_terminated();
+        Ok(())
+    }
+}
+
+/// (c) `allowViolations` waives a NAMED RFC audit rule per call. Baseline: the
+/// deviating scenario (BYE + Contact) reclassifies every sampled call to
+/// `rfc_audit_fail`. With a case carrying
+/// `allowViolations: ["rfc3261.noContactOnBye"]` the SAME flow stays OK —
+/// the load-surface analogue of `Harness::allow_violation`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_allow_violations_waives_named_rfc_rule() {
+    let (_h, b2bua, core, transport) = setup(6740, Correlation::header("X-Loadgen-Id"), 5).await;
+
+    // Baseline: no case → the full audit reclassifies to rfc_audit_fail.
+    let baseline = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
+    let driver = Driver::new(
+        cfg(b2bua.addr, 40.0, 2, 16, 0xA0D17),
+        vec![(Arc::new(ByeWithContact) as Arc<dyn LoadScenario>, 1.0)],
+        baseline.clone(),
+        transport.clone(),
+    );
+    driver.run().await;
+    assert!(
+        baseline.count("bye_with_contact", &ResultClass::RfcAuditFail) > 5,
+        "the deviation must trip the audit without a waiver:\n{}",
+        baseline.render_prometheus()
+    );
+    assert_eq!(baseline.count("bye_with_contact", &ResultClass::Ok), 0);
+
+    // Waived: the case exempts exactly that rule → the same flow stays OK.
+    let case = check_case(
+        r#"{ "id": "waived-bye", "compatibleShapes": ["basic_call"],
+             "allowViolations": ["rfc3261.noContactOnBye"] }"#,
+    );
+    let case = Arc::new(LoadCase::new(case, &Default::default(), 0x30B).unwrap());
+    let waived = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
+    let driver = Driver::new(
+        cfg(b2bua.addr, 40.0, 2, 16, 0xA0D18),
+        vec![MixEntry::from((Arc::new(ByeWithContact) as Arc<dyn LoadScenario>, 1.0))
+            .with_case(Some(case))],
+        waived.clone(),
+        transport,
+    );
+    driver.run().await;
+    let ok = waived.count("bye_with_contact", &ResultClass::Ok);
+    assert!(ok > 5, "waived calls must stay OK:\n{}", waived.render_prometheus());
+    assert_eq!(
+        waived.count("bye_with_contact", &ResultClass::RfcAuditFail),
+        0,
+        "the named rule must be exempt:\n{}",
+        waived.render_prometheus()
+    );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (allow_violations)");
     settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }

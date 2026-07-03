@@ -23,15 +23,18 @@ pub mod registry;
 pub mod shape;
 
 pub use bindings::{BindingMode, BindingPool, BindingResolver, ResolvedBinding, validate_bindings};
-pub use checks::{Bindings, CheckVerdict, all_passed, evaluate_blocks, evaluate_case};
+pub use checks::{
+    Bindings, CheckVerdict, all_passed, evaluate_blocks, evaluate_blocks_over, evaluate_case,
+    evaluate_case_over,
+};
 pub use egress::{
     ApiCall, ApiCallDestination, ApiCallRoute, CalleeTarget, EgressPolicy, EgressRewrite,
 };
 pub use endpoint::{EgressPolicySpec, EndpointConfig};
 pub use model::{
     Campaign, Check, CheckBlock, CheckOp, CheckSet, Concurrency, Input, ModelError, TestCase,
-    load_campaign, load_check_set, load_check_sets, load_endpoint_config, load_test_case,
-    schemas, validate_case,
+    collect_case_blocks, load_campaign, load_check_set, load_check_sets, load_endpoint_config,
+    load_test_case, schemas, validate_case,
 };
 pub use registry::{
     LoadFactory, ReroutingParams, ScenarioInputs, ShapeDescriptor, ShapeRegistry,

@@ -366,8 +366,9 @@ impl Harness {
         self.anchors.borrow_mut().push(crate::anchors::AnchorTag {
             agent: agent.name().to_string(),
             anchor: anchor.into(),
-            rx_addr: agent.addr(),
+            agent_addr: agent.addr(),
             keys: keys.into(),
+            sent: false,
         });
     }
 
@@ -1786,12 +1787,24 @@ impl<'a> InDialogRequest<'a> {
     /// instead of a panic. The mechanical layer (Via/branch, CSeq bump, tags,
     /// route set) is identical.
     pub async fn try_send(mut self) -> Result<InDialogTxn, StepError> {
+        self.try_send_inner().await.map(|(txn, _)| txn)
+    }
+
+    /// [`try_send`](Self::try_send) that also returns the request as sent —
+    /// for tagging a message ANCHOR on a request no test agent receives (the
+    /// REFER whose receiver is the SUT; see `CallCtx::anchor_sent`). The common
+    /// path pays nothing for it (`try_send` discards the clone-free original).
+    pub async fn try_send_with_request(mut self) -> Result<(InDialogTxn, SipRequest), StepError> {
+        self.try_send_inner().await
+    }
+
+    async fn try_send_inner(&mut self) -> Result<(InDialogTxn, SipRequest), StepError> {
         let opts = GenerateInDialogRequestOpts {
             via: Some(self.agent.via()),
             contact: Some(self.agent.contact()),
             body: self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
-            rack: self.rack,
-            extra_headers: self.extra_headers,
+            rack: self.rack.take(),
+            extra_headers: std::mem::take(&mut self.extra_headers),
             ..Default::default()
         };
         // Per-fork addressing: generate against a dialog view with the chosen
@@ -1824,10 +1837,16 @@ impl<'a> InDialogRequest<'a> {
             self.dialog.local_cseq = res.dialog.local_cseq;
         }
         let dst = next_hop(self.dialog, self.fallback);
-        self.agent.try_send(&SipMessage::Request(res.request), dst).await?;
-        Ok(InDialogTxn {
-            agent: self.agent.clone(),
-        })
+        // Send the wrapped request, then hand the original back (no clone).
+        let msg = SipMessage::Request(res.request);
+        self.agent.try_send(&msg, dst).await?;
+        let SipMessage::Request(request) = msg else { unreachable!() };
+        Ok((
+            InDialogTxn {
+                agent: self.agent.clone(),
+            },
+            request,
+        ))
     }
 }
 

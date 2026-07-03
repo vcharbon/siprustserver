@@ -54,8 +54,9 @@ pub use agent::{
     Agent, CancelHandle, ClientInvite, Dialog, Harness, InDialogRequest, InDialogTxn, Invite,
     OutOfDialogRequest, Proxy, Respond, ServerTxn, StepError,
 };
-// The Send agent factory for the load-test driver (`crates/loadgen`).
-pub use loadbind::AgentBinder;
+// The Send agent factory for the load-test driver (`crates/loadgen`), plus the
+// dependency-light check-verdict projection a sampled page renders.
+pub use loadbind::{AgentBinder, CheckNote};
 // The low-level scenarios-as-data DSL — for raw/torture cases that must send
 // exact (possibly malformed) bytes. `dsl::Agent` is the data-DSL agent handle;
 // the fluent `agent::Agent` (re-exported above) is the stateful UA.
