@@ -1,0 +1,41 @@
+{
+  "$schema": "../schemas/test-case.schema.json",
+  "id": "fusion-rerouting-prack",
+  "description": "Final-validation rerouting+PRACK case for the loadgen×e2e fusion. Binds the anchors the loadgen mux tags for the rerouting_prack load body (agent `bob2`, not the e2e `bob1`): the winning leg's reliable 183 carries Require:100rel + RSeq, alice PRACKs (RAck), and bob2's rerouted INVITE is properly tagged — i.e. the reliability markers survived the SUT's failover relay. Asserts nothing about the To URI (To-user correlation rewrites the To user-part with the per-call token).",
+  "compatibleShapes": [
+    "rerouting_prack"
+  ],
+  "input": {
+    "core": {
+      "from": "sip:+33123456789@fusion.example"
+    }
+  },
+  "checks": [
+    {
+      "on": "alice.firstProvisional",
+      "optional": false,
+      "checks": [
+        { "field": "header(Require)", "op": "regex", "value": "100rel" },
+        { "field": "header(RSeq)", "op": "exists" }
+      ]
+    },
+    {
+      "on": "bob2.prack",
+      "optional": false,
+      "checks": [
+        { "field": "header(RAck)", "op": "exists" }
+      ]
+    },
+    {
+      "on": "bob2.initialInvite",
+      "optional": false,
+      "checks": [
+        { "field": "from.tag", "op": "exists" },
+        { "field": "header(Max-Forwards)", "op": "exists" }
+      ]
+    }
+  ],
+  "allowViolations": [
+    "rfc3261.rport"
+  ]
+}
