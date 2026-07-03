@@ -611,31 +611,23 @@ async fn main() -> std::io::Result<()> {
     // endurance harness copies it out without waiting for the job to finish). Each
     // snapshot rewrites index.html/summary.md AND the machine-readable
     // load-result.json (still `finished:false`), listing the same sample pages.
-    if report_interval_secs > 0 {
-        let snap_reporter = reporter.clone();
-        let snap_core = core.clone();
+    // The handle is aborted+awaited before the final write below (see
+    // `Reporter::spawn_snapshots` shutdown-ordering contract).
+    let snapshots = (report_interval_secs > 0).then(|| {
         let snap_clock = clock.clone();
         let snap_meta = meta_base.clone();
-        let out = args.out_dir.clone();
-        let every = Duration::from_secs(report_interval_secs);
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(every);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tick.tick().await;
-                let meta = LoadRunMeta {
-                    finished_ms: snap_clock.now_ms(),
-                    finished: false,
-                    ..snap_meta.clone()
-                };
-                if let Err(e) =
-                    snap_reporter.finalize_run(&out, meta, mux_canaries(&snap_core))
-                {
-                    eprintln!("[loadgen] periodic report snapshot failed: {e}");
-                }
-            }
-        });
-    }
+        let snap_core = core.clone();
+        reporter.spawn_snapshots(
+            args.out_dir.clone(),
+            Duration::from_secs(report_interval_secs),
+            move || LoadRunMeta {
+                finished_ms: snap_clock.now_ms(),
+                finished: false,
+                ..snap_meta.clone()
+            },
+            move || mux_canaries(&snap_core),
+        )
+    });
 
     eprintln!(
         "[loadgen] {cps} cps for {duration}s, max_in_flight={max_in_flight}, target={via}, uas={uas}, egress={egress:?}, /metrics on {}",
@@ -643,6 +635,14 @@ async fn main() -> std::io::Result<()> {
     );
     driver.run().await;
 
+    // Stop the snapshot task BEFORE the final write: aborting and awaiting the
+    // handle guarantees no `finished:false` snapshot lands after (or interleaves
+    // with) the `finished:true` index — a tick fired exactly at the run's last
+    // instant (report interval dividing the duration) otherwise races it.
+    if let Some(snap) = snapshots {
+        snap.abort();
+        let _ = snap.await;
+    }
     reporter.finalize_run(&args.out_dir, meta_for(&clock, true), mux_canaries(&core))?;
     eprintln!(
         "[loadgen] done: {} calls; registry_size={}; report at {}",

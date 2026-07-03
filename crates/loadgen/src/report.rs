@@ -13,9 +13,9 @@
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use e2e_model::{
@@ -574,6 +574,38 @@ impl Reporter {
         self.write_index(out_dir, meta, canaries)
     }
 
+    /// Spawn the periodic on-disk snapshot task: every `every` it rewrites the
+    /// HTML/markdown report AND `load-result.json` (via
+    /// [`finalize_run`](Self::finalize_run)) so the report is browsable mid-run.
+    /// `meta` must stamp `finished: false` — a snapshot is never the final word.
+    ///
+    /// SHUTDOWN ORDERING: the caller MUST `abort()` the returned handle and
+    /// await it BEFORE the final `finalize_run(finished: true)` write. The task
+    /// loops forever; left running, a tick that lands on the run's last instant
+    /// (any report interval that divides the duration) races the final write and
+    /// strands `finished: false` on disk (the 2026-07-03 validation finding).
+    /// Awaiting the aborted handle guarantees no snapshot write is in flight or
+    /// pending when the final write starts.
+    pub fn spawn_snapshots(
+        self: &Arc<Self>,
+        out_dir: PathBuf,
+        every: Duration,
+        meta: impl Fn() -> LoadRunMeta + Send + 'static,
+        canaries: impl Fn() -> Canaries + Send + 'static,
+    ) -> tokio::task::JoinHandle<()> {
+        let reporter = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(every);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                if let Err(e) = reporter.finalize_run(&out_dir, meta(), canaries()) {
+                    eprintln!("[loadgen] periodic report snapshot failed: {e}");
+                }
+            }
+        })
+    }
+
     // -- Test/inspection accessors -----------------------------------------
 
     /// Total count for a `(scenario, class)` bucket, summed across both chaos
@@ -737,6 +769,78 @@ mod tests {
                 assert!(out.join(page).exists(), "index names a missing sample page: {page}");
             }
         }
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// Regression (2026-07-03 validation finding): the periodic snapshot task
+    /// races the final `finished:true` write whenever the report interval
+    /// divides the run duration — a tick fired at the run's last instant
+    /// overwrote the final index with a `finished:false` snapshot. The shutdown
+    /// sequence must abort+await the task BEFORE the final write; after that,
+    /// no tick may ever land again.
+    #[tokio::test(start_paused = true)]
+    async fn final_write_is_not_overwritten_by_snapshot_task() {
+        let r = Arc::new(Reporter::new(ReporterCfg { sample_cap: 1, background_record_every: 0 }));
+        r.record(
+            "basic_call",
+            &CallOutcome::Ok,
+            Duration::from_millis(3),
+            &[],
+            None,
+            ChaosTag::Clear,
+        );
+
+        let out =
+            std::env::temp_dir().join(format!("loadgen-snapshot-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let base = LoadRunMeta {
+            started_ms: 0,
+            finished_ms: 0,
+            finished: false,
+            target: "10.0.0.1:5060".to_string(),
+            cps: 1.0,
+            duration_secs: 60,
+            max_in_flight: 1,
+            egress: None,
+            profile: None,
+        };
+        let read_finished = |out: &Path| -> bool {
+            let idx: LoadRunIndex = serde_json::from_str(
+                &std::fs::read_to_string(out.join("load-result.json")).unwrap(),
+            )
+            .unwrap();
+            idx.meta.finished
+        };
+
+        let snap_meta = base.clone();
+        let snap = r.spawn_snapshots(
+            out.clone(),
+            Duration::from_secs(1),
+            move || snap_meta.clone(),
+            Canaries::default,
+        );
+
+        // Let a few ticks land: mid-run snapshots say finished:false.
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(!read_finished(&out), "mid-run snapshots are finished:false");
+
+        // The shutdown sequence under test: stop the task, THEN write the final.
+        snap.abort();
+        let _ = snap.await;
+        r.finalize_run(&out, LoadRunMeta { finished: true, ..base }, Canaries::default())
+            .unwrap();
+        assert!(read_finished(&out), "final write says finished:true");
+
+        // The regression: advance past several more would-be ticks — a leaked
+        // task would overwrite the final index with a finished:false snapshot.
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(read_finished(&out), "no snapshot tick may land after shutdown");
         let _ = std::fs::remove_dir_all(&out);
     }
 }
