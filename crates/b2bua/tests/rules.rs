@@ -681,6 +681,123 @@ Content-Length: 0\r\n\r\n";
     );
 }
 
+// ── CANCEL follows the INVITE's route set + next hop (RFC 3261 §9.1) ─────────
+//
+// Via-LB topology: the b-leg egresses through the front proxy
+// (`b2b_outbound_proxy`), so the b-leg INVITE carries a preloaded outbound-proxy
+// Route and its wire destination is the proxy. When the B2BUA later cancels the
+// pending INVITE (no-answer teardown / reroute-on-486), §9.1 requires the CANCEL
+// to take the SAME path — same next hop (the proxy, NOT `leg.source`, the
+// callee's advertised address) and the same Route set, with the transaction-
+// correlation Via branch echoed verbatim. Regression for GAP-P6-2: previously
+// `generate_cancel` dropped the Route and `cancel_to_leg` sent to `leg.source`,
+// so the CANCEL bypassed the proxy and never reached the pending server txn.
+#[test]
+fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
+    use b2bua::effects::OutboundBody;
+
+    let mut config = B2buaConfig::default();
+    config.b2b_outbound_proxy = Some(("proxy.example".to_string(), 5060));
+
+    let call = test_call();
+    let a_invite = b2bua::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
+    let id_gen = IdGen::seeded(7);
+    // The callee's own address — what `leg.source` becomes; the CANCEL must NOT
+    // go here (it must go to the proxy).
+    let callee_dest = ("10.0.0.2".to_string(), 5070u16);
+    let (leg, invite_effect) = b2bua::rules::relay::build_b_leg(
+        &call.call_ref,
+        "b-1",
+        false,
+        &a_invite,
+        callee_dest.clone(),
+        None,
+        None,
+        None,
+        None,
+        &config,
+        &id_gen,
+        None,
+        &[],
+        None,
+    );
+    // Sanity: the topology is via-LB — the INVITE itself went to the proxy.
+    assert_eq!(
+        invite_effect.destination,
+        ("proxy.example".to_string(), 5060),
+        "b-leg INVITE egresses through the front proxy"
+    );
+    let invite_via = match &invite_effect.body {
+        OutboundBody::Request(r) => r
+            .headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("via"))
+            .map(|h| h.value.clone())
+            .expect("INVITE has a Via"),
+        _ => panic!("INVITE is a request"),
+    };
+
+    let call = call::helpers::add_b_leg(call, leg);
+
+    // CancelLeg is action-driven and does not read the event; any event works.
+    let event = CallEvent::Timer {
+        timer_type: TimerType::NoAnswer,
+        call_ref: call.call_ref.clone(),
+        leg_id: Some("b-1".to_string()),
+    };
+    let ctx = RuleContext {
+        call: RuleCall::new(&call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "b-1",
+        direction: Direction::FromB,
+        now_ms: 0,
+        config: &config,
+    };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let result = exec.execute(&[RuleAction::CancelLeg { leg_id: "b-1".into() }], &call, &ctx);
+
+    let cancel_effect = result
+        .effects
+        .outbound
+        .iter()
+        .find(|e| matches!(&e.body, OutboundBody::Request(r) if r.method == "CANCEL"))
+        .expect("a CANCEL was emitted");
+
+    // (b) The CANCEL arrives AT THE PROXY (the INVITE's next hop), not pod-direct
+    // at the callee (`leg.source`).
+    assert_eq!(
+        cancel_effect.destination,
+        ("proxy.example".to_string(), 5060),
+        "CANCEL must follow the INVITE's next hop (the proxy), not leg.source {callee_dest:?}"
+    );
+
+    let cancel = match &cancel_effect.body {
+        OutboundBody::Request(r) => r,
+        _ => unreachable!(),
+    };
+    // (a) The CANCEL carries the INVITE's Route set (the preloaded proxy Route).
+    let routes: Vec<String> = cancel
+        .headers
+        .iter()
+        .filter(|h| h.name.eq_ignore_ascii_case("route"))
+        .map(|h| h.value.clone())
+        .collect();
+    assert_eq!(
+        routes,
+        vec!["<sip:proxy.example:5060;lr>".to_string()],
+        "CANCEL must echo the INVITE's preloaded outbound-proxy Route (RFC 3261 §9.1)"
+    );
+    // ... and the transaction-correlation Via branch is the INVITE's verbatim.
+    let cancel_via = cancel
+        .headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case("via"))
+        .map(|h| h.value.clone())
+        .expect("CANCEL has a Via");
+    assert_eq!(cancel_via, invite_via, "CANCEL top Via (incl. branch) must equal the INVITE's");
+}
+
 // ── Slice 5: media/INFO primitives + leg-kind relay gate (ADR-0016) ──────────
 //
 // Ports `tests/b2bua/leg-kind-gate.test.ts` (source pin

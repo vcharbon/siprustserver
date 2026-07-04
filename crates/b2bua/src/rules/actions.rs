@@ -1680,8 +1680,8 @@ impl<'a> ActionExecutor<'a> {
     fn cancel_to_leg(&self, call: &Call, leg_id: &str) -> Option<OutboundSipEffect> {
         let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
         let d = leg.dialogs.first()?;
-        let inv_bytes = &d.ext.pending_invite_txn.as_ref()?.original_invite;
-        let parsed = CustomParser::new().parse(inv_bytes).ok()?;
+        let handle = d.ext.pending_invite_txn.as_ref()?;
+        let parsed = CustomParser::new().parse(&handle.original_invite).ok()?;
         let req = match parsed {
             SipMessage::Request(r) => r,
             _ => return None,
@@ -1689,10 +1689,17 @@ impl<'a> ActionExecutor<'a> {
         let cancel = generators::generate_cancel(&InviteClientTransactionHandle {
             original_invite: req,
         });
+        // RFC 3261 §9.1: the CANCEL follows the INVITE's next hop, NOT `leg.source`
+        // (the callee's advertised address). When the b-leg egresses through the
+        // front proxy (`b2b_outbound_proxy`), the INVITE's wire destination — cached
+        // on the txn handle at send — is the proxy; sending to `leg.source` would
+        // bypass it, and the CANCEL would never reach the pending server txn the
+        // proxy holds. The echoed Route set (above) keeps the CANCEL's path aligned
+        // with the INVITE the whole way.
         Some(OutboundSipEffect {
             body: OutboundBody::Request(cancel),
             mode: OutboundTxnMode::Raw,
-            destination: (leg.source.address.clone(), leg.source.port),
+            destination: (handle.destination.host.clone(), handle.destination.port),
             label: format!("CANCEL → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
         })

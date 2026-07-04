@@ -470,6 +470,49 @@ fn cancel_mirrors_request_uri_callid_from_to_cseq() {
     assert_eq!(get_header(&cancel.headers, "Content-Length"), Some("0"));
 }
 
+#[test]
+fn cancel_echoes_the_invite_route_set_verbatim() {
+    // RFC 3261 §9.1: a CANCEL takes the same path as the INVITE it cancels, so
+    // its Route header fields MUST equal the INVITE's. When the b-leg INVITE
+    // egressed through the front proxy it carried a preloaded outbound-proxy
+    // Route; the CANCEL must reproduce it (else it bypasses the proxy and never
+    // reaches the pending server txn). Two Route values pin ordering too.
+    let headers = vec![
+        hdr("Via", "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKinvite123;cr=cref1;lg=b-1"),
+        hdr("Max-Forwards", "70"),
+        hdr("Route", "<sip:proxy.example:5060;lr>"),
+        hdr("Route", "<sip:edge.example:5060;lr>"),
+        hdr("From", "<sip:b2bua@10.0.0.1:5060>;tag=b2bua-local"),
+        hdr("To", "<sip:bob@192.0.2.20:5060>"),
+        hdr("Call-ID", "call-bleg-1"),
+        hdr("CSeq", "42 INVITE"),
+        hdr("Content-Length", "0"),
+    ];
+    let invite = hydrate_request("INVITE", "sip:bob@192.0.2.20:5060", headers, Vec::new())
+        .expect("invite hydrates");
+    let cancel = generate_cancel(&InviteClientTransactionHandle { original_invite: invite });
+
+    let cancel_routes: Vec<String> = cancel
+        .headers
+        .iter()
+        .filter(|h| h.name.eq_ignore_ascii_case("Route"))
+        .map(|h| h.value.clone())
+        .collect();
+    assert_eq!(
+        cancel_routes,
+        vec![
+            "<sip:proxy.example:5060;lr>".to_string(),
+            "<sip:edge.example:5060;lr>".to_string(),
+        ],
+        "CANCEL must echo the INVITE Route set in order (RFC 3261 §9.1)"
+    );
+    // Via branch (the transaction-correlation key) still matches the INVITE.
+    assert_eq!(
+        get_header(&cancel.headers, "Via"),
+        Some("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKinvite123;cr=cref1;lg=b-1")
+    );
+}
+
 // --- generate_response ---
 
 #[test]
@@ -590,4 +633,43 @@ fn ack_non_2xx_reuses_invite_via_and_copies_response_from_to() {
     assert_eq!(get_header(&ack.headers, "To"), get_header(&final487.headers, "To"));
     assert_eq!(get_header(&ack.headers, "Call-ID"), Some("call-bleg-1"));
     assert_eq!(get_header(&ack.headers, "CSeq"), Some("42 ACK"));
+}
+
+#[test]
+fn ack_non_2xx_echoes_the_invite_route_set_verbatim() {
+    // RFC 3261 §17.1.1.3: a non-2xx ACK belongs to the INVITE transaction and is
+    // routed the same way — its Route header fields MUST equal the INVITE's.
+    // Load-bearing in the via-LB topology: the ACK for a 486 on a proxy-egressed
+    // b-leg must retain the preloaded outbound-proxy Route so it reaches the same
+    // hop the INVITE (and its pending server txn) traversed.
+    let headers = vec![
+        hdr("Via", "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKinvite123;cr=cref1;lg=b-1"),
+        hdr("Max-Forwards", "70"),
+        hdr("Route", "<sip:proxy.example:5060;lr>"),
+        hdr("From", "<sip:b2bua@10.0.0.1:5060>;tag=b2bua-local"),
+        hdr("To", "<sip:bob@192.0.2.20:5060>"),
+        hdr("Call-ID", "call-bleg-1"),
+        hdr("CSeq", "42 INVITE"),
+        hdr("Content-Length", "0"),
+    ];
+    let invite = hydrate_request("INVITE", "sip:bob@192.0.2.20:5060", headers, Vec::new())
+        .expect("invite hydrates");
+    let final486 = generate_response(
+        &invite,
+        486,
+        "Busy Here",
+        &GenerateResponseOpts { to_tag: Some("uas-tag".to_string()), ..Default::default() },
+    );
+    let ack = generate_ack_for_non_2xx(&invite, &final486);
+    let ack_routes: Vec<String> = ack
+        .headers
+        .iter()
+        .filter(|h| h.name.eq_ignore_ascii_case("Route"))
+        .map(|h| h.value.clone())
+        .collect();
+    assert_eq!(
+        ack_routes,
+        vec!["<sip:proxy.example:5060;lr>".to_string()],
+        "non-2xx ACK must echo the INVITE Route set (RFC 3261 §17.1.1.3)"
+    );
 }
