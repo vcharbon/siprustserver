@@ -538,8 +538,8 @@ dependencies = [
  "announcement",
  "async-trait",
  "b2bua",
+ "b2bua-runner-kit",
  "call",
- "http-net",
  "jemalloc-stats",
  "kube",
  "lapin",
@@ -547,14 +547,26 @@ dependencies = [
  "repl-net",
  "rustls",
  "serde_json",
- "sip-clock",
- "sip-net",
- "sip-txn",
  "tikv-jemallocator",
  "tokio",
  "tokio-executor-trait",
  "tokio-reactor-trait",
  "topology",
+]
+
+[[package]]
+name = "b2bua-runner-kit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "b2bua",
+ "call",
+ "http-net",
+ "probe-http",
+ "sip-clock",
+ "sip-net",
+ "sip-txn",
+ "tokio",
 ]
 
 [[package]]

@@ -1,0 +1,23 @@
+[package]
+name = "b2bua-runner-kit"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Reusable B2BUA runner composition: the env -> config -> bind -> deps -> spawn -> drain plumbing shared by every runner binary (the in-tree b2bua-runner and downstream integrators composing their own runner per ADR-0016), so runner policy — env grammar, advertise coercion, overload-brake wiring, drain behavior — lives once instead of being copied per binary."
+
+[lints]
+workspace = true
+
+[dependencies]
+b2bua = { path = "../b2bua" }
+call = { path = "../call" }
+# Real HTTP transport for the default call-limiter client (LIMITER_URL).
+http-net = { path = "../http-net", features = ["real"] }
+# The shared /metrics + /healthz + /ready probe server every runner exposes.
+probe-http = { path = "../probe-http" }
+sip-clock = { path = "../sip-clock" }
+sip-net = { path = "../sip-net" }
+sip-txn = { path = "../sip-txn" }
+tokio = { workspace = true }
+async-trait = { workspace = true }

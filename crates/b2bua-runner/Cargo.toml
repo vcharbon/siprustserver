@@ -15,18 +15,17 @@ path = "src/main.rs"
 
 [dependencies]
 b2bua = { path = "../b2bua" }
+# The shared env -> bind -> deps -> spawn -> drain runner plumbing (this binary
+# is its first consumer; downstream integrator runner binaries are the others).
+b2bua-runner-kit = { path = "../b2bua-runner-kit" }
 # The shared HTTP probe/metrics server: /metrics, /healthz, /ready, and the
 # /debug/flamegraph pprof route — one module shared with the front proxy.
+# (The kit spawns the server; this binary passes the jemalloc extras in.)
 probe-http = { path = "../probe-http" }
 # Out-of-tree callflow service (ADR-0016 slice 8) — composed into the production
 # service registry (`compose_services`) so its diagram is generated alongside.
 announcement = { path = "../announcement" }
 call = { path = "../call" }
-# Real HTTP transport for the call-limiter client (LIMITER_URL).
-http-net = { path = "../http-net", features = ["real"] }
-sip-net = { path = "../sip-net" }
-sip-txn = { path = "../sip-txn" }
-sip-clock = { path = "../sip-clock" }
 # Replication wiring (S11): the real TCP transport + the shared membership seam
 # (with the kube EndpointSlice informer feature for in-cluster discovery).
 repl-net = { path = "../repl-net" }
