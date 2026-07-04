@@ -95,18 +95,41 @@ impl HttpTransport for RealHttpNetwork {
                         let svc = svc.clone();
                         async move {
                             let method = req.method().to_string();
-                            let path = req.uri().path().to_string();
+                            // path_and_query preserves the query string
+                            // (`?debug=true`); fall back to the bare path.
+                            let path = req
+                                .uri()
+                                .path_and_query()
+                                .map(|pq| pq.as_str().to_string())
+                                .unwrap_or_else(|| req.uri().path().to_string());
+                            let headers = req
+                                .headers()
+                                .iter()
+                                .map(|(k, v)| {
+                                    (k.as_str().to_string(), v.to_str().unwrap_or("").to_string())
+                                })
+                                .collect();
                             let body = req
                                 .into_body()
                                 .collect()
                                 .await
                                 .map(|c| c.to_bytes().to_vec())
                                 .unwrap_or_default();
-                            let resp = svc.handle(HttpRequest { method, path, body }).await;
-                            let built = Response::builder()
-                                .status(resp.status)
+                            let resp = svc
+                                .handle(HttpRequest {
+                                    method,
+                                    path,
+                                    headers,
+                                    body,
+                                })
+                                .await;
+                            let mut builder = Response::builder().status(resp.status);
+                            for (name, value) in &resp.headers {
+                                builder = builder.header(name.as_str(), value.as_str());
+                            }
+                            let built = builder
                                 .body(Full::new(Bytes::from(resp.body)))
-                                .expect("status + full body always builds a response");
+                                .expect("status + headers + full body always builds a response");
                             Ok::<_, std::convert::Infallible>(built)
                         }
                     });
@@ -121,28 +144,32 @@ impl HttpTransport for RealHttpNetwork {
     }
 
     async fn request(&self, dst: SocketAddr, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        // `req.path` is a path-and-query target, so the query string rides along.
         let url = format!("http://{dst}{}", req.path);
         let method = reqwest::Method::from_bytes(req.method.as_bytes()).map_err(|e| HttpError::Io {
             addr: dst,
             reason: format!("bad method: {e}"),
         })?;
-        let resp = self
-            .client
-            .request(method, &url)
-            .body(req.body)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_connect() {
-                    HttpError::Connect(dst)
-                } else {
-                    HttpError::Io {
-                        addr: dst,
-                        reason: e.to_string(),
-                    }
+        let mut builder = self.client.request(method, &url);
+        for (name, value) in &req.headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        let resp = builder.body(req.body).send().await.map_err(|e| {
+            if e.is_connect() {
+                HttpError::Connect(dst)
+            } else {
+                HttpError::Io {
+                    addr: dst,
+                    reason: e.to_string(),
                 }
-            })?;
+            }
+        })?;
         let status = resp.status().as_u16();
+        let headers = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
         let body = resp
             .bytes()
             .await
@@ -151,6 +178,10 @@ impl HttpTransport for RealHttpNetwork {
                 reason: e.to_string(),
             })?
             .to_vec();
-        Ok(HttpResponse { status, body })
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+        })
     }
 }
