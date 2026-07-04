@@ -1347,6 +1347,12 @@ impl<'a> ActionExecutor<'a> {
                             fx.outbound.push(e);
                         }
                         *call = set_bye_disposition(call.clone(), &id, ByeDisposition::Cancelled);
+                        // Same crossing-200 parity as `destroy_leg`: a ringing
+                        // b-leg CANCELed by termination (e.g. `setup-timeout` +
+                        // `BeginTermination` with no prior `CancelLeg`) must be
+                        // `Cancelling` so a 200 racing the CANCEL is reaped by
+                        // `cancel-200-crossing` rather than orphaning the callee.
+                        *call = set_leg_disposition(call.clone(), &id, LegDisposition::Cancelling);
                         *call = set_leg_state(call.clone(), &id, LegState::Terminated);
                     }
                 }
@@ -1376,6 +1382,13 @@ impl<'a> ActionExecutor<'a> {
                     fx.outbound.push(e);
                 }
                 *call = set_bye_disposition(call.clone(), leg_id, ByeDisposition::Cancelled);
+                // Parity with the explicit `CancelLeg` path: mark the ringing leg
+                // `Cancelling` so a 200 OK that crosses this internally-originated
+                // CANCEL on the wire matches `cancel-200-crossing` and is
+                // ACK+BYE'd. Without this the late-answering callee is orphaned in
+                // a one-sided established call (the 200 matches no rule — its
+                // `confirm-dialog` needs Trying/Early state, which we just left).
+                *call = set_leg_disposition(call.clone(), leg_id, LegDisposition::Cancelling);
             }
             _ => {}
         }
