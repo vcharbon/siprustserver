@@ -358,6 +358,12 @@ fn arb_timer_type() -> impl Strategy<Value = TimerType> {
         Just(TimerType::ReferSubscriptionExpiry),
         Just(TimerType::ReferReinviteAnswer),
         Just(TimerType::ReferOverallSafety),
+        // Service-owned timer: arbitrary (service_id, key) — both deserialise
+        // into owned strings on the replica side (Cow::Owned), so the codec
+        // P1 round-trip property covers the HA replication path for it.
+        ("[a-z][a-z0-9-]{0,8}", "[a-zA-Z0-9_-]{1,12}").prop_map(|(sid, key)| {
+            TimerType::Service { service_id: MachineId(sid.into()), key: key.into() }
+        }),
     ]
 }
 fn arb_cdr_type() -> impl Strategy<Value = CdrEventType> {

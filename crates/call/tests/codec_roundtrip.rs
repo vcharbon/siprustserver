@@ -25,6 +25,39 @@ fn representative_round_trips() {
     assert_eq!(decoded, call, "P1: round-trip preserves the value");
 }
 
+/// A service-owned timer (`TimerType::Service`, the ADR-0016 watchdog seam)
+/// rides the replicated `call.timers` ledger like any core timer: the borrowed
+/// `Cow<'static, str>` declaration form encodes and decodes back as an owned,
+/// **equal** value (the HA takeover-restore path), and the persisted id recipe
+/// (`TimerType::timer_id` == `Debug`) is stable per `(service_id, key)` [+ leg].
+#[test]
+fn service_timer_entry_round_trips_and_id_recipe_is_stable() {
+    use call::{TimerEntry, TimerType};
+
+    let t = TimerType::service(MachineId::new("routing"), "timer18x");
+    assert_eq!(t.timer_id(None), "Service:routing:timer18x");
+    assert_eq!(t.timer_id(Some("b-1")), "Service:routing:timer18x:b-1");
+    // Distinct keys mint distinct ids (no collision in the driver's
+    // (call_ref, id) keyspace); same key re-derives the same id (supersede).
+    assert_ne!(
+        TimerType::service(MachineId::new("routing"), "prack-guard").timer_id(None),
+        t.timer_id(None),
+    );
+
+    let codec = MsgpackCodec::new();
+    let mut call = representative_call();
+    call.timers.push(TimerEntry {
+        id: t.timer_id(None),
+        timer_type: t.clone(),
+        fire_at: 1_234_567,
+        leg_id: None,
+    });
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "service timer survives the replication codec");
+    let restored = decoded.timers.last().unwrap();
+    assert_eq!(restored.timer_type, t, "owned-Cow deserialisation compares equal to the borrowed declaration");
+}
+
 /// PA2 (source paranoid-decode precondition): empty input is a typed error.
 #[test]
 fn decode_empty_is_error() {

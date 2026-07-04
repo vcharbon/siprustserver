@@ -231,7 +231,7 @@ impl<'a> ActionExecutor<'a> {
                 delay_sec,
                 leg_id,
             } => {
-                self.schedule(call, fx, *timer_type, delay_sec * 1000, leg_id.clone());
+                self.schedule(call, fx, timer_type.clone(), delay_sec * 1000, leg_id.clone());
             }
             RuleAction::CancelTimer { id } => {
                 call.timers.retain(|t| &t.id != id);
@@ -1283,10 +1283,9 @@ impl<'a> ActionExecutor<'a> {
         delay_ms: i64,
         leg_id: Option<String>,
     ) {
-        let id = match &leg_id {
-            Some(l) => format!("{:?}:{}", timer_type, l),
-            None => format!("{:?}", timer_type),
-        };
+        // The ONE persisted-id recipe (`TimerType::timer_id`); every cancel
+        // site mints from the same method so schedule/cancel can never drift.
+        let id = timer_type.timer_id(leg_id.as_deref());
         let entry = TimerEntry {
             id,
             timer_type,
