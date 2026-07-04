@@ -183,7 +183,7 @@ impl ScriptedDecisionEngine {
 
 /// Parse the inbound `X-Api-Call` header as a JSON plan object.
 fn parse_api_call_plan(req: &NewCallRequest) -> Option<serde_json::Value> {
-    let raw = req.sip_headers.get("X-Api-Call")?;
+    let raw = req.sip_header("X-Api-Call")?;
     serde_json::from_str(raw).ok()
 }
 
@@ -421,7 +421,7 @@ pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
 /// non-JSON, or a missing/!array `call_limiter` field all yield an empty vec
 /// (no limiting). Entries missing `id`/`limit` are skipped.
 pub fn limiter_entries_from_api_call(req: &NewCallRequest) -> Vec<CallLimiterEntry> {
-    let raw = match req.sip_headers.get("X-Api-Call") {
+    let raw = match req.sip_header("X-Api-Call") {
         Some(v) => v,
         None => return Vec::new(),
     };
@@ -456,7 +456,7 @@ pub fn limiter_entries_from_api_call(req: &NewCallRequest) -> Vec<CallLimiterEnt
 /// `destination.host` → `None` (caller falls back to the configured `B2BUA_DEST`).
 /// `port` defaults to 5060 when omitted.
 pub fn route_dest_from_api_call(req: &NewCallRequest) -> Option<(String, u16)> {
-    let raw = req.sip_headers.get("X-Api-Call")?;
+    let raw = req.sip_header("X-Api-Call")?;
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     let dest = v.get("destination")?;
     let host = dest.get("host")?.as_str()?.trim().to_string();
@@ -481,7 +481,7 @@ pub fn route_dest_from_api_call(req: &NewCallRequest) -> Option<(String, u16)> {
 /// by default, which carries no AOR and is rejected). Absent / non-JSON / empty
 /// → `None` (caller keeps the userless R-URI).
 pub fn route_user_from_api_call(req: &NewCallRequest) -> Option<String> {
-    let raw = req.sip_headers.get("X-Api-Call")?;
+    let raw = req.sip_header("X-Api-Call")?;
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     let user = v.get("destination")?.get("user")?.as_str()?.trim().to_string();
     if user.is_empty() {
@@ -659,7 +659,7 @@ mod tests {
 
     fn req_with_header(name: &str, value: &str) -> NewCallRequest {
         let mut r = req("bob");
-        r.sip_headers.insert(name.into(), value.into());
+        r.sip_headers.insert(name.into(), vec![value.into()]);
         r
     }
 
