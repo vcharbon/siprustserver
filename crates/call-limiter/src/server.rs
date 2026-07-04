@@ -43,18 +43,12 @@ impl LimiterServer {
 fn json_ok<T: serde::Serialize>(value: &T) -> HttpResponse {
     match serde_json::to_vec(value) {
         Ok(body) => HttpResponse::ok(body),
-        Err(e) => HttpResponse {
-            status: 500,
-            body: format!("serialize error: {e}").into_bytes(),
-        },
+        Err(e) => HttpResponse::status(500).with_body(format!("serialize error: {e}").into_bytes()),
     }
 }
 
 fn bad_request(reason: &str) -> HttpResponse {
-    HttpResponse {
-        status: 400,
-        body: reason.as_bytes().to_vec(),
-    }
+    HttpResponse::status(400).with_body(reason.as_bytes().to_vec())
 }
 
 #[async_trait]
@@ -104,18 +98,13 @@ impl HttpService for LimiterServer {
                 self.metrics.on_refresh();
                 json_ok(&RefreshResponse { entries })
             }
-            ("GET", "/metrics") => HttpResponse {
-                status: 200,
-                body: self
-                    .metrics
+            ("GET", "/metrics") => HttpResponse::ok(
+                self.metrics
                     .prometheus_text(self.store.stats())
                     .into_bytes(),
-            },
+            ),
             ("GET", "/healthz") => HttpResponse::ok(b"ok\n".to_vec()),
-            _ => HttpResponse {
-                status: 404,
-                body: b"not found\n".to_vec(),
-            },
+            _ => HttpResponse::status(404).with_body(b"not found\n".to_vec()),
         }
     }
 }
