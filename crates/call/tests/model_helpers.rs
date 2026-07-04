@@ -67,6 +67,7 @@ fn pending_request_lifecycle() {
         source_from: "f".into(),
         source_to: "t".into(),
         direction: Direction::FromB,
+        cancelled: false,
     };
     let call = add_pending_request(call, "b-1", B_TAG, entry);
     let d = &call.b_legs[0].dialogs[0];

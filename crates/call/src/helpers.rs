@@ -194,6 +194,27 @@ pub fn find_pending_request(dialog: &Dialog, outbound_cseq: i64) -> Option<&Pend
         .find(|p| p.outbound_cseq == outbound_cseq)
 }
 
+/// Mark a pending transparent-relay entry CANCELled (RFC 3261 §9): the relayed
+/// (re-)INVITE it snapshots has been CANCELled toward its target, so the
+/// eventual final response resolves locally instead of being relayed back.
+pub fn cancel_pending_request(
+    call: Call,
+    leg_id: &str,
+    identity_tag: &str,
+    outbound_cseq: i64,
+) -> Call {
+    update_dialog(call, leg_id, identity_tag, |d| {
+        if let Some(p) = d
+            .ext
+            .inbound_pending_requests
+            .iter_mut()
+            .find(|p| p.outbound_cseq == outbound_cseq)
+        {
+            p.cancelled = true;
+        }
+    })
+}
+
 /// Remove a pending transparent-relay entry after its response is handled.
 pub fn remove_pending_request(
     call: Call,

@@ -24,7 +24,16 @@ pub enum CallEvent {
         leg_id: Option<String>,
     },
     /// A CANCEL matched a server INVITE txn; 200/487 already sent downstream.
-    Cancelled { call_id: String, from_tag: String },
+    /// RFC 3261 §9 scopes a CANCEL to the one INVITE *transaction* it matched:
+    /// `invite_cseq` is that INVITE's CSeq number, `in_dialog` whether it was an
+    /// in-dialog re-INVITE (its `To` carried a tag). The rule layer uses these
+    /// to end just the targeted renegotiation instead of the whole call.
+    Cancelled {
+        call_id: String,
+        from_tag: String,
+        invite_cseq: Option<u32>,
+        in_dialog: bool,
+    },
     /// A client transaction (b-leg INVITE, BYE, …) timed out with no final.
     Timeout {
         branch: String,
@@ -58,8 +67,8 @@ impl CallEvent {
     pub fn from_txn(event: TransactionEvent) -> Self {
         match event {
             TransactionEvent::Message { message, src } => CallEvent::Sip { message, src },
-            TransactionEvent::Cancelled { call_id, from_tag } => {
-                CallEvent::Cancelled { call_id, from_tag }
+            TransactionEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog } => {
+                CallEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog }
             }
             TransactionEvent::Timeout {
                 branch,

@@ -1284,6 +1284,18 @@ impl Owner {
             }
         };
 
+        // Snapshot the matched INVITE's CANCEL-scoping identity BEFORE the 487
+        // path clears `original_request` (RFC 3261 §9): its CSeq number, and
+        // whether it was an in-dialog re-INVITE (`To` already tagged). The
+        // upstream consumer uses these to scope the cancellation to the one
+        // transaction it targets instead of tearing the whole call down.
+        let (invite_cseq, in_dialog) = self
+            .txns
+            .get(&branch)
+            .and_then(|t| t.original_request.as_ref())
+            .map(|r| (Some(r.cseq.seq), r.to.tag.is_some()))
+            .unwrap_or((None, false));
+
         // Resolve (and lazily pin) the UAS To-tag on the matched INVITE.
         let mut uas_to_tag = self.txns.get(&branch).and_then(|t| t.uas_to_tag.clone());
         if uas_to_tag.is_none() {
@@ -1339,7 +1351,7 @@ impl Owner {
 
         // Critical: we already answered 200 + 487 on the wire; a dropped Cancelled
         // would leave the b-leg ringing a cancelled call (no other signal upstream).
-        self.emit_critical(TransactionEvent::Cancelled { call_id, from_tag });
+        self.emit_critical(TransactionEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog });
     }
 
     async fn handle_inbound_response(

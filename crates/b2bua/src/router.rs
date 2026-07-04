@@ -1119,7 +1119,7 @@ fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                 }
             }
         },
-        CallEvent::Cancelled { call_id, from_tag } => {
+        CallEvent::Cancelled { call_id, from_tag, .. } => {
             // A CANCEL races the very INVITE it cancels. The initial-INVITE body
             // `create()`s (and indexes) the call on the per-call FIFO *worker*,
             // asynchronously — whereas this `resolve` runs in the run loop the

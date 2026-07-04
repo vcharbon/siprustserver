@@ -134,6 +134,13 @@ pub struct PendingRequest {
     pub source_from: String,
     pub source_to: String,
     pub direction: Direction,
+    /// The originator CANCELled this relayed (re-)INVITE (RFC 3261 §9): the
+    /// B2BUA CANCELled the outbound client transaction and the txn layer
+    /// already answered the originator (200 + 487), so the target's eventual
+    /// final response is resolved locally — never relayed. A crossing 2xx
+    /// (target answered before the CANCEL landed) is ACKed and absorbed.
+    #[serde(default)]
+    pub cancelled: bool,
 }
 
 // ── Dialog ──────────────────────────────────────────────────────────────────

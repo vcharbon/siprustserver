@@ -1908,6 +1908,72 @@ impl Dialog {
     pub fn send_request(&mut self, method: InDialogMethod) -> InDialogRequest<'_> {
         InDialogRequest::new(self.agent.clone(), &mut self.dialog, self.fallback_addr, method)
     }
+
+    /// Send an in-dialog **re-INVITE** (optional SDP offer) and keep the
+    /// transaction handle, so the renegotiation can later be CANCELled — the
+    /// in-dialog mirror of [`ClientInvite::cancel`] (RFC 3261 §9.1). Mechanics
+    /// are identical to [`request`](Dialog::request)`(InDialogMethod::Invite, …)`
+    /// (same CSeq bump on this dialog, same next-hop routing); only the
+    /// returned handle differs: [`ClientReinvite`] can `expect(…)` responses
+    /// *and* [`cancel`](ClientReinvite::cancel) the still-pending re-INVITE.
+    pub async fn reinvite(&mut self, sdp: Option<&str>) -> ClientReinvite {
+        let mut builder = self.send_request(InDialogMethod::Invite);
+        if let Some(s) = sdp {
+            builder = builder.with_sdp(s);
+        }
+        let (_txn, request) = match builder.try_send_with_request().await {
+            Ok(v) => v,
+            Err(e) => panic!("{e}"),
+        };
+        ClientReinvite {
+            agent: self.agent.clone(),
+            wire_dst: next_hop(&self.dialog, self.fallback_addr),
+            original_invite: request,
+        }
+    }
+}
+
+/// Client transaction for an in-dialog re-INVITE sent via [`Dialog::reinvite`].
+/// Like [`InDialogTxn`] it can await responses; additionally it holds the
+/// re-INVITE as sent (plus its wire destination), so the pending renegotiation
+/// can be CANCELled (RFC 3261 §9.1) — the in-dialog counterpart of
+/// [`ClientInvite::cancel`].
+pub struct ClientReinvite {
+    agent: Agent,
+    wire_dst: SocketAddr,
+    original_invite: SipRequest,
+}
+
+impl ClientReinvite {
+    /// Wait for and assert a response status (the relayed 1xx/2xx/487 for this
+    /// re-INVITE, or the 200 to a CANCEL — whichever arrives next).
+    pub async fn expect(&mut self, status: u16) -> SipResponse {
+        expect_response(&self.agent, status).await
+    }
+
+    /// Fallible [`expect`](ClientReinvite::expect).
+    pub async fn try_expect(&mut self, status: u16) -> Result<SipResponse, StepError> {
+        try_expect_response(&self.agent, status).await
+    }
+
+    /// CANCEL this still-pending re-INVITE (RFC 3261 §9.1) — the in-dialog
+    /// mirror of [`ClientInvite::cancel`]. The CANCEL reuses the re-INVITE's
+    /// Request-URI / Call-ID / From / To / topmost Via branch, echoes its Route
+    /// set, uses the re-INVITE's CSeq *number* with method `CANCEL`, and goes
+    /// to the SAME wire destination the re-INVITE took. Returns a client
+    /// transaction to `expect(200)` on; the matching `487 Request Terminated`
+    /// for the re-INVITE arrives on this same UA via
+    /// [`ClientReinvite::expect`]. Per §9, this ends only the renegotiation —
+    /// the established dialog (and the call through a B2BUA) must survive.
+    pub async fn cancel(&self) -> InDialogTxn {
+        let cancel = generate_cancel(&InviteClientTransactionHandle {
+            original_invite: self.original_invite.clone(),
+        });
+        self.agent.send(&SipMessage::Request(cancel), self.wire_dst).await;
+        InDialogTxn {
+            agent: self.agent.clone(),
+        }
+    }
 }
 
 /// Builder for an in-dialog request carrying an `RAck` and/or custom headers

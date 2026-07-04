@@ -51,8 +51,8 @@ pub const SIMULATED_TRANSIT_DELAY_MS: u64 = 100;
 // The fluent, dialog-aware DSL (auto-generates correct-by-default B2B messages).
 // This is the primary surface — scenarios should not hand-author headers.
 pub use agent::{
-    Agent, CancelHandle, ClientInvite, Dialog, Harness, InDialogRequest, InDialogTxn, Invite,
-    OutOfDialogRequest, Proxy, Respond, ServerTxn, StepError,
+    Agent, CancelHandle, ClientInvite, ClientReinvite, Dialog, Harness, InDialogRequest,
+    InDialogTxn, Invite, OutOfDialogRequest, Proxy, Respond, ServerTxn, StepError,
 };
 // The Send agent factory for the load-test driver (`crates/loadgen`), plus the
 // dependency-light check-verdict projection a sampled page renders.
