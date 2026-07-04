@@ -295,19 +295,21 @@ pub(crate) fn reject_call(
 }
 
 fn build_request(invite: &SipRequest) -> NewCallRequest {
-    let sip_headers = invite
-        .headers
-        .iter()
-        .filter(|h| !STANDARD_HEADERS.contains(&h.name.to_ascii_lowercase().as_str()))
-        .map(|h| (h.name.clone(), h.value.clone()))
-        .collect();
+    let mut sip_headers: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for h in &invite.headers {
+        if STANDARD_HEADERS.contains(&h.name.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        sip_headers.entry(h.name.clone()).or_default().push(h.value.clone());
+    }
     NewCallRequest {
         call_id: invite.call_id.clone(),
         ruri: invite.uri.clone(),
         from: get_header(&invite.headers, "from").unwrap_or("").to_string(),
         to: get_header(&invite.headers, "to").unwrap_or("").to_string(),
         via: get_headers(&invite.headers, "via").iter().map(|s| s.to_string()).collect(),
-        contact: get_header(&invite.headers, "contact").map(str::to_string),
+        contact: get_headers(&invite.headers, "contact").iter().map(|s| s.to_string()).collect(),
         content_type: get_header(&invite.headers, "content-type").map(str::to_string),
         sip_headers,
         sip_body: (!invite.body.is_empty()).then(|| String::from_utf8_lossy(&invite.body).into_owned()),
@@ -455,5 +457,67 @@ mod emergency_on_invite_tests {
         let call =
             build_initial_call(&invite_with_rph(Some("dsn.flash, q735.0")), src(), &config_for("w0"), 0);
         assert_eq!(call.emergency, Some(true), "embedded canonical token flags emergency");
+    }
+}
+
+#[cfg(test)]
+mod multi_instance_header_tests {
+    //! Repeatable SIP headers (`History-Info`, `Diversion`, `P-Asserted-Identity`,
+    //! `Contact`) spread across separate lines must reach the decision engine
+    //! intact — collapsing to the last line silently drops every earlier hop, and
+    //! nothing downstream can restore a value lost above the adapter.
+
+    use super::build_request;
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser, SipRequest};
+
+    fn parse(raw: &str) -> SipRequest {
+        match CustomParser::new().parse(raw.as_bytes()).expect("fixture INVITE should parse") {
+            SipMessage::Request(r) => r,
+            SipMessage::Response(_) => panic!("expected a request"),
+        }
+    }
+
+    #[test]
+    fn repeated_header_lines_and_contacts_survive_in_wire_order() {
+        let invite = parse(
+            "INVITE sip:bob@example.com SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-multi\r\n\
+             Max-Forwards: 70\r\n\
+             From: <sip:alice@example.com>;tag=alicetag\r\n\
+             To: <sip:bob@example.com>\r\n\
+             Call-ID: multi@10.0.0.9\r\n\
+             CSeq: 1 INVITE\r\n\
+             Contact: <sip:alice@10.0.0.9:5060>\r\n\
+             History-Info: <sip:a@ex.com>;index=1\r\n\
+             History-Info: <sip:b@ex.com>;index=1.1\r\n\
+             History-Info: <sip:c@ex.com>;index=1.1.1\r\n\
+             Diversion: <sip:d1@ex.com>;reason=user-busy\r\n\
+             Diversion: <sip:d2@ex.com>;reason=no-answer\r\n\
+             Content-Length: 0\r\n\r\n",
+        );
+        let req = build_request(&invite);
+
+        // Contact is populated via the plural getter, so any number of instances
+        // survives (the parser caps an INVITE at one per RFC 3261 §8.1.1.8, but the
+        // schema no longer collapses — it carries whatever arrived).
+        assert_eq!(req.contact, vec!["<sip:alice@10.0.0.9:5060>".to_string()]);
+
+        // Every hop of a multi-line header survives, in wire order.
+        assert_eq!(
+            req.sip_headers.get("History-Info").map(Vec::as_slice),
+            Some(
+                &[
+                    "<sip:a@ex.com>;index=1".to_string(),
+                    "<sip:b@ex.com>;index=1.1".to_string(),
+                    "<sip:c@ex.com>;index=1.1.1".to_string(),
+                ][..]
+            ),
+        );
+        assert_eq!(req.sip_headers.get("Diversion").map(Vec::len), Some(2));
+
+        // The single-value accessor returns the first instance for the common read.
+        assert_eq!(req.sip_header("History-Info"), Some("<sip:a@ex.com>;index=1"));
+        assert_eq!(req.sip_header("Absent"), None);
     }
 }
