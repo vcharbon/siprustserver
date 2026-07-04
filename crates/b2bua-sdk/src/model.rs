@@ -885,6 +885,23 @@ impl<'a> RuleContext<'a> {
             _ => None,
         }
     }
+    /// Is the leg a [`RuleAction::RelayToPeer`] of the current request would
+    /// target in a **relayable** state (GAP-P8b-2)? `false` exactly when the
+    /// relay would go nowhere useful: no peer leg resolves, the peer leg is
+    /// `Terminated` (e.g. a failed b-leg whose `/call/failure` reroute is still
+    /// pending), or the target dialog has no remote tag yet (a replacement leg
+    /// still `Trying`). An `Early` peer dialog WITH a remote tag counts as
+    /// relayable (RFC 3311 §5.1 early-dialog UPDATE is the normal case). Uses
+    /// the SAME resolver as the executor's relay path
+    /// ([`call::helpers::resolve_relay_peer`]), so match and action never
+    /// disagree. Exposed on the context (usable from [`Match::filter`]) so a
+    /// service rule can own failover-pending policy; the CORE default is the
+    /// `update-peer-unavailable` local 491.
+    pub fn peer_relay_ready(&self) -> bool {
+        let to_tag = self.request().and_then(|r| r.to.tag.as_deref());
+        call::helpers::relay_peer_dialog_ready(self.call.0, self.source_leg_id, to_tag)
+    }
+
     /// The leg the event arrived on.
     pub fn source_leg(&self) -> Option<&'a Leg> {
         if self.source_leg_id == self.call.a_leg().leg_id {

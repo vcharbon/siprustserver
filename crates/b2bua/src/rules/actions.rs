@@ -1832,64 +1832,12 @@ fn via_sent_by(via: &str) -> (String, u16) {
 }
 
 /// Resolve the relay target leg plus, for forking, the specific callee early-
-/// dialog tag. Port of `executeRelayToPeer`'s fallback: an a-leg in-dialog
-/// request (PRACK/UPDATE) before the a↔b merge carries the B2BUA's a-facing tag
-/// in its To, which the tag map resolves to the right b-leg + callee fork tag.
+/// dialog tag. Thin view over [`call::helpers::resolve_relay_peer`] — the ONE
+/// resolver this relay path shares with the rule-vocabulary readiness predicate
+/// (`RuleContext::peer_relay_ready`, GAP-P8b-2), so the two never drift.
 fn resolve_peer(call: &Call, ctx: &RuleContext) -> (Option<String>, Option<String>) {
-    // The active peer (post-merge) wins — mirrors the TS `getPeer`-first order.
-    // After a failover the tag map carries a stale (same a-tag → failed b-leg)
-    // mapping, so resolving via the tag map first would route an a-leg in-dialog
-    // request (ACK/BYE) onto the terminated leg. The merge's `active_peer`
-    // points at the live leg, so prefer it.
-    if let Some(p) = &call.active_peer {
-        if p.leg_a == ctx.source_leg_id {
-            return (Some(p.leg_b.clone()), None);
-        }
-        if p.leg_b == ctx.source_leg_id {
-            return (Some(p.leg_a.clone()), None);
-        }
-    }
-    // Pre-merge a-leg in-dialog request (forking PRACK/UPDATE) → resolve the
-    // specific callee early dialog via the tag map.
-    if ctx.source_leg_id == call.a_leg.leg_id {
-        if let Some(req) = ctx.request() {
-            if let Some(tag) = req.to.tag.as_deref() {
-                if let Some(m) = call::helpers::find_by_a_tag(call, tag) {
-                    return (Some(m.b_leg_id.clone()), Some(m.b_tag.clone()));
-                }
-            }
-        }
-    }
-    // Implicit relay-to-peer fallback is gated on leg adoption (ADR-0014): an
-    // unadopted leg (a parked `media` leg, an un-realigned `transfer-target`) is
-    // owned by its service rule and must never be mis-routed to A by the generic
-    // relay. Explicit peering (active_peer / tag map, handled above) still wins —
-    // this only suppresses the implicit `→ a` fallback, matching the source gate
-    // `peerLegId === undefined && legId !== "a" && isAdopted(sourceLeg)`.
-    if ctx.source_leg_id != call.a_leg.leg_id {
-        if let Some(leg) = ctx.source_leg() {
-            if !call::helpers::is_adopted(leg) {
-                return (None, None);
-            }
-        }
-    }
-    (peer_leg_id(call, ctx.source_leg_id), None)
-}
-
-fn peer_leg_id(call: &Call, leg_id: &str) -> Option<String> {
-    if let Some(p) = &call.active_peer {
-        if p.leg_a == leg_id {
-            return Some(p.leg_b.clone());
-        }
-        if p.leg_b == leg_id {
-            return Some(p.leg_a.clone());
-        }
-    }
-    if leg_id == call.a_leg.leg_id {
-        return call.b_legs.iter().find(|l| l.state == LegState::Confirmed).map(|l| l.leg_id.clone())
-            .or_else(|| call.b_legs.first().map(|l| l.leg_id.clone()));
-    }
-    Some(call.a_leg.leg_id.clone())
+    let to_tag = ctx.request().and_then(|r| r.to.tag.as_deref());
+    call::helpers::resolve_relay_peer(call, ctx.source_leg_id, to_tag)
 }
 
 fn leg_index(call: &Call, leg_id: &str) -> Option<usize> {
