@@ -36,6 +36,8 @@ pub enum ExchangeOutcome {
     Response {
         /// HTTP status.
         status: u16,
+        /// Response headers as `(name, value)` pairs.
+        headers: Vec<(String, String)>,
         /// Response body bytes.
         body: Vec<u8>,
     },
@@ -52,8 +54,10 @@ pub struct CapturedExchange {
     pub dst: SocketAddr,
     /// Request method (e.g. `"POST"`).
     pub method: String,
-    /// Request path (e.g. `"/v1/admit"`).
+    /// Request path-and-query (e.g. `"/v1/admit"` or `"/routes?debug=true"`).
     pub path: String,
+    /// Request headers as `(name, value)` pairs.
+    pub req_headers: Vec<(String, String)>,
     /// Request body bytes.
     pub req_body: Vec<u8>,
     /// What came back.
@@ -101,11 +105,13 @@ impl HttpTransport for RecordingHttpNetwork {
     async fn request(&self, dst: SocketAddr, req: HttpRequest) -> Result<HttpResponse, HttpError> {
         let method = req.method.clone();
         let path = req.path.clone();
+        let req_headers = req.headers.clone();
         let req_body = req.body.clone();
         let result = self.inner.request(dst, req).await;
         let outcome = match &result {
             Ok(resp) => ExchangeOutcome::Response {
                 status: resp.status,
+                headers: resp.headers.clone(),
                 body: resp.body.clone(),
             },
             Err(e) => ExchangeOutcome::Error(e.to_string()),
@@ -115,6 +121,7 @@ impl HttpTransport for RecordingHttpNetwork {
             dst,
             method,
             path,
+            req_headers,
             req_body,
             outcome,
         });
