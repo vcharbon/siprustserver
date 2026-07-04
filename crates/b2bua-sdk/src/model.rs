@@ -58,7 +58,17 @@ pub struct Match {
     /// Request method / response cseq-method / timeout method (case-insensitive).
     pub methods: Option<Vec<&'static str>>,
     pub status: StatusMatch,
+    /// Exact timer-type matching — for a [`TimerType::Service`] entry this is
+    /// exact `(service_id, key)` equality (the leg, if any, is not part of the
+    /// type). Use [`Self::service_timers`] for a per-service any-key wildcard.
     pub timer_types: Option<Vec<TimerType>>,
+    /// Per-service timer wildcard: accept any [`TimerType::Service`] firing
+    /// whose `service_id` matches, regardless of `key`. A service can therefore
+    /// funnel all its watchdogs through one rule and branch on
+    /// [`RuleContext::service_timer_key`]. Never matches a core timer, and a
+    /// rule must name a `MachineId` to receive service fires at all — so no
+    /// rule catches another service's (or core's) timers by accident.
+    pub timer_service: Option<MachineId>,
     pub call_state: Option<Vec<CallModelState>>,
     pub leg_state: Option<Vec<LegState>>,
     pub leg_disposition: Option<Vec<LegDisposition>>,
@@ -76,6 +86,7 @@ impl Match {
             methods: None,
             status: StatusMatch::Any,
             timer_types: None,
+            timer_service: None,
             call_state: None,
             leg_state: None,
             leg_disposition: None,
@@ -129,6 +140,12 @@ impl Match {
     }
     pub fn timer_type(mut self, t: TimerType) -> Self {
         self.timer_types.get_or_insert_with(Vec::new).push(t);
+        self
+    }
+    /// Match any [`TimerType::Service`] firing owned by `service_id` (any key).
+    /// See [`Self::timer_service`].
+    pub fn service_timers(mut self, service_id: MachineId) -> Self {
+        self.timer_service = Some(service_id);
         self
     }
     pub fn call_state(mut self, s: CallModelState) -> Self {
@@ -201,7 +218,13 @@ impl Match {
 
         if let Some(tts) = &self.timer_types {
             match ctx.timer_type() {
-                Some(t) if tts.contains(&t) => {}
+                Some(t) if tts.contains(t) => {}
+                _ => return false,
+            }
+        }
+        if let Some(sid) = &self.timer_service {
+            match ctx.timer_type() {
+                Some(TimerType::Service { service_id, .. }) if service_id == sid => {}
                 _ => return false,
             }
         }
@@ -479,11 +502,17 @@ pub enum RuleAction {
     /// dialog. Never relayed — the txn layer answered the originator when the
     /// CANCEL matched.
     ResolveCancelledReinvite { leg_id: String, outbound_cseq: i64 },
+    /// Arm (or re-arm — same derived id supersedes) a per-call timer. The
+    /// persisted id is `timer_type.timer_id(leg_id)`; a service arms its own
+    /// watchdog with a [`TimerType::Service`] `(service_id, key)`.
     ScheduleTimer {
         timer_type: TimerType,
         delay_sec: i64,
         leg_id: Option<String>,
     },
+    /// Disarm a per-call timer by persisted id. Mint the id with
+    /// [`TimerType::timer_id`] (or use [`RuleAction::cancel_timer`]) so it can
+    /// never drift from the schedule recipe.
     CancelTimer { id: String },
     CancelAllTimers,
     TerminateCall,
@@ -644,6 +673,13 @@ pub enum RuleAction {
 }
 
 impl RuleAction {
+    /// [`RuleAction::CancelTimer`] with the id minted from the canonical
+    /// schedule recipe ([`TimerType::timer_id`]) — the symmetric disarm for any
+    /// `ScheduleTimer { timer_type, leg_id }` (core or service-owned).
+    pub fn cancel_timer(timer_type: &TimerType, leg_id: Option<&str>) -> Self {
+        RuleAction::CancelTimer { id: timer_type.timer_id(leg_id) }
+    }
+
     /// The single [`EffectKind`] this action contributes (ADR-0016 X9). Total by
     /// construction: a new `RuleAction` variant will not compile until it is
     /// categorised here, so a machine-bound rule's declared `effects` can be
@@ -856,9 +892,21 @@ impl<'a> RuleContext<'a> {
             _ => None,
         }
     }
-    pub fn timer_type(&self) -> Option<TimerType> {
+    pub fn timer_type(&self) -> Option<&TimerType> {
         match self.event {
-            CallEvent::Timer { timer_type, .. } => Some(*timer_type),
+            CallEvent::Timer { timer_type, .. } => Some(timer_type),
+            _ => None,
+        }
+    }
+    /// For a fired [`TimerType::Service`] timer: `(owning service, key)`. `None`
+    /// for every other event (including core timer fires). The branch point for
+    /// a rule that funnels several watchdog keys through one
+    /// [`Match::service_timers`] matcher.
+    pub fn service_timer_key(&self) -> Option<(&MachineId, &str)> {
+        match self.event {
+            CallEvent::Timer { timer_type: TimerType::Service { service_id, key }, .. } => {
+                Some((service_id, key))
+            }
             _ => None,
         }
     }

@@ -2449,6 +2449,38 @@ mod reclaim_timer_tests {
         );
     }
 
+    /// A service-owned timer (`TimerType::Service`) rides the restore-hygiene
+    /// seam GENERICALLY: it is kept (never stripped like `KeepaliveTimeout`),
+    /// re-anchored by the persisted skew offset like every timer, and left out
+    /// of the keepalive-only floor/smoothing — so a takeover node restores a
+    /// downstream service's watchdog (e.g. the 18x deadline) with the same
+    /// clock-skew bounds as core timers.
+    #[test]
+    fn service_timer_survives_restore_hygiene_and_is_reanchored() {
+        let svc = TimerType::service(call::MachineId::new("routing"), "timer18x");
+        let now = 1_000_000;
+        let skew = 45_000; // receiver_now − origin_now (clears the deadband)
+        let raw_fire_at = now - skew + 5_000; // origin-frame deadline
+        let mut timers = vec![
+            TimerEntry {
+                id: svc.timer_id(None),
+                timer_type: svc.clone(),
+                fire_at: raw_fire_at,
+                leg_id: None,
+            },
+            keepalive_timeout("b-1", now - skew + 1_000),
+        ];
+        let smoothing = Some(Smoothing { now_ms: now, l_max: 0, speedup: 10, cap_ms: None });
+        sanitize_restored_timers(&mut timers, "w1|svc|svc", now, Some(skew), 300_000, smoothing);
+        assert_eq!(timers.len(), 1, "service timer kept; stale KeepaliveTimeout stripped");
+        assert_eq!(timers[0].timer_type, svc);
+        assert_eq!(
+            timers[0].fire_at,
+            now + 5_000,
+            "re-anchored into this node's clock frame exactly like a core timer",
+        );
+    }
+
     // REPRO of the residual endurance loss at the timer layer: a *past-due*
     // `KeepaliveTimeout` restored from a pre-crash snapshot fires IMMEDIATELY
     // (`restore` clamps `fire_at <= now` to a next-tick fire) — this is the
