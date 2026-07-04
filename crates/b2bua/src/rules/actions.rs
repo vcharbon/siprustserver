@@ -386,6 +386,28 @@ impl<'a> ActionExecutor<'a> {
                     request: request.clone(),
                 });
             }
+            RuleAction::SetFeatures { features } => {
+                call.features = Some(features.clone());
+            }
+            RuleAction::MergeCallExt { ext } => {
+                for (service_id, value) in ext {
+                    let v = (!value.is_null()).then(|| value.clone());
+                    *call = call::helpers::set_call_ext(call.clone(), service_id, v);
+                }
+            }
+            RuleAction::RecordLimiterHolds { entries, window } => {
+                // Holds were INCRed by the router's failover fold; recording
+                // them here is what makes the `→ terminated` invariant DECR
+                // them (and the LimiterRefresh cadence re-stamp them).
+                for (limiter_id, limit) in entries {
+                    call.limiter_entries.push(call::CallLimiterState {
+                        limiter_id: limiter_id.clone(),
+                        limit: *limit,
+                        origin_window: *window,
+                        increment_succeeded: Some(true),
+                    });
+                }
+            }
             RuleAction::RelayFailureToALeg { status, reason } => {
                 let a_tag = self.ensure_a_dialog(call);
                 let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);

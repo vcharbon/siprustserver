@@ -1885,11 +1885,16 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
         match eff {
             FireAndForgetEffect::ReferAsyncHttp { call_ref, request } => {
                 let ctx2 = ctx.clone();
+                // Call-scoped context is attached HERE (the framework holds the
+                // authoritative call at dispatch); the seed rule's JSON carries
+                // only the event-scoped facts.
+                let snapshot = crate::decision::CallSnapshot::of(&result.call);
                 tokio::spawn(async move {
                     // Deserialize the request the seed rule built (mirrors the
                     // TS POST body); call the decision backend; map to a
                     // `refer-http-result` internal event; re-enter the chain.
-                    let req = parse_call_refer_request(&request);
+                    let mut req = parse_call_refer_request(&request);
+                    req.snapshot = snapshot;
                     let (outcome, payload) = match ctx2.decision.call_refer(req).await {
                         Ok(CallReferResponse::Allow {
                             destination,
@@ -1945,19 +1950,91 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
             }
             FireAndForgetEffect::FailureAsyncHttp { call_ref, request } => {
                 let ctx2 = ctx.clone();
+                // Call-scoped context is attached HERE (the framework holds the
+                // authoritative call at dispatch); the seed rule's JSON carries
+                // only the event-scoped facts (origin, failed leg, sip headers).
+                let snapshot = crate::decision::CallSnapshot::of(&result.call);
                 tokio::spawn(async move {
                     // The seed rule's request JSON carries the failure context
                     // plus `failed_leg_id` (echoed back so the resolution rule
                     // can cancel the right no-answer timer / relay the failure).
-                    let req = parse_call_failure_request(&request);
+                    let mut req = parse_call_failure_request(&request);
+                    req.snapshot = snapshot.clone();
                     let failed_leg_id = request
                         .get("failed_leg_id")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
                     use crate::decision::CallTreatment;
-                    let (outcome, payload) = match ctx2.decision.call_failure(req).await {
+                    // Failover-route/initial-route parity: a failover Route is
+                    // admitted against the call limiter here (the rule layer is
+                    // sync), and a limiter reject re-consults `/call/failure`
+                    // with origin `call_limiter` — the same bounded chain
+                    // `apply_route` runs for the initial route. A hold admitted
+                    // here is folded into the call by the resolution rule
+                    // (`RecordLimiterHolds`); if the call dies before the fold
+                    // lands, the orphaned INCR ages out of the limiter window.
+                    let mut depth: u32 = 0;
+                    let (outcome, payload) = loop {
+                        break match ctx2.decision.call_failure(req).await {
                         Ok(CallTreatment::Route(route)) => {
+                            let mut admitted: Option<(Vec<(String, i64)>, i64)> = None;
+                            if !route.call_limiter.is_empty() {
+                                let entries: Vec<crate::limiter::LimiterEntry> = route
+                                    .call_limiter
+                                    .iter()
+                                    .map(|e| crate::limiter::LimiterEntry {
+                                        id: e.id.clone(),
+                                        limit: e.limit,
+                                    })
+                                    .collect();
+                                match ctx2.limiter.admit(&entries).await {
+                                    crate::limiter::AdmitOutcome::Admitted { window } => {
+                                        admitted = Some((
+                                            route
+                                                .call_limiter
+                                                .iter()
+                                                .map(|e| (e.id.clone(), e.limit))
+                                                .collect(),
+                                            window,
+                                        ));
+                                    }
+                                    // Fail open: no holds recorded (parity with
+                                    // the initial path's fail-open policy).
+                                    crate::limiter::AdmitOutcome::Unavailable => {}
+                                    crate::limiter::AdmitOutcome::Rejected { limiter_id } => {
+                                        if route.callback_context.is_some()
+                                            && depth
+                                                < crate::decision::apply_route::MAX_LIMITER_FAILOVER
+                                        {
+                                            depth += 1;
+                                            req = crate::decision::CallFailureRequest {
+                                                callback_context: route.callback_context.clone(),
+                                                failure: crate::decision::FailureInfo {
+                                                    origin: "call_limiter".to_string(),
+                                                    limiter_id: Some(limiter_id),
+                                                    failed_leg_id: (!failed_leg_id.is_empty())
+                                                        .then(|| failed_leg_id.clone()),
+                                                    ..Default::default()
+                                                },
+                                                snapshot: snapshot.clone(),
+                                            };
+                                            continue;
+                                        }
+                                        // Chain exhausted / no context → the
+                                        // initial path's terminal limiter
+                                        // treatment (486 Busy Here).
+                                        break (
+                                            "reject",
+                                            serde_json::json!({
+                                                "code": 486,
+                                                "reason": "Busy Here",
+                                                "failed_leg_id": failed_leg_id,
+                                            }),
+                                        );
+                                    }
+                                }
+                            }
                             let mut p = serde_json::Map::new();
                             p.insert(
                                 "destination".into(),
@@ -1978,13 +2055,48 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
                             if let Some(v) = route.update_headers {
                                 p.insert("update_headers".into(), serde_json::json!(v));
                             }
-                            if let Some(v) = route.no_answer_timeout_sec {
+                            if let Some(v) = route
+                                .no_answer_timeout_sec
+                                .or(route.features.no_answer_timeout_sec)
+                            {
                                 p.insert("no_answer_timeout_sec".into(), serde_json::json!(v));
                             }
                             if let Some(v) = route.callback_context {
                                 p.insert("callback_context".into(), serde_json::json!(v));
                             }
                             p.insert("failed_leg_id".into(), serde_json::json!(failed_leg_id));
+                            // Route parity: the fields the initial `apply_route`
+                            // honors, forwarded to the resolution rule.
+                            if let Ok(v) = serde_json::to_value(&route.features) {
+                                p.insert("features".into(), v);
+                            }
+                            if !route.service_ext.is_empty() {
+                                p.insert(
+                                    "service_ext".into(),
+                                    serde_json::Value::Object(
+                                        route.service_ext.into_iter().collect(),
+                                    ),
+                                );
+                            }
+                            match route.update_body {
+                                crate::decision::BodyUpdate::Keep => {}
+                                crate::decision::BodyUpdate::Drop => {
+                                    p.insert("update_body".into(), serde_json::Value::Null);
+                                }
+                                crate::decision::BodyUpdate::Replace(s) => {
+                                    p.insert("update_body".into(), serde_json::json!(s));
+                                }
+                            }
+                            if let Some((entries, window)) = admitted {
+                                let entries: Vec<serde_json::Value> = entries
+                                    .iter()
+                                    .map(|(id, limit)| serde_json::json!({"id": id, "limit": limit}))
+                                    .collect();
+                                p.insert(
+                                    "call_limiter".into(),
+                                    serde_json::json!({"window": window, "entries": entries}),
+                                );
+                            }
                             ("failover", serde_json::Value::Object(p))
                         }
                         // Decision-authored reject — the plan declined to fail over
@@ -2034,6 +2146,7 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
                             p.insert("failed_leg_id".into(), serde_json::json!(failed_leg_id));
                             ("terminate", serde_json::Value::Object(p))
                         }
+                        };
                     };
                     let ev = CallEvent::InternalEvent {
                         call_ref,
@@ -2070,10 +2183,13 @@ fn parse_call_refer_request(v: &serde_json::Value) -> crate::decision::CallRefer
         refer_to: s("refer_to").unwrap_or_default(),
         referred_by: s("referred_by"),
         sip_headers,
+        snapshot: crate::decision::CallSnapshot::default(),
     }
 }
 
-/// Rebuild a [`CallFailureRequest`] from the JSON the seed rule emitted.
+/// Rebuild a [`CallFailureRequest`] from the JSON the seed rule emitted. The
+/// call-scoped `snapshot` is not part of the rule JSON — the dispatch site
+/// attaches it from the authoritative call.
 fn parse_call_failure_request(v: &serde_json::Value) -> crate::decision::CallFailureRequest {
     crate::decision::CallFailureRequest {
         callback_context: v
@@ -2091,7 +2207,26 @@ fn parse_call_failure_request(v: &serde_json::Value) -> crate::decision::CallFai
                 .and_then(|x| x.as_u64())
                 .map(|c| c as u16),
             limiter_id: v.get("limiter_id").and_then(|x| x.as_str()).map(str::to_string),
+            failed_leg_id: v
+                .get("failed_leg_id")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            // `[[name, value], …]` — wire order and duplicates preserved.
+            sip_headers: v
+                .get("sip_headers")
+                .and_then(|x| x.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|pair| {
+                            let p = pair.as_array()?;
+                            Some((p.first()?.as_str()?.to_string(), p.get(1)?.as_str()?.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         },
+        snapshot: crate::decision::CallSnapshot::default(),
     }
 }
 

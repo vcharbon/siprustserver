@@ -325,15 +325,36 @@ fn core_rules() -> Vec<RuleDefinition> {
                     // `failover-create-leg` or `failover-terminate`. We deliberately
                     // do NOT relay or terminate here: on a reject the caller must not
                     // see the failure until the backend declines to fail over.
-                    Some(cbctx) => actions.push(RuleAction::FailureAsyncHttp {
-                        request: serde_json::json!({
-                            "callback_context": cbctx,
-                            "origin": "external",
-                            "sip_code": status,
-                            "sip_reason": reason,
-                            "failed_leg_id": b,
-                        }),
-                    }),
+                    Some(cbctx) => {
+                        // Event-scoped context only this site has: the failed
+                        // final's non-structural headers, verbatim and in wire
+                        // order (`Reason:`/`Warning:`/`X-*` for the decision
+                        // backend). Structural fields already travel as typed
+                        // request fields.
+                        let sip_headers: Vec<serde_json::Value> = ctx
+                            .response()
+                            .map(|r| {
+                                r.headers
+                                    .iter()
+                                    .filter(|h| {
+                                        !crate::initial_invite::STANDARD_HEADERS
+                                            .contains(&h.name.to_ascii_lowercase().as_str())
+                                    })
+                                    .map(|h| serde_json::json!([h.name, h.value]))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        actions.push(RuleAction::FailureAsyncHttp {
+                            request: serde_json::json!({
+                                "callback_context": cbctx,
+                                "origin": "external",
+                                "sip_code": status,
+                                "sip_reason": reason,
+                                "failed_leg_id": b,
+                                "sip_headers": sip_headers,
+                            }),
+                        });
+                    }
                     // No callback context → relay the failure to the caller and
                     // tear the whole call down (the pre-failover behaviour).
                     None => {
@@ -385,11 +406,71 @@ fn core_rules() -> Vec<RuleDefinition> {
                     .unwrap_or_default();
                 let failed_leg_id = payload.get("failed_leg_id").and_then(|v| v.as_str()).unwrap_or("");
 
+                // ── failover/initial-route parity ────────────────────────────
+                // The same decision response must be honored the same way on
+                // both paths, so the reroute applies what `apply_route` applies:
+                // features (incl. the GlobalDuration re-arm), service_ext,
+                // update_body, and the limiter holds the router's fold already
+                // admitted against the new target.
+                let features: Option<call::features::FeatureActivations> = payload
+                    .get("features")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+                let service_ext: call::ExtMap = payload
+                    .get("service_ext")
+                    .and_then(|v| v.as_object())
+                    .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .unwrap_or_default();
+                // `update_body` mirrors the decision wire shape: absent = keep
+                // A's INVITE body, null = drop, string = substitute.
+                let body_override = match payload.get("update_body") {
+                    None => None,
+                    Some(serde_json::Value::Null) => Some(Vec::new()),
+                    Some(serde_json::Value::String(s)) => Some(s.clone().into_bytes()),
+                    Some(_) => None,
+                };
+                let limiter_holds = payload
+                    .get("call_limiter")
+                    .and_then(|v| v.as_object())
+                    .and_then(|o| {
+                        let window = o.get("window")?.as_i64()?;
+                        let entries: Vec<(String, i64)> = o
+                            .get("entries")?
+                            .as_array()?
+                            .iter()
+                            .filter_map(|e| {
+                                Some((e.get("id")?.as_str()?.to_string(), e.get("limit")?.as_i64()?))
+                            })
+                            .collect();
+                        Some((entries, window))
+                    });
+
                 let mut actions = Vec::new();
                 // Cancel the failed leg's no-answer timer (a reject can beat it;
                 // for the no-answer trigger the timer already fired — harmless).
                 if !failed_leg_id.is_empty() {
                     actions.push(RuleAction::CancelTimer { id: format!("NoAnswer:{failed_leg_id}") });
+                }
+                let no_answer = no_answer.or(features.as_ref().and_then(|f| f.no_answer_timeout_sec));
+                if let Some(f) = features {
+                    // Re-arm the duration cap from the reroute's features, as the
+                    // initial path does at route time (ScheduleTimer id-dedups).
+                    actions.push(RuleAction::ScheduleTimer {
+                        timer_type: TimerType::GlobalDuration,
+                        delay_sec: f.platform.max_duration_sec,
+                        leg_id: None,
+                    });
+                    actions.push(RuleAction::SetFeatures { features: f });
+                }
+                if !service_ext.is_empty() {
+                    actions.push(RuleAction::MergeCallExt { ext: service_ext });
+                }
+                if let Some((entries, window)) = limiter_holds {
+                    actions.push(RuleAction::RecordLimiterHolds { entries, window });
+                    actions.push(RuleAction::ScheduleTimer {
+                        timer_type: TimerType::LimiterRefresh,
+                        delay_sec: ctx.config.limiter_refresh_sec,
+                        leg_id: None,
+                    });
                 }
                 actions.push(RuleAction::CreateLeg {
                     destination: (host, port),
@@ -398,9 +479,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                     new_to,
                     no_answer_timeout_sec: no_answer,
                     callback_context,
-                    // `fromInvite: "snapshot"` — keep A's INVITE body (delayed
-                    // offer ⇒ none); failover is not a held-SDP transfer.
-                    body_override: None,
+                    body_override,
                     header_updates,
                     kind: None,
                 });
@@ -642,7 +721,47 @@ fn core_rules() -> Vec<RuleDefinition> {
             actions.push(RuleAction::BeginTermination { reason: Some("CANCEL".into()) });
             ok(actions)
         }),
-        rule("handle-timeout", &[], Match::timeout(), |_| {
+        rule("handle-timeout", &[], Match::timeout(), |ctx| {
+            // A **pending b-leg INVITE** transaction timeout (Timer B / the long
+            // INVITE backstop) on a failover-capable call is a failure the
+            // decision backend must get a shot at — the dead-gateway reroute is
+            // the classic failover case, and before this it was the one b-leg
+            // failure that never consulted `/call/failure`. Mirror the
+            // `no-answer` shape: record the timeout, destroy the failed leg
+            // (CANCELs a still-early dialog; a total blackhole gets a harmless
+            // raw CANCEL), and let `call-failure-result` drive the outcome.
+            // Everything else (a-leg, confirmed-leg re-INVITE, BYE/OPTIONS
+            // timeouts, no callback context) keeps the unconditional
+            // termination below.
+            let timed_out_invite = ctx
+                .timeout_method()
+                .map(|m| m.eq_ignore_ascii_case("INVITE"))
+                .unwrap_or(false);
+            let pending_b_leg = ctx.source_leg().is_some_and(|l| {
+                l.leg_id != ctx.call.a_leg().leg_id
+                    && matches!(l.state, LegState::Trying | LegState::Early)
+            });
+            if timed_out_invite && pending_b_leg {
+                if let Some(cbctx) = ctx.call.callback_context() {
+                    let leg = ctx.source_leg_id.to_string();
+                    return ok(vec![
+                        RuleAction::AddCdrEvent {
+                            event_type: CdrEventType::Timeout,
+                            leg_id: leg.clone(),
+                            status_code: None,
+                            reason: Some("transaction_timeout".into()),
+                        },
+                        RuleAction::DestroyLeg { leg_id: leg.clone() },
+                        RuleAction::FailureAsyncHttp {
+                            request: serde_json::json!({
+                                "callback_context": cbctx,
+                                "origin": "transaction_timeout",
+                                "failed_leg_id": leg,
+                            }),
+                        },
+                    ]);
+                }
+            }
             ok(vec![RuleAction::BeginTermination { reason: Some("timeout".into()) }])
         }),
         // ── timers ──────────────────────────────────────────────────────────

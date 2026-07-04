@@ -150,18 +150,111 @@ pub type NewCallResponse = CallTreatment;
 /// variants is valid on the failover path.
 pub type CallFailureResponse = CallTreatment;
 
-/// What failed on a b-leg, for the failover decision.
-#[derive(Debug, Clone)]
+/// What failed on a b-leg, for the failover decision. Carries the
+/// **event-scoped** facts only — everything the emitting site alone knows.
+/// Call-scoped context rides the [`CallSnapshot`] the framework attaches.
+#[derive(Debug, Clone, Default)]
 pub struct FailureInfo {
     pub origin: String,
     pub status_code: Option<u16>,
     pub limiter_id: Option<String>,
+    /// The leg whose failure triggered this decision (`None` for pre-leg
+    /// origins such as a limiter reject).
+    pub failed_leg_id: Option<String>,
+    /// The failed final response's non-structural headers, verbatim and in
+    /// wire order (duplicates preserved) — where `Reason:`/`Warning:`/`X-*`
+    /// land. Empty for internal origins (timeouts, limiter).
+    pub sip_headers: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CallFailureRequest {
     pub callback_context: Option<String>,
     pub failure: FailureInfo,
+    /// Call-scoped context, attached by the framework at dispatch time.
+    pub snapshot: CallSnapshot,
+}
+
+// ── Call-context snapshot (attached to every decision-point request) ────────
+
+/// Read-only per-leg view inside a [`CallSnapshot`].
+#[derive(Debug, Clone, Serialize)]
+pub struct LegSnapshot {
+    pub leg_id: String,
+    pub state: call::LegState,
+    pub disposition: call::LegDisposition,
+    /// How the leg was (or is being) torn down; `None` while it is live.
+    pub bye_disposition: Option<call::ByeDisposition>,
+    /// The B2BUA's local URI on this leg.
+    pub local_uri: Option<String>,
+    /// The remote party's URI on this leg.
+    pub remote_uri: Option<String>,
+    /// Request-URI of the outbound INVITE (post-rewrite).
+    pub invite_request_uri: Option<String>,
+    /// Per-service opaque leg ext slices (ADR-0016).
+    pub ext: Option<call::ExtMap>,
+}
+
+/// Read-only snapshot of the **observed call context**, built by the framework
+/// from the authoritative `Call` at dispatch time and attached to every
+/// decision-point request that has a call behind it ([`CallFailureRequest`],
+/// [`CallReferRequest`]). One generic carrier instead of one upstream field per
+/// downstream need: a decision backend derives what it wants (a `prov18x`
+/// flag is "any `Provisional` event ≥ 180 on the failed leg", ringing duration
+/// is two timestamps, REFER authorization can read per-service state) without
+/// the platform learning any of those semantics. Cost: one clone per
+/// failure/refer callback — never per SIP message.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CallSnapshot {
+    /// A-leg Call-ID (correlation handle for the decision backend).
+    pub call_id: String,
+    pub callback_context: Option<String>,
+    /// Every leg, a-leg first, in attempt order.
+    pub legs: Vec<LegSnapshot>,
+    /// The full observed CDR trail (invite/provisional/answer/reject/timeout…).
+    pub cdr_events: Vec<call::CdrEvent>,
+    /// Per-service opaque call ext slices (`Call.ext`, ADR-0016).
+    pub service_ext: call::ExtMap,
+    /// Per-service state-machine cursors (machine id → state label).
+    pub sm_cursors: BTreeMap<String, String>,
+    /// What the routing decision activated.
+    pub features: Option<FeatureActivations>,
+    /// Live limiter holds on the call.
+    pub limiter_ids: Vec<String>,
+}
+
+impl CallSnapshot {
+    /// Snapshot `call` for a decision request. Framework-only: rules never
+    /// build one (they pass event-scoped facts; the router attaches this).
+    pub fn of(call: &call::Call) -> Self {
+        let legs = std::iter::once(&call.a_leg)
+            .chain(call.b_legs.iter())
+            .map(|l| LegSnapshot {
+                leg_id: l.leg_id.clone(),
+                state: l.state,
+                disposition: l.disposition,
+                bye_disposition: l.bye_disposition,
+                local_uri: l.local_uri.clone(),
+                remote_uri: l.remote_uri.clone(),
+                invite_request_uri: l.invite_request_uri.clone(),
+                ext: l.ext.clone(),
+            })
+            .collect();
+        CallSnapshot {
+            call_id: call.a_leg.call_id.clone(),
+            callback_context: call.callback_context.clone(),
+            legs,
+            cdr_events: call.cdr_events.clone(),
+            service_ext: call.ext.clone().unwrap_or_default(),
+            sm_cursors: call
+                .sm_cursors
+                .iter()
+                .map(|(m, s)| (m.as_str().to_string(), s.as_str().to_string()))
+                .collect(),
+            features: call.features.clone(),
+            limiter_ids: call.limiter_entries.iter().map(|e| e.limiter_id.clone()).collect(),
+        }
+    }
 }
 
 /// The REFER authorization request POSTed to `/call/refer` (port of TS
@@ -177,6 +270,8 @@ pub struct CallReferRequest {
     pub referred_by: Option<String>,
     /// Non-structural REFER headers forwarded verbatim (incl. `X-Api-Call`).
     pub sip_headers: BTreeMap<String, String>,
+    /// Call-scoped context, attached by the framework at dispatch time.
+    pub snapshot: CallSnapshot,
 }
 
 #[derive(Debug, Clone)]

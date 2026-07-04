@@ -17,8 +17,10 @@ use crate::target_admission::{classify_admission, AdmissionVerdict};
 use super::schemas::{BodyUpdate, RouteDecision};
 
 /// Bound on chained limiter-reject failovers, so a misconfigured loop
-/// (`/call/failure` keeps returning a limited destination) can't recurse forever.
-const MAX_LIMITER_FAILOVER: u32 = 5;
+/// (`/call/failure` keeps returning a limited destination) can't recurse
+/// forever. Shared with the router's async-failover fold, which runs the same
+/// admit → re-consult chain for a failover route.
+pub(crate) const MAX_LIMITER_FAILOVER: u32 = 5;
 
 /// Apply a route decision to `call` (which already carries the a-leg), creating
 /// the first b-leg + its outbound INVITE. `depth` tracks chained limiter-reject
@@ -107,7 +109,10 @@ pub async fn apply_route(
                             origin: "call_limiter".to_string(),
                             status_code: None,
                             limiter_id: Some(limiter_id),
+                            failed_leg_id: None,
+                            sip_headers: Vec::new(),
                         },
+                        snapshot: crate::decision::CallSnapshot::of(&call),
                     };
                     match decision.call_failure(req).await {
                         Ok(CallTreatment::Route(route2)) => {

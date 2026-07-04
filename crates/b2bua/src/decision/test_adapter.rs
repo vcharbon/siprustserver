@@ -858,8 +858,9 @@ mod tests {
             failure: crate::decision::FailureInfo {
                 origin: "external".into(),
                 status_code: Some(503),
-                limiter_id: None,
+                ..Default::default()
             },
+            ..Default::default()
         }
     }
 

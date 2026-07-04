@@ -27,8 +27,11 @@ use crate::event::CallEvent;
 use crate::limiter::CallLimiter;
 use crate::rules::{relay, seed_services, ActionExecutor, ServiceDef};
 
-/// Headers sent as top-level decision-request fields (excluded from `sip_headers`).
-const STANDARD_HEADERS: &[&str] = &[
+/// Headers sent as top-level decision-request fields (excluded from
+/// `sip_headers`). Shared with the failure path: `route-failure` applies the
+/// same exclusion to the failed final response's headers, so "the
+/// non-structural remainder" means one thing across the decision seam.
+pub(crate) const STANDARD_HEADERS: &[&str] = &[
     "from", "to", "via", "contact", "content-type", "call-id", "cseq", "max-forwards",
     "content-length",
 ];

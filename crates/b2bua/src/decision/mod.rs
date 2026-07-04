@@ -10,9 +10,9 @@ pub mod test_adapter;
 
 pub use schemas::{
     default_platform_features, BodyUpdate, CallFailureRequest, CallFailureResponse, CallLimiterEntry,
-    CallReferRequest, CallReferResponse, CallTreatment, FailureInfo, FeatureActivations,
-    NewCallRequest, NewCallResponse, RedirectContact, RedirectDecision, RejectDecision,
-    RouteDecision, SipDestination, SipHeaderUpdates,
+    CallReferRequest, CallReferResponse, CallSnapshot, CallTreatment, FailureInfo,
+    FeatureActivations, LegSnapshot, NewCallRequest, NewCallResponse, RedirectContact,
+    RedirectDecision, RejectDecision, RouteDecision, SipDestination, SipHeaderUpdates,
 };
 pub use test_adapter::{default_call_refer, ReferOutcome, ScriptedDecisionEngine};
 

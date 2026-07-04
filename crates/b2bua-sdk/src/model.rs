@@ -590,6 +590,20 @@ pub enum RuleAction {
     /// calls `decision.call_failure` then re-enters via a `call-failure-result`
     /// internal event.
     FailureAsyncHttp { request: serde_json::Value },
+    /// Overwrite the call's feature activations from a (re)route decision. The
+    /// initial route applies features inside `apply_route`; the async failover
+    /// route folds back through the rule layer, so this is how the reroute's
+    /// features reach the call (failover/initial-route parity).
+    SetFeatures { features: FeatureActivations },
+    /// Merge per-service ext slices into `call.ext` (the failover-route
+    /// counterpart of `apply_route`'s `service_ext` seeding). `null` values
+    /// clear the slice, mirroring `set_call_ext`.
+    MergeCallExt { ext: ExtMap },
+    /// Record **already-admitted** limiter holds on the call. The async
+    /// failover route's admit runs in the router's fire-and-forget task (the
+    /// rule layer is sync); this folds the holds into the replicated call so
+    /// termination decrements them. `entries` are `(limiter_id, limit)`.
+    RecordLimiterHolds { entries: Vec<(String, i64)>, window: i64 },
     /// Synthesize a final failure response on the a-leg INVITE server txn
     /// (the terminate-after-`/call/failure` path — relay the b-leg failure to A
     /// once the backend declines to fail over). Reuses the a-dialog tag.
@@ -668,7 +682,10 @@ impl RuleAction {
             | RuleAction::SetPromotePem { .. }
             | RuleAction::SetTransfer { .. }
             | RuleAction::ReferAsyncHttp { .. }
-            | RuleAction::FailureAsyncHttp { .. } => EffectKind::Bookkeeping,
+            | RuleAction::FailureAsyncHttp { .. }
+            | RuleAction::SetFeatures { .. }
+            | RuleAction::MergeCallExt { .. }
+            | RuleAction::RecordLimiterHolds { .. } => EffectKind::Bookkeeping,
         }
     }
 }
