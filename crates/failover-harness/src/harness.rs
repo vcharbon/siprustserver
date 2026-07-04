@@ -482,8 +482,20 @@ impl ReplicatedB2buaSut {
             clock: self.clock.clone(),
             id_gen: Arc::new(IdGen::seeded(0xB2B0 + self.gen)),
             cdr: self.cdr.clone(),
-            // Live overload signal (no injection) on the replicating/failover path.
-            overload: None,
+            // DETERMINISTIC overload signal (ELU pinned to 0). The default `None`
+            // rides `OverloadSignal::live`, whose `LiveLoadSampler` reads the REAL
+            // tokio `worker_total_busy_duration` over REAL wall-clock — a signal
+            // that has no meaning under a `start_paused` deterministic harness and
+            // runs HOT during busy cold-start (spawning both workers + proxy +
+            // limiter + health-probe, replication bootstrap). It nondeterministically
+            // crossed the 0.75 panic-ELU threshold and shed the establish INVITE with
+            // a Tier-3 `panic_elu` 503 (the ~1/5 "cold-start-503" flake; worse under
+            // parallel/CI load). Inject a `simulated()` sampler left at ELU 0 so the
+            // panic-ELU backstop never trips on runtime busyness; a test that WANTS to
+            // exercise it drives a known ELU through the control instead.
+            overload: Some(b2bua::overload::OverloadSignal::new(Arc::new(
+                b2bua::overload::simulated().0,
+            ))),
         };
         b2bua_harness::spawn_b2bua_core(endpoint, params, |config| {
             // EXACT production (kind) timers — `deploy/k8s/manifests/20-worker.yaml`.
