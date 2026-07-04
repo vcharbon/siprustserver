@@ -14,61 +14,115 @@ pub use real::RealHttpNetwork;
 pub use recording::{CapturedExchange, Direction, ExchangeOutcome, RecordingHttpNetwork};
 pub use simulated::{Fault, SimulatedHttpNetwork};
 
-/// A one-shot HTTP request. Headers are intentionally omitted — the
-/// content-type is fixed `application/json` and framing is Content-Length, set
-/// by the real transport; the simulated fabric moves the [`body`](Self::body)
-/// bytes verbatim. Keep this minimal: it is the whole wire contract.
+/// A one-shot HTTP request.
+///
+/// [`headers`](Self::headers) and query strings (carried inline on
+/// [`path`](Self::path), which is really a *path-and-query* target) are honored
+/// end to end: the real transport maps them onto/off the wire, and the
+/// simulated fabric moves the whole struct verbatim. Both default to empty, so
+/// a header-agnostic service (e.g. the call-limiter, whose framing is a fixed
+/// `application/json` Content-Length body set by the transport) is unchanged.
+/// Any richer REST backend (query params, request headers) rides the same seam.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpRequest {
     /// e.g. `"POST"` / `"GET"`.
     pub method: String,
-    /// Request target, e.g. `"/v1/admit"`.
+    /// Request target *including any query string*, e.g. `"/v1/admit"` or
+    /// `"/routes?debug=true&seed=7"`. The real transport carries this as the
+    /// URI's `path_and_query`.
     pub path: String,
+    /// Request headers as ordered `(name, value)` pairs. Empty by default; the
+    /// transport does not synthesize framing headers into this list (they are
+    /// set on the wire), so a service sees only what the caller attached.
+    pub headers: Vec<(String, String)>,
     /// Opaque body bytes (JSON, set by the consumer).
     pub body: Vec<u8>,
 }
 
 impl HttpRequest {
-    /// A `POST <path>` carrying `body`.
+    /// A `POST <path>` carrying `body`, no headers.
     pub fn post(path: impl Into<String>, body: Vec<u8>) -> Self {
         Self {
             method: "POST".into(),
             path: path.into(),
+            headers: Vec::new(),
             body,
         }
     }
 
-    /// A `GET <path>` with an empty body.
+    /// A `GET <path>` with an empty body, no headers.
     pub fn get(path: impl Into<String>) -> Self {
         Self {
             method: "GET".into(),
             path: path.into(),
+            headers: Vec::new(),
             body: Vec::new(),
         }
+    }
+
+    /// Append one `(name, value)` header (builder style).
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Replace the header list wholesale (builder style).
+    pub fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.headers = headers;
+        self
     }
 }
 
 /// A one-shot HTTP response.
+///
+/// [`headers`](Self::headers) let a served service emit response headers (e.g.
+/// the Routing API's `X-Newkah-Trace-Id`); empty by default so a status+body
+/// service is unchanged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpResponse {
     /// HTTP status code (e.g. `200`, `404`).
     pub status: u16,
+    /// Response headers as ordered `(name, value)` pairs. Empty by default.
+    pub headers: Vec<(String, String)>,
     /// Opaque body bytes.
     pub body: Vec<u8>,
 }
 
 impl HttpResponse {
-    /// A `200 OK` carrying `body`.
+    /// A `200 OK` carrying `body`, no headers.
     pub fn ok(body: Vec<u8>) -> Self {
-        Self { status: 200, body }
+        Self {
+            status: 200,
+            headers: Vec::new(),
+            body,
+        }
     }
 
-    /// A status-only response with an empty body.
+    /// A status-only response with an empty body, no headers.
     pub fn status(status: u16) -> Self {
         Self {
             status,
+            headers: Vec::new(),
             body: Vec::new(),
         }
+    }
+
+    /// Set the body (builder style).
+    pub fn with_body(mut self, body: Vec<u8>) -> Self {
+        self.body = body;
+        self
+    }
+
+    /// Append one `(name, value)` header (builder style).
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Replace the header list wholesale (builder style).
+    pub fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.headers = headers;
+        self
     }
 }
 

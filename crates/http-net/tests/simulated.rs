@@ -210,6 +210,85 @@ async fn delay_fault_raises_transit() {
     assert!(h.await.unwrap().is_ok());
 }
 
+/// Reflects the request's query string and headers back out so a test can
+/// assert the whole struct — path-and-query + headers + body — survives the seam.
+struct ReflectService;
+
+#[async_trait]
+impl HttpService for ReflectService {
+    async fn handle(&self, req: HttpRequest) -> HttpResponse {
+        // Echo the received path (incl. query) as the body, and mirror a
+        // request header out as a response header (+ mint a trace id).
+        let echoed = req
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-debug"))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        HttpResponse::ok(req.path.into_bytes())
+            .header("x-echoed-debug", echoed)
+            .header("x-newkah-trace-id", "trace-1")
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn headers_and_query_travel_through_the_fabric() {
+    let net = SimulatedHttpNetwork::new();
+    let dst = addr("10.0.0.2:8080");
+    let _server = net.serve(dst, Arc::new(ReflectService)).await.unwrap();
+
+    let req = HttpRequest::get("/routes?debug=true&seed=7").header("x-debug", "on");
+    let h = tokio::spawn({
+        let net = net.clone();
+        async move { net.request(dst, req).await }
+    });
+    advance_in_100ms_chunks(Duration::from_millis(10)).await;
+    let resp = h.await.unwrap().unwrap();
+
+    // Query string survived on the path.
+    assert_eq!(resp.body, b"/routes?debug=true&seed=7");
+    // Request header reached the handler, response headers came back.
+    assert!(resp
+        .headers
+        .iter()
+        .any(|(k, v)| k == "x-echoed-debug" && v == "on"));
+    assert!(resp
+        .headers
+        .iter()
+        .any(|(k, v)| k == "x-newkah-trace-id" && v == "trace-1"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn recorder_captures_request_headers_and_response_headers() {
+    let sim = Arc::new(SimulatedHttpNetwork::new());
+    let rec = RecordingHttpNetwork::new(sim.clone(), Clock::test_at(0));
+    let dst = addr("10.0.0.2:8080");
+    let _server = rec.serve(dst, Arc::new(ReflectService)).await.unwrap();
+
+    let req = HttpRequest::get("/routes?seed=1").header("x-debug", "yes");
+    let h = tokio::spawn({
+        let rec = rec.clone();
+        async move { rec.request(dst, req).await }
+    });
+    advance_in_100ms_chunks(Duration::from_millis(10)).await;
+    h.await.unwrap().unwrap();
+
+    let cap = rec.captured();
+    assert_eq!(cap.len(), 1);
+    assert_eq!(cap[0].path, "/routes?seed=1");
+    assert!(cap[0]
+        .req_headers
+        .iter()
+        .any(|(k, v)| k == "x-debug" && v == "yes"));
+    match &cap[0].outcome {
+        ExchangeOutcome::Response { status, headers, .. } => {
+            assert_eq!(*status, 200);
+            assert!(headers.iter().any(|(k, v)| k == "x-newkah-trace-id" && v == "trace-1"));
+        }
+        other => panic!("expected a response, got {other:?}"),
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn recorder_captures_response_and_error() {
     let sim = Arc::new(SimulatedHttpNetwork::new());
