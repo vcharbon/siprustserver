@@ -207,6 +207,27 @@ fn core_rules() -> Vec<RuleDefinition> {
             }),
             |_ctx| ok(vec![RuleAction::Respond { status: 491, reason: "Request Pending".into(), body: vec![], content_type: None }]),
         ),
+        // In-dialog UPDATE while the peer side is NOT in a relayable state
+        // (GAP-P8b-2): no peer leg, the peer leg terminated by a failure whose
+        // `/call/failure` reroute is still pending, or a replacement leg whose
+        // dialog has no remote tag yet. `relay-update` would either be silently
+        // dropped by the relay machinery (tag-less target dialog) or fired into
+        // a dead dialog, leaving the requester to time out. Answer **491
+        // Request Pending** locally instead (RFC 5407 §3.1 glare treatment —
+        // the spec-expected "retry later" during a pending failover; the
+        // requester re-UPDATEs once the reroute settles). The condition rides
+        // `RuleContext::peer_relay_ready` — the same resolver the relay
+        // executor uses — and is part of the rule vocabulary, so a
+        // SERVICE_LAYER rule can out-rank this CORE default and own the policy
+        // (park, alternate code, …). A legitimate early-dialog UPDATE
+        // (RFC 3311 §5.1 — peer early WITH a remote tag) stays relayable and
+        // never matches here.
+        rule(
+            "update-peer-unavailable",
+            &["relay-update"],
+            Match::request().method("UPDATE").filter(|ctx| !ctx.peer_relay_ready()),
+            |_ctx| ok(vec![RuleAction::Respond { status: 491, reason: "Request Pending".into(), body: vec![], content_type: None }]),
+        ),
         // Resolve a response to a relayed re-INVITE the originator CANCELled
         // (RFC 3261 §9 — `handle-reinvite-cancel` marked its pending-relay
         // snapshot `cancelled`). The originator's own re-INVITE transaction was
@@ -370,6 +391,47 @@ fn core_rules() -> Vec<RuleDefinition> {
             Match::response()
                 .methods(&["OPTIONS", "INFO", "PRACK", "UPDATE", "REFER", "MESSAGE", "SUBSCRIBE"])
                 .status_class(2),
+            |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
+        ),
+        // A relayed non-INVITE request's **non-2xx final** is relayed back to
+        // its requester — plain transaction-layer symmetry (RFC 3261 §8.1.3.3),
+        // GAP-P8b-5. The non-INVITE sibling of `relay-reinvite-response`
+        // (INVITE) alongside `relay-non-invite-200` (the 2xx half): without it
+        // the far end's 481/488/491… to a relayed UPDATE/INFO was silently
+        // dropped and the requester timed out. Matches ONLY when the source
+        // dialog holds a pending-relay snapshot for the response CSeq — i.e. a
+        // transaction WE relayed. A B2BUA-originated request (keepalive
+        // OPTIONS, relayFirst18x PRACK, REFER-progress NOTIFY) leaves no
+        // snapshot, so its failures keep their own rules — in particular a
+        // keepalive-OPTIONS 481 still reaches `handle-481`'s teardown, which
+        // this rule outranks only for relayed transactions. Like a failed
+        // re-INVITE (§14.1), a failed relayed non-INVITE leaves the dialog and
+        // the call as they were: report the failure to the requester, nothing
+        // more. (BYE never takes this path — it is answered locally and leaves
+        // no snapshot; the relay executor removes the snapshot on this final.)
+        rule(
+            "relay-non-invite-failure",
+            &["handle-481"],
+            Match::response()
+                .methods(&["OPTIONS", "INFO", "PRACK", "UPDATE", "REFER", "MESSAGE", "SUBSCRIBE"])
+                .filter(|ctx| {
+                    let Some(resp) = ctx.response() else {
+                        return false;
+                    };
+                    if resp.status < 300 {
+                        return false;
+                    }
+                    let cseq = resp.cseq.seq as i64;
+                    // Fork-correct dialog pick (mirrors `relay_response`): the
+                    // responder's To-tag selects the exact source dialog, else
+                    // the confirmed/first one.
+                    let to_tag = resp.to.tag.clone().unwrap_or_default();
+                    ctx.source_leg()
+                        .and_then(|leg| call::helpers::find_dialog_by_to_tag(leg, &to_tag))
+                        .or_else(|| ctx.source_dialog())
+                        .and_then(|d| call::helpers::find_pending_request(d, cseq))
+                        .is_some()
+                }),
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
         ),
         // ── failure ─────────────────────────────────────────────────────────
