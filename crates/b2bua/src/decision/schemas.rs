@@ -25,15 +25,35 @@ pub struct NewCallRequest {
     pub from: String,
     pub to: String,
     pub via: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub contact: Option<String>,
+    /// Every `Contact` line, in wire order. A `Contact` is repeatable
+    /// (RFC 3261 §20.10) and diversion/redirect flows can carry several — keep
+    /// each instance rather than collapsing to the last.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub contact: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub content_type: Option<String>,
     /// All headers not sent as a top-level field (this is where `X-*` land).
+    ///
+    /// Multi-valued: a header appearing on N separate lines keeps **all N**
+    /// values, in wire order, under its name. `History-Info`, `Diversion`, and
+    /// `P-Asserted-Identity` are multi-hop/multi-instance by nature — collapsing
+    /// them to the last line silently drops every earlier hop before the
+    /// decision engine sees them. Use [`NewCallRequest::sip_header`] for the
+    /// common single-value read.
     #[serde(default)]
-    pub sip_headers: BTreeMap<String, String>,
+    pub sip_headers: BTreeMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub sip_body: Option<String>,
+}
+
+impl NewCallRequest {
+    /// First value of a repeatable header, for the common case where a consumer
+    /// wants a single value (e.g. `X-Api-Call`). Returns `None` if the header is
+    /// absent or present with no value. For every instance, index `sip_headers`
+    /// directly.
+    pub fn sip_header(&self, name: &str) -> Option<&str> {
+        self.sip_headers.get(name).and_then(|v| v.first()).map(String::as_str)
+    }
 }
 
 /// A downstream SIP peer.
