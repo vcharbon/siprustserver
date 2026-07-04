@@ -20,8 +20,21 @@ pub enum TransactionEvent {
         src: SocketAddr,
     },
     /// A CANCEL matched a server INVITE txn; the 200/487 were sent by this
-    /// layer and the call should be torn down upstream.
-    Cancelled { call_id: String, from_tag: String },
+    /// layer. RFC 3261 §9 scopes a CANCEL to the one INVITE *transaction* it
+    /// matched, so the event carries enough for the consumer to tell an
+    /// initial-INVITE CANCEL (tear the call down) from one targeting an
+    /// in-dialog re-INVITE (end that renegotiation only, keep the call):
+    /// `invite_cseq` is the matched INVITE's CSeq number and `in_dialog` is
+    /// whether its `To` already carried a tag (an established dialog — a
+    /// re-INVITE). Both derive from the matched txn's stored original request;
+    /// `(None, false)` only on the degenerate no-stored-request path, which
+    /// consumers treat as the initial-INVITE (teardown) case.
+    Cancelled {
+        call_id: String,
+        from_tag: String,
+        invite_cseq: Option<u32>,
+        in_dialog: bool,
+    },
     /// A client transaction's Timer B/F (or the long INVITE_INITIAL_TIMEOUT
     /// backstop) fired with no final response — the transaction timed out.
     Timeout {

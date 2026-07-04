@@ -100,10 +100,13 @@ struct PeerDialog {
     received_invite_cseqs: Vec<u32>,
     /// Confirmed remote tag (set by the first received message carrying one).
     remote_tag: Option<String>,
-    /// Request-URI and top-Via branch of the first received INVITE — for the
-    /// CANCEL-matches-INVITE rules.
-    received_invite_uri: Option<String>,
-    received_invite_branch: Option<String>,
+    /// `(top-Via branch, Request-URI)` of every received INVITE — for the
+    /// CANCEL-matches-INVITE rules. RFC 3261 §9.1 scopes a CANCEL to the one
+    /// INVITE *transaction* it cancels, and a dialog legitimately carries
+    /// several INVITE transactions (the initial INVITE plus re-INVITEs), so
+    /// the rules correlate the CANCEL to its INVITE **by branch** instead of
+    /// pinning the first INVITE seen.
+    received_invites: Vec<(Option<String>, String)>,
     /// From-URI established for the remote party (the initial received INVITE's
     /// From-URI) — for `dialogUri`.
     dialog_remote_uri: Option<String>,
@@ -150,12 +153,7 @@ fn track_received(ds: &mut PeerDialog, msg: &SipMessage) {
     if let SipMessage::Request(req) = msg {
         if req.method.as_str() == "INVITE" {
             ds.recv_invite = true;
-            if ds.received_invite_uri.is_none() {
-                ds.received_invite_uri = Some(req.uri.clone());
-            }
-            if ds.received_invite_branch.is_none() {
-                ds.received_invite_branch = top_via_branch(msg);
-            }
+            ds.received_invites.push((top_via_branch(msg), req.uri.clone()));
             if ds.dialog_remote_uri.is_none() {
                 ds.dialog_remote_uri = Some(from_uri(msg).to_string());
             }
@@ -822,11 +820,14 @@ impl PeerAuditRule for CallIdRule {
     }
 }
 
-/// **RFC 3261 §9.1 — CANCEL Request-URI MUST equal the INVITE's.** A CANCEL must
-/// target exactly the request it cancels; a Request-URI differing from the
-/// INVITE this bind received means the CANCEL cannot be matched to the INVITE
-/// server transaction. Judged on **received** CANCELs against the received
-/// INVITE.
+/// **RFC 3261 §9.1 — CANCEL Request-URI MUST equal its INVITE's.** A CANCEL must
+/// target exactly the request it cancels. The CANCEL's INVITE transaction is
+/// identified **by its top-Via branch** (§9.1: the CANCEL reuses the INVITE's
+/// branch) — a dialog legitimately carries several INVITE transactions (initial
+/// + re-INVITEs), so this must not be judged against "the first INVITE seen".
+/// If the branch matched a received INVITE, that INVITE's Request-URI must
+/// equal the CANCEL's. An unmatched branch is `cancelViaBranch`'s finding, not
+/// this rule's. Judged on **received** CANCELs.
 pub struct CancelRequestUriRule;
 
 impl PeerAuditRule for CancelRequestUriRule {
@@ -842,8 +843,14 @@ impl PeerAuditRule for CancelRequestUriRule {
             if req.method.as_str() != "CANCEL" {
                 return Vec::new();
             }
-            let Some(invite_uri) = &ds.received_invite_uri else {
-                return Vec::new(); // never saw the INVITE — cannot judge
+            let cancel_branch = top_via_branch(&step.msg);
+            let Some((_, invite_uri)) = ds
+                .received_invites
+                .iter()
+                .rev()
+                .find(|(b, _)| b.is_some() && *b == cancel_branch)
+            else {
+                return Vec::new(); // no branch-matched INVITE — cancelViaBranch's finding
             };
             if &req.uri != invite_uri {
                 vec![format!(
@@ -858,11 +865,13 @@ impl PeerAuditRule for CancelRequestUriRule {
     }
 }
 
-/// **RFC 3261 §9.1 — CANCEL top Via branch MUST equal the INVITE's.** The CANCEL
-/// carries a single Via whose branch matches the top Via branch of the INVITE it
-/// cancels, so the cancel is routed to the same server transaction. A differing
-/// branch orphans the CANCEL. Judged on **received** CANCELs against the
-/// received INVITE.
+/// **RFC 3261 §9.1 — CANCEL top Via branch MUST equal the branch of an INVITE
+/// this bind received.** The CANCEL carries a single Via whose branch matches
+/// the top Via branch of the INVITE transaction it cancels, so the cancel is
+/// routed to that server transaction. A dialog legitimately carries several
+/// INVITE transactions (the initial INVITE + re-INVITEs) — the CANCEL is fine
+/// as long as its branch matches **any** of them; a branch matching none
+/// orphans the CANCEL. Judged on **received** CANCELs.
 pub struct CancelViaBranchRule;
 
 impl PeerAuditRule for CancelViaBranchRule {
@@ -878,17 +887,27 @@ impl PeerAuditRule for CancelViaBranchRule {
             if req.method.as_str() != "CANCEL" {
                 return Vec::new();
             }
-            let Some(invite_branch) = &ds.received_invite_branch else {
-                return Vec::new();
-            };
+            if ds.received_invites.is_empty() {
+                return Vec::new(); // never saw an INVITE — cannot judge
+            }
             let Some(cancel_branch) = top_via_branch(&step.msg) else {
                 return Vec::new();
             };
-            if &cancel_branch != invite_branch {
+            if !ds
+                .received_invites
+                .iter()
+                .any(|(b, _)| b.as_deref() == Some(cancel_branch.as_str()))
+            {
+                let known: Vec<&str> = ds
+                    .received_invites
+                    .iter()
+                    .filter_map(|(b, _)| b.as_deref())
+                    .collect();
                 vec![format!(
-                    "CANCEL top Via branch \"{cancel_branch}\" differs from the INVITE Via branch \
-                     \"{invite_branch}\" — RFC 3261 §9.1 (the CANCEL is routed to a different \
-                     server transaction)"
+                    "CANCEL top Via branch \"{cancel_branch}\" matches no received INVITE's \
+                     Via branch (saw: {}) — RFC 3261 §9.1 (the CANCEL is routed to a different \
+                     server transaction)",
+                    known.join(" | "),
                 )]
             } else {
                 Vec::new()

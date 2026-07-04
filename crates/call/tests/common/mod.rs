@@ -66,6 +66,7 @@ fn dialog(
                     source_from: "<sip:alice@example.com>;tag=alice-001".into(),
                     source_to: "<sip:bob@example.com>;tag=b2bua-aleg".into(),
                     direction: Direction::FromA,
+                    cancelled: false,
                 })
                 .collect(),
             ack_branch: Some(format!("z9hG4bK-ack-{cseq:x}")),
@@ -397,6 +398,7 @@ fn arb_pending_request() -> impl Strategy<Value = PendingRequest> {
                     source_from,
                     source_to,
                     direction,
+                    cancelled: false,
                 }
             },
         )

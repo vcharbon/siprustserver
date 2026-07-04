@@ -465,6 +465,20 @@ pub enum RuleAction {
     },
     DestroyLeg { leg_id: String },
     CancelLeg { leg_id: String },
+    /// CANCEL a relayed, still-unanswered **re-INVITE** client transaction on
+    /// `leg_id`'s dialog (RFC 3261 §9.1) — transaction-scoped: no leg state or
+    /// disposition change, the established dialog and the call stay up. Builds
+    /// the CANCEL from the dialog's cached `pending_invite_txn` handle (same
+    /// branch / Route set / wire destination as the re-INVITE) and marks the
+    /// matching pending-relay snapshot (`outbound_cseq`) cancelled so the
+    /// peer's eventual final is resolved locally instead of relayed (the
+    /// originator's own re-INVITE was already 487'd by the txn layer).
+    CancelPendingReinvite { leg_id: String, outbound_cseq: i64 },
+    /// Resolve a CANCELled relayed re-INVITE's final response locally: drop the
+    /// cancelled pending-relay snapshot (`outbound_cseq`) from `leg_id`'s
+    /// dialog. Never relayed — the txn layer answered the originator when the
+    /// CANCEL matched.
+    ResolveCancelledReinvite { leg_id: String, outbound_cseq: i64 },
     ScheduleTimer {
         timer_type: TimerType,
         delay_sec: i64,
@@ -653,6 +667,7 @@ impl RuleAction {
             | RuleAction::CreateLeg { .. }
             | RuleAction::DestroyLeg { .. }
             | RuleAction::CancelLeg { .. }
+            | RuleAction::CancelPendingReinvite { .. }
             | RuleAction::TerminateLeg { .. }
             | RuleAction::SendRequestToLeg { .. }
             | RuleAction::SendProvisionalToLeg { .. }
@@ -685,7 +700,8 @@ impl RuleAction {
             | RuleAction::FailureAsyncHttp { .. }
             | RuleAction::SetFeatures { .. }
             | RuleAction::MergeCallExt { .. }
-            | RuleAction::RecordLimiterHolds { .. } => EffectKind::Bookkeeping,
+            | RuleAction::RecordLimiterHolds { .. }
+            | RuleAction::ResolveCancelledReinvite { .. } => EffectKind::Bookkeeping,
         }
     }
 }
@@ -849,6 +865,23 @@ impl<'a> RuleContext<'a> {
     pub fn timeout_method(&self) -> Option<&str> {
         match self.event {
             CallEvent::Timeout { method, .. } => method.as_deref(),
+            _ => None,
+        }
+    }
+    /// For a `Cancelled` event: did the CANCEL match an **in-dialog** INVITE
+    /// server transaction (a re-INVITE — its `To` carried a tag)? `false` for
+    /// the initial INVITE and for every other event kind. RFC 3261 §9: this is
+    /// the discriminator between "caller abandoned the call" and "caller
+    /// abandoned one renegotiation".
+    pub fn cancelled_in_dialog(&self) -> bool {
+        matches!(self.event, CallEvent::Cancelled { in_dialog: true, .. })
+    }
+    /// For a `Cancelled` event: the CSeq number of the INVITE transaction the
+    /// CANCEL matched (the canceller's own CSeq space — i.e. the relayed
+    /// pending request's `inbound_cseq`).
+    pub fn cancelled_invite_cseq(&self) -> Option<i64> {
+        match self.event {
+            CallEvent::Cancelled { invite_cseq, .. } => invite_cseq.map(i64::from),
             _ => None,
         }
     }

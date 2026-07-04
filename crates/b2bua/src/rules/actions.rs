@@ -215,6 +215,17 @@ impl<'a> ActionExecutor<'a> {
                 }
                 *call = set_leg_disposition(call.clone(), leg_id, LegDisposition::Cancelling);
             }
+            RuleAction::CancelPendingReinvite { leg_id, outbound_cseq } => {
+                self.cancel_pending_reinvite(call, fx, leg_id, *outbound_cseq);
+            }
+            RuleAction::ResolveCancelledReinvite { leg_id, outbound_cseq } => {
+                // Drop the cancelled pending-relay snapshot: the final response
+                // to the CANCELled relayed re-INVITE resolves here, never
+                // relayed (the txn layer already 487'd the originator).
+                if let Some((t_id, _)) = find_pending_dialog(call, leg_id, *outbound_cseq) {
+                    *call = remove_pending_request(call.clone(), leg_id, &t_id, *outbound_cseq);
+                }
+            }
             RuleAction::ScheduleTimer {
                 timer_type,
                 delay_sec,
@@ -788,6 +799,7 @@ impl<'a> ActionExecutor<'a> {
                 source_from: get_header(&req.headers, "from").unwrap_or_default().to_string(),
                 source_to: get_header(&req.headers, "to").unwrap_or_default().to_string(),
                 direction: ctx.direction,
+                cancelled: false,
             };
             *call = add_pending_request(call.clone(), target_leg, &t_id, pending);
         }
@@ -1677,6 +1689,53 @@ impl<'a> ActionExecutor<'a> {
         })
     }
 
+    /// Transaction-scoped CANCEL of a relayed, still-pending **re-INVITE** on
+    /// `leg_id`'s dialog (RFC 3261 §9.1). Unlike [`Self::cancel_to_leg`] /
+    /// `CancelLeg` this touches NO leg state or disposition — the established
+    /// dialog and the call stay up; only the renegotiation ends. The CANCEL is
+    /// built from the dialog's cached `pending_invite_txn` handle, so it reuses
+    /// the re-INVITE's branch, echoes its Route set (`generate_cancel`), and
+    /// goes to the re-INVITE's cached wire destination — the same next-hop
+    /// consistency as the initial-INVITE `cancel_to_leg` path. The matching
+    /// pending-relay snapshot is marked `cancelled` so the target's eventual
+    /// final (487, or a crossing 200) resolves locally instead of relaying.
+    fn cancel_pending_reinvite(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        outbound_cseq: i64,
+    ) {
+        let Some((t_id, dialog)) = find_pending_dialog(call, leg_id, outbound_cseq) else {
+            return;
+        };
+        let Some(handle) = dialog.ext.pending_invite_txn.as_ref() else {
+            return;
+        };
+        let Ok(SipMessage::Request(req)) = CustomParser::new().parse(&handle.original_invite)
+        else {
+            return;
+        };
+        // Defensive: the handle must be the re-INVITE this pending entry tracks
+        // (the glare guard makes a second in-flight INVITE on this dialog
+        // impossible, but never CANCEL a mismatched transaction).
+        if req.cseq.seq as i64 != outbound_cseq {
+            return;
+        }
+        let cancel = generators::generate_cancel(&InviteClientTransactionHandle {
+            original_invite: req,
+        });
+        fx.outbound.push(OutboundSipEffect {
+            body: OutboundBody::Request(cancel),
+            mode: OutboundTxnMode::Raw,
+            destination: (handle.destination.host.clone(), handle.destination.port),
+            label: format!("CANCEL re-INVITE → {leg_id}"),
+            leg_id: Some(leg_id.to_string()),
+        });
+        *call =
+            call::helpers::cancel_pending_request(call.clone(), leg_id, &t_id, outbound_cseq);
+    }
+
     fn cancel_to_leg(&self, call: &Call, leg_id: &str) -> Option<OutboundSipEffect> {
         let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
         let d = leg.dialogs.first()?;
@@ -1724,6 +1783,21 @@ fn dialog_identity_tag(leg_id: &str, dialog: &Dialog) -> String {
     } else {
         dialog.sip.remote_tag.clone()
     }
+}
+
+/// Find the dialog on `leg_id` (the a-leg or a b-leg) holding the pending
+/// transparent-relay snapshot for `outbound_cseq`; returns its identity tag
+/// (dialog selector for the lens helpers) plus an owned clone of the dialog.
+fn find_pending_dialog(call: &Call, leg_id: &str, outbound_cseq: i64) -> Option<(String, Dialog)> {
+    let leg = if call.a_leg.leg_id == leg_id {
+        &call.a_leg
+    } else {
+        call.b_legs.iter().find(|l| l.leg_id == leg_id)?
+    };
+    leg.dialogs
+        .iter()
+        .find(|d| find_pending_request(d, outbound_cseq).is_some())
+        .map(|d| (dialog_identity_tag(leg_id, d), d.clone()))
 }
 
 /// The INVITE CSeq cached on a dialog's pending INVITE handle (RFC 3261

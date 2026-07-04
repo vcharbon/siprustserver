@@ -39,6 +39,32 @@ fn parse_header_updates(payload: &serde_json::Value) -> Vec<(String, Option<Stri
         .unwrap_or_default()
 }
 
+/// Locate the leg carrying the still-pending relayed re-INVITE a CANCEL
+/// targets: the pending-relay snapshot whose `inbound_cseq` equals the
+/// CANCELled INVITE's CSeq (the canceller's own CSeq space). Returns the
+/// target leg id + the snapshot's `outbound_cseq` (the relayed transaction's
+/// CSeq on that leg's dialog). At most one relayed INVITE is in flight per
+/// call (`reinvite-glare` 491s a second), so the first match is the match;
+/// an already-`cancelled` snapshot is skipped (a retransmitted CANCEL must
+/// not re-CANCEL).
+fn find_pending_relayed_invite(ctx: &RuleContext, inbound_cseq: i64) -> Option<(String, i64)> {
+    std::iter::once(ctx.call.a_leg())
+        .chain(ctx.call.b_legs().iter())
+        .find_map(|leg| {
+            leg.dialogs.iter().find_map(|d| {
+                d.ext
+                    .inbound_pending_requests
+                    .iter()
+                    .find(|p| {
+                        p.method.eq_ignore_ascii_case("INVITE")
+                            && p.inbound_cseq == inbound_cseq
+                            && !p.cancelled
+                    })
+                    .map(|p| (leg.leg_id.clone(), p.outbound_cseq))
+            })
+        })
+}
+
 fn keepalive_interval(ctx: &RuleContext) -> i64 {
     // The in-dialog OPTIONS keepalive interval is an operator/worker knob
     // (`B2buaConfig::keepalive_interval_sec`, production default 300 s,
@@ -181,6 +207,57 @@ fn core_rules() -> Vec<RuleDefinition> {
             }),
             |_ctx| ok(vec![RuleAction::Respond { status: 491, reason: "Request Pending".into(), body: vec![], content_type: None }]),
         ),
+        // Resolve a response to a relayed re-INVITE the originator CANCELled
+        // (RFC 3261 §9 — `handle-reinvite-cancel` marked its pending-relay
+        // snapshot `cancelled`). The originator's own re-INVITE transaction was
+        // already answered by the txn layer (200 to the CANCEL + 487), so the
+        // target's final must NOT be relayed:
+        //   - 487 / any non-2xx final → drop the snapshot; renegotiation over,
+        //     dialog + call intact (§14.1: a failed re-INVITE leaves the
+        //     session as it was).
+        //   - **crossing 2xx** (the target answered before our CANCEL landed,
+        //     §9.1): ACK it on this dialog (quiesces the target's 2xx
+        //     retransmissions, §13.2.2.4) and absorb. The call stays up. The
+        //     two sides' SDP views may diverge until the next renegotiation
+        //     (the target applied the new offer; the canceller kept the old
+        //     session) — the deliberate minimal-intervention choice: the
+        //     canceller abandoned the renegotiation it initiated, and killing
+        //     the call (or minting a resync re-INVITE) costs more than the
+        //     transient divergence.
+        //   - 1xx → absorb and keep waiting for the final.
+        // Outranks `relay-reinvite-response` (whose filter also skips cancelled
+        // snapshots) and the INVITE-response fallbacks that would otherwise
+        // claim the final.
+        rule(
+            "resolve-cancelled-reinvite-response",
+            &["relay-reinvite-response", "relay-provisional", "confirm-dialog", "route-failure"],
+            Match::response().method("INVITE").filter(|ctx| {
+                let cseq = match ctx.response() {
+                    Some(r) => r.cseq.seq as i64,
+                    None => return false,
+                };
+                ctx.source_dialog()
+                    .and_then(|d| call::helpers::find_pending_request(d, cseq))
+                    .map(|p| p.cancelled)
+                    .unwrap_or(false)
+            }),
+            |ctx| {
+                let resp = ctx.response()?;
+                if resp.status < 200 {
+                    // Provisional on the CANCELled re-INVITE — absorb; the 487
+                    // (or crossing 2xx) is still coming.
+                    return ok(vec![]);
+                }
+                let leg = ctx.source_leg_id.to_string();
+                let outbound_cseq = resp.cseq.seq as i64;
+                let mut actions = Vec::new();
+                if (200..300).contains(&resp.status) {
+                    actions.push(RuleAction::AckLeg { leg_id: leg.clone() });
+                }
+                actions.push(RuleAction::ResolveCancelledReinvite { leg_id: leg, outbound_cseq });
+                ok(actions)
+            },
+        ),
         // Relay a re-INVITE response (1xx/2xx/3xx+) back to the originator. The
         // source dialog carries a pending-relay snapshot for the response CSeq
         // (captured when the re-INVITE was relayed onto this dialog) — so the
@@ -196,8 +273,12 @@ fn core_rules() -> Vec<RuleDefinition> {
                     Some(r) => r.cseq.seq as i64,
                     None => return false,
                 };
+                // A `cancelled` snapshot is NOT relayable — its originator was
+                // already 487'd by the txn layer when the CANCEL matched; the
+                // final resolves via `resolve-cancelled-reinvite-response`.
                 ctx.source_dialog()
-                    .map(|d| call::helpers::find_pending_request(d, cseq).is_some())
+                    .and_then(|d| call::helpers::find_pending_request(d, cseq))
+                    .map(|p| !p.cancelled)
                     .unwrap_or(false)
             }),
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
@@ -703,6 +784,46 @@ fn core_rules() -> Vec<RuleDefinition> {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
         // ── lifecycle ───────────────────────────────────────────────────────
+        // RFC 3261 §9: a CANCEL targets the one pending INVITE **transaction**
+        // it matched — cancelling a re-INVITE ends that renegotiation, not the
+        // call. The txn layer already answered the canceller (200 to the
+        // CANCEL, 487 to the re-INVITE) and told us which INVITE it matched
+        // (`in_dialog` = its To carried a tag ⇒ a re-INVITE). Here we CANCEL
+        // the *relayed* re-INVITE toward the peer (transaction-scoped: no leg
+        // state change, `CancelPendingReinvite`) and leave the dialog and the
+        // call up; the peer's 487 — or a crossing 200 — is resolved by
+        // `resolve-cancelled-reinvite-response`. If no un-cancelled pending
+        // relayed INVITE exists (the peer's final was already relayed — the
+        // CANCEL lost the race end-to-end), there is nothing left to cancel:
+        // absorb and keep the call (§9.2 — a CANCEL never affects a completed
+        // transaction). Outranks `handle-cancel`, whose unconditional teardown
+        // is the correct semantics ONLY for the initial INVITE.
+        rule(
+            "handle-reinvite-cancel",
+            &["handle-cancel"],
+            Match::cancelled().filter(|ctx| ctx.cancelled_in_dialog()),
+            |ctx| {
+                let Some((leg_id, outbound_cseq)) =
+                    ctx.cancelled_invite_cseq().and_then(|c| find_pending_relayed_invite(ctx, c))
+                else {
+                    // Already answered end-to-end (or never relayed): no-op —
+                    // the call must survive an in-dialog CANCEL regardless.
+                    return ok(vec![]);
+                };
+                ok(vec![
+                    RuleAction::CancelPendingReinvite {
+                        leg_id: leg_id.clone(),
+                        outbound_cseq,
+                    },
+                    RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Cancel,
+                        leg_id,
+                        status_code: None,
+                        reason: Some("reinvite_cancelled".into()),
+                    },
+                ])
+            },
+        ),
         rule("handle-cancel", &[], Match::cancelled(), |ctx| {
             let mut actions = Vec::new();
             for b in ctx.call.b_legs() {
