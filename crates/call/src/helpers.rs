@@ -456,6 +456,35 @@ pub fn relay_first_18x_first_relayed(call: &Call) -> bool {
         .unwrap_or(false)
 }
 
+/// The active `relay18x.messages` policy (defaults to `FIRST` — the historical
+/// behavior — when the feature or the field is absent).
+pub fn relay_first_18x_messages(call: &Call) -> crate::features::Relay18xMessages {
+    call.features
+        .as_ref()
+        .and_then(|f| f.relay_first_18x_to_180.as_ref())
+        .map(|r| r.messages)
+        .unwrap_or_default()
+}
+
+/// Whether an 18x with this *upstream* status value was already relayed
+/// (the `ONE_PER_VALUE` dedupe test).
+pub fn relay_first_18x_value_relayed(call: &Call, status: u16) -> bool {
+    call.relay_first_18x
+        .as_ref()
+        .map(|s| s.relayed_values.contains(&status))
+        .unwrap_or(false)
+}
+
+/// Record an *upstream* 18x status value as relayed (the `ONE_PER_VALUE`
+/// dedupe ledger; bounded — one entry per distinct 18x value).
+pub fn record_relay_first_18x_value(mut call: Call, status: u16) -> Call {
+    let s = call.relay_first_18x.get_or_insert_with(Default::default);
+    if !s.relayed_values.contains(&status) {
+        s.relayed_values.push(status);
+    }
+    call
+}
+
 /// The a-facing To-tag minted on the first 18x (reused on the 200 OK).
 pub fn relay_first_18x_stored_a_tag(call: &Call) -> Option<&str> {
     call.relay_first_18x
@@ -463,39 +492,36 @@ pub fn relay_first_18x_stored_a_tag(call: &Call) -> Option<&str> {
         .and_then(|s| s.stored_a_tag.as_deref())
 }
 
-/// Mark the first 18x relayed and record the minted a-facing tag.
+/// Mark the first 18x relayed and record the minted a-facing tag. Preserves the
+/// `ONE_PER_VALUE` dedupe ledger (a later relayed 18x re-runs this with the
+/// same stored tag).
 pub fn set_relay_first_18x_relayed(mut call: Call, stored_a_tag: &str) -> Call {
-    call.relay_first_18x = Some(crate::model::RelayFirst18xState {
-        first_relayed: true,
-        stored_a_tag: Some(stored_a_tag.to_string()),
-    });
+    let s = call.relay_first_18x.get_or_insert_with(Default::default);
+    s.first_relayed = true;
+    s.stored_a_tag = Some(stored_a_tag.to_string());
     call
 }
 
-/// Cache an SDP body on a b-leg dialog selected by its callee (remote) tag,
-/// falling back to the leg's first dialog when no tag matches.
+/// Cache an SDP body on a b-leg dialog selected **strictly** by its callee
+/// (remote) tag. No first-dialog fallback: under downstream forking each early
+/// dialog carries its own answer (RFC 3264 §4), and a fallback write would
+/// overwrite a *different* fork's cache (GAP-P7-1). A miss is a no-op — the
+/// executor ensures the `(leg, b_tag)` dialog exists before caching.
 pub fn cache_sdp_on_leg_dialog(mut call: Call, leg_id: &str, b_tag: &str, body: Vec<u8>) -> Call {
     if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
-        let idx = leg
-            .dialogs
-            .iter()
-            .position(|d| d.sip.remote_tag == b_tag)
-            .or(if leg.dialogs.is_empty() { None } else { Some(0) });
-        if let Some(i) = idx {
-            leg.dialogs[i].ext.cached_sdp = Some(body);
+        if let Some(d) = leg.dialogs.iter_mut().find(|d| d.sip.remote_tag == b_tag) {
+            d.ext.cached_sdp = Some(body);
         }
     }
     call
 }
 
-/// The SDP cached on a b-leg dialog selected by callee tag (else first dialog).
+/// The SDP cached on a b-leg dialog selected **strictly** by callee tag (no
+/// first-dialog fallback — a different fork's cache must never leak into this
+/// dialog's answer).
 pub fn cached_sdp_for_leg_dialog<'a>(call: &'a Call, leg_id: &str, b_tag: &str) -> Option<&'a [u8]> {
     let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
-    let dialog = leg
-        .dialogs
-        .iter()
-        .find(|d| d.sip.remote_tag == b_tag)
-        .or_else(|| leg.dialogs.first())?;
+    let dialog = leg.dialogs.iter().find(|d| d.sip.remote_tag == b_tag)?;
     dialog.ext.cached_sdp.as_deref()
 }
 

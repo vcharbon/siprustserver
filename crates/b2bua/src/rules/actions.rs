@@ -352,9 +352,18 @@ impl<'a> ActionExecutor<'a> {
                 invite_cseq,
                 b_tag,
             } => {
+                // A *suppressed* fork's reliable 1xx never rode the relay path
+                // (the only other early-dialog tracker), so register its
+                // per-To-tag dialog here — the PRACK targets strictly `(leg,
+                // b_tag)` (no first-dialog fallback; GAP-P7-1).
+                self.ensure_b_early_dialog(call, ctx, leg_id, b_tag);
                 self.send_prack_to_leg(call, fx, leg_id, *rseq, *invite_cseq, b_tag);
             }
             RuleAction::CacheSdpOnLegDialog { leg_id, b_tag, body } => {
+                // Same suppressed-fork registration as SendPrackToLeg: the cache
+                // is keyed strictly on `(leg, b_tag)` — a fallback write would
+                // overwrite a different fork's cached answer (GAP-P7-1).
+                self.ensure_b_early_dialog(call, ctx, leg_id, b_tag);
                 *call = call::helpers::cache_sdp_on_leg_dialog(
                     call.clone(),
                     leg_id,
@@ -366,11 +375,18 @@ impl<'a> ActionExecutor<'a> {
                 call.policy_update_body = Some(call::PolicyUpdateBody::Bytes(body.clone()));
             }
             RuleAction::RelayFirstBare180 { leg_id, b_tag } => {
-                // Mint the a-facing To-tag (executor owns the IdGen), seed the
-                // tag map for this b-leg dialog, record it, then relay the
-                // current 1xx as a bare 180. The relay path resolves the
-                // a-facing tag from the map (`find_by_b_tag`).
-                let a_facing_tag = self.id_gen.new_tag();
+                // Mint the a-facing To-tag on the FIRST 18x (executor owns the
+                // IdGen); a LATER 18x the `relay18x.messages` policy relays
+                // again (ALL / ONE_PER_VALUE) reuses the stored tag — the
+                // masking property presents ONE stable early dialog to the
+                // caller regardless of which fork rings. Seed the tag map for
+                // this b-leg dialog, record it (+ the upstream status value for
+                // ONE_PER_VALUE dedupe), then relay the current 1xx as a bare
+                // 180. The relay path resolves the a-facing tag from the map
+                // (`find_by_b_tag`).
+                let a_facing_tag = call::helpers::relay_first_18x_stored_a_tag(call)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| self.id_gen.new_tag());
                 *call = add_tag_mapping(
                     call.clone(),
                     TagMapping {
@@ -380,6 +396,9 @@ impl<'a> ActionExecutor<'a> {
                     },
                 );
                 *call = call::helpers::set_relay_first_18x_relayed(call.clone(), &a_facing_tag);
+                if let Some(resp) = ctx.response() {
+                    *call = call::helpers::record_relay_first_18x_value(call.clone(), resp.status);
+                }
                 let transform = MessageTransform {
                     status: Some(180),
                     reason: Some("Ringing".to_string()),
@@ -1110,10 +1129,33 @@ impl<'a> ActionExecutor<'a> {
         fx.outbound.push(effect);
     }
 
+    /// Register the current event's b-leg early dialog when the machine handles
+    /// a provisional WITHOUT relaying it (a suppressed fork's reliable 1xx):
+    /// `track_b_early_dialog` otherwise only runs on the relay path, so a
+    /// suppressed fork would have no `(leg, b_tag)` dialog and its AS-originated
+    /// PRACK / SDP cache — keyed strictly on that pair — would silently miss
+    /// (pre-fix they fell back to the FIRST dialog: mis-targeted PRACK +
+    /// overwritten cache, GAP-P7-1). Only the event's own response can seed the
+    /// dialog (Contact / Record-Route / CSeq come from it); other `(leg, tag)`
+    /// targets must already be tracked. Idempotent (`track_b_early_dialog`
+    /// skips a known tag).
+    fn ensure_b_early_dialog(&self, call: &mut Call, ctx: &RuleContext, leg_id: &str, b_tag: &str) {
+        if b_tag.is_empty() || leg_id == "a" {
+            return;
+        }
+        let Some(resp) = ctx.response() else { return };
+        if ctx.source_leg_id != leg_id || resp.to.tag.as_deref() != Some(b_tag) {
+            return;
+        }
+        self.track_b_early_dialog(call, leg_id, resp, b_tag);
+    }
+
     /// Establish (or refresh) a b-leg early dialog from a reliable 1xx so a
     /// subsequent in-dialog request (PRACK/UPDATE) can target the callee with
-    /// the right To-tag (RFC 3261 §12.1.2). Single early dialog per leg here;
-    /// multi-fork early dialogs are a forking-slice concern.
+    /// the right To-tag (RFC 3261 §12.1.2). One early dialog per distinct
+    /// callee To-tag (downstream forking → several per b-leg); called from the
+    /// b-leg 1xx/2xx relay path and from [`Self::ensure_b_early_dialog`] (the
+    /// suppressed-provisional seam). Idempotent per tag.
     fn track_b_early_dialog(
         &self,
         call: &mut Call,
@@ -1733,15 +1775,14 @@ impl<'a> ActionExecutor<'a> {
             Some(i) => i,
             None => return,
         };
-        // Pick the early dialog by callee tag (forking → independent dialogs).
+        // Pick the early dialog STRICTLY by callee tag (forking → independent
+        // dialogs). No first-dialog fallback: falling back would stamp another
+        // fork's To-tag on this fork's RAck (a PRACK the callee rejects with
+        // 481, and the fork keeps retransmitting its reliable 1xx). The
+        // `ensure_b_early_dialog` seam registers the dialog before this runs.
         let dialog = {
             let leg = leg_at(call, idx);
-            let picked = leg
-                .dialogs
-                .iter()
-                .find(|d| d.sip.remote_tag == b_tag)
-                .or_else(|| leg.dialogs.first());
-            match picked {
+            match leg.dialogs.iter().find(|d| d.sip.remote_tag == b_tag) {
                 Some(d) => d.clone(),
                 None => return,
             }

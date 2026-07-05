@@ -236,6 +236,7 @@ pub fn representative_call() -> Call {
             refer: None,
             relay_first_18x_to_180: Some(RelayFirst18xTo180Feature {
                 strategy: RelayFirst18xStrategy::FakePrack,
+                messages: Default::default(),
             }),
             no_answer_timeout_sec: Some(45),
             call_limiters: None,
@@ -576,17 +577,22 @@ fn arb_features() -> impl Strategy<Value = FeatureActivations> {
         Just(RelayFirst18xStrategy::FakePrack),
         Just(RelayFirst18xStrategy::PromotePemTo200),
     ];
+    let messages = prop_oneof![
+        Just(call::features::Relay18xMessages::All),
+        Just(call::features::Relay18xMessages::First),
+        Just(call::features::Relay18xMessages::OnePerValue),
+    ];
     (
         platform,
         proptest::option::of(proptest::option::of(any::<i64>())),
-        proptest::option::of(strat),
+        proptest::option::of((strat, messages)),
         proptest::option::of(any::<i64>()),
     )
         .prop_map(|(platform, refer_depth, strategy, no_answer)| FeatureActivations {
             platform,
             refer: refer_depth.map(|max_chain_depth| call::features::ReferFeature { max_chain_depth }),
             relay_first_18x_to_180: strategy
-                .map(|strategy| RelayFirst18xTo180Feature { strategy }),
+                .map(|(strategy, messages)| RelayFirst18xTo180Feature { strategy, messages }),
             no_answer_timeout_sec: no_answer,
             call_limiters: None,
         })

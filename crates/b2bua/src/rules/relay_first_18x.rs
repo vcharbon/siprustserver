@@ -7,9 +7,12 @@
 //!   - **`Masking`** — the first 18x has not been relayed yet. The next 18x from
 //!     any b-leg is rewritten into a bare 180 (no SDP, no `100rel`) toward A and
 //!     the call advances to `Suppressing`.
-//!   - **`Suppressing`** — the first 18x is out (as a bare 180). Every later 18x
-//!     across every b-leg is suppressed; the 200 OK reuses the first 180's To-tag
-//!     so the caller sees one stable callee identity across forking/failover.
+//!   - **`Suppressing`** — the first 18x is out (as a bare 180). Later 18x
+//!     across every b-leg follow the `relay18x.messages` policy (default FIRST:
+//!     all suppressed; ALL: each relayed downgraded; ONE_PER_VALUE: one per
+//!     distinct upstream status value) — every relayed one reuses the first
+//!     180's To-tag, and so does the 200 OK, so the caller sees one stable
+//!     callee identity across forking/failover.
 //!
 //! Its cursor is a read-only **projection** (see [`project_cursor`], mirroring the
 //! `global-call` / `transfer` projections) of two authoritative facts that already
@@ -91,12 +94,17 @@ define_service! {
     states: Phase { Masking, Suppressing },
     init: |_call| None,
     rules: [
-        // ── suppress-18x — first 18x → bare 180; suppress the rest ────────────
+        // ── suppress-18x — first 18x → bare 180; police the rest ──────────────
         // Wins over CORE `relay-provisional` by SERVICE_LAYER. On the first 18x:
         // relay a bare 180 (minting the a-facing tag + seeding the tag map, in the
-        // `RelayFirstBare180` executor) and advance to `Suppressing`. On later
-        // 18x: suppress the relay. Reliable 1xx is PRACKed by the B2BUA itself
-        // (alice never saw it); `fake-prack` caches bob's SDP per dialog.
+        // `RelayFirstBare180` executor) and advance to `Suppressing`. Later 18x
+        // follow the `relay18x.messages` policy (Routing API `Relay18x.messages`):
+        // FIRST (default) suppresses them all; ALL relays each one (downgraded to
+        // a bare 180 under the SAME stored a-facing tag — the mask stays one
+        // early dialog); ONE_PER_VALUE relays the first 18x of each distinct
+        // *upstream* status value and suppresses repeats. Reliable 1xx is PRACKed
+        // by the B2BUA itself (alice never saw it); `fake-prack` caches bob's SDP
+        // per `(leg, To-tag)` dialog — strictly, one cache per fork (GAP-P7-1).
         sm_rule! {
             id: "suppress-18x",
             machine: RELAY_FIRST_18X_MACHINE,
@@ -138,24 +146,41 @@ define_service! {
                 };
 
                 if ctx.call.relay_first_18x_first_relayed() {
-                    // Subsequent 18x — suppress relay; still PRACK + cache.
-                    let mut actions = Vec::new();
-                    if let Some(a) = prack_action {
-                        actions.push(a);
+                    // Subsequent 18x — the `relay18x.messages` policy decides
+                    // whether it is relayed again (downgraded, under the stored
+                    // a-facing tag) or suppressed. Either way it is PRACKed +
+                    // cached (per-fork dialog state is policy-independent).
+                    let relay_again = match ctx.call.relay_first_18x_messages() {
+                        call::features::Relay18xMessages::All => true,
+                        call::features::Relay18xMessages::First => false,
+                        call::features::Relay18xMessages::OnePerValue => {
+                            !ctx.call.relay_first_18x_value_relayed(resp.status)
+                        }
+                    };
+                    if !relay_again {
+                        let mut actions = Vec::new();
+                        if let Some(a) = prack_action {
+                            actions.push(a);
+                        }
+                        if let Some(a) = cache_action {
+                            actions.push(a);
+                        }
+                        actions.push(RuleAction::AddCdrEvent {
+                            event_type: CdrEventType::Provisional,
+                            leg_id: leg,
+                            status_code: Some(resp.status as i64),
+                            reason: None,
+                        });
+                        return ok(actions);
                     }
-                    if let Some(a) = cache_action {
-                        actions.push(a);
-                    }
-                    actions.push(RuleAction::AddCdrEvent {
-                        event_type: CdrEventType::Provisional,
-                        leg_id: leg,
-                        status_code: Some(resp.status as i64),
-                        reason: None,
-                    });
-                    return ok(actions);
+                    // Relay-again falls through to the RelayFirstBare180 branch:
+                    // its executor reuses the stored a-facing tag (one stable
+                    // early dialog toward the caller) and records the upstream
+                    // status value for ONE_PER_VALUE dedupe.
                 }
 
-                // First 18x — mint an a-facing tag + relay as a bare 180 (the
+                // First 18x (or a later one the messages policy relays again) —
+                // mint/reuse the a-facing tag + relay as a bare 180 (the
                 // executor owns the IdGen and the tag-map seeding, and flips
                 // `first_relayed`, which the projection mirrors → `Suppressing`).
                 let mut actions = vec![

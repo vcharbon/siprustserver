@@ -593,11 +593,14 @@ pub enum RuleAction {
     /// Stage `body` into `call.policy_update_body` so the response relay path
     /// substitutes it into the next relayed body (`fake-prack` 200-OK SDP).
     SetPolicyUpdateBody { body: Vec<u8> },
-    /// First-18x bare-180 downgrade (`relayFirst18xTo180`): mint an a-facing
-    /// To-tag (the executor owns the IdGen), seed the tag map for this b-leg
-    /// dialog, record it as `stored_a_tag` + `first_relayed`, and relay the
-    /// current 1xx to the caller as a bare 180 (no body / Require / RSeq). The
-    /// minted tag is the single source the relay path resolves via the tag map.
+    /// Bare-180 downgrade relay (`relayFirst18xTo180`): mint an a-facing To-tag
+    /// on the FIRST 18x (the executor owns the IdGen) — or reuse the stored one
+    /// on a later 18x the `relay18x.messages` policy relays again (the caller
+    /// keeps ONE stable early-dialog identity) — seed the tag map for this
+    /// b-leg dialog, record `stored_a_tag` + `first_relayed` (+ the upstream
+    /// status value for `ONE_PER_VALUE` dedupe), and relay the current 1xx to
+    /// the caller as a bare 180 (no body / Require / RSeq). The tag is the
+    /// single source the relay path resolves via the tag map.
     RelayFirstBare180 { leg_id: String, b_tag: String },
     // ── promote18xPemTo200 (SERVICE_LAYER) ──────────────────────────────────
     /// Originate a re-INVITE on `leg_id` (here always the a-leg) carrying `body`
@@ -911,6 +914,15 @@ impl<'a> RuleCall<'a> {
     }
     pub fn relay_first_18x_stored_a_tag(&self) -> Option<&'a str> {
         call::helpers::relay_first_18x_stored_a_tag(self.0)
+    }
+    /// The active `relay18x.messages` policy (defaults to `FIRST`).
+    pub fn relay_first_18x_messages(&self) -> call::features::Relay18xMessages {
+        call::helpers::relay_first_18x_messages(self.0)
+    }
+    /// Whether an 18x with this *upstream* status value was already relayed
+    /// (the `ONE_PER_VALUE` dedupe test).
+    pub fn relay_first_18x_value_relayed(&self, status: u16) -> bool {
+        call::helpers::relay_first_18x_value_relayed(self.0, status)
     }
     pub fn promote_pem_state(&self) -> Option<&'a PromotePemState> {
         self.0.promote_pem.as_ref()

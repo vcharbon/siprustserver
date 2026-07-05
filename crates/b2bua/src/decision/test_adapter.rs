@@ -516,9 +516,20 @@ pub fn route_to_with_18x(
     port: u16,
     strategy: call::features::RelayFirst18xStrategy,
 ) -> RouteDecision {
+    route_to_with_18x_messages(host, port, strategy, Default::default())
+}
+
+/// [`route_to_with_18x`] with an explicit `relay18x.messages` policy (the
+/// scripted equivalent of the Routing API `Relay18x.messages` field).
+pub fn route_to_with_18x_messages(
+    host: &str,
+    port: u16,
+    strategy: call::features::RelayFirst18xStrategy,
+    messages: call::features::Relay18xMessages,
+) -> RouteDecision {
     let mut r = route_to(host, port);
     r.features.relay_first_18x_to_180 =
-        Some(call::features::RelayFirst18xTo180Feature { strategy });
+        Some(call::features::RelayFirst18xTo180Feature { strategy, messages });
     r
 }
 

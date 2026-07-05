@@ -218,6 +218,114 @@ async fn failover_no_answer() {
     let _ = h.finish().await;
 }
 
+// ── relay18x.messages policy (GAP-P7-2) ─────────────────────────────────────
+// The Routing API `Relay18x.messages` field picks WHICH 18x are relayed (each
+// relayed one still downgraded to a bare 180 under the SAME stored To-tag):
+// FIRST (default, covered by the tests above), ALL, ONE_PER_VALUE (one per
+// distinct *upstream* status value). `expect` is strict (anything but the
+// expected status panics), so the `expect(200)` after the last expected 180
+// doubles as the "nothing extra was relayed" suppression assert.
+
+/// `messages = ALL`: every 18x bob sends is relayed, each downgraded to a bare
+/// 180 under the first 180's To-tag.
+#[tokio::test]
+async fn messages_all_relays_every_18x_downgraded() {
+    let h = Harness::with_transit_delay("suppress-18x-messages-all", 0);
+    let alice = h.agent("alice", "127.0.0.1:5607").await;
+    let bob = h.agent("bob", "127.0.0.1:5617").await;
+    let b2bua = B2buaSut::route_all_to_with_18x_messages(
+        "127.0.0.1",
+        5617,
+        RelayFirst18xStrategy::DropSdp,
+        call::features::Relay18xMessages::All,
+    )
+    .start(&h, "b2bua", "127.0.0.1:5627")
+    .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+
+    // 180 → bare 180 (mints the stored a-facing tag).
+    uas.respond(180, "Ringing").await;
+    let p1 = call.expect(180).await;
+    assert!(p1.body.is_empty(), "first relayed 18x is a bare 180");
+    let a_tag = p1.to.tag.clone().expect("180 has a To-tag");
+
+    // 183 with SDP → relayed again, STILL downgraded: bare 180, same To-tag.
+    uas.respond(183, "Session Progress").with_sdp(ANSWER).await;
+    let p2 = call.expect(180).await;
+    assert!(p2.body.is_empty(), "later relayed 18x is downgraded (no SDP)");
+    assert_eq!(p2.to.tag.as_deref(), Some(a_tag.as_str()), "same stored To-tag (one early dialog)");
+
+    // A third 18x → also relayed (ALL).
+    uas.respond(180, "Ringing").await;
+    let p3 = call.expect(180).await;
+    assert_eq!(p3.to.tag.as_deref(), Some(a_tag.as_str()));
+
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    let ok = call.expect(200).await;
+    assert_eq!(ok.to.tag.as_deref(), Some(a_tag.as_str()), "200 To-tag == first 180 To-tag");
+
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    let _ = h.finish().await;
+}
+
+/// `messages = ONE_PER_VALUE`: one relay per distinct *upstream* status value —
+/// bob's first 183 and first 180 are relayed (both as bare 180s under the same
+/// To-tag), the repeated 183/180 are suppressed.
+#[tokio::test]
+async fn messages_one_per_value_dedupes_on_upstream_status() {
+    let h = Harness::with_transit_delay("suppress-18x-messages-one-per-value", 0);
+    let alice = h.agent("alice", "127.0.0.1:5608").await;
+    let bob = h.agent("bob", "127.0.0.1:5618").await;
+    let b2bua = B2buaSut::route_all_to_with_18x_messages(
+        "127.0.0.1",
+        5618,
+        RelayFirst18xStrategy::DropSdp,
+        call::features::Relay18xMessages::OnePerValue,
+    )
+    .start(&h, "b2bua", "127.0.0.1:5628")
+    .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+
+    // First 183 → relayed as the bare 180 (value 183 now spent).
+    uas.respond(183, "Session Progress").with_sdp(ANSWER).await;
+    let p1 = call.expect(180).await;
+    assert!(p1.body.is_empty(), "bare 180");
+    let a_tag = p1.to.tag.clone().expect("180 has a To-tag");
+
+    // Second 183 → suppressed (same upstream value).
+    uas.respond(183, "Session Progress").with_sdp(ANSWER).await;
+
+    // First 180 → a NEW upstream value → relayed (bare 180, same To-tag).
+    uas.respond(180, "Ringing").await;
+    let p2 = call.expect(180).await;
+    assert_eq!(p2.to.tag.as_deref(), Some(a_tag.as_str()), "same stored To-tag");
+
+    // Second 180 → suppressed. If either suppressed 18x had been relayed, the
+    // strict expect(200) below would see it first and panic.
+    uas.respond(180, "Ringing").await;
+
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    let ok = call.expect(200).await;
+    assert_eq!(ok.to.tag.as_deref(), Some(a_tag.as_str()), "200 To-tag == first 180 To-tag");
+
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    let _ = h.finish().await;
+}
+
 /// No policy → normal behaviour: every 180 is relayed verbatim (no suppression,
 /// no bare-180 downgrade). Regression guard the new code stays off the default
 /// path. (TS `suppress18xDisabled`.)
