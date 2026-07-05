@@ -126,20 +126,75 @@ fn reap_force_terminal(ctx: &RuleContext, reason: &'static str) -> Option<RuleHa
     ok(actions)
 }
 
+/// Compose-time selection of which built-in CORE machines participate in the
+/// default rule set (ADR-0016 opt-out seam, newkahneed-019 part 1). Default =
+/// every built-in included, so [`default_rules`] is behaviour-preserving. A
+/// downstream integrator that ships its OWN subscription-gated transfer machine
+/// (a SERVICE_LAYER service) uses [`without_core_refer_transfer`](Self::without_core_refer_transfer)
+/// so it fully owns REFER; the opt-out is reachable via the spawn seam
+/// ([`B2buaDeps::compose`](crate::B2buaDeps)).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComposeOptions {
+    /// Include the upstream `refer_transfer` seed (`transfer-intercept-refer` /
+    /// `transfer-reject-a-leg-refer` / `transfer-reject-replaces`) **and** its
+    /// machine-gated SERVICE_LAYER rules (default `true`). Set `false` and an
+    /// in-dialog REFER is no longer intercepted — it falls through to the
+    /// transparent `relay-refer` path, forwarded to the peer leg like INFO. A
+    /// downstream transfer machine then owns the *subscribed* REFER; the
+    /// *unsubscribed* one relays transparently (RFC 3515 implicit subscription
+    /// rides the dialog, so its NOTIFYs relay through too).
+    pub core_refer_transfer: bool,
+}
+
+impl Default for ComposeOptions {
+    fn default() -> Self {
+        Self { core_refer_transfer: true }
+    }
+}
+
+impl ComposeOptions {
+    /// Exclude the upstream `refer_transfer` seed + machine-gated rules. The
+    /// composed rule set then relays every in-dialog REFER transparently via
+    /// `relay-refer` (newkahneed-019 part 1). Default composition (seed present)
+    /// is unaffected — `transfer-intercept-refer` still out-ranks `relay-refer`
+    /// by registration order.
+    pub fn without_core_refer_transfer(mut self) -> Self {
+        self.core_refer_transfer = false;
+        self
+    }
+}
+
 /// The ordered basic-B2BUA rule list. The SERVICE_LAYER `relayFirst18xTo180`
 /// rules are appended at the end; they are dormant unless a call activates the
 /// feature (their column+filter gate keeps them out of `pick_ranked` otherwise),
 /// and `pick_ranked` ranks SERVICE_LAYER above CORE so they win when active.
 pub fn default_rules() -> Vec<RuleDefinition> {
+    default_rules_with(&ComposeOptions::default())
+}
+
+/// [`default_rules`] under an explicit [`ComposeOptions`] — the compose-time
+/// opt-out seam. Threaded from [`B2buaDeps::compose`](crate::B2buaDeps) through
+/// `spawn_with_overload`, so a downstream runner selects it without touching the
+/// rule tables directly.
+pub fn default_rules_with(options: &ComposeOptions) -> Vec<RuleDefinition> {
     // The REFER seed rules are CORE_LAYER and must out-rank the generic
-    // `relay-non-invite` REFER relay; registration order (earlier wins within a
-    // layer) puts them first. Their match columns + `no_transfer_active` filter
-    // keep them inert for non-REFER traffic.
-    let mut rules = super::refer_transfer::transfer_seed_rules();
+    // `relay-refer`/`relay-non-invite` REFER relay; registration order (earlier
+    // wins within a layer) puts them first. Their match columns + `no_transfer_active`
+    // filter keep them inert for non-REFER traffic. Excluded when a downstream
+    // owns REFER via its own transfer machine.
+    let mut rules = Vec::new();
+    if options.core_refer_transfer {
+        rules.extend(super::refer_transfer::transfer_seed_rules());
+    }
     rules.extend(core_rules());
     rules.extend(super::relay_first_18x::relay_first_18x_rules());
     rules.extend(super::promote_pem::promote_pem_rules());
-    rules.extend(super::refer_transfer::transfer_rules());
+    if options.core_refer_transfer {
+        // The machine-gated transfer rules stay dormant without the seed (the
+        // slice is never installed), but a downstream owning REFER wants the
+        // whole upstream machine gone — exclude them together with the seed.
+        rules.extend(super::refer_transfer::transfer_rules());
+    }
     rules
 }
 
@@ -388,7 +443,7 @@ fn core_rules() -> Vec<RuleDefinition> {
             "relay-non-invite-200",
             &[],
             Match::response()
-                .methods(&["OPTIONS", "INFO", "PRACK", "UPDATE", "REFER", "MESSAGE", "SUBSCRIBE"])
+                .methods(&["OPTIONS", "INFO", "PRACK", "UPDATE", "REFER", "MESSAGE", "SUBSCRIBE", "NOTIFY"])
                 .status_class(2),
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
         ),
@@ -412,7 +467,7 @@ fn core_rules() -> Vec<RuleDefinition> {
             "relay-non-invite-failure",
             &["handle-481"],
             Match::response()
-                .methods(&["OPTIONS", "INFO", "PRACK", "UPDATE", "REFER", "MESSAGE", "SUBSCRIBE"])
+                .methods(&["OPTIONS", "INFO", "PRACK", "UPDATE", "REFER", "MESSAGE", "SUBSCRIBE", "NOTIFY"])
                 .filter(|ctx| {
                     let Some(resp) = ctx.response() else {
                         return false;
@@ -763,8 +818,21 @@ fn core_rules() -> Vec<RuleDefinition> {
         ),
         rule(
             "absorb-notify-200",
-            &[],
-            Match::response().method("NOTIFY").status_class(2),
+            &["relay-non-invite-200"],
+            // Only a B2BUA-originated NOTIFY is absorbed: the `referTransfer`
+            // machine's `SendNotify` (refer-progress sipfrag toward the referrer)
+            // leaves no pending-relay snapshot on the source dialog. A **relayed**
+            // NOTIFY — the transparent-REFER path forwards the transferee's
+            // implicit-subscription NOTIFYs (RFC 3515) end-to-end — DOES leave one
+            // (matching the response CSeq) → this declines and `relay-non-invite-200`
+            // forwards the 200 back to the requester. Mirrors `absorb-options-200`.
+            Match::response().method("NOTIFY").status_class(2).filter(|ctx| {
+                let cseq = ctx.response().map(|r| r.cseq.seq as i64);
+                match (ctx.source_dialog(), cseq) {
+                    (Some(d), Some(seq)) => call::helpers::find_pending_request(d, seq).is_none(),
+                    _ => true,
+                }
+            }),
             |_ctx| ok(vec![]),
         ),
         // ── terminating ─────────────────────────────────────────────────────
@@ -842,6 +910,28 @@ fn core_rules() -> Vec<RuleDefinition> {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
         rule("relay-message", &[], Match::request().method("MESSAGE"), |_| {
+            ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
+        }),
+        // Transparent in-dialog REFER relay (newkahneed-019 part 2): forward a
+        // REFER to the peer leg like INFO/MESSAGE. This is the FALLBACK for an
+        // *unsubscribed* transfer — with the `refer_transfer` seed PRESENT (default
+        // composition) `transfer-intercept-refer` (also CORE, registered earlier)
+        // out-ranks this by registration order and still intercepts; with the seed
+        // excluded (a downstream owns REFER), this relays it transparently. The
+        // 202/failure finals ride `relay-non-invite-200` / `relay-non-invite-failure`
+        // (REFER is in both method sets), and the transferee's implicit-subscription
+        // NOTIFYs ride `relay-notify` — the whole RFC 3515 exchange passes through.
+        rule("relay-refer", &[], Match::request().method("REFER"), |_| {
+            ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
+        }),
+        // Transparent in-dialog NOTIFY relay: forward an in-dialog NOTIFY request
+        // to the peer leg (the implicit REFER subscription's progress reports ride
+        // the dialog end-to-end on the transparent-transfer path). Its 200/failure
+        // finals relay back via `relay-non-invite-200`/`-failure` (NOTIFY is in both
+        // sets); `absorb-notify-200`'s snapshot filter keeps a B2BUA-*originated*
+        // NOTIFY's 200 absorbed. A SERVICE_LAYER rule (e.g. a subscribed transfer
+        // machine that owns NOTIFY) out-ranks this CORE default when active.
+        rule("relay-notify", &[], Match::request().method("NOTIFY"), |_| {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
         // ── lifecycle ───────────────────────────────────────────────────────

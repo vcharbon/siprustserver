@@ -578,6 +578,11 @@ impl RunnerBase {
             // The generic service-authorable async-HTTP port is opt-in; a runner
             // that wants it swaps this field before `spawn` (every field is pub).
             adaptation_http: None,
+            // Every built-in CORE machine included by default; a downstream that
+            // ships its own transfer machine swaps this for
+            // `ComposeOptions::default().without_core_refer_transfer()` before
+            // `spawn` (every field is pub) — ADR-0016 opt-out seam, newkahneed-019.
+            compose: b2bua::rules::ComposeOptions::default(),
         }
     }
 

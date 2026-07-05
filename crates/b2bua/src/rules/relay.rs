@@ -470,10 +470,25 @@ pub fn stamp_a_facing_invite_advert(
 /// Headers carried transparently when relaying an in-dialog *request* across
 /// the back-to-back UA (RFC 3261 §16.6 spirit — non-structural headers pass
 /// through; structural ones are owned by the generator). For the basic-B2BUA
-/// set this is the reliable-provisional negotiation (`Require`/`Supported`);
-/// `RAck` is rewritten separately (RFC 3262 §7.2), not copied verbatim.
+/// set this is the reliable-provisional negotiation (`Require`/`Supported`),
+/// plus the payload-bearing headers of a **transparently relayed REFER/NOTIFY**
+/// (newkahneed-019): a relayed REFER without its `Refer-To`/`Referred-By` is
+/// malformed, and a relayed NOTIFY's implicit-subscription state lives in
+/// `Event`/`Subscription-State` (the body carries only the sipfrag). These names
+/// only occur on REFER/NOTIFY, so an OPTIONS/INFO/UPDATE relay is unaffected.
+/// `RAck` is rewritten separately (RFC 3262 §7.2), not copied verbatim; the
+/// generator adds `Event`/`Subscription-State` from its own opts ONLY for a
+/// B2BUA-originated NOTIFY (`opts.event`/`subscription_state`), which the relay
+/// path leaves unset — so these pass through here without duplicating.
 pub fn relay_request_passthrough_headers(req: &SipRequest) -> Vec<MsgHeader> {
-    const PASSTHROUGH: [&str; 2] = ["require", "supported"];
+    const PASSTHROUGH: [&str; 6] = [
+        "require",
+        "supported",
+        "refer-to",
+        "referred-by",
+        "event",
+        "subscription-state",
+    ];
     req.headers
         .iter()
         .filter(|h| PASSTHROUGH.contains(&h.name.to_ascii_lowercase().as_str()))

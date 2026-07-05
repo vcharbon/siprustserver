@@ -24,7 +24,7 @@ use crate::metrics::B2buaMetrics;
 use crate::overload::OverloadSignal;
 use crate::repl::{ReplServer, ReplicatingCallStore, ReplicationSupervisor, Readiness};
 use crate::router::{self, RouterCtx};
-use crate::rules::{compose_rules, default_rules, ServiceDef};
+use crate::rules::{compose_rules, default_rules_with, ServiceDef};
 use crate::store::{BufferedTerminateWriter, CallState, CallStore};
 use crate::timers::TimerService;
 
@@ -110,6 +110,13 @@ pub struct B2buaDeps {
     /// service firing the effect gets an `outcome:"error"` re-entry, never a
     /// stranded machine); `Some` maps the logical endpoint onto its base URL.
     pub adaptation_http: Option<crate::router::AdaptationHttpPort>,
+    /// Compose-time selection of which built-in CORE machines participate in the
+    /// default rule set (ADR-0016 opt-out seam, newkahneed-019). `Default` =
+    /// every built-in included (behaviour-preserving). A downstream that ships
+    /// its own subscription-gated transfer machine sets
+    /// [`ComposeOptions::without_core_refer_transfer`](crate::rules::ComposeOptions::without_core_refer_transfer)
+    /// so an in-dialog REFER relays transparently instead of being intercepted.
+    pub compose: crate::rules::ComposeOptions,
 }
 
 impl B2buaCore {
@@ -165,6 +172,7 @@ impl B2buaCore {
             replication,
             metrics,
             adaptation_http,
+            compose,
         } = deps;
 
         let parser: Arc<dyn SipParser + Send + Sync> = Arc::new(CustomParser::new());
@@ -302,7 +310,7 @@ impl B2buaCore {
         // `default_rules()` directly (its cursor is a projection), so it is not in
         // this list; `services` here is for `init`-seeded services (e.g. the
         // out-of-tree `announcement` capstone).
-        let rules = compose_rules(&services, default_rules());
+        let rules = compose_rules(&services, default_rules_with(&compose));
         // Worker-side overload signal (migration/08). A live ELU/GC sampler backs
         // it by default; the periodic task below drives `sample()` at the 100 ms
         // cadence so the EWMAs published on every OPTIONS-200 `X-Overload` header

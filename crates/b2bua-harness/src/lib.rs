@@ -80,6 +80,11 @@ pub struct B2buaSpawnParams {
     /// behaviour. A test builds one over `SimulatedHttpNetwork` (mirroring the
     /// limiter injection) to round-trip a binary adaptation body.
     pub adaptation_http: Option<b2bua::AdaptationHttpPort>,
+    /// Compose-time built-in-machine selection (ADR-0016 opt-out seam,
+    /// newkahneed-019). `Default` = every built-in included. A downstream that
+    /// owns REFER via its own transfer machine passes
+    /// `ComposeOptions::default().without_core_refer_transfer()`.
+    pub compose: b2bua::rules::ComposeOptions,
 }
 
 /// Builds the base [`B2buaConfig`] (ip/port/ordinal/outbound_proxy wired),
@@ -111,6 +116,7 @@ pub fn spawn_b2bua_core(
         cdr,
         overload,
         adaptation_http,
+        compose,
     } = params;
     let mut config = B2buaConfig {
         self_ordinal: ordinal,
@@ -131,6 +137,7 @@ pub fn spawn_b2bua_core(
         replication,
         metrics: B2buaMetrics::new(),
         adaptation_http,
+        compose,
     };
     B2buaCore::spawn_with_overload(endpoint, deps, services, overload)
 }
@@ -278,6 +285,7 @@ pub struct B2buaSutBuilder {
     tune: Box<dyn FnOnce(&mut B2buaConfig)>,
     overload: Option<b2bua::overload::OverloadSignal>,
     adaptation_http: Option<b2bua::AdaptationHttpPort>,
+    compose: b2bua::rules::ComposeOptions,
 }
 
 impl B2buaSutBuilder {
@@ -338,6 +346,17 @@ impl B2buaSutBuilder {
         self
     }
 
+    /// Exclude the upstream `refer_transfer` seed + machine from the composed
+    /// rule set (ADR-0016 opt-out seam, newkahneed-019 part 1). An in-dialog
+    /// REFER is then relayed transparently to the peer leg (`relay-refer`)
+    /// instead of being intercepted — the shape a downstream that owns REFER via
+    /// its own subscription-gated transfer machine uses. Default composition
+    /// keeps the seed (intercept wins).
+    pub fn without_core_refer_transfer(mut self) -> Self {
+        self.compose = self.compose.without_core_refer_transfer();
+        self
+    }
+
     /// Bind the B2BUA at `addr` and spawn its core, consuming the builder.
     pub async fn start(self, h: &Harness, name: &str, addr: &str) -> B2buaSut {
         let B2buaSutBuilder {
@@ -348,6 +367,7 @@ impl B2buaSutBuilder {
             tune,
             overload,
             adaptation_http,
+            compose,
         } = self;
         // The B2BUA terminates each leg as a UA (UAS on the a-leg, UAC on the
         // b-leg) — it is NOT an RFC 3261 §16 proxy, so its bind declares
@@ -375,6 +395,7 @@ impl B2buaSutBuilder {
             cdr: cdr.clone(),
             overload,
             adaptation_http,
+            compose,
         };
         let core = spawn_b2bua_core(endpoint, params, |config| {
             // Production default is 300 s (5 min); the paused-clock keepalive
@@ -425,6 +446,7 @@ impl B2buaSut {
             tune: Box::new(|_| {}),
             overload: None,
             adaptation_http: None,
+            compose: b2bua::rules::ComposeOptions::default(),
         }
     }
 

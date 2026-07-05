@@ -499,6 +499,9 @@ impl ReplicatedB2buaSut {
             // The replicating failover path registers no callflow services, so
             // no `ServiceHttpRequest` is ever fired here.
             adaptation_http: None,
+            // Default composition (every built-in CORE machine, incl. the
+            // `refer_transfer` seed) — the failover harness does not opt out.
+            compose: b2bua::rules::ComposeOptions::default(),
         };
         b2bua_harness::spawn_b2bua_core(endpoint, params, |config| {
             // EXACT production (kind) timers — `deploy/k8s/manifests/20-worker.yaml`.

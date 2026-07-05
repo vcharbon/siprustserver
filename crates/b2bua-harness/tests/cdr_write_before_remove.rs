@@ -75,6 +75,7 @@ async fn cdr_is_written_while_the_call_is_still_live() {
         replication: None,
         metrics: B2buaMetrics::new(),
         adaptation_http: None,
+        compose: b2bua::rules::ComposeOptions::default(),
     };
     let core = Arc::new(B2buaCore::spawn(endpoint, deps));
     let probe_core = core.clone();
