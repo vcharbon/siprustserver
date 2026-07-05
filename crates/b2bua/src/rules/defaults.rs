@@ -106,11 +106,10 @@ const ACK_RETRANSMIT_SEC: i64 = 1;
 fn reap_force_terminal(ctx: &RuleContext, reason: &'static str) -> Option<RuleHandleResult> {
     let mut actions = Vec::new();
     for leg in std::iter::once(ctx.call.a_leg()).chain(ctx.call.b_legs().iter()) {
-        let resolved = match leg.bye_disposition {
-            None => leg.state == LegState::Trying,
-            Some(b) => b.is_terminal(),
-        };
-        if !resolved {
+        // `leg_is_resolved` also treats a still-`Cancelling` leg as unresolved, so
+        // a wedged in-flight CANCEL is force-terminated here too (TerminateLeg
+        // clears the `Cancelling` disposition, letting the call finalize).
+        if !call::helpers::leg_is_resolved(leg) {
             actions.push(RuleAction::TerminateLeg {
                 leg_id: leg.leg_id.clone(),
                 bye_disposition: Some(ByeDisposition::ByeTimeout),
@@ -1091,11 +1090,11 @@ fn core_rules() -> Vec<RuleDefinition> {
             // loop yields no actions and this stays the harmless canary it was.
             let mut actions = Vec::new();
             for leg in std::iter::once(ctx.call.a_leg()).chain(ctx.call.b_legs().iter()) {
-                let resolved = match leg.bye_disposition {
-                    None => leg.state == LegState::Trying,
-                    Some(b) => b.is_terminal(),
-                };
-                if !resolved {
+                // Force every still-unresolved leg terminal. `leg_is_resolved` also
+                // covers a leg wedged in `Cancelling` (an internal CANCEL whose 487
+                // / crossing 200 never arrived): TerminateLeg clears the disposition
+                // so the deferred termination can finally promote → RemoveCall.
+                if !call::helpers::leg_is_resolved(leg) {
                     actions.push(RuleAction::TerminateLeg {
                         leg_id: leg.leg_id.clone(),
                         bye_disposition: Some(ByeDisposition::ByeTimeout),

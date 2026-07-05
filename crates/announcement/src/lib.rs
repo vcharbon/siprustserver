@@ -156,9 +156,20 @@ fn on_media_failure(ctx: &RuleContext) -> Option<RuleHandleResult> {
     ok(vec![
         RuleAction::AddCdrEvent {
             event_type: CdrEventType::Reject,
-            leg_id: media,
+            leg_id: media.clone(),
             status_code: Some(status as i64),
             reason: Some("announcement-mrf-failure".to_string()),
+        },
+        // Record the media leg's final on the leg BEFORE begin-termination (the
+        // `route-failure` idiom): its INVITE transaction already received a final
+        // response, so it is resolved — NOT still ringing. Without this,
+        // begin-termination sees a `Trying` leg with no bye disposition and
+        // spuriously CANCELs a completed transaction, marking it `Cancelling` and
+        // (per `leg_is_resolved`) holding the call open for a 487 that will never
+        // come.
+        RuleAction::TerminateLeg {
+            leg_id: media,
+            bye_disposition: Some(call::ByeDisposition::Rejected),
         },
         // The caller's INVITE is still unanswered (early media only) — answer it
         // with the MRF's failure before tearing the call down (begin-termination

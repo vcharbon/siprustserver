@@ -123,21 +123,28 @@ async fn ringing_forever_is_torn_down_at_setup_timeout_and_releases_the_limiter(
     // INVITE_INITIAL_TIMEOUT backstop — the ledger timer must own the teardown
     // (it is the only one of the two that survives a crash → reclaim).
     h.advance(DEFAULT_SETUP_TIMEOUT + Duration::from_secs(1)).await;
+
+    // The caller gets its final 408 IMMEDIATELY (setup-timeout answers the a-leg
+    // explicitly), and the ringing b-leg gets a CANCEL. Call teardown, however,
+    // now HOLDS until that CANCEL resolves — the call-liveness ordering fix: a
+    // ringing b-leg's internal CANCEL must quiesce (its 487, or a crossing 200
+    // reaped by ACK+BYE) before RemoveCall, so a 200 crossing the CANCEL is never
+    // stranded on a removed call. So the reap completes when bob answers 487, NOT
+    // in the same turn as the setup timeout.
+    let mut cancel = bob.receive("CANCEL").await;
+    cancel.respond(200, "OK").await;
+    let final_resp = call.expect(408).await;
+    assert_eq!(final_resp.status, 408, "caller's INVITE resolves with 408 at the setup timeout");
+    uas.respond(487, "Request Terminated").await;
+
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     assert_eq!(
         b2bua.metrics().removals_total(),
         b2bua.metrics().creations_total(),
-        "setup-stalled call must be torn down at the setup timeout (not the 1h GlobalDuration)",
+        "setup-stalled call torn down once the ringing b-leg's CANCEL resolves (not the 1h GlobalDuration)",
     );
 
-    // The caller gets a final 408; the ringing b-leg gets a CANCEL.
-    let mut cancel = bob.receive("CANCEL").await;
-    cancel.respond(200, "OK").await;
-    uas.respond(487, "Request Terminated").await;
-    let final_resp = call.expect(408).await;
-    assert_eq!(final_resp.status, 408, "caller's INVITE resolves with 408");
-
-    // The limiter hold is released NOW (the leak fixed by this test).
+    // The limiter hold is released once teardown completes (the leak fixed by this test).
     settle_until(|| store.stats().current_total == 0).await;
     assert_eq!(store.stats().current_total, 0, "limiter hold released at teardown");
 

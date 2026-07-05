@@ -108,6 +108,81 @@ async fn no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee_and_failover
     let _ = h.finish().await;
 }
 
+/// The **reject / no-failover sibling** — the case the call-liveness ordering fix
+/// exists for. The same no-answer timer fires on a ringing b-leg, but the route
+/// carries NO callback context, so `/call/failure` is never consulted: the
+/// `no-answer` rule takes its `None` branch (`DestroyLeg` + `BeginTermination`).
+///
+/// Pre-fix, that teardown promoted `Terminating → Terminated → RemoveCall` in the
+/// SAME turn as the CANCEL (the CANCELled b-leg's interim `Cancelled` bye
+/// disposition read terminal), so a `200 OK` crossing the CANCEL landed on a
+/// REMOVED call: no ACK, no BYE — the answering callee orphaned in a one-sided
+/// established dialog. The fix keeps a `Cancelling` leg UNRESOLVED
+/// (`leg_is_resolved`), so finalization HOLDS while the internal CANCEL is in
+/// flight and the crossing 200 still has a live call to be reaped against —
+/// `cancel-200-crossing` ACK+BYEs the abandoned callee — and the caller's reject
+/// is delivered once that callee has quiesced (the spec's callee-reap-before-
+/// caller-reject ordering). Uniform with the failover path above, no failover.
+#[tokio::test(start_paused = true)]
+async fn no_answer_reject_cancel_crossed_by_200_reaps_the_abandoned_callee() {
+    let h = Harness::with_transit_delay("noanswer-reject-cancel-200-crossing", 1);
+    let alice = h.agent("alice", "127.0.0.1:5062").await;
+    let carol = h.agent("carol", "127.0.0.1:5072").await; // rings, no-answer'd, answers late
+
+    // Reject path: a short no-answer deadline but NO callback context, so the
+    // no-answer teardown rejects the caller WITHOUT consulting /call/failure.
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5072);
+                r.no_answer_timeout_sec = Some(30);
+                NewCallResponse::Route(r)
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            // Setup deadline past the no-answer so the NoAnswer timer is what
+            // fires; keepalive far out; reaper off to isolate the crossing-200
+            // mechanism from the liveness sweep.
+            c.setup_timeout_sec = 300;
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_enabled = false;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5082")
+        .await;
+
+    let mut call = alice.invite(&carol).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut carol_uas = carol.receive("INVITE").await;
+    carol_uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+
+    // Trip the no-answer timer (30 s).
+    h.advance(Duration::from_secs(30) + Duration::from_millis(300)).await;
+
+    // The B2BUA CANCELs the ringing b-leg. The call MUST outlive the CANCEL —
+    // pre-fix it was already gone in this same turn.
+    let mut cancel = carol.receive("CANCEL").await;
+    cancel.respond(200, "OK").await;
+
+    // ── CROSSING: carol answers 200 OK, crossing the CANCEL on the wire ───────
+    // The abandoned callee MUST be reaped — ACK then immediate BYE — not orphaned.
+    carol_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    carol.receive("ACK").await;
+    let mut bye = carol.receive("BYE").await;
+    bye.respond(200, "OK").await;
+
+    // The caller still gets its final reject — synthesized once the abandoned
+    // callee has quiesced (ADR-0022; the no-answer/None path answers via the
+    // →Terminated funnel), NOT dropped on the removed call.
+    let failed = call.expect(503).await;
+    assert_eq!(failed.status, 503, "caller's INVITE resolves with a final failure");
+
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
 /// The sibling internal trigger: a **pending b-leg INVITE transaction timeout**
 /// (Timer B / the long-INVITE backstop) CANCELs the ringing leg through the same
 /// `DestroyLeg` path and consults `/call/failure`. A crossing 200 must be reaped

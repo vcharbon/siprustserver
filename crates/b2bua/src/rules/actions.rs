@@ -255,6 +255,20 @@ impl<'a> ActionExecutor<'a> {
                 if let Some(bd) = bye_disposition {
                     *call = set_bye_disposition(call.clone(), leg_id, *bd);
                 }
+                // Settle an in-flight CANCEL: a leg that TerminateLeg brings to a
+                // terminal state is no longer "cancel pending", so clear the
+                // `Cancelling` disposition that held it unresolved (see
+                // `call::helpers::leg_is_resolved`). This is the seam the `487`
+                // (`resolve-cancel-response`) and the force-terminal reaper /
+                // safety-timeout paths ride to let a deferred termination finally
+                // finalize; the crossing-`200` path clears `Cancelling` earlier via
+                // `ConfirmDialog` (→ `Bridged`) instead.
+                let cancelling = call::helpers::find_leg(call, leg_id)
+                    .map(|l| l.disposition == LegDisposition::Cancelling)
+                    .unwrap_or(false);
+                if cancelling {
+                    *call = set_leg_disposition(call.clone(), leg_id, LegDisposition::Rejected);
+                }
             }
             RuleAction::AddCdrEvent {
                 event_type,
@@ -1218,7 +1232,19 @@ impl<'a> ActionExecutor<'a> {
         if let (Some(body), Some(d)) = (answer_body, call.a_leg.dialogs.first_mut()) {
             d.ext.cached_sdp = Some(body);
         }
-        *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
+        // Bridge the a-leg only for a live answer. `cancel-200-crossing` reuses
+        // `confirm_dialog` to learn the crossing 200's dialog so it can ACK + BYE
+        // the abandoned callee, but on the reject/no-failover teardown the call is
+        // already `Terminating` and the a-leg was never answered — resurrecting it
+        // to `Confirmed` would read as "answered" and suppress the ADR-0022
+        // unanswered-a-leg final (`invariants::enforce`), stranding the caller with
+        // no response. Leave it as-is (Trying/Early) so the caller still gets its
+        // final when the deferred termination finalizes. The failover crossing-200
+        // reap runs while the call is still `Active` (awaiting `/call/failure`), so
+        // it keeps confirming the a-leg exactly as before.
+        if call.state == call::CallModelState::Active {
+            *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
+        }
     }
 
     /// Ensure the a-leg has a dialog with a stable B2BUA-minted local tag; return

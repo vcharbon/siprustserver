@@ -72,11 +72,18 @@ async fn setup_stalled_call_is_reaped_by_global_duration() {
     );
 
     // ── Safety net: at the GlobalDuration cap the wedged call must be reaped ───
-    // GlobalDuration fires at the cap → `max-duration` rule begins termination
-    // (CANCEL the early b-leg) → the call resolves to Terminated and is reaped.
+    // GlobalDuration fires at the cap → `max-duration` rule begins termination,
+    // CANCELing the ringing b-leg. Teardown now HOLDS until that CANCEL resolves
+    // (the call-liveness ordering fix: a ringing b-leg's internal CANCEL must
+    // quiesce — its 487, or a crossing 200 reaped by ACK+BYE — before RemoveCall,
+    // so a 200 crossing the CANCEL is never stranded on a removed call), so a
+    // well-behaved ringing UAS's 487 completes the GlobalDuration-triggered reap.
     h.advance(MAX_DURATION + Duration::from_secs(1)).await;
+    let mut cancel = bob.receive("CANCEL").await;
+    cancel.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
-    // A setup-stalled call must be reaped by the GlobalDuration cap.
+    // A setup-stalled call must be reaped once the GlobalDuration-driven CANCEL resolves.
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
