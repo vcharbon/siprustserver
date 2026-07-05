@@ -17,7 +17,7 @@ pub mod sdp_diff;
 pub mod service;
 
 pub use actions::ActionExecutor;
-pub use defaults::default_rules;
+pub use defaults::{default_rules, default_rules_with, ComposeOptions};
 pub use promote_pem::promote_pem_rules;
 pub use refer_transfer::{transfer_rules, transfer_seed_rules, transfer_service_def};
 pub use relay_first_18x::{relay_first_18x_rules, relay_first_18x_service_def};
