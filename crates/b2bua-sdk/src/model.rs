@@ -624,6 +624,38 @@ pub enum RuleAction {
     /// calls `decision.call_refer` then re-enters via a `refer-http-result`
     /// internal event.
     ReferAsyncHttp { request: serde_json::Value },
+    /// The **generic, service-authorable** async-HTTP callback (the seam that
+    /// generalizes [`ReferAsyncHttp`]/[`FailureAsyncHttp`]). A custom service
+    /// emits this mid-dialog to POST/GET a logical adaptation endpoint with a
+    /// **binary** body; the host-injected `AdaptationHttpPort` maps `endpoint`
+    /// (a logical/relative path) onto its base URL, fires the request under
+    /// `timeout_ms` (host default if `None`), and folds the response back as a
+    /// `service-http-result` internal event whose raw entity bytes ride
+    /// [`CallEvent::InternalEvent::body`] verbatim (binary-safe — never a
+    /// character string). The `correlation_id` is service-minted and echoed in
+    /// the result `payload`, so a consuming rule's `Match::internal_event()
+    /// .topic("service-http-result").filter(..)` disambiguates concurrent
+    /// in-flight requests. If no port is injected the interpreter still folds an
+    /// `outcome:"error"` result back, so the machine is never stranded.
+    ServiceHttpRequest {
+        /// Service-minted opaque id echoed back in the result `payload`.
+        correlation_id: String,
+        /// Logical/relative request path (the host `AdaptationHttpPort` maps it
+        /// onto its base URL); may carry a query string, like `HttpRequest.path`.
+        endpoint: String,
+        /// e.g. `"POST"` / `"GET"`.
+        method: String,
+        /// Request headers as ordered `(name, value)` pairs.
+        headers: Vec<(String, String)>,
+        /// The **binary** request payload — an opaque `Vec<u8>`, never coerced
+        /// through a character string.
+        body: Vec<u8>,
+        /// Appended as a `Content-Type` request header when set.
+        content_type: Option<String>,
+        /// Per-request budget; the host `AdaptationHttpPort::default_timeout`
+        /// when `None`. Independent of `call_control_timeout_ms`.
+        timeout_ms: Option<u64>,
+    },
     /// Overwrite the per-call REFER transfer runtime slice (`None` clears it —
     /// the terminal path; mirrors `SetPromotePem`).
     SetTransfer { state: Option<call::TransferState> },
@@ -733,6 +765,7 @@ impl RuleAction {
             | RuleAction::SetPromotePem { .. }
             | RuleAction::SetTransfer { .. }
             | RuleAction::ReferAsyncHttp { .. }
+            | RuleAction::ServiceHttpRequest { .. }
             | RuleAction::FailureAsyncHttp { .. }
             | RuleAction::SetFeatures { .. }
             | RuleAction::MergeCallExt { .. }

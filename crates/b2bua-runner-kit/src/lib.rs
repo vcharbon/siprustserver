@@ -575,6 +575,9 @@ impl RunnerBase {
             id_gen: Arc::new(IdGen::from_entropy()),
             replication: None,
             metrics: self.metrics.clone(),
+            // The generic service-authorable async-HTTP port is opt-in; a runner
+            // that wants it swaps this field before `spawn` (every field is pub).
+            adaptation_http: None,
         }
     }
 

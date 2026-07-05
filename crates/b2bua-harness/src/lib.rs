@@ -75,6 +75,11 @@ pub struct B2buaSpawnParams {
     /// sampler (retaining its control) so it can drive a known ELU THROUGH the
     /// running 100 ms sampler task into the published `X-Overload` header.
     pub overload: Option<b2bua::overload::OverloadSignal>,
+    /// Host-injected generic async-HTTP capability for a service's
+    /// `RuleAction::ServiceHttpRequest` (ADR-0016 seam). `None` → today's
+    /// behaviour. A test builds one over `SimulatedHttpNetwork` (mirroring the
+    /// limiter injection) to round-trip a binary adaptation body.
+    pub adaptation_http: Option<b2bua::AdaptationHttpPort>,
 }
 
 /// Builds the base [`B2buaConfig`] (ip/port/ordinal/outbound_proxy wired),
@@ -105,6 +110,7 @@ pub fn spawn_b2bua_core(
         id_gen,
         cdr,
         overload,
+        adaptation_http,
     } = params;
     let mut config = B2buaConfig {
         self_ordinal: ordinal,
@@ -124,6 +130,7 @@ pub fn spawn_b2bua_core(
         id_gen,
         replication,
         metrics: B2buaMetrics::new(),
+        adaptation_http,
     };
     B2buaCore::spawn_with_overload(endpoint, deps, services, overload)
 }
@@ -270,6 +277,7 @@ pub struct B2buaSutBuilder {
     services: Vec<b2bua::rules::ServiceDef>,
     tune: Box<dyn FnOnce(&mut B2buaConfig)>,
     overload: Option<b2bua::overload::OverloadSignal>,
+    adaptation_http: Option<b2bua::AdaptationHttpPort>,
 }
 
 impl B2buaSutBuilder {
@@ -319,9 +327,28 @@ impl B2buaSutBuilder {
         self
     }
 
+    /// Inject the generic service-authorable async-HTTP capability
+    /// ([`AdaptationHttpPort`](b2bua::AdaptationHttpPort)) a registered service's
+    /// `RuleAction::ServiceHttpRequest` fires over. Defaults to `None` (a service
+    /// firing the effect then gets an `outcome:"error"` re-entry). A test builds
+    /// one over `SimulatedHttpNetwork` serving a real `HttpService` — the exact
+    /// shape [`limiter`](Self::limiter) uses for the `HttpCallLimiter`.
+    pub fn adaptation_http(mut self, port: b2bua::AdaptationHttpPort) -> Self {
+        self.adaptation_http = Some(port);
+        self
+    }
+
     /// Bind the B2BUA at `addr` and spawn its core, consuming the builder.
     pub async fn start(self, h: &Harness, name: &str, addr: &str) -> B2buaSut {
-        let B2buaSutBuilder { decision, outbound_proxy, limiter, services, tune, overload } = self;
+        let B2buaSutBuilder {
+            decision,
+            outbound_proxy,
+            limiter,
+            services,
+            tune,
+            overload,
+            adaptation_http,
+        } = self;
         // The B2BUA terminates each leg as a UA (UAS on the a-leg, UAC on the
         // b-leg) — it is NOT an RFC 3261 §16 proxy, so its bind declares
         // `{Uac, Uas}` and the proxy-subject audit rules (no-target-404,
@@ -347,6 +374,7 @@ impl B2buaSutBuilder {
             id_gen: Arc::new(IdGen::seeded(0xB2B0)),
             cdr: cdr.clone(),
             overload,
+            adaptation_http,
         };
         let core = spawn_b2bua_core(endpoint, params, |config| {
             // Production default is 300 s (5 min); the paused-clock keepalive
@@ -396,6 +424,7 @@ impl B2buaSut {
             services: Vec::new(),
             tune: Box::new(|_| {}),
             overload: None,
+            adaptation_http: None,
         }
     }
 

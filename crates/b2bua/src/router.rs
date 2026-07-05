@@ -35,6 +35,26 @@ use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext, RuleDef
 use crate::store::CallState;
 use crate::timers::TimerService;
 
+/// Host-injected capability for the generic service-authorable async-HTTP
+/// callback ([`RuleAction::ServiceHttpRequest`](crate::rules::RuleAction)). A
+/// logical [`endpoint`](crate::rules::RuleAction) path is mapped onto `base`;
+/// the same `http_net::HttpTransport` seam the limiter rides carries the request
+/// (real `reqwest` in the runner, the simulated fabric in tests). The caller
+/// owns the fail-safe budget: `default_timeout` bounds any request that omits a
+/// per-request `timeout_ms`. Mirrors [`limiter_http`](crate::limiter_http)'s
+/// transport+addr+timeout shape. `None` on [`B2buaDeps`](crate::B2buaDeps) →
+/// today's behaviour (a service that fires the effect still gets an
+/// `outcome:"error"` re-entry, never a stranded machine).
+pub struct AdaptationHttpPort {
+    /// The pluggable HTTP transport (binary-safe: `HttpRequest`/`HttpResponse`
+    /// bodies are `Vec<u8>`).
+    pub transport: Arc<dyn http_net::HttpTransport>,
+    /// Base address the logical endpoint path is dialed against.
+    pub base: SocketAddr,
+    /// Fail-safe per-request budget applied when the effect omits `timeout_ms`.
+    pub default_timeout: std::time::Duration,
+}
+
 /// Everything a handler body + the interpreter need. Shared via `Arc`.
 pub struct RouterCtx {
     pub config: B2buaConfig,
@@ -72,6 +92,11 @@ pub struct RouterCtx {
     /// `CallEvent::InternalEvent` here, which `run` consumes via `on_event` —
     /// keeping re-entry single-threaded and out of a non-`Send` async cycle.
     pub reentry_tx: mpsc::UnboundedSender<CallEvent>,
+    /// Host-injected generic async-HTTP capability (ADR-0016 seam). `Arc`-shared
+    /// into every per-call `ctx.clone()` exactly like `decision`/`limiter`;
+    /// `None` reproduces today's behaviour (the `ServiceHttpRequest` dispatch
+    /// arm then folds an `outcome:"error"` re-entry instead of hitting a wire).
+    pub adaptation_http: Option<Arc<AdaptationHttpPort>>,
 }
 
 /// Replication-driven commands the puller/supervisor inject into the router loop
@@ -1938,6 +1963,7 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
                         topic: "refer-http-result".to_string(),
                         outcome: outcome.to_string(),
                         payload,
+                        body: Vec::new(),
                     };
                     // Re-enter via the router's event channel rather than
                     // calling `on_event` directly: the `on_event → process →
@@ -1947,6 +1973,105 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
                     // breaks the recursion.
                     let _ = ctx2.reentry_tx.send(ev);
                 });
+            }
+            FireAndForgetEffect::ServiceHttpRequest {
+                call_ref,
+                correlation_id,
+                endpoint,
+                method,
+                headers,
+                body,
+                content_type,
+                timeout_ms,
+            } => {
+                // The generic service-authorable async HTTP callback (mirrors the
+                // `ReferAsyncHttp` arm's spawn+reentry recursion break). The
+                // response entity rides BINARY-SAFE on `InternalEvent::body` — it
+                // is NEVER coerced through `payload`'s JSON string.
+                match ctx.adaptation_http.clone() {
+                    // No port injected → never strand the machine: fold an
+                    // immediate `error` result so the consuming rule still fires.
+                    None => {
+                        let _ = ctx.reentry_tx.send(CallEvent::InternalEvent {
+                            call_ref,
+                            topic: "service-http-result".to_string(),
+                            outcome: "error".to_string(),
+                            payload: serde_json::json!({
+                                "correlation_id": correlation_id,
+                                "error": "adaptation_http_not_configured",
+                            }),
+                            body: Vec::new(),
+                        });
+                    }
+                    Some(port) => {
+                        let ctx2 = ctx.clone();
+                        // The transport request future IS `Send`, so the whole
+                        // spawned task is `Send` (unlike the `on_event` cycle).
+                        tokio::spawn(async move {
+                            // Per-request budget is INDEPENDENT of
+                            // `call_control_timeout_ms` (the `DeadlineDecisionEngine`
+                            // wraps only new_call/call_failure). Fail-safe on
+                            // teardown: a re-entry landing on a dead `call_ref` is
+                            // dropped.
+                            let budget = timeout_ms
+                                .map(std::time::Duration::from_millis)
+                                .unwrap_or(port.default_timeout);
+                            let mut req = http_net::HttpRequest {
+                                method,
+                                path: endpoint,
+                                headers,
+                                body,
+                            };
+                            if let Some(ct) = content_type {
+                                req.headers.push(("Content-Type".to_string(), ct));
+                            }
+                            let (outcome, payload, body): (&str, serde_json::Value, Vec<u8>) =
+                                match tokio::time::timeout(
+                                    budget,
+                                    port.transport.request(port.base, req),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(resp)) => {
+                                        let http_net::HttpResponse { status, headers, body } = resp;
+                                        (
+                                            "ok",
+                                            serde_json::json!({
+                                                "correlation_id": correlation_id,
+                                                "status": status,
+                                                "headers": headers,
+                                            }),
+                                            body,
+                                        )
+                                    }
+                                    Ok(Err(e)) => (
+                                        "error",
+                                        serde_json::json!({
+                                            "correlation_id": correlation_id,
+                                            "error": e.to_string(),
+                                        }),
+                                        Vec::new(),
+                                    ),
+                                    Err(_elapsed) => (
+                                        "error",
+                                        serde_json::json!({
+                                            "correlation_id": correlation_id,
+                                            "error": "timeout",
+                                        }),
+                                        Vec::new(),
+                                    ),
+                                };
+                            let ev = CallEvent::InternalEvent {
+                                call_ref,
+                                topic: "service-http-result".to_string(),
+                                outcome: outcome.to_string(),
+                                payload,
+                                body,
+                            };
+                            let _ = ctx2.reentry_tx.send(ev);
+                        });
+                    }
+                }
             }
             FireAndForgetEffect::FailureAsyncHttp { call_ref, request } => {
                 let ctx2 = ctx.clone();
@@ -2153,6 +2278,7 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
                         topic: "call-failure-result".to_string(),
                         outcome: outcome.to_string(),
                         payload,
+                        body: Vec::new(),
                     };
                     let _ = ctx2.reentry_tx.send(ev);
                 });
