@@ -300,10 +300,16 @@ async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_recla
 
     // ── The restored SetupTimeout fires at the (absolute) 150 s deadline ──────
     // No SIP will ever arrive for this call again (the load generator gave up
-    // during the kill); only the replicated ledger timer can resolve it.
+    // during the kill); only the replicated ledger timer can resolve it. The
+    // SetupTimeout CANCELs the ringing b-leg, and the call-liveness ordering fix
+    // now HOLDS finalization while that b-leg is `Cancelling` (awaiting a 487 or a
+    // crossing 200 — neither of which can ever arrive for this abandoned call), so
+    // the release completes at the 32 s `TerminatingTimeout` backstop that
+    // `begin_termination` arms — SetupTimeout (150 s) + 32 s, still FAR below the
+    // 1 h GlobalDuration cap this test guards against.
     fh.advance(Duration::from_secs(155)).await;
     let mut released = false;
-    for _ in 0..40 {
+    for _ in 0..200 {
         fh.advance(Duration::from_millis(200)).await;
         if store.stats().current_total == 0 {
             released = true;
@@ -312,8 +318,9 @@ async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_recla
     }
     assert!(
         released,
-        "the reclaimed in-setup call must release its limiter hold at the setup \
-         deadline — not at the 1 h GlobalDuration (the endurance cap20 pinning)",
+        "the reclaimed in-setup call must release its limiter hold shortly after the \
+         setup deadline (SetupTimeout + the terminating safety backstop) — not at the \
+         1 h GlobalDuration (the endurance cap20 pinning)",
     );
     assert_eq!(primary.active_calls(), 0, "no zombie call on the rebooted primary");
     assert_eq!(backup.active_calls(), 0, "the backup never owned a live copy");

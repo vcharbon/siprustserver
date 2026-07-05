@@ -104,16 +104,36 @@ pub fn set_bye_disposition(call: Call, leg_id: &str, bye: ByeDisposition) -> Cal
     update_leg(call, leg_id, |l| l.bye_disposition = Some(bye))
 }
 
-/// Whether all legs of a terminating call have reached a terminal BYE
-/// disposition. A `trying` leg with no `byeDisposition` never established, so it
+/// Whether a single leg has reached a terminal resolution for termination
+/// bookkeeping. A `trying` leg with no `byeDisposition` never established, so it
 /// is considered resolved.
+///
+/// A leg still in `Cancelling` disposition is **not** resolved even though its
+/// interim `Cancelled` bye disposition reads terminal: an internal CANCEL is in
+/// flight and its transaction has not settled — the callee owes us a `487`, or a
+/// `200 OK` may still be crossing our CANCEL on the wire (RFC 3261 §9.1). Holding
+/// the leg unresolved keeps the call alive until `resolve-cancel-response` (the
+/// 487) or `cancel-200-crossing` (200 → ACK + BYE) reaps the abandoned callee, so
+/// finalization (RemoveCall) never strands a ringing b-leg. Both of those rules —
+/// and the force-terminal reaper/safety paths — clear the `Cancelling`
+/// disposition as they resolve the leg, so this stays unresolved only for the
+/// duration of the in-flight CANCEL (bounded by the terminating safety timer).
+pub fn leg_is_resolved(leg: &Leg) -> bool {
+    if leg.disposition == LegDisposition::Cancelling {
+        return false;
+    }
+    match leg.bye_disposition {
+        None => leg.state == LegState::Trying,
+        Some(b) => b.is_terminal(),
+    }
+}
+
+/// Whether all legs of a terminating call have reached a terminal resolution
+/// (see [`leg_is_resolved`]).
 pub fn is_fully_resolved(call: &Call) -> bool {
     std::iter::once(&call.a_leg)
         .chain(call.b_legs.iter())
-        .all(|leg| match leg.bye_disposition {
-            None => leg.state == LegState::Trying,
-            Some(b) => b.is_terminal(),
-        })
+        .all(leg_is_resolved)
 }
 
 /// Append a CDR event.
