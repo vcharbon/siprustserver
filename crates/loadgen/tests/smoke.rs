@@ -13,9 +13,9 @@ use b2bua_harness::{settle_until, B2buaSut};
 use layer_harness::TransportKind;
 use loadgen::scenarios::{establish, BasicCall, LoadScenario, ScenarioId};
 use loadgen::{
-    CallConfig, CallCtx, CallEnv, CallRouting, CallScope, CallTuning, Correlation, Driver,
-    DriverCfg, EgressPolicy, EndpointSpec, LegInfo, LoadCase, MixEntry, MuxCore, MuxTransport,
-    ResultClass, Reporter, ReporterCfg, Role, ScenarioInputs, ShapeRegistry,
+    prefix_leg_picker, CallConfig, CallCtx, CallEnv, CallRouting, CallScope, CallTuning,
+    Correlation, Driver, DriverCfg, EgressPolicy, EndpointSpec, LegInfo, LoadCase, MixEntry,
+    MuxCore, MuxTransport, ResultClass, Reporter, ReporterCfg, Role, ScenarioInputs, ShapeRegistry,
 };
 use scenario_harness::{Harness, StepError};
 use sip_clock::Clock;
@@ -681,6 +681,77 @@ async fn loadgen_mux_picker_disambiguates_shared_socket() {
     drop(ep_charlie);
     drop(ep_dave);
     assert_eq!(core.registry_size(), 0, "shared-socket slot leaked after both receivers dropped");
+}
+
+/// The shared-callee **prefix** path (`prefix_leg_picker`): bob, bob2 AND charlie
+/// share ONE socket under ONE call token — the two-tier demux the reroute+transfer
+/// topology needs. Tier 1 (the token in `X-Loadgen-Id`) selects this call instance;
+/// tier 2 (the R-URI-user prefix) tells the three legs apart, including a
+/// per-call-suffixed transfer user (`sip:charlie-<tag>@…`) that still routes by its
+/// "charlie" prefix (not onto "bob" via a shorter match). Proves bob1/bob2/charlie
+/// need no per-leg socket — the primitive the driver now wires for every call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loadgen_mux_prefix_picker_shares_callee_port() {
+    use sip_net::BindUdpOpts;
+    let uas = addr(6443);
+    let core = MuxCore::bind(
+        vec![EndpointSpec { addr: uas, role: Role::Callee }],
+        Correlation::header("X-Loadgen-Id"),
+        256,
+        10,
+        RECV,
+        Clock::system(),
+    )
+    .await
+    .unwrap();
+
+    // ONE call token; three receivers on one socket; the ready-made prefix picker.
+    let token = "lgSHAREDPFX".to_string();
+    let routing = CallRouting::new(token.clone())
+        .leg(uas, "bob")
+        .leg(uas, "bob2")
+        .leg(uas, "charlie")
+        .picker(uas, prefix_leg_picker(["bob", "bob2", "charlie"]));
+    let net = core.network(routing);
+
+    // Bind in declaration order: bob, bob2, charlie.
+    let ep_bob = net.bind_udp(BindUdpOpts::new(uas, 256)).await.unwrap();
+    let ep_bob2 = net.bind_udp(BindUdpOpts::new(uas, 256)).await.unwrap();
+    let ep_charlie = net.bind_udp(BindUdpOpts::new(uas, 256)).await.unwrap();
+
+    let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    // Same token on every leg (one instance); the R-URI user names the leg. The
+    // transfer leg carries a per-call SUFFIX to prove prefix (not exact) matching.
+    let invite = |ruri_user: &str, cid: &str| {
+        format!(
+            "INVITE sip:{ruri_user}@127.0.0.1 SIP/2.0\r\nCall-ID: {cid}@h\r\n\
+             X-Loadgen-Id: {token}\r\nTo: <sip:{ruri_user}@127.0.0.1>\r\n\
+             From: <sip:a@h>;tag=1\r\nCSeq: 1 INVITE\r\n\r\n"
+        )
+    };
+    // Send out of declaration order to prove routing is by prefix, not arrival.
+    sender.send_to(invite("charlie-7f3a", "c-charlie").as_bytes(), uas).await.unwrap();
+    sender.send_to(invite("bob2", "c-bob2").as_bytes(), uas).await.unwrap();
+    sender.send_to(invite("bob", "c-bob").as_bytes(), uas).await.unwrap();
+
+    let got_bob = tokio::time::timeout(RECV, ep_bob.recv()).await.unwrap().unwrap();
+    let got_bob2 = tokio::time::timeout(RECV, ep_bob2.recv()).await.unwrap().unwrap();
+    let got_charlie = tokio::time::timeout(RECV, ep_charlie.recv()).await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&got_bob.raw).contains("sip:bob@"), "bob got the wrong leg");
+    assert!(String::from_utf8_lossy(&got_bob2.raw).contains("sip:bob2@"), "bob2 got the wrong leg");
+    assert!(
+        String::from_utf8_lossy(&got_charlie.raw).contains("sip:charlie-7f3a@"),
+        "charlie got the wrong leg (suffixed transfer user must route by its prefix)"
+    );
+    use std::sync::atomic::Ordering::Relaxed;
+    assert_eq!(core.stats().delivered.load(Relaxed), 3);
+    assert_eq!(core.stats().orphan_no_header.load(Relaxed), 0);
+    assert_eq!(core.stats().orphan_unknown_token.load(Relaxed), 0);
+
+    drop(ep_bob);
+    drop(ep_bob2);
+    drop(ep_charlie);
+    assert_eq!(core.registry_size(), 0, "shared-socket slot leaked after receivers dropped");
 }
 
 /// Emergency / non-emergency split under overload. The b2bua's CPS bucket is

@@ -50,7 +50,9 @@ pub use chaos::{ChaosLog, ChaosTag};
 pub use class::{CallOutcome, ResultClass};
 pub use ctx::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp};
 pub use driver::{serve_metrics, CallConfig, CallTuning, Driver, DriverCfg, MixEntry, MuxTransport};
-pub use mux::{CallRouting, Correlation, EndpointSpec, LegInfo, LegPicker, MuxCore, Role};
+pub use mux::{
+    prefix_leg_picker, CallRouting, Correlation, EndpointSpec, LegInfo, LegPicker, MuxCore, Role,
+};
 pub use rate::{Governor, RateHandle};
 pub use report::{Reporter, ReporterCfg};
 // The machine-readable run index (`load-result.json`) the reporter writes — the

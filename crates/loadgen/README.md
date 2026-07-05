@@ -629,15 +629,31 @@ then assert on `reporter.count(id, &class)` and the leak canaries
 `b2bua.assert_fully_reaped()`). Model it on
 `loadgen_post_call_cleanup_no_leak` / `loadgen_mux_emergency_split_under_overload`.
 
-### Advanced: multiple receivers on one socket (scenario-owned routing)
+### Shared callee socket: two-tier demux (bob / bob2 / charlie on one port)
 
-The mux correlates a *call* by its token; when two legs of one call land on the
-**same** socket, a scenario-supplied `LegPicker` (handed a parsed `LegInfo`)
-disambiguates which receiver gets the leg. Declare it via `CallRouting`
-(`.leg(addr,label)` per receiver, `.picker(addr, …)`). See
-`loadgen_mux_picker_disambiguates_shared_socket` for a worked example. This is
-the seam a future multi-REFER / re-route scenario builds on; the mux itself never
-reads `X-Api-Call` or any URI — leg routing is the scenario's to own.
+Every callee-side leg of a call — the b-leg `bob`, the rerouting failover
+`bob2`, and the transfer target `charlie` — shares **one** socket
+(`uas`), demuxed in two orthogonal tiers:
+
+1. **which call instance** a leg belongs to = the correlation token (the random
+   per-call `X-Loadgen-Id`, or the To-user). The mux matches it (`by_token`)
+   *before* it consults any picker, so a picker only ever sees the 2–3 awaiting
+   legs of ONE call.
+2. **which leg** within that instance = a `LegPicker` (handed a parsed
+   `LegInfo`) keyed on the **R-URI user prefix**. The egress addresses each
+   callee by role (`sip:bob2@…` = the reroute plan's `new_ruri`; `sip:charlie@…`
+   = the transfer's Refer-To user), so the user-part names the leg. A per-call
+   suffix (`bob2-<tag>`) still routes by its label prefix, and longest-match
+   keeps `bob` vs `bob2` (or `bob1` vs `bob10`) unambiguous.
+
+The driver wires this for every call; the ready-made picker is
+`loadgen::prefix_leg_picker(labels)`. To build your own routing, declare it via
+`CallRouting` (`.leg(addr,label)` per receiver, `.picker(addr, …)`) — a picker
+returns the receiver label, or `""` for a `no_route` orphan. The mux itself
+never reads `X-Api-Call` or any URI; leg routing is the caller's to own. Worked
+examples: `loadgen_mux_prefix_picker_shares_callee_port` (bob/bob2/charlie on one
+port, incl. a suffixed transfer user) and, for a hand-rolled picker,
+`loadgen_mux_picker_disambiguates_shared_socket`.
 
 ---
 

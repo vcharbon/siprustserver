@@ -283,6 +283,37 @@ impl LegInfo<'_> {
 /// contained (the leg becomes a `no_route` orphan), not propagated.
 pub type LegPicker = Arc<dyn Fn(&LegInfo) -> String + Send + Sync>;
 
+/// A ready-made prefix-matching [`LegPicker`] — the second demux tier for the
+/// several callee legs of ONE call that share a single socket (bob1 / bob2 /
+/// charlie, "distinguished by prefix").
+///
+/// Demux is two orthogonal tiers:
+/// 1. **which call instance** a leg belongs to is the correlation token (the
+///    random per-call `X-Loadgen-Id`, or the To-user). The mux matches it
+///    (`by_token`) BEFORE it ever consults a picker, so a picker only ever sees
+///    the handful of legs of ONE instance.
+/// 2. **which leg** within that instance is THIS picker's job: it returns the
+///    receiver whose label is the **longest prefix of the leg's Request-URI
+///    user-part**. The egress addresses each callee by role (`sip:bob2@…`,
+///    `sip:charlie@…`), so the user-part names the leg; a per-call suffix
+///    (`bob2-<tag>`) still routes by its label prefix, and longest-match keeps
+///    `bob` vs `bob2` (or `bob1` vs `bob10`) unambiguous.
+///
+/// A leg whose R-URI user prefixes NONE of `labels` yields `""` — the mux counts
+/// it a `no_route` orphan (observable, never mis-delivered).
+pub fn prefix_leg_picker(labels: impl IntoIterator<Item = impl Into<String>>) -> LegPicker {
+    let labels: Vec<String> = labels.into_iter().map(Into::into).collect();
+    Arc::new(move |leg: &LegInfo| {
+        let user = leg.ruri_user().unwrap_or_default();
+        labels
+            .iter()
+            .filter(|label| user.starts_with(label.as_str()))
+            .max_by_key(|label| label.len())
+            .cloned()
+            .unwrap_or_default()
+    })
+}
+
 /// A registry key owned by one endpoint (removed on its `Drop`).
 #[derive(Debug, Clone)]
 enum Key {
@@ -1642,6 +1673,58 @@ mod tests {
         // To-user only), and a userless To yields no token.
         let userless = invite("<sip:10.0.0.9:5070>", "X-Loadgen-Id: lg999\r\n");
         assert_eq!(c.token(&userless), None);
+    }
+
+    // -- prefix_leg_picker: the R-URI-prefix leg tier (bob/bob2/charlie on one
+    //    socket, once the token has already picked the call instance) ----------
+
+    /// An INVITE with a specific Request-URI (+ matching To), for the leg-picker
+    /// tests — the mux hands a picker a `LegInfo` over exactly these bytes.
+    fn invite_ruri(ruri: &str) -> Vec<u8> {
+        format!(
+            "INVITE {ruri} SIP/2.0\r\nCall-ID: c1@h\r\nTo: <{ruri}>\r\n\
+             From: <sip:a@h>;tag=1\r\nCSeq: 1 INVITE\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// The picker routes each shared-socket leg to the receiver whose label is the
+    /// LONGEST prefix of the R-URI user — bob / bob2 / charlie on one port,
+    /// including a per-call-suffixed user, with longest-match resolving bob-vs-bob2;
+    /// an unknown user (or a response with no R-URI) is a no-route (`""`).
+    #[test]
+    fn prefix_leg_picker_routes_by_longest_ruri_user_prefix() {
+        let pick = prefix_leg_picker(["bob", "bob2", "charlie"]);
+        let route = |ruri: &str| {
+            let raw = invite_ruri(ruri);
+            pick(&LegInfo { raw: raw.as_slice() })
+        };
+
+        assert_eq!(route("sip:bob@10.0.0.1:5070"), "bob");
+        // "bob2" is prefixed by both "bob" and "bob2" → longest wins.
+        assert_eq!(route("sip:bob2@10.0.0.1:5070"), "bob2");
+        assert_eq!(route("sip:charlie@10.0.0.1:5070"), "charlie");
+        // A per-call suffix on the user still routes by its label prefix.
+        assert_eq!(route("sip:bob2-lg99@10.0.0.1:5070"), "bob2");
+        assert_eq!(route("sip:charlie.7f3a@10.0.0.1:5070"), "charlie");
+        // No label prefixes the user → no route (a no_route orphan at the mux).
+        assert_eq!(route("sip:dave@10.0.0.1:5070"), "");
+        // A response (no Request-URI) is a no-route, never a panic.
+        assert_eq!(pick(&LegInfo { raw: &b"SIP/2.0 200 OK\r\n\r\n"[..] }), "");
+    }
+
+    /// Longest-match disambiguates labels that are prefixes of each other even
+    /// when the shorter also matches (`bob1` vs `bob10`).
+    #[test]
+    fn prefix_leg_picker_longest_match_disambiguates_numeric_siblings() {
+        let pick = prefix_leg_picker(["bob1", "bob10"]);
+        let route = |ruri: &str| {
+            let raw = invite_ruri(ruri);
+            pick(&LegInfo { raw: raw.as_slice() })
+        };
+        assert_eq!(route("sip:bob10@h"), "bob10");
+        assert_eq!(route("sip:bob1@h"), "bob1");
+        assert_eq!(route("sip:bob10x@h"), "bob10");
     }
 
     // -- CallTxns retransmit engine: method-generic regression --------------

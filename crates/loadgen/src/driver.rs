@@ -24,7 +24,7 @@ use crate::case::LoadCase;
 use crate::chaos::{ChaosLog, ChaosTag};
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
-use crate::mux::{CallRouting, Correlation, LegInfo, MuxCore};
+use crate::mux::{prefix_leg_picker, CallRouting, Correlation, MuxCore};
 use crate::rate::{Governor, RateHandle};
 use crate::report::{RenderedSample, Reporter};
 use crate::scenarios::LoadScenario;
@@ -416,23 +416,31 @@ async fn run_one(
         None => (Default::default(), Default::default(), None, None),
     };
 
-    // One correlation token per CALL: alice stamps it on her INVITE (per the
-    // run's correlation strategy — relayed header or To-user) and the SUT
-    // carries it onto every downstream leg, so every callee leg shares it. Each
-    // callee leg is declared on its own socket and the mux demuxes by (socket,
-    // token) — except a rerouting shape's `bob2`, which SHARES bob's socket:
-    // there the scenario-owned leg picker disambiguates by the R-URI user (the
-    // egress candidate list names each route's callee in its `new_ruri`, so the
-    // rerouted b-leg arrives addressed `sip:bob2@…`).
+    // Two-tier callee demux. One correlation token per CALL: alice stamps it on
+    // her INVITE (per the run's strategy — relayed header or To-user) and the SUT
+    // carries it onto every downstream leg, so every callee leg shares it. That
+    // token is the FIRST tier — it selects the call INSTANCE (mux `by_token`).
+    //
+    // Every callee-side leg (bob, the rerouting `bob2`, the transfer `charlie`)
+    // shares ONE socket (`transport.uas_addr`); the SECOND tier — WHICH leg of
+    // this instance — is the R-URI-prefix leg picker, since the egress addresses
+    // each callee by role (`sip:bob2@…`, `sip:charlie@…`: the reroute plan's
+    // `new_ruri`, the transfer's Refer-To user). So bob1/bob2/charlie need no
+    // per-leg socket — they are "distinguished by prefix".
     let token = mint_token();
-    let mut routing = CallRouting::new(token.clone()).leg(transport.uas_addr, "bob");
+    let mut callee_labels: Vec<&str> = vec!["bob"];
     if needs_bob2 {
-        routing = routing
-            .leg(transport.uas_addr, "bob2")
-            .picker(transport.uas_addr, Arc::new(|leg: &LegInfo| leg.ruri_user().unwrap_or_default()));
+        callee_labels.push("bob2");
     }
     if needs_charlie {
-        routing = routing.leg(transport.refer_addr, "charlie");
+        callee_labels.push("charlie");
+    }
+    let mut routing = CallRouting::new(token.clone());
+    for label in &callee_labels {
+        routing = routing.leg(transport.uas_addr, *label);
+    }
+    if callee_labels.len() > 1 {
+        routing = routing.picker(transport.uas_addr, prefix_leg_picker(callee_labels.iter().copied()));
     }
 
     let record = reporter.should_record(id);
@@ -451,8 +459,12 @@ async fn run_one(
     binder.seed_ids(next_seed(seed_base));
 
     let alice = binder.agent("alice", &transport.uac_addr.to_string()).await;
-    // Bind order is load-bearing on a shared socket: the mux assigns receivers
-    // in leg-declaration order, so bob (leg 1) binds before bob2 (leg 2).
+    // Bind order is load-bearing on the shared callee socket: the mux assigns
+    // receivers in leg-declaration order, so bind bob → bob2 → charlie to match
+    // the `callee_labels` order above. All callee legs share `uas_addr`; the
+    // prefix picker demuxes them (`transport.refer_addr` is retained as a bound
+    // endpoint for the CLI's alice/bob/charlie role set, but no longer carries a
+    // separate transfer socket).
     let bob = binder.agent("bob", &transport.uas_addr.to_string()).await;
     let bob2 = if needs_bob2 {
         Some(binder.agent("bob2", &transport.uas_addr.to_string()).await)
@@ -460,7 +472,7 @@ async fn run_one(
         None
     };
     let charlie = if needs_charlie {
-        Some(binder.agent("charlie", &transport.refer_addr.to_string()).await)
+        Some(binder.agent("charlie", &transport.uas_addr.to_string()).await)
     } else {
         None
     };
