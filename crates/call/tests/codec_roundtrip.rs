@@ -177,6 +177,44 @@ fn sm_cursors_round_trip_and_back_compat() {
     assert!(from_old.sm_cursors.is_empty(), "absent field decodes to empty");
 }
 
+/// GAP-P7-2 — the `relay18x.messages` policy field and the `ONE_PER_VALUE`
+/// dedupe ledger are replication-compatible under the positional msgpack codec:
+/// an old-shape body (encoded before the trailing fields existed) decodes with
+/// the FIRST / empty defaults via `#[serde(default)]`.
+#[test]
+fn relay18x_messages_fields_decode_from_old_shape_bodies() {
+    use call::features::{Relay18xMessages, RelayFirst18xStrategy, RelayFirst18xTo180Feature};
+
+    // Old `RelayFirst18xTo180Feature` carried ONLY `strategy` (one element).
+    #[derive(serde::Serialize)]
+    struct OldFeature {
+        strategy: RelayFirst18xStrategy,
+    }
+    let old = rmp_serde::to_vec(&OldFeature {
+        strategy: RelayFirst18xStrategy::FakePrack,
+    })
+    .unwrap();
+    let new: RelayFirst18xTo180Feature = rmp_serde::from_slice(&old).unwrap();
+    assert_eq!(new.strategy, RelayFirst18xStrategy::FakePrack);
+    assert_eq!(new.messages, Relay18xMessages::First, "absent messages defaults to FIRST");
+
+    // Old `RelayFirst18xState` carried `(first_relayed, stored_a_tag)`.
+    #[derive(serde::Serialize)]
+    struct OldState {
+        first_relayed: bool,
+        stored_a_tag: Option<String>,
+    }
+    let old = rmp_serde::to_vec(&OldState {
+        first_relayed: true,
+        stored_a_tag: Some("a1".into()),
+    })
+    .unwrap();
+    let new: call::RelayFirst18xState = rmp_serde::from_slice(&old).unwrap();
+    assert!(new.first_relayed);
+    assert_eq!(new.stored_a_tag.as_deref(), Some("a1"));
+    assert!(new.relayed_values.is_empty(), "absent dedupe ledger decodes empty");
+}
+
 /// ADR-0017 X4 — the numbering-plan **reroute remainder** rides the existing
 /// opaque `callback_context` string (and per-service `ext`), so it is part of the
 /// replicated `Call` body and survives failover by construction: no new wire

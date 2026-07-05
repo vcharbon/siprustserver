@@ -693,6 +693,13 @@ pub struct RelayFirst18xState {
     /// The a-facing To-tag minted on the first 18x — reused on the 200 OK so the
     /// caller sees one stable callee identity across forking/failover.
     pub stored_a_tag: Option<String>,
+    /// Distinct *upstream* 18x status values already relayed (dedupe key for the
+    /// `ONE_PER_VALUE` messages policy — the caller-facing wire form is always
+    /// the downgraded bare 180, so dedupe must key on what the callee sent).
+    /// `#[serde(default)]` keeps old replicated bodies (two-element positional
+    /// encoding) decoding unchanged.
+    #[serde(default)]
+    pub relayed_values: Vec<u16>,
 }
 
 /// Runtime state for the `promote18xPemTo200` service (port of the TS

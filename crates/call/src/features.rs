@@ -48,10 +48,32 @@ pub enum RelayFirst18xStrategy {
     PromotePemTo200,
 }
 
+/// `relayFirst18xTo180` messages policy — WHICH 18x messages are relayed
+/// toward the caller (each relayed one is downgraded per the machine's rules;
+/// this only picks how many). Wire values of the Routing API `Relay18x.messages`
+/// field (`ALL` / `FIRST` / `ONE_PER_VALUE`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Relay18xMessages {
+    /// Relay every 18x (each downgraded).
+    All,
+    /// Relay only the first 18x; suppress the rest (the historical behavior).
+    #[default]
+    First,
+    /// Relay one 18x per distinct upstream status value (first 180, first 183,
+    /// …); suppress repeats of an already-relayed value.
+    OnePerValue,
+}
+
 /// Optional `relayFirst18xTo180` feature arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayFirst18xTo180Feature {
     pub strategy: RelayFirst18xStrategy,
+    /// Which 18x messages are relayed (Routing API `Relay18x.messages`).
+    /// Defaults to [`Relay18xMessages::First`] — today's behavior — and the
+    /// serde default keeps old replicated bodies decoding unchanged.
+    #[serde(default)]
+    pub messages: Relay18xMessages,
 }
 
 /// One entry in the optional `callLimiters` feature arm.

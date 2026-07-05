@@ -476,6 +476,29 @@ impl B2buaSut {
         ))
     }
 
+    /// Builder for a B2BUA that routes every call to `dest` with the
+    /// `relayFirst18xTo180` feature active under `strategy` and an explicit
+    /// `relay18x.messages` policy (Routing API `Relay18x.messages`).
+    pub fn route_all_to_with_18x_messages(
+        dest_host: &str,
+        dest_port: u16,
+        strategy: call::features::RelayFirst18xStrategy,
+        messages: call::features::Relay18xMessages,
+    ) -> B2buaSutBuilder {
+        let dest = (dest_host.to_string(), dest_port);
+        Self::builder(Arc::new(
+            b2bua::decision::ScriptedDecisionEngine::builder()
+                .fallback(move |_req| {
+                    b2bua::decision::NewCallResponse::Route(
+                        b2bua::decision::test_adapter::route_to_with_18x_messages(
+                            &dest.0, dest.1, strategy, messages,
+                        ),
+                    )
+                })
+                .build(),
+        ))
+    }
+
     /// Builder for a B2BUA that routes the call to `dest_port` (bob1) with the
     /// `relayFirst18xTo180` feature active under `strategy` and a `callback_context`
     /// set (the failover-capable marker), and fails over via `/call/failure` to
