@@ -496,6 +496,9 @@ impl ReplicatedB2buaSut {
             overload: Some(b2bua::overload::OverloadSignal::new(Arc::new(
                 b2bua::overload::simulated().0,
             ))),
+            // The replicating failover path registers no callflow services, so
+            // no `ServiceHttpRequest` is ever fired here.
+            adaptation_http: None,
         };
         b2bua_harness::spawn_b2bua_core(endpoint, params, |config| {
             // EXACT production (kind) timers — `deploy/k8s/manifests/20-worker.yaml`.

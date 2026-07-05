@@ -192,6 +192,7 @@ impl Reaper {
             topic: REAPER_TOPIC.to_string(),
             outcome: outcome.to_string(),
             payload,
+            body: Vec::new(),
         });
     }
 }

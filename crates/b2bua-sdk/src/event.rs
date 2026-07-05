@@ -55,6 +55,15 @@ pub enum CallEvent {
         topic: String,
         outcome: String,
         payload: serde_json::Value,
+        /// Raw, **binary-safe** entity bytes carried alongside the JSON
+        /// `payload` (the generic service-authorable async-HTTP round-trip's
+        /// response body — an arbitrary `Vec<u8>` that may contain non-UTF-8
+        /// bytes). Kept OUT of `payload` on purpose: routing an opaque body
+        /// through a `serde_json::Value` would coerce it to a UTF-8 string /
+        /// force base64, so the bytes ride this field verbatim end to end.
+        /// `Vec::new()` for every text-only internal event (reaper verdicts,
+        /// the `/call/refer` and `/call/failure` decision results).
+        body: Vec<u8>,
     },
     /// The transaction layer reports the last transaction for a *watched* call has
     /// cleared (ADR-0014). The router uses it to self-release an acting-backup

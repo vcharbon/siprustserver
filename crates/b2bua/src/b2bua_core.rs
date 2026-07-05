@@ -104,6 +104,12 @@ pub struct B2buaDeps {
     /// *before* spawn (notably the CDR writers) record into the SAME registry the
     /// core exports at `/metrics`. Pass `B2buaMetrics::new()` if you don't scrape it.
     pub metrics: B2buaMetrics,
+    /// Host-injected generic async-HTTP capability for
+    /// [`RuleAction::ServiceHttpRequest`](crate::rules::RuleAction) (the
+    /// service-authorable adaptation callback). `None` = today's behaviour (a
+    /// service firing the effect gets an `outcome:"error"` re-entry, never a
+    /// stranded machine); `Some` maps the logical endpoint onto its base URL.
+    pub adaptation_http: Option<crate::router::AdaptationHttpPort>,
 }
 
 impl B2buaCore {
@@ -158,6 +164,7 @@ impl B2buaCore {
             id_gen,
             replication,
             metrics,
+            adaptation_http,
         } = deps;
 
         let parser: Arc<dyn SipParser + Send + Sync> = Arc::new(CustomParser::new());
@@ -335,6 +342,9 @@ impl B2buaCore {
             readiness: readiness.clone(),
             overload: overload.clone(),
             reentry_tx,
+            // Arc-share the injected port into every per-call `ctx.clone()`,
+            // exactly like `decision`/`limiter`.
+            adaptation_http: adaptation_http.map(Arc::new),
         });
 
         tasks.push(tokio::spawn(router::run(

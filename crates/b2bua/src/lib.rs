@@ -43,6 +43,7 @@ pub mod tier1_brake;
 pub mod timers;
 
 pub use b2bua_core::{B2buaCore, B2buaDeps, ReplicationSetup};
+pub use router::AdaptationHttpPort;
 
 pub use config::B2buaConfig;
 pub use effects::{HandlerEffects, HandlerResult};

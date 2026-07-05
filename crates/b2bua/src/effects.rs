@@ -70,6 +70,23 @@ pub enum FireAndForgetEffect {
         call_ref: String,
         request: serde_json::Value,
     },
+    /// The generic service-authorable async-HTTP callback (generalizes
+    /// `ReferAsyncHttp`/`FailureAsyncHttp`). A TYPED variant: the request `body`
+    /// is a raw `Vec<u8>` (NOT a `serde_json::Value`), so an arbitrary BINARY
+    /// payload rides to the wire and the response bytes round-trip back verbatim.
+    /// The router fires it over the host-injected `AdaptationHttpPort` and
+    /// re-enters via a `service-http-result` internal event whose entity bytes
+    /// ride `CallEvent::InternalEvent::body`.
+    ServiceHttpRequest {
+        call_ref: String,
+        correlation_id: String,
+        endpoint: String,
+        method: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        content_type: Option<String>,
+        timeout_ms: Option<u64>,
+    },
     /// Kick the async `/call/failure` decision (b-leg failover). Carries the
     /// request JSON the seed rule built; the router calls `decision.call_failure`
     /// then re-enters via a `call-failure-result` internal event.

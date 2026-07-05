@@ -402,6 +402,26 @@ impl<'a> ActionExecutor<'a> {
                     request: request.clone(),
                 });
             }
+            RuleAction::ServiceHttpRequest {
+                correlation_id,
+                endpoint,
+                method,
+                headers,
+                body,
+                content_type,
+                timeout_ms,
+            } => {
+                fx.fire_and_forget.push(crate::effects::FireAndForgetEffect::ServiceHttpRequest {
+                    call_ref: call.call_ref.clone(),
+                    correlation_id: correlation_id.clone(),
+                    endpoint: endpoint.clone(),
+                    method: method.clone(),
+                    headers: headers.clone(),
+                    body: body.clone(),
+                    content_type: content_type.clone(),
+                    timeout_ms: *timeout_ms,
+                });
+            }
             RuleAction::SetTransfer { state } => {
                 *call = call::helpers::set_transfer(call.clone(), state.clone());
             }
