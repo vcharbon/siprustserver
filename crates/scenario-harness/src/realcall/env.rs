@@ -297,21 +297,21 @@ impl<'a> CallEnv<'a> {
         Some(self.callee("charlie"))
     }
 
-    /// The `<sip:…>` Refer-To addressing charlie **through the egress seam**
-    /// (its host part is the policy-resolved URI's: the registered AOR domain or
-    /// charlie's address). The user-part is chosen by the correlation strategy:
-    /// cosmetic (`transfer`) with a header stamp, the TOKEN with the To-user
-    /// stamp — the SUT's transfer INVITE derives its To/R-URI from this URI,
-    /// which is how the C leg correlates. `None` if no charlie.
+    /// The `<sip:…>` Refer-To addressing charlie **through the egress seam** (its
+    /// host part is the policy-resolved URI's: the registered AOR domain or
+    /// charlie's address). The user-part names the transfer **role** (`charlie`),
+    /// because the SUT-originated C-leg copies the Refer-To onto its Request-URI
+    /// (only the R-URI — the C-leg's To is inherited from the A-leg): that makes
+    /// the transfer leg arrive `sip:charlie@…`, **prefix-routable** to charlie's
+    /// receiver when it shares the callee socket with bob/bob2 (the load mux's
+    /// `prefix_leg_picker`). Correlation is orthogonal and unaffected: the token
+    /// rides the relayed header (header stamp) or the A-leg-inherited To-user
+    /// (To-user stamp), never this user-part. `None` if no charlie.
     pub fn refer_to(&self) -> Option<String> {
         let target = self.refer_target()?;
-        let user = match &self.stamp {
-            CorrelationStamp::ToUser => self.token.as_str(),
-            CorrelationStamp::Header { .. } => "transfer",
-        };
-        // Splice the correlation user-part into the policy-resolved URI
-        // (`sip:charlie@<rest>` → `sip:<user>@<rest>`), keeping the topology-
-        // correct host part.
+        // Splice the transfer role into the policy-resolved URI
+        // (`sip:charlie@<rest>`), keeping the topology-correct host part.
+        let user = target.role.as_str();
         let rest = target
             .uri
             .split_once('@')
