@@ -1067,6 +1067,196 @@ mod media_primitives {
     }
 }
 
+// ── AnswerALegNewDialog: a-side fork-confirm (RFC 3261 §12.1 / RFC 3264 §5.1) ──
+//
+// The MRF / RBT early-media callflow answers ONE caller INVITE in two stages
+// with two *different* To-tags: 183 (SDP-MRF, tag A1) then 200 (SDP-B, tag A2 ≠
+// A1). `AnswerALegNewDialog` mints/adopts A2, supersedes the early a-dialog A1,
+// relays the callee 200/SDP under A2, and confirms the a-leg (GAP-M-A / newkahsip
+// MGIT spine).
+mod answer_a_leg_new_dialog {
+    use super::*;
+    use b2bua::effects::OutboundBody;
+    use sip_message::message_helpers::get_header;
+
+    /// A call whose a-leg already carries the MRF early-media dialog A1 (the tag
+    /// pinned by the media-leg `ConfirmDialog` / a prior 183).
+    fn call_with_early_a_dialog(a1: &str) -> call::Call {
+        let mut call = test_call();
+        call.a_leg.dialogs = vec![Dialog {
+            sip: StackDialog {
+                call_id: call.a_leg.call_id.clone(),
+                local_tag: a1.into(),
+                remote_tag: call.a_leg.from_tag.clone(),
+                local_uri: "sip:bob@host".into(),
+                remote_uri: "sip:alice@host".into(),
+                remote_target: "sip:alice@127.0.0.1:5060".into(),
+                local_cseq: 1,
+                route_set: vec![],
+            },
+            ext: B2buaDialogExt {
+                remote_cseq: Some(1),
+                inbound_pending_requests: vec![],
+                ack_branch: None,
+                pending_invite_txn: None,
+                cached_sdp: None,
+            },
+        }];
+        call
+    }
+
+    /// The action ignores the triggering event (it operates on the call), so any
+    /// event drives it.
+    fn some_event() -> CallEvent {
+        CallEvent::Sip {
+            message: Box::new(SipMessage::Request(super::invite())),
+            src: "127.0.0.1:5060".parse().unwrap(),
+        }
+    }
+
+    fn exec_on<'a>(
+        call: &'a call::Call,
+        event: &'a CallEvent,
+        source_leg_id: &'a str,
+        config: &'a B2buaConfig,
+        id_gen: &'a IdGen,
+        actions: &[RuleAction],
+    ) -> HandlerResult {
+        let exec = ActionExecutor { config, id_gen, now_ms: 0 };
+        let ctx = RuleContext {
+            call: RuleCall::new(call),
+            call_ref: &call.call_ref,
+            event,
+            source_leg_id,
+            direction: Direction::FromB,
+            now_ms: 0,
+            config,
+        };
+        exec.execute(actions, call, &ctx)
+    }
+
+    // The callee 200 answers the a-leg under a FRESH To-tag A2 ≠ the early A1:
+    // the a-dialog local_tag is re-stamped to A2, the SDP-B rides the 200, the
+    // answer SDP is cached for §13.3.1.4, and the a-leg is confirmed.
+    #[test]
+    fn answers_under_a_fresh_tag_superseding_the_early_dialog() {
+        let call = call_with_early_a_dialog("A1early");
+        let event = some_event();
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        let sdp_b = b"v=0\r\no=callee 2 2 IN IP4 10.0.0.70\r\n".to_vec();
+        let result = exec_on(
+            &call,
+            &event,
+            "b-1",
+            &config,
+            &id_gen,
+            &[RuleAction::AnswerALegNewDialog {
+                status: 200,
+                reason: "OK".into(),
+                body: sdp_b.clone(),
+                content_type: None,
+                to_tag: None,
+                header_updates: vec![],
+            }],
+        );
+        assert_eq!(result.effects.outbound.len(), 1);
+        let eff = &result.effects.outbound[0];
+        assert_eq!(eff.leg_id.as_deref(), Some("a"));
+        let a2 = match &eff.body {
+            OutboundBody::Response(r) => {
+                assert_eq!(r.status, 200);
+                assert_eq!(r.body, sdp_b, "the callee SDP-B rides the 200");
+                assert_eq!(
+                    get_header(&r.headers, "content-type"),
+                    Some("application/sdp"),
+                    "an SDP body defaults to application/sdp"
+                );
+                let tag = r.to.tag.clone().expect("the 200 carries an a-facing To-tag");
+                assert_ne!(tag, "A1early", "A2 ≠ the early-media tag A1 (RFC 3264 §5.1)");
+                tag
+            }
+            _ => panic!("expected an outbound response"),
+        };
+        let d = result.call.a_leg.dialogs.first().expect("a-dialog present");
+        assert_eq!(d.sip.local_tag, a2, "the a-dialog local_tag is re-stamped to A2");
+        assert_eq!(
+            d.ext.cached_sdp.as_deref(),
+            Some(sdp_b.as_slice()),
+            "the answer SDP is cached for a §13.3.1.4 un-ACKed-2xx retransmit"
+        );
+        assert_eq!(result.call.a_leg.state, LegState::Confirmed, "the a-leg is confirmed");
+    }
+
+    // An explicit `to_tag` is used verbatim; `header_updates` add non-structural
+    // headers (same discipline as `RespondToALeg`).
+    #[test]
+    fn honors_an_explicit_tag_and_header_updates() {
+        let call = call_with_early_a_dialog("A1early");
+        let event = some_event();
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        let result = exec_on(
+            &call,
+            &event,
+            "b-1",
+            &config,
+            &id_gen,
+            &[RuleAction::AnswerALegNewDialog {
+                status: 200,
+                reason: "OK".into(),
+                body: vec![],
+                content_type: None,
+                to_tag: Some("A2explicit".into()),
+                header_updates: vec![("X-Served-By".into(), Some("mrf".into()))],
+            }],
+        );
+        let eff = &result.effects.outbound[0];
+        match &eff.body {
+            OutboundBody::Response(r) => {
+                assert_eq!(r.to.tag.as_deref(), Some("A2explicit"), "the supplied A2 is used verbatim");
+                assert_eq!(get_header(&r.headers, "x-served-by"), Some("mrf"));
+            }
+            _ => panic!("expected an outbound response"),
+        }
+        assert_eq!(
+            result.call.a_leg.dialogs.first().map(|d| d.sip.local_tag.as_str()),
+            Some("A2explicit"),
+        );
+    }
+
+    // A non-2xx status establishes no dialog — the primitive is a no-op (the
+    // abandoned early dialog / the ADR-0022 unanswered-a-leg funnel own failure).
+    #[test]
+    fn non_2xx_status_is_a_no_op() {
+        let call = call_with_early_a_dialog("A1early");
+        let event = some_event();
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        let result = exec_on(
+            &call,
+            &event,
+            "b-1",
+            &config,
+            &id_gen,
+            &[RuleAction::AnswerALegNewDialog {
+                status: 486,
+                reason: "Busy Here".into(),
+                body: vec![],
+                content_type: None,
+                to_tag: None,
+                header_updates: vec![],
+            }],
+        );
+        assert!(result.effects.outbound.is_empty(), "a non-2xx final establishes no a-dialog");
+        assert_eq!(
+            result.call.a_leg.dialogs.first().map(|d| d.sip.local_tag.as_str()),
+            Some("A1early"),
+            "the early dialog A1 is left untouched",
+        );
+    }
+}
+
 // ── AckLeg body + Content-Type (RFC 3261 §13.2.2.4 delayed-offer answer) ─────
 //
 // `RuleAction::AckLeg` carries an optional body so a rule can ACK a 2xx with an
