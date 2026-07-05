@@ -518,7 +518,7 @@ define_service! {
                         disposition: Some(call::LegDisposition::Bridged),
                     },
                     RuleAction::ConfirmDialog { leg_id: c_leg_id.clone() },
-                    RuleAction::AckLeg { leg_id: c_leg_id.clone() },
+                    RuleAction::AckLeg { leg_id: c_leg_id.clone(), body: Vec::new(), content_type: None },
                     notify(&leg, SUB_STATE_TERMINATED_NORESOURCE, 200, "OK"),
                     RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferSubscriptionExpiry, None) },
                     RuleAction::CancelTimer { id: timer_id(call::TimerType::NoAnswer, Some(&c_leg_id)) },
@@ -664,7 +664,7 @@ define_service! {
                 new_state.phase = TransferPhase::ARealigning;
 
                 ok(vec![
-                    RuleAction::AckLeg { leg_id: c_leg_id.clone() },
+                    RuleAction::AckLeg { leg_id: c_leg_id.clone(), body: Vec::new(), content_type: None },
                     RuleAction::CancelTimer {
                         id: timer_id(call::TimerType::ReferReinviteAnswer, Some(&c_leg_id)),
                     },
@@ -811,7 +811,7 @@ define_service! {
                 let st = state(ctx)?.clone();
                 let c_leg_id = st.c_leg_id.clone()?;
                 ok(vec![
-                    RuleAction::AckLeg { leg_id: "a".to_string() },
+                    RuleAction::AckLeg { leg_id: "a".to_string(), body: Vec::new(), content_type: None },
                     RuleAction::CancelTimer {
                         id: timer_id(call::TimerType::ReferReinviteAnswer, Some("a")),
                     },

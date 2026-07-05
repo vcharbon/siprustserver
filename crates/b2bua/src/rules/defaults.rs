@@ -159,7 +159,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                 let b = ctx.source_leg_id.to_string();
                 ok(vec![
                     RuleAction::ConfirmDialog { leg_id: b.clone() },
-                    RuleAction::AckLeg { leg_id: b.clone() },
+                    RuleAction::AckLeg { leg_id: b.clone(), body: Vec::new(), content_type: None },
                     RuleAction::DestroyLeg { leg_id: b },
                 ])
             },
@@ -272,7 +272,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                 let outbound_cseq = resp.cseq.seq as i64;
                 let mut actions = Vec::new();
                 if (200..300).contains(&resp.status) {
-                    actions.push(RuleAction::AckLeg { leg_id: leg.clone() });
+                    actions.push(RuleAction::AckLeg { leg_id: leg.clone(), body: Vec::new(), content_type: None });
                 }
                 actions.push(RuleAction::ResolveCancelledReinvite { leg_id: leg, outbound_cseq });
                 ok(actions)

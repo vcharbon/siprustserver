@@ -216,6 +216,15 @@ pub struct B2buaConfig {
     /// relayable even if named here, so a misconfiguration cannot corrupt the
     /// dialog. Overridable per worker via `B2BUA_RELAY_HEADERS` (comma-separated).
     pub relay_headers: Vec<String>,
+    /// **Default SDP source** (a service parameter). A canned SDP body a service
+    /// rule can source (via `ctx.config`) to originate a deliberate *fake-offer*
+    /// INVITE — e.g. a delayed-offer flow where the service sends `INVITE(SDP)` it
+    /// authored itself. A `CreateLeg` opts in explicitly with
+    /// `body_override: ctx.config.default_sdp.clone()`; it is **never** an
+    /// automatic fallback (a normal reroute/failover `CreateLeg` passes
+    /// `body_override: None` on purpose to relay the caller's own offer). `None`
+    /// (the default) = no canned SDP, today's behaviour.
+    pub default_sdp: Option<Vec<u8>>,
 }
 
 impl Default for B2buaConfig {
@@ -273,6 +282,9 @@ impl Default for B2buaConfig {
             // Opt-in transparent header relay: empty = no relay (production
             // default, strict no-op). Set names via `B2BUA_RELAY_HEADERS`.
             relay_headers: Vec::new(),
+            // Default SDP source: None = no canned offer. Opt-in per-CreateLeg
+            // via `body_override`, never an automatic fallback.
+            default_sdp: None,
         }
     }
 }

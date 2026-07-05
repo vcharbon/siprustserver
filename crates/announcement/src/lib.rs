@@ -85,7 +85,7 @@ fn on_media_answer(ctx: &RuleContext) -> Option<RuleHandleResult> {
     ok(vec![
         // Establish the media dialog so the MSCML INFO can ride it.
         RuleAction::ConfirmDialog { leg_id: media.clone() },
-        RuleAction::AckLeg { leg_id: media.clone() },
+        RuleAction::AckLeg { leg_id: media.clone(), body: Vec::new(), content_type: None },
         // Early media: the MRF's SDP onto the caller as an unreliable 183.
         RuleAction::SendProvisionalToLeg {
             leg_id: "a".to_string(),

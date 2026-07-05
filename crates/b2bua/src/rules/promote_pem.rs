@@ -244,7 +244,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     disposition: Some(LegDisposition::Bridged),
                 });
                 actions.push(RuleAction::ConfirmDialog { leg_id: b.clone() });
-                actions.push(RuleAction::AckLeg { leg_id: b.clone() });
+                actions.push(RuleAction::AckLeg { leg_id: b.clone(), body: Vec::new(), content_type: None });
                 actions.push(RuleAction::Merge { leg_a: a.clone(), leg_b: b.clone() });
                 for other in ctx.call.b_legs() {
                     if other.leg_id != b && other.state != LegState::Terminated {
@@ -333,7 +333,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 }
                 if resp.status < 300 {
                     return ok(vec![
-                        RuleAction::AckLeg { leg_id: "a".to_string() },
+                        RuleAction::AckLeg { leg_id: "a".to_string(), body: Vec::new(), content_type: None },
                         RuleAction::AddCdrEvent {
                             event_type: CdrEventType::Answer,
                             leg_id: "a".to_string(),

@@ -91,16 +91,31 @@ impl<'a> ActionExecutor<'a> {
                     });
                 }
             }
-            RuleAction::AckLeg { leg_id } => {
+            RuleAction::AckLeg { leg_id, body, content_type } => {
                 let leg = if leg_id == &call.a_leg.leg_id {
                     Some(&call.a_leg)
                 } else {
                     call.b_legs.iter().find(|l| &l.leg_id == leg_id)
                 };
                 if let Some(leg) = leg {
-                    if let Some(e) =
-                        relay::ack_b_leg(&call.call_ref, leg, call.emergency == Some(true), self.config, self.id_gen, vec![], None)
-                    {
+                    // A body-bearing ACK carries a delayed-offer answer (RFC 3261
+                    // §13.2.2.4); default its type to `application/sdp` when none is
+                    // given. An empty ACK stays a bare ACK — no body, no Content-Type
+                    // (today's behaviour, unchanged).
+                    let ct = if body.is_empty() {
+                        None
+                    } else {
+                        content_type.clone().or_else(|| Some("application/sdp".to_string()))
+                    };
+                    if let Some(e) = relay::ack_b_leg(
+                        &call.call_ref,
+                        leg,
+                        call.emergency == Some(true),
+                        self.config,
+                        self.id_gen,
+                        body.clone(),
+                        ct,
+                    ) {
                         fx.outbound.push(e);
                     }
                 }
