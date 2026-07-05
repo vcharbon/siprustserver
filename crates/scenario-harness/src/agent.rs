@@ -1121,6 +1121,51 @@ impl Agent {
         }
     }
 
+    /// Like [`receive`](Agent::receive), but SILENTLY absorbs (drops, sends NO
+    /// response) any queued requests whose method is in `absorb` before returning
+    /// the first request matching `method`. This models a UAS **transaction layer**
+    /// swallowing a retransmission (RFC 3261 §17.2.1) of a request it has only
+    /// *provisionally* answered — the raw-UA `Agent` has no such layer, so it
+    /// surfaces every duplicate datagram.
+    ///
+    /// The load-bearing difference from [`receive_tolerating`](Agent::receive_tolerating)
+    /// is that the absorbed request is **not** `200 OK`'d: a 200 would ANSWER it.
+    /// The intended case is a b-leg INVITE the callee is deliberately leaving
+    /// unanswered (a **silent callee**, no `>=180`) while the UAC's Timer A keeps
+    /// retransmitting the INVITE hop-by-hop through a front proxy that absorbs the
+    /// callee's bare `100 Trying` (RFC 3261 §16.7) — so the UAC never quiesces its
+    /// retransmit timer and the duplicates queue ahead of the message under test
+    /// (the internally-originated CANCEL, the crossing-200's ACK, the reap BYE).
+    pub async fn receive_absorbing(&self, method: &str, absorb: &[&str]) -> ServerTxn {
+        loop {
+            match self.recv().await {
+                SipMessage::Request(r) => {
+                    if r.method == method {
+                        let route_set = get_headers(&r.headers, "record-route")
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect();
+                        return ServerTxn { agent: self.clone(), request: r, to_tag: None, route_set };
+                    }
+                    if absorb.iter().any(|t| r.method == *t) {
+                        // Drop the retransmission silently — no response (a UAS that
+                        // has only 100'd its INVITE absorbs retransmits, replaying at
+                        // most the 100 the proxy already eats). Keep waiting.
+                        continue;
+                    }
+                    panic!(
+                        "{} expected a {method} request (absorbing {absorb:?}), got {}",
+                        self.name, r.method
+                    );
+                }
+                SipMessage::Response(r) => panic!(
+                    "{} expected a {method} request, got a {} {} response",
+                    self.name, r.status, r.reason
+                ),
+            }
+        }
+    }
+
     /// Send an out-of-dialog REFER addressed to `dst` whose To carries a bogus
     /// tag and whose Request-URI carries a `callRef` the B2BUA never minted — so
     /// the router resolves the (non-existent) call, finds no state, and rejects
