@@ -502,6 +502,25 @@ impl<'a> ActionExecutor<'a> {
                     extra,
                 ));
             }
+            RuleAction::AnswerALegNewDialog {
+                status,
+                reason,
+                body,
+                content_type,
+                to_tag,
+                header_updates,
+            } => {
+                self.answer_a_leg_new_dialog(
+                    call,
+                    fx,
+                    *status,
+                    reason,
+                    body,
+                    content_type.as_deref(),
+                    to_tag.as_deref(),
+                    header_updates,
+                );
+            }
             RuleAction::RetransmitALeg2xx => {
                 self.retransmit_a_leg_2xx(call, fx);
             }
@@ -1621,6 +1640,79 @@ impl<'a> ActionExecutor<'a> {
             None,
             extra_headers,
         ));
+    }
+
+    /// A-side fork-confirm ([`RuleAction::AnswerALegNewDialog`]): answer the a-leg
+    /// INVITE with a final **2xx** under a fresh (or supplied) To-tag A2 that
+    /// becomes the confirmed a-dialog, **superseding** an early-media dialog A1
+    /// the caller saw on a prior `18x` (RFC 3261 §12.1 forked-request dialog
+    /// establishment; the tag change is the RFC 3264 §5.1 one-answer-per-dialog
+    /// way to deliver MRF-early-media-then-callee-media when the two SDPs differ).
+    ///
+    /// Only a `2xx` establishes a dialog — a non-2xx status is a no-op (the
+    /// abandoned early dialog / the ADR-0022 `invariants::enforce` unanswered-a-leg
+    /// funnel own the failure paths). Steps: mint/adopt A2, OVERWRITE the a-dialog
+    /// `local_tag` to A2 (the MRF `ConfirmDialog` / an earlier 18x pinned A1),
+    /// relay the final/SDP under A2, confirm the a-leg, and cache the answer SDP
+    /// for a §13.3.1.4 un-ACKed-2xx retransmit (mirrors [`Self::confirm_dialog`]).
+    ///
+    /// The sip-txn layer only *stores* `uas_to_tag` from the first >100 response
+    /// (the 183's A1) and never rewrites a later final's `to.tag`, so the `200`
+    /// leaves under A2 verbatim; a late CANCEL's autonomous 487 still carries the
+    /// pinned A1, which harmlessly matches the caller's abandoned early dialog.
+    #[allow(clippy::too_many_arguments)]
+    fn answer_a_leg_new_dialog(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        status: u16,
+        reason: &str,
+        body: &[u8],
+        content_type: Option<&str>,
+        to_tag: Option<&str>,
+        header_updates: &[(String, Option<String>)],
+    ) {
+        // Only a 2xx establishes the new a-dialog (RFC 3261 §12.1). A non-2xx
+        // final does not create a dialog and is not this primitive's job.
+        if !(200..300).contains(&status) {
+            return;
+        }
+        // A2: the caller-supplied tag verbatim, else a freshly minted one.
+        // Minting via the IdGen guarantees A2 ≠ A1 (distinct from the pinned
+        // early-media tag), the RFC 3264 §5.1 requirement.
+        let a2 = to_tag.map(str::to_string).unwrap_or_else(|| self.id_gen.new_tag());
+        // Seed the a-dialog if absent (fresh minting adopts A2 directly); when it
+        // already exists under the early-media A1, `ensure_a_dialog_with` returns
+        // A1 unchanged, so re-stamp local_tag to A2 explicitly — the early dialog
+        // is superseded, not kept. Also cache the answer SDP under A2 for a
+        // §13.3.1.4 un-ACKed-2xx retransmit.
+        self.ensure_a_dialog_with(call, Some(a2.clone()));
+        if let Some(d) = call.a_leg.dialogs.first_mut() {
+            d.sip.local_tag = a2.clone();
+            if !body.is_empty() {
+                d.ext.cached_sdp = Some(body.to_vec());
+            }
+        }
+        // SDP answer defaults to application/sdp (mirrors the provisional path).
+        let content_type = content_type
+            .map(str::to_string)
+            .or_else(|| (!body.is_empty()).then(|| "application/sdp".to_string()));
+        let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+        let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
+        let extra_headers = build_a_leg_response_headers(header_updates, &[]);
+        fx.outbound.push(relay::response_to_a_leg(
+            &a_invite,
+            status,
+            reason,
+            Some(a2),
+            Some(contact),
+            body.to_vec(),
+            content_type,
+            None,
+            extra_headers,
+        ));
+        // The caller now holds a confirmed dialog under A2 — confirm the a-leg.
+        *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
     }
 
     /// Originate a PRACK toward the b-leg early dialog (selected by callee tag)

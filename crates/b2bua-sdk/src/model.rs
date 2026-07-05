@@ -699,6 +699,41 @@ pub enum RuleAction {
         header_updates: Vec<(String, Option<String>)>,
         contacts: Vec<(String, Option<f32>)>,
     },
+    /// **A-side fork-confirm** (RFC 3261 §12.1 forked-request dialog
+    /// establishment + RFC 3264 §5.1 one-answer-per-dialog): answer the a-leg
+    /// INVITE with a final **2xx** under a *fresh* a-facing To-tag that becomes
+    /// the confirmed a-dialog, **superseding** any early-media dialog the caller
+    /// saw on a prior `18x`.
+    ///
+    /// The MRF / RBT early-media callflow answers ONE caller INVITE in two
+    /// stages with two *different* To-tags: a `183` (SDP-MRF, tag A1) then a
+    /// `200` (SDP-B, tag A2 ≠ A1). A1 and A2 carry different SDP answers to the
+    /// caller's single offer, so keeping A1 for both would put two answers in
+    /// one dialog (RFC 3264 §5.1 violation). This action delivers the
+    /// RFC-correct tag change: it (i) mints a fresh a-facing To-tag A2 (or uses
+    /// `to_tag` verbatim), (ii) sets/replaces the a-dialog `local_tag` to A2 and
+    /// confirms the a-leg, and (iii) relays the final/SDP under A2. Only a `2xx`
+    /// establishes a dialog — a non-2xx status is a no-op (the abandoned early
+    /// dialog / the ADR-0022 unanswered-a-leg funnel own the failure paths).
+    /// `content_type` defaults to `application/sdp` when a `body` is present;
+    /// `header_updates` follow the non-structural set/remove discipline of
+    /// [`Self::RespondToALeg`].
+    ///
+    /// Caveat (unchanged in sip-txn): after this 2xx, a late CANCEL's autonomous
+    /// 487 still carries the *pinned* early tag A1 — harmless, as it matches the
+    /// caller's abandoned early dialog A1.
+    AnswerALegNewDialog {
+        status: u16,
+        reason: String,
+        body: Vec<u8>,
+        content_type: Option<String>,
+        /// Explicit a-facing To-tag A2. `None` ⇒ mint a fresh one (guaranteed
+        /// distinct from any prior early-media tag).
+        to_tag: Option<String>,
+        /// Non-structural header sets/removes (structural keys are ignored),
+        /// same discipline as [`Self::RespondToALeg`].
+        header_updates: Vec<(String, Option<String>)>,
+    },
     /// RFC 3261 §13.3.1.4 — retransmit the a-leg INVITE **2xx** toward the caller
     /// while its ACK is missing. Sent **raw** (the a-leg INVITE server txn is
     /// already `Completed` and would DROP a second final via the txn layer), with
@@ -734,6 +769,7 @@ impl RuleAction {
             | RuleAction::RelayFirstBare180 { .. }
             | RuleAction::RelayFailureToALeg { .. }
             | RuleAction::RespondToALeg { .. }
+            | RuleAction::AnswerALegNewDialog { .. }
             | RuleAction::Respond { .. }
             | RuleAction::AckLeg { .. }
             | RuleAction::CreateLeg { .. }
