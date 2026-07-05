@@ -1067,6 +1067,118 @@ mod media_primitives {
     }
 }
 
+// ── AckLeg body + Content-Type (RFC 3261 §13.2.2.4 delayed-offer answer) ─────
+//
+// `RuleAction::AckLeg` carries an optional body so a rule can ACK a 2xx with an
+// SDP answer, completing a delayed-offer exchange (RFC 3264 §4 — the answer
+// rides the ACK). A body-bearing ACK defaults its Content-Type to
+// `application/sdp`; an explicit type overrides it; an empty body stays a bare
+// ACK (no body, no Content-Type — the pre-body behaviour, unchanged). The body
+// is a binary-safe `Vec<u8>`.
+mod ack_leg_body {
+    use super::*;
+    use b2bua::effects::OutboundBody;
+    use sip_message::message_helpers::get_header;
+
+    /// A confirmed b-leg (callee tag learned) whose first dialog `AckLeg` addresses.
+    fn b_leg_confirmed() -> Leg {
+        let mut leg = b_leg_pending();
+        leg.state = LegState::Confirmed;
+        leg.disposition = LegDisposition::Bridged;
+        if let Some(d) = leg.dialogs.first_mut() {
+            d.sip.remote_tag = "bobtag".into();
+        }
+        leg
+    }
+
+    /// Execute one `AckLeg { leg_id: "b-1", body, content_type }` against a call
+    /// carrying a confirmed `b-1`, and return the emitted ACK. `AckLeg` reads only
+    /// the call + the action fields (not the event), so any event serves.
+    fn ack_request(body: Vec<u8>, content_type: Option<String>) -> SipRequest {
+        let call = call::helpers::add_b_leg(test_call(), b_leg_confirmed());
+        let config = B2buaConfig::default();
+        let event = CallEvent::Timer {
+            timer_type: TimerType::NoAnswer,
+            call_ref: call.call_ref.clone(),
+            leg_id: Some("b-1".to_string()),
+        };
+        let ctx = RuleContext {
+            call: RuleCall::new(&call),
+            call_ref: &call.call_ref,
+            event: &event,
+            source_leg_id: "b-1",
+            direction: Direction::FromB,
+            now_ms: 0,
+            config: &config,
+        };
+        let id_gen = IdGen::seeded(1);
+        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+        let result = exec.execute(
+            &[RuleAction::AckLeg { leg_id: "b-1".into(), body, content_type }],
+            &call,
+            &ctx,
+        );
+        let effect = result
+            .effects
+            .outbound
+            .iter()
+            .find(|e| matches!(&e.body, OutboundBody::Request(r) if r.method == "ACK"))
+            .expect("AckLeg emits an ACK request");
+        match &effect.body {
+            OutboundBody::Request(r) => r.clone(),
+            _ => unreachable!(),
+        }
+    }
+
+    // A non-empty body rides the ACK verbatim (binary-safe) and, absent an
+    // explicit type, the ACK advertises `Content-Type: application/sdp`.
+    #[test]
+    fn ack_leg_carries_body_verbatim_and_defaults_content_type_to_sdp() {
+        let mut body =
+            b"v=0\r\no=- 0 0 IN IP4 10.0.0.9\r\ns=-\r\nc=IN IP4 10.0.0.9\r\nt=0 0\r\n\
+              m=audio 40000 RTP/AVP 0\r\n"
+                .to_vec();
+        body.push(0xFF); // a non-UTF-8 byte must survive the Vec<u8> round-trip.
+
+        let ack = ack_request(body.clone(), None);
+        assert_eq!(
+            ack.body, body,
+            "the delayed-offer answer rides the ACK byte-for-byte (binary-safe)"
+        );
+        assert_eq!(
+            get_header(&ack.headers, "content-type"),
+            Some("application/sdp"),
+            "a body-bearing ACK defaults Content-Type to application/sdp (§13.2.2.4)"
+        );
+    }
+
+    // An explicit content_type overrides the application/sdp default.
+    #[test]
+    fn ack_leg_honours_explicit_content_type_override() {
+        let body = b"<some>opaque</some>".to_vec();
+        let ack = ack_request(body.clone(), Some("application/custom".to_string()));
+        assert_eq!(ack.body, body);
+        assert_eq!(
+            get_header(&ack.headers, "content-type"),
+            Some("application/custom"),
+            "an explicit content_type is used verbatim (not coerced to application/sdp)"
+        );
+    }
+
+    // Regression: an empty body sends a bare ACK with no Content-Type — the
+    // behaviour before AckLeg grew a body, unchanged.
+    #[test]
+    fn ack_leg_empty_body_sends_bare_ack_with_no_content_type() {
+        let ack = ack_request(Vec::new(), None);
+        assert!(ack.body.is_empty(), "an empty AckLeg body sends a bodyless ACK");
+        assert_eq!(
+            get_header(&ack.headers, "content-type"),
+            None,
+            "a bare ACK carries no Content-Type (no regression vs the pre-body AckLeg)"
+        );
+    }
+}
+
 // ── TargetAdmission: the rule-driven `create-leg` gate (migration/26) ────────
 //
 // Port of `tests/b2bua/action-executor-create-leg-admission.test.ts` (source pin
@@ -1203,6 +1315,83 @@ mod create_leg_admission {
             result.call.state,
             CallModelState::Terminated,
             "a wildcard-admitted create-leg does not terminate the call"
+        );
+    }
+}
+
+// ── default_sdp config → CreateLeg body_override (service fake-offer source) ──
+//
+// The `default_sdp` service parameter is a canned SDP a service sources to
+// originate a deliberate *fake-offer* INVITE. The wiring is the existing
+// `CreateLeg { body_override }` mechanism: the service passes
+// `body_override: ctx.config.default_sdp.clone()` and `build_b_leg` stamps that
+// body (+ `Content-Type: application/sdp`) onto the emitted b-leg INVITE.
+// `default_sdp` is NEVER an automatic fallback — a normal reroute/failover
+// `CreateLeg` (`body_override: None`) still relays the caller's own offer.
+mod default_sdp_create_leg {
+    use super::*;
+    use b2bua::effects::OutboundBody;
+    use sip_message::message_helpers::get_header;
+
+    #[test]
+    fn create_leg_sources_body_override_from_config_default_sdp() {
+        let sdp = b"v=0\r\no=svc 42 42 IN IP4 10.0.0.9\r\ns=fake-offer\r\n\
+                    c=IN IP4 10.0.0.9\r\nt=0 0\r\nm=audio 50000 RTP/AVP 8\r\n"
+            .to_vec();
+        // A service authoring a fake-offer INVITE parks the canned SDP on config.
+        let config = B2buaConfig { default_sdp: Some(sdp.clone()), ..Default::default() };
+
+        let call = test_call();
+        let event = CallEvent::Sip {
+            message: Box::new(SipMessage::Request(invite())),
+            src: "127.0.0.1:5060".parse().unwrap(),
+        };
+        let ctx = RuleContext {
+            call: RuleCall::new(&call),
+            call_ref: &call.call_ref,
+            event: &event,
+            source_leg_id: "a",
+            direction: Direction::FromA,
+            now_ms: 0,
+            config: &config,
+        };
+        let id_gen = IdGen::seeded(1);
+        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+
+        // The service sources the fake offer from the config parameter — the whole
+        // opt-in wiring. (A normal reroute passes `body_override: None` here, which
+        // relays the caller's own offer; `default_sdp` never substitutes itself.)
+        let create = RuleAction::CreateLeg {
+            destination: ("10.0.1.5".into(), 5070), // IP literal → admission passes
+            new_ruri: None,
+            new_from: None,
+            new_to: None,
+            no_answer_timeout_sec: None,
+            callback_context: None,
+            body_override: config.default_sdp.clone(),
+            header_updates: vec![],
+            kind: None,
+        };
+        let result = exec.execute(&[create], &call, &ctx);
+
+        let invite_effect = result
+            .effects
+            .outbound
+            .iter()
+            .find(|e| matches!(&e.body, OutboundBody::Request(r) if r.method == "INVITE"))
+            .expect("CreateLeg emits a b-leg INVITE");
+        let inv = match &invite_effect.body {
+            OutboundBody::Request(r) => r,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            inv.body, sdp,
+            "the b-leg INVITE carries the config default_sdp sourced via body_override"
+        );
+        assert_eq!(
+            get_header(&inv.headers, "content-type"),
+            Some("application/sdp"),
+            "the fake-offer INVITE advertises Content-Type: application/sdp"
         );
     }
 }

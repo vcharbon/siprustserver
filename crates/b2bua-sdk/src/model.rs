@@ -451,7 +451,11 @@ pub enum RuleAction {
         body: Vec<u8>,
         content_type: Option<String>,
     },
-    AckLeg { leg_id: String },
+    /// ACK a leg's confirmed dialog. `body` rides the ACK (delayed-offer answer,
+    /// RFC 3261 §13.2.2.4 / RFC 3264 §4) — empty for the ordinary bare ACK.
+    /// `content_type` defaults to `application/sdp` when a body is present and
+    /// none is given; an empty ACK carries no body and no Content-Type.
+    AckLeg { leg_id: String, body: Vec<u8>, content_type: Option<String> },
     ConfirmDialog { leg_id: String },
     UpdateLegState {
         leg_id: String,
