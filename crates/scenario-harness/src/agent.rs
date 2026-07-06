@@ -2049,7 +2049,8 @@ pub struct InDialogRequest<'a> {
     dialog: &'a mut StackDialog,
     fallback: SocketAddr,
     method: InDialogMethod,
-    sdp: Option<String>,
+    body: Vec<u8>,
+    content_type: Option<String>,
     rack: Option<String>,
     extra_headers: Vec<SipHeader>,
     to_tag: Option<String>,
@@ -2066,7 +2067,8 @@ impl<'a> InDialogRequest<'a> {
             dialog,
             fallback,
             method,
-            sdp: None,
+            body: vec![],
+            content_type: None,
             rack: None,
             extra_headers: vec![],
             to_tag: None,
@@ -2091,9 +2093,24 @@ impl<'a> InDialogRequest<'a> {
     }
 
     /// Attach an SDP body (e.g. the answer carried in a PRACK to a delayed
-    /// offer, RFC 3264 §4).
+    /// offer, RFC 3264 §4). Thin sugar over [`with_body`](Self::with_body) that
+    /// pins `Content-Type: application/sdp`.
     pub fn with_sdp(mut self, sdp: &str) -> Self {
-        self.sdp = Some(sdp.to_string());
+        self.body = sdp.as_bytes().to_vec();
+        self.content_type = Some("application/sdp".to_string());
+        self
+    }
+
+    /// Attach an arbitrary-MIME body — mirror of [`with_sdp`](Self::with_sdp)
+    /// for any `Content-Type` and raw (binary-safe) bytes. Drives an in-dialog
+    /// `INFO`/other with a real payload: an `application/orangeindata` SUP body,
+    /// a `multipart/mixed` dual-part body, a `User-To-User` INFO, etc. With
+    /// non-empty `bytes` the request carries `Content-Type` + `Content-Length`;
+    /// an empty `bytes` emits no `Content-Type` (the generator only stamps it for
+    /// a non-empty body) — for a bodyless typed header use `with_header`.
+    pub fn with_body(mut self, content_type: &str, bytes: Vec<u8>) -> Self {
+        self.body = bytes;
+        self.content_type = Some(content_type.to_string());
         self
     }
 
@@ -2141,7 +2158,8 @@ impl<'a> InDialogRequest<'a> {
         let opts = GenerateInDialogRequestOpts {
             via: Some(self.agent.via()),
             contact: Some(self.agent.contact()),
-            body: self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
+            body: std::mem::take(&mut self.body),
+            content_type: self.content_type.take(),
             rack: self.rack.take(),
             extra_headers: std::mem::take(&mut self.extra_headers),
             ..Default::default()
