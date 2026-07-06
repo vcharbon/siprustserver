@@ -166,6 +166,8 @@ pub fn build_initial_call(
         relay_first_18x: None,
         promote_pem: None,
         transfer: None,
+        subscriptions: Vec::new(),
+        reroute: None,
         sm_cursors: std::collections::BTreeMap::new(),
     }
 }

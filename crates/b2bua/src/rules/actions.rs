@@ -465,6 +465,20 @@ impl<'a> ActionExecutor<'a> {
                     request: request.clone(),
                 });
             }
+            RuleAction::ReleaseAsyncHttp { request } => {
+                fx.fire_and_forget.push(crate::effects::FireAndForgetEffect::ReleaseAsyncHttp {
+                    call_ref: call.call_ref.clone(),
+                    request: request.clone(),
+                });
+            }
+            RuleAction::SetSubscriptions { events } => {
+                // The latest applied (re)route's declaration replaces the set
+                // (decision-response parity with `SetFeatures`).
+                call.subscriptions = events.clone();
+            }
+            RuleAction::SetReroute { state } => {
+                *call = call::helpers::set_reroute(call.clone(), state.clone());
+            }
             RuleAction::SetFeatures { features } => {
                 call.features = Some(features.clone());
             }

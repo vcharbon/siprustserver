@@ -1900,6 +1900,15 @@ impl Dialog {
         self.dialog.local_cseq = v;
     }
 
+    /// This side's dialog tag (the To-tag a UAS minted on its 2xx / the
+    /// From-tag a UAC sent). Read-only; lets a test re-answer an INVITE
+    /// retransmission with the SAME tag (a faithful RFC 3261 §17.2.1 2xx
+    /// retransmission via `Respond::with_to_tag`) instead of minting a
+    /// phantom fork dialog.
+    pub fn local_tag(&self) -> &str {
+        &self.dialog.local_tag
+    }
+
     /// Send a BYE (CSeq auto-incremented). Returns its client transaction.
     pub async fn bye(&mut self) -> InDialogTxn {
         self.request(InDialogMethod::Bye, None).await
