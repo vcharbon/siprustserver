@@ -102,6 +102,7 @@ fn on_media_answer(ctx: &RuleContext) -> Option<RuleHandleResult> {
             method: "INFO".to_string(),
             body: mscml::build_play(&data.clip_id),
             content_type: Some(mscml::CONTENT_TYPE.to_string()),
+            headers: vec![],
         },
         RuleAction::SetState {
             machine: MACHINE,
