@@ -82,6 +82,17 @@ fn is_fake_prack(ctx: &RuleContext) -> bool {
     ctx.call.relay_first_18x_strategy() == Some(RelayFirst18xStrategy::FakePrack)
 }
 
+/// fake-prack AND the current UPDATE carries **no body** — the session-refresh
+/// case the local-answer handler is meant for. An UPDATE that carries an SDP
+/// *offer* must NOT be answered locally with a bodyless 200 (that leaves the
+/// offer unanswered, RFC 3264 §5); it declines here and falls through to CORE
+/// `relay-update`, which forwards it to the b-leg early dialog and returns the
+/// callee's real answer (an early-dialog UPDATE is the RFC 3311 §5.1 normal
+/// case; the b-leg dialog carries its callee tag, so the relay is well-formed).
+fn is_fake_prack_bodyless_update(ctx: &RuleContext) -> bool {
+    is_fake_prack(ctx) && ctx.request().map(|r| r.body.is_empty()).unwrap_or(false)
+}
+
 // The `relayFirst18x` callflow service (ADR-0016). `Phase` is the declared
 // machine; its cursor is a projection of `(strategy, first_relayed)` (see
 // `project_cursor`), so the `transitions` a rule declares are diagram edges, never
@@ -356,22 +367,28 @@ define_service! {
                 }
             },
         },
-        // ── fake-prack: locally answer a-leg early-dialog UPDATE ─────────────
-        // alice has no committed bob-SDP to re-offer, so a 200 OK with no body
-        // (early state only; after merge, normal in-dialog UPDATE relay applies).
+        // ── fake-prack: locally answer a-leg early-dialog **bodyless** UPDATE ─
+        // A no-body UPDATE (session-timer / dialog refresh, RFC 4028) carries no
+        // offer to negotiate, so answer 200 OK locally — do NOT wake the b-leg.
+        // An UPDATE that carries an SDP *offer* is deliberately NOT matched here
+        // (`is_fake_prack_bodyless_update`): answering it with a bodyless 200
+        // would strand alice's offer (RFC 3264 §5). It falls through to CORE
+        // `relay-update`, which forwards the offer to the b-leg early dialog and
+        // relays the callee's real answer back — the RFC 3311 §5.1 normal case.
+        // (early state only; after merge, normal in-dialog UPDATE relay applies.)
         sm_rule! {
             id: "fake-prack-handle-update-from-a",
             machine: RELAY_FIRST_18X_MACHINE,
             active: [ Phase::Masking, Phase::Suppressing ],
             transitions: [],
             effects: [
-                Effect::Respond { status: 200, label: "200 OK → A (local answer; no committed B SDP)" },
+                Effect::Respond { status: 200, label: "200 OK → A (local answer; bodyless refresh)" },
             ],
             matcher: Match::request()
                 .method("UPDATE")
                 .direction(Direction::FromA)
                 .leg_states(&[LegState::Trying, LegState::Early])
-                .filter(is_fake_prack),
+                .filter(is_fake_prack_bodyless_update),
             handle: |_ctx| {
                 ok(vec![RuleAction::Respond {
                     status: 200,
