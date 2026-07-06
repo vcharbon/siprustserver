@@ -456,6 +456,44 @@ impl Harness {
         }
     }
 
+    /// Begin a **multi-callee group** — several logical [`Agent`]s that share
+    /// ONE bound socket at `addr`, demultiplexed by R-URI prefix (out-of-dialog)
+    /// and Call-ID (in-dialog). This is how the transfer flows drive Bob /
+    /// Charlie / David when the B2BUA egresses every callee leg to a single ROUTE
+    /// target: `callee_group(addr).callee("bob", "049…").callee("charlie", "231…")
+    /// .build().await`. See [`crate::callee_group`]. Both the direct and the
+    /// via-proxy paths are supported (the demux is source-address-agnostic).
+    pub fn callee_group(&self, addr: &str) -> crate::callee_group::CalleeGroupBuilder<'_> {
+        let addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
+        crate::callee_group::CalleeGroupBuilder::new(self, addr)
+    }
+
+    /// The shared recording-wrapped network — so the `callee_group` builder binds
+    /// its one shared socket through the very fabric the agents use.
+    pub(crate) fn network(&self) -> Arc<dyn SignalingNetwork> {
+        self.network.clone()
+    }
+
+    /// Register a recorder lane (one per bound socket) — used by
+    /// [`agent_with_roles`](Self::agent_with_roles) and the `callee_group`
+    /// builder, which registers a single lane for the shared callee socket.
+    pub(crate) fn register_lane(&self, addr: SocketAddr, name: String, tag: NetworkTag) {
+        self.recorder.register_lane(addr, name, tag);
+    }
+
+    /// The shared monotonic id source, so `callee_group`'s logical agents mint
+    /// branches/tags/Call-IDs from the same deterministic sequence as every other
+    /// agent this harness binds.
+    pub(crate) fn ids(&self) -> Arc<Ids> {
+        self.ids.clone()
+    }
+
+    /// The per-`recv` wait bound handed to every agent (inherited by a
+    /// `callee_group`'s logical agents).
+    pub(crate) fn recv_timeout(&self) -> Duration {
+        self.recv_timeout
+    }
+
     /// Declare and bind a record-routing proxy / load balancer at `addr`.
     /// Role-tagged `{Proxy}` so the proxy-subject RFC rules judge this lane
     /// and the per-UA dialog rules do not.

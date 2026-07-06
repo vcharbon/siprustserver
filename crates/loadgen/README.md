@@ -647,7 +647,10 @@ Every callee-side leg of a call — the b-leg `bob`, the rerouting failover
    keeps `bob` vs `bob2` (or `bob1` vs `bob10`) unambiguous.
 
 The driver wires this for every call; the ready-made picker is
-`loadgen::prefix_leg_picker(labels)`. To build your own routing, declare it via
+`loadgen::prefix_leg_picker(labels)` — now the shared `scenario_harness::legpick`
+primitive (relocated per newkahneed-022 so the functional/e2e multi-callee
+facility, `scenario_harness::callee_group`, uses the same one), re-exported here
+unchanged. To build your own routing, declare it via
 `CallRouting` (`.leg(addr,label)` per receiver, `.picker(addr, …)`) — a picker
 returns the receiver label, or `""` for a `no_route` orphan. The mux itself
 never reads `X-Api-Call` or any URI; leg routing is the caller's to own. Worked

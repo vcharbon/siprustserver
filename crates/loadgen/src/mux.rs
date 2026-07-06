@@ -202,7 +202,7 @@ impl Correlation {
                     Some(re) => re.captures(&value)?.get(1).map(|m| m.as_str().to_string()),
                 }
             }
-            Strategy::ToUser => LegInfo { raw }.to_user(),
+            Strategy::ToUser => LegInfo::new(raw).to_user(),
         }
     }
 }
@@ -238,81 +238,13 @@ impl DropModel {
     }
 }
 
-/// A read-only view of an inbound initial INVITE handed to a scenario-owned
-/// [`LegPicker`]. The mux uses it for **nothing** itself (it only correlates the
-/// call by token); it exists purely so a scenario can disambiguate which of its
-/// receivers should own a new leg, keying on whatever it likes (R-URI, To,
-/// `X-Api-Call`, a custom header). The scenario — not the mux — owns the meaning
-/// of these fields.
-pub struct LegInfo<'a> {
-    raw: &'a [u8],
-}
-
-impl LegInfo<'_> {
-    /// The raw datagram bytes.
-    pub fn raw(&self) -> &[u8] {
-        self.raw
-    }
-    /// Value of header `name` (case-insensitive), or `None`.
-    pub fn header(&self, name: &str) -> Option<String> {
-        header_value(self.raw, name)
-    }
-    /// The Request-URI (the full 2nd token of the request line).
-    pub fn ruri(&self) -> Option<String> {
-        ruri(self.raw)
-    }
-    /// The Request-URI user-part (e.g. `dave` from `sip:dave@host`).
-    pub fn ruri_user(&self) -> Option<String> {
-        self.ruri().as_deref().and_then(uri_user)
-    }
-    /// The To header user-part.
-    pub fn to_user(&self) -> Option<String> {
-        self.header("to").or_else(|| self.header("t")).as_deref().and_then(uri_user)
-    }
-}
-
-/// A scenario-owned callback that picks which receiver (by its label = the bound
-/// agent's name) should own a freshly-arrived leg, when **more than one**
-/// receiver shares a single socket for the same call. Invoked only on that
-/// ambiguity; a single-receiver socket never calls it. Returning a label that
-/// matches no receiver drops the leg as a `no_route` orphan.
-///
-/// Contract: the picker is called **while the mux holds the socket registry
-/// lock**, so it MUST be pure-ish — it must not re-enter the mux (e.g. call
-/// `registry_size`/bind/drop on the same core: self-deadlock). A panic is
-/// contained (the leg becomes a `no_route` orphan), not propagated.
-pub type LegPicker = Arc<dyn Fn(&LegInfo) -> String + Send + Sync>;
-
-/// A ready-made prefix-matching [`LegPicker`] — the second demux tier for the
-/// several callee legs of ONE call that share a single socket (bob1 / bob2 /
-/// charlie, "distinguished by prefix").
-///
-/// Demux is two orthogonal tiers:
-/// 1. **which call instance** a leg belongs to is the correlation token (the
-///    random per-call `X-Loadgen-Id`, or the To-user). The mux matches it
-///    (`by_token`) BEFORE it ever consults a picker, so a picker only ever sees
-///    the handful of legs of ONE instance.
-/// 2. **which leg** within that instance is THIS picker's job: it returns the
-///    receiver whose label is the **longest prefix of the leg's Request-URI
-///    user-part**. The egress addresses each callee by role (`sip:bob2@…`,
-///    `sip:charlie@…`), so the user-part names the leg; a per-call suffix
-///    (`bob2-<tag>`) still routes by its label prefix, and longest-match keeps
-///    `bob` vs `bob2` (or `bob1` vs `bob10`) unambiguous.
-///
-/// A leg whose R-URI user prefixes NONE of `labels` yields `""` — the mux counts
-/// it a `no_route` orphan (observable, never mis-delivered).
-pub fn prefix_leg_picker(labels: impl IntoIterator<Item = impl Into<String>>) -> LegPicker {
-    let labels: Vec<String> = labels.into_iter().map(Into::into).collect();
-    Arc::new(move |leg: &LegInfo| {
-        let user = leg.ruri_user().unwrap_or_default();
-        labels
-            .iter()
-            .filter(|label| user.starts_with(label.as_str()))
-            .max_by_key(|label| label.len())
-            .cloned()
-            .unwrap_or_default()
-    })
-}
+// The R-URI leg-picker now lives in its shared home, `scenario-harness`
+// (newkahneed-022): the same primitive backs the functional/e2e multi-callee
+// facility (`scenario_harness::callee_group`) and this load mux's second demux
+// tier. Re-exported here so `loadgen::{LegInfo, LegPicker, prefix_leg_picker}`
+// and `crate::mux::LegInfo` keep resolving unchanged — the mux consumes it, it
+// no longer owns it.
+pub use scenario_harness::legpick::{prefix_leg_picker, LegInfo, LegPicker};
 
 /// A registry key owned by one endpoint (removed on its `Drop`).
 #[derive(Debug, Clone)]
@@ -956,7 +888,7 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
                     // route/bind/drop on this endpoint). It must also not re-enter
                     // the mux (it would self-deadlock on `reg`).
                     let picked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        pick(&LegInfo { raw })
+                        pick(&LegInfo::new(raw))
                     }));
                     match picked.ok().and_then(|want| slot.receivers.iter().position(|r| r.label == want)) {
                         Some(i) => i,
@@ -1101,37 +1033,9 @@ fn cseq_method(raw: &[u8]) -> &'static str {
     "none"
 }
 
-/// The Request-URI (2nd token of the request line), or `None` for a response.
-/// Used only by the scenario-facing [`LegInfo`] (never by the mux's own demux).
-fn ruri(raw: &[u8]) -> Option<String> {
-    let line = first_line(raw);
-    if line.starts_with("SIP/2.0") {
-        return None; // response
-    }
-    line.split_whitespace().nth(1).map(str::to_string)
-}
-
-/// The user-part of a SIP URI (handles `<sip:user@host>`, `sip:user@host`,
-/// name-addr with a display name). A userless URI (`sip:host`) yields `None` —
-/// load-bearing for the To-user correlation strategy, which must not mint a
-/// bogus host-shaped token. For [`LegInfo`] helpers + token extraction.
-fn uri_user(value: &str) -> Option<String> {
-    let v = value.trim();
-    let inner = match (v.find('<'), v.find('>')) {
-        (Some(a), Some(b)) if b > a + 1 => &v[a + 1..b],
-        _ => v,
-    };
-    let no_scheme = inner
-        .strip_prefix("sips:")
-        .or_else(|| inner.strip_prefix("sip:"))
-        .unwrap_or(inner);
-    let (user, _host) = no_scheme.split_once('@')?;
-    if user.is_empty() || user.contains(' ') {
-        None
-    } else {
-        Some(user.to_string())
-    }
-}
+// `ruri` / `uri_user` moved to `scenario_harness::legpick` with the `LegInfo`
+// view that used them (newkahneed-022); the mux's own demux never called them
+// directly.
 
 fn is_initial_invite(raw: &[u8]) -> bool {
     first_line(raw).split_whitespace().next() == Some("INVITE")
@@ -1675,57 +1579,10 @@ mod tests {
         assert_eq!(c.token(&userless), None);
     }
 
-    // -- prefix_leg_picker: the R-URI-prefix leg tier (bob/bob2/charlie on one
-    //    socket, once the token has already picked the call instance) ----------
-
-    /// An INVITE with a specific Request-URI (+ matching To), for the leg-picker
-    /// tests — the mux hands a picker a `LegInfo` over exactly these bytes.
-    fn invite_ruri(ruri: &str) -> Vec<u8> {
-        format!(
-            "INVITE {ruri} SIP/2.0\r\nCall-ID: c1@h\r\nTo: <{ruri}>\r\n\
-             From: <sip:a@h>;tag=1\r\nCSeq: 1 INVITE\r\n\r\n"
-        )
-        .into_bytes()
-    }
-
-    /// The picker routes each shared-socket leg to the receiver whose label is the
-    /// LONGEST prefix of the R-URI user — bob / bob2 / charlie on one port,
-    /// including a per-call-suffixed user, with longest-match resolving bob-vs-bob2;
-    /// an unknown user (or a response with no R-URI) is a no-route (`""`).
-    #[test]
-    fn prefix_leg_picker_routes_by_longest_ruri_user_prefix() {
-        let pick = prefix_leg_picker(["bob", "bob2", "charlie"]);
-        let route = |ruri: &str| {
-            let raw = invite_ruri(ruri);
-            pick(&LegInfo { raw: raw.as_slice() })
-        };
-
-        assert_eq!(route("sip:bob@10.0.0.1:5070"), "bob");
-        // "bob2" is prefixed by both "bob" and "bob2" → longest wins.
-        assert_eq!(route("sip:bob2@10.0.0.1:5070"), "bob2");
-        assert_eq!(route("sip:charlie@10.0.0.1:5070"), "charlie");
-        // A per-call suffix on the user still routes by its label prefix.
-        assert_eq!(route("sip:bob2-lg99@10.0.0.1:5070"), "bob2");
-        assert_eq!(route("sip:charlie.7f3a@10.0.0.1:5070"), "charlie");
-        // No label prefixes the user → no route (a no_route orphan at the mux).
-        assert_eq!(route("sip:dave@10.0.0.1:5070"), "");
-        // A response (no Request-URI) is a no-route, never a panic.
-        assert_eq!(pick(&LegInfo { raw: &b"SIP/2.0 200 OK\r\n\r\n"[..] }), "");
-    }
-
-    /// Longest-match disambiguates labels that are prefixes of each other even
-    /// when the shorter also matches (`bob1` vs `bob10`).
-    #[test]
-    fn prefix_leg_picker_longest_match_disambiguates_numeric_siblings() {
-        let pick = prefix_leg_picker(["bob1", "bob10"]);
-        let route = |ruri: &str| {
-            let raw = invite_ruri(ruri);
-            pick(&LegInfo { raw: raw.as_slice() })
-        };
-        assert_eq!(route("sip:bob10@h"), "bob10");
-        assert_eq!(route("sip:bob1@h"), "bob1");
-        assert_eq!(route("sip:bob10x@h"), "bob10");
-    }
+    // -- prefix_leg_picker: relocated to `scenario_harness::legpick`
+    //    (newkahneed-022); its unit tests moved with it. The mux's
+    //    `loadgen_mux_prefix_picker_shares_callee_port` integration test (in
+    //    tests/smoke.rs) still exercises the picker through the mux end-to-end.
 
     // -- CallTxns retransmit engine: method-generic regression --------------
     //
