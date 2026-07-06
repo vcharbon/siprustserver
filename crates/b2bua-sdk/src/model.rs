@@ -551,11 +551,22 @@ pub enum RuleAction {
     /// **opaque** payload (MSCML rides here as `application/mediaservercontrol+xml`);
     /// `content_type` defaults to `application/sdp` when a body is present and no
     /// type is given.
+    ///
+    /// `headers` forwards arbitrary application headers verbatim onto the
+    /// re-originated request (mirrors [`RuleAction::ServiceHttpRequest`]'s header
+    /// list). This is the seam a service uses to **reconstruct a deferred relay**:
+    /// e.g. INFO_UUI RELAY stashes the inbound INFO's `User-To-User` header across
+    /// an async `/infouui` decision, then re-emits it toward the peer here with
+    /// `headers: [("User-To-User", value)]` (newkahneed/021). The B2BUA rebuilds
+    /// every dialog/transport header itself (Via/CSeq/From/To/Call-ID/Contact), so
+    /// only application headers belong here. `Content-Type`/`Content-Length` are
+    /// owned by `body`/`content_type` and are ignored if listed (never duplicated).
     SendRequestToLeg {
         leg_id: String,
         method: String,
         body: Vec<u8>,
         content_type: Option<String>,
+        headers: Vec<(String, String)>,
     },
     /// Broker an unadopted leg's SDP onto the a-leg as an **unreliable** `1xx`
     /// (RFC 3262 §3 early media — no `Require: 100rel`/`RSeq`). Only the a-leg has

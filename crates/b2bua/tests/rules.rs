@@ -966,6 +966,7 @@ mod media_primitives {
                 method: "INFO".into(),
                 body: mscml.clone(),
                 content_type: Some("application/mediaservercontrol+xml".into()),
+                headers: vec![],
             }],
         );
         assert_eq!(result.effects.outbound.len(), 1);
@@ -978,6 +979,71 @@ mod media_primitives {
                 assert_eq!(
                     get_header(&r.headers, "content-type"),
                     Some("application/mediaservercontrol+xml")
+                );
+            }
+            _ => panic!("expected an outbound request"),
+        }
+    }
+
+    // A service re-originating an in-dialog request forwards arbitrary application
+    // headers verbatim onto the request — the seam a deferred INFO_UUI RELAY uses
+    // to carry a held `User-To-User` toward the peer at an async decision re-entry
+    // (newkahneed/021). Body-owned headers (Content-Type/Content-Length) listed
+    // here are dropped, never duplicated: `body`/`content_type` own those.
+    #[test]
+    fn send_request_to_leg_forwards_arbitrary_headers() {
+        let mut call = test_call();
+        call = call::helpers::add_b_leg(call, confirmed_b_leg("b-1", LegKind::Media));
+        let event = CallEvent::Sip {
+            message: Box::new(SipMessage::Request(in_dialog_info())),
+            src: "10.0.0.2:5070".parse().unwrap(),
+        };
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        let uui = "3030373946313233;encoding=hex"; // RFC 7433 User-To-User
+        let body = b"SUP:orangeindata\x00\x01payload".to_vec();
+        let result = exec_on(
+            &call,
+            &event,
+            "b-1",
+            &config,
+            &id_gen,
+            &[RuleAction::SendRequestToLeg {
+                leg_id: "b-1".into(),
+                method: "INFO".into(),
+                body: body.clone(),
+                content_type: Some("application/orangeindata".into()),
+                headers: vec![
+                    ("User-To-User".into(), uui.into()),
+                    ("X-Orange-Trace".into(), "abc-123".into()),
+                    // A body-owned header MUST be ignored — it is owned by
+                    // `content_type` and must never be emitted twice.
+                    ("Content-Type".into(), "text/bogus".into()),
+                ],
+            }],
+        );
+        assert_eq!(result.effects.outbound.len(), 1);
+        let eff = &result.effects.outbound[0];
+        assert_eq!(eff.leg_id.as_deref(), Some("b-1"));
+        match &eff.body {
+            OutboundBody::Request(r) => {
+                assert_eq!(r.method, "INFO");
+                assert_eq!(r.body, body, "opaque body passes through unchanged");
+                // Forwarded application headers survive verbatim.
+                assert_eq!(get_header(&r.headers, "user-to-user"), Some(uui));
+                assert_eq!(get_header(&r.headers, "x-orange-trace"), Some("abc-123"));
+                // Content-Type is owned by `content_type`: exactly one, from the
+                // body — NOT the bogus forwarded one (dedup guard).
+                let cts: Vec<&str> = r
+                    .headers
+                    .iter()
+                    .filter(|h| h.name.eq_ignore_ascii_case("content-type"))
+                    .map(|h| h.value.as_str())
+                    .collect();
+                assert_eq!(
+                    cts,
+                    vec!["application/orangeindata"],
+                    "the body's Content-Type wins; a forwarded Content-Type is dropped, not duplicated"
                 );
             }
             _ => panic!("expected an outbound request"),

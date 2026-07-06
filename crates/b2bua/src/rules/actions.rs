@@ -322,8 +322,9 @@ impl<'a> ActionExecutor<'a> {
                 method,
                 body,
                 content_type,
+                headers,
             } => {
-                self.send_request_to_leg(call, fx, leg_id, method, body, content_type.as_deref());
+                self.send_request_to_leg(call, fx, leg_id, method, body, content_type.as_deref(), headers);
             }
             RuleAction::SendProvisionalToLeg {
                 leg_id,
@@ -1543,6 +1544,7 @@ impl<'a> ActionExecutor<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn send_request_to_leg(
         &self,
         call: &mut Call,
@@ -1551,6 +1553,7 @@ impl<'a> ActionExecutor<'a> {
         method: &str,
         body: &[u8],
         content_type: Option<&str>,
+        headers: &[(String, String)],
     ) {
         let m = match in_dialog_method(&Method::from_wire(method)) {
             Some(m) => m,
@@ -1620,6 +1623,18 @@ impl<'a> ActionExecutor<'a> {
         let content_type = content_type
             .map(str::to_string)
             .or_else(|| (!body.is_empty()).then(|| "application/sdp".to_string()));
+        // Forward the service-nominated application headers verbatim (e.g. a held
+        // `User-To-User` re-emitted toward the peer on a deferred INFO_UUI relay —
+        // newkahneed/021). Body-owned headers are dropped: `body`/`content_type`
+        // own Content-Type/Content-Length via `append_body_headers`, so listing
+        // them here would duplicate them.
+        let extra_headers: Vec<sip_message::SipHeader> = headers
+            .iter()
+            .filter(|(n, _)| {
+                !n.eq_ignore_ascii_case("content-type") && !n.eq_ignore_ascii_case("content-length")
+            })
+            .map(|(name, value)| sip_message::SipHeader { name: name.clone(), value: value.clone() })
+            .collect();
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&dialog.sip);
         let opts = GenerateInDialogRequestOpts {
@@ -1628,6 +1643,7 @@ impl<'a> ActionExecutor<'a> {
             cseq: Some(outbound_cseq as u32),
             body: body.to_vec(),
             content_type,
+            extra_headers,
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(m, &gen_dialog, &opts);
