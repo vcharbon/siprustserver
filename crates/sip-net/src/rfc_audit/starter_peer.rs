@@ -310,14 +310,23 @@ pub struct ContentLengthRule;
 impl ContentLengthRule {
     /// Mirror of the TS `checkRawContentLength`: compare the declared
     /// Content-Length against the actual post-`\r\n\r\n` (or `\n\n`) body length.
+    ///
+    /// The body may be **binary** (a non-UTF-8 in-dialog INFO/`orangeindata`
+    /// payload, a `multipart/mixed` part, …), so its length MUST be measured in
+    /// **raw bytes** — RFC 3261 §20.14 is a byte count, not a character count.
+    /// Decoding the whole datagram through `String::from_utf8_lossy` first would
+    /// inflate every non-UTF-8 byte into a 3-byte `U+FFFD` replacement, desyncing
+    /// the measured body length from the wire and spuriously flagging a faithful
+    /// binary body (an 8-byte body reads as 12). The header/body split and the
+    /// body count run on raw bytes; only the header block — ASCII/UTF-8 by
+    /// construction — is decoded, and solely to read the declared Content-Length.
     fn check_raw(raw: &[u8]) -> Option<String> {
-        let text = String::from_utf8_lossy(raw);
-        let (sep, sep_len) = match text.find("\r\n\r\n") {
-            Some(i) => (i, 4),
-            None => (text.find("\n\n")?, 2),
-        };
-        let header_block = &text[..sep];
-        let body = &text[sep + sep_len..];
+        let (header_end, body_start) = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|i| (i, i + 4))
+            .or_else(|| raw.windows(2).position(|w| w == b"\n\n").map(|i| (i, i + 2)))?;
+        let header_block = String::from_utf8_lossy(&raw[..header_end]);
         let declared = header_block.lines().find_map(|line| {
             let (name, value) = line.split_once(':')?;
             if name.trim().eq_ignore_ascii_case("content-length") {
@@ -326,7 +335,7 @@ impl ContentLengthRule {
                 None
             }
         })?;
-        let actual = body.len();
+        let actual = raw.len() - body_start;
         if declared != actual {
             Some(format!(
                 "Content-Length mismatch: header says {declared} but body is {actual} bytes — \
@@ -1335,6 +1344,57 @@ mod tests {
         let f = ContentLengthRule.check(&[sent("a", raw, 0)], "a");
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].contains("Content-Length mismatch"), "{}", f[0]);
+    }
+
+    /// A faithful **non-UTF-8** body (a binary `application/orangeindata` INFO
+    /// payload) whose Content-Length is the correct RAW byte count must NOT be
+    /// flagged. Regression guard for newkahneed-023: `String::from_utf8_lossy`
+    /// inflated each non-UTF-8 byte to a 3-byte `U+FFFD`, so an 8-byte body read
+    /// as 12 and the hard gate spuriously rejected a valid binary message.
+    #[test]
+    fn binary_body_with_correct_content_length_is_clean() {
+        let body: [u8; 8] = [0xFF, 0xFE, 0x00, 0x80, 0xC0, 0x01, 0x02, 0x03];
+        let mut raw = format!(
+            "INFO sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1\r\n\
+             From: <sip:alice@127.0.0.1>;tag=at\r\n\
+             To: <sip:bob@127.0.0.1>;tag=bt\r\n\
+             Call-ID: cid-bin\r\n\
+             CSeq: 2 INFO\r\n\
+             Max-Forwards: 70\r\n\
+             Content-Type: application/orangeindata\r\n\
+             Content-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        raw.extend_from_slice(&body);
+        assert!(
+            ContentLengthRule.check(&[sent("a", raw, 0)], "a").is_empty(),
+            "a binary body with a correct raw-byte Content-Length must not be flagged",
+        );
+    }
+
+    /// The raw-byte fix must not blind the rule: a genuinely wrong Content-Length
+    /// over a binary body is still caught, and the reported actual is the raw
+    /// byte count (8), not the lossy-inflated one.
+    #[test]
+    fn binary_body_with_wrong_content_length_is_still_flagged() {
+        let body: [u8; 8] = [0xFF, 0xFE, 0x00, 0x80, 0xC0, 0x01, 0x02, 0x03];
+        let mut raw = "INFO sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1\r\n\
+             From: <sip:alice@127.0.0.1>;tag=at\r\n\
+             To: <sip:bob@127.0.0.1>;tag=bt\r\n\
+             Call-ID: cid-bin\r\n\
+             CSeq: 2 INFO\r\n\
+             Max-Forwards: 70\r\n\
+             Content-Type: application/orangeindata\r\n\
+             Content-Length: 5\r\n\r\n"
+            .to_string()
+            .into_bytes();
+        raw.extend_from_slice(&body);
+        let f = ContentLengthRule.check(&[sent("a", raw, 0)], "a");
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].contains("body is 8 bytes"), "{}", f[0]);
     }
 
     // ── ContentTypeRule ─────────────────────────────────────────────────────
