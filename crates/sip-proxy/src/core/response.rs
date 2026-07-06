@@ -123,6 +123,29 @@ impl ProxyCore {
                 );
                 self.send_to(&serialize(&SipMessage::Request(ack)), &found.target).await;
                 self.metrics.record_ack_synthesized();
+
+                // Mark the transaction "we already ACKed downstream" so the
+                // request path absorbs the upstream's OWN ACK for this final
+                // (§17.1.1.3 — hop-by-hop) instead of relaying a second ACK
+                // to the callee. The upstream's ACK reuses ITS INVITE branch,
+                // which is exactly this relayed response's second Via branch
+                // (the hop the final is being forwarded to). Short TTL: the
+                // upstream ACKs within its final-retransmit window (a re-sent
+                // final refreshes the marker).
+                let upstream_branch = param_str(next, "branch").unwrap_or("").to_string();
+                self.cancel_lru.remember(
+                    &crate::cancel_lru::ack_absorb_key(
+                        &resp.call_id,
+                        resp.from.tag.as_deref(),
+                        resp.cseq.seq,
+                    ),
+                    crate::cancel_lru::CancelEntry {
+                        target: found.target.clone(),
+                        branch: found.branch.clone(),
+                        upstream_branch,
+                    },
+                    crate::cancel_lru::RTX_ENTRY_TTL_MS,
+                );
             }
         }
     }

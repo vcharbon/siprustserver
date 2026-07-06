@@ -357,7 +357,11 @@ mod sweeper_tests {
         // the request path does on every forward.
         lru.remember(
             &call_id_cseq_key("call-leaky", Some("t"), 1),
-            CancelEntry { target: ProxyAddr::new("10.0.0.2", 5070), branch: "z9hG4bK-x".into() },
+            CancelEntry {
+                target: ProxyAddr::new("10.0.0.2", 5070),
+                branch: "z9hG4bK-x".into(),
+                upstream_branch: String::new(),
+            },
             RTX_ENTRY_TTL_MS,
         );
         metrics.set_pending_invite_lru_size(lru.size() as u64);
