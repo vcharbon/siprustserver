@@ -140,10 +140,38 @@ impl ProxyCore {
         }
 
         // ── Hop-by-hop ACK absorption (§17.1.1.3) ───────────────────────────
-        if method == "ACK" && first_header_value(&req.headers, "route").is_none() {
-            let key = call_id_cseq_key(&req.call_id, req.from.tag.as_deref(), req.cseq.seq);
-            if self.cancel_lru.lookup(&key).is_some() {
-                return RouteOutcome { decision: select, target: None };
+        // An ACK for a NON-2xx INVITE final belongs to the INVITE transaction
+        // itself — it reuses the INVITE's top-Via branch — and is hop-by-hop:
+        // this proxy already generated its OWN ACK toward the downstream when
+        // it relayed the non-2xx final (`core/response.rs`, which writes the
+        // `ackabs|` marker consulted here), so the upstream's ACK terminates
+        // at this hop. An ACK for a 2xx is a NEW transaction and is forwarded
+        // end-to-end. The marker + the upstream's OWN final-relay branch (the
+        // relayed response's second Via) are the discriminator, NOT the
+        // presence of a Route header: a worker's b-leg INVITE carries a
+        // preloaded outbound-proxy Route, and §17.1.1.3 makes its non-2xx ACK
+        // copy that Route verbatim — the old `route.is_none()` heuristic then
+        // leaked the ACK downstream under a fresh proxy branch, handing the
+        // callee a SECOND ACK matching no transaction it ever created
+        // (newkahneed/014, 486-then-reroute). Gating on the marker (rather
+        // than merely branch-matching the remembered INVITE) also keeps a
+        // takeover worker's 2xx ACK safe: the simulated fabric's per-worker
+        // `IdGen` resets on failover, so its fresh ACK branch can ALIAS the
+        // dead primary's INVITE branch — but no non-2xx final was ever
+        // relayed for a confirmed call, so no marker exists and the ACK flows.
+        if method == "ACK" {
+            let key = crate::cancel_lru::ack_absorb_key(&req.call_id, req.from.tag.as_deref(), req.cseq.seq);
+            if let Some(found) = self.cancel_lru.lookup(&key) {
+                let same_txn = !found.upstream_branch.is_empty()
+                    && top_via_branch(req).as_deref() == Some(found.upstream_branch.as_str());
+                // Branchless legacy fallback (pre-RFC-3261 upstream): no branch
+                // to compare, so keep the old route-less heuristic for it — a
+                // 2xx ACK would carry the dialog's Route set.
+                let legacy_routeless = found.upstream_branch.is_empty()
+                    && first_header_value(&req.headers, "route").is_none();
+                if same_txn || legacy_routeless {
+                    return RouteOutcome { decision: select, target: None };
+                }
             }
         }
 
@@ -456,7 +484,11 @@ impl ProxyCore {
             if let Some(k) = &rtx_key {
                 self.cancel_lru.remember(
                     k,
-                    CancelEntry { target: target.clone(), branch: our_branch.clone() },
+                    CancelEntry {
+                        target: target.clone(),
+                        branch: our_branch.clone(),
+                        upstream_branch: incoming_branch.clone().unwrap_or_default(),
+                    },
                     crate::cancel_lru::RTX_ENTRY_TTL_MS,
                 );
             }
@@ -469,7 +501,11 @@ impl ProxyCore {
             let key = call_id_cseq_key(&req.call_id, req.from.tag.as_deref(), req.cseq.seq);
             self.cancel_lru.remember(
                 &key,
-                CancelEntry { target: target.clone(), branch: our_branch },
+                CancelEntry {
+                    target: target.clone(),
+                    branch: our_branch,
+                    upstream_branch: incoming_branch.clone().unwrap_or_default(),
+                },
                 crate::cancel_lru::INVITE_ENTRY_TTL_MS,
             );
             self.metrics.set_pending_invite_lru_size(self.cancel_lru.size() as u64);
@@ -1268,5 +1304,159 @@ Content-Length: 0\r\n\r\n"
         // as a self-route. It must instead stay foreign (and being malformed,
         // it can't drive loose routing either) → plain selection.
         assert_eq!(outcome.decision, RoutingDecisionKind::SelectNew);
+    }
+}
+
+#[cfg(test)]
+mod ack_absorption_tests {
+    //! Hop-by-hop ACK absorption is keyed on the §17.1.1.3 branch identity —
+    //! an ACK for a non-2xx final reuses its INVITE's top-Via branch — NOT on
+    //! the absence of a Route header (newkahneed/014). A b-leg INVITE behind
+    //! an outbound proxy carries a preloaded Route, so its non-2xx ACK carries
+    //! one too; the old `route.is_none()` heuristic relayed that ACK downstream
+    //! under a fresh proxy branch, giving the callee a second, unmatchable ACK
+    //! on top of the one the proxy had already synthesized.
+
+    use std::sync::Arc;
+
+    use sip_clock::Clock;
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+    use sip_net::types::BindUdpOpts;
+    use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
+
+    use crate::addr::ProxyAddr;
+    use crate::core::{ProxyCore, ProxyCoreBuilder};
+    use crate::registry::static_reg::StaticWorkerRegistry;
+    use crate::registry::WorkerRegistry;
+    use crate::strategies::forward_all::ForwardAllStrategy;
+    use crate::RoutingStrategy;
+
+    const UAC: &str = "10.244.7.13";
+    const PROXY_VIP: &str = "172.20.255.250";
+    const W1: &str = "10.0.0.1";
+
+    async fn core() -> ProxyCore {
+        let net = SimulatedSignalingNetwork::new(1);
+        let ep = net.bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64)).await.unwrap();
+        let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
+        let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
+        ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
+            .clock(Clock::test_at(0))
+            .build(ep)
+    }
+
+    fn parse_req(raw: &str) -> SipMessage {
+        CustomParser::default().parse(raw.as_bytes()).unwrap()
+    }
+
+    fn invite(branch: &str) -> SipMessage {
+        parse_req(&format!(
+            "INVITE sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch={branch};rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{UAC}>;tag=tag-a\r\n\
+To: <sip:bob@10.0.0.50>\r\n\
+Call-ID: absorb-1@test\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:alice@{UAC}:5060>\r\n\
+Route: <sip:{PROXY_VIP}:5060;lr>\r\n\
+Content-Length: 0\r\n\r\n"
+        ))
+    }
+
+    fn ack(branch: &str, route: &str) -> SipMessage {
+        parse_req(&format!(
+            "ACK sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch={branch};rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{UAC}>;tag=tag-a\r\n\
+To: <sip:bob@10.0.0.50>;tag=callee-1\r\n\
+Call-ID: absorb-1@test\r\n\
+CSeq: 1 ACK\r\n\
+{route}Content-Length: 0\r\n\r\n"
+        ))
+    }
+
+    fn src() -> std::net::SocketAddr {
+        format!("{UAC}:5060").parse().unwrap()
+    }
+
+    /// The non-2xx final coming back to the proxy: top Via = the proxy (so it
+    /// relays it and synthesizes the hop-by-hop ACK, writing the `ackabs|`
+    /// marker), second Via = the upstream's INVITE Via (its branch is what the
+    /// upstream's own §17.1.1.3 ACK will carry).
+    fn busy_486(upstream_branch: &str) -> sip_message::types::SipResponse {
+        let raw = format!(
+            "SIP/2.0 486 Busy Here\r\n\
+Via: SIP/2.0/UDP {PROXY_VIP}:5060;branch=z9hG4bKout;rport\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch={upstream_branch};rport\r\n\
+From: <sip:alice@{UAC}>;tag=tag-a\r\n\
+To: <sip:bob@10.0.0.50>;tag=callee-1\r\n\
+Call-ID: absorb-1@test\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n"
+        );
+        let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
+            panic!("expected response")
+        };
+        resp
+    }
+
+    // The 014 regression: the non-2xx ACK carries the INVITE's preloaded
+    // outbound-proxy Route (§17.1.1.3 copies the Route verbatim). The proxy
+    // already synthesized its own hop-by-hop ACK when it relayed the 486, so
+    // the upstream's same-branch ACK terminates here — the old
+    // `route.is_none()` heuristic leaked it downstream as a second ACK.
+    #[tokio::test]
+    async fn non_2xx_ack_with_preloaded_proxy_route_is_absorbed() {
+        let core = core().await;
+        core.route_request(&invite("z9hG4bKinv"), src()).await;
+        core.handle_response(busy_486("z9hG4bKinv")).await;
+
+        let route = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
+        let outcome = core.route_request(&ack("z9hG4bKinv", &route), src()).await;
+        assert_eq!(outcome.target, None, "the same-branch (non-2xx) ACK must be absorbed, not relayed");
+    }
+
+    // Control: the route-less non-2xx ACK (a UA with no preloaded route) keeps
+    // being absorbed exactly as before.
+    #[tokio::test]
+    async fn non_2xx_ack_without_route_is_absorbed() {
+        let core = core().await;
+        core.route_request(&invite("z9hG4bKinv"), src()).await;
+        core.handle_response(busy_486("z9hG4bKinv")).await;
+
+        let outcome = core.route_request(&ack("z9hG4bKinv", ""), src()).await;
+        assert_eq!(outcome.target, None, "the same-branch ACK is absorbed with or without a Route");
+    }
+
+    // An ACK for a 2xx is its OWN transaction (§13.2.2.4) and must be forwarded
+    // end-to-end, never absorbed — even when its fresh branch happens to ALIAS
+    // the INVITE's (the failover harness's per-worker `IdGen` resets on
+    // takeover and can re-mint a spent branch). No non-2xx final was relayed ⇒
+    // no absorption marker ⇒ the ACK flows.
+    #[tokio::test]
+    async fn ack_for_2xx_is_forwarded_even_when_its_branch_aliases_the_invite() {
+        let core = core().await;
+        core.route_request(&invite("z9hG4bKinv"), src()).await;
+
+        let route = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
+        let outcome = core.route_request(&ack("z9hG4bKinv", &route), src()).await;
+        assert!(
+            outcome.target.is_some(),
+            "with no relayed non-2xx final, an ACK must be forwarded even on a branch alias"
+        );
+    }
+
+    // The plain 2xx ACK (fresh branch, dialog Route set) keeps flowing.
+    #[tokio::test]
+    async fn ack_for_2xx_with_fresh_branch_is_forwarded() {
+        let core = core().await;
+        core.route_request(&invite("z9hG4bKinv"), src()).await;
+
+        let route = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
+        let outcome = core.route_request(&ack("z9hG4bKack2xx", &route), src()).await;
+        assert!(outcome.target.is_some(), "a fresh-branch (2xx) ACK must be forwarded end-to-end");
     }
 }

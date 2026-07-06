@@ -1184,6 +1184,36 @@ impl FailoverHarness {
     /// mid-life on the long-lived multi-SUT harness. Catches a takeover that
     /// probes a dialog with a stale CSeq — a regression a real UAC rejects as
     /// `unexpected_msg` but a test UA answers silently.
+    /// Run the FULL RFC audit suite — the per-bind **peer** rules (Via echo /
+    /// response↔transaction correlation, tags, CANCEL/RAck correlation, …) on
+    /// top of the cross-message rules — over the recorded trace and panic on
+    /// any non-advisory finding, honouring [`allow_rfc_violation`] waivers.
+    ///
+    /// The Drop-time gate deliberately runs only the endpoint-scoped
+    /// cross-message rules (a transparent failover splits one dialog's CSeq
+    /// stream across worker binds, so per-bind peer rules would report phantom
+    /// findings on the internal nodes). A NON-failover via-LB test — where no
+    /// call ever changes workers — can and should opt into the full per-bind
+    /// suite, which is exactly what gates the downstream (newkahsip) e2e runs:
+    /// it is the only lane that judges the **relay (proxy) bind's** own client
+    /// transactions (e.g. `rfc3261.via` §8.1.3/§17.1.3 response matching).
+    pub fn assert_full_rfc_clean(&self, cell: &str) {
+        let events = self.harness.recording().channel().snapshot();
+        let findings: Vec<sip_net::RfcFinding> = sip_net::evaluate_rfc_findings(&events)
+            .into_iter()
+            .filter(|f| !f.advisory && !self.waived_rfc_rules.contains(&f.rule))
+            .collect();
+        assert!(
+            findings.is_empty(),
+            "[{cell}] full-suite RFC audit violation(s) on the recorded trace:\n{}",
+            findings
+                .iter()
+                .map(|f| format!("  • [{}] {}: {}", f.lane, f.rule, f.detail))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+
     pub fn assert_sip_rfc_clean(&self, cell: &str) {
         let findings = self.rfc_audit_findings();
         assert!(

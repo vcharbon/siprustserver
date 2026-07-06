@@ -66,17 +66,38 @@ pub fn call_id_cseq_key(call_id: &str, from_tag: Option<&str>, cseq_num: u32) ->
     format!("{call_id}|{}|{cseq_num}", from_tag.unwrap_or(""))
 }
 
+/// Namespaced key for the hop-by-hop ACK-absorption marker: written on the
+/// RESPONSE path when the proxy relays a non-2xx INVITE final upstream and
+/// synthesizes its own ACK downstream (§17.1.1.3); consulted on the request
+/// path so the upstream's own ACK for that final terminates at this hop
+/// instead of reaching the callee twice. `ackabs|` keeps it disjoint from the
+/// plain INVITE keys and the `rtx|` memos sharing this store.
+pub fn ack_absorb_key(call_id: &str, from_tag: Option<&str>, cseq_num: u32) -> String {
+    format!("ackabs|{}", call_id_cseq_key(call_id, from_tag, cseq_num))
+}
+
 /// What we cache per remembered INVITE: the downstream target + the branch we
-/// stamped on our outgoing Via (reused on the matching CANCEL).
+/// stamped on our outgoing Via (reused on the matching CANCEL) + the branch
+/// the UPSTREAM stamped on the top Via of the request as it arrived.
+///
+/// `upstream_branch` is the §17.1.1.3 discriminator for hop-by-hop ACK
+/// absorption (consulted via the [`ack_absorb_key`] marker the response path
+/// writes when it relays a non-2xx final and synthesizes its own ACK): an ACK
+/// for a NON-2xx final reuses its INVITE's top-Via branch (same transaction),
+/// while an ACK for a 2xx is a new transaction with a fresh branch and must
+/// be forwarded end-to-end. Empty when the upstream request carried no branch
+/// (pre-RFC-3261 UA) — never matched against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelEntry {
     pub target: ProxyAddr,
     pub branch: String,
+    pub upstream_branch: String,
 }
 
 struct StoredEntry {
     target: ProxyAddr,
     branch: String,
+    upstream_branch: String,
     expires_at_ms: u64,
 }
 
@@ -140,7 +161,12 @@ impl CancelBranchLru {
         let expires_at_ms = self.now_ms() + ttl_ms;
         self.table.lock().unwrap().insert(
             key.to_string(),
-            StoredEntry { target: entry.target, branch: entry.branch, expires_at_ms },
+            StoredEntry {
+                target: entry.target,
+                branch: entry.branch,
+                upstream_branch: entry.upstream_branch,
+                expires_at_ms,
+            },
         );
     }
 
@@ -154,7 +180,11 @@ impl CancelBranchLru {
                 table.remove(key);
                 None
             }
-            Some(e) => Some(CancelEntry { target: e.target.clone(), branch: e.branch.clone() }),
+            Some(e) => Some(CancelEntry {
+                target: e.target.clone(),
+                branch: e.branch.clone(),
+                upstream_branch: e.upstream_branch.clone(),
+            }),
             None => None,
         }
     }
@@ -186,7 +216,11 @@ mod tests {
     use super::*;
 
     fn entry(branch: &str) -> CancelEntry {
-        CancelEntry { target: ProxyAddr::new("10.0.0.2", 5070), branch: branch.to_string() }
+        CancelEntry {
+            target: ProxyAddr::new("10.0.0.2", 5070),
+            branch: branch.to_string(),
+            upstream_branch: String::new(),
+        }
     }
 
     #[test]

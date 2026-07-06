@@ -1890,6 +1890,16 @@ pub struct Dialog {
 }
 
 impl Dialog {
+    /// Set the dialog's local CSeq floor — the next in-dialog request uses
+    /// `v + 1`. RFC 3261 §12.2.1.1 lets a UA pick ANY initial sequence number
+    /// for its own CSeq space, so a test can deliberately align this side's
+    /// CSeq with the peer's to force `(Call-ID, CSeq, method)`-coincident
+    /// crossing transactions (e.g. BYE/BYE glare through a relay, where only
+    /// the top-Via branch disambiguates the two 200s — RFC 3261 §17.1.3).
+    pub fn set_local_cseq(&mut self, v: u32) {
+        self.dialog.local_cseq = v;
+    }
+
     /// Send a BYE (CSeq auto-incremented). Returns its client transaction.
     pub async fn bye(&mut self) -> InDialogTxn {
         self.request(InDialogMethod::Bye, None).await

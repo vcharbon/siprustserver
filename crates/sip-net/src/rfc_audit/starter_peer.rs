@@ -558,9 +558,21 @@ impl PeerAuditRule for RecordRouteRule {
 /// **RFC 3261 §8.1.3 / §17.1.3 — a response's top Via MUST echo the request's.**
 /// A UAC matches a response to its client transaction by the topmost `Via`
 /// branch and copies the entire `Via` stack back unchanged; a response whose top
-/// branch differs from the request this bind sent, or whose Via *count* differs,
-/// cannot be correlated. Judged on **received** responses against this bind's
-/// sent requests.
+/// branch matches NO request this bind sent, or whose Via *count* differs from
+/// the request it matched, cannot be correlated. Judged on **received**
+/// responses against this bind's sent requests.
+///
+/// Correlation is **branch-first**, exactly as §17.1.3 defines the client
+/// transaction: among the sent requests sharing the response's `(Call-ID,
+/// CSeq number, CSeq method)`, the one that MINTED the response's top-Via
+/// branch is the transaction the response belongs to. `(Call-ID, CSeq)` alone
+/// is ambiguous at a bind that legitimately carries several same-key client
+/// transactions at once — a relay (proxy) forwarding BOTH directions of one
+/// dialog whose crossing BYEs coincide on a CSeq number (§12.2.1.1 lets each
+/// side pick any initial sequence number), or a reroute-after-non-2xx forking
+/// a second INVITE at the same CSeq. Picking "the most recent" there flagged
+/// perfectly-correct wires (newkahneed/014); only a response whose top branch
+/// matches NONE of the same-key sent requests is genuinely unmatchable.
 pub struct ViaRule;
 
 impl PeerAuditRule for ViaRule {
@@ -574,6 +586,12 @@ impl PeerAuditRule for ViaRule {
         let parser = super::lenient_parser();
         let mut by_call: HashMap<String, Vec<(u32, String, Vec<String>)>> = HashMap::new();
         let mut out = Vec::new();
+        // The branch the sender minted on a stored request's top Via.
+        fn sent_top_branch(vias: &[String]) -> Option<String> {
+            vias.first().and_then(|v| {
+                sip_message::message_helpers::parse_via_params(v).branch.filter(|b| !b.is_empty())
+            })
+        }
         for step in ordered_steps(events, &parser) {
             let cid = call_id(&step.msg);
             if cid.is_empty() {
@@ -601,32 +619,51 @@ impl PeerAuditRule for ViaRule {
             };
             let seq = cseq_seq(&step.msg);
             let method = cseq_method(&step.msg);
-            let Some(sent) = by_call
+            let candidates: Vec<&(u32, String, Vec<String>)> = by_call
                 .get(cid)
-                .and_then(|v| v.iter().rev().find(|(s, m, _)| *s == seq && m.as_str() == method))
-            else {
+                .map(|v| v.iter().filter(|(s, m, _)| *s == seq && m.as_str() == method).collect())
+                .unwrap_or_default();
+            let Some(&most_recent) = candidates.last() else {
                 continue; // un-correlated response — cannot judge
             };
             let resp_vias = sip_message::message_helpers::get_headers(msg_headers(&step.msg), "via");
             let resp_branch = top_via_branch(&step.msg);
-            let sent_branch = sent.2.first().and_then(|v| {
-                sip_message::message_helpers::parse_via_params(v).branch.filter(|b| !b.is_empty())
+            // §17.1.3 branch-first correlation: the sent request that minted the
+            // response's top branch is the client transaction it belongs to.
+            let matched = resp_branch.as_ref().and_then(|rb| {
+                candidates
+                    .iter()
+                    .rev()
+                    .find(|(_, _, vias)| sent_top_branch(vias).as_deref() == Some(rb))
+                    .copied()
             });
-            if let (Some(rb), Some(sb)) = (&resp_branch, &sent_branch) {
-                if rb != sb {
-                    out.push(format!(
-                        "response top Via branch \"{rb}\" differs from the branch this bind sent \
-                         \"{sb}\" — RFC 3261 §8.1.3 (the response cannot be matched to its client \
-                         transaction)"
-                    ));
+            let reference = match (&resp_branch, matched) {
+                // Correlated to the transaction that minted the branch.
+                (_, Some(m)) => m,
+                // A branch-carrying response matching NO same-key sent request:
+                // unmatchable at this bind's transaction layer. (Judged only
+                // when the sender minted a branch at all — a branchless legacy
+                // request cannot be branch-compared.)
+                (Some(rb), None) => {
+                    if let Some(sb) = sent_top_branch(&most_recent.2) {
+                        out.push(format!(
+                            "response top Via branch \"{rb}\" differs from the branch this bind \
+                             sent \"{sb}\" — RFC 3261 §8.1.3 (the response cannot be matched to \
+                             its client transaction)"
+                        ));
+                    }
+                    most_recent
                 }
-            }
-            if resp_vias.len() != sent.2.len() {
+                // Branchless response — fall back to the most recent same-key
+                // request for the stack-echo check.
+                (None, None) => most_recent,
+            };
+            if resp_vias.len() != reference.2.len() {
                 out.push(format!(
                     "response carries {} Via header(s) but the sent request had {} — RFC 3261 \
                      §8.1.3 requires the response to echo the request's Via stack unchanged",
                     resp_vias.len(),
-                    sent.2.len(),
+                    reference.2.len(),
                 ));
             }
         }
@@ -1441,6 +1478,80 @@ mod tests {
         let f = ViaRule.check(&evs, "a");
         assert!(!f.is_empty(), "{f:?}");
         assert!(f.iter().any(|m| m.contains("differs from the branch")), "{f:?}");
+    }
+
+    // §17.1.3 branch-first correlation (newkahneed/014): a relay forwarding
+    // BOTH directions of one dialog can hold two same-(Call-ID, CSeq, method)
+    // client transactions at once (crossing BYEs whose CSeq numbers coincide —
+    // legal per §12.2.1.1). Each 200 echoes its OWN request's branch; the rule
+    // must match by branch, not by recency.
+    #[test]
+    fn glare_responses_correlate_by_branch_not_recency() {
+        let bye_out = build_req(
+            "BYE", "sip:bob@127.0.0.1:5070", "z9hG4bK-worker", 2, "wt", Some("bt"), Some("70"),
+            None, "", None, "", "cid-glare",
+        );
+        let bye_back = build_req(
+            "BYE", "sip:w@127.0.0.1:5091", "z9hG4bK-callee", 2, "bt", Some("wt"), Some("70"),
+            None, "", None, "", "cid-glare",
+        );
+        // Both 200s arrive AFTER both BYEs were forwarded; the one echoing the
+        // FIRST BYE's branch lands last (worst-case for a recency matcher).
+        let ok_back = resp(200, "z9hG4bK-callee", 2, "BYE", "bt", Some("wt"), "cid-glare");
+        let ok_out = resp(200, "z9hG4bK-worker", 2, "BYE", "wt", Some("bt"), "cid-glare");
+        let evs = vec![
+            sent("proxy", bye_out, 0),
+            sent("proxy", bye_back, 1),
+            recv_at("proxy", ok_back, 2),
+            recv_at("proxy", ok_out, 3),
+        ];
+        assert!(ViaRule.check(&evs, "proxy").is_empty(), "{:?}", ViaRule.check(&evs, "proxy"));
+    }
+
+    // The genuine §8.1.3 defect still gates: a response whose top branch matches
+    // NO same-key sent request is unmatchable.
+    #[test]
+    fn response_matching_no_sent_branch_among_several_is_flagged() {
+        let bye_a = build_req(
+            "BYE", "sip:bob@127.0.0.1:5070", "z9hG4bK-a", 2, "at", Some("bt"), Some("70"),
+            None, "", None, "", "cid-nomatch",
+        );
+        let bye_b = build_req(
+            "BYE", "sip:w@127.0.0.1:5091", "z9hG4bK-b", 2, "bt", Some("at"), Some("70"),
+            None, "", None, "", "cid-nomatch",
+        );
+        let rp = resp(200, "z9hG4bK-neither", 2, "BYE", "at", Some("bt"), "cid-nomatch");
+        let evs = vec![sent("p", bye_a, 0), sent("p", bye_b, 1), recv_at("p", rp, 2)];
+        let f = ViaRule.check(&evs, "p");
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].contains("differs from the branch"), "{}", f[0]);
+    }
+
+    // The Via-stack echo (count) check judges against the BRANCH-matched
+    // request, not the most recent same-key one.
+    #[test]
+    fn via_count_is_checked_against_the_branch_matched_request() {
+        // First request carries TWO Vias (a relayed request: ours on top);
+        // second same-key request carries one. The response to the first (2
+        // Vias, top branch = the first's) must be judged against the first.
+        let two_via = build_req(
+            "BYE", "sip:bob@127.0.0.1:5070", "z9hG4bK-two", 2, "at", Some("bt"), Some("70"),
+            None, "", None, "Via: SIP/2.0/UDP 127.0.0.1:5091;branch=z9hG4bK-orig\r\n",
+            "cid-count",
+        );
+        let one_via = build_req(
+            "BYE", "sip:w@127.0.0.1:5091", "z9hG4bK-one", 2, "bt", Some("at"), Some("70"),
+            None, "", None, "", "cid-count",
+        );
+        let rp = String::from_utf8(resp(200, "z9hG4bK-two", 2, "BYE", "at", Some("bt"), "cid-count"))
+            .unwrap()
+            .replace(
+                "From:",
+                "Via: SIP/2.0/UDP 127.0.0.1:5091;branch=z9hG4bK-orig\r\nFrom:",
+            )
+            .into_bytes();
+        let evs = vec![sent("p", two_via, 0), sent("p", one_via, 1), recv_at("p", rp, 2)];
+        assert!(ViaRule.check(&evs, "p").is_empty(), "{:?}", ViaRule.check(&evs, "p"));
     }
 
     // ── ResponseCorrelationRule ─────────────────────────────────────────────
