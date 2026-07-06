@@ -259,6 +259,13 @@ pub fn representative_call() -> Call {
         relay_first_18x: None,
         promote_pem: None,
         transfer: None,
+        subscriptions: vec![ReleaseEventKind::MaxCallDuration],
+        reroute: Some(RerouteState {
+            phase: ReroutePhase::ARealigning,
+            new_leg_id: "b-2".into(),
+            old_leg_id: Some("b-1".into()),
+            started_at_ms: 1_779_440_050_000,
+        }),
         sm_cursors: BTreeMap::new(),
     }
 }
@@ -674,8 +681,21 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
         proptest::option::of(proptest::collection::vec(arb_tag(), 0..3)),
         arb_sm_cursors(),
     );
+    // newkahneed-009: release-event subscriptions + the in-flight reroute slice
+    // ride the replicated body like `features`/`transfer` do.
+    let release = (
+        proptest::collection::vec(Just(ReleaseEventKind::MaxCallDuration), 0..2),
+        proptest::option::of((arb_tag(), proptest::option::of(arb_tag()), any::<i64>(), any::<bool>()).prop_map(
+            |(new_leg_id, old_leg_id, started_at_ms, realigning)| RerouteState {
+                phase: if realigning { ReroutePhase::ARealigning } else { ReroutePhase::BLegDialing },
+                new_leg_id,
+                old_leg_id,
+                started_at_ms,
+            },
+        )),
+    );
 
-    (head, collections, state, trace, tail).prop_map(
+    (head, collections, state, trace, tail, release).prop_map(
         |(
             (call_ref, a_leg, b_legs, active_peer, callback_context, billing_context, a_leg_invite),
             (limiter_entries, timers, cdr_events, tag_map),
@@ -692,6 +712,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
                 terminating_refresh_legs,
                 sm_cursors,
             ),
+            (subscriptions, reroute),
         )| Call {
             call_ref,
             a_leg,
@@ -724,6 +745,8 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             relay_first_18x: None,
             promote_pem: None,
             transfer: None,
+            subscriptions,
+            reroute,
             sm_cursors,
         },
     )

@@ -572,6 +572,13 @@ pub fn set_transfer(mut call: Call, state: Option<crate::model::TransferState>) 
     call
 }
 
+/// Overwrite the established-call reroute slice (`None` clears it — the
+/// completion / rollback path). Mirrors [`set_transfer`] (newkahneed-009).
+pub fn set_reroute(mut call: Call, state: Option<crate::model::RerouteState>) -> Call {
+    call.reroute = state;
+    call
+}
+
 // ── Service ext + rule helpers (ADR-0016) ───────────────────────────────────
 
 /// Write an encoded ext slice into `call.ext[serviceId]`; `None` drops the key.

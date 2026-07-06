@@ -112,6 +112,15 @@ pub struct RouteDecision {
     pub callback_context: Option<String>,
     pub features: FeatureActivations,
     pub service_ext: BTreeMap<String, serde_json::Value>,
+    /// Internal release events the backend wants consulted on (`call_release`)
+    /// instead of handled locally — the Routing API's `subscribe[]`
+    /// (newkahneed-009). Recorded on the call at route-apply time (initial
+    /// route: `apply_route`; async failover/reroute route: the
+    /// `SetSubscriptions` fold), so it survives replication/takeover like
+    /// `features`. Empty = no subscriptions = today's local handling. (This
+    /// in-process type carries no serde; the persistence/back-compat default
+    /// lives on `Call.subscriptions`, which is `#[serde(default)]`.)
+    pub subscriptions: Vec<call::ReleaseEventKind>,
 }
 
 /// A "reject" decision — answer the INVITE with a failure response the decision
@@ -275,6 +284,35 @@ impl CallSnapshot {
             limiter_ids: call.limiter_entries.iter().map(|e| e.limiter_id.clone()).collect(),
         }
     }
+}
+
+/// The release-event consult sent when a **subscribed** internal release
+/// event fires (newkahneed-009; the Routing API's `POST /calls/events/release`).
+/// Built by the `max-duration` rule's `ReleaseAsyncHttp` seed; the framework
+/// attaches the snapshot at dispatch, exactly like [`CallFailureRequest`].
+#[derive(Debug, Clone)]
+pub struct CallReleaseRequest {
+    pub callback_context: Option<String>,
+    /// Which subscribed internal event fired.
+    pub event: call::ReleaseEventKind,
+    /// Call-scoped context, attached by the framework at dispatch time.
+    pub snapshot: CallSnapshot,
+}
+
+/// The release decision: proceed with the local teardown, or convert the
+/// release into an **established-call reroute** (replace the connected b-leg
+/// with a new destination — announcement / autocutoff treatment). The `Route`
+/// here is the same [`RouteDecision`] shape as every other decision point
+/// (ADR-0017 one-treatment-vocabulary; output parity per newkahneed-005
+/// applies: `call_limiter` admission, `features`, `service_ext`,
+/// `subscriptions` are all honored on the reroute).
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // mirror of CallTreatment's choice
+pub enum CallReleaseResponse {
+    /// Tear the call down locally, exactly as an unsubscribed event would.
+    Release,
+    /// Reroute the established call to `RouteDecision::destination`.
+    Route(RouteDecision),
 }
 
 /// The REFER authorization request POSTed to `/call/refer` (port of TS

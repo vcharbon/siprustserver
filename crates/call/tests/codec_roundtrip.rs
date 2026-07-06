@@ -58,6 +58,39 @@ fn service_timer_entry_round_trips_and_id_recipe_is_stable() {
     assert_eq!(restored.timer_type, t, "owned-Cow deserialisation compares equal to the borrowed declaration");
 }
 
+/// newkahneed-009 replication sanity: the release-event `subscriptions` and
+/// the in-flight `reroute` slice are ordinary replicated `Call` fields — a
+/// takeover node must keep honoring the subscription and be able to resume /
+/// tear down a mid-reroute call. Round-trips through the production msgpack
+/// codec across all three shapes (none / subscribed-idle / mid-reroute).
+#[test]
+fn release_subscriptions_and_reroute_round_trip() {
+    use call::{ReleaseEventKind, ReroutePhase, RerouteState};
+
+    let codec = MsgpackCodec::new();
+    let mut call = representative_call();
+
+    call.subscriptions = Vec::new();
+    call.reroute = None;
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "unsubscribed / no-reroute shape");
+
+    call.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
+    call.reroute = None;
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "subscribed-idle shape");
+    assert!(decoded.subscriptions.contains(&ReleaseEventKind::MaxCallDuration));
+
+    call.reroute = Some(RerouteState {
+        phase: ReroutePhase::BLegDialing,
+        new_leg_id: "b-2".into(),
+        old_leg_id: Some("b-1".into()),
+        started_at_ms: 1_779_440_099_000,
+    });
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "mid-reroute shape");
+}
+
 /// PA2 (source paranoid-decode precondition): empty input is a typed error.
 #[test]
 fn decode_empty_is_error() {

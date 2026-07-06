@@ -41,6 +41,12 @@ pub async fn apply_route(
 
     call.features = Some(route.features.clone());
     call.callback_context = route.callback_context.clone();
+    // Release-event subscription registry (newkahneed-009): recorded like
+    // `features`, so it replicates and survives takeover. The latest applied
+    // route owns the set (a limiter-reject failover recursion re-enters here
+    // and overwrites with ITS route's subscriptions — decision-response
+    // parity, same as `features`).
+    call.subscriptions = route.subscriptions.clone();
 
     // Seed per-service ext slices (service-layer activation gate).
     for (service_id, value) in route.service_ext {

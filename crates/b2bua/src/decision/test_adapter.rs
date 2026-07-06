@@ -16,13 +16,15 @@ use super::schemas::{
 };
 use super::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
-    CallReferRequest, CallReferResponse,
+    CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
 };
 
 type NewCallRule = Box<dyn Fn(&NewCallRequest) -> Option<NewCallResponse> + Send + Sync>;
 /// A scripted `/call/refer` outcome a test can request. `Hang` models an HTTP
 /// request that never resolves (the sub-expiry timer is what fires).
 type ReferRule = Box<dyn Fn(&CallReferRequest) -> ReferOutcome + Send + Sync>;
+/// A scripted `call_release` outcome (newkahneed-009).
+type ReleaseRule = Box<dyn Fn(&CallReleaseRequest) -> ReleaseOutcome + Send + Sync>;
 
 /// A scripted decision backend. Build with [`ScriptedDecisionEngine::route_all_to`]
 /// for the common case, or [`ScriptedDecisionEngine::builder`] for payload-driven
@@ -32,6 +34,7 @@ pub struct ScriptedDecisionEngine {
     fallback: NewCallFallback,
     failure: FailureRule,
     refer: ReferRule,
+    release: Option<ReleaseRule>,
 }
 
 /// What the scripted adapter decides for a `/call/refer` request.
@@ -41,6 +44,17 @@ pub enum ReferOutcome {
     Error,
     /// The HTTP request hangs forever — `call_refer` never resolves, so the
     /// re-entry never fires and the sub-expiry timer drives the outcome.
+    Hang,
+}
+
+/// What the scripted adapter decides for a `call_release` consult.
+pub enum ReleaseOutcome {
+    /// A decided response (`Release` or a reroute `Route`).
+    Respond(CallReleaseResponse),
+    /// Immediate backend failure → the dispatch falls back to local teardown.
+    Error,
+    /// The HTTP request hangs forever — the `DeadlineDecisionEngine` bound is
+    /// what resolves it (→ `Unavailable` → local teardown).
     Hang,
 }
 
@@ -175,6 +189,7 @@ impl ScriptedDecisionEngine {
             fallback: None,
             failure: None,
             refer: None,
+            release: None,
         }
     }
 }
@@ -505,6 +520,7 @@ pub fn route_to(host: &str, port: u16) -> RouteDecision {
         callback_context: None,
         features: default_platform_features(),
         service_ext: Default::default(),
+        subscriptions: Vec::new(),
     }
 }
 
@@ -550,6 +566,7 @@ pub struct ScriptedBuilder {
     fallback: Option<NewCallFallback>,
     failure: Option<FailureRule>,
     refer: Option<ReferRule>,
+    release: Option<ReleaseRule>,
 }
 
 impl ScriptedBuilder {
@@ -587,6 +604,17 @@ impl ScriptedBuilder {
         self
     }
 
+    /// Script the `call_release` consult (subscribed release events,
+    /// newkahneed-009). Unset = the trait's back-compat default (`Release` —
+    /// local teardown).
+    pub fn on_release(
+        mut self,
+        f: impl Fn(&CallReleaseRequest) -> ReleaseOutcome + Send + Sync + 'static,
+    ) -> Self {
+        self.release = Some(Box::new(f));
+        self
+    }
+
     pub fn build(self) -> ScriptedDecisionEngine {
         ScriptedDecisionEngine {
             rules: self.rules,
@@ -594,6 +622,7 @@ impl ScriptedBuilder {
                 .fallback
                 .unwrap_or_else(|| Box::new(|_| reject(404, "Not Found"))),
             failure: self.failure.unwrap_or_else(|| Box::new(|_| CallTreatment::Relay)),
+            release: self.release,
             refer: self.refer.unwrap_or_else(|| {
                 // Default: transfer is dormant — reject 501 (the pre-slice stub).
                 Box::new(|_| {
@@ -638,6 +667,24 @@ impl CallDecisionEngine for ScriptedDecisionEngine {
             // task awaits this forever (it is dropped at process exit); the
             // sub-expiry timer fires the outcome instead.
             ReferOutcome::Hang => std::future::pending().await,
+        }
+    }
+
+    async fn call_release(
+        &self,
+        req: CallReleaseRequest,
+    ) -> Result<CallReleaseResponse, CallDecisionError> {
+        match &self.release {
+            // Unscripted: the trait's back-compat default (local teardown).
+            None => Ok(CallReleaseResponse::Release),
+            Some(f) => match f(&req) {
+                ReleaseOutcome::Respond(resp) => Ok(resp),
+                ReleaseOutcome::Error => Err(CallDecisionError::Unavailable(
+                    "scripted call_release error".into(),
+                )),
+                // Hangs forever; the DeadlineDecisionEngine bound resolves it.
+                ReleaseOutcome::Hang => std::future::pending().await,
+            },
         }
     }
 }

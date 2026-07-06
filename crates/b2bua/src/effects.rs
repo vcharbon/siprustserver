@@ -94,6 +94,15 @@ pub enum FireAndForgetEffect {
         call_ref: String,
         request: serde_json::Value,
     },
+    /// Kick the async `call_release` consult for a subscribed internal release
+    /// event (newkahneed-009). Carries the event-scoped request JSON the
+    /// `max-duration` rule built; the router attaches the snapshot, calls
+    /// `decision.call_release` (deadline-bounded), then re-enters via a
+    /// `call-release-result` internal event (`release` | `reroute`).
+    ReleaseAsyncHttp {
+        call_ref: String,
+        request: serde_json::Value,
+    },
     /// Re-enter the handler chain with an internally-generated event.
     Reenter(Box<CallEvent>),
 }

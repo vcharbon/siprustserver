@@ -12,6 +12,7 @@ pub mod promote_pem;
 pub mod refer_transfer;
 pub mod relay;
 pub mod relay_first_18x;
+pub mod release_reroute;
 pub mod sdp_answer;
 pub mod sdp_diff;
 pub mod service;

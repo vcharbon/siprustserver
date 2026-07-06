@@ -672,6 +672,27 @@ pub enum RuleAction {
     /// calls `decision.call_failure` then re-enters via a `call-failure-result`
     /// internal event.
     FailureAsyncHttp { request: serde_json::Value },
+    // ── subscribed release events (call_release) — newkahneed-009 ───────────
+    /// Kick the async `call_release` consult for a **subscribed** internal
+    /// release event (max-call-duration first): push a `ReleaseAsyncHttp`
+    /// fire-and-forget effect carrying the event-scoped request JSON
+    /// (`callback_context`, `event`). The router interpreter attaches the
+    /// call-scoped `CallSnapshot`, calls `decision.call_release`
+    /// (deadline-bounded — a hung consult must never wedge the established
+    /// call), then re-enters via a `call-release-result` internal event
+    /// (`release` → local teardown; `reroute` → the established-call reroute
+    /// treatment). Engine error / timeout folds `release`, so local teardown
+    /// stays the fail-safe.
+    ReleaseAsyncHttp { request: serde_json::Value },
+    /// Record the decision-declared release-event **subscriptions** on the
+    /// call (replaces the previous set — the latest applied `Route` owns it).
+    /// The async (re)route folds back through the rule layer, so this is how
+    /// a failover/reroute route's `subscriptions` reach the replicated call
+    /// (`apply_route` records the initial route's directly).
+    SetSubscriptions { events: Vec<call::ReleaseEventKind> },
+    /// Overwrite the per-call established-call **reroute** runtime slice
+    /// (`None` clears it — completion / rollback; mirrors [`Self::SetTransfer`]).
+    SetReroute { state: Option<call::RerouteState> },
     /// Overwrite the call's feature activations from a (re)route decision. The
     /// initial route applies features inside `apply_route`; the async failover
     /// route folds back through the rule layer, so this is how the reroute's
@@ -810,6 +831,9 @@ impl RuleAction {
             | RuleAction::ReferAsyncHttp { .. }
             | RuleAction::ServiceHttpRequest { .. }
             | RuleAction::FailureAsyncHttp { .. }
+            | RuleAction::ReleaseAsyncHttp { .. }
+            | RuleAction::SetSubscriptions { .. }
+            | RuleAction::SetReroute { .. }
             | RuleAction::SetFeatures { .. }
             | RuleAction::MergeCallExt { .. }
             | RuleAction::RecordLimiterHolds { .. }
@@ -936,6 +960,27 @@ impl<'a> RuleCall<'a> {
     /// The SDP cached on a b-leg early dialog (`fake-prack`).
     pub fn cached_sdp_for_leg_dialog(&self, leg_id: &str, b_tag: &str) -> Option<&'a [u8]> {
         call::helpers::cached_sdp_for_leg_dialog(self.0, leg_id, b_tag)
+    }
+
+    // ── subscribed release events + established-call reroute (newkahneed-009) ─
+    /// The release events the decision backend subscribed to on the last
+    /// applied `Route` (written via `SetSubscriptions` / `apply_route`).
+    pub fn subscriptions(&self) -> &'a [call::ReleaseEventKind] {
+        &self.0.subscriptions
+    }
+    /// Whether the backend subscribed to `event` — the gate that decides
+    /// consult-the-engine vs act-locally when the event fires.
+    pub fn subscribed(&self, event: call::ReleaseEventKind) -> bool {
+        self.0.subscriptions.contains(&event)
+    }
+    /// The in-flight established-call reroute slice (written via `SetReroute`).
+    pub fn reroute_state(&self) -> Option<&'a call::RerouteState> {
+        self.0.reroute.as_ref()
+    }
+    /// Whether an established-call reroute is in flight (the activation guard
+    /// for the `release-reroute` rules, mirroring `transfer_active`).
+    pub fn reroute_active(&self) -> bool {
+        self.0.reroute.is_some()
     }
 
     // ── bookkeeping (read-only; written via `AddCdrEvent`) ───────────────

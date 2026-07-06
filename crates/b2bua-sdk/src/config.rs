@@ -36,6 +36,14 @@ pub struct B2buaConfig {
     pub refer_reinvite_answer_sec: i64,
     /// Overall REFER safety timer covering the whole transfer FSM, seconds. TS default 120.
     pub refer_overall_safety_sec: i64,
+    /// Overall safety timer covering the whole **established-call reroute**
+    /// (a `Route`-shaped `call_release` decision, newkahneed-009): replacement
+    /// b-leg dial + a-leg re-INVITE realign + old-leg BYE. Armed when the
+    /// reroute is applied, cancelled on completion; on expiry the call is torn
+    /// down (the release event stands — a wedged reroute must never extend the
+    /// call past its cap). Default 120, mirroring `refer_overall_safety_sec`
+    /// (the same two-re-INVITE realign shape).
+    pub release_reroute_guard_sec: i64,
     /// In-dialog OPTIONS keepalive interval, seconds. The B2BUA arms a keepalive
     /// timer at dialog confirmation and re-arms it each cycle; on expiry it pokes
     /// every peered leg with an in-dialog OPTIONS. Production default is **300 s**
@@ -250,6 +258,7 @@ impl Default for B2buaConfig {
             refer_subscription_expiry_sec: 60,
             refer_reinvite_answer_sec: 32,
             refer_overall_safety_sec: 120,
+            release_reroute_guard_sec: 120,
             keepalive_interval_sec: 300,
             keepalive_timeout_sec: 32,
             reboot_budget_sec: 600,

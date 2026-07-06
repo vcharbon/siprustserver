@@ -10,11 +10,12 @@ pub mod test_adapter;
 
 pub use schemas::{
     default_platform_features, BodyUpdate, CallFailureRequest, CallFailureResponse, CallLimiterEntry,
-    CallReferRequest, CallReferResponse, CallSnapshot, CallTreatment, FailureInfo,
-    FeatureActivations, LegSnapshot, NewCallRequest, NewCallResponse, RedirectContact,
-    RedirectDecision, RejectDecision, RouteDecision, SipDestination, SipHeaderUpdates,
+    CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse, CallSnapshot,
+    CallTreatment, FailureInfo, FeatureActivations, LegSnapshot, NewCallRequest, NewCallResponse,
+    RedirectContact, RedirectDecision, RejectDecision, RouteDecision, SipDestination,
+    SipHeaderUpdates,
 };
-pub use test_adapter::{default_call_refer, ReferOutcome, ScriptedDecisionEngine};
+pub use test_adapter::{default_call_refer, ReferOutcome, ReleaseOutcome, ScriptedDecisionEngine};
 
 use async_trait::async_trait;
 
@@ -34,6 +35,21 @@ pub trait CallDecisionEngine: Send + Sync {
         &self,
         req: CallReferRequest,
     ) -> Result<CallReferResponse, CallDecisionError>;
+    /// Decide release vs reroute when a **subscribed** internal release event
+    /// fires (max-call-duration first; newkahneed-009). Consulted only when
+    /// the event kind is in `Call.subscriptions` AND the call carries a
+    /// `callback_context` — otherwise the core acts locally and this is never
+    /// called.
+    ///
+    /// **Defaulted for back-compat**: existing engines compile unchanged and
+    /// behave exactly as before (every release event → local teardown); an
+    /// engine opts into the release round-trip by overriding this.
+    async fn call_release(
+        &self,
+        _req: CallReleaseRequest,
+    ) -> Result<CallReleaseResponse, CallDecisionError> {
+        Ok(CallReleaseResponse::Release)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -52,18 +68,28 @@ pub enum CallDecisionError {
 /// here means an adapter that forgets its own timeout can no longer strand a
 /// call.
 ///
-/// **Scope — `new_call` + `call_failure` only, deliberately NOT `call_refer`**
-/// (ADR-0022). These two are the decision calls that can block a caller who is
-/// waiting behind the INVITE's auto-100: `new_call` for the initial route, and
-/// `call_failure` for the limiter-reject / no-answer failover that reroutes
-/// *toward a still-pending INVITE final*. `call_refer` is different in kind —
-/// the REFER already received its `202 Accepted`, so a hanging refer
-/// authorization strands no waiting INVITE; it is bounded instead by the
-/// dedicated `refer_subscription_expiry_sec` (60 s) + `refer_overall_safety_sec`
+/// **Scope — `new_call` + `call_failure` + `call_release`, deliberately NOT
+/// `call_refer`** (ADR-0022 / newkahneed-009). The first two are the decision
+/// calls that can block a caller who is waiting behind the INVITE's auto-100:
+/// `new_call` for the initial route, and `call_failure` for the
+/// limiter-reject / no-answer failover that reroutes *toward a still-pending
+/// INVITE final*. `call_refer` is different in kind — the REFER already
+/// received its `202 Accepted`, so a hanging refer authorization strands no
+/// waiting INVITE; it is bounded instead by the dedicated
+/// `refer_subscription_expiry_sec` (60 s) + `refer_overall_safety_sec`
 /// (120 s) timers (see `refer_reject.rs::refer_http_timeout`). This is a
 /// documented divergence from the TS `callControlReferTimeoutMs`: the Rust port
 /// bounds the REFER lifecycle with those subscription timers rather than a
 /// decision deadline, so `call_refer` passes straight through.
+///
+/// `call_release` is **not caller-blocking** either (the call is established;
+/// nobody waits behind a 100), but unlike `call_refer` it has **no dedicated
+/// lifecycle timer** bounding it: a hung release consult would leave a call
+/// whose duration cap already expired alive indefinitely (its keepalives keep
+/// succeeding, so nothing else reaps it). So it rides the same deadline; on
+/// expiry the dispatch site's `Err` handling folds a `release` outcome →
+/// today's local teardown. With the `<= 0` escape hatch the consult is
+/// unbounded, exactly like a wedged `new_call` under the same hatch.
 ///
 /// On expiry the wrapped methods fail with [`CallDecisionError::Unavailable`],
 /// which every call-site already handles: `new_call` → 503 to the caller
@@ -127,5 +153,17 @@ impl CallDecisionEngine for DeadlineDecisionEngine {
         req: CallReferRequest,
     ) -> Result<CallReferResponse, CallDecisionError> {
         self.inner.call_refer(req).await
+    }
+    /// Deadline-wrapped — see the type doc: not caller-blocking, but nothing
+    /// else bounds it, and a hung consult must not wedge the established call.
+    /// Expiry → `Unavailable` → the release dispatch folds local teardown.
+    async fn call_release(
+        &self,
+        req: CallReleaseRequest,
+    ) -> Result<CallReleaseResponse, CallDecisionError> {
+        match tokio::time::timeout(self.deadline, self.inner.call_release(req)).await {
+            Ok(r) => r,
+            Err(_) => Err(self.expired("/calls/events/release")),
+        }
     }
 }

@@ -625,6 +625,26 @@ pub struct Call {
     /// for the early port). `None` until a REFER is intercepted; presence is the
     /// service-activation guard. Cleared (`None`) on every terminal transition.
     pub transfer: Option<TransferState>,
+    /// Internal release events the decision backend **subscribed to** on the
+    /// last applied `Route` (newkahneed-009): when a subscribed event fires
+    /// (max-call-duration first), the core consults the engine's
+    /// `call_release` instead of tearing the call down locally; an
+    /// unsubscribed event keeps today's local `BeginTermination`.
+    /// **Call-scoped, not per-leg**: the only v1 event (`GlobalDuration`) is
+    /// call-scoped, so a per-leg registry would be speculative — revisit when
+    /// a genuinely per-leg event (BYE/INFO reporting) lands. Replicated like
+    /// `features` (an ordinary `Call` field on the msgpack body), so a
+    /// takeover node keeps honoring the subscription. `#[serde(default)]` so
+    /// a body encoded before this field decodes as "no subscriptions".
+    #[serde(default)]
+    pub subscriptions: Vec<ReleaseEventKind>,
+    /// Per-call runtime state for an in-flight **established-call reroute**
+    /// (a `Route`-shaped `call_release` decision, newkahneed-009 piece 3):
+    /// replacement b-leg dialing → a-leg re-INVITE realign → old-leg BYE.
+    /// Mirrors `transfer` (typed slice; presence is the activation guard for
+    /// the `release-reroute` rules). `None` when no reroute is in flight.
+    #[serde(default)]
+    pub reroute: Option<RerouteState>,
     /// Per-call state-machine cursors (ADR-0016 X4): the single home for every
     /// active machine's current state label, keyed by [`MachineId`]. The
     /// `SetState` action is its sole writer; the rule engine reads it to gate
@@ -682,6 +702,50 @@ pub struct TransferState {
     /// a-realign re-INVITE (slice 5b) can offer it back to A.
     #[serde(with = "serde_bytes")]
     pub c_initial_sdp: Option<Vec<u8>>,
+}
+
+/// An internal release event the decision backend can subscribe to on a
+/// `Route` decision (newkahneed-009). When a subscribed event fires, the core
+/// consults the engine's `call_release` (release vs reroute) instead of
+/// tearing the call down locally. Wire form is `snake_case`
+/// (`"max_call_duration"`), matching the Routing API's `subscribe[]` names.
+/// Deliberately a closed enum, not free strings: the core must know each
+/// event's firing site to honor it, so an unknown name is a design change,
+/// not data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseEventKind {
+    /// The `GlobalDuration` (max-call-duration) cap expired on an answered call.
+    MaxCallDuration,
+}
+
+/// Established-call reroute phase — the authoritative state of the
+/// `release-reroute` treatment (newkahneed-009 piece 3), gating its rules the
+/// way `TransferPhase` gates the transfer rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReroutePhase {
+    /// Replacement b-leg INVITE sent, awaiting its final response.
+    BLegDialing,
+    /// Re-INVITE toward A with the replacement leg's answer SDP in flight.
+    ARealigning,
+}
+
+/// Per-call state for an in-flight established-call reroute (a `Route`-shaped
+/// `call_release` decision). Presence on the [`Call`] is the activation guard
+/// for the `release-reroute` rules; cleared on completion (merge + old-leg
+/// BYE) and dropped with the call on any failure teardown.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RerouteState {
+    /// Current reroute phase.
+    pub phase: ReroutePhase,
+    /// The replacement b-leg created toward the reroute destination.
+    pub new_leg_id: String,
+    /// The previously-bridged b-leg to BYE once A is realigned (`None` for a
+    /// call that had no peered b-leg — the replacement simply becomes it).
+    pub old_leg_id: Option<String>,
+    /// Wall-clock ms when the reroute was applied.
+    pub started_at_ms: i64,
 }
 
 /// Runtime state for the `relayFirst18xTo180` service. Strategy itself lives on

@@ -2160,68 +2160,8 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
                                     }
                                 }
                             }
-                            let mut p = serde_json::Map::new();
-                            p.insert(
-                                "destination".into(),
-                                serde_json::json!({
-                                    "host": route.destination.host,
-                                    "port": route.destination.port,
-                                }),
-                            );
-                            if let Some(v) = route.new_ruri {
-                                p.insert("new_ruri".into(), serde_json::json!(v));
-                            }
-                            if let Some(v) = route.new_from {
-                                p.insert("new_from".into(), serde_json::json!(v));
-                            }
-                            if let Some(v) = route.new_to {
-                                p.insert("new_to".into(), serde_json::json!(v));
-                            }
-                            if let Some(v) = route.update_headers {
-                                p.insert("update_headers".into(), serde_json::json!(v));
-                            }
-                            if let Some(v) = route
-                                .no_answer_timeout_sec
-                                .or(route.features.no_answer_timeout_sec)
-                            {
-                                p.insert("no_answer_timeout_sec".into(), serde_json::json!(v));
-                            }
-                            if let Some(v) = route.callback_context {
-                                p.insert("callback_context".into(), serde_json::json!(v));
-                            }
+                            let mut p = route_result_payload(route, admitted);
                             p.insert("failed_leg_id".into(), serde_json::json!(failed_leg_id));
-                            // Route parity: the fields the initial `apply_route`
-                            // honors, forwarded to the resolution rule.
-                            if let Ok(v) = serde_json::to_value(&route.features) {
-                                p.insert("features".into(), v);
-                            }
-                            if !route.service_ext.is_empty() {
-                                p.insert(
-                                    "service_ext".into(),
-                                    serde_json::Value::Object(
-                                        route.service_ext.into_iter().collect(),
-                                    ),
-                                );
-                            }
-                            match route.update_body {
-                                crate::decision::BodyUpdate::Keep => {}
-                                crate::decision::BodyUpdate::Drop => {
-                                    p.insert("update_body".into(), serde_json::Value::Null);
-                                }
-                                crate::decision::BodyUpdate::Replace(s) => {
-                                    p.insert("update_body".into(), serde_json::json!(s));
-                                }
-                            }
-                            if let Some((entries, window)) = admitted {
-                                let entries: Vec<serde_json::Value> = entries
-                                    .iter()
-                                    .map(|(id, limit)| serde_json::json!({"id": id, "limit": limit}))
-                                    .collect();
-                                p.insert(
-                                    "call_limiter".into(),
-                                    serde_json::json!({"window": window, "entries": entries}),
-                                );
-                            }
                             ("failover", serde_json::Value::Object(p))
                         }
                         // Decision-authored reject — the plan declined to fail over
@@ -2283,11 +2223,169 @@ async fn process_result(ctx: &Arc<RouterCtx>, call_ref: &str, result: HandlerRes
                     let _ = ctx2.reentry_tx.send(ev);
                 });
             }
+            FireAndForgetEffect::ReleaseAsyncHttp { call_ref, request } => {
+                let ctx2 = ctx.clone();
+                // Call-scoped context is attached HERE, like the failure/refer
+                // arms; the seed rule's JSON carries only the event-scoped
+                // facts (callback_context + which event fired).
+                let snapshot = crate::decision::CallSnapshot::of(&result.call);
+                tokio::spawn(async move {
+                    let req = parse_call_release_request(&request, snapshot);
+                    use crate::decision::CallReleaseResponse;
+                    // The engine is deadline-wrapped (`DeadlineDecisionEngine`
+                    // now bounds `call_release` too), so this await cannot
+                    // wedge the established call: expiry / engine error both
+                    // fold the `release` outcome — today's local teardown.
+                    let (outcome, payload) = match ctx2.decision.call_release(req).await {
+                        Ok(CallReleaseResponse::Route(route)) => {
+                            // Reroute-route parity (newkahneed-005): admit the
+                            // route's limiter entries against the new target,
+                            // exactly like the failover fold. Divergence from
+                            // the failover chain, DOCUMENTED: a limiter
+                            // *reject* here does NOT re-consult the engine —
+                            // the call was going down anyway, so the reject
+                            // degrades to the release default (local
+                            // teardown) instead of a recursive failover walk.
+                            let mut admitted: Option<(Vec<(String, i64)>, i64)> = None;
+                            let mut limiter_rejected = false;
+                            if !route.call_limiter.is_empty() {
+                                let entries: Vec<crate::limiter::LimiterEntry> = route
+                                    .call_limiter
+                                    .iter()
+                                    .map(|e| crate::limiter::LimiterEntry {
+                                        id: e.id.clone(),
+                                        limit: e.limit,
+                                    })
+                                    .collect();
+                                match ctx2.limiter.admit(&entries).await {
+                                    crate::limiter::AdmitOutcome::Admitted { window } => {
+                                        admitted = Some((
+                                            route
+                                                .call_limiter
+                                                .iter()
+                                                .map(|e| (e.id.clone(), e.limit))
+                                                .collect(),
+                                            window,
+                                        ));
+                                    }
+                                    // Fail open, record no holds (initial-route parity).
+                                    crate::limiter::AdmitOutcome::Unavailable => {}
+                                    crate::limiter::AdmitOutcome::Rejected { .. } => {
+                                        limiter_rejected = true;
+                                    }
+                                }
+                            }
+                            if limiter_rejected {
+                                ("release", serde_json::json!({"reason": "limiter_rejected"}))
+                            } else {
+                                (
+                                    "reroute",
+                                    serde_json::Value::Object(route_result_payload(
+                                        route, admitted,
+                                    )),
+                                )
+                            }
+                        }
+                        // Release, engine error, or deadline expiry → today's
+                        // local teardown (the fail-safe the request demands).
+                        Ok(CallReleaseResponse::Release) => ("release", serde_json::json!({})),
+                        Err(_) => ("release", serde_json::json!({"reason": "engine_error"})),
+                    };
+                    let ev = CallEvent::InternalEvent {
+                        call_ref,
+                        topic: "call-release-result".to_string(),
+                        outcome: outcome.to_string(),
+                        payload,
+                        body: Vec::new(),
+                    };
+                    let _ = ctx2.reentry_tx.send(ev);
+                });
+            }
             FireAndForgetEffect::Reenter(ev) => {
                 let _ = ctx.reentry_tx.send(*ev);
             }
         }
     }
+}
+
+/// Serialize a [`RouteDecision`](crate::decision::RouteDecision) into the
+/// internal-event payload the route-fold rules (`failover-create-leg` /
+/// `release-reroute`) consume: destination, identity/header rewrites, the
+/// output-parity fields the initial `apply_route` honors (features,
+/// service_ext, update_body, subscriptions), and any limiter holds the
+/// dispatching task **already admitted** (`(entries, window)`). ONE builder
+/// shared by the failover and release fire-and-forget arms, so the two folds
+/// can never drift (newkahneed-005 parity discipline).
+fn route_result_payload(
+    route: crate::decision::RouteDecision,
+    admitted: Option<(Vec<(String, i64)>, i64)>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut p = serde_json::Map::new();
+    p.insert(
+        "destination".into(),
+        serde_json::json!({
+            "host": route.destination.host,
+            "port": route.destination.port,
+        }),
+    );
+    if let Some(v) = route.new_ruri {
+        p.insert("new_ruri".into(), serde_json::json!(v));
+    }
+    if let Some(v) = route.new_from {
+        p.insert("new_from".into(), serde_json::json!(v));
+    }
+    if let Some(v) = route.new_to {
+        p.insert("new_to".into(), serde_json::json!(v));
+    }
+    if let Some(v) = route.update_headers {
+        p.insert("update_headers".into(), serde_json::json!(v));
+    }
+    if let Some(v) = route
+        .no_answer_timeout_sec
+        .or(route.features.no_answer_timeout_sec)
+    {
+        p.insert("no_answer_timeout_sec".into(), serde_json::json!(v));
+    }
+    if let Some(v) = route.callback_context {
+        p.insert("callback_context".into(), serde_json::json!(v));
+    }
+    // Route parity: the fields the initial `apply_route` honors, forwarded to
+    // the resolution rule.
+    if let Ok(v) = serde_json::to_value(&route.features) {
+        p.insert("features".into(), v);
+    }
+    if !route.service_ext.is_empty() {
+        p.insert(
+            "service_ext".into(),
+            serde_json::Value::Object(route.service_ext.into_iter().collect()),
+        );
+    }
+    // Always present (even when empty): the latest applied route OWNS the
+    // subscription registry, so a route with no `subscribe[]` must CLEAR a
+    // previous route's — exactly what `apply_route` does on the initial path.
+    if let Ok(v) = serde_json::to_value(&route.subscriptions) {
+        p.insert("subscriptions".into(), v);
+    }
+    match route.update_body {
+        crate::decision::BodyUpdate::Keep => {}
+        crate::decision::BodyUpdate::Drop => {
+            p.insert("update_body".into(), serde_json::Value::Null);
+        }
+        crate::decision::BodyUpdate::Replace(s) => {
+            p.insert("update_body".into(), serde_json::json!(s));
+        }
+    }
+    if let Some((entries, window)) = admitted {
+        let entries: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|(id, limit)| serde_json::json!({"id": id, "limit": limit}))
+            .collect();
+        p.insert(
+            "call_limiter".into(),
+            serde_json::json!({"window": window, "entries": entries}),
+        );
+    }
+    p
 }
 
 /// Rebuild a [`CallReferRequest`] from the JSON the seed rule emitted.
@@ -2310,6 +2408,30 @@ fn parse_call_refer_request(v: &serde_json::Value) -> crate::decision::CallRefer
         referred_by: s("referred_by"),
         sip_headers,
         snapshot: crate::decision::CallSnapshot::default(),
+    }
+}
+
+/// Rebuild a [`CallReleaseRequest`](crate::decision::CallReleaseRequest) from
+/// the JSON the `max-duration` seed rule emitted, attaching the call-scoped
+/// snapshot the dispatch site built from the authoritative call.
+fn parse_call_release_request(
+    v: &serde_json::Value,
+    snapshot: crate::decision::CallSnapshot,
+) -> crate::decision::CallReleaseRequest {
+    // The closed v1 set is the single `max_call_duration`; parse it via serde
+    // (the enum's snake_case wire form) and default to it — the one event that
+    // can currently emit this seed.
+    let event = v
+        .get("event")
+        .and_then(|x| serde_json::from_value::<call::ReleaseEventKind>(x.clone()).ok())
+        .unwrap_or(call::ReleaseEventKind::MaxCallDuration);
+    crate::decision::CallReleaseRequest {
+        callback_context: v
+            .get("callback_context")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
+        event,
+        snapshot,
     }
 }
 
