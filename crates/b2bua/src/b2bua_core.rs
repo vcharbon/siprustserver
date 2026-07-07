@@ -25,7 +25,7 @@ use crate::overload::OverloadSignal;
 use crate::repl::{ReplServer, ReplicatingCallStore, ReplicationSupervisor, Readiness};
 use crate::router::{self, RouterCtx};
 use crate::rules::{compose_rules, default_rules_with, ServiceDef};
-use crate::store::{BufferedTerminateWriter, CallState, CallStore};
+use crate::store::{BufferedTerminateWriter, CallState, CallStore, StoreFaults};
 use crate::timers::TimerService;
 
 /// A running B2BUA worker. Holds the shared context; the router loop runs on a
@@ -96,6 +96,14 @@ pub struct B2buaDeps {
     pub limiter: Arc<dyn CallLimiter>,
     pub cdr: Arc<dyn CdrWriter>,
     pub store: Arc<dyn CallStore>,
+    /// Live-path store-fault probe (ADR-0023). Default = **no faults**: the
+    /// router's live lookup sites (initial-INVITE dialog-existence check,
+    /// in-dialog request fetch, keepalive/audit read) consult it before their
+    /// sync map reads and behave exactly as before while disarmed. A test
+    /// retains a clone of the handle and flips per-path switches mid-call.
+    /// Sits ONLY on the live-serving sites — the HA reclaim/reconcile/
+    /// terminate-writer paths are deliberately un-probed.
+    pub store_faults: StoreFaults,
     pub clock: Clock,
     pub id_gen: Arc<IdGen>,
     /// Opt-in replication. `None` → today's non-replicating behaviour verbatim.
@@ -167,6 +175,7 @@ impl B2buaCore {
             limiter,
             cdr,
             store,
+            store_faults,
             clock,
             id_gen,
             replication,
@@ -333,6 +342,7 @@ impl B2buaCore {
         let ctx = Arc::new(RouterCtx {
             config,
             state,
+            store_faults,
             txn,
             timers,
             dispatcher,

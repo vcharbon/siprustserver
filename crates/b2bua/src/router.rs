@@ -32,7 +32,7 @@ use crate::overload::OverloadSignal;
 use crate::repl::{Readiness, ReadinessState};
 use crate::rules::model::RuleAction;
 use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext, RuleDefinition, ServiceDef};
-use crate::store::CallState;
+use crate::store::{CallState, StoreFaultPoint, StoreFaults};
 use crate::timers::TimerService;
 
 /// Host-injected capability for the generic service-authorable async-HTTP
@@ -59,6 +59,11 @@ pub struct AdaptationHttpPort {
 pub struct RouterCtx {
     pub config: B2buaConfig,
     pub state: CallState,
+    /// Live-path store-fault probe (ADR-0023). Consulted BEFORE the sync map
+    /// reads at the three live lookup sites in [`process`]; default = no
+    /// faults (a no-op atomic read). See `store::faults` for the defined
+    /// degraded-mode semantics.
+    pub store_faults: StoreFaults,
     pub txn: TransactionLayer,
     pub timers: TimerService,
     pub dispatcher: PerCallDispatcher,
@@ -1077,6 +1082,29 @@ fn build_stateless_overload_503(
     )
 }
 
+/// Build the fail-closed **500 Server Internal Error** for an initial INVITE
+/// whose dialog-existence store lookup failed (ADR-0023). Same call-layer-
+/// stateless shape as [`build_stateless_overload_503`]: sent through the INVITE
+/// server txn (`send_response` supersedes the cached 100, retransmits the final
+/// and absorbs the ACK) with **no** call/dialog/CDR/limiter state born. Fresh
+/// To-tag — this codebase enforces a tag on every non-100 final (RFC 3261
+/// §8.2.6.2). No Reason header: the bare canonical reject (ADR-0022 X3 shape);
+/// the fault is observable via `b2bua_store_fault_rejected_total`.
+fn build_store_fault_500(
+    id_gen: &IdGen,
+    req: &sip_message::SipRequest,
+) -> sip_message::SipResponse {
+    generate_response(
+        req,
+        500,
+        "Server Internal Error",
+        &GenerateResponseOpts {
+            to_tag: Some(id_gen.new_tag()),
+            ..Default::default()
+        },
+    )
+}
+
 /// Resolve the `callRef` + source leg for an event (synchronous, no blocking).
 fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
     match event {
@@ -1340,9 +1368,6 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
     }
 
     let result = if res.initial_invite {
-        if ctx.state.peek(&call_ref).is_some() {
-            return; // retransmitted INVITE for an existing call — ignore
-        }
         let (req, src) = match &event {
             CallEvent::Sip { message, src } => match message.as_ref() {
                 SipMessage::Request(r) => (r.clone(), *src),
@@ -1350,6 +1375,30 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
             },
             _ => return,
         };
+
+        // ── Live-path store-fault probe (ADR-0023): initial INVITE ──────────
+        // The dialog-existence lookup (the `peek` retransmit guard below) is
+        // the store read this INVITE depends on; a faulted store cannot answer
+        // "does this dialog already exist", so the probe fires BEFORE the peek
+        // (its answer is untrustworthy under a fault). Fail CLOSED: a final
+        // **500 Server Internal Error** through the INVITE server txn —
+        // superseding the auto-100, composing with the ADR-0022 no-100-then-
+        // silence guarantee — and NO call state is born. Same call-layer-
+        // stateless shape as the Tier-3 admission reject below, including the
+        // orphan teardown of the per-call queue/lock this dispatch created
+        // (nothing leaked).
+        if ctx.store_faults.check(StoreFaultPoint::LiveInitialInvite).is_err() {
+            let resp = build_store_fault_500(&ctx.id_gen, &req);
+            let _ = ctx.txn.send_response(resp, src).await;
+            ctx.metrics.bump_store_fault_rejected();
+            drop(_guard);
+            release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
+            return;
+        }
+
+        if ctx.state.peek(&call_ref).is_some() {
+            return; // retransmitted INVITE for an existing call — ignore
+        }
 
         // ── Tier-3 admission gate (migration/09 — port of the `overload.shouldAdmit`
         // + stateless-503 gate in `TransactionLayer.ts`). Only an *initial* INVITE
@@ -1438,6 +1487,60 @@ async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
             crate::rules::invariants::enforce(&ctx.obligations, &call, crate::rules::invariants::finalize(result), now_ms, true)
         }
     } else {
+        // ── Live-path store-fault probe (ADR-0023): the per-event call fetch ─
+        // The map read below (`hydrate_from_replica` → `peek`) is infallible
+        // by architecture; the probe is where an injected store fault surfaces,
+        // with the defined degraded-mode semantics:
+        //   - in-dialog SIP *request* (BYE, re-INVITE, …): fail CLOSED — 500
+        //     through the server txn, call + state untouched (deliberately
+        //     distinct from the 481 lookup-MISS: the call may well exist, the
+        //     store just cannot say). A retry after recovery proceeds
+        //     normally. ACK is never answered (RFC 3261 §17) — dropped, as the
+        //     orphan path drops it.
+        //   - Keepalive audit timer: fail OPEN — skip this probe cycle but
+        //     RE-ARM the timer so liveness detection resumes next interval; a
+        //     store fault alone must never tear down an established call
+        //     (protected-calls invariant, docs/testing/ha-acceptance.md).
+        //   - everything else (responses, CANCEL/timeout/internal events) is
+        //     deliberately un-probed: those paths owe no store-derived answer,
+        //     and absorbing e.g. a keepalive OPTIONS-200 here would convert a
+        //     store fault into a KeepaliveTimeout teardown of a healthy call.
+        if let CallEvent::Sip { message, src } = &event {
+            if let SipMessage::Request(req) = message.as_ref() {
+                if ctx.store_faults.check(StoreFaultPoint::LiveInDialog).is_err() {
+                    if req.method != "ACK" {
+                        let resp = generate_response(
+                            req,
+                            500,
+                            "Server Internal Error",
+                            &GenerateResponseOpts::default(),
+                        );
+                        let _ = ctx.txn.send_response(resp, *src).await;
+                    }
+                    ctx.metrics.bump_store_fault_rejected();
+                    return;
+                }
+            }
+        }
+        if let CallEvent::Timer { timer_type: TimerType::Keepalive, .. } = &event {
+            if ctx.store_faults.check(StoreFaultPoint::LiveAudit).is_err() {
+                ctx.metrics.bump_store_fault_audit_skipped();
+                // Re-arm at the config cadence — the same interval the
+                // `keepalive` rule re-arms with (`keepalive_interval`), read
+                // from config because the call body is what we could not
+                // fetch. Runtime driver only: the serialized `call.timers`
+                // intent stays untouched (the call is untouched), which is
+                // safe — a later HA restore sanitizes past-due entries.
+                let entry = TimerEntry {
+                    id: TimerType::Keepalive.timer_id(None),
+                    timer_type: TimerType::Keepalive,
+                    fire_at: now_ms + ctx.config.keepalive_interval_sec * 1000,
+                    leg_id: None,
+                };
+                ctx.timers.schedule(entry, call_ref.clone()).await;
+                return;
+            }
+        }
         // In-dialog: peek the in-memory map, falling back to the acting-backup
         // takeover read-path (S10b) — hydrate the call from the replica store's
         // backup partition when the primary crashed and the proxy failed this

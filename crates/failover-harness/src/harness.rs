@@ -502,6 +502,10 @@ impl ReplicatedB2buaSut {
             // Default composition (every built-in CORE machine, incl. the
             // `refer_transfer` seed) — the failover harness does not opt out.
             compose: b2bua::rules::ComposeOptions::default(),
+            // Default store + no injected store faults (ADR-0023): the HA
+            // stack's behaviour is identical to the pre-seam wiring.
+            store: None,
+            store_faults: None,
         };
         b2bua_harness::spawn_b2bua_core(endpoint, params, |config| {
             // EXACT production (kind) timers — `deploy/k8s/manifests/20-worker.yaml`.

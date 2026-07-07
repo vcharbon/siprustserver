@@ -11,7 +11,7 @@ use b2bua::config::B2buaConfig;
 use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
-use b2bua::store::InMemoryCallStore;
+use b2bua::store::{CallStore, FaultInjectingCallStore, InMemoryCallStore, StoreFaults};
 use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
 use scenario_harness::{Agent, Dialog, Harness, RunReport};
 
@@ -85,6 +85,15 @@ pub struct B2buaSpawnParams {
     /// owns REFER via its own transfer machine passes
     /// `ComposeOptions::default().without_core_refer_transfer()`.
     pub compose: b2bua::rules::ComposeOptions,
+    /// [`CallStore`] override (ADR-0023). `None` → the historical fresh
+    /// [`InMemoryCallStore`] (behaviour-identical default). On the replicating
+    /// path this slot stays the unused legacy one either way.
+    pub store: Option<Arc<dyn CallStore>>,
+    /// Store fault-injection handle (ADR-0023). `None` → no faults. `Some` does
+    /// two things with the SAME handle: wraps the (default or overridden)
+    /// store in a [`FaultInjectingCallStore`] and threads the handle as the
+    /// router's live-path probe, so one control drives both halves of the seam.
+    pub store_faults: Option<StoreFaults>,
 }
 
 /// Builds the base [`B2buaConfig`] (ip/port/ordinal/outbound_proxy wired),
@@ -117,6 +126,8 @@ pub fn spawn_b2bua_core(
         overload,
         adaptation_http,
         compose,
+        store,
+        store_faults,
     } = params;
     let mut config = B2buaConfig {
         self_ordinal: ordinal,
@@ -126,12 +137,26 @@ pub fn spawn_b2bua_core(
         ..Default::default()
     };
     tune(&mut config);
+    // The historical hardcoded `InMemoryCallStore` is now the DEFAULT, not the
+    // only option (ADR-0023). A `store_faults` handle wraps whichever store is
+    // in play in the fault decorator AND rides into the core as the live-path
+    // probe — one handle, both halves of the seam.
+    let base_store: Arc<dyn CallStore> =
+        store.unwrap_or_else(|| Arc::new(InMemoryCallStore::new()));
+    let (store, store_faults) = match store_faults {
+        Some(f) => (
+            Arc::new(FaultInjectingCallStore::new(base_store, f.clone())) as Arc<dyn CallStore>,
+            f,
+        ),
+        None => (base_store, StoreFaults::default()),
+    };
     let deps = B2buaDeps {
         config,
         decision,
         limiter,
         cdr: Arc::new(cdr),
-        store: Arc::new(InMemoryCallStore::new()),
+        store,
+        store_faults,
         clock,
         id_gen,
         replication,
@@ -286,6 +311,8 @@ pub struct B2buaSutBuilder {
     overload: Option<b2bua::overload::OverloadSignal>,
     adaptation_http: Option<b2bua::AdaptationHttpPort>,
     compose: b2bua::rules::ComposeOptions,
+    store: Option<Arc<dyn CallStore>>,
+    store_faults: Option<StoreFaults>,
 }
 
 impl B2buaSutBuilder {
@@ -357,6 +384,23 @@ impl B2buaSutBuilder {
         self
     }
 
+    /// Override the [`CallStore`] (ADR-0023). Default: a fresh
+    /// [`InMemoryCallStore`] — the historical hardcoded wiring.
+    pub fn with_store(mut self, store: Arc<dyn CallStore>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// Inject a store fault-control handle (ADR-0023). The SAME handle wraps
+    /// the store in a [`FaultInjectingCallStore`] (per-op `StoreError::Backend`
+    /// switches) AND rides into the core as the router's live-path probe
+    /// (`LiveInitialInvite`/`LiveInDialog`/`LiveAudit`), so a test retains its
+    /// clone and flips per-path switches mid-call. Default: no faults.
+    pub fn with_store_faults(mut self, faults: StoreFaults) -> Self {
+        self.store_faults = Some(faults);
+        self
+    }
+
     /// Bind the B2BUA at `addr` and spawn its core, consuming the builder.
     pub async fn start(self, h: &Harness, name: &str, addr: &str) -> B2buaSut {
         let B2buaSutBuilder {
@@ -368,6 +412,8 @@ impl B2buaSutBuilder {
             overload,
             adaptation_http,
             compose,
+            store,
+            store_faults,
         } = self;
         // The B2BUA terminates each leg as a UA (UAS on the a-leg, UAC on the
         // b-leg) — it is NOT an RFC 3261 §16 proxy, so its bind declares
@@ -396,6 +442,8 @@ impl B2buaSutBuilder {
             overload,
             adaptation_http,
             compose,
+            store,
+            store_faults,
         };
         let core = spawn_b2bua_core(endpoint, params, |config| {
             // Production default is 300 s (5 min); the paused-clock keepalive
@@ -447,6 +495,8 @@ impl B2buaSut {
             overload: None,
             adaptation_http: None,
             compose: b2bua::rules::ComposeOptions::default(),
+            store: None,
+            store_faults: None,
         }
     }
 

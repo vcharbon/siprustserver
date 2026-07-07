@@ -571,6 +571,9 @@ impl RunnerBase {
             limiter: self.limiter_from_env(),
             cdr: Arc::new(BufferedCdrWriter::spawn(sink, self.env.cdr_queue, self.metrics.clone())),
             store: Arc::new(InMemoryCallStore::new()),
+            // No injected store faults in production (ADR-0023: the live-path
+            // probe is a no-op while disarmed).
+            store_faults: Default::default(),
             clock: self.clock.clone(),
             id_gen: Arc::new(IdGen::from_entropy()),
             replication: None,

@@ -188,6 +188,7 @@ async fn spawn_reclaimer_core(
         limiter: Arc::new(NoopLimiter),
         cdr: Arc::new(InMemoryCdrWriter::new()),
         store: Arc::new(InMemoryCallStore::new()), // throwaway legacy slot
+        store_faults: Default::default(),          // no injected faults
         clock: clock.clone(),
         id_gen: Arc::new(IdGen::seeded(0xB2B1)),
         replication: Some(setup),
