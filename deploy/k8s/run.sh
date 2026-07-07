@@ -31,6 +31,29 @@
 #   ./run.sh down                    # delete the cluster (the ONLY destroy)
 #   FORCE_RECREATE=1 ./run.sh up     # delete any existing cluster, then recreate
 #
+# >>> SOURCEABLE LIBRARY (issue 025) <<<
+# This file doubles as a function library: all logic lives in functions and the
+# subcommand dispatch is run_main(), executed ONLY when the script is run
+# directly. A downstream overlay (living in a DIFFERENT directory) can
+#     SUT_IMAGE=... EXTRA_IMAGE_BUILDS=... MANIFEST_DIR=...  # knobs BEFORE source
+#     source /path/to/deploy/k8s/run.sh                      # executes nothing
+# then call or override the functions (up, deploy, apply_manifest,
+# subst_manifest, build_load_extra_images, ...) or dispatch via `run_main up`.
+# Sourcing has NO side effects beyond variable defaults + function definitions
+# (no cd, no docker/kubectl, no dispatch). Overlay knobs (all honoured on direct
+# invocation too; defaults reproduce the historical behaviour exactly):
+#   SUT_IMAGE           SUT image tag `up` builds + kind-loads (siprustserver:dev)
+#   EXTRA_IMAGE_BUILDS  whitespace-separated EXTRA images `up` additionally
+#                       builds + kind-loads, each entry
+#                       name=dockerfile:context[:build-args] with build-args a
+#                       comma-separated KEY=VAL list forwarded as --build-arg.
+#                       Use absolute paths. Default: empty (no-op).
+#   MANIFEST_DIR        directory the numbered manifests are applied from
+#                       (default: this checkout's deploy/k8s/manifests)
+#   CLUSTER_CONFIG      kind topology file (default: deploy/k8s/cluster.yaml)
+#   SIPP_DIR            vendored SIPp build context (default: deploy/k8s/sipp)
+#   SCENARIOS           SIPp scenario dir (default: $SIPP_DIR/scenarios)
+#
 # Observability (VictoriaMetrics + Grafana + vmagent/KSM/node-exporter/fluent-bit)
 # is brought up automatically by `up` via deploy/observability/install.sh and
 # survives across runs (host docker-compose); the in-cluster scrapers are
@@ -40,24 +63,26 @@
 # Env: SUT_IMAGE=siprustserver:dev  WORKER_REPLICAS=2  CLUSTER=sip-e2e  NS=sip-test
 #      OBS_ENABLE=1
 set -euo pipefail
-cd "$(dirname "$0")"
-HERE="$(pwd)"
-REPO_ROOT="$(cd ../.. && pwd)"
+# Resolve our own directory WITHOUT a top-level `cd` (a source-time cd would leak
+# into any script sourcing this library — issue 025); every path below that used
+# to be cwd-relative is now anchored on $K8S_DIR instead.
+K8S_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$K8S_DIR/../.." && pwd)"
 
 # Network/port wiring (SIP_SUBNET/SIP_GATEWAY/PROXY_VIP/PROXY_TARGET/SIP_PORT) and
 # host prerequisite checks (cgroups/sysctls) live in shared, env-overridable libs
 # so run.sh, endurance.sh and chaos.sh stay in lock-step.
-source "$HERE/lib/net-env.sh"
+source "$K8S_DIR/lib/net-env.sh"
 # HTTP(S)-proxy wiring for PROXIFIED hosts: forwards the host proxy into docker
 # builds (external mirrors/apt/git) while keeping cluster-local + 127 traffic OFF
 # the proxy via a merged NO_PROXY. Sourced AFTER net-env.sh (needs SIP_SUBNET/
 # SIP_GATEWAY/PROXY_VIP). See lib/proxy-env.sh for the local-vs-non-local split.
-source "$HERE/lib/proxy-env.sh"
-source "$HERE/lib/host-checks.sh"
+source "$K8S_DIR/lib/proxy-env.sh"
+source "$K8S_DIR/lib/host-checks.sh"
 # Pins every `kubectl` in this script to the kind cluster's own context (see lib)
 # — must be sourced AFTER CLUSTER is known to be overridable, but the wrapper
 # reads CLUSTER at call time so order is not load-bearing.
-source "$HERE/lib/kube-env.sh"
+source "$K8S_DIR/lib/kube-env.sh"
 
 CLUSTER="${CLUSTER:-sip-e2e}"
 NS="${NS:-sip-test}"
@@ -68,9 +93,18 @@ KIND_WAIT="${KIND_WAIT:-300s}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-300s}"
 SUT_IMAGE="${SUT_IMAGE:-siprustserver:dev}"
 WORKER_REPLICAS="${WORKER_REPLICAS:-2}"
-RESULTS="${RESULTS:-$HERE/results}"
-SIPP_DIR="$HERE/sipp"          # vendored sipp build context + scenarios
-SCENARIOS="$SIPP_DIR/scenarios"
+RESULTS="${RESULTS:-$K8S_DIR/results}"
+SIPP_DIR="${SIPP_DIR:-$K8S_DIR/sipp}"       # vendored sipp build context + scenarios
+SCENARIOS="${SCENARIOS:-$SIPP_DIR/scenarios}"
+# kind cluster topology + the numbered manifests. Both overridable so a
+# downstream overlay can point at its own copies; the manifests keep their
+# UPSTREAM apply order/logic in deploy() below — an overlay with a different
+# stack overrides deploy() and composes apply_manifest/subst_manifest itself.
+CLUSTER_CONFIG="${CLUSTER_CONFIG:-$K8S_DIR/cluster.yaml}"
+MANIFEST_DIR="${MANIFEST_DIR:-$K8S_DIR/manifests}"
+# Extra images `up` builds + kind-loads AFTER the standard set — the downstream
+# overlay hook (empty default = no-op). Format: see build_load_extra_images().
+EXTRA_IMAGE_BUILDS="${EXTRA_IMAGE_BUILDS:-}"
 # Replication: off by default for the plain load/endurance sweep (the chaos
 # suite — chaos.sh — sets REPL_ENABLE=1). REPL_PORT is the cluster-wide repl TCP
 # port (peer.host:REPL_PORT), templated into the worker manifest + headless svc.
@@ -95,7 +129,7 @@ export SUT_IMAGE WORKER_REPLICAS REPL_ENABLE REPL_PORT SCENARIO LIMITER_CAP RABB
 # (re)created cluster always has scraping wired and Grafana dashboards loaded.
 # Set OBS_ENABLE=0 to skip (e.g. CI without docker compose).
 OBS_ENABLE="${OBS_ENABLE:-1}"
-OBS_DIR="$REPO_ROOT/deploy/observability"
+OBS_DIR="${OBS_DIR:-$REPO_ROOT/deploy/observability}"
 
 log() { printf '\033[1;36m>> %s\033[0m\n' "$*" >&2; }
 die() { printf '\033[1;31m!! %s\033[0m\n' "$*" >&2; exit 1; }
@@ -103,11 +137,56 @@ die() { printf '\033[1;31m!! %s\033[0m\n' "$*" >&2; exit 1; }
 # docker_build() — proxy-forwarding `docker build` wrapper — is defined in
 # lib/proxy-env.sh (sourced above) so run.sh and endurance.sh share ONE definition.
 
+# Overlay seams: the ONE definition of "apply a manifest" (plain vs envsubst-
+# rendered), consumed by deploy()/caps() here and composable by a downstream
+# overlay's own deploy. Take a full path — pass "$MANIFEST_DIR/<file>".
+apply_manifest() { kubectl apply -f "$1"; }
+subst_manifest() { envsubst < "$1" | kubectl apply -f -; }
+
+# Build + kind-load every EXTRA_IMAGE_BUILDS entry (no-op when the list — the
+# default — is empty). Whitespace-separated entries, each
+#   name=dockerfile:context[:build-args]
+# where build-args is an optional comma-separated KEY=VAL list forwarded as
+# --build-arg, e.g.
+#   EXTRA_IMAGE_BUILDS="mock:dev=/abs/Dockerfile.mock:/abs/ctx:FOO=1,BAR=2"
+# Paths should be absolute (there is no cd — relative paths resolve against the
+# caller's cwd). Parsed defensively: a malformed entry dies (fail fast) rather
+# than silently skipping an image the overlay asked for. Called by up(); an
+# overlay's own bring-up can call it directly too.
+build_load_extra_images() {
+  local entry name rest dockerfile context buildargs pair parts args
+  for entry in $EXTRA_IMAGE_BUILDS; do
+    case "$entry" in
+      *=*:*) : ;;
+      *) die "EXTRA_IMAGE_BUILDS entry '$entry' malformed (want name=dockerfile:context[:build-args])" ;;
+    esac
+    name="${entry%%=*}"; rest="${entry#*=}"
+    dockerfile="${rest%%:*}"; rest="${rest#*:}"
+    context="${rest%%:*}"
+    buildargs=""
+    if [ "$context" != "$rest" ]; then buildargs="${rest#*:}"; fi
+    [ -n "$name" ]       || die "EXTRA_IMAGE_BUILDS entry '$entry': empty image name"
+    [ -f "$dockerfile" ] || die "EXTRA_IMAGE_BUILDS entry '$entry': dockerfile '$dockerfile' not found"
+    [ -d "$context" ]    || die "EXTRA_IMAGE_BUILDS entry '$entry': context dir '$context' not found"
+    args=()
+    if [ -n "$buildargs" ]; then
+      IFS=',' read -ra parts <<< "$buildargs"
+      for pair in "${parts[@]}"; do
+        if [ -n "$pair" ]; then args+=(--build-arg "$pair"); fi
+      done
+    fi
+    log "building extra image $name (EXTRA_IMAGE_BUILDS)"
+    docker_build -f "$dockerfile" -t "$name" ${args[@]+"${args[@]}"} "$context"
+    log "loading extra image $name into kind"
+    kind load docker-image "$name" --name "$CLUSTER"
+  done
+}
+
 preflight() {
   for t in kind kubectl docker envsubst; do command -v "$t" >/dev/null || die "missing tool: $t"; done
-  [ -f cluster.yaml ]          || die "cluster.yaml missing"
+  [ -f "$CLUSTER_CONFIG" ]      || die "cluster.yaml missing"
   [ -f "$SIPP_DIR/Dockerfile" ] || die "sipp/Dockerfile missing (vendored sipp build context)"
-  [ -d "$SCENARIOS" ]          || die "sipp/scenarios/ missing (vendored sipp scenarios)"
+  [ -d "$SCENARIOS" ]           || die "sipp/scenarios/ missing (vendored sipp scenarios)"
 }
 
 up() {
@@ -156,7 +235,7 @@ up() {
   export KIND_EXPERIMENTAL_DOCKER_NETWORK=kind
 
   log "creating cluster '$CLUSTER' from shared topology"
-  kind create cluster --name "$CLUSTER" --config cluster.yaml --wait "$KIND_WAIT"
+  kind create cluster --name "$CLUSTER" --config "$CLUSTER_CONFIG" --wait "$KIND_WAIT"
 
   # Cap each kind node's memory so the cluster can never starve the WSL2 host
   # (an uncapped node + a parallel cargo build OOM'd the host once). Pod limits
@@ -183,6 +262,9 @@ up() {
   kind load docker-image sipp:dev --name "$CLUSTER"
   kind load docker-image "$KEEPALIVED_IMAGE" --name "$CLUSTER"
   kind load docker-image "$RABBITMQ_IMAGE" --name "$CLUSTER"
+  # Downstream overlay hook: extra images to build + side-load (empty default =
+  # exact historical behaviour, nothing extra happens).
+  build_load_extra_images
 
   obs   # bring up / refresh observability against the new cluster
   trap - EXIT   # success — disarm the "left intact for analysis" handler
@@ -206,7 +288,7 @@ obs() {
 
 deploy() {
   preflight
-  kubectl apply -f manifests/00-namespace.yaml
+  apply_manifest "$MANIFEST_DIR/00-namespace.yaml"
   log "building sipp-scenarios ConfigMap from vendored scenarios"
   kubectl -n "$NS" create configmap sipp-scenarios \
     --from-file="$SCENARIOS/" -o yaml --dry-run=client | kubectl apply -f -
@@ -219,26 +301,26 @@ deploy() {
     --from-file="$SIPP_DIR/exporter/" -o yaml --dry-run=client | kubectl apply -f -
 
   log "deploying sipp-uas + b2bua workers (repl=${REPL_ENABLE}, repl_port=${REPL_PORT})"
-  kubectl apply -f manifests/10-sipp-uas.yaml
+  apply_manifest "$MANIFEST_DIR/10-sipp-uas.yaml"
   # RBAC for the worker's EndpointSlice informer (needed when REPL_ENABLE=1; a
   # harmless ServiceAccount/Role otherwise).
-  kubectl apply -f manifests/15-worker-rbac.yaml
+  apply_manifest "$MANIFEST_DIR/15-worker-rbac.yaml"
   # Shared call limiter (single replica). Deployed before the workers so its
   # ClusterIP DNS resolves at worker startup. Inert until a decision returns
   # `call_limiter` entries, so it is a no-op for the scripted load runner.
-  envsubst < manifests/50-call-limiter.yaml | kubectl apply -f -
+  subst_manifest "$MANIFEST_DIR/50-call-limiter.yaml"
   # CDR transport: RabbitMQ broker + the dedicated CDR metrics consumer. Broker
   # first (before the workers) so its ClusterIP DNS resolves at worker startup;
   # workers fail-open (drop CDRs) if it is briefly unavailable.
   log "deploying RabbitMQ (CDR transport) + cdr-consumer"
-  envsubst < manifests/55-rabbitmq.yaml | kubectl apply -f -
+  subst_manifest "$MANIFEST_DIR/55-rabbitmq.yaml"
   # CDR infra is best-effort telemetry, NOT on the call path: the workers
   # fail-open (drop CDRs) if the broker is slow/absent. So wait for it, but never
   # let an unhealthy broker/consumer abort the run (these gates are `|| true`,
   # unlike the call-path worker/proxy/uas gates below).
   kubectl -n "$NS" rollout status deploy/rabbitmq --timeout="$ROLLOUT_TIMEOUT" || true
-  envsubst < manifests/56-cdr-consumer.yaml | kubectl apply -f -
-  envsubst < manifests/20-worker.yaml | kubectl apply -f -
+  subst_manifest "$MANIFEST_DIR/56-cdr-consumer.yaml"
+  subst_manifest "$MANIFEST_DIR/20-worker.yaml"
   kubectl -n "$NS" rollout status statefulset/sipp-uas --timeout="$ROLLOUT_TIMEOUT"
   kubectl -n "$NS" rollout status statefulset/b2bua-worker --timeout="$ROLLOUT_TIMEOUT"
   kubectl -n "$NS" rollout status deploy/cdr-consumer --timeout="$ROLLOUT_TIMEOUT" || true
@@ -258,8 +340,8 @@ deploy() {
   # callRef ownership, the cookie, and replication membership agree by construction
   # (see 20-worker.yaml / 25-proxy-rbac.yaml).
   log "deploying sip-front-proxy (k8s EndpointSlice worker discovery)"
-  kubectl apply -f manifests/25-proxy-rbac.yaml
-  envsubst < manifests/30-proxy.yaml | kubectl apply -f -
+  apply_manifest "$MANIFEST_DIR/25-proxy-rbac.yaml"
+  subst_manifest "$MANIFEST_DIR/30-proxy.yaml"
   kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout="$ROLLOUT_TIMEOUT"
   log "stack ready"
   kubectl -n "$NS" get pods -o wide
@@ -298,7 +380,7 @@ caps() {
          UAC_MEM_REQ="${UAC_MEM_REQ:-384Mi}" UAC_MEM_LIM="${UAC_MEM_LIM:-1536Mi}"
   kubectl -n "$NS" delete job "$UAC_JOB_NAME" --ignore-not-found >/dev/null 2>&1 || true
   log "cap=$cps: launching UAC job (${secs}s), ramp ${ramp}s, sample ${sample}s"
-  envsubst < manifests/40-sipp-uac-job.yaml | kubectl apply -f -
+  subst_manifest "$MANIFEST_DIR/40-sipp-uac-job.yaml"
   sleep "$ramp"
   echo "  --- worker/proxy CPU% + RSS(MB) over ${sample}s @ ${cps} cps ---"
   { sample_pods "app=b2bua-worker" "$sample"; sample_pods "app=sip-front-proxy" 2; } | tee "$RESULTS/cap${cps}.txt"
@@ -359,15 +441,26 @@ heal-kindnet() {
 
 down() { kind delete cluster --name "$CLUSTER"; }
 
-cmd="${1:-}"; shift || true
-case "$cmd" in
-  up)     up ;;
-  deploy) deploy ;;
-  obs)    obs ;;
-  caps)   caps "$@" ;;
-  sweep)  sweep "$@" ;;
-  all)    up; deploy; sweep "$@" ;;
-  heal-kindnet) heal-kindnet ;;
-  down)   down ;;
-  *) die "usage: $0 {up|deploy|obs|caps <cps> <secs>|sweep <secs> <cps...>|all <secs> <cps...>|heal-kindnet|down}" ;;
-esac
+# Subcommand dispatch — the surface every existing caller (endurance.sh, docs,
+# direct CLI use) depends on: names and behaviour are FROZEN (issue 025).
+run_main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    up)     up ;;
+    deploy) deploy ;;
+    obs)    obs ;;
+    caps)   caps "$@" ;;
+    sweep)  sweep "$@" ;;
+    all)    up; deploy; sweep "$@" ;;
+    heal-kindnet) heal-kindnet ;;
+    down)   down ;;
+    *) die "usage: $0 {up|deploy|obs|caps <cps> <secs>|sweep <secs> <cps...>|all <secs> <cps...>|heal-kindnet|down}" ;;
+  esac
+}
+
+# Dispatch ONLY when executed directly; `source run.sh` defines + defaults and
+# runs nothing. (The if-form — not `[[ ... ]] && run_main` — so that sourcing
+# returns 0 and cannot trip a `set -e` caller.)
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  run_main "$@"
+fi
