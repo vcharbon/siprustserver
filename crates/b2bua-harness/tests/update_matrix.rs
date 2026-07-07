@@ -25,6 +25,7 @@ use sip_message::message_helpers::get_header;
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 const REOFFER_HOLD: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\n";
+const REANSWER_HELD: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
 
 // ── Established dialog: UPDATE WITHOUT SDP (session refresh) ──────────────────
 
@@ -302,6 +303,87 @@ async fn early_update_forking_b_to_a_second_fork() {
     call.expect(200).await;
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    let _ = h.finish().await;
+}
+
+// ── Worst case: PRACKed forking + SDP UPDATE + bodyless UPDATE interleaved ───
+
+/// The nastiest cell in one call: two reliable early dialogs (proxy fork), each
+/// PRACKed (RFC 3262), then an **SDP** re-offer UPDATE on fork 2 *and* a
+/// **bodyless** refresh UPDATE on fork 1 — interleaved across distinct forks,
+/// each riding its own dialog + CSeq space (RFC 3261 §12.2.1.1) — before the
+/// call is answered on the (non-first) fork that carried the SDP UPDATE. Proves
+/// PRACK, SDP-carrying UPDATE, bodyless UPDATE and forking all compose, and that
+/// the media re-negotiated on the winning fork survives into the confirmed
+/// dialog. Everything is hard-gated by the RFC audit at `finish()`.
+#[tokio::test]
+async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
+    let h = Harness::with_transit_delay("upd-worst-prack-fork-mixed", 1);
+    let alice = h.agent("alice", "127.0.0.1:5767").await;
+    let bob = h.agent("bob", "127.0.0.1:5777").await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5777).start(&h, "b2bua", "127.0.0.1:5787").await;
+
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+
+    // Fork 1: reliable 183 → PRACK fork 1.
+    uas.respond(183, "Session Progress").with_to_tag("bf1").reliable(1).with_sdp(ANSWER).await;
+    let p1 = call.expect(183).await;
+    let f1 = p1.to.tag.clone().expect("fork1 a-tag");
+    let mut prack1 = call.send_request(InDialogMethod::Prack).with_to_tag(&f1).with_rack("1 1 INVITE").send().await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+    prack1.expect(200).await;
+
+    // Fork 2: reliable 183 → PRACK fork 2 (its own CSeq space).
+    uas.respond(183, "Session Progress").with_to_tag("bf2").reliable(1).with_sdp(ANSWER).await;
+    let p2 = call.expect(183).await;
+    let f2 = p2.to.tag.clone().expect("fork2 a-tag");
+    assert_ne!(f1, f2);
+    let mut prack2 = call.send_request(InDialogMethod::Prack).with_to_tag(&f2).with_rack("1 1 INVITE").send().await;
+    let mut prack2_at_bob = bob.receive("PRACK").await;
+    assert_eq!(prack2_at_bob.request().to.tag.as_deref(), Some("bf2"), "fork2 PRACK targets fork2");
+    prack2_at_bob.respond(200, "OK").await;
+    prack2.expect(200).await;
+
+    // ── SDP re-offer UPDATE on fork 2 (hold) ──
+    let mut u2 = call.send_request(InDialogMethod::Update).with_to_tag(&f2).with_sdp(REOFFER_HOLD).send().await;
+    let mut u2_at_bob = bob.receive("UPDATE").await;
+    assert_eq!(u2_at_bob.request().to.tag.as_deref(), Some("bf2"), "SDP UPDATE rode fork 2");
+    assert!(String::from_utf8_lossy(&u2_at_bob.request().body).contains("a=sendonly"), "hold re-offer relayed to bob");
+    u2_at_bob.respond(200, "OK").with_sdp(REANSWER_HELD).await;
+    let u2_ok = u2.expect(200).await;
+    assert!(String::from_utf8_lossy(&u2_ok.body).contains("a=recvonly"), "held answer relayed back to alice");
+
+    // ── Bodyless refresh UPDATE on fork 1 (distinct fork, distinct CSeq) ──
+    let mut u1 = call.send_request(InDialogMethod::Update).with_to_tag(&f1).send().await;
+    let mut u1_at_bob = bob.receive("UPDATE").await;
+    assert_eq!(u1_at_bob.request().to.tag.as_deref(), Some("bf1"), "bodyless UPDATE rode fork 1");
+    assert!(u1_at_bob.request().body.is_empty(), "bodyless UPDATE relayed with no body");
+    u1_at_bob.respond(200, "OK").await;
+    u1.expect(200).await;
+
+    // ── Answer on fork 2 (the non-first fork that carried the SDP UPDATE) ──
+    uas.respond(200, "OK").with_to_tag("bf2").with_sdp(ANSWER).await;
+    let ok = call.expect(200).await;
+    assert_eq!(ok.to.tag.as_deref(), Some(f2.as_str()), "confirmed dialog is the winning fork 2");
+    let mut dialog = call.ack().await;
+    let ack_at_bob = bob.receive("ACK").await;
+    assert_eq!(ack_at_bob.request().to.tag.as_deref(), Some("bf2"), "ACK rides fork 2");
+
+    // ── A confirmed in-dialog UPDATE still works after the fork collapse ──
+    let mut cu = dialog.request(InDialogMethod::Update, Some(REOFFER_HOLD)).await;
+    bob.receive("UPDATE").await.respond(200, "OK").with_sdp(REANSWER_HELD).await;
+    cu.expect(200).await;
+
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
