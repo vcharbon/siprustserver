@@ -70,6 +70,7 @@ async fn cdr_is_written_while_the_call_is_still_live() {
             live_calls: live_calls.clone(),
         }),
         store: Arc::new(InMemoryCallStore::new()),
+        store_faults: Default::default(),
         clock: Clock::test_at(0),
         id_gen: Arc::new(IdGen::seeded(0xB2B0)),
         replication: None,

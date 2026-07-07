@@ -8,12 +8,14 @@
 //! `sip_index`; the store's `get_index` is the fallback the HA slice will use.
 
 mod call_store;
+mod faults;
 mod memory;
 mod terminate_writer;
 
 pub use call_store::{
     partition_of, role_of, CallStore, PartitionRole, PropagateDirection, PutOpts, StoreError,
 };
+pub use faults::{FaultInjectingCallStore, StoreFaultPoint, StoreFaults};
 pub use memory::InMemoryCallStore;
 pub use terminate_writer::BufferedTerminateWriter;
 
