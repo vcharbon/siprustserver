@@ -29,10 +29,29 @@
 #   PASS_THRESHOLD=90  min % successful calls to PASS (best-effort failover, X5)
 #   KEEP=1             leave the cluster up after the run (default tear down off)
 #
+# >>> SOURCEABLE LIBRARY (issue 025) <<<
+# This file doubles as a function library: all logic lives in functions and the
+# subcommand dispatch is chaos_main(), executed ONLY when the script is run
+# directly. A downstream overlay (living in a DIFFERENT directory) can set knobs,
+# `source /path/to/deploy/k8s/chaos.sh` (executes nothing), then call/override
+# the primitives (kill_worker, kill_proxy, peak, cpu_starve*, assert_survival,
+# wait_brought_back, ...) or dispatch via `chaos_main kill`. The formerly-inline
+# kill/assert kubectl targets are parameterized (defaults reproduce the
+# historical behaviour exactly):
+#   WORKER_SELECTOR / WORKER_STS / WORKER_CONTAINER     worker pods / workload / container
+#   PROXY_SELECTOR / PROXY_DEPLOY / PROXY_VRRP_CONTAINER proxy pods / workload / VIP owner
+#   UAC_SELECTOR / ORPHAN_SELECTOR / LIMITER_SELECTOR / LIMITER_DEPLOY
+#   MANIFEST_DIR        directory the UAC job template is rendered from
+# NOTE: the cluster-lifecycle helpers are namespaced chaos_up/chaos_deploy/
+# chaos_down (they shell out to run.sh) so they never collide with run.sh's own
+# up/deploy/down when an overlay sources BOTH files.
+#
 # Shares cluster name `sip-e2e` (WSL one-cluster switch) — see README/run.sh.
 set -euo pipefail
-cd "$(dirname "$0")"
-HERE="$(pwd)"
+# Resolve our own directory WITHOUT a top-level `cd` (a source-time cd would leak
+# into any script sourcing this library — issue 025); every path below that used
+# to be cwd-relative is now anchored on $K8S_DIR instead.
+K8S_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 NS="${NS:-sip-test}"
 CALLS="${CALLS:-30}"
@@ -41,6 +60,24 @@ KILL_TARGET="${KILL_TARGET:-b2bua-worker-0}"
 PASS_THRESHOLD="${PASS_THRESHOLD:-90}"
 SCENARIO="uac-hold-failover.xml"
 JOB="sipp-uac-failover"
+MANIFEST_DIR="${MANIFEST_DIR:-$K8S_DIR/manifests}"
+
+# Kill-target / assert knobs (issue 025): the label selectors, workload names and
+# container names the chaos primitives act on — extracted from the formerly-
+# inline kubectl calls so a downstream overlay can retarget them. KILL_TARGET/
+# STARVE_TARGET pick the POD; these pick the POPULATION each primitive
+# selects/waits on. Defaults reproduce the historical behaviour exactly.
+WORKER_SELECTOR="${WORKER_SELECTOR:-app=b2bua-worker}"       # worker pod label
+WORKER_STS="${WORKER_STS:-statefulset/b2bua-worker}"         # worker workload (rollout gate)
+WORKER_CONTAINER="${WORKER_CONTAINER:-b2bua-worker}"         # container cpu_starve throttles
+PROXY_SELECTOR="${PROXY_SELECTOR:-app=sip-front-proxy}"      # proxy pod label
+PROXY_DEPLOY="${PROXY_DEPLOY:-deploy/sip-front-proxy}"       # proxy workload (rollout gate)
+PROXY_VRRP_CONTAINER="${PROXY_VRRP_CONTAINER:-keepalived}"   # sidecar that owns the VIP
+UAC_SELECTOR="${UAC_SELECTOR:-app=sipp-uac}"                 # UAC pods (assert_survival reads logs)
+LIMITER_SELECTOR="${LIMITER_SELECTOR:-app=call-limiter}"     # limiter pod label
+LIMITER_DEPLOY="${LIMITER_DEPLOY:-deploy/call-limiter}"      # limiter workload (rollout gate)
+ORPHAN_SELECTOR="${ORPHAN_SELECTOR:-role=orphan}"            # orphan-stream pods (matches the
+                                                             # ROLE label in the UAC job template)
 
 # Replication ON, ≥2 workers so a primary + backup live on different app nodes.
 export REPL_ENABLE=1
@@ -48,8 +85,8 @@ export WORKER_REPLICAS="${WORKER_REPLICAS:-2}"
 export SCENARIO
 # Front-proxy HA VIP + LB port (ADR-0012 D7): from the shared lib (subnet→VIP
 # derivation, all three runners agree). UAC streams target PROXY_VIP, not the Service.
-source "$HERE/lib/net-env.sh"
-source "$HERE/lib/kube-env.sh"   # pin every kubectl to context kind-$CLUSTER
+source "$K8S_DIR/lib/net-env.sh"
+source "$K8S_DIR/lib/kube-env.sh"   # pin every kubectl to context kind-$CLUSTER
 LIMITER_CAP="${LIMITER_CAP:-20}"
 export LIMITER_CAP
 # Pod-resource envsubst vars for the shared 40-sipp-uac-job template (envsubst has
@@ -70,17 +107,19 @@ fail() { printf '\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
 
 # Reuse run.sh for the heavy lifting (image build, cluster, base deploy) so the
 # two stay in lock-step on topology + image. run.sh reads REPL_ENABLE/SCENARIO
-# from the environment we exported above.
-up()     { REPL_ENABLE=1 ./run.sh up; }
-deploy() { REPL_ENABLE=1 ./run.sh deploy; }
-down()   { ./run.sh down; }
+# from the environment we exported above. Invoked by absolute path (no cd — this
+# file is sourceable) and namespaced chaos_* so these can never collide with
+# run.sh's own up/deploy/down when an overlay sources both files.
+chaos_up()     { REPL_ENABLE=1 "$K8S_DIR/run.sh" up; }
+chaos_deploy() { REPL_ENABLE=1 "$K8S_DIR/run.sh" deploy; }
+chaos_down()   { "$K8S_DIR/run.sh" down; }
 
 # Wait until every worker reports Ready (re-hydrated + backup-current via the
 # /ready probe the StatefulSet's readinessProbe consumes).
 wait_ready() {
   log "waiting for all workers to be Ready (re-hydrated + backup-current)"
-  kubectl -n "$NS" rollout status statefulset/b2bua-worker --timeout=120s
-  kubectl -n "$NS" wait --for=condition=ready pod -l app=b2bua-worker --timeout=120s
+  kubectl -n "$NS" rollout status "$WORKER_STS" --timeout=120s
+  kubectl -n "$NS" wait --for=condition=ready pod -l "$WORKER_SELECTOR" --timeout=120s
 }
 
 # Launch the hold-failover UAC job: CALLS dialogs at CPS, each INVITE/ACK/15s
@@ -90,8 +129,8 @@ launch_calls() {
          MAX_CONCURRENT="${MAX_CONCURRENT:-$(( CPS * 600 ))}" ROLE="${ROLE:-failover}"
   kubectl -n "$NS" delete job "$JOB" --ignore-not-found >/dev/null 2>&1 || true
   log "launching $CALLS hold dialogs @ ${CPS}cps (scenario=$SCENARIO)"
-  envsubst < manifests/40-sipp-uac-job.yaml | kubectl apply -f -
-  kubectl -n "$NS" wait --for=condition=ready pod -l app=sipp-uac --timeout=60s || true
+  envsubst < "$MANIFEST_DIR/40-sipp-uac-job.yaml" | kubectl apply -f -
+  kubectl -n "$NS" wait --for=condition=ready pod -l "$UAC_SELECTOR" --timeout=60s || true
 }
 
 # Inject ONE fault: delete the pod holding (statistically) a share of the live
@@ -117,7 +156,7 @@ kill_worker() {
   else
     kubectl -n "$NS" delete pod "$KILL_TARGET" --grace-period=0 --force >/dev/null 2>&1 || true
   fi
-  kubectl -n "$NS" get pods -l app=b2bua-worker -o wide || true
+  kubectl -n "$NS" get pods -l "$WORKER_SELECTOR" -o wide || true
 }
 
 # ---------------------------------------------------------------------------
@@ -139,8 +178,8 @@ push_metric() {
 # if none found).
 proxy_master_pod() {
   local p
-  for p in $(kubectl -n "$NS" get pods -l app=sip-front-proxy -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-    if kubectl -n "$NS" exec "$p" -c keepalived -- ip -4 addr show dev eth0 2>/dev/null | grep -q "${PROXY_VIP}/"; then
+  for p in $(kubectl -n "$NS" get pods -l "$PROXY_SELECTOR" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+    if kubectl -n "$NS" exec "$p" -c "$PROXY_VRRP_CONTAINER" -- ip -4 addr show dev eth0 2>/dev/null | grep -q "${PROXY_VIP}/"; then
       echo "$p"; return 0
     fi
   done
@@ -156,13 +195,13 @@ proxy_master_pod() {
 kill_proxy() {
   local master
   master="$(proxy_master_pod)"
-  [ -n "$master" ] || master="$(kubectl -n "$NS" get pods -l app=sip-front-proxy -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+  [ -n "$master" ] || master="$(kubectl -n "$NS" get pods -l "$PROXY_SELECTOR" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
   log "CHAOS: killing VIP-master proxy ${master:-<none>} (backup takes over the VIP)"
   push_metric 'sip_chaos_event{type="kill_proxy",phase="start"} 1'
   [ -n "$master" ] && kubectl -n "$NS" delete pod "$master" --grace-period=0 --force >/dev/null 2>&1 || true
   log "waiting for the proxy Deployment to restore 2 Ready replicas"
-  kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout=120s || true
-  kubectl -n "$NS" get pods -l app=sip-front-proxy -o wide || true
+  kubectl -n "$NS" rollout status "$PROXY_DEPLOY" --timeout=120s || true
+  kubectl -n "$NS" get pods -l "$PROXY_SELECTOR" -o wide || true
   push_metric 'sip_chaos_event{type="kill_proxy",result="pass"} 1'
 }
 
@@ -187,7 +226,7 @@ sip_chaos_active{type=\"peak\"} 1"
          MAX_CONCURRENT="${MAX_CONCURRENT:-$(( PEAK_CAPS * 600 ))}" \
          SCENARIO="$PEAK_SCENARIO" ROLE="peak"
   kubectl -n "$NS" delete job "$job" --ignore-not-found >/dev/null 2>&1 || true
-  envsubst < manifests/40-sipp-uac-job.yaml | kubectl apply -f -
+  envsubst < "$MANIFEST_DIR/40-sipp-uac-job.yaml" | kubectl apply -f -
   sleep "$PEAK_SECS"
   kubectl -n "$NS" delete job "$job" --ignore-not-found >/dev/null 2>&1 || true
   push_metric "sip_chaos_event{type=\"peak\",result=\"pass\"} 1
@@ -253,9 +292,9 @@ _starve_locate() {
   node="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null)"
   [ -n "$node" ] || { warn "cpu_starve: pod $pod has no node (not scheduled?)"; return 1; }
   cid="$(kubectl -n "$NS" get pod "$pod" \
-        -o jsonpath='{.status.containerStatuses[?(@.name=="b2bua-worker")].containerID}' 2>/dev/null)"
+        -o jsonpath="{.status.containerStatuses[?(@.name==\"$WORKER_CONTAINER\")].containerID}" 2>/dev/null)"
   cid="${cid##*/}"   # strip the containerd://… scheme
-  [ -n "$cid" ] || { warn "cpu_starve: no b2bua-worker container id for $pod"; return 1; }
+  [ -n "$cid" ] || { warn "cpu_starve: no $WORKER_CONTAINER container id for $pod"; return 1; }
   # The leaf cgroup is the container's own scope (…<cid>.scope or …<cid>); pick the
   # one that actually has a cpu.max knob.
   dir="$(docker exec "$node" sh -c "find /sys/fs/cgroup -type d -name '*${cid}*' 2>/dev/null \
@@ -316,7 +355,7 @@ sip_chaos_active{type=\"cpu_starve\",pod=\"$pod\"} 0"
 # over. Same reversible cgroup mechanism, applied to all workers for ONE window.
 cpu_starve_all() {
   local pods p tup tups=()
-  pods="$(kubectl -n "$NS" get pods -l app=b2bua-worker -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)"
+  pods="$(kubectl -n "$NS" get pods -l "$WORKER_SELECTOR" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)"
   [ -n "$pods" ] || { warn "cpu_starve_all: no b2bua-worker pods found"; return 1; }
   log "CHAOS: cpu_starve_all — throttle ALL workers [$pods] to ${STARVE_QUOTA_US}/${STARVE_PERIOD_US} for ${STARVE_SECS}s (WORST case: no healthy peer)"
   push_metric "sip_chaos_event{type=\"cpu_starve_all\",phase=\"start\"} 1
@@ -379,7 +418,7 @@ abuse_up() {
          MAX_CONCURRENT="${MAX_CONCURRENT:-10000}" \
          SCENARIO="$ABUSE_SCENARIO" ROLE="abuse"
   kubectl -n "$NS" delete job "$ABUSE_JOB" --ignore-not-found >/dev/null 2>&1 || true
-  envsubst < manifests/40-sipp-uac-job.yaml | kubectl apply -f -
+  envsubst < "$MANIFEST_DIR/40-sipp-uac-job.yaml" | kubectl apply -f -
   push_metric 'sip_chaos_active{type="abuse"} 1'
 }
 abuse_down() {
@@ -405,11 +444,11 @@ orphan_kill() {
          MAX_CONCURRENT="${MAX_CONCURRENT:-$(( ORPHAN_CAPS * 600 ))}" \
          SCENARIO="uac-endurance-short.xml" ROLE="orphan"
   kubectl -n "$NS" delete job "$ORPHAN_JOB" --ignore-not-found >/dev/null 2>&1 || true
-  envsubst < manifests/40-sipp-uac-job.yaml | kubectl apply -f - >/dev/null
-  kubectl -n "$NS" wait --for=condition=ready pod -l role=orphan --timeout=40s >/dev/null 2>&1 || true
+  envsubst < "$MANIFEST_DIR/40-sipp-uac-job.yaml" | kubectl apply -f - >/dev/null
+  kubectl -n "$NS" wait --for=condition=ready pod -l "$ORPHAN_SELECTOR" --timeout=40s >/dev/null 2>&1 || true
   sleep "$ORPHAN_BUILD_SECS"   # let ~ORPHAN_CAPS*ORPHAN_BUILD_SECS dialogs establish
   log "CHAOS: abruptly killing the orphan UAC mid-call (dialogs orphaned on the B2BUA)"
-  kubectl -n "$NS" delete pod -l role=orphan --grace-period=0 --force >/dev/null 2>&1 || true
+  kubectl -n "$NS" delete pod -l "$ORPHAN_SELECTOR" --grace-period=0 --force >/dev/null 2>&1 || true
   kubectl -n "$NS" delete job "$ORPHAN_JOB" --grace-period=0 --force --ignore-not-found >/dev/null 2>&1 || true
   push_metric 'sip_chaos_event{type="orphan_kill",phase="killed"} 1'
 }
@@ -422,10 +461,10 @@ orphan_kill() {
 limiter_kill() {
   log "CHAOS: killing the shared call-limiter pod (b2bua fails open while it's down)"
   push_metric 'sip_chaos_event{type="limiter_kill",phase="start"} 1'
-  kubectl -n "$NS" delete pod -l app=call-limiter --grace-period=0 --force >/dev/null 2>&1 || true
+  kubectl -n "$NS" delete pod -l "$LIMITER_SELECTOR" --grace-period=0 --force >/dev/null 2>&1 || true
   log "waiting for call-limiter to come back Ready"
-  kubectl -n "$NS" rollout status deploy/call-limiter --timeout=90s || true
-  kubectl -n "$NS" get pods -l app=call-limiter -o wide || true
+  kubectl -n "$NS" rollout status "$LIMITER_DEPLOY" --timeout=90s || true
+  kubectl -n "$NS" get pods -l "$LIMITER_SELECTOR" -o wide || true
   push_metric 'sip_chaos_event{type="limiter_kill",result="pass"} 1'
 }
 
@@ -438,7 +477,7 @@ limiter_kill() {
 NETCUT_SECS="${NETCUT_SECS:-60}"
 limiter_netcut() {
   local pod
-  pod="$(kubectl -n "$NS" get pod -l app=call-limiter -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+  pod="$(kubectl -n "$NS" get pod -l "$LIMITER_SELECTOR" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
   if [ -z "$pod" ]; then log "limiter_netcut: no call-limiter pod found"; return; fi
   log "CHAOS: limiter_netcut — 100% packet loss on $pod eth0 for ${NETCUT_SECS}s (pod stays up)"
   push_metric 'sip_chaos_event{type="limiter_netcut",phase="start"} 1
@@ -461,7 +500,7 @@ assert_survival() {
     || kubectl -n "$NS" wait --for=condition=failed "job/$JOB" --timeout=10s 2>/dev/null || true
 
   local upod stats ok_n fail_n total_n
-  upod="$(kubectl -n "$NS" get pods -l app=sipp-uac --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
+  upod="$(kubectl -n "$NS" get pods -l "$UAC_SELECTOR" --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
   [ -n "$upod" ] || fail "no UAC pod found"
   stats="$(kubectl -n "$NS" logs "$upod" 2>/dev/null || true)"
   ok_n="$(printf '%s' "$stats"   | grep -aE 'Successful call'     | tail -1 | grep -oE '[0-9]+' | tail -1)"
@@ -481,8 +520,8 @@ assert_survival() {
 }
 
 failover() {
-  up
-  deploy
+  chaos_up
+  chaos_deploy
   wait_ready
   launch_calls
   # Let the dialogs reach the hold state, then kill mid-hold.
@@ -494,7 +533,7 @@ failover() {
   if [ "${KEEP:-0}" = "1" ]; then
     log "KEEP=1 — leaving cluster up (./chaos.sh down to tear down)"
   else
-    down
+    chaos_down
   fi
 }
 
@@ -540,8 +579,8 @@ assert_rehydrated() {
 # a SECOND batch of dialogs on the recovered topology and assert THEY survive too
 # — i.e. the brought-back worker serves traffic again, not just boots.
 bringback() {
-  up
-  deploy
+  chaos_up
+  chaos_deploy
   wait_ready
   launch_calls
   local settle=$(( CALLS / CPS + 4 ))
@@ -567,29 +606,40 @@ bringback() {
   if [ "${KEEP:-0}" = "1" ]; then
     log "KEEP=1 — leaving cluster up (./chaos.sh down to tear down)"
   else
-    down
+    chaos_down
   fi
 }
 
-cmd="${1:-failover}"; shift || true
-case "$cmd" in
-  failover)  failover ;;
-  bringback) bringback ;;
-  up)        up ;;
-  deploy)    deploy; wait_ready ;;
-  kill)      kill_worker ;;
-  proxykill) kill_proxy ;;
-  peak)      peak ;;
-  cpustarve) cpu_starve ;;
-  cpustarveall) cpu_starve_all ;;
-  overload)  overload_mix ;;
-  overloadall) overload_all ;;
-  orphankill) orphan_kill ;;
-  limiterkill) limiter_kill ;;
-  limiternetcut) limiter_netcut ;;
-  abuse)     case "${1:-up}" in up) abuse_up ;; down) abuse_down ;; *) fail "usage: $0 abuse {up|down}" ;; esac ;;
-  recover)   wait_brought_back; assert_rehydrated ;;
-  assert)    assert_survival ;;
-  down)      down ;;
-  *) fail "usage: $0 {failover|bringback|up|deploy|kill|proxykill|peak|cpustarve|cpustarveall|overload|overloadall|orphankill|limiterkill|limiternetcut|abuse {up|down}|recover|assert|down}" ;;
-esac
+# Subcommand dispatch — the surface every existing caller (endurance.sh, docs,
+# direct CLI use) depends on: names and behaviour are FROZEN (issue 025).
+chaos_main() {
+  local cmd="${1:-failover}"; shift || true
+  case "$cmd" in
+    failover)  failover ;;
+    bringback) bringback ;;
+    up)        chaos_up ;;
+    deploy)    chaos_deploy; wait_ready ;;
+    kill)      kill_worker ;;
+    proxykill) kill_proxy ;;
+    peak)      peak ;;
+    cpustarve) cpu_starve ;;
+    cpustarveall) cpu_starve_all ;;
+    overload)  overload_mix ;;
+    overloadall) overload_all ;;
+    orphankill) orphan_kill ;;
+    limiterkill) limiter_kill ;;
+    limiternetcut) limiter_netcut ;;
+    abuse)     case "${1:-up}" in up) abuse_up ;; down) abuse_down ;; *) fail "usage: $0 abuse {up|down}" ;; esac ;;
+    recover)   wait_brought_back; assert_rehydrated ;;
+    assert)    assert_survival ;;
+    down)      chaos_down ;;
+    *) fail "usage: $0 {failover|bringback|up|deploy|kill|proxykill|peak|cpustarve|cpustarveall|overload|overloadall|orphankill|limiterkill|limiternetcut|abuse {up|down}|recover|assert|down}" ;;
+  esac
+}
+
+# Dispatch ONLY when executed directly; `source chaos.sh` defines + defaults and
+# runs nothing. (The if-form — not `[[ ... ]] && chaos_main` — so that sourcing
+# returns 0 and cannot trip a `set -e` caller.)
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  chaos_main "$@"
+fi
