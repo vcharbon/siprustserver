@@ -40,7 +40,7 @@
 
 use b2bua_sdk::{define_service, sm_rule};
 use call::features::RelayFirst18xStrategy;
-use call::{Call, CdrEventType, Direction, LegState, TimerType};
+use call::{Call, CdrEventType, Direction, LegDisposition, LegState, TimerType};
 use sip_message::message_helpers::{get_header, get_headers};
 use sip_message::{Method, SipResponse};
 
@@ -80,6 +80,19 @@ fn relay_first_18x_active(call: &Call) -> bool {
 /// rules — the machine itself is active for all three masking strategies).
 fn is_fake_prack(ctx: &RuleContext) -> bool {
     ctx.call.relay_first_18x_strategy() == Some(RelayFirst18xStrategy::FakePrack)
+}
+
+/// The source leg is NOT mid-CANCEL (newkahneed-024). A 2xx crossing a CANCEL
+/// on the wire is a **reap** case — CORE `cancel-200-crossing` ACK+BYEs the
+/// abandoned callee — regardless of which relay machine is armed. Without this
+/// guard the SERVICE_LAYER 2xx rule out-ranks the CORE reap and relays/merges
+/// the crossing 200 into the being-rejected a-leg, orphaning the callee in a
+/// one-sided established dialog (the 012/016 symptom, resurrected by machine
+/// composition).
+fn source_leg_not_cancelling(ctx: &RuleContext) -> bool {
+    ctx.source_leg()
+        .map(|l| l.disposition != LegDisposition::Cancelling)
+        .unwrap_or(true)
 }
 
 /// fake-prack AND the current UPDATE carries **no body** — the session-refresh
@@ -227,6 +240,10 @@ define_service! {
         // when it has nothing to pre-seed it declines (`None`) and `confirm-dialog`
         // (CORE, ranked just below) handles the 2xx. No cursor move — the call
         // bridges via the `global-call` machine; the masking property persists.
+        // A 2xx on a leg being CANCELled is NOT matched (`source_leg_not_cancelling`,
+        // newkahneed-024): it defers to CORE `cancel-200-crossing`, which reaps
+        // the abandoned callee (ACK+BYE) instead of bridging it to a caller the
+        // teardown is already rejecting.
         sm_rule! {
             id: "force-tag-consistency",
             machine: RELAY_FIRST_18X_MACHINE,
@@ -242,7 +259,8 @@ define_service! {
             matcher: Match::response()
                 .method("INVITE")
                 .status_class(2)
-                .direction(Direction::FromB),
+                .direction(Direction::FromB)
+                .filter(source_leg_not_cancelling),
             handle: |ctx| {
                 let resp = ctx.response()?;
                 let b_tag = resp.to.tag.clone().unwrap_or_default();

@@ -20,9 +20,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use b2bua::decision::test_adapter::route_to;
+use b2bua::decision::test_adapter::{route_to, route_to_with_18x};
 use b2bua::decision::{CallTreatment, NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, B2buaSut};
+use call::features::RelayFirst18xStrategy;
 use scenario_harness::Harness;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -177,6 +178,101 @@ async fn no_answer_reject_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     // →Terminated funnel), NOT dropped on the removed call.
     let failed = call.expect(503).await;
     assert_eq!(failed.status, 503, "caller's INVITE resolves with a final failure");
+
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// **Composition regression (newkahneed-024):** the same no-answer CANCEL /
+/// crossing-200 flow with the `relayFirst18xTo180` **drop-sdp** machine armed.
+/// Pre-fix, the SERVICE_LAYER 2xx rule (`force-tag-consistency`, active in
+/// `Masking`/`Suppressing`) out-ranked CORE `cancel-200-crossing` and
+/// relayed/merged the crossing 200 into the being-rejected a-leg — orphaning
+/// the late-answering callee exactly like 012/016, resurrected by the machine
+/// composition. Now the 2xx rule defers on a `Cancelling` source leg: the
+/// crossing 200 is reaped (ACK + BYE), and the masking property survives the
+/// reap — the reroute target's 200 still reuses the first bare 180's To-tag.
+#[tokio::test(start_paused = true)]
+async fn drop_sdp_no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee() {
+    let h = Harness::with_transit_delay("dropsdp-noanswer-cancel-200-crossing", 1);
+    let alice = h.agent("alice", "127.0.0.1:5064").await;
+    let carol = h.agent("carol", "127.0.0.1:5074").await; // rings, no-answer'd, answers late
+    let bob = h.agent("bob", "127.0.0.1:5075").await; // reroute target
+
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r =
+                    route_to_with_18x("127.0.0.1", 5074, RelayFirst18xStrategy::DropSdp);
+                r.no_answer_timeout_sec = Some(30);
+                r.callback_context = Some("noanswer-ctx".into());
+                NewCallResponse::Route(r)
+            })
+            // The reroute keeps drop-sdp armed (failover/initial-route feature
+            // parity), so the masking machine stays active across the leg swap.
+            .on_failure(|_| {
+                CallTreatment::Route(route_to_with_18x(
+                    "127.0.0.1",
+                    5075,
+                    RelayFirst18xStrategy::DropSdp,
+                ))
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            c.setup_timeout_sec = 300;
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_enabled = false;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5084")
+        .await;
+
+    let mut call = alice.invite(&carol).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut carol_uas = carol.receive("INVITE").await;
+
+    // Carol rings 183 WITH SDP; the drop-sdp machine masks it: alice sees a
+    // bare 180 (no body) under a minted a-facing To-tag.
+    carol_uas.respond(183, "Session Progress").with_sdp(ANSWER).await;
+    let p180 = call.expect(180).await;
+    assert!(p180.body.is_empty(), "drop-sdp masked the 183 into a bare 180");
+    let first_to_tag = p180.to.tag.clone().expect("bare 180 has a To-tag");
+
+    // Trip the no-answer timer (30 s); stay inside the reroute INVITE's Timer A
+    // window (mirrors the plain no-answer test above).
+    h.advance(Duration::from_secs(30) + Duration::from_millis(300)).await;
+
+    // The B2BUA CANCELs the ringing b-leg.
+    let mut cancel = carol.receive("CANCEL").await;
+    cancel.respond(200, "OK").await;
+
+    // ── CROSSING: carol answers 200 OK, crossing the CANCEL on the wire ───────
+    // Pre-fix `force-tag-consistency` claimed this 2xx (the machine was in
+    // `Suppressing`) and bridged the CANCELled callee to alice. It must be
+    // reaped instead: ACK then immediate BYE.
+    carol_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    carol.receive("ACK").await;
+    let mut bye = carol.receive("BYE").await;
+    bye.respond(200, "OK").await;
+
+    // ── Caller flow unchanged: the reroute reaches bob under the same mask ────
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(180, "Ringing").await; // suppressed (mask already out)
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    let ok = call.expect(200).await;
+    assert_eq!(
+        ok.to.tag.as_deref(),
+        Some(first_to_tag.as_str()),
+        "200 To-tag reuses the first bare 180's tag across the reap + leg swap",
+    );
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    // Clean teardown of the surviving bridged call.
+    let mut d_bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    d_bye.expect(200).await;
 
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
