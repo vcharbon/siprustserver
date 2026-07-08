@@ -142,6 +142,57 @@ async fn announcement_mrf_rejects() {
     assert_eq!(b2bua.active_calls(), 0, "the call is reaped");
 }
 
+// ── Reject-teardown AFTER the media leg answered (newkahneed-027 regression).
+// The MRF answers (alice gets 183 early media, a parked *unadopted* media leg),
+// then the clip fails (MSCML <response> non-2xx). The service rejects the caller
+// with a 4xx on its early dialog and terminates. The caller never got a 2xx, so
+// the a-leg must be resolved by that 4xx — NOT BYE'd. Before the generic fix,
+// `confirm-dialog` on the media 200 spuriously marked the a-leg `Confirmed`, so
+// `BeginTermination` tried to BYE a dialog alice never established → undeliverable
+// BYE, the call stranded in `Terminating`, and its CDR never flushed.
+#[tokio::test]
+async fn announcement_clip_fails_after_answer_rejects_caller_without_bye() {
+    let h = Harness::with_transit_delay("announcement-clip-fails", 1);
+    let alice = h.agent("alice", "127.0.0.1:5904").await;
+    let mrf = h.agent("mrf", &format!("127.0.0.1:{MRF_PORT}")).await;
+    let b2bua = B2buaSut::builder(announcement_decision())
+        .services(vec![announcement::service()])
+        .start(&h, "b2bua", "127.0.0.1:5924")
+        .await;
+
+    let mut call = alice.invite(&mrf).with_sdp(OFFER).through(b2bua.addr).send().await;
+
+    // MRF answers the media leg; alice gets early media; the MSCML <play> flies.
+    let mut mrf_uas = mrf.receive("INVITE").await;
+    mrf_uas.respond(200, "OK").with_sdp(MRF_SDP).await;
+    mrf.receive("ACK").await;
+    let mut mrf_dialog = mrf_uas.dialog();
+    call.expect(183).await;
+    mrf.receive("INFO").await.respond(200, "OK").await;
+
+    // The MRF reports the clip FAILED (MSCML <response code="480"> — a
+    // max-duration/no-answer abort). The service rejects the caller.
+    let fail_body = String::from_utf8(announcement::mscml::build_response(480)).unwrap();
+    let mut failed_info = mrf_dialog
+        .send_request(InDialogMethod::Info)
+        .with_header("Content-Type", "application/mediaservercontrol+xml")
+        .with_sdp(&fail_body)
+        .send()
+        .await;
+    failed_info.expect(200).await; // the INFO is answered
+
+    // Alice gets her 4xx final on the early dialog (mapped from the MSCML code) —
+    // a real INVITE final, not a BYE on a phantom confirmed dialog.
+    let rejected = call.expect(480).await;
+    assert_eq!(rejected.status, 480, "caller rejected with the announced 4xx");
+
+    // Only the (confirmed) media leg is BYE'd by the teardown.
+    mrf.receive("BYE").await.respond(200, "OK").await;
+
+    let _ = h.finish().await;
+    assert_eq!(b2bua.active_calls(), 0, "the call reaps — no stranded a-leg BYE");
+}
+
 // ── A-side hangup mid-announcement: alice CANCELs before the bridge → ordinary
 // →Terminated cleanup BYEs the unadopted media leg (no special rule).
 #[tokio::test]

@@ -1343,17 +1343,36 @@ impl<'a> ActionExecutor<'a> {
         if let (Some(body), Some(d)) = (answer_body, call.a_leg.dialogs.first_mut()) {
             d.ext.cached_sdp = Some(body);
         }
-        // Bridge the a-leg only for a live answer. `cancel-200-crossing` reuses
-        // `confirm_dialog` to learn the crossing 200's dialog so it can ACK + BYE
-        // the abandoned callee, but on the reject/no-failover teardown the call is
-        // already `Terminating` and the a-leg was never answered — resurrecting it
-        // to `Confirmed` would read as "answered" and suppress the ADR-0022
-        // unanswered-a-leg final (`invariants::enforce`), stranding the caller with
-        // no response. Leave it as-is (Trying/Early) so the caller still gets its
-        // final when the deferred termination finalizes. The failover crossing-200
-        // reap runs while the call is still `Active` (awaiting `/call/failure`), so
-        // it keeps confirming the a-leg exactly as before.
-        if call.state == call::CallModelState::Active {
+        // Bridge the a-leg only for a live answer that actually faces the caller.
+        // Two guards, both load-bearing:
+        //
+        // 1. `call.state == Active`. `cancel-200-crossing` reuses `confirm_dialog`
+        //    to learn the crossing 200's dialog so it can ACK + BYE the abandoned
+        //    callee, but on the reject/no-failover teardown the call is already
+        //    `Terminating` and the a-leg was never answered — resurrecting it to
+        //    `Confirmed` would read as "answered" and suppress the ADR-0022
+        //    unanswered-a-leg final (`invariants::enforce`), stranding the caller
+        //    with no response. Leave it as-is (Trying/Early) so the caller still
+        //    gets its final when the deferred termination finalizes. The failover
+        //    crossing-200 reap runs while the call is still `Active` (awaiting
+        //    `/call/failure`), so it keeps confirming the a-leg as before.
+        //
+        // 2. The confirmed leg is *adopted*. An unadopted `media` leg (an MRF
+        //    parked behind early media, ADR-0016) is answered by the *service*,
+        //    not relayed to alice — its 2xx surfaced to the caller only as a 183,
+        //    so RFC-wise there is no confirmed a-dialog. Confirming the a-leg off
+        //    such a 2xx would let a later `BeginTermination` BYE a dialog the
+        //    caller never established (undeliverable BYE → the call strands in
+        //    `Terminating`, its CDR never flushes; newkahneed-027). The a-leg is
+        //    confirmed only by an a-facing final 2xx — core relay, `RespondToALeg`,
+        //    or `AnswerALegNewDialog`. Adopted destination legs (incl. the REFER
+        //    transfer target and the failover crossing-200 callee) are unaffected.
+        let confirmed_leg_adopted = call
+            .b_legs
+            .iter()
+            .find(|l| l.leg_id == leg_id)
+            .is_none_or(call::helpers::is_adopted);
+        if call.state == call::CallModelState::Active && confirmed_leg_adopted {
             *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
         }
     }

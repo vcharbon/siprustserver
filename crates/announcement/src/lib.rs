@@ -23,6 +23,13 @@
 //!    normal adopted leg, so the framework's core `confirm-dialog` rule answers
 //!    the caller with its SDP and bridges the two — no announcement rule needed,
 //!    and no dead cursor lingers on the bridged call.
+//! 4. **@Announcing**, on a `<response>` **failure** (max-duration abort, no-answer,
+//!    a final-announcement reject): a reject-teardown — send the caller its 4xx on
+//!    the early dialog and terminate. The caller never got a 2xx, so this leans on
+//!    the generic layer keeping the a-leg `Early` (newkahneed-027): the parked leg
+//!    is an unadopted `Media` leg, so core `confirm-dialog` does not confirm the
+//!    a-leg off its 200, and `BeginTermination` resolves the unanswered a-leg with
+//!    its 4xx (no BYE) — no service-side a-leg un-confirm repair.
 //!
 //! A media-leg failure/timeout while offering or announcing terminates the call
 //! (the one-hop service→global command, `BeginTermination`).
@@ -147,6 +154,56 @@ fn on_mscml_done(ctx: &RuleContext) -> Option<RuleHandleResult> {
     ])
 }
 
+/// Map an MSCML playback-failure `code` onto the SIP final the caller gets on its
+/// early dialog. MSCML's failure numbering overlaps SIP for the common cases (a
+/// max-duration abort surfaces as `480`); anything outside SIP's failure range
+/// collapses to a `500`.
+fn mscml_reject_status(code: u16) -> (u16, &'static str) {
+    match code {
+        480 => (480, "Temporarily Unavailable"),
+        486 => (486, "Busy Here"),
+        c if (400..600).contains(&c) => (c, "Announcement Rejected"),
+        _ => (500, "Announcement Rejected"),
+    }
+}
+
+/// @Announcing — the MRF reports the clip **failed** (MSCML `<response>` with a
+/// non-2xx code: max-duration abort, no-answer, a final-announcement reject). The
+/// caller only ever saw a `183` early dialog, so this is a reject-teardown: answer
+/// the INFO, send the caller its 4xx final, and terminate.
+///
+/// This path is the whole point of newkahneed-027. The parked media leg is an
+/// **unadopted** `Media` leg, so core `confirm-dialog` (correctly, since the fix)
+/// does NOT mark the a-leg `Confirmed` off its 200 — the a-leg is still `Early`.
+/// `BeginTermination` therefore treats it as an unanswered a-leg (the rule already
+/// sent the 4xx → `ByeDisposition::None`) and BYEs only the confirmed media leg.
+/// No un-confirm repair (a wire-silent `TerminateLeg{Rejected}` on the a-leg) is
+/// needed — the generic layer keeps the a-side honest.
+fn on_mscml_failed(ctx: &RuleContext) -> Option<RuleHandleResult> {
+    media_leg_id(&ctx.call)?; // fire only while a parked media leg exists
+    let req = ctx.request()?;
+    let code = mscml::parse_response_code(&req.body).unwrap_or(500);
+    let (status, reason) = mscml_reject_status(code);
+    ok(vec![
+        // Answer the MRF's in-dialog INFO (the B2BUA is its UAS).
+        RuleAction::Respond {
+            status: 200,
+            reason: "OK".to_string(),
+            body: vec![],
+            content_type: None,
+        },
+        // The caller's INVITE is still unanswered (early media only) — send its
+        // 4xx final before tearing down (begin-termination assumes the firing rule
+        // already replied to a Trying/Early a-leg).
+        RuleAction::RelayFailureToALeg { status, reason: reason.to_string() },
+        // Terminate: the confirmed media leg is BYE'd, the Early a-leg is resolved
+        // by its just-sent 4xx (no BYE). No a-leg un-confirm workaround here.
+        RuleAction::BeginTermination {
+            reason: Some("announcement-clip-failed".to_string()),
+        },
+    ])
+}
+
 /// @OfferingMrf/@Announcing — the media leg failed (MRF rejected/timed out).
 /// Terminate the call cleanly (the one-hop service → global command).
 fn on_media_failure(ctx: &RuleContext) -> Option<RuleHandleResult> {
@@ -253,6 +310,27 @@ define_service! {
                         && ctx.request().is_some_and(|r| mscml::is_success_response(&r.body))
                 }),
             handle: on_mscml_done,
+        },
+        // The MRF's MSCML <response> reports failure (max-duration/no-answer/final
+        // reject) → reject-teardown: 4xx to the caller's early dialog, terminate.
+        sm_rule! {
+            id: "announcement-mscml-failed",
+            machine: MACHINE,
+            active: [ State::Announcing ],
+            transitions: [ State::Announcing => Terminal ],
+            effects: [
+                Effect::Respond { status: 200, label: "200 OK → media (answer MSCML INFO)" },
+                Effect::Relay { label: "clip-failed final → A" },
+                Effect::LifecycleCommand { label: "terminate (announcement clip failed)" },
+            ],
+            matcher: Match::request()
+                .method("INFO")
+                .direction(Direction::FromB)
+                .filter(|ctx| {
+                    on_media_leg(ctx)
+                        && ctx.request().is_some_and(|r| mscml::is_failure_response(&r.body))
+                }),
+            handle: on_mscml_failed,
         },
         // The media leg failed while offering/announcing → terminate the call.
         sm_rule! {
