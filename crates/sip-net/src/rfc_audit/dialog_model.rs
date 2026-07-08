@@ -7,10 +7,19 @@
 //! through [`advance_dialog_model`] before / after its own check.
 //!
 //! [`project_per_dialog`] slices the flat recorded channel into per-`(bind,
-//! Call-ID, From-tag, To-tag)` [`AgentSlot`]s (forked early dialogs that share a
-//! Call-ID + From-tag but differ on To-tag become distinct slices once the
-//! To-tag is observed; messages with no confirmed To-tag land in the `to_tag =
-//! None` slice and migrate when it appears).
+//! Call-ID, unordered tag-pair)` [`AgentSlot`]s. The RFC 3261 §12 dialog id is
+//! direction-independent (local/remote tags swap with the viewpoint), so a
+//! mid-dialog request initiated by the callee side — a UAS hold re-INVITE or a
+//! UAS give-up BYE, whose From/To tags are REVERSED relative to the
+//! dialog-establishing INVITE — lands in the same bucket as the INVITE and its
+//! confirming 2xx (newkahneed-029: a From-tag-oriented key split those into a
+//! bucket with no 200, misreading a confirmed-dialog BYE as early-dialog).
+//! Forked early dialogs that share a Call-ID + caller tag but differ on the
+//! callee tag are distinct pairs and stay distinct slices; messages recorded
+//! before the callee's tag exists (INVITE, 100) land in a single-tag pending
+//! bucket and migrate into the pair-keyed bucket when the second tag appears.
+//! Each [`DialogSlice`] reports its tags in **establishing orientation**
+//! (`from_tag` = the tag that appeared alone first, i.e. the caller's).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -272,6 +281,12 @@ pub enum EventKind {
 }
 
 /// Rebuild dialog state incrementally, exactly as the TS `advanceDialogModel`.
+///
+/// Only a **dialog-establishing** INVITE (no To-tag) can seed the UAC/UAS role
+/// and the `initial_invite_*` branches: with unordered tag-pair bucketing a
+/// UAS-initiated re-INVITE (both tags, reversed orientation) shares the slice
+/// with the establishing INVITE, and mistaking it for the initial INVITE would
+/// flip the slot's role and corrupt the route set / dialog URIs.
 pub fn advance_dialog_model(m: &mut DialogModel, ev: &OrderedEvent) {
     let msg = &ev.msg;
     fn set_if_empty(slot: &mut String, val: &str) {
@@ -279,10 +294,13 @@ pub fn advance_dialog_model(m: &mut DialogModel, ev: &OrderedEvent) {
             *slot = val.to_string();
         }
     }
+    fn is_establishing_invite(req: &SipRequest) -> bool {
+        req.method.as_str() == "INVITE" && req.to.tag.as_deref().is_none_or(str::is_empty)
+    }
 
     if ev.kind == EventKind::Sent {
         if let SipMessage::Request(req) = msg {
-            if req.method.as_str() == "INVITE" && m.initial_invite_sent_branch.is_empty() {
+            if is_establishing_invite(req) && m.initial_invite_sent_branch.is_empty() {
                 m.is_uac = true;
                 m.initial_invite_sent_branch = top_via_branch(msg).unwrap_or_default();
                 set_if_empty(&mut m.call_id, call_id(msg));
@@ -305,7 +323,7 @@ pub fn advance_dialog_model(m: &mut DialogModel, ev: &OrderedEvent) {
 
     // Received.
     if let SipMessage::Request(req) = msg {
-        if req.method.as_str() == "INVITE" && m.initial_invite_received_branch.is_empty() {
+        if is_establishing_invite(req) && m.initial_invite_received_branch.is_empty() {
             m.is_uas = true;
             m.initial_invite_received_branch = top_via_branch(msg).unwrap_or_default();
             set_if_empty(&mut m.call_id, call_id(msg));
@@ -382,12 +400,19 @@ pub struct AgentSlot {
 /// would false-positive. B2BUA legs are NOT relays here — each leg is a distinct
 /// Call-ID, so its slot only ever sends OR receives the leg's INVITE. Per-UA
 /// cross rules should `continue` past a relay slot.
+///
+/// Only the **dialog-establishing** INVITE (no To-tag) counts: with unordered
+/// tag-pair bucketing a UAS-initiated re-INVITE (both tags present) lands in
+/// the same slice as the establishing INVITE, and an endpoint that sent the
+/// initial INVITE and later *received* such a re-INVITE must not be
+/// misclassified as a relay. A true relay forwards the establishing INVITE in
+/// both directions, so it still qualifies.
 pub fn slot_is_relay(slot: &AgentSlot) -> bool {
     let mut sent_invite = false;
     let mut recv_invite = false;
     for ev in &slot.ordered {
         if let SipMessage::Request(r) = &ev.msg {
-            if r.method.as_str() == "INVITE" {
+            if r.method.as_str() == "INVITE" && r.to.tag.as_deref().is_none_or(str::is_empty) {
                 match ev.kind {
                     EventKind::Sent => sent_invite = true,
                     EventKind::Received => recv_invite = true,
@@ -398,7 +423,13 @@ pub fn slot_is_relay(slot: &AgentSlot) -> bool {
     sent_invite && recv_invite
 }
 
-/// All agent slots that share a `(Call-ID, From-tag, To-tag)` dialog identity.
+/// All agent slots that share a `(Call-ID, unordered tag-pair)` dialog
+/// identity (RFC 3261 §12 — the dialog id is direction-independent). The tags
+/// are reported in **establishing orientation**: `from_tag` is the caller's
+/// tag (the tag that appeared alone, before the callee's tag existed) even
+/// when the slice also carries callee-initiated mid-dialog requests whose
+/// wire From/To are reversed. `to_tag = None` is a pending (never-confirmed)
+/// early slice keyed by its single tag.
 #[derive(Clone, Debug)]
 pub struct DialogSlice {
     pub call_id: String,
@@ -409,20 +440,36 @@ pub struct DialogSlice {
 
 struct Bucket {
     call_id: String,
+    /// Establishing orientation as known to THIS bucket (the pending bucket's
+    /// single tag stays `from_tag` through migration). The slice recomputes
+    /// orientation across all its buckets; these are the per-bucket seed.
     from_tag: String,
     to_tag: Option<String>,
     bind_key: LaneKey,
     ordered: Vec<OrderedEvent>,
 }
 
-fn bucket_key(bind: &str, call_id: &str, from_tag: &str, to_tag: Option<&str>) -> String {
-    format!("{bind}\x00{call_id}\x00{from_tag}\x00{}", to_tag.unwrap_or(""))
+/// Key for a confirmed dialog bucket: the **unordered** tag pair, so both
+/// From/To orientations of one dialog map to one bucket.
+fn confirmed_key(bind: &str, call_id: &str, tag_a: &str, tag_b: &str) -> String {
+    let (lo, hi) = if tag_a <= tag_b { (tag_a, tag_b) } else { (tag_b, tag_a) };
+    format!("{bind}\x00{call_id}\x00{lo}\x00{hi}")
 }
 
-/// Group the recorded channel into per-`(bind, Call-ID, From-tag, To-tag)`
-/// agent slots, with To-tag migration from the pending (`None`) bucket once the
-/// To-tag is observed. Slots that share a `(Call-ID, From-tag, To-tag)` are
-/// gathered under one [`DialogSlice`].
+/// Key for a pending (single-tag) bucket — messages recorded before the
+/// callee's tag exists (INVITE, 100 Trying). Distinct from every confirmed
+/// key: a confirmed key always carries two non-empty tags.
+fn pending_key(bind: &str, call_id: &str, tag: &str) -> String {
+    format!("{bind}\x00{call_id}\x00{tag}\x00")
+}
+
+/// Group the recorded channel into per-`(bind, Call-ID, unordered tag-pair)`
+/// agent slots. One-tag messages sit in a pending bucket keyed by their single
+/// tag and migrate into the pair-keyed bucket when the second tag is observed
+/// (forked dialogs: the migration happens once, into the first pair observed;
+/// later pairs sharing the caller tag start fresh — distinct slices). Slots
+/// that share a `(Call-ID, tag-pair)` are gathered under one [`DialogSlice`]
+/// whose tags are normalised to establishing orientation.
 pub fn project_per_dialog(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<DialogSlice> {
     let parser = super::lenient_parser();
 
@@ -476,22 +523,29 @@ pub fn project_per_dialog(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Dial
             Some(t) if !t.is_empty() => t.to_string(),
             _ => continue,
         };
-        let tt = to_tag(&e.msg).map(str::to_string);
+        let tt = to_tag(&e.msg).map(str::to_string).filter(|t| !t.is_empty());
 
-        // Resolve the bucket, migrating the pending (None) bucket if this is the
-        // first message to carry the confirmed To-tag.
+        // Resolve the bucket, migrating a pending (single-tag) bucket if this
+        // is the first message to carry the dialog's second tag. The pending
+        // bucket is normally keyed on the message's From-tag (same orientation
+        // as the establishing INVITE), but a callee-initiated first two-tag
+        // message carries the caller's tag in **To** — probe both.
         let key = if let Some(ref tag) = tt {
-            let confirmed = bucket_key(&e.bind_key, cid, &ft, Some(tag));
+            let confirmed = confirmed_key(&e.bind_key, cid, &ft, tag);
             if !buckets.contains_key(&confirmed) {
-                let pending = bucket_key(&e.bind_key, cid, &ft, None);
-                if let Some(mut b) = buckets.remove(&pending) {
-                    b.to_tag = Some(tag.clone());
+                let migrated = buckets
+                    .remove(&pending_key(&e.bind_key, cid, &ft))
+                    .or_else(|| buckets.remove(&pending_key(&e.bind_key, cid, tag)));
+                if let Some(mut b) = migrated {
+                    // Establishing orientation: the pending bucket's single tag
+                    // is the caller's; the OTHER tag of the pair is the callee's.
+                    b.to_tag = Some(if b.from_tag == ft { tag.clone() } else { ft.clone() });
                     buckets.insert(confirmed.clone(), b);
                 }
             }
             confirmed
         } else {
-            bucket_key(&e.bind_key, cid, &ft, None)
+            pending_key(&e.bind_key, cid, &ft)
         };
 
         let bucket = buckets.entry(key).or_insert_with(|| Bucket {
@@ -511,12 +565,20 @@ pub fn project_per_dialog(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Dial
 
     let mut slices: HashMap<String, DialogSlice> = HashMap::new();
     for b in buckets.into_values() {
-        let k = format!(
-            "{}\x00{}\x00{}",
-            b.call_id,
-            b.from_tag,
-            b.to_tag.clone().unwrap_or_default()
-        );
+        // Cross-bind grouping key: unordered pair for confirmed dialogs (both
+        // orientations of one dialog gather under one slice), single tag for
+        // pending ones.
+        let k = match &b.to_tag {
+            Some(t) => {
+                let (lo, hi) = if b.from_tag.as_str() <= t.as_str() {
+                    (b.from_tag.as_str(), t.as_str())
+                } else {
+                    (t.as_str(), b.from_tag.as_str())
+                };
+                format!("{}\x00{lo}\x00{hi}", b.call_id)
+            }
+            None => format!("{}\x00{}\x00", b.call_id, b.from_tag),
+        };
         let slice = slices.entry(k).or_insert_with(|| DialogSlice {
             call_id: b.call_id.clone(),
             from_tag: b.from_tag.clone(),
@@ -530,6 +592,9 @@ pub fn project_per_dialog(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Dial
             ordered,
         });
     }
+    for slice in slices.values_mut() {
+        normalise_slice_orientation(slice);
+    }
 
     let mut out: Vec<DialogSlice> = slices.into_values().collect();
     out.sort_by(|a, b| {
@@ -539,6 +604,43 @@ pub fn project_per_dialog(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Dial
             .then(a.to_tag.cmp(&b.to_tag))
     });
     out
+}
+
+/// Report a confirmed slice's tag pair in **establishing orientation**:
+/// `from_tag` = the caller's tag. The caller's tag is the one that appeared
+/// with no partner tag — the dialog-establishing INVITE / 100 Trying carry
+/// only the From-tag — identified by the earliest (global capture order)
+/// single-tag event across all the slice's slots. When no single-tag message
+/// was recorded (a slice observed only mid-dialog), the earliest event's own
+/// From/To orientation stands. Also makes the seed orientation deterministic:
+/// the slice was seeded from an arbitrary bucket (`HashMap` iteration order).
+fn normalise_slice_orientation(slice: &mut DialogSlice) {
+    let Some(cur_to) = slice.to_tag.clone() else {
+        return; // pending slice: single tag, nothing to orient
+    };
+    let mut earliest_any: Option<(usize, String)> = None;
+    let mut earliest_single: Option<(usize, String)> = None;
+    for slot in &slice.per_agent {
+        for ev in &slot.ordered {
+            let ft = from_tag(&ev.msg).unwrap_or("");
+            if ft.is_empty() {
+                continue;
+            }
+            if earliest_any.as_ref().is_none_or(|(i, _)| ev.idx < *i) {
+                earliest_any = Some((ev.idx, ft.to_string()));
+            }
+            let tt = to_tag(&ev.msg).unwrap_or("");
+            if tt.is_empty() && earliest_single.as_ref().is_none_or(|(i, _)| ev.idx < *i) {
+                earliest_single = Some((ev.idx, ft.to_string()));
+            }
+        }
+    }
+    let Some((_, caller)) = earliest_single.or(earliest_any) else {
+        return;
+    };
+    if caller == cur_to && caller != slice.from_tag {
+        slice.to_tag = Some(std::mem::replace(&mut slice.from_tag, cur_to));
+    }
 }
 
 #[cfg(test)]
@@ -575,5 +677,164 @@ mod tests {
     fn parse_sdp_origin_rejects_non_sdp() {
         assert!(parse_sdp_origin(b"").is_none());
         assert!(parse_sdp_origin(b"not sdp").is_none());
+    }
+
+    // ── project_per_dialog: unordered tag-pair keying (newkahneed-029) ──────
+
+    use crate::types::UdpPacket;
+
+    fn raw_req(method: &str, branch: &str, cseq: u32, ftag: &str, ttag: Option<&str>) -> Vec<u8> {
+        let to = match ttag {
+            Some(t) => format!("<sip:peer@127.0.0.1>;tag={t}"),
+            None => "<sip:peer@127.0.0.1>".to_string(),
+        };
+        format!(
+            "{method} sip:peer@127.0.0.1 SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
+             From: <sip:orig@127.0.0.1>;tag={ftag}\r\n\
+             To: {to}\r\n\
+             Call-ID: cid-1@127.0.0.1\r\n\
+             CSeq: {cseq} {method}\r\n\
+             Max-Forwards: 70\r\n\
+             Content-Length: 0\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    fn raw_resp(status: u16, cseq: u32, method: &str, branch: &str, ftag: &str, ttag: Option<&str>) -> Vec<u8> {
+        let to = match ttag {
+            Some(t) => format!("<sip:peer@127.0.0.1>;tag={t}"),
+            None => "<sip:peer@127.0.0.1>".to_string(),
+        };
+        format!(
+            "SIP/2.0 {status} X\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
+             From: <sip:orig@127.0.0.1>;tag={ftag}\r\n\
+             To: {to}\r\n\
+             Call-ID: cid-1@127.0.0.1\r\n\
+             CSeq: {cseq} {method}\r\n\
+             Content-Length: 0\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    fn sent(bind: &str, raw: Vec<u8>, seq: u64) -> Stamped<SignalingNetworkEvent> {
+        Stamped {
+            event: SignalingNetworkEvent::SendCalled {
+                bind_key: bind.to_string(),
+                to: "127.0.0.1:5070".parse().unwrap(),
+                msg: raw,
+            },
+            seq,
+            at_ms: seq,
+        }
+    }
+
+    fn recv(bind: &str, raw: Vec<u8>, seq: u64) -> Stamped<SignalingNetworkEvent> {
+        Stamped {
+            event: SignalingNetworkEvent::RecvItem {
+                bind_key: bind.to_string(),
+                packet: UdpPacket {
+                    raw,
+                    src: "127.0.0.1:5070".parse().unwrap(),
+                    arrival_ms: seq,
+                },
+            },
+            seq,
+            at_ms: seq,
+        }
+    }
+
+    #[test]
+    fn reversed_mid_dialog_request_joins_the_establishing_slice() {
+        // The UAS-side re-INVITE / BYE reverse From/To relative to the
+        // establishing INVITE. The unordered-pair key must map both
+        // orientations onto ONE dialog slice, reported in establishing
+        // orientation (from = caller's tag "at").
+        let evs = vec![
+            recv("bob", raw_req("INVITE", "z9hG4bK-i", 1, "at", None), 0),
+            sent("bob", raw_resp(200, 1, "INVITE", "z9hG4bK-i", "at", Some("bt")), 1),
+            recv("bob", raw_req("ACK", "z9hG4bK-k", 1, "at", Some("bt")), 2),
+            // UAS-initiated re-INVITE toward the caller: tags reversed.
+            sent("bob", raw_req("INVITE", "z9hG4bK-r", 1, "bt", Some("at")), 3),
+            recv("bob", raw_resp(500, 1, "INVITE", "z9hG4bK-r", "bt", Some("at")), 4),
+            sent("bob", raw_req("ACK", "z9hG4bK-r", 1, "bt", Some("at")), 5),
+            sent("bob", raw_req("BYE", "z9hG4bK-b", 2, "bt", Some("at")), 6),
+            recv("bob", raw_resp(200, 2, "BYE", "z9hG4bK-b", "bt", Some("at")), 7),
+        ];
+        let slices = project_per_dialog(&evs);
+        assert_eq!(slices.len(), 1, "one dialog, one slice: {slices:?}");
+        let s = &slices[0];
+        assert_eq!(s.from_tag, "at", "establishing orientation: caller's tag first");
+        assert_eq!(s.to_tag.as_deref(), Some("bt"));
+        assert_eq!(s.per_agent.len(), 1);
+        assert_eq!(s.per_agent[0].ordered.len(), 8, "all 8 events in the one slot");
+    }
+
+    #[test]
+    fn one_tag_events_migrate_into_the_pair_keyed_bucket() {
+        // INVITE and 100 Trying exist before the callee's tag does — they sit
+        // in the single-tag pending bucket and must migrate into the pair
+        // bucket when the tagged 180/200 arrives.
+        let evs = vec![
+            sent("alice", raw_req("INVITE", "z9hG4bK-i", 1, "at", None), 0),
+            recv("alice", raw_resp(100, 1, "INVITE", "z9hG4bK-i", "at", None), 1),
+            recv("alice", raw_resp(180, 1, "INVITE", "z9hG4bK-i", "at", Some("bt")), 2),
+            recv("alice", raw_resp(200, 1, "INVITE", "z9hG4bK-i", "at", Some("bt")), 3),
+        ];
+        let slices = project_per_dialog(&evs);
+        assert_eq!(slices.len(), 1, "{slices:?}");
+        assert_eq!(slices[0].from_tag, "at");
+        assert_eq!(slices[0].to_tag.as_deref(), Some("bt"));
+        assert_eq!(slices[0].per_agent[0].ordered.len(), 4, "INVITE + 100 migrated");
+    }
+
+    #[test]
+    fn forked_to_tags_stay_distinct_slices() {
+        // Two callee tags forked off one INVITE are two dialogs (two distinct
+        // tag pairs). The pending bucket migrates into the FIRST pair; the
+        // second fork starts its own slice.
+        let evs = vec![
+            sent("alice", raw_req("INVITE", "z9hG4bK-i", 1, "at", None), 0),
+            recv("alice", raw_resp(180, 1, "INVITE", "z9hG4bK-i", "at", Some("b1")), 1),
+            recv("alice", raw_resp(200, 1, "INVITE", "z9hG4bK-i", "at", Some("b2")), 2),
+        ];
+        let slices = project_per_dialog(&evs);
+        assert_eq!(slices.len(), 2, "{slices:?}");
+        let fork1 = slices.iter().find(|s| s.to_tag.as_deref() == Some("b1")).unwrap();
+        let fork2 = slices.iter().find(|s| s.to_tag.as_deref() == Some("b2")).unwrap();
+        assert_eq!(fork1.from_tag, "at");
+        assert_eq!(fork2.from_tag, "at");
+        assert_eq!(fork1.per_agent[0].ordered.len(), 2, "INVITE migrated with the first fork");
+        assert_eq!(fork2.per_agent[0].ordered.len(), 1);
+    }
+
+    #[test]
+    fn endpoint_receiving_reversed_reinvite_is_not_a_relay() {
+        // The caller sent the establishing INVITE and later RECEIVED the
+        // UAS-initiated re-INVITE (both tags). Now that both live in one slot,
+        // only the To-tag-less INVITE may count toward relay detection — the
+        // endpoint must not be misclassified.
+        let evs = vec![
+            sent("alice", raw_req("INVITE", "z9hG4bK-i", 1, "at", None), 0),
+            recv("alice", raw_resp(200, 1, "INVITE", "z9hG4bK-i", "at", Some("bt")), 1),
+            recv("alice", raw_req("INVITE", "z9hG4bK-r", 1, "bt", Some("at")), 2),
+        ];
+        let slices = project_per_dialog(&evs);
+        assert_eq!(slices.len(), 1, "{slices:?}");
+        assert!(!slot_is_relay(&slices[0].per_agent[0]), "endpoint misread as relay");
+    }
+
+    #[test]
+    fn transparent_relay_is_still_a_relay() {
+        // A relay forwards the establishing INVITE in both directions — the
+        // initial-INVITE-only gate must keep classifying it as a relay.
+        let evs = vec![
+            recv("lb", raw_req("INVITE", "z9hG4bK-i", 1, "at", None), 0),
+            sent("lb", raw_req("INVITE", "z9hG4bK-i2", 1, "at", None), 1),
+        ];
+        let slices = project_per_dialog(&evs);
+        assert_eq!(slices.len(), 1, "{slices:?}");
+        assert!(slot_is_relay(&slices[0].per_agent[0]));
     }
 }

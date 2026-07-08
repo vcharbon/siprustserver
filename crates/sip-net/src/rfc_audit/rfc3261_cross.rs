@@ -2321,6 +2321,69 @@ mod tests {
         assert!(f[0].1.contains("outside any dialog"), "{}", f[0].1);
     }
 
+    #[test]
+    fn bye_after_uas_initiated_reinvite_tag_reversal_clean() {
+        // newkahneed-029 regression: a mid-dialog re-INVITE initiated by the
+        // UAS side (the AS sending a hold re-INVITE toward the caller) reverses
+        // From/To tags relative to the dialog-establishing INVITE. With
+        // From-tag-oriented bucketing, the LB relay's copy of the caller's 500
+        // and of the AS's terminating BYE landed in a bucket that lacked the
+        // dialog-confirming 200 under that key orientation, so the projector
+        // misread a long-confirmed dialog's BYE as an early-dialog BYE and
+        // falsely failed this rule (the identical wire passes on the direct
+        // topology). Unordered tag-pair keying maps both orientations onto the
+        // one dialog slice — the audit must stay clean on every slot.
+        //
+        // Complete callflow, relayed by a transparent LB ("lb" both receives
+        // and re-sends every message; alice / bob are the dialog endpoints):
+        // INVITE/200/ACK, then bob's re-INVITE (tags reversed) rejected 500 +
+        // ACK, then bob's BYE answered 200.
+        let al = "127.0.0.1:5060"; // alice <-> lb wire peer
+        let lb = "127.0.0.1:5090"; // lb address as seen by both UAs
+        let bl = "127.0.0.1:5070"; // bob <-> lb wire peer
+        let evs = vec![
+            // Establishment: alice -> lb -> bob, 200 back, ACK forward.
+            sent("alice", req("INVITE", "z9hG4bK-i-a", 1, A, B, "at", None, ""), lb, 0),
+            recv("lb", req("INVITE", "z9hG4bK-i-a", 1, A, B, "at", None, ""), al, 1),
+            sent("lb", req("INVITE", "z9hG4bK-i-b", 1, A, B, "at", None, ""), bl, 2),
+            recv("bob", req("INVITE", "z9hG4bK-i-b", 1, A, B, "at", None, ""), lb, 3),
+            sent("bob", resp(200, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-i-b", ""), lb, 4),
+            recv("lb", resp(200, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-i-b", ""), bl, 5),
+            sent("lb", resp(200, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-i-a", ""), al, 6),
+            recv("alice", resp(200, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-i-a", ""), lb, 7),
+            sent("alice", req("ACK", "z9hG4bK-k-a", 1, A, B, "at", Some("bt"), ""), lb, 8),
+            recv("lb", req("ACK", "z9hG4bK-k-a", 1, A, B, "at", Some("bt"), ""), al, 9),
+            sent("lb", req("ACK", "z9hG4bK-k-b", 1, A, B, "at", Some("bt"), ""), bl, 10),
+            recv("bob", req("ACK", "z9hG4bK-k-b", 1, A, B, "at", Some("bt"), ""), lb, 11),
+            // UAS-initiated hold re-INVITE toward the caller: From/To reversed
+            // relative to the establishing INVITE. Caller rejects it (500).
+            sent("bob", req("INVITE", "z9hG4bK-r-b", 1, B, A, "bt", Some("at"), ""), lb, 12),
+            recv("lb", req("INVITE", "z9hG4bK-r-b", 1, B, A, "bt", Some("at"), ""), bl, 13),
+            sent("lb", req("INVITE", "z9hG4bK-r-a", 1, B, A, "bt", Some("at"), ""), al, 14),
+            recv("alice", req("INVITE", "z9hG4bK-r-a", 1, B, A, "bt", Some("at"), ""), lb, 15),
+            sent("alice", resp(500, 1, "INVITE", B, A, "bt", "at", "z9hG4bK-r-a", ""), lb, 16),
+            recv("lb", resp(500, 1, "INVITE", B, A, "bt", "at", "z9hG4bK-r-a", ""), al, 17),
+            sent("lb", resp(500, 1, "INVITE", B, A, "bt", "at", "z9hG4bK-r-b", ""), bl, 18),
+            recv("bob", resp(500, 1, "INVITE", B, A, "bt", "at", "z9hG4bK-r-b", ""), lb, 19),
+            // Non-2xx ACK (hop-by-hop, reuses the INVITE branch per hop).
+            sent("bob", req("ACK", "z9hG4bK-r-b", 1, B, A, "bt", Some("at"), ""), lb, 20),
+            recv("lb", req("ACK", "z9hG4bK-r-b", 1, B, A, "bt", Some("at"), ""), bl, 21),
+            sent("lb", req("ACK", "z9hG4bK-r-a", 1, B, A, "bt", Some("at"), ""), al, 22),
+            recv("alice", req("ACK", "z9hG4bK-r-a", 1, B, A, "bt", Some("at"), ""), lb, 23),
+            // Terminating BYE from the AS side rides the confirmed dialog.
+            sent("bob", req("BYE", "z9hG4bK-b-b", 2, B, A, "bt", Some("at"), ""), lb, 24),
+            recv("lb", req("BYE", "z9hG4bK-b-b", 2, B, A, "bt", Some("at"), ""), bl, 25),
+            sent("lb", req("BYE", "z9hG4bK-b-a", 2, B, A, "bt", Some("at"), ""), al, 26),
+            recv("alice", req("BYE", "z9hG4bK-b-a", 2, B, A, "bt", Some("at"), ""), lb, 27),
+            sent("alice", resp(200, 2, "BYE", B, A, "bt", "at", "z9hG4bK-b-a", ""), lb, 28),
+            recv("lb", resp(200, 2, "BYE", B, A, "bt", "at", "z9hG4bK-b-a", ""), al, 29),
+            sent("lb", resp(200, 2, "BYE", B, A, "bt", "at", "z9hG4bK-b-b", ""), bl, 30),
+            recv("bob", resp(200, 2, "BYE", B, A, "bt", "at", "z9hG4bK-b-b", ""), lb, 31),
+        ];
+        let f = NoByeOutsideOrEarlyDialogRule.check(&evs);
+        assert!(f.is_empty(), "confirmed-dialog BYE misread as early-dialog BYE: {f:?}");
+    }
+
     // ---- noTarget404 [advisory] ------------------------------------------
 
     #[test]

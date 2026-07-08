@@ -2335,7 +2335,14 @@ impl ServerTxn {
             local_tag,
             remote_tag: req.from.tag.clone().unwrap_or_default(),
             // From the UAS's view, "local" is itself and "remote" is the caller.
-            local_uri: self.agent.uri.clone(),
+            // RFC 3261 §12.1.1: the dialog LOCAL URI is the To field of the
+            // request, NOT the agent's own AOR — they coincide in the usual
+            // alice→bob case (To:bob == bob's uri) but diverge when a UAS is
+            // handed an INVITE addressed to a third party (e.g. the MRF media
+            // leg carries To:dest): the callee's in-dialog requests must then
+            // carry From:dest, and the recorded-trace midDialogUri audit — which
+            // now merges both tag orientations into one dialog slice — checks it.
+            local_uri: req.to.uri.clone(),
             remote_uri: req.from.uri.clone(),
             remote_target,
             local_cseq: 0, // UAS originates its own CSeq space; first request → 1
