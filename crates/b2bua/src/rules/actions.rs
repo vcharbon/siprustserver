@@ -1458,7 +1458,10 @@ impl<'a> ActionExecutor<'a> {
     /// `cancel-leg` CANCEL is already in flight) — issue the right teardown:
     /// confirmed → BYE + `bye_sent`; trying/early b-leg → CANCEL + `cancelled` +
     /// terminated; trying/early a-leg → `none` (the rule already sent the SIP
-    /// reply). Then enter `terminating` and arm the safety timer.
+    /// reply) — and, when a final to the a-leg is among this turn's outbound
+    /// effects, → terminated too (newkahneed-028: the answered leg is resolved,
+    /// so the ADR-0022 unanswered-a-leg invariant stays a pure safety net).
+    /// Then enter `terminating` and arm the safety timer.
     ///
     /// `source_leg_id` is intentionally *not* special-cased here: rules that
     /// consume a BYE/CANCEL pre-mark their source leg's disposition before
@@ -1509,6 +1512,25 @@ impl<'a> ActionExecutor<'a> {
                     if is_a {
                         // a-leg trying/early: the rule already sent the SIP reply.
                         *call = set_bye_disposition(call.clone(), &id, ByeDisposition::None);
+                        // Parity with the b-leg arm (newkahneed-028): when that
+                        // reply is REAL — a ≥200 final to the a-leg among THIS
+                        // turn's outbound effects (`RespondToALeg` /
+                        // `RelayFailureToALeg` are wire-only and never move leg
+                        // state) — the leg is resolved; record it `Terminated` so
+                        // a later turn's `→ terminated` edge doesn't read a
+                        // still-`Early` a-leg and have the ADR-0022 invariant
+                        // re-answer a spurious 503 (observed: a crossing BYE from
+                        // the parked media leg right after the reject). A leg
+                        // with NO final this turn deliberately stays
+                        // Trying/Early — `answer_a_leg_if_unanswered` still owes
+                        // that caller its 503.
+                        let answered_this_turn = fx.outbound.iter().any(|e| {
+                            e.leg_id.as_deref() == Some(id.as_str())
+                                && matches!(&e.body, OutboundBody::Response(r) if r.status >= 200)
+                        });
+                        if answered_this_turn {
+                            *call = set_leg_state(call.clone(), &id, LegState::Terminated);
+                        }
                     } else {
                         if let Some(e) = self.cancel_to_leg(call, &id) {
                             fx.outbound.push(e);

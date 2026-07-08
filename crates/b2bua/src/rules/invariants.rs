@@ -107,8 +107,10 @@ pub fn enforce(
 ///
 /// Guards, in order:
 ///  - `before.a_leg.state ∈ {Trying, Early}` — the a-leg entered this turn
-///    unanswered. Any earlier turn that answered moved it (reject_call /
-///    `RespondToALeg` → Terminated, confirm-dialog → Confirmed).
+///    unanswered. Any earlier turn that answered moved it (reject_call →
+///    Terminated, confirm-dialog → Confirmed, and `BeginTermination` marks a
+///    Trying/Early a-leg Terminated when a ≥200 final to it rides the same
+///    turn's effects — newkahneed-028).
 ///  - no final response to the a-leg among THIS turn's outbound effects (the
 ///    reject/relay/setup-timeout paths all answer through effects).
 ///  - no a-leg `Cancel` CDR event: on CANCEL the txn layer answers 487

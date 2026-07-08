@@ -175,10 +175,12 @@ fn mscml_reject_status(code: u16) -> (u16, &'static str) {
 /// This path is the whole point of newkahneed-027. The parked media leg is an
 /// **unadopted** `Media` leg, so core `confirm-dialog` (correctly, since the fix)
 /// does NOT mark the a-leg `Confirmed` off its 200 — the a-leg is still `Early`.
-/// `BeginTermination` therefore treats it as an unanswered a-leg (the rule already
-/// sent the 4xx → `ByeDisposition::None`) and BYEs only the confirmed media leg.
-/// No un-confirm repair (a wire-silent `TerminateLeg{Rejected}` on the a-leg) is
-/// needed — the generic layer keeps the a-side honest.
+/// `BeginTermination` sees the 4xx among the turn's effects and resolves the
+/// a-leg (`ByeDisposition::None` + `Terminated`, newkahneed-028) — no BYE toward
+/// the caller, and no spurious ADR-0022 503 on a later turn (e.g. a crossing BYE
+/// from the media leg). No un-confirm repair (a wire-silent
+/// `TerminateLeg{Rejected}` on the a-leg) is needed — the generic layer keeps
+/// the a-side honest.
 fn on_mscml_failed(ctx: &RuleContext) -> Option<RuleHandleResult> {
     media_leg_id(&ctx.call)?; // fire only while a parked media leg exists
     let req = ctx.request()?;

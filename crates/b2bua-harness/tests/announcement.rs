@@ -10,10 +10,12 @@ use std::sync::Arc;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
 use sip_message::message_helpers::get_header;
+use sip_message::parser::custom::CustomParser;
+use sip_message::{SipMessage, SipParser};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const MRF_SDP: &str = "v=0\r\no=mrf 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
@@ -191,6 +193,106 @@ async fn announcement_clip_fails_after_answer_rejects_caller_without_bye() {
 
     let _ = h.finish().await;
     assert_eq!(b2bua.active_calls(), 0, "the call reaps — no stranded a-leg BYE");
+}
+
+// ── Post-reject crossing BYE (newkahneed-028 regression). Same reject-teardown
+// as above, but the MRF's own BYE crosses the b2bua's teardown BYE on the wire.
+// Before the fix, the reject turn left the a-leg unresolved (`RelayFailureToALeg`/
+// `RespondToALeg` are wire-only, and `BeginTermination`'s a-leg arm only set
+// `ByeDisposition::None`), so the turn consuming the crossing BYE reached
+// `→ terminated` with a "still-unanswered" a-leg and the ADR-0022 invariant
+// re-answered a spurious 503 (INVITE) — a second final on an already-rejected
+// INVITE. Now `BeginTermination` resolves the just-answered a-leg to
+// `Terminated`, and the invariant stays a pure safety net.
+//
+// Two assertion lanes, deliberately:
+//  - the CDR must NOT carry the `unanswered_at_termination` 503 synthesis —
+//    this is the discriminating check (pre-fix it fails);
+//  - the wire must show exactly one final toward the caller. In this compact
+//    flow the a-leg INVITE server txn is still `Completed` when the spurious
+//    503 fires, so sip-txn's idempotence backstop absorbs the wire copy — but
+//    in a long early-media flow (RBT max-duration; the txn swept at ~193 s)
+//    `do_send_response` falls through to a RAW send and the 503 reaches the
+//    caller, which is how newkahsip observed it. State must be right, not
+//    backstop-dependent.
+#[tokio::test]
+async fn crossing_bye_after_reject_gets_200_and_no_second_final_to_caller() {
+    let h = Harness::with_transit_delay("announcement-reject-crossing-bye", 1);
+    let alice = h.agent("alice", "127.0.0.1:5905").await;
+    let mrf = h.agent("mrf", &format!("127.0.0.1:{MRF_PORT}")).await;
+    let b2bua = B2buaSut::builder(announcement_decision())
+        .services(vec![announcement::service()])
+        .start(&h, "b2bua", "127.0.0.1:5925")
+        .await;
+
+    let mut call = alice.invite(&mrf).with_sdp(OFFER).through(b2bua.addr).send().await;
+
+    // MRF answers the media leg; alice gets early media; the MSCML <play> flies.
+    let mut mrf_uas = mrf.receive("INVITE").await;
+    mrf_uas.respond(200, "OK").with_sdp(MRF_SDP).await;
+    mrf.receive("ACK").await;
+    let mut mrf_dialog = mrf_uas.dialog();
+    call.expect(183).await;
+    mrf.receive("INFO").await.respond(200, "OK").await;
+
+    // The MRF reports the clip FAILED → the service rejects the caller with a
+    // 480 on its early dialog and begins termination (BYE toward the media leg).
+    let fail_body = String::from_utf8(announcement::mscml::build_response(480)).unwrap();
+    let mut failed_info = mrf_dialog
+        .send_request(InDialogMethod::Info)
+        .with_header("Content-Type", "application/mediaservercontrol+xml")
+        .with_sdp(&fail_body)
+        .send()
+        .await;
+    failed_info.expect(200).await;
+    let rejected = call.expect(480).await;
+    assert_eq!(rejected.status, 480, "caller rejected with the announced 4xx");
+
+    // The MRF hangs up on its own — its BYE crosses the b2bua's teardown BYE
+    // (already in flight toward the MRF) on the wire.
+    let mut mrf_bye = mrf_dialog.bye().await;
+    // The b2bua's teardown BYE is confirmed as usual…
+    mrf.receive("BYE").await.respond(200, "OK").await;
+    // …and the b2bua answers the crossing BYE 200 (`resolve-cross-bye`).
+    mrf_bye.expect(200).await;
+
+    // Drain the async teardown (reap + buffered CDR write), then finish (RFC
+    // audit) + the leak oracle.
+    settle_until(|| b2bua.active_calls() == 0 && b2bua.cdr_records().len() == 1).await;
+    let alice_addr = alice.addr();
+    let report = h.finish().await;
+
+    // THE regression (discriminating check): the a-leg was resolved by its
+    // just-sent 4xx, so the ADR-0022 `unanswered_at_termination` 503 synthesis
+    // must not fire — not into the CDR, and not toward the wire.
+    let cdrs = b2bua.cdr_records();
+    assert_eq!(cdrs.len(), 1, "exactly one CDR");
+    let spurious: Vec<_> = cdrs[0]
+        .events
+        .iter()
+        .filter(|e| e.reason.as_deref() == Some("unanswered_at_termination"))
+        .collect();
+    assert!(
+        spurious.is_empty(),
+        "the rejected a-leg is resolved — no ADR-0022 503 synthesis: {spurious:?}",
+    );
+
+    // And the wire: exactly one final toward alice — her 480, no second final.
+    let finals_to_alice: Vec<u16> = report
+        .entries()
+        .iter()
+        .filter(|e| e.to == alice_addr)
+        .filter_map(|e| match CustomParser::new().parse(&e.raw) {
+            Ok(SipMessage::Response(r)) if r.status >= 200 => Some(r.status),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        finals_to_alice,
+        vec![480],
+        "exactly one final (the 480) toward the caller — no spurious second final",
+    );
+    b2bua.assert_fully_reaped();
 }
 
 // ── A-side hangup mid-announcement: alice CANCELs before the bridge → ordinary
