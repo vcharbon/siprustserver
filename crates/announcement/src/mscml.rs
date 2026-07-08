@@ -49,6 +49,14 @@ pub fn is_success_response(body: &[u8]) -> bool {
     matches!(parse_response_code(body), Some(c) if (200..300).contains(&c))
 }
 
+/// Whether `body` is an MSCML `<response>` reporting a failed playback (a code
+/// that is present but not 2xx — e.g. a max-duration/no-answer abort). Distinct
+/// from "not an MSCML response" (no code), so the failure rule fires only on a
+/// genuine negative `<response>`.
+pub fn is_failure_response(body: &[u8]) -> bool {
+    matches!(parse_response_code(body), Some(c) if !(200..300).contains(&c))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +82,14 @@ mod tests {
         assert!(!is_success_response(&build_response(420)));
         assert!(!is_success_response(b"not xml"));
         assert!(!is_success_response(b"<response request=\"play\"/>")); // no code
+    }
+
+    #[test]
+    fn failure_is_present_non_2xx() {
+        assert!(is_failure_response(&build_response(480)));
+        assert!(is_failure_response(&build_response(420)));
+        assert!(!is_failure_response(&build_response(200)));
+        assert!(!is_failure_response(b"not xml")); // no code ⇒ not a failure report
+        assert!(!is_failure_response(b"<response request=\"play\"/>")); // no code
     }
 }
