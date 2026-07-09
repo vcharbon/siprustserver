@@ -1767,7 +1767,9 @@ impl<'a> ActionExecutor<'a> {
     /// funnel own the failure paths). Steps: mint/adopt A2, OVERWRITE the a-dialog
     /// `local_tag` to A2 (the MRF `ConfirmDialog` / an earlier 18x pinned A1),
     /// relay the final/SDP under A2, confirm the a-leg, and cache the answer SDP
-    /// for a §13.3.1.4 un-ACKed-2xx retransmit (mirrors [`Self::confirm_dialog`]).
+    /// for a §13.3.1.4 un-ACKed-2xx retransmit (mirrors [`Self::confirm_dialog`],
+    /// including the B2BUA's own `Allow`/`Supported` advert on the 2xx — a
+    /// `header_updates` entry naming either overrides it).
     ///
     /// The sip-txn layer only *stores* `uas_to_tag` from the first >100 response
     /// (the 183's A1) and never rewrites a later final's `to.tag`, so the `200`
@@ -1812,7 +1814,22 @@ impl<'a> ActionExecutor<'a> {
             .or_else(|| (!body.is_empty()).then(|| "application/sdp".to_string()));
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
-        let extra_headers = build_a_leg_response_headers(header_updates, &[]);
+        let mut extra_headers = build_a_leg_response_headers(header_updates, &[]);
+        // An a-facing INVITE 2xx carries the B2BUA's own Allow/Supported (RFC
+        // 3261 §13.2.1/§20.37), same as the confirm-dialog relay. A
+        // `header_updates` entry naming either owns it: a set value is kept
+        // verbatim, a removal keeps it absent (`build_a_leg_response_headers`
+        // already dropped it).
+        let service_owned: Vec<(&'static str, String)> = ["Allow", "Supported"]
+            .into_iter()
+            .filter_map(|name| {
+                header_updates
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                    .map(|(_, v)| (name, v.clone().unwrap_or_default()))
+            })
+            .collect();
+        relay::stamp_a_facing_invite_advert(&mut extra_headers, &service_owned);
         fx.outbound.push(relay::response_to_a_leg(
             &a_invite,
             status,

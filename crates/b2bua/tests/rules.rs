@@ -1321,6 +1321,96 @@ mod answer_a_leg_new_dialog {
             "the early dialog A1 is left untouched",
         );
     }
+
+    // The fork-confirm 2xx is an a-facing final answer like confirm-dialog's:
+    // it carries the B2BUA's own Allow/Supported capability advert by default
+    // (RFC 3261 §13.2.1/§20.37), so a service need not duplicate core policy
+    // via header_updates (newkahneed-026).
+    #[test]
+    fn stamps_the_b2bua_capability_advert_by_default() {
+        let call = call_with_early_a_dialog("A1early");
+        let event = some_event();
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        let result = exec_on(
+            &call,
+            &event,
+            "b-1",
+            &config,
+            &id_gen,
+            &[RuleAction::AnswerALegNewDialog {
+                status: 200,
+                reason: "OK".into(),
+                body: vec![],
+                content_type: None,
+                to_tag: None,
+                header_updates: vec![],
+            }],
+        );
+        match &result.effects.outbound[0].body {
+            OutboundBody::Response(r) => {
+                assert_eq!(
+                    get_header(&r.headers, "allow"),
+                    Some(sip_message::generators::B2BUA_ALLOW),
+                );
+                assert_eq!(
+                    get_header(&r.headers, "supported"),
+                    Some(sip_message::generators::B2BUA_SUPPORTED),
+                );
+                for name in ["allow", "supported"] {
+                    let n = r.headers.iter().filter(|h| h.name.eq_ignore_ascii_case(name)).count();
+                    assert_eq!(n, 1, "exactly one {name} header (no §7.3.1 duplicate)");
+                }
+            }
+            _ => panic!("expected an outbound response"),
+        }
+    }
+
+    // A header_updates entry naming Allow/Supported owns it: a set value
+    // replaces the default verbatim (exactly once), a removal keeps the header
+    // absent — the pre-026 downstream workaround stays valid.
+    #[test]
+    fn header_updates_override_the_capability_advert() {
+        let call = call_with_early_a_dialog("A1early");
+        let event = some_event();
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        let result = exec_on(
+            &call,
+            &event,
+            "b-1",
+            &config,
+            &id_gen,
+            &[RuleAction::AnswerALegNewDialog {
+                status: 200,
+                reason: "OK".into(),
+                body: vec![],
+                content_type: None,
+                to_tag: None,
+                header_updates: vec![
+                    ("Supported".into(), Some("timer".into())),
+                    ("Allow".into(), None),
+                ],
+            }],
+        );
+        match &result.effects.outbound[0].body {
+            OutboundBody::Response(r) => {
+                assert_eq!(
+                    get_header(&r.headers, "supported"),
+                    Some("timer"),
+                    "a set value replaces the default verbatim"
+                );
+                let n = r.headers.iter().filter(|h| h.name.eq_ignore_ascii_case("supported")).count();
+                assert_eq!(n, 1, "the service value is not duplicated by the default");
+                assert_eq!(
+                    get_header(&r.headers, "allow"),
+                    None,
+                    "an explicit removal keeps the header absent"
+                );
+            }
+            _ => panic!("expected an outbound response"),
+        }
+    }
 }
 
 // ── AckLeg body + Content-Type (RFC 3261 §13.2.2.4 delayed-offer answer) ─────
