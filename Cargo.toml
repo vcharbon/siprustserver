@@ -35,6 +35,7 @@ members = [
     "crates/e2e-cli",
     "crates/e2e-web",
     "crates/loadgen",
+    "crates/sip-pcap",
     "xtask",
 ]
 

@@ -3865,6 +3865,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sip-pcap"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "sip-message",
+]
+
+[[package]]
 name = "sip-proxy"
 version = "0.1.0"
 dependencies = [
