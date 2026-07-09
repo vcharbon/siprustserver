@@ -1268,6 +1268,14 @@ impl CrossMessageAuditRule for SerialRegisterRule {
 /// A new in-dialog INVITE MUST NOT be sent while a prior INVITE transaction is
 /// still outstanding (no final received). A real peer 491s the second; the test
 /// UA answers both. Regression-only tripwire (also covers RFC3261-MUST-084).
+///
+/// In-progress tracking keys on the ORDERED tag pair — (dialog id, requester
+/// orientation) — NOT the unordered §12 dialog id: the merged per-dialog slice
+/// gathers both From/To orientations of a dialog, and a forwarding slot (the
+/// LB proxy's single bind) relays BOTH parties' crossing re-INVITEs, one hop
+/// per direction of travel. Glare — one INVITE in progress per direction — is
+/// legal (§14.1/§14.2, the peers 491/answer per leg); only a *same-direction*
+/// overlap is one UAC violating §14.1 (newkahneed-030).
 pub struct NoReInviteWhileInviteInProgressRule;
 
 impl CrossMessageAuditRule for NoReInviteWhileInviteInProgressRule {
@@ -1296,18 +1304,16 @@ impl CrossMessageAuditRule for NoReInviteWhileInviteInProgressRule {
                             let ft = from_tag(msg).unwrap_or("");
                             let tt = to_tag(msg).unwrap_or("");
                             if !tt.is_empty() && !ft.is_empty() {
+                                // ORDERED key: same-direction overlap only —
+                                // the reversed orientation is the OTHER
+                                // party's request (relayed glare), not this
+                                // requester's (see the rule doc).
                                 let d_key = dialog_key(cid, ft, tt);
-                                let d_key_alt = dialog_key(cid, tt, ft);
-                                let in_a = in_progress_by_dialog.get(&d_key);
-                                let in_b = in_progress_by_dialog.get(&d_key_alt);
+                                let in_flight = in_progress_by_dialog.get(&d_key);
                                 let is_retransmit =
-                                    in_a.map(|s| s.contains(&branch)).unwrap_or(false)
-                                        || in_b.map(|s| s.contains(&branch)).unwrap_or(false);
-                                let prior = in_a
-                                    .and_then(|s| s.iter().find(|b| *b != &branch))
-                                    .or_else(|| {
-                                        in_b.and_then(|s| s.iter().find(|b| *b != &branch))
-                                    });
+                                    in_flight.map(|s| s.contains(&branch)).unwrap_or(false);
+                                let prior =
+                                    in_flight.and_then(|s| s.iter().find(|b| *b != &branch));
                                 if !is_retransmit {
                                     if let Some(prior_branch) = prior {
                                         out.push((
@@ -1352,19 +1358,6 @@ impl CrossMessageAuditRule for NoReInviteWhileInviteInProgressRule {
                             };
                             if let Some(s) = in_progress_by_dialog.get_mut(&d_key) {
                                 s.remove(&branch);
-                            }
-                            // Migrate the From-only entry to the full dialog key
-                            // once the dialog identifier is complete.
-                            let cid = call_id(msg);
-                            let ft = from_tag(msg).unwrap_or("");
-                            let tt = to_tag(msg).unwrap_or("");
-                            if !ft.is_empty() && !tt.is_empty() {
-                                let full_key = dialog_key(cid, ft, tt);
-                                if full_key != d_key {
-                                    let alt = dialog_key(cid, tt, ft);
-                                    in_progress_by_dialog.entry(full_key).or_default();
-                                    in_progress_by_dialog.entry(alt).or_default();
-                                }
                             }
                         }
                         _ => {}
@@ -2590,6 +2583,38 @@ mod tests {
         let f = NoReInviteWhileInviteInProgressRule.check(&evs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].1.contains("still"), "{}", f[0].1);
+    }
+
+    #[test]
+    fn no_reinvite_in_progress_clean_on_relayed_crossing_glare() {
+        // A forwarding slot (the LB proxy's single bind) relays BOTH parties'
+        // crossing re-INVITEs — one hop per direction of travel. In the merged
+        // §12 slice these are two requesters with one INVITE in progress each
+        // (legal §14.1/§14.2 glare), not one UAC overlapping (newkahneed-030).
+        let evs = vec![
+            sent("proxy", req("INVITE", "z9hG4bK-a1", 2, A, B, "at", Some("bt"), ""), "127.0.0.1:5070", 0),
+            sent("proxy", req("INVITE", "z9hG4bK-b1", 2, B, A, "bt", Some("at"), ""), "127.0.0.1:5060", 1),
+            recv("proxy", resp(491, 2, "INVITE", A, B, "at", "bt", "z9hG4bK-a1", ""), "127.0.0.1:5070", 2),
+            recv("proxy", resp(491, 2, "INVITE", B, A, "bt", "at", "z9hG4bK-b1", ""), "127.0.0.1:5060", 3),
+        ];
+        let f = NoReInviteWhileInviteInProgressRule.check(&evs);
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn no_reinvite_in_progress_same_direction_overlap_flags_amid_reversed_traffic() {
+        // Ordered keying must not blind the rule: a genuinely overlapping
+        // same-direction pair still flags (exactly once) with the other
+        // party's reversed re-INVITE interleaved in the same merged slice.
+        let evs = vec![
+            sent("proxy", req("INVITE", "z9hG4bK-b1", 2, B, A, "bt", Some("at"), ""), "127.0.0.1:5060", 0),
+            sent("proxy", req("INVITE", "z9hG4bK-a1", 2, A, B, "at", Some("bt"), ""), "127.0.0.1:5070", 1),
+            sent("proxy", req("INVITE", "z9hG4bK-a2", 3, A, B, "at", Some("bt"), ""), "127.0.0.1:5070", 2),
+        ];
+        let f = NoReInviteWhileInviteInProgressRule.check(&evs);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].1.contains("z9hG4bK-a1"), "{}", f[0].1);
+        assert!(f[0].1.contains("z9hG4bK-a2"), "{}", f[0].1);
     }
 
     // ---- proxy100WithinT100ms [advisory] ---------------------------------
