@@ -51,7 +51,8 @@ pub use class::{CallOutcome, ResultClass};
 pub use ctx::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp};
 pub use driver::{serve_metrics, CallConfig, CallTuning, Driver, DriverCfg, MixEntry, MuxTransport};
 pub use mux::{
-    prefix_leg_picker, CallRouting, Correlation, EndpointSpec, LegInfo, LegPicker, MuxCore, Role,
+    labelled_prefix_leg_picker, prefix_leg_picker, CallRouting, Correlation, EndpointSpec,
+    LegInfo, LegPicker, MuxCore, Role,
 };
 pub use rate::{Governor, RateHandle};
 pub use report::{Reporter, ReporterCfg};
@@ -62,7 +63,9 @@ pub use e2e_model::{
     Canaries, CheckSummaryRow, CheckpointRow, CountRow, LatencyRow, LoadRunIndex, LoadRunMeta,
     SampleGroup,
 };
-pub use scenarios::{LoadScenario, ScenarioId, ScenarioInputs, ShapeDescriptor, ShapeRegistry};
+pub use scenarios::{
+    LegSpec, LoadScenario, ScenarioId, ScenarioInputs, ShapeDescriptor, ShapeRegistry,
+};
 pub use scope::CallScope;
 // The environment axis shared with the e2e framework: the egress policy a run's
 // `CallConfig`/`CallEnv` carries (authored via `e2e_model::EndpointConfig.egress`,

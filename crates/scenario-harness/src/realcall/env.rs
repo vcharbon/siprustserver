@@ -80,6 +80,13 @@ pub struct CallEnv<'a> {
     pub bob2: Option<&'a Agent>,
     /// The transfer target leg (REFER scenario only).
     pub charlie: Option<&'a Agent>,
+    /// Every bound callee leg `(role, agent)` in declaration order — the OPEN
+    /// generalization of the fixed bob/bob2/charlie trio, populated by the load
+    /// driver from the shape's named `LegSpec`s (an open-registry role such as
+    /// `"mrf"` lives only here). [`Self::callee`] / [`Self::callee_agent`]
+    /// resolve a role in this list first and fall back to the named fields, so
+    /// a surface that leaves it empty (the functional gate) is unchanged.
+    pub callees: Vec<(&'a str, &'a Agent)>,
     /// The address the initial INVITE routes *through* — the SUT (in-process
     /// b2bua addr, or the real front-proxy VIP).
     pub via: SocketAddr,
@@ -162,6 +169,7 @@ impl<'a> CallEnv<'a> {
             bob,
             bob2: None,
             charlie,
+            callees: Vec::new(),
             via,
             // The functional gate keeps the historic plain relayed-header stamp
             // (value = the bare token).
@@ -195,21 +203,40 @@ impl<'a> CallEnv<'a> {
     /// Panics on an unknown role or an unbound charlie (like the e2e resolver
     /// panics on a role missing from the Endpoint config).
     pub fn callee(&self, role: &str) -> CalleeTarget {
-        let addr = match role {
-            "bob" => self.bob.addr(),
-            "bob2" => self.bob2.expect("CallEnv: callee role \"bob2\" is not bound").addr(),
-            "charlie" => {
-                self.charlie.expect("CallEnv: callee role \"charlie\" is not bound").addr()
-            }
-            other => panic!("CallEnv has no agent for callee role {other:?}"),
-        };
+        let addr = self.callee_agent(role).addr();
         CalleeTarget { role: role.to_string(), uri: self.egress.callee_uri(role, addr), addr }
+    }
+
+    /// The bound agent behind a logical callee **role** — the receiver a load
+    /// body drives for that leg. Resolves the open [`Self::callees`] list
+    /// first (a named-`LegSpec` role such as `"mrf"`), then the historic
+    /// bob/bob2/charlie fields. Panics on an unbound role — a scenario wiring
+    /// bug, caught loudly.
+    pub fn callee_agent(&self, role: &str) -> &'a Agent {
+        if let Some((_, agent)) = self.callees.iter().find(|(r, _)| *r == role) {
+            return agent;
+        }
+        match role {
+            "bob" => self.bob,
+            "bob2" => self.bob2.expect("CallEnv: callee role \"bob2\" is not bound"),
+            "charlie" => self.charlie.expect("CallEnv: callee role \"charlie\" is not bound"),
+            other => panic!("CallEnv has no agent for callee role {other:?}"),
+        }
     }
 
     /// Bind the second callee receiver (`bob2`) — the rerouting scenarios'
     /// failover target. Builder-style so `for_functional` call sites stay put.
     pub fn with_bob2(mut self, bob2: &'a Agent) -> Self {
         self.bob2 = Some(bob2);
+        self
+    }
+
+    /// Bind an additional NAMED callee leg (an open-registry role beyond the
+    /// bob/bob2/charlie trio, e.g. `"mrf"`) — resolved by [`Self::callee`] /
+    /// [`Self::callee_agent`]. Builder-style, for functional surfaces; the load
+    /// driver populates [`Self::callees`] wholesale from the shape's `LegSpec`s.
+    pub fn with_callee(mut self, role: &'a str, agent: &'a Agent) -> Self {
+        self.callees.push((role, agent));
         self
     }
 

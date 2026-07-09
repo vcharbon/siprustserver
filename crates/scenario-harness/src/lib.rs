@@ -59,7 +59,7 @@ pub use agent::{
 // Multi-callee routing: several logical agents on one bound socket, demuxed by
 // the shared R-URI leg-picker (the transfer Bob/Charlie/David fabric).
 pub use callee_group::{CalleeGroup, CalleeGroupBuilder};
-pub use legpick::{prefix_leg_picker, LegInfo, LegPicker};
+pub use legpick::{labelled_prefix_leg_picker, prefix_leg_picker, LegInfo, LegPicker};
 // The Send agent factory for the load-test driver (`crates/loadgen`), plus the
 // dependency-light check-verdict projection a sampled page renders.
 pub use loadbind::{AgentBinder, CheckNote};

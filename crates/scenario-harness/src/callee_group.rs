@@ -44,7 +44,7 @@ use sip_net::{
 };
 
 use crate::agent::{decide_rr_fold, Agent, Harness};
-use crate::legpick::{prefix_leg_picker, LegInfo};
+use crate::legpick::{labelled_prefix_leg_picker, LegInfo};
 
 /// A picker that resolves a leg to an owning logical-agent **name**, or `None`
 /// for a no-route leg (dropped, never mis-delivered).
@@ -293,19 +293,14 @@ impl<'h> CalleeGroupBuilder<'h> {
             .unwrap_or_else(|e| panic!("callee-group bind {} failed: {e}", self.addr));
         let shared: Arc<dyn UdpEndpoint> = Arc::from(ep);
 
-        // Longest-prefix picker over the members, mapping the matched prefix back
-        // to its agent name.
-        let prefix_to_name: HashMap<String, String> =
-            self.members.iter().map(|(n, p)| (p.clone(), n.clone())).collect();
-        let prefixes: Vec<String> = self.members.iter().map(|(_, p)| p.clone()).collect();
-        let base = prefix_leg_picker(prefixes);
+        // Longest-prefix picker over the members, each prefix labelled with its
+        // agent name (the shared `legpick` primitive).
+        let base = labelled_prefix_leg_picker(
+            self.members.iter().map(|(n, p)| (p.clone(), n.clone())),
+        );
         let pick: OwnerPicker = Box::new(move |leg: &LegInfo| {
             let matched = base(leg);
-            if matched.is_empty() {
-                None
-            } else {
-                prefix_to_name.get(&matched).cloned()
-            }
+            (!matched.is_empty()).then_some(matched)
         });
 
         let router = Arc::new(Mutex::new(Router {
