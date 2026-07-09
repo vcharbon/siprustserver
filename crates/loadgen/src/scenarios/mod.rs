@@ -29,4 +29,4 @@ pub use scenario_harness::realcall::scenarios::{
 
 // The unified shape registry + the per-run construction inputs (SUT auth data
 // such as the refer key), declared once in the shared axis model.
-pub use e2e_model::{ScenarioInputs, ShapeDescriptor, ShapeRegistry};
+pub use e2e_model::{LegSpec, ScenarioInputs, ShapeDescriptor, ShapeRegistry};

@@ -3,8 +3,9 @@
 //! surfaces:
 //!
 //!   - the **load** surface (`crates/loadgen`) consumes the descriptor's
-//!     load-side attributes (`needs_charlie` / `needs_bob2` / `emergency` /
-//!     mix weights) and its optional [`RealCallScenario`] body factory;
+//!     load-side attributes (the named callee [`LegSpec`]s — or their
+//!     `needs_charlie` / `needs_bob2` sugar — plus `emergency` / mix weights)
+//!     and its optional [`RealCallScenario`] body factory;
 //!   - the **functional** surface (`crates/e2e-core`) ATTACHES its `!Send`
 //!     `CallflowShape` bodies to the same descriptors **by id** (the body
 //!     drives an `InfraRuntime`, which cannot live in this dependency-light
@@ -58,6 +59,46 @@ impl Default for ScenarioInputs {
 /// bodies ignore the inputs).
 pub type LoadFactory = Arc<dyn Fn(&ScenarioInputs) -> Arc<dyn RealCallScenario> + Send + Sync>;
 
+/// One **named callee leg** of a load shape: which receiver the load driver
+/// binds on the shared UAS socket and which R-URI user-part prefixes select it
+/// there. Generalizes the closed `needs_bob2`/`needs_charlie` label list — an
+/// open-registry shape's legs arrive under number-plan digits (`+041…`,
+/// `0491…`), never under the agent name, so label and prefix must be declared
+/// independently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LegSpec {
+    /// Agent name the load body binds/choreographs against (`"bob"`, `"mrf"`,
+    /// …) — the label the driver's leg picker returns and the `CallEnv` callee
+    /// role key.
+    pub role: &'static str,
+    /// R-URI user-part prefixes that select this leg on the shared UAS socket.
+    /// Longest match wins across ALL legs' prefixes (a transfer target
+    /// `0650033033231089055` must beat a sibling `0650033033` — the same rule
+    /// `callee_group` applies), and several prefixes may select one leg (a
+    /// callee reachable under more than one number form).
+    pub ruri_prefixes: &'static [&'static str],
+}
+
+/// The boolean sugar's expansion targets: the historic hardcoded callee labels,
+/// role == single prefix == label, so a pre-legs shape is byte-identical on the
+/// wire.
+const LEG_BOB: LegSpec = LegSpec { role: "bob", ruri_prefixes: &["bob"] };
+const LEG_BOB2: LegSpec = LegSpec { role: "bob2", ruri_prefixes: &["bob2"] };
+const LEG_CHARLIE: LegSpec = LegSpec { role: "charlie", ruri_prefixes: &["charlie"] };
+
+impl LegSpec {
+    /// The historic `[bob(, bob2)(, charlie)]` expansion of the
+    /// `needs_bob2`/`needs_charlie` sugar, in the load-bearing bind order.
+    pub const fn historic(needs_bob2: bool, needs_charlie: bool) -> &'static [LegSpec] {
+        match (needs_bob2, needs_charlie) {
+            (false, false) => &[LEG_BOB],
+            (true, false) => &[LEG_BOB, LEG_BOB2],
+            (false, true) => &[LEG_BOB, LEG_CHARLIE],
+            (true, true) => &[LEG_BOB, LEG_BOB2, LEG_CHARLIE],
+        }
+    }
+}
+
 /// The ONE declaration of a Callflow shape (see the module docs): its stable
 /// **id** (the Test-case/campaign selector, the load report/metrics label and
 /// the functional-body attachment key — one id space), its load-time metadata
@@ -82,11 +123,19 @@ pub struct ShapeDescriptor {
     /// Test case's open `extras` map by the editor projection). `None` = no
     /// declared params.
     pub params_schema: Option<serde_json::Value>,
+    /// Load: this shape's **named callee legs** ([`LegSpec`]: agent role +
+    /// R-URI user-part prefixes) on the shared UAS socket, in the load-bearing
+    /// bind order. Empty (the default) = derive from the
+    /// `needs_bob2`/`needs_charlie` sugar — consume via
+    /// [`callee_legs`](Self::callee_legs), never this field directly.
+    pub legs: &'static [LegSpec],
     /// Load: this shape needs a third (transfer-target) callee leg bound.
+    /// Pure sugar over [`legs`](Self::legs) (ignored when `legs` is declared).
     pub needs_charlie: bool,
     /// Load: this shape needs a SECOND callee receiver (`bob2`) sharing the
     /// callee socket — the rerouting shapes' failover target, demuxed by the
-    /// driver's R-URI-user leg picker.
+    /// driver's R-URI-user leg picker. Pure sugar over [`legs`](Self::legs)
+    /// (ignored when `legs` is declared).
     pub needs_bob2: bool,
     /// Load: this call is an emergency (`Resource-Priority: esnet.0`) — the SUT
     /// force-admits it under overload, so it must never be shed.
@@ -106,6 +155,7 @@ impl std::fmt::Debug for ShapeDescriptor {
             .field("id", &self.id)
             .field("anchors", &self.anchors)
             .field("required_input", &self.required_input)
+            .field("legs", &self.legs)
             .field("needs_charlie", &self.needs_charlie)
             .field("needs_bob2", &self.needs_bob2)
             .field("emergency", &self.emergency)
@@ -125,6 +175,7 @@ impl ShapeDescriptor {
             anchors: &[],
             required_input: &[],
             params_schema: None,
+            legs: &[],
             needs_charlie: false,
             needs_bob2: false,
             emergency: false,
@@ -147,6 +198,26 @@ impl ShapeDescriptor {
     pub fn params_schema(mut self, schema: serde_json::Value) -> Self {
         self.params_schema = Some(schema);
         self
+    }
+
+    /// Declare the shape's named callee legs (role + R-URI user-part prefixes,
+    /// in bind order) — the open form the boolean sugar expands to. Overrides
+    /// `needs_bob2`/`needs_charlie`.
+    pub fn legs(mut self, legs: &'static [LegSpec]) -> Self {
+        self.legs = legs;
+        self
+    }
+
+    /// The effective callee-leg declaration the load driver binds and demuxes
+    /// from: [`legs`](Self::legs) verbatim when declared, else the historic
+    /// `[bob(, bob2)(, charlie)]` expansion of the boolean sugar (role ==
+    /// single prefix == label), so every pre-existing shape is byte-identical
+    /// on the wire.
+    pub fn callee_legs(&self) -> &'static [LegSpec] {
+        if !self.legs.is_empty() {
+            return self.legs;
+        }
+        LegSpec::historic(self.needs_bob2, self.needs_charlie)
     }
 
     pub fn needs_charlie(mut self) -> Self {
@@ -484,6 +555,44 @@ mod tests {
         assert_eq!(reg.load_scenario("refer", &inputs).unwrap().id(), "refer");
         assert!(reg.load_scenario("basic-call", &inputs).is_none(), "functional-only: no body");
         assert!(reg.load_scenario("nope", &inputs).is_none());
+    }
+
+    /// The boolean sugar expands to the historic hardcoded label list (role ==
+    /// single prefix == label, bob → bob2 → charlie bind order), so every
+    /// pre-legs shape drives the wire byte-identically.
+    #[test]
+    fn callee_legs_boolean_sugar_expands_to_the_historic_labels() {
+        let flat = |legs: &[LegSpec]| -> Vec<(&str, Vec<&str>)> {
+            legs.iter().map(|l| (l.role, l.ruri_prefixes.to_vec())).collect()
+        };
+        let with = |d: ShapeDescriptor| flat(d.callee_legs());
+
+        assert_eq!(with(ShapeDescriptor::new("s")), vec![("bob", vec!["bob"])]);
+        assert_eq!(
+            with(ShapeDescriptor::new("s").needs_bob2()),
+            vec![("bob", vec!["bob"]), ("bob2", vec!["bob2"])]
+        );
+        assert_eq!(
+            with(ShapeDescriptor::new("s").needs_charlie()),
+            vec![("bob", vec!["bob"]), ("charlie", vec!["charlie"])]
+        );
+        assert_eq!(
+            with(ShapeDescriptor::new("s").needs_bob2().needs_charlie()),
+            vec![("bob", vec!["bob"]), ("bob2", vec!["bob2"]), ("charlie", vec!["charlie"])]
+        );
+    }
+
+    /// An explicit `legs` declaration wins over the boolean sugar — the open
+    /// form a third-party (newkah) shape uses: roles addressed on the wire by
+    /// number-plan prefixes, multiple prefixes per leg.
+    #[test]
+    fn explicit_legs_override_the_boolean_sugar() {
+        const NK_LEGS: &[LegSpec] = &[
+            LegSpec { role: "bob", ruri_prefixes: &["+04", "0590"] },
+            LegSpec { role: "mrf", ruri_prefixes: &["0491"] },
+        ];
+        let d = ShapeDescriptor::new("nk_mrf_rbt").legs(NK_LEGS).needs_charlie();
+        assert_eq!(d.callee_legs(), NK_LEGS, "declared legs win; the sugar is ignored");
     }
 
     #[test]

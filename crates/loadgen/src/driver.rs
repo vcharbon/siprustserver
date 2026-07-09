@@ -14,9 +14,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use e2e_model::{ScenarioInputs, ShapeDescriptor, ShapeRegistry};
+use e2e_model::{LegSpec, ScenarioInputs, ShapeDescriptor, ShapeRegistry};
 use futures::FutureExt;
-use scenario_harness::{AgentBinder, EgressPolicy};
+use scenario_harness::{Agent, AgentBinder, EgressPolicy};
 use sip_clock::Clock;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -24,7 +24,7 @@ use crate::case::LoadCase;
 use crate::chaos::{ChaosLog, ChaosTag};
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
-use crate::mux::{prefix_leg_picker, CallRouting, Correlation, MuxCore};
+use crate::mux::{labelled_prefix_leg_picker, CallRouting, Correlation, MuxCore};
 use crate::rate::{Governor, RateHandle};
 use crate::report::{RenderedSample, Reporter};
 use crate::scenarios::LoadScenario;
@@ -123,11 +123,11 @@ pub struct MixEntry {
     pub scenario: Arc<dyn LoadScenario>,
     pub weight: f64,
     pub case: Option<Arc<LoadCase>>,
-    /// Bind a third (transfer-target) callee leg for this shape's calls.
-    pub needs_charlie: bool,
-    /// Bind a SECOND callee receiver (`bob2`) sharing the callee socket,
-    /// demuxed by the R-URI-user leg picker (the rerouting shapes).
-    pub needs_bob2: bool,
+    /// The callee legs bound for this shape's calls
+    /// ([`ShapeDescriptor::callee_legs`]): each leg's agent-name **role** plus
+    /// the R-URI user-part **prefixes** that demux it on the shared UAS
+    /// socket, in the load-bearing bind order.
+    pub legs: &'static [LegSpec],
     /// Stamp `Resource-Priority: esnet.0` (the SUT force-admits under overload).
     pub emergency: bool,
     /// **Deferred-by-design auth adapter** (see
@@ -145,8 +145,7 @@ impl From<(Arc<dyn LoadScenario>, f64)> for MixEntry {
             scenario,
             weight,
             case: None,
-            needs_charlie: false,
-            needs_bob2: false,
+            legs: LegSpec::historic(false, false),
             emergency: false,
             challenge_responder: None,
         }
@@ -168,8 +167,7 @@ impl MixEntry {
             scenario,
             weight,
             case: None,
-            needs_charlie: shape.needs_charlie,
-            needs_bob2: shape.needs_bob2,
+            legs: shape.callee_legs(),
             emergency: shape.emergency,
             challenge_responder: None,
         })
@@ -398,8 +396,7 @@ async fn run_one(
         id,
         scenario,
         case,
-        needs_charlie,
-        needs_bob2,
+        legs,
         emergency,
         challenge_responder,
         weight: _,
@@ -421,26 +418,28 @@ async fn run_one(
     // carries it onto every downstream leg, so every callee leg shares it. That
     // token is the FIRST tier — it selects the call INSTANCE (mux `by_token`).
     //
-    // Every callee-side leg (bob, the rerouting `bob2`, the transfer `charlie`)
-    // shares ONE socket (`transport.uas_addr`); the SECOND tier — WHICH leg of
-    // this instance — is the R-URI-prefix leg picker, since the egress addresses
-    // each callee by role (`sip:bob2@…`, `sip:charlie@…`: the reroute plan's
-    // `new_ruri`, the transfer's Refer-To user). So bob1/bob2/charlie need no
-    // per-leg socket — they are "distinguished by prefix".
+    // Every callee-side leg (the shape's named `LegSpec`s — historically bob,
+    // the rerouting `bob2`, the transfer `charlie`) shares ONE socket
+    // (`transport.uas_addr`); the SECOND tier — WHICH leg of this instance — is
+    // the R-URI-prefix leg picker, fed each leg's declared `ruri_prefixes`
+    // labelled with its role. The in-house shapes' legs arrive under their role
+    // (`sip:bob2@…`, `sip:charlie@…`: the reroute plan's `new_ruri`, the
+    // transfer's Refer-To user); an open-registry shape's legs arrive under
+    // number-plan digits (`+041…`, `0491…`) that its specs map back to the
+    // role. Either way no leg needs a per-leg socket — they are "distinguished
+    // by prefix".
     let token = mint_token();
-    let mut callee_labels: Vec<&str> = vec!["bob"];
-    if needs_bob2 {
-        callee_labels.push("bob2");
-    }
-    if needs_charlie {
-        callee_labels.push("charlie");
-    }
     let mut routing = CallRouting::new(token.clone());
-    for label in &callee_labels {
-        routing = routing.leg(transport.uas_addr, *label);
+    for leg in legs {
+        routing = routing.leg(transport.uas_addr, leg.role);
     }
-    if callee_labels.len() > 1 {
-        routing = routing.picker(transport.uas_addr, prefix_leg_picker(callee_labels.iter().copied()));
+    if legs.len() > 1 {
+        routing = routing.picker(
+            transport.uas_addr,
+            labelled_prefix_leg_picker(
+                legs.iter().flat_map(|leg| leg.ruri_prefixes.iter().map(|p| (*p, leg.role))),
+            ),
+        );
     }
 
     let record = reporter.should_record(id);
@@ -460,22 +459,23 @@ async fn run_one(
 
     let alice = binder.agent("alice", &transport.uac_addr.to_string()).await;
     // Bind order is load-bearing on the shared callee socket: the mux assigns
-    // receivers in leg-declaration order, so bind bob → bob2 → charlie to match
-    // the `callee_labels` order above. All callee legs share `uas_addr`; the
-    // prefix picker demuxes them (`transport.refer_addr` is retained as a bound
-    // endpoint for the CLI's alice/bob/charlie role set, but no longer carries a
-    // separate transfer socket).
-    let bob = binder.agent("bob", &transport.uas_addr.to_string()).await;
-    let bob2 = if needs_bob2 {
-        Some(binder.agent("bob2", &transport.uas_addr.to_string()).await)
-    } else {
-        None
-    };
-    let charlie = if needs_charlie {
-        Some(binder.agent("charlie", &transport.uas_addr.to_string()).await)
-    } else {
-        None
-    };
+    // receivers in leg-declaration order, so bind the callee agents exactly in
+    // `legs` order to match the `routing.leg` declarations above. All callee
+    // legs share `uas_addr`; the prefix picker demuxes them
+    // (`transport.refer_addr` is retained as a bound endpoint for the CLI's
+    // alice/bob/charlie role set, but no longer carries a separate transfer
+    // socket).
+    let mut callee_agents: Vec<(&'static str, Agent)> = Vec::with_capacity(legs.len());
+    for leg in legs {
+        callee_agents
+            .push((leg.role, binder.agent(leg.role, &transport.uas_addr.to_string()).await));
+    }
+    let agent_for =
+        |role: &str| callee_agents.iter().find(|(r, _)| *r == role).map(|(_, a)| a);
+    // The primary callee: the "bob" role (every derived spec — and every newkah
+    // shape — declares it), falling back to the first declared leg for an
+    // exotic spec that names its primary differently.
+    let bob = agent_for("bob").unwrap_or(&callee_agents[0].1);
 
     // A SAMPLED call collects message anchors (ADR-0019) so the attached Test
     // case's checks can resolve `<agent>.<anchor>` over its recorded trace;
@@ -487,9 +487,12 @@ async fn run_one(
 
     let env = CallEnv {
         alice: &alice,
-        bob: &bob,
-        bob2: bob2.as_ref(),
-        charlie: charlie.as_ref(),
+        bob,
+        bob2: agent_for("bob2"),
+        charlie: agent_for("charlie"),
+        // Every named leg, so a load body resolves ANY declared role
+        // (`callee_agent("mrf")`), not just the historic trio.
+        callees: callee_agents.iter().map(|(role, agent)| (*role, agent)).collect(),
         via: call.via,
         stamp: transport.correlation.stamp(&token),
         token,
@@ -517,12 +520,8 @@ async fn run_one(
     scope.teardown().await;
     let failed = !matches!(result, Ok(Ok(())));
     if failed && !call.teardown_quiesce.is_zero() {
-        bob.quiesce(call.teardown_quiesce).await;
-        if let Some(b2) = &bob2 {
-            b2.quiesce(call.teardown_quiesce).await;
-        }
-        if let Some(c) = &charlie {
-            c.quiesce(call.teardown_quiesce).await;
+        for (_, agent) in &callee_agents {
+            agent.quiesce(call.teardown_quiesce).await;
         }
     }
 

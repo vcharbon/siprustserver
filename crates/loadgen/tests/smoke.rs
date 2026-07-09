@@ -14,8 +14,9 @@ use layer_harness::TransportKind;
 use loadgen::scenarios::{establish, BasicCall, LoadScenario, ScenarioId};
 use loadgen::{
     prefix_leg_picker, CallConfig, CallCtx, CallEnv, CallRouting, CallScope, CallTuning,
-    Correlation, Driver, DriverCfg, EgressPolicy, EndpointSpec, LegInfo, LoadCase, MixEntry,
-    MuxCore, MuxTransport, ResultClass, Reporter, ReporterCfg, Role, ScenarioInputs, ShapeRegistry,
+    Correlation, Driver, DriverCfg, EgressPolicy, EndpointSpec, LegInfo, LegSpec, LoadCase,
+    MixEntry, MuxCore, MuxTransport, ResultClass, Reporter, ReporterCfg, Role, ScenarioInputs,
+    ShapeDescriptor, ShapeRegistry,
 };
 use scenario_harness::{Harness, StepError};
 use sip_clock::Clock;
@@ -1371,6 +1372,147 @@ async fn loadgen_allow_violations_waives_named_rfc_rule() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak (allow_violations)");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+// ---------------------------------------------------------------------------
+// 031 — named leg specs (role + R-URI prefixes) on `ShapeDescriptor`
+// ---------------------------------------------------------------------------
+
+/// The transfer target's full number form — the SUT copies it from the Refer-To
+/// onto the C-leg Request-URI, so it is ALL the wire carries: the receiving
+/// leg's role label never appears in any R-URI (the newkah Business-Layer
+/// number rewrite).
+const XFER_NUMBER: &str = "065003303312345";
+
+/// A blind transfer whose transfer leg is addressed by NUMBER, not by role —
+/// the demux problem of the newkah multi-callee-leg shapes (`nk_ct_refer`).
+/// The body resolves the leg by its declared role (`callee_agent("xfer")`)
+/// while the wire carries only digits. Flow mirrors the shipped `refer`
+/// scenario (including its ordered merge-settle before the BYE).
+struct NumberPlanRefer {
+    refer_key: String,
+}
+
+#[async_trait]
+impl LoadScenario for NumberPlanRefer {
+    fn id(&self) -> ScenarioId {
+        "nk_refer_like"
+    }
+    async fn run(
+        &self,
+        env: &CallEnv<'_>,
+        scope: &CallScope,
+        _ctx: &CallCtx,
+    ) -> Result<(), scenario_harness::StepError> {
+        use scenario_harness::{ApiCall, ANSWER_SDP, OFFER_SDP};
+        use sip_message::generators::InDialogMethod;
+
+        // The 031 role lookup: a named leg beyond the bob/bob2/charlie trio.
+        let xfer = env.callee_agent("xfer");
+
+        // A↔B established (bob's UAS dialog originates the REFER).
+        let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP);
+        let mut call = env.outgoing_invite(&["bob"], inv).send().await;
+        scope.set_early(call.cancel_handle());
+        let mut bob_uas = env.bob.try_receive("INVITE").await?;
+        bob_uas.respond(180, "Ringing").await;
+        call.try_expect(180).await?;
+        bob_uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
+        call.try_expect(200).await?;
+        let mut alice_dialog = call.ack().await;
+        scope.set_confirmed(alice_dialog.clone());
+        env.bob.try_receive("ACK").await?;
+        let mut bob_dialog = bob_uas.dialog();
+
+        // REFER whose Refer-To user is the NUMBER; the transfer is authorized
+        // for the xfer leg's (shared-socket) address under this run's key.
+        let refer_to = format!("<sip:{XFER_NUMBER}@{}>", xfer.addr());
+        let api =
+            ApiCall::refer(&self.refer_key, xfer.addr().ip().to_string(), xfer.addr().port())
+                .to_header();
+        let mut refer = bob_dialog
+            .send_request(InDialogMethod::Refer)
+            .with_header("Refer-To", &refer_to)
+            .with_header("X-Api-Call", &api)
+            .try_send()
+            .await?;
+        refer.try_expect_tolerating(202, &["NOTIFY"]).await?;
+
+        // The transfer INVITE lands on the "xfer" receiver — only if the
+        // driver demuxed the number-form R-URI by the leg's declared prefix.
+        let mut xfer_uas = xfer.try_receive("INVITE").await?;
+        xfer_uas.respond(180, "Ringing").await;
+        xfer_uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
+        let _xfer_dialog = xfer_uas.dialog();
+
+        // Settle the ORDERED merge (c-realign, then a-realign) before the BYE —
+        // the same drain ordering the shipped `refer` scenario documents.
+        let settle = Duration::from_millis(150);
+        env.bob.quiesce(settle).await;
+        xfer.quiesce(settle).await;
+        env.alice.quiesce(Duration::from_millis(600)).await;
+
+        let mut alice_bye = alice_dialog.bye().await;
+        scope.set_confirmed(alice_dialog.clone());
+        env.bob.quiesce(settle).await;
+        xfer.quiesce(settle).await;
+        alice_bye.try_expect_tolerating(200, &["BYE", "NOTIFY", "INVITE"]).await?;
+        scope.mark_terminated();
+        Ok(())
+    }
+}
+
+/// 031 end-to-end through the DRIVER: a registered third-party shape declares
+/// NAMED leg specs — `[bob: ["bob"], xfer: ["0650033033"]]` — whose transfer
+/// leg arrives under a number-form R-URI that never contains the role label.
+/// The driver must bind the receivers from the specs (in declaration order),
+/// feed the leg picker the PREFIXES labelled with their roles (not the agent
+/// names), and expose each agent by role in the `CallEnv` — the flow the
+/// closed `needs_bob2`/`needs_charlie` booleans could not express. Calls
+/// complete OK (RFC-audited), with no timeout (a timeout here means the
+/// number-form leg was never demuxed), no orphan, and no mux/SUT leak.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_named_leg_specs_demux_number_form_transfer_leg() {
+    const NK_LEGS: &[LegSpec] = &[
+        LegSpec { role: "bob", ruri_prefixes: &["bob"] },
+        LegSpec { role: "xfer", ruri_prefixes: &["0650033033"] },
+    ];
+    let (_h, b2bua, core, transport) = setup(6760, Correlation::header("X-Loadgen-Id"), 5).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
+
+    // Third-party registration: the open shape carries its own leg specs.
+    let mut registry = ShapeRegistry::with_defaults();
+    registry.register(ShapeDescriptor::new("nk_refer_like").legs(NK_LEGS).load_with(
+        |inputs| Arc::new(NumberPlanRefer { refer_key: inputs.refer_key.clone() }),
+    ));
+
+    let driver = Driver::new(
+        cfg(b2bua.addr, 30.0, 2, 8, 0x031A),
+        vec![MixEntry::by_id(&registry, "nk_refer_like", &inputs(), 1.0).expect("registered shape")],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    use std::sync::atomic::Ordering::Relaxed;
+    assert!(
+        reporter.count("nk_refer_like", &ResultClass::Ok) > 3,
+        "named-leg transfer calls must complete OK:\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        reporter.count("nk_refer_like", &ResultClass::Timeout),
+        0,
+        "a timeout means the number-form transfer leg was never demuxed to \"xfer\":\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(core.stats().orphan_no_header.load(Relaxed), 0, "uncorrelatable legs");
+    assert_eq!(core.stats().orphan_unknown_token.load(Relaxed), 0, "token matched no call");
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (named legs)");
     settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }

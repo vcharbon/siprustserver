@@ -244,7 +244,9 @@ impl DropModel {
 // tier. Re-exported here so `loadgen::{LegInfo, LegPicker, prefix_leg_picker}`
 // and `crate::mux::LegInfo` keep resolving unchanged — the mux consumes it, it
 // no longer owns it.
-pub use scenario_harness::legpick::{prefix_leg_picker, LegInfo, LegPicker};
+pub use scenario_harness::legpick::{
+    labelled_prefix_leg_picker, prefix_leg_picker, LegInfo, LegPicker,
+};
 
 /// A registry key owned by one endpoint (removed on its `Drop`).
 #[derive(Debug, Clone)]
