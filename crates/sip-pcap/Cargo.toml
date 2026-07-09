@@ -1,0 +1,14 @@
+[package]
+name = "sip-pcap"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Offline pcap → SIP callflow triage tooling (never in a runner). Decodes tcpdump ring files (deploy/k8s/sip-capture.sh) with a hand-rolled classic-pcap/L2/L3 decoder — including IPv4/IPv6 fragment reassembly — parses every UDP datagram with the real sip-message parser, correlates B2BUA a/b legs (relayed X-Loadgen-Id / X-Api-Call tokens + From/To adjacency fallback), and prints per-call message ladders filtered by Call-ID / From / To / R-URI / final status. See the `sipflow` bin."
+
+[lints]
+workspace = true
+
+[dependencies]
+sip-message = { path = "../sip-message" }
+clap = { version = "4", features = ["derive"] }
