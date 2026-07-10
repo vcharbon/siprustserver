@@ -726,11 +726,19 @@ impl CrossMessageAuditRule for AllowSupportedOnInviteRule {
                         SipMessage::Request(req) if req.method.as_str() == "INVITE" => {
                             let cid = call_id(&ev.msg).to_string();
                             let branch = top_via_branch(&ev.msg).unwrap_or_default();
-                            if let std::collections::hash_map::Entry::Vacant(e) =
-                                initial_invite_branch_by_call_id.entry(cid)
-                            {
-                                e.insert(branch);
-                                continue;
+                            match initial_invite_branch_by_call_id.entry(cid) {
+                                std::collections::hash_map::Entry::Vacant(e) => {
+                                    e.insert(branch);
+                                    continue;
+                                }
+                                std::collections::hash_map::Entry::Occupied(e) => {
+                                    // A same-branch repeat is a §17.2.3 Timer-A
+                                    // RETRANSMISSION of the initial INVITE, not a
+                                    // re-INVITE — exempt like the initial itself.
+                                    if *e.get() == branch {
+                                        continue;
+                                    }
+                                }
                             }
                             check_allow_supported(&mut out, slot, "re-INVITE", &ev.msg);
                         }
