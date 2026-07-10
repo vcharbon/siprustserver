@@ -14,6 +14,16 @@
 //! against it. Crash/reboot is exercised in the dedicated scenarios; here we
 //! keep both nodes alive and vary mutations + partitions so the invariant is a
 //! clean function of LWW + delivery (no incarnation churn to confound it).
+//!
+//! ## callRefs are unique — deletes are final (resurrection tombstone)
+//! The store's Model Y resurrection tombstone (`put_call` delete-wins guard,
+//! `RESURRECTION_TOMBSTONE_MS`) silently rejects a Put for a ref deleted within
+//! the tombstone window: production callRefs are unique, so a deleted ref never
+//! legitimately comes back, and a late reverse-flush must not re-create a
+//! discharged call. The driver honours that contract by bumping a per-key
+//! *epoch* after every delete — a "recreated" call is a NEW unique callRef, not
+//! a resurrection of the deleted one. Live-ref updates still collide on the
+//! small key space, so LWW stays exercised.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -54,13 +64,18 @@ async fn run_sequence(seed: u64) {
     // other node) and forward-replicates. Keep a small key space so updates +
     // deletes collide and LWW is actually exercised.
     let keys = 4u32;
+    // Per-A-key delete epoch: a delete retires the current callRef forever
+    // (resurrection-tombstone contract, see module doc); the next put on the
+    // same key targets a fresh unique ref.
+    let mut epoch = [0u32; 4];
+    let a_id = |k: u32, epoch: &[u32; 4]| format!("{k}e{}", epoch[k as usize]);
 
     for _ in 0..40 {
         match rng.below(10) {
             // put/update A-owned call (forward A→B).
             0..=3 => {
                 let k = rng.below(keys);
-                let c = cref("A", &k.to_string());
+                let c = cref("A", &a_id(k, &epoch));
                 let g = gen_of.entry(c.clone()).or_insert(0);
                 *g += 1;
                 let body = format!("A{k}@g{}", *g).into_bytes();
@@ -77,15 +92,17 @@ async fn run_sequence(seed: u64) {
                 cl.put("B", &c, body.clone(), *g, 0, &backup_is("A")).await;
                 latest.insert(c, (*g, Some(body)));
             }
-            // delete an A-owned call.
+            // delete an A-owned call (final for that ref: bump the key's epoch
+            // so a later put on the same key is a new call, not a resurrection).
             7 => {
                 let k = rng.below(keys);
-                let c = cref("A", &k.to_string());
+                let c = cref("A", &a_id(k, &epoch));
                 if gen_of.contains_key(&c) {
                     let g = gen_of.get_mut(&c).unwrap();
                     *g += 1;
                     cl.delete("A", &c, &backup_is("B")).await;
                     latest.insert(c, (*g, None));
+                    epoch[k as usize] += 1;
                 }
             }
             // toggle partition / heal between A and B.
