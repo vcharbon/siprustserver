@@ -25,6 +25,28 @@ use tokio::net::UdpSocket;
 
 const RECV: Duration = Duration::from_secs(2);
 
+/// Peak-contention governor. These tests are real-clock over real loopback
+/// UDP, and libtest starts ALL of them at once — 20+ concurrent multi-worker
+/// runtimes, each bursting a driver against an in-process SUT whose per-call
+/// RFC audit is CPU-heavy in debug builds. That oversubscription can starve
+/// individual calls past their recv/retransmit windows on a loaded box, so
+/// calls land in the `timeout` class and the strict every-call-OK asserts
+/// flake (~1-in-20 under full-suite contention). Cap how many DRIVERS run
+/// concurrently — setup and post-run settling stay parallel, and the strict
+/// asserts keep their teeth.
+static DRIVERS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+const DRIVER_PERMITS: usize = 4;
+
+/// Run `driver` while holding a governor permit (see [`DRIVERS`]).
+async fn run_throttled(driver: &Driver) {
+    let _permit = DRIVERS
+        .get_or_init(|| tokio::sync::Semaphore::new(DRIVER_PERMITS))
+        .acquire()
+        .await
+        .expect("driver governor closed");
+    driver.run().await;
+}
+
 fn addr(p: u16) -> SocketAddr {
     format!("127.0.0.1:{p}").parse().unwrap()
 }
@@ -225,7 +247,7 @@ async fn loadgen_mux_smoke_basic_concurrent() {
         reporter.clone(),
         transport,
     );
-    driver.run().await;
+    run_throttled(&driver).await;
 
     assert!(reporter.count("basic_call", &ResultClass::Ok) > 5, "too few OK basic calls: {}", reporter.render_prometheus());
     assert_eq!(reporter.count("basic_call", &ResultClass::Timeout), 0, "unexpected timeouts (dialog mixing?)");
@@ -263,7 +285,7 @@ async fn loadgen_to_user_correlation_without_relayed_header() {
         reporter.clone(),
         transport,
     );
-    driver.run().await;
+    run_throttled(&driver).await;
 
     assert!(
         reporter.count("basic_call", &ResultClass::Ok) > 5,
@@ -297,7 +319,7 @@ async fn loadgen_mux_smoke_all_scenarios() {
         reporter.clone(),
         transport,
     );
-    driver.run().await;
+    run_throttled(&driver).await;
 
     for id in ["basic_call", "reinvite", "options_hold", "refer"] {
         assert!(
@@ -338,7 +360,7 @@ async fn loadgen_mux_smoke_timed_and_long_call() {
         reporter.clone(),
         transport,
     );
-    driver.run().await;
+    run_throttled(&driver).await;
 
     for id in ["basic_call", "reinvite", "long_call"] {
         assert!(
@@ -374,7 +396,7 @@ async fn loadgen_mux_smoke_prack_update_mix() {
         reporter.clone(),
         transport,
     );
-    driver.run().await;
+    run_throttled(&driver).await;
 
     let ok_prack = reporter.count("prack_update", &ResultClass::Ok);
     let ok_basic = reporter.count("basic_call", &ResultClass::Ok);
@@ -436,7 +458,7 @@ async fn loadgen_mux_smoke_rerouting_prack_mix() {
         reporter.clone(),
         transport,
     );
-    driver.run().await;
+    run_throttled(&driver).await;
 
     let ok_rr = reporter.count("rerouting_prack", &ResultClass::Ok);
     let ok_basic = reporter.count("basic_call", &ResultClass::Ok);
@@ -498,7 +520,7 @@ async fn loadgen_mux_teardown_no_leak() {
         reporter.clone(),
         transport,
     );
-    driver.run().await;
+    run_throttled(&driver).await;
 
     assert!(reporter.count("fail_mid_call", &ResultClass::Timeout) > 0, "no failed calls recorded");
     settle_until(|| core.registry_size() == 0).await;
@@ -851,7 +873,7 @@ async fn loadgen_mux_emergency_split_under_overload() {
         reporter.clone(),
         transport,
     );
-    driver.run().await;
+    run_throttled(&driver).await;
 
     // Non-emergency: shed → classified status_503, and NONE got through.
     let ne_503 = reporter.count("basic_call", &ResultClass::WrongStatus(503));
@@ -907,7 +929,7 @@ async fn loadgen_post_call_cleanup_no_leak() {
     let mut scenarios = MixEntry::failure_mix(&ShapeRegistry::with_defaults(), &inputs());
     scenarios.push(mix("basic_call", 2.0)); // some happy traffic in the mix
     let driver = Driver::new(cfg(b2bua.addr, 50.0, 3, 12, 0xFA17), scenarios, reporter.clone(), transport);
-    driver.run().await;
+    run_throttled(&driver).await;
 
     // Each failure mode produced its NOK bucket, and the happy path its OK.
     assert!(
@@ -943,7 +965,7 @@ async fn loadgen_packet_drop_without_retransmit_breaks_calls() {
     // ≈ 0.9^10 ≈ 0.35, so the majority of calls must fail.
     c.default_tuning = CallTuning { drop_rate: 0.12, retransmit: false };
     let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
-    driver.run().await;
+    run_throttled(&driver).await;
 
     let drops = core.stats().dropped_out.load(std::sync::atomic::Ordering::Relaxed)
         + core.stats().dropped_in.load(std::sync::atomic::Ordering::Relaxed);
@@ -971,14 +993,19 @@ async fn loadgen_packet_drop_without_retransmit_breaks_calls() {
 /// production 5 s) so compounded two-hop recovery has headroom under CI CPU load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_auto_retransmit_recovers_packet_drop() {
+    // recv = 12 s: under CPU contention a recovering call's retransmit ladder
+    // (0.5+1+2+4 s cumulative) plus stretched per-hop latency can overrun a 6 s
+    // window, flipping the small-N dominance ratio below — the observed flake.
+    // The wide window only costs wall time on the deterministic doomed-call
+    // tail, which idles the full window either way.
     let (_h, b2bua, core, transport) =
-        setup_recv(6490, Correlation::header("X-Loadgen-Id"), 3, Duration::from_secs(6)).await;
+        setup_recv(6490, Correlation::header("X-Loadgen-Id"), 3, Duration::from_secs(12)).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 12.0, 2, 8, 0x5EED);
     c.default_tuning = CallTuning { drop_rate: 0.10, retransmit: true };
     let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
-    driver.run().await;
+    run_throttled(&driver).await;
 
     let drops = core.stats().dropped_out.load(std::sync::atomic::Ordering::Relaxed)
         + core.stats().dropped_in.load(std::sync::atomic::Ordering::Relaxed);
@@ -1032,7 +1059,7 @@ async fn loadgen_ringing_gate_counts_every_ring() {
     let mut c = cfg(b2bua.addr, 40.0, 2, 16, 0x9A17);
     c.default_tuning = CallTuning { drop_rate: 0.0, retransmit: true };
     let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
-    driver.run().await;
+    run_throttled(&driver).await;
 
     let (rung, expected) = reporter.ringing_totals();
     assert!(expected >= 20, "too few answered calls: {expected}");
@@ -1066,7 +1093,7 @@ async fn loadgen_inprocess_endurance_lossy() {
     let mut c = cfg(b2bua.addr, 25.0, 25, 64, 0xE0D0E);
     c.default_tuning = CallTuning { drop_rate: 0.001, retransmit: true };
     let driver = Driver::new(c, MixEntry::default_mix(&ShapeRegistry::with_defaults(), &inputs()), reporter.clone(), transport);
-    driver.run().await;
+    run_throttled(&driver).await;
 
     let total: u64 = ["basic_call", "reinvite", "options_hold", "refer"]
         .iter()
@@ -1166,7 +1193,7 @@ async fn loadgen_pooled_case_identities_and_dwell_overrides() {
         reporter.clone(),
         transport,
     );
-    driver.run().await;
+    run_throttled(&driver).await;
 
     // (b) Green classes: every completed call is OK (no timeout / wrong-status /
     // rfc_audit_fail on the sampled+audited half).
@@ -1274,7 +1301,7 @@ async fn loadgen_case_checks_pass_and_render_verdicts() {
         reporter.clone(),
         transport,
     );
-    driver.run().await;
+    run_throttled(&driver).await;
 
     // Passing checks never reclassify: every completed call stays OK.
     let ok = reporter.count("basic_call", &ResultClass::Ok);
@@ -1325,7 +1352,7 @@ async fn loadgen_failing_check_reclassifies_to_check_fail() {
         reporter.clone(),
         transport,
     );
-    driver.run().await;
+    run_throttled(&driver).await;
 
     // Every call records (background 1) → every otherwise-OK call reclassifies.
     let failed = reporter.count("basic_call", &ResultClass::CheckFail);
@@ -1403,7 +1430,7 @@ async fn loadgen_allow_violations_waives_named_rfc_rule() {
         baseline.clone(),
         transport.clone(),
     );
-    driver.run().await;
+    run_throttled(&driver).await;
     assert!(
         baseline.count("bye_with_contact", &ResultClass::RfcAuditFail) > 5,
         "the deviation must trip the audit without a waiver:\n{}",
@@ -1425,7 +1452,7 @@ async fn loadgen_allow_violations_waives_named_rfc_rule() {
         waived.clone(),
         transport,
     );
-    driver.run().await;
+    run_throttled(&driver).await;
     let ok = waived.count("bye_with_contact", &ResultClass::Ok);
     assert!(ok > 5, "waived calls must stay OK:\n{}", waived.render_prometheus());
     assert_eq!(
@@ -1559,7 +1586,7 @@ async fn loadgen_named_leg_specs_demux_number_form_transfer_leg() {
         reporter.clone(),
         transport,
     );
-    driver.run().await;
+    run_throttled(&driver).await;
 
     use std::sync::atomic::Ordering::Relaxed;
     assert!(
