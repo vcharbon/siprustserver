@@ -40,8 +40,8 @@ use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use layer_harness::{Channel, NetworkTag, Recorder, RunContext, TransportKind};
@@ -453,6 +453,7 @@ impl Harness {
             ids: self.ids.clone(),
             rr_fold,
             recv_timeout: self.recv_timeout,
+            txn: Arc::new(TxnView::functional()),
         }
     }
 
@@ -800,6 +801,148 @@ impl Drop for CseqGate {
 }
 
 // ---------------------------------------------------------------------------
+// Transaction-layer receive view (newkahneed-034)
+// ---------------------------------------------------------------------------
+
+/// RFC 3261 §17.2 **once-and-only-once receive view** — the transaction-layer
+/// dedup the raw `Agent` deliberately lacked (its doc used to say "surfaces
+/// every duplicate datagram", and every functional test re-absorbed Timer A/E
+/// retransmissions by hand via `receive_absorbing`/`receive_tolerating` lists
+/// keyed on METHOD NAME, which over-approximates "a retransmission of the
+/// request I already saw" into "any request of this method" — a genuinely new
+/// request could be silently swallowed as noise).
+///
+/// Semantics (applied below the test-facing receive API, per [`Agent`] UA):
+/// The one rule: **absorb only a provable duplicate.** A datagram is absorbed
+/// iff it is BYTE-IDENTICAL to one already surfaced under the same key;
+/// anything else surfaces. This can never mask a real signal (a genuine
+/// message differs in bytes and is delivered) and can never wedge a liveness
+/// flow (nothing panics).
+/// - An inbound **request** is keyed (Call-ID, top-Via `branch`, method) —
+///   §17.2.3 plus Call-ID so two different calls that reuse a branch (a
+///   deterministic harness-proxy / crash-reboot id-reuse artifact) are not
+///   conflated. A CANCEL/ACK sharing its INVITE's branch is its own key
+///   (method differs). First arrival surfaces once; a byte-identical re-arrival
+///   (Timer A/E) is absorbed; different bytes under the same key (deterministic
+///   id reuse across a reboot) surface as new work.
+/// - An inbound **final response** (>= 200) dedups the same way, keyed
+///   (Call-ID, branch, CSeq, status). A byte-different same-key final — a
+///   forked 2xx with a distinct To-tag — surfaces (a real signal).
+/// - **Provisionals are NEVER deduped**: a byte-identical second 180 is a
+///   legitimate B2BUA relay observable ("ring again", one a-leg early dialog —
+///   see newkahneed-033 D2), not something the harness may hide.
+/// - **No §17.2.1 response re-emission**: the simulated fabric is lossless, so
+///   a duplicate only means the answer is still in transit (or the test has
+///   deliberately not answered — the silent-callee case); re-emitting would
+///   add trace noise without function. The load lane's `loadgen::mux::CallTxns`
+///   owns re-answer semantics on real, lossy networks.
+///
+/// Recording and leak bookkeeping are unaffected: dedup happens after the
+/// endpoint read, so the RFC-audit trace still contains every duplicate
+/// datagram, and an absorbed read is marked received (no `queueLeak`).
+///
+/// The load-lane [`loadbind::AgentBinder`] constructs its agents in **wire
+/// view** ([`TxnView::wire`]): the mux already dedups ahead of the agent
+/// there, and double-dedup would silently change load semantics.
+pub(crate) struct TxnView {
+    /// Raw-surface opt-out ([`Agent::wire_view`]); shared by every clone of
+    /// the UA so the whole logical endpoint drops to the wire together.
+    wire: AtomicBool,
+    /// First-seen raw bytes per server-transaction key
+    /// (Call-ID, top-Via branch, request-line method). Call-ID is part of the
+    /// key so two *different* calls that collide on a branch (a deterministic
+    /// harness-proxy artifact — the real ProxyCore can mint the same forwarded
+    /// branch across calls under the harness's seeded id source) are never
+    /// mistaken for one transaction; a genuine §17.2.3 retransmission carries
+    /// the same Call-ID by construction.
+    requests: Mutex<HashMap<(String, String, String), Vec<u8>>>,
+    /// First-seen raw bytes per final-response key
+    /// (Call-ID, top-Via branch, CSeq number, CSeq method, status).
+    finals: Mutex<HashMap<(String, String, u32, String, u16), Vec<u8>>>,
+}
+
+/// What the txn view decided about one inbound datagram.
+#[derive(Debug, PartialEq, Eq)]
+enum TxnVerdict {
+    /// New work — hand it to the test.
+    Surface,
+    /// A byte-identical retransmission of something already surfaced — drop it
+    /// below the API (the read is still recorded).
+    Absorb,
+}
+
+impl TxnView {
+    /// Functional-lane default: txn view ON.
+    pub(crate) fn functional() -> Self {
+        Self { wire: AtomicBool::new(false), requests: Mutex::default(), finals: Mutex::default() }
+    }
+
+    /// Load-lane default: raw wire surface (the mux owns dedup there).
+    pub(crate) fn wire() -> Self {
+        Self { wire: AtomicBool::new(true), requests: Mutex::default(), finals: Mutex::default() }
+    }
+
+    fn verdict(&self, raw: &[u8], msg: &SipMessage) -> TxnVerdict {
+        if self.wire.load(Ordering::Relaxed) {
+            return TxnVerdict::Surface;
+        }
+        match msg {
+            SipMessage::Request(r) => {
+                // Unkeyable (no top-Via branch / pre-RFC3261 cookie): surface —
+                // graceful degradation to the old raw behaviour.
+                let Some(branch) = top_via_branch(&r.headers) else {
+                    return TxnVerdict::Surface;
+                };
+                if !branch.starts_with("z9hG4bK") {
+                    return TxnVerdict::Surface;
+                }
+                let key = (r.call_id.clone(), branch, r.method.to_string());
+                let mut seen = self.requests.lock().unwrap();
+                match seen.get(&key) {
+                    Some(first) if first.as_slice() == raw => TxnVerdict::Absorb,
+                    _ => {
+                        // New key, or same key with different bytes (deterministic
+                        // id reuse across a reboot): deliver it, and remember the
+                        // latest bytes so its OWN retransmits still dedup.
+                        seen.insert(key, raw.to_vec());
+                        TxnVerdict::Surface
+                    }
+                }
+            }
+            SipMessage::Response(r) if r.status >= 200 => {
+                let Some(branch) = top_via_branch(&r.headers) else {
+                    return TxnVerdict::Surface;
+                };
+                let key =
+                    (r.call_id.clone(), branch, r.cseq.seq, r.cseq.method.to_string(), r.status);
+                let mut seen = self.finals.lock().unwrap();
+                match seen.get(&key) {
+                    None => {
+                        seen.insert(key, raw.to_vec());
+                        TxnVerdict::Surface
+                    }
+                    Some(first) if first.as_slice() == raw => TxnVerdict::Absorb,
+                    // Byte-different same-key final = a forked 2xx (distinct
+                    // To-tag) — a real signal, surfaced.
+                    Some(_) => TxnVerdict::Surface,
+                }
+            }
+            // Provisionals: never deduped (ring-again is observable here).
+            SipMessage::Response(_) => TxnVerdict::Surface,
+        }
+    }
+}
+
+/// The `branch` parameter of the topmost Via header, if any.
+fn top_via_branch(headers: &[SipHeader]) -> Option<String> {
+    let via = get_header(headers, "via")?;
+    via.split(';').skip(1).find_map(|p| {
+        let (k, v) = p.split_once('=')?;
+        k.trim().eq_ignore_ascii_case("branch").then(|| v.trim().to_string())
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Agent
 // ---------------------------------------------------------------------------
 
@@ -821,6 +964,9 @@ pub struct Agent {
     pub(crate) rr_fold: RecordRouteFold,
     /// Per-`recv` wait bound, inherited from the [`Harness`] (Endpoint config).
     pub(crate) recv_timeout: Duration,
+    /// §17.2 once-and-only-once receive view ([`TxnView`], newkahneed-034).
+    /// Shared across clones — one transaction table per logical UA.
+    pub(crate) txn: Arc<TxnView>,
 }
 
 impl Agent {
@@ -829,6 +975,16 @@ impl Agent {
     }
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Drop this UA to the **raw wire surface**: disable the §17.2
+    /// once-and-only-once receive view ([`TxnView`]) so EVERY duplicate
+    /// datagram surfaces again. Reach for this ONLY when retransmission is
+    /// the *subject* of the test (Timer A/E assertions, ring-again pinning,
+    /// drop-rate recovery) — the same sanction rule as
+    /// [`Harness::allow_violation`]. Affects every clone of this UA.
+    pub fn wire_view(&self) {
+        self.txn.wire.store(true, Ordering::Relaxed);
     }
 
     fn branch(&self) -> String {
@@ -873,13 +1029,19 @@ impl Agent {
     }
 
     async fn recv(&self) -> SipMessage {
-        let pkt = tokio::time::timeout(self.recv_timeout, self.ep.recv())
-            .await
-            .unwrap_or_else(|_| panic!("{} timed out waiting for a datagram", self.name))
-            .unwrap_or_else(|| panic!("{} endpoint queue closed", self.name));
-        CustomParser::new()
-            .parse(&pkt.raw)
-            .unwrap_or_else(|e| panic!("{} received an unparseable datagram: {e}", self.name))
+        loop {
+            let pkt = tokio::time::timeout(self.recv_timeout, self.ep.recv())
+                .await
+                .unwrap_or_else(|_| panic!("{} timed out waiting for a datagram", self.name))
+                .unwrap_or_else(|| panic!("{} endpoint queue closed", self.name));
+            let msg = CustomParser::new()
+                .parse(&pkt.raw)
+                .unwrap_or_else(|e| panic!("{} received an unparseable datagram: {e}", self.name));
+            match self.txn.verdict(&pkt.raw, &msg) {
+                TxnVerdict::Surface => return msg,
+                TxnVerdict::Absorb => continue,
+            }
+        }
     }
 
     /// Fallible [`send`](Agent::send): a transport error returns
@@ -901,14 +1063,21 @@ impl Agent {
     /// [`recv`](Agent::recv). A timeout / closed queue / parse error becomes a
     /// [`StepError`] instead of a `panic!`.
     async fn try_recv(&self) -> Result<SipMessage, StepError> {
-        let pkt = match tokio::time::timeout(self.recv_timeout, self.ep.recv()).await {
-            Err(_) => return Err(StepError::Timeout { who: self.name.clone() }),
-            Ok(None) => return Err(StepError::QueueClosed { who: self.name.clone() }),
-            Ok(Some(p)) => p,
-        };
-        CustomParser::new()
-            .parse(&pkt.raw)
-            .map_err(|e| StepError::Unparseable { who: self.name.clone(), detail: e.to_string() })
+        loop {
+            let pkt = match tokio::time::timeout(self.recv_timeout, self.ep.recv()).await {
+                Err(_) => return Err(StepError::Timeout { who: self.name.clone() }),
+                Ok(None) => return Err(StepError::QueueClosed { who: self.name.clone() }),
+                Ok(Some(p)) => p,
+            };
+            let msg = CustomParser::new().parse(&pkt.raw).map_err(|e| StepError::Unparseable {
+                who: self.name.clone(),
+                detail: e.to_string(),
+            })?;
+            match self.txn.verdict(&pkt.raw, &msg) {
+                TxnVerdict::Surface => return Ok(msg),
+                TxnVerdict::Absorb => continue,
+            }
+        }
     }
 
     /// Fallible [`receive`](Agent::receive) for the load driver: a wrong method,
@@ -1055,6 +1224,10 @@ impl Agent {
             let msg = CustomParser::new()
                 .parse(&pkt.raw)
                 .unwrap_or_else(|e| panic!("{} received an unparseable datagram: {e}", self.name));
+            match self.txn.verdict(&pkt.raw, &msg) {
+                TxnVerdict::Surface => {}
+                TxnVerdict::Absorb => continue,
+            }
             let r = match msg {
                 SipMessage::Request(r) => r,
                 SipMessage::Response(r) => panic!(
@@ -1230,10 +1403,15 @@ impl Agent {
 
     /// Like [`receive`](Agent::receive), but SILENTLY absorbs (drops, sends NO
     /// response) any queued requests whose method is in `absorb` before returning
-    /// the first request matching `method`. This models a UAS **transaction layer**
-    /// swallowing a retransmission (RFC 3261 §17.2.1) of a request it has only
-    /// *provisionally* answered — the raw-UA `Agent` has no such layer, so it
-    /// surfaces every duplicate datagram.
+    /// the first request matching `method`.
+    ///
+    /// NOTE (newkahneed-034): the agent now has a §17.2 receive view
+    /// ([`TxnView`]) that absorbs **byte-identical retransmissions**
+    /// automatically, so most historical uses of this helper are no longer
+    /// needed. It remains for (a) [`wire_view`](Agent::wire_view) agents, and
+    /// (b) absorbing *distinct* same-method requests — which it matches by
+    /// METHOD NAME ONLY, so a genuinely unexpected request of that method is
+    /// masked too. Prefer a plain [`receive`](Agent::receive) first.
     ///
     /// The load-bearing difference from [`receive_tolerating`](Agent::receive_tolerating)
     /// is that the absorbed request is **not** `200 OK`'d: a 200 would ANSWER it.
@@ -1713,6 +1891,7 @@ impl ClientInvite {
     /// Wait for and assert a response status. Learns the remote tag (from the
     /// first tagged response) and the remote target (from Contact), so the
     /// later ACK/BYE route and address correctly. Returns the response.
+    ///
     pub async fn expect(&mut self, status: u16) -> SipResponse {
         let resp = expect_response(&self.agent, status).await;
         self.learn_from_response(&resp);
@@ -3309,6 +3488,211 @@ mod auth_seam_tests {
         }
 
         srv.await.unwrap();
+        let _ = h.finish().await;
+    }
+}
+
+#[cfg(test)]
+mod txn_view_tests {
+    //! newkahneed-034: the §17.2 once-and-only-once receive view ([`TxnView`]).
+    //! Pure verdict tests pin the keying/byte-identity semantics; the
+    //! paused-clock integration tests pin the end-to-end contract (a Timer-A
+    //! style duplicate never surfaces, `receive_absorbing` lists unneeded;
+    //! `wire_view()` restores the raw surface).
+
+    use super::*;
+
+    const OFFER: &str = "v=0\r\no=a 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+
+    fn parse(raw: &str) -> SipMessage {
+        CustomParser::new().parse(raw.as_bytes()).expect("test fixture parses")
+    }
+
+    const INV: &str = "INVITE sip:bob@10.0.0.2 SIP/2.0\r\n\
+        Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-tv-1\r\n\
+        From: <sip:alice@10.0.0.1>;tag=a1\r\n\
+        To: <sip:bob@10.0.0.2>\r\n\
+        Call-ID: tv-c1\r\n\
+        CSeq: 1 INVITE\r\n\
+        Content-Length: 0\r\n\r\n";
+
+    fn verdict_of(view: &TxnView, raw: &str) -> TxnVerdict {
+        view.verdict(raw.as_bytes(), &parse(raw))
+    }
+
+    #[test]
+    fn byte_identical_request_rearrival_is_absorbed() {
+        let view = TxnView::functional();
+        assert!(matches!(verdict_of(&view, INV), TxnVerdict::Surface));
+        assert!(matches!(verdict_of(&view, INV), TxnVerdict::Absorb));
+        assert!(matches!(verdict_of(&view, INV), TxnVerdict::Absorb));
+    }
+
+    #[test]
+    fn same_key_different_bytes_surfaces_not_absorbed() {
+        let view = TxnView::functional();
+        assert!(matches!(verdict_of(&view, INV), TxnVerdict::Surface));
+        // Same key, different bytes (an extra header): NOT a retransmission, so
+        // it is delivered — the receive view only ever absorbs a provable
+        // byte-identical duplicate, never masks a differing datagram.
+        let mutated = INV.replace("Call-ID: tv-c1", "Call-ID: tv-c1\r\nX-Mutant: yes");
+        assert_eq!(verdict_of(&view, &mutated), TxnVerdict::Surface);
+        // And that delivered datagram's OWN retransmit now dedups.
+        assert_eq!(verdict_of(&view, &mutated), TxnVerdict::Absorb);
+    }
+
+    #[test]
+    fn same_branch_different_call_id_both_surface() {
+        // A branch reused across TWO calls (a deterministic harness-proxy
+        // artifact) is NOT one transaction — the Call-ID disambiguates, so
+        // both surface and neither is mistaken for the other's retransmission.
+        let view = TxnView::functional();
+        assert!(matches!(verdict_of(&view, INV), TxnVerdict::Surface));
+        let other_call = INV.replace("Call-ID: tv-c1", "Call-ID: tv-c2");
+        assert!(matches!(verdict_of(&view, &other_call), TxnVerdict::Surface));
+    }
+
+    #[test]
+    fn distinct_branch_and_shared_branch_cancel_both_surface() {
+        let view = TxnView::functional();
+        assert!(matches!(verdict_of(&view, INV), TxnVerdict::Surface));
+        // A NEW transaction (fresh branch) of the same method surfaces.
+        let second = INV.replace("z9hG4bK-tv-1", "z9hG4bK-tv-2");
+        assert!(matches!(verdict_of(&view, &second), TxnVerdict::Surface));
+        // A CANCEL sharing the INVITE's branch is its OWN server transaction
+        // (§17.2.3 keys on method too) — surfaced, not absorbed.
+        // (A pre-RFC3261 cookie-less branch never reaches the verdict: the
+        // parser rejects it — the `z9hG4bK` guard in [`TxnView::verdict`] is
+        // pure defense in depth.)
+        let cancel = INV
+            .replace("INVITE sip:bob@10.0.0.2 SIP/2.0", "CANCEL sip:bob@10.0.0.2 SIP/2.0")
+            .replace("CSeq: 1 INVITE", "CSeq: 1 CANCEL");
+        assert!(matches!(verdict_of(&view, &cancel), TxnVerdict::Surface));
+    }
+
+    const FINAL_200: &str = "SIP/2.0 200 OK\r\n\
+        Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-tv-1\r\n\
+        From: <sip:alice@10.0.0.1>;tag=a1\r\n\
+        To: <sip:bob@10.0.0.2>;tag=b1\r\n\
+        Call-ID: tv-c1\r\n\
+        CSeq: 1 INVITE\r\n\
+        Content-Length: 0\r\n\r\n";
+
+    #[test]
+    fn final_repeat_absorbed_but_forked_2xx_surfaces() {
+        let view = TxnView::functional();
+        assert!(matches!(verdict_of(&view, FINAL_200), TxnVerdict::Surface));
+        // Timer-G style byte-identical repeat: absorbed.
+        assert!(matches!(verdict_of(&view, FINAL_200), TxnVerdict::Absorb));
+        // A forked 2xx — same key, DIFFERENT To-tag/bytes — is a real signal.
+        let fork = FINAL_200.replace(";tag=b1", ";tag=b2");
+        assert!(matches!(verdict_of(&view, &fork), TxnVerdict::Surface));
+    }
+
+    #[test]
+    fn provisionals_are_never_deduped() {
+        let view = TxnView::functional();
+        // A byte-identical second 180 is the ring-again observable (033-D2):
+        // the functional lane is exactly where it must stay visible.
+        let ringing = FINAL_200.replace("SIP/2.0 200 OK", "SIP/2.0 180 Ringing");
+        assert!(matches!(verdict_of(&view, &ringing), TxnVerdict::Surface));
+        assert!(matches!(verdict_of(&view, &ringing), TxnVerdict::Surface));
+    }
+
+    #[test]
+    fn wire_view_surfaces_everything() {
+        let view = TxnView::wire();
+        assert!(matches!(verdict_of(&view, INV), TxnVerdict::Surface));
+        assert!(matches!(verdict_of(&view, INV), TxnVerdict::Surface));
+        assert!(matches!(verdict_of(&view, FINAL_200), TxnVerdict::Surface));
+        assert!(matches!(verdict_of(&view, FINAL_200), TxnVerdict::Surface));
+    }
+
+    /// The headline contract: a Timer-A style INVITE retransmission never
+    /// surfaces, so the callee needs NO `receive_absorbing` list — the exact
+    /// pattern that used to require one (silent-callee duplicates queued ahead
+    /// of the ACK; pre-034 the `receive("ACK")` below panicked with
+    /// "expected a ACK request, got INVITE").
+    #[tokio::test(start_paused = true)]
+    async fn invite_retransmits_absorbed_without_lists() {
+        let h = Harness::new("txn-view-invite-retransmit");
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let server = h.agent("server", "127.0.0.1:5070").await;
+
+        let mut call = alice.invite(&server).with_sdp(OFFER).send().await;
+        // Byte-identical Timer-A duplicates, straight from the original request.
+        let dup = SipMessage::Request(call.original_invite.clone());
+        alice.send(&dup, call.wire_dst).await;
+        alice.send(&dup, call.wire_dst).await;
+
+        let mut uas = server.receive("INVITE").await;
+        uas.respond(180, "Ringing").send().await;
+        call.expect(180).await;
+        uas.respond(200, "OK").with_sdp(OFFER).send().await;
+        call.expect(200).await;
+        let mut dialog = call.ack().await;
+        // The two duplicates are queued ahead of the ACK — absorbed below the API.
+        server.receive("ACK").await;
+
+        let mut bye = dialog.bye().await;
+        server.receive("BYE").await.respond(200, "OK").send().await;
+        bye.expect(200).await;
+        let _ = h.finish().await;
+    }
+
+    /// A byte-identical 2xx repeat (Timer-G style) is absorbed — and can no
+    /// longer be mis-taken for the answer to a LATER transaction (the old
+    /// status-only `expect(200)` would have returned the duplicate 200-INVITE
+    /// as the BYE's answer).
+    #[tokio::test(start_paused = true)]
+    async fn duplicate_final_not_mistaken_for_later_answer() {
+        let h = Harness::new("txn-view-final-dedup");
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let server = h.agent("server", "127.0.0.1:5070").await;
+
+        let mut call = alice.invite(&server).with_sdp(OFFER).send().await;
+        let mut uas = server.receive("INVITE").await;
+        uas.respond(200, "OK").with_sdp(OFFER).send().await;
+        call.expect(200).await;
+        // The 2xx repeat: sticky To-tag + same SDP ⇒ byte-identical.
+        uas.respond(200, "OK").with_sdp(OFFER).send().await;
+
+        let mut dialog = call.ack().await;
+        server.receive("ACK").await;
+        let mut bye = dialog.bye().await;
+        server.receive("BYE").await.respond(200, "OK").send().await;
+        let resp = bye.expect(200).await;
+        assert_eq!(
+            resp.cseq.method.to_string(),
+            "BYE",
+            "the duplicate 200-INVITE was absorbed, not returned as the BYE answer"
+        );
+        let _ = h.finish().await;
+    }
+
+    /// `wire_view()` restores the raw surface: the duplicate SURFACES again and
+    /// the historical `receive_absorbing` idiom is once more the caller's job —
+    /// the sanctioned escape hatch for tests whose subject is retransmission.
+    #[tokio::test(start_paused = true)]
+    async fn wire_view_restores_raw_duplicates() {
+        let h = Harness::new("txn-view-wire-optout");
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let server = h.agent("server", "127.0.0.1:5070").await;
+        server.wire_view();
+
+        let mut call = alice.invite(&server).with_sdp(OFFER).send().await;
+        alice.send(&SipMessage::Request(call.original_invite.clone()), call.wire_dst).await;
+
+        let mut uas = server.receive("INVITE").await;
+        uas.respond(200, "OK").with_sdp(OFFER).send().await;
+        call.expect(200).await;
+        let mut dialog = call.ack().await;
+        // The duplicate INVITE is still queued and SURFACES — absorb it the old way.
+        server.receive_absorbing("ACK", &["INVITE"]).await;
+
+        let mut bye = dialog.bye().await;
+        server.receive("BYE").await.respond(200, "OK").send().await;
+        bye.expect(200).await;
         let _ = h.finish().await;
     }
 }

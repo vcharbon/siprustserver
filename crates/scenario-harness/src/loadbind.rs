@@ -206,6 +206,11 @@ impl AgentBinder {
             ep: Arc::from(ep),
             ids: self.ids.clone(),
             recv_timeout: self.recv_timeout,
+            // Load lane stays on the RAW wire surface: `loadgen::mux::CallTxns`
+            // already owns retransmit dedup ahead of the agent, and a second
+            // (differently-keyed) dedup here would silently change load
+            // semantics (newkahneed-034).
+            txn: Arc::new(crate::agent::TxnView::wire()),
         }
     }
 

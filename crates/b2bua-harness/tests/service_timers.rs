@@ -237,12 +237,11 @@ async fn service_timer_fires_and_owning_rule_reaps_the_silent_call() {
     h.advance(Duration::from_secs(ringwatch::DEADLINE_SEC as u64 + 1)).await;
 
     // The service rule answered the caller and tore the call down. Bob never
-    // sent a provisional, so deterministic Timer-A INVITE retransmits (+0.5 s,
-    // +1.5 s, +3.5 s) queued ahead of the CANCEL — same transaction, bob keeps
-    // ignoring them (a 200 here would fork unACKed dialogs and fail the audit).
-    for _ in 0..3 {
-        let _dup = bob.receive("INVITE").await;
-    }
+    // sent a provisional, so the SUT's Timer-A INVITE retransmits (+0.5 s,
+    // +1.5 s, +3.5 s) queued ahead of the CANCEL — all byte-identical to the
+    // original INVITE, so the §17.2 receive view (newkahneed-034) absorbs them
+    // below the API; bob just receives the CANCEL. (Pre-034 this needed a manual
+    // `for _ in 0..3 { bob.receive("INVITE") }` drain.)
     let mut cancel = bob.receive("CANCEL").await;
     cancel.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;

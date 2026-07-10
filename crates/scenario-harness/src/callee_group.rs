@@ -328,6 +328,9 @@ impl<'h> CalleeGroupBuilder<'h> {
                 ids: ids.clone(),
                 rr_fold: decide_rr_fold(name),
                 recv_timeout,
+                // Each logical callee is its own UA: per-leg §17.2 receive
+                // view over the shared socket (newkahneed-034).
+                txn: std::sync::Arc::new(crate::agent::TxnView::functional()),
             };
             agents.insert(name.clone(), agent);
         }

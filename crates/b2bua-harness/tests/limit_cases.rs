@@ -196,19 +196,28 @@ async fn max_duration_fires_mid_reinvite_and_releases_the_limiter() {
     bob.receive("ACK").await;
     assert_eq!(store.stats().current_total, 1, "established call holds one limiter slot");
 
-    // ── alice re-INVITEs; bob sits on it (never answers) ─────────────────────
+    // ── alice re-INVITEs; bob leaves it pending across the cap ───────────────
     let _reinv = dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
-    let _bob_reinv = bob.receive("INVITE").await;
+    let mut bob_reinv = bob.receive("INVITE").await;
 
     // ── the 10 s cap trips while the re-INVITE is pending ────────────────────
     h.advance(Duration::from_secs(11)).await;
 
-    // The max-duration teardown BYEs both legs (abandoning the pending re-INVITE).
-    // Answer bob's BYE (his queue is just the BYE); alice's queue also holds the
-    // B2BUA's 100 Trying for her abandoned re-INVITE, so drain it — her a-leg BYE
-    // then force-resolves at the 32 s TerminatingTimeout backstop.
-    let mut b_bye = bob.receive_tolerating("BYE", &["INVITE"]).await;
+    // The max-duration teardown BYEs both legs. The b-leg re-INVITE is abandoned
+    // by the SUT (UAC); that client transaction still blocks call removal — and
+    // hence the limiter release — until it completes. Resolve bob's open re-INVITE
+    // server transaction with a 200 + SDP answer (RFC 3264 §5) so the client
+    // transaction terminates. (Pre-newkahneed-034 this happened IMPLICITLY: the
+    // Timer-A re-INVITE retransmit was 200-OK'd by `receive_tolerating("BYE",
+    // &["INVITE"])`; now the §17.2 receive view absorbs the retransmit, so the
+    // real answer must be sent explicitly — and a bodyless tolerated-200 to an
+    // offer-carrying re-INVITE was an RFC 3264 §5 violation anyway.)
+    bob_reinv.respond(200, "OK").with_sdp(ANSWER).await;
+    let mut b_bye = bob.receive("BYE").await;
     b_bye.respond(200, "OK").await;
+    // alice's queue holds the B2BUA's 100 Trying for her abandoned re-INVITE and
+    // the a-leg BYE; drain it — her a-leg BYE then force-resolves at the 32 s
+    // TerminatingTimeout backstop.
     alice.drain().await;
     h.advance(Duration::from_secs(33)).await;
 
