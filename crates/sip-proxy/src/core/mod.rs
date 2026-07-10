@@ -361,6 +361,7 @@ mod sweeper_tests {
                 target: ProxyAddr::new("10.0.0.2", 5070),
                 branch: "z9hG4bK-x".into(),
                 upstream_branch: String::new(),
+                invite_ruri: String::new(),
             },
             RTX_ENTRY_TTL_MS,
         );

@@ -488,6 +488,7 @@ impl ProxyCore {
                         target: target.clone(),
                         branch: our_branch.clone(),
                         upstream_branch: incoming_branch.clone().unwrap_or_default(),
+                        invite_ruri: String::new(),
                     },
                     crate::cancel_lru::RTX_ENTRY_TTL_MS,
                 );
@@ -505,6 +506,9 @@ impl ProxyCore {
                     target: target.clone(),
                     branch: our_branch,
                     upstream_branch: incoming_branch.clone().unwrap_or_default(),
+                    // §17.1.1.3: the ACK synthesized for a non-2xx final must
+                    // carry the INVITE's Request-URI verbatim (see response.rs).
+                    invite_ruri: req.uri.clone(),
                 },
                 crate::cancel_lru::INVITE_ENTRY_TTL_MS,
             );
