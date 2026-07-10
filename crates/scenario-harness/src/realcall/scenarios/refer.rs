@@ -105,34 +105,43 @@ impl RealCallScenario for Refer {
         ctx.phase("transferred");
         let _charlie_dialog = charlie_uas.dialog();
 
-        // Let the B2BUA MERGE the transfer media before tearing down. The merge
-        // is ORDERED: the B2BUA first re-INVITEs CHARLIE (the c-realign, carrying
-        // alice's SDP); only once charlie answers 200 does it re-INVITE ALICE (the
-        // a-realign). So drain charlie/bob FIRST to settle the c-realign + the
-        // remaining NOTIFYs, THEN drain ALICE last and longer so her a-realign
-        // re-INVITE arrives and is 200'd + ACKed BEFORE we BYE.
+        // The B2BUA MERGES the transfer media before teardown, in ORDER: it
+        // ACKs charlie, re-INVITEs CHARLIE (the c-realign, carrying alice's
+        // SDP), and only once charlie answers does it re-INVITE ALICE (the
+        // a-realign). Each step used to be a blind `quiesce` drain — which
+        // could not assert the realigns actually happened AND answered the
+        // offer-carrying realign re-INVITE with a bodyless 200 (an RFC 3264
+        // §5 / §13.3.1.1 violation on our own UA). The blocking tolerant
+        // receive (newkahneed-033 ask C) makes each step assertable and
+        // answers the realign with a real SDP answer; a missing realign is
+        // now a Timeout, not silent success.
         //
-        // Why the ordering matters (and the old "drain alice first" was wrong):
-        // alice's a-realign only fires AFTER the c-realign, i.e. well after an
-        // early alice drain has closed. If alice BYEs before the a-realign lands,
-        // that in-dialog 2xx is left un-ACKed on the closing dialog — a benign
-        // race, but it legitimately trips the §13.3.1.4 "answered 2xx never
-        // ACKed/BYE'd" audit. Completing the a-realign in order keeps the audit
-        // clean WITHOUT weakening it.
-        let settle = std::time::Duration::from_millis(150);
-        env.bob.quiesce(settle).await;
-        charlie.quiesce(settle).await;
-        // Alice last: a generous window that outlasts the c-realign → a-realign
-        // chain so her realign 200 (and the B2BUA's ACK of it) complete pre-BYE.
-        env.alice.quiesce(std::time::Duration::from_millis(600)).await;
+        // Why alice's realign must complete BEFORE her BYE: if alice BYEs
+        // while the a-realign 2xx is in flight, that in-dialog 2xx is left
+        // un-ACKed on the closing dialog — a benign race, but it legitimately
+        // trips the §13.3.1.4 "answered 2xx never ACKed/BYE'd" audit.
+        let (mut c_realign, _) = charlie.try_receive_tolerating_blocking("INVITE", &[]).await?;
+        c_realign.respond(200, "OK").with_sdp(ANSWER_SDP).try_send().await?;
+        let (_c_realign_ack, _) = charlie.try_receive_tolerating_blocking("ACK", &[]).await?;
+        let (mut a_realign, _) = env.alice.try_receive_tolerating_blocking("INVITE", &[]).await?;
+        a_realign.respond(200, "OK").with_sdp(ANSWER_SDP).try_send().await?;
+        let (_a_realign_ack, _) = env.alice.try_receive_tolerating_blocking("ACK", &[]).await?;
+        // Bob's completion NOTIFY(s) have no terminating sentinel pre-BYE (the
+        // Trying NOTIFY may already have been absorbed by the 202 wait), so a
+        // short drain remains the right tool for HIS socket only.
+        env.bob.quiesce(std::time::Duration::from_millis(150)).await;
 
         // A↔B↔C merged; tear down via A BYE → the B2BUA BYEs every leg.
         let mut alice_bye = alice_dialog.bye().await;
         scope.set_confirmed(alice_dialog.clone());
-        // The relayed b-leg BYEs to B and C race the 200; absorb them, then read
-        // alice's own 200 (tolerating a stray late NOTIFY / re-INVITE).
-        env.bob.quiesce(settle).await;
-        charlie.quiesce(settle).await;
+        // The relayed b-leg BYEs to B and C race alice's 200. ASSERT both
+        // arrive (a lost teardown is a failure, not silence), answering any
+        // interleaved NOTIFY, then read alice's own 200.
+        let (mut bob_bye, _) = env.bob.try_receive_tolerating_blocking("BYE", &["NOTIFY"]).await?;
+        bob_bye.respond(200, "OK").try_send().await?;
+        let (mut charlie_bye, _) =
+            charlie.try_receive_tolerating_blocking("BYE", &["NOTIFY"]).await?;
+        charlie_bye.respond(200, "OK").try_send().await?;
         alice_bye.try_expect_tolerating(200, &["BYE", "NOTIFY", "INVITE"]).await?;
         scope.mark_terminated();
         Ok(())

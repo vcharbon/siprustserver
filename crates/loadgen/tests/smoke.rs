@@ -755,6 +755,71 @@ async fn loadgen_mux_prefix_picker_shares_callee_port() {
     assert_eq!(core.registry_size(), 0, "shared-socket slot leaked after receivers dropped");
 }
 
+/// newkahneed-033 ask A: a HOP-ROUTED in-dialog/in-transaction request that
+/// reaches the shared UAS socket with its R-URI user-part STRIPPED, its Via
+/// stack replaced by a single proxy Via, and (being an ACK) no correlation
+/// token — the exact wire shape the LB's synthesized §17.1.1.3 non-2xx ACK has
+/// — must still demux to the leg that owns the dialog (via the Call-ID
+/// promoted when the leg's initial INVITE arrived), never land as a `stray`
+/// orphan. The shape mirrors the `nk_reroute` 486 flow captured by `sipflow`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loadgen_mux_tokenless_in_dialog_ack_demuxes_by_dialog() {
+    use sip_net::BindUdpOpts;
+    let uas = addr(6444);
+    let core = MuxCore::bind(
+        vec![EndpointSpec { addr: uas, role: Role::Callee }],
+        Correlation::header("X-Loadgen-Id"),
+        256,
+        10,
+        RECV,
+        Clock::system(),
+    )
+    .await
+    .unwrap();
+
+    // Two receivers share the socket (the reroute shape's callee + alt legs),
+    // demuxed by number-plan prefixes — so a wrong fall-through would surface.
+    let token = "lgHOPACK".to_string();
+    let routing = CallRouting::new(token.clone())
+        .leg(uas, "callee")
+        .leg(uas, "alt")
+        .picker(uas, loadgen::labelled_prefix_leg_picker([("+0411", "callee"), ("+0422", "alt")]));
+    let net = core.network(routing);
+    let ep_callee = net.bind_udp(BindUdpOpts::new(uas, 256)).await.unwrap();
+    let _ep_alt = net.bind_udp(BindUdpOpts::new(uas, 256)).await.unwrap();
+
+    let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    // The b-leg INVITE as the LB forwards it: full R-URI, proxy Via on top.
+    let invite = format!(
+        "INVITE sip:+0411133166602012@127.0.0.1:6444;user=phone SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKproxy1;rport\r\n\
+         X-Loadgen-Id: {token}\r\n\
+         Call-ID: hopack-1@h\r\nTo: <sip:+0411133166602012@127.0.0.1>\r\n\
+         From: <sip:worker@h>;tag=w1\r\nCSeq: 1 INVITE\r\n\r\n"
+    );
+    sender.send_to(invite.as_bytes(), uas).await.unwrap();
+    let got = tokio::time::timeout(RECV, ep_callee.recv()).await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&got.raw).starts_with("INVITE "), "leg INVITE demuxes");
+
+    // The hop-routed ACK to this leg's 486, as observed on the wire: user-part
+    // stripped from the R-URI, ONE fresh proxy Via, no token header — only the
+    // dialog identity (Call-ID / From / To / CSeq) survives.
+    let ack = "ACK sip:127.0.0.1:6444 SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKproxy2;rport\r\n\
+         Call-ID: hopack-1@h\r\nTo: <sip:+0411133166602012@127.0.0.1>;tag=c486\r\n\
+         From: <sip:worker@h>;tag=w1\r\nCSeq: 1 ACK\r\n\r\n";
+    sender.send_to(ack.as_bytes(), uas).await.unwrap();
+
+    let got = tokio::time::timeout(RECV, ep_callee.recv())
+        .await
+        .expect("the tokenless hop-routed ACK must demux to the dialog's leg, not orphan")
+        .unwrap();
+    assert!(String::from_utf8_lossy(&got.raw).starts_with("ACK "), "delivered message is the ACK");
+    use std::sync::atomic::Ordering::Relaxed;
+    assert_eq!(core.stats().orphan_stray.load(Relaxed), 0, "no stray orphan for the ACK");
+}
+
 /// Emergency / non-emergency split under overload. The b2bua's CPS bucket is
 /// exhausted (size 0, no refill), so EVERY non-emergency new INVITE is shed with
 /// a stateless 503 while an emergency (`Resource-Priority: esnet.0`) call is

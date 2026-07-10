@@ -1087,6 +1087,75 @@ impl Agent {
         None
     }
 
+    /// **Blocking**, fallible, tolerant receive — the load-lane primitive that
+    /// replaces `quiesce`-as-choreography (newkahneed-033 ask C): wait (up to
+    /// `recv_timeout` per datagram) until a `method` request arrives, answering
+    /// every interleaved `tolerate` request `200 OK` along the way, and return
+    /// the matched [`ServerTxn`] **plus everything that was absorbed** so the
+    /// body can ASSERT the interleaved traffic instead of blind-draining it.
+    ///
+    /// Contract details that make this assertable where `quiesce` is not:
+    /// - a missing `method` request is a [`StepError::Timeout`] — a lost BYE
+    ///   can no longer masquerade as success;
+    /// - an interleaved **ACK** is absorbed + collected WITHOUT a response (an
+    ///   ACK completes a transaction and must never be answered), whether or
+    ///   not it is listed in `tolerate`;
+    /// - a tolerated **offer-carrying INVITE/UPDATE** (a realign re-INVITE) is
+    ///   answered `200` **with an SDP answer** — RFC 3264 §5 / RFC 3261
+    ///   §13.3.1.1 forbid the bodyless 200 that `quiesce`'s bare drain sends;
+    /// - any other method (or an inbound response) is an error, not a silent
+    ///   200 — the strict-agent contract survives.
+    pub async fn try_receive_tolerating_blocking(
+        &self,
+        method: &str,
+        tolerate: &[&str],
+    ) -> Result<(ServerTxn, Vec<SipRequest>), StepError> {
+        let mut absorbed = Vec::new();
+        loop {
+            let r = match self.try_recv().await? {
+                SipMessage::Request(r) => r,
+                SipMessage::Response(r) => {
+                    return Err(StepError::UnexpectedKind {
+                        who: self.name.clone(),
+                        detail: format!(
+                            "got a {} {} response, expected a {method} request (tolerating {tolerate:?})",
+                            r.status, r.reason
+                        ),
+                    })
+                }
+            };
+            let route_set: Vec<String> = get_headers(&r.headers, "record-route")
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let mut txn = ServerTxn { agent: self.clone(), request: r, to_tag: None, route_set };
+            if txn.request.method == method {
+                return Ok((txn, absorbed));
+            }
+            if txn.request.method.as_str() == "ACK" {
+                absorbed.push(txn.request);
+                continue;
+            }
+            if tolerate.iter().any(|t| txn.request.method == *t) {
+                let is_offer_reinvite = matches!(txn.request.method.as_str(), "INVITE" | "UPDATE")
+                    && !txn.request.body.is_empty();
+                let respond = txn.respond(200, "OK");
+                if is_offer_reinvite {
+                    respond.with_sdp(crate::callflow::ANSWER_SDP).try_send().await?;
+                } else {
+                    respond.try_send().await?;
+                }
+                absorbed.push(txn.request);
+                continue;
+            }
+            return Err(StepError::WrongMethod {
+                who: self.name.clone(),
+                expected: format!("{method} (tolerating {tolerate:?})"),
+                got: txn.request.method.to_string(),
+            });
+        }
+    }
+
     /// **Best-effort socket drain** — read (and discard) every datagram *currently
     /// queued* at this UA without waiting, asserting nothing about them. Each read
     /// goes through the recording layer, so a message the scenario delivered but
@@ -1657,6 +1726,57 @@ impl ClientInvite {
         let resp = try_expect_response(&self.agent, status).await?;
         self.learn_from_response(&resp);
         Ok(resp)
+    }
+
+    /// SIPp-`optional` semantics for the load lane (newkahneed-033 ask D):
+    /// wait for the FINAL response `status`, absorbing — and collecting — any
+    /// interleaved provisional (1xx), instead of erroring on it the way
+    /// [`try_expect`](Self::try_expect) does. A multi-leg shape legitimately
+    /// sees a relay-timing-dependent number of provisionals (the reroute
+    /// caller gets one or two 180s depending on when the alternate leg rings),
+    /// so a body says `try_expect_final(200)` and asserts the collected 1xx
+    /// list only where the count IS deterministic. Every absorbed provisional
+    /// still feeds the dialog bookkeeping (early To-tag, Contact, route set),
+    /// exactly as a sequence of `try_expect(18x)` calls would; the final
+    /// overrides per §13.2.2.4. A non-matching FINAL is still a
+    /// [`StepError::WrongStatus`].
+    ///
+    /// NOTE (033 ask D2): under `--auto-retransmit` the mux absorbs a REPEATED
+    /// byte-identical provisional as a retransmission before any body sees it
+    /// — see the retransmit-engine notes in `loadgen::mux` (`CallTxns`); a
+    /// "ring again" assertion belongs to the functional/e2e surface, not here.
+    pub async fn try_expect_final(
+        &mut self,
+        status: u16,
+    ) -> Result<(SipResponse, Vec<SipResponse>), StepError> {
+        let mut provisionals = Vec::new();
+        loop {
+            match self.agent.try_recv().await? {
+                SipMessage::Response(r) if r.status == 100 => continue,
+                SipMessage::Response(r) if r.status < 200 => {
+                    self.learn_from_response(&r);
+                    provisionals.push(r);
+                }
+                SipMessage::Response(r) => {
+                    if r.status != status {
+                        return Err(StepError::WrongStatus {
+                            who: self.agent.name.clone(),
+                            expected: status,
+                            got: r.status,
+                            reason: r.reason.clone(),
+                        });
+                    }
+                    self.learn_from_response(&r);
+                    return Ok((r, provisionals));
+                }
+                SipMessage::Request(r) => {
+                    return Err(StepError::UnexpectedKind {
+                        who: self.agent.name.clone(),
+                        detail: format!("got a {} request, expected a {status} final", r.method),
+                    })
+                }
+            }
+        }
     }
 
     /// Receive the next response to this INVITE **without asserting its status**
@@ -2929,6 +3049,92 @@ mod auth_seam_tests {
         server.try_receive("BYE").await.unwrap().respond(200, "OK").try_send().await.unwrap();
         bye.try_expect(200).await.unwrap();
 
+        let _ = h.finish().await;
+    }
+
+    /// newkahneed-033 ask D: `try_expect_final` absorbs (and collects) any
+    /// interleaved provisionals — the SIPp-`optional` semantics — instead of
+    /// erroring on a 1xx the body did not hard-code, and still learns the
+    /// dialog state the final confirms (the ACK/BYE route correctly after).
+    #[tokio::test(start_paused = true)]
+    async fn try_expect_final_absorbs_and_collects_provisionals() {
+        let h = Harness::new("try-expect-final");
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let server = h.agent("server", "127.0.0.1:5070").await;
+
+        let mut call = alice.invite(&server).with_sdp(OFFER).send().await;
+        let mut uas = server.try_receive("INVITE").await.unwrap();
+        // A relay-timing-dependent provisional mix: 180 then 183, then the 200.
+        uas.respond(180, "Ringing").try_send().await.unwrap();
+        uas.respond(183, "Session Progress").try_send().await.unwrap();
+        uas.respond(200, "OK").with_sdp(OFFER).try_send().await.unwrap();
+
+        let (answer, provisionals) = call.try_expect_final(200).await.unwrap();
+        assert_eq!(answer.status, 200);
+        assert_eq!(
+            provisionals.iter().map(|p| p.status).collect::<Vec<_>>(),
+            vec![180, 183],
+            "every absorbed 1xx is collected, in arrival order"
+        );
+
+        // The learned dialog state routes the ACK + teardown correctly.
+        let mut dialog = call.ack().await;
+        server.try_receive("ACK").await.unwrap();
+        let mut bye = dialog.bye().await;
+        server.try_receive("BYE").await.unwrap().respond(200, "OK").try_send().await.unwrap();
+        bye.try_expect(200).await.unwrap();
+        let _ = h.finish().await;
+    }
+
+    /// newkahneed-033 ask C: `try_receive_tolerating_blocking` waits for the
+    /// sentinel method, 200-OKs the tolerated traffic in between, and RETURNS
+    /// the absorbed requests so the body can assert them — where `quiesce`
+    /// blind-drains and a lost sentinel becomes silent success (here it is a
+    /// `Timeout` error, asserted first on an idle socket).
+    #[tokio::test(start_paused = true)]
+    async fn try_receive_tolerating_blocking_collects_absorbed_and_times_out() {
+        let h = Harness::new("blocking-tolerant-receive");
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let server = h.agent("server", "127.0.0.1:5070").await;
+
+        // Establish A↔server.
+        let mut call = alice.invite(&server).with_sdp(OFFER).send().await;
+        let mut uas = server.try_receive("INVITE").await.unwrap();
+        uas.respond(200, "OK").with_sdp(OFFER).try_send().await.unwrap();
+        call.try_expect(200).await.unwrap();
+        let mut dialog = call.ack().await;
+        server.try_receive("ACK").await.unwrap();
+
+        // A lost sentinel is a DETECTABLE failure: nothing is in flight, so the
+        // blocking receive times out instead of silently succeeding.
+        match server.try_receive_tolerating_blocking("BYE", &["NOTIFY"]).await {
+            Err(StepError::Timeout { .. }) => {}
+            Err(e) => panic!("an absent sentinel must surface as Timeout, got {e}"),
+            Ok((txn, _)) => panic!(
+                "an absent sentinel must surface as Timeout, got a {} request",
+                txn.request().method
+            ),
+        }
+
+        // NOTIFY(s) then the BYE — the nondeterministic-count release pattern
+        // (the ct_refer shape). The primitive 200s the NOTIFY, returns on the
+        // BYE, and hands the absorbed NOTIFY back for assertion.
+        let mut notify =
+            dialog.send_request(InDialogMethod::Notify).try_send().await.unwrap();
+        let mut bye = dialog.bye().await;
+
+        let (mut bye_txn, absorbed) =
+            server.try_receive_tolerating_blocking("BYE", &["NOTIFY"]).await.unwrap();
+        assert_eq!(
+            absorbed.iter().map(|r| r.method.to_string()).collect::<Vec<_>>(),
+            vec!["NOTIFY".to_string()],
+            "the absorbed traffic is returned, assertable"
+        );
+        bye_txn.respond(200, "OK").try_send().await.unwrap();
+
+        // Alice's side settles: the primitive's 200 (NOTIFY) and her BYE 200.
+        notify.try_expect(200).await.unwrap();
+        bye.try_expect(200).await.unwrap();
         let _ = h.finish().await;
     }
 

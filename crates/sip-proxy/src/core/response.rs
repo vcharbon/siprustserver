@@ -120,6 +120,11 @@ impl ProxyCore {
                     (&found.target.host, found.target.port),
                     &found.branch,
                     (&self.advertised.host, self.advertised.port),
+                    // §17.1.1.3: reuse the INVITE's Request-URI verbatim (the
+                    // remembered forward), so the downstream UAS sees the ACK
+                    // under the URI it was INVITEd on — not a user-stripped
+                    // `sip:{target}` (newkahneed-033 ask B).
+                    Some(&found.invite_ruri),
                 );
                 self.send_to(&serialize(&SipMessage::Request(ack)), &found.target).await;
                 self.metrics.record_ack_synthesized();
@@ -143,6 +148,7 @@ impl ProxyCore {
                         target: found.target.clone(),
                         branch: found.branch.clone(),
                         upstream_branch,
+                        invite_ruri: found.invite_ruri.clone(),
                     },
                     crate::cancel_lru::RTX_ENTRY_TTL_MS,
                 );
@@ -393,5 +399,130 @@ Content-Length: 0\r\n\r\n"
         let txt = metrics.prometheus_text();
         assert!(txt.contains("sip_messages_total{label=\"outbound:dropped\"} 1"));
         assert!(!txt.contains("outbound:forwarded"), "the 100 must not be relayed upstream");
+    }
+
+    /// Endpoint double capturing every sent datagram's bytes.
+    #[derive(Default)]
+    struct ByteCapturingEndpoint {
+        sent: std::sync::Mutex<Vec<Vec<u8>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl sip_net::UdpEndpoint for ByteCapturingEndpoint {
+        async fn send_to(&self, buf: &[u8], _dst: std::net::SocketAddr) -> Result<(), sip_net::SendError> {
+            self.sent.lock().unwrap().push(buf.to_vec());
+            Ok(())
+        }
+        async fn recv(&self) -> Option<sip_net::UdpPacket> {
+            std::future::pending().await
+        }
+        fn try_recv(&self) -> Option<sip_net::UdpPacket> {
+            None
+        }
+        fn local_addr(&self) -> std::net::SocketAddr {
+            format!("{PROXY_VIP}:5060").parse().unwrap()
+        }
+        fn queue_depth(&self) -> usize {
+            0
+        }
+        fn queue_max(&self) -> usize {
+            0
+        }
+        fn counters(&self) -> sip_net::UdpEndpointCounters {
+            sip_net::UdpEndpointCounters::default()
+        }
+    }
+
+    // RFC 3261 §17.1.1.3 (newkahneed-033 ask B): the hop-by-hop ACK the proxy
+    // synthesizes for a relayed non-2xx INVITE final must carry the SAME
+    // Request-URI as the INVITE it acknowledges — the old `sip:{target}`
+    // fallback stripped the user-part (`sip:+0411…@uas:6001;user=phone` became
+    // `sip:uas:6001`), so any downstream R-URI-keyed demux (the loadgen mux's
+    // prefix picker) could no longer attribute the ACK to its leg.
+    #[tokio::test]
+    async fn synthesized_non_2xx_ack_reuses_the_invite_request_uri() {
+        let ep = Arc::new(ByteCapturingEndpoint::default());
+        let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
+        let metrics = Arc::new(ProxyMetrics::new());
+        let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
+        let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
+            .clock(Clock::test_at(0))
+            .metrics(metrics.clone())
+            .build(Box::new(EpHandle(ep.clone())));
+
+        // A full callee-shaped R-URI: user-part + `;user=phone`, as a worker's
+        // b-leg INVITE carries it through the LB.
+        let invite_ruri = "sip:+0411133166602012@uas.example:6001;user=phone";
+        let raw_invite = format!(
+            "INVITE {invite_ruri} SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKackuri;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:worker@{UAC}>;tag=w1\r\n\
+To: <sip:+0411133166602012@uas.example>\r\n\
+Call-ID: ackuri-1@test\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n"
+        );
+        let msg = CustomParser::default().parse(raw_invite.as_bytes()).unwrap();
+        core.handle_request(msg, format!("{UAC}:5060").parse().unwrap()).await;
+
+        let raw_486 = format!(
+            "SIP/2.0 486 Busy Here\r\n\
+Via: SIP/2.0/UDP {PROXY_VIP}:5060;branch=z9hG4bKout\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKackuri\r\n\
+From: <sip:worker@{UAC}>;tag=w1\r\n\
+To: <sip:+0411133166602012@uas.example>;tag=callee-1\r\n\
+Call-ID: ackuri-1@test\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n"
+        );
+        let SipMessage::Response(resp) = CustomParser::default().parse(raw_486.as_bytes()).unwrap()
+        else {
+            panic!("expected response")
+        };
+        core.handle_response(resp).await;
+        assert_eq!(metrics.ack_synthesized_total(), 1, "the 486 relay must synthesize the hop ACK");
+
+        let sent = ep.sent.lock().unwrap();
+        let ack = sent
+            .iter()
+            .map(|b| String::from_utf8_lossy(b).to_string())
+            .find(|s| s.starts_with("ACK "))
+            .expect("a synthesized ACK must have been sent");
+        let first_line = ack.lines().next().unwrap();
+        assert_eq!(
+            first_line,
+            format!("ACK {invite_ruri} SIP/2.0"),
+            "the synthesized ACK must reuse the INVITE's Request-URI verbatim"
+        );
+    }
+
+    /// Thin `UdpEndpoint` wrapper so the shared `Arc<ByteCapturingEndpoint>` can
+    /// be both handed to the builder (boxed) and inspected by the test.
+    struct EpHandle(Arc<ByteCapturingEndpoint>);
+
+    #[async_trait::async_trait]
+    impl sip_net::UdpEndpoint for EpHandle {
+        async fn send_to(&self, buf: &[u8], dst: std::net::SocketAddr) -> Result<(), sip_net::SendError> {
+            self.0.send_to(buf, dst).await
+        }
+        async fn recv(&self) -> Option<sip_net::UdpPacket> {
+            self.0.recv().await
+        }
+        fn try_recv(&self) -> Option<sip_net::UdpPacket> {
+            self.0.try_recv()
+        }
+        fn local_addr(&self) -> std::net::SocketAddr {
+            self.0.local_addr()
+        }
+        fn queue_depth(&self) -> usize {
+            self.0.queue_depth()
+        }
+        fn queue_max(&self) -> usize {
+            self.0.queue_max()
+        }
+        fn counters(&self) -> sip_net::UdpEndpointCounters {
+            self.0.counters()
+        }
     }
 }

@@ -87,17 +87,26 @@ pub fn ack_absorb_key(call_id: &str, from_tag: Option<&str>, cseq_num: u32) -> S
 /// while an ACK for a 2xx is a new transaction with a fresh branch and must
 /// be forwarded end-to-end. Empty when the upstream request carried no branch
 /// (pre-RFC-3261 UA) — never matched against.
+/// `invite_ruri` is the Request-URI of the INVITE **as this proxy forwarded
+/// it** — RFC 3261 §17.1.1.3 requires the ACK a client transaction generates
+/// for a non-2xx final to carry the *same* Request-URI as its INVITE, so the
+/// hop-by-hop ACK the response path synthesizes must reuse it verbatim (the
+/// old `sip:{target}` fallback stripped the user-part, which also broke any
+/// downstream R-URI-based demux — newkahneed-033 ask B). Empty on the `rtx|`
+/// memos and the `ackabs|` marker, which never source an ACK's R-URI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelEntry {
     pub target: ProxyAddr,
     pub branch: String,
     pub upstream_branch: String,
+    pub invite_ruri: String,
 }
 
 struct StoredEntry {
     target: ProxyAddr,
     branch: String,
     upstream_branch: String,
+    invite_ruri: String,
     expires_at_ms: u64,
 }
 
@@ -165,6 +174,7 @@ impl CancelBranchLru {
                 target: entry.target,
                 branch: entry.branch,
                 upstream_branch: entry.upstream_branch,
+                invite_ruri: entry.invite_ruri,
                 expires_at_ms,
             },
         );
@@ -184,6 +194,7 @@ impl CancelBranchLru {
                 target: e.target.clone(),
                 branch: e.branch.clone(),
                 upstream_branch: e.upstream_branch.clone(),
+                invite_ruri: e.invite_ruri.clone(),
             }),
             None => None,
         }
@@ -220,6 +231,7 @@ mod tests {
             target: ProxyAddr::new("10.0.0.2", 5070),
             branch: branch.to_string(),
             upstream_branch: String::new(),
+            invite_ruri: String::new(),
         }
     }
 

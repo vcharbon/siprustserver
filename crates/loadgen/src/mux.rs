@@ -21,7 +21,13 @@
 //! SUT cooperation). Demux precedence per inbound datagram:
 //! 1. **known Call-ID** — our UAC dialog (Call-ID sniffed from our outbound
 //!    INVITE), or a UAS dialog *after* its first request (the SUT-minted Call-ID
-//!    we learned from the INVITE).
+//!    we learned from the INVITE). This tier is what makes EVERY in-dialog /
+//!    in-transaction request demux with **no token and no R-URI cooperation**
+//!    (newkahneed-033 ask A): a hop-routed ACK the LB re-emits with the R-URI
+//!    user-part stripped and a fresh proxy Via still carries the dialog's
+//!    Call-ID, so it reaches the right leg's inbox — the R-URI/prefix picker
+//!    plays no role after a leg's initial INVITE (pinned by
+//!    `loadgen_mux_tokenless_in_dialog_ack_demuxes_by_dialog`).
 //! 2. **correlation token** — an inbound *initial* request whose Call-ID we've
 //!    never seen, matched against the pending-UAS registry by the token the
 //!    strategy extracts. The SUT carries the token unchanged onto **every**
@@ -1379,8 +1385,17 @@ impl CallTxns {
             // (incl. `100 Trying`, RFC 3261 §17.1.1.2); non-INVITE only on a final.
             // We deliberately do NOT keep retransmitting the INVITE to force the UAS
             // to resend a lost 18x — a non-PRACK provisional is best-effort and may
-            // be lost (the caller tolerates it via `try_expect_answer`, and the
-            // driver gates the cross-call 18x delivery rate instead).
+            // be lost (the caller absorbs a variable 1xx count via
+            // `ClientInvite::try_expect_final`, and the driver gates the cross-call
+            // 18x delivery rate instead).
+            //
+            // The `(branch, status)` dedup below also means a REPEATED
+            // byte-identical provisional — e.g. a B2BUA relaying a SECOND
+            // ringing leg's 180 on the same a-leg early dialog (same branch,
+            // same To-tag) — is absorbed as a retransmission before any body
+            // sees it. That is CORRECT (on the wire it IS one), but it makes
+            // "ring again" semantics unobservable from a load body — see the
+            // shape-authoring caveat in `crate::scenarios` (033 ask D2).
             let stop = if is_invite { status >= 100 } else { status >= 200 };
             if stop {
                 if let Some(ctl) = g.client.remove(&branch) {

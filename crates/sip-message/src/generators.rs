@@ -908,11 +908,18 @@ pub fn generate_ack_for_non_2xx(
 
 /// Build the hop-by-hop ACK a stateless proxy sends downstream when forwarding
 /// a 3xx-6xx INVITE final response upstream (RFC 3261 §17.1.1.3 / §17.2.6).
+///
+/// `invite_ruri` is the Request-URI of the INVITE **as the proxy forwarded
+/// it** — §17.1.1.3 requires the ACK to carry the *same* Request-URI as the
+/// INVITE being acknowledged. `None` (the INVITE was not remembered) falls
+/// back to the bare `sip:{target}` form; that fallback strips the user-part,
+/// so it is a last resort, not the normal path (newkahneed-033 ask B).
 pub fn generate_proxy_ack_for_non_2xx(
     final_response: &SipResponse,
     target: (&str, u16),
     our_branch: &str,
     our_advertised: (&str, u16),
+    invite_ruri: Option<&str>,
 ) -> SipRequest {
     let from = get_header(&final_response.headers, "from").unwrap_or("");
     let to = get_header(&final_response.headers, "to").unwrap_or("");
@@ -932,5 +939,9 @@ pub fn generate_proxy_ack_for_non_2xx(
         h("Content-Length", "0"),
     ];
 
-    make_request("ACK", &format!("sip:{}:{}", target.0, target.1), headers, Vec::new())
+    let ruri = match invite_ruri {
+        Some(uri) if !uri.is_empty() => uri.to_string(),
+        _ => format!("sip:{}:{}", target.0, target.1),
+    };
+    make_request("ACK", &ruri, headers, Vec::new())
 }

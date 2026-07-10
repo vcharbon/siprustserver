@@ -1738,6 +1738,121 @@ impl CrossMessageAuditRule for UnackedInvite2xxByedRule {
 }
 
 // ---------------------------------------------------------------------------
+// rfc3261.unackedInviteNon2xxFinal
+// ---------------------------------------------------------------------------
+
+/// **RFC 3261 §17.1.1.3 — a non-2xx INVITE final MUST be ACKed.** The UAS-side
+/// obligation (newkahneed-033 ask E): a bind that received an INVITE and
+/// answered it with a 3xx–6xx final must see the matching ACK — same Call-ID,
+/// same top-Via branch (the non-2xx ACK belongs to the INVITE transaction and
+/// reuses its branch; hop-by-hop, so through the LB the arriving ACK is the
+/// proxy's synthesized one, which carries the proxy's forward branch — exactly
+/// the branch this UAS saw on the INVITE). A final that is never ACKed means
+/// the rejecting UAS retransmits it to Timer H and the reject path never
+/// cleanly completes — the exact class the `sipflow` pcap triage caught at
+/// load ("486 never ACKed at the UAS") that no per-step `expect` sees.
+///
+/// **Advisory** — deliberately, for now: the harness UAC does NOT auto-ACK a
+/// non-2xx final the way a real transaction layer must (`InviteReject` reads
+/// the relayed 486 and moves on; `AbandonRinging` never reads its 487 at
+/// all — both sanctioned flows), so on the functional surface (where the
+/// SUT's own binds are recorded) the SUT's a-leg finals would gate every such
+/// test. It still lands in every findings table / sampled-call report, which
+/// is where the load triage reads it. Promote to gating once the harness UAC
+/// grows txn-layer auto-ACK of non-2xx finals.
+pub struct UnackedInviteNon2xxFinalRule;
+
+impl CrossMessageAuditRule for UnackedInviteNon2xxFinalRule {
+    fn name(&self) -> &'static str {
+        "rfc3261.unackedInviteNon2xxFinal"
+    }
+
+    fn force_advisory(&self) -> bool {
+        true
+    }
+
+    fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        let parser = crate::rfc_audit::lenient_parser();
+        // bind → (Call-ID \x00 branch) → discharged?
+        let mut per_bind: HashMap<LaneKey, HashMap<String, bool>> = HashMap::new();
+        // Branches this bind is the UAS of: it RECEIVED the initial INVITE.
+        let mut uas_branches: HashMap<LaneKey, HashSet<String>> = HashMap::new();
+        let key_of = |cid: &str, branch: &str| format!("{cid}\x00{branch}");
+        for s in events {
+            let (bind, raw, kind) = match &s.event {
+                SignalingNetworkEvent::SendCalled { bind_key, msg, .. } => {
+                    (bind_key, msg.as_slice(), EventKind::Sent)
+                }
+                SignalingNetworkEvent::RecvItem { bind_key, packet } => {
+                    (bind_key, packet.raw.as_slice(), EventKind::Received)
+                }
+                _ => continue,
+            };
+            let Ok(msg) = parser.parse(raw) else { continue };
+            let branch = branch_of(&msg);
+            if branch.is_empty() {
+                continue;
+            }
+            let cid = call_id(&msg);
+            match &msg {
+                SipMessage::Request(req)
+                    if kind == EventKind::Received
+                        && req.method.as_str().eq_ignore_ascii_case("INVITE") =>
+                {
+                    uas_branches.entry(bind.clone()).or_default().insert(key_of(cid, &branch));
+                }
+                // The ACK for a non-2xx final reuses the INVITE's branch
+                // (§17.1.1.3) → discharge that transaction's obligation.
+                SipMessage::Request(req)
+                    if kind == EventKind::Received
+                        && req.method.as_str().eq_ignore_ascii_case("ACK") =>
+                {
+                    if let Some(m) = per_bind.get_mut(bind) {
+                        if let Some(v) = m.get_mut(&key_of(cid, &branch)) {
+                            *v = true;
+                        }
+                    }
+                }
+                // A SENT 3xx–6xx INVITE final on a branch we are the UAS of
+                // opens the obligation (a retransmitted final re-uses the key).
+                SipMessage::Response(_)
+                    if kind == EventKind::Sent
+                        && cseq_method(&msg).eq_ignore_ascii_case("INVITE")
+                        && (300..700).contains(&status(&msg)) =>
+                {
+                    let key = key_of(cid, &branch);
+                    if uas_branches.get(bind).is_some_and(|b| b.contains(&key)) {
+                        per_bind.entry(bind.clone()).or_default().entry(key).or_insert(false);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for (bind, obligations) in per_bind {
+            for (key, discharged) in obligations {
+                if !discharged {
+                    let mut parts = key.split('\x00');
+                    let cid = parts.next().unwrap_or("");
+                    let branch = parts.next().unwrap_or("");
+                    out.push((
+                        bind.clone(),
+                        format!(
+                            "Sent a non-2xx final to an INVITE (callId {cid}, branch {branch}) \
+                             that was never ACKed — the INVITE transaction never completes and \
+                             the reject retransmits to Timer H; RFC 3261 §17.1.1.3 makes the \
+                             ACK mandatory (hop-by-hop, so a proxy in the path owes this UAS \
+                             its own synthesized ACK)"
+                        ),
+                    ));
+                }
+            }
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
 // rfc3261.failedReinviteTearsDownDialog
 // ---------------------------------------------------------------------------
 
@@ -1893,6 +2008,7 @@ pub(crate) fn cross_rules() -> Vec<Arc<dyn CrossMessageAuditRule>> {
         Arc::new(StrictRouteRewriteHandledRule),
         Arc::new(AckPreservesInviteRouteRule),
         Arc::new(UnackedInvite2xxByedRule),
+        Arc::new(UnackedInviteNon2xxFinalRule),
         Arc::new(FailedReinviteTearsDownDialogRule),
     ]
 }
@@ -2773,6 +2889,51 @@ mod tests {
         assert!(!UnackedInvite2xxByedRule.force_advisory());
     }
 
+    // ---- unackedInviteNon2xxFinal ----------------------------------------
+
+    #[test]
+    fn unacked_non2xx_clean_when_acked_on_the_invite_branch() {
+        // bob (UAS): INVITE in, 486 out, ACK in on the SAME branch (§17.1.1.3:
+        // the non-2xx ACK belongs to the INVITE transaction) → discharged. A
+        // retransmitted 486 must not re-open the obligation.
+        let evs = vec![
+            recv("bob", req("INVITE", "z9hG4bK-i", 1, A, B, "at", None, ""), "127.0.0.1:5070", 0),
+            sent("bob", resp(486, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-i", ""), "127.0.0.1:5070", 1),
+            sent("bob", resp(486, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-i", ""), "127.0.0.1:5070", 2),
+            recv("bob", req("ACK", "z9hG4bK-i", 1, A, B, "at", Some("bt"), ""), "127.0.0.1:5070", 3),
+        ];
+        assert!(UnackedInviteNon2xxFinalRule.check(&evs).is_empty());
+    }
+
+    #[test]
+    fn unacked_non2xx_never_acked_is_flagged_advisory() {
+        // The 033 wire finding: the 486 goes out, the mandatory ACK never
+        // reaches this UAS (mis-demuxed / dropped at a hop) → one finding.
+        let evs = vec![
+            recv("bob", req("INVITE", "z9hG4bK-i", 1, A, B, "at", None, ""), "127.0.0.1:5070", 0),
+            sent("bob", resp(486, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-i", ""), "127.0.0.1:5070", 1),
+        ];
+        let f = UnackedInviteNon2xxFinalRule.check(&evs);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].1.contains("never ACKed"), "{}", f[0].1);
+        // Advisory until the harness UAC auto-ACKs non-2xx finals (see rule doc).
+        assert!(UnackedInviteNon2xxFinalRule.force_advisory());
+    }
+
+    #[test]
+    fn unacked_non2xx_ignores_uac_side_finals_and_2xx() {
+        // alice's bind RECEIVES a 486 (she is the UAC — the obligation is the
+        // sender's), and bob's 2xx final is the OTHER rule's business: neither
+        // opens an obligation here.
+        let evs = vec![
+            sent("alice", req("INVITE", "z9hG4bK-u", 1, A, B, "at", None, ""), "127.0.0.1:5070", 0),
+            recv("alice", resp(486, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-u", ""), "127.0.0.1:5070", 1),
+            recv("bob", req("INVITE", "z9hG4bK-i", 1, A, B, "at", None, ""), "127.0.0.1:5070", 2),
+            sent("bob", resp(200, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-i", ""), "127.0.0.1:5070", 3),
+        ];
+        assert!(UnackedInviteNon2xxFinalRule.check(&evs).is_empty());
+    }
+
     // ---- failedReinviteTearsDownDialog -----------------------------------
 
     #[test]
@@ -2833,6 +2994,6 @@ mod tests {
 
     #[test]
     fn all_cross_rules_registered() {
-        assert_eq!(cross_rules().len(), 21);
+        assert_eq!(cross_rules().len(), 22);
     }
 }
