@@ -28,12 +28,17 @@
 //!   [`MixEntry`](driver::MixEntry) is built from.
 //! - [`driver`] — the CPS governor + max-in-flight semaphore + per-call
 //!   `catch_unwind` boundary + [`scope`]-based teardown.
+//! - [`app`] — the whole CLI application ([`app::Args`] + [`app::run`]) behind
+//!   an injectable [`ShapeRegistry`](e2e_model::ShapeRegistry), so a
+//!   third-party load bin is a one-liner passing its own composed registry
+//!   (the shipped bin passes `with_defaults()`).
 //! - [`report`] — bounded-memory counters, latency histograms, sampling gate,
 //!   Prometheus text, on-disk report.
 //! - [`class`] — result classification.
 //!
 //! [`Agent`]: scenario_harness::Agent
 
+pub mod app;
 pub mod case;
 pub mod chaos;
 pub mod class;
