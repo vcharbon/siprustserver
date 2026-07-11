@@ -89,7 +89,7 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
         let mut findings = Vec::new();
         let parser = CustomParser::new();
         for s in events {
-            let SignalingNetworkEvent::RecvItem { bind_key, packet } = &s.event else {
+            let SignalingNetworkEvent::RecvItem { bind_key, packet, .. } = &s.event else {
                 continue;
             };
             let Ok(SipMessage::Request(req)) = parser.parse(&packet.raw) else {
@@ -242,7 +242,7 @@ impl CrossMessageAuditRule for ResponseCseqMatchesTransactionRule {
         }
         let mut findings = Vec::new();
         for s in events {
-            let SignalingNetworkEvent::RecvItem { bind_key, packet } = &s.event else {
+            let SignalingNetworkEvent::RecvItem { bind_key, packet, .. } = &s.event else {
                 continue;
             };
             let Ok(SipMessage::Response(resp)) = parser.parse(&packet.raw) else {
@@ -300,7 +300,7 @@ impl CrossMessageAuditRule for AckCseqMatchesInviteRule {
         let mut invite_cseqs: HashMap<(LaneKey, String, String), HashSet<u32>> = HashMap::new();
         let mut findings = Vec::new();
         for s in events {
-            let SignalingNetworkEvent::RecvItem { bind_key, packet } = &s.event else {
+            let SignalingNetworkEvent::RecvItem { bind_key, packet, .. } = &s.event else {
                 continue;
             };
             let Ok(SipMessage::Request(req)) = parser.parse(&packet.raw) else {
@@ -429,6 +429,7 @@ mod tests {
         Stamped {
             event: SignalingNetworkEvent::RecvItem {
                 bind_key: bind.to_string(),
+                disposition: crate::types::RecvDisposition::Delivered,
                 packet: UdpPacket { raw, src: "127.0.0.1:5091".parse().unwrap(), arrival_ms: seq },
             },
             seq,

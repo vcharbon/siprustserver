@@ -241,6 +241,15 @@ fn project_entry(e: &RecordedSipEntry, base: i64) -> SeqRow {
             seq_report::format_relative(rcvd as i64 - base),
         ));
     }
+    // True-wire receive note (newkahneed-036 ask A): a message that arrived but
+    // was never consumed by the scenario body (or was refused by the inbox /
+    // discarded by the loadgen loss model) is visibly distinguishable from one
+    // the body expected and matched — on the arrow label AND in the detail.
+    let mut label = facets(&e.raw).label;
+    if let Some(note) = e.recv_note {
+        label.push_str(&format!(" ⚠ [{}]", note.tag()));
+        detail.push_str(&format!("┄ receive note: {}\n", note.tag()));
+    }
     detail.push_str(&wire_text(&e.raw));
 
     SeqRow {
@@ -248,7 +257,7 @@ fn project_entry(e: &RecordedSipEntry, base: i64) -> SeqRow {
         seq: e.seq,
         from: e.from.to_string(),
         to: Some(e.to.to_string()),
-        label: facets(&e.raw).label,
+        label,
         detail: Some(detail),
         conn: None,
         kind: RowKind::Sip {
@@ -270,6 +279,7 @@ mod tests {
             sent_ms,
             received_ms: Some(sent_ms + 1),
             delivered: true,
+            recv_note: None,
             seq,
         }
     }

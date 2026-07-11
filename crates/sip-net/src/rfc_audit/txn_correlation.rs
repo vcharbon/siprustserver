@@ -108,7 +108,7 @@ pub fn build_branch_index(events: &[Stamped<SignalingNetworkEvent>]) -> BranchIn
             SignalingNetworkEvent::SendCalled { bind_key, msg, .. } => {
                 (bind_key, Direction::Sent, msg.as_slice())
             }
-            SignalingNetworkEvent::RecvItem { bind_key, packet } => {
+            SignalingNetworkEvent::RecvItem { bind_key, packet, .. } => {
                 (bind_key, Direction::Received, packet.raw.as_slice())
             }
             _ => continue,
@@ -327,6 +327,7 @@ mod tests {
         Stamped {
             event: SignalingNetworkEvent::RecvItem {
                 bind_key: bind.to_string(),
+                disposition: crate::types::RecvDisposition::Delivered,
                 packet: UdpPacket {
                     raw,
                     src: "127.0.0.1:5091".parse().unwrap(),

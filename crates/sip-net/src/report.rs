@@ -12,6 +12,13 @@
 //! (when delivered) received timestamps. A send with no matching receive (lost
 //! packet, unbound destination) becomes an entry with `delivered = false`.
 //!
+//! Arrival vs consumption (newkahneed-036 ask A): a `RecvItem` is the ARRIVAL
+//! fact (recorded at delivery into the inbox); a `RecvConsumed` marker is the
+//! CONSUMPTION fact (the endpoint's `recv` returned it). An arrival with no
+//! matching consumption — or one the inbox/loss-model refused — carries a
+//! [`RecvNote`] so renderers can distinguish "the peer sent this and the body
+//! ignored it" from "the body expected and matched this".
+//!
 //! This is intentionally **byte-level**: it owns no SIP parser. A reporter that
 //! wants method/status/Call-ID labels parses `raw` itself with `sip-message`.
 //! Keeping the parser out is what lets this projection sit in the network layer.
@@ -21,6 +28,37 @@ use std::net::SocketAddr;
 use layer_harness::Stamped;
 
 use crate::contracts::SignalingNetworkEvent;
+use crate::types::RecvDisposition;
+
+/// Why a received message deserves a distinct rendering. `None` on an entry
+/// means the normal case: delivered and consumed by the scenario (or a pure
+/// send with no receive half).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecvNote {
+    /// Delivered to the endpoint's inbox but the scenario body never read it.
+    Unconsumed,
+    /// Arrived but the bounded inbox was full — the app never saw it.
+    InboxOverflow,
+    /// Arrived after the endpoint closed its inbox.
+    InboxClosed,
+    /// Discarded by the simulated packet-loss model (loadgen `--drop-rate`).
+    LossModel,
+    /// Absorbed as a duplicate by the retransmit engine (`--auto-retransmit`).
+    AbsorbedRetransmit,
+}
+
+impl RecvNote {
+    /// Short human tag for renderers (label suffix / badge text).
+    pub fn tag(self) -> &'static str {
+        match self {
+            RecvNote::Unconsumed => "unconsumed",
+            RecvNote::InboxOverflow => "inbox overflow",
+            RecvNote::InboxClosed => "after close",
+            RecvNote::LossModel => "dropped: loss model",
+            RecvNote::AbsorbedRetransmit => "absorbed retransmit",
+        }
+    }
+}
 
 /// One message as it crossed (or tried to cross) the wire, reconstructed from a
 /// `SendCalled`/`RecvItem` pair on the recording channel. Port of the source's
@@ -39,10 +77,41 @@ pub struct RecordedSipEntry {
     pub received_ms: Option<u64>,
     /// `true` when a matching `RecvItem` was found on the channel.
     pub delivered: bool,
+    /// How the receive half fared beyond plain delivered-and-consumed
+    /// (see [`RecvNote`]); `None` for the normal case.
+    pub recv_note: Option<RecvNote>,
     /// Capture-order tiebreaker from the originating `SendCalled` — the
     /// renderer sorts on `(sent_ms, seq)` exactly like the source's SVG/text
     /// renderers sort on `(timestamp, seq)`.
     pub seq: u64,
+}
+
+struct RecvHalf<'a> {
+    seq: u64,
+    receiver: SocketAddr,
+    bind_key: &'a str,
+    src: SocketAddr,
+    raw: &'a [u8],
+    arrival_ms: u64,
+    at_ms: u64,
+    disposition: RecvDisposition,
+    /// A `RecvConsumed` marker claimed this arrival.
+    read: bool,
+    /// A `SendCalled` claimed this arrival (pairing state).
+    paired: bool,
+}
+
+impl RecvHalf<'_> {
+    fn note(&self) -> Option<RecvNote> {
+        match self.disposition {
+            RecvDisposition::Delivered if self.read => None,
+            RecvDisposition::Delivered => Some(RecvNote::Unconsumed),
+            RecvDisposition::InboxOverflow => Some(RecvNote::InboxOverflow),
+            RecvDisposition::InboxClosed => Some(RecvNote::InboxClosed),
+            RecvDisposition::LossModel => Some(RecvNote::LossModel),
+            RecvDisposition::AbsorbedRetransmit => Some(RecvNote::AbsorbedRetransmit),
+        }
+    }
 }
 
 /// Pair every `SendCalled` on the channel with its delivering `RecvItem` and
@@ -76,16 +145,45 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
         }
     }
 
-    // Pre-index the deliveries so a send can claim the first unconsumed match.
-    let mut recvs: Vec<(usize, SocketAddr, SocketAddr, &[u8], u64, u64)> = Vec::new();
+    // Pre-index the arrivals so a send can claim the first unpaired match.
+    let mut recvs: Vec<RecvHalf<'_>> = Vec::new();
     for s in events {
-        if let SignalingNetworkEvent::RecvItem { bind_key, packet } = &s.event {
+        if let SignalingNetworkEvent::RecvItem { bind_key, packet, disposition } = &s.event {
             if let Ok(receiver) = bind_key.parse::<SocketAddr>() {
-                recvs.push((s.seq as usize, receiver, packet.src, &packet.raw, s.at_ms, s.seq));
+                recvs.push(RecvHalf {
+                    seq: s.seq,
+                    receiver,
+                    bind_key,
+                    src: packet.src,
+                    raw: &packet.raw,
+                    arrival_ms: packet.arrival_ms,
+                    at_ms: s.at_ms,
+                    disposition: *disposition,
+                    read: false,
+                    paired: false,
+                });
             }
         }
     }
-    let mut consumed = vec![false; recvs.len()];
+
+    // Claim consumption: each `RecvConsumed` marks the first unread arrival of
+    // the SAME packet on the same bind. (The packet clone carries the arrival
+    // stamp, so equality is exact; byte-identical retransmits claim in FIFO
+    // order, matching the queue's pop order.)
+    for s in events {
+        let SignalingNetworkEvent::RecvConsumed { bind_key, packet } = &s.event else {
+            continue;
+        };
+        if let Some(r) = recvs.iter_mut().find(|r| {
+            !r.read
+                && r.bind_key == bind_key
+                && r.src == packet.src
+                && r.arrival_ms == packet.arrival_ms
+                && r.raw == packet.raw.as_slice()
+        }) {
+            r.read = true;
+        }
+    }
 
     let mut out = Vec::new();
     for s in events {
@@ -96,24 +194,19 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
             continue;
         };
 
-        // Earliest unconsumed delivery: receiver == `to`, packet.src == `from`,
+        // Earliest unpaired delivery: receiver == `to`, packet.src == `from`,
         // same bytes, and observed at-or-after this send (seq order).
-        let mut matched: Option<usize> = None;
-        for (i, (rseq, receiver, src, raw, _, _)) in recvs.iter().enumerate() {
-            if consumed[i] {
-                continue;
-            }
-            if *receiver == *to && *src == from && *raw == msg.as_slice() && *rseq >= s.seq as usize
-            {
-                matched = Some(i);
-                break;
-            }
-        }
-
-        let received_ms = matched.map(|i| {
-            consumed[i] = true;
-            recvs[i].4
+        let matched = recvs.iter_mut().find(|r| {
+            !r.paired && r.receiver == *to && r.src == from && r.raw == msg.as_slice() && r.seq >= s.seq
         });
+
+        let (received_ms, recv_note) = match matched {
+            Some(r) => {
+                r.paired = true;
+                (Some(r.at_ms), r.note())
+            }
+            None => (None, None),
+        };
 
         out.push(RecordedSipEntry {
             from,
@@ -124,6 +217,7 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
             // Unmatched + recorded destination ⇒ genuinely lost on the fabric;
             // unmatched + external destination ⇒ left the recording's horizon.
             delivered: received_ms.is_some() || !recorded_binds.contains(to),
+            recv_note,
             seq: s.seq,
         });
     }
@@ -132,18 +226,19 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
     // its arrival. (An orphan whose src IS a recorded bind — e.g. a fake
     // fabric's pre-ingress synthetic reply — keeps the historic behaviour of
     // not being an entry, so fully-recorded reports are byte-identical.)
-    for (i, (_, receiver, src, raw, at_ms, seq)) in recvs.iter().enumerate() {
-        if consumed[i] || recorded_binds.contains(src) {
+    for r in &recvs {
+        if r.paired || recorded_binds.contains(&r.src) {
             continue;
         }
         out.push(RecordedSipEntry {
-            from: *src,
-            to: *receiver,
-            raw: raw.to_vec(),
-            sent_ms: *at_ms,
-            received_ms: Some(*at_ms),
+            from: r.src,
+            to: r.receiver,
+            raw: r.raw.to_vec(),
+            sent_ms: r.at_ms,
+            received_ms: Some(r.at_ms),
             delivered: true,
-            seq: *seq,
+            recv_note: r.note(),
+            seq: r.seq,
         });
     }
 

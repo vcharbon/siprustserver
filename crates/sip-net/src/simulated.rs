@@ -274,6 +274,11 @@ impl UdpEndpoint for SimEndpoint {
     fn counters(&self) -> UdpEndpointCounters {
         self.counters.snapshot()
     }
+
+    fn install_recv_tap(&self, tap: crate::types::RecvTap) -> bool {
+        self.queue.install_tap(tap);
+        true
+    }
 }
 
 impl Drop for SimEndpoint {

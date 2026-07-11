@@ -44,8 +44,8 @@ use layer_harness::{lane_key, Channel, LaneKey, RecordedAnomaly, Recorder, RunCo
 
 use crate::net::{SignalingNetwork, UdpEndpoint};
 use crate::types::{
-    all_ua_roles, BindError, BindSummary, BindUdpOpts, SendError, UaRole, UdpEndpointCounters,
-    UdpPacket, UndeliveredPacket,
+    all_ua_roles, BindError, BindSummary, BindUdpOpts, RecvDisposition, SendError, UaRole,
+    UdpEndpointCounters, UdpPacket, UndeliveredPacket,
 };
 
 /// The `layer-harness` channel key for this layer. The `RunContext` uses the
@@ -59,13 +59,23 @@ pub const SIGNALING_TAG: &str = "sip-net/SignalingNetwork";
 /// One observation on the `SignalingNetwork` typed channel. Every variant
 /// carries the lane-identifying `bind_key` so per-peer rules can slice on a
 /// single peer. (Port of `SignalingNetworkEvent`.)
+///
+/// `RecvItem` is the ARRIVAL fact, recorded at delivery into the endpoint's
+/// inbox (via the [`crate::types::RecvTap`] the decorator installs at bind);
+/// `RecvConsumed` is the CONSUMPTION fact, recorded when the endpoint's
+/// `recv`/`try_recv` returns the packet. A `RecvItem` with no matching
+/// `RecvConsumed` is a message that really crossed the wire but the scenario
+/// body never read (newkahneed-036 ask A) — still on the ladder, still seen by
+/// the RFC audit. On an impl with no tappable inbox the decorator falls back to
+/// recording both, adjacently, at recv time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SignalingNetworkEvent {
     BindAcquire { bind_key: LaneKey, summary: BindSummary },
     BindRelease { bind_key: LaneKey },
     SendCalled { bind_key: LaneKey, to: SocketAddr, msg: Vec<u8> },
     SendResult { bind_key: LaneKey, outcome: SendOutcome },
-    RecvItem { bind_key: LaneKey, packet: UdpPacket },
+    RecvItem { bind_key: LaneKey, packet: UdpPacket, disposition: RecvDisposition },
+    RecvConsumed { bind_key: LaneKey, packet: UdpPacket },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,8 +91,24 @@ impl SignalingNetworkEvent {
             | SignalingNetworkEvent::BindRelease { bind_key }
             | SignalingNetworkEvent::SendCalled { bind_key, .. }
             | SignalingNetworkEvent::SendResult { bind_key, .. }
-            | SignalingNetworkEvent::RecvItem { bind_key, .. } => bind_key,
+            | SignalingNetworkEvent::RecvItem { bind_key, .. }
+            | SignalingNetworkEvent::RecvConsumed { bind_key, .. } => bind_key,
         }
+    }
+}
+
+/// Whether the RFC audit sees this event. `RecvConsumed` is a projection-only
+/// consumption marker; a `RecvItem` is included per its disposition's
+/// [`RecvDisposition::audit_visible`] (modeled loss / infra-absorbed duplicates
+/// are deliberately invisible to the rules). EVERY rule invocation — the
+/// per-bind Drop pass, the layer-close cross pass, and any external harness
+/// running `rfc_*_rules` over a channel snapshot — must filter through this, so
+/// the rules keep one view of the wire.
+pub fn audit_visible_event(event: &SignalingNetworkEvent) -> bool {
+    match event {
+        SignalingNetworkEvent::RecvConsumed { .. } => false,
+        SignalingNetworkEvent::RecvItem { disposition, .. } => disposition.audit_visible(),
+        _ => true,
     }
 }
 
@@ -266,9 +292,16 @@ impl RecordingSignalingNetwork {
             }
         }
 
-        // Cross-message rules — one pass over the whole channel.
+        // Cross-message rules — one pass over the whole channel (audit view:
+        // consumption markers + modeled-loss arrivals filtered out).
         if !self.0.cross_rules.is_empty() {
-            let snapshot = self.0.channel.snapshot();
+            let snapshot: Vec<Stamped<SignalingNetworkEvent>> = self
+                .0
+                .channel
+                .snapshot()
+                .into_iter()
+                .filter(|s| audit_visible_event(&s.event))
+                .collect();
             let bind_roles = self.0.bind_roles.lock().unwrap().clone();
             for rule in self.0.cross_rules.iter() {
                 for (bind_key, detail) in rule.check(&snapshot) {
@@ -356,6 +389,19 @@ impl SignalingNetwork for RecordingSignalingNetwork {
             summary,
         });
         let endpoint = self.0.inner.bind_udp(opts).await?;
+        // Delivery-time recording (newkahneed-036 ask A): arrivals are recorded
+        // the moment the inner inbox accepts (or overflows/refuses) them, so a
+        // packet the body never reads is still on the trace. Falls back to
+        // recv-time recording on impls with no tappable inbox.
+        let tap_channel = self.0.channel.clone();
+        let tap_key = bind_key.clone();
+        let tapped = endpoint.install_recv_tap(Arc::new(move |pkt, disposition| {
+            tap_channel.record(SignalingNetworkEvent::RecvItem {
+                bind_key: tap_key.clone(),
+                packet: pkt.clone(),
+                disposition,
+            });
+        }));
         Ok(Box::new(RecordedEndpoint {
             inner: endpoint,
             channel: self.0.channel.clone(),
@@ -365,6 +411,7 @@ impl SignalingNetwork for RecordingSignalingNetwork {
             roles,
             rules: self.0.rules.clone(),
             should_audit: self.0.should_audit.clone(),
+            tapped,
         }))
     }
 
@@ -397,6 +444,26 @@ struct RecordedEndpoint {
     roles: HashSet<UaRole>,
     rules: Arc<Vec<Arc<dyn PeerAuditRule>>>,
     should_audit: ShouldAuditBind,
+    /// Whether the inner endpoint accepted the delivery tap. `true` → arrivals
+    /// are recorded at delivery and `recv` records only consumption; `false` →
+    /// legacy fallback, `recv` records arrival + consumption adjacently.
+    tapped: bool,
+}
+
+impl RecordedEndpoint {
+    fn record_read(&self, p: &UdpPacket) {
+        if !self.tapped {
+            self.channel.record(SignalingNetworkEvent::RecvItem {
+                bind_key: self.bind_key.clone(),
+                packet: p.clone(),
+                disposition: RecvDisposition::Delivered,
+            });
+        }
+        self.channel.record(SignalingNetworkEvent::RecvConsumed {
+            bind_key: self.bind_key.clone(),
+            packet: p.clone(),
+        });
+    }
 }
 
 #[async_trait]
@@ -428,10 +495,7 @@ impl UdpEndpoint for RecordedEndpoint {
     async fn recv(&self) -> Option<UdpPacket> {
         let pkt = self.inner.recv().await;
         if let Some(p) = &pkt {
-            self.channel.record(SignalingNetworkEvent::RecvItem {
-                bind_key: self.bind_key.clone(),
-                packet: p.clone(),
-            });
+            self.record_read(p);
         }
         pkt
     }
@@ -439,10 +503,7 @@ impl UdpEndpoint for RecordedEndpoint {
     fn try_recv(&self) -> Option<UdpPacket> {
         let pkt = self.inner.try_recv();
         if let Some(p) = &pkt {
-            self.channel.record(SignalingNetworkEvent::RecvItem {
-                bind_key: self.bind_key.clone(),
-                packet: p.clone(),
-            });
+            self.record_read(p);
         }
         pkt
     }
@@ -496,7 +557,7 @@ impl Drop for RecordedEndpoint {
             .channel
             .snapshot()
             .into_iter()
-            .filter(|s| s.event.bind_key() == &self.bind_key)
+            .filter(|s| s.event.bind_key() == &self.bind_key && audit_visible_event(&s.event))
             .collect();
         for rule in self.rules.iter() {
             if !subject_intersects(&rule.subject(), &self.roles) {

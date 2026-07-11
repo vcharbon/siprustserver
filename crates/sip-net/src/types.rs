@@ -28,6 +28,45 @@ pub struct UdpPacket {
     pub arrival_ms: u64,
 }
 
+/// How an inbound datagram fared at the receiving endpoint's inbox, recorded on
+/// `SignalingNetworkEvent::RecvItem` at DELIVERY time (newkahneed-036 ask A) so
+/// the trace reflects the true wire even when the scenario body never reads the
+/// packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecvDisposition {
+    /// Enqueued into the endpoint's inbox (the normal case).
+    Delivered,
+    /// Arrived but the bounded inbox was full — the app never saw it.
+    InboxOverflow,
+    /// Arrived after the endpoint closed its inbox — the app never saw it.
+    InboxClosed,
+    /// Arrived but the simulated packet-loss model discarded it (loadgen
+    /// `--drop-rate`): modeled network loss.
+    LossModel,
+    /// Arrived but the per-call retransmit engine absorbed it as a duplicate
+    /// (loadgen `--auto-retransmit`): infra dedup the app must not see.
+    AbsorbedRetransmit,
+}
+
+impl RecvDisposition {
+    /// Whether the RFC audit judges the receiving UA against this arrival.
+    /// `Delivered`/`InboxOverflow` are true arrivals at a live endpoint;
+    /// `LossModel`/`AbsorbedRetransmit` are deliberately modeled as "the UA
+    /// never saw it" (auditing on them would judge behaviour the loss model
+    /// forbade), and `InboxClosed` arrivals postdate the endpoint (ladder-only,
+    /// like an orphan).
+    pub fn audit_visible(self) -> bool {
+        matches!(self, RecvDisposition::Delivered | RecvDisposition::InboxOverflow)
+    }
+}
+
+/// Delivery-time tap installed on an endpoint's inbox by the recording
+/// decorator (sampled/recording calls only — the non-recording path never
+/// installs one). Invoked with each inbound datagram + its disposition at the
+/// moment the inbox accepts or rejects it, so arrival is observed independently
+/// of whether the body ever calls `recv`.
+pub type RecvTap = Arc<dyn Fn(&UdpPacket, RecvDisposition) + Send + Sync>;
+
 /// Per-endpoint counters. Snapshot of the live atomics behind an endpoint.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UdpEndpointCounters {

@@ -139,6 +139,16 @@ pub fn bind_roles_of(
 /// its `advisory` tags — so the gate and the report can never disagree on
 /// which endpoint a rule applies to.
 pub fn evaluate_rfc_findings(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<RfcFinding> {
+    // Audit view (newkahneed-036 ask A): consumption markers and modeled-loss /
+    // infra-absorbed arrivals are projection-only — filtered here so EVERY
+    // caller (harness hard gate, e2e collector, report projection) hands the
+    // rules the same view of the wire.
+    let events: Vec<Stamped<SignalingNetworkEvent>> = events
+        .iter()
+        .filter(|s| crate::contracts::audit_visible_event(&s.event))
+        .cloned()
+        .collect();
+    let events = events.as_slice();
     let roles = bind_roles_of(events);
     let roles_of =
         |bind: &str| roles.get(bind).cloned().unwrap_or_else(all_ua_roles);

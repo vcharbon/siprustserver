@@ -224,3 +224,171 @@ async fn real_run_silences_rules() {
 
     assert!(wrapped.recording.close().await.is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// Record-at-demux (newkahneed-036 ask A): arrivals are recorded at DELIVERY
+// into the inbox, consumption separately at recv — so a message the body never
+// reads is still on the trace, distinguishably.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn unconsumed_arrival_is_recorded_at_delivery_and_noted() {
+    let recorder = Recorder::fake();
+    let wrapped = with_all_contracts(
+        sim(),
+        recorder,
+        RunContext::TestWithRecorder,
+        ScopedAuditOptions::default(),
+        true,
+    );
+    let net = wrapped.network.clone();
+
+    let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
+    let b = net.bind_udp(opts("10.0.0.2:5060", 64)).await.unwrap();
+    a.send_to(b"ACK sip:x SIP/2.0\r\n", b.local_addr()).await.unwrap();
+    net.await_in_flight(Duration::from_secs(1)).await;
+    // b NEVER calls recv().
+
+    let snapshot = wrapped.recording.channel().snapshot();
+    assert!(
+        snapshot.iter().any(|s| matches!(
+            &s.event,
+            SignalingNetworkEvent::RecvItem {
+                disposition: sip_net::RecvDisposition::Delivered,
+                ..
+            }
+        )),
+        "arrival must be recorded at delivery, without any recv()"
+    );
+    assert!(
+        !snapshot
+            .iter()
+            .any(|s| matches!(&s.event, SignalingNetworkEvent::RecvConsumed { .. })),
+        "no consumption marker without a recv()"
+    );
+
+    let entries = sip_net::to_sip_entries(&snapshot);
+    let e = entries.iter().find(|e| e.raw.starts_with(b"ACK")).unwrap();
+    assert!(e.delivered, "the wire fact is delivery");
+    assert_eq!(e.recv_note, Some(sip_net::RecvNote::Unconsumed));
+
+    // The audit view keeps the arrival (that is the whole point).
+    assert!(snapshot
+        .iter()
+        .filter(|s| matches!(&s.event, SignalingNetworkEvent::RecvItem { .. }))
+        .all(|s| sip_net::audit_visible_event(&s.event)));
+
+    drop(b);
+    drop(a);
+}
+
+#[tokio::test]
+async fn consumed_arrival_pairs_with_its_consumption_marker() {
+    let recorder = Recorder::fake();
+    let wrapped = with_all_contracts(
+        sim(),
+        recorder,
+        RunContext::TestWithRecorder,
+        ScopedAuditOptions::default(),
+        true,
+    );
+    let net = wrapped.network.clone();
+
+    let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
+    let b = net.bind_udp(opts("10.0.0.2:5060", 64)).await.unwrap();
+    a.send_to(b"OPTIONS sip:x SIP/2.0\r\n", b.local_addr()).await.unwrap();
+    let _ = timeout(Duration::from_secs(1), b.recv()).await.unwrap();
+
+    let snapshot = wrapped.recording.channel().snapshot();
+    let item_seq = snapshot
+        .iter()
+        .find(|s| matches!(&s.event, SignalingNetworkEvent::RecvItem { .. }))
+        .expect("arrival recorded")
+        .seq;
+    let consumed_seq = snapshot
+        .iter()
+        .find(|s| matches!(&s.event, SignalingNetworkEvent::RecvConsumed { .. }))
+        .expect("consumption recorded")
+        .seq;
+    assert!(item_seq < consumed_seq, "arrival sequences before consumption");
+
+    let entries = sip_net::to_sip_entries(&snapshot);
+    let e = entries.iter().find(|e| e.raw.starts_with(b"OPTIONS")).unwrap();
+    assert_eq!(e.recv_note, None, "a consumed message carries no note");
+}
+
+#[tokio::test]
+async fn overflow_arrival_is_recorded_with_its_disposition() {
+    let recorder = Recorder::fake();
+    let wrapped = with_all_contracts(
+        sim(),
+        recorder,
+        RunContext::TestWithRecorder,
+        ScopedAuditOptions::default(),
+        true,
+    );
+    let net = wrapped.network.clone();
+
+    let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
+    let b = net.bind_udp(opts("10.0.0.2:5060", 1)).await.unwrap();
+    a.send_to(b"NOTIFY one SIP/2.0\r\n", b.local_addr()).await.unwrap();
+    net.await_in_flight(Duration::from_secs(1)).await;
+    a.send_to(b"NOTIFY two SIP/2.0\r\n", b.local_addr()).await.unwrap();
+    net.await_in_flight(Duration::from_secs(1)).await;
+
+    let snapshot = wrapped.recording.channel().snapshot();
+    let dispositions: Vec<_> = snapshot
+        .iter()
+        .filter_map(|s| match &s.event {
+            SignalingNetworkEvent::RecvItem { disposition, .. } => Some(*disposition),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        dispositions,
+        vec![
+            sip_net::RecvDisposition::Delivered,
+            sip_net::RecvDisposition::InboxOverflow
+        ],
+        "the overflowed datagram is still a recorded arrival"
+    );
+
+    let entries = sip_net::to_sip_entries(&snapshot);
+    let two = entries.iter().find(|e| e.raw.starts_with(b"NOTIFY two")).unwrap();
+    assert_eq!(two.recv_note, Some(sip_net::RecvNote::InboxOverflow));
+    assert!(two.delivered, "it arrived on the wire — overflow is inbox-side");
+
+    // Overflow arrivals stay audit-visible (true wire), unlike modeled loss.
+    assert!(sip_net::audit_visible_event(
+        &snapshot
+            .iter()
+            .filter(|s| matches!(&s.event, SignalingNetworkEvent::RecvItem { .. }))
+            .last()
+            .unwrap()
+            .event
+    ));
+}
+
+#[test]
+fn audit_view_hides_consumption_markers_and_modeled_loss() {
+    use sip_net::{RecvDisposition, UdpPacket};
+    let pkt = UdpPacket {
+        raw: b"BYE sip:x SIP/2.0\r\n".to_vec(),
+        src: "10.0.0.1:5060".parse().unwrap(),
+        arrival_ms: 7,
+    };
+    let item = |disposition| SignalingNetworkEvent::RecvItem {
+        bind_key: "10.0.0.2:5060".to_string(),
+        packet: pkt.clone(),
+        disposition,
+    };
+    assert!(sip_net::audit_visible_event(&item(RecvDisposition::Delivered)));
+    assert!(sip_net::audit_visible_event(&item(RecvDisposition::InboxOverflow)));
+    assert!(!sip_net::audit_visible_event(&item(RecvDisposition::InboxClosed)));
+    assert!(!sip_net::audit_visible_event(&item(RecvDisposition::LossModel)));
+    assert!(!sip_net::audit_visible_event(&item(RecvDisposition::AbsorbedRetransmit)));
+    assert!(!sip_net::audit_visible_event(&SignalingNetworkEvent::RecvConsumed {
+        bind_key: "10.0.0.2:5060".to_string(),
+        packet: pkt,
+    }));
+}

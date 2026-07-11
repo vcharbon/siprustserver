@@ -1424,7 +1424,7 @@ impl CrossMessageAuditRule for Proxy100WithinT100msRule {
 
         for s in events {
             let (bind, raw, received) = match &s.event {
-                SignalingNetworkEvent::RecvItem { bind_key, packet } => {
+                SignalingNetworkEvent::RecvItem { bind_key, packet, .. } => {
                     (bind_key, &packet.raw, true)
                 }
                 SignalingNetworkEvent::SendCalled { bind_key, msg, .. } => {
@@ -1673,7 +1673,7 @@ impl CrossMessageAuditRule for UnackedInvite2xxByedRule {
                 SignalingNetworkEvent::SendCalled { bind_key, msg, .. } => {
                     (bind_key, msg.as_slice(), EventKind::Sent)
                 }
-                SignalingNetworkEvent::RecvItem { bind_key, packet } => {
+                SignalingNetworkEvent::RecvItem { bind_key, packet, .. } => {
                     (bind_key, packet.raw.as_slice(), EventKind::Received)
                 }
                 _ => continue,
@@ -1788,7 +1788,7 @@ impl CrossMessageAuditRule for UnackedInviteNon2xxFinalRule {
                 SignalingNetworkEvent::SendCalled { bind_key, msg, .. } => {
                     (bind_key, msg.as_slice(), EventKind::Sent)
                 }
-                SignalingNetworkEvent::RecvItem { bind_key, packet } => {
+                SignalingNetworkEvent::RecvItem { bind_key, packet, .. } => {
                     (bind_key, packet.raw.as_slice(), EventKind::Received)
                 }
                 _ => continue,
@@ -1903,7 +1903,7 @@ impl CrossMessageAuditRule for FailedReinviteTearsDownDialogRule {
         for s in events {
             let (bind, raw) = match &s.event {
                 SignalingNetworkEvent::SendCalled { bind_key, msg, .. } => (bind_key, msg.as_slice()),
-                SignalingNetworkEvent::RecvItem { bind_key, packet } => (bind_key, packet.raw.as_slice()),
+                SignalingNetworkEvent::RecvItem { bind_key, packet, .. } => (bind_key, packet.raw.as_slice()),
                 _ => continue,
             };
             let Ok(msg) = parser.parse(raw) else { continue };
@@ -2041,6 +2041,7 @@ mod tests {
         Stamped {
             event: SignalingNetworkEvent::RecvItem {
                 bind_key: bind.to_string(),
+                disposition: crate::types::RecvDisposition::Delivered,
                 packet: UdpPacket { raw, src: src.parse().unwrap(), arrival_ms: seq },
             },
             seq,

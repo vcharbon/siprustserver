@@ -574,9 +574,11 @@ impl Harness {
     /// Drain the fabric before the trace snapshot: wait out in-flight
     /// datagrams (a txn-layer auto-ACK sent by the scenario's LAST receive is
     /// still in transit when `finish` runs), then yield the scheduler so a
-    /// LIVE recv loop (the SUT's) reads — and records — what was delivered.
-    /// Fabricates nothing: a passive test agent's queue is untouched (its
-    /// unread ACK stays unrecorded — such a test reads the ACK explicitly).
+    /// LIVE recv loop (the SUT's) reads what was delivered. Fabricates
+    /// nothing: a passive test agent's queue is untouched — since
+    /// newkahneed-036 ask A its unread datagrams are already recorded at
+    /// DELIVERY (arrival is a wire fact, tagged `unconsumed` on the ladder),
+    /// so the audit sees them without any explicit read.
     async fn settle_network(&self) {
         self.network.await_in_flight(Duration::from_millis(200)).await;
         for _ in 0..8 {

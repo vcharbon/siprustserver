@@ -1260,7 +1260,9 @@ impl FailoverHarness {
         let snapshot = self.harness.recording().channel().snapshot();
         let events: Vec<_> = snapshot
             .into_iter()
-            .filter(|s| !worker_binds.contains(s.event.bind_key()))
+            .filter(|s| {
+                !worker_binds.contains(s.event.bind_key()) && sip_net::audit_visible_event(&s.event)
+            })
             .collect();
         let mut findings = Vec::new();
         for rule in sip_net::rfc_cross_message_rules() {

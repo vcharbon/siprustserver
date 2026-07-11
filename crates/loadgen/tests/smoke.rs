@@ -842,6 +842,107 @@ async fn loadgen_mux_tokenless_in_dialog_ack_demuxes_by_dialog() {
     assert_eq!(core.stats().orphan_stray.load(Relaxed), 0, "no stray orphan for the ACK");
 }
 
+/// newkahneed-036 ask A: the mux inbox reports every demuxed datagram to an
+/// installed delivery tap AT DELIVERY — independent of whether the scenario
+/// body ever `recv`s it — and a datagram the per-call loss model discards is
+/// still reported, tagged as modeled loss. This is the seam the recording
+/// decorator rides so a sampled call's ladder / RFC audit reflect the true
+/// wire (the `nk_reroute` unconsumed hop-ACK class).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loadgen_mux_recorded_inbox_taps_delivery_and_modeled_loss() {
+    use sip_net::{BindUdpOpts, RecvDisposition};
+    use std::sync::Mutex as StdMutex;
+    let uas = addr(6446);
+    let core = MuxCore::bind(
+        vec![EndpointSpec { addr: uas, role: Role::Callee }],
+        Correlation::header("X-Loadgen-Id"),
+        256,
+        10,
+        RECV,
+        Clock::system(),
+    )
+    .await
+    .unwrap();
+
+    let first_line = |raw: &[u8]| {
+        String::from_utf8_lossy(raw).split_whitespace().next().unwrap_or("").to_string()
+    };
+
+    // Call 1: no loss model. INVITE + in-dialog ACK both tap `Delivered` at
+    // demux time; NOTHING ever recvs from the endpoint.
+    let net = core.network(CallRouting::new("lgTAP1".to_string()).leg(uas, "callee"));
+    let ep = net.bind_udp(BindUdpOpts::new(uas, 256)).await.unwrap();
+    let seen: Arc<StdMutex<Vec<(String, RecvDisposition)>>> = Arc::new(StdMutex::new(Vec::new()));
+    let sink = seen.clone();
+    assert!(ep.install_recv_tap(Arc::new(move |pkt, disp| {
+        sink.lock().unwrap().push((
+            String::from_utf8_lossy(&pkt.raw).split_whitespace().next().unwrap_or("").to_string(),
+            disp,
+        ));
+    })));
+
+    let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let invite = "INVITE sip:x@127.0.0.1:6446 SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKt1\r\n\
+         X-Loadgen-Id: lgTAP1\r\n\
+         Call-ID: tap-1@h\r\nTo: <sip:x@127.0.0.1>\r\n\
+         From: <sip:w@h>;tag=w1\r\nCSeq: 1 INVITE\r\n\r\n";
+    let ack = "ACK sip:127.0.0.1:6446 SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKt2\r\n\
+         Call-ID: tap-1@h\r\nTo: <sip:x@127.0.0.1>;tag=c486\r\n\
+         From: <sip:w@h>;tag=w1\r\nCSeq: 1 ACK\r\n\r\n";
+    sender.send_to(invite.as_bytes(), uas).await.unwrap();
+    sender.send_to(ack.as_bytes(), uas).await.unwrap();
+
+    // Both datagrams demux + tap without a single recv() on the endpoint.
+    tokio::time::timeout(RECV, async {
+        loop {
+            if seen.lock().unwrap().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("both arrivals must reach the tap without any recv()");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            ("INVITE".to_string(), RecvDisposition::Delivered),
+            ("ACK".to_string(), RecvDisposition::Delivered)
+        ]
+    );
+    assert_eq!(first_line(&ep.try_recv().unwrap().raw), "INVITE", "tap did not consume the inbox");
+
+    // Call 2: loss model at 100% — the demuxed INVITE never reaches the inbox,
+    // but a recorded call still sees the arrival, tagged as modeled loss.
+    let lossy =
+        core.network_tuned(CallRouting::new("lgTAP2".to_string()).leg(uas, "callee"), 1.0, false, 7);
+    let ep2 = lossy.bind_udp(BindUdpOpts::new(uas, 256)).await.unwrap();
+    let seen2: Arc<StdMutex<Vec<(String, RecvDisposition)>>> = Arc::new(StdMutex::new(Vec::new()));
+    let sink2 = seen2.clone();
+    assert!(ep2.install_recv_tap(Arc::new(move |pkt, disp| {
+        sink2.lock().unwrap().push((
+            String::from_utf8_lossy(&pkt.raw).split_whitespace().next().unwrap_or("").to_string(),
+            disp,
+        ));
+    })));
+    let invite2 = invite.replace("lgTAP1", "lgTAP2").replace("tap-1@h", "tap-2@h");
+    sender.send_to(invite2.as_bytes(), uas).await.unwrap();
+    tokio::time::timeout(RECV, async {
+        loop {
+            if !seen2.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the loss-model discard must still reach the tap");
+    assert_eq!(*seen2.lock().unwrap(), vec![("INVITE".to_string(), RecvDisposition::LossModel)]);
+    assert!(ep2.try_recv().is_none(), "the loss model kept it out of the inbox");
+}
+
 /// Emergency / non-emergency split under overload. The b2bua's CPS bucket is
 /// exhausted (size 0, no refill), so EVERY non-emergency new INVITE is shed with
 /// a stateless 503 while an emergency (`Resource-Priority: esnet.0`) call is

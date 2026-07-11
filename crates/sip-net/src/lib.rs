@@ -21,7 +21,7 @@ pub mod simulated;
 pub mod types;
 
 pub use contracts::{
-    with_all_contracts, CrossMessageAuditRule, ParanoidSignalingNetwork, PeerAuditRule,
+    audit_visible_event, with_all_contracts, CrossMessageAuditRule, ParanoidSignalingNetwork, PeerAuditRule,
     RecordingSignalingNetwork, ScopedAuditOptions, SendOutcome, SignalingAuditViolation,
     SignalingNetworkEvent, WrappedNetwork, SIGNALING_TAG,
 };
@@ -30,11 +30,12 @@ pub use rfc_audit::{
     CSeqInDialogOrderRule, RfcFinding,
 };
 pub use net::{SignalingNetwork, UdpEndpoint};
-pub use report::{to_sip_entries, RecordedSipEntry};
+pub use report::{to_sip_entries, RecordedSipEntry, RecvNote};
 pub use real::RealSignalingNetwork;
 pub use simulated::SimulatedSignalingNetwork;
 pub use types::{
     all_ua_roles, BindError, BindErrorReason, BindSummary, BindUdpOpts, PreIngressAction,
-    PreIngressHook, SendError, UaRole, UdpEndpointCounters, UdpPacket, UndeliveredPacket,
+    PreIngressHook, RecvDisposition, RecvTap, SendError, UaRole, UdpEndpointCounters,
+    UdpPacket, UndeliveredPacket,
     MAX_UDP_PAYLOAD,
 };

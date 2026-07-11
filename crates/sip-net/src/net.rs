@@ -43,6 +43,16 @@ pub trait UdpEndpoint: Send + Sync {
 
     /// Snapshot of the live per-endpoint counters.
     fn counters(&self) -> UdpEndpointCounters;
+
+    /// Install a delivery-time recording tap on this endpoint's inbox
+    /// (newkahneed-036 ask A). Returns `false` when the impl has no tappable
+    /// inbox — the recording decorator then falls back to recv-time recording.
+    /// Concrete endpoints (real / simulated / loadgen mux) delegate to their
+    /// `PacketQueue`; pure test doubles keep the default.
+    fn install_recv_tap(&self, tap: crate::types::RecvTap) -> bool {
+        let _ = tap;
+        false
+    }
 }
 
 /// Forwarding impl so a single bound endpoint can be **shared**: one owner is
@@ -76,6 +86,9 @@ impl UdpEndpoint for std::sync::Arc<dyn UdpEndpoint> {
     }
     fn counters(&self) -> UdpEndpointCounters {
         (**self).counters()
+    }
+    fn install_recv_tap(&self, tap: crate::types::RecvTap) -> bool {
+        (**self).install_recv_tap(tap)
     }
 }
 
