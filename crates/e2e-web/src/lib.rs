@@ -914,13 +914,15 @@ async fn load_run_detail(
                 @else { span .fail { (idx.clear_failures()) " genuine failure(s)" } }
             }
 
-            h2 { "Results by scenario × class × chaos" }
+            h2 { "Results by scenario × class × case × chaos" }
             p .muted {
                 "chaos=" b { "clear" } " are the genuine results to triage; chaos=" b { "near" }
-                " are within the tolerance of an injected fault (accepted kill collateral)."
+                " are within the tolerance of an injected fault (accepted kill collateral). "
+                "case splits a class into its distinct failure modes (RFC rule, failed check, "
+                "agent@phase), each with its own first-N samples."
             }
             table {
-                tr { th { "scenario" } th { "class" } th { "chaos" } th { "count" } th { "samples" } }
+                tr { th { "scenario" } th { "class" } th { "case" } th { "chaos" } th { "count" } th { "samples" } }
                 @for row in &idx.counts {
                     tr {
                         td { (row.scenario) }
@@ -928,12 +930,13 @@ async fn load_run_detail(
                             @if row.ok { span .pass { (row.class) } }
                             @else { span .fail { (row.class) } }
                         }
+                        td { code { (row.case) } }
                         td {
                             @if row.chaos == "near" { span .crash { "near" } }
                             @else { (row.chaos) }
                         }
                         td { (row.count) }
-                        td { (sample_links(&run, &idx, &row.scenario, &row.class, &row.chaos)) }
+                        td { (sample_links(&run, &idx, &row.scenario, &row.class, &row.case, &row.chaos)) }
                     }
                 }
             }
@@ -1023,13 +1026,13 @@ fn canary_row(label: &str, value: u64) -> Markup {
     }
 }
 
-/// The sample-page links for a `(scenario, class, chaos)` count row: the stored
-/// callflow pages, each served through `/load/{run}/files/…`.
-fn sample_links(run: &str, idx: &model::LoadRunIndex, scenario: &str, class: &str, chaos: &str) -> Markup {
+/// The sample-page links for a `(scenario, class, case, chaos)` count row: the
+/// stored callflow pages, each served through `/load/{run}/files/…`.
+fn sample_links(run: &str, idx: &model::LoadRunIndex, scenario: &str, class: &str, case: &str, chaos: &str) -> Markup {
     let group = idx
         .samples
         .iter()
-        .find(|g| g.scenario == scenario && g.class == class && g.chaos == chaos);
+        .find(|g| g.scenario == scenario && g.class == class && g.case == case && g.chaos == chaos);
     html! {
         @if let Some(group) = group {
             @for (i, page) in group.pages.iter().enumerate() {

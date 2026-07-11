@@ -75,13 +75,18 @@ pub struct LoadRunMeta {
     pub profile: Option<String>,
 }
 
-/// One `(scenario, class, chaos)` completed-call count.
+/// One `(scenario, class, case, chaos)` completed-call count.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CountRow {
     pub scenario: String,
     /// The result class label (`ok`, `timeout`, `status_486`, `check_fail`, …).
     pub class: String,
+    /// The bounded case discriminator refining the class into its distinct
+    /// failure modes (RFC rule id(s), failed check id(s), `agent@phase`).
+    /// Empty = un-refined (`ok` rows, indexes written before the field existed).
+    #[serde(default)]
+    pub case: String,
     /// Chaos proximity: `clear` (genuine) or `near` (accepted kill collateral).
     pub chaos: String,
     pub count: u64,
@@ -157,15 +162,20 @@ impl Canaries {
     }
 }
 
-/// The stored sampled callflow pages for one `(scenario, class, chaos)` bucket.
+/// The stored sampled callflow pages for one `(scenario, class, case, chaos)`
+/// bucket.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SampleGroup {
     pub scenario: String,
     pub class: String,
+    /// The case discriminator (see [`CountRow::case`]); empty = un-refined.
+    #[serde(default)]
+    pub case: String,
     pub chaos: String,
     /// Run-dir-relative paths to each sample's rendered callflow HTML page
-    /// (e.g. `callflows/reinvite/check_fail/clear/0.html`).
+    /// (e.g. `callflows/reinvite/check_fail/alice.invite.from.userInfo/clear/0.html`;
+    /// no case segment when `case` is empty).
     pub pages: Vec<String>,
 }
 
@@ -212,6 +222,7 @@ mod tests {
                 CountRow {
                     scenario: "basic_call".into(),
                     class: "ok".into(),
+                    case: String::new(),
                     chaos: "clear".into(),
                     count: 1180,
                     ok: true,
@@ -219,6 +230,7 @@ mod tests {
                 CountRow {
                     scenario: "reinvite".into(),
                     class: "check_fail".into(),
+                    case: "alice.invite.from.userInfo".into(),
                     chaos: "clear".into(),
                     count: 3,
                     ok: false,
@@ -226,6 +238,7 @@ mod tests {
                 CountRow {
                     scenario: "reinvite".into(),
                     class: "timeout".into(),
+                    case: "bob@connected".into(),
                     chaos: "near".into(),
                     count: 2,
                     ok: false,
@@ -263,8 +276,11 @@ mod tests {
             samples: vec![SampleGroup {
                 scenario: "reinvite".into(),
                 class: "check_fail".into(),
+                case: "alice.invite.from.userInfo".into(),
                 chaos: "clear".into(),
-                pages: vec!["callflows/reinvite/check_fail/clear/0.html".into()],
+                pages: vec![
+                    "callflows/reinvite/check_fail/alice.invite.from.userInfo/clear/0.html".into(),
+                ],
             }],
         }
     }

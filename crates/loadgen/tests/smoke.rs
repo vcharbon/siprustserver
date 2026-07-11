@@ -1368,8 +1368,12 @@ async fn loadgen_failing_check_reclassifies_to_check_fail() {
     let out = std::env::temp_dir().join(format!("loadgen-checks-fail-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
     reporter.finalize(&out).unwrap();
-    let html = std::fs::read_to_string(out.join("callflows/basic_call/check_fail/clear/0.html"))
-        .unwrap();
+    // The sample path carries the case discriminator (`<on>.<field>` of the
+    // failing check), so distinct failing checks keep distinct first-N buckets.
+    let html = std::fs::read_to_string(
+        out.join("callflows/basic_call/check_fail/bob.initialInvite.from.userInfo/clear/0.html"),
+    )
+    .unwrap();
     assert!(html.contains("check bob.initialInvite from.userInfo"), "verdict missing:\n{html}");
     assert!(html.contains("FAIL"), "FAIL verdict must render");
     assert!(html.contains("nobody-ever"), "expected-value detail must render");
