@@ -191,6 +191,13 @@ pub struct ProxyMetrics {
     ack_synthesized: AtomicU64,
     pending_invite_lru_size: AtomicU64,
     named_sends: LabeledCounter, // keyed outcome (crate::resolver::outcome — closed set)
+    /// Proactive resolver refresh + startup prewarm events, keyed outcome
+    /// (crate::resolver::refresh_outcome — closed set:
+    /// refreshed|failed|idle_stopped|prewarmed|prewarm_failed). The
+    /// cold-cache-kill visibility for newkahneed-037: `refreshed` moving means
+    /// active names never expire cold; `prewarm_failed`/`failed` climbing
+    /// means DNS is unhealthy while the old entries keep serving.
+    resolver_refresh: LabeledCounter,
     resolver_cache_size: AtomicU64,
     /// Outbound datagrams the endpoint failed to send (EPERM/ENOBUFS/...).
     /// `sip_messages_total{outbound,forwarded}` counts hand-off to the send
@@ -314,6 +321,13 @@ impl ProxyMetrics {
         self.named_sends.inc(outcome);
     }
 
+    /// Count a proactive resolver refresh / startup prewarm event by outcome
+    /// (refreshed/failed/idle_stopped/prewarmed/prewarm_failed), for
+    /// `sip_proxy_resolver_refresh_total{outcome}`. See [`crate::resolver`].
+    pub fn record_resolver_refresh(&self, outcome: &str) {
+        self.resolver_refresh.inc(outcome);
+    }
+
     pub fn set_resolver_cache_size(&self, n: u64) {
         self.resolver_cache_size.store(n, Ordering::Relaxed);
     }
@@ -392,6 +406,9 @@ impl ProxyMetrics {
     }
     pub fn named_send_count(&self, outcome: &str) -> u64 {
         self.named_sends.snapshot().get(outcome).copied().unwrap_or(0)
+    }
+    pub fn resolver_refresh_count(&self, outcome: &str) -> u64 {
+        self.resolver_refresh.snapshot().get(outcome).copied().unwrap_or(0)
     }
     pub fn resolver_cache_size(&self) -> u64 {
         self.resolver_cache_size.load(Ordering::Relaxed)
@@ -486,6 +503,7 @@ impl ProxyMetrics {
         g(&mut s, "sip_proxy_ack_synthesized_total", "Hop-by-hop ACKs synthesized for non-2xx.", "counter", self.ack_synthesized.load(Ordering::Relaxed));
         g(&mut s, "sip_proxy_pending_invite_lru_size", "Pending-INVITE LRU size.", "gauge", self.pending_invite_lru_size.load(Ordering::Relaxed));
         labeled(&mut s, "sip_proxy_named_sends_total", "Named-target (DNS) sends by outcome.", "counter", "outcome", &self.named_sends.snapshot());
+        labeled(&mut s, "sip_proxy_resolver_refresh_total", "Proactive resolver refresh + startup prewarm events by outcome.", "counter", "outcome", &self.resolver_refresh.snapshot());
         g(&mut s, "sip_proxy_resolver_cache_size", "Resolver name-cache size.", "gauge", self.resolver_cache_size.load(Ordering::Relaxed));
         g(&mut s, "sip_proxy_send_failures_total", "Outbound datagrams the endpoint failed to send.", "counter", self.send_failures.load(Ordering::Relaxed));
         let [udp_depth, udp_max, udp_enq, udp_drop] = self.udp_totals();

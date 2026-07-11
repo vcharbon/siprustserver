@@ -36,6 +36,10 @@
 //!   PROXY_HMAC_KID   stickiness cookie key id              (default k0)
 //!   PROXY_HMAC_KEY   stickiness cookie secret (>=16 bytes) (default dev key)
 //!   HEALTH_INTERVAL_MS / HEALTH_TIMEOUT_MS / HEALTH_THRESHOLD  (probe tuning)
+//!   PROXY_RESOLVER_PREWARM  comma-separated host:port DNS targets to resolve
+//!                    at startup and pin permanently warm      (default empty)
+//!   PROXY_RESOLVER_POSITIVE_TTL_MS  resolver positive-cache TTL (default 60000)
+//!   PROXY_RESOLVER_NEGATIVE_TTL_MS  resolver negative-cache TTL (default 5000)
 //!   PROXY_SELF_GATE  1 → real ELU/CPS self-gate, 0 → always-admit (default 1)
 //!   PROXY_SELF_GATE_ELU_CRITICAL  ELU shed threshold       (default 0.80)
 //!   PROXY_SELF_GATE_CPS_SIZE      CPS bucket capacity      (default 50)
@@ -69,6 +73,7 @@ use sip_proxy::registry::composed::ComposedWorkerRegistry;
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
 use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
 use topology::{K8sMembership, Membership};
+use sip_proxy::resolver::ResolverConfig;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
 use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, ProxySelfGate, ProxySelfGateConfig};
 use sip_proxy::strategies::{LoadBalancerConfig, LoadBalancerStrategy};
@@ -551,6 +556,31 @@ async fn main() {
     // shards — a response or CANCEL can hash to a different socket than the
     // INVITE that populated the entry.
     let cancel_lru = Arc::new(sip_proxy::cancel_lru::CancelBranchLru::with_clock(clock.clone()));
+
+    // Named-target resolver tuning + startup prewarm (newkahneed-037). A COLD
+    // name (fresh deploy, CoreDNS restart, TTL expiry) used to cost the first
+    // b-leg forward a full in-path resolve — 3.5–7.5 s under kube ndots:5
+    // search expansion, blowing the downstream 2 s connect timer. Prewarm
+    // targets are resolved off the serving path right after core construction
+    // (boot never blocks or fails on a slow/failed prewarm — outcomes land in
+    // sip_proxy_resolver_refresh_total{outcome=prewarmed|prewarm_failed}) and
+    // pinned so the proactive refresh keeps them permanently warm.
+    let resolver_cfg = ResolverConfig {
+        positive_ttl_ms: parse_u64("PROXY_RESOLVER_POSITIVE_TTL_MS", ResolverConfig::default().positive_ttl_ms),
+        negative_ttl_ms: parse_u64("PROXY_RESOLVER_NEGATIVE_TTL_MS", ResolverConfig::default().negative_ttl_ms),
+        ..ResolverConfig::default()
+    };
+    let prewarm_raw = env_or("PROXY_RESOLVER_PREWARM", "");
+    let prewarm_targets: Vec<ProxyAddr> = prewarm_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            ProxyAddr::parse(s)
+                .unwrap_or_else(|| panic!("bad PROXY_RESOLVER_PREWARM entry {s:?} (want host:port)"))
+        })
+        .collect();
+
     let mut cores = Vec::with_capacity(recv_shards);
     for (shard, endpoint) in endpoints.into_iter().enumerate() {
         cores.push(
@@ -560,8 +590,20 @@ async fn main() {
                 .metrics(metrics.clone())
                 .cancel_lru(cancel_lru.clone())
                 .self_gate(gate_dyn.clone())
+                .resolver_config(resolver_cfg)
                 .shard(shard)
                 .build(endpoint),
+        );
+    }
+    if !prewarm_targets.is_empty() {
+        // Each recv shard owns its own resolver cache, so prewarm every core.
+        for core in &cores {
+            core.prewarm_named_targets(prewarm_targets.clone());
+        }
+        eprintln!(
+            "sip-proxy-runner resolver prewarm: [{}] pinned warm across {recv_shards} shard cache(s) \
+             (outcomes: sip_proxy_resolver_refresh_total{{outcome=prewarmed|prewarm_failed}})",
+            prewarm_targets.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(","),
         );
     }
 
