@@ -598,6 +598,7 @@ impl CrossMessageAuditRule for ConcurrentReInvite500or491Rule {
         for slice in project_per_dialog(events) {
             for slot in &slice.per_agent {
                 let mut in_progress_by_dialog: HashMap<String, HashSet<String>> = HashMap::new();
+                let mut completed_branches: HashSet<String> = HashSet::new();
                 let mut branch_to_dialog: HashMap<String, String> = HashMap::new();
                 let mut concurrent_by_branch: HashMap<String, String> = HashMap::new();
                 let mut response_by_branch: HashMap<String, (u16, bool)> = HashMap::new();
@@ -616,6 +617,13 @@ impl CrossMessageAuditRule for ConcurrentReInvite500or491Rule {
                             }
                             let branch = branch_of(msg);
                             if branch.is_empty() {
+                                continue;
+                            }
+                            // A same-branch repeat after its final is a §17.2.1
+                            // retransmission (the server txn re-emits the
+                            // response), not a new transaction — exempt, and it
+                            // must NOT re-enter the in-progress window.
+                            if completed_branches.contains(&branch) {
                                 continue;
                             }
                             let cid = call_id(msg);
@@ -662,6 +670,7 @@ impl CrossMessageAuditRule for ConcurrentReInvite500or491Rule {
                                     if let Some(s) = in_progress_by_dialog.get_mut(d_key) {
                                         s.remove(&branch);
                                     }
+                                    completed_branches.insert(branch.clone());
                                 }
                             }
                         }
@@ -2398,6 +2407,27 @@ mod tests {
         let f = ConcurrentReInvite500or491Rule.check(&evs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].1.contains("491 or 500"), "{}", f[0].1);
+    }
+
+    #[test]
+    fn concurrent_reinvite_post_final_retransmit_not_reinserted() {
+        // newkahneed-035 regression: a Timer-A retransmission of an
+        // already-finalised re-INVITE crosses its 491 on the wire and is
+        // recorded after it. A same-branch INVITE repeat after its final is a
+        // §17.2.1 retransmission (the server txn re-emits the response), not a
+        // new transaction — it must not re-enter the in-progress window, so
+        // the follow-up re-INVITE's compliant 200 stays clean.
+        let evs = vec![
+            recv("bob", req("INVITE", "z9hG4bK-1", 2, A, B, "at", Some("bt"), ""), "127.0.0.1:5070", 0),
+            sent("bob", resp(491, 2, "INVITE", A, B, "at", "bt", "z9hG4bK-1", ""), "127.0.0.1:5070", 1),
+            // Post-final retransmit of the 491'd re-INVITE.
+            recv("bob", req("INVITE", "z9hG4bK-1", 2, A, B, "at", Some("bt"), ""), "127.0.0.1:5070", 2),
+            // The DRR491 retry — the only re-INVITE genuinely in progress.
+            recv("bob", req("INVITE", "z9hG4bK-2", 3, A, B, "at", Some("bt"), ""), "127.0.0.1:5070", 3),
+            sent("bob", resp(200, 3, "INVITE", A, B, "at", "bt", "z9hG4bK-2", ""), "127.0.0.1:5070", 4),
+        ];
+        let f = ConcurrentReInvite500or491Rule.check(&evs);
+        assert!(f.is_empty(), "post-final retransmit re-inserted as concurrent re-INVITE: {f:?}");
     }
 
     // ---- noByeOutsideOrEarlyDialog ---------------------------------------
