@@ -79,13 +79,15 @@ impl Ids {
     }
 }
 
-/// A fallible step outcome for the **load-test** driver. The fluent agent
-/// methods (`recv`/`expect`/`receive`) `panic!` on a timeout / status / method
-/// mismatch — correct for a `#[tokio::test]` that asserts one call, fatal for a
-/// load generator that must *count* a bad call and keep going. The `try_*`
-/// siblings ([`Agent::try_receive`], [`ClientInvite::try_expect`],
-/// [`InDialogTxn::try_expect`]) return this instead so the driver classifies the
-/// failure (see `loadgen::class`). The panicking originals are untouched.
+/// A fallible step outcome — the error type of the agent's ONE receive/expect/
+/// send core (newkahneed-034 ask C). Every primitive is implemented once,
+/// fallibly (`try_receive`, `try_expect`, `try_send`, …); the panicking fluent
+/// methods (`receive`/`expect`/`send`) are thin veneers that [`unwrap_step`]
+/// the error into a `panic!` carrying this error's `Display`. Two policies,
+/// one mechanism: a `#[tokio::test]` stops the world at the first divergence
+/// (panic → [`PanicDump`] renders the wire trace), while the load driver
+/// *counts* the failure and keeps going (see `loadgen::class`, which matches
+/// on the VARIANT — the `Display` text is for humans).
 #[derive(Debug, Clone)]
 pub enum StepError {
     /// No datagram arrived within the agent's `recv_timeout`.
@@ -124,6 +126,22 @@ impl std::fmt::Display for StepError {
     }
 }
 impl std::error::Error for StepError {}
+
+/// Unwrap a fallible-core step for the panicking (functional-test) lane: `Ok`
+/// passes through, `Err` becomes `panic!("{e}")` — the same message the load
+/// lane would have counted, now stopping the world instead (the [`PanicDump`]
+/// guard renders the wire trace). `#[track_caller]` so the panic reports the
+/// veneer's line; it cannot reach the *test's* line yet because
+/// `#[track_caller]` on an `async fn` is still a no-op on stable
+/// (rust-lang/rust#110011) — no loss, the panicking bodies always reported
+/// `agent.rs` lines.
+#[track_caller]
+fn unwrap_step<T>(r: Result<T, StepError>) -> T {
+    match r {
+        Ok(v) => v,
+        Err(e) => panic!("{e}"),
+    }
+}
 
 /// How a simulated UA, acting as UAS, echoes multiple Record-Route header rows
 /// back in its response: as separate `Record-Route:` lines, or folded into a
@@ -1039,33 +1057,21 @@ impl Agent {
         }
     }
 
+    /// Panicking veneer over [`try_send`](Agent::try_send).
     async fn send(&self, msg: &SipMessage, dst: SocketAddr) {
-        self.ep
-            .send_to(&serialize(msg), dst)
-            .await
-            .unwrap_or_else(|e| panic!("{} send failed: {e}", self.name));
+        unwrap_step(self.try_send(msg, dst).await)
     }
 
+    /// Panicking veneer over [`try_recv`](Agent::try_recv).
     async fn recv(&self) -> SipMessage {
-        loop {
-            let pkt = tokio::time::timeout(self.recv_timeout, self.ep.recv())
-                .await
-                .unwrap_or_else(|_| panic!("{} timed out waiting for a datagram", self.name))
-                .unwrap_or_else(|| panic!("{} endpoint queue closed", self.name));
-            let msg = CustomParser::new()
-                .parse(&pkt.raw)
-                .unwrap_or_else(|e| panic!("{} received an unparseable datagram: {e}", self.name));
-            match self.txn.verdict(&pkt.raw, &msg) {
-                TxnVerdict::Surface => return msg,
-                TxnVerdict::Absorb => continue,
-            }
-        }
+        unwrap_step(self.try_recv().await)
     }
 
-    /// Fallible [`send`](Agent::send): a transport error returns
-    /// [`StepError::Transport`] instead of `panic!`ing. Used by the best-effort
-    /// teardown helpers ([`Dialog::bye_best_effort`], [`CancelHandle`]) the load
-    /// driver runs on a failed call, where a send must never abort the worker.
+    /// THE send core: one datagram out, a transport error returned as
+    /// [`StepError::Transport`]. The functional lane panics on it via
+    /// [`send`](Agent::send); the best-effort teardown helpers
+    /// ([`Dialog::bye_best_effort`], [`CancelHandle`]) the load driver runs on
+    /// a failed call swallow it — a send must never abort the worker.
     pub(crate) async fn try_send(
         &self,
         msg: &SipMessage,
@@ -1077,9 +1083,9 @@ impl Agent {
             .map_err(|e| StepError::Transport { who: self.name.clone(), detail: e.to_string() })
     }
 
-    /// Fallible receive of one SIP datagram — the load-driver sibling of
-    /// [`recv`](Agent::recv). A timeout / closed queue / parse error becomes a
-    /// [`StepError`] instead of a `panic!`.
+    /// THE receive core: one SIP datagram surfaced through the §17.2 receive
+    /// view ([`TxnView`]). A timeout / closed queue / parse error is a
+    /// [`StepError`]; the functional lane panics on it via [`recv`](Agent::recv).
     async fn try_recv(&self) -> Result<SipMessage, StepError> {
         loop {
             let pkt = match tokio::time::timeout(self.recv_timeout, self.ep.recv()).await {
@@ -1098,9 +1104,10 @@ impl Agent {
         }
     }
 
-    /// Fallible [`receive`](Agent::receive) for the load driver: a wrong method,
-    /// an unexpected response, a timeout — all become a [`StepError`] rather than
-    /// a `panic!`. Returns a UAS-side transaction on the matching request.
+    /// THE request-receive core: receive the next request and check its method,
+    /// returning a UAS-side transaction. A wrong method, an unexpected
+    /// response, a timeout — all become a [`StepError`]; the functional lane
+    /// panics on them via [`receive`](Agent::receive).
     pub async fn try_receive(&self, method: &str) -> Result<ServerTxn, StepError> {
         match self.try_recv().await? {
             SipMessage::Request(r) => {
@@ -1111,11 +1118,7 @@ impl Agent {
                         got: r.method.to_string(),
                     });
                 }
-                let route_set = get_headers(&r.headers, "record-route")
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
-                Ok(ServerTxn { agent: self.clone(), request: r, to_tag: None, route_set })
+                Ok(ServerTxn::from_request(self.clone(), r))
             }
             SipMessage::Response(r) => Err(StepError::UnexpectedKind {
                 who: self.name.clone(),
@@ -1194,35 +1197,10 @@ impl Agent {
     }
 
     /// Receive the next request and assert its method. Returns a UAS-side
-    /// transaction handle for sending responses.
+    /// transaction handle for sending responses. Panicking veneer over
+    /// [`try_receive`](Agent::try_receive).
     pub async fn receive(&self, method: &str) -> ServerTxn {
-        match self.recv().await {
-            SipMessage::Request(r) => {
-                assert!(
-                    r.method == method,
-                    "{} expected a {method} request, got {}",
-                    self.name,
-                    r.method
-                );
-                // UAS route set (§12.1.1): the request's Record-Route in
-                // received order. Used if this UAS later originates in-dialog
-                // requests (e.g. bob sends the BYE).
-                let route_set = get_headers(&r.headers, "record-route")
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
-                ServerTxn {
-                    agent: self.clone(),
-                    request: r,
-                    to_tag: None,
-                    route_set,
-                }
-            }
-            SipMessage::Response(r) => panic!(
-                "{} expected a {method} request, got a {} {} response",
-                self.name, r.status, r.reason
-            ),
-        }
+        unwrap_step(self.try_receive(method).await)
     }
 
     /// Non-blocking variant of [`receive_tolerating`](Agent::receive_tolerating):
@@ -1253,16 +1231,7 @@ impl Agent {
                     self.name, r.status, r.reason
                 ),
             };
-            let route_set: Vec<String> = get_headers(&r.headers, "record-route")
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-            let mut txn = ServerTxn {
-                agent: self.clone(),
-                request: r,
-                to_tag: None,
-                route_set,
-            };
+            let mut txn = ServerTxn::from_request(self.clone(), r);
             if txn.request.method == method {
                 return Some(txn);
             }
@@ -1315,11 +1284,7 @@ impl Agent {
                     })
                 }
             };
-            let route_set: Vec<String> = get_headers(&r.headers, "record-route")
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-            let mut txn = ServerTxn { agent: self.clone(), request: r, to_tag: None, route_set };
+            let mut txn = ServerTxn::from_request(self.clone(), r);
             if txn.request.method == method {
                 return Ok((txn, absorbed));
             }
@@ -1379,30 +1344,12 @@ impl Agent {
             match msg {
                 SipMessage::Request(r) => {
                     if r.method == method {
-                        let route_set = get_headers(&r.headers, "record-route")
-                            .iter()
-                            .map(|s| s.to_string())
-                            .collect();
-                        return ServerTxn {
-                            agent: self.clone(),
-                            request: r,
-                            to_tag: None,
-                            route_set,
-                        };
+                        return ServerTxn::from_request(self.clone(), r);
                     }
                     if tolerate.iter().any(|t| r.method == *t) {
                         // Drain + answer the duplicate so the txn layer stops
                         // retransmitting it, then keep waiting for `method`.
-                        let route_set: Vec<String> = get_headers(&r.headers, "record-route")
-                            .iter()
-                            .map(|s| s.to_string())
-                            .collect();
-                        let mut txn = ServerTxn {
-                            agent: self.clone(),
-                            request: r,
-                            to_tag: None,
-                            route_set,
-                        };
+                        let mut txn = ServerTxn::from_request(self.clone(), r);
                         txn.respond(200, "OK").send().await;
                         continue;
                     }
@@ -1444,11 +1391,7 @@ impl Agent {
             match self.recv().await {
                 SipMessage::Request(r) => {
                     if r.method == method {
-                        let route_set = get_headers(&r.headers, "record-route")
-                            .iter()
-                            .map(|s| s.to_string())
-                            .collect();
-                        return ServerTxn { agent: self.clone(), request: r, to_tag: None, route_set };
+                        return ServerTxn::from_request(self.clone(), r);
                     }
                     if absorb.iter().any(|t| r.method == *t) {
                         // Drop the retransmission silently — no response (a UAS that
@@ -1794,10 +1737,7 @@ impl<'a> OutOfDialogRequest<'a> {
 
     /// Panicking [`try_send`](Self::try_send) for functional tests.
     pub async fn send(self) -> InDialogTxn {
-        match self.try_send().await {
-            Ok(txn) => txn,
-            Err(e) => panic!("{e}"),
-        }
+        unwrap_step(self.try_send().await)
     }
 
     /// **RFC 3261 §22.2 authenticated send** — the out-of-dialog twin of the
@@ -1926,15 +1866,16 @@ impl ClientInvite {
     /// automatically on the INVITE's branch, completing the client transaction
     /// the way a real txn layer does. A test whose *subject* is the
     /// ACK-retransmission dance hand-rolls raw sends instead.
+    ///
+    /// Panicking veneer over [`try_expect`](ClientInvite::try_expect).
     pub async fn expect(&mut self, status: u16) -> SipResponse {
-        let resp = expect_response(&self.agent, status, Some(&self.ack_ctx())).await;
-        self.learn_from_response(&resp);
-        resp
+        unwrap_step(self.try_expect(status).await)
     }
 
-    /// Fallible [`expect`](ClientInvite::expect) for the load driver: a wrong
-    /// status / timeout / unexpected request becomes a [`StepError`] instead of a
-    /// `panic!`. On success it learns the dialog state identically to `expect`.
+    /// THE expect core for this INVITE transaction: a wrong status / timeout /
+    /// unexpected request becomes a [`StepError`] (the functional lane panics
+    /// on it via [`expect`](ClientInvite::expect)). On success it learns the
+    /// dialog state (remote tag / target / route set).
     pub async fn try_expect(&mut self, status: u16) -> Result<SipResponse, StepError> {
         let resp = try_expect_response(&self.agent, status, Some(&self.ack_ctx())).await?;
         self.learn_from_response(&resp);
@@ -2166,10 +2107,7 @@ impl ClientInvite {
     /// Terminated` for the INVITE arrives on this same UA and is consumed via
     /// [`ClientInvite::expect`].
     pub async fn cancel(&self) -> InDialogTxn {
-        let cancel = generate_cancel(&InviteClientTransactionHandle {
-            original_invite: self.original_invite.clone(),
-        });
-        self.agent.send(&SipMessage::Request(cancel), self.wire_dst).await;
+        unwrap_step(try_send_cancel(&self.agent, &self.original_invite, self.wire_dst).await);
         InDialogTxn {
             agent: self.agent.clone(),
             // A CANCEL transaction's finals take no ACK; the INVITE's 487 is
@@ -2260,10 +2198,7 @@ impl CancelHandle {
     /// basis — a transport error is swallowed (the call is already failing). Does
     /// not wait for the 200/487.
     pub async fn cancel_best_effort(&self) {
-        let cancel = generate_cancel(&InviteClientTransactionHandle {
-            original_invite: self.original_invite.clone(),
-        });
-        let _ = self.agent.try_send(&SipMessage::Request(cancel), self.wire_dst).await;
+        let _ = try_send_cancel(&self.agent, &self.original_invite, self.wire_dst).await;
     }
 }
 
@@ -2312,15 +2247,7 @@ impl Dialog {
     /// transport error and **not** waiting for the 200. Runs on a failed call to
     /// release the dialog on the SUT (RFC 3261 §15) so no call is leaked.
     pub async fn bye_best_effort(&mut self) {
-        let opts = GenerateInDialogRequestOpts {
-            via: Some(self.agent.via()),
-            contact: Some(self.agent.contact()),
-            ..Default::default()
-        };
-        let res = generate_in_dialog_request(InDialogMethod::Bye, &self.dialog, &opts);
-        self.dialog = res.dialog; // local_cseq bumped
-        let dst = next_hop(&self.dialog, self.fallback_addr);
-        let _ = self.agent.try_send(&SipMessage::Request(res.request), dst).await;
+        let _ = self.send_request(InDialogMethod::Bye).try_send().await;
     }
 
     /// ACK a re-INVITE's 2xx on this confirmed dialog (RFC 3261 §13.2.2.4 — the
@@ -2341,27 +2268,15 @@ impl Dialog {
     }
 
     /// Send any in-dialog request (re-INVITE, INFO, …); attach an SDP body
-    /// with `sdp`.
+    /// with `sdp`. Sugar over the [`send_request`](Dialog::send_request)
+    /// builder — same mechanics (CSeq bump, next-hop routing, §17.1.1.3
+    /// (re-)INVITE retention on the returned transaction).
     pub async fn request(&mut self, method: InDialogMethod, sdp: Option<&str>) -> InDialogTxn {
-        let opts = GenerateInDialogRequestOpts {
-            via: Some(self.agent.via()),
-            contact: Some(self.agent.contact()),
-            body: sdp.map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
-            ..Default::default()
-        };
-        let res = generate_in_dialog_request(method, &self.dialog, &opts);
-        self.dialog = res.dialog; // local_cseq bumped
-        let dst = next_hop(&self.dialog, self.fallback_addr);
-        let msg = SipMessage::Request(res.request);
-        self.agent.send(&msg, dst).await;
-        let SipMessage::Request(request) = msg else { unreachable!() };
-        InDialogTxn {
-            agent: self.agent.clone(),
-            // A re-INVITE's non-2xx final takes a txn-layer ACK (§17.1.1.3) —
-            // retain the request so the txn can build it.
-            invite: matches!(method, InDialogMethod::Invite).then_some(request),
-            wire_dst: dst,
+        let mut req = self.send_request(method);
+        if let Some(s) = sdp {
+            req = req.with_sdp(s);
         }
+        req.send().await
     }
 
     /// Begin an in-dialog request with fine-grained control over RAck (RFC 3262
@@ -2384,10 +2299,7 @@ impl Dialog {
         if let Some(s) = sdp {
             builder = builder.with_sdp(s);
         }
-        let (_txn, request) = match builder.try_send_with_request().await {
-            Ok(v) => v,
-            Err(e) => panic!("{e}"),
-        };
+        let (_txn, request) = unwrap_step(builder.try_send_with_request().await);
         ClientReinvite {
             agent: self.agent.clone(),
             wire_dst: next_hop(&self.dialog, self.fallback_addr),
@@ -2420,9 +2332,10 @@ impl ClientReinvite {
     /// Wait for and assert a response status (the relayed 1xx/2xx/487 for this
     /// re-INVITE, or the 200 to a CANCEL — whichever arrives next). A non-2xx
     /// final to the re-INVITE is auto-ACKed on its branch (RFC 3261
-    /// §17.1.1.3), like [`ClientInvite::expect`].
+    /// §17.1.1.3), like [`ClientInvite::expect`]. Panicking veneer over
+    /// [`try_expect`](ClientReinvite::try_expect).
     pub async fn expect(&mut self, status: u16) -> SipResponse {
-        expect_response(&self.agent, status, Some(&self.ack_ctx())).await
+        unwrap_step(self.try_expect(status).await)
     }
 
     /// Fallible [`expect`](ClientReinvite::expect).
@@ -2440,10 +2353,7 @@ impl ClientReinvite {
     /// [`ClientReinvite::expect`]. Per §9, this ends only the renegotiation —
     /// the established dialog (and the call through a B2BUA) must survive.
     pub async fn cancel(&self) -> InDialogTxn {
-        let cancel = generate_cancel(&InviteClientTransactionHandle {
-            original_invite: self.original_invite.clone(),
-        });
-        self.agent.send(&SipMessage::Request(cancel), self.wire_dst).await;
+        unwrap_step(try_send_cancel(&self.agent, &self.original_invite, self.wire_dst).await);
         InDialogTxn {
             agent: self.agent.clone(),
             // The CANCELled re-INVITE's 487 is read — and auto-ACKed — via
@@ -2546,10 +2456,7 @@ impl<'a> InDialogRequest<'a> {
     /// Generate and send the request; returns its client transaction. Panics on
     /// a transport failure — use [`try_send`](Self::try_send) in the load lane.
     pub async fn send(self) -> InDialogTxn {
-        match self.try_send().await {
-            Ok(txn) => txn,
-            Err(e) => panic!("{e}"),
-        }
+        unwrap_step(self.try_send().await)
     }
 
     /// Fallible [`send`](Self::send) — the generic any-method in-dialog send for
@@ -2652,14 +2559,15 @@ impl InDialogTxn {
         })
     }
 
-    /// Wait for and assert a response status.
+    /// Wait for and assert a response status. Panicking veneer over
+    /// [`try_expect`](InDialogTxn::try_expect).
     pub async fn expect(&mut self, status: u16) -> SipResponse {
-        expect_response(&self.agent, status, self.ack_ctx().as_ref()).await
+        unwrap_step(self.try_expect(status).await)
     }
 
-    /// Fallible [`expect`](InDialogTxn::expect) for the load driver: a wrong
-    /// status / timeout / unexpected request becomes a [`StepError`] instead of a
-    /// `panic!`.
+    /// THE expect core for this transaction: a wrong status / timeout /
+    /// unexpected request becomes a [`StepError`] (the functional lane panics
+    /// on it via [`expect`](InDialogTxn::expect)).
     pub async fn try_expect(&mut self, status: u16) -> Result<SipResponse, StepError> {
         try_expect_response(&self.agent, status, self.ack_ctx().as_ref()).await
     }
@@ -2684,8 +2592,9 @@ impl InDialogTxn {
     /// of [`Agent::receive_tolerating`]. Under a paused clock a keepalive OPTIONS
     /// retransmit can race the awaited response on the same socket; tolerate it
     /// rather than relax the assertion (CLAUDE.md retransmit hazard).
+    /// Panicking veneer over [`try_expect_tolerating`](InDialogTxn::try_expect_tolerating).
     pub async fn expect_tolerating(&mut self, status: u16, tolerate: &[&str]) -> SipResponse {
-        expect_response_tolerating(&self.agent, status, tolerate, self.ack_ctx().as_ref()).await
+        unwrap_step(self.try_expect_tolerating(status, tolerate).await)
     }
 }
 
@@ -2703,6 +2612,18 @@ pub struct ServerTxn {
 }
 
 impl ServerTxn {
+    /// The ONE constructor from a received request. Captures the UAS route set
+    /// (RFC 3261 §12.1.1): the request's Record-Route rows in received order —
+    /// used if this UAS later originates in-dialog requests (e.g. bob sends
+    /// the BYE).
+    fn from_request(agent: Agent, request: SipRequest) -> Self {
+        let route_set = get_headers(&request.headers, "record-route")
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        ServerTxn { agent, request, to_tag: None, route_set }
+    }
+
     /// The received request (for inspecting headers / SDP).
     pub fn request(&self) -> &SipRequest {
         &self.request
@@ -2805,9 +2726,7 @@ impl<'a> Respond<'a> {
     /// Generate and send the response. Panics on a transport failure — use
     /// [`try_send`](Self::try_send) in the load lane.
     pub async fn send(self) {
-        if let Err(e) = self.try_send().await {
-            panic!("{e}");
-        }
+        unwrap_step(self.try_send().await)
     }
 
     /// Fallible [`send`](Self::send) for the load lane: a transport failure
@@ -3038,45 +2957,28 @@ impl AckCtx<'_> {
         let ack = generate_ack_for_non_2xx(self.invite, resp);
         self.agent.try_send(&SipMessage::Request(ack), self.wire_dst).await
     }
-
-    /// [`ack_non_2xx`](Self::ack_non_2xx) for the panicking lane.
-    async fn ack_non_2xx_or_panic(&self, resp: &SipResponse) {
-        if let Err(e) = self.ack_non_2xx(resp).await {
-            panic!("{e}");
-        }
-    }
 }
 
+/// Build + send the CANCEL for a still-pending (re-)INVITE (RFC 3261 §9.1) —
+/// the ONE mechanism behind [`ClientInvite::cancel`], [`ClientReinvite::cancel`]
+/// (which unwrap it) and [`CancelHandle::cancel_best_effort`] (which swallows
+/// the error — the call is already failing).
+async fn try_send_cancel(
+    agent: &Agent,
+    original_invite: &SipRequest,
+    wire_dst: SocketAddr,
+) -> Result<(), StepError> {
+    let cancel = generate_cancel(&InviteClientTransactionHandle {
+        original_invite: original_invite.clone(),
+    });
+    agent.try_send(&SipMessage::Request(cancel), wire_dst).await
+}
+
+/// Panicking veneer over [`try_expect_response`].
 async fn expect_response(agent: &Agent, status: u16, ack: Option<&AckCtx<'_>>) -> SipResponse {
-    loop {
-        match agent.recv().await {
-            // A real UAC absorbs an unsolicited 100 Trying (RFC 3261 §8.1.3.2) —
-            // a stateful upstream (B2BUA / proxy txn layer) emits it before the
-            // first real provisional. Skip it unless 100 is what we await.
-            SipMessage::Response(r) if r.status == 100 && status != 100 => continue,
-            SipMessage::Response(r) => {
-                if let Some(ctx) = ack {
-                    ctx.ack_non_2xx_or_panic(&r).await;
-                }
-                assert_eq!(
-                    r.status, status,
-                    "{} expected a {status} response, got {} {}",
-                    agent.name, r.status, r.reason
-                );
-                return r;
-            }
-            SipMessage::Request(r) => panic!(
-                "{} expected a {status} response, got a {} request",
-                agent.name, r.method
-            ),
-        }
-    }
+    unwrap_step(try_expect_response(agent, status, ack).await)
 }
 
-/// Fallible [`expect_response`] for the load driver: returns a [`StepError`]
-/// (wrong status, unexpected request, timeout) instead of `panic!`ing. Absorbs
-/// an unsolicited 100 Trying (RFC 3261 §8.1.3.2) the same way `expect_response`
-/// does.
 /// Receive the next response WITHOUT asserting its status (an unsolicited `100
 /// Trying` is absorbed) — the raw-await the out-of-dialog auth retry
 /// ([`OutOfDialogRequest::try_send_authed`]) uses so a `401`/`407` keeps its
@@ -3096,41 +2998,25 @@ async fn recv_response_raw(agent: &Agent) -> Result<SipResponse, StepError> {
     }
 }
 
+/// [`try_expect_response_tolerating`] with an empty tolerate list.
 async fn try_expect_response(
     agent: &Agent,
     status: u16,
     ack: Option<&AckCtx<'_>>,
 ) -> Result<SipResponse, StepError> {
-    loop {
-        match agent.try_recv().await? {
-            SipMessage::Response(r) if r.status == 100 && status != 100 => continue,
-            SipMessage::Response(r) => {
-                if let Some(ctx) = ack {
-                    ctx.ack_non_2xx(&r).await?;
-                }
-                if r.status != status {
-                    return Err(StepError::WrongStatus {
-                        who: agent.name.clone(),
-                        expected: status,
-                        got: r.status,
-                        reason: r.reason.clone(),
-                    });
-                }
-                return Ok(r);
-            }
-            SipMessage::Request(r) => {
-                return Err(StepError::UnexpectedKind {
-                    who: agent.name.clone(),
-                    detail: format!("got a {} request, expected a {status} response", r.method),
-                })
-            }
-        }
-    }
+    try_expect_response_tolerating(agent, status, &[], ack).await
 }
 
-/// Fallible, tolerant [`try_expect_response`]: 200-OKs `tolerate`d inbound
-/// requests racing the awaited response (and absorbs an unsolicited 100), all
-/// without `panic!`ing — returns a [`StepError`] on a genuinely wrong message.
+/// THE client-side expect core, behind every `expect`/`try_expect`
+/// (`_tolerating`) on [`ClientInvite`] / [`ClientReinvite`] / [`InDialogTxn`]:
+/// wait for the response with status `status`, absorbing an unsolicited `100
+/// Trying` (RFC 3261 §8.1.3.2 — a stateful upstream emits it before the first
+/// real provisional) and 200-OKing any inbound request whose method is in
+/// `tolerate` (e.g. a keepalive OPTIONS racing the awaited response on the
+/// same socket). Any non-2xx final belonging to `ack`'s INVITE transaction is
+/// auto-ACKed on arrival (§17.1.1.3), matching or not. A wrong status /
+/// genuinely unexpected request / timeout is a [`StepError`]; the panicking
+/// veneers unwrap it.
 async fn try_expect_response_tolerating(
     agent: &Agent,
     status: u16,
@@ -3155,64 +3041,24 @@ async fn try_expect_response_tolerating(
                 return Ok(r);
             }
             SipMessage::Request(r) if tolerate.iter().any(|t| r.method == *t) => {
-                let route_set: Vec<String> = get_headers(&r.headers, "record-route")
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
-                let mut txn = ServerTxn { agent: agent.clone(), request: r, to_tag: None, route_set };
-                txn.respond(200, "OK").send().await;
+                let mut txn = ServerTxn::from_request(agent.clone(), r);
+                txn.respond(200, "OK").try_send().await?;
                 continue;
             }
             SipMessage::Request(r) => {
+                let tolerating = if tolerate.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (tolerating {tolerate:?})")
+                };
                 return Err(StepError::UnexpectedKind {
                     who: agent.name.clone(),
-                    detail: format!("got a {} request, expected a {status} response", r.method),
-                })
+                    detail: format!(
+                        "got a {} request, expected a {status} response{tolerating}",
+                        r.method
+                    ),
+                });
             }
-        }
-    }
-}
-
-/// [`expect_response`] that drains + 200-OKs `tolerate`d inbound requests
-/// (e.g. keepalive OPTIONS retransmits) racing the awaited response.
-async fn expect_response_tolerating(
-    agent: &Agent,
-    status: u16,
-    tolerate: &[&str],
-    ack: Option<&AckCtx<'_>>,
-) -> SipResponse {
-    loop {
-        match agent.recv().await {
-            SipMessage::Response(r) if r.status == 100 && status != 100 => continue,
-            SipMessage::Response(r) => {
-                if let Some(ctx) = ack {
-                    ctx.ack_non_2xx_or_panic(&r).await;
-                }
-                assert_eq!(
-                    r.status, status,
-                    "{} expected a {status} response, got {} {}",
-                    agent.name, r.status, r.reason
-                );
-                return r;
-            }
-            SipMessage::Request(r) if tolerate.iter().any(|t| r.method == *t) => {
-                let route_set: Vec<String> = get_headers(&r.headers, "record-route")
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
-                let mut txn = ServerTxn {
-                    agent: agent.clone(),
-                    request: r,
-                    to_tag: None,
-                    route_set,
-                };
-                txn.respond(200, "OK").send().await;
-                continue;
-            }
-            SipMessage::Request(r) => panic!(
-                "{} expected a {status} response (tolerating {tolerate:?}), got a {} request",
-                agent.name, r.method
-            ),
         }
     }
 }
