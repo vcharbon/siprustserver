@@ -135,6 +135,7 @@ async fn announcement_mrf_rejects() {
     // The MRF declines the announcement leg.
     let mut mrf_uas = mrf.receive("INVITE").await;
     mrf_uas.respond(503, "Service Unavailable").await;
+    mrf.receive("ACK").await; // the b2bua completes the MRF's reject txn (§17.1.1.3)
 
     // The caller's INVITE is failed (the MRF's status relayed) and the call ends.
     let failed = call.expect(503).await;

@@ -255,6 +255,7 @@ async fn reroute_exhaustion_redirects_caller() {
         .await;
 
     carol.receive("INVITE").await.respond(503, "Service Unavailable").await;
+    carol.receive("ACK").await; // the b2bua completes carol's reject txn (§17.1.1.3)
 
     // List exhausted → the plan's on_exhausted 302 reaches alice.
     let resp = call.expect(302).await;

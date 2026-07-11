@@ -130,13 +130,12 @@ async fn cancel_during_slow_decision_tears_down_cleanly() {
     let mut b_cxl = bob.receive("CANCEL").await;
     b_cxl.respond(200, "OK").await; // 200 to the CANCEL
     b_inv.respond(487, "Request Terminated").await; // 487 to the b-leg INVITE
+    bob.receive("ACK").await; // the b2bua completes bob's 487 txn (§17.1.1.3)
 
     // ── The call must be fully reaped (active_calls -> 0) ──────────────────────
-    // The B2BUA's b-leg client txn auto-ACKs the 487 (non-2xx) and the call
+    // The B2BUA's b-leg client txn ACKed the 487 (read above) and the call
     // resolves to Terminated — well before the 32 s TerminatingTimeout backstop,
-    // so a 1 s settle suffices. (A late ACK to bob may sit undelivered in its
-    // queue — finish() only gates the RFC CSeq rules, not structural in-flight,
-    // so that is fine here.)
+    // so a 1 s settle suffices.
     h.advance(Duration::from_secs(1)).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     // A CANCEL racing a slow decision must still reap the call.

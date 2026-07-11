@@ -20,7 +20,8 @@ async fn b_leg_busy_is_relayed_and_call_terminates() {
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     bob.receive("INVITE").await.respond(486, "Busy Here").await;
-    call.expect(486).await; // the 486 is relayed back to alice
+    bob.receive("ACK").await; // the b2bua completes bob's reject txn (§17.1.1.3)
+    call.expect(486).await; // the 486 is relayed back to alice (and auto-ACKed)
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     let cdrs = b2bua.cdr_records();

@@ -39,12 +39,17 @@ impl RealCallScenario for InviteReject {
 
         let mut uas = env.bob.try_receive("INVITE").await?;
         uas.respond(486, "Busy Here").await;
+        // The SUT's b-leg client txn ACKs bob's 486 (§17.1.1.3) — read it so
+        // the reject transaction completes on the recorded trace (the
+        // rfc3261.unackedInviteNon2xxFinal rule gates).
+        env.bob.try_receive("ACK").await?;
 
         // Expect the (never-arriving) 200; the relayed 486 surfaces as
-        // `WrongStatus { got: 486 }`. A real FINAL (≥ 200) ended the transaction,
-        // so mark the scope terminated — CANCELing an already-rejected INVITE just
-        // churns the SUT (mirrors `establish`'s shed handling). A non-180
-        // provisional would NOT qualify, leaving the scope Early to CANCEL.
+        // `WrongStatus { got: 486 }` — auto-ACKed by the receive (§17.1.1.3).
+        // A real FINAL (≥ 200) ended the transaction, so mark the scope
+        // terminated — CANCELing an already-rejected INVITE just churns the SUT
+        // (mirrors `establish`'s shed handling). A non-180 provisional would
+        // NOT qualify, leaving the scope Early to CANCEL.
         let r = call.try_expect(200).await;
         if matches!(&r, Err(StepError::WrongStatus { got, .. }) if *got >= 200) {
             scope.mark_terminated();
@@ -81,14 +86,18 @@ impl RealCallScenario for AbandonRinging {
         // the non-2xx on both legs and terminates the call. (A bare fire-and-
         // forget CANCEL leaves the b-leg INVITE unfinalized → the call lingers to
         // Timer C; completing bob's 487 is what makes the reap immediate.)
-        let _cxl = call.cancel().await;
+        let mut cxl = call.cancel().await;
         let mut bob_cancel = env.bob.try_receive("CANCEL").await?;
         bob_cancel.respond(200, "OK").await;
         bob_uas.respond(487, "Request Terminated").await;
-        // The B2BUA removes the call once the b-leg terminates (bob's 487, which
-        // it auto-ACKs); alice's own `200 (CANCEL)` + `487 (INVITE)` settle at the
-        // transaction layer and need not be read here (and reading them races the
-        // two interleaved finals on one inbox). So we do NOT read alice's side.
+        // The SUT's b-leg client txn ACKs bob's 487 — read it so the reject
+        // transaction completes on the recorded trace (§17.1.1.3 gates).
+        env.bob.try_receive("ACK").await?;
+        // Alice reads her own `200 (CANCEL)` then `487 (INVITE)` — the SUT
+        // emits them in that order at its transaction layer, and reading the
+        // 487 auto-ACKs it, completing the a-leg INVITE transaction too.
+        cxl.try_expect(200).await?;
+        call.try_expect(487).await?;
         scope.mark_terminated(); // both legs torn down — teardown is a no-op
 
         // The abandoned-before-answer call is the NOK outcome.
