@@ -329,8 +329,10 @@ impl<'h> CalleeGroupBuilder<'h> {
                 rr_fold: decide_rr_fold(name),
                 recv_timeout,
                 // Each logical callee is its own UA: per-leg §17.2 receive
-                // view over the shared socket (newkahneed-034).
+                // view over the shared socket (newkahneed-034) and per-leg
+                // §17.1.1.3 ACK obligations (newkahneed-036 ask B).
                 txn: std::sync::Arc::new(crate::agent::TxnView::functional()),
+                acks: std::sync::Arc::new(crate::agent::AckObligations::default()),
             };
             agents.insert(name.clone(), agent);
         }

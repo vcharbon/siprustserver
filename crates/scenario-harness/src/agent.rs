@@ -472,6 +472,7 @@ impl Harness {
             rr_fold,
             recv_timeout: self.recv_timeout,
             txn: Arc::new(TxnView::functional()),
+            acks: Arc::new(AckObligations::default()),
         }
     }
 
@@ -971,6 +972,72 @@ impl TxnView {
     }
 }
 
+/// §17.1.1.3 UAS-side ACK obligations (newkahneed-036 ask B) — the receive-side
+/// mirror of 034-B's client auto-ACK: when a body answers an INVITE with a
+/// **non-2xx final** through [`ServerTxn`]/[`Respond`], the transaction layer —
+/// not the body — owns the arriving hop ACK.
+///
+/// Keyed `(Call-ID, INVITE top-Via branch)`, exactly like the SUT's own
+/// synthesized hop ACK (the LB remembers the INVITE's forward branch and reuses
+/// it) and the `rfc3261.unackedInviteNon2xxFinal` audit rule — so the
+/// obligation, the wire, and the audit can never disagree on what matches.
+///
+/// **Order-independence is the point**: the ACK races the next transaction's
+/// INVITE (the reroute shape: hop ACK for the 486 vs the rerouted INVITE) and
+/// may land before or after it. Matching is by key, never positional:
+/// - a matching ACK that would otherwise be a step error (a `receive("INVITE")`
+///   that pulls the ACK first, a response wait that pulls a request) is
+///   **absorbed** instead — the body never trips over it;
+/// - a matching ACK that surfaces through a path that handles ACKs anyway (an
+///   explicit `receive("ACK")`, `try_receive_tolerating_blocking`'s collect)
+///   still **fulfils** the obligation — [`ServerTxn::expect_ack`] then returns
+///   immediately;
+/// - a matching ACK nothing ever pulls is still recorded at delivery
+///   (036 ask A), so the gating wire rule discharges at `finish()` — that rule
+///   IS the settle gate; no duplicate receive-side gate exists.
+///
+/// Shared across clones of one logical UA (like [`TxnView`]); works identically
+/// in the load lane's wire view (claiming is independent of dedup).
+#[derive(Default)]
+pub(crate) struct AckObligations {
+    /// `(Call-ID, INVITE top-Via branch)` → the hop ACK has been sighted.
+    pending: Mutex<HashMap<(String, String), bool>>,
+    /// Wakes an [`ServerTxn::expect_ack`] parked on fulfilment.
+    notify: tokio::sync::Notify,
+}
+
+impl AckObligations {
+    /// Open (or refresh — a retransmitted final re-arms the same key without
+    /// clearing a sighting) the obligation for one rejected INVITE transaction.
+    fn arm(&self, call_id: String, branch: String) {
+        self.pending.lock().unwrap().entry((call_id, branch)).or_insert(false);
+    }
+
+    /// Record an ACK sighting. Returns `true` iff the key belongs to an armed
+    /// obligation (fulfilled now or previously) — the caller may absorb it.
+    fn note_ack(&self, call_id: &str, branch: &str) -> bool {
+        let mut g = self.pending.lock().unwrap();
+        match g.get_mut(&(call_id.to_string(), branch.to_string())) {
+            Some(seen) => {
+                *seen = true;
+                drop(g);
+                self.notify.notify_waiters();
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn is_fulfilled(&self, call_id: &str, branch: &str) -> bool {
+        self.pending
+            .lock()
+            .unwrap()
+            .get(&(call_id.to_string(), branch.to_string()))
+            .copied()
+            .unwrap_or(false)
+    }
+}
+
 /// The `branch` parameter of the topmost Via header, if any.
 fn top_via_branch(headers: &[SipHeader]) -> Option<String> {
     let via = get_header(headers, "via")?;
@@ -1005,6 +1072,9 @@ pub struct Agent {
     /// §17.2 once-and-only-once receive view ([`TxnView`], newkahneed-034).
     /// Shared across clones — one transaction table per logical UA.
     pub(crate) txn: Arc<TxnView>,
+    /// §17.1.1.3 UAS-side ACK obligations ([`AckObligations`],
+    /// newkahneed-036 ask B). Shared across clones — one table per logical UA.
+    pub(crate) acks: Arc<AckObligations>,
 }
 
 impl Agent {
@@ -1088,6 +1158,12 @@ impl Agent {
     /// THE receive core: one SIP datagram surfaced through the §17.2 receive
     /// view ([`TxnView`]). A timeout / closed queue / parse error is a
     /// [`StepError`]; the functional lane panics on it via [`recv`](Agent::recv).
+    ///
+    /// Every surfaced ACK is also SIGHTED against the §17.1.1.3 obligation
+    /// table ([`AckObligations`], 036 ask B) — fulfilment is recorded here so
+    /// it happens on ANY pull path, but the absorb decision stays with the
+    /// caller ([`ack_obligation_claims`](Agent::ack_obligation_claims) at the
+    /// would-be-error sites), so an explicit `receive("ACK")` keeps working.
     async fn try_recv(&self) -> Result<SipMessage, StepError> {
         loop {
             let pkt = match tokio::time::timeout(self.recv_timeout, self.ep.recv()).await {
@@ -1099,6 +1175,9 @@ impl Agent {
                 who: self.name.clone(),
                 detail: e.to_string(),
             })?;
+            if let SipMessage::Request(r) = &msg {
+                self.ack_obligation_claims(r);
+            }
             match self.txn.verdict(&pkt.raw, &msg) {
                 TxnVerdict::Surface => return Ok(msg),
                 TxnVerdict::Absorb => continue,
@@ -1106,26 +1185,50 @@ impl Agent {
         }
     }
 
+    /// Whether `r` is the hop ACK of an armed §17.1.1.3 obligation on this UA
+    /// (036 ask B). Marks the obligation fulfilled (idempotent). A receive path
+    /// that would otherwise ERROR on an unexpected ACK calls this and absorbs
+    /// instead — the ACK-races-the-next-INVITE interleave, in either order,
+    /// never trips a body.
+    pub(crate) fn ack_obligation_claims(&self, r: &SipRequest) -> bool {
+        r.method.as_str() == "ACK"
+            && top_via_branch(&r.headers).is_some_and(|b| self.acks.note_ack(&r.call_id, &b))
+    }
+
     /// THE request-receive core: receive the next request and check its method,
     /// returning a UAS-side transaction. A wrong method, an unexpected
     /// response, a timeout — all become a [`StepError`]; the functional lane
     /// panics on them via [`receive`](Agent::receive).
+    ///
+    /// A txn-owned hop ACK (an armed §17.1.1.3 obligation, 036 ask B) that
+    /// arrives ahead of the awaited request is absorbed, not an error — the
+    /// ACK-before-the-next-INVITE interleave needs no body-side boilerplate.
     pub async fn try_receive(&self, method: &str) -> Result<ServerTxn, StepError> {
-        match self.try_recv().await? {
-            SipMessage::Request(r) => {
-                if r.method != method {
-                    return Err(StepError::WrongMethod {
-                        who: self.name.clone(),
-                        expected: method.to_string(),
-                        got: r.method.to_string(),
-                    });
+        loop {
+            match self.try_recv().await? {
+                SipMessage::Request(r) => {
+                    if r.method != method {
+                        if self.ack_obligation_claims(&r) {
+                            continue;
+                        }
+                        return Err(StepError::WrongMethod {
+                            who: self.name.clone(),
+                            expected: method.to_string(),
+                            got: r.method.to_string(),
+                        });
+                    }
+                    return Ok(ServerTxn::from_request(self.clone(), r));
                 }
-                Ok(ServerTxn::from_request(self.clone(), r))
+                SipMessage::Response(r) => {
+                    return Err(StepError::UnexpectedKind {
+                        who: self.name.clone(),
+                        detail: format!(
+                            "got a {} {} response, expected a {method} request",
+                            r.status, r.reason
+                        ),
+                    })
+                }
             }
-            SipMessage::Response(r) => Err(StepError::UnexpectedKind {
-                who: self.name.clone(),
-                detail: format!("got a {} {} response, expected a {method} request", r.status, r.reason),
-            }),
         }
     }
 
@@ -1236,6 +1339,9 @@ impl Agent {
             let mut txn = ServerTxn::from_request(self.clone(), r);
             if txn.request.method == method {
                 return Some(txn);
+            }
+            if self.ack_obligation_claims(&txn.request) {
+                continue; // txn-owned §17.1.1.3 hop ACK (036 ask B)
             }
             if tolerate.iter().any(|t| txn.request.method == *t) {
                 txn.respond(200, "OK").send().await;
@@ -1348,6 +1454,9 @@ impl Agent {
                     if r.method == method {
                         return ServerTxn::from_request(self.clone(), r);
                     }
+                    if self.ack_obligation_claims(&r) {
+                        continue; // txn-owned §17.1.1.3 hop ACK (036 ask B)
+                    }
                     if tolerate.iter().any(|t| r.method == *t) {
                         // Drain + answer the duplicate so the txn layer stops
                         // retransmitting it, then keep waiting for `method`.
@@ -1400,6 +1509,9 @@ impl Agent {
                         // has only 100'd its INVITE absorbs retransmits, replaying at
                         // most the 100 the proxy already eats). Keep waiting.
                         continue;
+                    }
+                    if self.ack_obligation_claims(&r) {
+                        continue; // txn-owned §17.1.1.3 hop ACK (036 ask B)
                     }
                     panic!(
                         "{} expected a {method} request (absorbing {absorb:?}), got {}",
@@ -1940,10 +2052,13 @@ impl ClientInvite {
                     return Ok((r, provisionals));
                 }
                 SipMessage::Request(r) => {
+                    if self.agent.ack_obligation_claims(&r) {
+                        continue; // txn-owned §17.1.1.3 hop ACK (036 ask B)
+                    }
                     return Err(StepError::UnexpectedKind {
                         who: self.agent.name.clone(),
                         detail: format!("got a {} request, expected a {status} final", r.method),
-                    })
+                    });
                 }
             }
         }
@@ -1967,10 +2082,13 @@ impl ClientInvite {
                     return Ok(r);
                 }
                 SipMessage::Request(r) => {
+                    if self.agent.ack_obligation_claims(&r) {
+                        continue; // txn-owned §17.1.1.3 hop ACK (036 ask B)
+                    }
                     return Err(StepError::UnexpectedKind {
                         who: self.agent.name.clone(),
                         detail: format!("got a {} request, expected a response", r.method),
-                    })
+                    });
                 }
             }
         }
@@ -2644,6 +2762,65 @@ impl ServerTxn {
         }
     }
 
+    /// Assert the §17.1.1.3 hop ACK for THIS transaction's non-2xx final
+    /// (036 ask B). Returns immediately if the transaction layer already
+    /// claimed it (it may have landed before or after any of the body's other
+    /// receives — matching is by `(Call-ID, INVITE branch)`, never positional);
+    /// otherwise pulls until the ACK arrives, the panicking-veneer sibling of
+    /// [`try_expect_ack`](Self::try_expect_ack). Purely optional: an unread ACK
+    /// is still recorded at delivery (036 ask A) and the gating
+    /// `unackedInviteNon2xxFinal` wire rule settles the obligation at
+    /// `finish()` — reach for this when the test asserts the ACK at a specific
+    /// point in the flow.
+    pub async fn expect_ack(&self) {
+        unwrap_step(self.try_expect_ack().await)
+    }
+
+    /// Fallible core of [`expect_ack`](Self::expect_ack).
+    pub async fn try_expect_ack(&self) -> Result<(), StepError> {
+        let Some(branch) = top_via_branch(&self.request.headers) else {
+            return Err(StepError::UnexpectedKind {
+                who: self.agent.name.clone(),
+                detail: "expect_ack on a request with no top-Via branch".to_string(),
+            });
+        };
+        loop {
+            if self.agent.acks.is_fulfilled(&self.request.call_id, &branch) {
+                return Ok(());
+            }
+            // Pull; the receive core sights (and thereby fulfils) a matching
+            // ACK. Anything else arriving while the test explicitly awaits the
+            // ACK is a deviation, exactly as `receive("ACK")` would treat it.
+            match self.agent.try_recv().await? {
+                SipMessage::Request(r) if r.method.as_str() == "ACK" => {
+                    if self.agent.ack_obligation_claims(&r) {
+                        continue; // ours (loop returns Ok) or another txn's obligation
+                    }
+                    return Err(StepError::UnexpectedKind {
+                        who: self.agent.name.clone(),
+                        detail: "got an ACK for a different transaction".to_string(),
+                    });
+                }
+                SipMessage::Request(r) => {
+                    return Err(StepError::WrongMethod {
+                        who: self.agent.name.clone(),
+                        expected: "ACK".to_string(),
+                        got: r.method.to_string(),
+                    })
+                }
+                SipMessage::Response(r) => {
+                    return Err(StepError::UnexpectedKind {
+                        who: self.agent.name.clone(),
+                        detail: format!(
+                            "got a {} {} response, expected the ACK to this txn's final",
+                            r.status, r.reason
+                        ),
+                    })
+                }
+            }
+        }
+    }
+
     /// Form the UAS-side confirmed [`Dialog`] for this transaction, so this UA
     /// can originate in-dialog requests (e.g. the callee sends the BYE). Call
     /// after responding 2xx (so the To-tag is minted). The remote target is the
@@ -2790,7 +2967,18 @@ impl<'a> Respond<'a> {
         // request's topmost Via sent-by. With a proxy in the path that Via is
         // the proxy's, so the response correctly traverses it back.
         let dst = top_via_addr(&txn.request).unwrap_or(txn.agent.addr);
-        txn.agent.try_send(&SipMessage::Response(resp), dst).await
+        txn.agent.try_send(&SipMessage::Response(resp), dst).await?;
+        // §17.1.1.3 UAS obligation (036 ask B): a non-2xx final to an INVITE
+        // (initial or re-INVITE) arms the txn-owned ACK wait — the arriving hop
+        // ACK is the transaction layer's to claim, in whatever order it lands
+        // relative to the body's next receive; `expect_ack` asserts it and the
+        // gating `unackedInviteNon2xxFinal` wire rule settles it at finish.
+        if (300..700).contains(&self.status) && txn.request.method.as_str() == "INVITE" {
+            if let Some(branch) = top_via_branch(&txn.request.headers) {
+                txn.agent.acks.arm(txn.request.call_id.clone(), branch);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -3048,6 +3236,9 @@ async fn try_expect_response_tolerating(
                 continue;
             }
             SipMessage::Request(r) => {
+                if agent.ack_obligation_claims(&r) {
+                    continue; // txn-owned §17.1.1.3 hop ACK (036 ask B)
+                }
                 let tolerating = if tolerate.is_empty() {
                     String::new()
                 } else {

@@ -209,8 +209,11 @@ impl AgentBinder {
             // Load lane stays on the RAW wire surface: `loadgen::mux::CallTxns`
             // already owns retransmit dedup ahead of the agent, and a second
             // (differently-keyed) dedup here would silently change load
-            // semantics (newkahneed-034).
+            // semantics (newkahneed-034). The §17.1.1.3 ACK obligations (036
+            // ask B) are independent of the view and apply here too — a load
+            // body that rejects an INVITE never trips over the hop ACK.
             txn: Arc::new(crate::agent::TxnView::wire()),
+            acks: Arc::new(crate::agent::AckObligations::default()),
         }
     }
 
