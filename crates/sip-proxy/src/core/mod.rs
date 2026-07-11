@@ -55,6 +55,8 @@ pub(crate) struct ProxyCoreParts {
     /// Resolver for DNS-named forward targets (worker-outbound b-leg R-URIs).
     /// IP-literal traffic never touches it; see [`crate::resolver`].
     pub resolver: Arc<dyn HostResolver>,
+    /// Cache TTLs / caps for the named-target resolver.
+    pub resolver_cfg: ResolverConfig,
     /// Recv-shard index for this core's endpoint-stats slot (`0` for the
     /// single-socket wiring; `0..N` when the runner shards the recv path over
     /// N reuse-port sockets).
@@ -84,7 +86,7 @@ impl ProxyCore {
         let named = NamedForwarder::new(
             endpoint.clone(),
             parts.resolver,
-            ResolverConfig::default(),
+            parts.resolver_cfg,
             parts.clock.clone(),
             parts.metrics.clone(),
         );
@@ -111,6 +113,15 @@ impl ProxyCore {
 
     pub fn advertised(&self) -> &ProxyAddr {
         &self.advertised
+    }
+
+    /// Pin + pre-resolve DNS-named forward targets (`PROXY_RESOLVER_PREWARM`)
+    /// so their FIRST b-leg forward is a warm cache hit; pinned names are kept
+    /// permanently warm by the resolver's proactive refresh. Runs off the
+    /// serving path and never blocks the caller (boot must not wait on DNS).
+    /// See [`crate::resolver`].
+    pub fn prewarm_named_targets(&self, targets: Vec<ProxyAddr>) {
+        self.named.prewarm(targets);
     }
 
     fn now_ms(&self) -> u64 {
@@ -231,6 +242,7 @@ pub struct ProxyCoreBuilder {
     metrics: Option<Arc<ProxyMetrics>>,
     self_gate: Option<Arc<dyn ProxySelfGate>>,
     resolver: Option<Arc<dyn HostResolver>>,
+    resolver_cfg: Option<ResolverConfig>,
     shard: usize,
 }
 
@@ -246,6 +258,7 @@ impl ProxyCoreBuilder {
             metrics: None,
             self_gate: None,
             resolver: None,
+            resolver_cfg: None,
             shard: 0,
         }
     }
@@ -274,6 +287,14 @@ impl ProxyCoreBuilder {
         self.resolver = Some(resolver);
         self
     }
+    /// Cache TTLs / caps for the named-target resolver (defaults:
+    /// [`ResolverConfig::default`] — positive 60 s, negative 5 s). The runner
+    /// env-exposes the TTLs as `PROXY_RESOLVER_POSITIVE_TTL_MS` /
+    /// `PROXY_RESOLVER_NEGATIVE_TTL_MS`.
+    pub fn resolver_config(mut self, cfg: ResolverConfig) -> Self {
+        self.resolver_cfg = Some(cfg);
+        self
+    }
     /// Recv-shard index (the endpoint-stats slot). Defaults to 0; the sharded
     /// runner numbers its cores 0..N.
     pub fn shard(mut self, shard: usize) -> Self {
@@ -295,6 +316,7 @@ impl ProxyCoreBuilder {
             metrics: self.metrics.unwrap_or_else(|| Arc::new(ProxyMetrics::new())),
             self_gate: self.self_gate.unwrap_or_else(|| Arc::new(AlwaysAdmitGate)),
             resolver: self.resolver.unwrap_or_else(|| Arc::new(SystemResolver)),
+            resolver_cfg: self.resolver_cfg.unwrap_or_default(),
             shard: self.shard,
         })
     }
