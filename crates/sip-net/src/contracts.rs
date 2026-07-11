@@ -376,7 +376,13 @@ impl RecordingSignalingNetwork {
 #[async_trait]
 impl SignalingNetwork for RecordingSignalingNetwork {
     async fn bind_udp(&self, opts: BindUdpOpts) -> Result<Box<dyn UdpEndpoint>, BindError> {
-        let bind_key = lane_key(opts.addr);
+        // Logical sub-lane (036 ask C): a labelled bind records under
+        // `ip:port#<label>` so several logical endpoints sharing one socket
+        // stay distinct columns. `report::lane_addr` recovers the address.
+        let bind_key = match &opts.lane_label {
+            Some(label) => format!("{}#{label}", lane_key(opts.addr)),
+            None => lane_key(opts.addr),
+        };
         let roles = opts.effective_roles();
         self.0
             .bind_roles

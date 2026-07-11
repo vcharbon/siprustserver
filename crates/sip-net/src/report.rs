@@ -30,6 +30,12 @@ use layer_harness::Stamped;
 use crate::contracts::SignalingNetworkEvent;
 use crate::types::RecvDisposition;
 
+/// The socket address behind a lane/bind key. A key is either the bare
+/// `ip:port` or the labelled `ip:port#<logical-endpoint>` form (036 ask C).
+pub fn lane_addr(bind_key: &str) -> Option<SocketAddr> {
+    bind_key.split('#').next()?.parse().ok()
+}
+
 /// Why a received message deserves a distinct rendering. `None` on an entry
 /// means the normal case: delivered and consumed by the scenario (or a pure
 /// send with no receive half).
@@ -43,6 +49,9 @@ pub enum RecvNote {
     InboxClosed,
     /// Discarded by the simulated packet-loss model (loadgen `--drop-rate`).
     LossModel,
+    /// Correlated to the call but no live logical endpoint accepted it —
+    /// rendered on the `ip:port#noendpoint` sub-lane (036 ask C).
+    Unrouted,
     /// Absorbed as a duplicate by the retransmit engine (`--auto-retransmit`).
     AbsorbedRetransmit,
 }
@@ -55,6 +64,7 @@ impl RecvNote {
             RecvNote::InboxOverflow => "inbox overflow",
             RecvNote::InboxClosed => "after close",
             RecvNote::LossModel => "dropped: loss model",
+            RecvNote::Unrouted => "no endpoint to route to",
             RecvNote::AbsorbedRetransmit => "absorbed retransmit",
         }
     }
@@ -80,6 +90,12 @@ pub struct RecordedSipEntry {
     /// How the receive half fared beyond plain delivered-and-consumed
     /// (see [`RecvNote`]); `None` for the normal case.
     pub recv_note: Option<RecvNote>,
+    /// The sender's full lane key (`ip:port` or `ip:port#label`) when the send
+    /// half is in the recording — lets the projector place the row on the
+    /// logical sub-lane instead of the collapsed socket (036 ask C).
+    pub from_lane: Option<String>,
+    /// The receiver's full lane key, when a receive half was matched.
+    pub to_lane: Option<String>,
     /// Capture-order tiebreaker from the originating `SendCalled` — the
     /// renderer sorts on `(sent_ms, seq)` exactly like the source's SVG/text
     /// renderers sort on `(timestamp, seq)`.
@@ -110,6 +126,7 @@ impl RecvHalf<'_> {
             RecvDisposition::InboxClosed => Some(RecvNote::InboxClosed),
             RecvDisposition::LossModel => Some(RecvNote::LossModel),
             RecvDisposition::AbsorbedRetransmit => Some(RecvNote::AbsorbedRetransmit),
+            RecvDisposition::Unrouted => Some(RecvNote::Unrouted),
         }
     }
 }
@@ -140,7 +157,7 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
     // as a backstop) — the boundary between in-trace and external peers.
     let mut recorded_binds: std::collections::HashSet<SocketAddr> = std::collections::HashSet::new();
     for s in events {
-        if let Ok(addr) = s.event.bind_key().parse::<SocketAddr>() {
+        if let Some(addr) = lane_addr(s.event.bind_key()) {
             recorded_binds.insert(addr);
         }
     }
@@ -149,7 +166,7 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
     let mut recvs: Vec<RecvHalf<'_>> = Vec::new();
     for s in events {
         if let SignalingNetworkEvent::RecvItem { bind_key, packet, disposition } = &s.event {
-            if let Ok(receiver) = bind_key.parse::<SocketAddr>() {
+            if let Some(receiver) = lane_addr(bind_key) {
                 recvs.push(RecvHalf {
                     seq: s.seq,
                     receiver,
@@ -190,7 +207,7 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
         let SignalingNetworkEvent::SendCalled { bind_key, to, msg } = &s.event else {
             continue;
         };
-        let Ok(from) = bind_key.parse::<SocketAddr>() else {
+        let Some(from) = lane_addr(bind_key) else {
             continue;
         };
 
@@ -200,12 +217,12 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
             !r.paired && r.receiver == *to && r.src == from && r.raw == msg.as_slice() && r.seq >= s.seq
         });
 
-        let (received_ms, recv_note) = match matched {
+        let (received_ms, recv_note, to_lane) = match matched {
             Some(r) => {
                 r.paired = true;
-                (Some(r.at_ms), r.note())
+                (Some(r.at_ms), r.note(), Some(r.bind_key.to_string()))
             }
-            None => (None, None),
+            None => (None, None, None),
         };
 
         out.push(RecordedSipEntry {
@@ -218,6 +235,8 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
             // unmatched + external destination ⇒ left the recording's horizon.
             delivered: received_ms.is_some() || !recorded_binds.contains(to),
             recv_note,
+            from_lane: Some(bind_key.clone()),
+            to_lane,
             seq: s.seq,
         });
     }
@@ -238,6 +257,8 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
             received_ms: Some(r.at_ms),
             delivered: true,
             recv_note: r.note(),
+            from_lane: None,
+            to_lane: Some(r.bind_key.to_string()),
             seq: r.seq,
         });
     }

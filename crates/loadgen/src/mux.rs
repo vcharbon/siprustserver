@@ -907,6 +907,7 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
                         Some(i) => i,
                         None => {
                             mux.stats.orphan(OrphanReason::NoRoute, raw);
+                            tap_unrouted(mux, slot, raw, src);
                             return;
                         }
                     }
@@ -915,6 +916,7 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
                     // Several receivers but no picker to disambiguate — a
                     // scenario bug, not a silent first-wins.
                     mux.stats.orphan(OrphanReason::NoRoute, raw);
+                    tap_unrouted(mux, slot, raw, src);
                     return;
                 }
             },
@@ -969,6 +971,23 @@ fn tap_discard(mux: &MuxSocket, d: &Delivery, raw: &[u8], src: SocketAddr, disp:
         let arrival_ms = mux.clock.now_ms().max(0) as u64;
         tap(&UdpPacket { raw: raw.to_vec(), src, arrival_ms }, disp);
     }
+}
+
+/// A datagram that CORRELATED to the call (its token matched this slot) but
+/// no live logical endpoint accepted it (picker miss / undisambiguated
+/// receivers): on a recorded call, still record the arrival — tagged
+/// `Unrouted`, rendered on the `ip:port#noendpoint` sub-lane (036 ask C).
+/// Uncorrelated datagrams never reach here and stay counter-only, so
+/// cross-call noise cannot contaminate a sampled trace.
+fn tap_unrouted(mux: &MuxSocket, slot: &CallSlot, raw: &[u8], src: SocketAddr) {
+    let Some(tap) = slot.receivers.first().and_then(|r| r.queue.recv_tap()) else {
+        return;
+    };
+    let arrival_ms = mux.clock.now_ms().max(0) as u64;
+    tap(
+        &UdpPacket { raw: raw.to_vec(), src, arrival_ms },
+        sip_net::RecvDisposition::Unrouted,
+    );
 }
 
 fn deliver(stats: &MuxStats, q: &PacketQueue, pkt: UdpPacket) {
