@@ -31,6 +31,24 @@ data:
         enable_script_security
         script_user root
     }
+    # Gate mastership on the proxy process actually running (newkahneed-038).
+    # shareProcessNamespace on the pod lets this sidecar pgrep the proxy
+    # container's process. init_fail => a fresh keepalived starts FAULT and only
+    # claims the VIP once the proxy is up, so proxy/keepalived container start
+    # order no longer matters: the VIP is only ever served where a proxy runs.
+    # No `weight` => script failure drives the instance to FAULT (VIP released,
+    # peer takes over) rather than a priority nudge nopreempt would ignore.
+    # pgrep -f (full cmdline): the comm name truncates at 15 chars so -x would
+    # never match "sip-proxy-runner"; keepalived execs this directly (no shell
+    # wrapper), so pgrep's self-exclusion keeps -f from matching itself.
+    vrrp_script chk_proxy {
+        script "/usr/bin/pgrep -f sip-proxy-runner"
+        interval 2
+        timeout 2
+        rise 1
+        fall 2
+        init_fail
+    }
     vrrp_instance VI_SIP {
         state BACKUP
         interface eth0
@@ -38,8 +56,23 @@ data:
         priority 100
         advert_int 0.5
         nopreempt
+        # GARP hardening (newkahneed-038): on a FRESHLY-created kind docker
+        # bridge the default single gratuitous-ARP burst at election is easily
+        # lost while veth/FDB state is still settling, and it was never
+        # re-asserted — neighbour ARP caches kept a dead VIP->MAC binding
+        # indefinitely (responses sourced from VIP:5060 never returned until a
+        # manual proxy restart forced a re-election). Repeat the transition
+        # burst and refresh the claim periodically so any lost/stale binding
+        # self-heals within ~garp_master_refresh seconds.
+        garp_master_delay 1
+        garp_master_repeat 5
+        garp_master_refresh 10
+        garp_master_refresh_repeat 2
         virtual_ipaddress {
             ${PROXY_VIP}
+        }
+        track_script {
+            chk_proxy
         }
         # Keep the VIP on lo at all times so either pod can bind(VIP:5060) and use
         # it as the outbound source IP for forwarded SIP (source-IP discipline).
@@ -76,7 +109,8 @@ spec:
       terminationGracePeriodSeconds: 30
       # VIP requires hostNetwork so keepalived can answer ARP on the node's eth0;
       # the two pods must land on different edge nodes (anti-affinity below).
-      # shareProcessNamespace lets a future keepalived chk_script pgrep the proxy.
+      # shareProcessNamespace lets the keepalived chk_proxy vrrp_script pgrep the
+      # proxy process — mastership is gated on the proxy actually running.
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       shareProcessNamespace: true
@@ -129,6 +163,14 @@ spec:
             # EndpointSlice informer over the headless worker Service.
             - { name: PROXY_WORKER_SERVICE, value: "b2bua-worker" }
             - { name: PROXY_WORKER_PORT,    value: "5060" }
+            # B-leg next-hop DNS warm cache (newkahneed-037): the proxy resolves
+            # non-IP R-URI hosts off the forwarding path with a TTL cache +
+            # pre-expiry refresh, and qualifies dotted names absolutely to dodge
+            # the kube ndots:5 search-expansion tax. Overlays whose b-leg targets
+            # are known Service FQDNs should pin them warm at startup so even the
+            # FIRST call after a fresh deploy / CoreDNS restart forwards
+            # warm-equivalent, e.g.:
+            # - { name: PROXY_RESOLVER_PREWARM, value: "newkah-loadgen.sip-test.svc.cluster.local:6001,sipp-uas.sip-test.svc.cluster.local:5060" }
             # The binary uses jemalloc (#[global_allocator], see sip-proxy-runner
             # src/main.rs); aggressive decay returns freed pages to the OS quickly.
             # Confirm it parsed via the jemalloc_opt_*_decay_ms gauges on /metrics
@@ -142,6 +184,13 @@ spec:
           # Readiness gates on >=1 routable (Alive) worker (ADR-0012 D4). Liveness
           # is separate (process up) so the warm backup is never killed for having
           # no traffic. kubelet probes node-IP:9090 (hostNetwork).
+          # NOTE (newkahneed-038): /readyz deliberately does NOT gate on "this pod
+          # is VRRP master / the VIP serves" — the warm backup must stay Ready or
+          # the Deployment rollout could never complete. A same-node self-probe
+          # also cannot observe the actual failure mode (stale VIP ARP on OTHER
+          # nodes' caches). The functional response-path check therefore lives at
+          # deploy level: run.sh vip_smoke() sends an OPTIONS through the VIP from
+          # a tier=load vantage and blocks the deploy until a response returns.
           readinessProbe:
             httpGet: { path: /readyz, port: 9090 }
             initialDelaySeconds: 1

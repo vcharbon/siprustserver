@@ -343,8 +343,58 @@ deploy() {
   apply_manifest "$MANIFEST_DIR/25-proxy-rbac.yaml"
   subst_manifest "$MANIFEST_DIR/30-proxy.yaml"
   kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout="$ROLLOUT_TIMEOUT"
+  # Proxy "Ready" means process-up + >=1 Alive worker — NOT "the VIP response
+  # path works" (newkahneed-038: a fresh bring-up once passed Ready with ~99% of
+  # responses never returning through the VIP until a manual proxy restart).
+  # Gate the deploy on a real call-path round-trip before declaring the stack
+  # ready. Skippable via VIP_SMOKE=0 for clusters without a tier=load node.
+  if [ "${VIP_SMOKE:-1}" = "1" ]; then
+    vip_smoke || die "vip-smoke: VIP ${PROXY_VIP}:${SIP_PORT} response path is DEAD after deploy (newkahneed-038). Check keepalived GARP convergence: kubectl -n $NS logs deploy/sip-front-proxy -c keepalived; a 'kubectl -n $NS rollout restart deploy/sip-front-proxy' forces a clean re-election."
+  fi
   log "stack ready"
   kubectl -n "$NS" get pods -o wide
+}
+
+# Functional VIP response-path gate (newkahneed-038). Sends a SIP OPTIONS to
+# PROXY_VIP:SIP_PORT from a one-shot pod on a tier=load node — the same vantage
+# as real callers, so the reply (worker 200 relayed back OUT of the VIP socket)
+# must traverse the docker bridge and exercises exactly the path that a lost
+# gratuitous ARP kills: request in via VIP, response sourced from VIP back out.
+# Retries inside the pod (~3 s/attempt) until VIP_SMOKE_TIMEOUT (default 90 s):
+# the keepalived garp_master_refresh (10 s) makes a stale-ARP window self-heal
+# well inside that budget, so a healthy stack passes on an early attempt and a
+# genuinely dead path fails loudly instead of surfacing as an all-timeout run.
+# Reuses the keepalived sidecar image (already kind-loaded; busybox nc).
+vip_smoke() {
+  local timeout="${VIP_SMOKE_TIMEOUT:-90}" attempts
+  attempts=$(( timeout / 3 ))
+  log "vip-smoke: OPTIONS round-trip via ${PROXY_VIP}:${SIP_PORT} from tier=load vantage (<=${attempts} attempts)"
+  local probe
+  probe="$(cat <<'EOS'
+vip="$1"; port="$2"; attempts="$3"
+myip="$(hostname -i 2>/dev/null | awk '{print $1}')"
+i=0
+while [ "$i" -lt "$attempts" ]; do
+  printf 'OPTIONS sip:vip-smoke@%s:%s SIP/2.0\r\nVia: SIP/2.0/UDP %s:5060;branch=z9hG4bK-vipsmoke-%s;rport\r\nMax-Forwards: 10\r\nFrom: <sip:vip-smoke@vip-smoke.invalid>;tag=vipsmoke%s\r\nTo: <sip:vip-smoke@%s>\r\nCall-ID: vip-smoke-%s@vip-smoke\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\n\r\n' \
+    "$vip" "$port" "$myip" "$i" "$i" "$vip" "$i" > /tmp/req
+  nc -u -w 2 "$vip" "$port" < /tmp/req > /tmp/resp 2>/dev/null || true
+  if grep -q '^SIP/2.0' /tmp/resp; then
+    echo "VIP-SMOKE-OK attempt=$i status=$(head -n1 /tmp/resp | tr -d '\r')"
+    exit 0
+  fi
+  i=$((i+1))
+  sleep 1
+done
+echo "VIP-SMOKE-FAIL: no SIP response from $vip:$port in $attempts attempts"
+exit 1
+EOS
+)"
+  kubectl -n "$NS" delete pod vip-smoke --ignore-not-found --now >/dev/null 2>&1 || true
+  kubectl -n "$NS" run vip-smoke --rm -i --restart=Never \
+    --image="$KEEPALIVED_IMAGE" --image-pull-policy=IfNotPresent \
+    --pod-running-timeout=2m \
+    --overrides='{"spec":{"nodeSelector":{"tier":"load"}}}' \
+    --command -- /bin/sh -c "$probe" vip-smoke "$PROXY_VIP" "$SIP_PORT" "$attempts"
 }
 
 # sample_pod <label-selector> <window-seconds> -> prints "pod cpu% rss_mb" lines
@@ -453,8 +503,9 @@ run_main() {
     sweep)  sweep "$@" ;;
     all)    up; deploy; sweep "$@" ;;
     heal-kindnet) heal-kindnet ;;
+    vip-smoke) vip_smoke ;;
     down)   down ;;
-    *) die "usage: $0 {up|deploy|obs|caps <cps> <secs>|sweep <secs> <cps...>|all <secs> <cps...>|heal-kindnet|down}" ;;
+    *) die "usage: $0 {up|deploy|obs|caps <cps> <secs>|sweep <secs> <cps...>|all <secs> <cps...>|heal-kindnet|vip-smoke|down}" ;;
   esac
 }
 

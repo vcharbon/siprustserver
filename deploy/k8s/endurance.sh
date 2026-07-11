@@ -1347,6 +1347,12 @@ wireup() {
   # will NOT restart pods onto the freshly-loaded image. Force a rollout so the
   # new binary actually runs, then wait Ready before driving any traffic — else
   # we'd repeat the stale-binary trap above.
+  # NOTE: this proxy restart also happened to MASK newkahneed-038 (fresh-bringup
+  # dead VIP response path — a restart forces a clean keepalived re-election +
+  # GARP burst onto a now-settled bridge), which is why endurance runs never saw
+  # what plain `run.sh deploy` hit. The real fix is upstream (GARP repeat/refresh
+  # + chk_proxy track_script in 30-proxy.yaml, vip_smoke gate in run.sh deploy);
+  # this restart is retained purely for the image-refresh reason above.
   if [ "${SKIP_BUILD:-0}" != "1" ]; then
     log "wireup: rolling workers/proxy/uas onto the freshly-built image"
     kubectl -n "$NS" rollout restart statefulset/b2bua-worker deploy/sip-front-proxy statefulset/sipp-uas deploy/cdr-consumer >>"$RUNLOG" 2>&1 || true
