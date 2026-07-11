@@ -1752,23 +1752,19 @@ impl CrossMessageAuditRule for UnackedInvite2xxByedRule {
 /// cleanly completes — the exact class the `sipflow` pcap triage caught at
 /// load ("486 never ACKed at the UAS") that no per-step `expect` sees.
 ///
-/// **Advisory** — deliberately, for now: the harness UAC does NOT auto-ACK a
-/// non-2xx final the way a real transaction layer must (`InviteReject` reads
-/// the relayed 486 and moves on; `AbandonRinging` never reads its 487 at
-/// all — both sanctioned flows), so on the functional surface (where the
-/// SUT's own binds are recorded) the SUT's a-leg finals would gate every such
-/// test. It still lands in every findings table / sampled-call report, which
-/// is where the load triage reads it. Promote to gating once the harness UAC
-/// grows txn-layer auto-ACK of non-2xx finals.
+/// **Gating** (promoted from advisory, newkahneed-034 ask B): the harness UAC
+/// now has the §17.1.1.3 client-transaction behaviour — `ClientInvite` /
+/// `ClientReinvite` / `InDialogTxn` auto-ACK any non-2xx INVITE final they
+/// surface — so an undischarged obligation on the functional surface is a
+/// genuine defect again (an unread reject, a peer that never ACKs, or the
+/// "486 emitted but never delivered" class the load triage caught). A test
+/// that deliberately models a peer which never ACKs waives with
+/// `allow_violation`.
 pub struct UnackedInviteNon2xxFinalRule;
 
 impl CrossMessageAuditRule for UnackedInviteNon2xxFinalRule {
     fn name(&self) -> &'static str {
         "rfc3261.unackedInviteNon2xxFinal"
-    }
-
-    fn force_advisory(&self) -> bool {
-        true
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
@@ -2906,7 +2902,7 @@ mod tests {
     }
 
     #[test]
-    fn unacked_non2xx_never_acked_is_flagged_advisory() {
+    fn unacked_non2xx_never_acked_is_flagged_and_gates() {
         // The 033 wire finding: the 486 goes out, the mandatory ACK never
         // reaches this UAS (mis-demuxed / dropped at a hop) → one finding.
         let evs = vec![
@@ -2916,8 +2912,8 @@ mod tests {
         let f = UnackedInviteNon2xxFinalRule.check(&evs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].1.contains("never ACKed"), "{}", f[0].1);
-        // Advisory until the harness UAC auto-ACKs non-2xx finals (see rule doc).
-        assert!(UnackedInviteNon2xxFinalRule.force_advisory());
+        // Gating since the harness UAC auto-ACKs non-2xx finals (034 ask B).
+        assert!(!UnackedInviteNon2xxFinalRule.force_advisory());
     }
 
     #[test]

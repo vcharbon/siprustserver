@@ -123,6 +123,7 @@ async fn failover_reject() {
     let first_to_tag = p180.to.tag.clone().expect("180 has a To-tag");
 
     uas1.respond(503, "Service Unavailable").await;
+    bob1.receive("ACK").await; // the b2bua completes bob1's reject txn (§17.1.1.3)
 
     // Failover to bob2 (new R-URI per the on_failure decision).
     let mut uas2 = bob2.receive("INVITE").await;
@@ -190,6 +191,7 @@ async fn failover_no_answer() {
     // 487s the INVITE; the B2BUA auto-ACKs the 487.
     bob1.receive("CANCEL").await.respond(200, "OK").await;
     uas1.respond(487, "Request Terminated").await;
+    bob1.receive("ACK").await; // the b2bua completes bob1's 487 txn (§17.1.1.3)
 
     // Bob2 receives the failover INVITE with the configured new R-URI.
     let mut uas2 = bob2.receive("INVITE").await;

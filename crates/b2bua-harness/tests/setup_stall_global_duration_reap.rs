@@ -59,9 +59,10 @@ async fn setup_stalled_call_is_reaped_by_global_duration() {
     let b2bua = B2buaSut::builder(decision).start(&h, "b2bua", "127.0.0.1:5089").await;
 
     // ── Call setup that stalls: bob rings, then goes silent (no 200) ──────────
-    let _call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
     uas.respond(180, "Ringing").await;
+    call.expect(180).await; // alice reads the relayed 180 (early dialog)
     // Deliberately never send a final response — the call wedges `Active` with
     // its b-leg in `Early` and (before the fix) zero timers.
 
@@ -82,6 +83,10 @@ async fn setup_stalled_call_is_reaped_by_global_duration() {
     let mut cancel = bob.receive("CANCEL").await;
     cancel.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
+    bob.receive("ACK").await; // the b2bua completes bob's 487 txn (§17.1.1.3)
+    // The still-unanswered a-leg gets the ADR-0022 synthesized 503 (terminated
+    // unanswered); reading it auto-ACKs the a-leg INVITE txn (§17.1.1.3).
+    call.expect(503).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     // A setup-stalled call must be reaped once the GlobalDuration-driven CANCEL resolves.
     b2bua.assert_fully_reaped();

@@ -71,13 +71,16 @@ fn forward_all_with_worker() -> (Arc<dyn RoutingStrategy>, Arc<dyn WorkerRegistr
 
 /// A new-dialog INVITE (no To-tag) from `from_via` toward bob through the proxy.
 /// `rph` injects a `Resource-Priority` header (`Some("esnet.0")` → emergency).
+/// The From-tag is derived from `branch` — each call is its own dialog, the way
+/// a real UAC mints a fresh tag per call (two calls sharing a From-tag confuse
+/// the per-dialog RFC audit projection at the proxy bind).
 fn new_invite(from_via: &str, branch: &str, rph: Option<&str>) -> Vec<u8> {
     let rph_line = rph.map(|v| format!("Resource-Priority: {v}\r\n")).unwrap_or_default();
     format!(
         "INVITE sip:bob@{BOB} SIP/2.0\r\n\
 Via: SIP/2.0/UDP {from_via};branch={branch}\r\n\
 Max-Forwards: 70\r\n\
-From: <sip:alice@127.0.0.1>;tag=t1\r\n\
+From: <sip:alice@127.0.0.1>;tag=t-{branch}\r\n\
 To: <sip:bob@127.0.0.1>\r\n\
 Call-ID: {branch}-call@127.0.0.1\r\n\
 CSeq: 1 INVITE\r\n\
@@ -157,10 +160,33 @@ async fn assert_wire_503(name: &str, gate_reason: Option<&'static str>, retry: u
     );
     assert_eq!(gate.tries.load(Ordering::SeqCst), 1, "the gate is consulted exactly once");
 
-    // The over-the-cap INVITE was NEVER forwarded.
+    // §17.1.1.3: ACK the shed 503 (same branch/CSeq as the INVITE, To echoed
+    // from the response). The proxy generated that final itself, so it absorbs
+    // the ACK at this hop — bob still sees nothing (asserted below).
+    client.send_to(&ack_for_reject(ALICE, "z9hG4bK-rej", &resp), proxy.addr()).await.unwrap();
+
+    // The over-the-cap INVITE was NEVER forwarded (and neither was its ACK).
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(bob_ep.try_recv().is_none(), "a shed INVITE must not reach the backend");
     let _ = h.finish().await;
+}
+
+/// The §17.1.1.3 ACK for a proxy-self-generated non-2xx INVITE final: reuses
+/// the INVITE's top-Via branch + CSeq number (method ACK), From/Call-ID
+/// unchanged, To echoed from the final (it carries the proxy's minted tag).
+fn ack_for_reject(from_via: &str, branch: &str, resp: &sip_message::SipResponse) -> Vec<u8> {
+    format!(
+        "ACK sip:bob@{BOB} SIP/2.0\r\n\
+Via: SIP/2.0/UDP {from_via};branch={branch}\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@127.0.0.1>;tag=t-{branch}\r\n\
+To: {to}\r\n\
+Call-ID: {branch}-call@127.0.0.1\r\n\
+CSeq: 1 ACK\r\n\
+Content-Length: 0\r\n\r\n",
+        to = get_header(&resp.headers, "to").expect("final carries To"),
+    )
+    .into_bytes()
 }
 
 #[tokio::test]
@@ -227,6 +253,9 @@ async fn real_gate_cps_drain_yields_a_wire_503_cps() {
     assert_eq!(get_header(&resp.headers, "retry-after"), Some("60"));
     assert_eq!(gate.metrics().rejected_cps_total, 1);
 
+    // §17.1.1.3: ACK the shed 503 — absorbed at the proxy (self-generated).
+    client.send_to(&ack_for_reject(ALICE, "z9hG4bK-shed", &resp), proxy.addr()).await.unwrap();
+
     tokio::time::advance(std::time::Duration::from_millis(50)).await;
     assert!(bob_uas.try_recv().is_none(), "the shed INVITE must not reach bob");
     let _ = h.finish().await;
@@ -259,6 +288,9 @@ async fn real_gate_elu_over_critical_yields_a_wire_503_elu() {
     // ELU rejection carries Retry-After: 1.
     assert_eq!(get_header(&resp.headers, "retry-after"), Some("1"));
     assert_eq!(gate.metrics().rejected_elu_total, 1);
+
+    // §17.1.1.3: ACK the shed 503 — absorbed at the proxy (self-generated).
+    client.send_to(&ack_for_reject(ALICE, "z9hG4bK-elu", &resp), proxy.addr()).await.unwrap();
 
     tokio::time::advance(std::time::Duration::from_millis(50)).await;
     assert!(bob_ep.try_recv().is_none(), "an ELU-shed INVITE must not reach bob");

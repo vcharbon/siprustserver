@@ -553,6 +553,22 @@ impl Harness {
         sip_clock::testkit::advance_in_100ms_chunks(d).await;
     }
 
+    /// Drain the fabric before the trace snapshot: wait out in-flight
+    /// datagrams (a txn-layer auto-ACK sent by the scenario's LAST receive is
+    /// still in transit when `finish` runs), then yield the scheduler so a
+    /// LIVE recv loop (the SUT's) reads — and records — what was delivered.
+    /// Fabricates nothing: a passive test agent's queue is untouched (its
+    /// unread ACK stays unrecorded — such a test reads the ACK explicitly).
+    async fn settle_network(&self) {
+        self.network.await_in_flight(Duration::from_millis(200)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        // The reads above may themselves send (an auto-answered keepalive) —
+        // one more drain so the snapshot closes on a quiet wire.
+        self.network.await_in_flight(Duration::from_millis(200)).await;
+    }
+
     /// The recording decorator handle — lets a caller read the raw signaling
     /// event channel (`recording().channel().snapshot()`) to run an audit rule
     /// directly over the trace WITHOUT consuming the harness or invoking the
@@ -580,6 +596,7 @@ impl Harness {
         // gate inline just below, so the Drop guard would only double-check.
         self.dump.disarm();
         self.cseq_gate.disarm();
+        self.settle_network().await;
         let events = self.recording.channel().snapshot();
         // Hard gate on the RFC CSeq rule(s) BEFORE the structural close: a CSeq
         // violation must fail the test (a real UA would reject these). Skip if the
@@ -604,6 +621,7 @@ impl Harness {
     pub async fn finish_collecting(self) -> (RunReport, Vec<sip_net::RfcFinding>) {
         self.dump.disarm();
         self.cseq_gate.disarm();
+        self.settle_network().await;
         let events = self.recording.channel().snapshot();
         let allow = self.allow_violations.borrow().clone();
         let gating: Vec<sip_net::RfcFinding> = sip_net::evaluate_rfc_findings(&events)
@@ -1492,6 +1510,9 @@ impl Agent {
         self.send(&SipMessage::Request(res.request), dst).await;
         InDialogTxn {
             agent: self.clone(),
+            // A REFER's finals take no ACK.
+            invite: None,
+            wire_dst: dst,
         }
     }
 
@@ -1532,7 +1553,7 @@ impl Agent {
         };
         let req = generate_out_of_dialog_request(OutOfDialogMethod::Register, &opts);
         self.send(&SipMessage::Request(req), registrar).await;
-        let resp = expect_response(self, 200).await;
+        let resp = expect_response(self, 200, None).await;
         // Echo back the Expires the registrar actually granted (RFC 3261 §10.3
         // step 8): the registrar may clamp our request; the UA refreshes on it.
         get_header(&resp.headers, "expires")
@@ -1759,8 +1780,16 @@ impl<'a> OutOfDialogRequest<'a> {
             extra_headers: self.extra_headers,
         };
         let req = generate_out_of_dialog_request(self.method, &opts);
-        caller.try_send(&SipMessage::Request(req), wire_dst).await?;
-        Ok(InDialogTxn { agent: caller.clone() })
+        let msg = SipMessage::Request(req);
+        caller.try_send(&msg, wire_dst).await?;
+        let SipMessage::Request(request) = msg else { unreachable!() };
+        Ok(InDialogTxn {
+            agent: caller.clone(),
+            // An out-of-dialog INVITE's non-2xx final takes a txn-layer ACK
+            // (§17.1.1.3) — retain the request so the txn can build it.
+            invite: matches!(self.method, OutOfDialogMethod::Invite).then_some(request),
+            wire_dst,
+        })
     }
 
     /// Panicking [`try_send`](Self::try_send) for functional tests.
@@ -1892,8 +1921,13 @@ impl ClientInvite {
     /// first tagged response) and the remote target (from Contact), so the
     /// later ACK/BYE route and address correctly. Returns the response.
     ///
+    /// **Txn-layer auto-ACK (RFC 3261 §17.1.1.3):** any non-2xx final this
+    /// transaction surfaces (here and in the `try_*` siblings) is ACKed
+    /// automatically on the INVITE's branch, completing the client transaction
+    /// the way a real txn layer does. A test whose *subject* is the
+    /// ACK-retransmission dance hand-rolls raw sends instead.
     pub async fn expect(&mut self, status: u16) -> SipResponse {
-        let resp = expect_response(&self.agent, status).await;
+        let resp = expect_response(&self.agent, status, Some(&self.ack_ctx())).await;
         self.learn_from_response(&resp);
         resp
     }
@@ -1902,9 +1936,20 @@ impl ClientInvite {
     /// status / timeout / unexpected request becomes a [`StepError`] instead of a
     /// `panic!`. On success it learns the dialog state identically to `expect`.
     pub async fn try_expect(&mut self, status: u16) -> Result<SipResponse, StepError> {
-        let resp = try_expect_response(&self.agent, status).await?;
+        let resp = try_expect_response(&self.agent, status, Some(&self.ack_ctx())).await?;
         self.learn_from_response(&resp);
         Ok(resp)
+    }
+
+    /// The §17.1.1.3 auto-ACK context for THIS INVITE transaction (tracks the
+    /// auth-retried INVITE — `ack_and_resend_with_auth` re-points
+    /// `original_invite`, so a final to the retried transaction matches).
+    fn ack_ctx(&self) -> AckCtx<'_> {
+        AckCtx {
+            agent: &self.agent,
+            invite: &self.original_invite,
+            wire_dst: self.wire_dst,
+        }
     }
 
     /// SIPp-`optional` semantics for the load lane (newkahneed-033 ask D):
@@ -1937,6 +1982,9 @@ impl ClientInvite {
                     provisionals.push(r);
                 }
                 SipMessage::Response(r) => {
+                    // §17.1.1.3 txn-layer auto-ACK — matching or not, a non-2xx
+                    // final to THIS INVITE completes its client transaction.
+                    self.ack_ctx().ack_non_2xx(&r).await?;
                     if r.status != status {
                         return Err(StepError::WrongStatus {
                             who: self.agent.name.clone(),
@@ -1963,12 +2011,18 @@ impl ClientInvite {
     /// [`try_expect`](Self::try_expect) this surfaces a `401`/`407` challenge as an
     /// `Ok(response)` the auth retry point can inspect, rather than collapsing it
     /// to `WrongStatus`. It does NOT learn dialog state (a non-2xx final seeds no
-    /// dialog); the caller learns from a 2xx via [`try_expect`].
+    /// dialog); the caller learns from a 2xx via [`try_expect`]. Like every
+    /// receive on this transaction, a non-2xx final (a challenge, a shed 503,
+    /// any reject) is auto-ACKed on arrival (§17.1.1.3) — the auth retry then
+    /// resends under a FRESH branch, a new transaction.
     pub(crate) async fn try_recv_response(&mut self) -> Result<SipResponse, StepError> {
         loop {
             match self.agent.try_recv().await? {
                 SipMessage::Response(r) if r.status == 100 => continue,
-                SipMessage::Response(r) => return Ok(r),
+                SipMessage::Response(r) => {
+                    self.ack_ctx().ack_non_2xx(&r).await?;
+                    return Ok(r);
+                }
                 SipMessage::Request(r) => {
                     return Err(StepError::UnexpectedKind {
                         who: self.agent.name.clone(),
@@ -2037,11 +2091,9 @@ impl ClientInvite {
         challenge: &SipResponse,
         responder: &dyn ChallengeResponder,
     ) -> Result<bool, StepError> {
-        // 1. Complete the challenged INVITE transaction (§17.1.1.3). The ACK for a
-        //    non-2xx reuses the INVITE's Via/branch + CSeq number, so it matches
-        //    the same transaction the challenge answered.
-        let ack = generate_ack_for_non_2xx(&self.original_invite, challenge);
-        self.agent.try_send(&SipMessage::Request(ack), self.wire_dst).await?;
+        // 1. The challenged INVITE transaction is already complete: the receive
+        //    that surfaced the challenge auto-ACKed it (§17.1.1.3 — see
+        //    [`try_recv_response`](Self::try_recv_response)).
 
         // 2. Ask the pluggable adapter for a credential. A missing/parsed-off
         //    challenge still fires the responder (a static fixture ignores it);
@@ -2120,6 +2172,10 @@ impl ClientInvite {
         self.agent.send(&SipMessage::Request(cancel), self.wire_dst).await;
         InDialogTxn {
             agent: self.agent.clone(),
+            // A CANCEL transaction's finals take no ACK; the INVITE's 487 is
+            // read — and auto-ACKed — via [`ClientInvite::expect`].
+            invite: None,
+            wire_dst: self.wire_dst,
         }
     }
 
@@ -2296,9 +2352,15 @@ impl Dialog {
         let res = generate_in_dialog_request(method, &self.dialog, &opts);
         self.dialog = res.dialog; // local_cseq bumped
         let dst = next_hop(&self.dialog, self.fallback_addr);
-        self.agent.send(&SipMessage::Request(res.request), dst).await;
+        let msg = SipMessage::Request(res.request);
+        self.agent.send(&msg, dst).await;
+        let SipMessage::Request(request) = msg else { unreachable!() };
         InDialogTxn {
             agent: self.agent.clone(),
+            // A re-INVITE's non-2xx final takes a txn-layer ACK (§17.1.1.3) —
+            // retain the request so the txn can build it.
+            invite: matches!(method, InDialogMethod::Invite).then_some(request),
+            wire_dst: dst,
         }
     }
 
@@ -2346,15 +2408,26 @@ pub struct ClientReinvite {
 }
 
 impl ClientReinvite {
+    /// The §17.1.1.3 auto-ACK context for this re-INVITE transaction.
+    fn ack_ctx(&self) -> AckCtx<'_> {
+        AckCtx {
+            agent: &self.agent,
+            invite: &self.original_invite,
+            wire_dst: self.wire_dst,
+        }
+    }
+
     /// Wait for and assert a response status (the relayed 1xx/2xx/487 for this
-    /// re-INVITE, or the 200 to a CANCEL — whichever arrives next).
+    /// re-INVITE, or the 200 to a CANCEL — whichever arrives next). A non-2xx
+    /// final to the re-INVITE is auto-ACKed on its branch (RFC 3261
+    /// §17.1.1.3), like [`ClientInvite::expect`].
     pub async fn expect(&mut self, status: u16) -> SipResponse {
-        expect_response(&self.agent, status).await
+        expect_response(&self.agent, status, Some(&self.ack_ctx())).await
     }
 
     /// Fallible [`expect`](ClientReinvite::expect).
     pub async fn try_expect(&mut self, status: u16) -> Result<SipResponse, StepError> {
-        try_expect_response(&self.agent, status).await
+        try_expect_response(&self.agent, status, Some(&self.ack_ctx())).await
     }
 
     /// CANCEL this still-pending re-INVITE (RFC 3261 §9.1) — the in-dialog
@@ -2373,6 +2446,10 @@ impl ClientReinvite {
         self.agent.send(&SipMessage::Request(cancel), self.wire_dst).await;
         InDialogTxn {
             agent: self.agent.clone(),
+            // The CANCELled re-INVITE's 487 is read — and auto-ACKed — via
+            // [`ClientReinvite::expect`]; the CANCEL's own finals take no ACK.
+            invite: None,
+            wire_dst: self.wire_dst,
         }
     }
 }
@@ -2538,6 +2615,10 @@ impl<'a> InDialogRequest<'a> {
         Ok((
             InDialogTxn {
                 agent: self.agent.clone(),
+                // A re-INVITE's non-2xx final takes a txn-layer ACK
+                // (§17.1.1.3) — retain the request so the txn can build it.
+                invite: matches!(self.method, InDialogMethod::Invite).then(|| request.clone()),
+                wire_dst: dst,
             },
             request,
         ))
@@ -2545,21 +2626,42 @@ impl<'a> InDialogRequest<'a> {
 }
 
 /// Client transaction for an in-dialog request.
+///
+/// For a **re-INVITE** it retains the request as sent (plus its wire
+/// destination), so a 3xx–6xx final — a 488 to a rejected renegotiation, a 491
+/// glare — is auto-ACKed on the re-INVITE's branch/CSeq (RFC 3261 §17.1.1.3),
+/// exactly like [`ClientInvite`]'s finals (newkahneed-034 ask B). Non-INVITE
+/// transactions (BYE, INFO, CANCEL, …) retain nothing: their finals take no ACK.
 pub struct InDialogTxn {
     agent: Agent,
+    /// The sent request, retained ONLY when it was an (re-)INVITE — the
+    /// §17.1.1.3 non-2xx auto-ACK needs its Via branch / CSeq / R-URI / Route.
+    invite: Option<SipRequest>,
+    /// Where the request was sent (the next hop) — the non-2xx ACK is
+    /// hop-by-hop and follows the SAME path.
+    wire_dst: SocketAddr,
 }
 
 impl InDialogTxn {
+    /// The §17.1.1.3 auto-ACK context — `None` for a non-INVITE transaction.
+    fn ack_ctx(&self) -> Option<AckCtx<'_>> {
+        self.invite.as_ref().map(|invite| AckCtx {
+            agent: &self.agent,
+            invite,
+            wire_dst: self.wire_dst,
+        })
+    }
+
     /// Wait for and assert a response status.
     pub async fn expect(&mut self, status: u16) -> SipResponse {
-        expect_response(&self.agent, status).await
+        expect_response(&self.agent, status, self.ack_ctx().as_ref()).await
     }
 
     /// Fallible [`expect`](InDialogTxn::expect) for the load driver: a wrong
     /// status / timeout / unexpected request becomes a [`StepError`] instead of a
     /// `panic!`.
     pub async fn try_expect(&mut self, status: u16) -> Result<SipResponse, StepError> {
-        try_expect_response(&self.agent, status).await
+        try_expect_response(&self.agent, status, self.ack_ctx().as_ref()).await
     }
 
     /// Fallible, tolerant [`try_expect`](InDialogTxn::try_expect): while waiting
@@ -2573,7 +2675,8 @@ impl InDialogTxn {
         status: u16,
         tolerate: &[&str],
     ) -> Result<SipResponse, StepError> {
-        try_expect_response_tolerating(&self.agent, status, tolerate).await
+        try_expect_response_tolerating(&self.agent, status, tolerate, self.ack_ctx().as_ref())
+            .await
     }
 
     /// Like [`expect`](InDialogTxn::expect), but first drains (and 200-OKs) any
@@ -2582,7 +2685,7 @@ impl InDialogTxn {
     /// retransmit can race the awaited response on the same socket; tolerate it
     /// rather than relax the assertion (CLAUDE.md retransmit hazard).
     pub async fn expect_tolerating(&mut self, status: u16, tolerate: &[&str]) -> SipResponse {
-        expect_response_tolerating(&self.agent, status, tolerate).await
+        expect_response_tolerating(&self.agent, status, tolerate, self.ack_ctx().as_ref()).await
     }
 }
 
@@ -2905,7 +3008,46 @@ fn strip_top_via_if_self(headers: &mut Vec<SipHeader>, me: SocketAddr) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn expect_response(agent: &Agent, status: u16) -> SipResponse {
+/// RFC 3261 §17.1.1.3 client-transaction auto-ACK context (newkahneed-034
+/// ask B): the INVITE (initial or re-INVITE) whose response is being awaited,
+/// plus the wire destination it was sent to — the non-2xx ACK belongs to the
+/// INVITE transaction (same branch, same CSeq number) and is hop-by-hop, so it
+/// follows the SAME path. The surfaces that own an INVITE client transaction
+/// ([`ClientInvite`], [`ClientReinvite`], [`InDialogTxn`] for a re-INVITE)
+/// thread this into the shared expect helpers so EVERY non-2xx final they
+/// surface completes its transaction the way a real txn layer does — the
+/// `rfc3261.unackedInviteNon2xxFinal` audit rule gates on it.
+struct AckCtx<'a> {
+    agent: &'a Agent,
+    invite: &'a SipRequest,
+    wire_dst: SocketAddr,
+}
+
+impl AckCtx<'_> {
+    /// ACK `resp` iff it is a non-2xx final belonging to THIS transaction
+    /// (CSeq number + method INVITE). Everything else — provisionals, finals
+    /// to a CANCEL/BYE on the same socket, a 2xx (whose ACK is a dialog-level
+    /// act the scenario performs, §13.2.2.4) — is left alone.
+    async fn ack_non_2xx(&self, resp: &SipResponse) -> Result<(), StepError> {
+        if resp.status < 300
+            || !resp.cseq.method.as_str().eq_ignore_ascii_case("INVITE")
+            || resp.cseq.seq != self.invite.cseq.seq
+        {
+            return Ok(());
+        }
+        let ack = generate_ack_for_non_2xx(self.invite, resp);
+        self.agent.try_send(&SipMessage::Request(ack), self.wire_dst).await
+    }
+
+    /// [`ack_non_2xx`](Self::ack_non_2xx) for the panicking lane.
+    async fn ack_non_2xx_or_panic(&self, resp: &SipResponse) {
+        if let Err(e) = self.ack_non_2xx(resp).await {
+            panic!("{e}");
+        }
+    }
+}
+
+async fn expect_response(agent: &Agent, status: u16, ack: Option<&AckCtx<'_>>) -> SipResponse {
     loop {
         match agent.recv().await {
             // A real UAC absorbs an unsolicited 100 Trying (RFC 3261 §8.1.3.2) —
@@ -2913,6 +3055,9 @@ async fn expect_response(agent: &Agent, status: u16) -> SipResponse {
             // first real provisional. Skip it unless 100 is what we await.
             SipMessage::Response(r) if r.status == 100 && status != 100 => continue,
             SipMessage::Response(r) => {
+                if let Some(ctx) = ack {
+                    ctx.ack_non_2xx_or_panic(&r).await;
+                }
                 assert_eq!(
                     r.status, status,
                     "{} expected a {status} response, got {} {}",
@@ -2951,11 +3096,18 @@ async fn recv_response_raw(agent: &Agent) -> Result<SipResponse, StepError> {
     }
 }
 
-async fn try_expect_response(agent: &Agent, status: u16) -> Result<SipResponse, StepError> {
+async fn try_expect_response(
+    agent: &Agent,
+    status: u16,
+    ack: Option<&AckCtx<'_>>,
+) -> Result<SipResponse, StepError> {
     loop {
         match agent.try_recv().await? {
             SipMessage::Response(r) if r.status == 100 && status != 100 => continue,
             SipMessage::Response(r) => {
+                if let Some(ctx) = ack {
+                    ctx.ack_non_2xx(&r).await?;
+                }
                 if r.status != status {
                     return Err(StepError::WrongStatus {
                         who: agent.name.clone(),
@@ -2983,11 +3135,15 @@ async fn try_expect_response_tolerating(
     agent: &Agent,
     status: u16,
     tolerate: &[&str],
+    ack: Option<&AckCtx<'_>>,
 ) -> Result<SipResponse, StepError> {
     loop {
         match agent.try_recv().await? {
             SipMessage::Response(r) if r.status == 100 && status != 100 => continue,
             SipMessage::Response(r) => {
+                if let Some(ctx) = ack {
+                    ctx.ack_non_2xx(&r).await?;
+                }
                 if r.status != status {
                     return Err(StepError::WrongStatus {
                         who: agent.name.clone(),
@@ -3019,11 +3175,19 @@ async fn try_expect_response_tolerating(
 
 /// [`expect_response`] that drains + 200-OKs `tolerate`d inbound requests
 /// (e.g. keepalive OPTIONS retransmits) racing the awaited response.
-async fn expect_response_tolerating(agent: &Agent, status: u16, tolerate: &[&str]) -> SipResponse {
+async fn expect_response_tolerating(
+    agent: &Agent,
+    status: u16,
+    tolerate: &[&str],
+    ack: Option<&AckCtx<'_>>,
+) -> SipResponse {
     loop {
         match agent.recv().await {
             SipMessage::Response(r) if r.status == 100 && status != 100 => continue,
             SipMessage::Response(r) => {
+                if let Some(ctx) = ack {
+                    ctx.ack_non_2xx_or_panic(&r).await;
+                }
                 assert_eq!(
                     r.status, status,
                     "{} expected a {status} response, got {} {}",
@@ -3396,6 +3560,10 @@ mod auth_seam_tests {
                 .try_send()
                 .await
                 .unwrap();
+            // The UAC auto-ACKs the 401 (§17.1.1.3) even with no responder —
+            // read it so the challenger's reject transaction completes on the
+            // recorded trace (rfc3261.unackedInviteNon2xxFinal gates).
+            mbox_.try_receive("ACK").await.unwrap();
         });
 
         // No responder (the default).

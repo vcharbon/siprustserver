@@ -224,6 +224,14 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
 #[tokio::test(start_paused = true)]
 async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_reclaim() {
     let mut fh = ha_harness("limiter-ha-setup-stall-reclaim");
+    // The caller is modeled as GONE (the load generator gave up during the
+    // kill): the SetupTimeout final reaches alice at ~150 s, long past her
+    // INVITE client transaction's own Timer B (~32 s), so no real UAC would
+    // ACK it — the un-ACKed a-leg final IS the scenario, not a defect.
+    fh.allow_rfc_violation(
+        "rfc3261.unackedInviteNon2xxFinal",
+        "abandoned caller: the a-leg final lands past Timer B; no UAC ACKs it",
+    );
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 

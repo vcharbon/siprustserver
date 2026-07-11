@@ -287,6 +287,7 @@ async fn provisional_storm_before_connect_trips_the_cap_and_releases_the_limiter
     let mut cancel = bob.receive("CANCEL").await;
     cancel.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
+    bob.receive("ACK").await; // the b2bua completes bob's 487 txn (§17.1.1.3)
 
     settle_until(|| store.stats().current_total == 0).await;
     assert_eq!(store.stats().current_total, 0, "limiter hold released at the cap teardown");

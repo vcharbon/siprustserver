@@ -199,6 +199,7 @@ async fn b_fails_post_promote() {
     // Bob fails — alice already saw 200 OK, so the failure cannot be relayed as a
     // routing failure. begin-termination BYEs the confirmed a-leg with a Reason.
     uas.respond(503, "Service Unavailable").await;
+    bob.receive("ACK").await; // the b2bua completes bob's reject txn (§17.1.1.3)
 
     let mut bye = alice.receive("BYE").await;
     let reason = get_header(&bye.request().headers, "reason").unwrap_or("");
@@ -286,6 +287,7 @@ async fn a_bye_during_window() {
     // CANCEL targets bob's still-open INVITE transaction.
     bob.receive("CANCEL").await.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
+    bob.receive("ACK").await; // the b2bua completes bob's 487 txn (§17.1.1.3)
 
     let _ = h.finish().await;
 }

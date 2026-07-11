@@ -48,6 +48,7 @@ impl CallflowShape for ReroutingPrack {
         let mut uas1 = bob1.receive("INVITE").await;
         rt.anchor("bob1", Anchor::InitialInvite, uas1.request());
         uas1.respond(486, "Busy Here").await;
+        bob1.receive("ACK").await; // the SUT completes bob1's reject txn (§17.1.1.3)
 
         let mut uas2 = bob2.receive("INVITE").await;
         rt.anchor("bob2", Anchor::InitialInvite, uas2.request());

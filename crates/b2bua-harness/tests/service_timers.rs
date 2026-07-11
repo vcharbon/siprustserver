@@ -245,6 +245,7 @@ async fn service_timer_fires_and_owning_rule_reaps_the_silent_call() {
     let mut cancel = bob.receive("CANCEL").await;
     cancel.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
+    bob.receive("ACK").await; // the b2bua completes bob's 487 txn (§17.1.1.3)
     let final_resp = call.expect(480).await;
     assert_eq!(final_resp.status, 480, "service watchdog authored the caller's final");
 

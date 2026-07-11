@@ -86,7 +86,22 @@ Content-Length: 0\r\n\r\n";
     };
     assert_eq!(resp.status, 483, "Max-Forwards: 0 → 483 Too Many Hops");
 
-    // Bob must not have received the over-hopped INVITE.
+    // §17.1.1.3: ACK the 483 (same branch/CSeq, To echoed from the final). The
+    // proxy generated the final itself, so it absorbs the ACK at this hop.
+    let ack = format!(
+        "ACK sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-mf\r\n\
+From: <sip:alice@127.0.0.1>;tag=t1\r\n\
+To: {to}\r\n\
+Call-ID: mf0-call@127.0.0.1\r\n\
+CSeq: 1 ACK\r\n\
+Max-Forwards: 70\r\n\
+Content-Length: 0\r\n\r\n",
+        to = get_header(&resp.headers, "to").expect("483 carries To"),
+    );
+    client.send_to(ack.as_bytes(), proxy.addr()).await.unwrap();
+
+    // Bob must not have received the over-hopped INVITE (nor its ACK).
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(bob_ep.try_recv().is_none(), "bob must see nothing on a 483");
     let _ = h.finish().await;

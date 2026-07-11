@@ -533,6 +533,36 @@ impl ProxyCore {
         let resp = generate_response(req, status, reason, &opts);
         self.reply_to_source(&serialize(&SipMessage::Response(resp)), src).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Responded);
+
+        // ── §16.7 / §17.1.1.3: absorb the ACK to our OWN non-2xx INVITE final ─
+        // Generating a final response makes this proxy the UAS of that INVITE
+        // transaction, and a non-2xx ACK is hop-by-hop — the upstream's ACK
+        // terminates HERE. Write the same `ackabs|` marker the relay path
+        // writes (`core/response.rs`), keyed on the upstream's INVITE branch,
+        // so the request path absorbs that ACK instead of running the strategy
+        // over it and handing a downstream worker a stray ACK matching no
+        // transaction it ever created (the newkahneed-014 class). No
+        // downstream exists for a self-generated reject, so the entry's
+        // target/branch are inert (the absorb check reads only
+        // `upstream_branch`).
+        if (300..700).contains(&status) && req.method.as_str() == "INVITE" {
+            if let Some(upstream_branch) = top_via_branch(req) {
+                self.cancel_lru.remember(
+                    &crate::cancel_lru::ack_absorb_key(
+                        &req.call_id,
+                        req.from.tag.as_deref(),
+                        req.cseq.seq,
+                    ),
+                    crate::cancel_lru::CancelEntry {
+                        target: self.advertised.clone(),
+                        branch: String::new(),
+                        upstream_branch,
+                        invite_ruri: req.uri.clone(),
+                    },
+                    crate::cancel_lru::RTX_ENTRY_TTL_MS,
+                );
+            }
+        }
     }
 
     /// Map a `select_for_new_dialog` failure to its 503. Each variant carries a
@@ -1462,5 +1492,35 @@ Content-Length: 0\r\n\r\n"
         let route = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
         let outcome = core.route_request(&ack("z9hG4bKack2xx", &route), src()).await;
         assert!(outcome.target.is_some(), "a fresh-branch (2xx) ACK must be forwarded end-to-end");
+    }
+
+    // §16.7 / §17.1.1.3: a final the proxy generated ITSELF (here a 420 to an
+    // unsupported Proxy-Require) makes it the UAS of the INVITE transaction, so
+    // the upstream's same-branch ACK terminates at this hop — it must be
+    // absorbed, never run through the strategy and handed to a worker as a
+    // stray ACK matching no transaction it ever created (newkahneed-034 ask B;
+    // same class as the 014 relay leak).
+    #[tokio::test]
+    async fn ack_for_a_self_generated_reject_is_absorbed() {
+        let core = core().await;
+        let inv = parse_req(&format!(
+            "INVITE sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKinv;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{UAC}>;tag=tag-a\r\n\
+To: <sip:bob@10.0.0.50>\r\n\
+Call-ID: absorb-1@test\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:alice@{UAC}:5060>\r\n\
+Proxy-Require: bogus-extension-xyz\r\n\
+Content-Length: 0\r\n\r\n"
+        ));
+        core.route_request(&inv, src()).await; // → self-generated 420
+
+        let outcome = core.route_request(&ack("z9hG4bKinv", ""), src()).await;
+        assert_eq!(
+            outcome.target, None,
+            "the ACK to a self-generated non-2xx final must be absorbed at this hop"
+        );
     }
 }

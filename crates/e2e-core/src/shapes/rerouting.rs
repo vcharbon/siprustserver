@@ -48,6 +48,7 @@ impl CallflowShape for Rerouting {
         let mut uas1 = bob1.receive("INVITE").await;
         rt.anchor("bob1", Anchor::InitialInvite, uas1.request());
         uas1.respond(params.reject_status, &params.reject_reason).await;
+        bob1.receive("ACK").await; // the SUT completes bob1's reject txn (§17.1.1.3)
 
         // The SUT fails over: bob2 gets the rerouted b-leg
         // (anchor: bob2.initialInvite) and answers.

@@ -209,7 +209,23 @@ Content-Length: 0\r\n\r\n";
         "Unsupported header must list the offending option-tag, got {unsupported:?}"
     );
 
-    // The over-required INVITE must not reach bob.
+    // §17.1.1.3: ACK the 420 (same branch/CSeq, To echoed from the final; no
+    // Proxy-Require — only the request that needs the extension carries it).
+    // The proxy generated the final itself, so it absorbs the ACK at this hop.
+    let ack = format!(
+        "ACK sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-pr\r\n\
+From: <sip:alice@127.0.0.1>;tag=t1\r\n\
+To: {to}\r\n\
+Call-ID: proxy-require@127.0.0.1\r\n\
+CSeq: 1 ACK\r\n\
+Max-Forwards: 70\r\n\
+Content-Length: 0\r\n\r\n",
+        to = get_header(&resp.headers, "to").expect("420 carries To"),
+    );
+    client.send_to(ack.as_bytes(), proxy.addr()).await.unwrap();
+
+    // The over-required INVITE must not reach bob (nor its ACK).
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(bob_ep.try_recv().is_none(), "bob must see nothing on a 420");
     let _ = h.finish().await;

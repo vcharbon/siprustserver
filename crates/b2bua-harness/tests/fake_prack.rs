@@ -399,6 +399,7 @@ async fn run_fake_prack_failover(scenario: &str, alice_p: u16, bob1_p: u16, bob2
 
     // bob1 rejects → failover to bob2.
     uas1.respond(503, "Service Unavailable").await;
+    bob1.receive("ACK").await; // the b2bua completes bob1's reject txn (§17.1.1.3)
 
     // bob2 on the unreliable path: 180 suppressed, 200 with its own SDP.
     let mut uas2 = bob2.receive("INVITE").await;
