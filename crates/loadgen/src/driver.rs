@@ -538,9 +538,9 @@ async fn run_one(
             if findings.is_empty() {
                 CallOutcome::Ok
             } else {
-                CallOutcome::RfcAuditFail(
-                    findings.iter().map(|f| f.detail.clone()).collect::<Vec<_>>().join("; "),
-                )
+                // Carried structured (not pre-joined) so the report can bucket
+                // the first-N samples by rule id, not by "first rfc error seen".
+                CallOutcome::RfcAuditFail(findings)
             }
         }
         Ok(Err(e)) => CallOutcome::Step(e),
@@ -566,13 +566,7 @@ async fn run_one(
         reporter.record_checks(id, verdicts.iter().all(|v| v.passed));
     }
     let outcome = if verdicts.iter().any(|v| !v.passed) {
-        let failed = verdicts
-            .iter()
-            .filter(|v| !v.passed)
-            .map(|v| format!("{} {}: {}", v.on, v.field, v.detail))
-            .collect::<Vec<_>>()
-            .join("; ");
-        CallOutcome::CheckFail(failed)
+        CallOutcome::CheckFail(verdicts.iter().filter(|v| !v.passed).cloned().collect())
     } else {
         outcome
     };
@@ -611,7 +605,11 @@ async fn run_one(
         _ => ChaosTag::Clear,
     };
 
-    let sample = if reporter.wants_sample(id, &class, chaos_tag) {
+    // The bounded case discriminator (which RFC rule / failed check / agent@phase)
+    // — computed once; keys the first-N sample buckets AND the counts split.
+    let case = outcome.case(ctx.phases().last().map(|(name, _)| *name));
+
+    let sample = if reporter.wants_sample(id, &class, &case, chaos_tag) {
         let detail = phase_annotated_detail(outcome.detail(), &ctx);
         // Thread the failure reason into the rendered callflow so a sampled NOK
         // page explains WHY (header banner + an explicit anomaly), not just "FAIL".
@@ -648,7 +646,7 @@ async fn run_one(
         None
     };
 
-    reporter.record(id, &outcome, e2e, &checkpoints, sample, chaos_tag);
+    reporter.record(id, &outcome, &case, e2e, &checkpoints, sample, chaos_tag);
     reporter.dec_inflight();
 }
 

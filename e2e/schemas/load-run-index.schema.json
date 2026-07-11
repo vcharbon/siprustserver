@@ -162,9 +162,14 @@
       ]
     },
     "CountRow": {
-      "description": "One `(scenario, class, chaos)` completed-call count.",
+      "description": "One `(scenario, class, case, chaos)` completed-call count.",
       "type": "object",
       "properties": {
+        "case": {
+          "description": "The bounded case discriminator refining the class into its distinct\nfailure modes (RFC rule id(s), failed check id(s), `agent@phase`).\nEmpty = un-refined (`ok` rows, indexes written before the field existed).",
+          "type": "string",
+          "default": ""
+        },
         "chaos": {
           "description": "Chaos proximity: `clear` (genuine) or `near` (accepted kill collateral).",
           "type": "string"
@@ -302,9 +307,14 @@
       ]
     },
     "SampleGroup": {
-      "description": "The stored sampled callflow pages for one `(scenario, class, chaos)` bucket.",
+      "description": "The stored sampled callflow pages for one `(scenario, class, case, chaos)`\nbucket.",
       "type": "object",
       "properties": {
+        "case": {
+          "description": "The case discriminator (see [`CountRow::case`]); empty = un-refined.",
+          "type": "string",
+          "default": ""
+        },
         "chaos": {
           "type": "string"
         },
@@ -312,7 +322,7 @@
           "type": "string"
         },
         "pages": {
-          "description": "Run-dir-relative paths to each sample's rendered callflow HTML page\n(e.g. `callflows/reinvite/check_fail/clear/0.html`).",
+          "description": "Run-dir-relative paths to each sample's rendered callflow HTML page\n(e.g. `callflows/reinvite/check_fail/alice.invite.from.userInfo/clear/0.html`;\nno case segment when `case` is empty).",
           "type": "array",
           "items": {
             "type": "string"

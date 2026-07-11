@@ -1,10 +1,14 @@
 //! Result classification — how a finished load call is bucketed for counting
 //! and for the bounded per-class callflow samples.
 //!
-//! Two layers: [`CallOutcome`] is the raw result of one call (Ok, a structured
-//! [`StepError`], or a caught panic). [`ResultClass`] collapses it to a
-//! low-cardinality bucket key (e.g. `status_486`, `timeout`, `panic`) so the
-//! sample store and the Prometheus `class` label stay small.
+//! Three layers: [`CallOutcome`] is the raw result of one call (Ok, a
+//! structured [`StepError`], or a caught panic). [`ResultClass`] collapses it
+//! to a low-cardinality bucket key (e.g. `status_486`, `timeout`, `panic`) so
+//! the Prometheus `class` label stays small. [`CallOutcome::case`] refines the
+//! class into a still-bounded *case* discriminator (which RFC rule fired, which
+//! check failed, which agent/phase a step died at) so the first-N sample
+//! capture keeps distinct failure modes apart instead of filling one
+//! `rfc_audit_fail` bucket with N copies of the first rule to fire.
 
 use scenario_harness::StepError;
 
@@ -18,13 +22,14 @@ pub enum CallOutcome {
     /// The scenario future panicked (caught at the per-call `catch_unwind`
     /// boundary); the string is the panic message, best-effort.
     Panic(String),
-    /// The call otherwise succeeded but its sampled trace failed the RFC audit.
-    RfcAuditFail(String),
+    /// The call otherwise succeeded but its sampled trace failed the RFC audit
+    /// — carries the structured findings so the case key can bucket by rule id
+    /// (the joined human detail is derived in [`detail`](Self::detail)).
+    RfcAuditFail(Vec<sip_net::RfcFinding>),
     /// The call otherwise succeeded but its attached Test case's checks failed
-    /// over the sampled trace (the e2e check engine's verdicts); the string
-    /// lists the failed checks. Sampled calls only — checks are a per-sample
-    /// oracle, like the RFC audit.
-    CheckFail(String),
+    /// over the sampled trace — carries the FAILED verdicts only. Sampled calls
+    /// only — checks are a per-sample oracle, like the RFC audit.
+    CheckFail(Vec<e2e_model::CheckVerdict>),
 }
 
 /// A low-cardinality bucket for a call result. `Display`/[`label`](Self::label)
@@ -126,8 +131,90 @@ impl CallOutcome {
             CallOutcome::Ok => None,
             CallOutcome::Step(e) => Some(e.to_string()),
             CallOutcome::Panic(m) => Some(format!("panic: {m}")),
-            CallOutcome::RfcAuditFail(d) => Some(format!("rfc audit: {d}")),
-            CallOutcome::CheckFail(d) => Some(format!("case checks: {d}")),
+            CallOutcome::RfcAuditFail(findings) => Some(format!(
+                "rfc audit: {}",
+                findings.iter().map(|f| f.detail.clone()).collect::<Vec<_>>().join("; ")
+            )),
+            CallOutcome::CheckFail(failed) => Some(format!(
+                "case checks: {}",
+                failed
+                    .iter()
+                    .map(|v| format!("{} {}: {}", v.on, v.field, v.detail))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )),
         }
     }
+
+    /// The bounded **case** discriminator refining [`ResultClass`] for the
+    /// first-N sample capture: same scenario + same class but a different case
+    /// (a different RFC rule, a different failed check, a different agent/phase)
+    /// gets its own sample bucket. Empty for Ok (and any un-refined outcome).
+    ///
+    /// Cardinality stays structural: RFC rule ids and check `<on>.<field>`
+    /// selectors are finite authored sets; agent names and lifecycle phase
+    /// names are static strings. Free-form text (finding details, panic
+    /// messages — they embed Call-IDs/branches) is deliberately NEVER keyed.
+    /// `last_phase` is the call's last reached lifecycle phase — the
+    /// "where in the callflow" axis for mid-flow deaths (steps/panics); the
+    /// post-hoc oracles (RFC audit, checks) run on completed calls, where the
+    /// rule/check id already localises the offence.
+    pub fn case(&self, last_phase: Option<&'static str>) -> String {
+        let case = match self {
+            CallOutcome::Ok => String::new(),
+            CallOutcome::Step(e) => {
+                format!("{}@{}", step_who(e), last_phase.unwrap_or("start"))
+            }
+            CallOutcome::Panic(_) => last_phase.unwrap_or("start").to_string(),
+            CallOutcome::RfcAuditFail(findings) => {
+                joined_distinct(findings.iter().map(|f| f.rule.as_str()))
+            }
+            CallOutcome::CheckFail(failed) => {
+                joined_distinct(failed.iter().map(|v| format!("{}.{}", v.on, v.field)))
+            }
+        };
+        slug(&case)
+    }
+}
+
+/// The agent a step failure is attributed to (the `who` every [`StepError`]
+/// variant carries) — bounded: load agents are named by role (`alice`, `bob`,
+/// `callee`, …).
+fn step_who(e: &StepError) -> &str {
+    match e {
+        StepError::Timeout { who }
+        | StepError::QueueClosed { who }
+        | StepError::Unparseable { who, .. }
+        | StepError::WrongStatus { who, .. }
+        | StepError::WrongMethod { who, .. }
+        | StepError::UnexpectedKind { who, .. }
+        | StepError::Transport { who, .. } => who,
+    }
+}
+
+/// Sorted-distinct ids joined with `+`, capped at 3 (`+{n}` names the overflow)
+/// so a many-findings call can't mint an unbounded key or an absurd dir name.
+fn joined_distinct<I: IntoIterator<Item = impl Into<String>>>(ids: I) -> String {
+    let distinct: std::collections::BTreeSet<String> =
+        ids.into_iter().map(Into::into).collect();
+    let n = distinct.len();
+    let mut out: Vec<String> = distinct.into_iter().take(3).collect();
+    if n > 3 {
+        out.push(format!("+{}", n - 3));
+    }
+    out.join("+")
+}
+
+/// Make a case key filesystem/URL-safe (it becomes a sample directory segment):
+/// keep `[A-Za-z0-9._+@-]`, map everything else to `-`.
+fn slug(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '@' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
