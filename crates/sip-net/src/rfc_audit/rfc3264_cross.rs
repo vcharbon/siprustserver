@@ -654,6 +654,7 @@ mod tests {
         Stamped {
             event: SignalingNetworkEvent::RecvItem {
                 bind_key: bind.to_string(),
+                disposition: crate::types::RecvDisposition::Delivered,
                 packet: UdpPacket { raw, src: src.parse().unwrap(), arrival_ms: seq },
             },
             seq,

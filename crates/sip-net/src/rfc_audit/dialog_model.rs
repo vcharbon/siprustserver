@@ -496,7 +496,7 @@ pub fn project_per_dialog(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Dial
                     });
                 }
             }
-            SignalingNetworkEvent::RecvItem { bind_key, packet } => {
+            SignalingNetworkEvent::RecvItem { bind_key, packet, .. } => {
                 if let Ok(m) = parser.parse(&packet.raw) {
                     ordered.push(Entry {
                         kind: EventKind::Received,
@@ -734,6 +734,7 @@ mod tests {
         Stamped {
             event: SignalingNetworkEvent::RecvItem {
                 bind_key: bind.to_string(),
+                disposition: crate::types::RecvDisposition::Delivered,
                 packet: UdpPacket {
                     raw,
                     src: "127.0.0.1:5070".parse().unwrap(),

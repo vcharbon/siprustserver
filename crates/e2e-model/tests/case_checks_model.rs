@@ -127,6 +127,7 @@ fn fixture() -> (Vec<RecordedSipEntry>, Vec<AnchorTag>) {
             sent_ms: 1,
             received_ms: Some(1),
             delivered: true,
+            recv_note: None,
             seq: 1,
         },
         RecordedSipEntry {
@@ -136,6 +137,7 @@ fn fixture() -> (Vec<RecordedSipEntry>, Vec<AnchorTag>) {
             sent_ms: 2,
             received_ms: None,
             delivered: true, // external destination: left the recording's horizon
+            recv_note: None,
             seq: 2,
         },
     ];

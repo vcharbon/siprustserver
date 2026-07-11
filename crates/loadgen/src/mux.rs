@@ -804,6 +804,11 @@ impl UdpEndpoint for MuxEndpoint {
     fn counters(&self) -> UdpEndpointCounters {
         UdpEndpointCounters::default()
     }
+
+    fn install_recv_tap(&self, tap: sip_net::RecvTap) -> bool {
+        self.queue.install_tap(tap);
+        true
+    }
 }
 
 impl Drop for MuxEndpoint {
@@ -941,15 +946,29 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
 fn handle_inbound(mux: &MuxSocket, d: &Delivery, raw: &[u8], src: SocketAddr) {
     if d.drop.drops() {
         mux.stats.dropped_in.fetch_add(1, Ordering::Relaxed);
+        // A recorded (sampled) call still shows the arrival on its ladder,
+        // tagged as modeled loss — the RFC audit filters it out (036 ask A).
+        tap_discard(mux, d, raw, src, sip_net::RecvDisposition::LossModel);
         return;
     }
     if let Some(txns) = &d.txns {
         if !txns.on_inbound(raw, src) {
-            return; // duplicate absorbed (engine did any re-ACK / re-answer)
+            // duplicate absorbed (engine did any re-ACK / re-answer)
+            tap_discard(mux, d, raw, src, sip_net::RecvDisposition::AbsorbedRetransmit);
+            return;
         }
     }
     let arrival_ms = mux.clock.now_ms().max(0) as u64;
     deliver(&mux.stats, &d.queue, UdpPacket { raw: raw.to_vec(), src, arrival_ms });
+}
+
+/// Report a demuxed-but-discarded datagram to a recorded inbox's delivery tap
+/// (no-op — not even an allocation — on the unsampled path).
+fn tap_discard(mux: &MuxSocket, d: &Delivery, raw: &[u8], src: SocketAddr, disp: sip_net::RecvDisposition) {
+    if let Some(tap) = d.queue.recv_tap() {
+        let arrival_ms = mux.clock.now_ms().max(0) as u64;
+        tap(&UdpPacket { raw: raw.to_vec(), src, arrival_ms }, disp);
+    }
 }
 
 fn deliver(stats: &MuxStats, q: &PacketQueue, pkt: UdpPacket) {
