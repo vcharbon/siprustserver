@@ -116,6 +116,31 @@ pub fn render_html(doc: &SeqDoc) -> String {
         .map(|d| format!("<p class=\"desc\">{}</p>", escape(d)))
         .unwrap_or_default();
 
+    // Per-flow color legend (036 ask C): SIP rows carrying a `conn` (the
+    // Call-ID) are colored per flow — name each color so a reader can map
+    // arrow hue → dialog without opening payloads. First-seen order.
+    let mut flow_chips = String::new();
+    let mut seen_conns: Vec<&str> = Vec::new();
+    for row in &rows {
+        let (RowKind::Sip { .. }, Some(conn)) = (&row.kind, row.conn.as_deref()) else {
+            continue;
+        };
+        if seen_conns.contains(&conn) {
+            continue;
+        }
+        seen_conns.push(conn);
+        let shown: String = if conn.chars().count() > 28 {
+            format!("{}…", conn.chars().take(27).collect::<String>())
+        } else {
+            conn.to_string()
+        };
+        flow_chips.push_str(&format!(
+            "<span><i class=\"swatch\" style=\"border-top-color:{}\"></i>Call-ID {}</span>\n",
+            conn_color(conn),
+            escape(&shown),
+        ));
+    }
+
     // When the doc is wall-clock-aligned, state the absolute anchor so every
     // relative `T+…` stamp maps to a real UTC instant (the "proper reference"
     // for correlating a callflow to external events like a chaos kill).
@@ -187,6 +212,7 @@ pub fn render_html(doc: &SeqDoc) -> String {
       <span><i class="swatch" style="border-top-color:{REPL_COLOR};border-top-style:dashed"></i>Replication (dashed; hue = per-socket connection)</span>
       <span><i class="swatch" style="border-top-color:{BAND_COLOR}"></i>Lifecycle (crash / reboot / failover / partition)</span>
       <span style="color:{LOST_COLOR}">✗ lost — frame emitted into a dead / superseded socket; the stub stops short of the lane (never reached the live node)</span>
+      {flow_chips}
     </div>
   </header>
   <div class="main">
@@ -346,8 +372,35 @@ fn svg_markup(
     }
     s.push_str("</defs>\n");
 
-    // Lifelines + column heads.
+    // Lifelines + column heads. Consecutive lanes sharing a `group` (logical
+    // sub-lanes of one socket — 036 ask C) get one bracketing header with the
+    // shared resource (the ip:port) centered above their individual captions.
     let life_bottom = height - BOTTOM_PAD / 2;
+    {
+        let mut i = 0;
+        while i < doc.lanes.len() {
+            let Some(group) = &doc.lanes[i].group else {
+                i += 1;
+                continue;
+            };
+            let mut j = i + 1;
+            while j < doc.lanes.len() && doc.lanes[j].group.as_deref() == Some(group.as_str()) {
+                j += 1;
+            }
+            let (x1, x2) = (lane_x(i), lane_x(j - 1));
+            let y = TOP_PAD - 52;
+            s.push_str(&format!(
+                "<text x=\"{}\" y=\"{y}\" text-anchor=\"middle\" font-weight=\"bold\" fill=\"#6b7280\">{}</text>\n",
+                (x1 + x2) / 2,
+                escape(group),
+            ));
+            s.push_str(&format!(
+                "<path d=\"M{} {} L{} {} L{} {} L{} {}\" fill=\"none\" stroke=\"#9ca3af\" stroke-width=\"1\"/>\n",
+                x1 - 20, y + 10, x1 - 20, y + 16, x2 + 20, y + 16, x2 + 20, y + 10,
+            ));
+            i = j;
+        }
+    }
     for (i, lane) in doc.lanes.iter().enumerate() {
         let x = lane_x(i);
         let color = lane_color(lane.kind);
@@ -386,25 +439,32 @@ fn svg_markup(
             }
             RowKind::Sip { delivered } | RowKind::Repl { delivered } => {
                 let is_repl = matches!(row.kind, RowKind::Repl { .. });
-                // Per-socket color for repl arrows (so two flows to the same node,
-                // and a node's pre-crash vs post-reboot sockets, read as distinct
-                // arrows); SIP stays blue. A repl row with no `conn` falls back to
-                // the historic repl purple (palette index 0).
-                let color = if is_repl {
-                    row.conn.as_deref().map(conn_color).unwrap_or(REPL_COLOR)
-                } else {
-                    SIP_COLOR
+                // Per-key color for arrows carrying a `conn`: repl rows key on
+                // the socket (two flows to the same node, pre-crash vs
+                // post-reboot sockets); SIP rows key on the Call-ID (036 ask C
+                // — a b2bua's a-leg vs b-leg read as distinct flows). A row
+                // with no `conn` falls back to its plane's default color.
+                let color = match (&row.conn, is_repl) {
+                    (Some(c), _) => conn_color(c),
+                    (None, true) => REPL_COLOR,
+                    (None, false) => SIP_COLOR,
                 };
-                let marker = if is_repl {
-                    format!("ah-conn-{}", row.conn.as_deref().map(conn_palette_index).unwrap_or(0))
-                } else {
-                    "ah-sip".to_string()
+                let marker = match (&row.conn, is_repl) {
+                    (Some(c), _) => format!("ah-conn-{}", conn_palette_index(c)),
+                    (None, true) => "ah-conn-0".to_string(),
+                    (None, false) => "ah-sip".to_string(),
                 };
                 let dash = if is_repl { " stroke-dasharray=\"5 3\"" } else { "" };
                 let plane_class = if is_repl { "seq-repl" } else { "seq-sip" };
                 // The socket tag rendered inline so distinct connections are
-                // nameable, not just colored (e.g. `:40007` vs the live `:40011`).
-                let sock = row.conn.as_deref().map(|c| format!(" {c}")).unwrap_or_default();
+                // nameable, not just colored (e.g. `:40007` vs the live
+                // `:40011`). Repl-only: a SIP row's `conn` is its Call-ID —
+                // far too long inline; the legend names those colors instead.
+                let sock = if is_repl {
+                    row.conn.as_deref().map(|c| format!(" {c}")).unwrap_or_default()
+                } else {
+                    String::new()
+                };
 
                 let fi = lane_idx.get(row.from.as_str()).copied().unwrap_or(0);
                 let ti = row

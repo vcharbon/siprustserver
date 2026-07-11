@@ -75,6 +75,13 @@ pub struct Lane {
     pub label: String,
     /// What the lane represents (styling only).
     pub kind: LaneKind,
+    /// Shared-resource header this lane belongs under (e.g. the `ip:port` of a
+    /// shared mux socket whose LOGICAL endpoints each get their own sub-lane —
+    /// newkahneed-036 ask C). Consecutive lanes with the same `group` render
+    /// one bracketing header above their individual captions. `None` (the
+    /// default, and every pre-existing doc) renders exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 impl Lane {
@@ -84,7 +91,14 @@ impl Lane {
             id: id.into(),
             label: label.into(),
             kind,
+            group: None,
         }
+    }
+
+    /// Attach the shared-resource group header (see [`Lane::group`]).
+    pub fn with_group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
+        self
     }
 }
 
@@ -596,5 +610,51 @@ mod tests {
         let txt = render_global_txt(&doc);
         assert!(txt.contains("FAIL"));
         assert!(txt.contains("rfc.cseqInDialogOrder"));
+    }
+
+    /// 036 ask C: consecutive lanes sharing a `group` render one bracketing
+    /// socket header above their individual captions.
+    #[test]
+    fn grouped_sub_lanes_render_a_shared_socket_header() {
+        let mut doc = mixed_doc();
+        doc.lanes = vec![
+            lane("alice", LaneKind::Ua),
+            Lane::new("10.0.0.9:5070#callee", "callee", LaneKind::Ua).with_group("10.0.0.9:5070"),
+            Lane::new("10.0.0.9:5070#alt", "alt", LaneKind::Ua).with_group("10.0.0.9:5070"),
+        ];
+        doc.rows.truncate(0);
+        doc.rows.push(SeqRow {
+            at_ms: 0,
+            seq: 1,
+            from: "alice".into(),
+            to: Some("10.0.0.9:5070#callee".into()),
+            label: "INVITE sip:x".into(),
+            detail: None,
+            conn: None,
+            kind: RowKind::Sip { delivered: true },
+        });
+        let html = render_html(&doc);
+        // The shared socket appears once as the group header; both sub-lane
+        // captions render individually.
+        assert!(html.contains("10.0.0.9:5070</text>"), "group header text:\n{html}");
+        assert!(html.contains(">callee</text>"));
+        assert!(html.contains(">alt</text>"));
+    }
+
+    /// 036 ask C: SIP rows carrying a `conn` (the Call-ID) are coloured per
+    /// flow and named in the legend; the long id never renders inline on the
+    /// arrow label.
+    #[test]
+    fn sip_rows_colour_by_call_id_with_legend() {
+        let mut doc = mixed_doc();
+        let cid = "b-1-1234567890abcdef@10.244.0.7";
+        doc.rows[1].conn = Some(cid.into());
+        let html = render_html(&doc);
+        // Legend chip names the (truncated) Call-ID.
+        assert!(html.contains("Call-ID b-1-1234567890abcdef@10.244…"), "legend chip:\n{html}");
+        // The arrow label itself stays clean (no inline Call-ID).
+        assert!(html.contains(">INVITE sip:bob</text>"), "inline label unchanged:\n{html}");
+        // The arrow is drawn with a conn-coloured arrowhead, not the SIP one.
+        assert!(html.contains("url(#ah-conn-"), "conn-coloured arrowhead used:\n{html}");
     }
 }

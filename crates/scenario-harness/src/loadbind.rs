@@ -189,13 +189,22 @@ impl AgentBinder {
         let name = name.into();
         let addr: SocketAddr =
             addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
+        // Per-logical-endpoint sub-lane (036 ask C): load agents may SHARE a
+        // mux socket (callee + alt legs), so each registers — and binds — under
+        // `ip:port#<name>` instead of colliding on the socket's lane. The
+        // projector groups sub-lanes under their shared `ip:port` header.
         if let Some(recorder) = &self.recorder {
-            recorder.register_lane(addr, name.clone(), NetworkTag::Ext);
+            recorder.register_lane_keyed(
+                format!("{addr}#{name}"),
+                addr,
+                name.clone(),
+                NetworkTag::Ext,
+            );
         }
         let roles = HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]);
         let ep = self
             .network
-            .bind_udp(BindUdpOpts::new(addr, 64).with_roles(roles))
+            .bind_udp(BindUdpOpts::new(addr, 64).with_roles(roles).with_lane_label(&name))
             .await
             .unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
         Agent {

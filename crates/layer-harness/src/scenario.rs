@@ -44,6 +44,10 @@ pub enum TransportKind {
 /// fabric it sits on, and any kill timestamps (virtual or wall ms).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lane {
+    /// The registry key — the bare `ip:port`, or `ip:port#<label>` for a
+    /// logical sub-lane on a shared socket (newkahneed-036 ask C). Matches the
+    /// `bind_key` recorded on the signaling events of this lane's endpoint.
+    pub key: LaneKey,
     pub addr: SocketAddr,
     pub names: Vec<String>,
     pub network: NetworkTag,

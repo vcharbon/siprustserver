@@ -191,17 +191,27 @@ pub fn sip_doc_with_overlay(
 /// Project the recorder lanes into seq-report columns. A `proxy`/`core` lane is
 /// an SUT; everything else is a UA. Any address that appears in the trace but
 /// was never registered as a lane (rare) is appended so its rows resolve.
+///
+/// Lane identity is the recorder's lane KEY — the bare `ip:port`, or the
+/// logical-sub-lane `ip:port#<endpoint>` form (036 ask C) when several logical
+/// endpoints share one socket. Sub-lanes carry a `group` (the shared `ip:port`)
+/// so the renderer brackets them under one socket header.
 fn project_lanes(rec_lanes: &[RecLane], entries: &[RecordedSipEntry]) -> Vec<Lane> {
     let mut lanes: Vec<Lane> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for l in rec_lanes {
-        let id = l.addr.to_string();
+        let id = l.key.clone();
+        let addr = l.addr.to_string();
+        let sublane = id.contains('#');
         let name = l.names.first().cloned().unwrap_or_default();
-        let label = if name.is_empty() {
-            id.clone()
-        } else {
-            format!("{name} ({id})")
+        // A sub-lane sits under its socket's group header (which shows the
+        // ip:port), so its own caption is just the endpoint name.
+        let label = match (sublane, name.is_empty()) {
+            (true, false) => name.clone(),
+            (true, true) => id.split('#').nth(1).unwrap_or(&id).to_string(),
+            (false, false) => format!("{name} ({addr})"),
+            (false, true) => addr.clone(),
         };
         // A core-fabric endpoint (the proxy) is an SUT; an ext UA is a Ua.
         let kind = match l.network {
@@ -210,21 +220,61 @@ fn project_lanes(rec_lanes: &[RecLane], entries: &[RecordedSipEntry]) -> Vec<Lan
             NetworkTag::Ext => LaneKind::Ua,
         };
         if seen.insert(id.clone()) {
-            lanes.push(Lane::new(id, label, kind));
+            let mut lane = Lane::new(id, label, kind);
+            if sublane {
+                lane = lane.with_group(addr);
+            }
+            lanes.push(lane);
         }
     }
 
-    // Backstop: any addr referenced by a row but missing a lane.
+    // Backstop: any lane id referenced by a row but never registered — an
+    // unregistered address, or the synthesized `ip:port#noendpoint` sub-lane
+    // an unrouted-but-call-correlated datagram renders on (036 ask C).
     for e in entries {
-        for addr in [e.from, e.to] {
-            let id = addr.to_string();
+        let (from_id, to_id) = entry_lane_ids(e);
+        for id in [from_id, to_id] {
             if seen.insert(id.clone()) {
-                lanes.push(Lane::new(id.clone(), id, LaneKind::Ua));
+                let mut lane = match id.split_once('#') {
+                    Some((addr, "noendpoint")) => {
+                        Lane::new(id.clone(), "(no endpoint)", LaneKind::Ua).with_group(addr)
+                    }
+                    Some((addr, label)) => {
+                        Lane::new(id.clone(), label, LaneKind::Ua).with_group(addr)
+                    }
+                    None => Lane::new(id.clone(), id.clone(), LaneKind::Ua),
+                };
+                // Keep sub-lanes of one socket adjacent so the group brackets.
+                let insert_at = lane
+                    .group
+                    .as_deref()
+                    .and_then(|g| {
+                        lanes
+                            .iter()
+                            .rposition(|l| l.group.as_deref() == Some(g))
+                            .map(|i| i + 1)
+                    })
+                    .unwrap_or(lanes.len());
+                lanes.insert(insert_at, lane);
             }
         }
     }
 
     lanes
+}
+
+/// The seq-report lane ids a recorded entry's row endpoints resolve to: the
+/// full lane key when the recording knows it, the bare address otherwise, and
+/// the synthesized `ip:port#noendpoint` sub-lane for a datagram that
+/// correlated to the call but had no live logical endpoint to land on.
+fn entry_lane_ids(e: &RecordedSipEntry) -> (String, String) {
+    let from = e.from_lane.clone().unwrap_or_else(|| e.from.to_string());
+    let to = if e.recv_note == Some(sip_net::RecvNote::Unrouted) {
+        format!("{}#noendpoint", e.to)
+    } else {
+        e.to_lane.clone().unwrap_or_else(|| e.to.to_string())
+    };
+    (from, to)
 }
 
 fn project_entry(e: &RecordedSipEntry, base: i64) -> SeqRow {
@@ -245,21 +295,26 @@ fn project_entry(e: &RecordedSipEntry, base: i64) -> SeqRow {
     // was never consumed by the scenario body (or was refused by the inbox /
     // discarded by the loadgen loss model) is visibly distinguishable from one
     // the body expected and matched — on the arrow label AND in the detail.
-    let mut label = facets(&e.raw).label;
+    let f = facets(&e.raw);
+    let mut label = f.label;
     if let Some(note) = e.recv_note {
         label.push_str(&format!(" ⚠ [{}]", note.tag()));
         detail.push_str(&format!("┄ receive note: {}\n", note.tag()));
     }
     detail.push_str(&wire_text(&e.raw));
 
+    let (from, to) = entry_lane_ids(e);
     SeqRow {
         at_ms: e.sent_ms as i64,
         seq: e.seq,
-        from: e.from.to_string(),
-        to: Some(e.to.to_string()),
+        from,
+        to: Some(to),
         label,
         detail: Some(detail),
-        conn: None,
+        // Colour-band per dialog (036 ask C): rows sharing a Call-ID share a
+        // hue, so a b2bua's a-leg vs b-leg — or a reroute's primary vs alt
+        // dialog — read as distinct flows at a glance.
+        conn: (!f.call_id.is_empty()).then(|| f.call_id.clone()),
         kind: RowKind::Sip {
             delivered: e.delivered,
         },
@@ -280,6 +335,8 @@ mod tests {
             received_ms: Some(sent_ms + 1),
             delivered: true,
             recv_note: None,
+            from_lane: None,
+            to_lane: None,
             seq,
         }
     }
@@ -290,6 +347,65 @@ mod tests {
             lanes: vec![],
             anomalies: vec![],
         }
+    }
+
+    /// 036 ask C: registered sub-lanes keep their composite key as the lane id
+    /// and group under the shared socket; an `Unrouted` entry lands on a
+    /// synthesized `ip:port#noendpoint` sub-lane adjacent to its siblings; and
+    /// rows colour-band by Call-ID via `conn`.
+    #[test]
+    fn sub_lanes_noendpoint_and_call_id_bands() {
+        let sock: std::net::SocketAddr = "10.0.0.2:5070".parse().unwrap();
+        let mut scenario = scenario();
+        scenario.lanes = vec![
+            layer_harness::Lane {
+                key: "10.0.0.1:5060".into(),
+                addr: "10.0.0.1:5060".parse().unwrap(),
+                names: vec!["alice".into()],
+                network: NetworkTag::Ext,
+                killed_at: vec![],
+            },
+            layer_harness::Lane {
+                key: "10.0.0.2:5070#callee".into(),
+                addr: sock,
+                names: vec!["callee".into()],
+                network: NetworkTag::Ext,
+                killed_at: vec![],
+            },
+        ];
+
+        let raw = "INVITE sip:x@h SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKt1\r\n\
+             Call-ID: cid-1@h\r\n\
+             From: <sip:a@h>;tag=1\r\nTo: <sip:x@h>\r\nCSeq: 1 INVITE\r\n\
+             Content-Length: 0\r\n\r\n";
+        let mut routed = entry("10.0.0.1:5060", "10.0.0.2:5070", raw, 10, 1);
+        routed.from_lane = Some("10.0.0.1:5060".into());
+        routed.to_lane = Some("10.0.0.2:5070#callee".into());
+        let mut unrouted = entry("10.0.0.1:5060", "10.0.0.2:5070", raw, 20, 2);
+        unrouted.recv_note = Some(sip_net::RecvNote::Unrouted);
+
+        let doc = sip_doc("lanes", None, &[routed, unrouted], &scenario, true, &[]);
+
+        let callee = doc.lanes.iter().find(|l| l.id == "10.0.0.2:5070#callee").unwrap();
+        assert_eq!(callee.label, "callee");
+        assert_eq!(callee.group.as_deref(), Some("10.0.0.2:5070"));
+
+        let noep = doc.lanes.iter().find(|l| l.id == "10.0.0.2:5070#noendpoint").unwrap();
+        assert_eq!(noep.label, "(no endpoint)");
+        assert_eq!(noep.group.as_deref(), Some("10.0.0.2:5070"));
+        // Adjacent to its sibling sub-lane so the group header brackets both.
+        let idx_of = |id: &str| doc.lanes.iter().position(|l| l.id == id).unwrap();
+        assert_eq!(
+            idx_of("10.0.0.2:5070#noendpoint"),
+            idx_of("10.0.0.2:5070#callee") + 1
+        );
+
+        // Rows resolve to the sub-lane ids, and colour-band by Call-ID.
+        assert_eq!(doc.rows[0].to.as_deref(), Some("10.0.0.2:5070#callee"));
+        assert_eq!(doc.rows[1].to.as_deref(), Some("10.0.0.2:5070#noendpoint"));
+        assert!(doc.rows[1].label.contains("no endpoint to route to"));
+        assert_eq!(doc.rows[0].conn.as_deref(), Some("cid-1@h"));
     }
 
     #[test]

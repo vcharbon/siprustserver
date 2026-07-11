@@ -943,6 +943,71 @@ async fn loadgen_mux_recorded_inbox_taps_delivery_and_modeled_loss() {
     assert!(ep2.try_recv().is_none(), "the loss model kept it out of the inbox");
 }
 
+/// newkahneed-036 ask C (`noendpoint` sub-lane): a datagram that CORRELATES to
+/// the call (its token matches the slot) but that no logical endpoint accepts
+/// (picker miss) is a `NoRoute` orphan on the counters — and, on a recorded
+/// call, is still reported to the delivery tap tagged `Unrouted`, so the
+/// sampled ladder shows the demux failure instead of hiding it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loadgen_mux_unrouted_correlated_datagram_taps_for_the_ladder() {
+    use sip_net::{BindUdpOpts, RecvDisposition};
+    use std::sync::Mutex as StdMutex;
+    let uas = addr(6447);
+    let core = MuxCore::bind(
+        vec![EndpointSpec { addr: uas, role: Role::Callee }],
+        Correlation::header("X-Loadgen-Id"),
+        256,
+        10,
+        RECV,
+        Clock::system(),
+    )
+    .await
+    .unwrap();
+
+    let token = "lgUNROUTED".to_string();
+    let routing = CallRouting::new(token.clone())
+        .leg(uas, "callee")
+        .leg(uas, "alt")
+        .picker(uas, loadgen::labelled_prefix_leg_picker([("+0411", "callee"), ("+0422", "alt")]));
+    let net = core.network(routing);
+    let ep_callee = net.bind_udp(BindUdpOpts::new(uas, 256)).await.unwrap();
+    let ep_alt = net.bind_udp(BindUdpOpts::new(uas, 256)).await.unwrap();
+
+    let seen: Arc<StdMutex<Vec<(String, RecvDisposition)>>> = Arc::new(StdMutex::new(Vec::new()));
+    let sink = seen.clone();
+    assert!(ep_callee.install_recv_tap(Arc::new(move |pkt, disp| {
+        sink.lock().unwrap().push((
+            String::from_utf8_lossy(&pkt.raw).split_whitespace().next().unwrap_or("").to_string(),
+            disp,
+        ));
+    })));
+
+    // Correlated (token matches) but the R-URI prefix matches NO declared leg.
+    let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let invite = format!(
+        "INVITE sip:+0999000@127.0.0.1:6447 SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKu1\r\n\
+         X-Loadgen-Id: {token}\r\n\
+         Call-ID: unrouted-1@h\r\nTo: <sip:+0999000@127.0.0.1>\r\n\
+         From: <sip:w@h>;tag=w1\r\nCSeq: 1 INVITE\r\n\r\n"
+    );
+    sender.send_to(invite.as_bytes(), uas).await.unwrap();
+
+    tokio::time::timeout(RECV, async {
+        loop {
+            if !seen.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the unrouted-but-correlated arrival must reach the tap");
+    assert_eq!(*seen.lock().unwrap(), vec![("INVITE".to_string(), RecvDisposition::Unrouted)]);
+    assert!(ep_callee.try_recv().is_none(), "no inbox got it");
+    assert!(ep_alt.try_recv().is_none(), "no inbox got it");
+}
+
 /// Emergency / non-emergency split under overload. The b2bua's CPS bucket is
 /// exhausted (size 0, no refill), so EVERY non-emergency new INVITE is shed with
 /// a stateless 503 while an emergency (`Resource-Priority: esnet.0`) call is

@@ -46,6 +46,11 @@ pub enum RecvDisposition {
     /// Arrived but the per-call retransmit engine absorbed it as a duplicate
     /// (loadgen `--auto-retransmit`): infra dedup the app must not see.
     AbsorbedRetransmit,
+    /// Demuxed to the CALL (token/dialog correlation succeeded) but no live
+    /// logical endpoint accepted it — a picker miss or an endpointless slot
+    /// (newkahneed-036 ask C). Rendered on the `ip:port#noendpoint` sub-lane;
+    /// like an orphan it is ladder-only, never judged by the audit.
+    Unrouted,
 }
 
 impl RecvDisposition {
@@ -121,6 +126,13 @@ pub struct BindUdpOpts {
     pub reuse_port: bool,
     /// SIP role(s) this bind serves. `None` → [`all_ua_roles`].
     pub roles: Option<HashSet<UaRole>>,
+    /// Logical sub-lane label for recording (newkahneed-036 ask C): when
+    /// several LOGICAL endpoints share one socket (loadgen mux legs — callee,
+    /// alt), the recording decorator keys this bind's lane
+    /// `"ip:port#<label>"` instead of the bare `ip:port`, so each leg is its
+    /// own ladder column instead of all legs collapsing onto the socket.
+    /// Ignored by the transports; recording-only.
+    pub lane_label: Option<String>,
 }
 
 impl BindUdpOpts {
@@ -133,7 +145,14 @@ impl BindUdpOpts {
             pre_ingress: None,
             reuse_port: false,
             roles: None,
+            lane_label: None,
         }
+    }
+
+    /// Declare the logical sub-lane label (see the `lane_label` field).
+    pub fn with_lane_label(mut self, label: impl Into<String>) -> Self {
+        self.lane_label = Some(label.into());
+        self
     }
 
     pub fn with_pre_ingress(mut self, hook: PreIngressHook) -> Self {

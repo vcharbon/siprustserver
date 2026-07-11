@@ -226,8 +226,23 @@ impl Recorder {
     /// Registering a *different* name on an existing lane records both names
     /// and queues a `nameConflict` anomaly (once per lane).
     pub fn register_lane(&self, addr: SocketAddr, name: impl Into<String>, network: NetworkTag) {
+        self.register_lane_keyed(lane_key(addr), addr, name, network)
+    }
+
+    /// [`register_lane`](Self::register_lane) under an explicit key — the
+    /// logical-sub-lane form `ip:port#<label>` (newkahneed-036 ask C), so
+    /// several logical endpoints sharing one socket each get their own lane
+    /// instead of colliding (and `nameConflict`-ing) on the socket's key. The
+    /// key must match the `bind_key` the recording decorator stamps on the
+    /// endpoint's events (see `BindUdpOpts::with_lane_label`).
+    pub fn register_lane_keyed(
+        &self,
+        key: LaneKey,
+        addr: SocketAddr,
+        name: impl Into<String>,
+        network: NetworkTag,
+    ) {
         let name = name.into();
-        let key = lane_key(addr);
         let mut st = self.state.lock().unwrap();
         match st.lanes.get_mut(&key) {
             None => {
@@ -290,8 +305,9 @@ impl Recorder {
         let st = self.state.lock().unwrap();
         let lanes: Vec<Lane> = st
             .lanes
-            .values()
-            .map(|l| Lane {
+            .iter()
+            .map(|(key, l)| Lane {
+                key: key.clone(),
                 addr: l.addr,
                 names: l.names.clone(),
                 network: l.network,
