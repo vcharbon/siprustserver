@@ -233,6 +233,31 @@ pub fn spawn_proxy_core(
     workers: &[(&str, SocketAddr)],
     clock: Clock,
 ) -> ProxyCoreParts {
+    spawn_proxy_core_with(endpoint, addr, None, workers, clock, 0xC0FFEE)
+}
+
+/// The **external face** of a dual-face proxy SUT (see
+/// [`spawn_proxy_core_with`]): a second bound endpoint on the caller plane +
+/// its advertise + the internal-plane CIDR list driving the egress face picker
+/// (`PROXY_FACE_INT_CIDRS` equivalent).
+pub struct ExternalProxyFace {
+    pub endpoint: Box<dyn UdpEndpoint>,
+    pub addr: SocketAddr,
+    pub int_cidrs: sip_proxy::FaceCidrs,
+}
+
+/// [`spawn_proxy_core`] generalized: optional dual-face external endpoint and
+/// an explicit `id_seed` (a takeover twin re-bound on the same VIPs must mint
+/// DIFFERENT Via branches than the proxy it replaces — reusing the seed would
+/// replay the dead proxy's branch sequence into the same dialogs).
+pub fn spawn_proxy_core_with(
+    endpoint: Box<dyn UdpEndpoint>,
+    addr: SocketAddr,
+    external: Option<ExternalProxyFace>,
+    workers: &[(&str, SocketAddr)],
+    clock: Clock,
+    id_seed: u64,
+) -> ProxyCoreParts {
     let entries: Vec<WorkerEntry> = workers
         .iter()
         .map(|(id, sa)| WorkerEntry::alive(*id, ProxyAddr::new(sa.ip().to_string(), sa.port())))
@@ -252,11 +277,18 @@ pub fn spawn_proxy_core(
     ));
 
     let metrics = Arc::new(ProxyMetrics::new());
-    let core = ProxyCoreBuilder::new(ProxyAddr::from(addr), strategy, registry_dyn)
+    let mut builder = ProxyCoreBuilder::new(ProxyAddr::from(addr), strategy, registry_dyn)
         .clock(clock)
-        .id_gen(Arc::new(IdGen::seeded(0xC0FFEE)))
-        .metrics(metrics.clone())
-        .build(endpoint);
+        .id_gen(Arc::new(IdGen::seeded(id_seed)))
+        .metrics(metrics.clone());
+    if let Some(ext) = external {
+        builder = builder.external_face(sip_proxy::ExternalFaceParts {
+            endpoint: ext.endpoint,
+            advertised: ProxyAddr::from(ext.addr),
+            int_cidrs: ext.int_cidrs,
+        });
+    }
+    let core = builder.build(endpoint);
     let task = tokio::spawn(core.run());
     ProxyCoreParts { addr, registry, metrics, observer, task }
 }

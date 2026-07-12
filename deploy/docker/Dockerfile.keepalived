@@ -7,7 +7,10 @@
 #
 #   docker build -f deploy/docker/Dockerfile.keepalived -t siprustserver-keepalived:dev .
 FROM alpine:3.20
-RUN apk add --no-cache keepalived iproute2
+# iptables: also reused by the masq-exempt DaemonSet (manifests/05-masq-exempt
+# .yaml) so ONE side-loaded image serves keepalived, the vip-smoke probe and the
+# KIND-MASQ-AGENT RETURN-rule asserter (newkahneed-041 deploy contract).
+RUN apk add --no-cache keepalived iproute2 iptables
 # keepalived → /usr/sbin/keepalived ; ip → /sbin/ip ; sh → busybox /bin/sh.
 ENTRYPOINT []
 CMD ["/usr/sbin/keepalived", "--dont-fork", "--log-console", "--log-detail", "--use-file=/etc/keepalived/keepalived.conf"]

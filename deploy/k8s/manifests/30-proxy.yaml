@@ -1,16 +1,23 @@
-# SIP front proxy + load balancer — HIGH-AVAILABILITY (ADR-0012 D7).
+# SIP front proxy + load balancer — HIGH-AVAILABILITY (ADR-0012 D7), DUAL-FACE
+# (sipext dual-plane layout).
 #
-# TWO anti-affined replicas on the two tier=edge nodes, fronted by a keepalived
-# VRRP virtual IP (${PROXY_VIP}, the top of the configurable kind SIP_SUBNET).
-# Active/passive: the VRRP master owns the VIP and serves ALL traffic; the backup
-# is warm (its OPTIONS health probes source from its own node IP — the runner
-# binds a SEPARATE ephemeral probe socket — so it keeps a live worker view and its
-# /readyz passes). On master loss the backup claims the VIP in <2s. Because the
-# proxy advertises the *VIP* (stable across failover AND pod restart) in
-# Record-Route, in-dialog BYE/keepalives never get orphaned the way a per-pod-IP
-# advertise did, and the HMAC stickiness cookie + worker P2P replication
-# (ADR-0011) keep in-dialog routing + worker failover correct from either proxy.
-# Active/passive keeps the per-pod cancel_lru (CANCEL/ACK correlation) coherent.
+# TWO anti-affined replicas on the two tier=edge nodes — the only dual-homed
+# components in the cluster: internal face on the kind bridge, external face on
+# the no-NAT `sipext` bridge (run.sh connects the edge nodes; callers/loadgen
+# live there as plain docker containers). ONE keepalived VRRP instance floats
+# BOTH identities together: ${PROXY_VIP} (internal, worker-facing, top of
+# SIP_SUBNET) and ${SIPEXT_VIP} (external, caller-facing, top of SIPEXT_SUBNET).
+# Active/passive: the VRRP master owns both VIPs and serves ALL traffic; the
+# backup is warm (its OPTIONS health probes source from its own node IP — the
+# runner binds a SEPARATE ephemeral probe socket — so it keeps a live worker
+# view and its /readyz passes). On master loss the backup claims both VIPs in
+# <2s. Because the proxy advertises the *VIPs* (stable across failover AND pod
+# restart) in Via/Record-Route, in-dialog BYE/keepalives never get orphaned the
+# way a per-pod-IP advertise did, and the HMAC stickiness cookie + worker P2P
+# replication (ADR-0011) keep in-dialog routing + worker failover correct from
+# either proxy. Active/passive keeps the per-pod cancel_lru (CANCEL/ACK
+# correlation) coherent. Isolation invariant: ONLY the proxy bridges the two
+# planes — workers are unreachable from sipext (gated by run.sh smokes).
 #
 # The worker pool is discovered from k8s EndpointSlices via the shared
 # topology::K8sMembership informer (ADR-0012 D4); the proxy reaches each worker at
@@ -24,61 +31,58 @@ metadata:
 data:
   keepalived.conf: |
     # Identical on both pods. state BACKUP + nopreempt => the first pod up wins
-    # the VIP and keeps it across peer reboots (no flapping). Multicast VRRP — the
-    # kind Docker bridge floods link-local 224.0.0.18 between the edge nodes.
+    # the VIPs and keeps them across peer reboots (no flapping). Multicast VRRP —
+    # a docker bridge floods link-local 224.0.0.18 between the edge nodes.
+    #
+    # DUAL-PLANE (sipext layout): ONE vrrp_instance owns BOTH identities — the
+    # internal VIP (${PROXY_VIP} on ${SIP_IF}, worker-facing) and the external
+    # VIP (${SIPEXT_VIP} on ${SIPEXT_IF}, caller-facing). One election, adverts
+    # on the INTERNAL plane, per-address `dev` — the two faces of the dual-face
+    # proxy can NEVER split across pods. track_interface drives the instance to
+    # FAULT if the external iface disappears (chaos cut_external_plane / carrier
+    # loss) so the peer takes both VIPs together.
+    #
+    # NO exec-based vrrp_script (newkahneed-040 absorbed): the 038 chk_proxy
+    # pgrep track_script latched a startup-window execve failure (exit 127) and
+    # pinned BOTH nodes in FAULT — dead VIP. Interface tracking is native
+    # netlink (nothing to exec, nothing to latch); the functional response-path
+    # gate is run.sh vip_smoke at deploy time. If process-gating ever returns,
+    # it must be a /bin/sh -c-wrapped predicate clamped to exit 0/1 and land
+    # together with a staggered-start acceptance test (040 §Ask).
     global_defs {
         router_id sip-front-proxy
-        enable_script_security
-        script_user root
-    }
-    # Gate mastership on the proxy process actually running (newkahneed-038).
-    # shareProcessNamespace on the pod lets this sidecar pgrep the proxy
-    # container's process. init_fail => a fresh keepalived starts FAULT and only
-    # claims the VIP once the proxy is up, so proxy/keepalived container start
-    # order no longer matters: the VIP is only ever served where a proxy runs.
-    # No `weight` => script failure drives the instance to FAULT (VIP released,
-    # peer takes over) rather than a priority nudge nopreempt would ignore.
-    # pgrep -f (full cmdline): the comm name truncates at 15 chars so -x would
-    # never match "sip-proxy-runner"; keepalived execs this directly (no shell
-    # wrapper), so pgrep's self-exclusion keeps -f from matching itself.
-    vrrp_script chk_proxy {
-        script "/usr/bin/pgrep -f sip-proxy-runner"
-        interval 2
-        timeout 2
-        rise 1
-        fall 2
-        init_fail
     }
     vrrp_instance VI_SIP {
         state BACKUP
-        interface eth0
+        interface ${SIP_IF}
         virtual_router_id 51
         priority 100
         advert_int 0.5
         nopreempt
-        # GARP hardening (newkahneed-038): on a FRESHLY-created kind docker
-        # bridge the default single gratuitous-ARP burst at election is easily
-        # lost while veth/FDB state is still settling, and it was never
-        # re-asserted — neighbour ARP caches kept a dead VIP->MAC binding
-        # indefinitely (responses sourced from VIP:5060 never returned until a
-        # manual proxy restart forced a re-election). Repeat the transition
-        # burst and refresh the claim periodically so any lost/stale binding
-        # self-heals within ~garp_master_refresh seconds.
+        # GARP hardening (newkahneed-038): on a FRESHLY-created docker bridge
+        # the default single gratuitous-ARP burst at election is easily lost
+        # while veth/FDB state is still settling, and it was never re-asserted —
+        # neighbour ARP caches kept a dead VIP->MAC binding indefinitely.
+        # Repeat the transition burst and refresh the claim periodically so any
+        # lost/stale binding self-heals within ~garp_master_refresh seconds.
+        # Applies PER ADDRESS, i.e. to both planes — sipext is recreated fresh
+        # on every `up`, exactly the lost-GARP condition.
         garp_master_delay 1
         garp_master_repeat 5
         garp_master_refresh 10
         garp_master_refresh_repeat 2
         virtual_ipaddress {
-            ${PROXY_VIP}
+            ${PROXY_VIP} dev ${SIP_IF}
+            ${SIPEXT_VIP} dev ${SIPEXT_IF}
         }
-        track_script {
-            chk_proxy
+        track_interface {
+            ${SIPEXT_IF}
         }
-        # Keep the VIP on lo at all times so either pod can bind(VIP:5060) and use
-        # it as the outbound source IP for forwarded SIP (source-IP discipline).
-        notify_master "/bin/sh -c 'ip addr add ${PROXY_VIP}/32 dev lo 2>/dev/null || true'"
-        notify_backup "/bin/sh -c 'ip addr add ${PROXY_VIP}/32 dev lo 2>/dev/null || true'"
-        notify_fault  "/bin/sh -c 'ip addr add ${PROXY_VIP}/32 dev lo 2>/dev/null || true'"
+        # Keep BOTH VIPs on lo at all times so either pod can bind(VIP:5060) on
+        # each face and use them as outbound source IPs (source-IP discipline).
+        notify_master "/bin/sh -c 'ip addr add ${PROXY_VIP}/32 dev lo 2>/dev/null; ip addr add ${SIPEXT_VIP}/32 dev lo 2>/dev/null; true'"
+        notify_backup "/bin/sh -c 'ip addr add ${PROXY_VIP}/32 dev lo 2>/dev/null; ip addr add ${SIPEXT_VIP}/32 dev lo 2>/dev/null; true'"
+        notify_fault  "/bin/sh -c 'ip addr add ${PROXY_VIP}/32 dev lo 2>/dev/null; ip addr add ${SIPEXT_VIP}/32 dev lo 2>/dev/null; true'"
     }
 ---
 apiVersion: apps/v1
@@ -107,21 +111,23 @@ spec:
       serviceAccountName: sip-front-proxy
       nodeSelector: { tier: edge }
       terminationGracePeriodSeconds: 30
-      # VIP requires hostNetwork so keepalived can answer ARP on the node's eth0;
-      # the two pods must land on different edge nodes (anti-affinity below).
-      # shareProcessNamespace lets the keepalived chk_proxy vrrp_script pgrep the
-      # proxy process — mastership is gated on the proxy actually running.
+      # VIPs require hostNetwork so keepalived can answer ARP on the node's
+      # interfaces (internal ${SIP_IF} + external ${SIPEXT_IF} — the edge nodes
+      # are the only dual-homed components; `run.sh up` connects them to the
+      # sipext bridge). The two pods must land on different edge nodes
+      # (anti-affinity below). shareProcessNamespace REMOVED with chk_proxy
+      # (newkahneed-040) — nothing pgreps across containers anymore.
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
-      shareProcessNamespace: true
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector: { matchLabels: { app: sip-front-proxy } }
               topologyKey: kubernetes.io/hostname
-      # Pre-bind the VIP on lo + strict-ARP BEFORE the proxy starts, so the
-      # proxy's bind(VIP:5060) succeeds even on the backup (keepalived's notify
-      # scripts only fire after it elects — an EADDRNOTAVAIL race otherwise).
+      # Pre-bind BOTH VIPs on lo + strict-ARP BEFORE the proxy starts, so the
+      # proxy's bind(VIP:5060) on each face succeeds even on the backup
+      # (keepalived's notify scripts only fire after it elects — an
+      # EADDRNOTAVAIL race otherwise).
       initContainers:
         - name: vip-loopback
           image: siprustserver-keepalived:dev
@@ -132,15 +138,18 @@ spec:
               set -e
               ip addr add ${PROXY_VIP}/32 dev lo 2>/dev/null || \
                 ip addr show dev lo | grep -q "${PROXY_VIP}/32"
-              # strict-ARP (LVS/DSR fix): with the VIP on lo on BOTH nodes, only
+              ip addr add ${SIPEXT_VIP}/32 dev lo 2>/dev/null || \
+                ip addr show dev lo | grep -q "${SIPEXT_VIP}/32"
+              # strict-ARP (LVS/DSR fix): with the VIPs on lo on BOTH nodes, only
               # the interface that actually owns the IP should answer ARP, else
-              # both eth0s reply and client traffic flaps. Write /proc/sys directly
-              # (no sysctl binary dependency).
+              # both nodes reply and client traffic flaps. conf/all covers the
+              # external ${SIPEXT_IF} as well. Write /proc/sys directly (no
+              # sysctl binary dependency).
               echo 1 > /proc/sys/net/ipv4/conf/all/arp_ignore
               echo 2 > /proc/sys/net/ipv4/conf/all/arp_announce
               echo 1 > /proc/sys/net/ipv4/conf/lo/arp_ignore
               echo 2 > /proc/sys/net/ipv4/conf/lo/arp_announce
-              echo "vip-loopback: ${PROXY_VIP}/32 + strict-ARP ready"
+              echo "vip-loopback: ${PROXY_VIP}/32 + ${SIPEXT_VIP}/32 + strict-ARP ready"
           securityContext:
             privileged: true
             capabilities: { add: ["NET_ADMIN"] }
@@ -158,6 +167,16 @@ spec:
             # from its node IP and stays warm.
             - { name: PROXY_LISTEN,    value: "${PROXY_VIP}:${SIP_PORT}" }
             - { name: PROXY_ADVERTISE, value: "${PROXY_VIP}:${SIP_PORT}" }
+            # Dual-face mode (sipext layout): a SECOND socket on the external
+            # VIP serves the caller-facing plane. Egress face-picker: dest ∈
+            # PROXY_FACE_INT_CIDRS (pod CIDR + internal kind subnet) leaves on
+            # the internal face sourced from ${PROXY_VIP}; everything else
+            # leaves on the external face sourced from ${SIPEXT_VIP}. Forwarding
+            # between faces double-Record-Routes (RFC 3261 §16.6/16.7); workers
+            # never see a sipext address they could dial directly.
+            - { name: PROXY_LISTEN_EXT,      value: "${SIPEXT_VIP}:${SIP_PORT}" }
+            - { name: PROXY_ADVERTISE_EXT,   value: "${SIPEXT_VIP}:${SIP_PORT}" }
+            - { name: PROXY_FACE_INT_CIDRS,  value: "${PROXY_FACE_INT_CIDRS}" }
             - { name: PROXY_METRICS,   value: "0.0.0.0:9090" }
             # Worker pool discovered from k8s (ADR-0012 D4). PROXY_WORKERS UNSET →
             # EndpointSlice informer over the headless worker Service.
@@ -189,8 +208,9 @@ spec:
           # the Deployment rollout could never complete. A same-node self-probe
           # also cannot observe the actual failure mode (stale VIP ARP on OTHER
           # nodes' caches). The functional response-path check therefore lives at
-          # deploy level: run.sh vip_smoke() sends an OPTIONS through the VIP from
-          # a tier=load vantage and blocks the deploy until a response returns.
+          # deploy level: run.sh vip_smoke() sends an OPTIONS through the EXTERNAL
+          # VIP from a throwaway container on the sipext bridge — the same vantage
+          # as real callers — and blocks the deploy until a response returns.
           readinessProbe:
             httpGet: { path: /readyz, port: 9090 }
             initialDelaySeconds: 1

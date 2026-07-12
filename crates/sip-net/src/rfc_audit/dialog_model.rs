@@ -389,6 +389,13 @@ pub fn is_in_dialog_request(req: &SipRequest, m: &DialogModel) -> bool {
 pub struct AgentSlot {
     pub bind_key: LaneKey,
     pub ordered: Vec<OrderedEvent>,
+    /// The bind declared itself `{Proxy}`-ONLY (no Uac/Uas role) at
+    /// `BindAcquire` — a relay **by declaration**. Load-bearing for the
+    /// dual-face (multi-homed) proxy: its two face binds each carry only ONE
+    /// direction of a dialog (request in on one face, out on the other), so
+    /// the sent-AND-received heuristic in [`slot_is_relay`] can never fire on
+    /// them, yet per-UA dialog rules must not judge half a relay's stream.
+    pub proxy_only: bool,
 }
 
 /// True if this slot both **sent** and **received** an initial INVITE for the
@@ -408,6 +415,12 @@ pub struct AgentSlot {
 /// misclassified as a relay. A true relay forwards the establishing INVITE in
 /// both directions, so it still qualifies.
 pub fn slot_is_relay(slot: &AgentSlot) -> bool {
+    // Relay by DECLARATION: a `{Proxy}`-only bind (each face of a dual-face
+    // proxy) — the behavioural heuristic below cannot see a relay whose two
+    // directions live on two different binds.
+    if slot.proxy_only {
+        return true;
+    }
     let mut sent_invite = false;
     let mut recv_invite = false;
     for ev in &slot.ordered {
@@ -481,6 +494,18 @@ pub fn project_per_dialog(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Dial
         msg: SipMessage,
         wire_peer: SocketAddr,
     }
+    // Lanes declared `{Proxy}`-only at BindAcquire — relays by declaration
+    // (see [`AgentSlot::proxy_only`] / [`slot_is_relay`]).
+    let mut proxy_only_lanes: std::collections::HashSet<LaneKey> = std::collections::HashSet::new();
+    for s in events {
+        if let SignalingNetworkEvent::BindAcquire { bind_key, summary } = &s.event {
+            let roles = &summary.roles;
+            if roles.len() == 1 && roles.contains(&crate::types::UaRole::Proxy) {
+                proxy_only_lanes.insert(bind_key.clone());
+            }
+        }
+    }
+
     let mut ordered: Vec<Entry> = Vec::new();
     for s in events {
         match &s.event {
@@ -587,9 +612,11 @@ pub fn project_per_dialog(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Dial
         });
         let mut ordered = b.ordered;
         ordered.sort_by_key(|o| o.idx);
+        let proxy_only = proxy_only_lanes.contains(&b.bind_key);
         slice.per_agent.push(AgentSlot {
             bind_key: b.bind_key,
             ordered,
+            proxy_only,
         });
     }
     for slice in slices.values_mut() {

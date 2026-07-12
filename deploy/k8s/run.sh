@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Thin k8s endurance/load runner for the containerized Rust SIP SUT.
 #
-#   sipp UAC (tier=load) -> sip-front-proxy (tier=edge, LB+HMAC stickiness)
-#                        -> b2bua-worker pool (tier=app) -> sipp UAS (tier=load)
+#   sipp UAC (docker, sipext bridge) -> sip-front-proxy (tier=edge, dual-faced,
+#   LB+HMAC stickiness) -> b2bua-worker pool (tier=app) -> sipp UAS (docker,
+#   sipext bridge). All generators are plain docker containers on the no-NAT
+#   $SIPEXT_NET bridge (sipext dual-plane layout — tier=load kind nodes GONE);
+#   they dial the EXTERNAL VIP ${SIPEXT_TARGET}:${SIP_PORT}.
 #
 # Deliberately minimal: deploy-all, run SIPp at a list of CAPS, sample per-pod
 # CPU% + RSS from /proc, tear down. As of S11 the cluster topology
@@ -73,6 +76,11 @@ REPO_ROOT="$(cd "$K8S_DIR/../.." && pwd)"
 # host prerequisite checks (cgroups/sysctls) live in shared, env-overridable libs
 # so run.sh, endurance.sh and chaos.sh stay in lock-step.
 source "$K8S_DIR/lib/net-env.sh"
+# Shared docker-on-sipext generator launcher (UAC stream + stat exporter as
+# labelled, IP-pinned, resource-capped containers) — the single implementation
+# caps()/sweep() here, endurance.sh and chaos.sh all compose. Sourced AFTER
+# net-env.sh (needs SIPEXT_NET/SIPEXT_TARGET/SIPEXT_UAC_BASE_IP).
+source "$K8S_DIR/lib/sipext-gen.sh"
 # HTTP(S)-proxy wiring for PROXIFIED hosts: forwards the host proxy into docker
 # builds (external mirrors/apt/git) while keeping cluster-local + 127 traffic OFF
 # the proxy via a merged NO_PROXY. Sourced AFTER net-env.sh (needs SIP_SUBNET/
@@ -111,11 +119,12 @@ EXTRA_IMAGE_BUILDS="${EXTRA_IMAGE_BUILDS:-}"
 REPL_ENABLE="${REPL_ENABLE:-0}"
 REPL_PORT="${REPL_PORT:-9092}"
 SCENARIO="${SCENARIO:-uac-basic.xml}"   # UAC scenario the load sweep drives
-# Front-proxy HA (ADR-0012 D7): the proxy sits behind a keepalived VRRP VIP
-# (PROXY_VIP) on SIP_PORT — both come from lib/net-env.sh, derived from SIP_SUBNET
-# and stamped into the proxy/worker/UAC manifests by envsubst. PROXY_TARGET (what
-# the UAC job dials) defaults to the VIP. LIMITER_CAP feeds the -key xapi JSON in
-# the UAC job (default 20).
+# Front-proxy HA (ADR-0012 D7): the proxy sits behind a keepalived VRRP VIP pair
+# (PROXY_VIP internal + SIPEXT_VIP external) on SIP_PORT — all from lib/net-env.sh
+# and stamped into the proxy/worker manifests by envsubst. Callers (the docker
+# UAC streams) dial SIPEXT_TARGET (= the external VIP); PROXY_TARGET stays the
+# INTERNAL VIP for in-cluster consumers (workers' outbound proxy). LIMITER_CAP
+# feeds the -key xapi JSON in the UAC streams (default 20, lib/sipext-gen.sh).
 LIMITER_CAP="${LIMITER_CAP:-20}"
 KEEPALIVED_IMAGE="${KEEPALIVED_IMAGE:-siprustserver-keepalived:dev}"
 # CDR transport: RabbitMQ broker (55-rabbitmq) + cdr-consumer (56-cdr-consumer).
@@ -243,6 +252,10 @@ up() {
   log "capping kind node memory (host-starvation backstop)"
   CLUSTER="$CLUSTER" "$REPO_ROOT/deploy/k8s/cap-kind-memory.sh" || true
 
+  # External SIP plane: create the no-NAT sipext bridge and dual-home the two
+  # tier=edge nodes (the ONLY components attached to both planes).
+  sipext_up
+
   # Log the effective proxy env ONCE before any build so the exact forwarded
   # values (and the merged local NO_PROXY bypass) are transparent in the run log.
   log "proxy env (forwarded to docker build): $(proxy_env_summary)"
@@ -259,7 +272,8 @@ up() {
   docker image inspect "$RABBITMQ_IMAGE" >/dev/null 2>&1 || docker pull "$RABBITMQ_IMAGE"
   log "loading images into kind"
   kind load docker-image "$SUT_IMAGE" --name "$CLUSTER"
-  kind load docker-image sipp:dev --name "$CLUSTER"
+  # sipp:dev is NOT kind-loaded: all SIPp generators (UAC + UAS) run as plain
+  # docker containers on the sipext bridge now, straight off the host image.
   kind load docker-image "$KEEPALIVED_IMAGE" --name "$CLUSTER"
   kind load docker-image "$RABBITMQ_IMAGE" --name "$CLUSTER"
   # Downstream overlay hook: extra images to build + side-load (empty default =
@@ -289,19 +303,22 @@ obs() {
 deploy() {
   preflight
   apply_manifest "$MANIFEST_DIR/00-namespace.yaml"
-  log "building sipp-scenarios ConfigMap from vendored scenarios"
-  kubectl -n "$NS" create configmap sipp-scenarios \
-    --from-file="$SCENARIOS/" -o yaml --dry-run=client | kubectl apply -f -
+  # NOTE: the sipp-scenarios / sipp-exporter ConfigMaps are GONE — scenarios
+  # and the stat exporter are bind-mounted straight into the docker-on-sipext
+  # generator containers (lib/sipext-gen.sh); nothing in-cluster consumes them.
 
-  # SIPp stat->Prometheus exporter script, mounted into every UAC job's native
-  # sidecar (manifests/40-sipp-uac-job.yaml). Built here so the reporting path
-  # is wired through the same `deploy` as the rest of the stack.
-  log "building sipp-exporter ConfigMap from vendored exporter"
-  kubectl -n "$NS" create configmap sipp-exporter \
-    --from-file="$SIPP_DIR/exporter/" -o yaml --dry-run=client | kubectl apply -f -
+  # KIND-MASQ-AGENT exemptions FIRST (manifests/05): the RETURN rules must be
+  # in place before the first SIP flows or early calls hit the newkahneed-041
+  # masquerade drop. Call-path load-bearing — gate on the rollout.
+  log "deploying masq-exempt DaemonSet (KIND-MASQ-AGENT RETURN rules, newkahneed-041 contract)"
+  subst_manifest "$MANIFEST_DIR/05-masq-exempt.yaml"
+  kubectl -n "$NS" rollout status ds/masq-exempt --timeout="$ROLLOUT_TIMEOUT"
 
-  log "deploying sipp-uas + b2bua workers (repl=${REPL_ENABLE}, repl_port=${REPL_PORT})"
-  apply_manifest "$MANIFEST_DIR/10-sipp-uas.yaml"
+  # Downstream UAS: docker containers on the sipext plane (regenerates
+  # uas-targets.csv with their pinned IPs for the UAC streams).
+  sipp_uas_up
+
+  log "deploying b2bua workers (repl=${REPL_ENABLE}, repl_port=${REPL_PORT})"
   # RBAC for the worker's EndpointSlice informer (needed when REPL_ENABLE=1; a
   # harmless ServiceAccount/Role otherwise).
   apply_manifest "$MANIFEST_DIR/15-worker-rbac.yaml"
@@ -321,7 +338,6 @@ deploy() {
   kubectl -n "$NS" rollout status deploy/rabbitmq --timeout="$ROLLOUT_TIMEOUT" || true
   subst_manifest "$MANIFEST_DIR/56-cdr-consumer.yaml"
   subst_manifest "$MANIFEST_DIR/20-worker.yaml"
-  kubectl -n "$NS" rollout status statefulset/sipp-uas --timeout="$ROLLOUT_TIMEOUT"
   kubectl -n "$NS" rollout status statefulset/b2bua-worker --timeout="$ROLLOUT_TIMEOUT"
   kubectl -n "$NS" rollout status deploy/cdr-consumer --timeout="$ROLLOUT_TIMEOUT" || true
 
@@ -347,28 +363,120 @@ deploy() {
   # path works" (newkahneed-038: a fresh bring-up once passed Ready with ~99% of
   # responses never returning through the VIP until a manual proxy restart).
   # Gate the deploy on a real call-path round-trip before declaring the stack
-  # ready. Skippable via VIP_SMOKE=0 for clusters without a tier=load node.
+  # ready. Skippable via VIP_SMOKE=0 for hosts without the sipext bridge.
   if [ "${VIP_SMOKE:-1}" = "1" ]; then
-    vip_smoke || die "vip-smoke: VIP ${PROXY_VIP}:${SIP_PORT} response path is DEAD after deploy (newkahneed-038). Check keepalived GARP convergence: kubectl -n $NS logs deploy/sip-front-proxy -c keepalived; a 'kubectl -n $NS rollout restart deploy/sip-front-proxy' forces a clean re-election."
+    vip_smoke || die "vip-smoke: external VIP ${SIPEXT_VIP}:${SIP_PORT} response path is DEAD after deploy (newkahneed-038). Check keepalived GARP convergence + track_interface: kubectl -n $NS logs deploy/sip-front-proxy -c keepalived; a 'kubectl -n $NS rollout restart deploy/sip-front-proxy' forces a clean re-election."
+  fi
+  # Isolation invariant gate (sipext layout): only the proxy bridges the two
+  # planes; workers can neither be reached from sipext nor reach it, and the
+  # external zone is NXDOMAIN in-cluster. Skippable via ISOLATION_SMOKE=0.
+  if [ "${ISOLATION_SMOKE:-1}" = "1" ]; then
+    isolation_smoke
   fi
   log "stack ready"
   kubectl -n "$NS" get pods -o wide
 }
 
+# ---------------------------------------------------------------------------
+# External SIP plane (sipext) — the no-NAT dual-plane layout.
+#
+# A dedicated docker bridge with masquerade DISABLED: callers (loadgen / sipp
+# containers / the WSL host itself via the bridge interface) reach the proxy's
+# EXTERNAL face (SIPEXT_VIP) same-L2 — zero SNAT/DNAT/conntrack rewrite on the
+# SIP path (the newkahneed-041 failure class is structurally impossible here).
+# Only the two tier=edge kind nodes are dual-homed; app nodes/workers have no
+# interface or route to this plane (isolation_smoke gates that).
+sipext_up() {
+  # Reuse-or-recreate like the kind net above: only (re)create when absent or
+  # on the wrong subnet, so long-lived attachments survive a re-run.
+  if [ "$(docker network inspect "$SIPEXT_NET" --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null | tr ' ' '\n' | grep -cF "$SIPEXT_SUBNET")" != "1" ]; then
+    docker network rm "$SIPEXT_NET" >/dev/null 2>&1 || true
+    docker network create --driver bridge \
+      --subnet "$SIPEXT_SUBNET" --gateway "$SIPEXT_GATEWAY" \
+      -o com.docker.network.bridge.enable_ip_masquerade=false \
+      "$SIPEXT_NET" >/dev/null
+    log "sipext: created no-NAT bridge $SIPEXT_NET ($SIPEXT_SUBNET, masquerade OFF)"
+  fi
+  # Dual-home the two tier=edge kind nodes (k8s node name == docker container
+  # name). Sorted for a deterministic edge1/edge2 -> .11/.12 assignment. This
+  # adds ${SIPEXT_IF} (eth1 on a fresh kind node — the kind net claimed eth0 at
+  # creation) which keepalived tracks and the proxy's external face binds via
+  # the SIPEXT_VIP that keepalived floats.
+  local edges node ip n=0
+  edges="$(kubectl get nodes -l tier=edge -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort)"
+  [ -n "$edges" ] || die "sipext: no tier=edge nodes found (cluster not up?)"
+  for node in $edges; do
+    case "$n" in
+      0) ip="$SIPEXT_EDGE1_IP" ;;
+      1) ip="$SIPEXT_EDGE2_IP" ;;
+      *) die "sipext: >2 tier=edge nodes — pin more SIPEXT_EDGE*_IPs" ;;
+    esac
+    if ! docker network inspect "$SIPEXT_NET" --format '{{range .Containers}}{{.Name}} {{end}}' | grep -qw "$node"; then
+      docker network connect --ip "$ip" "$SIPEXT_NET" "$node"
+      log "sipext: connected edge node $node as $ip"
+    fi
+    n=$((n+1))
+  done
+  [ "$n" -eq 2 ] || log "sipext: WARNING expected 2 edge nodes, connected $n"
+}
+
+# Remove every sipext-plane container this runner started (labelled at
+# `docker run`) and the bridge itself. Called from down(); safe when absent.
+sipext_down() {
+  docker ps -aq --filter "label=sipext-run=$CLUSTER" | xargs -r docker rm -f >/dev/null 2>&1 || true
+  docker network rm "$SIPEXT_NET" >/dev/null 2>&1 || true
+}
+
+# Downstream SIPp UAS as plain docker containers on sipext (replaces the
+# 10-sipp-uas StatefulSet + headless Service — tier=load nodes are GONE).
+# Pinned IPs from SIPEXT_UAS_IP upward; regenerates uas-targets.csv (consumed
+# by the UAC streams' -inf per-call callee injection) with those IP LITERALS —
+# workers must never resolve an external name (see 20-worker.yaml
+# WORKER_ALLOWED_TARGET_SUFFIXES). Explicit --cpus/--memory caps: these now
+# ride the host directly, and the WSL2 box freezes when overcommitted.
+SIPP_UAS_REPLICAS="${SIPP_UAS_REPLICAS:-2}"
+# Per-UAS-container docker caps (NEW KNOBS, endurance-sizeable): the endurance
+# profile sizes the UAS pool for ~9k concurrent B-leg dialogs across
+# SIPP_UAS_REPLICAS=5 shards (the SIPp single-process timer-wheel ceiling is
+# ~2900 concurrent — see the retired manifests/10-sipp-uas.yaml history), and
+# raises these caps per container. Defaults match the historical values.
+SIPP_UAS_CPUS="${SIPP_UAS_CPUS:-4}"
+SIPP_UAS_MEM="${SIPP_UAS_MEM:-2g}"
+SIPEXT_GEN_DIR="${SIPEXT_GEN_DIR:-$K8S_DIR/.sipext-gen}"
+sipp_uas_up() {
+  docker network inspect "$SIPEXT_NET" >/dev/null 2>&1 || die "sipext network missing — './run.sh up' creates it"
+  mkdir -p "$SIPEXT_GEN_DIR"
+  local prefix="${SIPEXT_UAS_IP%.*}" base="${SIPEXT_UAS_IP##*.}" i ip
+  printf 'SEQUENTIAL\n' > "$SIPEXT_GEN_DIR/uas-targets.csv"
+  for i in $(seq 0 $(( SIPP_UAS_REPLICAS - 1 ))); do
+    ip="${prefix}.$(( base + i ))"
+    docker rm -f "sipp-uas-$i" >/dev/null 2>&1 || true
+    docker run -d --name "sipp-uas-$i" --label "sipext-run=$CLUSTER" \
+      --restart unless-stopped \
+      --network "$SIPEXT_NET" --ip "$ip" \
+      --cpus "$SIPP_UAS_CPUS" --memory "$SIPP_UAS_MEM" \
+      -v "$SCENARIOS:/scenarios:ro" \
+      sipp:dev sipp -sf /scenarios/uas-basic.xml -i "$ip" -p 5060 \
+        -l 60000 -recv_timeout 600000 -trace_err >/dev/null
+    printf '%s\n' "$ip" >> "$SIPEXT_GEN_DIR/uas-targets.csv"
+    log "sipp-uas-$i up at $ip (docker, sipext)"
+  done
+}
+
 # Functional VIP response-path gate (newkahneed-038). Sends a SIP OPTIONS to
-# PROXY_VIP:SIP_PORT from a one-shot pod on a tier=load node — the same vantage
-# as real callers, so the reply (worker 200 relayed back OUT of the VIP socket)
-# must traverse the docker bridge and exercises exactly the path that a lost
-# gratuitous ARP kills: request in via VIP, response sourced from VIP back out.
-# Retries inside the pod (~3 s/attempt) until VIP_SMOKE_TIMEOUT (default 90 s):
+# SIPEXT_VIP:SIP_PORT from a one-shot docker container on the sipext bridge —
+# the same vantage as real callers, so the reply (worker 200 relayed back OUT
+# of the external-face socket) exercises exactly the path that a lost
+# gratuitous ARP kills: request in via the external VIP, response sourced from
+# it back out. Retries (~3 s/attempt) until VIP_SMOKE_TIMEOUT (default 90 s):
 # the keepalived garp_master_refresh (10 s) makes a stale-ARP window self-heal
 # well inside that budget, so a healthy stack passes on an early attempt and a
 # genuinely dead path fails loudly instead of surfacing as an all-timeout run.
-# Reuses the keepalived sidecar image (already kind-loaded; busybox nc).
+# Reuses the keepalived image (alpine busybox nc; already built locally).
 vip_smoke() {
   local timeout="${VIP_SMOKE_TIMEOUT:-90}" attempts
   attempts=$(( timeout / 3 ))
-  log "vip-smoke: OPTIONS round-trip via ${PROXY_VIP}:${SIP_PORT} from tier=load vantage (<=${attempts} attempts)"
+  log "vip-smoke: OPTIONS round-trip via ${SIPEXT_VIP}:${SIP_PORT} from sipext vantage (<=${attempts} attempts)"
   local probe
   probe="$(cat <<'EOS'
 vip="$1"; port="$2"; attempts="$3"
@@ -389,12 +497,66 @@ echo "VIP-SMOKE-FAIL: no SIP response from $vip:$port in $attempts attempts"
 exit 1
 EOS
 )"
-  kubectl -n "$NS" delete pod vip-smoke --ignore-not-found --now >/dev/null 2>&1 || true
-  kubectl -n "$NS" run vip-smoke --rm -i --restart=Never \
+  docker rm -f vip-smoke >/dev/null 2>&1 || true
+  docker run --rm --name vip-smoke --label "sipext-run=$CLUSTER" \
+    --network "$SIPEXT_NET" "$KEEPALIVED_IMAGE" \
+    /bin/sh -c "$probe" vip-smoke "$SIPEXT_VIP" "$SIP_PORT" "$attempts"
+}
+
+# Isolation gates (sipext dual-plane invariant: ONLY the proxy bridges the two
+# planes; workers may resolve internal Services only). Three properties, each
+# asserted from the vantage where a violation would originate:
+#   1. sipext vantage -> internal plane: OPTIONS at a worker pod IP and at the
+#      internal VIP must get NO reply (only SIPEXT_VIP answers externally).
+#   2. pod-network vantage -> sipext: OPTIONS at SIPEXT_VIP must get NO reply.
+#   3. pod-network vantage: the external test zone must be NXDOMAIN (external
+#      names are resolvable ONLY by the proxy's own resolver, never CoreDNS).
+# Negative probes retry 3x so a single lost packet can't mask a real reply.
+isolation_smoke() {
+  local neg
+  neg="$(cat <<'EOS'
+target="$1"; port="$2"; label="$3"
+i=0
+while [ "$i" -lt 3 ]; do
+  printf 'OPTIONS sip:iso@%s:%s SIP/2.0\r\nVia: SIP/2.0/UDP 0.0.0.0:5060;branch=z9hG4bK-iso-%s;rport\r\nMax-Forwards: 10\r\nFrom: <sip:iso@iso.invalid>;tag=iso%s\r\nTo: <sip:iso@%s>\r\nCall-ID: iso-%s@iso\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\n\r\n' \
+    "$target" "$port" "$i" "$i" "$target" "$i" > /tmp/req
+  nc -u -w 2 "$target" "$port" < /tmp/req > /tmp/resp 2>/dev/null || true
+  if grep -q '^SIP/2.0' /tmp/resp; then
+    echo "ISOLATION-FAIL: $label ($target:$port) ANSWERED from this vantage"
+    exit 1
+  fi
+  i=$((i+1))
+done
+echo "ISOLATION-OK: $label ($target:$port) unreachable as required"
+exit 0
+EOS
+)"
+  local wip
+  wip="$(kubectl -n "$NS" get pods -l app=b2bua-worker -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)"
+  [ -n "$wip" ] || die "isolation-smoke: no b2bua-worker pod IP (deploy first)"
+  log "isolation-smoke 1/3: sipext vantage must NOT reach worker $wip / internal VIP $PROXY_VIP"
+  docker run --rm --label "sipext-run=$CLUSTER" --network "$SIPEXT_NET" "$KEEPALIVED_IMAGE" \
+    /bin/sh -c "$neg" iso "$wip" 5060 "worker-pod" \
+    || die "isolation-smoke: worker pod reachable from sipext — the b2b is NOT protected"
+  docker run --rm --label "sipext-run=$CLUSTER" --network "$SIPEXT_NET" "$KEEPALIVED_IMAGE" \
+    /bin/sh -c "$neg" iso "$PROXY_VIP" "$SIP_PORT" "internal-VIP" \
+    || die "isolation-smoke: internal VIP reachable from sipext — planes are bridged outside the proxy"
+  log "isolation-smoke 2/3: pod-network vantage must NOT reach external VIP $SIPEXT_VIP"
+  kubectl -n "$NS" delete pod iso-smoke --ignore-not-found --now >/dev/null 2>&1 || true
+  kubectl -n "$NS" run iso-smoke --rm -i --restart=Never \
     --image="$KEEPALIVED_IMAGE" --image-pull-policy=IfNotPresent \
     --pod-running-timeout=2m \
-    --overrides='{"spec":{"nodeSelector":{"tier":"load"}}}' \
-    --command -- /bin/sh -c "$probe" vip-smoke "$PROXY_VIP" "$SIP_PORT" "$attempts"
+    --overrides='{"spec":{"nodeSelector":{"tier":"app"}}}' \
+    --command -- /bin/sh -c "$neg" iso "$SIPEXT_VIP" "$SIP_PORT" "external-VIP" \
+    || die "isolation-smoke: external VIP reachable from the pod network — workers can dial the world"
+  log "isolation-smoke 3/3: external zone must be NXDOMAIN in-cluster"
+  kubectl -n "$NS" run iso-dns --rm -i --restart=Never \
+    --image="$KEEPALIVED_IMAGE" --image-pull-policy=IfNotPresent \
+    --pod-running-timeout=2m \
+    --overrides='{"spec":{"nodeSelector":{"tier":"app"}}}' \
+    --command -- /bin/sh -c 'if nslookup uas.sipext.test >/dev/null 2>&1; then echo "ISOLATION-FAIL: uas.sipext.test resolves in-cluster"; exit 1; fi; echo "ISOLATION-OK: external zone NXDOMAIN in-cluster"' \
+    || die "isolation-smoke: external test zone resolvable from the pod network"
+  log "isolation-smoke: all 3 properties hold (only the proxy bridges the planes)"
 }
 
 # sample_pod <label-selector> <window-seconds> -> prints "pod cpu% rss_mb" lines
@@ -417,38 +579,43 @@ sample_pods() {
   done
 }
 
-# caps <cps> <seconds>
+# caps <cps> <seconds> — one measured cap step. The UAC is a docker container
+# on the sipext bridge (lib/sipext-gen.sh; was the 40-sipp-uac-job kubectl Job):
+# same sipp argv semantics, dialing the EXTERNAL VIP ${SIPEXT_TARGET}:${SIP_PORT},
+# with a stat-exporter twin on :9035 at the stream's sipext IP (scraped
+# statically by the host VictoriaMetrics). Slot 0 (.100) by convention — caps
+# steps run sequentially, so one slot serves the whole sweep.
 caps() {
   local cps="$1" secs="$2"
   mkdir -p "$RESULTS"
   local ramp=8 sample=$(( secs > 8 ? secs-8 : secs ))
-  export CAPS="$cps" MAX_CALLS=$(( cps * (secs+20) )) UAC_JOB_NAME="sipp-uac-${cps}"
-  export ROLE="${ROLE:-load}" MAX_CONCURRENT="${MAX_CONCURRENT:-$(( cps * 600 ))}"
-  # Pod-resource envsubst vars for the shared 40-sipp-uac-job template (no default
-  # syntax in envsubst — every render site must export them).
-  export UAC_CPU_REQ="${UAC_CPU_REQ:-2}" UAC_CPU_LIM="${UAC_CPU_LIM:-8}" \
-         UAC_MEM_REQ="${UAC_MEM_REQ:-384Mi}" UAC_MEM_LIM="${UAC_MEM_LIM:-1536Mi}"
-  kubectl -n "$NS" delete job "$UAC_JOB_NAME" --ignore-not-found >/dev/null 2>&1 || true
-  log "cap=$cps: launching UAC job (${secs}s), ramp ${ramp}s, sample ${sample}s"
-  subst_manifest "$MANIFEST_DIR/40-sipp-uac-job.yaml"
+  local name="sipp-uac-${cps}"
+  local max_calls=$(( cps * (secs+20) ))
+  local maxc="${MAX_CONCURRENT:-$(( cps * 600 ))}"
+  log "cap=$cps: launching UAC stream $name (${secs}s), ramp ${ramp}s, sample ${sample}s"
+  # Docker caps from the legacy k8s knobs: the old LIMITS map to --cpus/--memory
+  # (requests were a k8s scheduler reservation — no docker analog). The per-run
+  # stats dir under $RESULTS keeps the stat CSV after the container is reaped.
+  UAC_CPU_LIM="${UAC_CPU_LIM:-8}" UAC_MEM_LIM="${UAC_MEM_LIM:-1536Mi}" \
+  SIPEXT_STATS_ROOT="$RESULTS/cap${cps}-stats" \
+    sipext_sipp_uac_up "$name" "$SCENARIO" "$cps" "${ROLE:-load}" "${UAC_SLOT:-0}" \
+      "$max_calls" "$maxc"
   sleep "$ramp"
   echo "  --- worker/proxy CPU% + RSS(MB) over ${sample}s @ ${cps} cps ---"
   { sample_pods "app=b2bua-worker" "$sample"; sample_pods "app=sip-front-proxy" 2; } | tee "$RESULTS/cap${cps}.txt"
-  # Capture UAC call outcome before deleting the job.
-  # Capture UAC call outcome before deleting the job. Guard the whole block:
-  # grep returns non-zero on no-match, which must not abort the sweep.
+  # Capture UAC call outcome (same "Successful call"/"Failed call"/"Total Calls
+  # created" screens, now from docker logs) before reaping the containers.
+  # Guard the whole block: grep returns non-zero on no-match, which must not
+  # abort the sweep.
   set +e
-  local upod stats ok fail total
-  upod="$(kubectl -n "$NS" get pods -l app=sipp-uac --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null)"
-  if [ -n "$upod" ]; then
-    stats="$(kubectl -n "$NS" logs "$upod" 2>/dev/null)"
-    ok="$(printf '%s' "$stats"   | grep -aE 'Successful call'     | tail -1 | grep -oE '[0-9]+' | tail -1)"
-    fail="$(printf '%s' "$stats" | grep -aE 'Failed call'         | tail -1 | grep -oE '[0-9]+' | tail -1)"
-    total="$(printf '%s' "$stats"| grep -aE 'Total Calls created' | tail -1 | grep -oE '[0-9]+' | tail -1)"
-    printf "  UAC: total=%s successful=%s failed=%s\n" "${total:-?}" "${ok:-?}" "${fail:-?}" | tee -a "$RESULTS/cap${cps}.txt"
-  fi
+  local stats ok fail total
+  stats="$(sipext_uac_logs "$name")"
+  ok="$(printf '%s' "$stats"   | grep -aE 'Successful call'     | tail -1 | grep -oE '[0-9]+' | tail -1)"
+  fail="$(printf '%s' "$stats" | grep -aE 'Failed call'         | tail -1 | grep -oE '[0-9]+' | tail -1)"
+  total="$(printf '%s' "$stats"| grep -aE 'Total Calls created' | tail -1 | grep -oE '[0-9]+' | tail -1)"
+  printf "  UAC: total=%s successful=%s failed=%s\n" "${total:-?}" "${ok:-?}" "${fail:-?}" | tee -a "$RESULTS/cap${cps}.txt"
   set -e
-  kubectl -n "$NS" delete job "$UAC_JOB_NAME" --ignore-not-found >/dev/null 2>&1 || true
+  sipext_sipp_uac_rm "$name"   # stop/rm UAC + exporter (both carry sipext-run=$CLUSTER)
   sleep 6   # let in-flight calls drain before the next cap
 }
 
@@ -489,7 +656,12 @@ heal-kindnet() {
                       || log "restarted $healed stuck kindnet pod(s); DaemonSet will recreate them"
 }
 
-down() { kind delete cluster --name "$CLUSTER"; }
+down() {
+  kind delete cluster --name "$CLUSTER"
+  # Tear down the external plane too: the labelled sipext containers (UAS,
+  # loadgen, probes) and the bridge itself.
+  sipext_down
+}
 
 # Subcommand dispatch — the surface every existing caller (endurance.sh, docs,
 # direct CLI use) depends on: names and behaviour are FROZEN (issue 025).
@@ -504,8 +676,11 @@ run_main() {
     all)    up; deploy; sweep "$@" ;;
     heal-kindnet) heal-kindnet ;;
     vip-smoke) vip_smoke ;;
+    isolation-smoke) isolation_smoke ;;
+    sipext-up) sipext_up ;;
+    uas-up) sipp_uas_up ;;
     down)   down ;;
-    *) die "usage: $0 {up|deploy|obs|caps <cps> <secs>|sweep <secs> <cps...>|all <secs> <cps...>|heal-kindnet|vip-smoke|down}" ;;
+    *) die "usage: $0 {up|deploy|obs|caps <cps> <secs>|sweep <secs> <cps...>|all <secs> <cps...>|heal-kindnet|vip-smoke|isolation-smoke|sipext-up|uas-up|down}" ;;
   esac
 }
 

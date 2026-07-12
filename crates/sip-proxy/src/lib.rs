@@ -26,6 +26,7 @@
 pub mod addr;
 pub mod cancel_lru;
 pub mod core;
+pub mod face;
 pub mod headers;
 pub mod health;
 pub mod load_observer;
@@ -38,7 +39,8 @@ pub mod strategy;
 pub mod strategies;
 
 pub use addr::ProxyAddr;
-pub use core::{ProxyCore, ProxyCoreBuilder};
+pub use core::{ExternalFaceParts, ProxyCore, ProxyCoreBuilder};
+pub use face::{FaceCidrs, Ipv4Cidr};
 pub use observability::ProxyMetrics;
 pub use strategies::{ForwardAllStrategy, LoadBalancerConfig, LoadBalancerStrategy};
 pub use strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};

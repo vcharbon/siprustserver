@@ -40,8 +40,10 @@
 # historical behaviour exactly):
 #   WORKER_SELECTOR / WORKER_STS / WORKER_CONTAINER     worker pods / workload / container
 #   PROXY_SELECTOR / PROXY_DEPLOY / PROXY_VRRP_CONTAINER proxy pods / workload / VIP owner
-#   UAC_SELECTOR / ORPHAN_SELECTOR / LIMITER_SELECTOR / LIMITER_DEPLOY
-#   MANIFEST_DIR        directory the UAC job template is rendered from
+#   LIMITER_SELECTOR / LIMITER_DEPLOY
+# UAC streams are docker containers on the sipext bridge (lib/sipext-gen.sh) —
+# the old UAC_SELECTOR/ORPHAN_SELECTOR pod selectors and the 40-sipp-uac-job
+# template (MANIFEST_DIR) are retired; streams are addressed by container name.
 # NOTE: the cluster-lifecycle helpers are namespaced chaos_up/chaos_deploy/
 # chaos_down (they shell out to run.sh) so they never collide with run.sh's own
 # up/deploy/down when an overlay sources BOTH files.
@@ -60,7 +62,6 @@ KILL_TARGET="${KILL_TARGET:-b2bua-worker-0}"
 PASS_THRESHOLD="${PASS_THRESHOLD:-90}"
 SCENARIO="uac-hold-failover.xml"
 JOB="sipp-uac-failover"
-MANIFEST_DIR="${MANIFEST_DIR:-$K8S_DIR/manifests}"
 
 # Kill-target / assert knobs (issue 025): the label selectors, workload names and
 # container names the chaos primitives act on — extracted from the formerly-
@@ -73,32 +74,30 @@ WORKER_CONTAINER="${WORKER_CONTAINER:-b2bua-worker}"         # container cpu_sta
 PROXY_SELECTOR="${PROXY_SELECTOR:-app=sip-front-proxy}"      # proxy pod label
 PROXY_DEPLOY="${PROXY_DEPLOY:-deploy/sip-front-proxy}"       # proxy workload (rollout gate)
 PROXY_VRRP_CONTAINER="${PROXY_VRRP_CONTAINER:-keepalived}"   # sidecar that owns the VIP
-UAC_SELECTOR="${UAC_SELECTOR:-app=sipp-uac}"                 # UAC pods (assert_survival reads logs)
 LIMITER_SELECTOR="${LIMITER_SELECTOR:-app=call-limiter}"     # limiter pod label
 LIMITER_DEPLOY="${LIMITER_DEPLOY:-deploy/call-limiter}"      # limiter workload (rollout gate)
-ORPHAN_SELECTOR="${ORPHAN_SELECTOR:-role=orphan}"            # orphan-stream pods (matches the
-                                                             # ROLE label in the UAC job template)
+# UAC_SELECTOR / ORPHAN_SELECTOR are RETIRED: UAC streams are docker containers
+# on sipext now, addressed by NAME ($JOB / $ORPHAN_JOB), not pod label.
 
 # Replication ON, ≥2 workers so a primary + backup live on different app nodes.
 export REPL_ENABLE=1
 export WORKER_REPLICAS="${WORKER_REPLICAS:-2}"
 export SCENARIO
 # Front-proxy HA VIP + LB port (ADR-0012 D7): from the shared lib (subnet→VIP
-# derivation, all three runners agree). UAC streams target PROXY_VIP, not the Service.
+# derivation, all three runners agree). UAC streams dial SIPEXT_TARGET (the
+# EXTERNAL VIP) from the sipext bridge.
 source "$K8S_DIR/lib/net-env.sh"
+# Shared docker-on-sipext UAC stream launcher (replaces the retired
+# 40-sipp-uac-job.yaml renders). Sourced AFTER net-env.sh.
+source "$K8S_DIR/lib/sipext-gen.sh"
 source "$K8S_DIR/lib/kube-env.sh"   # pin every kubectl to context kind-$CLUSTER
 LIMITER_CAP="${LIMITER_CAP:-20}"
 export LIMITER_CAP
-# Pod-resource envsubst vars for the shared 40-sipp-uac-job template (envsubst has
-# no default syntax, so EVERY render site must export them — endurance.sh sizes
-# these per-role; the chaos/abuse/orphan/peak/failover streams here are transient
-# and low-concurrency, so a modest default is fine).
-# Request lowered 2 -> 1 (limit unchanged at 8): these chaos/abuse/orphan/peak
-# streams are transient and low-concurrency, so a 1-core RESERVATION is plenty and
-# the 2-core default added needless scheduling pressure on the 2-load-node cluster
-# (issue1). The burst limit (8) is untouched, so a brief peak is still uncapped.
-export UAC_CPU_REQ="${UAC_CPU_REQ:-1}" UAC_CPU_LIM="${UAC_CPU_LIM:-8}" \
-       UAC_MEM_REQ="${UAC_MEM_REQ:-384Mi}" UAC_MEM_LIM="${UAC_MEM_LIM:-1536Mi}"
+# Docker resource caps for the transient chaos/abuse/orphan/peak/failover UAC
+# streams (lib/sipext-gen.sh maps the k8s quantities onto --cpus/--memory; the
+# old k8s *_REQ reservations have no docker analog). Low-concurrency streams —
+# the modest burst caps are plenty.
+export UAC_CPU_LIM="${UAC_CPU_LIM:-8}" UAC_MEM_LIM="${UAC_MEM_LIM:-1536Mi}"
 
 log()  { printf '\033[1;36m>> %s\033[0m\n' "$*" >&2; }
 ok()   { printf '\033[1;32mPASS: %s\033[0m\n' "$*" >&2; }
@@ -122,15 +121,14 @@ wait_ready() {
   kubectl -n "$NS" wait --for=condition=ready pod -l "$WORKER_SELECTOR" --timeout=120s
 }
 
-# Launch the hold-failover UAC job: CALLS dialogs at CPS, each INVITE/ACK/15s
-# hold/BYE. SIPp exits 0 only if every call succeeded.
+# Launch the hold-failover UAC stream: CALLS dialogs at CPS, each INVITE/ACK/
+# 15s hold/BYE. A docker container on sipext (slot 1 = .101; the bringback
+# batch-2 stream reuses the same slot — the batches never overlap).
 launch_calls() {
-  export UAC_JOB_NAME="$JOB" CAPS="$CPS" MAX_CALLS="$CALLS" \
-         MAX_CONCURRENT="${MAX_CONCURRENT:-$(( CPS * 600 ))}" ROLE="${ROLE:-failover}"
-  kubectl -n "$NS" delete job "$JOB" --ignore-not-found >/dev/null 2>&1 || true
-  log "launching $CALLS hold dialogs @ ${CPS}cps (scenario=$SCENARIO)"
-  envsubst < "$MANIFEST_DIR/40-sipp-uac-job.yaml" | kubectl apply -f -
-  kubectl -n "$NS" wait --for=condition=ready pod -l "$UAC_SELECTOR" --timeout=60s || true
+  local slot="${UAC_SLOT:-1}"
+  log "launching $CALLS hold dialogs @ ${CPS}cps (scenario=$SCENARIO, docker/sipext)"
+  sipext_sipp_uac_up "$JOB" "$SCENARIO" "$CPS" "${ROLE:-failover}" "$slot" \
+    "$CALLS" "${MAX_CONCURRENT:-$(( CPS * 600 ))}"
 }
 
 # Inject ONE fault: delete the pod holding (statistically) a share of the live
@@ -218,17 +216,13 @@ PEAK_SECS="${PEAK_SECS:-30}"
 PEAK_SCENARIO="${PEAK_SCENARIO:-uac-endurance-short-noemerg.xml}"
 peak() {
   local job="sipp-uac-peak"
-  log "CHAOS: traffic peak ${PEAK_CAPS}cps for ${PEAK_SECS}s (scenario=$PEAK_SCENARIO)"
+  log "CHAOS: traffic peak ${PEAK_CAPS}cps for ${PEAK_SECS}s (scenario=$PEAK_SCENARIO, docker/sipext slot 3)"
   push_metric "sip_chaos_event{type=\"peak\",phase=\"start\"} 1
 sip_chaos_active{type=\"peak\"} 1"
-  export UAC_JOB_NAME="$job" CAPS="$PEAK_CAPS" \
-         MAX_CALLS=$(( PEAK_CAPS * (PEAK_SECS + 10) )) \
-         MAX_CONCURRENT="${MAX_CONCURRENT:-$(( PEAK_CAPS * 600 ))}" \
-         SCENARIO="$PEAK_SCENARIO" ROLE="peak"
-  kubectl -n "$NS" delete job "$job" --ignore-not-found >/dev/null 2>&1 || true
-  envsubst < "$MANIFEST_DIR/40-sipp-uac-job.yaml" | kubectl apply -f -
+  sipext_sipp_uac_up "$job" "$PEAK_SCENARIO" "$PEAK_CAPS" "peak" "${PEAK_SLOT:-3}" \
+    $(( PEAK_CAPS * (PEAK_SECS + 10) )) "${MAX_CONCURRENT:-$(( PEAK_CAPS * 600 ))}" || true
   sleep "$PEAK_SECS"
-  kubectl -n "$NS" delete job "$job" --ignore-not-found >/dev/null 2>&1 || true
+  sipext_sipp_uac_rm "$job"
   push_metric "sip_chaos_event{type=\"peak\",result=\"pass\"} 1
 sip_chaos_active{type=\"peak\"} 0"
 }
@@ -412,18 +406,14 @@ ABUSE_CAPS="${ABUSE_CAPS:-1}"
 ABUSE_SCENARIO="${ABUSE_SCENARIO:-uac-abuse-options-flood.xml}"
 ABUSE_JOB="sipp-uac-abuse"
 abuse_up() {
-  log "ABUSE: starting ${ABUSE_CAPS}cps stream (${ABUSE_SCENARIO})"
-  export UAC_JOB_NAME="$ABUSE_JOB" CAPS="$ABUSE_CAPS" \
-         MAX_CALLS="${ABUSE_MAX_CALLS:-1000000}" \
-         MAX_CONCURRENT="${MAX_CONCURRENT:-10000}" \
-         SCENARIO="$ABUSE_SCENARIO" ROLE="abuse"
-  kubectl -n "$NS" delete job "$ABUSE_JOB" --ignore-not-found >/dev/null 2>&1 || true
-  envsubst < "$MANIFEST_DIR/40-sipp-uac-job.yaml" | kubectl apply -f -
+  log "ABUSE: starting ${ABUSE_CAPS}cps stream (${ABUSE_SCENARIO}, docker/sipext slot 4)"
+  sipext_sipp_uac_up "$ABUSE_JOB" "$ABUSE_SCENARIO" "$ABUSE_CAPS" "abuse" "${ABUSE_SLOT:-4}" \
+    "${ABUSE_MAX_CALLS:-1000000}" "${MAX_CONCURRENT:-10000}"
   push_metric 'sip_chaos_active{type="abuse"} 1'
 }
 abuse_down() {
   log "ABUSE: stopping stream"
-  kubectl -n "$NS" delete job "$ABUSE_JOB" --ignore-not-found >/dev/null 2>&1 || true
+  sipext_sipp_uac_rm "$ABUSE_JOB"
   push_metric 'sip_chaos_active{type="abuse"} 0'
 }
 
@@ -437,19 +427,15 @@ ORPHAN_CAPS="${ORPHAN_CAPS:-50}"
 ORPHAN_BUILD_SECS="${ORPHAN_BUILD_SECS:-20}"
 ORPHAN_JOB="sipp-uac-orphan"
 orphan_kill() {
-  log "CHAOS: orphan_kill — ${ORPHAN_CAPS}cps for ${ORPHAN_BUILD_SECS}s then abrupt UAC kill (no BYE)"
+  log "CHAOS: orphan_kill — ${ORPHAN_CAPS}cps for ${ORPHAN_BUILD_SECS}s then abrupt UAC kill (no BYE; docker/sipext slot 5)"
   push_metric 'sip_chaos_event{type="orphan_kill",phase="start"} 1'
-  export UAC_JOB_NAME="$ORPHAN_JOB" CAPS="$ORPHAN_CAPS" \
-         MAX_CALLS=$(( ORPHAN_CAPS * (ORPHAN_BUILD_SECS + 120) )) \
-         MAX_CONCURRENT="${MAX_CONCURRENT:-$(( ORPHAN_CAPS * 600 ))}" \
-         SCENARIO="uac-endurance-short.xml" ROLE="orphan"
-  kubectl -n "$NS" delete job "$ORPHAN_JOB" --ignore-not-found >/dev/null 2>&1 || true
-  envsubst < "$MANIFEST_DIR/40-sipp-uac-job.yaml" | kubectl apply -f - >/dev/null
-  kubectl -n "$NS" wait --for=condition=ready pod -l "$ORPHAN_SELECTOR" --timeout=40s >/dev/null 2>&1 || true
+  sipext_sipp_uac_up "$ORPHAN_JOB" "uac-endurance-short.xml" "$ORPHAN_CAPS" "orphan" "${ORPHAN_SLOT:-5}" \
+    $(( ORPHAN_CAPS * (ORPHAN_BUILD_SECS + 120) )) "${MAX_CONCURRENT:-$(( ORPHAN_CAPS * 600 ))}" || true
   sleep "$ORPHAN_BUILD_SECS"   # let ~ORPHAN_CAPS*ORPHAN_BUILD_SECS dialogs establish
   log "CHAOS: abruptly killing the orphan UAC mid-call (dialogs orphaned on the B2BUA)"
-  kubectl -n "$NS" delete pod -l "$ORPHAN_SELECTOR" --grace-period=0 --force >/dev/null 2>&1 || true
-  kubectl -n "$NS" delete job "$ORPHAN_JOB" --grace-period=0 --force --ignore-not-found >/dev/null 2>&1 || true
+  # docker rm -f = SIGKILL + remove: no BYE, no restart-policy resurrection —
+  # the same abruptness as the old --grace-period=0 pod delete.
+  sipext_sipp_uac_rm "$ORPHAN_JOB"
   push_metric 'sip_chaos_event{type="orphan_kill",phase="killed"} 1'
 }
 
@@ -491,18 +477,94 @@ sip_chaos_active{type="limiter_netcut"} 1'
 sip_chaos_active{type="limiter_netcut"} 0'
 }
 
-# Read the UAC job's SIPp stats and assert the success rate clears the bar.
-assert_survival() {
-  log "waiting for the UAC job to finish (hold + BYE)"
-  # Job completes when all calls finish (success or fail); give the 15s hold +
-  # failover slack room.
-  kubectl -n "$NS" wait --for=condition=complete "job/$JOB" --timeout=120s 2>/dev/null \
-    || kubectl -n "$NS" wait --for=condition=failed "job/$JOB" --timeout=10s 2>/dev/null || true
+# CHAOS: cut_external_plane — sever the CURRENT VRRP master's edge node from
+# the sipext bridge (`docker network disconnect`), i.e. yank the caller-facing
+# plane out from under the proxy that owns both VIPs.
+#
+# EXPECTATION (30-proxy.yaml keepalived conf): the disconnect removes
+# ${SIPEXT_IF} from the node; keepalived's `track_interface { ${SIPEXT_IF} }`
+# drives the master's vrrp_instance to FAULT, and the peer edge node claims
+# BOTH VIPs together (<2s + the garp_master_* burst re-asserts the MAC
+# bindings). Established/ringing calls must survive per the
+# docs/testing/ha-acceptance.md rules (state changes within the acceptance
+# window of the cut are accepted collateral; chaos="clear" failures are
+# genuine). endurance.sh measures it through the generic chaos_event gate
+# (blended success% + long-dialog survival).
+#
+# HEAL: `docker network connect --ip <its original pinned IP>` restores the
+# node's sipext face (pinned IPs .11/.12 recovered from the node's position in
+# the SORTED edge-node list — the exact assignment run.sh sipext_up makes).
+# Because the instance is `nopreempt`, the healed node does NOT reclaim the
+# VIPs: they stay with the peer until IT fails — expected, documented behaviour
+# (the next cut targets whichever node is master THEN, so the event stays
+# symmetric across a rotation).
+#
+# Knobs: CUT_SECS=60 (disconnect hold), CUT_TARGET_NODE (explicit node name
+# override — skips master auto-detection). Fails loudly if the master cannot
+# be determined (e.g. both nodes already in FAULT).
+CUT_SECS="${CUT_SECS:-60}"
+# Echo the edge node (docker container name == k8s node name) whose
+# ${SIPEXT_IF} currently carries ${SIPEXT_VIP} — i.e. the VRRP master. The
+# backup parks the VIP on lo only (notify scripts), so checking the sipext
+# interface specifically is what disambiguates master from backup.
+sipext_master_edge_node() {
+  local n
+  for n in $(kubectl get nodes -l tier=edge -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | sort); do
+    if docker exec "$n" ip -4 addr show dev "$SIPEXT_IF" 2>/dev/null | grep -q "${SIPEXT_VIP}/"; then
+      echo "$n"; return 0
+    fi
+  done
+  return 0
+}
+cut_external_plane() {
+  local node="${CUT_TARGET_NODE:-}" edges n idx=0 ip=""
+  edges="$(kubectl get nodes -l tier=edge -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | sort)"
+  [ -n "$edges" ] || fail "cut_external_plane: no tier=edge nodes found (cluster up?)"
+  [ -n "$node" ] || node="$(sipext_master_edge_node)"
+  [ -n "$node" ] || fail "cut_external_plane: could not determine the VRRP master (no edge node holds ${SIPEXT_VIP} on ${SIPEXT_IF}) — pass CUT_TARGET_NODE=<node> explicitly"
+  # Recover the node's pinned sipext IP from its position in the sorted edge
+  # list (index 0 -> SIPEXT_EDGE1_IP, 1 -> SIPEXT_EDGE2_IP), mirroring
+  # run.sh sipext_up's deterministic assignment — needed to re-connect it.
+  for n in $edges; do
+    [ "$n" = "$node" ] && break
+    idx=$(( idx + 1 ))
+  done
+  case "$idx" in
+    0) ip="$SIPEXT_EDGE1_IP" ;;
+    1) ip="$SIPEXT_EDGE2_IP" ;;
+    *) fail "cut_external_plane: node '$node' not in the sorted tier=edge list [$edges]" ;;
+  esac
+  log "CHAOS: cut_external_plane — disconnecting master edge node $node from $SIPEXT_NET for ${CUT_SECS}s (peer must take BOTH VIPs via track_interface FAULT)"
+  push_metric 'sip_chaos_event{type="cut_external_plane",phase="start"} 1
+sip_chaos_active{type="cut_external_plane"} 1'
+  docker network disconnect "$SIPEXT_NET" "$node" \
+    || fail "cut_external_plane: docker network disconnect $SIPEXT_NET $node failed"
+  # SAFETY: reconnect even if the hold is interrupted (Ctrl-C / kill) — a
+  # stranded half-plane edge node silently degrades every later run.
+  trap '_t="$?"; docker network connect --ip "'"$ip"'" "'"$SIPEXT_NET"'" "'"$node"'" >/dev/null 2>&1 || true; trap - INT TERM; exit "$_t"' INT TERM
+  sleep "$CUT_SECS"
+  trap - INT TERM
+  if docker network connect --ip "$ip" "$SIPEXT_NET" "$node"; then
+    log "cut_external_plane: reconnected $node as $ip (nopreempt: the VIPs STAY with the peer — expected)"
+    push_metric 'sip_chaos_event{type="cut_external_plane",result="pass"} 1
+sip_chaos_active{type="cut_external_plane"} 0'
+  else
+    push_metric 'sip_chaos_event{type="cut_external_plane",result="fail"} 1
+sip_chaos_active{type="cut_external_plane"} 0'
+    fail "cut_external_plane: FAILED to reconnect $node to $SIPEXT_NET as $ip — heal manually: docker network connect --ip $ip $SIPEXT_NET $node"
+  fi
+}
 
-  local upod stats ok_n fail_n total_n
-  upod="$(kubectl -n "$NS" get pods -l "$UAC_SELECTOR" --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
-  [ -n "$upod" ] || fail "no UAC pod found"
-  stats="$(kubectl -n "$NS" logs "$upod" 2>/dev/null || true)"
+# Read the UAC stream's SIPp stats and assert the success rate clears the bar.
+assert_survival() {
+  log "waiting for the UAC stream to finish (hold + BYE)"
+  # The container exits when all calls finish (success or fail); give the 15s
+  # hold + failover slack room. Replaces the kubectl job-completion wait.
+  sipext_uac_wait_exit "$JOB" 120 || true
+
+  local stats ok_n fail_n total_n
+  docker inspect "$JOB" >/dev/null 2>&1 || fail "no UAC container '$JOB' found"
+  stats="$(sipext_uac_logs "$JOB")"
   ok_n="$(printf '%s' "$stats"   | grep -aE 'Successful call'     | tail -1 | grep -oE '[0-9]+' | tail -1)"
   fail_n="$(printf '%s' "$stats" | grep -aE 'Failed call'         | tail -1 | grep -oE '[0-9]+' | tail -1)"
   total_n="$(printf '%s' "$stats"| grep -aE 'Total Calls created' | tail -1 | grep -oE '[0-9]+' | tail -1)"
@@ -530,6 +592,7 @@ failover() {
   sleep "$settle"
   kill_worker
   assert_survival
+  sipext_sipp_uac_rm "$JOB"   # containers have no Job TTL — reap explicitly
   if [ "${KEEP:-0}" = "1" ]; then
     log "KEEP=1 — leaving cluster up (./chaos.sh down to tear down)"
   else
@@ -589,6 +652,7 @@ bringback() {
   kill_worker
   # (1) batch-1 survived the kill (failover to the backup replica).
   assert_survival
+  sipext_sipp_uac_rm "$JOB"   # reap batch-1's containers (no Job TTL)
   # (2) the killed primary comes back + re-hydrates.
   wait_brought_back
   assert_rehydrated
@@ -602,6 +666,7 @@ bringback() {
   launch_calls
   log "letting batch-2 dialogs run to completion (no kill — pure serve)"
   assert_survival
+  sipext_sipp_uac_rm "$JOB"   # reap batch-2's containers
   ok "bring-back: recovered topology served a fresh batch after primary restart"
   if [ "${KEEP:-0}" = "1" ]; then
     log "KEEP=1 — leaving cluster up (./chaos.sh down to tear down)"
@@ -629,11 +694,12 @@ chaos_main() {
     orphankill) orphan_kill ;;
     limiterkill) limiter_kill ;;
     limiternetcut) limiter_netcut ;;
+    cutext)    cut_external_plane ;;
     abuse)     case "${1:-up}" in up) abuse_up ;; down) abuse_down ;; *) fail "usage: $0 abuse {up|down}" ;; esac ;;
     recover)   wait_brought_back; assert_rehydrated ;;
     assert)    assert_survival ;;
     down)      chaos_down ;;
-    *) fail "usage: $0 {failover|bringback|up|deploy|kill|proxykill|peak|cpustarve|cpustarveall|overload|overloadall|orphankill|limiterkill|limiternetcut|abuse {up|down}|recover|assert|down}" ;;
+    *) fail "usage: $0 {failover|bringback|up|deploy|kill|proxykill|peak|cpustarve|cpustarveall|overload|overloadall|orphankill|limiterkill|limiternetcut|cutext|abuse {up|down}|recover|assert|down}" ;;
   esac
 }
 

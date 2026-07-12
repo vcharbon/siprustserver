@@ -23,7 +23,7 @@
   The vendored sipp parses any literal `[...]` in CDATA as a keyword reference
   ("Unsupported keyword"), so the X-Api-Call JSON (a `call_limiter` array) is
   injected via sipp's `-key xapi '<json>'` CLI flag — a single-pass substitution
-  whose value is NOT re-parsed. `40-sipp-uac-job.yaml` passes that key on every
+  whose value is NOT re-parsed. `lib/sipext-gen.sh` (the docker UAC stream launcher) passes that key on every
   stream; only this scenario references `[xapi]`, so only it sends the header.
 
   NOTE: every call ALSO carries the worker's always-on `global-stress:999999`

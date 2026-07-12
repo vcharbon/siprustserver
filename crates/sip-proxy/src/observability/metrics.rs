@@ -29,6 +29,24 @@ impl Direction {
     }
 }
 
+/// Which proxy face a datagram crossed, for
+/// `sip_proxy_face_messages_total{face,direction}` (dual-face mode). A
+/// single-face proxy records everything as `int`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Face {
+    Internal,
+    External,
+}
+
+impl Face {
+    fn as_str(self) -> &'static str {
+        match self {
+            Face::Internal => "int",
+            Face::External => "ext",
+        }
+    }
+}
+
 /// How a message was handled, for `sip_messages_total{result}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageResult {
@@ -218,6 +236,11 @@ pub struct ProxyMetrics {
     /// is otherwise silent (the proxy just black-holes every INVITE). Pairs with
     /// the `/readyz` gate; alert on `sip_proxy_worker_pool_empty == 1`.
     worker_pool_empty: AtomicU64,
+    /// Per-face traffic counters (dual-face mode): `[face][direction]` where
+    /// face ∈ {int, ext} and direction ∈ {inbound (recv), outbound (egress)}.
+    /// A single-face proxy only ever touches the `int` slots — cheap fixed
+    /// atomics, no restructuring of the existing counters.
+    face_messages: [[AtomicU64; 2]; 2],
     /// Cardinality-bounded per-peer failure/timeout counters
     /// (`sip_proxy_peer_failures_total{peer,scope,kind}`). Internal = resolves to
     /// a known worker (registry); external = LRU-bounded
@@ -258,6 +281,21 @@ impl ProxyMetrics {
     /// out-of-dialog INVITE), for `sip_proxy_calls_total`.
     pub fn record_call(&self) {
         self.calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one datagram RECEIVED on `face` (the recv loop's arrival socket).
+    pub fn record_face_ingress(&self, face: Face) {
+        self.face_messages[face as usize][Direction::Inbound as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one datagram EGRESSED on `face` (the destination-picked socket).
+    pub fn record_face_egress(&self, face: Face) {
+        self.face_messages[face as usize][Direction::Outbound as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Read one per-face counter (test/assertion surface).
+    pub fn face_messages_total(&self, face: Face, direction: Direction) -> u64 {
+        self.face_messages[face as usize][direction as usize].load(Ordering::Relaxed)
     }
 
     pub fn record_routing_decision(&self, kind: RoutingDecisionKind) {
@@ -483,7 +521,18 @@ impl ProxyMetrics {
             }
         }
 
+        let mut faces_map = BTreeMap::new();
+        for f in [Face::Internal, Face::External] {
+            for d in Direction::ALL {
+                let v = self.face_messages[f as usize][d as usize].load(Ordering::Relaxed);
+                if v > 0 {
+                    faces_map.insert(format!("{}:{}", f.as_str(), d.as_str()), v);
+                }
+            }
+        }
+
         labeled(&mut s, "sip_messages_total", "SIP messages by direction+result.", "counter", "label", &messages_map);
+        labeled(&mut s, "sip_proxy_face_messages_total", "Datagrams by proxy face + direction (dual-face mode; single-face records int only).", "counter", "label", &faces_map);
         labeled(&mut s, "sip_proxy_requests_total", "Inbound SIP requests by method.", "counter", "method", &requests_map);
         labeled2(&mut s, "sip_proxy_responses_total", "Inbound SIP responses by CSeq method + status code.", ("method", "code"), &self.responses.snapshot());
         g(&mut s, "sip_proxy_calls_total", "New calls: initial dialog-creating INVITEs (no To-tag).", "counter", self.calls.load(Ordering::Relaxed));

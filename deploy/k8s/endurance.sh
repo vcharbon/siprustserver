@@ -76,15 +76,29 @@ VM="${VM:-http://127.0.0.1:8428}"
 VM_IMPORT="$VM/api/v1/import/prometheus"
 
 WORKER_REPLICAS="${WORKER_REPLICAS:-2}"
+# Downstream SIPp UAS pool — docker containers on the sipext bridge (run.sh
+# sipp_uas_up; the 10-sipp-uas StatefulSet is retired). The endurance profile
+# sizes for ~9k concurrent B-leg dialogs: 5 shards keep each SIPp process
+# under its ~2900-dialog single-process timer-wheel ceiling (exit-255 aborts),
+# with per-container --cpus/--memory caps (an uncapped generator can freeze
+# the 20 GB WSL2 host). Exported so `./run.sh deploy` (via wireup) launches
+# the pool at this size; raise per-container caps via SIPP_UAS_CPUS/MEM.
+SIPP_UAS_REPLICAS="${SIPP_UAS_REPLICAS:-5}"
+SIPP_UAS_CPUS="${SIPP_UAS_CPUS:-4}"
+SIPP_UAS_MEM="${SIPP_UAS_MEM:-2g}"
+export SIPP_UAS_REPLICAS SIPP_UAS_CPUS SIPP_UAS_MEM
 LONG_CPS="${LONG_CPS:-5}"
 # The long stream's steady-state concurrency (≈ hold × LONG_CPS ≈ 5700 at 5cps)
 # sits FAR above a single SIPp process's ~2900-dialog timer-wheel ceiling (the same
-# ceiling that aborts the UAS with exit 255 — see manifests/10-sipp-uas.yaml), so a
-# single long pod self-aborts mid-ramp and the long-HA signal sawtooths. Shard it
-# across LONG_SHARDS pods at LONG_CPS/LONG_SHARDS each (all role=long, so the
-# exporters aggregate by sum()), keeping every shard well under the ceiling — the
-# UAC analogue of the UAS 1→5 scale-out. 5 shards × 1cps ≈ 1140 conc/pod.
+# ceiling that aborts the UAS with exit 255 — see the retired 10-sipp-uas.yaml
+# history), so a single long process self-aborts mid-ramp and the long-HA signal
+# sawtooths. Shard it across LONG_SHARDS containers at LONG_CPS/LONG_SHARDS each
+# (all role=long, so the exporters aggregate by sum()), keeping every shard well
+# under the ceiling — the UAC analogue of the UAS 1→5 scale-out.
 LONG_SHARDS="${LONG_SHARDS:-5}"
+# Long shards own sipext IP slots 10..29 (baseline_specs); >20 would collide
+# with the fixed streams at slot 30+.
+[ "$LONG_SHARDS" -le 20 ] || { printf 'LONG_SHARDS=%s > 20 overflows the long-shard sipext IP slot range (10..29)\n' "$LONG_SHARDS" >&2; exit 1; }
 LONG_SHARD_CPS=$(( LONG_CPS / LONG_SHARDS )); [ "$LONG_SHARD_CPS" -lt 1 ] && LONG_SHARD_CPS=1
 # Per-shard `-l` (= the long steady-state, since OPTIONS-hold calls grow to `-l`).
 # CAPPED at 800/shard → 4000 total long concurrency. The 5 UAS pods hold every
@@ -151,8 +165,14 @@ LIMITER_CPS="${LIMITER_CPS:-2}"        # continuous limiter stream rate; 2cps x 
 LIMITER_CAP="${LIMITER_CAP:-20}"       # cap stamped into the -key xapi JSON (40-job)
 LIMITER_TARGET="${LIMITER_TARGET:-$LIMITER_CAP}" # the cap the stream pins conc. at
 # Front-proxy HA VIP + LB port (ADR-0012 D7): from the shared lib (subnet→VIP
-# derivation, all three runners agree). UAC streams target PROXY_VIP, not the Service.
+# derivation, all three runners agree). UAC streams dial SIPEXT_TARGET (the
+# EXTERNAL VIP) from the sipext docker bridge — sipext dual-plane layout.
 source "$HERE/lib/net-env.sh"
+# Shared docker-on-sipext UAC stream launcher (UAC container + stat-exporter
+# twin, labelled sipext-run=$CLUSTER, pinned IPs, --cpus/--memory caps) — the
+# SAME helper run.sh caps() and chaos.sh compose. Replaces every
+# 40-sipp-uac-job.yaml render. Sourced AFTER net-env.sh.
+source "$HERE/lib/sipext-gen.sh"
 # Proxy split (local=kind+127 bypass, non-local=through proxy). Gives wireup's
 # image rebuild the SAME proxy-forwarding `docker_build` run.sh uses, so the
 # endurance run can build images on a PROXIFIED host. Sourced AFTER net-env.sh.
@@ -251,8 +271,11 @@ LOADGEN_REPORT_INTERVAL="${LOADGEN_REPORT_INTERVAL:-60}"
 # connected call across the fault stays chaos="clear" (genuine). 200ms per the
 # "sub-RTT confirm-vs-flush" analysis; raise if propagation skew is larger.
 LOADGEN_CHAOS_PHASE_TOL_MS="${LOADGEN_CHAOS_PHASE_TOL_MS:-200}"
-LOADGEN_CPU_REQ="${LOADGEN_CPU_REQ:-1}"; LOADGEN_CPU_LIM="${LOADGEN_CPU_LIM:-6}"
-LOADGEN_MEM_REQ="${LOADGEN_MEM_REQ:-512Mi}"; LOADGEN_MEM_LIM="${LOADGEN_MEM_LIM:-2Gi}"
+# Docker caps for the loadgen container (--cpus/--memory via the k8s-unit
+# mappers in lib/sipext-gen.sh; the old *_REQ scheduler reservations have no
+# docker analog and are retired).
+LOADGEN_CPU_LIM="${LOADGEN_CPU_LIM:-6}"
+LOADGEN_MEM_LIM="${LOADGEN_MEM_LIM:-2Gi}"
 
 TS="$(date +%Y%m%d-%H%M%S)"
 RUN_DIR="$HERE/results/endurance-$TS"
@@ -288,29 +311,26 @@ close_window() { # $1 = chaos type
 # kill collateral, not triaged by hand) vs chaos="clear" (a genuine SUT defect) —
 # see crates/loadgen/src/chaos.rs. The loadgen timestamps the marker on its OWN
 # clock (same as its calls), so the overlap is exact — no Call-ID ms-base
-# reconciliation. Best-effort: a one-shot port-forward + POST that NEVER fails the
-# run. Call it in the BACKGROUND right at the kill so its port-forward setup
-# overlaps the delete.
+# reconciliation. Best-effort: a direct POST to the loadgen's pinned sipext IP
+# that NEVER fails the run. Call it in the BACKGROUND right at the kill.
 #
-# CRITICAL — marker accuracy: the POST lands over the port-forward ~1.5 s after
-# the kill, so recording it at receipt mis-buckets calls whose `connected`
-# transition coincided with the kill (the transition falls outside the 200 ms
-# phase window and reads chaos="clear" — a false genuine signal). When $3 names a
-# kill-timestamp file (written by chaos.sh kill_worker at the actual delete
-# instant, Unix epoch ms), we wait for it, pass it as `&ts=` and the loadgen
-# back-dates the marker to the REAL kill — robust to ANY plumbing latency. The PF
-# setup still overlaps the delete; only the POST waits for the ts. Falls back to a
-# no-ts POST (receipt instant) if the file never appears.
+# CRITICAL — marker accuracy: recording the POST at receipt mis-buckets calls
+# whose `connected` transition coincided with the kill (the transition falls
+# outside the 200 ms phase window and reads chaos="clear" — a false genuine
+# signal). When $3 names a kill-timestamp file (written by chaos.sh kill_worker
+# at the actual delete instant, Unix epoch ms), we wait for it, pass it as
+# `&ts=` and the loadgen back-dates the marker to the REAL kill — robust to ANY
+# plumbing latency. Falls back to a no-ts POST (receipt instant) if the file
+# never appears. The loadgen is a docker container on sipext now, so the POST
+# goes STRAIGHT to its pinned IP (the host owns the bridge gateway) — no
+# port-forward.
 loadgen_chaos_flag() {  # $1 = chaos type, $2 = target (optional), $3 = kill-ts file (optional)
   [ "${LOADGEN_ENABLE:-1}" = "1" ] || return 0
-  local type="$1" target="${2:-}" ts_file="${3:-}" pod pf i kill_ms="" qs
-  pod="$(kubectl -n "$NS" get pod -l app=loadgen --field-selector=status.phase=Running \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
-  [ -n "$pod" ] || { warn "loadgen_chaos_flag: no running loadgen pod (skip $type)"; return 0; }
-  kubectl -n "$NS" port-forward "$pod" 19300:9300 >/dev/null 2>&1 &
-  pf=$!
-  # Wait (briefly) for chaos.sh to publish the actual kill instant, so `ts` is the
-  # real delete time, not the POST-receipt time. PF setup above already overlaps.
+  local type="$1" target="${2:-}" ts_file="${3:-}" i kill_ms="" qs
+  [ "$(sipext_uac_running "$LOADGEN_JOB_NAME")" = "true" ] \
+    || { warn "loadgen_chaos_flag: loadgen container not running (skip $type)"; return 0; }
+  # Wait (briefly) for chaos.sh to publish the actual kill instant, so `ts` is
+  # the real delete time, not the POST-receipt time.
   if [ -n "$ts_file" ]; then
     for i in $(seq 1 20); do
       [ -s "$ts_file" ] && { kill_ms="$(cat "$ts_file" 2>/dev/null)"; break; }
@@ -320,11 +340,10 @@ loadgen_chaos_flag() {  # $1 = chaos type, $2 = target (optional), $3 = kill-ts 
   qs="type=${type}&target=${target}"
   [ -n "$kill_ms" ] && qs="${qs}&ts=${kill_ms}"
   for i in $(seq 1 10); do
-    curl -s --max-time 2 -X POST "http://127.0.0.1:19300/chaos?${qs}" \
+    curl -s --max-time 2 -X POST "http://${SIPEXT_LOADGEN_IP}:9300/chaos?${qs}" \
       >/dev/null 2>&1 && { log "loadgen_chaos_flag: flagged ${type}(${target}) ts=${kill_ms:-<receipt>}"; break; }
     sleep 0.3
   done
-  kill "$pf" 2>/dev/null || true
 }
 
 # vmq <promql> -> scalar value of the first result (0 if none / unreachable).
@@ -340,9 +359,11 @@ except Exception:
 " 2>/dev/null || echo 0
 }
 
-# Launch (or replace) a long-lived UAC stream from the shared job manifest.
+# Launch (or replace) a long-lived UAC stream as a docker container on the
+# sipext bridge (lib/sipext-gen.sh). <slot> is the stream's deterministic IP
+# slot (see baseline_specs + the slot plan in lib/net-env.sh).
 launch_stream() {
-  local job="$1" scenario="$2" cps="$3" role="$4"
+  local job="$1" scenario="$2" cps="$3" role="$4" slot="$5"
   # `-l` headroom (MAX_CONCURRENT): sized so the offered rate never throttles on
   # transient stuck-call backlog. With the SIPp dead-call reaper (-recv_timeout
   # 600s, manifests/40) the backlog is bounded to ~10 min of leaked calls; the
@@ -360,53 +381,46 @@ launch_stream() {
   # ~2900/pod crash ceiling — see LONG_SHARD_MAXCONC. Other streams keep the
   # generous 1800× headroom (short@100cps never sits near the UAS ceiling).
   [ "$role" = "long" ] && maxc="${LONG_SHARD_MAXCONC:-800}"
-  # Per-role pod resources. The exit-255 crash is a CPU-starvation timer-wheel slip,
-  # not OOM/-l, so the lever is guaranteed CPU + a high burst limit per process —
-  # NOT more pods (more SIPp processes contend for the 2×24-core load pool and make
-  # the slip MORE likely). `short` holds ~3000 conc in one process (at the ceiling)
-  # so it gets fattened; the rest stay modest to keep total CPU requests inside the
-  # node budget alongside the 5 fattened UAS pods (req 4 each). Override via env.
-  # CPU REQUESTS trimmed for THIS cluster shape (2 load nodes, ~10 allocatable CPU
-  # each, already running other pods + the 5 UAS pods) — issue1: the old requests
-  # (short 4, short_em/ne 3, long 2, default 2) reserved more than the load nodes
-  # had spare and piled scheduling pressure on top of the UAS StatefulSet. We trim
-  # the RESERVATION only; the burst LIMITS are unchanged, so each CPU-bound SIPp
-  # timer wheel can still burst to catch up under load (the slip is prevented by the
-  # high limit, not the request floor). Override per-role via *_CPU_REQ env.
-  local cpu_req cpu_lim mem_req mem_lim
+  # Per-role docker caps. The exit-255 crash is a CPU-starvation timer-wheel
+  # slip, not OOM/-l, so the lever is a high per-process CPU cap — NOT more
+  # containers (more SIPp processes contend for the host cores and make the
+  # slip MORE likely). Docker has no request/limit split: the old k8s burst
+  # LIMITS become the --cpus/--memory caps (the requests were a scheduler
+  # reservation — meaningless on plain docker, where the generators now ride
+  # the host directly on a 20 GB WSL2 box; the caps are what keeps an
+  # uncapped generator from freezing it). Override per-role via *_CPU_LIM env.
+  local cpu_lim mem_lim
   case "$role" in
     # Both short halves (short_em/short_ne) hold ~half the old single-stream
-    # concurrency (SHORT_CPS/2 × 30s); req 3 -> 2 (limit 12 unchanged).
-    short_em|short_ne) cpu_req="${SHORT_CPU_REQ:-2}"; cpu_lim="${SHORT_CPU_LIM:-12}"; mem_req="512Mi"; mem_lim="2Gi" ;;
-    short)  cpu_req="${SHORT_CPU_REQ:-2}"; cpu_lim="${SHORT_CPU_LIM:-16}"; mem_req="512Mi"; mem_lim="2Gi" ;;
-    long)   cpu_req="${LONG_CPU_REQ:-1}";  cpu_lim="${LONG_CPU_LIM:-12}"; mem_req="384Mi"; mem_lim="1536Mi" ;;
-    *)      cpu_req="1"; cpu_lim="8"; mem_req="384Mi"; mem_lim="1536Mi" ;;
+    # concurrency (SHORT_CPS/2 × 30s).
+    short_em|short_ne) cpu_lim="${SHORT_CPU_LIM:-12}"; mem_lim="2Gi" ;;
+    short)  cpu_lim="${SHORT_CPU_LIM:-16}"; mem_lim="2Gi" ;;
+    long)   cpu_lim="${LONG_CPU_LIM:-12}";  mem_lim="1536Mi" ;;
+    *)      cpu_lim="8"; mem_lim="1536Mi" ;;
   esac
-  export UAC_JOB_NAME="$job" SCENARIO="$scenario" CAPS="$cps" ROLE="$role" \
-         MAX_CALLS=$(( cps * (DURATION + 600) )) \
-         MAX_CONCURRENT="$maxc" \
-         UAC_CPU_REQ="$cpu_req" UAC_CPU_LIM="$cpu_lim" \
-         UAC_MEM_REQ="$mem_req" UAC_MEM_LIM="$mem_lim"
-  kubectl -n "$NS" delete job "$job" --ignore-not-found >/dev/null 2>&1 || true
-  envsubst < manifests/40-sipp-uac-job.yaml | kubectl apply -f - >/dev/null
+  UAC_CPU_LIM="$cpu_lim" UAC_MEM_LIM="$mem_lim" \
+    sipext_sipp_uac_up "$job" "$scenario" "$cps" "$role" "$slot" \
+      $(( cps * (DURATION + 600) )) "$maxc" >/dev/null
 }
 
-# The baseline stream specs ("job scenario cps role"). The long stream is expanded
-# into LONG_SHARDS shards (sipp-uac-long-0..N-1), each a separate SIPp pod at
+# The baseline stream specs ("job scenario cps role slot" — slot is the
+# stream's deterministic sipext IP slot, see lib/net-env.sh: long shards own
+# 10..29, the fixed streams 30+). The long stream is expanded into LONG_SHARDS
+# shards (sipp-uac-long-0..N-1), each a separate SIPp CONTAINER at
 # LONG_SHARD_CPS — all role=long so the exporters aggregate by sum(). This keeps
 # each SIPp process under the ~2900-dialog timer-wheel ceiling that otherwise
-# aborts a single long pod with exit 255 (see LONG_SHARDS above).
+# aborts a single long process with exit 255 (see LONG_SHARDS above).
 baseline_specs() {
   local i
   for ((i=0; i<LONG_SHARDS; i++)); do
-    echo "sipp-uac-long-$i uac-long-options.xml $LONG_SHARD_CPS long"
+    echo "sipp-uac-long-$i uac-long-options.xml $LONG_SHARD_CPS long $(( 10 + i ))"
   done
-  echo "sipp-uac-reinvite uac-reinvite.xml $REINVITE_CPS reinvite"
+  echo "sipp-uac-reinvite uac-reinvite.xml $REINVITE_CPS reinvite 30"
   # Short split into emergency (short_em) + non-emergency (short_ne) halves — see
   # SHORT_EM_CPS/SHORT_NE_CPS. Two roles so the overload gate measures them apart.
-  echo "sipp-uac-short-em uac-endurance-short.xml $SHORT_EM_CPS short_em"
-  echo "sipp-uac-short-ne uac-endurance-short-noemerg.xml $SHORT_NE_CPS short_ne"
-  echo "sipp-uac-limiter uac-endurance-limiter-cap20.xml $LIMITER_CPS limiter"
+  echo "sipp-uac-short-em uac-endurance-short.xml $SHORT_EM_CPS short_em 31"
+  echo "sipp-uac-short-ne uac-endurance-short-noemerg.xml $SHORT_NE_CPS short_ne 32"
+  echo "sipp-uac-limiter uac-endurance-limiter-cap20.xml $LIMITER_CPS limiter 33"
 }
 
 # Re-create any baseline stream whose job has vanished or failed (keeps the
@@ -417,33 +431,34 @@ baseline_specs() {
 # calls (long-loss vacuously passes), it does not corrupt the SUT's view the way a
 # UAS crash does, so it cannot produce a FALSE SUT failure.
 ensure_baseline() {
-  local job scenario cps role
-  while read -r job scenario cps role; do
+  local job scenario cps role slot
+  while read -r job scenario cps role slot; do
     [ -n "$job" ] || continue
-    local active
-    active="$(kubectl -n "$NS" get job "$job" -o jsonpath='{.status.active}' 2>/dev/null || echo)"
-    if [ "${active:-0}" != "1" ]; then
+    if [ "$(sipext_uac_running "$job")" != "true" ]; then
       # Capture WHY it died before relaunching, so the monitoring loop / a
-      # subagent investigation has the dead pod's status + tail of its logs.
+      # subagent investigation has the dead container's state + log tail.
+      # (docker --restart on-failure:4 is the old Job backoffLimit analog —
+      # reaching here means the retry budget is spent, the stream ran to its
+      # MAX_CALLS, or the container vanished.)
       local dump="$RUN_DIR/dead-$job-$(date +%s)"
       local exitc
-      exitc="$(kubectl -n "$NS" get pods -l "job-name=$job" -o jsonpath='{range .items[*]}{.status.containerStatuses[?(@.name=="sipp-uac")].lastState.terminated.exitCode}{" "}{end}' 2>/dev/null)"
-      { kubectl -n "$NS" describe job "$job" 2>&1
-        echo "--- last pod logs (sipp) ---"
-        kubectl -n "$NS" logs "job/$job" -c sipp-uac --tail=60 2>&1
-        echo "--- last pod logs (stat-exporter) ---"
-        kubectl -n "$NS" logs "job/$job" -c stat-exporter --tail=20 2>&1
+      exitc="$(docker inspect -f '{{.State.ExitCode}} (restarts={{.RestartCount}})' "$job" 2>/dev/null || echo '?')"
+      { docker inspect -f 'state={{json .State}}' "$job" 2>&1
+        echo "--- last container logs (sipp) ---"
+        docker logs --tail 60 "$job" 2>&1
+        echo "--- last container logs (stat-exporter) ---"
+        docker logs --tail 20 "$job-exporter" 2>&1
       } > "$dump.txt" 2>&1 || true
-      warn "INVOLUNTARY UAC-stream crash (test-infra, NOT SUT): $job not active (exit=${exitc:-?}) — diagnostics in ${dump##*/}.txt — relaunching (no taint: a dead UAC stream cannot false-fail the SUT)"
+      warn "INVOLUNTARY UAC-stream crash (test-infra, NOT SUT): $job not running (exit=${exitc:-?}) — diagnostics in ${dump##*/}.txt — relaunching (no taint: a dead UAC stream cannot false-fail the SUT)"
       push_metric "sip_endurance_stream_restart{stream=\"$role\"} 1
 sip_chaos_event{type=\"uac_crash\",result=\"involuntary\"} 1"
       printf '{"ts":%s,"type":"uac_crash_involuntary","job":"%s","role":"%s","exit_code":"%s","note":"SIPp UAC self-abort (exit 255 timer-wheel) — load generator, not the SUT; no taint"}\n' \
         "$(date +%s)" "$job" "$role" "${exitc:-?}" >> "$EVENTS"
-      launch_stream "$job" "$scenario" "$cps" "$role"
+      launch_stream "$job" "$scenario" "$cps" "$role" "$slot"
     fi
   done < <(baseline_specs)
   # Abuse stream via chaos.sh (handles its own metric markers).
-  if ! kubectl -n "$NS" get job sipp-uac-abuse >/dev/null 2>&1; then
+  if [ "$(sipext_uac_running sipp-uac-abuse)" != "true" ]; then
     ABUSE_CAPS="$ABUSE_CAPS" ./chaos.sh abuse up >>"$RUNLOG" 2>&1 || true
   fi
 }
@@ -496,18 +511,28 @@ snap_ghost()  { vmq 'sum(b2bua_active_calls) - sum(sipp_current_calls)'; }
 snap_limiter_conc() { vmq 'sum(sipp_current_calls{role="limiter"})'; }
 
 # --- INVOLUNTARY SIPp-UAS crash detection (test-infra fault, NOT the SUT) ---
-# The downstream SIPp UAS (sipp-uas-N) periodically self-aborts with exit 255 —
-# a SIPp v3.7.7 internal timer-wheel slip ("wheel_base > clock_tick") under high
-# concurrency, NOT OOM / fd / -l (see manifests/10-sipp-uas.yaml). When it dies,
-# k8s restarts it but the in-memory B-leg dialog state is WIPED, so the b2bua's
-# in-dialog keepalive/BYE to that pod go unanswered and it tears down long calls.
-# That looks exactly like a SUT HA regression (long-loss spike) but is purely a
-# load-generator fault. We surface every UAS restart as an explicit INVOLUNTARY
-# chaos event and TAINT any chaos window it overlaps, so the run's failures are
-# not mis-attributed to the SUT. KSM relabels its emitted pod identity into
-# exported_* (the scrape overwrites namespace/pod with KSM's own), so the UAS
-# pods are matched on exported_pod, not pod.
-snap_uas_restarts() { vmq 'sum(kube_pod_container_status_restarts_total{exported_namespace="sip-test",exported_pod=~"sipp-uas.*",exported_container="sipp-uas"})'; }
+# The downstream SIPp UAS (sipp-uas-N, docker containers on sipext) periodically
+# self-aborts with exit 255 — a SIPp v3.7.7 internal timer-wheel slip
+# ("wheel_base > clock_tick") under high concurrency, NOT OOM / fd / -l (see
+# the retired manifests/10-sipp-uas.yaml history). When it dies, docker
+# restarts it (--restart unless-stopped, run.sh sipp_uas_up) but the in-memory
+# B-leg dialog state is WIPED, so the b2bua's in-dialog keepalive/BYE to that
+# container go unanswered and it tears down long calls. That looks exactly like
+# a SUT HA regression (long-loss spike) but is purely a load-generator fault.
+# We surface every UAS restart as an explicit INVOLUNTARY chaos event and TAINT
+# any chaos window it overlaps, so the run's failures are not mis-attributed to
+# the SUT. The counter is the summed docker RestartCount over the sipp-uas-*
+# containers (the exact analog of the old KSM
+# kube_pod_container_status_restarts_total query — in-cluster KSM cannot see
+# docker containers on the sipext bridge).
+snap_uas_restarts() {
+  local total=0 c n
+  for c in $(docker ps -aq --filter "label=sipext-run=$CLUSTER" --filter "name=sipp-uas-" 2>/dev/null); do
+    n="$(docker inspect -f '{{.RestartCount}}' "$c" 2>/dev/null || echo 0)"
+    total=$(( total + ${n:-0} ))
+  done
+  echo "$total"
+}
 
 # A UAS crash (exit-255 timer-wheel abort) wipes that pod's B-leg dialog state, so
 # ~1/N of established long calls are left A-leg-up / B-leg-dead. Those calls are not
@@ -600,9 +625,15 @@ uas_crash_watcher() {
     cur="$(snap_uas_restarts)"
     delta="$(python3 -c "print(int(float('$cur')-float('$last')))" 2>/dev/null || echo 0)"
     if [ "${delta:-0}" -gt 0 ]; then
-      pods="$(kubectl -n "$NS" get pods -l app=sipp-uas \
-        -o jsonpath='{range .items[*]}{.metadata.name}=r{.status.containerStatuses[0].restartCount} {end}' 2>/dev/null)"
-      exitc="$(vmq 'max(kube_pod_container_status_last_terminated_exitcode{exported_namespace="sip-test",exported_pod=~"sipp-uas.*"})')"
+      pods="$(docker ps -a --filter "label=sipext-run=$CLUSTER" --filter "name=sipp-uas-" \
+        --format '{{.Names}}' 2>/dev/null \
+        | while read -r p; do printf '%s=r%s ' "$p" "$(docker inspect -f '{{.RestartCount}}' "$p" 2>/dev/null || echo '?')"; done)"
+      # Exit code of the most recent UAS die event (docker retains only the
+      # CURRENT run's State.ExitCode after a restart, so read the die event
+      # stream — best-effort, 0 if none captured in the lookback).
+      exitc="$(docker events --since 90s --until 1s --filter type=container --filter event=die \
+        --format '{{.Actor.Attributes.name}} {{index .Actor.Attributes "exitCode"}}' 2>/dev/null \
+        | awk '/^sipp-uas-/{c=$2} END{print c+0}')"
       warn "INVOLUNTARY UAS CRASH (test-infra, NOT SUT): +${delta} restart(s), last exit=${exitc%.*} — [$pods] — flagged; overlapping chaos windows AND the next ${UAS_CRASH_DRAIN_SEC}s (dead-B-leg drain) will be TAINTED"
       date +%s > "$UAS_CRASH_TS_FILE"   # aftermath taint window: read by taint_if_uas_crash
       push_metric "sip_chaos_uas_crash_total ${cur%.*}
@@ -813,10 +844,10 @@ reboot_event() {
   log "CHAOS #$idx: kill_worker REBOOT $tgt mode=$mode (success=$s0 failed=$f0 ghost=$g0 active=$a0)"
   push_metric "sip_chaos_run{type=\"kill_worker\",phase=\"inject\"} 1"
   open_window kill_worker
-  # Flag the loadgen at the kill instant (background: its port-forward setup
-  # overlaps the delete) so post-reboot calls are auto-split near/clear. chaos.sh
-  # writes the REAL delete-instant timestamp to $kill_ts_file; loadgen_chaos_flag
-  # waits for it and back-dates the marker, so port-forward latency can't shift it
+  # Flag the loadgen at the kill instant (background POST to its sipext IP) so
+  # post-reboot calls are auto-split near/clear. chaos.sh writes the REAL
+  # delete-instant timestamp to $kill_ts_file; loadgen_chaos_flag waits for it
+  # and back-dates the marker, so plumbing latency can't shift it
   # (mis-bucketing kill-coincident transitions as chaos="clear").
   local kill_ts_file; kill_ts_file="$(mktemp "${TMPDIR:-/tmp}/endur-kill-ts.XXXXXX")"
   : > "$kill_ts_file"
@@ -1056,6 +1087,13 @@ chaos_event() {
       ./chaos.sh proxykill >>"$RUNLOG" 2>&1 || true ;;
     peak)
       PEAK_CAPS="$PEAK_CAPS" PEAK_SECS="$PEAK_SECS" ./chaos.sh peak >>"$RUNLOG" 2>&1 || true ;;
+    # cut_external_plane: sever the VRRP master edge node's sipext face for
+    # CUT_SECS; keepalived track_interface FAULTs it and the peer takes BOTH
+    # VIPs (<2s + GARP). Judged on the generic gate: blended success% + long-
+    # dialog survival per docs/testing/ha-acceptance.md (nopreempt: the VIPs
+    # stay with the peer after heal, so consecutive cuts alternate nodes).
+    cut_external_plane)
+      CUT_SECS="${CUT_SECS:-60}" ./chaos.sh cutext >>"$RUNLOG" 2>&1 || true ;;
   esac
 
   sleep "$SETTLE"
@@ -1121,93 +1159,49 @@ sip_chaos_resolved{type=\"$type\",outcome=\"failed\"} $df"
 }
 
 # --- deploy preflight + readiness gates (issue1) ---------------------------------
-# Normalise a k8s CPU quantity (e.g. "2", "500m", "1500m") to millicores (integer).
-cpu_to_millis() {  # $1 = quantity
-  python3 - "$1" <<'PY' 2>/dev/null || echo 0
-import sys, re
-q = (sys.argv[1] or "0").strip()
-if not q:
-    print(0); raise SystemExit
-m = re.match(r'^(\d+(?:\.\d+)?)(m?)$', q)
-if not m:
-    print(0); raise SystemExit
-v = float(m.group(1))
-print(int(round(v * (1 if m.group(2) == 'm' else 1000))))
-PY
+# Normalise a docker memory cap ("2g", "1536m", plain bytes) to MB (integer).
+docker_mem_to_mb() {  # $1 = quantity
+  local q="$1"
+  case "$q" in
+    *g|*G) awk -v v="${q%[gG]}" 'BEGIN{printf "%d", v*1024}' ;;
+    *m|*M) printf '%d' "${q%[mM]}" 2>/dev/null || echo 0 ;;
+    *k|*K) awk -v v="${q%[kK]}" 'BEGIN{printf "%d", v/1024}' ;;
+    ''|*[!0-9]*) echo 0 ;;
+    *) awk -v v="$q" 'BEGIN{printf "%d", v/1048576}' ;;
+  esac
 }
 
-# Capacity preflight: BEFORE the StatefulSet is applied, verify the 5 tier=load
-# sipp-uas replicas (each requesting UAS_CPU_REQ cores) actually fit on the tier=load
-# nodes given what is ALREADY scheduled there. Reads node allocatable CPU and the sum
-# of existing (non-terminated) pod CPU requests per tier=load node via kubectl/python.
-# DEGRADES TO A WARNING (returns 0) if it cannot compute (no jq dependency; tolerant
-# of odd numbers) so it never wedges a run on a parsing hiccup — it only HARD-FAILS
-# when it can confidently prove the pods will not fit.
-UAS_REPLICAS="${UAS_REPLICAS:-5}"          # must match manifests/10-sipp-uas.yaml replicas
-UAS_CPU_REQ_CORES="${UAS_CPU_REQ_CORES:-2}" # must match the UAS pod cpu request (millis below)
+# Capacity preflight — HOST-side now: the tier=load kind nodes are GONE and
+# every generator (UAS shards, UAC streams, loadgen) is a docker container
+# riding the WSL2 host directly. An overcommitted host FREEZES (20 GB VM,
+# vm.overcommit_memory=1), so before starting the UAS pool prove its summed
+# --memory caps fit inside the host's currently-available memory with margin.
+# DEGRADES TO A WARNING (returns 0) if it cannot compute, so it never wedges a
+# run on a parsing hiccup — it only HARD-FAILS when it can confidently prove
+# the containers will not fit. (The old k8s version proved the UAS CPU
+# requests fit the tier=load allocatable pool; docker has no reservations, so
+# memory-vs-MemAvailable is the meaningful host-freeze guard.)
 capacity_preflight() {
-  local want_millis allocatable_millis used_millis headroom_millis
-  want_millis=$(( UAS_REPLICAS * $(cpu_to_millis "${UAS_CPU_REQ_CORES}") ))
-  # Allocatable CPU summed over tier=load nodes.
-  local nodes
-  nodes="$(kubectl get nodes -l tier=load -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)"
-  if [ -z "$nodes" ]; then
-    warn "capacity preflight: no tier=load nodes found (or kubectl unavailable) — skipping (degraded to warning)"
+  local avail_kb avail_mb uas_mb want_mb
+  avail_kb="$(awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+  if [ "${avail_kb:-0}" -le 0 ]; then
+    warn "capacity preflight: cannot read /proc/meminfo MemAvailable — skipping (degraded to warning)"
     return 0
   fi
-  allocatable_millis=0
-  local n a
-  while read -r n; do
-    [ -n "$n" ] || continue
-    a="$(kubectl get node "$n" -o jsonpath='{.status.allocatable.cpu}' 2>/dev/null)"
-    allocatable_millis=$(( allocatable_millis + $(cpu_to_millis "$a") ))
-  done <<< "$nodes"
-  # Existing requested CPU on those nodes (sum of container requests for pods bound
-  # to a tier=load node, excluding Succeeded/Failed). Computed entirely in python so
-  # a missing field never aborts the loop.
-  # The python script lives in a heredoc-to-VARIABLE (a SIMPLE `cat` substitution —
-  # the same safe shape cpu_to_millis uses), NOT inline in the pipeline below. A
-  # heredoc inside a `$( ... | ... || echo 0 )` pipeline trips bash's RUNTIME parser
-  # ("command substitution: syntax error near ||" — invisible to `bash -n`, so it
-  # only blows up once tier=load nodes exist and this path runs), AND the `<<'PY'`
-  # heredoc would override the pipe as stdin so the kubectl JSON never reached python
-  # (used would always be 0). With `python3 -c "$used_py"` the JSON pipes to stdin,
-  # the script comes from -c, and $nodes is argv[1].
-  local used_py
-  used_py="$(cat <<'PY'
-import sys, json, re
-load_nodes = set(filter(None, (l.strip() for l in sys.argv[1].splitlines())))
-def millis(q):
-    q = (q or "").strip()
-    m = re.match(r'^(\d+(?:\.\d+)?)(m?)$', q)
-    if not m: return 0
-    return int(round(float(m.group(1)) * (1 if m.group(2) == 'm' else 1000)))
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    print(0); raise SystemExit
-total = 0
-for p in d.get("items", []):
-    if p.get("spec", {}).get("nodeName") not in load_nodes:
-        continue
-    for c in p.get("spec", {}).get("containers", []):
-        total += millis(c.get("resources", {}).get("requests", {}).get("cpu"))
-print(total)
-PY
-)"
-  used_millis="$(kubectl get pods -A \
-      --field-selector=status.phase!=Succeeded,status.phase!=Failed \
-      -o json 2>/dev/null \
-    | python3 -c "$used_py" "$nodes" 2>/dev/null || echo 0)"
-  if [ "${allocatable_millis:-0}" -le 0 ]; then
-    warn "capacity preflight: could not read tier=load allocatable CPU — skipping (degraded to warning)"
+  avail_mb=$(( avail_kb / 1024 ))
+  uas_mb="$(docker_mem_to_mb "${SIPP_UAS_MEM:-2g}")"
+  if [ "${uas_mb:-0}" -le 0 ]; then
+    warn "capacity preflight: cannot parse SIPP_UAS_MEM='${SIPP_UAS_MEM:-}' — skipping (degraded to warning)"
     return 0
   fi
-  headroom_millis=$(( allocatable_millis - used_millis ))
-  log "capacity preflight: sipp-uas wants $(( want_millis / 1000 )) CPU (${UAS_REPLICAS}×${UAS_CPU_REQ_CORES}); tier=load allocatable $(( allocatable_millis / 1000 )) CPU, already requested $(( used_millis / 1000 )) CPU, headroom ~$(( headroom_millis / 1000 )) CPU"
-  if [ "$want_millis" -gt "$headroom_millis" ]; then
-    warn "sipp-uas requests $(( want_millis / 1000 )) CPU across tier=load but headroom is ~$(( headroom_millis / 1000 )) CPU — refusing to deploy (lower sipp-uas replicas/cpu request or free node capacity)"
-    kubectl get nodes -l tier=load -o wide 2>/dev/null | tee -a "$RUNLOG" || true
+  want_mb=$(( SIPP_UAS_REPLICAS * uas_mb ))
+  log "capacity preflight: sipp-uas pool caps at ${want_mb}MB (${SIPP_UAS_REPLICAS}×${SIPP_UAS_MEM}); host MemAvailable ~${avail_mb}MB"
+  # Require the UAS pool to fit in <75% of what is available NOW, leaving the
+  # UAC streams/loadgen (their caps are burst ceilings, steady RSS is far
+  # lower) and the host itself real headroom.
+  if [ "$want_mb" -gt $(( avail_mb * 3 / 4 )) ]; then
+    warn "sipp-uas docker caps total ${want_mb}MB but host MemAvailable is ~${avail_mb}MB — refusing to deploy (lower SIPP_UAS_REPLICAS/SIPP_UAS_MEM or free host memory)"
+    free -m 2>/dev/null | tee -a "$RUNLOG" || true
     return 1
   fi
   return 0
@@ -1218,14 +1212,15 @@ PY
 # to fall through on a stuck rollout and baseline never produced traffic).
 assert_workloads_ready() {
   local ok_all=1
-  # sipp-uas: ALL replicas Ready (the StatefulSet that wedged Pending on the 5th pod).
-  local desired ready
-  # Desired = .spec.replicas (the authoritative target); .status.replicas can lag
-  # mid-reconcile and read low, letting the gate pass before the STS is fully scaled.
-  desired="$(kubectl -n "$NS" get statefulset sipp-uas -o jsonpath='{.spec.replicas}' 2>/dev/null || echo)"
-  ready="$(kubectl -n "$NS" get statefulset sipp-uas -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
-  if [ -z "$desired" ] || [ "${ready:-0}" != "$desired" ]; then
-    warn "sipp-uas not fully ready (${ready:-0}/${desired:-?} replicas Ready)"
+  # sipp-uas: ALL docker containers running (was: StatefulSet readyReplicas).
+  local i uas_up=0
+  for (( i=0; i<SIPP_UAS_REPLICAS; i++ )); do
+    if [ "$(docker inspect -f '{{.State.Running}}' "sipp-uas-$i" 2>/dev/null || echo false)" = "true" ]; then
+      uas_up=$(( uas_up + 1 ))
+    fi
+  done
+  if [ "$uas_up" != "$SIPP_UAS_REPLICAS" ]; then
+    warn "sipp-uas not fully up (${uas_up}/${SIPP_UAS_REPLICAS} docker containers running)"
     ok_all=0
   fi
   # b2bua workers: all replicas Ready.
@@ -1244,7 +1239,7 @@ assert_workloads_ready() {
     ok_all=0
   fi
   if [ "$ok_all" -ne 1 ]; then
-    warn "deploy is PARTIAL — dumping pending pods + their reasons for diagnosis:"
+    warn "deploy is PARTIAL — dumping pending pods + generator containers for diagnosis:"
     kubectl -n "$NS" get pods -o wide 2>/dev/null | tee -a "$RUNLOG" || true
     kubectl -n "$NS" get pods --field-selector=status.phase=Pending \
       -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
@@ -1253,14 +1248,18 @@ assert_workloads_ready() {
           echo "--- describe pod $pp (last events) ---" | tee -a "$RUNLOG"
           kubectl -n "$NS" describe pod "$pp" 2>/dev/null | sed -n '/Events:/,$p' | tee -a "$RUNLOG" || true
         done
+    docker ps -a --filter "label=sipext-run=$CLUSTER" \
+      --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null | tee -a "$RUNLOG" || true
     return 1
   fi
   return 0
 }
 
-# Traffic-started assertion: within ~60s confirm at least one sipp-uac pod exists AND
-# calls are actually being created (sipp_calls_created_total increasing). Fails fast
-# with the specific reason so a "clean-looking" zero-traffic run is impossible.
+# Traffic-started assertion: within ~150s confirm at least one sipp-uac docker
+# container is running AND calls are actually being created
+# (sipp_calls_created_total increasing — now scraped by the host
+# VictoriaMetrics from the exporters' static sipext targets). Fails fast with
+# the specific reason so a "clean-looking" zero-traffic run is impossible.
 assert_traffic_started() {
   # 150s (was 60s): on a COLD start the sipp stat-exporter sidecars (:9035) and
   # loadgen (:9300) are slow to answer vmagent's scrape under the bring-up CPU
@@ -1273,21 +1272,26 @@ assert_traffic_started() {
   local c0 saw_pod=0
   c0="$(vmq 'sum(sipp_calls_created_total)')"
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    if kubectl -n "$NS" get pods -l app=sipp-uac -o name 2>/dev/null | grep -q . ; then
+    if docker ps -q --filter "label=sipext-run=$CLUSTER" --filter "label=sipext-kind=sipp-uac" 2>/dev/null | grep -q . ; then
       saw_pod=1
       local c1; c1="$(vmq 'sum(sipp_calls_created_total)')"
       if python3 -c "exit(0 if float('$c1') > float('$c0') else 1)" 2>/dev/null; then
-        ok "traffic started: sipp-uac pods present and calls created ($c0 -> $c1)"
+        ok "traffic started: sipp-uac containers running and calls created ($c0 -> $c1)"
         return 0
       fi
     fi
     sleep 5
   done
   if [ "$saw_pod" -ne 1 ]; then
-    warn "no sipp-uac pod appeared within 60s of starting baseline — traffic NEVER started (check the UAC jobs / scheduling)"
+    warn "no sipp-uac container appeared within 150s of starting baseline — traffic NEVER started (check docker / the stream launcher)"
   else
-    warn "sipp-uac pods exist but sipp_calls_created_total did not increase within 60s — no calls being placed (check SIPp logs / proxy reachability)"
-    kubectl -n "$NS" logs -l app=sipp-uac -c sipp-uac --tail=40 2>/dev/null | tee -a "$RUNLOG" || true
+    warn "sipp-uac containers exist but sipp_calls_created_total did not increase within 150s — no calls being placed (check SIPp logs / VIP reachability / the VM static sipext scrape)"
+    docker ps --filter "label=sipext-run=$CLUSTER" --filter "label=sipext-kind=sipp-uac" --format '{{.Names}}' 2>/dev/null \
+      | while read -r cn; do
+          [ -n "$cn" ] || continue
+          echo "--- $cn (tail) ---" | tee -a "$RUNLOG"
+          docker logs --tail 40 "$cn" 2>&1 | tee -a "$RUNLOG" || true
+        done
   fi
   return 1
 }
@@ -1329,15 +1333,16 @@ wireup() {
     log "wireup: pulling RabbitMQ image $RABBITMQ_IMAGE (CDR transport)"
     docker image inspect "$RABBITMQ_IMAGE" >/dev/null 2>&1 || docker pull "$RABBITMQ_IMAGE" >>"$RUNLOG" 2>&1
     log "wireup: loading images into kind"
+    # sipp:dev is NOT kind-loaded: all SIPp generators run as docker containers
+    # on the sipext bridge straight off the host image (built above).
     kind load docker-image "$SUT_IMAGE" --name "$CLUSTER" >>"$RUNLOG" 2>&1
     kind load docker-image "$KEEPALIVED_IMAGE" --name "$CLUSTER" >>"$RUNLOG" 2>&1
-    kind load docker-image sipp:dev --name "$CLUSTER" >>"$RUNLOG" 2>&1
     kind load docker-image "$RABBITMQ_IMAGE" --name "$CLUSTER" >>"$RUNLOG" 2>&1
   fi
-  # Capacity preflight BEFORE deploy applies the sipp-uas StatefulSet: prove the 5
-  # tier=load replicas fit, else fail with a clear headroom message (issue1 — the 5th
-  # UAS pod stayed Pending on CPU and deploy timed out). Skippable for odd clusters
-  # via CAPACITY_PREFLIGHT=0; degrades to a warning if it cannot compute.
+  # Capacity preflight BEFORE deploy launches the sipp-uas docker pool: prove
+  # the summed UAS memory caps fit the HOST (generators ride the WSL2 host
+  # directly now), else fail with a clear headroom message. Skippable via
+  # CAPACITY_PREFLIGHT=0; degrades to a warning if it cannot compute.
   if [ "${CAPACITY_PREFLIGHT:-1}" = "1" ]; then
     capacity_preflight || { warn "wireup: capacity preflight failed — refusing to deploy"; return 1; }
   fi
@@ -1354,11 +1359,12 @@ wireup() {
   # + chk_proxy track_script in 30-proxy.yaml, vip_smoke gate in run.sh deploy);
   # this restart is retained purely for the image-refresh reason above.
   if [ "${SKIP_BUILD:-0}" != "1" ]; then
-    log "wireup: rolling workers/proxy/uas onto the freshly-built image"
-    kubectl -n "$NS" rollout restart statefulset/b2bua-worker deploy/sip-front-proxy statefulset/sipp-uas deploy/cdr-consumer >>"$RUNLOG" 2>&1 || true
+    log "wireup: rolling workers/proxy onto the freshly-built image"
+    # No sipp-uas restart needed: `./run.sh deploy` above (sipp_uas_up) already
+    # recreated the UAS docker containers from the sipp:dev image built above.
+    kubectl -n "$NS" rollout restart statefulset/b2bua-worker deploy/sip-front-proxy deploy/cdr-consumer >>"$RUNLOG" 2>&1 || true
     kubectl -n "$NS" rollout status statefulset/b2bua-worker --timeout=300s >>"$RUNLOG" 2>&1 || true
     kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout=180s >>"$RUNLOG" 2>&1 || true
-    kubectl -n "$NS" rollout status statefulset/sipp-uas --timeout=180s >>"$RUNLOG" 2>&1 || true
     kubectl -n "$NS" rollout status deploy/cdr-consumer --timeout=180s >>"$RUNLOG" 2>&1 || true
   fi
   log "wireup: (re)load observability dashboards/scrape"
@@ -1375,31 +1381,66 @@ wireup() {
 }
 
 # --- Rust loadgen stream (runs in PARALLEL with the SIPp baseline) ------------
-# Apply the loadgen Job from the shared manifest. All LOADGEN_* knobs + the shared
-# PROXY_TARGET/SIP_PORT are exported for envsubst.
+# A docker container on the sipext bridge at the pinned $SIPEXT_LOADGEN_IP
+# (.20), replacing the 45-loadgen-job.yaml kubectl Job. Same binary/argv: the
+# image is $LOADGEN_IMAGE (= $SUT_IMAGE siprustserver:dev — built from this
+# repo's deploy/docker/Dockerfile by `run.sh up` / wireup; /usr/local/bin/
+# loadgen ships inside it). It is BOTH UAC and UAS (mux sockets on its own IP:
+# uac=base, uas=base+1), dials the EXTERNAL VIP ${SIPEXT_TARGET}:${SIP_PORT},
+# and --route-pin-to-uas stamps its sipext IP LITERAL as the per-call callee —
+# exactly the injected-IP-literal contract the workers' allowed-target gate
+# requires. /report is a HOST BIND MOUNT into the run dir now, so the HTML
+# callflow report is browsable live and survives the container — no kubectl cp.
+# Metrics :9300 are scraped by the host VictoriaMetrics at its static sipext
+# target; POST /chaos goes straight to the same IP (no port-forward).
 launch_loadgen() {
   [ "$LOADGEN_ENABLE" = "1" ] || { log "LOADGEN_ENABLE=0 — skipping rust loadgen stream"; return 0; }
-  export LOADGEN_JOB_NAME LOADGEN_IMAGE LOADGEN_CPS LOADGEN_DURATION LOADGEN_MAX_INFLIGHT \
-         LOADGEN_RING_MS LOADGEN_TALK_MS LOADGEN_GAP_MS LOADGEN_LONG_HOLD_SECS LOADGEN_RECV_TIMEOUT_MS \
-         LOADGEN_DROP_RATE \
-         LOADGEN_W_BASIC LOADGEN_W_REINVITE LOADGEN_W_REFER LOADGEN_W_LONG \
-         LOADGEN_RECORD_EVERY LOADGEN_SAMPLE_CAP LOADGEN_REPORT_INTERVAL LOADGEN_CHAOS_PHASE_TOL_MS \
-         LOADGEN_CPU_REQ LOADGEN_CPU_LIM LOADGEN_MEM_REQ LOADGEN_MEM_LIM \
-         PROXY_TARGET SIP_PORT
-  kubectl -n "$NS" delete job "$LOADGEN_JOB_NAME" --ignore-not-found >/dev/null 2>&1 || true
-  envsubst < manifests/45-loadgen-job.yaml | kubectl apply -f - >/dev/null
-  log "loadgen started: ${LOADGEN_CPS}cps (basic=${LOADGEN_W_BASIC} reinvite=${LOADGEN_W_REINVITE} long=${LOADGEN_W_LONG} refer=${LOADGEN_W_REFER}), ring=${LOADGEN_RING_MS}ms talk=${LOADGEN_TALK_MS}ms gap=${LOADGEN_GAP_MS}ms long_hold=${LOADGEN_LONG_HOLD_SECS}s, full-rec=$([ "$LOADGEN_RECORD_EVERY" = 1 ] && echo on || echo 1/${LOADGEN_RECORD_EVERY})"
+  docker network inspect "$SIPEXT_NET" >/dev/null 2>&1 || { warn "launch_loadgen: sipext network missing"; return 1; }
+  mkdir -p "$RUN_DIR/loadgen-report"
+  docker rm -f "$LOADGEN_JOB_NAME" >/dev/null 2>&1 || true
+  docker run -d --name "$LOADGEN_JOB_NAME" \
+    --label "sipext-run=$CLUSTER" --label "sipext-kind=loadgen" \
+    --network "$SIPEXT_NET" --ip "$SIPEXT_LOADGEN_IP" \
+    --restart on-failure:4 \
+    --cpus "$(k8s_cpu_to_docker "$LOADGEN_CPU_LIM")" \
+    --memory "$(k8s_mem_to_docker "$LOADGEN_MEM_LIM")" \
+    -v "$RUN_DIR/loadgen-report:/report" \
+    "$LOADGEN_IMAGE" /usr/local/bin/loadgen \
+      --target "${SIPEXT_TARGET}:${SIP_PORT}" \
+      --bind-ip "$SIPEXT_LOADGEN_IP" \
+      --route-pin-to-uas \
+      --correlation-header X-Loadgen-Id \
+      --cps "$LOADGEN_CPS" \
+      --duration "$LOADGEN_DURATION" \
+      --max-in-flight "$LOADGEN_MAX_INFLIGHT" \
+      --ring-delay-ms "$LOADGEN_RING_MS" \
+      --talk-time-ms "$LOADGEN_TALK_MS" \
+      --reinvite-gap-ms "$LOADGEN_GAP_MS" \
+      --long-hold-secs "$LOADGEN_LONG_HOLD_SECS" \
+      --recv-timeout-ms "$LOADGEN_RECV_TIMEOUT_MS" \
+      --drop-rate "$LOADGEN_DROP_RATE" \
+      --auto-retransmit \
+      --scenario "basic_call=${LOADGEN_W_BASIC}" \
+      --scenario "reinvite=${LOADGEN_W_REINVITE}" \
+      --scenario "refer=${LOADGEN_W_REFER}" \
+      --scenario "long_call=${LOADGEN_W_LONG}" \
+      --background-record-every "$LOADGEN_RECORD_EVERY" \
+      --sample-cap "$LOADGEN_SAMPLE_CAP" \
+      --out-dir /report \
+      --report-interval-secs "$LOADGEN_REPORT_INTERVAL" \
+      --metrics-addr "0.0.0.0:9300" \
+      --chaos-phase-tolerance-ms "$LOADGEN_CHAOS_PHASE_TOL_MS" \
+    >/dev/null
+  log "loadgen started at $SIPEXT_LOADGEN_IP (docker/sipext): ${LOADGEN_CPS}cps (basic=${LOADGEN_W_BASIC} reinvite=${LOADGEN_W_REINVITE} long=${LOADGEN_W_LONG} refer=${LOADGEN_W_REFER}), ring=${LOADGEN_RING_MS}ms talk=${LOADGEN_TALK_MS}ms gap=${LOADGEN_GAP_MS}ms long_hold=${LOADGEN_LONG_HOLD_SECS}s, full-rec=$([ "$LOADGEN_RECORD_EVERY" = 1 ] && echo on || echo 1/${LOADGEN_RECORD_EVERY})"
 }
 
-# Recreate the loadgen Job if it vanished/failed (same supervision the SIPp
-# baseline gets via ensure_baseline). A loadgen self-abort loses only its own
-# calls, so — like a UAC stream crash — it never taints a chaos window.
+# Recreate the loadgen container if it vanished/failed (same supervision the
+# SIPp baseline gets via ensure_baseline). A loadgen self-abort loses only its
+# own calls, so — like a UAC stream crash — it never taints a chaos window.
 ensure_loadgen() {
   [ "$LOADGEN_ENABLE" = "1" ] || return 0
-  local active
-  active="$(kubectl -n "$NS" get job "$LOADGEN_JOB_NAME" -o jsonpath='{.status.active}' 2>/dev/null || echo)"
-  if [ "${active:-0}" != "1" ]; then
-    warn "loadgen job not active — relaunching"
+  if [ "$(sipext_uac_running "$LOADGEN_JOB_NAME")" != "true" ]; then
+    warn "loadgen container not running — relaunching"
     push_metric "sip_endurance_stream_restart{stream=\"loadgen\"} 1"
     launch_loadgen
   fi
@@ -1407,24 +1448,21 @@ ensure_loadgen() {
 
 stop_loadgen() {
   [ "$LOADGEN_ENABLE" = "1" ] || return 0
-  kubectl -n "$NS" delete job "$LOADGEN_JOB_NAME" --ignore-not-found >/dev/null 2>&1 || true
+  docker rm -f "$LOADGEN_JOB_NAME" >/dev/null 2>&1 || true
 }
 
-# Copy the loadgen on-disk HTML callflow report out of the running pod into the
-# run's results dir (index.html + callflows/), so it is easy to open locally. The
-# generator re-snapshots it every LOADGEN_REPORT_INTERVAL s, so this works mid-run
-# AND at the end. Also logs the OK ratio from live metrics.
+# The loadgen HTML callflow report (/report) is a HOST BIND MOUNT into
+# $RUN_DIR/loadgen-report now — no copy needed, it is live on disk and
+# survives the container (the old kubectl-cp-per-cycle dance and its
+# "pod already gone -> zero callflows" failure mode are structurally gone).
+# This just confirms it and logs the OK ratio / 18x gate from live metrics.
 fetch_loadgen_report() {
   [ "$LOADGEN_ENABLE" = "1" ] || return 0
-  local pod dest
-  pod="$(kubectl -n "$NS" get pod -l app=loadgen -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo)"
-  if [ -z "$pod" ]; then warn "fetch-loadgen: no loadgen pod found"; return 0; fi
-  dest="$RUN_DIR/loadgen-report"
-  mkdir -p "$dest"
-  if kubectl -n "$NS" cp "$pod:/report" "$dest" >>"$RUNLOG" 2>&1; then
-    ok "loadgen report copied to $dest (open $dest/index.html)"
+  local dest="$RUN_DIR/loadgen-report"
+  if [ -f "$dest/index.html" ]; then
+    ok "loadgen report live at $dest (bind mount; open $dest/index.html)"
   else
-    warn "fetch-loadgen: kubectl cp from $pod:/report failed (report may not be snapshotted yet)"
+    warn "fetch-loadgen: $dest/index.html not present yet (report may not be snapshotted yet)"
   fi
   # Live OK ratio from the loadgen series (best-effort; 0 if VM unreachable).
   local ok_n tot_n
@@ -1453,9 +1491,9 @@ fetch_loadgen_report() {
 
 start_baseline() {
   log "starting baseline streams: long@${LONG_CPS}(${LONG_SHARDS} shards×${LONG_SHARD_CPS}cps) reinvite@${REINVITE_CPS} short_em@${SHORT_EM_CPS}+short_ne@${SHORT_NE_CPS}(=${SHORT_CPS}) abuse@${ABUSE_CAPS} limiter@${LIMITER_CPS}(cap ${LIMITER_TARGET}) loadgen@${LOADGEN_CPS}"
-  local job scenario cps role
-  while read -r job scenario cps role; do
-    [ -n "$job" ] && launch_stream "$job" "$scenario" "$cps" "$role"
+  local job scenario cps role slot
+  while read -r job scenario cps role slot; do
+    [ -n "$job" ] && launch_stream "$job" "$scenario" "$cps" "$role" "$slot"
   done < <(baseline_specs)
   ABUSE_CAPS="$ABUSE_CAPS" ./chaos.sh abuse up >>"$RUNLOG" 2>&1 || true
   launch_loadgen
@@ -1465,10 +1503,12 @@ start_baseline() {
 stop_streams() {
   log "stopping baseline + abuse streams"
   local job _rest
-  # Delete every long shard + the fixed-name streams + the transient chaos jobs.
+  # Remove every long shard + the fixed-name streams + the transient chaos
+  # streams (docker rm -f of UAC + exporter twin; all carry sipext-run=$CLUSTER
+  # so `run.sh down`/sipext_down would reap any stragglers anyway).
   { baseline_specs | awk '{print $1}'; printf '%s\n' sipp-uac-peak sipp-uac-orphan; } \
     | while read -r job; do
-        kubectl -n "$NS" delete job "$job" --ignore-not-found >/dev/null 2>&1 || true
+        sipext_sipp_uac_rm "$job"
       done
   ./chaos.sh abuse down >>"$RUNLOG" 2>&1 || true
   stop_loadgen
@@ -1516,6 +1556,12 @@ run() {
     log "REBOOT_FOCUS=1 — chaos cycle is b2bua worker reboot only (graceful/crash alternating)"
   else
     cycle=(orphan_kill kill_worker kill_proxy peak cpu_starve cpu_starve_all limiter_kill limiter_netcut)
+    # NEW, default-OFF event: cut the VRRP master's external (sipext) plane —
+    # opt in with CUT_EXTERNAL_ENABLE=1 (see chaos.sh cut_external_plane).
+    if [ "${CUT_EXTERNAL_ENABLE:-0}" = "1" ]; then
+      cycle+=(cut_external_plane)
+      log "CUT_EXTERNAL_ENABLE=1 — cut_external_plane added to the chaos cycle"
+    fi
   fi
   local start now idx=0
   start="$(date +%s)"
@@ -1544,14 +1590,12 @@ run() {
     ensure_loadgen
     chaos_event "${cycle[$(( idx % ${#cycle[@]} ))]}" "$idx"
     idx=$(( idx + 1 ))
-    # Preserve the loadgen callflow report EVERY cycle, not just at teardown: the
-    # generator re-snapshots /report every LOADGEN_REPORT_INTERVAL s, and the Job
-    # pod can exit (its own duration, an OOM, or a chaos-adjacent restart) BEFORE
-    # the end-of-run fetch — which loses the sampled NOK callflows with the pod's
-    # emptyDir (observed endurance-20260701: "fetch-loadgen: no loadgen pod found"
-    # → zero callflows for the run's residual failures). A failed cp (pod already
-    # gone) warns and leaves the last good copy intact, so this only ever upgrades
-    # the on-disk snapshot. Cheap (one kubectl cp per CHAOS_INTERVAL).
+    # The loadgen /report is a HOST BIND MOUNT now (re-snapshotted every
+    # LOADGEN_REPORT_INTERVAL s straight into $RUN_DIR/loadgen-report), so the
+    # old per-cycle kubectl-cp preservation dance — and its "pod already gone
+    # → zero callflows" failure mode (endurance-20260701) — is structurally
+    # gone. This per-cycle call just logs report presence + the live OK/18x
+    # ratios so a mid-run stall is visible in the run log.
     fetch_loadgen_report
     # Remaining sleep until the next interval boundary.
     local elapsed_since=$(( $(date +%s) - now ))
@@ -1586,9 +1630,9 @@ case "$cmd" in
   run)    run ;;
   wireup) wireup ;;
   stop)   stop_streams ;;
-  # Copy the loadgen HTML callflow report out of the running pod ANYTIME (it is
-  # re-snapshotted every LOADGEN_REPORT_INTERVAL s). Writes under the LATEST
-  # results/endurance-* run dir if one exists, else a fresh timestamped dir.
+  # Confirm the loadgen HTML callflow report ANYTIME (it is a live host bind
+  # mount, re-snapshotted every LOADGEN_REPORT_INTERVAL s). Looks under the
+  # LATEST results/endurance-* run dir if one exists, else a fresh dir.
   fetch-loadgen)
     LATEST="$(ls -dt "$HERE"/results/endurance-* 2>/dev/null | head -1 || true)"
     RUN_DIR="${LATEST:-$RUN_DIR}"; RUNLOG="$RUN_DIR/run.log"; mkdir -p "$RUN_DIR"

@@ -12,7 +12,7 @@
   terminates ONLY when keepalives stop (genuine teardown), which is the
   intended reboot-survival semantics. CurrentCall growth is bounded
   operationally by the job's `-l MAX_CONCURRENT` ceiling + `-recv_timeout`
-  dead-call reaper (manifests/40-sipp-uac-job.yaml), not by an OPTIONS
+  dead-call reaper (lib/sipext-gen.sh, the docker UAC stream launcher), not by an OPTIONS
   count — size those (and the offered LONG_CPS) for the target steady
   concurrency.
 
@@ -117,7 +117,7 @@
        reclaimed dialog's replayed OPTIONS always lands on a parked recv and
        is answered. CurrentCall growth is bounded operationally by the job's
        `-l MAX_CONCURRENT` ceiling + `-recv_timeout` dead-call reaper
-       (manifests/40-sipp-uac-job.yaml), not by a per-call message count. -->
+       (lib/sipext-gen.sh, the docker UAC stream launcher), not by a per-call message count. -->
   <label id="hold_loop"/>
   <!-- An AS-initiated BYE (max-duration cap, keepalive-timeout, any policy
        teardown) is a LEGITIMATE call end a real UAC answers with 200 — NOT a

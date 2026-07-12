@@ -1,0 +1,67 @@
+# KIND-MASQ-AGENT exemption — the newkahneed-041 fix as a FIRST-CLASS deploy
+# contract (replaces the newkahsip overlay's post-deploy `vip_masq_exempt`
+# iptables poke).
+#
+# kindnetd's KIND-MASQ-AGENT chain (nat POSTROUTING) exempts only the pod CIDR
+# and MASQUERADEs everything else. The SIP plane must keep REAL addresses:
+#
+#   - worker pod -> ${PROXY_VIP} (internal VIP) crosses it: the caller/worker
+#     source gets SNAT'd to a node IP with the source PORT REMAPPED under load,
+#     and the proxy's VIP-sourced replies get re-SNAT'd VIP -> node-IP so they
+#     no longer match the peer's egress conntrack reply tuple -> silently
+#     dropped (~95% caller timeouts, newkahneed-041).
+#   - proxy external-face traffic toward ${SIPEXT_SUBNET} must never be
+#     masqueraded either (defensive: the sipext bridge itself has docker
+#     masquerade disabled, but the node's own POSTROUTING still applies).
+#
+# One RETURN rule per direction per identity, inserted at position 1, asserted
+# idempotently and RE-ASSERTED every 15 s so a kindnetd reconcile can't wipe
+# them for longer than one period (the overlay poke's documented weakness).
+# Runs on EVERY node (edge + app: both ends of the worker<->VIP path masq).
+#
+# Rendered via subst_manifest (envsubst): ${PROXY_VIP} ${SIPEXT_VIP}
+# ${SIPEXT_SUBNET} come from lib/net-env.sh. The shell script below must use
+# NO named shell variables (envsubst would blank them) — literals only.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: masq-exempt
+  namespace: sip-test
+  labels: { app: masq-exempt }
+spec:
+  selector: { matchLabels: { app: masq-exempt } }
+  template:
+    metadata:
+      labels: { app: masq-exempt }
+    spec:
+      hostNetwork: true
+      tolerations:
+        - { key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }
+      containers:
+        - name: masq-exempt
+          # Reuses the locally-built keepalived image (alpine + iptables) so no
+          # extra image is built or side-loaded.
+          image: siprustserver-keepalived:dev
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            capabilities: { add: ["NET_ADMIN", "NET_RAW"] }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "masq-exempt: asserting KIND-MASQ-AGENT RETURN rules for ${PROXY_VIP}, ${SIPEXT_VIP}, ${SIPEXT_SUBNET} (period 15s)"
+              while true; do
+                if iptables -t nat -nL KIND-MASQ-AGENT >/dev/null 2>&1; then
+                  iptables -t nat -C KIND-MASQ-AGENT -s ${PROXY_VIP}/32 -j RETURN 2>/dev/null \
+                    || { iptables -t nat -I KIND-MASQ-AGENT 1 -s ${PROXY_VIP}/32 -j RETURN && echo "masq-exempt: inserted -s ${PROXY_VIP}/32 RETURN"; }
+                  iptables -t nat -C KIND-MASQ-AGENT -d ${PROXY_VIP}/32 -j RETURN 2>/dev/null \
+                    || { iptables -t nat -I KIND-MASQ-AGENT 1 -d ${PROXY_VIP}/32 -j RETURN && echo "masq-exempt: inserted -d ${PROXY_VIP}/32 RETURN"; }
+                  iptables -t nat -C KIND-MASQ-AGENT -s ${SIPEXT_VIP}/32 -j RETURN 2>/dev/null \
+                    || { iptables -t nat -I KIND-MASQ-AGENT 1 -s ${SIPEXT_VIP}/32 -j RETURN && echo "masq-exempt: inserted -s ${SIPEXT_VIP}/32 RETURN"; }
+                  iptables -t nat -C KIND-MASQ-AGENT -d ${SIPEXT_SUBNET} -j RETURN 2>/dev/null \
+                    || { iptables -t nat -I KIND-MASQ-AGENT 1 -d ${SIPEXT_SUBNET} -j RETURN && echo "masq-exempt: inserted -d ${SIPEXT_SUBNET} RETURN"; }
+                fi
+                sleep 15
+              done
+          resources:
+            requests: { cpu: "10m", memory: "8Mi" }
+            limits:   { memory: "32Mi" }

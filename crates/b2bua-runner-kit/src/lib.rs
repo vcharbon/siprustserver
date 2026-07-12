@@ -134,6 +134,29 @@ pub fn validate_tier1_pct(udp_tier1_pct: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// Boot-time invariant for cluster-profile workers (pure, unit-testable):
+/// when `B2BUA_REQUIRE_OUTBOUND_PROXY` is set, `B2BUA_OUTBOUND_PROXY` MUST be
+/// configured — a worker without it dials b-leg R-URIs pod-direct, bypassing
+/// the front proxy and (in the dual-face network split) reaching for a plane
+/// it must not see. Checked at [`RunnerEnv::bind`]; exported for runners that
+/// assemble their own env.
+pub fn validate_outbound_proxy_requirement(
+    require_outbound_proxy: bool,
+    outbound_proxy_set: bool,
+) -> Result<(), String> {
+    if require_outbound_proxy && !outbound_proxy_set {
+        return Err(
+            "B2BUA_REQUIRE_OUTBOUND_PROXY is set but B2BUA_OUTBOUND_PROXY is unset: this \
+             profile REQUIRES every b-leg to traverse the front proxy (workers must never \
+             dial callees pod-direct — only the proxy bridges to the external plane). Set \
+             B2BUA_OUTBOUND_PROXY=host:port or unset B2BUA_REQUIRE_OUTBOUND_PROXY for \
+             local/dev"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Boot-time coherence check for runners with a **static default callee**: the
 /// b-leg admission gate (`apply_route`) classifies the callee's
 /// `destination.host`, so a default the worker's own TargetAdmission allow-list
@@ -178,6 +201,13 @@ pub struct RunnerEnv {
     /// fatal at parse — a silent fallback to pod-direct is exactly the
     /// endurance bug this prevents.
     pub outbound_proxy: Option<(String, u16)>,
+    /// `B2BUA_REQUIRE_OUTBOUND_PROXY` — set (to ANY non-empty value) to refuse
+    /// boot when `B2BUA_OUTBOUND_PROXY` is unset. In the cluster profile a
+    /// worker silently dialing R-URIs pod-direct violates the "only the proxy
+    /// sees the external world" invariant (the dual-face network split);
+    /// crashing at boot turns that misconfiguration into a loud
+    /// CrashLoopBackOff instead of a live plane leak.
+    pub require_outbound_proxy: bool,
     /// `B2BUA_METRICS` — Prometheus HTTP listen addr (default `0.0.0.0:9091`).
     pub metrics_addr: String,
     /// `B2BUA_QUEUE` — inbound UDP queue depth, packets (default 8192).
@@ -268,6 +298,9 @@ impl RunnerEnv {
                 }
                 _ => None,
             },
+            require_outbound_proxy: env::var("B2BUA_REQUIRE_OUTBOUND_PROXY")
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false),
             metrics_addr: env_or("B2BUA_METRICS", "0.0.0.0:9091"),
             queue_max: env_or("B2BUA_QUEUE", "8192").parse().expect("B2BUA_QUEUE"),
             cdr_queue: env_or("B2BUA_CDR_QUEUE", "1024").parse().expect("B2BUA_CDR_QUEUE"),
@@ -334,6 +367,8 @@ impl RunnerEnv {
     /// bind failure or an invalid config. `name` prefixes every log line.
     pub async fn bind(self, name: &str) -> RunnerBase {
         validate_tier1_pct(self.udp_tier1_pct)
+            .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
+        validate_outbound_proxy_requirement(self.require_outbound_proxy, self.outbound_proxy.is_some())
             .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
 
         let listen_sa = resolve(&self.listen);
@@ -809,6 +844,25 @@ mod tests {
         assert_eq!(split_host_port("bob:5071"), ("bob".to_string(), 5071));
         assert_eq!(split_host_port("bob"), ("bob".to_string(), 5060));
         assert_eq!(split_host_port("bob:nope"), ("bob".to_string(), 5060));
+    }
+
+    #[test]
+    fn require_outbound_proxy_without_proxy_refuses_boot() {
+        let e = validate_outbound_proxy_requirement(true, false)
+            .expect_err("required-but-unset outbound proxy must fail boot");
+        assert!(e.contains("B2BUA_OUTBOUND_PROXY"), "msg was: {e}");
+        assert!(e.contains("B2BUA_REQUIRE_OUTBOUND_PROXY"), "msg names the guard: {e}");
+    }
+
+    #[test]
+    fn require_outbound_proxy_with_proxy_boots() {
+        assert!(validate_outbound_proxy_requirement(true, true).is_ok());
+    }
+
+    #[test]
+    fn outbound_proxy_optional_when_not_required() {
+        assert!(validate_outbound_proxy_requirement(false, false).is_ok());
+        assert!(validate_outbound_proxy_requirement(false, true).is_ok());
     }
 
     #[test]

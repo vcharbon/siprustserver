@@ -163,15 +163,19 @@ stays a config knob for degenerate clusters.
   **2 nodes per zone**. Hosts the three zoned StatefulSets (2 workers/zone).
 - **proxies** — co-located on 2 of the app nodes in 2 distinct zones (no separate
   `tier=edge` nodes). The proxy `nodeSelector` + zone anti-affinity place them.
-- **load** ×2 — `tier: load` (unchanged; keeps SIPp generators off the SUT
-  nodes; one carries the `30060→5060` port map).
+- **load** — NONE (updated for the sipext dual-plane layout, 2026-07-12): the
+  generators (sipp UAC/UAS, loadgen) are plain docker containers on the no-NAT
+  `sipext` bridge dialing the proxy's EXTERNAL VIP; there are no tier=load kind
+  nodes and no hostPort map anymore. Note the co-located-proxy row above also
+  needs revisiting against sipext: whichever nodes host the proxies must be the
+  (only) ones dual-homed onto the sipext bridge.
 
-> **WSL2 memory caveat.** 6 app + 2 load + control-plane ≈ 9 kind nodes is
-> heavier than today's cluster — see the endurance OOM history
+> **WSL2 memory caveat.** 6 app + control-plane ≈ 7 kind nodes is still heavier
+> than today's cluster — see the endurance OOM history
 > (`deploy/observability/.../cap-kind-memory.sh`, MEMORY: *endurance+chaos
-> suite*). Run `cap-kind-memory.sh` first; consider 1 load node if memory is
-> tight. A smaller "mechanism-only" variant (3 zones × 1 node = 3 app nodes) can
-> validate distinct-zone selection + zone-kill without the 2-per-zone density.
+> suite*). Run `cap-kind-memory.sh` first. A smaller "mechanism-only" variant
+> (3 zones × 1 node = 3 app nodes) can validate distinct-zone selection +
+> zone-kill without the 2-per-zone density.
 
 ### Validation on kind
 

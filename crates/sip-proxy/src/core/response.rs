@@ -38,7 +38,9 @@ impl ProxyCore {
         }
         let top = resp.via.first();
         let top_port = top.port.unwrap_or(5060);
-        if top.host != self.advertised.host || top_port != self.advertised.port {
+        // Dual-face: the proxy stamps its outbound Via with the EGRESS face's
+        // advertise, so a response legitimately names either face here.
+        if !self.is_self_addr(&top.host, top_port) {
             // Top Via is not us — not our response to relay.
             self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
             return;
@@ -115,11 +117,16 @@ impl ProxyCore {
             // re-builds exactly the key the INVITE was remembered under.
             let key = call_id_cseq_key(&resp.call_id, resp.from.tag.as_deref(), resp.cseq.seq);
             if let Some(found) = self.cancel_lru.lookup(&key) {
+                // The synthesized hop ACK travels the SAME hop the INVITE was
+                // forwarded on, so its proxy Via carries THAT face's advertise
+                // (matching the branch-correlated INVITE Via the downstream
+                // UAS saw).
+                let ack_adv = self.egress_advertised(&found.target);
                 let ack = generate_proxy_ack_for_non_2xx(
                     &resp,
                     (&found.target.host, found.target.port),
                     &found.branch,
-                    (&self.advertised.host, self.advertised.port),
+                    (&ack_adv.host, ack_adv.port),
                     // §17.1.1.3: reuse the INVITE's Request-URI verbatim (the
                     // remembered forward), so the downstream UAS sees the ACK
                     // under the URI it was INVITEd on — not a user-stripped
@@ -163,8 +170,10 @@ impl ProxyCore {
         for h in resp.headers.iter().filter(|h| h.name.eq_ignore_ascii_case("record-route")) {
             for entry in crate::headers::split_top_level_commas(&h.value) {
                 if let Some(parsed) = parse_sip_uri(&entry) {
-                    if parsed.host == self.advertised.host
-                        && crate::headers::uri_port_u16(parsed.port) == Some(self.advertised.port)
+                    // Either face's advertise is "our" Record-Route (dual-face
+                    // stamps the two halves with different hosts).
+                    if crate::headers::uri_port_u16(parsed.port)
+                        .is_some_and(|p| self.is_self_addr(&parsed.host, p))
                     {
                         return Some(parse_uri_params(&entry));
                     }
