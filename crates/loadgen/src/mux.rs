@@ -53,7 +53,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -62,8 +62,8 @@ use scenario_harness::realcall::CorrelationStamp;
 use sip_clock::Clock;
 use sip_net::queue::PacketQueue;
 use sip_net::{
-    BindError, BindErrorReason, BindUdpOpts, SendError, SignalingNetwork, UdpEndpoint,
-    UdpEndpointCounters, UdpPacket, UndeliveredPacket,
+    BindError, BindErrorReason, BindUdpOpts, ReEmitKind, SendError, SendTap, SignalingNetwork,
+    UdpEndpoint, UdpEndpointCounters, UdpPacket, UndeliveredPacket,
 };
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
@@ -810,6 +810,20 @@ impl UdpEndpoint for MuxEndpoint {
         self.queue.install_tap(tap);
         true
     }
+
+    fn install_send_tap(&self, tap: SendTap) -> bool {
+        // Re-emissions come from the per-call retransmit engine; with no engine
+        // (`--auto-retransmit` off) there is nothing to tap. The engine handle is
+        // shared with the inbound `route` path, so one install covers both the
+        // proactive (Timer A/E/G) and reactive (re-ACK / re-answer) resends.
+        match &self.txns {
+            Some(txns) => {
+                txns.set_sendtap(tap);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 impl Drop for MuxEndpoint {
@@ -1227,6 +1241,7 @@ fn spawn_resender(
     bytes: Vec<u8>,
     dst: SocketAddr,
     invite: bool,
+    sendtap: Arc<OnceLock<SendTap>>,
 ) {
     tokio::spawn(async move {
         let mut interval = T1;
@@ -1243,6 +1258,11 @@ fn spawn_resender(
                 stats.dropped_out.fetch_add(1, Ordering::Relaxed);
             } else {
                 let _ = socket.send_to(&bytes, dst).await;
+                // Record the re-emission (a frame that reached the wire) on the
+                // ladder — a proactive Timer A/E/G retransmit of our own frame.
+                if let Some(tap) = sendtap.get() {
+                    tap(&bytes, dst, ReEmitKind::Retransmit);
+                }
             }
             interval = if invite {
                 interval.saturating_mul(2)
@@ -1283,6 +1303,12 @@ struct CallTxns {
     drop: Arc<DropModel>,
     stats: Arc<MuxStats>,
     inner: Mutex<TxnInner>,
+    /// Send-time recording tap for re-emissions (installed by the recording
+    /// decorator on sampled calls; `None` on the non-recording path). Shared as
+    /// an `Arc<OnceLock>` so the detached resender tasks can read it at fire
+    /// time — recovery frames go on the wire below the recording layer, so this
+    /// is the only way they reach the ladder.
+    sendtap: Arc<OnceLock<SendTap>>,
 }
 
 #[derive(Default)]
@@ -1310,17 +1336,35 @@ struct TxnInner {
 
 impl CallTxns {
     fn new(socket: Arc<UdpSocket>, drop: Arc<DropModel>, stats: Arc<MuxStats>) -> Self {
-        Self { socket, drop, stats, inner: Mutex::new(TxnInner::default()) }
+        Self {
+            socket,
+            drop,
+            stats,
+            inner: Mutex::new(TxnInner::default()),
+            sendtap: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// Install the re-emission recording tap (first installer wins). Called by
+    /// the recording decorator via [`MuxEndpoint::install_send_tap`].
+    fn set_sendtap(&self, tap: SendTap) {
+        let _ = self.sendtap.set(tap);
     }
 
     /// Best-effort non-blocking send for the reactive resends (re-ACK / re-answer)
-    /// that run on the inbound (sync) path — re-applies the loss model.
-    fn send(&self, bytes: &[u8], dst: SocketAddr) {
+    /// that run on the inbound (sync) path — re-applies the loss model. `kind`
+    /// classifies the re-emission for the ladder; a frame that actually reaches
+    /// the wire is reported to the send tap (a dropped one is invisible, like a
+    /// dropped first transmission).
+    fn send(&self, bytes: &[u8], dst: SocketAddr, kind: ReEmitKind) {
         if self.drop.drops() {
             self.stats.dropped_out.fetch_add(1, Ordering::Relaxed);
             return;
         }
         let _ = self.socket.try_send_to(bytes, dst);
+        if let Some(tap) = self.sendtap.get() {
+            tap(bytes, dst, kind);
+        }
     }
 
     /// Record an outbound datagram and arm any retransmission it needs.
@@ -1347,6 +1391,7 @@ impl CallTxns {
                             raw.to_vec(),
                             dst,
                             false,
+                            self.sendtap.clone(),
                         );
                     }
                 }
@@ -1375,6 +1420,7 @@ impl CallTxns {
                             raw.to_vec(),
                             dst,
                             false,
+                            self.sendtap.clone(),
                         );
                     }
                 }
@@ -1405,6 +1451,7 @@ impl CallTxns {
             raw.to_vec(),
             dst,
             invite,
+            self.sendtap.clone(),
         );
     }
 
@@ -1448,7 +1495,7 @@ impl CallTxns {
                 if (200..300).contains(&status) && is_invite {
                     if let (Some(cid), Some(cseq)) = (call_id(raw), cseq_num(raw)) {
                         if let Some((ack, dst)) = g.acks.get(&(cid, cseq)).cloned() {
-                            self.send(&ack, dst);
+                            self.send(&ack, dst, ReEmitKind::ReAck);
                         }
                     }
                 }
@@ -1487,7 +1534,7 @@ impl CallTxns {
         if g.seen_in.contains(&key) {
             // The peer retransmitted this request → our response was lost; re-send it.
             if let Some((resp, dst)) = g.server.get(&branch).cloned() {
-                self.send(&resp, dst);
+                self.send(&resp, dst, ReEmitKind::ReAnswer);
             }
             return false;
         }
@@ -1765,6 +1812,53 @@ mod tests {
             recv_one(&peer, 1_500).await.is_none(),
             "reliable-183 resender must stop on the matching PRACK"
         );
+        txns.shutdown();
+    }
+
+    fn ack_req(branch: &str, cseq: u32) -> Vec<u8> {
+        format!(
+            "ACK sip:b@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
+             Call-ID: ct1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag=2\r\nCSeq: {cseq} ACK\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// Always-display re-emission (the invisible-recovery gap): the send tap sees
+    /// EVERY recovery frame the engine puts on the wire, tagged by kind — the
+    /// proactive Timer A/E/G retransmit, the reactive re-ACK on a duplicate 2xx,
+    /// and the reactive re-answer to a duplicate request. Without it these hit the
+    /// socket below the recording layer and never reach the ladder.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn calltxns_sendtap_records_every_reemission() {
+        let (txns, peer, peer_addr) = txn_rig().await;
+        let seen = Arc::new(Mutex::new(Vec::<ReEmitKind>::new()));
+        let sink = seen.clone();
+        txns.set_sendtap(Arc::new(move |_raw, _dst, kind| {
+            sink.lock().unwrap().push(kind);
+        }));
+
+        // (1) Proactive Timer-E retransmit of an outbound UPDATE, then stop it.
+        txns.on_outbound(&update_req("z9hG4bK-u1"), peer_addr);
+        recv_one(&peer, 2_000).await.expect("Timer E retransmit of the UPDATE");
+        assert!(txns.on_inbound(&resp(200, "z9hG4bK-u1", "2 UPDATE", ""), peer_addr));
+
+        // (2) Reactive re-answer to a duplicate request (our 200 was lost).
+        let prack = prack_req("z9hG4bK-p1", "1 1 INVITE");
+        assert!(txns.on_inbound(&prack, peer_addr));
+        txns.on_outbound(&resp(200, "z9hG4bK-p1", "2 PRACK", ""), peer_addr);
+        assert!(!txns.on_inbound(&prack, peer_addr), "dup PRACK absorbed → re-answer");
+
+        // (3) Reactive re-ACK on a duplicate INVITE 2xx (our ACK was lost).
+        let ok_inv = resp(200, "z9hG4bK-i9", "1 INVITE", "");
+        assert!(txns.on_inbound(&ok_inv, peer_addr), "first 200 (INVITE) delivered");
+        txns.on_outbound(&ack_req("z9hG4bK-a9", 1), peer_addr);
+        assert!(!txns.on_inbound(&ok_inv, peer_addr), "dup 200 (INVITE) absorbed → re-ACK");
+
+        let _ = recv_one(&peer, 200).await; // drain stragglers
+        let kinds = seen.lock().unwrap().clone();
+        assert!(kinds.contains(&ReEmitKind::Retransmit), "proactive retransmit tapped: {kinds:?}");
+        assert!(kinds.contains(&ReEmitKind::ReAnswer), "reactive re-answer tapped: {kinds:?}");
+        assert!(kinds.contains(&ReEmitKind::ReAck), "reactive re-ACK tapped: {kinds:?}");
         txns.shutdown();
     }
 }

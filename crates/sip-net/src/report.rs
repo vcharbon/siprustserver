@@ -90,6 +90,11 @@ pub struct RecordedSipEntry {
     /// How the receive half fared beyond plain delivered-and-consumed
     /// (see [`RecvNote`]); `None` for the normal case.
     pub recv_note: Option<RecvNote>,
+    /// Set when this entry is an OUTBOUND re-emission (retransmit / re-ACK /
+    /// re-answer) the endpoint's retransmit engine put on the wire below the
+    /// recording layer; `None` for an ordinary send. Renderers tag it so
+    /// recovery traffic is visible (see [`crate::types::ReEmitKind`]).
+    pub reemit: Option<crate::types::ReEmitKind>,
     /// The sender's full lane key (`ip:port` or `ip:port#label`) when the send
     /// half is in the recording — lets the projector place the row on the
     /// logical sub-lane instead of the collapsed socket (036 ask C).
@@ -235,6 +240,44 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
             // unmatched + external destination ⇒ left the recording's horizon.
             delivered: received_ms.is_some() || !recorded_binds.contains(to),
             recv_note,
+            reemit: None,
+            from_lane: Some(bind_key.clone()),
+            to_lane,
+            seq: s.seq,
+        });
+    }
+
+    // Re-emissions (loadgen retransmit engine): each is an OUTBOUND frame the
+    // engine put on the wire below the recording. Render as its own tagged entry
+    // from the re-emitting bind. It may pair with a delivery on a recorded peer
+    // (fully-recorded fabric) or leave the horizon toward an external SUT — same
+    // delivered rule as an ordinary send.
+    for s in events {
+        let SignalingNetworkEvent::ReEmit { bind_key, to, msg, kind } = &s.event else {
+            continue;
+        };
+        let Some(from) = lane_addr(bind_key) else {
+            continue;
+        };
+        let matched = recvs.iter_mut().find(|r| {
+            !r.paired && r.receiver == *to && r.src == from && r.raw == msg.as_slice() && r.seq >= s.seq
+        });
+        let (received_ms, to_lane) = match matched {
+            Some(r) => {
+                r.paired = true;
+                (Some(r.at_ms), Some(r.bind_key.to_string()))
+            }
+            None => (None, None),
+        };
+        out.push(RecordedSipEntry {
+            from,
+            to: *to,
+            raw: msg.clone(),
+            sent_ms: s.at_ms,
+            received_ms,
+            delivered: received_ms.is_some() || !recorded_binds.contains(to),
+            recv_note: None,
+            reemit: Some(*kind),
             from_lane: Some(bind_key.clone()),
             to_lane,
             seq: s.seq,
@@ -257,6 +300,7 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
             received_ms: Some(r.at_ms),
             delivered: true,
             recv_note: r.note(),
+            reemit: None,
             from_lane: None,
             to_lane: Some(r.bind_key.to_string()),
             seq: r.seq,
