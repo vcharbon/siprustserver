@@ -17,16 +17,14 @@
 
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use scenario_harness::actor::scenarios::{
-    AbandonRinging as ActorAbandonRinging, InviteReject as ActorInviteReject,
-    LongCall as ActorLongCall, OptionsHold as ActorOptionsHold, PrackUpdate as ActorPrackUpdate,
-    Refer as ActorRefer, ReferCharlieReject as ActorReferCharlieReject, Reinvite as ActorReinvite,
+    AbandonRinging as ActorAbandonRinging, BasicCall as ActorBasicCall,
+    InviteReject as ActorInviteReject, LongCall as ActorLongCall, OptionsHold as ActorOptionsHold,
+    PrackUpdate as ActorPrackUpdate, Refer as ActorRefer,
+    ReferCharlieReject as ActorReferCharlieReject, Reinvite as ActorReinvite,
 };
 use scenario_harness::actor::ActorScenario;
-use scenario_harness::realcall::scenarios::BasicCall;
-use scenario_harness::realcall::{
-    run_actor_asserting, run_actor_collecting, run_asserting, run_collecting, CallEnv,
-};
-use scenario_harness::{Agent, RealCallScenario};
+use scenario_harness::realcall::{run_actor_asserting, run_actor_collecting, CallEnv};
+use scenario_harness::Agent;
 
 // The REFER backend the b2bua's scripted `/call/refer` authorizes (see
 // `ScriptedDecisionEngine::route_all_with_refer` → `default_call_refer`); the
@@ -49,32 +47,9 @@ async fn drain_callees(bob: &Agent, charlie: &Agent) {
 
 // ── Happy-path leak gate (alice/bob only) ──────────────────────────────────
 
-/// Drive a shared real-call scenario through an in-process B2BUA and assert it
-/// left no call state behind.
-async fn assert_no_leak(name: &str, scenario: &dyn RealCallScenario) {
-    let scene = B2buaScene::new(name).await;
-    let env = CallEnv::for_functional(
-        &scene.alice,
-        &scene.bob,
-        None,
-        scene.b2bua.addr,
-        "X-Loadgen-Id",
-        format!("{name}-tok"),
-    );
-
-    run_asserting(scenario, &env).await;
-
-    // No leak: the a-leg BYE released the SUT's call state and limiter token.
-    settle_until(|| scene.b2bua.active_calls() == 0).await;
-    scene.b2bua.assert_fully_reaped();
-
-    // Gate the RFC 3261/3262/3264 audit over the recorded trace (consumes scene).
-    let report = scene.finish().await;
-    assert!(report.passed(), "RFC audit failed for `{name}`");
-}
-
-/// The ACTOR-lane twin of [`assert_no_leak`] for an alice/bob-only actor body:
-/// drive it through an in-process B2BUA via the actor runner and assert no leak.
+/// Drive an alice/bob-only actor body through an in-process B2BUA via the actor
+/// runner and assert it left no call state behind, then gate the RFC audit. All
+/// the shipped happy load bodies are ACTOR-declared since P3.
 async fn assert_no_leak_actor(name: &str, scenario: &dyn ActorScenario) {
     let scene = B2buaScene::new(name).await;
     let env = CallEnv::for_functional(
@@ -97,7 +72,8 @@ async fn assert_no_leak_actor(name: &str, scenario: &dyn ActorScenario) {
 
 #[tokio::test(start_paused = true)]
 async fn realcall_basic_call_no_leak() {
-    assert_no_leak("realcall-basic", &BasicCall).await;
+    // Since P3 the basic_call load body is the ACTOR-declared port.
+    assert_no_leak_actor("realcall-basic", &ActorBasicCall).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -216,49 +192,13 @@ async fn realcall_refer_no_leak() {
 
 // ── Voluntarily-failing leak gate — a FAILED call must still clean up ────────
 
-/// Drive a scenario that FAILS by design and assert the SUT still fully reaped
-/// it. The whole point of these flows is that a failed call leaves no leaked
-/// dialog/limiter/lock behind, so we use `run_collecting` (which RETURNS the
-/// `Err` instead of `panic!`ing on it), assert the run failed as expected, then
-/// assert the no-leak invariant. No RFC gate: a deliberately-truncated flow
-/// (a CANCELed handshake, a non-2xx final, a declined transfer) legitimately
-/// does not satisfy the §13.3.1.4 / cross-message happy-path audit — the leak
-/// invariant IS the assertion here, so we gate on that alone.
-async fn assert_expected_failure_no_leak(name: &str, scenario: &dyn RealCallScenario, env: &CallEnv<'_>) {
-    let result = run_collecting(scenario, env).await;
-    assert!(
-        result.is_err(),
-        "voluntarily-failing scenario `{name}` unexpectedly succeeded"
-    );
-}
-
-/// As [`assert_expected_failure_no_leak`] but for the alice/bob-only failing
-/// scenarios (binds the scene, runs, asserts failure + no leak). The refer
-/// failing case ([`ReferCharlieReject`]) needs the charlie scene, so it is wired
-/// separately below.
-async fn failing_no_leak(name: &str, scenario: &dyn RealCallScenario) {
-    let scene = B2buaScene::new(name).await;
-    let env = CallEnv::for_functional(
-        &scene.alice,
-        &scene.bob,
-        None,
-        scene.b2bua.addr,
-        "X-Loadgen-Id",
-        format!("{name}-tok"),
-    );
-
-    assert_expected_failure_no_leak(name, scenario, &env).await;
-
-    settle_until(|| scene.b2bua.active_calls() == 0).await;
-    scene.b2bua.assert_fully_reaped();
-    // No RFC gate (see `assert_expected_failure_no_leak`): just drop the scene so
-    // the recorded trace is rendered without a happy-path verdict.
-    let _ = scene.finish().await;
-}
-
-/// The ACTOR-lane twin of [`failing_no_leak`] for an alice/bob-only failing
-/// actor body: drive it via the actor runner (which OWNS teardown), assert it
-/// surfaced its NOK terminal, and assert the SUT fully reaped.
+/// Drive an alice/bob-only failing actor body via the actor runner (which OWNS
+/// teardown), assert it surfaced its NOK terminal, and assert the SUT fully
+/// reaped. The whole point of these flows is that a FAILED call leaves no leaked
+/// dialog/limiter/lock behind, so the leak invariant IS the assertion — no RFC
+/// gate (a deliberately-truncated flow does not satisfy the happy-path audit).
+/// The refer failing case ([`ActorReferCharlieReject`]) needs the charlie scene,
+/// so it is wired separately below.
 async fn failing_no_leak_actor(name: &str, scenario: &dyn ActorScenario) {
     let scene = B2buaScene::new(name).await;
     let env = CallEnv::for_functional(

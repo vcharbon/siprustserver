@@ -281,6 +281,12 @@ pub struct ActorState<'c> {
     /// Whether this caller has already stamped the first-OPTIONS-ping feed —
     /// so the looped `options_hold` pings stamp `keepalive_ack` exactly once.
     saw_options_200: bool,
+    /// The provisional this caller's establishing INVITE awaits — `180` by
+    /// default, `183` once it has advertised `Supported: 100rel` (the reliable
+    /// flows). The `expected` field of the incidental `WrongStatus` a shed/reject
+    /// on the establishing INVITE surfaces (linear `establish`/`establish_100rel`
+    /// parity).
+    expected_provisional: u16,
 }
 
 impl<'c> ActorState<'c> {
@@ -314,6 +320,7 @@ impl<'c> ActorState<'c> {
             pracked_rseqs: HashSet::new(),
             pending_reinvite: false,
             saw_options_200: false,
+            expected_provisional: 180,
         }
     }
 
@@ -665,6 +672,23 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
                 );
                 st.obs.record(Observation::LegTerminated { leg: st.role }, now);
                 st.scope.mark_terminated();
+                // The establishing INVITE drew a non-2xx final. If this caller
+                // still has scripted goals that need the (now impossible)
+                // confirmed dialog, the establishment failed INCIDENTALLY — a
+                // happy body cannot proceed, so surface the shed/reject exactly
+                // as the linear `establish` did: `WrongStatus { who: caller,
+                // expected: <180|183>, got, reason }` (→ `status_<got>`), never a
+                // 32 s `established`-barrier timeout. A body whose reject IS the
+                // intended terminal (invite_reject / abandon_ringing) has no
+                // pending goal here, so it falls through to the `Expect` mapping.
+                if st.goals.has_pending() {
+                    return Err(StepError::WrongStatus {
+                        who: st.role.to_string(),
+                        expected: st.expected_provisional,
+                        got: status,
+                        reason: resp.reason.clone(),
+                    });
+                }
             }
         }
         return Ok(());
@@ -770,6 +794,17 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
                     None => builder,
                 },
             };
+            // A caller advertising `Supported: 100rel` awaits a reliable `183`
+            // (not the `180`) — the `expected` of an incidental shed/reject
+            // WrongStatus (linear `establish_100rel` parity).
+            if plan
+                .as_ref()
+                .is_some_and(|p| p.headers.iter().any(|(n, v)| {
+                    n.eq_ignore_ascii_case("supported") && v.to_ascii_lowercase().contains("100rel")
+                }))
+            {
+                st.expected_provisional = 183;
+            }
             let call = builder.send().await;
             st.scope.set_early(call.cancel_handle());
             st.dialogs.pending_invite = Some(call);
