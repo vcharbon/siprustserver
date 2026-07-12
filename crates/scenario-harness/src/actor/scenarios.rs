@@ -499,3 +499,79 @@ impl ActorScenario for PrackUpdate {
         })
     }
 }
+
+/// Establish then a delayed-offer in-dialog re-INVITE renegotiation then BYE,
+/// actor-declared — the port of [`crate::realcall::scenarios::Reinvite`]. Bob
+/// rings-then-answers; once established alice sends a bodyless (delayed-offer)
+/// re-INVITE, whose 2xx she ACKs WITH the answer SDP (RFC 3264 §4) in her
+/// reactor, then BYEs. Emergency variant `reinvite_em` reuses this body (the
+/// marker rides the INVITE plan).
+///
+/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.2):
+/// phases `connected` → `reinvited` → `bye_200`; checkpoints `time_to_200` /
+/// `time_to_reinvite_200` / `time_to_bye_200`; `mark_ringing` on the 180;
+/// anchors `LOAD_REINVITE_ANCHORS` (adds `reInvite`←bob rx).
+pub struct Reinvite;
+
+impl ActorScenario for Reinvite {
+    fn id(&self) -> ScenarioId {
+        "reinvite"
+    }
+
+    fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
+        let actors = vec![
+            // Alice originates, ACKs the delayed-offer re-INVITE's 2xx with her
+            // answer SDP reactively, and BYEs once the renegotiation completes.
+            ActorSpec {
+                role: "alice",
+                agent: env.alice.clone(),
+                disposition: Disposition::Caller,
+                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                goals: vec![
+                    Goal::new(
+                        Barrier::None,
+                        GoalStep::Invite { callee: "bob", plan: Some(env.invite_plan(&["bob"])) },
+                    ),
+                    Goal::new(Barrier::pred("established", established), GoalStep::Reinvite)
+                        .after(env.reinvite_gap),
+                    Goal::new(Barrier::pred("reinvited", reneg_done), GoalStep::Bye)
+                        .after(env.reinvite_gap),
+                ],
+                invite_targets: vec![("bob", env.bob.clone())],
+                via: None,
+                feed: CtxFeed {
+                    ringing_gate: true,
+                    on_answer_rx: Feed::new(Some("time_to_200"), None),
+                    on_reinvite_ok: Feed::new(Some("time_to_reinvite_200"), Some("reinvited")),
+                    on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
+                    ..CtxFeed::default()
+                },
+            },
+            // Bob rings then answers, then answers alice's re-INVITE (200 + SDP)
+            // reactively; his ACK receipt stamps `connected`, and receiving the
+            // re-INVITE stamps the `reInvite` anchor.
+            ActorSpec {
+                role: "bob",
+                agent: env.bob.clone(),
+                disposition: Disposition::RingThenAnswer { ring: env.ring_delay },
+                media: MediaState::answer(ANSWER_SDP),
+                goals: vec![],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed {
+                    on_ack_rx: Feed::new(None, Some("connected")),
+                    ..CtxFeed::default()
+                },
+            },
+        ];
+
+        let plan = vec![phase("established", established), phase("reinvited", reneg_done)];
+
+        Ok(ActorCall {
+            actors,
+            plan,
+            settle: SettleBarrier::default_ceiling(),
+            expect: Expect::HappyBye,
+        })
+    }
+}

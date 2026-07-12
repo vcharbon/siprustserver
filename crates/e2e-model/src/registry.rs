@@ -28,11 +28,12 @@ use std::sync::Arc;
 
 use scenario_harness::actor::scenarios::{
     PrackUpdate as ActorPrackUpdate, Refer as ActorRefer,
-    ReferCharlieReject as ActorReferCharlieReject, ReroutingPrack as ActorReroutingPrack,
+    ReferCharlieReject as ActorReferCharlieReject, Reinvite as ActorReinvite,
+    ReroutingPrack as ActorReroutingPrack,
 };
 use scenario_harness::actor::ActorScenario;
 use scenario_harness::realcall::scenarios::{
-    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, Reinvite,
+    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold,
 };
 use scenario_harness::realcall::{RealCallScenario, ScenarioId};
 
@@ -471,10 +472,12 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .anchors(LOAD_CALL_ANCHORS)
             .default_weight(4.0)
             .load_shared(Arc::new(BasicCall)),
+        // ACTOR-executed (plan §6 P3 order #2): same downstream contract
+        // (table §5.2).
         ShapeDescriptor::new("reinvite")
             .anchors(LOAD_REINVITE_ANCHORS)
             .default_weight(2.0)
-            .load_shared(Arc::new(Reinvite)),
+            .load_actor_with(|_| Arc::new(ActorReinvite)),
         // The first ACTOR-executed shape (plan §4.5 — the redesign's exemplar):
         // per-endpoint reactive actors + the ack-gated settle barrier replace
         // the one serialized coroutine. Same id, same anchors, same downstream
@@ -504,7 +507,7 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
         ShapeDescriptor::new("reinvite_em")
             .anchors(LOAD_REINVITE_ANCHORS)
             .emergency()
-            .load_shared(Arc::new(Reinvite)),
+            .load_actor_with(|_| Arc::new(ActorReinvite)),
         // ── Load: the voluntarily-failing cleanup-coverage set ───────────────
         ShapeDescriptor::new("invite_reject")
             .failure_weight(1.0)

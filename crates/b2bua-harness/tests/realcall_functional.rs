@@ -18,11 +18,11 @@
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use scenario_harness::actor::scenarios::{
     PrackUpdate as ActorPrackUpdate, Refer as ActorRefer,
-    ReferCharlieReject as ActorReferCharlieReject,
+    ReferCharlieReject as ActorReferCharlieReject, Reinvite as ActorReinvite,
 };
 use scenario_harness::actor::ActorScenario;
 use scenario_harness::realcall::scenarios::{
-    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, Reinvite,
+    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold,
 };
 use scenario_harness::realcall::{
     run_actor_asserting, run_actor_collecting, run_asserting, run_collecting, CallEnv,
@@ -103,7 +103,9 @@ async fn realcall_basic_call_no_leak() {
 
 #[tokio::test(start_paused = true)]
 async fn realcall_reinvite_no_leak() {
-    assert_no_leak("realcall-reinvite", &Reinvite).await;
+    // Since P3 the reinvite load body is the ACTOR-declared port (per-endpoint
+    // reactors + the ack-gated settle barrier).
+    assert_no_leak_actor("realcall-reinvite", &ActorReinvite).await;
 }
 
 #[tokio::test(start_paused = true)]
