@@ -2348,6 +2348,24 @@ impl ClientInvite {
         self.send_request(InDialogMethod::Prack).with_rack(&rack).try_send().await
     }
 
+    /// [`try_prack`](Self::try_prack) that also returns the PRACK request as
+    /// sent — the reactive actor keys its "PRACK awaiting 200" ledger obligation
+    /// on the returned request's CSeq (the 200 carries the same number). Same
+    /// RAck derivation; the linear lane uses the request-less [`try_prack`].
+    pub async fn try_prack_with_request(
+        &mut self,
+        reliable_1xx: &SipResponse,
+    ) -> Result<(InDialogTxn, SipRequest), StepError> {
+        let rack = rack_for(reliable_1xx).ok_or_else(|| StepError::UnexpectedKind {
+            who: self.agent.name.clone(),
+            detail: format!(
+                "cannot PRACK the {} {}: no parseable RSeq header (not a reliable provisional)",
+                reliable_1xx.status, reliable_1xx.reason
+            ),
+        })?;
+        self.send_request(InDialogMethod::Prack).with_rack(&rack).try_send_with_request().await
+    }
+
     /// Generate and send the ACK for the 2xx (CSeq reused from the INVITE per
     /// RFC 3261 §13.2.2.4), then return the confirmed [`Dialog`]. With a route
     /// set the ACK carries Route headers and goes to the first hop (the proxy).

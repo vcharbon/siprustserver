@@ -28,11 +28,11 @@ use std::sync::Arc;
 
 use scenario_harness::actor::scenarios::{
     Refer as ActorRefer, ReferCharlieReject as ActorReferCharlieReject,
+    ReroutingPrack as ActorReroutingPrack,
 };
 use scenario_harness::actor::ActorScenario;
 use scenario_harness::realcall::scenarios::{
     AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate, Reinvite,
-    ReroutingPrack,
 };
 use scenario_harness::realcall::{RealCallScenario, ScenarioId};
 
@@ -529,10 +529,13 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
         // panic-on-deviation) body; the load body below drives the same flow
         // fallibly through the egress candidate list ([bob, bob2] → the
         // `X-Api-Call` routes failover plan on a pinned layout).
+        // The load body is ACTOR-executed (plan §6 P3 order #2 — establishes the
+        // reactive 100rel/PRACK machinery); the functional body stays in
+        // `e2e-core`. Same downstream contract (table §5.7).
         ShapeDescriptor::new("rerouting_prack")
             .anchors(PRACK_ANCHORS)
             .needs_bob2()
-            .load_shared(Arc::new(ReroutingPrack)),
+            .load_actor_with(|_| Arc::new(ActorReroutingPrack)),
     ]
 }
 

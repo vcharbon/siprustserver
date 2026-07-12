@@ -71,6 +71,11 @@ pub enum Disposition {
     RingThenAnswer { ring: Duration },
     /// Rejects the initial INVITE with a final `code` (486/603/…).
     Reject(u16),
+    /// Answers RELIABLY (RFC 3262): a `183` carrying `Require:100rel` + `RSeq` +
+    /// the answer SDP, then HOLDS the INVITE transaction, answering `200` to the
+    /// INVITE only after the caller PRACKs (MUST-014 ordering). The
+    /// rerouting/prack winning-leg disposition.
+    ReliableAnswer,
 }
 
 /// The offer/answer SDP an endpoint negotiates with.
@@ -158,6 +163,12 @@ pub struct CtxFeed {
     /// Stamped when this UAS leg SENDS its 200 to the initial INVITE — the
     /// refer charlie's `time_to_charlie_200` + `transferred`.
     pub on_answer_sent: Feed,
+    /// Stamped when this leg RECEIVES its initial (dialog-creating) INVITE — the
+    /// rerouted winning leg's `rerouted` (`rerouting_prack.rs:73`).
+    pub on_invite_rx: Feed,
+    /// Stamped when the `200` to this caller's PRACK arrives — the 100rel
+    /// flows' `time_to_prack_200` + `pracked`.
+    pub on_prack_ok: Feed,
     /// Stamped when a 2xx to this leg's sent REFER arrives — the refer bob's
     /// `time_to_202` + `referred`.
     pub on_refer_accepted: Feed,
@@ -236,6 +247,14 @@ pub struct ActorState<'c> {
     /// CSeq numbers of in-dialog re-INVITEs this leg has ANSWERED (200 sent,
     /// ACK outstanding) — the matching ACK advances the realign sub-flow.
     answered_reinvites: HashSet<u32>,
+    /// A reliable-`183` answer (RFC 3262) awaiting the caller's PRACK: the held
+    /// UAS INVITE transaction, answered `200` only once the PRACK arrives
+    /// (MUST-014). `Some` for a [`Disposition::ReliableAnswer`] leg between its
+    /// 183 and the PRACK.
+    pending_prack_answer: Option<ServerTxn>,
+    /// RSeq values of reliable provisionals this caller has already PRACKed —
+    /// so a retransmitted 183 is not double-PRACKed.
+    pracked_rseqs: HashSet<u32>,
 }
 
 impl<'c> ActorState<'c> {
@@ -265,6 +284,8 @@ impl<'c> ActorState<'c> {
             feed: spec.feed,
             saw_provisional: false,
             answered_reinvites: HashSet::new(),
+            pending_prack_answer: None,
+            pracked_rseqs: HashSet::new(),
         }
     }
 
@@ -397,6 +418,16 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
         // answered-awaiting-ACK obligation (the ACK's CSeq equals the INVITE's,
         // §13.2.2.4 — closing a never-opened key is a harmless no-op).
         "ACK" => {
+            // An ACK that FOLLOWS a non-2xx reject (this leg already Terminated)
+            // just completes that transaction on the wire — absorb it without
+            // confirming the leg or stamping the `ack` anchor (that anchor is the
+            // winning leg's; the rejected b-leg's reject-ACK must not claim it).
+            let already_terminated = st
+                .obs
+                .with_snapshot(|s| s.leg(st.role).phase() == super::state::LegPhase::Terminated);
+            if already_terminated {
+                return Ok(());
+            }
             st.obs.record(
                 Observation::ResponseObserved {
                     key: ObligationKey::new(st.role, ObligationKind::ReInvite, cseq),
@@ -478,6 +509,17 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
             respond_200_sdp(&mut uas, st.answer_body()).await?;
             st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq }, now);
         }
+        // A PRACK (RFC 3262) for our reliable 183: 200 it, then — MUST-014 — this
+        // is the trigger to answer 200 to the HELD INVITE txn (the reliable
+        // provisional's whole point: no 200-to-INVITE before the PRACK).
+        "PRACK" => {
+            st.ctx.anchor(&st.agent, "prack", uas.request());
+            uas.respond(200, "OK").try_send().await?;
+            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq }, now);
+            if let Some(inv_txn) = st.pending_prack_answer.take() {
+                answer_initial_invite(st, inv_txn).await?;
+            }
+        }
         // Any other in-dialog method: a plain 200 (dialog-neutral).
         _ => {
             uas.respond(200, "OK").try_send().await?;
@@ -490,6 +532,9 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
 async fn apply_disposition(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<(), StepError> {
     let now = Instant::now();
     st.ctx.anchor(&st.agent, "initialInvite", uas.request());
+    // The rerouted winning leg stamps `rerouted` on receiving its INVITE
+    // (default NONE for every other body — see `CtxFeed::on_invite_rx`).
+    st.feed.on_invite_rx.stamp(st.ctx);
     match st.disposition {
         // A caller should never receive an initial INVITE; answer it defensively
         // so a wiring bug doesn't strand the peer. `Answer` is the immediate
@@ -508,18 +553,30 @@ async fn apply_disposition(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Resul
             st.obs.record(Observation::LegTerminated { leg: st.role }, now);
             st.scope.mark_terminated();
         }
+        // RFC 3262: answer RELIABLY with a 183 (Require:100rel + RSeq:1 + the
+        // answer SDP) and HOLD the INVITE txn — the 200 to the INVITE waits for
+        // the PRACK (MUST-014, fired from the PRACK arm of `react_request`).
+        Disposition::ReliableAnswer => {
+            let sdp = st.answer_body();
+            uas.respond(183, "Session Progress").reliable(1).with_sdp(sdp).try_send().await?;
+            st.obs.record(Observation::LegEarly { leg: st.role }, now);
+            st.pending_prack_answer = Some(uas);
+        }
     }
     Ok(())
 }
 
 async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<(), StepError> {
     let now = Instant::now();
-    // A response to our still-pending caller INVITE drives the establish flow.
-    // Take the transaction out; put it back only while it stays pending.
-    if let Some(mut inv) = st.dialogs.pending_invite.take() {
+    // A response to our still-pending caller INVITE drives the establish flow —
+    // but ONLY a response whose CSeq method is INVITE. A PRACK's 200 (or any
+    // other in-dialog final) sharing the early dialog must NOT be fed to the
+    // INVITE transaction (`absorb_response` would misread a PRACK 200 as the
+    // INVITE being answered); it falls through to the obligation-closing path.
+    if resp.cseq.method == "INVITE" {
+        if let Some(mut inv) = st.dialogs.pending_invite.take() {
         match inv.absorb_response(&resp).await? {
             InviteResponseFate::Provisional { status } => {
-                st.dialogs.pending_invite = Some(inv);
                 // A 100 Trying is transaction plumbing, not an early dialog.
                 if status > 100 {
                     st.obs.record(Observation::LegEarly { leg: st.role }, now);
@@ -530,7 +587,28 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
                             st.ctx.mark_ringing(true);
                         }
                     }
+                    // A RELIABLE provisional (RFC 3262: carries `RSeq`) must be
+                    // PRACKed — once per RSeq (a retransmitted 183 is not
+                    // double-PRACKed). The PRACK opens a "awaiting 200" ledger
+                    // obligation the settle barrier holds on.
+                    if let Some(rseq) = reliable_rseq(&resp) {
+                        if st.pracked_rseqs.insert(rseq) {
+                            let (_txn, req) = inv.try_prack_with_request(&resp).await?;
+                            st.obs.record(
+                                Observation::RequestSent {
+                                    key: ObligationKey::new(
+                                        st.role,
+                                        ObligationKind::Prack,
+                                        req.cseq.seq,
+                                    ),
+                                    detail: "prack awaiting 200".to_string(),
+                                },
+                                now,
+                            );
+                        }
+                    }
                 }
+                st.dialogs.pending_invite = Some(inv);
             }
             InviteResponseFate::Answered => {
                 st.ctx.anchor(&st.agent, "answer", &resp);
@@ -559,11 +637,12 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
             }
         }
         return Ok(());
+        }
     }
 
     // Otherwise it is a final to one of our sent in-dialog requests (our BYE's
-    // 200, our REFER's 202, our NOTIFY's 200, …) — close the obligation it
-    // opened and stamp the declared feed for the flow-advancing ones.
+    // 200, our REFER's 202, our NOTIFY's 200, our PRACK's 200, …) — close the
+    // obligation it opened and stamp the declared feed for the flow-advancing ones.
     if let Some(kind) = ObligationKind::from_cseq_method(resp.cseq.method.as_str()) {
         let key = ObligationKey::new(st.role, kind, resp.cseq.seq);
         st.obs.record(Observation::ResponseObserved { key }, now);
@@ -585,11 +664,20 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
                     );
                     st.feed.on_refer_accepted.stamp(st.ctx);
                 }
+                // The 200 to our PRACK — the 100rel flows' `pracked` /
+                // `time_to_prack_200` (the reliable provisional is acknowledged).
+                ObligationKind::Prack => st.feed.on_prack_ok.stamp(st.ctx),
                 _ => {}
             }
         }
     }
     Ok(())
+}
+
+/// The `RSeq` of a reliable provisional (RFC 3262) — `Some(rseq)` iff `resp`
+/// carries a parseable `RSeq` header (marking it PRACK-required), else `None`.
+fn reliable_rseq(resp: &SipResponse) -> Option<u32> {
+    sip_message::message_helpers::get_header(&resp.headers, "rseq").and_then(|v| v.trim().parse().ok())
 }
 
 /// Drive one scripted goal step.
