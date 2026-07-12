@@ -292,3 +292,111 @@ impl ActorScenario for ReferCharlieReject {
         })
     }
 }
+
+/// Rerouting + a RELIABLE provisional on the winning leg, actor-declared — the
+/// port of [`crate::realcall::scenarios::ReroutingPrack`] (the LOAD body of the
+/// dual-body `rerouting_prack` shape). Alice INVITEs with a `[bob, bob2]`
+/// candidate list; bob `486`s, the SUT fails over to bob2, which answers
+/// RELIABLY (RFC 3262: `183`/PRACK/`200`/ACK) on the winning leg. Each endpoint
+/// reacts independently: bob rejects, bob2 runs the reliable-answer state
+/// machine ([`Disposition::ReliableAnswer`]), alice PRACKs the reliable 183 in
+/// her reactor and BYEs once established.
+///
+/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.7):
+/// phases `rerouted` → `pracked` → `connected` → `bye_200`; checkpoints
+/// `time_to_prack_200` / `time_to_200` / `time_to_bye_200`; `mark_ringing(true)`
+/// on bob2's reliable 183; anchors `PRACK_ANCHORS` (with `initialInvite` on BOTH
+/// bob's rejected and bob2's winning INVITE).
+pub struct ReroutingPrack;
+
+impl ActorScenario for ReroutingPrack {
+    fn id(&self) -> ScenarioId {
+        "rerouting_prack"
+    }
+
+    fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
+        // The linear body's guard, byte-for-byte (`rerouting_prack.rs:44` — the
+        // `who` is the fixed sample-key, contract table §5.7 / §8.3).
+        let bob2 = env.bob2.ok_or_else(|| guard("rerouting_prack", "bound without a bob2 leg"))?;
+
+        let actors = vec![
+            // Alice INVITEs through the SUT advertising 100rel over the [bob,
+            // bob2] candidate list, PRACKs the winning leg's reliable 183 in her
+            // reactor, then BYEs the (rerouted) winning leg.
+            ActorSpec {
+                role: "alice",
+                agent: env.alice.clone(),
+                disposition: Disposition::Caller,
+                media: MediaState::offer(OFFER_SDP),
+                goals: vec![
+                    Goal::new(
+                        Barrier::None,
+                        GoalStep::Invite {
+                            callee: "bob",
+                            // The candidate list realizes as the SUT's failover
+                            // plan ([bob, bob2] → the X-Api-Call routes walked on
+                            // bob's rejection); alice adds `Supported: 100rel`.
+                            plan: Some(env.invite_plan(&["bob", "bob2"]).with_supported_100rel()),
+                        },
+                    ),
+                    Goal::new(Barrier::AllConfirmed(&["alice", "bob2"]), GoalStep::Bye)
+                        .after(env.talk_time),
+                ],
+                invite_targets: vec![("bob", env.bob.clone())],
+                via: None,
+                feed: CtxFeed {
+                    // bob2's reliable 183 is guaranteed-delivery, so it counts
+                    // toward the cross-call 18x gate (contract table §5.7).
+                    ringing_gate: true,
+                    on_answer_rx: Feed::new(Some("time_to_200"), None),
+                    on_prack_ok: Feed::new(Some("time_to_prack_200"), Some("pracked")),
+                    on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
+                    ..CtxFeed::default()
+                },
+            },
+            // The primary callee REJECTS its b-leg (486), triggering the SUT's
+            // failover to bob2. Its reject-ACK is absorbed without confirming.
+            ActorSpec {
+                role: "bob",
+                agent: env.bob.clone(),
+                disposition: Disposition::Reject(486),
+                media: MediaState::none(),
+                goals: vec![],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed::default(),
+            },
+            // The rerouted winning leg answers RELIABLY (183/PRACK/200/ACK).
+            ActorSpec {
+                role: "bob2",
+                agent: bob2.clone(),
+                disposition: Disposition::ReliableAnswer,
+                media: MediaState::answer(ANSWER_SDP),
+                goals: vec![],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed {
+                    // `rerouted` on receiving the winning INVITE; `connected` on
+                    // its ACK.
+                    on_invite_rx: Feed::new(None, Some("rerouted")),
+                    on_ack_rx: Feed::new(None, Some("connected")),
+                    ..CtxFeed::default()
+                },
+            },
+        ];
+
+        // Internal controller gating only (no `ctx.phase` stamps here — those
+        // ride the reactor feeds above): established (winning leg confirmed).
+        let plan = vec![phase("established", |s| {
+            s.leg_at_least("alice", LegPhase::Confirmed)
+                && s.leg_at_least("bob2", LegPhase::Confirmed)
+        })];
+
+        Ok(ActorCall {
+            actors,
+            plan,
+            settle: SettleBarrier::default_ceiling(),
+            expect: Expect::HappyBye,
+        })
+    }
+}

@@ -374,6 +374,20 @@ pub struct InvitePlan {
 }
 
 impl InvitePlan {
+    /// Add an extra header to fold onto the INVITE (before the egress rewrite) —
+    /// the owned-plan analogue of an `Invite::with_header`. The 100rel flows use
+    /// it to advertise `Supported: 100rel` (RFC 3262 §3) from the actor lane,
+    /// where the caller drives the INVITE from owned plan data at goal time.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// [`with_header`](Self::with_header) preset for `Supported: 100rel`.
+    pub fn with_supported_100rel(self) -> Self {
+        self.with_header("Supported", "100rel")
+    }
+
     /// Replay the plan onto an INVITE builder — the same op order
     /// [`CallEnv::outgoing_invite`] historically applied: `through(via)` → core
     /// From/To/R-URI → identity headers → the egress rewrite last.
