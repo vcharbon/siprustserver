@@ -27,12 +27,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use scenario_harness::actor::scenarios::{
+    AbandonRinging as ActorAbandonRinging, InviteReject as ActorInviteReject,
     LongCall as ActorLongCall, OptionsHold as ActorOptionsHold, PrackUpdate as ActorPrackUpdate,
     Refer as ActorRefer, ReferCharlieReject as ActorReferCharlieReject, Reinvite as ActorReinvite,
     ReroutingPrack as ActorReroutingPrack,
 };
 use scenario_harness::actor::ActorScenario;
-use scenario_harness::realcall::scenarios::{AbandonRinging, BasicCall, InviteReject};
+use scenario_harness::realcall::scenarios::BasicCall;
 use scenario_harness::realcall::{RealCallScenario, ScenarioId};
 
 use crate::shape::{Anchor, ShapeSpec};
@@ -511,12 +512,16 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .emergency()
             .load_actor_with(|_| Arc::new(ActorReinvite)),
         // ── Load: the voluntarily-failing cleanup-coverage set ───────────────
+        // ACTOR-executed (plan §6 P3 order #5): same downstream contract
+        // (table §5.8).
         ShapeDescriptor::new("invite_reject")
             .failure_weight(1.0)
-            .load_shared(Arc::new(InviteReject)),
+            .load_actor_with(|_| Arc::new(ActorInviteReject)),
+        // ACTOR-executed (plan §6 P3 order #6): same downstream contract
+        // (table §5.9).
         ShapeDescriptor::new("abandon_ringing")
             .failure_weight(1.0)
-            .load_shared(Arc::new(AbandonRinging)),
+            .load_actor_with(|_| Arc::new(ActorAbandonRinging)),
         // ACTOR-executed (plan §6 P3 order #1): per-endpoint reactors + the
         // ack-gated settle barrier; same downstream contract (table §5.10).
         ShapeDescriptor::new("refer_charlie_reject")

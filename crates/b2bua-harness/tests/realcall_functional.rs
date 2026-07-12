@@ -17,11 +17,12 @@
 
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use scenario_harness::actor::scenarios::{
+    AbandonRinging as ActorAbandonRinging, InviteReject as ActorInviteReject,
     LongCall as ActorLongCall, OptionsHold as ActorOptionsHold, PrackUpdate as ActorPrackUpdate,
     Refer as ActorRefer, ReferCharlieReject as ActorReferCharlieReject, Reinvite as ActorReinvite,
 };
 use scenario_harness::actor::ActorScenario;
-use scenario_harness::realcall::scenarios::{AbandonRinging, BasicCall, InviteReject};
+use scenario_harness::realcall::scenarios::BasicCall;
 use scenario_harness::realcall::{
     run_actor_asserting, run_actor_collecting, run_asserting, run_collecting, CallEnv,
 };
@@ -255,18 +256,45 @@ async fn failing_no_leak(name: &str, scenario: &dyn RealCallScenario) {
     let _ = scene.finish().await;
 }
 
+/// The ACTOR-lane twin of [`failing_no_leak`] for an alice/bob-only failing
+/// actor body: drive it via the actor runner (which OWNS teardown), assert it
+/// surfaced its NOK terminal, and assert the SUT fully reaped.
+async fn failing_no_leak_actor(name: &str, scenario: &dyn ActorScenario) {
+    let scene = B2buaScene::new(name).await;
+    let env = CallEnv::for_functional(
+        &scene.alice,
+        &scene.bob,
+        None,
+        scene.b2bua.addr,
+        "X-Loadgen-Id",
+        format!("{name}-tok"),
+    );
+
+    let result = run_actor_collecting(scenario, &env).await;
+    assert!(
+        result.is_err(),
+        "voluntarily-failing actor scenario `{name}` unexpectedly succeeded: {result:?}"
+    );
+
+    settle_until(|| scene.b2bua.active_calls() == 0).await;
+    scene.b2bua.assert_fully_reaped();
+    let _ = scene.finish().await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn realcall_invite_reject_no_leak() {
     // Bob 486s the INVITE: the final completes the transaction (auto-ACKed), so
     // there is nothing to CANCEL/BYE — the SUT must reap the rejected call.
-    failing_no_leak("realcall-invite-reject", &InviteReject).await;
+    // Since P3 the load body is the ACTOR-declared port.
+    failing_no_leak_actor("realcall-invite-reject", &ActorInviteReject).await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn realcall_abandon_ringing_no_leak() {
     // Alice abandons after 180: the scenario drives the full CANCEL handshake
     // (CANCEL → bob 200/487) so the SUT reaps both legs immediately.
-    failing_no_leak("realcall-abandon-ringing", &AbandonRinging).await;
+    // Since P3 the load body is the ACTOR-declared port.
+    failing_no_leak_actor("realcall-abandon-ringing", &ActorAbandonRinging).await;
 }
 
 #[tokio::test(start_paused = true)]

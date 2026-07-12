@@ -773,6 +773,14 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
             let call = builder.send().await;
             st.scope.set_early(call.cancel_handle());
             st.dialogs.pending_invite = Some(call);
+            // The caller APPEARS the moment she originates — so `all_terminated`
+            // cannot fire (and the runner exit) before she has processed her own
+            // INVITE's final. Without this, a callee that terminates immediately
+            // (the `invite_reject` 486) can make the obs "all terminated" while
+            // the caller's leg has not yet recorded a fact, so the runner exits
+            // before she ACKs the reject (RFC 3261 §17.1.1.3). Monotone: a later
+            // provisional/answer only advances the phase.
+            st.obs.record(Observation::LegEarly { leg: st.role }, Instant::now());
         }
         GoalStep::Refer { refer_to, authorization } => {
             let now = Instant::now();
