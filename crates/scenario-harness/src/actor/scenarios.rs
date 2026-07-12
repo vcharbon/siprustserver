@@ -860,3 +860,70 @@ impl ActorScenario for AbandonRinging {
         })
     }
 }
+
+/// The bread-and-butter happy call (INVITE/180/200/ACK, short talk, BYE),
+/// actor-declared — the port of [`crate::realcall::scenarios::BasicCall`] and
+/// the standard-path confirmation. Bob rings-then-answers; alice holds for
+/// `talk_time` then BYEs. Emergency variant `basic_call_em` reuses this body
+/// (the marker rides the INVITE plan).
+///
+/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.1):
+/// phases `connected` → `bye_200`; checkpoints `time_to_200` / `time_to_bye_200`;
+/// `mark_ringing` on the 180; anchors `LOAD_CALL_ANCHORS`.
+pub struct BasicCall;
+
+impl ActorScenario for BasicCall {
+    fn id(&self) -> ScenarioId {
+        "basic_call"
+    }
+
+    fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
+        let actors = vec![
+            ActorSpec {
+                role: "alice",
+                agent: env.alice.clone(),
+                disposition: Disposition::Caller,
+                media: MediaState::offer(OFFER_SDP),
+                goals: vec![
+                    Goal::new(
+                        Barrier::None,
+                        GoalStep::Invite { callee: "bob", plan: Some(env.invite_plan(&["bob"])) },
+                    ),
+                    // Realistic post-connect talk time before teardown.
+                    Goal::new(Barrier::pred("established", established), GoalStep::Bye)
+                        .after(env.talk_time),
+                ],
+                invite_targets: vec![("bob", env.bob.clone())],
+                via: None,
+                feed: CtxFeed {
+                    ringing_gate: true,
+                    on_answer_rx: Feed::new(Some("time_to_200"), None),
+                    on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
+                    ..CtxFeed::default()
+                },
+            },
+            ActorSpec {
+                role: "bob",
+                agent: env.bob.clone(),
+                disposition: Disposition::RingThenAnswer { ring: env.ring_delay },
+                media: MediaState::answer(ANSWER_SDP),
+                goals: vec![],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed {
+                    on_ack_rx: Feed::new(None, Some("connected")),
+                    ..CtxFeed::default()
+                },
+            },
+        ];
+
+        let plan = vec![phase("established", established)];
+
+        Ok(ActorCall {
+            actors,
+            plan,
+            settle: SettleBarrier::default_ceiling(),
+            expect: Expect::HappyBye,
+        })
+    }
+}

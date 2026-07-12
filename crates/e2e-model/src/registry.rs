@@ -27,13 +27,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use scenario_harness::actor::scenarios::{
-    AbandonRinging as ActorAbandonRinging, InviteReject as ActorInviteReject,
-    LongCall as ActorLongCall, OptionsHold as ActorOptionsHold, PrackUpdate as ActorPrackUpdate,
-    Refer as ActorRefer, ReferCharlieReject as ActorReferCharlieReject, Reinvite as ActorReinvite,
+    AbandonRinging as ActorAbandonRinging, BasicCall as ActorBasicCall,
+    InviteReject as ActorInviteReject, LongCall as ActorLongCall, OptionsHold as ActorOptionsHold,
+    PrackUpdate as ActorPrackUpdate, Refer as ActorRefer,
+    ReferCharlieReject as ActorReferCharlieReject, Reinvite as ActorReinvite,
     ReroutingPrack as ActorReroutingPrack,
 };
 use scenario_harness::actor::ActorScenario;
-use scenario_harness::realcall::scenarios::BasicCall;
 use scenario_harness::realcall::{RealCallScenario, ScenarioId};
 
 use crate::shape::{Anchor, ShapeSpec};
@@ -467,10 +467,12 @@ const TRANSFER_ANCHORS: &[Anchor] = &[
 fn default_shapes() -> Vec<ShapeDescriptor> {
     vec![
         // ── Load: the happy-path real-call scenarios ─────────────────────────
+        // ACTOR-executed (plan §6 P3 order #7): same downstream contract
+        // (table §5.1).
         ShapeDescriptor::new("basic_call")
             .anchors(LOAD_CALL_ANCHORS)
             .default_weight(4.0)
-            .load_shared(Arc::new(BasicCall)),
+            .load_actor_with(|_| Arc::new(ActorBasicCall)),
         // ACTOR-executed (plan §6 P3 order #2): same downstream contract
         // (table §5.2).
         ShapeDescriptor::new("reinvite")
@@ -506,7 +508,7 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
         ShapeDescriptor::new("basic_call_em")
             .anchors(LOAD_CALL_ANCHORS)
             .emergency()
-            .load_shared(Arc::new(BasicCall)),
+            .load_actor_with(|_| Arc::new(ActorBasicCall)),
         ShapeDescriptor::new("reinvite_em")
             .anchors(LOAD_REINVITE_ANCHORS)
             .emergency()
@@ -554,6 +556,9 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // A third-party registration test binds a plain LINEAR body — the last
+    // in-tree use of the linear `BasicCall` now the shipped shapes are actors.
+    use scenario_harness::realcall::scenarios::BasicCall;
 
     #[test]
     fn defaults_register_one_id_space_with_both_surfaces() {
