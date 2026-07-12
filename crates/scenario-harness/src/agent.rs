@@ -1051,6 +1051,17 @@ fn top_via_branch(headers: &[SipHeader]) -> Option<String> {
 // Agent
 // ---------------------------------------------------------------------------
 
+/// One inbound SIP message surfaced through the §17.2 receive view — a request
+/// (as a UAS-side [`ServerTxn`]) or a response — WITHOUT asserting either the
+/// kind or, for a request, the method. The reactive per-endpoint actor
+/// ([`crate::actor`]) dispatches on this via [`Agent::recv_any`].
+pub enum Inbound {
+    /// A received request, wrapped in its UAS-side transaction.
+    Request(ServerTxn),
+    /// A received response (to one of our client transactions).
+    Response(SipResponse),
+}
+
 /// A stateful fake UA. Cheap to clone (shares the endpoint + id source); the
 /// dialog state lives on the per-transaction handles it returns, not here.
 #[derive(Clone)]
@@ -1228,6 +1239,37 @@ impl Agent {
                         ),
                     })
                 }
+            }
+        }
+    }
+
+    /// Receive the next inbound message of EITHER kind through the shared §17.2
+    /// receive view ([`TxnView`]) — the reactive-actor primitive (the
+    /// [`crate::actor`] reactor dispatches on this instead of asserting one
+    /// expected message, so a late / reordered / retransmitted datagram is
+    /// always consumed). A timeout / closed queue / parse error is a
+    /// [`StepError`] exactly as [`try_receive`](Agent::try_receive) returns
+    /// (the reactor treats `Timeout` as "loop again", `QueueClosed` as fatal).
+    ///
+    /// Unlike [`try_receive`](Agent::try_receive) it neither asserts a method
+    /// nor auto-answers anything — the reactor's `default_react` owns the answer
+    /// policy. A txn-owned §17.1.1.3 hop ACK (036 ask B, an armed obligation) is
+    /// still absorbed below the API: it is the transaction layer's to claim,
+    /// never the reactor's to see. A NORMAL ACK (to our own 2xx, no armed
+    /// obligation) surfaces as `Inbound::Request` so the reactor records it.
+    pub async fn recv_any(&self) -> Result<Inbound, StepError> {
+        loop {
+            match self.try_recv().await? {
+                SipMessage::Request(r) => {
+                    // An armed non-2xx hop ACK is the txn layer's; a plain 2xx
+                    // ACK is not armed and surfaces (idempotent re-sight — the
+                    // receive core already sighted it, `note_ack` is a no-op).
+                    if self.ack_obligation_claims(&r) {
+                        continue;
+                    }
+                    return Ok(Inbound::Request(ServerTxn::from_request(self.clone(), r)));
+                }
+                SipMessage::Response(r) => return Ok(Inbound::Response(r)),
             }
         }
     }
@@ -1947,6 +1989,19 @@ impl<'a> OutOfDialogRequest<'a> {
     }
 }
 
+/// What a response fed to [`ClientInvite::absorb_response`] means for the
+/// INVITE transaction it belongs to — the reactor's caller-side dispatch. The
+/// `status` payloads are for the reactor's diagnostics/phase decisions (P1).
+#[allow(dead_code)]
+pub(crate) enum InviteResponseFate {
+    /// A provisional (learned into the early dialog); keep waiting.
+    Provisional { status: u16 },
+    /// A 2xx — the dialog is confirmed; the caller must now [`ClientInvite::ack`].
+    Answered,
+    /// A non-2xx final (auto-ACKed on arrival, §17.1.1.3); the INVITE failed.
+    Failed { status: u16 },
+}
+
 /// UAC-side INVITE client transaction + the dialog it is establishing.
 pub struct ClientInvite {
     agent: Agent,
@@ -2092,6 +2147,33 @@ impl ClientInvite {
                 }
             }
         }
+    }
+
+    /// Fold an ALREADY-received response (surfaced via [`Agent::recv_any`]) into
+    /// this INVITE transaction WITHOUT recv'ing again — the reactive-actor
+    /// caller-side analogue of [`try_expect`](Self::try_expect), which owns its
+    /// own receive. A provisional / 2xx updates the dialog bookkeeping (early
+    /// tag, target, route set) exactly as `try_expect` would; a non-2xx final is
+    /// auto-ACKed on its branch (§17.1.1.3), like every other receive on this
+    /// transaction. On [`InviteResponseFate::Answered`] the caller then
+    /// [`ack`](Self::ack)s to confirm the dialog. `100 Trying` is a provisional
+    /// here (the reactor ignores it) — the actor never awaits a specific status.
+    pub(crate) async fn absorb_response(
+        &mut self,
+        resp: &SipResponse,
+    ) -> Result<InviteResponseFate, StepError> {
+        if resp.status < 200 {
+            self.learn_from_response(resp);
+            return Ok(InviteResponseFate::Provisional { status: resp.status });
+        }
+        if (200..300).contains(&resp.status) {
+            self.learn_from_response(resp);
+            return Ok(InviteResponseFate::Answered);
+        }
+        // A non-2xx final completes the client transaction — auto-ACK it on the
+        // INVITE branch (§17.1.1.3), matching the `try_expect` path.
+        self.ack_ctx().ack_non_2xx(resp).await?;
+        Ok(InviteResponseFate::Failed { status: resp.status })
     }
 
     /// Learn the remote tag / target / route set from a response — the dialog
@@ -2346,6 +2428,15 @@ impl Dialog {
     /// the top-Via branch disambiguates the two 200s — RFC 3261 §17.1.3).
     pub fn set_local_cseq(&mut self, v: u32) {
         self.dialog.local_cseq = v;
+    }
+
+    /// This side's current CSeq high-water — the number the LAST in-dialog
+    /// request this UA sent used (0 before any). The reactive actor reads it
+    /// right after [`bye`](Self::bye) / [`request`](Self::request) to key the
+    /// ledger obligation the sent request opens (the matching final response
+    /// carries the same `CSeq` number).
+    pub fn local_cseq(&self) -> u32 {
+        self.dialog.local_cseq
     }
 
     /// This side's dialog tag (the To-tag a UAS minted on its 2xx / the

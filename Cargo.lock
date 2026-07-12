@@ -3564,6 +3564,7 @@ name = "scenario-harness"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "layer-harness",
  "seq-report",
  "serde",
