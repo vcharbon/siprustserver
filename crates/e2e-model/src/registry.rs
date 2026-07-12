@@ -26,11 +26,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use scenario_harness::actor::scenarios::Refer as ActorRefer;
+use scenario_harness::actor::scenarios::{
+    Refer as ActorRefer, ReferCharlieReject as ActorReferCharlieReject,
+};
 use scenario_harness::actor::ActorScenario;
 use scenario_harness::realcall::scenarios::{
-    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate,
-    ReferCharlieReject, Reinvite, ReroutingPrack,
+    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate, Reinvite,
+    ReroutingPrack,
 };
 use scenario_harness::realcall::{RealCallScenario, ScenarioId};
 
@@ -508,10 +510,12 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
         ShapeDescriptor::new("abandon_ringing")
             .failure_weight(1.0)
             .load_shared(Arc::new(AbandonRinging)),
+        // ACTOR-executed (plan §6 P3 order #1): per-endpoint reactors + the
+        // ack-gated settle barrier; same downstream contract (table §5.10).
         ShapeDescriptor::new("refer_charlie_reject")
             .failure_weight(1.0)
             .needs_charlie()
-            .load_with(|inputs| Arc::new(ReferCharlieReject::new(&inputs.refer_key))),
+            .load_actor_with(|inputs| Arc::new(ActorReferCharlieReject::new(&inputs.refer_key))),
         // ── Functional: the anchored e2e shapes ──────────────────────────────
         ShapeDescriptor::new("basic-call").anchors(CALL_ANCHORS),
         ShapeDescriptor::new("basic-call-media").anchors(CALL_ANCHORS),

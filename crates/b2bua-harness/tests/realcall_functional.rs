@@ -16,12 +16,15 @@
 //! into `realcall::scenarios`, add a case here per flow.
 
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
-use scenario_harness::actor::scenarios::Refer as ActorRefer;
-use scenario_harness::realcall::scenarios::{
-    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate,
-    ReferCharlieReject, Reinvite,
+use scenario_harness::actor::scenarios::{
+    Refer as ActorRefer, ReferCharlieReject as ActorReferCharlieReject,
 };
-use scenario_harness::realcall::{run_actor_asserting, run_asserting, run_collecting, CallEnv};
+use scenario_harness::realcall::scenarios::{
+    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate, Reinvite,
+};
+use scenario_harness::realcall::{
+    run_actor_asserting, run_actor_collecting, run_asserting, run_collecting, CallEnv,
+};
 use scenario_harness::{Agent, RealCallScenario};
 
 // The REFER backend the b2bua's scripted `/call/refer` authorizes (see
@@ -240,15 +243,21 @@ async fn realcall_abandon_ringing_no_leak() {
 #[tokio::test(start_paused = true)]
 async fn realcall_refer_charlie_reject_no_leak() {
     // A↔B establish, B REFERs to C, C 603-declines: the transfer fails but A↔B
-    // stays up, so the scope-driven teardown BYEs the still-live A↔B and the SUT
-    // reaps the born-and-rejected transfer leg. Needs the charlie/refer scene.
+    // stays up. Since P3 this is the ACTOR-declared body (per-endpoint reactors +
+    // the ack-gated settle barrier), so the runner OWNS teardown — alice BYEs
+    // A↔B herself once the decline is observed, and the SUT reaps the
+    // born-and-rejected transfer leg. Needs the charlie/refer scene.
     let name = "realcall-refer-charlie-reject";
     let (scene, charlie) = refer_scene(name).await;
     let env = refer_env(name, &scene, &charlie);
 
-    assert_expected_failure_no_leak(name, &ReferCharlieReject::new(REFER_KEY), &env).await;
+    let result = run_actor_collecting(&ActorReferCharlieReject::new(REFER_KEY), &env).await;
+    assert!(
+        result.is_err(),
+        "the declined-transfer body must surface its NOK terminal, got {result:?}"
+    );
 
-    // The scope-driven teardown BYEs the still-live A↔B; pump bob (and charlie,
+    // The actor's own teardown BYEs the still-live A↔B; pump bob (and charlie,
     // harmless — its leg was already declined) so the relayed b-leg BYE is answered
     // and the SUT reaps promptly (see the refer happy-path note on the late BYE).
     drain_callees(&scene.bob, &charlie).await;
