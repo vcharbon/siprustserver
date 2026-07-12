@@ -171,11 +171,13 @@ clock, ≥1 ms transit.
 
 `bin/loadgen.rs` (`clap`): `--cps --duration --max-in-flight --scenario name=weight
 --target <vip:port> --bind-ip <host-bridge-ip> --recv-timeout --sample-cap --out-dir
---metrics-addr --options-hold`. Run from host against kind VIP; `--bind-ip` must be a
-kind-bridge-reachable host IP and the bob/charlie `X-Api-Call` pins must point at
-`--bind-ip` (not loopback) for return traffic (VIP→HOST masquerade, per `cluster-nat-inventory`).
-Validate one host-mode call, then ramp. **Phase 5 (defer):** `deploy/k8s/loadgen/` Job
-manifest modeled on `40-sipp-uac-job.yaml` + VictoriaMetrics wiring.
+--metrics-addr --options-hold`.
+> **Updated for the sipext dual-plane layout (2026-07-12):** loadgen runs as a
+> docker container on the no-NAT `sipext` bridge dialing the EXTERNAL VIP
+> (`SIPEXT_TARGET`, default 192.168.60.250) — no host-bridge masquerade
+> concerns remain (the old VIP→HOST masquerade note and the `40-sipp-uac-job`
+> Job-manifest phase are obsolete; the docker launch lives in
+> `deploy/k8s/endurance.sh` `launch_loadgen`, metrics scraped at .20:9300).
 
 ## Files
 
