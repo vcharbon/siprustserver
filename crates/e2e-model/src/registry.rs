@@ -26,11 +26,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use scenario_harness::actor::scenarios::Refer as ActorRefer;
+use scenario_harness::actor::ActorScenario;
 use scenario_harness::realcall::scenarios::{
-    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate, Refer,
+    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate,
     ReferCharlieReject, Reinvite, ReroutingPrack,
 };
-use scenario_harness::realcall::RealCallScenario;
+use scenario_harness::realcall::{RealCallScenario, ScenarioId};
 
 use crate::shape::{Anchor, ShapeSpec};
 
@@ -54,10 +56,32 @@ impl Default for ScenarioInputs {
     }
 }
 
+/// A shape's minted **load body** — the executor fork (plan §4.4, B8): a
+/// LINEAR body drives one coroutine through `RealCallScenario::run`; an ACTOR
+/// body declares per-endpoint reactive actors the runner joins
+/// (`scenario_harness::actor::run_actor_scenario`). The load driver's
+/// `run_one` branches on this; everything downstream (teardown,
+/// classification, sampling) is shared.
+#[derive(Clone)]
+pub enum Scenario {
+    Linear(Arc<dyn RealCallScenario>),
+    Actor(Arc<dyn ActorScenario>),
+}
+
+impl Scenario {
+    /// The body's intrinsic name (panic messages, direct functional use).
+    pub fn id(&self) -> ScenarioId {
+        match self {
+            Scenario::Linear(s) => s.id(),
+            Scenario::Actor(s) => s.id(),
+        }
+    }
+}
+
 /// Factory minting a shape's **load body** from the per-run [`ScenarioInputs`]
 /// (the refer scenarios take the run's `refer_key` at construction; stateless
 /// bodies ignore the inputs).
-pub type LoadFactory = Arc<dyn Fn(&ScenarioInputs) -> Arc<dyn RealCallScenario> + Send + Sync>;
+pub type LoadFactory = Arc<dyn Fn(&ScenarioInputs) -> Scenario + Send + Sync>;
 
 /// One **named callee leg** of a load shape: which receiver the load driver
 /// binds on the shared UAS socket and which R-URI user-part prefixes select it
@@ -245,23 +269,33 @@ impl ShapeDescriptor {
         self
     }
 
-    /// Attach a load body built fresh from the per-run [`ScenarioInputs`].
+    /// Attach a LINEAR load body built fresh from the per-run [`ScenarioInputs`].
     pub fn load_with(
         mut self,
         factory: impl Fn(&ScenarioInputs) -> Arc<dyn RealCallScenario> + Send + Sync + 'static,
     ) -> Self {
-        self.load = Some(Arc::new(factory));
+        self.load = Some(Arc::new(move |i: &ScenarioInputs| Scenario::Linear(factory(i))));
         self
     }
 
-    /// Attach a stateless, inputs-independent load body (the common case).
+    /// Attach an ACTOR load body built fresh from the per-run
+    /// [`ScenarioInputs`] — the executor fork's other arm (see [`Scenario`]).
+    pub fn load_actor_with(
+        mut self,
+        factory: impl Fn(&ScenarioInputs) -> Arc<dyn ActorScenario> + Send + Sync + 'static,
+    ) -> Self {
+        self.load = Some(Arc::new(move |i: &ScenarioInputs| Scenario::Actor(factory(i))));
+        self
+    }
+
+    /// Attach a stateless, inputs-independent LINEAR load body (the common case).
     pub fn load_shared(self, body: Arc<dyn RealCallScenario>) -> Self {
         self.load_with(move |_| body.clone())
     }
 
     /// Mint this shape's load body from the per-run inputs (`None` =
     /// functional-only shape).
-    pub fn load_scenario(&self, inputs: &ScenarioInputs) -> Option<Arc<dyn RealCallScenario>> {
+    pub fn load_scenario(&self, inputs: &ScenarioInputs) -> Option<Scenario> {
         self.load.as_ref().map(|f| f(inputs))
     }
 }
@@ -324,11 +358,7 @@ impl ShapeRegistry {
 
     /// Mint the load body for `id` from the per-run inputs. `None` when the id
     /// is unknown OR the shape has no load body (functional-only).
-    pub fn load_scenario(
-        &self,
-        id: &str,
-        inputs: &ScenarioInputs,
-    ) -> Option<Arc<dyn RealCallScenario>> {
+    pub fn load_scenario(&self, id: &str, inputs: &ScenarioInputs) -> Option<Scenario> {
         self.get(id)?.load_scenario(inputs)
     }
 
@@ -443,11 +473,15 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .anchors(LOAD_REINVITE_ANCHORS)
             .default_weight(2.0)
             .load_shared(Arc::new(Reinvite)),
+        // The first ACTOR-executed shape (plan §4.5 — the redesign's exemplar):
+        // per-endpoint reactive actors + the ack-gated settle barrier replace
+        // the one serialized coroutine. Same id, same anchors, same downstream
+        // contract (`docs/todos/actor-harness-p1-contract-table.md` §5.3).
         ShapeDescriptor::new("refer")
             .anchors(LOAD_REFER_ANCHORS)
             .default_weight(1.0)
             .needs_charlie()
-            .load_with(|inputs| Arc::new(Refer::new(&inputs.refer_key))),
+            .load_actor_with(|inputs| Arc::new(ActorRefer::new(&inputs.refer_key))),
         ShapeDescriptor::new("options_hold")
             .anchors(LOAD_CALL_ANCHORS)
             .default_weight(1.0)

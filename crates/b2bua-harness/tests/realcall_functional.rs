@@ -16,11 +16,12 @@
 //! into `realcall::scenarios`, add a case here per flow.
 
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
+use scenario_harness::actor::scenarios::Refer as ActorRefer;
 use scenario_harness::realcall::scenarios::{
-    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate, Refer,
+    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate,
     ReferCharlieReject, Reinvite,
 };
-use scenario_harness::realcall::{run_asserting, run_collecting, CallEnv};
+use scenario_harness::realcall::{run_actor_asserting, run_asserting, run_collecting, CallEnv};
 use scenario_harness::{Agent, RealCallScenario};
 
 // The REFER backend the b2bua's scripted `/call/refer` authorizes (see
@@ -142,11 +143,14 @@ fn refer_env<'a>(name: &str, scene: &'a B2buaScene, charlie: &'a Agent) -> CallE
 
 #[tokio::test(start_paused = true)]
 async fn realcall_refer_no_leak() {
+    // Since P1 the refer shape's load body is the ACTOR-declared port
+    // (per-endpoint reactors + the ack-gated settle barrier), so the leak gate
+    // drives the same executor the load fleet does (plan §4.4/§4.5).
     let name = "realcall-refer";
     let (scene, charlie) = refer_scene(name).await;
     let env = refer_env(name, &scene, &charlie);
 
-    run_asserting(&Refer::new(REFER_KEY), &env).await;
+    run_actor_asserting(&ActorRefer::new(REFER_KEY), &env).await;
 
     // After alice BYEs, the SUT relays a BYE to BOTH downstream legs (bob + charlie)
     // and reaps the call only once each answers `200`. The scenario's own 150 ms

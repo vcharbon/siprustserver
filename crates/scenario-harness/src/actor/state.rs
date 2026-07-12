@@ -60,6 +60,10 @@ pub enum SubflowState {
 pub struct LegObservation {
     phase: Option<LegPhase>,
     subflows: HashMap<&'static str, SubflowState>,
+    /// Every non-2xx final observed on this leg's establishing INVITE, as
+    /// `(status, reason)` — a grow-only set (commutative fold), read by
+    /// `Expect::Reject`'s verdict mapping. Almost always 0 or 1 entries.
+    finals: std::collections::BTreeSet<(u16, String)>,
 }
 
 impl LegObservation {
@@ -71,6 +75,16 @@ impl LegObservation {
     /// A named sub-flow's state, if it has been observed.
     pub fn subflow(&self, name: &str) -> Option<SubflowState> {
         self.subflows.get(name).copied()
+    }
+
+    /// Whether this leg's establishing INVITE drew the given non-2xx final.
+    pub fn saw_final(&self, status: u16) -> bool {
+        self.finals.iter().any(|(s, _)| *s == status)
+    }
+
+    /// The reason phrase of the given observed non-2xx final, if any.
+    pub fn final_reason(&self, status: u16) -> Option<String> {
+        self.finals.iter().find(|(s, _)| *s == status).map(|(_, r)| r.clone())
     }
 
     /// Monotone phase advance — never retreats (the B2 no-downgrade invariant).
@@ -152,6 +166,9 @@ pub enum Observation {
     /// An in-dialog request arrived on a dialog — folds into the CSeq gap
     /// detector (any method).
     InDialogRequest { leg: &'static str, call_id: String, cseq: u32 },
+    /// `leg`'s establishing INVITE drew a non-2xx final (the reject path) —
+    /// grow-only, read by the `Expect::Reject` verdict mapping.
+    LegFinal { leg: &'static str, status: u16, reason: String },
     /// A named sub-flow advanced (re-INVITE realign tracking; P1 realign use).
     Subflow { leg: &'static str, name: &'static str, to: SubflowState },
 }
@@ -171,6 +188,9 @@ impl StateInner {
             Observation::ResponseObserved { key } => self.ledger.close(key),
             Observation::InDialogRequest { leg, call_id, cseq } => {
                 self.ledger.record_in_dialog(call_id, leg, cseq)
+            }
+            Observation::LegFinal { leg, status, reason } => {
+                self.leg_mut(leg).finals.insert((status, reason));
             }
             Observation::Subflow { leg, name, to } => self.leg_mut(leg).advance_subflow(name, to),
         }

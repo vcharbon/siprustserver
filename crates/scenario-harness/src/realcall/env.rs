@@ -263,44 +263,45 @@ impl<'a> CallEnv<'a> {
     /// load-bearing demux infrastructure) — then (4) applies the layout's
     /// [`EgressRewrite`](crate::egress::EgressRewrite), which has the final say
     /// (e.g. an `X-Api-Call` destination pin / AOR R-URI on the real cluster).
+    ///
+    /// Delegates to [`Self::invite_plan`] so the borrowed (linear) and owned
+    /// (actor) surfaces can never drift.
     pub fn outgoing_invite<'b>(&self, callees: &[&str], inv: Invite<'b>) -> Invite<'b> {
-        let inv = self.apply_identity(self.apply_core(inv.through(self.via)));
-        let targets: Vec<CalleeTarget> = callees.iter().map(|r| self.callee(r)).collect();
-        self.egress.rewrite_for(&targets).apply(inv)
+        self.invite_plan(callees).apply(inv)
     }
 
-    /// Fold the resolved binding's core From/To/R-URI overrides into the INVITE
-    /// (mirrors the `input.core` fold-in of `InfraRuntime::outgoing_invite`).
-    fn apply_core<'b>(&self, mut inv: Invite<'b>) -> Invite<'b> {
-        if let Some(from) = &self.core.from {
-            inv = inv.from(from);
-        }
-        if let Some(to) = &self.core.to {
-            inv = inv.to(to);
-        }
-        if let Some(ruri) = &self.core.ruri {
-            inv = inv.ruri(ruri);
-        }
-        inv
-    }
-
-    /// The per-call identity: the correlation stamp + the emergency marker.
-    /// Deliberately separate from the egress rewrite — correlation is a run
-    /// strategy, not topology.
-    fn apply_identity<'b>(&self, inv: Invite<'b>) -> Invite<'b> {
-        let mut inv = match &self.stamp {
-            CorrelationStamp::Header { name, value } => inv.with_header(name, value),
-            // The token IS the To user-part; the host part stays the callee's
-            // address (cosmetic — the SUT routes on the R-URI / its config).
-            CorrelationStamp::ToUser => {
-                inv.to(format!("sip:{}@{}", self.token, self.bob.addr()))
+    /// The OWNED, data-only realization of [`Self::outgoing_invite`] — the same
+    /// fold-in (via → core → identity → egress rewrite), captured as replayable
+    /// data so a consumer that outlives the borrowed `CallEnv` (the actor
+    /// harness's goal cursor, which drives the INVITE at goal time from owned
+    /// state) can apply it later. Everything is eagerly resolved here: the plan
+    /// is `Send + 'static`.
+    pub fn invite_plan(&self, callees: &[&str]) -> InvitePlan {
+        // (3) the per-call identity — the correlation stamp + emergency marker.
+        // A To-user stamp supersedes the authored core `to` (`apply_identity`
+        // applies AFTER `apply_core` on the builder; eager form: override here).
+        let mut headers = Vec::new();
+        let mut to = self.core.to.clone();
+        match &self.stamp {
+            CorrelationStamp::Header { name, value } => {
+                headers.push((name.clone(), value.clone()));
             }
-        };
-        if self.emergency {
-            // Emergency namespace marker the b2bua's overload brake never sheds.
-            inv = inv.with_header("Resource-Priority", "esnet.0");
+            CorrelationStamp::ToUser => {
+                to = Some(format!("sip:{}@{}", self.token, self.bob.addr()));
+            }
         }
-        inv
+        if self.emergency {
+            headers.push(("Resource-Priority".to_string(), "esnet.0".to_string()));
+        }
+        let targets: Vec<CalleeTarget> = callees.iter().map(|r| self.callee(r)).collect();
+        InvitePlan {
+            via: self.via,
+            from: self.core.from.clone(),
+            to,
+            ruri: self.core.ruri.clone(),
+            headers,
+            rewrite: self.egress.rewrite_for(&targets),
+        }
     }
 
     /// The `X-Api-Call` REFER-authorization header value for a blind transfer to
@@ -345,6 +346,52 @@ impl<'a> CallEnv<'a> {
             .map(|(_, rest)| rest.to_string())
             .unwrap_or_else(|| target.addr.to_string());
         Some(format!("<sip:{user}@{rest}>"))
+    }
+}
+
+/// The owned, data-only realization of one logical initial INVITE on a run's
+/// wire — everything [`CallEnv::outgoing_invite`] folds in (SUT ingress route,
+/// resolved core identity, correlation stamp, emergency marker, layout egress
+/// rewrite), eagerly resolved so it is `Send + 'static`. Built by
+/// [`CallEnv::invite_plan`]; applied onto an [`Invite`] builder at send time.
+#[derive(Debug, Clone)]
+pub struct InvitePlan {
+    /// The SUT ingress the INVITE routes through (`Invite::through`).
+    pub via: SocketAddr,
+    /// Resolved From override (the authored core identity), if any.
+    pub from: Option<String>,
+    /// Resolved To override — the authored core `to`, superseded by a To-user
+    /// correlation stamp (correlation is load-bearing demux infrastructure).
+    pub to: Option<String>,
+    /// Resolved R-URI override (the authored core), if any — the egress
+    /// rewrite's own R-URI still has the final say.
+    pub ruri: Option<String>,
+    /// Extra headers, in fold-in order: the correlation header stamp, then the
+    /// emergency `Resource-Priority` marker.
+    pub headers: Vec<(String, String)>,
+    /// The layout's egress rewrite — applied LAST (final say on R-URI/headers).
+    pub rewrite: crate::egress::EgressRewrite,
+}
+
+impl InvitePlan {
+    /// Replay the plan onto an INVITE builder — the same op order
+    /// [`CallEnv::outgoing_invite`] historically applied: `through(via)` → core
+    /// From/To/R-URI → identity headers → the egress rewrite last.
+    pub fn apply<'b>(&self, inv: Invite<'b>) -> Invite<'b> {
+        let mut inv = inv.through(self.via);
+        if let Some(from) = &self.from {
+            inv = inv.from(from);
+        }
+        if let Some(to) = &self.to {
+            inv = inv.to(to);
+        }
+        if let Some(ruri) = &self.ruri {
+            inv = inv.ruri(ruri);
+        }
+        for (name, value) in &self.headers {
+            inv = inv.with_header(name, value);
+        }
+        self.rewrite.clone().apply(inv)
     }
 }
 
