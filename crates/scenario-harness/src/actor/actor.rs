@@ -55,6 +55,11 @@ use crate::{Agent, ClientInvite, Dialog, Inbound, ServerTxn, StepError};
 pub const SUBFLOW_REALIGN: &str = "realign";
 /// The sub-flow name a REFER's acceptance (202) advances on the sending leg.
 pub const SUBFLOW_REFER: &str = "refer";
+/// The sub-flow name a CALLER-initiated in-dialog renegotiation (a re-INVITE's
+/// answered-and-ACKed 2xx, or an UPDATE's 200) advances on the sending leg —
+/// the barrier the `reinvite` / `prack_update` teardown gates on so the BYE
+/// never races the renegotiation's completion.
+pub const SUBFLOW_RENEG: &str = "reneg";
 
 /// How an endpoint answers the INITIAL (dialog-creating) INVITE it receives —
 /// the endpoint state machine's entry policy (B6). Later in-dialog traffic is
@@ -157,6 +162,21 @@ pub struct CtxFeed {
     /// Stamped when this caller's establishing INVITE is answered (2xx
     /// received) — `time_to_200` on every current body.
     pub on_answer_rx: Feed,
+    /// Stamped on this caller's FIRST >100 provisional (18x/183) — the abandon
+    /// body's `time_to_180`. Distinct from the ringing gate (which is a rate,
+    /// not a checkpoint).
+    pub on_provisional: Feed,
+    /// Stamped when the 2xx to this caller's delayed-offer re-INVITE arrives
+    /// (after it is ACKed) — the `reinvite` flow's `time_to_reinvite_200` +
+    /// `reinvited`.
+    pub on_reinvite_ok: Feed,
+    /// Stamped when the 200 to this caller's in-dialog UPDATE arrives — the
+    /// `prack_update` flow's `time_to_update_200` + `updated`.
+    pub on_update_ok: Feed,
+    /// Stamped when the 200 to this caller's FIRST in-dialog OPTIONS keepalive
+    /// ping arrives — the keepalive flows' `time_to_options_200` +
+    /// `keepalive_ack` (first ping only).
+    pub on_options_ok: Feed,
     /// Stamped when this UAS leg's answer is confirmed (ACK received) — the
     /// shared establishment's `connected`.
     pub on_ack_rx: Feed,
@@ -255,6 +275,12 @@ pub struct ActorState<'c> {
     /// RSeq values of reliable provisionals this caller has already PRACKed —
     /// so a retransmitted 183 is not double-PRACKed.
     pracked_rseqs: HashSet<u32>,
+    /// This caller sent a delayed-offer re-INVITE and awaits its 2xx (which the
+    /// reactor ACKs with the answer SDP). `false` for every non-`reinvite` leg.
+    pending_reinvite: bool,
+    /// Whether this caller has already stamped the first-OPTIONS-ping feed —
+    /// so the looped `options_hold` pings stamp `keepalive_ack` exactly once.
+    saw_options_200: bool,
 }
 
 impl<'c> ActorState<'c> {
@@ -286,6 +312,8 @@ impl<'c> ActorState<'c> {
             answered_reinvites: HashSet::new(),
             pending_prack_answer: None,
             pracked_rseqs: HashSet::new(),
+            pending_reinvite: false,
+            saw_options_200: false,
         }
     }
 
@@ -583,6 +611,9 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
                     if !st.saw_provisional {
                         st.saw_provisional = true;
                         st.ctx.anchor(&st.agent, "firstProvisional", &resp);
+                        // The abandon body's `time_to_180` (default NONE on every
+                        // other body).
+                        st.feed.on_provisional.stamp(st.ctx);
                         if st.feed.ringing_gate {
                             st.ctx.mark_ringing(true);
                         }
@@ -638,6 +669,26 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
         }
         return Ok(());
         }
+        // A re-INVITE 2xx with NO pending initial INVITE: this caller's own
+        // delayed-offer re-INVITE (the `reinvite` body). ACK it WITH the answer
+        // SDP (RFC 3264 §4 delayed offer), close the `ReInvite` obligation the
+        // goal opened, advance the caller's `reneg` sub-flow (the teardown
+        // barrier), and stamp the declared feed.
+        if st.pending_reinvite && (200..300).contains(&resp.status) {
+            st.pending_reinvite = false;
+            let sdp = st.answer_body();
+            if let Some(dialog) = st.dialogs.confirmed.as_mut() {
+                dialog.ack(Some(sdp)).await;
+            }
+            let key = ObligationKey::new(st.role, ObligationKind::ReInvite, resp.cseq.seq);
+            st.obs.record(Observation::ResponseObserved { key }, now);
+            st.obs.record(
+                Observation::Subflow { leg: st.role, name: SUBFLOW_RENEG, to: SubflowState::Confirmed },
+                now,
+            );
+            st.feed.on_reinvite_ok.stamp(st.ctx);
+            return Ok(());
+        }
     }
 
     // Otherwise it is a final to one of our sent in-dialog requests (our BYE's
@@ -667,6 +718,21 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
                 // The 200 to our PRACK — the 100rel flows' `pracked` /
                 // `time_to_prack_200` (the reliable provisional is acknowledged).
                 ObligationKind::Prack => st.feed.on_prack_ok.stamp(st.ctx),
+                // The 200 to our in-dialog UPDATE — the `prack_update` flow's
+                // `updated` / `time_to_update_200` (no ACK; the 200 completes it).
+                // Advance the caller's `reneg` sub-flow so the teardown barrier
+                // holds before the BYE.
+                ObligationKind::Update => {
+                    st.obs.record(
+                        Observation::Subflow {
+                            leg: st.role,
+                            name: SUBFLOW_RENEG,
+                            to: SubflowState::Confirmed,
+                        },
+                        now,
+                    );
+                    st.feed.on_update_ok.stamp(st.ctx);
+                }
                 _ => {}
             }
         }
@@ -737,6 +803,74 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
                 now,
             );
         }
+        // A delayed-offer (bodyless) re-INVITE: send it, open the ReInvite
+        // obligation keyed on its CSeq; the reactor ACKs the 2xx with the answer
+        // SDP and stamps `on_reinvite_ok` (see `react_response`).
+        GoalStep::Reinvite => {
+            let now = Instant::now();
+            let (key, dialog_clone) = {
+                let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
+                    StepError::UnexpectedKind {
+                        who: st.role.to_string(),
+                        detail: "Reinvite goal with no confirmed dialog".to_string(),
+                    }
+                })?;
+                let _reinv = dialog.request(InDialogMethod::Invite, None).await;
+                let cseq = dialog.local_cseq();
+                (ObligationKey::new(st.role, ObligationKind::ReInvite, cseq), dialog.clone())
+            };
+            st.pending_reinvite = true;
+            st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
+            st.obs.record(
+                Observation::RequestSent { key, detail: "re-INVITE awaiting 2xx".to_string() },
+                now,
+            );
+        }
+        // An in-dialog UPDATE (RFC 3311) carrying this leg's offer: send it, open
+        // the Update obligation; its 200 closes it (no ACK) and stamps
+        // `on_update_ok` (see `react_response`).
+        GoalStep::Update => {
+            let now = Instant::now();
+            let offer = st.media.offer_sdp().unwrap_or(crate::OFFER_SDP);
+            let (key, dialog_clone) = {
+                let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
+                    StepError::UnexpectedKind {
+                        who: st.role.to_string(),
+                        detail: "Update goal with no confirmed dialog".to_string(),
+                    }
+                })?;
+                let _upd = dialog.send_request(InDialogMethod::Update).with_sdp(offer).try_send().await?;
+                let cseq = dialog.local_cseq();
+                (ObligationKey::new(st.role, ObligationKind::Update, cseq), dialog.clone())
+            };
+            st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
+            st.obs.record(
+                Observation::RequestSent { key, detail: "update awaiting 200".to_string() },
+                now,
+            );
+        }
+        // One in-dialog OPTIONS keepalive ping, its 200 read inline (the reactor
+        // has nothing else to do for this leg during the ping).
+        GoalStep::Options => {
+            ping_options_once(st).await?;
+        }
+        // The OPTIONS-keepalive hold loop: ping every `cadence` until `hold`
+        // elapses. Each 200 is read inline; the first stamps `keepalive_ack`.
+        GoalStep::EveryOptions { cadence, hold } => {
+            let start = Instant::now();
+            while start.elapsed() < hold {
+                tokio::time::sleep(cadence).await;
+                ping_options_once(st).await?;
+            }
+        }
+        // CANCEL the still-pending initial INVITE (RFC 3261 §9.1). KEEP the
+        // pending INVITE so its `487` still routes to it (→ `Failed{487}` →
+        // LegTerminated); the peer's CANCEL→200+487 is handled reactively.
+        GoalStep::Cancel => {
+            if let Some(inv) = st.dialogs.pending_invite.as_ref() {
+                let _cxl = inv.cancel().await;
+            }
+        }
         GoalStep::Bye => {
             let now = Instant::now();
             let (key, dialog_clone) = {
@@ -755,6 +889,28 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
             st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
             st.obs.record(Observation::RequestSent { key, detail: "hangup".to_string() }, now);
         }
+    }
+    Ok(())
+}
+
+/// Send ONE in-dialog OPTIONS keepalive ping on the confirmed dialog and read
+/// its 200 inline — the reactor is parked on the goal arm during the ping, so
+/// the 200 is consumed here (mirrors the linear `options_hold`/`long_call`
+/// pings). The FIRST ping stamps the `keepalive_ack` feed exactly once.
+async fn ping_options_once(st: &mut ActorState<'_>) -> Result<(), StepError> {
+    let (mut opt, dialog_clone) = {
+        let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| StepError::UnexpectedKind {
+            who: st.role.to_string(),
+            detail: "Options goal with no confirmed dialog".to_string(),
+        })?;
+        let opt = dialog.request(InDialogMethod::Options, None).await;
+        (opt, dialog.clone())
+    };
+    st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
+    opt.try_expect(200).await?;
+    if !st.saw_options_200 {
+        st.saw_options_200 = true;
+        st.feed.on_options_ok.stamp(st.ctx);
     }
     Ok(())
 }

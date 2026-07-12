@@ -17,10 +17,12 @@
 
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use scenario_harness::actor::scenarios::{
-    Refer as ActorRefer, ReferCharlieReject as ActorReferCharlieReject,
+    PrackUpdate as ActorPrackUpdate, Refer as ActorRefer,
+    ReferCharlieReject as ActorReferCharlieReject,
 };
+use scenario_harness::actor::ActorScenario;
 use scenario_harness::realcall::scenarios::{
-    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate, Reinvite,
+    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, Reinvite,
 };
 use scenario_harness::realcall::{
     run_actor_asserting, run_actor_collecting, run_asserting, run_collecting, CallEnv,
@@ -72,6 +74,28 @@ async fn assert_no_leak(name: &str, scenario: &dyn RealCallScenario) {
     assert!(report.passed(), "RFC audit failed for `{name}`");
 }
 
+/// The ACTOR-lane twin of [`assert_no_leak`] for an alice/bob-only actor body:
+/// drive it through an in-process B2BUA via the actor runner and assert no leak.
+async fn assert_no_leak_actor(name: &str, scenario: &dyn ActorScenario) {
+    let scene = B2buaScene::new(name).await;
+    let env = CallEnv::for_functional(
+        &scene.alice,
+        &scene.bob,
+        None,
+        scene.b2bua.addr,
+        "X-Loadgen-Id",
+        format!("{name}-tok"),
+    );
+
+    run_actor_asserting(scenario, &env).await;
+
+    settle_until(|| scene.b2bua.active_calls() == 0).await;
+    scene.b2bua.assert_fully_reaped();
+
+    let report = scene.finish().await;
+    assert!(report.passed(), "RFC audit failed for `{name}`");
+}
+
 #[tokio::test(start_paused = true)]
 async fn realcall_basic_call_no_leak() {
     assert_no_leak("realcall-basic", &BasicCall).await;
@@ -95,8 +119,10 @@ async fn realcall_prack_update_no_leak() {
     // PRACK/200 → 200/ACK → in-dialog UPDATE/200 → BYE. The b2bua relays the
     // reliable provisional, the PRACK and the UPDATE end-to-end with no special
     // config; the report gate below enforces the full RFC 3261/3262/3264 audit
-    // with NO allow_violation.
-    assert_no_leak("realcall-prack-update", &PrackUpdate).await;
+    // with NO allow_violation. Since P3 this is the ACTOR-declared body
+    // (per-endpoint reactors + the ack-gated settle barrier), driven through the
+    // same executor the load fleet uses.
+    assert_no_leak_actor("realcall-prack-update", &ActorPrackUpdate).await;
 }
 
 #[tokio::test(start_paused = true)]

@@ -44,7 +44,7 @@ use crate::StepError;
 
 pub use actor::{
     run_actor, ActorSpec, ActorState, CtxFeed, Disposition, Feed, MediaState, SUBFLOW_REALIGN,
-    SUBFLOW_REFER,
+    SUBFLOW_RENEG, SUBFLOW_REFER,
 };
 pub use goals::{Barrier, Goal, GoalCursor, GoalStep};
 pub use ledger::{ObligationKey, ObligationKind, ObligationLedger};

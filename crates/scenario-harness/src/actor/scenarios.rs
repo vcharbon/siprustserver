@@ -4,13 +4,27 @@
 
 use std::time::Duration;
 
-use super::actor::{CtxFeed, Disposition, Feed, MediaState, SUBFLOW_REALIGN, SUBFLOW_REFER};
+use super::actor::{
+    CtxFeed, Disposition, Feed, MediaState, SUBFLOW_REALIGN, SUBFLOW_RENEG, SUBFLOW_REFER,
+};
 use super::goals::{Barrier, Goal, GoalStep};
 use super::spec::{ActorCall, ActorScenario, Expect};
 use super::state::{LegPhase, StateInner, SubflowState};
 use super::{phase, ActorSpec, SettleBarrier};
 use crate::realcall::{CallEnv, ScenarioId};
 use crate::{StepError, ANSWER_SDP, OFFER_SDP};
+
+/// The caller's in-dialog renegotiation (a re-INVITE's answered-and-ACKed 2xx,
+/// or an UPDATE's 200) is complete — the `reinvite` / `prack_update` teardown
+/// barrier, so the BYE never races the renegotiation.
+fn reneg_done(s: &StateInner) -> bool {
+    s.leg("alice").subflow(SUBFLOW_RENEG).is_some_and(|f| f >= SubflowState::Confirmed)
+}
+
+/// Both legs established (confirmed) — the shared `established` controller gate.
+fn established(s: &StateInner) -> bool {
+    s.leg_at_least("alice", LegPhase::Confirmed) && s.leg_at_least("bob", LegPhase::Confirmed)
+}
 
 /// Guard [`StepError`] under a fixed synthetic `who` (a bounded sample-key) —
 /// the actor twin of the linear bodies' `who`-tagged build guards. `detail` is
@@ -391,6 +405,91 @@ impl ActorScenario for ReroutingPrack {
             s.leg_at_least("alice", LegPhase::Confirmed)
                 && s.leg_at_least("bob2", LegPhase::Confirmed)
         })];
+
+        Ok(ActorCall {
+            actors,
+            plan,
+            settle: SettleBarrier::default_ceiling(),
+            expect: Expect::HappyBye,
+        })
+    }
+}
+
+/// RFC 3262 reliable-provisional establishment followed by an RFC 3311 in-dialog
+/// UPDATE renegotiation, actor-declared — the port of
+/// [`crate::realcall::scenarios::PrackUpdate`]. Bob answers RELIABLY
+/// ([`Disposition::ReliableAnswer`]: `183`/PRACK/`200`/ACK), alice PRACKs the
+/// reliable 183 in her reactor, and — once established — sends an in-dialog
+/// UPDATE (offer) whose 200 completes the exchange (no ACK), then BYEs. The
+/// reactor reuses the 100rel machinery the rerouting-prack port built.
+///
+/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.6):
+/// phases `pracked` → `connected` → `updated` → `bye_200`; checkpoints
+/// `time_to_prack_200` / `time_to_200` / `time_to_update_200` / `time_to_bye_200`;
+/// `mark_ringing(true)` on the reliable 183; anchors `PRACK_ANCHORS` (UPDATE NOT
+/// anchored).
+pub struct PrackUpdate;
+
+impl ActorScenario for PrackUpdate {
+    fn id(&self) -> ScenarioId {
+        "prack_update"
+    }
+
+    fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
+        let actors = vec![
+            // Alice INVITEs advertising 100rel, PRACKs bob's reliable 183 in her
+            // reactor, then UPDATEs the confirmed dialog and BYEs.
+            ActorSpec {
+                role: "alice",
+                agent: env.alice.clone(),
+                disposition: Disposition::Caller,
+                media: MediaState::offer(OFFER_SDP),
+                goals: vec![
+                    Goal::new(
+                        Barrier::None,
+                        GoalStep::Invite {
+                            callee: "bob",
+                            plan: Some(env.invite_plan(&["bob"]).with_supported_100rel()),
+                        },
+                    ),
+                    Goal::new(Barrier::pred("established", established), GoalStep::Update)
+                        .after(env.reinvite_gap),
+                    Goal::new(Barrier::pred("updated", reneg_done), GoalStep::Bye)
+                        .after(env.reinvite_gap),
+                ],
+                invite_targets: vec![("bob", env.bob.clone())],
+                via: None,
+                feed: CtxFeed {
+                    // bob's reliable 183 is guaranteed-delivery, so it counts
+                    // toward the cross-call 18x gate (contract table §5.6).
+                    ringing_gate: true,
+                    on_answer_rx: Feed::new(Some("time_to_200"), None),
+                    on_prack_ok: Feed::new(Some("time_to_prack_200"), Some("pracked")),
+                    on_update_ok: Feed::new(Some("time_to_update_200"), Some("updated")),
+                    on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
+                    ..CtxFeed::default()
+                },
+            },
+            // Bob answers RELIABLY (183/PRACK/200/ACK) and reacts to the UPDATE
+            // (200 + SDP) reactively; his ACK receipt stamps `connected`.
+            ActorSpec {
+                role: "bob",
+                agent: env.bob.clone(),
+                disposition: Disposition::ReliableAnswer,
+                media: MediaState::answer(ANSWER_SDP),
+                goals: vec![],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed {
+                    on_ack_rx: Feed::new(None, Some("connected")),
+                    ..CtxFeed::default()
+                },
+            },
+        ];
+
+        // Internal controller gating only (no `ctx.phase` stamps here — those
+        // ride the reactor feeds above): established → updated.
+        let plan = vec![phase("established", established), phase("updated", reneg_done)];
 
         Ok(ActorCall {
             actors,
