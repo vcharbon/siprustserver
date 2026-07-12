@@ -26,12 +26,12 @@ use crate::strategy::{DecodeResult, SelectError, SelectOpts};
 use super::{is_dialog_creating, ProxyCore};
 
 /// Outcome of routing a request — what to meter after the work is done.
-struct RouteOutcome {
-    decision: RoutingDecisionKind,
+pub(super) struct RouteOutcome {
+    pub(super) decision: RoutingDecisionKind,
     /// The forwarded-to target. The lib meters only the decision; the routing
     /// regression tests assert on this field.
     #[allow(dead_code)]
-    target: Option<ProxyAddr>,
+    pub(super) target: Option<ProxyAddr>,
 }
 
 /// The `branch=` token of the TOP (first) `Via` header of an inbound request —
@@ -90,7 +90,7 @@ impl ProxyCore {
         self.metrics.record_routing_decision(outcome.decision);
     }
 
-    async fn route_request(&self, msg: &SipMessage, src: SocketAddr) -> RouteOutcome {
+    pub(super) async fn route_request(&self, msg: &SipMessage, src: SocketAddr) -> RouteOutcome {
         let SipMessage::Request(req) = msg else {
             return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
         };
@@ -229,9 +229,13 @@ impl ProxyCore {
             let Some(entry) = crate::headers::split_top_level_commas(top_route).into_iter().next() else { break };
             let Some(parsed) = parse_sip_uri(&entry) else { break };
             // Out-of-range port → malformed, never truncated (70596 ≢ 5060).
-            if parsed.host != self.advertised.host
-                || crate::headers::uri_port_u16(parsed.port) != Some(self.advertised.port)
-            {
+            // Dual-face: a self Route may carry EITHER face's advertise (the
+            // §16.6 double-RR stamps the two entries with the face facing each
+            // party), so match both — the in-dialog request must pop BOTH self
+            // entries before the next-hop decision.
+            let self_route = crate::headers::uri_port_u16(parsed.port)
+                .is_some_and(|p| self.is_self_addr(&parsed.host, p));
+            if !self_route {
                 break;
             }
             let params = sip_message::message_helpers::parse_uri_params(&entry);
@@ -444,12 +448,51 @@ impl ProxyCore {
                 target.clone()
             };
             let stickiness = self.strategy.encode_stickiness(&cookie_addr, msg);
-            let cookie_rr = match &stickiness {
-                Some(params) => build_record_route_value(&self.advertised, params.iter()),
-                None => build_record_route_value(&self.advertised, std::iter::empty()),
+            // Dual-face (§16.6/§16.7 multi-homed): stamp each half of the
+            // double-RR with the advertise of the face facing the party that
+            // will USE it —
+            //   • cookie RR   → the EXTERNAL party's face (the caller for an
+            //     inbound dialog-forming request = the source's face; the
+            //     callee for a worker-outbound one = the target's face), so
+            //     that party's in-dialog requests reach the proxy on the face
+            //     it lives on;
+            //   • outbound RR → the WORKER party's face (the forward target
+            //     for inbound; the originating worker for worker-outbound) —
+            //     the internal plane in the deployed topology.
+            // The §12.1.1/§12.1.2 route-set rules then put the correct face on
+            // top of each party's route set on their own. When both resolve to
+            // the SAME face (single-face mode, intra-face forwarding) this is
+            // byte-identical to the historical single-advertise double-RR.
+            let external_party_adv = if is_worker_outbound {
+                self.egress_advertised(&target)
+            } else {
+                self.advertised_for_ip(src.ip())
             };
-            let outbound_rr =
-                format!("<sip:{}:{};outbound;lr>", self.advertised.host, self.advertised.port);
+            let worker_party_adv = if is_worker_outbound {
+                self.egress_advertised(&cookie_addr)
+            } else {
+                self.egress_advertised(&target)
+            };
+            let cross_face = external_party_adv != worker_party_adv;
+            let cookie_rr = match &stickiness {
+                Some(params) => build_record_route_value(external_party_adv, params.iter()),
+                None => build_record_route_value(external_party_adv, std::iter::empty()),
+            };
+            // Cross-face, the stickiness cookie rides BOTH entries: whichever
+            // self-RR a response's reverse-failover (or a diagnostic) recovers
+            // params from, the signed worker pin is present. Intra-face keeps
+            // the historical param-less `;outbound;lr` form.
+            let outbound_rr = match (&stickiness, cross_face) {
+                (Some(params), true) => crate::headers::build_record_route_value_flagged(
+                    worker_party_adv,
+                    params.iter(),
+                    "outbound",
+                ),
+                _ => format!(
+                    "<sip:{}:{};outbound;lr>",
+                    worker_party_adv.host, worker_party_adv.port
+                ),
+            };
             if is_worker_outbound {
                 prepend_header(&mut headers, "Record-Route", &outbound_rr);
                 prepend_header(&mut headers, "Record-Route", &cookie_rr);
@@ -474,8 +517,13 @@ impl ProxyCore {
         }
 
         let our_branch = reuse_branch.unwrap_or_else(|| self.id_gen.new_branch());
+        // Stamp the EGRESS face's advertise on the pushed Via (§18.1.1: the
+        // sent-by must be an address the next hop can return the response to —
+        // in dual-face mode that is the face the request leaves on, so the
+        // response arrives back on the same face).
+        let egress_adv = self.egress_advertised(&target);
         let via_value =
-            format!("SIP/2.0/UDP {}:{};branch={};rport", self.advertised.host, self.advertised.port, our_branch);
+            format!("SIP/2.0/UDP {}:{};branch={};rport", egress_adv.host, egress_adv.port, our_branch);
         prepend_header(&mut headers, "Via", &via_value);
 
         // Remember the outbound (target, branch) so a retransmit of THIS

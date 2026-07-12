@@ -89,9 +89,13 @@ status_main() {
   fi
   echo
 
-  # Pod status.
-  log "Current Pod Status:"
-  kubectl -n "$NS" get pods -l "app=b2bua-worker,app=sipp-uac,app=sipp-uas" --sort-by=.metadata.creationTimestamp -o wide 2>/dev/null | tail -10 || warn "Unable to query pod status"
+  # SUT pod status (workers stay in-cluster) + generator container status
+  # (UAC/UAS/loadgen are docker containers on the sipext bridge now).
+  log "Current SUT Pod Status:"
+  kubectl -n "$NS" get pods -l "app=b2bua-worker" --sort-by=.metadata.creationTimestamp -o wide 2>/dev/null | tail -10 || warn "Unable to query pod status"
+  log "Current Generator Containers (sipext):"
+  docker ps -a --filter "label=sipext-run=${CLUSTER:-sip-e2e}" \
+    --format 'table {{.Names}}\t{{.Status}}' 2>/dev/null | tail -25 || warn "Unable to query generator containers"
   echo
 
   # Warnings.

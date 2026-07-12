@@ -26,4 +26,9 @@ RUN apt-get update \
       ca-certificates libpcap0.8 libncursesw6 libssl3 python3 \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/build/sipp /usr/local/bin/sipp
-ENTRYPOINT ["sipp"]
+# No ENTRYPOINT: every caller names the binary explicitly — `docker run sipp:dev
+# sipp <args>` for the UAC/UAS generators (run.sh sipp_uas_up, sipext-gen.sh
+# sipext_sipp_uac_up) and `docker run sipp:dev python3 /exporter/...` for the
+# stat->Prometheus exporter twin. A hard `ENTRYPOINT ["sipp"]` would prepend a
+# second `sipp` (→ "remote_host given multiple times") to the generators AND make
+# the python3 exporter unrunnable (sipp would parse "python3" as a remote host).

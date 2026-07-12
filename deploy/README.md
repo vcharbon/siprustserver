@@ -6,11 +6,19 @@ the Rust-side counterpart to sipjsserver's k8s endurance harness.
 
 ```
 sipp UAC ──INVITE──▶ sip-front-proxy ──INVITE──▶ b2bua-worker pool ──INVITE──▶ sipp UAS
- (tier=load)          (tier=edge, LB +            (tier=app, real CDR          (tier=load)
-                       HMAC Record-Route           buffer, /metrics)
-                       stickiness, OPTIONS
-                       health probe, /metrics)
+ (docker on the        (tier=edge, dual-faced:     (tier=app, real CDR          (docker on the
+  no-NAT sipext         ext VIP caller-facing /     buffer, /metrics)            sipext bridge,
+  bridge; dials the     int VIP worker-facing;                                   pinned IPs)
+  external VIP)         LB + HMAC Record-Route
+                        stickiness, OPTIONS
+                        health probe, /metrics)
 ```
+
+All load generators (SIPp UAC/UAS, the Rust loadgen) are plain docker
+containers on the `sipext` bridge with pinned IPs and explicit `--cpus/
+--memory` caps (sipext dual-plane layout — the tier=load kind nodes are gone);
+see `deploy/k8s/lib/sipext-gen.sh` and the slot plan in
+`deploy/k8s/lib/net-env.sh`.
 
 ## Binaries (containerizable today)
 

@@ -1,0 +1,3 @@
+# Per-run generated sipext artifacts (uas-targets.csv, stat dirs) — regenerated
+# by run.sh sipp_uas_up / lib/sipext-gen.sh on every deploy.
+.sipext-gen/

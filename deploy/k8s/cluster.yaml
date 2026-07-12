@@ -25,18 +25,8 @@ nodes:
   - role: worker
     labels:
       tier: app
-  - role: worker
-    labels:
-      tier: load
-    extraPortMappings:
-      - containerPort: 30060
-        hostPort: 5060
-        protocol: UDP
-  # Second load node: the endurance profile runs long(~1750) + short(3000) +
-  # abuse + 200cps peak bursts simultaneously; on a single load node they
-  # exhausted memory and OOM'd the generators late in a 2h run. Spreading the
-  # SIPp UAC/UAS pods across two load nodes (plus per-pod memory limits in
-  # manifests/40-sipp-uac-job.yaml) keeps the generators alive for the full run.
-  - role: worker
-    labels:
-      tier: load
+  # tier=load nodes REMOVED (sipext dual-plane layout): all load generators
+  # (loadgen, sipp UAC/UAS, dnsmasq) run as plain docker containers on the
+  # external `sipext` bridge, outside k8s, with their own --memory/--cpus caps
+  # (run.sh). The extraPortMappings hostPort-5060 DNAT is gone with them — the
+  # WSL host reaches the external VIP directly via the sipext bridge.

@@ -67,6 +67,31 @@ kind_cluster_present() {
   docker network ls --format '{{.Name}}' | grep -qx "$KIND_NET"
 }
 
+# The compose file attaches victoriametrics to the external `sipext` bridge so
+# it can scrape the load-generator containers (sipp UAC exporters :9035 /
+# loadgen :9300) that live there — an external network that does not exist
+# would abort compose up. Normally run.sh sipext_up creates it; this guard
+# covers a standalone --bootstrap before any cluster `up`, using the SAME
+# parameters (no-NAT, pinned subnet) from deploy/k8s/lib/net-env.sh when the
+# sibling checkout layout is present, else the identical hardcoded defaults.
+ensure_sipext_net() {
+  if [[ -f "$HERE/../k8s/lib/net-env.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "$HERE/../k8s/lib/net-env.sh"
+  fi
+  SIPEXT_NET="${SIPEXT_NET:-sipext}"
+  SIPEXT_SUBNET="${SIPEXT_SUBNET:-192.168.60.0/24}"
+  SIPEXT_GATEWAY="${SIPEXT_GATEWAY:-192.168.60.1}"
+  export SIPEXT_NET   # compose interpolates ${SIPEXT_NET:-sipext}
+  if ! docker network inspect "$SIPEXT_NET" >/dev/null 2>&1; then
+    c_cyan "==> creating missing sipext bridge $SIPEXT_NET ($SIPEXT_SUBNET, masquerade OFF)"
+    docker network create --driver bridge \
+      --subnet "$SIPEXT_SUBNET" --gateway "$SIPEXT_GATEWAY" \
+      -o com.docker.network.bridge.enable_ip_masquerade=false \
+      "$SIPEXT_NET" >/dev/null
+  fi
+}
+
 kubectl_kind_present() {
   command -v kubectl >/dev/null 2>&1 && kubectl get nodes >/dev/null 2>&1
 }
@@ -100,6 +125,8 @@ cmd_bootstrap() {
            "$STACK_DIR/data/victorialogs" "$STACK_DIR/data/victoria-traces"
   docker run --rm -v "$STACK_DIR/data/grafana:/data" alpine \
     chown -R 472:472 /data >/dev/null
+  # sipext must exist BEFORE compose up (external network in the compose file).
+  ensure_sipext_net
   c_cyan "==> bringing up host stack (docker compose up -d --build)"
   # --build: the grafana service builds a custom image (bakes the VictoriaLogs
   # plugin in at build time, honouring the proxy build-args exported above). Without

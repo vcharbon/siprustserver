@@ -1,6 +1,18 @@
-# Almost all scraping is done by vmagent inside the kind cluster, which
-# remote-writes to this VictoriaMetrics instance via the kind docker
-# network. We keep one static job here so VM has its own self-metrics.
+# Almost all in-CLUSTER scraping is done by vmagent inside the kind cluster,
+# which remote-writes to this VictoriaMetrics instance via the kind docker
+# network. One static job keeps VM's own self-metrics.
+#
+# The sipext load generators (sipp UAC streams + loadgen — plain docker
+# containers on the no-NAT `sipext` bridge, sipext dual-plane layout) are
+# INVISIBLE to the in-cluster vmagent, so this VM scrapes them DIRECTLY: the
+# compose file attaches the victoriametrics container to the sipext network,
+# and the targets below are the deterministic generator IPs
+# (deploy/k8s/lib/net-env.sh: UAC streams at SIPEXT_UAC_BASE_IP .100 + slot,
+# stat exporter :9035 sharing the stream's own IP; loadgen pinned at .20:9300).
+# The range is STATIC on the default SIPEXT_SUBNET (192.168.60.0/24) — change
+# it here if you override the subnet. Streams come and go, so most targets are
+# down at any instant: that is EXPECTED and must never fail a run (a down
+# target simply scrapes nothing).
 
 global:
   scrape_interval: 15s
@@ -11,3 +23,31 @@ scrape_configs:
       - targets: ["localhost:8428"]
         labels:
           app: "victoriametrics"
+
+  # SIPp stat exporters on the sipext bridge — slots 0..35 (run.sh caps=0,
+  # chaos failover/bringback=1..2, peak/abuse/orphan=3..5, endurance long
+  # shards 10..29, fixed endurance streams 30..33). The exporter itself labels
+  # every series with scenario/role/sipp_job (sipp_stat_exporter.py env), so
+  # the dashboards' role= queries need no target labels.
+  - job_name: "sipext-sipp-exporter"
+    static_configs:
+      - targets: [
+          "192.168.60.100:9035", "192.168.60.101:9035", "192.168.60.102:9035",
+          "192.168.60.103:9035", "192.168.60.104:9035", "192.168.60.105:9035",
+          "192.168.60.106:9035", "192.168.60.107:9035", "192.168.60.108:9035",
+          "192.168.60.109:9035", "192.168.60.110:9035", "192.168.60.111:9035",
+          "192.168.60.112:9035", "192.168.60.113:9035", "192.168.60.114:9035",
+          "192.168.60.115:9035", "192.168.60.116:9035", "192.168.60.117:9035",
+          "192.168.60.118:9035", "192.168.60.119:9035", "192.168.60.120:9035",
+          "192.168.60.121:9035", "192.168.60.122:9035", "192.168.60.123:9035",
+          "192.168.60.124:9035", "192.168.60.125:9035", "192.168.60.126:9035",
+          "192.168.60.127:9035", "192.168.60.128:9035", "192.168.60.129:9035",
+          "192.168.60.130:9035", "192.168.60.131:9035", "192.168.60.132:9035",
+          "192.168.60.133:9035", "192.168.60.134:9035", "192.168.60.135:9035",
+        ]
+
+  # Rust loadgen on the sipext bridge (crates/loadgen /metrics :9300 at the
+  # pinned SIPEXT_LOADGEN_IP).
+  - job_name: "sipext-loadgen"
+    static_configs:
+      - targets: ["192.168.60.20:9300"]

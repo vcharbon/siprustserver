@@ -3,7 +3,14 @@ services:
     image: victoriametrics/victoria-metrics:v1.143.0
     container_name: victoriametrics
     restart: unless-stopped
-    networks: [default, kind]
+    # `sipext` attachment: VM scrapes the load-generator containers (sipp UAC
+    # exporters :9035 / loadgen :9300) DIRECTLY on the no-NAT sipext bridge —
+    # docker inter-bridge isolation would otherwise block it (the in-cluster
+    # vmagent cannot see them at all). install.sh ensures the network exists
+    # before compose up. Side effect: while VM is attached, `run.sh down`'s
+    # `docker network rm sipext` fails silently and the bridge lingers — fine,
+    # sipext_up reuses a same-subnet bridge on the next `up`.
+    networks: [default, kind, sipext]
     ports:
       - "8428:8428"
     volumes:
@@ -134,3 +141,9 @@ networks:
   kind:
     external: true
     name: kind
+  # External SIP plane (sipext dual-plane layout): created by run.sh sipext_up,
+  # or by install.sh's ensure_sipext_net guard when the obs stack comes up
+  # first. Name overridable to match deploy/k8s/lib/net-env.sh SIPEXT_NET.
+  sipext:
+    external: true
+    name: ${SIPEXT_NET:-sipext}

@@ -3,8 +3,10 @@
 # for the proxy's partition routing AND matched against the membership ordinal
 # the K8sMembership informer derives from each EndpointSlice's targetRef.name —
 # so callRef ownership and replication membership agree by construction). Routes
-# every call to the sipp-uas Service (B2BUA_DEST resolves DNS at startup).
-# Pinned to tier=app like the sipjs worker.
+# every call to the external sipp-uas docker containers on the sipext plane —
+# by IP LITERAL (B2BUA_DEST / the UAC's injected per-call destination): workers
+# never resolve external names (sipext dual-plane invariant; the external zone
+# is deliberately NXDOMAIN in-cluster). Pinned to tier=app like the sipjs worker.
 #
 # HA replication (S11) is opt-in via ${REPL_ENABLE} (default "0" for the plain
 # load runner; the chaos suite sets "1"). When on, each worker:
@@ -58,17 +60,25 @@ spec:
               valueFrom: { fieldRef: { fieldPath: status.podIP } }
             - { name: B2BUA_LISTEN,  value: "0.0.0.0:5060" }
             - { name: B2BUA_ADVERTISE, value: "$(POD_IP)" }
-            - { name: B2BUA_DEST,    value: "sipp-uas.sip-test.svc.cluster.local:5060" }
+            # Default b-leg callee = the first external sipp-uas container's
+            # PINNED sipext IP (net-env.sh). An IP literal on purpose: the
+            # worker must never resolve an external name (only-the-proxy-sees-
+            # the-world invariant); the proxy's face-picker routes it out the
+            # external face. Per-call destinations injected by the UAC
+            # (X-Api-Call [field0] from the run-generated uas-targets.csv) are
+            # sipext IP literals for the same reason.
+            - { name: B2BUA_DEST,    value: "${SIPEXT_UAS_IP}:5060" }
             # b-leg TargetAdmission allow-list (target_admission.rs). A non-IP
             # callee host that matches none of these suffixes is 503'd + terminated
             # BEFORE the send path, so one unresolvable target can't stall the
-            # libuv/threadpool on getaddrinfo/EAI_AGAIN. Every callee this cluster
-            # routes to is a cluster FQDN — B2BUA_DEST and the uas-targets.csv pod
-            # FQDNs are all `*.svc.cluster.local`, and the outbound proxy is an IP
-            # literal (always admitted). Pinned here (not left to the binary
-            # default) so the policy is visible at the deploy layer; set to `*` to
-            # disable the gate as a rollback without a rebuild. Suffixes match at a
-            # label boundary, so a leading dot is the safe form.
+            # send path on getaddrinfo/EAI_AGAIN. Under the sipext layout every
+            # legitimate callee is an IP LITERAL (always admitted); the only
+            # names a worker may still dial are internal cluster Services. This
+            # gate is therefore ALSO the worker-side enforcement of the "workers
+            # never resolve the external world" invariant — an external FQDN
+            # (e.g. uas.sipext.test) is 503'd here BEFORE any DNS lookup. Set to
+            # `*` to disable as a rollback without a rebuild. Suffixes match at
+            # a label boundary, so a leading dot is the safe form.
             - { name: WORKER_ALLOWED_TARGET_SUFFIXES, value: ".svc.cluster.local" }
             # Opt-in transparent header relay: copy the loadgen correlation id
             # from the a-leg INVITE onto every originated b-leg INVITE (callee +
@@ -89,6 +99,11 @@ spec:
             # The VIP is the keepalived VRRP address (ADR-0012 D7), stable across
             # proxy failover and pod restart.
             - { name: B2BUA_OUTBOUND_PROXY, value: "${PROXY_VIP}:${SIP_PORT}" }
+            # Boot-time assert (sipext dual-plane invariant: only the proxy sees
+            # the external world). With this set the runner REFUSES to start if
+            # B2BUA_OUTBOUND_PROXY is unset — a worker silently dialing R-URIs
+            # directly would bypass the LB and leak internal addressing.
+            - { name: B2BUA_REQUIRE_OUTBOUND_PROXY, value: "1" }
             - { name: B2BUA_METRICS, value: "0.0.0.0:9091" }
             # --- CDR sink: publish one JSON CDR per terminated call to RabbitMQ
             # (55-rabbitmq). Sits behind the in-process BufferedCdrWriter

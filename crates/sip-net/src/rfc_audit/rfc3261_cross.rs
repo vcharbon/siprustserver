@@ -2172,6 +2172,7 @@ mod tests {
                     msg: bye,
                     wire_peer: None,
                 }],
+                proxy_only: false,
             }],
         };
         let f = UnknownDialog481Rule.check_slice(&slice);

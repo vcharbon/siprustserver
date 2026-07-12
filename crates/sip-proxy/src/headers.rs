@@ -124,6 +124,28 @@ pub fn build_record_route_value<'a>(
     uri
 }
 
+/// [`build_record_route_value`] with a trailing valueless flag param before
+/// `;lr` — the dual-face worker-facing Record-Route entry, which carries the
+/// stickiness cookie params AND the `;outbound` direction marker:
+/// `<sip:host:port;k=v;...;outbound;lr>`.
+pub fn build_record_route_value_flagged<'a>(
+    advertised: &ProxyAddr,
+    params: impl IntoIterator<Item = (&'a String, &'a String)>,
+    flag: &str,
+) -> String {
+    let mut uri = format!("<sip:{}:{}", advertised.host, advertised.port);
+    for (k, v) in params {
+        uri.push(';');
+        uri.push_str(k);
+        uri.push('=');
+        uri.push_str(v);
+    }
+    uri.push(';');
+    uri.push_str(flag);
+    uri.push_str(";lr>");
+    uri
+}
+
 /// A parsed URI port (`u64` in the lenient parser) as a real `u16`. A value
 /// above 65535 is malformed and must NOT be silently truncated: `sip:host:70596`
 /// would otherwise wrap to 5060 — forwarding to the wrong port and even

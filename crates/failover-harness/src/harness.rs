@@ -198,6 +198,26 @@ impl HarnessHandle {
         *self.inner.lock().unwrap() = Some(h);
         res
     }
+
+    /// [`bind_sut`](Self::bind_sut) with explicit RFC-audit roles (the
+    /// dual-face proxy lanes are `{Proxy}`-only so per-UA subject rules do not
+    /// judge a face that carries half a relay's stream).
+    async fn bind_sut_with_roles(
+        &self,
+        name: &str,
+        addr: &str,
+        roles: std::collections::HashSet<sip_net::UaRole>,
+    ) -> (Box<dyn sip_net::UdpEndpoint>, SocketAddr) {
+        let h = self
+            .inner
+            .lock()
+            .unwrap()
+            .take()
+            .expect("harness taken (already finished?)");
+        let res = h.bind_sut_with_roles(name, addr, roles).await;
+        *self.inner.lock().unwrap() = Some(h);
+        res
+    }
 }
 
 impl ReplicatedB2buaSut {
@@ -544,6 +564,9 @@ impl ReplicatedB2buaSut {
 /// scenario can flip a worker's health (dead on crash, alive+ready on recovery).
 pub struct ProxySut {
     addr: SocketAddr,
+    /// Dual-face mode: the external (caller-plane) face's address. `None` for
+    /// the classic single-face proxy.
+    ext_addr: Option<SocketAddr>,
     registry: SimulatedWorkerRegistry,
     metrics: Arc<ProxyMetrics>,
     task: JoinHandle<()>,
@@ -557,9 +580,17 @@ pub struct ProxySut {
 }
 
 impl ProxySut {
-    /// The proxy's listen address (alice/bob send through it).
+    /// The proxy's listen address (alice/bob send through it). In dual-face
+    /// mode this is the INTERNAL face (the workers' outbound proxy target).
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Dual-face mode: the EXTERNAL face's address — what callers dial
+    /// `through(..)`. Panics on a single-face proxy (a test asking for the
+    /// external face of a single-face proxy is a topology bug).
+    pub fn ext_addr(&self) -> SocketAddr {
+        self.ext_addr.expect("ext_addr on a single-face proxy — spawn with spawn_proxy_dual")
     }
 
     /// The proxy's metrics.
@@ -637,6 +668,14 @@ pub struct FailoverHarness {
     /// would misread as a skip); after a reboot moves a worker to a new addr its
     /// PRE-reboot bind must stay excluded too, so accumulate rather than replace.
     all_worker_sip_addrs: Vec<SocketAddr>,
+    /// Dual-face proxy bind addrs (both faces, every takeover twin). Excluded
+    /// from the Drop-time endpoint-scoped audit exactly like worker binds: a
+    /// dual-face relay splits one dialog's stream across its two binds
+    /// (request in on one face, out on the other), so neither face alone is an
+    /// endpoint-shaped stream — conformance is judged at alice/bob. The
+    /// single-face proxy bind is NOT here (its one lane sees both directions
+    /// and stays audited, unchanged).
+    relay_sip_addrs: Vec<SocketAddr>,
     /// Injected timeline markers (crash/reboot/failover/partition/…).
     markers: Vec<Marker>,
     /// The ONE shared global recording-order sequencer (the SIP recorder's
@@ -730,6 +769,7 @@ impl FailoverHarness {
             repl_addrs,
             worker_sip_addrs: HashMap::new(),
             all_worker_sip_addrs: Vec::new(),
+            relay_sip_addrs: Vec::new(),
             markers: Vec::new(),
             event_seq,
             harness: Arc::new(HarnessHandle::new(harness)),
@@ -873,11 +913,78 @@ impl FailoverHarness {
 
         ProxySut {
             addr: sock,
+            ext_addr: None,
             registry,
             metrics,
             task,
             probe_task,
         }
+    }
+
+    /// Stand up a **dual-face** load-balancing proxy SUT: the internal face at
+    /// `int_addr` (workers' outbound-proxy target, worker plane), the external
+    /// face at `ext_addr` (what callers dial), and `int_cidrs` (the
+    /// `PROXY_FACE_INT_CIDRS` equivalent) driving the per-destination egress
+    /// face picker. `name` prefixes the two bind lanes (`{name}-int` /
+    /// `{name}-ext`); `id_seed` seeds the proxy's Via-branch generator — a
+    /// takeover twin re-bound on the SAME VIPs must use a different seed so it
+    /// cannot replay the dead proxy's branch sequence into live dialogs.
+    ///
+    /// Both faces are registered as **relay lanes**: the Drop-time
+    /// endpoint-scoped RFC audit excludes them (same rationale as worker
+    /// binds — a dual-face relay splits one dialog's stream across its two
+    /// binds, so neither face alone is an endpoint-shaped stream; conformance
+    /// is judged at alice/bob, which see everything the proxy emits). The
+    /// lanes are role-tagged `{Proxy}` so the full-suite audit
+    /// ([`assert_full_rfc_clean`](Self::assert_full_rfc_clean)) judges them
+    /// under the proxy-subject rules only.
+    pub async fn spawn_proxy_dual(
+        &mut self,
+        name: &str,
+        int_addr: &str,
+        ext_addr: &str,
+        int_cidrs: &str,
+        workers: &[(&str, SocketAddr)],
+        id_seed: u64,
+    ) -> ProxySut {
+        let roles = std::collections::HashSet::from([sip_net::UaRole::Proxy]);
+        let (int_ep, int_sock) = self
+            .harness
+            .bind_sut_with_roles(&format!("{name}-int"), int_addr, roles.clone())
+            .await;
+        let (ext_ep, ext_sock) = self
+            .harness
+            .bind_sut_with_roles(&format!("{name}-ext"), ext_addr, roles)
+            .await;
+        self.relay_sip_addrs.push(int_sock);
+        self.relay_sip_addrs.push(ext_sock);
+
+        let external = b2bua_harness::ExternalProxyFace {
+            endpoint: ext_ep,
+            addr: ext_sock,
+            int_cidrs: sip_proxy::FaceCidrs::parse(int_cidrs)
+                .unwrap_or_else(|e| panic!("bad dual-face int CIDRs {int_cidrs:?}: {e}")),
+        };
+        let parts = b2bua_harness::spawn_proxy_core_with(
+            int_ep,
+            int_sock,
+            Some(external),
+            workers,
+            self.clock.clone(),
+            id_seed,
+        );
+        let b2bua_harness::ProxyCoreParts { addr: sock, registry, metrics, observer: _, task } =
+            parts;
+        ProxySut { addr: sock, ext_addr: Some(ext_sock), registry, metrics, task, probe_task: None }
+    }
+
+    /// The recorded SIP wire entries so far (every send paired with its
+    /// delivery — `from`/`to` are the REAL socket addresses). Non-consuming;
+    /// the dual-face tests assert per-face source-address discipline on it
+    /// (every datagram a caller receives originates from the external face's
+    /// bind, every worker-bound one from the internal face's).
+    pub fn sip_entries(&self) -> Vec<sip_net::RecordedSipEntry> {
+        sip_net::to_sip_entries(&self.harness.recording().channel().snapshot())
     }
 
     /// Bind a replicating B2BUA worker `ordinal` (declared in [`new`](Self::new))
@@ -1255,8 +1362,12 @@ impl FailoverHarness {
         // request and so sees the whole 1,2,3 sequence) are each CSeq-monotonic.
         // The endpoint/proxy binds still catch a genuine same-leg CSeq collision
         // (e.g. a keepalive OPTIONS and a later BYE reusing one CSeq toward bob).
-        let worker_binds: std::collections::HashSet<String> =
-            self.all_worker_sip_addrs.iter().map(|a| a.to_string()).collect();
+        let worker_binds: std::collections::HashSet<String> = self
+            .all_worker_sip_addrs
+            .iter()
+            .chain(self.relay_sip_addrs.iter())
+            .map(|a| a.to_string())
+            .collect();
         let snapshot = self.harness.recording().channel().snapshot();
         let events: Vec<_> = snapshot
             .into_iter()

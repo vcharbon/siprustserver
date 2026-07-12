@@ -12,8 +12,10 @@
 
 mod request;
 mod response;
+#[cfg(test)]
+mod dual_face_tests;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +27,8 @@ use sip_txn::IdGen;
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::CancelBranchLru;
+use crate::face::FaceCidrs;
+use crate::observability::metrics::Face;
 use crate::observability::ProxyMetrics;
 use crate::registry::WorkerRegistry;
 use crate::resolver::{HostResolver, NamedForwarder, ResolverConfig, SystemResolver};
@@ -37,6 +41,27 @@ fn is_dialog_creating(method: &str) -> bool {
     method == "INVITE" || method == "SUBSCRIBE"
 }
 
+/// The **external face** of a dual-face (multi-homed edge) proxy — the second
+/// UDP socket bound on the caller plane, its own advertise, and the internal
+/// CIDR classifier that picks the egress face per destination IP. Handed to
+/// [`ProxyCoreBuilder::external_face`]; when absent the core is the classic
+/// single-face proxy (behaviour byte-identical to before dual-face existed).
+pub struct ExternalFaceParts {
+    /// The external-plane socket (bound on the external VIP).
+    pub endpoint: Box<dyn UdpEndpoint>,
+    /// The `host:port` stamped on Via / Record-Route for external-face egress.
+    pub advertised: ProxyAddr,
+    /// Destination IP ∈ any listed CIDR → internal face; else external.
+    pub int_cidrs: FaceCidrs,
+}
+
+/// The live external face inside a running core.
+struct ExternalFace {
+    endpoint: Arc<dyn UdpEndpoint>,
+    advertised: ProxyAddr,
+    int_cidrs: FaceCidrs,
+}
+
 /// The dependency bundle for a [`ProxyCore`] (avoids a 10-argument
 /// constructor). Crate-private: external wiring goes through
 /// [`ProxyCoreBuilder`], which is the one place the defaults live.
@@ -45,6 +70,9 @@ pub(crate) struct ProxyCoreParts {
     /// The address the proxy stamps on Via / Record-Route (its advertised
     /// `host:port`). Usually the endpoint's bound address.
     pub advertised: ProxyAddr,
+    /// Dual-face mode: the external-plane socket + advertise + face picker.
+    /// `None` → single-face (today's behaviour, unchanged).
+    pub external: Option<ExternalFaceParts>,
     pub strategy: Arc<dyn RoutingStrategy>,
     pub registry: Arc<dyn WorkerRegistry>,
     pub cancel_lru: Arc<CancelBranchLru>,
@@ -65,8 +93,12 @@ pub(crate) struct ProxyCoreParts {
 
 /// The stateless proxy.
 pub struct ProxyCore {
+    /// The internal-face socket (single-face mode: the ONLY socket).
     endpoint: Arc<dyn UdpEndpoint>,
+    /// The internal-face advertise (single-face mode: THE advertise).
     advertised: ProxyAddr,
+    /// Dual-face mode: the external-plane socket/advertise/picker.
+    external: Option<ExternalFace>,
     strategy: Arc<dyn RoutingStrategy>,
     registry: Arc<dyn WorkerRegistry>,
     cancel_lru: Arc<CancelBranchLru>,
@@ -83,8 +115,25 @@ pub struct ProxyCore {
 impl ProxyCore {
     pub(crate) fn new(parts: ProxyCoreParts) -> Self {
         let endpoint: Arc<dyn UdpEndpoint> = Arc::from(parts.endpoint);
+        let external = parts.external.map(|e| ExternalFace {
+            endpoint: Arc::from(e.endpoint),
+            advertised: e.advertised,
+            int_cidrs: e.int_cidrs,
+        });
+        // The named-target (DNS) forwarder resolves off-path and only then
+        // sends to the resolved SocketAddr; in dual-face mode hand it a
+        // face-picking send seam so a resolved destination still egresses on
+        // the face its IP lives on. Single-face keeps the raw endpoint.
+        let named_ep: Arc<dyn UdpEndpoint> = match &external {
+            Some(ext) => Arc::new(FacePickSendEndpoint {
+                internal: endpoint.clone(),
+                external: ext.endpoint.clone(),
+                int_cidrs: ext.int_cidrs.clone(),
+            }),
+            None => endpoint.clone(),
+        };
         let named = NamedForwarder::new(
-            endpoint.clone(),
+            named_ep,
             parts.resolver,
             parts.resolver_cfg,
             parts.clock.clone(),
@@ -93,6 +142,7 @@ impl ProxyCore {
         Self {
             endpoint,
             advertised: parts.advertised,
+            external,
             strategy: parts.strategy,
             registry: parts.registry,
             cancel_lru: parts.cancel_lru,
@@ -113,6 +163,76 @@ impl ProxyCore {
 
     pub fn advertised(&self) -> &ProxyAddr {
         &self.advertised
+    }
+
+    // ── Dual-face plumbing ──────────────────────────────────────────────────
+    // Single-face mode (external = None): every helper below degenerates to
+    // the pre-dual-face behaviour — internal endpoint, internal advertise,
+    // `is_self_addr` == "matches the one advertise". Zero behavioural delta.
+
+    /// Is `ip` on the internal plane? Single-face: everything is internal.
+    fn ip_is_internal(&self, ip: IpAddr) -> bool {
+        match &self.external {
+            Some(ext) => ext.int_cidrs.contains_ip(ip),
+            None => true,
+        }
+    }
+
+    /// The send socket for a concrete destination (the egress face picker).
+    fn egress_endpoint(&self, dst: SocketAddr) -> &Arc<dyn UdpEndpoint> {
+        match &self.external {
+            Some(ext) if !ext.int_cidrs.contains_ip(dst.ip()) => &ext.endpoint,
+            _ => &self.endpoint,
+        }
+    }
+
+    /// The metrics label of the face a destination egresses on.
+    fn egress_face(&self, dst: SocketAddr) -> Face {
+        if self.ip_is_internal(dst.ip()) {
+            Face::Internal
+        } else {
+            Face::External
+        }
+    }
+
+    /// The advertise stamped for egress **toward `target`** (the Via sent-by of
+    /// a forwarded request, the proxy hop inside a synthesized ACK). An
+    /// IP-literal target classifies by CIDR; a DNS-named target (a worker-
+    /// outbound b-leg R-URI — callers/callees live on the external plane, the
+    /// worker pool is always IP literals) classifies **external** when a second
+    /// face exists.
+    pub(super) fn egress_advertised(&self, target: &ProxyAddr) -> &ProxyAddr {
+        match &self.external {
+            Some(ext) => match target.to_socket_addr() {
+                Some(sa) if ext.int_cidrs.contains_ip(sa.ip()) => &self.advertised,
+                _ => &ext.advertised,
+            },
+            None => &self.advertised,
+        }
+    }
+
+    /// The advertise of the face `ip` lives on (the ingress-face advertise for
+    /// a request arriving from that source).
+    pub(super) fn advertised_for_ip(&self, ip: IpAddr) -> &ProxyAddr {
+        match &self.external {
+            Some(ext) if !ext.int_cidrs.contains_ip(ip) => &ext.advertised,
+            _ => &self.advertised,
+        }
+    }
+
+    /// Does `host:port` name THIS proxy — either face's advertise? The
+    /// self-identity check for Route popping (§16.4), the response top-Via
+    /// ownership check (§16.7.3), and Record-Route cookie recovery: in
+    /// dual-face mode the proxy's Via/Record-Route entries legitimately carry
+    /// EITHER face's advertise.
+    pub(super) fn is_self_addr(&self, host: &str, port: u16) -> bool {
+        if host == self.advertised.host && port == self.advertised.port {
+            return true;
+        }
+        match &self.external {
+            Some(ext) => host == ext.advertised.host && port == ext.advertised.port,
+            None => false,
+        }
     }
 
     /// Pin + pre-resolve DNS-named forward targets (`PROXY_RESOLVER_PREWARM`)
@@ -136,7 +256,8 @@ impl ProxyCore {
     /// recv loop NEVER waits on DNS (see [`crate::resolver`]).
     async fn send_to(&self, bytes: &[u8], target: &ProxyAddr) {
         if let Some(dst) = target.to_socket_addr() {
-            if self.endpoint.send_to(bytes, dst).await.is_err() {
+            self.metrics.record_face_egress(self.egress_face(dst));
+            if self.egress_endpoint(dst).send_to(bytes, dst).await.is_err() {
                 self.metrics.record_send_failure();
                 // Per-peer attribution (sip_proxy_peer_failures_total{...,
                 // kind="send_failure"}): classify against the registry (a known
@@ -164,9 +285,11 @@ impl ProxyCore {
         }
     }
 
-    /// Reply to the packet's source.
+    /// Reply to the packet's source (egresses on the face the source lives on
+    /// — which is the face the packet arrived on).
     async fn reply_to_source(&self, bytes: &[u8], src: SocketAddr) {
-        if self.endpoint.send_to(bytes, src).await.is_err() {
+        self.metrics.record_face_egress(self.egress_face(src));
+        if self.egress_endpoint(src).send_to(bytes, src).await.is_err() {
             self.metrics.record_send_failure();
             // The reply source is whoever sent us the packet (typically an
             // upstream UAC/UAS — external); still classify via the registry in
@@ -191,7 +314,12 @@ impl ProxyCore {
         // Per-shard endpoint-stats publisher: a tail-dropping queue otherwise
         // shows 100% forwarded on dashboards. Each core owns its endpoint's
         // slot, so N shards never stomp one gauge; the metrics render the
-        // cross-shard aggregate.
+        // cross-shard aggregate. The AbortOnDrop guard aborts it even when the
+        // whole recv-loop TASK is aborted (a supervisor/harness abort drops
+        // this future mid-`recv`): without it the stats task kept a strong
+        // endpoint `Arc` alive forever, so the socket (and on the simulated
+        // fabric the bind address itself) leaked past the core's death — which
+        // broke rebinding the same VIP for a takeover proxy.
         let stats = {
             let metrics = self.metrics.clone();
             let endpoint = self.endpoint.clone();
@@ -213,8 +341,23 @@ impl ProxyCore {
                 }
             })
         };
+        let _stats_guard = AbortOnDrop(stats);
 
-        while let Some(pkt) = self.endpoint.recv().await {
+        loop {
+            // Dual-face: serve BOTH sockets from the one core (one process,
+            // one state — cancel_lru / stickiness / registry shared across
+            // faces by construction). Either socket closing ends the core: the
+            // faces are one identity and must live and die together (the
+            // runner supervises the core task and exits for restart).
+            let (pkt, face) = match &self.external {
+                Some(ext) => tokio::select! {
+                    p = self.endpoint.recv() => (p, Face::Internal),
+                    p = ext.endpoint.recv() => (p, Face::External),
+                },
+                None => (self.endpoint.recv().await, Face::Internal),
+            };
+            let Some(pkt) = pkt else { break };
+            self.metrics.record_face_ingress(face);
             let Ok(msg) = self.parser.parse(&pkt.raw) else {
                 // Malformed datagram — drop silently.
                 continue;
@@ -224,9 +367,55 @@ impl ProxyCore {
                 SipMessage::Response(resp) => self.handle_response(resp).await,
             }
         }
+    }
+}
 
-        // Endpoint closed — stop the stats task so it doesn't outlive the core.
-        stats.abort();
+/// Abort a spawned task when dropped — ties a helper task's lifetime to the
+/// owning future (surviving task aborts, not just clean loop exits).
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// A send-only `UdpEndpoint` that picks the internal/external socket per
+/// destination IP — the face picker as a seam, for consumers that hold "an
+/// endpoint" and send to already-resolved addresses (the [`NamedForwarder`]).
+/// Never used for recv (the core recv-selects the real sockets).
+struct FacePickSendEndpoint {
+    internal: Arc<dyn UdpEndpoint>,
+    external: Arc<dyn UdpEndpoint>,
+    int_cidrs: FaceCidrs,
+}
+
+#[async_trait::async_trait]
+impl UdpEndpoint for FacePickSendEndpoint {
+    async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), sip_net::SendError> {
+        if self.int_cidrs.contains_ip(dst.ip()) {
+            self.internal.send_to(buf, dst).await
+        } else {
+            self.external.send_to(buf, dst).await
+        }
+    }
+    async fn recv(&self) -> Option<sip_net::UdpPacket> {
+        std::future::pending().await
+    }
+    fn try_recv(&self) -> Option<sip_net::UdpPacket> {
+        None
+    }
+    fn local_addr(&self) -> SocketAddr {
+        self.internal.local_addr()
+    }
+    fn queue_depth(&self) -> usize {
+        0
+    }
+    fn queue_max(&self) -> usize {
+        0
+    }
+    fn counters(&self) -> sip_net::UdpEndpointCounters {
+        sip_net::UdpEndpointCounters::default()
     }
 }
 
@@ -234,6 +423,7 @@ impl ProxyCore {
 /// fresh metrics + entropy IdGen + system clock).
 pub struct ProxyCoreBuilder {
     advertised: ProxyAddr,
+    external: Option<ExternalFaceParts>,
     strategy: Arc<dyn RoutingStrategy>,
     registry: Arc<dyn WorkerRegistry>,
     cancel_lru: Option<Arc<CancelBranchLru>>,
@@ -250,6 +440,7 @@ impl ProxyCoreBuilder {
     pub fn new(advertised: ProxyAddr, strategy: Arc<dyn RoutingStrategy>, registry: Arc<dyn WorkerRegistry>) -> Self {
         Self {
             advertised,
+            external: None,
             strategy,
             registry,
             cancel_lru: None,
@@ -265,6 +456,14 @@ impl ProxyCoreBuilder {
 
     pub fn clock(mut self, clock: Clock) -> Self {
         self.clock = Some(clock);
+        self
+    }
+    /// Enable **dual-face mode**: a second socket on the external (caller)
+    /// plane with its own advertise, and the internal CIDR list that picks the
+    /// egress face per destination IP. Absent → single-face, byte-identical to
+    /// the pre-dual-face proxy.
+    pub fn external_face(mut self, parts: ExternalFaceParts) -> Self {
+        self.external = Some(parts);
         self
     }
     pub fn id_gen(mut self, id_gen: Arc<IdGen>) -> Self {
@@ -308,6 +507,7 @@ impl ProxyCoreBuilder {
         ProxyCore::new(ProxyCoreParts {
             endpoint,
             advertised: self.advertised,
+            external: self.external,
             strategy: self.strategy,
             registry: self.registry,
             cancel_lru: self.cancel_lru.unwrap_or_else(|| Arc::new(CancelBranchLru::with_clock(clock.clone()))),

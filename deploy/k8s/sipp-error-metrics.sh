@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # SIPp error metrics collector for endurance runs.
-# Extracts detailed failure information from SIPp pods and pushes metrics to VictoriaMetrics.
+# Extracts detailed failure information from the SIPp generator CONTAINERS
+# (docker on the sipext bridge — sipext dual-plane layout; was: kubectl pods)
+# and pushes metrics to VictoriaMetrics.
 #
 # Usage:
 #   ./sipp-error-metrics.sh                    # single snapshot
@@ -18,6 +20,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 NS="${NS:-sip-test}"
+CLUSTER="${CLUSTER:-sip-e2e}"   # matches the sipext-run=$CLUSTER container label
 VM_IMPORT="${VM_IMPORT:-http://127.0.0.1:8428/api/v1/import/prometheus}"
 
 log() { printf '\033[1;36m>> %s\033[0m\n' "$*" >&2; }
@@ -27,12 +30,12 @@ push_metric() {
   curl -s --max-time 4 -X POST "$VM_IMPORT" --data-binary "$1" >/dev/null 2>&1 || true
 }
 
-# Parse SIPp logs for error details. Returns metrics lines.
+# Parse SIPp container logs for error details. Returns metrics lines.
 collect_sipp_errors() {
-  local role="$1" pod="$2"
+  local role="$1" ctr="$2"
   local stats lines ok fail total
 
-  stats="$(kubectl -n "$NS" logs "$pod" 2>/dev/null | tail -100 || true)"
+  stats="$(docker logs --tail 100 "$ctr" 2>&1 || true)"
   [ -z "$stats" ] && return
 
   # Extract summary line from SIPp logs.
@@ -83,21 +86,21 @@ snapshot() {
   log "collecting SIPp error metrics"
   local metrics=""
 
-  # Collect from all UAC pods.
-  local pods role
-  pods="$(kubectl -n "$NS" get pods -l app=sipp-uac -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)"
-  for pod in $pods; do
-    # Extract role from pod label.
-    role="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.metadata.labels.role}' 2>/dev/null || echo unknown)"
-    metrics+="$(collect_sipp_errors "$role" "$pod")"
+  # Collect from all UAC stream containers (label sipext-kind=sipp-uac; role
+  # from the sipext-role label the shared launcher stamps).
+  local ctrs ctr role
+  ctrs="$(docker ps --filter "label=sipext-run=$CLUSTER" --filter "label=sipext-kind=sipp-uac" --format '{{.Names}}' 2>/dev/null)"
+  for ctr in $ctrs; do
+    role="$(docker inspect -f '{{index .Config.Labels "sipext-role"}}' "$ctr" 2>/dev/null || echo unknown)"
+    metrics+="$(collect_sipp_errors "${role:-unknown}" "$ctr")"
     metrics+=$'\n'
   done
 
-  # Collect from UAS pods.
-  pods="$(kubectl -n "$NS" get pods -l app=sipp-uas -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)"
-  for pod in $pods; do
+  # Collect from UAS containers (sipp-uas-N, run.sh sipp_uas_up).
+  ctrs="$(docker ps --filter "label=sipext-run=$CLUSTER" --filter "name=sipp-uas-" --format '{{.Names}}' 2>/dev/null)"
+  for ctr in $ctrs; do
     role="uas"
-    metrics+="$(collect_sipp_errors "$role" "$pod")"
+    metrics+="$(collect_sipp_errors "$role" "$ctr")"
     metrics+=$'\n'
   done
 
@@ -105,7 +108,7 @@ snapshot() {
   if [ -n "$metrics" ]; then
     push_metric "$metrics"
   else
-    warn "no SIPp pods found or no metrics collected"
+    warn "no SIPp containers found or no metrics collected"
   fi
 }
 

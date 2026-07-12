@@ -19,9 +19,19 @@
 //!   - Prometheus `/metrics` + `/healthz` + `/readyz` via the shared `probe-http`.
 //!
 //! Config via env (all optional):
-//!   PROXY_LISTEN     SIP listen addr                       (default 0.0.0.0:5060)
-//!   PROXY_ADVERTISE  host:port stamped on Via/Record-Route (default: listen, or
-//!                    127.0.0.1 if listen IP is unspecified)
+//!   PROXY_LISTEN     SIP listen addr — the INTERNAL face   (default 0.0.0.0:5060)
+//!   PROXY_ADVERTISE  host:port stamped on Via/Record-Route for internal-face
+//!                    egress (default: listen, or 127.0.0.1 if listen IP is
+//!                    unspecified)
+//!   PROXY_LISTEN_EXT optional — enables DUAL-FACE mode: a second UDP socket
+//!                    bound on the external (caller) plane VIP. The proxy then
+//!                    picks the egress socket + advertise per destination IP.
+//!   PROXY_ADVERTISE_EXT  external-face advertise (default: PROXY_LISTEN_EXT,
+//!                    same unspecified→loopback rule as PROXY_ADVERTISE)
+//!   PROXY_FACE_INT_CIDRS comma-separated IPv4 CIDRs of the INTERNAL plane
+//!                    (e.g. 10.244.0.0/16,172.20.0.0/16). REQUIRED when
+//!                    PROXY_LISTEN_EXT is set — boot fails fast otherwise.
+//!                    Destination ∈ any CIDR → internal socket; else external.
 //!   PROXY_WORKERS    static worker pool "id@host:port,..." (default empty → k8s
 //!                    EndpointSlice discovery; ADR-0012 D4)
 //!   PROXY_WORKER_SERVICE  headless worker Service to watch  (default b2bua-worker)
@@ -77,7 +87,7 @@ use sip_proxy::resolver::ResolverConfig;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
 use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, ProxySelfGate, ProxySelfGateConfig};
 use sip_proxy::strategies::{LoadBalancerConfig, LoadBalancerStrategy};
-use sip_proxy::{ProxyAddr, ProxyCoreBuilder, RoutingStrategy};
+use sip_proxy::{ExternalFaceParts, FaceCidrs, ProxyAddr, ProxyCoreBuilder, RoutingStrategy};
 use sip_txn::IdGen;
 
 fn env_or(key: &str, default: &str) -> String {
@@ -106,6 +116,31 @@ fn parse_bool(key: &str, default: bool) -> bool {
         Some("1" | "true" | "yes" | "on") => true,
         Some("0" | "false" | "no" | "off") => false,
         _ => default,
+    }
+}
+
+/// Dual-face boot rule (pure, unit-tested): `PROXY_FACE_INT_CIDRS` is REQUIRED
+/// (and must parse) whenever `PROXY_LISTEN_EXT` enables the second face — a
+/// dual-face proxy without a plane classifier would silently egress worker
+/// traffic on the caller plane. Single-face (`listen_ext_set == false`) never
+/// consults it (a stray CIDR list is ignored; the caller logs a note).
+fn parse_ext_face_cidrs(
+    listen_ext_set: bool,
+    cidrs: Option<&str>,
+) -> Result<Option<FaceCidrs>, String> {
+    if !listen_ext_set {
+        return Ok(None);
+    }
+    match cidrs.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Err(
+            "PROXY_FACE_INT_CIDRS is REQUIRED when PROXY_LISTEN_EXT is set: the dual-face \
+             egress picker needs the internal-plane CIDR list (e.g. \
+             PROXY_FACE_INT_CIDRS=10.244.0.0/16,172.20.0.0/16). Refusing to start."
+                .to_string(),
+        ),
+        Some(s) => FaceCidrs::parse(s)
+            .map(Some)
+            .map_err(|e| format!("bad PROXY_FACE_INT_CIDRS: {e}. Refusing to start.")),
     }
 }
 
@@ -438,6 +473,44 @@ async fn main() {
     let recv_shards: usize = env_or("PROXY_RECV_SHARDS", "1").parse().expect("PROXY_RECV_SHARDS");
     assert!(recv_shards >= 1, "PROXY_RECV_SHARDS must be >= 1");
 
+    // ── Dual-face mode (PROXY_LISTEN_EXT) ───────────────────────────────────
+    // A second UDP socket on the external (caller) plane. PROXY_FACE_INT_CIDRS
+    // is REQUIRED with it (fail-fast); PROXY_ADVERTISE_EXT defaults to the
+    // external listen addr under the same unspecified→loopback rule as the
+    // internal pair. Unset → single-face, behaviour identical to before.
+    let listen_ext: Option<String> = env::var("PROXY_LISTEN_EXT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let ext_cidrs = parse_ext_face_cidrs(
+        listen_ext.is_some(),
+        env::var("PROXY_FACE_INT_CIDRS").ok().as_deref(),
+    )
+    .unwrap_or_else(|e| panic!("sip-proxy-runner: {e}"));
+    if listen_ext.is_none() && env::var("PROXY_FACE_INT_CIDRS").is_ok() {
+        eprintln!(
+            "sip-proxy-runner: PROXY_FACE_INT_CIDRS set but PROXY_LISTEN_EXT unset — \
+             single-face mode, CIDR list ignored"
+        );
+    }
+    let ext_face: Option<(SocketAddr, ProxyAddr, FaceCidrs)> = listen_ext.map(|l| {
+        let sa = resolve(&l);
+        let adv = match env::var("PROXY_ADVERTISE_EXT") {
+            Ok(s) => {
+                ProxyAddr::parse(&s).unwrap_or_else(|| panic!("bad PROXY_ADVERTISE_EXT {s:?}"))
+            }
+            Err(_) => {
+                let ip = if sa.ip().is_unspecified() {
+                    IpAddr::V4(Ipv4Addr::LOCALHOST)
+                } else {
+                    sa.ip()
+                };
+                ProxyAddr::new(ip.to_string(), sa.port())
+            }
+        };
+        (sa, adv, ext_cidrs.clone().expect("CIDRs present when PROXY_LISTEN_EXT is set"))
+    });
+
     // Cross-component config preflight (port of config-validation.ts). Resolve
     // the HealthProbe timings + the WorkerLoadObserver config here so the
     // BETWEEN-component invariants (payload_stale_ms ≥ 2× probe cycle, cap floor/
@@ -478,6 +551,21 @@ async fn main() {
             .await
             .unwrap_or_else(|e| panic!("bind {listen_sa} failed: {e:?}"));
         endpoints.push(ep);
+    }
+
+    // External-face sockets, one per recv shard — the SO_REUSEPORT recv
+    // sharding applies to BOTH faces identically (kernel flow-hashing keeps
+    // each caller src:port on one socket per face, so per-flow ordering holds
+    // on the external plane too).
+    let mut ext_endpoints = Vec::new();
+    if let Some((ext_sa, _, _)) = &ext_face {
+        for _ in 0..recv_shards {
+            let ep = net
+                .bind_udp(BindUdpOpts::new(*ext_sa, queue_max).with_reuse_port(recv_shards > 1))
+                .await
+                .unwrap_or_else(|e| panic!("bind external face {ext_sa} failed: {e:?}"));
+            ext_endpoints.push(ep);
+        }
     }
 
     // Separate endpoint for the OPTIONS health probe (its own source socket).
@@ -582,18 +670,24 @@ async fn main() {
         .collect();
 
     let mut cores = Vec::with_capacity(recv_shards);
+    let mut ext_endpoints = ext_endpoints.into_iter();
     for (shard, endpoint) in endpoints.into_iter().enumerate() {
-        cores.push(
-            ProxyCoreBuilder::new(advertised.clone(), strategy.clone(), registry.clone())
-                .clock(clock.clone())
-                .id_gen(id_gen.clone())
-                .metrics(metrics.clone())
-                .cancel_lru(cancel_lru.clone())
-                .self_gate(gate_dyn.clone())
-                .resolver_config(resolver_cfg)
-                .shard(shard)
-                .build(endpoint),
-        );
+        let mut builder = ProxyCoreBuilder::new(advertised.clone(), strategy.clone(), registry.clone())
+            .clock(clock.clone())
+            .id_gen(id_gen.clone())
+            .metrics(metrics.clone())
+            .cancel_lru(cancel_lru.clone())
+            .self_gate(gate_dyn.clone())
+            .resolver_config(resolver_cfg)
+            .shard(shard);
+        if let Some((_, ext_adv, cidrs)) = &ext_face {
+            builder = builder.external_face(ExternalFaceParts {
+                endpoint: ext_endpoints.next().expect("one external endpoint per shard"),
+                advertised: ext_adv.clone(),
+                int_cidrs: cidrs.clone(),
+            });
+        }
+        cores.push(builder.build(endpoint));
     }
     if !prewarm_targets.is_empty() {
         // Each recv shard owns its own resolver cache, so prewarm every core.
@@ -607,8 +701,15 @@ async fn main() {
         );
     }
 
+    let face_note = match &ext_face {
+        Some((ext_sa, ext_adv, _)) => format!(
+            " DUAL-FACE ext_listen={ext_sa} ext_advertise={}:{} (int CIDRs from PROXY_FACE_INT_CIDRS)",
+            ext_adv.host, ext_adv.port,
+        ),
+        None => String::new(),
+    };
     eprintln!(
-        "sip-proxy-runner pid={} listening UDP {listen_sa} advertise={}:{} workers=[{}] (queue={queue_max}, recv_shards={recv_shards})",
+        "sip-proxy-runner pid={} listening UDP {listen_sa} advertise={}:{}{face_note} workers=[{}] (queue={queue_max}, recv_shards={recv_shards})",
         std::process::id(),
         advertised.host,
         advertised.port,
@@ -1030,6 +1131,35 @@ mod tests {
     fn assert_valid_config_does_not_panic_on_a_valid_config() {
         // No `#[should_panic]` ⇒ a panic here fails the test.
         assert_valid_config(HELM_PROBE, &LoadObserverConfig::default());
+    }
+
+    // ── parse_ext_face_cidrs — dual-face boot rule ───────────────────────────
+
+    #[test]
+    fn single_face_ignores_cidrs() {
+        assert_eq!(parse_ext_face_cidrs(false, None).unwrap(), None);
+        assert_eq!(parse_ext_face_cidrs(false, Some("10.0.0.0/8")).unwrap(), None);
+    }
+
+    #[test]
+    fn dual_face_requires_cidrs() {
+        let e = parse_ext_face_cidrs(true, None).unwrap_err();
+        assert!(e.contains("PROXY_FACE_INT_CIDRS is REQUIRED"), "{e}");
+        let e = parse_ext_face_cidrs(true, Some("  ")).unwrap_err();
+        assert!(e.contains("REQUIRED"), "blank counts as missing: {e}");
+    }
+
+    #[test]
+    fn dual_face_rejects_unparseable_cidrs() {
+        let e = parse_ext_face_cidrs(true, Some("10.0.0.0/8,bogus")).unwrap_err();
+        assert!(e.contains("bad PROXY_FACE_INT_CIDRS"), "{e}");
+    }
+
+    #[test]
+    fn dual_face_parses_a_valid_list() {
+        let f = parse_ext_face_cidrs(true, Some("10.244.0.0/16,172.20.0.0/16")).unwrap().unwrap();
+        assert!(f.contains_ip("10.244.1.2".parse().unwrap()));
+        assert!(!f.contains_ip("192.168.60.9".parse().unwrap()));
     }
 
     // ── load_observer_cfg_from_env — LB_* operator overrides (migration/32) ──
