@@ -88,44 +88,50 @@ pub struct ParsedReferTo {
 // ---------------------------------------------------------------------------
 
 pub fn split_top_level_commas(value: &str) -> Vec<String> {
-    let s: Vec<char> = value.chars().collect();
+    // Byte-scan rather than collecting a `Vec<char>` (4x the bytes, and the
+    // single hottest parse frame under load). Every structural delimiter here
+    // (`" \ < > ,`) is ASCII, so a UTF-8 lead/continuation byte can never alias
+    // one, and each split index lands on a `,` — always a char boundary — so
+    // slicing the original `&str` by byte index is panic-free and byte-identical
+    // to the old scalar walk.
+    let bytes = value.as_bytes();
     let mut out: Vec<String> = Vec::new();
     let mut depth: i32 = 0;
     let mut in_quote = false;
     let mut start = 0usize;
     let mut i = 0usize;
-    while i < s.len() {
-        let c = s[i];
+    while i < bytes.len() {
+        let c = bytes[i];
         if in_quote {
-            if c == '\\' && i + 1 < s.len() {
+            if c == b'\\' && i + 1 < bytes.len() {
                 i += 2;
                 continue;
             }
-            if c == '"' {
+            if c == b'"' {
                 in_quote = false;
             }
             i += 1;
             continue;
         }
         match c {
-            '"' => {
+            b'"' => {
                 in_quote = true;
             }
-            '<' => {
+            b'<' => {
                 depth += 1;
             }
-            '>' if depth > 0 => {
+            b'>' if depth > 0 => {
                 depth -= 1;
             }
-            ',' if depth == 0 => {
-                out.push(slice(&s, start, i).trim().to_string());
+            b',' if depth == 0 => {
+                out.push(value[start..i].trim().to_string());
                 start = i + 1;
             }
             _ => {}
         }
         i += 1;
     }
-    let tail = slice(&s, start, s.len()).trim().to_string();
+    let tail = value[start..].trim().to_string();
     if !tail.is_empty() || !out.is_empty() {
         out.push(tail);
     }

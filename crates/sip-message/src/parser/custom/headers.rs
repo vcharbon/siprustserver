@@ -5,7 +5,7 @@
 
 use super::compact_forms::expand_compact_form;
 use super::structured_headers::split_top_level_commas;
-use super::scanner::{is_token_char, is_wsp, strict_non_negative_decimal, Scanner, COLON, CR, HTAB, LF};
+use super::scanner::{decode, is_token_char, is_wsp, strict_non_negative_decimal, Scanner, COLON, CR, HTAB, LF};
 use crate::error::SipParseError;
 use crate::parser::SipParserLimits;
 use crate::types::SipHeader;
@@ -21,18 +21,33 @@ struct NumericHeaderRule {
 
 /// Numeric-header registry — every header whose value must be a non-negative
 /// decimal integer within a defined range (see ADR-0007). `None` if not numeric.
-fn numeric_header_rule(lower_name: &str) -> Option<NumericHeaderRule> {
+/// Case-insensitive on the raw wire name (`eq_ignore_ascii_case`) so the caller
+/// need not mint a lowercased `String` per header just to probe the registry.
+fn numeric_header_rule(name: &str) -> Option<NumericHeaderRule> {
     let r = |max, allow_param_tail| Some(NumericHeaderRule { max, allow_param_tail });
-    match lower_name {
-        "content-length" => r(INT_32_MAX, false),
-        "cseq" => r(INT_32_MAX, false),
-        "max-forwards" => r(255, false),
-        "expires" => r(UINT_32_MAX, false),
-        "min-expires" => r(UINT_32_MAX, false),
-        "session-expires" => r(UINT_32_MAX, true),
-        "min-se" => r(UINT_32_MAX, true),
-        _ => None,
+    if name.eq_ignore_ascii_case("content-length") {
+        r(INT_32_MAX, false)
+    } else if name.eq_ignore_ascii_case("cseq") {
+        r(INT_32_MAX, false)
+    } else if name.eq_ignore_ascii_case("max-forwards") {
+        r(255, false)
+    } else if name.eq_ignore_ascii_case("expires") {
+        r(UINT_32_MAX, false)
+    } else if name.eq_ignore_ascii_case("min-expires") {
+        r(UINT_32_MAX, false)
+    } else if name.eq_ignore_ascii_case("session-expires") {
+        r(UINT_32_MAX, true)
+    } else if name.eq_ignore_ascii_case("min-se") {
+        r(UINT_32_MAX, true)
+    } else {
+        None
     }
+}
+
+/// ASCII-case-insensitive membership against a set of already-lowercase
+/// candidates — no allocation (contrast `name.to_lowercase()` then `match`).
+fn eq_any_ignore_ascii_case(name: &str, candidates: &[&str]) -> bool {
+    candidates.iter().any(|c| name.eq_ignore_ascii_case(c))
 }
 
 /// Strict numeric extraction with optional param tail. The digit prefix is
@@ -53,8 +68,10 @@ fn extract_strict_numeric_prefix(value: &str, rule: &NumericHeaderRule) -> Optio
         }
         i += 1;
     }
-    let prefix = String::from_utf8_lossy(&bytes[0..i]);
-    strict_non_negative_decimal(prefix.trim(), rule.max)
+    // `value` is already a valid `&str` and `i` lands on an ASCII WSP byte (or a
+    // char boundary at `end`/len), so the prefix slice is valid — borrow it
+    // rather than re-decoding into a fresh `String`.
+    strict_non_negative_decimal(value[..i].trim(), rule.max)
 }
 
 pub struct ParsedHeaders {
@@ -88,7 +105,6 @@ pub fn parse_headers(s: &mut Scanner, limits: &SipParserLimits) -> Result<Parsed
         let value = s.read_header_value();
         let name = expand_compact_form(&raw_name);
         let trimmed_value = value.trim().to_string();
-        let lower_name = name.to_lowercase();
 
         // Bound per-header memory: name + ": " + value, post-unfold/trim.
         let header_len = name.len() + 2 + trimmed_value.len();
@@ -100,10 +116,10 @@ pub fn parse_headers(s: &mut Scanner, limits: &SipParserLimits) -> Result<Parsed
         }
 
         // Registry-driven paranoid digit-only pass (ADR-0007).
-        if let Some(rule) = numeric_header_rule(&lower_name) {
+        if let Some(rule) = numeric_header_rule(&name) {
             match extract_strict_numeric_prefix(&trimmed_value, &rule) {
                 Some(parsed) => {
-                    if lower_name == "content-length" {
+                    if name.eq_ignore_ascii_case("content-length") {
                         content_length = parsed;
                     }
                 }
@@ -117,13 +133,13 @@ pub fn parse_headers(s: &mut Scanner, limits: &SipParserLimits) -> Result<Parsed
 
         // Reject unterminated quoted-strings on quoted-string-bearing headers
         // (CVE-2023-27599).
-        if is_quoted_string_header(&lower_name) && has_unbalanced_quotes(&trimmed_value) {
+        if is_quoted_string_header(&name) && has_unbalanced_quotes(&trimmed_value) {
             return Err(SipParseError::new(format!("Unterminated quoted-string in {name} header")));
         }
 
         // Digest credentials must be comma-separated name=value pairs
         // (CVE-2023-28098).
-        if is_authorization_header(&lower_name) && !is_valid_digest_credentials(&trimmed_value) {
+        if is_authorization_header(&name) && !is_valid_digest_credentials(&trimmed_value) {
             return Err(SipParseError::new(format!("Malformed Digest credentials in {name} header")));
         }
 
@@ -133,29 +149,33 @@ pub fn parse_headers(s: &mut Scanner, limits: &SipParserLimits) -> Result<Parsed
     Ok(ParsedHeaders { headers, content_length })
 }
 
-/// Headers whose RFC 3261 grammar can carry a quoted-string.
-fn is_quoted_string_header(lower: &str) -> bool {
-    matches!(
-        lower,
-        "to" | "from"
-            | "contact"
-            | "reply-to"
-            | "refer-to"
-            | "subject"
-            | "authorization"
-            | "proxy-authorization"
-            | "www-authenticate"
-            | "proxy-authenticate"
-            | "authentication-info"
-            | "warning"
-            | "alert-info"
-            | "call-info"
-            | "error-info"
+/// Headers whose RFC 3261 grammar can carry a quoted-string. Case-insensitive
+/// on the raw wire name — no lowercased `String` allocation.
+fn is_quoted_string_header(name: &str) -> bool {
+    eq_any_ignore_ascii_case(
+        name,
+        &[
+            "to",
+            "from",
+            "contact",
+            "reply-to",
+            "refer-to",
+            "subject",
+            "authorization",
+            "proxy-authorization",
+            "www-authenticate",
+            "proxy-authenticate",
+            "authentication-info",
+            "warning",
+            "alert-info",
+            "call-info",
+            "error-info",
+        ],
     )
 }
 
-fn is_authorization_header(lower: &str) -> bool {
-    matches!(lower, "authorization" | "proxy-authorization")
+fn is_authorization_header(name: &str) -> bool {
+    eq_any_ignore_ascii_case(name, &["authorization", "proxy-authorization"])
 }
 
 /// True iff `value` contains an unterminated quoted-string. Inside a quote,
@@ -205,7 +225,7 @@ fn read_header_name(s: &mut Scanner) -> Result<String, SipParseError> {
         }
         s.pos += 1;
     }
-    let name = String::from_utf8_lossy(&s.buf[start..s.pos]).into_owned();
+    let name = decode(&s.buf[start..s.pos]);
     s.skip_wsp();
     Ok(name)
 }
@@ -223,8 +243,13 @@ fn is_illegal_header_name_byte(b: u8) -> bool {
 /// `name=value` pairs with a non-empty token name (RFC 3261 §22.4).
 fn is_valid_digest_credentials(value: &str) -> bool {
     const SCHEME: &str = "digest";
-    let lower = value.to_lowercase();
-    if !lower.starts_with(SCHEME) {
+    // ASCII-case-insensitive prefix probe on the bytes — no lowercased copy of
+    // the whole (credential-length) value just to read the scheme token.
+    let is_digest_scheme = value
+        .as_bytes()
+        .get(..SCHEME.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(SCHEME.as_bytes()));
+    if !is_digest_scheme {
         return true; // not Digest; skip
     }
     let after_scheme = value.as_bytes().get(SCHEME.len()).copied();
