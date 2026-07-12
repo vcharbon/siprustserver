@@ -53,6 +53,17 @@ pub trait UdpEndpoint: Send + Sync {
         let _ = tap;
         false
     }
+
+    /// Install a send-time tap for re-emitted (retransmit / re-ACK / re-answer)
+    /// datagrams — the outbound twin of [`install_recv_tap`](Self::install_recv_tap).
+    /// Returns `false` when the impl has no retransmit engine to tap (the
+    /// recording decorator then simply records nothing extra). Only the loadgen
+    /// mux — the one endpoint that re-emits below the recording layer — overrides
+    /// this.
+    fn install_send_tap(&self, tap: crate::types::SendTap) -> bool {
+        let _ = tap;
+        false
+    }
 }
 
 /// Forwarding impl so a single bound endpoint can be **shared**: one owner is
@@ -89,6 +100,9 @@ impl UdpEndpoint for std::sync::Arc<dyn UdpEndpoint> {
     }
     fn install_recv_tap(&self, tap: crate::types::RecvTap) -> bool {
         (**self).install_recv_tap(tap)
+    }
+    fn install_send_tap(&self, tap: crate::types::SendTap) -> bool {
+        (**self).install_send_tap(tap)
     }
 }
 

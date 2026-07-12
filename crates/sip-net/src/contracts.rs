@@ -76,6 +76,11 @@ pub enum SignalingNetworkEvent {
     SendResult { bind_key: LaneKey, outcome: SendOutcome },
     RecvItem { bind_key: LaneKey, packet: UdpPacket, disposition: RecvDisposition },
     RecvConsumed { bind_key: LaneKey, packet: UdpPacket },
+    /// An outbound datagram the endpoint's retransmit engine re-emitted below
+    /// the recording layer (loadgen `--auto-retransmit`). Projection-only — it
+    /// renders on the ladder as a tagged outbound frame but is invisible to the
+    /// RFC audit (a re-emit is a byte-identical retransmission the rules dedup).
+    ReEmit { bind_key: LaneKey, to: SocketAddr, msg: Vec<u8>, kind: crate::types::ReEmitKind },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,7 +97,8 @@ impl SignalingNetworkEvent {
             | SignalingNetworkEvent::SendCalled { bind_key, .. }
             | SignalingNetworkEvent::SendResult { bind_key, .. }
             | SignalingNetworkEvent::RecvItem { bind_key, .. }
-            | SignalingNetworkEvent::RecvConsumed { bind_key, .. } => bind_key,
+            | SignalingNetworkEvent::RecvConsumed { bind_key, .. }
+            | SignalingNetworkEvent::ReEmit { bind_key, .. } => bind_key,
         }
     }
 }
@@ -107,6 +113,9 @@ impl SignalingNetworkEvent {
 pub fn audit_visible_event(event: &SignalingNetworkEvent) -> bool {
     match event {
         SignalingNetworkEvent::RecvConsumed { .. } => false,
+        // A re-emit is a byte-identical retransmission — projection-only, so the
+        // rules keep one un-duplicated view of the wire.
+        SignalingNetworkEvent::ReEmit { .. } => false,
         SignalingNetworkEvent::RecvItem { disposition, .. } => disposition.audit_visible(),
         _ => true,
     }
@@ -406,6 +415,19 @@ impl SignalingNetwork for RecordingSignalingNetwork {
                 bind_key: tap_key.clone(),
                 packet: pkt.clone(),
                 disposition,
+            });
+        }));
+        // Send-side twin (loadgen mux only): re-emitted recovery frames go on the
+        // wire below this decorator, so tap them into the channel as `ReEmit`
+        // events — visible on the ladder, invisible to the audit.
+        let sendtap_channel = self.0.channel.clone();
+        let sendtap_key = bind_key.clone();
+        endpoint.install_send_tap(Arc::new(move |raw: &[u8], to, kind| {
+            sendtap_channel.record(SignalingNetworkEvent::ReEmit {
+                bind_key: sendtap_key.clone(),
+                to,
+                msg: raw.to_vec(),
+                kind,
             });
         }));
         Ok(Box::new(RecordedEndpoint {

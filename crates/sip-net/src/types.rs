@@ -72,6 +72,44 @@ impl RecvDisposition {
 /// of whether the body ever calls `recv`.
 pub type RecvTap = Arc<dyn Fn(&UdpPacket, RecvDisposition) + Send + Sync>;
 
+/// Why an OUTBOUND datagram was re-emitted — the send-side twin of
+/// [`RecvDisposition`]. The loadgen's retransmit engine (`--auto-retransmit`)
+/// sends these BELOW the recording decorator (straight to the socket), so
+/// without a [`SendTap`] they are invisible on the ladder even though they are
+/// real frames on the wire. Projection-only: like the modeled-loss / absorbed
+/// receive markers, a re-emit is never judged by the RFC audit (a re-emit is a
+/// byte-identical retransmission the rules already dedup).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReEmitKind {
+    /// A proactive Timer A/E/G retransmit of our own request or final response,
+    /// still waiting for its response/ACK.
+    Retransmit,
+    /// Our ACK to an INVITE 2xx, re-sent because the peer retransmitted the 2xx
+    /// (our first ACK was lost) — RFC 3261 §13.2.2.4.
+    ReAck,
+    /// Our non-INVITE response, re-sent because the peer retransmitted the
+    /// request (our first response was lost).
+    ReAnswer,
+}
+
+impl ReEmitKind {
+    /// Short human tag for renderers (label suffix / badge text).
+    pub fn tag(self) -> &'static str {
+        match self {
+            ReEmitKind::Retransmit => "re-emit: timer",
+            ReEmitKind::ReAck => "re-ACK: dup 2xx",
+            ReEmitKind::ReAnswer => "re-answer: dup req",
+        }
+    }
+}
+
+/// Send-time tap installed on an endpoint by the recording decorator (sampled
+/// calls only). Invoked with the raw bytes, destination, and [`ReEmitKind`]
+/// each time the endpoint's retransmit engine puts a re-emitted datagram on the
+/// wire — the outbound twin of [`RecvTap`], so recovery traffic is visible on
+/// the ladder rather than silently hitting the socket below the recording.
+pub type SendTap = Arc<dyn Fn(&[u8], SocketAddr, ReEmitKind) + Send + Sync>;
+
 /// Per-endpoint counters. Snapshot of the live atomics behind an endpoint.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UdpEndpointCounters {

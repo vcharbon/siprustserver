@@ -35,7 +35,7 @@ pub use real::RealSignalingNetwork;
 pub use simulated::SimulatedSignalingNetwork;
 pub use types::{
     all_ua_roles, BindError, BindErrorReason, BindSummary, BindUdpOpts, PreIngressAction,
-    PreIngressHook, RecvDisposition, RecvTap, SendError, UaRole, UdpEndpointCounters,
-    UdpPacket, UndeliveredPacket,
+    PreIngressHook, ReEmitKind, RecvDisposition, RecvTap, SendError, SendTap, UaRole,
+    UdpEndpointCounters, UdpPacket, UndeliveredPacket,
     MAX_UDP_PAYLOAD,
 };

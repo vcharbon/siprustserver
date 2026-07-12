@@ -301,6 +301,13 @@ fn project_entry(e: &RecordedSipEntry, base: i64) -> SeqRow {
         label.push_str(&format!(" ⚠ [{}]", note.tag()));
         detail.push_str(&format!("┄ receive note: {}\n", note.tag()));
     }
+    // Outbound re-emission (loadgen retransmit engine): tag it so recovery
+    // traffic reads distinctly from a first transmission (always-display
+    // re-emission).
+    if let Some(kind) = e.reemit {
+        label.push_str(&format!(" ⟳ [{}]", kind.tag()));
+        detail.push_str(&format!("┄ re-emit: {}\n", kind.tag()));
+    }
     detail.push_str(&wire_text(&e.raw));
 
     let (from, to) = entry_lane_ids(e);
@@ -335,6 +342,7 @@ mod tests {
             received_ms: Some(sent_ms + 1),
             delivered: true,
             recv_note: None,
+            reemit: None,
             from_lane: None,
             to_lane: None,
             seq,
