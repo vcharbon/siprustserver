@@ -224,11 +224,64 @@ impl Correlation {
 struct DropModel {
     rate: f64,
     state: AtomicU64,
+    /// Optional DETERMINISTIC targeted drop (see [`TargetedDrop`]) — evaluated
+    /// on the inbound path only, alongside the probabilistic `rate`.
+    targeted: Option<(TargetedDrop, Mutex<TargetState>)>,
+}
+
+/// Which direction a [`TargetedDrop`] fires on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropDir {
+    /// Discard on the INBOUND path — a datagram this call's endpoint receives
+    /// (models a network loss just before the app reads it). Recovery then
+    /// depends on the SENDER re-emitting (e.g. the SUT retransmitting its own
+    /// request — which this in-process SUT does NOT do for a fire-and-forget
+    /// NOTIFY, making that an UNRECOVERABLE loss → the settle give-up path).
+    Inbound,
+    /// Discard on the OUTBOUND path — a datagram this call's endpoint sends,
+    /// before it hits the wire. When the sending endpoint runs the loadgen
+    /// retransmit engine (`--auto-retransmit`), its Timer A/E re-sends the
+    /// request, so a one-shot outbound drop is RECOVERED by the harness itself.
+    Outbound,
+}
+
+/// A deterministic, targeted drop for one call: discard the `nth` DISTINCT (by
+/// CSeq number) **request** whose CSeq method is `method`, on the `dir` path.
+/// `permanent: false` drops only its FIRST occurrence — a re-emission gets
+/// through, proving loss RECOVERY; `permanent: true` drops every occurrence
+/// including re-emissions — proving the bounded give-up path (the actor settle
+/// barrier's `Fail`, naming the open obligation). Applied above the retransmit
+/// engine, exactly like `drop_rate`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TargetedDrop {
+    /// The CSeq method to match (e.g. `"NOTIFY"`, `"BYE"`). Requests only.
+    pub method: &'static str,
+    /// Which distinct occurrence (1-based, by CSeq number, in arrival order).
+    pub nth: u32,
+    /// Drop every occurrence (incl. re-emissions) instead of just the first.
+    pub permanent: bool,
+    /// Which direction to fire on (see [`DropDir`]).
+    pub dir: DropDir,
+}
+
+/// The targeted drop's arrival bookkeeping (per endpoint, like the loss RNG).
+#[derive(Default)]
+struct TargetState {
+    /// Distinct CSeq numbers of matching requests, in first-arrival order.
+    seen: Vec<u32>,
+    /// The CSeq of the nth distinct match, once identified.
+    target_cseq: Option<u32>,
+    /// Whether the one-shot (non-permanent) drop already fired.
+    fired: bool,
 }
 
 impl DropModel {
-    fn new(rate: f64, seed: u64) -> Self {
-        Self { rate, state: AtomicU64::new(seed | 1) }
+    fn new(rate: f64, seed: u64, targeted: Option<TargetedDrop>) -> Self {
+        Self {
+            rate,
+            state: AtomicU64::new(seed | 1),
+            targeted: targeted.map(|t| (t, Mutex::new(TargetState::default()))),
+        }
     }
     /// Whether THIS datagram is dropped. `false` (no RNG advance) when disabled.
     fn drops(&self) -> bool {
@@ -241,6 +294,40 @@ impl DropModel {
         x ^= x << 17;
         self.state.store(x, Ordering::Relaxed);
         (x as f64 / u64::MAX as f64) < self.rate
+    }
+
+    /// Inbound-path drop verdict: the probabilistic model, plus the targeted
+    /// matcher when it fires on the inbound direction.
+    fn drops_inbound(&self, raw: &[u8]) -> bool {
+        self.drops() || self.targeted_hit(raw, DropDir::Inbound)
+    }
+
+    /// Whether the targeted matcher fires on `raw` in direction `dir`. `raw` is
+    /// only scanned when a target for that direction is configured.
+    fn targeted_hit(&self, raw: &[u8], dir: DropDir) -> bool {
+        let Some((td, state)) = &self.targeted else { return false };
+        if td.dir != dir || is_response(raw) || cseq_method(raw) != td.method {
+            return false;
+        }
+        let Some(cseq) = cseq_number(raw) else { return false };
+        let mut st = state.lock().unwrap();
+        if st.target_cseq.is_none() && !st.seen.contains(&cseq) {
+            st.seen.push(cseq);
+            if st.seen.len() as u32 == td.nth {
+                st.target_cseq = Some(cseq);
+            }
+        }
+        if st.target_cseq != Some(cseq) {
+            return false;
+        }
+        if td.permanent {
+            return true;
+        }
+        if st.fired {
+            return false;
+        }
+        st.fired = true;
+        true
     }
 }
 
@@ -482,7 +569,7 @@ impl MuxCore {
     /// single call token + each callee leg's label + any same-socket picker).
     /// No simulated packet loss and no auto-retransmit (the historic behaviour).
     pub fn network(self: &Arc<Self>, routing: CallRouting) -> MuxNetwork {
-        self.network_tuned(routing, 0.0, false, 0)
+        self.network_tuned(routing, 0.0, false, 0, None)
     }
 
     /// [`network`](Self::network) with per-call robustness knobs:
@@ -495,12 +582,15 @@ impl MuxCore {
     ///
     /// `seed` seeds each endpoint's loss RNG (derive it from the per-call id seed
     /// for reproducibility).
+    /// `drop_nth` optionally adds the DETERMINISTIC targeted drop
+    /// ([`TargetedDrop`]) on top of the probabilistic rate.
     pub fn network_tuned(
         self: &Arc<Self>,
         routing: CallRouting,
         drop_rate: f64,
         retransmit: bool,
         seed: u64,
+        drop_nth: Option<TargetedDrop>,
     ) -> MuxNetwork {
         // Per-callee-addr bind-order label queue: each `bind_udp(addr)` dispenses
         // the next declared label for that addr (so several receivers can share a
@@ -518,6 +608,7 @@ impl MuxCore {
             drop_rate,
             retransmit,
             drop_seed: AtomicU64::new(seed | 1),
+            drop_nth,
         }
     }
 
@@ -619,6 +710,9 @@ pub struct MuxNetwork {
     /// Whether each endpoint runs the per-call SIP retransmit engine.
     retransmit: bool,
     drop_seed: AtomicU64,
+    /// Optional deterministic targeted drop, applied per endpoint (each bound
+    /// endpoint tracks its own matching-request arrivals).
+    drop_nth: Option<TargetedDrop>,
 }
 
 impl MuxNetwork {
@@ -644,7 +738,7 @@ impl SignalingNetwork for MuxNetwork {
         // One loss model + (optional) retransmit engine per endpoint, shared
         // between this endpoint (outbound) and the registry entry the inbound
         // `route` path consults, so both directions and the resend tasks agree.
-        let drop = Arc::new(DropModel::new(self.drop_rate, self.next_drop_seed()));
+        let drop = Arc::new(DropModel::new(self.drop_rate, self.next_drop_seed(), self.drop_nth));
         let txns = self
             .retransmit
             .then(|| Arc::new(CallTxns::new(mux.socket.clone(), drop.clone(), mux.stats.clone())));
@@ -774,8 +868,9 @@ impl UdpEndpoint for MuxEndpoint {
         }
         // Simulated loss: report success (the txn believes it sent) but never put
         // the datagram on the wire — the SUT never sees it, so only auto-retransmit
-        // recovers the call.
-        if self.drop.drops() {
+        // recovers the call. The targeted OUTBOUND drop fires here too (a
+        // deterministic single-shot the engine's Timer-E resend then heals).
+        if self.drop.drops() || self.drop.targeted_hit(buf, DropDir::Outbound) {
             self.mux.stats.dropped_out.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
@@ -961,7 +1056,7 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
 /// stop-resenders / re-answer; a datagram the engine ABSORBS (a duplicate the app
 /// must not see) is not enqueued.
 fn handle_inbound(mux: &MuxSocket, d: &Delivery, raw: &[u8], src: SocketAddr) {
-    if d.drop.drops() {
+    if d.drop.drops_inbound(raw) {
         mux.stats.dropped_in.fetch_add(1, Ordering::Relaxed);
         // A recorded (sampled) call still shows the arrival on its ladder,
         // tagged as modeled loss — the RFC audit filters it out (036 ask A).
@@ -1051,6 +1146,17 @@ fn as_str(raw: &[u8]) -> std::borrow::Cow<'_, str> {
 
 fn first_line(raw: &[u8]) -> String {
     as_str(raw).lines().next().unwrap_or("").trim().to_string()
+}
+
+/// The CSeq sequence number of a datagram, `None` if absent/unparseable.
+fn cseq_number(raw: &[u8]) -> Option<u32> {
+    for line in as_str(raw).lines() {
+        let l = line.trim();
+        if l.len() >= 5 && l[..5].eq_ignore_ascii_case("cseq:") {
+            return l[5..].split_whitespace().next()?.parse().ok();
+        }
+    }
+    None
 }
 
 /// The CSeq line value (`<num> <METHOD>`) of a datagram, for an orphan sample.
@@ -1705,7 +1811,7 @@ mod tests {
         let peer_addr = peer.local_addr().unwrap();
         let txns = Arc::new(CallTxns::new(
             sock,
-            Arc::new(DropModel::new(0.0, 1)),
+            Arc::new(DropModel::new(0.0, 1, None)),
             Arc::new(MuxStats::new(4)),
         ));
         (txns, peer, peer_addr)

@@ -261,7 +261,7 @@ fn default_tuning(args: &Args) -> CallTuning {
     } else {
         0.0
     };
-    CallTuning { drop_rate, retransmit: args.auto_retransmit }
+    CallTuning { drop_rate, retransmit: args.auto_retransmit, drop_nth: None }
 }
 
 /// The `infraShape` id the flag-synthesized [`EndpointConfig`] carries. A loaded
@@ -394,6 +394,7 @@ fn resolve_profile_mix(
     let t = CallTuning {
         drop_rate: m.drop_rate.unwrap_or(base.drop_rate),
         retransmit: m.retransmit.unwrap_or(base.retransmit),
+        drop_nth: None,
     };
     (entry, t)
 }
@@ -472,6 +473,7 @@ pub async fn run_with_inputs(
             CallTuning {
                 drop_rate: profile.robustness.drop_rate,
                 retransmit: profile.robustness.retransmit,
+                drop_nth: None,
             }
         };
         // A per-flag explicit still overrides the profile individually.

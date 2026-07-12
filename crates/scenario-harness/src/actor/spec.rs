@@ -134,6 +134,14 @@ pub async fn run_actor_scenario(
     let obs = ObservedState::new();
     let verdict =
         run_call_with(CallPlan { actors, plan, settle }, obs.clone(), ctx, STEP_TIMEOUT).await;
+    // A settle breach's open-obligation names go to the sample DETAIL channel
+    // (bounded leg/kind/cseq strings from `describe_open`) — the case key stays
+    // the fixed `settle@<phase>` (contract table §2).
+    if let CallVerdict::Settle(open) = &verdict {
+        for o in open {
+            ctx.note(format!("settle: {o}"));
+        }
+    }
     into_result(expect, verdict, &obs, caller)
 }
 

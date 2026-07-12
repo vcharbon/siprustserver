@@ -57,7 +57,7 @@ pub use ctx::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp};
 pub use driver::{serve_metrics, CallConfig, CallTuning, Driver, DriverCfg, MixEntry, MuxTransport};
 pub use mux::{
     labelled_prefix_leg_picker, prefix_leg_picker, CallRouting, Correlation, EndpointSpec,
-    LegInfo, LegPicker, MuxCore, Role,
+    DropDir, LegInfo, LegPicker, MuxCore, Role, TargetedDrop,
 };
 pub use rate::{Governor, RateHandle};
 pub use report::{Reporter, ReporterCfg};

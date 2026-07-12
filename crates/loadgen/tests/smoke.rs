@@ -16,7 +16,7 @@ use loadgen::{
     prefix_leg_picker, CallConfig, CallCtx, CallEnv, CallRouting, CallScope, CallTuning,
     Correlation, Driver, DriverCfg, EgressPolicy, EndpointSpec, LegInfo, LegSpec, LoadCase,
     MixEntry, MuxCore, MuxTransport, ResultClass, Reporter, ReporterCfg, Role, ScenarioInputs,
-    ShapeDescriptor, ShapeRegistry,
+    DropDir, ShapeDescriptor, ShapeRegistry, TargetedDrop,
 };
 use scenario_harness::{Harness, StepError};
 use sip_clock::Clock;
@@ -917,7 +917,7 @@ async fn loadgen_mux_recorded_inbox_taps_delivery_and_modeled_loss() {
     // Call 2: loss model at 100% — the demuxed INVITE never reaches the inbox,
     // but a recorded call still sees the arrival, tagged as modeled loss.
     let lossy =
-        core.network_tuned(CallRouting::new("lgTAP2".to_string()).leg(uas, "callee"), 1.0, false, 7);
+        core.network_tuned(CallRouting::new("lgTAP2".to_string()).leg(uas, "callee"), 1.0, false, 7, None);
     let ep2 = lossy.bind_udp(BindUdpOpts::new(uas, 256)).await.unwrap();
     let seen2: Arc<StdMutex<Vec<(String, RecvDisposition)>>> = Arc::new(StdMutex::new(Vec::new()));
     let sink2 = seen2.clone();
@@ -1129,7 +1129,7 @@ async fn loadgen_packet_drop_without_retransmit_breaks_calls() {
     let mut c = cfg(b2bua.addr, 10.0, 1, 8, 0xD40F);
     // ~12%/datagram loss, no recovery: over a ~10-message call P(all delivered)
     // ≈ 0.9^10 ≈ 0.35, so the majority of calls must fail.
-    c.default_tuning = CallTuning { drop_rate: 0.12, retransmit: false };
+    c.default_tuning = CallTuning { drop_rate: 0.12, retransmit: false, ..CallTuning::default() };
     let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
 
@@ -1169,7 +1169,7 @@ async fn loadgen_auto_retransmit_recovers_packet_drop() {
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 12.0, 2, 8, 0x5EED);
-    c.default_tuning = CallTuning { drop_rate: 0.10, retransmit: true };
+    c.default_tuning = CallTuning { drop_rate: 0.10, retransmit: true, ..CallTuning::default() };
     let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
 
@@ -1221,7 +1221,7 @@ async fn loadgen_refer_drop_without_retransmit_breaks_transfers() {
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 8.0, 2, 8, 0xB9B9);
-    c.default_tuning = CallTuning { drop_rate: 0.08, retransmit: false };
+    c.default_tuning = CallTuning { drop_rate: 0.08, retransmit: false, ..CallTuning::default() };
     let driver = Driver::new(c, vec![mix("refer", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
 
@@ -1284,7 +1284,7 @@ async fn loadgen_actor_refer_recovers_loss_without_false_audit() {
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 6.0, 2, 8, 0xB9A2);
-    c.default_tuning = CallTuning { drop_rate: 0.05, retransmit: true };
+    c.default_tuning = CallTuning { drop_rate: 0.05, retransmit: true, ..CallTuning::default() };
     let driver = Driver::new(c, vec![mix("refer", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
 
@@ -1344,6 +1344,163 @@ async fn loadgen_actor_refer_recovers_loss_without_false_audit() {
     );
 }
 
+/// **P2 — the ack-gate RECOVERY side** (plan §5). A refer call's a-leg BYE — an
+/// in-dialog request the settle ledger tracks (a `Bye` obligation + its dialog
+/// CSeq) — is dropped DETERMINISTICALLY on its first OUTBOUND send. The loadgen
+/// retransmit engine's Timer-E resend heals it: the SUT eventually sees the BYE,
+/// 200s it, and the ledger closes — so the settle barrier returns OK rather than
+/// racing the verdict past the still-in-flight teardown. Every call is OK and
+/// the drop NEVER surfaces as an RFC-audit false positive. (A dropped SUT→peer
+/// NOTIFY is NOT used for the recovery side: this in-process SUT sends distinct
+/// fire-and-forget progress NOTIFYs and does not retransmit a lost one — that
+/// unrecoverable case is the permanent-loss test below.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_settle_gate_recovers_dropped_bye() {
+    let (_h, b2bua, core, transport) =
+        setup_recv(6560, Correlation::header("X-Loadgen-Id"), 3, Duration::from_secs(12)).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    let mut c = cfg(b2bua.addr, 2.0, 1, 4, 0x2D07);
+    c.default_tuning = CallTuning {
+        drop_rate: 0.0,
+        retransmit: true,
+        drop_nth: Some(TargetedDrop { method: "BYE", nth: 1, permanent: false, dir: DropDir::Outbound }),
+    };
+    let driver = Driver::new(c, vec![mix("refer", 1.0)], reporter.clone(), transport);
+    run_throttled(&driver).await;
+
+    let drops = core.stats().dropped_out.load(std::sync::atomic::Ordering::Relaxed);
+    let total = reporter.total_calls();
+    let ok = reporter.count("refer", &ResultClass::Ok);
+    assert!(total >= 1, "no calls ran");
+    assert!(drops >= total, "the targeted BYE drop never fired: drops={drops} calls={total}");
+    // EVERY call recovered: the re-sent BYE was acked before the settle ceiling —
+    // deterministic, so no dominance ratio, all-or-nothing.
+    assert_eq!(
+        ok, total,
+        "a targeted first-BYE drop was not recovered by retransmit:\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        reporter.count("refer", &ResultClass::RfcAuditFail),
+        0,
+        "a recovered drop leaked into the RFC audit:\n{}",
+        reporter.render_prometheus()
+    );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// **P2 — the 2nd-NOTIFY ack gate, PERMANENT-LOSS side** (plan §5). The same
+/// targeted drop, but EVERY arrival (re-emissions included) is discarded — an
+/// unrecoverable loss. The contract (table §2): the call's teardown still
+/// completes, the settle barrier's 32 s ceiling elapses with the CSeq gap open
+/// (the later BYE reveals the hole), and the verdict maps to the FIXED
+/// `Timeout { who: "settle" }` — class `timeout`, case `settle@transferred` —
+/// with the sample DETAIL naming the open obligation. Never a protocol-defect
+/// class: `rfc_audit_fail` stays 0. Real-clock ~35 s (the genuine 64·T1 settle
+/// ceiling — deliberately not a knob), still inside the default lane's 60 s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_settle_gate_permanent_notify_loss_names_obligation() {
+    let (_h, b2bua, core, transport) =
+        setup_recv(6570, Correlation::header("X-Loadgen-Id"), 3, Duration::from_secs(12)).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 1 }));
+
+    // ONE call is enough — the outcome is deterministic.
+    let mut c = cfg(b2bua.addr, 1.0, 1, 2, 0x2D08);
+    c.default_tuning = CallTuning {
+        drop_rate: 0.0,
+        retransmit: true,
+        drop_nth: Some(TargetedDrop {
+            method: "NOTIFY",
+            nth: 2,
+            permanent: true,
+            dir: DropDir::Inbound,
+        }),
+    };
+    let driver = Driver::new(c, vec![mix("refer", 1.0)], reporter.clone(), transport);
+    run_throttled(&driver).await;
+
+    let total = reporter.total_calls();
+    assert!(total >= 1, "no calls ran");
+    let timeouts = reporter.count("refer", &ResultClass::Timeout);
+    // Graceful, bounded give-up: EVERY call lands in `timeout` (the settle
+    // verdict), never an RFC-audit/unexpected/panic class.
+    assert_eq!(
+        timeouts, total,
+        "permanent NOTIFY loss did not land in the settle timeout class:\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        reporter.count("refer", &ResultClass::RfcAuditFail),
+        0,
+        "permanent loss surfaced as an RFC-audit false positive:\n{}",
+        reporter.render_prometheus()
+    );
+
+    // The report names the failure mode: the case bucket is the FIXED
+    // `settle@transferred` (who="settle", last phase `transferred`), and the
+    // sampled page's detail names the open obligation (the never-observed CSeq).
+    let out = std::env::temp_dir().join(format!("loadgen-settle-gate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    reporter.finalize(&out).expect("finalize report");
+    let case_dir = out.join("callflows/refer/timeout/settle@transferred");
+    assert!(
+        case_dir.is_dir(),
+        "expected the settle@transferred case bucket; report tree: {:?}",
+        list_dirs(&out)
+    );
+    let mut named = false;
+    for entry in walk_files(&case_dir) {
+        let html = std::fs::read_to_string(&entry).unwrap_or_default();
+        if html.contains("settle:") && html.contains("gap") {
+            named = true;
+            break;
+        }
+    }
+    assert!(named, "no sampled page names the open obligation under {case_dir:?}");
+    let _ = std::fs::remove_dir_all(&out);
+
+    // The teardown itself completed (the loss was a NOTIFY, not the BYE): the
+    // SUT is fully reaped despite the NOK verdict.
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// Every file under `dir`, recursively (report-tree assertion helper).
+fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else { return out };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk_files(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// Every directory path under `root`, recursively (assert-message diagnostics).
+fn list_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(root) else { return out };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.push(p.clone());
+            out.extend(list_dirs(&p));
+        }
+    }
+    out
+}
+
 /// The cross-call **18x-delivery gate mechanism**: with NO loss the ringing
 /// counter must read exactly 100% (`received == expected`) — a deterministic proof
 /// that the strict ordering holds (the 180 always precedes the 200, never stranded
@@ -1357,7 +1514,7 @@ async fn loadgen_ringing_gate_counts_every_ring() {
 
     // No loss → every 18x is delivered; retransmit on to exercise that path too.
     let mut c = cfg(b2bua.addr, 40.0, 2, 16, 0x9A17);
-    c.default_tuning = CallTuning { drop_rate: 0.0, retransmit: true };
+    c.default_tuning = CallTuning { drop_rate: 0.0, retransmit: true, ..CallTuning::default() };
     let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
 
@@ -1391,7 +1548,7 @@ async fn loadgen_inprocess_endurance_lossy() {
 
     // The default mix (basic-heavy), production loss + retransmit, 25 s at 25 cps.
     let mut c = cfg(b2bua.addr, 25.0, 25, 64, 0xE0D0E);
-    c.default_tuning = CallTuning { drop_rate: 0.001, retransmit: true };
+    c.default_tuning = CallTuning { drop_rate: 0.001, retransmit: true, ..CallTuning::default() };
     let driver = Driver::new(c, MixEntry::default_mix(&ShapeRegistry::with_defaults(), &inputs()), reporter.clone(), transport);
     run_throttled(&driver).await;
 
