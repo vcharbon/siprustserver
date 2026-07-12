@@ -27,14 +27,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use scenario_harness::actor::scenarios::{
-    PrackUpdate as ActorPrackUpdate, Refer as ActorRefer,
-    ReferCharlieReject as ActorReferCharlieReject, Reinvite as ActorReinvite,
+    LongCall as ActorLongCall, OptionsHold as ActorOptionsHold, PrackUpdate as ActorPrackUpdate,
+    Refer as ActorRefer, ReferCharlieReject as ActorReferCharlieReject, Reinvite as ActorReinvite,
     ReroutingPrack as ActorReroutingPrack,
 };
 use scenario_harness::actor::ActorScenario;
-use scenario_harness::realcall::scenarios::{
-    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold,
-};
+use scenario_harness::realcall::scenarios::{AbandonRinging, BasicCall, InviteReject};
 use scenario_harness::realcall::{RealCallScenario, ScenarioId};
 
 use crate::shape::{Anchor, ShapeSpec};
@@ -487,13 +485,17 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .default_weight(1.0)
             .needs_charlie()
             .load_actor_with(|inputs| Arc::new(ActorRefer::new(&inputs.refer_key))),
+        // ACTOR-executed (plan §6 P3 order #3): same downstream contract
+        // (table §5.4).
         ShapeDescriptor::new("options_hold")
             .anchors(LOAD_CALL_ANCHORS)
             .default_weight(1.0)
-            .load_shared(Arc::new(OptionsHold)),
+            .load_actor_with(|_| Arc::new(ActorOptionsHold)),
+        // ACTOR-executed (plan §6 P3 order #4): the reactors answer SUT
+        // keepalives on both legs during the hold (table §5.5).
         ShapeDescriptor::new("long_call")
             .anchors(LOAD_ESTABLISH_ANCHORS)
-            .load_shared(Arc::new(LongCall)),
+            .load_actor_with(|_| Arc::new(ActorLongCall)),
         // ACTOR-executed (plan §6 P3 order #1): per-endpoint reactors + the
         // ack-gated settle barrier; same downstream contract (table §5.6).
         ShapeDescriptor::new("prack_update")
