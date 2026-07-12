@@ -22,7 +22,7 @@ mod scope;
 pub mod scenarios;
 
 pub use auth::{Challenge, ChallengeResponder};
-pub use env::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp};
+pub use env::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp, InvitePlan};
 pub use scope::CallScope;
 
 /// Stable scenario name — the Prometheus `scenario` label and report dir name.
@@ -94,6 +94,34 @@ pub async fn run_collecting(
 pub async fn run_asserting(scenario: &dyn RealCallScenario, env: &CallEnv<'_>) {
     if let Err(e) = run_collecting(scenario, env).await {
         panic!("real-call scenario `{}` failed: {e:?}", scenario.id());
+    }
+}
+
+/// Run an [`ActorScenario`](crate::actor::ActorScenario) once and **return**
+/// its outcome — the actor twin of [`run_collecting`]. The runner owns the
+/// per-actor teardown scopes (they survive a body panic — see
+/// [`run_call_with`](crate::actor::run_call_with)), so no outer `CallScope` is
+/// needed: after this returns, every leg the call opened on the SUT has been
+/// released (its own BYE on the happy path, best-effort CANCEL/BYE otherwise).
+pub async fn run_actor_collecting(
+    scenario: &dyn crate::actor::ActorScenario,
+    env: &CallEnv<'_>,
+) -> Result<(), StepError> {
+    let ctx = CallCtx::new();
+    crate::actor::run_actor_scenario(scenario, env, &ctx).await
+}
+
+/// Run an [`ActorScenario`](crate::actor::ActorScenario) as an **in-process
+/// functional leak gate**: drive it once (teardown included) and `panic!` if it
+/// did not reach its declared happy outcome — the actor twin of
+/// [`run_asserting`]. The caller then asserts on the SUT
+/// (`active_calls() == 0`, `assert_fully_reaped()`).
+pub async fn run_actor_asserting(
+    scenario: &dyn crate::actor::ActorScenario,
+    env: &CallEnv<'_>,
+) {
+    if let Err(e) = run_actor_collecting(scenario, env).await {
+        panic!("actor scenario `{}` failed: {e:?}", scenario.id());
     }
 }
 

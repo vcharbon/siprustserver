@@ -1210,6 +1210,140 @@ async fn loadgen_auto_retransmit_recovers_packet_drop() {
     assert_eq!(core.registry_size(), 0, "mux registry leak under loss+retransmit");
 }
 
+/// B9 baseline: the SAME lossy fabric, refer-only mix, NO retransmit — the
+/// multi-leg transfer (~3× the datagrams of a basic call, three serialized
+/// legs) breaks under loss, establishing that the recovery proof below is not
+/// vacuous. (No SUT-reap assert: with no retransmit the teardown itself can be
+/// lost — the very fragility the recovery test proves fixed.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_refer_drop_without_retransmit_breaks_transfers() {
+    let (_h, b2bua, core, transport) = setup(6510, Correlation::header("X-Loadgen-Id"), 3).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    let mut c = cfg(b2bua.addr, 8.0, 2, 8, 0xB9B9);
+    c.default_tuning = CallTuning { drop_rate: 0.08, retransmit: false };
+    let driver = Driver::new(c, vec![mix("refer", 1.0)], reporter.clone(), transport);
+    run_throttled(&driver).await;
+
+    let drops = core.stats().dropped_out.load(std::sync::atomic::Ordering::Relaxed)
+        + core.stats().dropped_in.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(drops > 0, "the loss model dropped nothing — the knob is not wired");
+    let ok = reporter.count("refer", &ResultClass::Ok);
+    let total = reporter.total_calls();
+    assert!(
+        total > ok,
+        "no refer call failed despite {drops} dropped datagrams and no retransmit:\n{}",
+        reporter.render_prometheus()
+    );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak under refer loss");
+}
+
+/// **B9 — the actor-refer loss-recovery proof** (plan §4.5). The two endurance
+/// failures this port exists to fix (`results/endurance-20260712-074837`, refer
+/// callflows) both trace to the LINEAR body's ONE serialized coroutine racing
+/// the protocol's own re-emission:
+///
+/// 1. a REFER-progress NOTIFY dropped toward bob, whose re-emission landed
+///    after the coroutine had already torn down → a §12.2.1.1 CSeq gap charged
+///    to the SUT (`rfc_audit_fail/rfc3261.cseqInDialogOrder` — a TEST-MODEL
+///    false positive: the SUT emitted a contiguous stream, the harness saw a
+///    hole);
+/// 2. the SUT's realign ACK dropped, stranding the coroutine at
+///    `charlie.try_receive("ACK")` — which also left alice's realign unserved
+///    and let NOTIFYs pile up as `⚠absorbed retransmit`
+///    (`timeout/charlie@transferred`).
+///
+/// The actor executor's structural wins, held constant against the SAME
+/// in-process SUT and the SAME lossy fabric + retransmit engine that breaks the
+/// no-retransmit baseline above:
+///
+/// - **No false RFC charge, ever.** Every peer stays reactive and the settle
+///   barrier holds the verdict until every in-dialog CSeq is accounted for, so
+///   a dropped datagram can NEVER surface as a §12.2.1.1 audit finding —
+///   `rfc_audit_fail` is 0 under loss (failure 1's regression gate). An
+///   unrecovered loss degrades to a graceful `timeout` (the barrier / settle
+///   ceiling), never a protocol-defect class.
+/// - **No stranding.** A drop on one realign leg no longer freezes the others —
+///   each answers independently, so the recoverable majority (dropped
+///   NOTIFY/200/BYE the peer or SUT re-emits) SUCCEEDS.
+///
+/// A drop of the SUT's OWN realign ACK stays unrecoverable — only the SUT can
+/// re-ACK its re-INVITE 2xx (§13.2.2.4), and this in-process `B2buaCore` does
+/// not (the same gap the endurance memory flags as failure 2's leading
+/// hypothesis, out of scope for a harness redesign). The actor form makes that
+/// residue a clean, bounded `timeout` instead of a cascade — which is exactly
+/// what this test pins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loadgen_actor_refer_recovers_loss_without_false_audit() {
+    // recv = 12 s like the basic-call recovery test: compounded two-hop
+    // retransmit ladders (0.5+1+2+4 s) need headroom under CI CPU contention.
+    let (_h, b2bua, core, transport) =
+        setup_recv(6530, Correlation::header("X-Loadgen-Id"), 3, Duration::from_secs(12)).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    let mut c = cfg(b2bua.addr, 6.0, 2, 8, 0xB9A2);
+    c.default_tuning = CallTuning { drop_rate: 0.05, retransmit: true };
+    let driver = Driver::new(c, vec![mix("refer", 1.0)], reporter.clone(), transport);
+    run_throttled(&driver).await;
+
+    let drops = core.stats().dropped_out.load(std::sync::atomic::Ordering::Relaxed)
+        + core.stats().dropped_in.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(drops > 0, "loss model dropped nothing — recovery proof is vacuous");
+
+    let ok = reporter.count("refer", &ResultClass::Ok);
+    let timeouts = reporter.count("refer", &ResultClass::Timeout);
+    let total = reporter.total_calls();
+    let nok = total.saturating_sub(ok);
+
+    // The recoverable majority succeeds — the SAME loss that broke transfers with
+    // no retransmit above (a strict majority, unlike the no-retransmit baseline
+    // where the majority failed).
+    assert!(ok >= 6, "too few OK transfers despite retransmit: ok={ok}/{total} drops={drops}\n{}", reporter.render_prometheus());
+    assert!(
+        ok > nok,
+        "actor refer did not recover the majority: ok={ok} nok={nok} drops={drops}\n{}",
+        reporter.render_prometheus()
+    );
+
+    // FAILURE 1'S REGRESSION GATE — the headline: a loss-model drop can NEVER
+    // surface as a §12.2.1.1 cseq-gap audit false positive.
+    assert_eq!(
+        reporter.count("refer", &ResultClass::RfcAuditFail),
+        0,
+        "a dropped datagram leaked into the RFC audit as a false positive:\n{}",
+        reporter.render_prometheus()
+    );
+    // Graceful degradation: the ONLY way an actor-refer call fails under loss is
+    // a `timeout` (a barrier / the settle ceiling) — never a protocol-defect
+    // class (RfcAuditFail / WrongMethod / Unexpected / Panic). So every NOK is a
+    // timeout: the unrecoverable SUT-realign-ACK residue is a clean bounded
+    // give-up, not the linear form's stranded-coroutine cascade.
+    assert_eq!(
+        ok + timeouts,
+        total,
+        "an actor-refer call failed with a NON-timeout class under loss:\n{}",
+        reporter.render_prometheus()
+    );
+    // Contract-table §3 regression: the refer body must NOT feed the cross-call
+    // 18x gate (the linear body never did — a pure-refer run expects zero).
+    let (_rung, expected) = reporter.ringing_totals();
+    assert_eq!(expected, 0, "refer began feeding the 18x ringing gate — contract drift");
+
+    // The loadgen's own mux state is always reclaimed; the SUT may hold only the
+    // (rare) failed calls' straggler dialogs (best-effort teardown is single-shot
+    // under loss), reaped on its own timers.
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak under loss+retransmit");
+    settle_until(|| b2bua.active_calls() as u64 <= nok).await;
+    assert!(
+        b2bua.active_calls() as u64 <= nok,
+        "SUT holds {} live calls vs {nok} failed — a RECOVERED call leaked",
+        b2bua.active_calls()
+    );
+}
+
 /// The cross-call **18x-delivery gate mechanism**: with NO loss the ringing
 /// counter must read exactly 100% (`received == expected`) — a deterministic proof
 /// that the strict ordering holds (the 180 always precedes the 200, never stranded

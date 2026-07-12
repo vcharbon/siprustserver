@@ -43,6 +43,11 @@ pub use scenario_harness::realcall::scenarios::{
     AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate, Refer,
     ReferCharlieReject, Reinvite, ReroutingPrack,
 };
+// The ACTOR-declared bodies (the executor fork's other arm — `refer` runs on
+// this since P1) plus their trait/runner, re-exported under the same roof.
+pub use scenario_harness::actor::{
+    run_actor_scenario, scenarios::Refer as ActorRefer, ActorCall, ActorScenario, Expect,
+};
 
 // The unified shape registry + the per-run construction inputs (SUT auth data
 // such as the refer key), declared once in the shared axis model.

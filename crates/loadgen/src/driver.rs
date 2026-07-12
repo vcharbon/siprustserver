@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use e2e_model::{LegSpec, ScenarioInputs, ShapeDescriptor, ShapeRegistry};
+use e2e_model::{LegSpec, Scenario, ScenarioInputs, ShapeDescriptor, ShapeRegistry};
 use futures::FutureExt;
 use scenario_harness::{Agent, AgentBinder, EgressPolicy};
 use sip_clock::Clock;
@@ -120,7 +120,10 @@ pub struct MixEntry {
     /// The report/metrics id — the DESCRIPTOR's id (may differ from the body's
     /// intrinsic `id()` when one body serves several shapes, e.g. `basic_call_em`).
     pub id: crate::scenarios::ScenarioId,
-    pub scenario: Arc<dyn LoadScenario>,
+    /// The load body — the executor fork ([`Scenario`]): a LINEAR coroutine
+    /// body or an ACTOR-declared one. `run_one` branches; everything after
+    /// (teardown, classification, sampling) is shared.
+    pub scenario: Scenario,
     pub weight: f64,
     pub case: Option<Arc<LoadCase>>,
     /// The callee legs bound for this shape's calls
@@ -142,7 +145,7 @@ impl From<(Arc<dyn LoadScenario>, f64)> for MixEntry {
     fn from((scenario, weight): (Arc<dyn LoadScenario>, f64)) -> Self {
         MixEntry {
             id: scenario.id(),
-            scenario,
+            scenario: Scenario::Linear(scenario),
             weight,
             case: None,
             legs: LegSpec::historic(false, false),
@@ -522,7 +525,20 @@ async fn run_one(
     };
     let scope = CallScope::new();
 
-    let result = AssertUnwindSafe(scenario.run(&env, &scope, &ctx)).catch_unwind().await;
+    // The executor fork (plan §4.4): a LINEAR body is one coroutine over the
+    // shared choreography; an ACTOR body is joined per-endpoint reactors whose
+    // runner owns its own per-actor teardown scopes (so the outer `scope` stays
+    // Idle and the shared teardown below is a no-op for it). Both yield the
+    // same `Result<(), StepError>` contract, so everything downstream —
+    // classification, sampling, phases, the ringing gate — is untouched.
+    let result = match &scenario {
+        Scenario::Linear(s) => AssertUnwindSafe(s.run(&env, &scope, &ctx)).catch_unwind().await,
+        Scenario::Actor(s) => {
+            AssertUnwindSafe(scenario_harness::actor::run_actor_scenario(s.as_ref(), &env, &ctx))
+                .catch_unwind()
+                .await
+        }
+    };
 
     // Cleanup FIRST (release any dialog on the SUT), then classify/report.
     scope.teardown().await;

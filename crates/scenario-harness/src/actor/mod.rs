@@ -28,28 +28,36 @@
 mod actor;
 mod goals;
 mod ledger;
+pub mod scenarios;
 mod settle;
+mod spec;
 mod state;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream::{FuturesUnordered, StreamExt};
+use futures::FutureExt;
 
 use crate::realcall::{CallCtx, CallScope};
 use crate::StepError;
 
-pub use actor::{run_actor, ActorSpec, ActorState, Disposition, MediaState};
+pub use actor::{
+    run_actor, ActorSpec, ActorState, CtxFeed, Disposition, Feed, MediaState, SUBFLOW_REALIGN,
+    SUBFLOW_REFER,
+};
 pub use goals::{Barrier, Goal, GoalCursor, GoalStep};
 pub use ledger::{ObligationKey, ObligationKind, ObligationLedger};
 pub use settle::{SettleBarrier, SettleVerdict, T1};
+pub use spec::{into_result, run_actor_scenario, ActorCall, ActorScenario, Expect, STEP_TIMEOUT};
 pub use state::{
     await_pred, LegObservation, LegPhase, Observation, ObservedState, StateInner, SubflowState,
 };
 
 /// One phase barrier in the controller's plan — a named predicate over the
-/// observed state that must hold (bounded by `recv_timeout`) before the call
-/// proceeds. The name is a bounded label for the timeout `StepError`.
+/// observed state that must hold (bounded by the controller's `step_timeout`)
+/// before the call proceeds. The name is a bounded label for the timeout
+/// `StepError`.
 pub struct BarrierPhase {
     name: &'static str,
     pred: Box<dyn Fn(&StateInner) -> bool + Send + Sync>,
@@ -100,8 +108,10 @@ struct CallController {
     obs: ObservedState,
     plan: Vec<BarrierPhase>,
     settle: SettleBarrier,
-    recv_timeout: Duration,
-    scopes: Vec<Arc<CallScope>>,
+    /// The per-barrier wait bound (the same 32 s ceiling the actors' goal
+    /// guards use — [`spec::STEP_TIMEOUT`]); a barrier that never holds fails
+    /// the call rather than hanging.
+    step_timeout: Duration,
 }
 
 impl CallController {
@@ -111,7 +121,7 @@ impl CallController {
     /// and acked DURING settle).
     async fn drive_to_verdict(&self) -> CallVerdict {
         for phase in &self.plan {
-            let deadline = tokio::time::Instant::now() + self.recv_timeout;
+            let deadline = tokio::time::Instant::now() + self.step_timeout;
             let held = await_pred(&self.obs, phase.name, |s| (phase.pred)(s), deadline).await;
             if let Err(e) = held {
                 return CallVerdict::Failed(e);
@@ -119,7 +129,7 @@ impl CallController {
         }
         // Teardown: every leg terminated. Bounded separately (teardown can take
         // the whole flow after the last phase barrier).
-        let deadline = tokio::time::Instant::now() + self.recv_timeout;
+        let deadline = tokio::time::Instant::now() + self.step_timeout;
         if let Err(e) =
             await_pred(&self.obs, "torn_down", |s| s.all_terminated(), deadline).await
         {
@@ -146,25 +156,37 @@ async fn drive_actors(
     std::future::pending().await
 }
 
-/// Run one declarative [`CallPlan`] to a verdict. Builds the shared observed
-/// state, one teardown scope per actor, and the actor futures; races the
-/// controller's verdict against the joined actors; then tears down every scope
-/// (a no-op on a clean call, best-effort CANCEL/BYE on an aborted one).
-pub async fn run_call(call: CallPlan, recv_timeout: Duration) -> CallVerdict {
-    let obs = ObservedState::new();
-    let ctx = Arc::new(CallCtx::new());
+/// Run one declarative [`CallPlan`] to a verdict with its own fresh observed
+/// state + per-call recorder — the self-contained form (the P0 toy call).
+/// Adapter surfaces use [`run_call_with`] to share the driver's `CallCtx` and
+/// read the observed state after the verdict.
+pub async fn run_call(call: CallPlan, step_timeout: Duration) -> CallVerdict {
+    let ctx = CallCtx::new();
+    run_call_with(call, ObservedState::new(), &ctx, step_timeout).await
+}
 
+/// Run one declarative [`CallPlan`] to a verdict over a caller-provided
+/// observed state (readable afterwards — the `Expect::Reject` mapping) and
+/// per-call recorder (the load driver's `CallCtx`). Builds one teardown scope
+/// per actor and the joined actor futures; races the controller's verdict
+/// against them; then tears down every scope (a no-op on a clean call,
+/// best-effort CANCEL/BYE on an aborted one).
+///
+/// **Panic-safe:** the scopes are owned HERE, outside a `catch_unwind` around
+/// the drive, so a panicking actor still gets its call torn down (no leaked
+/// dialog on the SUT) before the panic resumes to the caller's own
+/// `catch_unwind` (the load driver's per-call boundary, which classifies it).
+pub async fn run_call_with(
+    call: CallPlan,
+    obs: ObservedState,
+    ctx: &CallCtx,
+    step_timeout: Duration,
+) -> CallVerdict {
     let mut scopes = Vec::with_capacity(call.actors.len());
     let mut states = Vec::with_capacity(call.actors.len());
     for spec in call.actors {
         let scope = Arc::new(CallScope::new());
-        states.push(ActorState::from_spec(
-            spec,
-            obs.clone(),
-            scope.clone(),
-            ctx.clone(),
-            recv_timeout,
-        ));
+        states.push(ActorState::from_spec(spec, obs.clone(), scope.clone(), ctx, step_timeout));
         scopes.push(scope);
     }
 
@@ -172,23 +194,28 @@ pub async fn run_call(call: CallPlan, recv_timeout: Duration) -> CallVerdict {
         obs: obs.clone(),
         plan: call.plan,
         settle: call.settle,
-        recv_timeout,
-        scopes: scopes.clone(),
+        step_timeout,
     };
 
-    let actors: FuturesUnordered<_> = states.into_iter().map(run_actor).collect();
-
-    let verdict = tokio::select! {
-        v = controller.drive_to_verdict() => v,
-        e = drive_actors(actors) => CallVerdict::Failed(e),
+    let drive = async {
+        let actors: FuturesUnordered<_> = states.into_iter().map(run_actor).collect();
+        tokio::select! {
+            v = controller.drive_to_verdict() => v,
+            e = drive_actors(actors) => CallVerdict::Failed(e),
+        }
     };
+    let result = std::panic::AssertUnwindSafe(drive).catch_unwind().await;
 
     // The loser future is dropped; teardown acts on whatever each scope last
-    // registered (Terminated → no-op on the happy path).
-    for scope in &controller.scopes {
+    // registered (Terminated → no-op on the happy path) — including after a
+    // caught panic, so a panicking actor never leaks SUT state.
+    for scope in &scopes {
         scope.teardown().await;
     }
-    verdict
+    match result {
+        Ok(verdict) => verdict,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 #[cfg(test)]
@@ -220,7 +247,7 @@ mod tests {
                     disposition: Disposition::Caller,
                     media: MediaState::offer(OFFER_SDP),
                     goals: vec![
-                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob" }),
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
                         Goal::new(
                             Barrier::AllConfirmed(&["alice", "bob"]),
                             GoalStep::Bye,
@@ -228,6 +255,7 @@ mod tests {
                     ],
                     invite_targets: vec![("bob", bob.clone())],
                     via: None,
+                    feed: CtxFeed::default(),
                 },
                 ActorSpec {
                     role: "bob",
@@ -239,6 +267,7 @@ mod tests {
                     goals: vec![],
                     invite_targets: vec![],
                     via: None,
+                    feed: CtxFeed::default(),
                 },
             ],
             plan: vec![phase("established", |s| {
