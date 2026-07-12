@@ -26,6 +26,12 @@ fn established(s: &StateInner) -> bool {
     s.leg_at_least("alice", LegPhase::Confirmed) && s.leg_at_least("bob", LegPhase::Confirmed)
 }
 
+/// Alice's leg reached (at least) an early dialog — she received the 180 (the
+/// abandon body's CANCEL trigger).
+fn alice_early(s: &StateInner) -> bool {
+    s.leg_at_least("alice", LegPhase::Early)
+}
+
 /// Guard [`StepError`] under a fixed synthetic `who` (a bounded sample-key) —
 /// the actor twin of the linear bodies' `who`-tagged build guards. `detail` is
 /// free-form (never keyed).
@@ -720,6 +726,137 @@ impl ActorScenario for LongCall {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
+        })
+    }
+}
+
+/// The callee REJECTS the INVITE with `486 Busy Here`, actor-declared — the port
+/// of [`crate::realcall::scenarios::InviteReject`]. Alice INVITEs, bob 486s (the
+/// final auto-ACKed on both legs), and the transaction completes with nothing to
+/// CANCEL/BYE; the SUT must still reap the rejected call. Alice has ONLY the
+/// INVITE goal (her INVITE is rejected — no dialog, no BYE); the clean torn-down
+/// verdict is re-interpreted by [`Expect::Reject`] into the contract terminal.
+///
+/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.8):
+/// NO phases, NO anchors, NO checkpoints, NO `mark_ringing`; terminal
+/// `WrongStatus { who: "alice", expected: 200, got: 486, reason: "Busy Here" }`
+/// → class `status_486`, case `alice@start`.
+pub struct InviteReject;
+
+impl ActorScenario for InviteReject {
+    fn id(&self) -> ScenarioId {
+        "invite_reject"
+    }
+
+    fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
+        let actors = vec![
+            // Alice originates and — her INVITE rejected — reaches a terminal leg
+            // with no dialog (the reactor records her 486 final + terminates).
+            ActorSpec {
+                role: "alice",
+                agent: env.alice.clone(),
+                disposition: Disposition::Caller,
+                media: MediaState::offer(OFFER_SDP),
+                goals: vec![Goal::new(
+                    Barrier::None,
+                    GoalStep::Invite { callee: "bob", plan: Some(env.invite_plan(&["bob"])) },
+                )],
+                invite_targets: vec![("bob", env.bob.clone())],
+                via: None,
+                // NO phases / checkpoints / ringing gate (contract table §5.8).
+                feed: CtxFeed::default(),
+            },
+            // Bob rejects the initial INVITE with 486; its reject-ACK is absorbed
+            // without confirming.
+            ActorSpec {
+                role: "bob",
+                agent: env.bob.clone(),
+                disposition: Disposition::Reject(486),
+                media: MediaState::none(),
+                goals: vec![],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed::default(),
+            },
+        ];
+
+        // Internal controller gating only: bob rejected (both legs then terminate).
+        let plan = vec![phase("rejected", |s| s.leg_at_least("bob", LegPhase::Terminated))];
+
+        Ok(ActorCall {
+            actors,
+            plan,
+            settle: SettleBarrier::default_ceiling(),
+            expect: Expect::Reject(486),
+        })
+    }
+}
+
+/// The caller ABANDONS after ringing (CANCEL), actor-declared — the port of
+/// [`crate::realcall::scenarios::AbandonRinging`]. Alice INVITEs, sees the 180,
+/// then CANCELs the still-pending INVITE (RFC 3261 §9.1); the SUT relays the
+/// CANCEL to bob, who 200s it and 487s his held INVITE, and both legs reap. The
+/// clean torn-down verdict is re-interpreted by [`Expect::AbandonedEarly`] into
+/// the synthetic terminal.
+///
+/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.9):
+/// NO phases, NO anchors, checkpoint `time_to_180` only, NO `mark_ringing`;
+/// terminal `Timeout { who: "alice-abandoned-after-ringing" }` → class `timeout`,
+/// case `alice-abandoned-after-ringing@start`.
+pub struct AbandonRinging;
+
+impl ActorScenario for AbandonRinging {
+    fn id(&self) -> ScenarioId {
+        "abandon_ringing"
+    }
+
+    fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
+        let actors = vec![
+            // Alice originates, then CANCELs once she has seen the 180 (her leg
+            // Early). She keeps her pending INVITE so its 487 still routes to it.
+            ActorSpec {
+                role: "alice",
+                agent: env.alice.clone(),
+                disposition: Disposition::Caller,
+                media: MediaState::offer(OFFER_SDP),
+                goals: vec![
+                    Goal::new(
+                        Barrier::None,
+                        GoalStep::Invite { callee: "bob", plan: Some(env.invite_plan(&["bob"])) },
+                    ),
+                    Goal::new(Barrier::pred("ringing", alice_early), GoalStep::Cancel),
+                ],
+                invite_targets: vec![("bob", env.bob.clone())],
+                via: None,
+                feed: CtxFeed {
+                    // `time_to_180` on the first provisional; NO phase, NO ringing
+                    // gate (contract table §5.9).
+                    on_provisional: Feed::new(Some("time_to_180"), None),
+                    ..CtxFeed::default()
+                },
+            },
+            // Bob rings (180) then would answer — but the CANCEL arrives first, so
+            // his CANCEL reactor 200s the CANCEL + 487s the held INVITE and reaps.
+            ActorSpec {
+                role: "bob",
+                agent: env.bob.clone(),
+                disposition: Disposition::RingThenAnswer { ring: env.ring_delay },
+                media: MediaState::answer(ANSWER_SDP),
+                goals: vec![],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed::default(),
+            },
+        ];
+
+        // Internal controller gating only: alice rang (Early) → both torn down.
+        let plan = vec![phase("ringing", alice_early)];
+
+        Ok(ActorCall {
+            actors,
+            plan,
+            settle: SettleBarrier::default_ceiling(),
+            expect: Expect::AbandonedEarly,
         })
     }
 }
