@@ -88,6 +88,26 @@ pub enum GoalStep {
     /// the SUT's REFER backend authorizes. Both are extracted OWNED from the
     /// `CallEnv` at build time.
     Refer { refer_to: String, authorization: Option<String> },
+    /// Send a DELAYED-OFFER (bodyless) re-INVITE on the confirmed dialog (the
+    /// `reinvite` renegotiation). Opens a `ReInvite` obligation keyed on its
+    /// CSeq; the reactor ACKs the 2xx WITH the answer SDP (RFC 3264 §4) and
+    /// advances the caller's `reneg` sub-flow.
+    Reinvite,
+    /// Send an in-dialog UPDATE (RFC 3311) carrying an offer on the confirmed
+    /// dialog (the `prack_update` renegotiation). Opens an `Update` obligation;
+    /// its 200 closes it (no ACK) and advances the caller's `reneg` sub-flow.
+    Update,
+    /// Send ONE in-dialog OPTIONS keepalive ping on the confirmed dialog and
+    /// read its 200 inline — the `long_call` single ping. The first ping stamps
+    /// the `keepalive_ack` feed.
+    Options,
+    /// Loop an in-dialog OPTIONS keepalive ping every `cadence` until `hold`
+    /// elapses (the `options_hold` keepalive loop) — each 200 read inline; the
+    /// first stamps `keepalive_ack`.
+    EveryOptions { cadence: Duration, hold: Duration },
+    /// CANCEL the still-pending initial INVITE (RFC 3261 §9.1) — the abandon
+    /// path. Keeps the pending INVITE so its `487` still routes to it.
+    Cancel,
     /// Hang up — send a BYE on the confirmed dialog.
     Bye,
 }

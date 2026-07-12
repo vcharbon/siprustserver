@@ -27,12 +27,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use scenario_harness::actor::scenarios::{
-    Refer as ActorRefer, ReferCharlieReject as ActorReferCharlieReject,
-    ReroutingPrack as ActorReroutingPrack,
+    PrackUpdate as ActorPrackUpdate, Refer as ActorRefer,
+    ReferCharlieReject as ActorReferCharlieReject, ReroutingPrack as ActorReroutingPrack,
 };
 use scenario_harness::actor::ActorScenario;
 use scenario_harness::realcall::scenarios::{
-    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate, Reinvite,
+    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, Reinvite,
 };
 use scenario_harness::realcall::{RealCallScenario, ScenarioId};
 
@@ -491,9 +491,11 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
         ShapeDescriptor::new("long_call")
             .anchors(LOAD_ESTABLISH_ANCHORS)
             .load_shared(Arc::new(LongCall)),
+        // ACTOR-executed (plan §6 P3 order #1): per-endpoint reactors + the
+        // ack-gated settle barrier; same downstream contract (table §5.6).
         ShapeDescriptor::new("prack_update")
             .anchors(PRACK_ANCHORS)
-            .load_shared(Arc::new(PrackUpdate)),
+            .load_actor_with(|_| Arc::new(ActorPrackUpdate)),
         // ── Load: the emergency variants (same flows, force-admitted) ────────
         ShapeDescriptor::new("basic_call_em")
             .anchors(LOAD_CALL_ANCHORS)
