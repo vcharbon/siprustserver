@@ -17,13 +17,11 @@
 
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use scenario_harness::actor::scenarios::{
-    PrackUpdate as ActorPrackUpdate, Refer as ActorRefer,
-    ReferCharlieReject as ActorReferCharlieReject, Reinvite as ActorReinvite,
+    LongCall as ActorLongCall, OptionsHold as ActorOptionsHold, PrackUpdate as ActorPrackUpdate,
+    Refer as ActorRefer, ReferCharlieReject as ActorReferCharlieReject, Reinvite as ActorReinvite,
 };
 use scenario_harness::actor::ActorScenario;
-use scenario_harness::realcall::scenarios::{
-    AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold,
-};
+use scenario_harness::realcall::scenarios::{AbandonRinging, BasicCall, InviteReject};
 use scenario_harness::realcall::{
     run_actor_asserting, run_actor_collecting, run_asserting, run_collecting, CallEnv,
 };
@@ -112,7 +110,8 @@ async fn realcall_reinvite_no_leak() {
 async fn realcall_options_hold_no_leak() {
     // Default `for_functional` options_hold (2 s) / cadence (1 s) drives a couple
     // of in-dialog OPTIONS pings the SUT relays to bob, then a BYE — no leak.
-    assert_no_leak("realcall-options-hold", &OptionsHold).await;
+    // Since P3 the load body is the ACTOR-declared port.
+    assert_no_leak_actor("realcall-options-hold", &ActorOptionsHold).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -132,7 +131,9 @@ async fn realcall_long_call_no_leak() {
     // Default `for_functional` long_hold (2 s) holds the call past its single
     // in-dialog OPTIONS ping then BYEs. The harness keepalive interval is 30 s
     // and the dwell is seconds, so no SUT keepalive fires — the BYE lands clean.
-    assert_no_leak("realcall-long-call", &LongCall).await;
+    // Since P3 the load body is the ACTOR-declared port (the reactors answer any
+    // SUT keepalive during the hold).
+    assert_no_leak_actor("realcall-long-call", &ActorLongCall).await;
 }
 
 // ── Refer (blind transfer) leak gate — needs a third (charlie) leg ──────────
