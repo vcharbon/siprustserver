@@ -52,10 +52,12 @@ pub struct RequestEager {
 // ---------------------------------------------------------------------------
 
 fn get_header_value<'a>(headers: &'a [crate::types::SipHeader], name: &str) -> Option<&'a str> {
-    let lower = name.to_lowercase();
+    // eq_ignore_ascii_case, not to_lowercase(): matches the sibling
+    // `get_header_values` — avoids a lowercased-String alloc for the probe name
+    // AND one per header scanned (SIP names are ASCII tokens; folding is ASCII).
     headers
         .iter()
-        .find(|h| h.name.to_lowercase() == lower)
+        .find(|h| h.name.eq_ignore_ascii_case(name))
         .map(|h| h.value.as_str())
 }
 

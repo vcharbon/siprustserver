@@ -43,9 +43,25 @@ pub fn is_wsp(b: u8) -> bool {
 }
 
 /// Lenient UTF-8 decode of a byte range, matching Node `Buffer.toString("utf-8")`
-/// (invalid sequences → U+FFFD).
-fn decode(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
+/// (invalid sequences → U+FFFD). The common SIP path is pure ASCII: try the
+/// `str::from_utf8` fast path first (word-at-a-time validation, one alloc) and
+/// only fall back to the `Utf8Chunks`-based lossy machinery on genuinely
+/// invalid input — output is byte-identical either way.
+pub(crate) fn decode(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_owned(),
+        Err(_) => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+/// Append a lenient-UTF-8 decode of `bytes` onto `out` without minting an
+/// intermediate owned `String` (the previous `push_str(&decode(..))` shape
+/// allocated a throwaway per header-value segment on the hot path).
+fn push_decoded(out: &mut String, bytes: &[u8]) {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => out.push_str(s),
+        Err(_) => out.push_str(&String::from_utf8_lossy(bytes)),
+    }
 }
 
 pub struct Scanner<'a> {
@@ -144,7 +160,7 @@ impl<'a> Scanner<'a> {
         while self.pos < self.buf.len() {
             let b = self.buf[self.pos];
             if b == CR {
-                result.push_str(&decode(&self.buf[start..self.pos]));
+                push_decoded(&mut result, &self.buf[start..self.pos]);
                 if self.pos + 1 < self.buf.len() && self.buf[self.pos + 1] == LF {
                     // Continuation line?
                     if self.pos + 2 < self.buf.len() && is_wsp(self.buf[self.pos + 2]) {
@@ -159,7 +175,7 @@ impl<'a> Scanner<'a> {
             }
             if b == LF {
                 // Bare LF (lenient).
-                result.push_str(&decode(&self.buf[start..self.pos]));
+                push_decoded(&mut result, &self.buf[start..self.pos]);
                 if self.pos + 1 < self.buf.len() && is_wsp(self.buf[self.pos + 1]) {
                     result.push(' ');
                     self.pos += 2;
@@ -172,7 +188,7 @@ impl<'a> Scanner<'a> {
             self.pos += 1;
         }
         // EOF without CRLF — return what we have.
-        result.push_str(&decode(&self.buf[start..self.pos]));
+        push_decoded(&mut result, &self.buf[start..self.pos]);
         result
     }
 
