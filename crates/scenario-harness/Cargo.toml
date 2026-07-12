@@ -12,6 +12,10 @@ workspace = true
 [dependencies]
 tokio = { workspace = true }
 async-trait = { workspace = true }
+# The per-endpoint actor runner (`src/actor`) joins N reactor futures on ONE
+# task via `FuturesUnordered` (no `tokio::spawn` — determinism under the paused
+# clock); see docs/todos/actor-harness-impl-plan.md §1.
+futures = "0.3"
 # The typed `X-Api-Call` control header of the shared egress model
 # (`egress::ApiCall`) serializes through serde, so every emitter builds the
 # same JSON instead of hand-formatting it.

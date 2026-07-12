@@ -29,6 +29,7 @@
 //! **TEST-ONLY.** This crate composes the recording/audit decorators, which
 //! never belong in a production network tree.
 
+pub mod actor;
 pub mod agent;
 pub mod anchors;
 pub mod callee_group;
@@ -54,7 +55,7 @@ pub const SIMULATED_TRANSIT_DELAY_MS: u64 = 100;
 // This is the primary surface — scenarios should not hand-author headers.
 pub use agent::{
     Agent, CancelHandle, ClientInvite, ClientReinvite, Dialog, Harness, InDialogRequest,
-    InDialogTxn, Invite, OutOfDialogRequest, Proxy, Respond, ServerTxn, StepError,
+    InDialogTxn, Inbound, Invite, OutOfDialogRequest, Proxy, Respond, ServerTxn, StepError,
 };
 // Multi-callee routing: several logical agents on one bound socket, demuxed by
 // the shared R-URI leg-picker (the transfer Bob/Charlie/David fabric).
