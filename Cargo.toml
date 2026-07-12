@@ -154,6 +154,16 @@ tokio-reactor-trait = "1"
 [profile.release]
 debug = "line-tables-only"
 
+# Dev/test builds default to full DWARF (`debug = 2`), which on this
+# test-heavy workspace bloats `target/debug/deps` to tens of GB — the bulk of
+# it per-test-binary variable-level debug info almost never used interactively.
+# `line-tables-only` keeps file:line in panic backtraces (load-bearing for the
+# PanicDump wire-trace dump and general test triage) while dropping the
+# variable info, cutting the debug target by roughly half. `test`/`bench`
+# inherit these from `dev`/`release`, so `cargo test` is covered.
+[profile.dev]
+debug = "line-tables-only"
+
 # First-party code is unsafe-free by policy. Every member crate opts in with
 # `[lints] workspace = true`, turning a stray `unsafe` block into a hard compile
 # error rather than a silent perf shortcut nobody reviewed. `forbid` (stronger
