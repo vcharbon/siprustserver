@@ -420,6 +420,11 @@ pub struct CallCtx {
     /// check engine can resolve `<agent>.<anchor>` over the recorded trace.
     collect_anchors: AtomicBool,
     anchors: Mutex<Vec<AnchorTag>>,
+    /// Free-form per-call diagnostic notes for the SAMPLE DETAIL channel only —
+    /// e.g. the settle barrier's still-open obligation names. NEVER keyed (the
+    /// case discriminator stays `who@phase`); the driver appends them to a NOK
+    /// sample's failure detail so the rendered page explains WHY.
+    notes: Mutex<Vec<String>>,
 }
 
 impl CallCtx {
@@ -431,6 +436,7 @@ impl CallCtx {
             ringing: Mutex::new(None),
             collect_anchors: AtomicBool::new(false),
             anchors: Mutex::new(Vec::new()),
+            notes: Mutex::new(Vec::new()),
         }
     }
 
@@ -525,6 +531,18 @@ impl CallCtx {
 
     pub fn take_checkpoints(&self) -> Vec<(&'static str, Duration)> {
         std::mem::take(&mut self.checkpoints.lock().unwrap())
+    }
+
+    /// Attach a free-form diagnostic note for the sample DETAIL channel (see
+    /// the field docs — never a report key; the settle verdict's open-obligation
+    /// names ride this).
+    pub fn note(&self, text: impl Into<String>) {
+        self.notes.lock().unwrap().push(text.into());
+    }
+
+    /// The attached diagnostic notes, in attach order.
+    pub fn notes(&self) -> Vec<String> {
+        self.notes.lock().unwrap().clone()
     }
 }
 

@@ -88,6 +88,10 @@ pub struct CallTuning {
     /// requests, 2xx-until-ACK for answers) on this call — so a rare drop is
     /// recovered instead of failing the call.
     pub retransmit: bool,
+    /// Optional DETERMINISTIC targeted drop (test knob): discard the nth
+    /// distinct inbound request of a given CSeq method, once or permanently —
+    /// see [`crate::mux::TargetedDrop`]. Default off.
+    pub drop_nth: Option<crate::mux::TargetedDrop>,
 }
 
 /// Driver construction config.
@@ -463,6 +467,7 @@ async fn run_one(
         tuning.drop_rate,
         tuning.retransmit,
         next_seed(seed_base),
+        tuning.drop_nth,
     );
     let binder =
         AgentBinder::mux(Arc::new(mux_net), transport.clock.clone(), transport.recv_timeout, record);
@@ -679,7 +684,13 @@ async fn run_one(
 /// reached before it failed (and, with the chaos correlation, near which fault).
 /// `None`/empty detail (an OK call) is left untouched.
 fn phase_annotated_detail(detail: Option<String>, ctx: &CallCtx) -> Option<String> {
-    let detail = detail?;
+    let mut detail = detail?;
+    // Scenario-attached diagnostic notes (e.g. the actor settle barrier's
+    // still-open obligations) — detail-channel only, never a report key.
+    let notes = ctx.notes();
+    if !notes.is_empty() {
+        detail = format!("{detail} [{}]", notes.join("; "));
+    }
     let phases = ctx.phases();
     if phases.is_empty() {
         return Some(detail);
