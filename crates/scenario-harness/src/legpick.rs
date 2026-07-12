@@ -116,10 +116,34 @@ pub fn prefix_leg_picker(labels: impl IntoIterator<Item = impl Into<String>>) ->
 pub fn labelled_prefix_leg_picker(
     entries: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
 ) -> LegPicker {
+    labelled_prefix_leg_picker_defaulting(entries, Option::<String>::None)
+}
+
+/// A [`labelled_prefix_leg_picker`] with a fallback for a **userless** leg — an
+/// initial INVITE whose Request-URI carries no user-part (`sip:host:port`).
+///
+/// A B2BUA originates its *primary* callee leg from its own routing config, so
+/// that leg's R-URI is the bare route target (`sip:192.168.60.20:6001`) — it
+/// does NOT copy a user-part the way a transfer (Refer-To → `sip:charlie@…`) or
+/// a reroute (`new_ruri` → `sip:bob2@…`) does. Such a leg prefix-matches nothing
+/// and would orphan; instead it routes to `default_label` (the primary leg's
+/// role). A leg WITH a user-part that matches no prefix still orphans (`""`) —
+/// that is a genuine mis-route, kept observable. `None` restores the strict
+/// "no prefix ⇒ orphan" behaviour.
+pub fn labelled_prefix_leg_picker_defaulting(
+    entries: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    default_label: Option<impl Into<String>>,
+) -> LegPicker {
     let entries: Vec<(String, String)> =
         entries.into_iter().map(|(p, l)| (p.into(), l.into())).collect();
+    let default_label = default_label.map(Into::into);
     Arc::new(move |leg: &LegInfo| {
-        let user = leg.ruri_user().unwrap_or_default();
+        // A userless R-URI (no user-part) is the SUT's default route target —
+        // the primary callee leg. Only initial INVITEs reach a picker, so a
+        // `None` here is always "userless", never "a response with no R-URI".
+        let Some(user) = leg.ruri_user() else {
+            return default_label.clone().unwrap_or_default();
+        };
         let mut best: Option<&(String, String)> = None;
         for entry in &entries {
             if user.starts_with(entry.0.as_str())
@@ -275,6 +299,34 @@ mod tests {
         assert_eq!(route("sip:0650033033231089055@10.0.0.1:5070"), "xfer");
         // No prefix matches → no route (a no_route orphan at the caller).
         assert_eq!(route("sip:999@10.0.0.1:5070"), "");
+    }
+
+    /// A userless leg (`sip:host:port` — the SUT's primary-leg default route
+    /// target) routes to the default label, while a leg with a user-part that
+    /// matches no prefix still orphans (a genuine mis-route). This is the refer
+    /// bug: the b2bua's initial bob leg arrives userless and must not orphan.
+    #[test]
+    fn labelled_prefix_leg_picker_defaulting_routes_userless_to_default() {
+        let pick = labelled_prefix_leg_picker_defaulting(
+            [("bob", "bob"), ("charlie", "charlie")],
+            Some("bob"),
+        );
+        let route = |ruri: &str| {
+            let raw = invite_ruri(ruri);
+            pick(&LegInfo::new(raw.as_slice()))
+        };
+
+        // The SUT's userless primary b-leg → the default (primary) role.
+        assert_eq!(route("sip:192.168.60.20:6001"), "bob");
+        // A distinguishing user-part still wins by prefix.
+        assert_eq!(route("sip:charlie@192.168.60.20:6001"), "charlie");
+        assert_eq!(route("sip:bob@192.168.60.20:6001"), "bob");
+        // A user-part matching NO prefix stays an observable orphan.
+        assert_eq!(route("sip:dave@192.168.60.20:6001"), "");
+        // `None` default restores strict orphan-on-userless.
+        let strict =
+            labelled_prefix_leg_picker_defaulting([("bob", "bob")], Option::<String>::None);
+        assert_eq!(strict(&LegInfo::new(invite_ruri("sip:h:6001").as_slice())), "");
     }
 
     /// `to_user` / `header` read the header block (name-addr and bare-URI To),

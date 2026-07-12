@@ -24,7 +24,7 @@ use crate::case::LoadCase;
 use crate::chaos::{ChaosLog, ChaosTag};
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
-use crate::mux::{labelled_prefix_leg_picker, CallRouting, Correlation, MuxCore};
+use crate::mux::{labelled_prefix_leg_picker_defaulting, CallRouting, Correlation, MuxCore};
 use crate::rate::{Governor, RateHandle};
 use crate::report::{RenderedSample, Reporter};
 use crate::scenarios::LoadScenario;
@@ -434,10 +434,18 @@ async fn run_one(
         routing = routing.leg(transport.uas_addr, leg.role);
     }
     if legs.len() > 1 {
+        // The SUT originates its PRIMARY callee leg from its own route config, so
+        // that INVITE's R-URI is the bare route target (`sip:host:port`, userless)
+        // — unlike a transfer (Refer-To → `sip:charlie@…`) or reroute
+        // (`new_ruri` → `sip:bob2@…`) leg, which carries a distinguishing
+        // user-part. Route such a userless leg to the primary (first-declared)
+        // role instead of orphaning it; otherwise every multi-leg shape (refer,
+        // reroute) drops its very first bob leg as `no endpoint to route to`.
         routing = routing.picker(
             transport.uas_addr,
-            labelled_prefix_leg_picker(
+            labelled_prefix_leg_picker_defaulting(
                 legs.iter().flat_map(|leg| leg.ruri_prefixes.iter().map(|p| (*p, leg.role))),
+                Some(legs[0].role),
             ),
         );
     }
