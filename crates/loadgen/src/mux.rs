@@ -251,7 +251,8 @@ impl DropModel {
 // and `crate::mux::LegInfo` keep resolving unchanged — the mux consumes it, it
 // no longer owns it.
 pub use scenario_harness::legpick::{
-    labelled_prefix_leg_picker, prefix_leg_picker, LegInfo, LegPicker,
+    labelled_prefix_leg_picker, labelled_prefix_leg_picker_defaulting, prefix_leg_picker, LegInfo,
+    LegPicker,
 };
 
 /// A registry key owned by one endpoint (removed on its `Drop`).
