@@ -12,6 +12,13 @@ use super::{phase, ActorSpec, SettleBarrier};
 use crate::realcall::{CallEnv, ScenarioId};
 use crate::{StepError, ANSWER_SDP, OFFER_SDP};
 
+/// Guard [`StepError`] under a fixed synthetic `who` (a bounded sample-key) —
+/// the actor twin of the linear bodies' `who`-tagged build guards. `detail` is
+/// free-form (never keyed).
+fn guard(who: &'static str, detail: &'static str) -> StepError {
+    StepError::UnexpectedKind { who: who.to_string(), detail: detail.to_string() }
+}
+
 /// REFER blind transfer, actor-declared — the port of
 /// [`crate::realcall::scenarios::Refer`] and the redesign's exemplar: the
 /// B2BUA's post-transfer media merge re-INVITEs charlie (the c-realign) and
@@ -155,6 +162,133 @@ impl ActorScenario for Refer {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
+        })
+    }
+}
+
+/// A blind transfer whose target DECLINES (`603`), actor-declared — the port of
+/// [`crate::realcall::scenarios::ReferCharlieReject`]. A↔B establish, bob REFERs
+/// to charlie, charlie 603-declines the transfer INVITE; the transfer fails and
+/// A↔B stays up. The linear body returns its NOK terminal and leaves the scope
+/// Confirmed so the *driver's* teardown BYEs A↔B; the actor runner OWNS teardown
+/// (its own per-actor scopes), so here **alice BYEs A↔B herself** once the
+/// decline is observed — the call reaches a clean torn-down + settled
+/// [`CallVerdict::Ok`], which [`Expect::TransferDeclined`] then maps onto the
+/// EXACT contract Err (`UnexpectedKind { who: "refer_charlie_reject", detail:
+/// "transfer declined by charlie (603)" }`). Same net SUT effect (A↔B BYE'd,
+/// fully reaped), same downstream `Result`.
+///
+/// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.10):
+/// NO phases, NO anchors, checkpoint `time_to_200` only, NO `mark_ringing`;
+/// guard errors + the terminal all under `who: "refer_charlie_reject"`.
+pub struct ReferCharlieReject {
+    /// The `X-Api-Call.refer_key` the SUT's REFER backend authorizes.
+    pub refer_key: String,
+}
+
+impl ReferCharlieReject {
+    pub fn new(refer_key: impl Into<String>) -> Self {
+        Self { refer_key: refer_key.into() }
+    }
+}
+
+/// The transfer was declined: charlie's leg reached a terminal state (its
+/// `603`), so no successful transfer INVITE was confirmed.
+fn declined(s: &StateInner) -> bool {
+    s.leg_at_least("charlie", LegPhase::Terminated)
+}
+
+impl ActorScenario for ReferCharlieReject {
+    fn id(&self) -> ScenarioId {
+        "refer_charlie_reject"
+    }
+
+    fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
+        // The linear body's guards, byte-for-byte (`failures.rs:133,154` — the
+        // `who` is the fixed sample-key, contract table §5.10 / §8.1).
+        if env.charlie.is_none() {
+            return Err(guard("refer_charlie_reject", "bound without a charlie leg"));
+        }
+        let refer_to = env
+            .refer_to()
+            .ok_or_else(|| guard("refer_charlie_reject", "no charlie for Refer-To"))?;
+        let authorization = env.refer_authorization(&self.refer_key);
+
+        let actors = vec![
+            // Alice originates through the SUT and — once the decline is observed
+            // — BYEs A↔B (the actor owns teardown; see the type doc). She answers
+            // any post-decline realign reactively.
+            ActorSpec {
+                role: "alice",
+                agent: env.alice.clone(),
+                disposition: Disposition::Caller,
+                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                goals: vec![
+                    Goal::new(
+                        Barrier::None,
+                        GoalStep::Invite {
+                            callee: "bob",
+                            plan: Some(env.invite_plan(&["bob"])),
+                        },
+                    ),
+                    Goal::new(Barrier::pred("declined", declined), GoalStep::Bye),
+                ],
+                invite_targets: vec![("bob", env.bob.clone())],
+                via: None,
+                feed: CtxFeed {
+                    // `time_to_200` on alice's answer; NO phase, NO ringing gate
+                    // (contract table §5.10).
+                    on_answer_rx: Feed::new(Some("time_to_200"), None),
+                    ..CtxFeed::default()
+                },
+            },
+            // Bob rings then answers, then REFERs the call to charlie; his
+            // REFER-progress NOTIFYs (incl. the failure sipfrag) are answered
+            // reactively and gap-checked by the ledger.
+            ActorSpec {
+                role: "bob",
+                agent: env.bob.clone(),
+                disposition: Disposition::RingThenAnswer { ring: env.ring_delay },
+                media: MediaState::answer(ANSWER_SDP),
+                goals: vec![Goal::new(
+                    Barrier::AllConfirmed(&["alice", "bob"]),
+                    GoalStep::Refer { refer_to, authorization },
+                )
+                .after(env.reinvite_gap)],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed::default(),
+            },
+            // Charlie DECLINES the transfer INVITE with 603 (the contract's
+            // TransferDeclined outcome).
+            ActorSpec {
+                role: "charlie",
+                agent: env.callee_agent("charlie").clone(),
+                disposition: Disposition::Reject(603),
+                media: MediaState::answer(ANSWER_SDP),
+                goals: vec![],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed::default(),
+            },
+        ];
+
+        // Internal controller gating only (these do NOT stamp `ctx.phase` — that
+        // is the reactor's CtxFeed job, and this body declares none, so the
+        // contract's "no phases" holds): established → declined → torn_down.
+        let plan = vec![
+            phase("established", |s| {
+                s.leg_at_least("alice", LegPhase::Confirmed)
+                    && s.leg_at_least("bob", LegPhase::Confirmed)
+            }),
+            phase("declined", declined),
+        ];
+
+        Ok(ActorCall {
+            actors,
+            plan,
+            settle: SettleBarrier::default_ceiling(),
+            expect: Expect::TransferDeclined,
         })
     }
 }
