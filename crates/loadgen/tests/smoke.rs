@@ -1310,10 +1310,12 @@ async fn loadgen_actor_refer_recovers_loss_without_false_audit() {
 
     // The loadgen's own mux state is always reclaimed; the SUT may hold only the
     // (rare) failed calls' straggler dialogs (best-effort teardown is single-shot
-    // under loss), reaped on its own timers.
-    settle_until(|| core.registry_size() == 0).await;
+    // under loss), reaped on its own timers. Use a generous settle (like the other
+    // loss tests here) not the 1 s `settle_until`: under loss a recovered refer
+    // call's teardown rides retransmit ladders, so its SUT-side reap can trail the
+    // verdict by seconds — under full-suite CPU contention the 1 s window flaked.
+    settle_secs(20, || core.registry_size() == 0 && b2bua.active_calls() as u64 <= nok).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak under loss+retransmit");
-    settle_until(|| b2bua.active_calls() as u64 <= nok).await;
     assert!(
         b2bua.active_calls() as u64 <= nok,
         "SUT holds {} live calls vs {nok} failed — a RECOVERED call leaked",
@@ -2433,10 +2435,23 @@ async fn loadgen_loss_soak_all_bodies_recover() {
     // What P4 + the actor executor GUARANTEE under loss (STRICT): `rfc_audit_fail
     // == 0` (a datagram RECOVERED by re-emission must never look like a false
     // `cseqInDialogOrder`/order charge — the anomaly the actor redesign
-    // eliminated) and `panic == 0`. The `timeout` class is the recovery TAIL:
-    // host CPU jitter overrunning the recv window PLUS the same SUT §13.2.2.4
-    // re-ACK gap in its softer (timeout, not leak) form (refer-family tops it).
-    // So we bound recovery (≥90%/body) rather than demand 0, and log the rate.
+    // eliminated) and `panic == 0`. The `timeout` class is now ONLY host CPU
+    // jitter overrunning the recv window — every SUT-side reliability gap the loss
+    // soak used to bleed is fixed at the source:
+    //  - in-dialog re-INVITE 2xx (§13.3.1.4): the a-leg 2xx retransmit watchdog
+    //    (`unacked-reinvite-2xx-retransmit`) now covers re-INVITEs, not just the
+    //    initial answer — a lost a-leg re-INVITE ACK is recovered, not stranded;
+    //  - fire-and-forget in-dialog NOTIFY: a still-active non-INVITE CLIENT txn is
+    //    now DETACHED (not deleted) on call teardown, so its Timer-E retransmit
+    //    completes and a dropped progress NOTIFY is redelivered (no §12.2.1.1
+    //    CSeq gap) — see `crates/sip-txn` `do_cancel_txns_for_call`;
+    //  - the caller actor ACKs every in-dialog re-INVITE 2xx idempotently (not via
+    //    a one-shot flag), and discharges a pending in-dialog ack on dialog
+    //    teardown (RFC §15 subsumes a re-INVITE ACK / PRACK 200 the caller BYEs
+    //    before its ~500 ms retransmit lands).
+    // So every body recovers ~100%; we hold a tight ≥97%/body floor (a few % of
+    // host-jitter slack on a CPU-capped WSL box) and log the rate — a body dipping
+    // below is a genuine regression, no longer an "accepted §13.2.2.4 tail".
     eprintln!("loadgen loss soak — per-body recovery @ 1% loss + retransmit:");
     let mut worst = 100.0f64;
     for &id in GROUP_A.iter().chain(GROUP_B.iter()) {
@@ -2464,8 +2479,8 @@ async fn loadgen_loss_soak_all_bodies_recover() {
         );
         assert_eq!(panic, 0, "body {id}: {panic} panic:\n{}", reporter.render_prometheus());
         assert!(
-            pct >= 90.0,
-            "body {id}: only {pct:.1}% loss recovery ({timeout} timeouts / {done}) — below the 90% floor, investigate (not the accepted jitter/§13.2.2.4 tail):\n{}",
+            pct >= 97.0,
+            "body {id}: only {pct:.1}% loss recovery ({timeout} timeouts / {done}) — below the 97% floor. Every SUT reliability gap is fixed at the source, so this is a genuine regression (a re-INVITE 2xx / NOTIFY / in-dialog ack no longer recovering), NOT host jitter:\n{}",
             reporter.render_prometheus()
         );
     }

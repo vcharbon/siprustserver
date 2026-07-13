@@ -223,7 +223,9 @@ fn ack_timeout(ctx: &RuleContext) -> i64 {
 /// bounds the whole window. Seconds for the `ScheduleTimer` delay_sec contract is
 /// integer, so the cadence is kept as a whole second (1 s) to stay on the
 /// existing seconds-granularity timer plumbing without a finer-grained API.
-const ACK_RETRANSMIT_SEC: i64 = 1;
+/// `pub(crate)` so the re-INVITE watchdog's first arm (in `actions.rs`
+/// `relay_response`) shares the one cadence constant with the re-arm rule below.
+pub(crate) const ACK_RETRANSMIT_SEC: i64 = 1;
 
 /// Shared body of the reaper-verdict rules (ADR-0020 X1): force every
 /// still-unresolved leg terminal (mirroring `is_fully_resolved`, like
@@ -991,6 +993,29 @@ fn core_rules() -> Vec<RuleDefinition> {
             if ctx.direction == Direction::FromA {
                 actions.push(RuleAction::CancelTimer { id: format!("{:?}", TimerType::AckRetransmit) });
                 actions.push(RuleAction::CancelTimer { id: format!("{:?}", TimerType::AckTimeout) });
+                // RFC 3261 §13.3.1.4 (in-dialog): if this a-leg ACK is for the
+                // pending re-INVITE 2xx (its CSeq matches the cached snapshot),
+                // quiesce the re-INVITE un-ACKed-2xx watchdog and discharge the
+                // obligation. CSeq-matched so a retransmitted *initial* ACK
+                // (a lower CSeq) cannot prematurely cancel it; at most one
+                // re-INVITE is ever pending (`reinvite-glare` 491s a second).
+                let acks_pending_reinvite = ctx
+                    .request()
+                    .map(|r| r.cseq.seq as i64)
+                    .and_then(|c| {
+                        ctx.call
+                            .a_leg()
+                            .dialogs
+                            .first()
+                            .and_then(|d| d.ext.pending_reinvite_2xx.as_ref())
+                            .map(|p| p.cseq == c)
+                    })
+                    .unwrap_or(false);
+                if acks_pending_reinvite {
+                    actions.push(RuleAction::CancelTimer { id: format!("{:?}", TimerType::ReinviteAckRetransmit) });
+                    actions.push(RuleAction::CancelTimer { id: format!("{:?}", TimerType::ReinviteAckTimeout) });
+                    actions.push(RuleAction::ClearPendingReinvite2xx);
+                }
             }
             ok(actions)
         }),
@@ -1280,6 +1305,32 @@ fn core_rules() -> Vec<RuleDefinition> {
                 RuleAction::CancelTimer { id: format!("{:?}", TimerType::AckRetransmit) },
                 RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: ctx.call.a_leg().leg_id.clone(), status_code: None, reason: Some("ack_timeout".into()) },
                 RuleAction::BeginTermination { reason: Some("ack-timeout".into()) },
+            ])
+        }),
+        // ── un-ACKed re-INVITE 2xx watchdog (RFC 3261 §13.3.1.4, in-dialog) ──
+        // The re-INVITE twin of `unacked-2xx-retransmit`: the originator's ACK
+        // for the relayed re-INVITE 2xx has not yet arrived, so retransmit the
+        // cached a-leg re-INVITE 2xx (raw, byte-faithful) and re-arm the cadence.
+        // Cancelled by `relay-ack` on the CSeq-matched a-leg ACK; bounded by
+        // `unacked-reinvite-2xx-give-up`. Only fires while Active — a `Terminating`
+        // call's cadence stops here and the terminal CancelAll reclaims it.
+        rule("unacked-reinvite-2xx-retransmit", &[], Match::timer().timer_type(TimerType::ReinviteAckRetransmit).call_state(CallModelState::Active), |_ctx| {
+            ok(vec![
+                RuleAction::RetransmitALegReinvite2xx,
+                RuleAction::ScheduleTimer { timer_type: TimerType::ReinviteAckRetransmit, delay_sec: ACK_RETRANSMIT_SEC, leg_id: None },
+            ])
+        }),
+        // The re-INVITE 2xx give-up deadline (64·T1) elapsed with no a-leg ACK: a
+        // permanently-lost re-INVITE ACK must never retransmit forever. Cancel the
+        // cadence and tear the call down (BeginTermination BYEs both confirmed
+        // legs; the → terminated invariant settles the obligations). The re-INVITE
+        // twin of `unacked-2xx-give-up`.
+        rule("unacked-reinvite-2xx-give-up", &[], Match::timer().timer_type(TimerType::ReinviteAckTimeout).call_state(CallModelState::Active), |ctx| {
+            ok(vec![
+                RuleAction::CancelTimer { id: format!("{:?}", TimerType::ReinviteAckRetransmit) },
+                RuleAction::ClearPendingReinvite2xx,
+                RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: ctx.call.a_leg().leg_id.clone(), status_code: None, reason: Some("reinvite_ack_timeout".into()) },
+                RuleAction::BeginTermination { reason: Some("reinvite-ack-timeout".into()) },
             ])
         }),
         // ── call reaper verdicts (ADR-0020 X1/X6) ───────────────────────────

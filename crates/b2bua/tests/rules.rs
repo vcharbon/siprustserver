@@ -503,6 +503,7 @@ fn b_leg_pending() -> Leg {
             ack_branch: None,
             pending_invite_txn: None,
             cached_sdp: None,
+            pending_reinvite_2xx: None,
         },
     };
     Leg {
@@ -846,6 +847,7 @@ mod media_primitives {
                 ack_branch: None,
                 pending_invite_txn: None,
                 cached_sdp: None,
+                pending_reinvite_2xx: None,
             },
         }];
     }
@@ -1166,6 +1168,7 @@ mod answer_a_leg_new_dialog {
                 ack_branch: None,
                 pending_invite_txn: None,
                 cached_sdp: None,
+                pending_reinvite_2xx: None,
             },
         }];
         call

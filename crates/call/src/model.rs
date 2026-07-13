@@ -163,6 +163,33 @@ pub struct StackDialog {
     pub route_set: Vec<String>,
 }
 
+/// The a-leg re-INVITE **2xx** the B2BUA relayed to the originator and is still
+/// awaiting the originator's ACK for (RFC 3261 §13.3.1.4, in-dialog). Cached at
+/// relay time on the a-leg dialog so the re-INVITE un-ACKed-2xx watchdog can
+/// re-send a **byte-faithful** copy raw until the ACK arrives — the re-INVITE
+/// analogue of the initial-INVITE retransmit, which rebuilds from the never-
+/// mutated `a_leg_invite` + `cached_sdp`. A re-INVITE 2xx *cannot* be rebuilt
+/// from the initial snapshot (wrong CSeq, different answer SDP), so the exact
+/// serialized outbound bytes are stored instead. Cleared when the a-leg ACK
+/// (matching [`cseq`](Self::cseq)) arrives; `None` when no a-leg re-INVITE
+/// awaits its ACK. Replicated like `cached_sdp`, so a takeover node keeps the
+/// retransmit obligation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingReinvite2xx {
+    /// The exact serialized 2xx response emitted to the a-leg (byte-faithful
+    /// retransmit — same To-tag, SDP, Contact, Allow/Supported, CSeq).
+    #[serde(with = "serde_bytes")]
+    pub response: Vec<u8>,
+    /// Wire destination of the retransmit (the a-leg's address — the 2xx's
+    /// top-Via sent-by, computed once at relay time).
+    pub dest_host: String,
+    pub dest_port: u16,
+    /// CSeq the originator's ACK will carry (the a-leg re-INVITE's CSeq). The
+    /// watchdog is quiesced only by an ACK echoing this number, so a
+    /// retransmitted *initial* ACK cannot prematurely cancel it.
+    pub cseq: i64,
+}
+
 /// B2BUA-only dialog extensions that never surface to the SIP stack.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct B2buaDialogExt {
@@ -177,6 +204,12 @@ pub struct B2buaDialogExt {
     /// SDP cached from a reliable 18x / UPDATE under the `fake-prack` strategy.
     #[serde(with = "serde_bytes")]
     pub cached_sdp: Option<Vec<u8>>,
+    /// RFC 3261 §13.3.1.4 (in-dialog) — the a-leg re-INVITE 2xx awaiting the
+    /// originator's ACK, on the a-leg dialog only. `None` normally; see
+    /// [`PendingReinvite2xx`]. Trailing field with `#[serde(default)]` so it is
+    /// decode-tolerant of a body encoded before it existed.
+    #[serde(default)]
+    pub pending_reinvite_2xx: Option<PendingReinvite2xx>,
 }
 
 /// Composite Dialog = stack §12 state + B2BUA-only extensions.
@@ -336,6 +369,20 @@ pub enum TimerType {
     /// fix). Distinct from [`AckRetransmit`](Self::AckRetransmit), the on-wire
     /// re-send cadence.
     AckTimeout,
+    /// RFC 3261 §13.3.1.4 (in-dialog) — periodic retransmit of the a-leg
+    /// **re-INVITE** 2xx while the originator's ACK is missing (re-armed each
+    /// fire; cancelled on the a-leg ACK matching the re-INVITE CSeq). The
+    /// re-INVITE twin of [`AckRetransmit`](Self::AckRetransmit); distinct so it
+    /// never collides with the initial-INVITE watchdog and re-sends the cached
+    /// re-INVITE 2xx (not the initial 2xx). Paired with
+    /// [`ReinviteAckTimeout`](Self::ReinviteAckTimeout).
+    ReinviteAckRetransmit,
+    /// RFC 3261 §13.3.1.4 (in-dialog) — the a-leg re-INVITE 2xx-without-ACK
+    /// **give-up** deadline (64·T1). Single-shot, armed when the re-INVITE 2xx
+    /// is relayed to the originator, cancelled on the a-leg ACK; on expiry the
+    /// B2BUA tears the call down (a permanently-lost re-INVITE ACK must never
+    /// retransmit forever). The re-INVITE twin of [`AckTimeout`](Self::AckTimeout).
+    ReinviteAckTimeout,
     /// Safety-net timer scheduled when entering "terminating" state.
     TerminatingTimeout,
     /// REFER subscription expiry (RFC 3515).
@@ -401,6 +448,8 @@ impl std::fmt::Debug for TimerType {
             TimerType::KeepaliveTimeout => f.write_str("KeepaliveTimeout"),
             TimerType::AckRetransmit => f.write_str("AckRetransmit"),
             TimerType::AckTimeout => f.write_str("AckTimeout"),
+            TimerType::ReinviteAckRetransmit => f.write_str("ReinviteAckRetransmit"),
+            TimerType::ReinviteAckTimeout => f.write_str("ReinviteAckTimeout"),
             TimerType::TerminatingTimeout => f.write_str("TerminatingTimeout"),
             TimerType::ReferSubscriptionExpiry => f.write_str("ReferSubscriptionExpiry"),
             TimerType::ReferReinviteAnswer => f.write_str("ReferReinviteAnswer"),

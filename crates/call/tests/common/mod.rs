@@ -72,6 +72,7 @@ fn dialog(
             ack_branch: Some(format!("z9hG4bK-ack-{cseq:x}")),
             pending_invite_txn: None,
             cached_sdp: cached_sdp.then(|| SDP_BODY.to_vec()),
+            pending_reinvite_2xx: None,
         },
     }
 }
@@ -458,6 +459,7 @@ fn arb_dialog() -> impl Strategy<Value = Dialog> {
                     ack_branch,
                     pending_invite_txn,
                     cached_sdp,
+                    pending_reinvite_2xx: None,
                 }
             },
         );
