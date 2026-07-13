@@ -47,7 +47,7 @@ use sip_message::generators::InDialogMethod;
 use sip_message::SipResponse;
 
 use crate::agent::{top_via_branch, InviteResponseFate};
-use crate::realcall::{CallCtx, CallScope};
+use crate::realcall::{CallCtx, CallScope, ChallengeResponder};
 use crate::{Agent, ClientInvite, Dialog, Inbound, ServerTxn, StepError};
 
 /// The realign sub-flow name every leg's re-INVITE confirm progress is tracked
@@ -307,6 +307,19 @@ pub struct ActorState<'c> {
     /// At most one per leg (a leg rejects its initial INVITE once, or 487s its
     /// one CANCELled ring).
     pending_reject_ack: Option<PendingRejectAck>,
+    /// The **deferred-auth adapter** (RFC 3261 §22.2) wired onto this caller's
+    /// establishing INVITE. `Some` → a `401`/`407` to that INVITE is ACKed, the
+    /// responder is asked for a credential, and the INVITE is resent ONCE
+    /// (bumped CSeq, fresh branch — see [`ClientInvite::ack_and_resend_with_auth`]);
+    /// `None` (the default) → a challenge classifies as `status_401/407`
+    /// unchanged. Reaches the caller from [`CallEnv::challenge_responder`]
+    /// (`crates/loadgen/src/driver.rs` `run_one`).
+    challenge_responder: Option<Arc<dyn ChallengeResponder>>,
+    /// Authenticated INVITE resends still permitted (RFC 3261 §22.2) — `1` when a
+    /// [`challenge_responder`](Self::challenge_responder) is wired, else `0`.
+    /// Capped so a challenge to the *resent* INVITE surfaces as a plain
+    /// `status_401/407` deviation, never an unbounded loop.
+    auth_retries_left: u8,
 }
 
 impl<'c> ActorState<'c> {
@@ -318,6 +331,7 @@ impl<'c> ActorState<'c> {
         scope: Arc<CallScope>,
         ctx: &'c CallCtx,
         step_timeout: Duration,
+        challenge_responder: Option<Arc<dyn ChallengeResponder>>,
     ) -> Self {
         Self {
             role: spec.role,
@@ -342,6 +356,8 @@ impl<'c> ActorState<'c> {
             saw_options_200: false,
             expected_provisional: 180,
             pending_reject_ack: None,
+            auth_retries_left: if challenge_responder.is_some() { 1 } else { 0 },
+            challenge_responder,
         }
     }
 
@@ -748,6 +764,34 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
                 st.obs.record(Observation::LegConfirmed { leg: st.role }, now);
             }
             InviteResponseFate::Failed { status } => {
+                // RFC 3261 §22.2 authenticated retry: a `401`/`407` to this
+                // caller's establishing INVITE, with a configured responder and a
+                // retry still in budget. `absorb_response` already ACKed the
+                // challenge (§17.1.1.3) above, so `ack_and_resend_with_auth` goes
+                // straight to asking the responder for a credential and resending
+                // ONCE (bumped CSeq, fresh branch — a new client transaction). On
+                // a resend the leg stays Early: its next response arrives through
+                // the reactor and re-enters this path (a second challenge now has
+                // `auth_retries_left == 0`, so it classifies as a plain
+                // `status_401/407` deviation — never an unbounded loop). This
+                // reproduces the deleted linear `admitted_uas` classification.
+                if matches!(status, 401 | 407) && st.auth_retries_left > 0 {
+                    if let Some(responder) = st.challenge_responder.clone() {
+                        if inv.ack_and_resend_with_auth(&resp, responder.as_ref()).await? {
+                            st.auth_retries_left -= 1;
+                            // The resent INVITE is a fresh pending transaction —
+                            // re-point the scope's early CANCEL handle at it (its
+                            // branch/CSeq changed) before parking it back, then
+                            // continue reacting.
+                            st.scope.set_early(inv.cancel_handle());
+                            st.dialogs.pending_invite = Some(inv);
+                            return Ok(());
+                        }
+                        // Responder DECLINED — fall through and surface the
+                        // challenge as a plain deviation (status_401/407), exactly
+                        // as with no responder.
+                    }
+                }
                 st.obs.record(
                     Observation::LegFinal { leg: st.role, status, reason: resp.reason.clone() },
                     now,
