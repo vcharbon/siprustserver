@@ -46,7 +46,7 @@ use super::state::{Observation, ObservedState, SubflowState};
 use sip_message::generators::InDialogMethod;
 use sip_message::SipResponse;
 
-use crate::agent::InviteResponseFate;
+use crate::agent::{top_via_branch, InviteResponseFate};
 use crate::realcall::{CallCtx, CallScope};
 use crate::{Agent, ClientInvite, Dialog, Inbound, ServerTxn, StepError};
 
@@ -207,6 +207,21 @@ struct TimedAnswer {
     uas: ServerTxn,
 }
 
+/// A non-2xx final we sent to an initial INVITE, awaiting its §17.1.1.3
+/// hop-ACK. The receive core claims that ACK below `recv_any` (it never
+/// surfaces to the reactor — 036 ask B), so the actor watches the transaction
+/// layer's fulfilment as its own `select!` arm and closes the `reject-final`
+/// ledger obligation there. This is what makes the UA outlive the call: a
+/// REJECTED leg abandoned by a reroute keeps its actor reactive (and the
+/// settle barrier holds the verdict + recording window, Timer-H-bounded) until
+/// a lost hop-ACK is recovered by the Timer-G final retransmit + the SUT's
+/// §17.1.1.2 re-ACK.
+struct PendingRejectAck {
+    key: ObligationKey,
+    call_id: String,
+    branch: String,
+}
+
 /// The confirmed dialog(s) + pending INVITE transaction an endpoint owns.
 /// Deliberately minimal (one caller INVITE, one confirmed dialog — enough for
 /// every current body incl. the realign flows, which ride the confirmed dialog
@@ -287,6 +302,11 @@ pub struct ActorState<'c> {
     /// on the establishing INVITE surfaces (linear `establish`/`establish_100rel`
     /// parity).
     expected_provisional: u16,
+    /// A sent non-2xx initial-INVITE final whose hop-ACK is outstanding — its
+    /// own `select!` arm closes the `reject-final` obligation on fulfilment.
+    /// At most one per leg (a leg rejects its initial INVITE once, or 487s its
+    /// one CANCELled ring).
+    pending_reject_ack: Option<PendingRejectAck>,
 }
 
 impl<'c> ActorState<'c> {
@@ -321,6 +341,7 @@ impl<'c> ActorState<'c> {
             pending_reinvite: false,
             saw_options_200: false,
             expected_provisional: 180,
+            pending_reject_ack: None,
         }
     }
 
@@ -365,8 +386,23 @@ pub async fn run_actor(mut st: ActorState<'_>) -> Result<(), StepError> {
             _ = wait_timed_answer(&st.pending_answer), if st.pending_answer.is_some() => {
                 fire_timed_answer(&mut st).await?;
             }
+            // Our non-2xx final's hop-ACK was sighted (the receive core claims
+            // it below `recv_any`, so it never surfaces as an inbound) — close
+            // the reject-final obligation. This arm is also the wake that lets
+            // the exit check below run once the ledger closes.
+            _ = wait_reject_ack(&agent, &st.pending_reject_ack), if st.pending_reject_ack.is_some() => {
+                if let Some(p) = st.pending_reject_ack.take() {
+                    st.obs.record(Observation::ResponseObserved { key: p.key }, Instant::now());
+                }
+            }
         }
-        if obs.all_terminated() && st.goals.is_exhausted() {
+        // `ledger_closed` keeps a leg with an outstanding acknowledgement (its
+        // own reject-final, or any leg's open obligation) REACTIVE through the
+        // settle window — the UA outlives the call, so a re-emitted final /
+        // recovered ACK is consumed, closed, and recorded rather than orphaned.
+        // Bounded: the controller's settle ceiling (64·T1) wins the outer
+        // `select!` and drops still-parked actors either way.
+        if obs.all_terminated() && st.goals.is_exhausted() && obs.ledger_closed() {
             return Ok(());
         }
     }
@@ -379,6 +415,31 @@ async fn wait_timed_answer(pending: &Option<TimedAnswer>) {
         Some(ta) => tokio::time::sleep_until(ta.at).await,
         None => std::future::pending().await,
     }
+}
+
+/// Park until the pending reject-final's hop-ACK is sighted (or forever if
+/// none) — the fulfilment arm for the obligation [`arm_reject_final`] opened.
+async fn wait_reject_ack(agent: &Agent, pending: &Option<PendingRejectAck>) {
+    match pending {
+        Some(p) => agent.hop_ack_fulfilled(&p.call_id, &p.branch).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Open the `reject-final awaiting hop-ACK` ledger obligation for a non-2xx
+/// final just sent on `uas` (§17.2.1: a real UAS keeps its server txn — and
+/// this harness its recording window — until the final is ACKed, even when the
+/// call has moved on). Skipped for a branch-less request, exactly like the
+/// agent's own ACK-obligation table (nothing to match the hop-ACK by).
+fn arm_reject_final(st: &mut ActorState<'_>, uas: &ServerTxn, code: u16) {
+    let Some(branch) = top_via_branch(&uas.request().headers) else { return };
+    let call_id = uas.request().call_id.clone();
+    let key = ObligationKey::new(st.role, ObligationKind::RejectFinal, uas.request().cseq.seq);
+    st.obs.record(
+        Observation::RequestSent { key, detail: format!("{code} final awaiting hop-ACK") },
+        Instant::now(),
+    );
+    st.pending_reject_ack = Some(PendingRejectAck { key, call_id, branch });
 }
 
 /// Answer a UAS transaction `200 OK` with the given SDP body — the single
@@ -457,10 +518,29 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
             // just completes that transaction on the wire — absorb it without
             // confirming the leg or stamping the `ack` anchor (that anchor is the
             // winning leg's; the rejected b-leg's reject-ACK must not claim it).
+            // It DOES close whichever acknowledgement obligation it satisfies
+            // (a reject-final's hop-ACK that surfaced unclaimed, or a recovered
+            // answer-ACK landing after the leg was BYE-terminated) — closing a
+            // never-opened key is a harmless no-op.
             let already_terminated = st
                 .obs
                 .with_snapshot(|s| s.leg(st.role).phase() == super::state::LegPhase::Terminated);
             if already_terminated {
+                st.obs.record(
+                    Observation::ResponseObserved {
+                        key: ObligationKey::new(st.role, ObligationKind::RejectFinal, cseq),
+                    },
+                    now,
+                );
+                st.obs.record(
+                    Observation::ResponseObserved {
+                        key: ObligationKey::new(st.role, ObligationKind::ReInvite, cseq),
+                    },
+                    now,
+                );
+                if st.pending_reject_ack.as_ref().is_some_and(|p| p.key.cseq == cseq) {
+                    st.pending_reject_ack = None;
+                }
                 return Ok(());
             }
             st.obs.record(
@@ -501,6 +581,7 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
             if let Some(ta) = st.pending_answer.take() {
                 let mut inv = ta.uas;
                 inv.respond(487, "Request Terminated").try_send().await?;
+                arm_reject_final(st, &inv, 487);
             }
             st.obs.record(Observation::LegTerminated { leg: st.role }, now);
             st.scope.mark_terminated();
@@ -585,6 +666,7 @@ async fn apply_disposition(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Resul
         }
         Disposition::Reject(code) => {
             uas.respond(code, reject_reason(code)).try_send().await?;
+            arm_reject_final(st, &uas, code);
             st.obs.record(Observation::LegTerminated { leg: st.role }, now);
             st.scope.mark_terminated();
         }

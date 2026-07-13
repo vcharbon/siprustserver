@@ -1041,16 +1041,35 @@ impl Owner {
         // here would drop its retransmit-absorption window (RFC 3261 §17.2.1/§17.2.2),
         // so a retransmitted request after teardown builds a fresh txn and 481s
         // upstream instead of replaying the cached final.
+        //
+        // The SAME retransmit-absorption argument exempts a client INVITE txn in
+        // **Completed** (a non-2xx final, ACKed, holding Timer D — §17.1.1.2): its
+        // Timer B/F are already cancelled, and deleting it would drop the re-ACK
+        // window, so a rejected leg abandoned by a reroute (or a call torn down
+        // before the reject's hop-ACK recovered) strands the UAS retransmitting
+        // its final to Timer H, never re-ACKed. Such a txn is DETACHED instead:
+        // its call attribution is dropped (so `has_txns_for` / `ActiveTxnCount` /
+        // the ADR-0014 CallQuiesced timing are exactly as if it were cancelled)
+        // while the txn itself lives on to re-ACK + absorb until its own Timer D
+        // cleanup deletes it.
         let branches: Vec<String> = match self.txn_index.get(call_ref) {
             Some(set) => set.iter().cloned().collect(),
             None => return,
         };
         for branch in branches {
-            let is_client = self
+            let (is_client, is_completed) = self
                 .txns
                 .get(&branch)
-                .is_some_and(|t| t.role == TxnRole::Client);
-            if is_client && self.delete_txn(&branch) {
+                .map_or((false, false), |t| {
+                    (t.role == TxnRole::Client, t.state == TxnState::Completed)
+                });
+            if !is_client {
+                continue;
+            }
+            if is_completed {
+                let cr = self.txns.get_mut(&branch).and_then(|t| t.call_ref.take());
+                self.untrack_call_ref(&cr, &branch);
+            } else if self.delete_txn(&branch) {
                 self.metrics
                     .txn_cancelled_on_call_evict
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
