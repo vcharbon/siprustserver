@@ -491,6 +491,53 @@ fn core_rules() -> Vec<RuleDefinition> {
             }),
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
         ),
+        // RFC 3261 §13.2.2.4 — re-ACK a **retransmitted 2xx** whose first ACK was
+        // lost. The ACK for a 2xx is a UAC-core responsibility and the answerer
+        // re-sends its 2xx end-to-end until ACKed (up to its Timer H ≈ 32 s), so
+        // the B2BUA — as the ACKing UAC on its own realign/reroute re-INVITE, or
+        // when it ACKs a callee's 2xx — MUST re-emit the ACK on the SAME client
+        // transaction (reusing the retained `ack_branch` + the INVITE CSeq) for
+        // every retransmit. Without this, a single lost ACK on a realign/reroute
+        // (or initial) leg strands the answerer's INVITE server txn: the confirmed
+        // call is never fully reaped (leak) or times out late — a genuine SUT bug
+        // under real-network packet loss. This is the b-leg / realign twin of the
+        // a-leg `unacked-2xx-retransmit` (which retransmits the B2BUA's *own* 2xx
+        // to a silent caller). Delayed-offer answer bodies are not replayed on the
+        // re-ACK (the realign/reroute leak paths are all offer-in-INVITE, so their
+        // ACKs are bodyless); the branch + CSeq are what quiesce the answerer.
+        //
+        // Fires ONLY on a genuine retransmit that nothing else claims: the source
+        // dialog has a retained `ack_branch` (so its current INVITE's 2xx was
+        // already ACKed — the field is reset on every new INVITE txn), the
+        // response echoes that INVITE's CSeq, and no pending-relay snapshot is open
+        // (a first-time re-INVITE final is claimed by `relay-reinvite-response` /
+        // the realign-200 rules, whose `ack_branch` is still `None`). Absorbs
+        // (AckLeg only — no relay to the peer, which already saw the first final).
+        rule(
+            "re-ack-retransmitted-2xx",
+            &[],
+            Match::response()
+                .method("INVITE")
+                .status_class(2)
+                .leg_states(&[LegState::Confirmed])
+                .filter(|ctx| {
+                    let Some(d) = ctx.source_dialog() else { return false };
+                    if d.ext.ack_branch.is_none() {
+                        return false;
+                    }
+                    let Some(resp) = ctx.response() else { return false };
+                    let cseq = resp.cseq.seq as i64;
+                    super::relay::acked_invite_cseq(d) == Some(resp.cseq.seq)
+                        && call::helpers::find_pending_request(d, cseq).is_none()
+                }),
+            |ctx| {
+                ok(vec![RuleAction::AckLeg {
+                    leg_id: ctx.source_leg_id.to_string(),
+                    body: Vec::new(),
+                    content_type: None,
+                }])
+            },
+        ),
         // ── dialog ──────────────────────────────────────────────────────────
         rule(
             "relay-provisional",

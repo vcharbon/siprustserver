@@ -97,17 +97,17 @@ impl<'a> ActionExecutor<'a> {
                 } else {
                     call.b_legs.iter().find(|l| &l.leg_id == leg_id)
                 };
-                if let Some(leg) = leg {
-                    // A body-bearing ACK carries a delayed-offer answer (RFC 3261
-                    // §13.2.2.4); default its type to `application/sdp` when none is
-                    // given. An empty ACK stays a bare ACK — no body, no Content-Type
-                    // (today's behaviour, unchanged).
+                // A body-bearing ACK carries a delayed-offer answer (RFC 3261
+                // §13.2.2.4); default its type to `application/sdp` when none is
+                // given. An empty ACK stays a bare ACK — no body, no Content-Type
+                // (today's behaviour, unchanged).
+                let ack = leg.and_then(|leg| {
                     let ct = if body.is_empty() {
                         None
                     } else {
                         content_type.clone().or_else(|| Some("application/sdp".to_string()))
                     };
-                    if let Some(e) = relay::ack_b_leg(
+                    relay::ack_b_leg(
                         &call.call_ref,
                         leg,
                         call.emergency == Some(true),
@@ -115,9 +115,13 @@ impl<'a> ActionExecutor<'a> {
                         self.id_gen,
                         body.clone(),
                         ct,
-                    ) {
-                        fx.outbound.push(e);
-                    }
+                    )
+                });
+                if let Some((e, branch)) = ack {
+                    fx.outbound.push(e);
+                    // Retain the ACK branch so a retransmitted 2xx is re-ACKed on the
+                    // SAME transaction (§13.2.2.4 — `re-ack-retransmitted-2xx`).
+                    *call = call::helpers::retain_ack_branch(call.clone(), leg_id, &branch);
                 }
             }
             RuleAction::ConfirmDialog { leg_id } => {
@@ -713,13 +717,16 @@ impl<'a> ActionExecutor<'a> {
             relay::apply_b_leg_egress(self.config, leg_id, &gen_dialog.route_set, res.request, dest);
 
         // Cache the re-INVITE's client-transaction handle so the ACK-for-2xx
-        // echoes its CSeq (§13.2.2.4).
+        // echoes its CSeq (§13.2.2.4). Reset the retained ACK branch: this new
+        // INVITE transaction's 2xx will mint its own (the old branch belonged to
+        // the prior CSeq).
         *call = call::helpers::update_dialog(call.clone(), leg_id, &t_id, |d| {
             d.ext.pending_invite_txn = Some(call::InviteTxnHandle {
                 branch: branch.clone(),
                 original_invite: sip_message::serialize(&SipMessage::Request(out_req.clone())),
                 destination: call::HostPort { host: dest.0.clone(), port: dest.1 },
             });
+            d.ext.ack_branch = None;
         });
 
         fx.outbound.push(OutboundSipEffect {
@@ -777,9 +784,9 @@ impl<'a> ActionExecutor<'a> {
             } else {
                 call.b_legs.iter().find(|l| l.leg_id == target_leg)
             };
-            if let Some(leg) = leg {
+            let ack = leg.and_then(|leg| {
                 let content_type = get_header(&req.headers, "content-type").map(str::to_string);
-                if let Some(e) = relay::ack_b_leg(
+                relay::ack_b_leg(
                     &call.call_ref,
                     leg,
                     call.emergency == Some(true),
@@ -787,9 +794,13 @@ impl<'a> ActionExecutor<'a> {
                     self.id_gen,
                     req.body.clone(),
                     content_type,
-                ) {
-                    fx.outbound.push(e);
-                }
+                )
+            });
+            if let Some((e, branch)) = ack {
+                fx.outbound.push(e);
+                // Retain the ACK branch so a retransmitted 2xx is re-ACKed on the
+                // SAME transaction (§13.2.2.4 — `re-ack-retransmitted-2xx`).
+                *call = call::helpers::retain_ack_branch(call.clone(), target_leg, &branch);
             }
             return;
         }
@@ -881,6 +892,9 @@ impl<'a> ActionExecutor<'a> {
                     original_invite: sip_message::serialize(&SipMessage::Request(out_req.clone())),
                     destination: call::HostPort { host: dest.0.clone(), port: dest.1 },
                 });
+                // New INVITE transaction → drop the prior ACK branch (§13.2.2.4);
+                // this re-INVITE's 2xx ACK mints its own, retained on first ACK.
+                d.ext.ack_branch = None;
             });
         }
 
