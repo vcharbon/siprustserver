@@ -1143,11 +1143,6 @@ impl Agent {
     }
     /// A fresh top `Via` header value (new branch) — a new client transaction
     /// (RFC 3261 §8.1.1.7) for a resend (e.g. the §22.2 authenticated INVITE).
-    // Part of the deferred-auth primitive chain (`ack_and_resend_with_auth`),
-    // exercised only by tests until the actor load path wires a challenge
-    // responder — dead in a non-test build since P4 removed the linear
-    // `admitted_uas` (its former sole production caller).
-    #[cfg_attr(not(test), allow(dead_code))]
     fn via_header(&self) -> String {
         format!(
             "SIP/2.0/UDP {}:{};branch={}",
@@ -2164,10 +2159,12 @@ impl ClientInvite {
     /// receive on this transaction, a non-2xx final (a challenge, a shed 503,
     /// any reject) is auto-ACKed on arrival (§17.1.1.3) — the auth retry then
     /// resends under a FRESH branch, a new transaction.
-    // Deferred-auth primitive: only the auth retry / its tests read a raw
-    // challenge response — dead in a non-test build since P4 removed the linear
-    // `admitted_uas` (see `via_header`).
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Test-only scaffolding for the `ack_and_resend_with_auth` end-to-end unit
+    // test: it reads a raw 401/407 with a BLOCKING receive. The production actor
+    // caller never re-receives here — its reactor already surfaced the response
+    // via `recv_any`, which it folds in with [`absorb_response`](Self::absorb_response)
+    // (that path drives the live §22.2 retry). Hence `#[cfg(test)]`-only.
+    #[cfg(test)]
     pub(crate) async fn try_recv_response(&mut self) -> Result<SipResponse, StepError> {
         loop {
             match self.agent.try_recv().await? {
@@ -2269,10 +2266,6 @@ impl ClientInvite {
     /// resend — the caller surfaces the original challenge as `status_401/407`),
     /// or `Err` on a transport failure. The default (no responder) never reaches
     /// here, so today's classification is unchanged.
-    // Deferred-auth primitive (the RFC 3261 §22.2 retry): exercised by tests
-    // until the actor load path wires a challenge responder — dead in a non-test
-    // build since P4 removed the linear `admitted_uas` (see `via_header`).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn ack_and_resend_with_auth(
         &mut self,
         challenge: &SipResponse,

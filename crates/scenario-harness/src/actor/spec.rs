@@ -131,8 +131,17 @@ pub async fn run_actor_scenario(
         .map(|a| a.role)
         .unwrap_or("alice");
     let obs = ObservedState::new();
-    let verdict =
-        run_call_with(CallPlan { actors, plan, settle }, obs.clone(), ctx, STEP_TIMEOUT).await;
+    // The deferred-auth adapter (RFC 3261 §22.2) reaches the caller's
+    // establishing INVITE from the call env — `None` on every current surface
+    // (no CLI flag mints one yet), so a challenge classifies unchanged.
+    let verdict = run_call_with(
+        CallPlan { actors, plan, settle },
+        obs.clone(),
+        ctx,
+        STEP_TIMEOUT,
+        env.challenge_responder.clone(),
+    )
+    .await;
     // A settle breach's open-obligation names go to the sample DETAIL channel
     // (bounded leg/kind/cseq strings from `describe_open`) — the case key stays
     // the fixed `settle@<phase>` (contract table §2).
