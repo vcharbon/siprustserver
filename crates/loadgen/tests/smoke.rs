@@ -28,7 +28,31 @@ use sip_clock::Clock;
 use sip_net::{RealSignalingNetwork, SignalingNetwork};
 use tokio::net::UdpSocket;
 
-const RECV: Duration = Duration::from_secs(2);
+/// Default per-recv timeout for the happy-path (no-loss) smoke tests. Deliberately
+/// generous: libtest starts every real-clock loopback test at once, and that CPU
+/// oversubscription can delay the recv task's *scheduling* — not the datagram —
+/// well past a tight window, flipping a healthy call into the `timeout` class and
+/// flaking the strict every-call-OK asserts. A passing call returns the instant its
+/// datagram is observed, so a wide window costs ZERO wall-clock on the happy path;
+/// it is pure contention headroom. Kept large on purpose — flaky tests waste far
+/// more time than a slow timeout tail on the rare genuine failure.
+const RECV: Duration = Duration::from_secs(20);
+
+/// Per-recv timeout for the LOSSY tests: must clear the full retransmit ladder
+/// (0.5+1+2+4 s) PLUS stretched two-hop latency AND recv-task starvation under
+/// full-suite contention. A recovered call lands late-but-OK inside this window;
+/// only a genuinely unrecoverable datagram waits it out. Wide = headroom, not
+/// baseline cost (see [`RECV`]).
+const RECV_LOSSY: Duration = Duration::from_secs(45);
+
+/// Teardown-reap settle ceiling for the LOSSY tests. Must clear the SUT's own 32 s
+/// terminating-safety timer (`TERMINATING_TIMEOUT_MS`) — a recovered call whose
+/// teardown BYE was fully lost falls back to it — PLUS real-clock reap-timer
+/// starvation under full-suite contention. [`settle_secs`] polls and returns the
+/// instant the leak clears, so a high ceiling is pure headroom (it only waits out a
+/// GENUINE leak, which must fail anyway). 20 s (below the 32 s timer) was the
+/// refer-recovery flake; 45 s clears it with margin.
+const SETTLE_LOSS_SECS: u64 = 45;
 
 /// Peak-contention governor. These tests are real-clock over real loopback
 /// UDP, and libtest starts ALL of them at once — 20+ concurrent multi-worker
@@ -1142,7 +1166,7 @@ async fn loadgen_auto_retransmit_recovers_packet_drop() {
     // The wide window only costs wall time on the deterministic doomed-call
     // tail, which idles the full window either way.
     let (_h, b2bua, core, transport) =
-        setup_recv(6490, Correlation::header("X-Loadgen-Id"), 3, Duration::from_secs(12)).await;
+        setup_recv(6490, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 12.0, 2, 8, 0x5EED);
@@ -1257,7 +1281,7 @@ async fn loadgen_actor_refer_recovers_loss_without_false_audit() {
     // recv = 12 s like the basic-call recovery test: compounded two-hop
     // retransmit ladders (0.5+1+2+4 s) need headroom under CI CPU contention.
     let (_h, b2bua, core, transport) =
-        setup_recv(6530, Correlation::header("X-Loadgen-Id"), 3, Duration::from_secs(12)).await;
+        setup_recv(6530, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 6.0, 2, 8, 0xB9A2);
@@ -1310,11 +1334,12 @@ async fn loadgen_actor_refer_recovers_loss_without_false_audit() {
 
     // The loadgen's own mux state is always reclaimed; the SUT may hold only the
     // (rare) failed calls' straggler dialogs (best-effort teardown is single-shot
-    // under loss), reaped on its own timers. Use a generous settle (like the other
-    // loss tests here) not the 1 s `settle_until`: under loss a recovered refer
-    // call's teardown rides retransmit ladders, so its SUT-side reap can trail the
-    // verdict by seconds — under full-suite CPU contention the 1 s window flaked.
-    settle_secs(20, || core.registry_size() == 0 && b2bua.active_calls() as u64 <= nok).await;
+    // under loss), reaped on its own timers. Use the shared lossy settle ceiling
+    // ([`SETTLE_LOSS_SECS`], > the SUT's 32 s terminating timer) not the 1 s
+    // `settle_until`: under loss a recovered refer call's teardown rides retransmit
+    // ladders and — worst case, a fully-lost BYE — falls back to that 32 s SUT
+    // timer, so a 20 s window flaked under full-suite CPU contention.
+    settle_secs(SETTLE_LOSS_SECS, || core.registry_size() == 0 && b2bua.active_calls() as u64 <= nok).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak under loss+retransmit");
     assert!(
         b2bua.active_calls() as u64 <= nok,
@@ -1336,7 +1361,7 @@ async fn loadgen_actor_refer_recovers_loss_without_false_audit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_settle_gate_recovers_dropped_bye() {
     let (_h, b2bua, core, transport) =
-        setup_recv(6560, Correlation::header("X-Loadgen-Id"), 3, Duration::from_secs(12)).await;
+        setup_recv(6560, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 2.0, 1, 4, 0x2D07);
@@ -1383,7 +1408,7 @@ async fn loadgen_settle_gate_recovers_dropped_bye() {
 #[ignore = "real-clock UDP — slow lane (just test-slow); avoids default-lane bind contention"]
 async fn loadgen_reack_recovers_dropped_initial_b_leg_ack() {
     let (_h, b2bua, core, transport) =
-        setup_recv(6600, Correlation::header("X-Loadgen-Id"), 3, Duration::from_secs(12)).await;
+        setup_recv(6600, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 1.0, 1, 4, 0x2AC0);
@@ -1402,7 +1427,7 @@ async fn loadgen_reack_recovers_dropped_initial_b_leg_ack() {
     eprintln!("REPRO drops_in={drops} total={total} ok={ok} audit={audit}\n{}", reporter.render_prometheus());
     assert!(total >= 1 && drops >= 1, "no call / drop never fired: drops={drops} total={total}");
 
-    settle_secs(40, || core.registry_size() == 0 && b2bua.active_calls() == 0).await;
+    settle_secs(SETTLE_LOSS_SECS, || core.registry_size() == 0 && b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
     assert_eq!(audit, 0, "dropped initial b-leg ACK charged the audit (SUT re-ACK gap):\n{}", reporter.render_prometheus());
     assert_eq!(ok, total, "dropped initial b-leg ACK not recovered by SUT re-ACK");
@@ -1419,7 +1444,7 @@ async fn loadgen_reack_recovers_dropped_initial_b_leg_ack() {
 #[ignore = "real-clock UDP — slow lane (just test-slow); avoids default-lane bind contention"]
 async fn loadgen_callee_retransmits_non2xx_final_on_lost_hop_ack() {
     let (_h, b2bua, core, transport) =
-        setup_recv(6610, Correlation::header("X-Loadgen-Id"), 3, Duration::from_secs(12)).await;
+        setup_recv(6610, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 1.0, 1, 4, 0x2AC1);
@@ -1436,7 +1461,7 @@ async fn loadgen_callee_retransmits_non2xx_final_on_lost_hop_ack() {
     eprintln!("REPRO-486 drops_in={drops} audit={audit}\n{}", reporter.render_prometheus());
     assert!(drops >= 1, "the reject hop-ACK drop never fired: drops={drops}");
 
-    settle_secs(40, || core.registry_size() == 0 && b2bua.active_calls() == 0).await;
+    settle_secs(SETTLE_LOSS_SECS, || core.registry_size() == 0 && b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
     assert_eq!(
         audit, 0,
@@ -1495,7 +1520,7 @@ async fn loadgen_abandoned_reject_leg_recovery_lands_on_recording() {
     eprintln!("repro report: {}/index.html", out_dir.display());
     assert!(total >= 1 && drops >= 1, "no call / the reject hop-ACK drop never fired: drops={drops} total={total}");
 
-    settle_secs(40, || core.registry_size() == 0 && b2bua.active_calls() == 0).await;
+    settle_secs(SETTLE_LOSS_SECS, || core.registry_size() == 0 && b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
     assert_eq!(
         audit, 0,
@@ -1521,7 +1546,7 @@ async fn loadgen_abandoned_reject_leg_recovery_lands_on_recording() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_settle_gate_permanent_notify_loss_names_obligation() {
     let (_h, b2bua, core, transport) =
-        setup_recv(6570, Correlation::header("X-Loadgen-Id"), 3, Duration::from_secs(12)).await;
+        setup_recv(6570, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 1 }));
 
     // ONE call is enough — the outcome is deterministic.
@@ -1659,7 +1684,7 @@ async fn loadgen_ringing_gate_counts_every_ring() {
 #[ignore = "real-clock ~25s — in-process endurance, slow lane (just test-slow)"]
 async fn loadgen_inprocess_endurance_lossy() {
     let (_h, b2bua, core, transport) =
-        setup_recv(6520, Correlation::header("X-Loadgen-Id"), 5, Duration::from_secs(5)).await;
+        setup_recv(6520, Correlation::header("X-Loadgen-Id"), 5, RECV_LOSSY).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 16 }));
 
     // The default mix (basic-heavy), production loss + retransmit, 25 s at 25 cps.
@@ -2342,7 +2367,7 @@ async fn loadgen_loss_soak_all_bodies_recover() {
     // CI CPU load must fit, or a recovered call flips to `timeout` and the strict
     // zero-failure assert flakes. At 1% loss recovery is rare, so the wide window
     // only costs wall time on the deterministic tail.
-    const WIDE: Duration = Duration::from_secs(12);
+    const WIDE: Duration = RECV_LOSSY;
     // ~200 calls per body: run each body in its OWN sub-run (rate × duration ≈
     // 200) into the SHARED reporter, so coverage is even per body (the default
     // mix is basic-heavy).
@@ -2420,7 +2445,7 @@ async fn loadgen_loss_soak_all_bodies_recover() {
     // (`TERMINATING_TIMEOUT_MS`) reaps — so we give that window before the strict
     // assert (a residual leak AFTER it is a genuine, non-timing SUT stranding).
     // Regression gate for the fix (handoff: `handoff-sut-reack-retransmitted-2xx-13.2.2.4.md`).
-    settle_secs(40, || {
+    settle_secs(SETTLE_LOSS_SECS, || {
         core_a.registry_size() == 0
             && b2bua_a.active_calls() == 0
             && core_b.registry_size() == 0
