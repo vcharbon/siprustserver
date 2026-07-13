@@ -8,7 +8,7 @@
 //! default options gives every harness the same "post-run all-clean" CSeq check
 //! that the live SIPp endpoints apply in endurance.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use layer_harness::{LaneKey, Stamped};
@@ -34,19 +34,50 @@ struct StreamState {
     /// primary spent — keying on the branch alone would mis-skip it as a phantom
     /// retransmit (RFC 3261 assumes globally-unique branches, §8.1.1.7).
     seen_txns: HashSet<(String, String, u32)>,
-    /// Per dialog (To-tag, `""` = dialog-creating) → CSeq of the last *new*
-    /// (non-ACK/CANCEL) request seen on that dialog.
-    last_new_cseq: HashMap<String, u32>,
+    /// Per dialog (To-tag, `""` = dialog-creating) → its accumulated CSeq set.
+    dialogs: HashMap<String, DialogCseqs>,
+}
+
+/// One dialog's worth of new-request CSeq accounting, gathered **order-
+/// independently**. §12.2.1.1 is a property of the SET of sequence numbers a
+/// dialog's UAC emitted, not of the order they were *recorded* in: a request
+/// dropped and later recovered by re-emission (Timer A/E/G) legitimately arrives
+/// out of order — after a request the UAC sent *later* — yet the UAC still
+/// incremented by exactly one and left no hole. So we accumulate the values as
+/// they arrive and judge contiguity + reuse once, over the whole set, rather than
+/// arrival-to-arrival (which would charge every recovered-after-drop reordering as
+/// a bug — the TEST-MODEL false positive this rule used to produce).
+#[derive(Default)]
+struct DialogCseqs {
+    /// Distinct new-transaction CSeq → `(top-Via branch, method)` of the FIRST new
+    /// transaction that carried it. A `BTreeMap`, so the keys come out ascending
+    /// for the contiguity scan. A *later* new transaction with a **different**
+    /// branch at the same CSeq is a genuine reuse — the dialog CSeq never advanced.
+    by_cseq: BTreeMap<u32, (String, String)>,
+    /// Reuse violations, in arrival order: `(reusing method, CSeq)`.
+    reuses: Vec<(String, u32)>,
 }
 
 /// **RFC 3261 §12.2.1.1 — in-dialog request sequencing.** Within a dialog the
 /// UAC MUST increment the CSeq sequence number by **exactly one** for each new
 /// request (ACK and CANCEL excepted — they reuse the CSeq of the request they
-/// acknowledge/cancel). A UAS rejects a new in-dialog request whose CSeq is not
-/// exactly one greater than the dialog's last: lower/equal → 500 out of order or
-/// silently dropped as a retransmission; a gap (≥ +2) violates the
-/// increment-by-one rule. An on-wire retransmission reuses both its CSeq *and*
-/// its top-Via branch — exempt.
+/// acknowledge/cancel). So the sequence numbers a dialog's UAC emits form a
+/// **contiguous run with no value used twice and none skipped**. That is what
+/// this rule checks, and it does so over the whole recorded SET per dialog — it
+/// is deliberately **independent of arrival order**. An on-wire retransmission
+/// reuses both its CSeq *and* its top-Via branch — folded away as one transaction.
+///
+/// **Why order is not judged.** §12.2.1.1 constrains what the UAC *generates*,
+/// not the order the recording *observes*. Over a lossy fabric a request can be
+/// dropped and then recovered by re-emission (Timer A/E/G); its recovered copy
+/// legitimately lands *after* a request the UAC sent later (e.g. a REFER-progress
+/// NOTIFY at CSeq 3 recovered after the BYE at CSeq 4). The UAC still incremented
+/// by exactly one and left no hole — the set is `{…,3,4}`, contiguous. Charging
+/// that reordering as "out of order" is a TEST-MODEL false positive (the SUT
+/// emitted a contiguous stream, the harness merely saw it recovered late), so it
+/// is not flagged. Only two things flag: a **reuse** (a CSeq carried by two
+/// distinct new transactions on one dialog) and a **gap** (a sequence value the
+/// UAC skipped, leaving the sorted set non-contiguous).
 ///
 /// **Per-dialog, not per-leg.** The check keys each stream by `(receiving
 /// endpoint, Call-ID, From-tag)` and then tracks each dialog **by To-tag**. This
@@ -57,17 +88,17 @@ struct StreamState {
 /// (distinct dialogs), not a reuse — conflating them by ignoring the To-tag would
 /// be a false positive. The dialog-creating INVITE (no To-tag, tracked under
 /// `""`) is the baseline: a forked/confirmed dialog's first in-dialog request
-/// must be `INVITE_CSeq + 1`, and that same To-tag's sequence then advances by
-/// one per request as the early dialog becomes the confirmed one.
+/// must be `INVITE_CSeq + 1` (folded in as the set's lower anchor), and that
+/// To-tag's sequence then advances by one per request.
 ///
 /// Within a stream it distinguishes a *retransmission* from a *new transaction*
 /// by the top (first) `Via` header's `branch=` token (a retransmission reuses
-/// it). This is the teeth for (a) a takeover that probes a dialog with a stale
-/// (pre-failover) CSeq snapshot — the survivor's OPTIONS lands at/below the CSeq
-/// the callee already saw — and (b) a keepalive loop that never increments the
-/// dialog CSeq, so each new OPTIONS (and the eventual BYE) reuses the previous
-/// request's CSeq. Both are invisible to a test UA that answers whatever it is
-/// handed.
+/// it). This is the teeth for a keepalive loop that never increments the dialog
+/// CSeq (each new OPTIONS, and the eventual BYE, reuses the previous request's
+/// CSeq → a reuse) and for a takeover that re-originates a dialog request from a
+/// stale (pre-failover) CSeq snapshot — the survivor mints a `local_cseq + 1`
+/// the dialog already spent, so the value shows up twice (a reuse). Both are
+/// invisible to a test UA that answers whatever it is handed.
 pub struct CSeqInDialogOrderRule;
 
 /// The `branch=` token of the TOP (first) `Via` header, if present and
@@ -84,10 +115,13 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
-        // (receiving bind, Call-ID, From-tag) -> stream state.
+        // (receiving bind, Call-ID, From-tag) -> stream state, plus first-seen
+        // order so findings come out deterministically (HashMap order is not).
         let mut streams: HashMap<(LaneKey, String, String), StreamState> = HashMap::new();
-        let mut findings = Vec::new();
+        let mut stream_order: Vec<(LaneKey, String, String)> = Vec::new();
         let parser = CustomParser::new();
+
+        // ── Pass 1: accumulate each dialog's new-transaction CSeq set. ──────────
         for s in events {
             let SignalingNetworkEvent::RecvItem { bind_key, packet, .. } = &s.event else {
                 continue;
@@ -102,63 +136,129 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
                 continue;
             };
             let key = (bind_key.clone(), call_id, from_tag);
-            let st = streams.entry(key.clone()).or_default();
+            if !streams.contains_key(&key) {
+                stream_order.push(key.clone());
+                streams.insert(key.clone(), StreamState::default());
+            }
+            let st = streams.get_mut(&key).unwrap();
             let seq = req.cseq.seq;
             let method = req.method.to_string();
+            let branch = top_via_branch(&req);
 
             // 1. A repeat of the SAME (branch, method, CSeq) is a retransmission
-            //    of a transaction we already accounted for: skip entirely (no flag,
-            //    no state). Method + CSeq guard against an `IdGen`-reset branch
-            //    collision masquerading as a retransmit (see `seen_txns`).
-            if let Some(branch) = top_via_branch(&req) {
-                let txn = (branch, method.clone(), seq);
-                if st.seen_txns.contains(&txn) {
+            //    of a transaction we already accounted for: skip entirely. Method +
+            //    CSeq guard against an `IdGen`-reset branch collision masquerading
+            //    as a retransmit (see `seen_txns`).
+            if let Some(b) = &branch {
+                if !st.seen_txns.insert((b.clone(), method.clone(), seq)) {
                     continue;
                 }
-                // 2. Record this transaction.
-                st.seen_txns.insert(txn);
             }
 
-            // 3. ACK/CANCEL legitimately reuse the related request's CSeq:
-            //    exempt, and they do not advance the per-dialog sequence.
+            // 2. ACK/CANCEL legitimately reuse the related request's CSeq: exempt,
+            //    and they do not advance the per-dialog sequence.
             if method.eq_ignore_ascii_case("ACK") || method.eq_ignore_ascii_case("CANCEL") {
                 continue;
             }
 
-            // 4. A genuinely new in-dialog request. The dialog it belongs to is
+            // 3. A genuinely new in-dialog request. The dialog it belongs to is
             //    identified by the To-tag (`""` for the dialog-creating request
-            //    that has none yet); each dialog owns an independent CSeq space.
+            //    that has none yet); each dialog owns an independent CSeq space. We
+            //    only ACCUMULATE here — contiguity is judged below, over the whole
+            //    set, because arrival order is irrelevant to §12.2.1.1.
             let to_tag = req.to.tag.clone().unwrap_or_default();
+            let branch = branch.unwrap_or_default();
+            let dlg = st.dialogs.entry(to_tag).or_default();
+            match dlg.by_cseq.get(&seq).map(|(b, _)| b.clone()) {
+                None => {
+                    dlg.by_cseq.insert(seq, (branch, method));
+                }
+                Some(first_branch) if first_branch != branch => {
+                    // A *different* transaction carried a CSeq the dialog already
+                    // spent → the dialog CSeq failed to increment (a reuse).
+                    dlg.reuses.push((method, seq));
+                }
+                Some(_) => {} // same branch/CSeq shape: nothing new to record.
+            }
+        }
 
-            // `prev` is the number this request must be exactly one greater than:
-            //   - subsequent request on this dialog → its last new CSeq;
-            //   - first in-dialog request of a (forked/confirmed) dialog → the
-            //     dialog-creating INVITE's CSeq (the `""` baseline), if observed.
-            // A dialog-creating request (empty To-tag) only seeds the baseline.
-            let prev = match st.last_new_cseq.get(&to_tag) {
-                Some(&last) => Some(last),
-                None if to_tag.is_empty() => None,
-                None => st.last_new_cseq.get("").copied(),
-            };
+        // ── Pass 2: judge each dialog's CSeq set — reuse + non-contiguity. ──────
+        let mut findings = Vec::new();
+        for key in &stream_order {
+            let st = &streams[key];
+            // The dialog-creating (empty To-tag) request's CSeq anchors every
+            // forked/confirmed dialog's first in-dialog request at baseline + 1.
+            let baseline = st.dialogs.get("").and_then(|d| d.by_cseq.keys().next().copied());
+            let mut to_tags: Vec<&String> = st.dialogs.keys().collect();
+            to_tags.sort();
+            for to_tag in to_tags {
+                let dlg = &st.dialogs[to_tag];
 
-            if let Some(prev) = prev {
-                if seq != prev + 1 {
+                // Reuse: a CSeq spent by two distinct transactions on this dialog.
+                for (method, seq) in &dlg.reuses {
                     findings.push((
-                        bind_key.clone(),
-                        cseq_violation_msg(&method, seq, prev, &key.1, &key.2, &to_tag),
+                        key.0.clone(),
+                        cseq_reuse_msg(method, *seq, &key.1, &key.2, to_tag),
                     ));
                 }
+
+                // Contiguity: the sorted distinct CSeqs must have no interior hole.
+                // A forked/confirmed dialog folds in the dialog-creating INVITE's
+                // CSeq as the lower anchor, so a first request that is not
+                // `INVITE_CSeq + 1` surfaces as a gap.
+                let mut seqs: Vec<u32> = dlg.by_cseq.keys().copied().collect();
+                if !to_tag.is_empty() {
+                    if let Some(b) = baseline {
+                        if let Err(pos) = seqs.binary_search(&b) {
+                            seqs.insert(pos, b);
+                        }
+                    }
+                }
+                for w in seqs.windows(2) {
+                    let (lo, hi) = (w[0], w[1]);
+                    if hi > lo + 1 {
+                        let method =
+                            dlg.by_cseq.get(&hi).map(|(_, m)| m.as_str()).unwrap_or("request");
+                        findings.push((
+                            key.0.clone(),
+                            cseq_gap_msg(method, hi, lo, &key.1, &key.2, to_tag),
+                        ));
+                    }
+                }
             }
-            st.last_new_cseq.insert(to_tag, seq);
         }
         findings
     }
 }
 
-/// Phrase the §12.2.1.1 violation for `{method} CSeq {seq}` when the dialog's
-/// last new CSeq (or, for a dialog's first in-dialog request, the dialog-creating
-/// INVITE's CSeq) was `prev` and the only RFC-legal value is `prev + 1`.
-fn cseq_violation_msg(
+/// The `Call-ID=… from-tag=… to-tag=…` dialog descriptor shared by the messages.
+fn dialog_desc(call_id: &str, from_tag: &str, to_tag: &str) -> String {
+    format!(
+        "Call-ID={call_id} from-tag={from_tag} to-tag={}",
+        if to_tag.is_empty() { "<none>" } else { to_tag },
+    )
+}
+
+/// Phrase a §12.2.1.1 **reuse**: `{method} CSeq {seq}` was already carried by an
+/// earlier transaction on this dialog. A new in-dialog request MUST increment the
+/// dialog CSeq by exactly one, so a repeat means the CSeq never advanced — a real
+/// UAS drops it as a retransmission.
+fn cseq_reuse_msg(method: &str, seq: u32, call_id: &str, from_tag: &str, to_tag: &str) -> String {
+    let dialog = dialog_desc(call_id, from_tag, to_tag);
+    format!(
+        "in-dialog CSeq reused (RFC 3261 §12.2.1.1): {method} CSeq {seq} reuses a prior \
+         request's CSeq (a new in-dialog transaction must increment the dialog CSeq by \
+         exactly one) on {dialog} — a real UAS treats this as a retransmission and drops the \
+         new request (the test UA answers it, hiding the bug)"
+    )
+}
+
+/// Phrase a §12.2.1.1 **gap**: once the dialog's requests are folded (retransmits)
+/// and re-ordered by CSeq, a value between `prev` and `seq` was never emitted — the
+/// UAC skipped a sequence number (incremented by more than one). Arrival order is
+/// deliberately not judged: a request dropped and recovered by re-emission arrives
+/// late but leaves no hole, so only a genuinely MISSING number reaches here.
+fn cseq_gap_msg(
     method: &str,
     seq: u32,
     prev: u32,
@@ -166,31 +266,13 @@ fn cseq_violation_msg(
     from_tag: &str,
     to_tag: &str,
 ) -> String {
-    let dialog = format!(
-        "Call-ID={call_id} from-tag={from_tag} to-tag={}",
-        if to_tag.is_empty() { "<none>" } else { to_tag },
-    );
-    if seq == prev {
-        format!(
-            "in-dialog CSeq reused (RFC 3261 §12.2.1.1): {method} CSeq {seq} reuses a prior \
-             request's CSeq (a new in-dialog transaction must increment the dialog CSeq by \
-             exactly one) on {dialog} — a real UAS treats this as a retransmission and drops the \
-             new request (the test UA answers it, hiding the bug)"
-        )
-    } else if seq < prev {
-        format!(
-            "in-dialog CSeq regressed (RFC 3261 §12.2.1.1): {method} CSeq {seq} arrived after \
-             CSeq {prev} (out of order) on {dialog} — a real UAS rejects this 500 (the test UA \
-             answers it, hiding the bug)"
-        )
-    } else {
-        format!(
-            "in-dialog CSeq not contiguous (RFC 3261 §12.2.1.1): {method} CSeq {seq} skips ahead \
-             of CSeq {prev}; the UAC MUST increment the dialog CSeq by exactly one (expected \
-             {}) on {dialog}",
-            prev + 1,
-        )
-    }
+    let dialog = dialog_desc(call_id, from_tag, to_tag);
+    format!(
+        "in-dialog CSeq not contiguous (RFC 3261 §12.2.1.1): {method} CSeq {seq} skips ahead \
+         of CSeq {prev}; the UAC MUST increment the dialog CSeq by exactly one (expected \
+         {}) on {dialog}",
+        prev + 1,
+    )
 }
 
 /// Top (first) `Via` branch token from a raw header list — the transaction
@@ -489,17 +571,42 @@ mod tests {
     }
 
     #[test]
-    fn regressed_cseq_is_flagged() {
-        // The stale-snapshot takeover shape: CSeq 2 after CSeq 3 on the same
-        // (bind, Call-ID, From-tag) stream — out of order, must be flagged.
+    fn out_of_order_recovered_drop_is_clean() {
+        // The endurance / nk_ct_refer shape. On ONE dialog the UAC emits a
+        // contiguous 2,3,4 (re-INVITE, NOTIFY, BYE), but NOTIFY(3) is dropped by
+        // the loss model and its re-emission lands AFTER the BYE(4) — so the
+        // recording captures the requests out of order (…4 then 3). The UAC still
+        // incremented by exactly one and left NO hole: §12.2.1.1 is a property of
+        // the CSeq SET, not of arrival order, so this is clean (it was the
+        // TEST-MODEL false positive this rule used to charge).
         let evs = vec![
-            recv_at("bob", options("cid-1", "ft", 3), 0),
-            recv_at("bob", options("cid-1", "ft", 2), 1),
+            recv_at("bob", req("INVITE", "cid-1", "ft", 2, "z9hG4bK-ri"), 0),
+            recv_at("bob", req("BYE", "cid-1", "ft", 4, "z9hG4bK-b"), 1),
+            recv_at("bob", req("NOTIFY", "cid-1", "ft", 3, "z9hG4bK-n"), 2),
+        ];
+        assert!(
+            CSeqInDialogOrderRule.check(&evs).is_empty(),
+            "a recovered-after-drop request that lands out of order leaves no hole — clean",
+        );
+    }
+
+    #[test]
+    fn stale_takeover_reusing_cseq_is_flagged() {
+        // The stale-snapshot takeover as it appears in a FULL recording: the
+        // primary keepalives OPTIONS 2 then 3; the survivor takes over with a
+        // pre-failover snapshot and re-originates OPTIONS 2 on a NEW transaction
+        // (fresh branch) — reusing a CSeq the dialog already spent. The reuse is
+        // the violation (a real UAS drops it as a retransmission); the fact that
+        // it also arrives "after" CSeq 3 is not, on its own, judged.
+        let evs = vec![
+            recv_at("bob", options("cid-1", "ft", 2), 0),
+            recv_at("bob", options("cid-1", "ft", 3), 1),
+            recv_at("bob", req("OPTIONS", "cid-1", "ft", 2, "z9hG4bK-stale"), 2),
         ];
         let findings = CSeqInDialogOrderRule.check(&evs);
-        assert_eq!(findings.len(), 1, "the regression must be flagged");
+        assert_eq!(findings.len(), 1, "the stale-snapshot CSeq reuse must be flagged");
         assert_eq!(findings[0].0, "bob", "attributed to the receiving endpoint");
-        assert!(findings[0].1.contains("out of order"), "{}", findings[0].1);
+        assert!(findings[0].1.contains("reuses a prior request's CSeq"), "{}", findings[0].1);
     }
 
     #[test]
