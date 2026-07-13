@@ -104,7 +104,7 @@ pub fn parse_headers(s: &mut Scanner, limits: &SipParserLimits) -> Result<Parsed
 
         let value = s.read_header_value();
         let name = expand_compact_form(&raw_name);
-        let trimmed_value = value.trim().to_string();
+        let trimmed_value = trim_in_place(value);
 
         // Bound per-header memory: name + ": " + value, post-unfold/trim.
         let header_len = name.len() + 2 + trimmed_value.len();
@@ -147,6 +147,19 @@ pub fn parse_headers(s: &mut Scanner, limits: &SipParserLimits) -> Result<Parsed
     }
 
     Ok(ParsedHeaders { headers, content_length })
+}
+
+/// Trim surrounding whitespace in place — `read_header_value` already
+/// allocated the value; `value.trim().to_string()` would mint a second copy
+/// per header on the hot path. Same Unicode whitespace set as `str::trim`.
+fn trim_in_place(mut value: String) -> String {
+    let end = value.trim_end().len();
+    value.truncate(end);
+    let start = value.len() - value.trim_start().len();
+    if start > 0 {
+        value.drain(..start);
+    }
+    value
 }
 
 /// Headers whose RFC 3261 grammar can carry a quoted-string. Case-insensitive
