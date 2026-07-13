@@ -2,6 +2,7 @@
 
 Project is ultra early, not in production, do not worry about upgrade
 compatibility when designing solutions.
+To show a html file to user use tha bash alias  'firefox ./path/to/file/index.html' so that it works on wsl.
 
 ## Where the details live (progressive disclosure)
 
