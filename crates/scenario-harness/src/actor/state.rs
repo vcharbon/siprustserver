@@ -179,6 +179,12 @@ pub enum Observation {
     LegConfirmed { leg: &'static str },
     /// `leg` reached a terminal state — a BYE/200, a non-2xx final, a CANCEL.
     LegTerminated { leg: &'static str },
+    /// `leg`'s DIALOG is being torn down (a BYE in either direction) — discharge
+    /// its still-open in-dialog acknowledgement obligations (a pending re-INVITE
+    /// ACK / PRACK-200 / … whose peer transaction dies with the call can never
+    /// arrive), so the settle barrier does not hold the verdict its 32 s ceiling
+    /// for an impossible ack. See [`ObligationLedger::discharge_leg`].
+    DialogTornDown { leg: &'static str },
     /// We answered a received dialog-creating INVITE — seed the dialog's
     /// received-CSeq baseline with the INVITE's CSeq (so the first in-dialog
     /// request is not a phantom hole, §12.2.1.1).
@@ -207,6 +213,7 @@ impl StateInner {
             Observation::LegEarly { leg } => self.leg_mut(leg).advance(LegPhase::Early),
             Observation::LegConfirmed { leg } => self.leg_mut(leg).advance(LegPhase::Confirmed),
             Observation::LegTerminated { leg } => self.leg_mut(leg).advance(LegPhase::Terminated),
+            Observation::DialogTornDown { leg } => self.ledger.discharge_leg(leg),
             Observation::SeedDialog { leg, call_id, cseq } => {
                 self.leg_mut(leg).advance(LegPhase::Early);
                 self.ledger.seed_dialog(call_id, leg, cseq);

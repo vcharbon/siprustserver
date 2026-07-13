@@ -2522,9 +2522,21 @@ impl Dialog {
     /// case where the answer rides the ACK, RFC 3264 §4). Routed to the next hop
     /// like any in-dialog request; the B2BUA relays it end-to-end.
     pub async fn ack(&mut self, sdp: Option<&str>) {
+        self.ack_for(self.dialog.local_cseq, sdp).await;
+    }
+
+    /// ACK a re-INVITE's 2xx echoing an **explicit** INVITE CSeq (RFC 3261
+    /// §13.2.2.4 — the ACK number is the re-INVITE's, taken from the 2xx being
+    /// ACKed, NOT this dialog's current `local_cseq`, which may have advanced past
+    /// it if another in-dialog request went out meanwhile). Idempotent and
+    /// re-derivable from the confirmed dialog + the response's CSeq, so a
+    /// retransmitted 2xx can always be re-ACKed with no per-call one-shot state
+    /// (mirrors the loadgen mux's `(Call-ID, CSeq)` re-ACK contract). Carries an
+    /// optional SDP answer (the delayed-offer case, RFC 3264 §4).
+    pub async fn ack_for(&mut self, invite_cseq: u32, sdp: Option<&str>) {
         let opts = GenerateAckFor2xxOpts {
             via: Some(self.agent.via()),
-            cseq: Some(self.dialog.local_cseq),
+            cseq: Some(invite_cseq),
             body: sdp.map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
             ..Default::default()
         };

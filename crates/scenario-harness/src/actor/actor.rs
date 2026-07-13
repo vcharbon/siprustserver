@@ -290,9 +290,13 @@ pub struct ActorState<'c> {
     /// RSeq values of reliable provisionals this caller has already PRACKed —
     /// so a retransmitted 183 is not double-PRACKed.
     pracked_rseqs: HashSet<u32>,
-    /// This caller sent a delayed-offer re-INVITE and awaits its 2xx (which the
-    /// reactor ACKs with the answer SDP). `false` for every non-`reinvite` leg.
-    pending_reinvite: bool,
+    /// CSeq numbers of in-dialog re-INVITEs THIS caller has ORIGINATED whose
+    /// `reneg` sub-flow has not yet been advanced (the `reinvite` body's
+    /// delayed-offer re-INVITE). A set keyed by CSeq — NOT a one-shot bool — so
+    /// the 2xx ACK is re-derivable and a lost datagram interleaving can never
+    /// strand it (mirrors the mux's `(Call-ID, CSeq)` re-ACK). Empty for every
+    /// non-`reinvite` leg.
+    sent_reinvites: HashSet<u32>,
     /// Whether this caller has already stamped the first-OPTIONS-ping feed —
     /// so the looped `options_hold` pings stamp `keepalive_ack` exactly once.
     saw_options_200: bool,
@@ -352,7 +356,7 @@ impl<'c> ActorState<'c> {
             answered_reinvites: HashSet::new(),
             pending_prack_answer: None,
             pracked_rseqs: HashSet::new(),
-            pending_reinvite: false,
+            sent_reinvites: HashSet::new(),
             saw_options_200: false,
             expected_provisional: 180,
             pending_reject_ack: None,
@@ -456,6 +460,23 @@ fn arm_reject_final(st: &mut ActorState<'_>, uas: &ServerTxn, code: u16) {
         Instant::now(),
     );
     st.pending_reject_ack = Some(PendingRejectAck { key, call_id, branch });
+}
+
+/// Discharge this leg's still-open in-dialog acknowledgement obligations because
+/// its DIALOG is being torn down (a BYE in either direction, §15). Any pending
+/// ack — a re-INVITE we answered awaiting its ACK, a PRACK/UPDATE awaiting its
+/// 200, an in-dialog request awaiting its 2xx — is MOOT once the dialog ends: the
+/// far end's transaction dies with the call, so the ack can never arrive. Without
+/// this the settle barrier holds the verdict its full 32 s ceiling waiting for
+/// that impossible ack, surfacing under loss as a spurious `settle@…` timeout —
+/// the residual re-INVITE/realign/PRACK tail where an answering/renegotiating leg
+/// strands when the peer BYEs (`reinvite_gap = 0`) before a lost ack could be
+/// recovered. The `RejectFinal` obligation is deliberately preserved (it outlives
+/// the call on a REROUTE-abandoned leg — never a BYE — see its ledger doc). The
+/// `answered_reinvites` set is drained in lockstep for hygiene.
+fn discharge_on_teardown(st: &mut ActorState<'_>, now: Instant) {
+    st.answered_reinvites.clear();
+    st.obs.record(Observation::DialogTornDown { leg: st.role }, now);
 }
 
 /// Answer a UAS transaction `200 OK` with the given SDP body — the single
@@ -587,6 +608,10 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
             st.ctx.anchor(&st.agent, "bye", uas.request());
             uas.respond(200, "OK").try_send().await?;
             st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
+            // An in-dialog ack this leg still awaits (a re-INVITE it answered, a
+            // PRACK/UPDATE, …) is moot now the dialog ends (§15) — discharge it so
+            // settle does not wait 32 s for an ack the torn-down peer can never send.
+            discharge_on_teardown(st, now);
             st.obs.record(Observation::LegTerminated { leg: st.role }, now);
             st.scope.mark_terminated();
         }
@@ -819,24 +844,29 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
         }
         return Ok(());
         }
-        // A re-INVITE 2xx with NO pending initial INVITE: this caller's own
-        // delayed-offer re-INVITE (the `reinvite` body). ACK it WITH the answer
-        // SDP (RFC 3264 §4 delayed offer), close the `ReInvite` obligation the
-        // goal opened, advance the caller's `reneg` sub-flow (the teardown
-        // barrier), and stamp the declared feed.
-        if st.pending_reinvite && (200..300).contains(&resp.status) {
-            st.pending_reinvite = false;
+        // A 2xx to an in-dialog INVITE with NO pending initial INVITE: this
+        // caller's own delayed-offer re-INVITE (the `reinvite` body). ACK it WITH
+        // the answer SDP (RFC 3264 §4 delayed offer) — IDEMPOTENTLY, re-derived
+        // from the confirmed dialog + `resp.cseq`, NEVER gated on a one-shot a
+        // lost-datagram interleaving could strand (that stranding is the bug this
+        // fixes — mirrors the mux's `(Call-ID, CSeq)` re-ACK, the P0 contract).
+        // Every such 2xx the reactor is handed is ACKed; closing the `ReInvite`
+        // obligation, advancing the `reneg` teardown barrier, and stamping the
+        // feed happen ONCE, keyed on the CSeq of a re-INVITE THIS leg originated.
+        if (200..300).contains(&resp.status) && st.dialogs.confirmed.is_some() {
             let sdp = st.answer_body();
             if let Some(dialog) = st.dialogs.confirmed.as_mut() {
-                dialog.ack(Some(sdp)).await;
+                dialog.ack_for(resp.cseq.seq, Some(sdp)).await;
             }
-            let key = ObligationKey::new(st.role, ObligationKind::ReInvite, resp.cseq.seq);
-            st.obs.record(Observation::ResponseObserved { key }, now);
-            st.obs.record(
-                Observation::Subflow { leg: st.role, name: SUBFLOW_RENEG, to: SubflowState::Confirmed },
-                now,
-            );
-            st.feed.on_reinvite_ok.stamp(st.ctx);
+            if st.sent_reinvites.remove(&resp.cseq.seq) {
+                let key = ObligationKey::new(st.role, ObligationKind::ReInvite, resp.cseq.seq);
+                st.obs.record(Observation::ResponseObserved { key }, now);
+                st.obs.record(
+                    Observation::Subflow { leg: st.role, name: SUBFLOW_RENEG, to: SubflowState::Confirmed },
+                    now,
+                );
+                st.feed.on_reinvite_ok.stamp(st.ctx);
+            }
             return Ok(());
         }
     }
@@ -988,7 +1018,7 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
                 let cseq = dialog.local_cseq();
                 (ObligationKey::new(st.role, ObligationKind::ReInvite, cseq), dialog.clone())
             };
-            st.pending_reinvite = true;
+            st.sent_reinvites.insert(key.cseq);
             st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
             st.obs.record(
                 Observation::RequestSent { key, detail: "re-INVITE awaiting 2xx".to_string() },
@@ -1091,6 +1121,11 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
         }
         GoalStep::Bye => {
             let now = Instant::now();
+            // This leg is hanging up: discharge any in-dialog ack it still awaits
+            // (a re-INVITE/realign it answered, a PRACK/UPDATE 200) BEFORE opening
+            // the BYE's own obligation — the terminating dialog subsumes them
+            // (§15), and the fresh BYE obligation below is still held to the 200.
+            discharge_on_teardown(st, now);
             let (key, dialog_clone) = {
                 let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
                     StepError::UnexpectedKind {
@@ -1109,6 +1144,7 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
         }
         GoalStep::ByeWith { headers } => {
             let now = Instant::now();
+            discharge_on_teardown(st, now); // see GoalStep::Bye — subsume pending in-dialog acks
             let (key, dialog_clone) = {
                 let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
                     StepError::UnexpectedKind {

@@ -33,7 +33,8 @@ pub use model::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, B2buaDialogExt, ByeDisposition, Call,
     CallLimiterState, CallModelState, CallTopology, CdrEvent, CdrEventType, Dialog, Direction,
     ExtMap, HostPort, InviteTxnHandle, Leg, LegDisposition, LegKind, LegState, MachineId,
-    PendingRequest, PolicyUpdateBody, PromotePemState, RelayFirst18xState, ReleaseEventKind,
+    PendingReinvite2xx, PendingRequest, PolicyUpdateBody, PromotePemState, RelayFirst18xState,
+    ReleaseEventKind,
     RemoteInfo, ReroutePhase, RerouteState, SipHeader, StackDialog, StateLabel, TagMapping,
     TimerEntry, TimerType, TransferPhase, TransferState,
 };

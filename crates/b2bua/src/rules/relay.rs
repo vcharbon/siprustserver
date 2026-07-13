@@ -366,6 +366,7 @@ pub fn build_b_leg(
                 },
             }),
             cached_sdp: None,
+            pending_reinvite_2xx: None,
         },
     };
 

@@ -216,6 +216,30 @@ impl ObligationLedger {
         self.closed.insert(key);
     }
 
+    /// Discharge every still-open in-dialog acknowledgement obligation this leg
+    /// holds because its DIALOG is being torn down (a BYE, §15): once the dialog
+    /// ends, a pending ACK / 200 for one of its in-dialog transactions can never
+    /// arrive — the far end's transaction dies with the call — so the settle
+    /// barrier must not hold the verdict its full 32 s ceiling for it. Skips
+    /// [`RejectFinal`](ObligationKind::RejectFinal), the ONE obligation with
+    /// UA-outlives-the-call recovery semantics (its leg is abandoned by a REROUTE,
+    /// never a BYE, and its lost hop-ACK is still recoverable via the peer's
+    /// Timer-G retransmit + the SUT re-ACK — see the kind's doc). The CSeq gap
+    /// detector is deliberately untouched: a genuinely-lost fire-and-forget
+    /// in-dialog request (a dropped NOTIFY the SUT never retransmits) is a REAL
+    /// hole the terminal state does not fill.
+    pub fn discharge_leg(&mut self, leg: &'static str) {
+        let stranded: Vec<ObligationKey> = self
+            .opened
+            .keys()
+            .filter(|k| k.leg == leg && k.kind != ObligationKind::RejectFinal && !self.closed.contains(k))
+            .copied()
+            .collect();
+        for key in stranded {
+            self.closed.insert(key);
+        }
+    }
+
     /// Seed a dialog's CSeq baseline with its dialog-creating request's CSeq, so
     /// the first in-dialog request is not mistaken for a hole above an empty
     /// stream. Idempotent (the stream is a grow-only set).

@@ -776,6 +776,17 @@ pub enum RuleAction {
     /// copy of the original 200 the caller can ACK. No-op if the a-leg dialog is
     /// not yet confirmed.
     RetransmitALeg2xx,
+    /// RFC 3261 §13.3.1.4 (in-dialog) — retransmit the cached a-leg **re-INVITE**
+    /// 2xx toward the originator while its ACK is missing. Re-sends the exact
+    /// bytes stored in the a-leg dialog's `pending_reinvite_2xx` **raw** (the
+    /// a-leg re-INVITE server txn is already `Completed`), so it is byte-faithful
+    /// to the 2xx the originator must ACK. No-op when nothing awaits an ACK. The
+    /// re-INVITE twin of [`Self::RetransmitALeg2xx`].
+    RetransmitALegReinvite2xx,
+    /// Clear the a-leg dialog's `pending_reinvite_2xx` (the re-INVITE
+    /// un-ACKed-2xx obligation is discharged — the matching a-leg ACK arrived).
+    /// Idempotent; a no-op when nothing is pending.
+    ClearPendingReinvite2xx,
 }
 
 impl RuleAction {
@@ -817,7 +828,8 @@ impl RuleAction {
             | RuleAction::SendPrackToLeg { .. }
             | RuleAction::SendReinvite { .. }
             | RuleAction::SendNotify { .. }
-            | RuleAction::RetransmitALeg2xx => EffectKind::LegMessage,
+            | RuleAction::RetransmitALeg2xx
+            | RuleAction::RetransmitALegReinvite2xx => EffectKind::LegMessage,
             // Call-lifecycle commands — the one service → global hop (X3).
             RuleAction::BeginTermination { .. }
             | RuleAction::TerminateCall
@@ -848,7 +860,8 @@ impl RuleAction {
             | RuleAction::SetFeatures { .. }
             | RuleAction::MergeCallExt { .. }
             | RuleAction::RecordLimiterHolds { .. }
-            | RuleAction::ResolveCancelledReinvite { .. } => EffectKind::Bookkeeping,
+            | RuleAction::ResolveCancelledReinvite { .. }
+            | RuleAction::ClearPendingReinvite2xx => EffectKind::Bookkeeping,
         }
     }
 }

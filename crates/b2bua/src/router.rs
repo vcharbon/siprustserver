@@ -2707,6 +2707,7 @@ mod reclaim_timer_tests {
                 ack_branch: None,
                 pending_invite_txn: None,
                 cached_sdp: None,
+                pending_reinvite_2xx: None,
             },
         }
     }

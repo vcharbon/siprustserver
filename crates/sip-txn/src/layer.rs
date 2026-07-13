@@ -1052,21 +1052,43 @@ impl Owner {
         // the ADR-0014 CallQuiesced timing are exactly as if it were cancelled)
         // while the txn itself lives on to re-ACK + absorb until its own Timer D
         // cleanup deletes it.
+        //
+        // The SAME detach — for the SAME "finish your in-flight protocol
+        // obligation off the vanished call's books" reason — extends to an ACTIVE
+        // (Trying/Proceeding, still awaiting its final) non-INVITE CLIENT txn
+        // (NOTIFY / BYE / INFO / MESSAGE …). Deleting it here cancels its Timer E
+        // retransmit + Timer F before the first 500 ms retransmit can fire, so a
+        // datagram lost right as the call is torn down is NEVER re-sent — in a
+        // REFER transfer a dropped progress NOTIFY, whose BYE lands within a few
+        // ms, leaves a permanent hole in that leg's in-dialog CSeq stream. Detach
+        // instead: Timer E keeps re-sending (500 ms → ×2 capped at T2) until the
+        // final arrives (the inbound-final path `delete_txn`s it — call_ref no
+        // longer needed) or Timer F (64·T1 = 32 s) self-reaps it (`fire_timeout` →
+        // `delete_txn`). Bounded — a permanently-lost final still reaps at Timer F,
+        // never an infinite retransmit or a leak, and the detach drops the call
+        // attribution so it is not counted as a live txn for the gone call.
+        //
+        // An ACTIVE client INVITE is deliberately still DELETED (its Timer B is the
+        // call's own failure-detection deadline — teardown means give up now).
         let branches: Vec<String> = match self.txn_index.get(call_ref) {
             Some(set) => set.iter().cloned().collect(),
             None => return,
         };
         for branch in branches {
-            let (is_client, is_completed) = self
+            let (is_client, is_completed, is_non_invite) = self
                 .txns
                 .get(&branch)
-                .map_or((false, false), |t| {
-                    (t.role == TxnRole::Client, t.state == TxnState::Completed)
+                .map_or((false, false, false), |t| {
+                    (
+                        t.role == TxnRole::Client,
+                        t.state == TxnState::Completed,
+                        t.kind == TxnKind::NonInvite,
+                    )
                 });
             if !is_client {
                 continue;
             }
-            if is_completed {
+            if is_completed || is_non_invite {
                 let cr = self.txns.get_mut(&branch).and_then(|t| t.call_ref.take());
                 self.untrack_call_ref(&cr, &branch);
             } else if self.delete_txn(&branch) {

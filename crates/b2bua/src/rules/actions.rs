@@ -562,6 +562,14 @@ impl<'a> ActionExecutor<'a> {
             RuleAction::RetransmitALeg2xx => {
                 self.retransmit_a_leg_2xx(call, fx);
             }
+            RuleAction::RetransmitALegReinvite2xx => {
+                self.retransmit_a_leg_reinvite_2xx(call, fx);
+            }
+            RuleAction::ClearPendingReinvite2xx => {
+                if let Some(d) = call.a_leg.dialogs.first_mut() {
+                    d.ext.pending_reinvite_2xx = None;
+                }
+            }
         }
     }
 
@@ -604,6 +612,36 @@ impl<'a> ActionExecutor<'a> {
         effect.mode = OutboundTxnMode::Raw;
         effect.label = "200 (2xx retransmit, no ACK) → a-leg".to_string();
         fx.outbound.push(effect);
+    }
+
+    /// RFC 3261 §13.3.1.4 (in-dialog) — re-send the a-leg **re-INVITE** 2xx
+    /// toward the originator while its ACK is missing. Unlike the initial-INVITE
+    /// twin above (which rebuilds from the never-mutated `a_leg_invite` +
+    /// `cached_sdp`), a re-INVITE 2xx cannot be reconstructed from the initial
+    /// snapshot, so the exact bytes captured at relay time
+    /// (`pending_reinvite_2xx`, on the a-leg dialog) are re-parsed and re-emitted
+    /// **raw** — byte-faithful to the 2xx the originator must ACK. No-op when no
+    /// a-leg re-INVITE awaits an ACK.
+    fn retransmit_a_leg_reinvite_2xx(&self, call: &Call, fx: &mut HandlerEffects) {
+        let Some(pending) = call
+            .a_leg
+            .dialogs
+            .first()
+            .and_then(|d| d.ext.pending_reinvite_2xx.as_ref())
+        else {
+            return;
+        };
+        let parsed = CustomParser::new().parse(&pending.response).ok();
+        let Some(SipMessage::Response(resp)) = parsed else { return };
+        fx.outbound.push(OutboundSipEffect {
+            body: OutboundBody::Response(resp),
+            // Bypass the (Completed) a-leg re-INVITE server txn — a second final
+            // on the ServerResponse path would be dropped.
+            mode: OutboundTxnMode::Raw,
+            destination: (pending.dest_host.clone(), pending.dest_port),
+            label: "200 (re-INVITE 2xx retransmit, no ACK) → a-leg".to_string(),
+            leg_id: Some(call.a_leg.leg_id.clone()),
+        });
     }
 
     /// Originate a NOTIFY on `leg_id`'s confirmed dialog (toward the referrer)
@@ -1051,6 +1089,50 @@ impl<'a> ActionExecutor<'a> {
                     .first()
                     .map(|v| via_sent_by(v))
                     .unwrap_or_else(|| ("127.0.0.1".to_string(), 5060));
+                // RFC 3261 §13.3.1.4 (in-dialog): a **2xx to a re-INVITE the
+                // originator (a-leg) issued** was relayed via the a-leg server
+                // txn, which goes `Completed` on this final and will NOT
+                // retransmit it — so a lost a-leg ACK strands the renegotiation.
+                // Cache the exact outbound bytes + arm the un-ACKed-re-INVITE-2xx
+                // watchdog (the initial-INVITE `AckRetransmit`/`AckTimeout` twin).
+                // Only a genuine originator re-INVITE reaches here: the initial
+                // 2xx carries no relay snapshot (it takes the per-fork branch
+                // below), and a B2BUA-originated re-INVITE (realign / reroute /
+                // promote, whose 2xx comes back FromA and is ACKed by the B2BUA)
+                // leaves no snapshot either — so a reclaim/realign leg never arms
+                // this. `ack_timeout_sec <= 0` disables the watchdog (as initial).
+                if cseq_method == "INVITE"
+                    && (200..300).contains(&status)
+                    && target_leg == call.a_leg.leg_id
+                    && self.config.ack_timeout_sec > 0
+                {
+                    let bytes = sip_message::serialize(&SipMessage::Response(relayed.clone()));
+                    if let Some(d) = call.a_leg.dialogs.first_mut() {
+                        d.ext.pending_reinvite_2xx = Some(call::PendingReinvite2xx {
+                            response: bytes,
+                            dest_host: dest.0.clone(),
+                            dest_port: dest.1,
+                            // The relayed 2xx echoes the originator's re-INVITE
+                            // CSeq (`pending.inbound_cseq`); the a-leg ACK carries
+                            // it, so only that ACK quiesces the watchdog.
+                            cseq: pending.inbound_cseq,
+                        });
+                    }
+                    self.schedule(
+                        call,
+                        fx,
+                        TimerType::ReinviteAckRetransmit,
+                        super::defaults::ACK_RETRANSMIT_SEC * 1000,
+                        None,
+                    );
+                    self.schedule(
+                        call,
+                        fx,
+                        TimerType::ReinviteAckTimeout,
+                        self.config.ack_timeout_sec * 1000,
+                        None,
+                    );
+                }
                 fx.outbound.push(OutboundSipEffect {
                     body: OutboundBody::Response(relayed),
                     mode: OutboundTxnMode::ServerResponse,
@@ -1439,6 +1521,7 @@ impl<'a> ActionExecutor<'a> {
                 ack_branch: None,
                 pending_invite_txn: None,
                 cached_sdp: None,
+                pending_reinvite_2xx: None,
             },
         };
         call.a_leg.dialogs = vec![dialog];
