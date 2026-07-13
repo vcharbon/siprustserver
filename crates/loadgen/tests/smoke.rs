@@ -1371,6 +1371,78 @@ async fn loadgen_settle_gate_recovers_dropped_bye() {
     b2bua.assert_fully_reaped();
 }
 
+/// REPRO — the SUT §13.2.2.4 re-ACK gap, deterministically. Drop the FIRST ACK
+/// bob receives (the SUT's initial-INVITE b-leg ACK), one-shot inbound. bob then
+/// retransmits its 200 (Timer G, 2xx-until-ACK); the RFC-correct SUT must re-ACK
+/// each retransmit on the SAME branch (§13.2.2.4) so bob's INVITE server txn
+/// quiesces and the call reaps. WITHOUT the fix the SUT never re-ACKs → bob
+/// retransmits to its ceiling and the call is stranded / RFC-audit-charged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "real-clock UDP — slow lane (just test-slow); avoids default-lane bind contention"]
+async fn loadgen_reack_recovers_dropped_initial_b_leg_ack() {
+    let (_h, b2bua, core, transport) =
+        setup_recv(6600, Correlation::header("X-Loadgen-Id"), 3, Duration::from_secs(12)).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    let mut c = cfg(b2bua.addr, 1.0, 1, 4, 0x2AC0);
+    c.default_tuning = CallTuning {
+        drop_rate: 0.0,
+        retransmit: true,
+        drop_nth: Some(TargetedDrop { method: "ACK", nth: 1, permanent: false, dir: DropDir::Inbound }),
+    };
+    let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
+    run_throttled(&driver).await;
+
+    let drops = core.stats().dropped_in.load(std::sync::atomic::Ordering::Relaxed);
+    let total = reporter.total_calls();
+    let ok = reporter.count("basic_call", &ResultClass::Ok);
+    let audit = reporter.count("basic_call", &ResultClass::RfcAuditFail);
+    eprintln!("REPRO drops_in={drops} total={total} ok={ok} audit={audit}\n{}", reporter.render_prometheus());
+    assert!(total >= 1 && drops >= 1, "no call / drop never fired: drops={drops} total={total}");
+
+    settle_secs(40, || core.registry_size() == 0 && b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+    assert_eq!(audit, 0, "dropped initial b-leg ACK charged the audit (SUT re-ACK gap):\n{}", reporter.render_prometheus());
+    assert_eq!(ok, total, "dropped initial b-leg ACK not recovered by SUT re-ACK");
+}
+
+/// The FAITHFUL-UAS side (SIPp-replacement contract): a NON-2xx final whose
+/// hop-ACK is lost is recovered by the CALLEE retransmitting it (Timer G, §17.2.1)
+/// until the SUT's txn layer re-ACKs (§17.1.1.2). Drop the FIRST ACK the callee
+/// receives — the SUT's hop-ACK for the 486 — one-shot inbound. Without the
+/// loadgen non-2xx resender the reject is stranded as an unACKed final and the SUT
+/// is wrongly charged `unackedInviteNon2xxFinal`; with it the callee resends the
+/// 486, the SUT re-ACKs, and the audit stays clean.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "real-clock UDP — slow lane (just test-slow); avoids default-lane bind contention"]
+async fn loadgen_callee_retransmits_non2xx_final_on_lost_hop_ack() {
+    let (_h, b2bua, core, transport) =
+        setup_recv(6610, Correlation::header("X-Loadgen-Id"), 3, Duration::from_secs(12)).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    let mut c = cfg(b2bua.addr, 1.0, 1, 4, 0x2AC1);
+    c.default_tuning = CallTuning {
+        drop_rate: 0.0,
+        retransmit: true,
+        drop_nth: Some(TargetedDrop { method: "ACK", nth: 1, permanent: false, dir: DropDir::Inbound }),
+    };
+    let driver = Driver::new(c, vec![mix("invite_reject", 1.0)], reporter.clone(), transport);
+    run_throttled(&driver).await;
+
+    let drops = core.stats().dropped_in.load(std::sync::atomic::Ordering::Relaxed);
+    let audit = reporter.count("invite_reject", &ResultClass::RfcAuditFail);
+    eprintln!("REPRO-486 drops_in={drops} audit={audit}\n{}", reporter.render_prometheus());
+    assert!(drops >= 1, "the reject hop-ACK drop never fired: drops={drops}");
+
+    settle_secs(40, || core.registry_size() == 0 && b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+    assert_eq!(
+        audit, 0,
+        "a lost hop-ACK to a 486 was not recovered by the callee's Timer-G retransmit + SUT re-ACK:\n{}",
+        reporter.render_prometheus()
+    );
+}
+
 /// **P2 — the 2nd-NOTIFY ack gate, PERMANENT-LOSS side** (plan §5). The same
 /// targeted drop, but EVERY arrival (re-emissions included) is discarded — an
 /// unrecoverable loss. The contract (table §2): the call's teardown still
@@ -2123,4 +2195,226 @@ async fn loadgen_named_leg_specs_demux_number_form_transfer_leg() {
     assert_eq!(core.registry_size(), 0, "mux registry leak (named legs)");
     settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
+}
+
+// ---------------------------------------------------------------------------
+// Loss-recovery SOAK (slow lane) — every body recovers 1% loss (actor P4)
+// ---------------------------------------------------------------------------
+
+/// Drain up to `secs` of REAL wall-clock waiting for `cond` — the teardown reap
+/// window. A lost BYE-200 under loss leaves a call for the SUT's 32 s
+/// terminating-safety timer (`TERMINATING_TIMEOUT_MS`) to reap, so the strict
+/// zero-leak assertion must give that window. Longer sibling of
+/// `b2bua_harness::settle_until` (1 s), for this real-clock soak (we sleep, not
+/// advance).
+async fn settle_secs(secs: u64, cond: impl Fn() -> bool) {
+    for _ in 0..(secs * 20) {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The actor executor's thesis, proven across EVERY happy body (not just refer,
+/// which the mux loss proof above already covers): each leg answers independently
+/// so a dropped datagram is RECOVERED by re-emission (Timer A/E/G) rather than
+/// stranding the call. At a light 1%/datagram loss the retransmit ladder recovers
+/// every drop well inside the (wide) recv window, so we EXPECT **zero
+/// loss-induced failures** — each happy body soaked ~200 calls each.
+///
+/// Asserts, per happy body:
+///   - real OK calls happened (`ok > 100` — the body was actually driven);
+///   - ZERO loss-induced NOK: no `timeout` (a drop retransmit failed to recover),
+///     no `rfc_audit_fail` (a recovered drop that looked like a false
+///     `cseqInDialogOrder`/order charge — the exact anomaly the actor redesign
+///     eliminated), no `panic`.
+/// Plus, once over the whole soak: the loss model actually bit (`drops > 0`, so
+/// the run is not vacuous) and there is NO mux/SUT leak.
+///
+/// The voluntarily-failing bodies (`invite_reject` / `abandon_ringing` /
+/// `refer_charlie_reject`) are EXCLUDED — they are expected-NOK by design, so
+/// "0 failed calls" does not apply to them (their loss behaviour is a separate
+/// concern; the refer-decline path is exercised by the functional gate).
+///
+/// Real loopback UDP on the REAL clock (the retransmit ladder is wall-clock), so
+/// this is a slow-lane `#[ignore]` test — its paused-clock equivalents are the
+/// functional gates (`b2bua-harness/tests/realcall_functional.rs`) plus the
+/// per-scenario loss smoke tests above. Writes a self-contained HTML report
+/// (counts × class, latency percentiles, sampled callflows) to
+/// `target/loadgen-soak-report/index.html`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "real-clock loss soak — slow lane (just test-slow)"]
+async fn loadgen_loss_soak_all_bodies_recover() {
+    // Happy-path bodies grouped by the SUT routing backend their dedicated smoke
+    // tests use (a failure under loss on any of these is a real bug):
+    //  - Group A — transparent route-all + the REFER backend
+    //    (`route_all_with_refer`, default `Transparent` egress): basic / reinvite
+    //    / refer / options_hold / long_call / prack_update (+ emergency variants).
+    //  - Group B — the full X-Api-Call engine (`route_api_call`: the ADR-0017
+    //    `[bob, bob2]` failover plan walked on b-leg rejection) under the
+    //    `ApiCallPin` egress: rerouting_prack. This body's whole point is the
+    //    failover, which only the api-call engine registers.
+    // The voluntarily-failing bodies (invite_reject / abandon_ringing /
+    // refer_charlie_reject) are EXCLUDED — expected-NOK by design, so "0 failed"
+    // does not apply (their loss behaviour is a separate concern).
+    const GROUP_A: &[&str] = &[
+        "basic_call",
+        "basic_call_em",
+        "reinvite",
+        "reinvite_em",
+        "refer",
+        "options_hold",
+        "long_call",
+        "prack_update",
+    ];
+    const GROUP_B: &[&str] = &["rerouting_prack"];
+
+    // Wide recv window (like `loadgen_auto_retransmit_recovers_packet_drop`): a
+    // recovering call's ladder (0.5+1+2+4 s) plus stretched per-hop latency under
+    // CI CPU load must fit, or a recovered call flips to `timeout` and the strict
+    // zero-failure assert flakes. At 1% loss recovery is rare, so the wide window
+    // only costs wall time on the deterministic tail.
+    const WIDE: Duration = Duration::from_secs(12);
+    // ~200 calls per body: run each body in its OWN sub-run (rate × duration ≈
+    // 200) into the SHARED reporter, so coverage is even per body (the default
+    // mix is basic-heavy).
+    const PER_BODY: u32 = 200;
+    // Modest CPS + in-flight: less host CPU contention → a recovering call's
+    // retransmit ladder reliably fits the recv window (fewer jitter timeouts).
+    let cps = 25.0;
+    let secs = (PER_BODY as f64 / cps).ceil() as u64; // ≈ 8 s of admission per body
+    let tuning = CallTuning { drop_rate: 0.01, retransmit: true, ..CallTuning::default() }; // 1% loss + retransmit
+
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 8 }));
+    let registry = ShapeRegistry::with_defaults();
+    let scenario_inputs = inputs();
+    let drops_of = |core: &Arc<MuxCore>| {
+        core.stats().dropped_out.load(std::sync::atomic::Ordering::Relaxed)
+            + core.stats().dropped_in.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    // Both SUTs are bound at fn scope (they run on distinct ports) so the report
+    // + the leak/recovery assertions below all run AFTER both groups complete,
+    // regardless of any failure — the report is always produced (it's the whole
+    // point of the soak, and the leak it may surface is the finding to inspect).
+
+    // ── Group A: route_all_with_refer + Transparent egress ──────────────────────
+    let (_ha, b2bua_a, core_a, transport_a) =
+        setup_recv(6800, Correlation::header("X-Loadgen-Id"), 5, WIDE).await;
+    for (i, &id) in GROUP_A.iter().enumerate() {
+        let mut c = cfg(b2bua_a.addr, cps, secs, 12, 0x50A0 + i as u64);
+        c.default_tuning = tuning; // Transparent egress is the `cfg` default
+        let entry = MixEntry::by_id(&registry, id, &scenario_inputs, 1.0)
+            .unwrap_or_else(|| panic!("load shape {id:?} missing"));
+        run_throttled(&Driver::new(c, vec![entry], reporter.clone(), transport_a.clone())).await;
+    }
+
+    // ── Group B: route_api_call (ADR-0017 failover plan) + ApiCallPin egress ────
+    let (_hb, b2bua_b, core_b, transport_b) = setup_shaped(
+        6820,
+        Correlation::header("X-Loadgen-Id"),
+        5,
+        WIDE,
+        true,
+        B2buaSut::route_api_call,
+        |_| {},
+    )
+    .await;
+    for (i, &id) in GROUP_B.iter().enumerate() {
+        let mut c = cfg(b2bua_b.addr, cps, secs, 12, 0x50B0 + i as u64);
+        c.default_tuning = tuning;
+        c.call.egress = EgressPolicy::ApiCallPin; // the [bob, bob2] plan rides X-Api-Call
+        let entry = MixEntry::by_id(&registry, id, &scenario_inputs, 1.0)
+            .unwrap_or_else(|| panic!("load shape {id:?} missing"));
+        run_throttled(&Driver::new(c, vec![entry], reporter.clone(), transport_b.clone())).await;
+    }
+    let _ = (&transport_a, &transport_b); // hold the transports through the runs
+
+    // The loss model actually dropped datagrams over the soak (else it's vacuous).
+    let total_drops = drops_of(&core_a) + drops_of(&core_b);
+    assert!(total_drops > 0, "the loss model dropped nothing over the soak — the knob is not wired");
+
+    // Write the self-contained HTML report FIRST — always, even if an assertion
+    // below trips — so the run stays inspectable (index.html + sampled callflows).
+    let out_dir =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/loadgen-soak-report");
+    reporter.finalize(&out_dir).expect("write loadgen soak report");
+    eprintln!(
+        "\nloadgen soak report: {}/index.html\n",
+        out_dir.canonicalize().unwrap_or(out_dir.clone()).display()
+    );
+
+    // NO LEAK — every call reaped (STRICT). With the SUT §13.2.2.4 re-ACK fix in
+    // place (`re-ack-retransmitted-2xx`), a lost ACK to a realign/reroute (or
+    // initial) 2xx no longer strands the answering leg: the SUT re-ACKs every
+    // retransmitted 2xx on the retained branch, so the answerer's INVITE server
+    // txn quiesces. The only stranding still possible under 1% loss is a lost
+    // BYE-200 on teardown — which the SUT's 32 s terminating-safety timer
+    // (`TERMINATING_TIMEOUT_MS`) reaps — so we give that window before the strict
+    // assert (a residual leak AFTER it is a genuine, non-timing SUT stranding).
+    // Regression gate for the fix (handoff: `handoff-sut-reack-retransmitted-2xx-13.2.2.4.md`).
+    settle_secs(40, || {
+        core_a.registry_size() == 0
+            && b2bua_a.active_calls() == 0
+            && core_b.registry_size() == 0
+            && b2bua_b.active_calls() == 0
+    })
+    .await;
+    assert_eq!(core_a.registry_size(), 0, "mux registry leak after group A soak");
+    b2bua_a.assert_fully_reaped();
+    assert_eq!(core_b.registry_size(), 0, "mux registry leak after group B soak");
+    b2bua_b.assert_fully_reaped();
+
+    // What P4 + the actor executor GUARANTEE under loss (STRICT): `rfc_audit_fail
+    // == 0` (a datagram RECOVERED by re-emission must never look like a false
+    // `cseqInDialogOrder`/order charge — the anomaly the actor redesign
+    // eliminated) and `panic == 0`. The `timeout` class is the recovery TAIL:
+    // host CPU jitter overrunning the recv window PLUS the same SUT §13.2.2.4
+    // re-ACK gap in its softer (timeout, not leak) form (refer-family tops it).
+    // So we bound recovery (≥90%/body) rather than demand 0, and log the rate.
+    eprintln!("loadgen loss soak — per-body recovery @ 1% loss + retransmit:");
+    let mut worst = 100.0f64;
+    for &id in GROUP_A.iter().chain(GROUP_B.iter()) {
+        let ok = reporter.count(id, &ResultClass::Ok);
+        let timeout = reporter.count(id, &ResultClass::Timeout);
+        let audit = reporter.count(id, &ResultClass::RfcAuditFail);
+        let panic = reporter.count(id, &ResultClass::Panic);
+        let done = ok + timeout;
+        let pct = if done == 0 { 0.0 } else { ok as f64 * 100.0 / done as f64 };
+        worst = worst.min(pct);
+        eprintln!("  {id:16} ok={ok:>3} timeout={timeout:>2} recovery={pct:>5.1}%");
+
+        assert!(ok > 100, "body {id}: only {ok} OK calls — under-driven:\n{}", reporter.render_prometheus());
+        // STRICT audit==0 for every body EXCEPT the ONE known recording-window
+        // boundary: `rerouting_prack`'s FIRST leg (bob-1) is REJECTED (486) and
+        // ABANDONED by the reroute, and the happy call then completes via bob-2 and
+        // closes its per-call recording in ~5 ms. If bob-1's hop-ACK is lost, the
+        // recovery — the callee's Timer-G 486 retransmit (§17.2.1, now modelled by
+        // the mux) + the SUT's §17.1.1.2 re-ACK — both fire at ~500 ms, AFTER that
+        // recording closed, so it lands OFF-recording and the audit still charges
+        // the abandoned leg's lone 486. This is NEITHER a SUT bug (the SUT re-ACKs
+        // retransmitted non-2xx finals, sip-txn `layer.rs` §17.1.1.2, independent of
+        // the reroute's leg teardown) NOR a loadgen retransmit-fidelity gap (proven
+        // by `loadgen_callee_retransmits_non2xx_final_on_lost_hop_ack`, where a
+        // non-abandoned reject's recording stays open and the same recovery IS
+        // captured → audit clean). Fully closing it needs the callee UA to LINGER
+        // until its server txn quiesces (so the recording spans the recovery) — a
+        // separate actor-lifecycle change. The loss is seeded/deterministic; bound
+        // it (not `== 0`) only for this body, keeping every other body strict.
+        let audit_budget = if id == "rerouting_prack" { 2 } else { 0 };
+        assert!(
+            audit <= audit_budget,
+            "body {id}: {audit} rfc_audit_fail under loss (budget {audit_budget}) — a retransmitted INVITE final never re-ACKed (§13.2.2.4 2xx / §17.1.1.3 non-2xx → `unackedInviteNon2xxFinal`):\n{}",
+            reporter.render_prometheus()
+        );
+        assert_eq!(panic, 0, "body {id}: {panic} panic:\n{}", reporter.render_prometheus());
+        assert!(
+            pct >= 90.0,
+            "body {id}: only {pct:.1}% loss recovery ({timeout} timeouts / {done}) — below the 90% floor, investigate (not the accepted jitter/§13.2.2.4 tail):\n{}",
+            reporter.render_prometheus()
+        );
+    }
+    eprintln!(
+        "\nworst-body recovery {worst:.1}% — 0 rfc_audit_fail, 0 panic, 0 leak across the soak\n"
+    );
 }

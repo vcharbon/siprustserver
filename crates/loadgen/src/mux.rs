@@ -1425,6 +1425,18 @@ struct TxnInner {
     /// Our proactive 2xx (INVITE server txn) resenders, keyed by (Call-ID, CSeq
     /// number) so the inbound ACK — which carries a *different* branch — can stop them.
     invite_2xx: HashMap<(String, u32), Arc<ResendCtl>>,
+    /// Our proactive NON-2xx INVITE-final resenders (RFC 3261 §17.2.1: a real UAS
+    /// retransmits its non-2xx final via Timer G until the ACK arrives, giving up
+    /// at Timer H = 64·T1), keyed by (Call-ID, CSeq number) so the inbound hop-ACK
+    /// — which reuses the INVITE CSeq (§17.1.1.3) — can stop them. Symmetric to
+    /// `invite_2xx`, with one difference: these are NOT drained at `shutdown`
+    /// (below) — a rejected leg's server txn is independent of the call it was
+    /// part of (a REFER/reroute abandons the leg immediately, yet a real callee
+    /// keeps retransmitting its 486 until ACKed). Bounded by the resender's own
+    /// `TXN_TIMEOUT` (Timer H), so lifetime stays bounded. Without this the loadgen
+    /// is not a faithful UAS: a lost hop-ACK to a reject is never recovered and the
+    /// SUT is wrongly charged `unackedInviteNon2xxFinal`.
+    invite_non2xx: HashMap<(String, u32), Arc<ResendCtl>>,
     /// Our proactive RELIABLE-1xx resenders (RFC 3262 §3: retransmit until
     /// PRACKed), keyed by (Call-ID, RSeq) so the inbound PRACK — whose RAck
     /// response-num carries that RSeq but whose branch is its own — can stop them.
@@ -1487,6 +1499,30 @@ impl CallTxns {
             if (200..300).contains(&status) && cseq_method(raw) == "INVITE" {
                 if let (Some(cid), Some(cseq)) = (call_id(raw), cseq_num(raw)) {
                     if let std::collections::hash_map::Entry::Vacant(e) = g.invite_2xx.entry((cid, cseq)) {
+                        let ctl = ResendCtl::new();
+                        e.insert(ctl.clone());
+                        spawn_resender(
+                            ctl,
+                            self.socket.clone(),
+                            self.drop.clone(),
+                            self.stats.clone(),
+                            raw.to_vec(),
+                            dst,
+                            false,
+                            self.sendtap.clone(),
+                        );
+                    }
+                }
+            }
+            // Proactive non-2xx-until-ACK for an INVITE reject (Timer G, §17.2.1):
+            // a real UAS retransmits its final until the hop-ACK arrives, so a lost
+            // SUT hop-ACK is RECOVERED (the SUT's txn layer re-ACKs each resend,
+            // §17.1.1.2) instead of stranding the reject as an unACKed final and
+            // mis-charging the SUT. In no-loss runs the ACK arrives first and stops
+            // this before it ever fires (no extra wire).
+            if (300..700).contains(&status) && cseq_method(raw) == "INVITE" {
+                if let (Some(cid), Some(cseq)) = (call_id(raw), cseq_num(raw)) {
+                    if let std::collections::hash_map::Entry::Vacant(e) = g.invite_non2xx.entry((cid, cseq)) {
                         let ctl = ResendCtl::new();
                         e.insert(ctl.clone());
                         spawn_resender(
@@ -1613,9 +1649,15 @@ impl CallTxns {
         // Inbound request.
         let method = req_method(raw).unwrap_or_default();
         if method == "ACK" {
-            // The ACK confirms our INVITE 2xx → stop its proactive resender.
+            // The ACK confirms our INVITE final → stop its proactive resender
+            // (2xx §13.3.1 or non-2xx §17.2.1; both keyed by the INVITE CSeq, which
+            // the hop-ACK reuses per §17.1.1.3).
             if let (Some(cid), Some(cseq)) = (call_id(raw), cseq_num(raw)) {
-                if let Some(ctl) = g.invite_2xx.remove(&(cid, cseq)) {
+                let key = (cid, cseq);
+                if let Some(ctl) = g.invite_2xx.remove(&key) {
+                    ctl.stop();
+                }
+                if let Some(ctl) = g.invite_non2xx.remove(&key) {
                     ctl.stop();
                 }
             }
@@ -1658,6 +1700,13 @@ impl CallTxns {
         for (_, ctl) in g.invite_2xx.drain() {
             ctl.stop();
         }
+        // NOT `invite_non2xx`: a rejected leg's server txn is independent of the
+        // call it belonged to (a reroute/REFER abandons the leg immediately, but a
+        // real UAS keeps retransmitting its non-2xx final until ACKed, §17.2.1). We
+        // leave those resenders running so a lost hop-ACK is still recovered; each
+        // self-terminates on its inbound ACK or its own `TXN_TIMEOUT` (Timer H), so
+        // lifetime stays bounded. Dropping the map here releases only CallTxns's ctl
+        // clones — the detached tasks hold their own.
         for (_, ctl) in g.reliable_1xx.drain() {
             ctl.stop();
         }
