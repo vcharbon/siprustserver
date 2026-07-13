@@ -89,6 +89,25 @@ pub fn update_dialog(
     })
 }
 
+/// Retain the Via branch of the ACK-for-2xx just sent on `leg_id`'s dialog, so a
+/// re-ACK of a **retransmitted** 2xx reuses the SAME branch (RFC 3261 §13.2.2.4).
+/// A fresh branch would mint a new client transaction and never quiesce the
+/// answerer's INVITE server txn, leaking / late-timing-out the confirmed call
+/// when the first ACK is lost. Idempotent: only the first ACK writes it (every
+/// re-ACK re-observes the same value). Reset to `None` wherever a new INVITE
+/// transaction is cached on the dialog, so the stored branch always belongs to
+/// the current INVITE's CSeq. Mirrors the `dialogs.first()` dialog choice in
+/// `rules::relay::ack_b_leg`, its sole writer's twin.
+pub fn retain_ack_branch(call: Call, leg_id: &str, branch: &str) -> Call {
+    update_leg(call, leg_id, |leg| {
+        if let Some(d) = leg.dialogs.first_mut() {
+            if d.ext.ack_branch.is_none() {
+                d.ext.ack_branch = Some(branch.to_string());
+            }
+        }
+    })
+}
+
 /// Set the state of a specific leg.
 pub fn set_leg_state(call: Call, leg_id: &str, state: LegState) -> Call {
     update_leg(call, leg_id, |l| l.state = state)
