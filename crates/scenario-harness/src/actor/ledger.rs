@@ -189,9 +189,17 @@ pub struct ObligationLedger {
     /// Every obligation ever closed (grow-only). An obligation is satisfied iff
     /// its key is in BOTH `opened` and `closed`.
     closed: HashSet<ObligationKey>,
-    /// Per-dialog CSeq streams, keyed by dialog identity (the Call-ID). Tracks
-    /// ALL in-dialog methods, not a NOTIFY-only stream (§12.2.1.1).
-    dialogs: HashMap<String, InDialogCseq>,
+    /// Per-dialog-end CSeq streams, keyed by `(Call-ID, observing-leg)`. A SIP
+    /// dialog has TWO independent CSeq spaces — each end maintains and increments
+    /// its own local sequence (RFC 3261 §12.2.1.1) — that share one Call-ID.
+    /// Keying by Call-ID alone would fold both ends' sequences into a single
+    /// stream; two interleaved monotone sequences are not one contiguous run, so
+    /// [`is_contiguous`](InDialogCseq::is_contiguous) would report a phantom gap
+    /// (or mask a real one). The `leg` here is the OBSERVING leg, so each stream
+    /// holds exactly the one remote space that observer sees — all of that
+    /// sender's methods (BYE + keepalive-OPTIONS + NOTIFY + …) still land in one
+    /// stream, preserving the §12.2.1.1 completeness detector.
+    dialogs: HashMap<(String, &'static str), InDialogCseq>,
 }
 
 impl ObligationLedger {
@@ -213,7 +221,7 @@ impl ObligationLedger {
     /// stream. Idempotent (the stream is a grow-only set).
     pub fn seed_dialog(&mut self, call_id: impl Into<String>, leg: &'static str, cseq: u32) {
         self.dialogs
-            .entry(call_id.into())
+            .entry((call_id.into(), leg))
             .or_insert_with(|| InDialogCseq::new(leg))
             .record(cseq);
     }
@@ -222,7 +230,7 @@ impl ObligationLedger {
     /// NOTIFY, OPTIONS, re-INVITE, …). Creates the stream if unseen.
     pub fn record_in_dialog(&mut self, call_id: impl Into<String>, leg: &'static str, cseq: u32) {
         self.dialogs
-            .entry(call_id.into())
+            .entry((call_id.into(), leg))
             .or_insert_with(|| InDialogCseq::new(leg))
             .record(cseq);
     }
@@ -312,6 +320,28 @@ mod tests {
         assert!(!led.is_closed());
         led.record_in_dialog("call-abc", "bob", 2); // e.g. a BYE / OPTIONS
         assert!(led.is_closed(), "any in-dialog method filling cseq 2 closes the gap");
+    }
+
+    #[test]
+    fn two_ends_keep_independent_cseq_spaces() {
+        // A SUT-less two-actor dialog where BOTH ends originate in-dialog
+        // requests on the SAME Call-ID. Each end runs its OWN local CSeq space
+        // (RFC 3261 §12.2.1.1) — two independent monotone sequences that share
+        // only the Call-ID. alice seeds at 1 (the dialog-creating INVITE) and
+        // sends an INFO at 2; bob originates its first in-dialog request in
+        // *bob's* space (here 20 — bob's local sequence, unrelated to alice's).
+        // Folding both directions into one Call-ID-keyed stream yields {1,2,20}
+        // and a PHANTOM gap at 3..19. Keyed by (Call-ID, observing-leg) each
+        // end's stream is contiguous on its own, so the ledger settles.
+        let mut led = ObligationLedger::default();
+        led.seed_dialog("call-shared", "alice", 1);
+        led.record_in_dialog("call-shared", "alice", 2);
+        led.record_in_dialog("call-shared", "bob", 20);
+        assert!(
+            led.is_closed(),
+            "each end's CSeq space is contiguous independently — no phantom gap: {:?}",
+            led.describe_open()
+        );
     }
 
     #[test]
