@@ -283,6 +283,119 @@ mod tests {
         h.finish().await;
     }
 
+    /// The generic in-dialog origination primitive (`GoalStep::InDialog`): alice
+    /// establishes, sends an INFO carrying a typed body + an extra header on the
+    /// confirmed dialog, and hangs up ONLY once the observed state shows bob
+    /// received that INFO (`Barrier::received` — the ordering gate that replaces a
+    /// timed dwell). The INFO opens an `InDialog` obligation the settle barrier
+    /// holds on until its 2xx closes it; the RFC hard gate at `finish()` confirms
+    /// the INFO rode the wire compliantly.
+    #[tokio::test(start_paused = true)]
+    async fn actor_originates_in_dialog_info() {
+        use sip_message::generators::InDialogMethod;
+
+        let h = Harness::new("actor-in-dialog-info").describe(
+            "044 primitive: alice originates a plain in-dialog INFO (typed body) on \
+             the confirmed dialog; bob 200s it reactively; alice BYEs gated on the \
+             observed fact that bob received the INFO (Barrier::received), and the \
+             settle barrier holds until the INFO's 2xx closes its InDialog obligation",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let call = CallPlan {
+            actors: vec![
+                ActorSpec {
+                    role: "alice",
+                    agent: alice.clone(),
+                    disposition: Disposition::Caller,
+                    media: MediaState::offer(OFFER_SDP),
+                    goals: vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        // Send the INFO once the call is up.
+                        Goal::new(
+                            Barrier::AllConfirmed(&["alice", "bob"]),
+                            GoalStep::InDialog {
+                                method: InDialogMethod::Info,
+                                content_type: Some("application/x-info-test".to_string()),
+                                body: Some(b"<info>eof</info>".to_vec()),
+                                headers: vec![("X-Info-Kind".to_string(), "eof".to_string())],
+                            },
+                        ),
+                        // Hang up only once bob has OBSERVABLY received the INFO —
+                        // the ordering barrier, no timed dwell.
+                        Goal::new(Barrier::received("info_seen", "bob", "INFO"), GoalStep::Bye),
+                    ],
+                    invite_targets: vec![("bob", bob.clone())],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+                ActorSpec {
+                    role: "bob",
+                    agent: bob.clone(),
+                    disposition: Disposition::RingThenAnswer {
+                        ring: Duration::from_millis(200),
+                    },
+                    media: MediaState::answer(ANSWER_SDP),
+                    goals: vec![],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+            ],
+            plan: vec![phase("established", |s| {
+                s.leg_at_least("alice", LegPhase::Confirmed)
+                    && s.leg_at_least("bob", LegPhase::Confirmed)
+            })],
+            settle: SettleBarrier::default_ceiling(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "the INFO call must settle OK, got {verdict:?}");
+
+        h.finish().await;
+    }
+
+    /// `Barrier::received` (and its `leg_received_method` backing) hold exactly
+    /// when the named leg has folded an inbound request of the named method —
+    /// method-specific and leg-scoped, so the MRF-EOF ordering gates on the right
+    /// observed fact and never a sibling's traffic.
+    #[tokio::test]
+    async fn barrier_received_is_method_and_leg_scoped() {
+        let now = tokio::time::Instant::now();
+        let obs = ObservedState::new();
+        let barrier = Barrier::received("info_seen", "bob", "INFO");
+
+        assert!(!obs.with_snapshot(|s| barrier.holds(s)), "no INFO observed yet");
+
+        // A different method on the right leg does NOT satisfy it.
+        obs.record(
+            Observation::InDialogRequest {
+                leg: "bob",
+                call_id: "c1".to_string(),
+                cseq: 2,
+                method: "OPTIONS".to_string(),
+            },
+            now,
+        );
+        assert!(!obs.with_snapshot(|s| barrier.holds(s)), "OPTIONS is not INFO");
+
+        // The INFO on the RIGHT leg satisfies it...
+        obs.record(
+            Observation::InDialogRequest {
+                leg: "bob",
+                call_id: "c1".to_string(),
+                cseq: 3,
+                method: "INFO".to_string(),
+            },
+            now,
+        );
+        assert!(obs.with_snapshot(|s| barrier.holds(s)), "bob received INFO");
+        assert!(obs.with_snapshot(|s| s.leg_received_method("bob", "INFO")));
+        // ...but the fact is leg-scoped: alice has not received an INFO.
+        assert!(!obs.with_snapshot(|s| s.leg_received_method("alice", "INFO")));
+    }
+
     /// Fold-order determinism: the SAME set of observations folded in forward
     /// and reverse order yields the SAME barrier verdict + ledger state — the
     /// grow-only, commutative fold the N-reactor reconciliation depends on.
@@ -302,7 +415,12 @@ mod tests {
                     key: ObligationKey::new("alice", ObligationKind::Bye, 2),
                     detail: "hangup".to_string(),
                 },
-                Observation::InDialogRequest { leg: "bob", call_id: "c1".to_string(), cseq: 2 },
+                Observation::InDialogRequest {
+                    leg: "bob",
+                    call_id: "c1".to_string(),
+                    cseq: 2,
+                    method: "BYE".to_string(),
+                },
                 Observation::ResponseObserved {
                     key: ObligationKey::new("alice", ObligationKind::Bye, 2),
                 },
@@ -343,7 +461,12 @@ mod tests {
             vec![
                 // A NOTIFY gap: cseq 1 seeded, 3 seen, 2 dropped.
                 Observation::SeedDialog { leg: "bob", call_id: "c1".to_string(), cseq: 1 },
-                Observation::InDialogRequest { leg: "bob", call_id: "c1".to_string(), cseq: 3 },
+                Observation::InDialogRequest {
+                    leg: "bob",
+                    call_id: "c1".to_string(),
+                    cseq: 3,
+                    method: "NOTIFY".to_string(),
+                },
                 // An obligation closed before it is opened (permutation hazard).
                 Observation::ResponseObserved {
                     key: ObligationKey::new("bob", ObligationKind::Notify, 3),
