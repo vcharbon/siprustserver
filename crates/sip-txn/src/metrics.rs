@@ -29,6 +29,12 @@ pub(crate) struct MetricsInner {
     /// Per-reason drop counters, indexed by [`EventQueueDropReason::index`].
     pub event_queue_drops: [AtomicU64; 6],
     pub txn_cancelled_on_call_evict: AtomicU64,
+    /// RFC 3261 §17.2.1 Timer-G retransmissions of an INVITE server txn's non-2xx
+    /// final (the reject the caller has not yet ACKed). Zero under no loss (the ACK
+    /// beats the 500 ms Timer G); a climb tracks loss on the caller-facing reject
+    /// path — the retransmits that heal a dropped final instead of wedging the
+    /// caller for the full 32 s.
+    pub server_final_retransmits: AtomicU64,
     /// Inbound packets the parser rejected (dropped). A persistent climb here vs a
     /// flat `messages_processed` is the signature of a malformed-traffic flood or a
     /// parser regression — distinguishable from "no traffic arrived".
@@ -51,6 +57,7 @@ impl MetricsInner {
             outbound_messages_total: AtomicU64::new(0),
             event_queue_drops: Default::default(),
             txn_cancelled_on_call_evict: AtomicU64::new(0),
+            server_final_retransmits: AtomicU64::new(0),
             parse_errors: AtomicU64::new(0),
             send_errors: AtomicU64::new(0),
         }
@@ -127,6 +134,12 @@ impl TransactionMetrics {
     /// Client transactions torn down because their owning call was evicted.
     pub fn txn_cancelled_on_call_evict(&self) -> u64 {
         self.inner.txn_cancelled_on_call_evict.load(Ordering::Relaxed)
+    }
+
+    /// Timer-G retransmissions of an INVITE server txn's unACKed non-2xx final
+    /// (RFC 3261 §17.2.1 caller-facing reject recovery under loss).
+    pub fn server_final_retransmits(&self) -> u64 {
+        self.inner.server_final_retransmits.load(Ordering::Relaxed)
     }
 
     /// Inbound packets the parser rejected and dropped (counter).

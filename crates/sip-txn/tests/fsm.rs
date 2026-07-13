@@ -414,6 +414,79 @@ async fn duplicate_final_on_completed_server_txn_is_dropped() {
     assert_eq!(active(&stack), 0);
 }
 
+// ── Timer G: server INVITE non-2xx final retransmit (§17.2.1) ───────────────
+
+/// RFC 3261 §17.2.1: an INVITE server txn that answered NON-2xx MUST actively
+/// retransmit the final (Timer G: T1, then ×2 capped at T2) until the ACK or
+/// Timer H. The auto-100 we sent already silenced the UAC's INVITE retransmit,
+/// so the passive replay-on-request-retransmit path never fires — without Timer G
+/// a single dropped reject wedges the caller for the full 32 s (newkahneed-046).
+#[tokio::test(start_paused = true)]
+async fn server_invite_non_2xx_final_retransmits_on_timer_g() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let branch = "z9hG4bK-timerg";
+    let call_id = "timerg-call";
+
+    stack.inject(&inbound_request("INVITE", branch, call_id, None)).await;
+    elapse_ms(60).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 100), 1, "100 Trying");
+    let _ = stack.drain_events();
+
+    // App rejects with 603 → Completed, sent ONCE, Timer G armed at T1.
+    let resp = parse_response(&response_bytes(603, "Decline", "INVITE", branch, call_id, true));
+    stack.txn.send_response(resp, addr(PEER)).await.unwrap();
+    elapse_ms(60).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 603), 1, "603 sent once");
+    assert_eq!(active(&stack), 1, "completed txn pinned (Timer G/H)");
+
+    // The caller never ACKs (the 603 was dropped on the wire). Over the next ~8 s
+    // Timer G fires at 500 / 1500 / 3500 / 7500 ms (interval 500→1000→2000→4000,
+    // capped at T2) = FOUR retransmits — any one heals a per-datagram loss.
+    elapse_ms(8_000).await;
+    assert_eq!(
+        count_responses(&stack.drain_peer(), 603),
+        4,
+        "Timer G retransmits the non-2xx final (×2 cadence capped at T2)"
+    );
+    assert_eq!(
+        stack.txn.metrics().server_final_retransmits(),
+        4,
+        "the counter tracks the Timer-G retransmits"
+    );
+    assert_eq!(active(&stack), 1, "still Completed (unACKed), bounded by Timer H");
+
+    // The ACK finally lands → Timer G cancelled, txn terminated, silence after.
+    stack
+        .inject(&inbound_request("ACK", branch, call_id, Some("peer-tag")))
+        .await;
+    elapse_ms(60).await;
+    assert_eq!(active(&stack), 0, "ACK terminates the txn (Timer G cancelled)");
+    elapse_ms(5_000).await;
+    assert_eq!(
+        count_responses(&stack.drain_peer(), 603),
+        0,
+        "no retransmit after the ACK — Timer G was cancelled with the txn"
+    );
+}
+
+/// A 2xx final on an INVITE server txn is EXEMPT from Timer G (§17.2.1: the
+/// server txn is done on a 2xx; the TU owns §13.3.1.4 2xx retransmission). Timer G
+/// firing here would put a duplicate 200 on the wire that the TU's own watchdog
+/// already covers, so the server txn must stay silent until its ACK.
+#[tokio::test(start_paused = true)]
+async fn server_invite_2xx_final_is_not_timer_g_retransmitted() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let branch = "z9hG4bK-noG2xx";
+    let call_id = "noG2xx-call";
+    invite_then_final(&mut stack, branch, call_id, 200).await;
+
+    // Well past T1/T2 with no ACK — the server txn must NOT retransmit the 200.
+    elapse_ms(8_000).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 200), 0, "no Timer-G resend for a 2xx");
+    assert_eq!(stack.txn.metrics().server_final_retransmits(), 0, "counter untouched by 2xx");
+    assert_eq!(active(&stack), 1, "still held in Completed for Timer H / the 2xx ACK");
+}
+
 // ── Auto-ACK for non-2xx (client INVITE) ────────────────────────────────────
 
 #[tokio::test(start_paused = true)]

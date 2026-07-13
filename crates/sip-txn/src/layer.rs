@@ -73,6 +73,10 @@ impl TxnState {
 enum Timer {
     /// Timer A (INVITE) / Timer E (non-INVITE) — client retransmit.
     ClientRetransmit(String),
+    /// Timer G (RFC 3261 §17.2.1) — INVITE *server* txn retransmit of an unACKed
+    /// non-2xx final. Disjoint from `ClientRetransmit` (a txn is client XOR server),
+    /// so both reuse the `retransmit_*` fields without colliding.
+    ServerRetransmit(String),
     /// Timer B (INVITE) / Timer F (non-INVITE) — client transaction timeout.
     ClientTimeout(String),
     /// Delete-by-branch cleanup: Timer H/J/Timer-H-487 (server final-response hold)
@@ -699,6 +703,12 @@ impl Owner {
                 }
                 self.fire_retransmit(endpoint, &branch).await
             }
+            Timer::ServerRetransmit(branch) => {
+                if let Some(t) = self.txns.get_mut(&branch) {
+                    t.retransmit_key = None;
+                }
+                self.fire_server_retransmit(endpoint, &branch).await
+            }
             Timer::ClientTimeout(branch) => {
                 if let Some(t) = self.txns.get_mut(&branch) {
                     t.timeout_key = None;
@@ -763,6 +773,46 @@ impl Owner {
                 txn.retransmit_interval_ms = next_interval;
                 txn.retransmit_elapsed_ms = next_elapsed;
             }
+        }
+    }
+
+    /// RFC 3261 §17.2.1 Timer G: retransmit the cached non-2xx final of an INVITE
+    /// server txn still in `Completed` (not yet ACKed / Timer-H'd), then re-arm at
+    /// MIN(2×interval, T2). The auto-100 we already sent silenced the UAC's INVITE
+    /// retransmit, so the passive "replay the cached final on a request retransmit"
+    /// path never fires — without this a single dropped reject wedges the caller
+    /// for the full 32 s (Timer H). The ACK (or Timer H) `delete_txn`s the branch,
+    /// which cancels `retransmit_key`, so this stops exactly when RFC requires.
+    /// Non-INVITE (Timer J) and 2xx (TU-owned §13.3.1.4 retransmit) are excluded at
+    /// the arming site in `do_send_response`.
+    async fn fire_server_retransmit(&mut self, endpoint: &dyn UdpEndpoint, branch: &str) {
+        let (buf, dest, next_interval) = match self.txns.get(branch) {
+            Some(t)
+                if t.role == TxnRole::Server
+                    && t.kind == TxnKind::Invite
+                    && t.state == TxnState::Completed =>
+            {
+                match (&t.last_response, t.destination) {
+                    (Some(buf), Some(dest)) => {
+                        (buf.clone(), dest, std::cmp::min(t.retransmit_interval_ms * 2, T2))
+                    }
+                    _ => return, // no cached final / destination — nothing to resend
+                }
+            }
+            _ => return, // ACKed (deleted), Timer-H'd, or no longer a completed INVITE server txn
+        };
+
+        self.send_buffer(endpoint, &buf, dest).await;
+        self.metrics
+            .server_final_retransmits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let key = self
+            .timers
+            .insert(Timer::ServerRetransmit(branch.to_string()), ms(next_interval));
+        if let Some(t) = self.txns.get_mut(branch) {
+            t.retransmit_key = Some(key);
+            t.retransmit_interval_ms = next_interval;
         }
     }
 
@@ -1018,9 +1068,27 @@ impl Owner {
                             TxnKind::Invite => TIMER_H,
                             TxnKind::NonInvite => TIMER_J,
                         };
+                        // RFC 3261 §17.2.1: an INVITE server txn that answered NON-2xx
+                        // MUST actively retransmit the final (Timer G, T1 then ×2 capped
+                        // at T2) until the ACK or Timer H — our auto-100 already silenced
+                        // the UAC's INVITE retransmit, so the passive replay-on-request-
+                        // retransmit path never fires and a single dropped reject would
+                        // otherwise wedge the caller for the full 32 s. 2xx is exempt (the
+                        // TU owns §13.3.1.4 2xx retransmission); non-INVITE (Timer J) only
+                        // absorbs, never retransmits.
+                        let arm_timer_g = matches!(txn.kind, TxnKind::Invite) && status >= 300;
                         let key = self.timers.insert(Timer::Cleanup(branch.clone()), ms(delay));
+                        let g_key = arm_timer_g.then(|| {
+                            self.timers
+                                .insert(Timer::ServerRetransmit(branch.clone()), ms(T1))
+                        });
                         if let Some(txn) = self.txns.get_mut(&branch) {
                             txn.cleanup_key = Some(key);
+                            if let Some(g_key) = g_key {
+                                txn.retransmit_key = Some(g_key);
+                                txn.retransmit_interval_ms = T1;
+                                txn.destination = Some(dest);
+                            }
                         }
                     }
                 }
