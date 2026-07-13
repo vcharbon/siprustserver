@@ -1,19 +1,20 @@
-//! Functional leak gate over the **shared** real-call scenarios.
+//! Functional leak gate over the **shared** actor-declared scenarios.
 //!
-//! These are the SAME `scenario_harness::realcall` scenarios the load generator
-//! drives at 20–100 cps against the real cluster — here run ONCE, in-process,
-//! against a real `B2buaCore`, on a paused clock. `run_asserting` panics on any
-//! deviation (the strict analogue of the load driver's count-and-classify), then
-//! we assert the SUT leaked no call state. So a scenario that leaks a dialog,
-//! holds a limiter token, or mis-tears-down is caught deterministically in CI —
-//! no cluster, no soak — and the realistic 180→200 / re-INVITE / pre-BYE dwells
-//! are exercised for free (the sleeps auto-advance under `start_paused`).
+//! These are the SAME `scenario_harness::actor::scenarios` bodies the load
+//! generator drives at 20–100 cps against the real cluster — here run ONCE,
+//! in-process, against a real `B2buaCore`, on a paused clock.
+//! `run_actor_asserting` panics on any deviation (the strict analogue of the
+//! load driver's count-and-classify), then we assert the SUT leaked no call
+//! state. So a scenario that leaks a dialog, holds a limiter token, or
+//! mis-tears-down is caught deterministically in CI — no cluster, no soak — and
+//! the realistic 180→200 / re-INVITE / pre-BYE dwells are exercised for free
+//! (the sleeps auto-advance under `start_paused`).
 //!
 //! This is the proof that one scenario definition feeds both lanes — every
-//! migrated scenario is covered here: the happy-path flows (`run_asserting`) AND
-//! the voluntarily-failing ones (`run_collecting`, where a FAILED call that still
-//! cleans up is the leak gate's most valuable assertion). As more flows migrate
-//! into `realcall::scenarios`, add a case here per flow.
+//! scenario is covered here: the happy-path flows (`run_actor_asserting`) AND
+//! the voluntarily-failing ones (`run_actor_collecting`, where a FAILED call
+//! that still cleans up is the leak gate's most valuable assertion). As more
+//! flows land in `actor::scenarios`, add a case here per flow.
 
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use scenario_harness::actor::scenarios::{

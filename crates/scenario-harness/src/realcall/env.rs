@@ -64,8 +64,8 @@ impl CoreIdentity {
     }
 }
 
-/// Everything a [`RealCallScenario`](super::RealCallScenario) needs to drive one
-/// call: the agents (bound on the mux or a functional harness) + the
+/// Everything an [`ActorScenario`](crate::actor::ActorScenario) needs to drive
+/// one call: the agents (bound on the mux or a functional harness) + the
 /// correlation/routing knobs + the realistic-timing dwells. Built fresh per call
 /// (so the per-call token is unique).
 pub struct CallEnv<'a> {

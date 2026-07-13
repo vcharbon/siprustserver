@@ -1,6 +1,7 @@
-//! The actor-declared scenario bodies — the [`ActorScenario`] ports of the
-//! linear [`crate::realcall::scenarios`] bodies (P1 ships the exemplar,
-//! `Refer`; P3 collapses the rest).
+//! The actor-declared scenario bodies — the load/functional call flows
+//! expressed as per-endpoint reactive actors ([`ActorScenario`]). The only
+//! executor: each drives one full call through the SUT, and the load driver +
+//! the in-process functional leak gate both run them.
 
 use std::time::Duration;
 
@@ -40,7 +41,7 @@ fn guard(who: &'static str, detail: &'static str) -> StepError {
 }
 
 /// REFER blind transfer, actor-declared — the port of
-/// [`crate::realcall::scenarios::Refer`] and the redesign's exemplar: the
+/// `Refer` and the redesign's exemplar: the
 /// B2BUA's post-transfer media merge re-INVITEs charlie (the c-realign) and
 /// alice (the a-realign) as logically parallel sub-flows, which the linear
 /// body serialized (one stall froze the other two legs — endurance failure
@@ -187,7 +188,7 @@ impl ActorScenario for Refer {
 }
 
 /// A blind transfer whose target DECLINES (`603`), actor-declared — the port of
-/// [`crate::realcall::scenarios::ReferCharlieReject`]. A↔B establish, bob REFERs
+/// `ReferCharlieReject`. A↔B establish, bob REFERs
 /// to charlie, charlie 603-declines the transfer INVITE; the transfer fails and
 /// A↔B stays up. The linear body returns its NOK terminal and leaves the scope
 /// Confirmed so the *driver's* teardown BYEs A↔B; the actor runner OWNS teardown
@@ -314,7 +315,7 @@ impl ActorScenario for ReferCharlieReject {
 }
 
 /// Rerouting + a RELIABLE provisional on the winning leg, actor-declared — the
-/// port of [`crate::realcall::scenarios::ReroutingPrack`] (the LOAD body of the
+/// port of `ReroutingPrack` (the LOAD body of the
 /// dual-body `rerouting_prack` shape). Alice INVITEs with a `[bob, bob2]`
 /// candidate list; bob `486`s, the SUT fails over to bob2, which answers
 /// RELIABLY (RFC 3262: `183`/PRACK/`200`/ACK) on the winning leg. Each endpoint
@@ -423,7 +424,7 @@ impl ActorScenario for ReroutingPrack {
 
 /// RFC 3262 reliable-provisional establishment followed by an RFC 3311 in-dialog
 /// UPDATE renegotiation, actor-declared — the port of
-/// [`crate::realcall::scenarios::PrackUpdate`]. Bob answers RELIABLY
+/// `PrackUpdate`. Bob answers RELIABLY
 /// ([`Disposition::ReliableAnswer`]: `183`/PRACK/`200`/ACK), alice PRACKs the
 /// reliable 183 in her reactor, and — once established — sends an in-dialog
 /// UPDATE (offer) whose 200 completes the exchange (no ACK), then BYEs. The
@@ -507,7 +508,7 @@ impl ActorScenario for PrackUpdate {
 }
 
 /// Establish then a delayed-offer in-dialog re-INVITE renegotiation then BYE,
-/// actor-declared — the port of [`crate::realcall::scenarios::Reinvite`]. Bob
+/// actor-declared — the port of `Reinvite`. Bob
 /// rings-then-answers; once established alice sends a bodyless (delayed-offer)
 /// re-INVITE, whose 2xx she ACKs WITH the answer SDP (RFC 3264 §4) in her
 /// reactor, then BYEs. Emergency variant `reinvite_em` reuses this body (the
@@ -583,7 +584,7 @@ impl ActorScenario for Reinvite {
 }
 
 /// OPTIONS-keepalive long hold, actor-declared — the port of
-/// [`crate::realcall::scenarios::OptionsHold`]. Establish, then keep the dialog
+/// `OptionsHold`. Establish, then keep the dialog
 /// alive with periodic in-dialog OPTIONS pings for `options_hold` (each 200 read
 /// inline), then BYE. The first ping stamps `keepalive_ack`.
 ///
@@ -656,7 +657,7 @@ impl ActorScenario for OptionsHold {
 }
 
 /// Long recorded call, actor-declared — the port of
-/// [`crate::realcall::scenarios::LongCall`]. Establish, send exactly ONE
+/// `LongCall`. Establish, send exactly ONE
 /// in-dialog OPTIONS keepalive ping, then simply SURVIVE for `long_hold` — the
 /// reactors answer the SUT's own in-dialog keepalives on BOTH legs concurrently
 /// (that is what the linear body's `quiesce` did) — then BYE tolerantly.
@@ -731,7 +732,7 @@ impl ActorScenario for LongCall {
 }
 
 /// The callee REJECTS the INVITE with `486 Busy Here`, actor-declared — the port
-/// of [`crate::realcall::scenarios::InviteReject`]. Alice INVITEs, bob 486s (the
+/// of `InviteReject`. Alice INVITEs, bob 486s (the
 /// final auto-ACKed on both legs), and the transaction completes with nothing to
 /// CANCEL/BYE; the SUT must still reap the rejected call. Alice has ONLY the
 /// INVITE goal (her INVITE is rejected — no dialog, no BYE); the clean torn-down
@@ -793,7 +794,7 @@ impl ActorScenario for InviteReject {
 }
 
 /// The caller ABANDONS after ringing (CANCEL), actor-declared — the port of
-/// [`crate::realcall::scenarios::AbandonRinging`]. Alice INVITEs, sees the 180,
+/// `AbandonRinging`. Alice INVITEs, sees the 180,
 /// then CANCELs the still-pending INVITE (RFC 3261 §9.1); the SUT relays the
 /// CANCEL to bob, who 200s it and 487s his held INVITE, and both legs reap. The
 /// clean torn-down verdict is re-interpreted by [`Expect::AbandonedEarly`] into
@@ -862,7 +863,7 @@ impl ActorScenario for AbandonRinging {
 }
 
 /// The bread-and-butter happy call (INVITE/180/200/ACK, short talk, BYE),
-/// actor-declared — the port of [`crate::realcall::scenarios::BasicCall`] and
+/// actor-declared — the port of `BasicCall` and
 /// the standard-path confirmation. Bob rings-then-answers; alice holds for
 /// `talk_time` then BYEs. Emergency variant `basic_call_em` reuses this body
 /// (the marker rides the INVITE plan).

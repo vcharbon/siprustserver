@@ -10,7 +10,7 @@
 //! registrar / edge proxy WILL challenge, and the day we point the load fleet at
 //! one we want digest to be a single pluggable object, wired through
 //! [`CallEnv`](super::CallEnv) exactly like the correlation strategy — never a
-//! branch sprinkled through `establish` / the request builders.
+//! branch sprinkled through the actor caller's INVITE goal / the request builders.
 //!
 //! # The retry contract (RFC 3261 §22.2 / §8.1.3.5)
 //!
@@ -37,8 +37,9 @@
 //! `method` + `ruri` are the two request-line inputs the `A2` hash needs), return
 //! `Some("Digest username=…, realm=…, nonce=…, uri=…, response=…")`, and attach
 //! it to the [`CallEnv`](super::CallEnv) (or the load `MixEntry`) as
-//! `Some(Arc::new(MyDigest{…}))`. No `establish` / builder change is needed — the
-//! retry point is already wired.
+//! `Some(Arc::new(MyDigest{…}))`. No choreography / builder change is needed —
+//! the retry primitive (`ClientInvite::ack_and_resend_with_auth`) is already
+//! wired; only the actor caller's INVITE path has to call it.
 
 use sip_message::message_helpers::get_header;
 use sip_message::SipResponse;

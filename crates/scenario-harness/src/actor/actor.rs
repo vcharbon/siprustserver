@@ -932,6 +932,29 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
             st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
             st.obs.record(Observation::RequestSent { key, detail: "hangup".to_string() }, now);
         }
+        GoalStep::ByeWith { headers } => {
+            let now = Instant::now();
+            let (key, dialog_clone) = {
+                let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
+                    StepError::UnexpectedKind {
+                        who: st.role.to_string(),
+                        detail: "ByeWith goal with no confirmed dialog".to_string(),
+                    }
+                })?;
+                // Send the BYE carrying the extra headers (the deliberate
+                // deviation); the reactor observes its 200 and closes the
+                // obligation (we do not block on the final here).
+                let mut req = dialog.send_request(InDialogMethod::Bye);
+                for (name, value) in &headers {
+                    req = req.with_header(name, value);
+                }
+                let _bye = req.try_send().await?;
+                let cseq = dialog.local_cseq();
+                (ObligationKey::new(st.role, ObligationKind::Bye, cseq), dialog.clone())
+            };
+            st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
+            st.obs.record(Observation::RequestSent { key, detail: "hangup".to_string() }, now);
+        }
     }
     Ok(())
 }

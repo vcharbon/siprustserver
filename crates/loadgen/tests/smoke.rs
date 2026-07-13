@@ -8,12 +8,17 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use b2bua_harness::{settle_until, B2buaSut};
 use layer_harness::TransportKind;
-use loadgen::scenarios::{establish, BasicCall, LoadScenario, ScenarioId};
+use loadgen::scenarios::ScenarioId;
+use scenario_harness::actor::scenarios::BasicCall;
+use scenario_harness::actor::{
+    phase, ActorCall, ActorScenario, ActorSpec, Barrier, CtxFeed, Disposition, Expect, Feed, Goal,
+    GoalStep, LegPhase, MediaState, SettleBarrier, StateInner, SubflowState, SUBFLOW_REALIGN,
+};
+use scenario_harness::{ANSWER_SDP, ApiCall, OFFER_SDP};
 use loadgen::{
-    prefix_leg_picker, CallConfig, CallCtx, CallEnv, CallRouting, CallScope, CallTuning,
+    prefix_leg_picker, CallConfig, CallEnv, CallRouting, CallTuning,
     Correlation, Driver, DriverCfg, EgressPolicy, EndpointSpec, LegInfo, LegSpec, LoadCase,
     MixEntry, MuxCore, MuxTransport, ResultClass, Reporter, ReporterCfg, Role, ScenarioInputs,
     DropDir, ShapeDescriptor, ShapeRegistry, TargetedDrop,
@@ -493,41 +498,13 @@ async fn loadgen_mux_smoke_rerouting_prack_mix() {
     b2bua.assert_fully_reaped();
 }
 
-/// A scenario that establishes then bails without hanging up — the driver's
-/// teardown must release the dialog (no SUT leak) AND the mux entries must be
-/// reclaimed (no registry leak).
-struct FailMidCall;
-
-#[async_trait]
-impl LoadScenario for FailMidCall {
-    fn id(&self) -> ScenarioId {
-        "fail_mid_call"
-    }
-    async fn run(&self, env: &CallEnv<'_>, scope: &CallScope, ctx: &CallCtx) -> Result<(), StepError> {
-        let _dialog = establish(env, scope, ctx).await?;
-        Err(StepError::Timeout { who: "alice".to_string() })
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn loadgen_mux_teardown_no_leak() {
-    let (_h, b2bua, core, transport) = setup(6420, Correlation::header("X-Loadgen-Id"), 5).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
-
-    let driver = Driver::new(
-        cfg(b2bua.addr, 40.0, 2, 8, 0xDEAD),
-        vec![(Arc::new(FailMidCall) as Arc<dyn LoadScenario>, 1.0)],
-        reporter.clone(),
-        transport,
-    );
-    run_throttled(&driver).await;
-
-    assert!(reporter.count("fail_mid_call", &ResultClass::Timeout) > 0, "no failed calls recorded");
-    settle_until(|| core.registry_size() == 0).await;
-    assert_eq!(core.registry_size(), 0, "mux registry leak after teardown");
-    settle_until(|| b2bua.active_calls() == 0).await;
-    b2bua.assert_fully_reaped();
-}
+// NOTE: the former `fail_mid_call` / `loadgen_mux_teardown_no_leak` test
+// exercised the LINEAR driver's own `scope.teardown()` reaping a confirmed
+// dialog a body had leaked — a path deleted with the linear executor (the actor
+// runner always owns its per-actor teardown, so that leak is structurally
+// impossible). "A failed/aborted call still fully reaps a confirmed dialog" is
+// now covered by `loadgen_post_call_cleanup_no_leak` (actor failure-mix incl.
+// `refer_charlie_reject`, which BYEs a confirmed A↔B, + `assert_fully_reaped`).
 
 /// Orphan observability: a new dialog with NO correlation header, and one with a
 /// header matching no pending call, are both counted + sampled + dropped (never
@@ -1604,18 +1581,20 @@ struct ObservedBasic {
     dwells: Arc<std::sync::Mutex<Vec<(Duration, Duration)>>>,
 }
 
-#[async_trait]
-impl LoadScenario for ObservedBasic {
+impl ActorScenario for ObservedBasic {
     fn id(&self) -> ScenarioId {
         "pooled_basic"
     }
-    async fn run(&self, env: &CallEnv<'_>, scope: &CallScope, ctx: &CallCtx) -> Result<(), scenario_harness::StepError> {
+    fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
+        // The observation moves from the linear `run()` to `build()` — both are
+        // invoked once per call with the bound env — then delegate to the shipped
+        // actor `BasicCall` body verbatim.
         self.froms
             .lock()
             .unwrap()
             .push(env.core.from.clone().expect("every pool entry sets `from`"));
         self.dwells.lock().unwrap().push((env.ring_delay, env.talk_time));
-        BasicCall.run(env, scope, ctx).await
+        BasicCall.build(env)
     }
 }
 
@@ -1639,7 +1618,7 @@ async fn loadgen_pooled_case_identities_and_dwell_overrides() {
 
     let froms = Arc::new(std::sync::Mutex::new(Vec::new()));
     let dwells = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let scenario: Arc<dyn LoadScenario> =
+    let scenario: Arc<dyn ActorScenario> =
         Arc::new(ObservedBasic { froms: froms.clone(), dwells: dwells.clone() });
 
     // Global dwells stay 0 (the `cfg` default), so an observed 25 ms ring /
@@ -1848,29 +1827,66 @@ async fn loadgen_failing_check_reclassifies_to_check_fail() {
 /// rule on every sampled call.
 struct ByeWithContact;
 
-#[async_trait]
-impl LoadScenario for ByeWithContact {
+impl ActorScenario for ByeWithContact {
     fn id(&self) -> ScenarioId {
         "bye_with_contact"
     }
-    async fn run(
-        &self,
-        env: &CallEnv<'_>,
-        scope: &CallScope,
-        ctx: &CallCtx,
-    ) -> Result<(), scenario_harness::StepError> {
-        use sip_message::generators::InDialogMethod;
-        let mut dialog = establish(env, scope, ctx).await?;
-        let mut bye = dialog
-            .send_request(InDialogMethod::Bye)
-            .with_header("Contact", "<sip:alice@127.0.0.1>")
-            .try_send()
-            .await?;
-        scope.set_confirmed(dialog.clone());
-        env.bob.try_receive("BYE").await?.respond(200, "OK").await;
-        bye.try_expect(200).await?;
-        scope.mark_terminated();
-        Ok(())
+    fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
+        let actors = vec![
+            ActorSpec {
+                role: "alice",
+                agent: env.alice.clone(),
+                disposition: Disposition::Caller,
+                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                goals: vec![
+                    Goal::new(
+                        Barrier::None,
+                        GoalStep::Invite { callee: "bob", plan: Some(env.invite_plan(&["bob"])) },
+                    ),
+                    // The deliberate deviation: a BYE carrying a `Contact` header
+                    // (RFC 3261 §15.1 forbids it — the dialog is ending, target
+                    // refresh is meaningless), which trips the non-advisory
+                    // `rfc3261.noContactOnBye` audit rule on every sampled call.
+                    Goal::new(
+                        Barrier::AllConfirmed(&["alice", "bob"]),
+                        GoalStep::ByeWith {
+                            headers: vec![(
+                                "Contact".to_string(),
+                                "<sip:alice@127.0.0.1>".to_string(),
+                            )],
+                        },
+                    )
+                    .after(env.talk_time),
+                ],
+                invite_targets: vec![("bob", env.bob.clone())],
+                via: None,
+                feed: CtxFeed {
+                    ringing_gate: true,
+                    on_answer_rx: Feed::new(Some("time_to_200"), None),
+                    on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
+                    ..CtxFeed::default()
+                },
+            },
+            ActorSpec {
+                role: "bob",
+                agent: env.bob.clone(),
+                disposition: Disposition::RingThenAnswer { ring: env.ring_delay },
+                media: MediaState::answer(ANSWER_SDP),
+                goals: vec![],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed { on_ack_rx: Feed::new(None, Some("connected")), ..CtxFeed::default() },
+            },
+        ];
+        let plan = vec![phase("established", |s: &StateInner| {
+            s.leg_at_least("alice", LegPhase::Confirmed) && s.leg_at_least("bob", LegPhase::Confirmed)
+        })];
+        Ok(ActorCall {
+            actors,
+            plan,
+            settle: SettleBarrier::default_ceiling(),
+            expect: Expect::HappyBye,
+        })
     }
 }
 
@@ -1887,7 +1903,7 @@ async fn loadgen_allow_violations_waives_named_rfc_rule() {
     let baseline = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
     let driver = Driver::new(
         cfg(b2bua.addr, 40.0, 2, 16, 0xA0D17),
-        vec![(Arc::new(ByeWithContact) as Arc<dyn LoadScenario>, 1.0)],
+        vec![(Arc::new(ByeWithContact) as Arc<dyn ActorScenario>, 1.0)],
         baseline.clone(),
         transport.clone(),
     );
@@ -1908,7 +1924,7 @@ async fn loadgen_allow_violations_waives_named_rfc_rule() {
     let waived = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
     let driver = Driver::new(
         cfg(b2bua.addr, 40.0, 2, 16, 0xA0D18),
-        vec![MixEntry::from((Arc::new(ByeWithContact) as Arc<dyn LoadScenario>, 1.0))
+        vec![MixEntry::from((Arc::new(ByeWithContact) as Arc<dyn ActorScenario>, 1.0))
             .with_case(Some(case))],
         waived.clone(),
         transport,
@@ -1948,72 +1964,111 @@ struct NumberPlanRefer {
     refer_key: String,
 }
 
-#[async_trait]
-impl LoadScenario for NumberPlanRefer {
+impl NumberPlanRefer {
+    fn new(refer_key: impl Into<String>) -> Self {
+        Self { refer_key: refer_key.into() }
+    }
+}
+
+/// The post-transfer media merge is complete for the number-addressed leg: BOTH
+/// realign re-INVITEs (the `xfer` target and alice) have been answered AND
+/// acknowledged — the actor twin of the shipped `refer` body's `merged`.
+fn xfer_merged(s: &StateInner) -> bool {
+    let confirmed = |leg: &str| {
+        s.leg(leg).subflow(SUBFLOW_REALIGN).is_some_and(|f| f >= SubflowState::Confirmed)
+    };
+    confirmed("alice") && confirmed("xfer")
+}
+
+impl ActorScenario for NumberPlanRefer {
     fn id(&self) -> ScenarioId {
         "nk_refer_like"
     }
-    async fn run(
-        &self,
-        env: &CallEnv<'_>,
-        scope: &CallScope,
-        _ctx: &CallCtx,
-    ) -> Result<(), scenario_harness::StepError> {
-        use scenario_harness::{ApiCall, ANSWER_SDP, OFFER_SDP};
-        use sip_message::generators::InDialogMethod;
-
-        // The 031 role lookup: a named leg beyond the bob/bob2/charlie trio.
+    fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
+        // The 031 role lookup: a named leg beyond the bob/bob2/charlie trio. The
+        // Refer-To user is the NUMBER (never the role label); the transfer is
+        // authorized for the xfer leg's (shared-socket) address under this run's
+        // key. The transfer INVITE only lands on `xfer` if the driver demuxed the
+        // number-form R-URI by the leg's declared prefix.
         let xfer = env.callee_agent("xfer");
-
-        // A↔B established (bob's UAS dialog originates the REFER).
-        let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP);
-        let mut call = env.outgoing_invite(&["bob"], inv).send().await;
-        scope.set_early(call.cancel_handle());
-        let mut bob_uas = env.bob.try_receive("INVITE").await?;
-        bob_uas.respond(180, "Ringing").await;
-        call.try_expect(180).await?;
-        bob_uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
-        call.try_expect(200).await?;
-        let mut alice_dialog = call.ack().await;
-        scope.set_confirmed(alice_dialog.clone());
-        env.bob.try_receive("ACK").await?;
-        let mut bob_dialog = bob_uas.dialog();
-
-        // REFER whose Refer-To user is the NUMBER; the transfer is authorized
-        // for the xfer leg's (shared-socket) address under this run's key.
         let refer_to = format!("<sip:{XFER_NUMBER}@{}>", xfer.addr());
-        let api =
+        let authorization = Some(
             ApiCall::refer(&self.refer_key, xfer.addr().ip().to_string(), xfer.addr().port())
-                .to_header();
-        let mut refer = bob_dialog
-            .send_request(InDialogMethod::Refer)
-            .with_header("Refer-To", &refer_to)
-            .with_header("X-Api-Call", &api)
-            .try_send()
-            .await?;
-        refer.try_expect_tolerating(202, &["NOTIFY"]).await?;
+                .to_header(),
+        );
 
-        // The transfer INVITE lands on the "xfer" receiver — only if the
-        // driver demuxed the number-form R-URI by the leg's declared prefix.
-        let mut xfer_uas = xfer.try_receive("INVITE").await?;
-        xfer_uas.respond(180, "Ringing").await;
-        xfer_uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
-        let _xfer_dialog = xfer_uas.dialog();
+        let actors = vec![
+            // Alice originates through the SUT, answers the a-realign reactively,
+            // and BYEs once the merge completes (mirrors the shipped `refer`).
+            ActorSpec {
+                role: "alice",
+                agent: env.alice.clone(),
+                disposition: Disposition::Caller,
+                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                goals: vec![
+                    Goal::new(
+                        Barrier::None,
+                        GoalStep::Invite { callee: "bob", plan: Some(env.invite_plan(&["bob"])) },
+                    ),
+                    Goal::new(Barrier::pred("merged", xfer_merged), GoalStep::Bye),
+                ],
+                invite_targets: vec![("bob", env.bob.clone())],
+                via: None,
+                feed: CtxFeed {
+                    on_answer_rx: Feed::new(Some("time_to_200"), None),
+                    ..CtxFeed::default()
+                },
+            },
+            // Bob rings then answers, then — established + a talk dwell — REFERs
+            // the call to the number-addressed xfer leg.
+            ActorSpec {
+                role: "bob",
+                agent: env.bob.clone(),
+                disposition: Disposition::RingThenAnswer { ring: env.ring_delay },
+                media: MediaState::answer(ANSWER_SDP),
+                goals: vec![Goal::new(
+                    Barrier::AllConfirmed(&["alice", "bob"]),
+                    GoalStep::Refer { refer_to, authorization },
+                )
+                .after(env.reinvite_gap)],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed {
+                    on_refer_accepted: Feed::new(Some("time_to_202"), Some("referred")),
+                    ..CtxFeed::default()
+                },
+            },
+            // The number-addressed transfer target answers the transfer INVITE
+            // (180 then an immediate 200) and the c-realign re-INVITE reactively.
+            ActorSpec {
+                role: "xfer",
+                agent: xfer.clone(),
+                disposition: Disposition::RingThenAnswer { ring: Duration::ZERO },
+                media: MediaState::answer(ANSWER_SDP),
+                goals: vec![],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed {
+                    on_answer_sent: Feed::new(Some("time_to_charlie_200"), Some("transferred")),
+                    ..CtxFeed::default()
+                },
+            },
+        ];
 
-        // Settle the ORDERED merge (c-realign, then a-realign) before the BYE —
-        // the same drain ordering the shipped `refer` scenario documents.
-        let settle = Duration::from_millis(150);
-        env.bob.quiesce(settle).await;
-        xfer.quiesce(settle).await;
-        env.alice.quiesce(Duration::from_millis(600)).await;
+        let plan = vec![
+            phase("established", |s: &StateInner| {
+                s.leg_at_least("alice", LegPhase::Confirmed)
+                    && s.leg_at_least("bob", LegPhase::Confirmed)
+            }),
+            phase("merged", xfer_merged),
+        ];
 
-        let mut alice_bye = alice_dialog.bye().await;
-        scope.set_confirmed(alice_dialog.clone());
-        env.bob.quiesce(settle).await;
-        xfer.quiesce(settle).await;
-        alice_bye.try_expect_tolerating(200, &["BYE", "NOTIFY", "INVITE"]).await?;
-        scope.mark_terminated();
-        Ok(())
+        Ok(ActorCall {
+            actors,
+            plan,
+            settle: SettleBarrier::default_ceiling(),
+            expect: Expect::HappyBye,
+        })
     }
 }
 
@@ -2037,8 +2092,8 @@ async fn loadgen_named_leg_specs_demux_number_form_transfer_leg() {
 
     // Third-party registration: the open shape carries its own leg specs.
     let mut registry = ShapeRegistry::with_defaults();
-    registry.register(ShapeDescriptor::new("nk_refer_like").legs(NK_LEGS).load_with(
-        |inputs| Arc::new(NumberPlanRefer { refer_key: inputs.refer_key.clone() }),
+    registry.register(ShapeDescriptor::new("nk_refer_like").legs(NK_LEGS).load_actor_with(
+        |inputs| Arc::new(NumberPlanRefer::new(inputs.refer_key.clone())),
     ));
 
     let driver = Driver::new(

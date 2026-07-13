@@ -1123,6 +1123,11 @@ impl Agent {
     }
     /// A fresh top `Via` header value (new branch) — a new client transaction
     /// (RFC 3261 §8.1.1.7) for a resend (e.g. the §22.2 authenticated INVITE).
+    // Part of the deferred-auth primitive chain (`ack_and_resend_with_auth`),
+    // exercised only by tests until the actor load path wires a challenge
+    // responder — dead in a non-test build since P4 removed the linear
+    // `admitted_uas` (its former sole production caller).
+    #[cfg_attr(not(test), allow(dead_code))]
     fn via_header(&self) -> String {
         format!(
             "SIP/2.0/UDP {}:{};branch={}",
@@ -2128,6 +2133,10 @@ impl ClientInvite {
     /// receive on this transaction, a non-2xx final (a challenge, a shed 503,
     /// any reject) is auto-ACKed on arrival (§17.1.1.3) — the auth retry then
     /// resends under a FRESH branch, a new transaction.
+    // Deferred-auth primitive: only the auth retry / its tests read a raw
+    // challenge response — dead in a non-test build since P4 removed the linear
+    // `admitted_uas` (see `via_header`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn try_recv_response(&mut self) -> Result<SipResponse, StepError> {
         loop {
             match self.agent.try_recv().await? {
@@ -2229,6 +2238,10 @@ impl ClientInvite {
     /// resend — the caller surfaces the original challenge as `status_401/407`),
     /// or `Err` on a transport failure. The default (no responder) never reaches
     /// here, so today's classification is unchanged.
+    // Deferred-auth primitive (the RFC 3261 §22.2 retry): exercised by tests
+    // until the actor load path wires a challenge responder — dead in a non-test
+    // build since P4 removed the linear `admitted_uas` (see `via_header`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn ack_and_resend_with_auth(
         &mut self,
         challenge: &SipResponse,
@@ -3448,7 +3461,6 @@ mod auth_seam_tests {
 
     use super::*;
     use crate::realcall::auth::{Challenge, ChallengeResponder};
-    use crate::realcall::{CallCtx, CallEnv, CallScope};
 
     const OFFER: &str = "v=0\r\no=a 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
@@ -3626,108 +3638,6 @@ mod auth_seam_tests {
         // Alice's side settles: the primitive's 200 (NOTIFY) and her BYE 200.
         notify.try_expect(200).await.unwrap();
         bye.try_expect(200).await.unwrap();
-        let _ = h.finish().await;
-    }
-
-    /// The full `admitted_uas` seam WITH a responder: a challenging middlebox
-    /// (`via`) `401`s the first INVITE, then relays the authenticated resend to
-    /// bob, whom `admitted_uas` returns as admitted — the retry is invisible to
-    /// the choreography above it.
-    #[tokio::test(start_paused = true)]
-    async fn admitted_uas_retries_through_a_challenging_middlebox() {
-        let h = Harness::new("auth-retry-admitted");
-        let alice = h.agent("alice", "127.0.0.1:5060").await;
-        let mbox_ = h.agent("mbox", "127.0.0.1:5080").await; // the challenger `via`
-        let bob = h.agent("bob", "127.0.0.1:5070").await;
-
-        let responder: Arc<dyn ChallengeResponder> = Arc::new(FakeResponder {
-            credential: "Digest username=\"alice\", realm=\"sip\", response=\"x\"".to_string(),
-            seen: std::sync::Mutex::new(Vec::new()),
-        });
-
-        // The middlebox: 401 the first INVITE, then relay the authed resend to bob.
-        let mbox_addr = mbox_.addr();
-        let bob_addr = bob.addr();
-        let relay = tokio::spawn(async move {
-            let mut c = mbox_.try_receive("INVITE").await.unwrap();
-            c.respond(401, "Unauthorized")
-                .with_header("WWW-Authenticate", "Digest realm=\"sip\", nonce=\"n1\"")
-                .try_send()
-                .await
-                .unwrap();
-            mbox_.try_receive("ACK").await.unwrap();
-            let authed = mbox_.try_receive("INVITE").await.unwrap();
-            assert!(
-                get_header(&authed.request().headers, "authorization").is_some(),
-                "the relayed INVITE is the authenticated one",
-            );
-            // Relay the raw authed INVITE onward to bob (pub(crate) send — in-crate).
-            mbox_
-                .try_send(&SipMessage::Request(authed.request().clone()), bob_addr)
-                .await
-                .unwrap();
-        });
-
-        let env = CallEnv::for_functional(&alice, &bob, None, mbox_addr, "X-Test-Id", "tok")
-            .with_challenge_responder(responder.clone());
-        let scope = CallScope::new();
-        let ctx = CallCtx::new();
-
-        // admitted_uas must ride through the 401 and return bob (admitted).
-        let mut call = env.outgoing_invite(&["bob"], alice.invite(&bob).with_sdp(OFFER)).send().await;
-        scope.set_early(call.cancel_handle());
-        let uas = crate::realcall::admitted_uas(&env, &scope, &mut call, 180).await;
-        let uas = uas.expect("admitted_uas returns bob after the auth retry");
-        assert_eq!(uas.request().method, "INVITE");
-        assert!(
-            get_header(&uas.request().headers, "authorization").is_some(),
-            "bob receives the authenticated INVITE",
-        );
-        let _ = ctx; // (anchors unused here)
-
-        relay.await.unwrap();
-        let _ = h.finish().await;
-    }
-
-    /// NO responder → the classification is unchanged: `admitted_uas` surfaces the
-    /// `401` as a `WrongStatus { got: 401 }` (the driver buckets it `status_401`)
-    /// and marks the scope terminated (the challenged INVITE transaction is
-    /// complete — nothing to CANCEL).
-    #[tokio::test(start_paused = true)]
-    async fn admitted_uas_without_responder_classifies_401_unchanged() {
-        let h = Harness::new("auth-no-responder");
-        let alice = h.agent("alice", "127.0.0.1:5060").await;
-        let mbox_ = h.agent("mbox", "127.0.0.1:5080").await;
-        let bob = h.agent("bob", "127.0.0.1:5070").await;
-
-        let mbox_addr = mbox_.addr();
-        let chal = tokio::spawn(async move {
-            let mut c = mbox_.try_receive("INVITE").await.unwrap();
-            c.respond(401, "Unauthorized")
-                .with_header("WWW-Authenticate", "Digest realm=\"sip\", nonce=\"n1\"")
-                .try_send()
-                .await
-                .unwrap();
-            // The UAC auto-ACKs the 401 (§17.1.1.3) even with no responder —
-            // read it so the challenger's reject transaction completes on the
-            // recorded trace (rfc3261.unackedInviteNon2xxFinal gates).
-            mbox_.try_receive("ACK").await.unwrap();
-        });
-
-        // No responder (the default).
-        let env = CallEnv::for_functional(&alice, &bob, None, mbox_addr, "X-Test-Id", "tok");
-        assert!(env.challenge_responder.is_none(), "default is no responder");
-        let scope = CallScope::new();
-
-        let mut call = env.outgoing_invite(&["bob"], alice.invite(&bob).with_sdp(OFFER)).send().await;
-        scope.set_early(call.cancel_handle());
-        match crate::realcall::admitted_uas(&env, &scope, &mut call, 180).await {
-            Err(StepError::WrongStatus { got: 401, expected: 180, .. }) => {}
-            Err(other) => panic!("expected WrongStatus 180/401, got {other:?}"),
-            Ok(_) => panic!("a 401 with no responder must not admit"),
-        }
-
-        chal.await.unwrap();
         let _ = h.finish().await;
     }
 

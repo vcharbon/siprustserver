@@ -110,6 +110,11 @@ pub enum GoalStep {
     Cancel,
     /// Hang up — send a BYE on the confirmed dialog.
     Bye,
+    /// Hang up with EXTRA request headers on the BYE — the deliberate-deviation
+    /// path (e.g. a `Contact` on the BYE, which RFC 3261 §15.1 forbids: the
+    /// `bye_with_contact` load-audit-waiver case). Same obligation bookkeeping as
+    /// [`GoalStep::Bye`]; the headers ride the outgoing request verbatim.
+    ByeWith { headers: Vec<(String, String)> },
 }
 
 /// A goal: its barrier guard + an optional post-guard dwell + the step it
