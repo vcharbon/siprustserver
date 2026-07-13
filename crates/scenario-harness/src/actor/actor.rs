@@ -570,7 +570,7 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
         "BYE" => {
             st.ctx.anchor(&st.agent, "bye", uas.request());
             uas.respond(200, "OK").try_send().await?;
-            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq }, now);
+            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
             st.obs.record(Observation::LegTerminated { leg: st.role }, now);
             st.scope.mark_terminated();
         }
@@ -590,7 +590,7 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
         // gap detector (all methods share the dialog CSeq space, §12.2.1.1).
         "NOTIFY" | "OPTIONS" | "INFO" | "MESSAGE" => {
             uas.respond(200, "OK").try_send().await?;
-            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq }, now);
+            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
         }
         // An in-dialog (re-)INVITE — an offer realign. Answer 200 WITH SDP; a
         // delayed-offer bodyless re-INVITE still gets 200 + our SDP (B6-c: no
@@ -602,7 +602,7 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
             st.ctx.anchor(&st.agent, "reInvite", uas.request());
             respond_200_sdp(&mut uas, st.answer_body()).await?;
             st.answered_reinvites.insert(cseq);
-            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.clone(), cseq }, now);
+            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.clone(), cseq, method: method.clone() }, now);
             st.obs.record(
                 Observation::RequestSent {
                     key: ObligationKey::new(st.role, ObligationKind::ReInvite, cseq),
@@ -623,7 +623,7 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
         // completes it (no ACK), so no obligation opens.
         "UPDATE" => {
             respond_200_sdp(&mut uas, st.answer_body()).await?;
-            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq }, now);
+            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
         }
         // A PRACK (RFC 3262) for our reliable 183: 200 it, then — MUST-014 — this
         // is the trigger to answer 200 to the HELD INVITE txn (the reliable
@@ -631,7 +631,7 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
         "PRACK" => {
             st.ctx.anchor(&st.agent, "prack", uas.request());
             uas.respond(200, "OK").try_send().await?;
-            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq }, now);
+            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
             if let Some(inv_txn) = st.pending_prack_answer.take() {
                 answer_initial_invite(st, inv_txn).await?;
             }
@@ -995,6 +995,55 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
             if let Some(inv) = st.dialogs.pending_invite.as_ref() {
                 let _cxl = inv.cancel().await;
             }
+        }
+        // A plain in-dialog request (INFO/MESSAGE) carrying an optional typed
+        // body + extra headers: send it on the confirmed dialog and open the
+        // InDialog obligation keyed on its CSeq. Its 2xx closes it (no ACK, no
+        // sub-flow — the `_` arm of `react_response`'s obligation match); a
+        // dropped request or its 2xx holds the settle barrier until re-emitted,
+        // exactly like a lost NOTIFY.
+        GoalStep::InDialog { method, content_type, body, headers } => {
+            let now = Instant::now();
+            let (key, dialog_clone) = {
+                let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
+                    StepError::UnexpectedKind {
+                        who: st.role.to_string(),
+                        detail: format!("{} goal with no confirmed dialog", method.as_str()),
+                    }
+                })?;
+                let mut req = dialog.send_request(method);
+                match (body, content_type) {
+                    // A typed body rides `with_body` (Content-Type +
+                    // Content-Length); an untyped body still ships under a
+                    // generic type so Content-Length is emitted.
+                    (Some(bytes), ct) => {
+                        req = req.with_body(ct.as_deref().unwrap_or("application/octet-stream"), bytes);
+                    }
+                    // A content-type with no body: emit it as a header
+                    // (`with_body` only stamps Content-Type for a non-empty body).
+                    (None, Some(ct)) => req = req.with_header("Content-Type", &ct),
+                    (None, None) => {}
+                }
+                for (name, value) in &headers {
+                    req = req.with_header(name, value);
+                }
+                // The 2xx arrives through the reactor (recv_any); the returned
+                // transaction handle is not awaited on here.
+                let (_txn, request) = req.try_send_with_request().await?;
+                // INFO/MESSAGE map to InDialog; any other method routed through
+                // this goal opens under its own kind so its final still matches.
+                let kind = ObligationKind::from_cseq_method(method.as_str())
+                    .unwrap_or(ObligationKind::InDialog);
+                (ObligationKey::new(st.role, kind, request.cseq.seq), dialog.clone())
+            };
+            st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
+            st.obs.record(
+                Observation::RequestSent {
+                    key,
+                    detail: format!("{} awaiting 2xx", method.as_str()),
+                },
+                now,
+            );
         }
         GoalStep::Bye => {
             let now = Instant::now();

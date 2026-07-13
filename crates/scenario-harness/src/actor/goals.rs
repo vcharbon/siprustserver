@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
+use sip_message::generators::InDialogMethod;
+
 use super::state::{await_pred, LegPhase, ObservedState, StateInner};
 use crate::realcall::InvitePlan;
 use crate::StepError;
@@ -40,6 +42,16 @@ impl Barrier {
         pred: impl Fn(&StateInner) -> bool + Send + Sync + 'static,
     ) -> Self {
         Barrier::Pred { name, pred: Arc::new(pred) }
+    }
+
+    /// A barrier that holds once `leg` has received an inbound in-dialog request
+    /// of `method` (the RFC name, e.g. `"INFO"`) — the observed-fact gate that
+    /// orders an origination AFTER a specific inbound request (an MRF's
+    /// `INFO(EOF)` following the worker's `INFO(play)`), replacing a timed
+    /// post-confirm dwell. `name` is the bounded barrier label a guard-timeout
+    /// [`StepError::who`](crate::StepError) carries (B7: never free-form).
+    pub fn received(name: &'static str, leg: &'static str, method: &'static str) -> Self {
+        Barrier::pred(name, move |s| s.leg_received_method(leg, method))
     }
 
     /// Whether the guard holds against a state snapshot.
@@ -108,6 +120,24 @@ pub enum GoalStep {
     /// CANCEL the still-pending initial INVITE (RFC 3261 §9.1) — the abandon
     /// path. Keeps the pending INVITE so its `487` still routes to it.
     Cancel,
+    /// Originate a plain in-dialog request (`INFO`/`MESSAGE`) on the confirmed
+    /// dialog, optionally carrying a typed body + extra headers — the GENERIC
+    /// origination for the long tail of body-carrying in-dialog requests that
+    /// have no dedicated goal. Its **2xx alone** completes it (no ACK, no
+    /// sub-flow); it opens an [`ObligationKind::InDialog`](super::ledger::ObligationKind::InDialog)
+    /// obligation keyed on its CSeq that the reactor closes on the 2xx, so a
+    /// dropped request (or its 2xx) holds the settle barrier open until re-emitted
+    /// — the same loss-soak contract every other in-dialog request gets. `Info`
+    /// today (the MSCML `INFO(EOF)` an MRF media leg sends to release the caller);
+    /// `Message` is the plausible next. `content_type`/`body` ride the request
+    /// verbatim (SIP bodies are bytes — MSCML is UTF-8 XML); `headers` are extra
+    /// request headers.
+    InDialog {
+        method: InDialogMethod,
+        content_type: Option<String>,
+        body: Option<Vec<u8>>,
+        headers: Vec<(String, String)>,
+    },
     /// Hang up — send a BYE on the confirmed dialog.
     Bye,
     /// Hang up with EXTRA request headers on the BYE — the deliberate-deviation

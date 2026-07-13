@@ -53,6 +53,15 @@ pub enum ObligationKind {
     Prack,
     /// An UPDATE we sent, awaiting its 200.
     Update,
+    /// A plain in-dialog request we sent (INFO/MESSAGE) carrying an optional
+    /// body, awaiting its 2xx. Unlike re-INVITE/UPDATE it opens NO sub-flow and
+    /// takes NO ACK — its 2xx **alone** closes it — but it rides the same ledger
+    /// so a dropped request (or its 2xx) holds the settle barrier open until
+    /// re-emitted: the loss-soak contract every in-dialog request gets (a lost
+    /// NOTIFY, a lost realign ACK). That is the whole reason to route it through
+    /// the ledger rather than fire-and-forget. `INFO` today (an MRF media leg's
+    /// MSCML `INFO(EOF)`), `MESSAGE` next — see [`from_cseq_method`](Self::from_cseq_method).
+    InDialog,
     /// A non-2xx final we sent to an initial INVITE (a reject, or the 487 to a
     /// CANCELled ring), awaiting its hop-ACK (§17.2.1). Closed by the
     /// transaction layer's ACK sighting, not by a response — so it is NOT in
@@ -73,6 +82,7 @@ impl ObligationKind {
             ObligationKind::Refer => "REFER",
             ObligationKind::Prack => "PRACK",
             ObligationKind::Update => "UPDATE",
+            ObligationKind::InDialog => "in-dialog",
             ObligationKind::RejectFinal => "reject-final",
         }
     }
@@ -88,6 +98,10 @@ impl ObligationKind {
             "REFER" => Some(ObligationKind::Refer),
             "PRACK" => Some(ObligationKind::Prack),
             "UPDATE" => Some(ObligationKind::Update),
+            // A plain body-carrying in-dialog request whose 2xx alone completes
+            // it (no ACK, no sub-flow) — the generic origination behind
+            // [`super::goals::GoalStep::InDialog`].
+            "INFO" | "MESSAGE" => Some(ObligationKind::InDialog),
             // A re-INVITE's 2xx is matched by the ReInvite kind; the initial
             // INVITE creates the dialog and opens no obligation (its CSeq seeds
             // the gap detector instead).
@@ -308,6 +322,29 @@ mod tests {
         led.seed_dialog("call-xyz", "bob", 1);
         led.record_in_dialog("call-xyz", "bob", 2);
         assert!(led.is_closed(), "1 then 2 is contiguous — no phantom hole at the baseline");
+    }
+
+    #[test]
+    fn info_and_message_map_to_in_dialog() {
+        // The generic in-dialog origination (INFO/MESSAGE) is closed by its 2xx,
+        // matched back through the same CSeq-method mapping every sent request
+        // uses — no ACK, no sub-flow.
+        assert_eq!(ObligationKind::from_cseq_method("INFO"), Some(ObligationKind::InDialog));
+        assert_eq!(ObligationKind::from_cseq_method("MESSAGE"), Some(ObligationKind::InDialog));
+        assert_eq!(ObligationKind::InDialog.label(), "in-dialog");
+    }
+
+    #[test]
+    fn in_dialog_obligation_holds_settle_until_its_2xx() {
+        // A sent INFO opens an InDialog obligation; only its 2xx closes it — the
+        // loss-soak contract (a dropped INFO/2xx keeps the ledger open).
+        let mut led = ObligationLedger::default();
+        let k = ObligationKey::new("bob", ObligationKind::InDialog, 2);
+        led.open(k, t0(), "INFO awaiting 2xx");
+        assert!(!led.is_closed(), "the unacked INFO keeps the ledger open");
+        assert!(led.describe_open().iter().any(|s| s.contains("bob:in-dialog cseq=2")));
+        led.close(k);
+        assert!(led.is_closed(), "the INFO's 2xx closes it");
     }
 
     #[test]

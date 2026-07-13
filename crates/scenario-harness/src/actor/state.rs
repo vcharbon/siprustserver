@@ -64,6 +64,12 @@ pub struct LegObservation {
     /// `(status, reason)` — a grow-only set (commutative fold), read by
     /// `Expect::Reject`'s verdict mapping. Almost always 0 or 1 entries.
     finals: std::collections::BTreeSet<(u16, String)>,
+    /// The RFC method names of the inbound in-dialog requests this leg has
+    /// received (`INFO`, `MESSAGE`, `NOTIFY`, …) — a grow-only set (commutative
+    /// fold), read by [`Barrier::received`](super::goals::Barrier::received) so an
+    /// origination can gate on an *observed* inbound request rather than a timed
+    /// dwell (the MRF `INFO(EOF)` that must follow the worker's `INFO(play)`).
+    received_methods: std::collections::BTreeSet<String>,
 }
 
 impl LegObservation {
@@ -85,6 +91,19 @@ impl LegObservation {
     /// The reason phrase of the given observed non-2xx final, if any.
     pub fn final_reason(&self, status: u16) -> Option<String> {
         self.finals.iter().find(|(s, _)| *s == status).map(|(_, r)| r.clone())
+    }
+
+    /// Whether this leg has received an inbound in-dialog request of `method`
+    /// (the RFC name, e.g. `"INFO"`) — the observed fact `Barrier::received`
+    /// gates an origination on.
+    pub fn received_method(&self, method: &str) -> bool {
+        self.received_methods.contains(method)
+    }
+
+    /// Record an observed inbound in-dialog method name (idempotent — a set, so
+    /// the fold stays commutative).
+    fn record_method(&mut self, method: String) {
+        self.received_methods.insert(method);
     }
 
     /// Monotone phase advance — never retreats (the B2 no-downgrade invariant).
@@ -119,6 +138,13 @@ impl StateInner {
     /// Whether a leg has reached (at least) a given phase.
     pub fn leg_at_least(&self, role: &str, phase: LegPhase) -> bool {
         self.leg(role).phase() >= phase
+    }
+
+    /// Whether `leg` has received an inbound in-dialog request of `method` — the
+    /// observed-fact predicate [`Barrier::received`](super::goals::Barrier::received)
+    /// gates on (borrows, so a poll never clones the leg's method set).
+    pub fn leg_received_method(&self, role: &str, method: &str) -> bool {
+        self.legs.get(role).is_some_and(|l| l.received_method(method))
     }
 
     /// Whether EVERY leg that has appeared is `Terminated` — the `torn_down`
@@ -164,8 +190,9 @@ pub enum Observation {
     /// obligation.
     ResponseObserved { key: ObligationKey },
     /// An in-dialog request arrived on a dialog — folds into the CSeq gap
-    /// detector (any method).
-    InDialogRequest { leg: &'static str, call_id: String, cseq: u32 },
+    /// detector (any method) AND into the receiving leg's received-method set
+    /// (so an origination can gate on "leg X received an inbound `<method>`").
+    InDialogRequest { leg: &'static str, call_id: String, cseq: u32, method: String },
     /// `leg`'s establishing INVITE drew a non-2xx final (the reject path) —
     /// grow-only, read by the `Expect::Reject` verdict mapping.
     LegFinal { leg: &'static str, status: u16, reason: String },
@@ -186,8 +213,9 @@ impl StateInner {
             }
             Observation::RequestSent { key, detail } => self.ledger.open(key, now, detail),
             Observation::ResponseObserved { key } => self.ledger.close(key),
-            Observation::InDialogRequest { leg, call_id, cseq } => {
-                self.ledger.record_in_dialog(call_id, leg, cseq)
+            Observation::InDialogRequest { leg, call_id, cseq, method } => {
+                self.ledger.record_in_dialog(call_id, leg, cseq);
+                self.leg_mut(leg).record_method(method);
             }
             Observation::LegFinal { leg, status, reason } => {
                 self.leg_mut(leg).finals.insert((status, reason));
