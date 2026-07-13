@@ -186,9 +186,15 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
         let mut findings = Vec::new();
         for key in &stream_order {
             let st = &streams[key];
-            // The dialog-creating (empty To-tag) request's CSeq anchors every
-            // forked/confirmed dialog's first in-dialog request at baseline + 1.
-            let baseline = st.dialogs.get("").and_then(|d| d.by_cseq.keys().next().copied());
+            // Every dialog-CREATING request (empty To-tag) on this stream. For a
+            // plain call that is the sole INVITE; but under a deferred-auth §22.2
+            // retry it holds BOTH attempts — the challenged one (CSeq n, its 401
+            // established no dialog) AND the resent one (CSeq n+1) that actually
+            // minted the confirmed dialog. Each forked/confirmed dialog anchors on
+            // the attempt that established IT (chosen per To-tag below), not the
+            // lowest attempt in the bucket.
+            let creating_cseqs: Vec<u32> =
+                st.dialogs.get("").map(|d| d.by_cseq.keys().copied().collect()).unwrap_or_default();
             let mut to_tags: Vec<&String> = st.dialogs.keys().collect();
             to_tags.sort();
             for to_tag in to_tags {
@@ -203,14 +209,20 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
                 }
 
                 // Contiguity: the sorted distinct CSeqs must have no interior hole.
-                // A forked/confirmed dialog folds in the dialog-creating INVITE's
-                // CSeq as the lower anchor, so a first request that is not
-                // `INVITE_CSeq + 1` surfaces as a gap.
+                // A forked/confirmed dialog folds in the dialog-creating INVITE that
+                // ESTABLISHED IT as the lower anchor — the largest empty-To-tag
+                // attempt CSeq ≤ this dialog's first in-dialog request. For a plain
+                // single-attempt call that is the sole INVITE CSeq (unchanged); for
+                // an auth retry it is the resent, higher CSeq — NOT the challenged
+                // first attempt, whose abandoned CSeq would fabricate a gap. A first
+                // request that is not `anchor + 1` still surfaces as a real gap.
                 let mut seqs: Vec<u32> = dlg.by_cseq.keys().copied().collect();
                 if !to_tag.is_empty() {
-                    if let Some(b) = baseline {
-                        if let Err(pos) = seqs.binary_search(&b) {
-                            seqs.insert(pos, b);
+                    if let Some(&first) = seqs.first() {
+                        if let Some(&anchor) = creating_cseqs.iter().filter(|&&c| c <= first).max() {
+                            if let Err(pos) = seqs.binary_search(&anchor) {
+                                seqs.insert(pos, anchor);
+                            }
                         }
                     }
                 }
@@ -691,6 +703,49 @@ mod tests {
             recv_at("bob", req_to("BYE", "cid-1", "ft", 4, "z9hG4bK-b", Some("fork1")), 4),
         ];
         assert!(CSeqInDialogOrderRule.check(&evs).is_empty());
+    }
+
+    #[test]
+    fn auth_retry_confirmed_dialog_anchors_on_the_resent_invite_clean() {
+        // Deferred-auth §22.2 retry: the establishing INVITE draws a 401 and is
+        // resent ONCE with a bumped CSeq (fresh branch, new transaction). BOTH
+        // attempts are dialog-CREATING (no To-tag) — the 401 established no dialog
+        // — so the empty-To-tag bucket holds {1, 2}. The 200 to the RESENT INVITE
+        // (CSeq 2) mints the confirmed dialog's To-tag; its first in-dialog request
+        // (the BYE) is CSeq 3 = 2 + 1. The confirmed dialog must anchor on the
+        // attempt that ESTABLISHED it (CSeq 2), NOT the lowest/abandoned attempt
+        // (CSeq 1) — folding CSeq 1 fabricates a [1, 3] gap. The ACKs (of the 401
+        // and the 2xx) reuse their INVITE's CSeq and are exempt. Clean.
+        let evs = vec![
+            recv_at("bob", req_to("INVITE", "cid-1", "ft", 1, "z9hG4bK-i1", None), 0),
+            recv_at("bob", req_to("ACK", "cid-1", "ft", 1, "z9hG4bK-a1", Some("server6")), 1),
+            recv_at("bob", req_to("INVITE", "cid-1", "ft", 2, "z9hG4bK-i2", None), 2),
+            recv_at("bob", req_to("ACK", "cid-1", "ft", 2, "z9hG4bK-a2", Some("server6")), 3),
+            recv_at("bob", req_to("BYE", "cid-1", "ft", 3, "z9hG4bK-b", Some("server6")), 4),
+        ];
+        assert!(
+            CSeqInDialogOrderRule.check(&evs).is_empty(),
+            "the confirmed dialog anchors on the resent INVITE (CSeq 2), not the 401'd attempt \
+             (CSeq 1) — no fabricated [1, 3] gap",
+        );
+    }
+
+    #[test]
+    fn auth_retry_with_a_real_gap_after_the_resent_invite_is_flagged() {
+        // Same auth-retry shape (empty-To-tag {1, 2}), but the confirmed dialog's
+        // first in-dialog request skips a number: BYE at CSeq 4 instead of 3. The
+        // anchor is still the RESENT INVITE (CSeq 2, the largest attempt ≤ 4), so
+        // the fold is [2, 4] — a genuine +2 gap the caller really left. Correcting
+        // the false positive must NOT swallow a real skip past the establishing
+        // attempt.
+        let evs = vec![
+            recv_at("bob", req_to("INVITE", "cid-1", "ft", 1, "z9hG4bK-i1", None), 0),
+            recv_at("bob", req_to("INVITE", "cid-1", "ft", 2, "z9hG4bK-i2", None), 1),
+            recv_at("bob", req_to("BYE", "cid-1", "ft", 4, "z9hG4bK-b", Some("server6")), 2),
+        ];
+        let findings = CSeqInDialogOrderRule.check(&evs);
+        assert_eq!(findings.len(), 1, "a real +2 gap off the establishing INVITE must be flagged");
+        assert!(findings[0].1.contains("not contiguous"), "{}", findings[0].1);
     }
 
     // ── ResponseCseqMatchesTransactionRule (RFC 3261 §8.1.3.5) ──────────────
