@@ -53,6 +53,14 @@ pub enum ObligationKind {
     Prack,
     /// An UPDATE we sent, awaiting its 200.
     Update,
+    /// A non-2xx final we sent to an initial INVITE (a reject, or the 487 to a
+    /// CANCELled ring), awaiting its hop-ACK (§17.2.1). Closed by the
+    /// transaction layer's ACK sighting, not by a response — so it is NOT in
+    /// [`from_cseq_method`](Self::from_cseq_method). Keeps the settle barrier
+    /// (and thus the per-call recording window) open until a lost hop-ACK is
+    /// recovered by the Timer-G final retransmit + the SUT's §17.1.1.2 re-ACK
+    /// — the UA-outlives-the-call contract for an abandoned reject leg.
+    RejectFinal,
 }
 
 impl ObligationKind {
@@ -65,6 +73,7 @@ impl ObligationKind {
             ObligationKind::Refer => "REFER",
             ObligationKind::Prack => "PRACK",
             ObligationKind::Update => "UPDATE",
+            ObligationKind::RejectFinal => "reject-final",
         }
     }
 

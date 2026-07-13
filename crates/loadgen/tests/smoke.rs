@@ -1341,7 +1341,7 @@ async fn loadgen_settle_gate_recovers_dropped_bye() {
     c.default_tuning = CallTuning {
         drop_rate: 0.0,
         retransmit: true,
-        drop_nth: Some(TargetedDrop { method: "BYE", nth: 1, permanent: false, dir: DropDir::Outbound }),
+        drop_nth: Some(TargetedDrop { method: "BYE", nth: 1, permanent: false, dir: DropDir::Outbound, leg: None }),
     };
     let driver = Driver::new(c, vec![mix("refer", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -1388,7 +1388,7 @@ async fn loadgen_reack_recovers_dropped_initial_b_leg_ack() {
     c.default_tuning = CallTuning {
         drop_rate: 0.0,
         retransmit: true,
-        drop_nth: Some(TargetedDrop { method: "ACK", nth: 1, permanent: false, dir: DropDir::Inbound }),
+        drop_nth: Some(TargetedDrop { method: "ACK", nth: 1, permanent: false, dir: DropDir::Inbound, leg: None }),
     };
     let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -1424,7 +1424,7 @@ async fn loadgen_callee_retransmits_non2xx_final_on_lost_hop_ack() {
     c.default_tuning = CallTuning {
         drop_rate: 0.0,
         retransmit: true,
-        drop_nth: Some(TargetedDrop { method: "ACK", nth: 1, permanent: false, dir: DropDir::Inbound }),
+        drop_nth: Some(TargetedDrop { method: "ACK", nth: 1, permanent: false, dir: DropDir::Inbound, leg: None }),
     };
     let driver = Driver::new(c, vec![mix("invite_reject", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -1439,6 +1439,70 @@ async fn loadgen_callee_retransmits_non2xx_final_on_lost_hop_ack() {
     assert_eq!(
         audit, 0,
         "a lost hop-ACK to a 486 was not recovered by the callee's Timer-G retransmit + SUT re-ACK:\n{}",
+        reporter.render_prometheus()
+    );
+}
+
+/// The UA-OUTLIVES-THE-CALL side of the faithful-UAS contract: the recovery of
+/// an ABANDONED reject leg must land ON-recording. `rerouting_prack`: bob
+/// REJECTS (486) and the SUT walks the failover plan to bob2, so bob's leg is
+/// abandoned by the reroute while the happy call completes via bob2 within
+/// milliseconds. Drop the FIRST inbound ACK — the SUT's hop-ACK for bob's 486.
+/// The recovery (bob's Timer-G 486 retransmit, §17.2.1, + the SUT's §17.1.1.2
+/// re-ACK) fires at ~500 ms; without the reject-final ledger obligation the
+/// per-call verdict (and the RFC-audit snapshot) is computed before it lands —
+/// off-recording — and the audit falsely charges `unackedInviteNon2xxFinal`.
+/// With the obligation, the settle barrier holds the verdict (Timer-H-bounded)
+/// until the hop-ACK is claimed, so the recording spans the recovery and the
+/// audit stays clean.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "real-clock UDP — slow lane (just test-slow); avoids default-lane bind contention"]
+async fn loadgen_abandoned_reject_leg_recovery_lands_on_recording() {
+    let (_h, b2bua, core, transport) =
+        setup_api_call(6630, Correlation::header("X-Loadgen-Id"), 3).await;
+    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    let mut c = cfg(b2bua.addr, 1.0, 1, 4, 0x2AC2);
+    c.call.egress = EgressPolicy::ApiCallPin; // the [bob, bob2] plan rides X-Api-Call
+    c.default_tuning = CallTuning {
+        drop_rate: 0.0,
+        retransmit: true,
+        // Leg-scoped to bob: an unscoped `ACK`/`nth:1` would ALSO drop bob2's
+        // answer ACK (per-endpoint counters), whose ~500 ms recovery delays the
+        // whole call and masks the off-recording window under test.
+        drop_nth: Some(TargetedDrop {
+            method: "ACK",
+            nth: 1,
+            permanent: false,
+            dir: DropDir::Inbound,
+            leg: Some("bob"),
+        }),
+    };
+    let driver = Driver::new(c, vec![mix("rerouting_prack", 1.0)], reporter.clone(), transport);
+    run_throttled(&driver).await;
+
+    let drops = core.stats().dropped_in.load(std::sync::atomic::Ordering::Relaxed);
+    let total = reporter.total_calls();
+    let ok = reporter.count("rerouting_prack", &ResultClass::Ok);
+    let audit = reporter.count("rerouting_prack", &ResultClass::RfcAuditFail);
+    eprintln!("REPRO-abandoned-486 drops_in={drops} total={total} ok={ok} audit={audit}\n{}", reporter.render_prometheus());
+    // Report FIRST (before the asserts), so a failing run stays inspectable.
+    let out_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/loadgen-abandoned-reject-report");
+    reporter.finalize(&out_dir).expect("write repro report");
+    eprintln!("repro report: {}/index.html", out_dir.display());
+    assert!(total >= 1 && drops >= 1, "no call / the reject hop-ACK drop never fired: drops={drops} total={total}");
+
+    settle_secs(40, || core.registry_size() == 0 && b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+    assert_eq!(
+        audit, 0,
+        "the abandoned reject leg's recovery landed OFF-recording — `unackedInviteNon2xxFinal` falsely charged:\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        ok, total,
+        "a reroute call with a lost reject hop-ACK did not recover to OK:\n{}",
         reporter.render_prometheus()
     );
 }
@@ -1468,6 +1532,7 @@ async fn loadgen_settle_gate_permanent_notify_loss_names_obligation() {
             nth: 2,
             permanent: true,
             dir: DropDir::Inbound,
+            leg: None,
         }),
     };
     let driver = Driver::new(c, vec![mix("refer", 1.0)], reporter.clone(), transport);
@@ -2385,26 +2450,16 @@ async fn loadgen_loss_soak_all_bodies_recover() {
         eprintln!("  {id:16} ok={ok:>3} timeout={timeout:>2} recovery={pct:>5.1}%");
 
         assert!(ok > 100, "body {id}: only {ok} OK calls — under-driven:\n{}", reporter.render_prometheus());
-        // STRICT audit==0 for every body EXCEPT the ONE known recording-window
-        // boundary: `rerouting_prack`'s FIRST leg (bob-1) is REJECTED (486) and
-        // ABANDONED by the reroute, and the happy call then completes via bob-2 and
-        // closes its per-call recording in ~5 ms. If bob-1's hop-ACK is lost, the
-        // recovery — the callee's Timer-G 486 retransmit (§17.2.1, now modelled by
-        // the mux) + the SUT's §17.1.1.2 re-ACK — both fire at ~500 ms, AFTER that
-        // recording closed, so it lands OFF-recording and the audit still charges
-        // the abandoned leg's lone 486. This is NEITHER a SUT bug (the SUT re-ACKs
-        // retransmitted non-2xx finals, sip-txn `layer.rs` §17.1.1.2, independent of
-        // the reroute's leg teardown) NOR a loadgen retransmit-fidelity gap (proven
-        // by `loadgen_callee_retransmits_non2xx_final_on_lost_hop_ack`, where a
-        // non-abandoned reject's recording stays open and the same recovery IS
-        // captured → audit clean). Fully closing it needs the callee UA to LINGER
-        // until its server txn quiesces (so the recording spans the recovery) — a
-        // separate actor-lifecycle change. The loss is seeded/deterministic; bound
-        // it (not `== 0`) only for this body, keeping every other body strict.
-        let audit_budget = if id == "rerouting_prack" { 2 } else { 0 };
-        assert!(
-            audit <= audit_budget,
-            "body {id}: {audit} rfc_audit_fail under loss (budget {audit_budget}) — a retransmitted INVITE final never re-ACKed (§13.2.2.4 2xx / §17.1.1.3 non-2xx → `unackedInviteNon2xxFinal`):\n{}",
+        // STRICT audit==0 for EVERY body — including `rerouting_prack`'s abandoned
+        // reject leg, the former bounded tolerance: the callee UA now outlives the
+        // call (the `reject-final` ledger obligation holds the settle barrier —
+        // and thus the recording window — until a lost reject hop-ACK is recovered
+        // by the Timer-G 486 retransmit + the SUT's §17.1.1.2 re-ACK, which the
+        // call-eviction path no longer purges). Deterministic gate:
+        // `loadgen_abandoned_reject_leg_recovery_lands_on_recording`.
+        assert_eq!(
+            audit, 0,
+            "body {id}: {audit} rfc_audit_fail under loss — a retransmitted INVITE final never re-ACKed (§13.2.2.4 2xx / §17.1.1.3 non-2xx → `unackedInviteNon2xxFinal`):\n{}",
             reporter.render_prometheus()
         );
         assert_eq!(panic, 0, "body {id}: {panic} panic:\n{}", reporter.render_prometheus());

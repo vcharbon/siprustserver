@@ -262,6 +262,13 @@ pub struct TargetedDrop {
     pub permanent: bool,
     /// Which direction to fire on (see [`DropDir`]).
     pub dir: DropDir,
+    /// Restrict the drop to ONE callee leg's endpoint (its declared routing
+    /// label, e.g. `"bob"`). `None` arms the matcher on EVERY endpoint of the
+    /// call — note the arrival counters are PER ENDPOINT, so a multi-leg shape
+    /// then drops the nth match on each leg independently (e.g. `ACK`/`nth:1`
+    /// hits bob's reject hop-ACK AND bob2's answer ACK). Target the leg when
+    /// the repro needs exactly one victim.
+    pub leg: Option<&'static str>,
 }
 
 /// The targeted drop's arrival bookkeeping (per endpoint, like the loss RNG).
@@ -735,33 +742,41 @@ impl SignalingNetwork for MuxNetwork {
         })?;
         let queue = Arc::new(PacketQueue::new(mux.queue_max));
         let keyset = Arc::new(Mutex::new(Vec::new()));
+        // Dispense the callee's next declared label for this addr FIRST (bind
+        // order, so several receivers can share a socket) — the leg-scoped
+        // targeted drop below keys off it.
+        let label = if mux.role == Role::Callee {
+            let mut cur = self.cursor.lock().unwrap();
+            let n = cur.entry(opts.addr).or_insert(0);
+            let idx = *n;
+            *n += 1;
+            Some(self.labels.get(&opts.addr).and_then(|v| v.get(idx)).cloned().ok_or_else(
+                || BindError {
+                    reason: BindErrorReason::OsError,
+                    addr: opts.addr,
+                    message: format!(
+                        "callee endpoint {} bound without a declared leg (#{idx})",
+                        opts.addr
+                    ),
+                },
+            )?)
+        } else {
+            None
+        };
         // One loss model + (optional) retransmit engine per endpoint, shared
         // between this endpoint (outbound) and the registry entry the inbound
         // `route` path consults, so both directions and the resend tasks agree.
-        let drop = Arc::new(DropModel::new(self.drop_rate, self.next_drop_seed(), self.drop_nth));
+        // A leg-scoped targeted drop arms only on its named leg's endpoint.
+        let drop_nth = self.drop_nth.filter(|t| match t.leg {
+            None => true,
+            Some(leg) => label.as_deref() == Some(leg),
+        });
+        let drop = Arc::new(DropModel::new(self.drop_rate, self.next_drop_seed(), drop_nth));
         let txns = self
             .retransmit
             .then(|| Arc::new(CallTxns::new(mux.socket.clone(), drop.clone(), mux.stats.clone())));
 
-        if mux.role == Role::Callee {
-            // Dispense the next declared label for this addr (bind order), so
-            // several receivers can share a socket.
-            let label = {
-                let mut cur = self.cursor.lock().unwrap();
-                let n = cur.entry(opts.addr).or_insert(0);
-                let idx = *n;
-                *n += 1;
-                self.labels.get(&opts.addr).and_then(|v| v.get(idx)).cloned().ok_or_else(|| {
-                    BindError {
-                        reason: BindErrorReason::OsError,
-                        addr: opts.addr,
-                        message: format!(
-                            "callee endpoint {} bound without a declared leg (#{idx})",
-                            opts.addr
-                        ),
-                    }
-                })?
-            };
+        if let Some(label) = label {
             let token = self.token.clone();
             keyset.lock().unwrap().push(Key::Token { token: token.clone(), label: label.clone() });
             let mut g = mux.reg.lock().unwrap();

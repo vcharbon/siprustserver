@@ -1036,10 +1036,30 @@ impl AckObligations {
             .copied()
             .unwrap_or(false)
     }
+
+    /// Park until the obligation is fulfilled — WITHOUT pulling from the inbox
+    /// (the sighting itself is whoever pulls next — e.g. the actor reactor's
+    /// `recv_any`, which claims a matching ACK below its API and so never
+    /// surfaces it). This is the actor's wake for closing its `reject-final`
+    /// ledger obligation. Never times out; callers bound it (a `select!` arm).
+    async fn fulfilled(&self, call_id: &str, branch: &str) {
+        loop {
+            // Register interest BEFORE the check: `notify_waiters` only wakes
+            // already-registered waiters, so check-then-wait would race a
+            // sighting landing in between.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_fulfilled(call_id, branch) {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 /// The `branch` parameter of the topmost Via header, if any.
-fn top_via_branch(headers: &[SipHeader]) -> Option<String> {
+pub(crate) fn top_via_branch(headers: &[SipHeader]) -> Option<String> {
     let via = get_header(headers, "via")?;
     via.split(';').skip(1).find_map(|p| {
         let (k, v) = p.split_once('=')?;
@@ -1277,6 +1297,17 @@ impl Agent {
                 SipMessage::Response(r) => return Ok(Inbound::Response(r)),
             }
         }
+    }
+
+    /// Park until the §17.1.1.3 hop ACK for the given INVITE server transaction
+    /// (`(Call-ID, top-Via branch)`) has been SIGHTED by the receive core —
+    /// the non-pulling twin of [`ServerTxn::expect_ack`], for the reactive
+    /// actor: its own `recv_any` claims the ACK below the API (never surfacing
+    /// it), and this future is how the actor still observes the fulfilment
+    /// (closing its `reject-final` ledger obligation). Never times out; run it
+    /// as a bounded `select!` arm.
+    pub(crate) async fn hop_ack_fulfilled(&self, call_id: &str, branch: &str) {
+        self.acks.fulfilled(call_id, branch).await
     }
 
     /// Best-effort drain-and-200 for the load driver's teardown: for up to
