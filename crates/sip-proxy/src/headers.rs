@@ -57,7 +57,7 @@ pub fn remove_first_header_entry(headers: &mut Vec<SipHeader>, name: &str) -> Op
     match split_top_level_commas(&value).split_first() {
         Some((first, rest)) if !rest.is_empty() => {
             headers[pos].value = rest.join(", ");
-            Some(first.clone())
+            Some((*first).to_string())
         }
         _ => {
             headers.remove(pos);
@@ -70,16 +70,18 @@ pub fn remove_first_header_entry(headers: &mut Vec<SipHeader>, name: &str) -> Op
 /// the canonical sip-message splitter (quote-, escape- AND angle-bracket-
 /// aware); the old local copy had drifted (it ignored backslash escapes
 /// inside quoted strings, so the same value could split differently here
-/// than in the parser that produced it).
-pub fn split_top_level_commas(value: &str) -> Vec<String> {
+/// than in the parser that produced it). Entries are trimmed borrowed
+/// subslices of `value` — this runs per forwarded packet on the proxy's
+/// single hot task.
+pub fn split_top_level_commas(value: &str) -> Vec<&str> {
     let mut out = sip_message::message_helpers::split_top_level_commas(value);
     // Preserve this module's historical edge behavior: a trailing empty entry
     // is dropped (unless it is the only entry).
-    if out.len() > 1 && out.last().is_some_and(String::is_empty) {
+    if out.len() > 1 && out.last().is_some_and(|s| s.is_empty()) {
         out.pop();
     }
     if out.is_empty() {
-        out.push(String::new());
+        out.push("");
     }
     out
 }
@@ -92,18 +94,20 @@ pub fn populate_received_rport_on_top_via(headers: &mut [SipHeader], src_ip: &st
     let Some(h) = headers.iter_mut().find(|h| h.name.eq_ignore_ascii_case("via")) else {
         return;
     };
-    let entries = split_top_level_commas(&h.value);
+    // Take the value out so the borrowed split entries don't pin `h.value`
+    // while we write the rewritten line back.
+    let value = std::mem::take(&mut h.value);
+    let entries = split_top_level_commas(&value);
     let Some((first, rest)) = entries.split_first() else {
+        h.value = value;
         return;
     };
-    let stamped = sip_message::generators::stamp_received_rport_on_via(first, src_ip, src_port);
-    if rest.is_empty() {
-        h.value = stamped;
-    } else {
-        let mut joined = vec![stamped];
-        joined.extend(rest.iter().cloned());
-        h.value = joined.join(", ");
+    let mut stamped = sip_message::generators::stamp_received_rport_on_via(first, src_ip, src_port);
+    for r in rest {
+        stamped.push_str(", ");
+        stamped.push_str(r);
     }
+    h.value = stamped;
 }
 
 /// Build a loose-route Record-Route value: `<sip:host:port;k=v;...;lr>`. The

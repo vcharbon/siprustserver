@@ -78,10 +78,6 @@ fn is_valid_port(p: u64) -> bool {
     (1..=65535).contains(&p)
 }
 
-fn is_token_char_c(c: char) -> bool {
-    (c as u32) < 0x80 && is_token_char(c as u8)
-}
-
 // ---------------------------------------------------------------------------
 // Internal → public field mapping
 // ---------------------------------------------------------------------------
@@ -95,31 +91,24 @@ fn to_contact(p: super::structured_headers::ParsedContact) -> Contact {
 }
 
 // ---------------------------------------------------------------------------
-// Byte-scan strict gates (operate on &[char] for index fidelity with the TS)
+// Byte-scan strict gates. All structural bytes tested below are ASCII, so a
+// UTF-8 lead/continuation byte can never alias one — byte scans visit exactly
+// the positions the old `Vec<char>` walks did, without the per-call collect.
 // ---------------------------------------------------------------------------
 
 /// True iff the URI carries unescaped control bytes (0x00-0x1F except HTAB,
 /// or 0x7F).
 fn has_unescaped_ctl_bytes(uri: &str) -> bool {
-    for c in uri.chars() {
-        let u = c as u32;
-        if u == 0x09 {
-            continue;
-        }
-        if u < 0x20 || u == 0x7f {
-            return true;
-        }
-    }
-    false
+    uri.bytes().any(|b| b != 0x09 && (b < 0x20 || b == 0x7f))
 }
 
 /// True iff `uri` contains `[` without a matching `]`.
 fn has_unbalanced_square_brackets(uri: &str) -> bool {
     let mut open: i32 = 0;
-    for c in uri.chars() {
-        if c == '[' {
+    for c in uri.bytes() {
+        if c == b'[' {
             open += 1;
-        } else if c == ']' {
+        } else if c == b']' {
             if open == 0 {
                 return true;
             }
@@ -132,30 +121,30 @@ fn has_unbalanced_square_brackets(uri: &str) -> bool {
 /// True iff the host portion has 2+ colons outside `[...]` — IPv6 without the
 /// required bracket delimiters (RFC 5118 §4.2).
 fn has_unbracketed_ipv6(uri: &str) -> bool {
-    let s: Vec<char> = uri.chars().collect();
-    let scheme_colon = match s.iter().position(|&c| c == ':') {
-        Some(i) => i as i64,
+    let s = uri.as_bytes();
+    let scheme_colon = match s.iter().position(|&c| c == b':') {
+        Some(i) => i,
         None => return false,
     };
-    let mut i = (scheme_colon + 1) as usize;
-    if let Some(at) = (i..s.len()).find(|&j| s[j] == '@') {
-        i = at + 1;
+    let mut i = scheme_colon + 1;
+    if let Some(at) = s[i..].iter().position(|&c| c == b'@') {
+        i += at + 1;
     }
     let mut depth = 0i32;
     let mut colons = 0i32;
     while i < s.len() {
         let c = s[i];
-        if c == '[' {
+        if c == b'[' {
             depth += 1;
-        } else if c == ']' && depth > 0 {
+        } else if c == b']' && depth > 0 {
             depth -= 1;
         } else if depth == 0 {
-            if c == ':' {
+            if c == b':' {
                 colons += 1;
                 if colons >= 2 {
                     return true;
                 }
-            } else if c == ';' || c == '?' || c == '>' {
+            } else if c == b';' || c == b'?' || c == b'>' {
                 break;
             }
         }
@@ -167,26 +156,26 @@ fn has_unbracketed_ipv6(uri: &str) -> bool {
 /// True iff `uri` has port digits followed by an alphabetic byte at the
 /// host:port position (SIP-ALG confusion), context-aware about userinfo.
 fn has_uri_port_trailing_garbage(uri: &str) -> bool {
-    let s: Vec<char> = uri.chars().collect();
-    let first = match s.iter().position(|&c| c == '@') {
+    let s = uri.as_bytes();
+    let first = match s.iter().position(|&c| c == b'@') {
         Some(a) => a,
-        None => match s.iter().position(|&c| c == ':') {
+        None => match s.iter().position(|&c| c == b':') {
             Some(c) => c,
             None => return false,
         },
     };
     let mut i = first + 1; // past `@` or scheme colon
-    if i < s.len() && s[i] == '[' {
-        match (i + 1..s.len()).find(|&j| s[j] == ']') {
+    if i < s.len() && s[i] == b'[' {
+        match s[i + 1..].iter().position(|&c| c == b']') {
             None => return false,
-            Some(close) => i = close + 1,
+            Some(close) => i = i + 1 + close + 1,
         }
     } else {
-        while i < s.len() && s[i] != ':' && s[i] != ';' && s[i] != '?' && s[i] != '>' {
+        while i < s.len() && s[i] != b':' && s[i] != b';' && s[i] != b'?' && s[i] != b'>' {
             i += 1;
         }
     }
-    if i >= s.len() || s[i] != ':' {
+    if i >= s.len() || s[i] != b':' {
         return false;
     }
     i += 1;
@@ -203,7 +192,7 @@ fn has_uri_port_trailing_garbage(uri: &str) -> bool {
 /// True iff `via` carries a port followed by alphabetic trailing garbage,
 /// quote-aware.
 fn has_via_port_trailing_garbage(via: &str) -> bool {
-    let s: Vec<char> = via.chars().collect();
+    let s = via.as_bytes();
     if s.is_empty() {
         return false;
     }
@@ -212,22 +201,22 @@ fn has_via_port_trailing_garbage(via: &str) -> bool {
     while i + 1 < s.len() {
         let c = s[i];
         if in_quote {
-            if c == '\\' {
+            if c == b'\\' {
                 i += 2;
                 continue;
             }
-            if c == '"' {
+            if c == b'"' {
                 in_quote = false;
             }
             i += 1;
             continue;
         }
-        if c == '"' {
+        if c == b'"' {
             in_quote = true;
             i += 1;
             continue;
         }
-        if c != ':' {
+        if c != b':' {
             i += 1;
             continue;
         }
@@ -250,34 +239,34 @@ fn has_via_port_trailing_garbage(via: &str) -> bool {
 
 /// Count `;tag=` occurrences outside quoted-strings (RFC 3261 permits one).
 fn count_tag_params(value: &str) -> usize {
-    let s: Vec<char> = value.chars().collect();
+    let s = value.as_bytes();
     let mut count = 0usize;
     let mut in_quote = false;
     let mut i = 0usize;
     while i < s.len() {
         let c = s[i];
         if in_quote {
-            if c == '\\' {
+            if c == b'\\' {
                 i += 2;
                 continue;
             }
-            if c == '"' {
+            if c == b'"' {
                 in_quote = false;
             }
             i += 1;
             continue;
         }
-        if c == '"' {
+        if c == b'"' {
             in_quote = true;
             i += 1;
             continue;
         }
-        if c != ';' {
+        if c != b';' {
             i += 1;
             continue;
         }
         let mut j = i + 1;
-        while j < s.len() && (s[j] == ' ' || s[j] == '\t') {
+        while j < s.len() && (s[j] == b' ' || s[j] == b'\t') {
             j += 1;
         }
         if j + 3 > s.len() {
@@ -287,15 +276,15 @@ fn count_tag_params(value: &str) -> usize {
         let t = s[j];
         let a = s[j + 1];
         let g = s[j + 2];
-        if (t != 't' && t != 'T') || (a != 'a' && a != 'A') || (g != 'g' && g != 'G') {
+        if (t != b't' && t != b'T') || (a != b'a' && a != b'A') || (g != b'g' && g != b'G') {
             i += 1;
             continue;
         }
         let mut k = j + 3;
-        while k < s.len() && (s[k] == ' ' || s[k] == '\t') {
+        while k < s.len() && (s[k] == b' ' || s[k] == b'\t') {
             k += 1;
         }
-        if k >= s.len() || s[k] != '=' {
+        if k >= s.len() || s[k] != b'=' {
             i += 1;
             continue;
         }
@@ -308,15 +297,15 @@ fn count_tag_params(value: &str) -> usize {
 /// Confirm the Via sent-protocol grammar: three non-empty `1*tchar` tokens
 /// separated by `/` with LWS permitted around the `/`. `None` if valid.
 fn check_sent_protocol(via: &str) -> Option<String> {
-    let s: Vec<char> = via.chars().collect();
+    let s = via.as_bytes();
     let skip_ws = |mut i: usize| {
-        while i < s.len() && (s[i] == ' ' || s[i] == '\t') {
+        while i < s.len() && (s[i] == b' ' || s[i] == b'\t') {
             i += 1;
         }
         i
     };
     let read_token_run = |mut i: usize| {
-        while i < s.len() && is_token_char_c(s[i]) {
+        while i < s.len() && is_token_char(s[i]) {
             i += 1;
         }
         i
@@ -328,7 +317,7 @@ fn check_sent_protocol(via: &str) -> Option<String> {
         return Some("empty Via protocol-name".to_string());
     }
     i = skip_ws(i);
-    if i >= s.len() || s[i] != '/' {
+    if i >= s.len() || s[i] != b'/' {
         return Some("missing `/` after Via protocol-name".to_string());
     }
     i = skip_ws(i + 1);
@@ -338,7 +327,7 @@ fn check_sent_protocol(via: &str) -> Option<String> {
         return Some("empty Via protocol-version".to_string());
     }
     i = skip_ws(i);
-    if i >= s.len() || s[i] != '/' {
+    if i >= s.len() || s[i] != b'/' {
         return Some("missing `/` after Via protocol-version".to_string());
     }
     i = skip_ws(i + 1);
@@ -364,13 +353,19 @@ pub fn extract_common_fields(
     // From/To/Call-ID/CSeq appear exactly once; only Via may repeat.
     {
         let (mut n_from, mut n_to, mut n_call_id, mut n_cseq) = (0, 0, 0, 0);
+        // eq_ignore_ascii_case, not to_lowercase(): this loop runs once per
+        // header per parsed message — the lowercased String per header was one
+        // of the largest remaining parse-path allocation sources.
         for hdr in headers {
-            match hdr.name.to_lowercase().as_str() {
-                "from" => n_from += 1,
-                "to" => n_to += 1,
-                "call-id" => n_call_id += 1,
-                "cseq" => n_cseq += 1,
-                _ => {}
+            let n = hdr.name.as_str();
+            if n.eq_ignore_ascii_case("from") {
+                n_from += 1;
+            } else if n.eq_ignore_ascii_case("to") {
+                n_to += 1;
+            } else if n.eq_ignore_ascii_case("call-id") {
+                n_call_id += 1;
+            } else if n.eq_ignore_ascii_case("cseq") {
+                n_cseq += 1;
             }
         }
         if n_from > 1 {
@@ -427,21 +422,20 @@ pub fn extract_common_fields(
     let cseq_parsed = parse_cseq(cseq_val);
     if wire {
         let cseq_raw = cseq_val.trim();
-        let cseq_chars: Vec<char> = cseq_raw.chars().collect();
-        let space_idx = cseq_chars.iter().position(|&c| c == ' ' || c == '\t');
+        // First SP/HTAB is ASCII → a valid slice boundary.
+        let space_idx = cseq_raw.bytes().position(|c| c == b' ' || c == b'\t');
         match space_idx {
             None => {
                 return Err(SipParseError::new(format!("CSeq missing method token: \"{cseq_val}\"")));
             }
             Some(idx) => {
-                let cseq_digits: String = cseq_chars[..idx].iter().collect();
-                if strict_non_negative_decimal(&cseq_digits, INT_32_MAX).is_none() {
+                let cseq_digits = &cseq_raw[..idx];
+                if strict_non_negative_decimal(cseq_digits, INT_32_MAX).is_none() {
                     return Err(SipParseError::new(format!(
                         "CSeq seq malformed (paranoid digit check): \"{cseq_digits}\""
                     )));
                 }
-                let method_token: String = cseq_chars[idx + 1..].iter().collect();
-                if method_token.trim().is_empty() {
+                if cseq_raw[idx + 1..].trim().is_empty() {
                     return Err(SipParseError::new(format!("CSeq missing method token: \"{cseq_val}\"")));
                 }
             }
@@ -454,24 +448,24 @@ pub fn extract_common_fields(
     if via_values.is_empty() {
         return Err(SipParseError::new("Missing mandatory Via header"));
     }
-    for v in &via_values {
-        for segment in split_top_level_commas(v) {
-            if has_via_port_trailing_garbage(&segment) {
-                return Err(SipParseError::new(format!("Trailing non-digit after Via port: \"{segment}\"")));
-            }
-            if wire {
-                if let Some(reason) = check_sent_protocol(&segment) {
-                    return Err(SipParseError::new(format!("{reason}: \"{segment}\"")));
-                }
+    // Split each Via value ONCE — the validation pass below and the parse pass
+    // share the segment list (this used to re-split every value a second time).
+    let via_segments: Vec<&str> =
+        via_values.iter().flat_map(|v| split_top_level_commas(v)).collect();
+    for segment in &via_segments {
+        if has_via_port_trailing_garbage(segment) {
+            return Err(SipParseError::new(format!("Trailing non-digit after Via port: \"{segment}\"")));
+        }
+        if wire {
+            if let Some(reason) = check_sent_protocol(segment) {
+                return Err(SipParseError::new(format!("{reason}: \"{segment}\"")));
             }
         }
     }
-    let via_segments: Vec<String> =
-        via_values.iter().flat_map(|v| split_top_level_commas(v)).collect();
     let vias_parsed: Vec<_> = via_segments.iter().map(|seg| parse_via(seg)).collect();
 
     for (idx, v) in vias_parsed.iter().enumerate() {
-        let raw = &via_segments[idx];
+        let raw = via_segments[idx];
         if let Some(p) = v.port {
             if !is_valid_port(p) {
                 return Err(SipParseError::new(format!("Via port out of range: {p}")));
@@ -505,19 +499,19 @@ pub fn extract_common_fields(
         {
             let mut in_bracket = false;
             let mut colon_count = 0i32;
-            for c in raw.chars() {
-                if c == '[' {
+            for c in raw.bytes() {
+                if c == b'[' {
                     in_bracket = true;
                     continue;
                 }
-                if c == ']' {
+                if c == b']' {
                     in_bracket = false;
                     continue;
                 }
-                if c == ';' && !in_bracket {
+                if c == b';' && !in_bracket {
                     break;
                 }
-                if !in_bracket && c == ':' {
+                if !in_bracket && c == b':' {
                     colon_count += 1;
                 }
             }
@@ -527,7 +521,9 @@ pub fn extract_common_fields(
                 )));
             }
         }
-        if !limits.allowed_transports.contains(&v.transport.to_uppercase()) {
+        // The allowlist is documented case-insensitive; probe without minting
+        // an uppercased String per Via (set is ≤6 entries — linear is fine).
+        if !limits.allowed_transports.iter().any(|t| t.eq_ignore_ascii_case(&v.transport)) {
             return Err(SipParseError::new(format!("Via transport \"{}\" not in allowed set", v.transport)));
         }
     }
@@ -545,14 +541,13 @@ pub fn extract_common_fields(
     // Contact — parse + validate every value; fold comma-list and repeated
     // lines; `Contact: *` must stand alone.
     let mut contact_wildcard = false;
-    let mut contact_entries: Vec<String> = Vec::new();
+    let mut contact_entries: Vec<&str> = Vec::new();
     for v in get_header_values(headers, "Contact") {
         for seg in split_top_level_commas(v) {
-            let trimmed = seg.trim();
-            if trimmed.is_empty() {
+            if seg.is_empty() {
                 continue;
             }
-            if trimmed == "*" {
+            if seg == "*" {
                 contact_wildcard = true;
                 continue;
             }
@@ -610,17 +605,21 @@ pub fn extract_request_fields(
     // Contact cardinality on dialog-creating requests.
     if wire {
         if let Some(method) = method {
-            let m = method.to_uppercase();
-            if m == "INVITE" || m == "SUBSCRIBE" || m == "REFER" {
+            let dialog_creating = method.eq_ignore_ascii_case("INVITE")
+                || method.eq_ignore_ascii_case("SUBSCRIBE")
+                || method.eq_ignore_ascii_case("REFER");
+            if dialog_creating {
                 match &common.contacts {
                     ContactSet::Wildcard => {
                         return Err(SipParseError::new(format!(
-                            "Contact: * wildcard is not valid in {m} (RFC 3261 §10.2.2)"
+                            "Contact: * wildcard is not valid in {} (RFC 3261 §10.2.2)",
+                            method.to_ascii_uppercase()
                         )));
                     }
                     ContactSet::Contacts(cs) if cs.len() > 1 => {
                         return Err(SipParseError::new(format!(
-                            "{m} must not contain multiple Contact headers (RFC 3261 §8.1.1.8 — found {})",
+                            "{} must not contain multiple Contact headers (RFC 3261 §8.1.1.8 — found {})",
+                            method.to_ascii_uppercase(),
                             cs.len()
                         )));
                     }
@@ -633,18 +632,13 @@ pub fn extract_request_fields(
     // CSeq method must match the request method.
     if let Some(method) = method {
         if let Some(cseq_val) = get_header_value(headers, "CSeq") {
-            let cseq_method = {
-                let trimmed: Vec<char> = cseq_val.trim().chars().collect();
-                let mut found = String::new();
-                for i in 0..trimmed.len() {
-                    if trimmed[i] == ' ' || trimmed[i] == '\t' {
-                        found = trimmed[i + 1..].iter().collect::<String>().trim().to_string();
-                        break;
-                    }
-                }
-                found
+            let trimmed = cseq_val.trim();
+            // First SP/HTAB is ASCII → a valid slice boundary.
+            let cseq_method = match trimmed.bytes().position(|c| c == b' ' || c == b'\t') {
+                Some(idx) => trimmed[idx + 1..].trim(),
+                None => "",
             };
-            if !cseq_method.is_empty() && cseq_method.to_uppercase() != method.to_uppercase() {
+            if !cseq_method.is_empty() && !cseq_method.eq_ignore_ascii_case(method) {
                 return Err(SipParseError::new(format!(
                     "CSeq method \"{cseq_method}\" does not match request method \"{method}\""
                 )));

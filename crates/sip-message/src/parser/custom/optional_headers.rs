@@ -124,12 +124,13 @@ fn parse_refer_to_header(headers: &[SipHeader]) -> Result<Option<ReferTo>, SipPa
         None => return Err(SipParseError::new(format!("Malformed Refer-To: \"{}\"", values[0]))),
     };
     // Strict SIP-URI on the target URI head (without embedded headers).
-    let uri_chars: Vec<char> = parsed.uri.chars().collect();
-    let uri_head: String = match find_uri_embedded_headers_start(&parsed.uri) {
-        None => parsed.uri.clone(),
-        Some(q) => uri_chars[..q].iter().collect(),
+    // `find_uri_embedded_headers_start` returns a byte index at the `?` (ASCII
+    // → char boundary), so the head is a plain borrow.
+    let uri_head = match find_uri_embedded_headers_start(&parsed.uri) {
+        None => parsed.uri.as_str(),
+        Some(q) => &parsed.uri[..q],
     };
-    if let Some(reason) = validate_strict_sip_uri(&uri_head) {
+    if let Some(reason) = validate_strict_sip_uri(uri_head) {
         return Err(SipParseError::new(format!("Strict Refer-To URI: {reason} (\"{uri_head}\")")));
     }
     Ok(Some(to_refer_to(parsed)))
@@ -352,7 +353,7 @@ fn validate_contact_strict(headers: &[SipHeader]) -> Result<(), SipParseError> {
             if entry.is_empty() {
                 continue;
             }
-            validate_name_addr_strict(&entry, "Contact")?;
+            validate_name_addr_strict(entry, "Contact")?;
         }
     }
     Ok(())
