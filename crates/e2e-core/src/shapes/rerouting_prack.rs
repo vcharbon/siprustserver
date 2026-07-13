@@ -16,7 +16,7 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 
 /// The FUNCTIONAL body of the dual-body `rerouting_prack` shape — the strict
 /// (anchored, panic-on-deviation) half; the fallible LOAD body is
-/// `scenario_harness::realcall::scenarios::ReroutingPrack`, and both attach to
+/// `scenario_harness::actor::scenarios::ReroutingPrack`, and both attach to
 /// the ONE `rerouting_prack` descriptor in `e2e_model::registry`.
 pub struct ReroutingPrack;
 

@@ -5,7 +5,7 @@
 //!   - the **load** surface (`crates/loadgen`) consumes the descriptor's
 //!     load-side attributes (the named callee [`LegSpec`]s — or their
 //!     `needs_charlie` / `needs_bob2` sugar — plus `emergency` / mix weights)
-//!     and its optional [`RealCallScenario`] body factory;
+//!     and its optional [`ActorScenario`] body factory;
 //!   - the **functional** surface (`crates/e2e-core`) ATTACHES its `!Send`
 //!     `CallflowShape` bodies to the same descriptors **by id** (the body
 //!     drives an `InfraRuntime`, which cannot live in this dependency-light
@@ -34,7 +34,6 @@ use scenario_harness::actor::scenarios::{
     ReroutingPrack as ActorReroutingPrack,
 };
 use scenario_harness::actor::ActorScenario;
-use scenario_harness::realcall::{RealCallScenario, ScenarioId};
 
 use crate::shape::{Anchor, ShapeSpec};
 
@@ -58,27 +57,12 @@ impl Default for ScenarioInputs {
     }
 }
 
-/// A shape's minted **load body** — the executor fork (plan §4.4, B8): a
-/// LINEAR body drives one coroutine through `RealCallScenario::run`; an ACTOR
-/// body declares per-endpoint reactive actors the runner joins
-/// (`scenario_harness::actor::run_actor_scenario`). The load driver's
-/// `run_one` branches on this; everything downstream (teardown,
-/// classification, sampling) is shared.
-#[derive(Clone)]
-pub enum Scenario {
-    Linear(Arc<dyn RealCallScenario>),
-    Actor(Arc<dyn ActorScenario>),
-}
-
-impl Scenario {
-    /// The body's intrinsic name (panic messages, direct functional use).
-    pub fn id(&self) -> ScenarioId {
-        match self {
-            Scenario::Linear(s) => s.id(),
-            Scenario::Actor(s) => s.id(),
-        }
-    }
-}
+/// A shape's minted **load body**: an ACTOR-declared scenario — per-endpoint
+/// reactive actors the runner joins (`scenario_harness::actor::run_actor_scenario`).
+/// The load driver's `run_one` drives it; everything downstream (teardown,
+/// classification, sampling) is shared. `.id()` resolves through
+/// [`ActorScenario`].
+pub type Scenario = Arc<dyn ActorScenario>;
 
 /// Factory minting a shape's **load body** from the per-run [`ScenarioInputs`]
 /// (the refer scenarios take the run's `refer_key` at construction; stateless
@@ -271,28 +255,20 @@ impl ShapeDescriptor {
         self
     }
 
-    /// Attach a LINEAR load body built fresh from the per-run [`ScenarioInputs`].
-    pub fn load_with(
-        mut self,
-        factory: impl Fn(&ScenarioInputs) -> Arc<dyn RealCallScenario> + Send + Sync + 'static,
-    ) -> Self {
-        self.load = Some(Arc::new(move |i: &ScenarioInputs| Scenario::Linear(factory(i))));
-        self
-    }
-
-    /// Attach an ACTOR load body built fresh from the per-run
-    /// [`ScenarioInputs`] — the executor fork's other arm (see [`Scenario`]).
+    /// Attach an ACTOR load body built fresh from the per-run [`ScenarioInputs`]
+    /// (the refer scenarios take the run's `refer_key` at construction;
+    /// stateless bodies ignore the inputs).
     pub fn load_actor_with(
         mut self,
         factory: impl Fn(&ScenarioInputs) -> Arc<dyn ActorScenario> + Send + Sync + 'static,
     ) -> Self {
-        self.load = Some(Arc::new(move |i: &ScenarioInputs| Scenario::Actor(factory(i))));
+        self.load = Some(Arc::new(move |i: &ScenarioInputs| factory(i) as Scenario));
         self
     }
 
-    /// Attach a stateless, inputs-independent LINEAR load body (the common case).
-    pub fn load_shared(self, body: Arc<dyn RealCallScenario>) -> Self {
-        self.load_with(move |_| body.clone())
+    /// Attach a stateless, inputs-independent ACTOR load body (the common case).
+    pub fn load_shared(self, body: Arc<dyn ActorScenario>) -> Self {
+        self.load_actor_with(move |_| body.clone())
     }
 
     /// Mint this shape's load body from the per-run inputs (`None` =
@@ -405,9 +381,10 @@ impl Default for ReroutingParams {
 
 /// The anchor set of a plain full-call shape.
 const CALL_ANCHORS: &[Anchor] = &[Anchor::InitialInvite, Anchor::Answer, Anchor::Ack, Anchor::Bye];
-/// The anchor set the shared LOAD establishment publishes (`realcall::establish`
-/// + `hangup`): the plain set plus the 180 (tagged only when it arrived — a
-/// non-PRACK provisional is best-effort, so key it from an `optional` block).
+/// The anchor set the standard LOAD establishment + teardown publishes (the
+/// actor caller's INVITE + BYE feeds): the plain set plus the 180 (tagged only
+/// when it arrived — a non-PRACK provisional is best-effort, so key it from an
+/// `optional` block).
 const LOAD_CALL_ANCHORS: &[Anchor] = &[
     Anchor::InitialInvite,
     Anchor::FirstProvisional,
@@ -558,7 +535,7 @@ mod tests {
     use super::*;
     // A third-party registration test binds a plain LINEAR body — the last
     // in-tree use of the linear `BasicCall` now the shipped shapes are actors.
-    use scenario_harness::realcall::scenarios::BasicCall;
+    use scenario_harness::actor::scenarios::BasicCall;
 
     #[test]
     fn defaults_register_one_id_space_with_both_surfaces() {

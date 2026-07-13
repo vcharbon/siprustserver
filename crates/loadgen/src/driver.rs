@@ -27,8 +27,7 @@ use crate::ctx::{CallCtx, CallEnv};
 use crate::mux::{labelled_prefix_leg_picker_defaulting, CallRouting, Correlation, MuxCore};
 use crate::rate::{Governor, RateHandle};
 use crate::report::{RenderedSample, Reporter};
-use crate::scenarios::LoadScenario;
-use crate::scope::CallScope;
+use scenario_harness::actor::ActorScenario;
 
 /// The mux transport the driver binds calls on.
 pub struct MuxTransport {
@@ -124,9 +123,9 @@ pub struct MixEntry {
     /// The report/metrics id — the DESCRIPTOR's id (may differ from the body's
     /// intrinsic `id()` when one body serves several shapes, e.g. `basic_call_em`).
     pub id: crate::scenarios::ScenarioId,
-    /// The load body — the executor fork ([`Scenario`]): a LINEAR coroutine
-    /// body or an ACTOR-declared one. `run_one` branches; everything after
-    /// (teardown, classification, sampling) is shared.
+    /// The load body — an ACTOR-declared [`Scenario`] (per-endpoint reactors).
+    /// `run_one` drives it; everything after (teardown, classification,
+    /// sampling) is shared.
     pub scenario: Scenario,
     pub weight: f64,
     pub case: Option<Arc<LoadCase>>,
@@ -145,11 +144,11 @@ pub struct MixEntry {
     pub challenge_responder: Option<Arc<dyn scenario_harness::realcall::ChallengeResponder>>,
 }
 
-impl From<(Arc<dyn LoadScenario>, f64)> for MixEntry {
-    fn from((scenario, weight): (Arc<dyn LoadScenario>, f64)) -> Self {
+impl From<(Arc<dyn ActorScenario>, f64)> for MixEntry {
+    fn from((scenario, weight): (Arc<dyn ActorScenario>, f64)) -> Self {
         MixEntry {
             id: scenario.id(),
-            scenario: Scenario::Linear(scenario),
+            scenario,
             weight,
             case: None,
             legs: LegSpec::historic(false, false),
@@ -528,25 +527,16 @@ async fn run_one(
         reinvite_gap: dwells.reinvite_gap.unwrap_or(call.reinvite_gap),
         long_hold: dwells.long_hold.unwrap_or(call.long_hold),
     };
-    let scope = CallScope::new();
+    // An ACTOR body is joined per-endpoint reactors whose runner owns its own
+    // per-actor teardown scopes (so no outer `CallScope` is needed here); it
+    // yields the `Result<(), StepError>` contract everything downstream —
+    // classification, sampling, phases, the ringing gate — buckets on, inside a
+    // `catch_unwind` boundary (a panic is a counted failure, never a worker abort).
+    let result =
+        AssertUnwindSafe(scenario_harness::actor::run_actor_scenario(scenario.as_ref(), &env, &ctx))
+            .catch_unwind()
+            .await;
 
-    // The executor fork (plan §4.4): a LINEAR body is one coroutine over the
-    // shared choreography; an ACTOR body is joined per-endpoint reactors whose
-    // runner owns its own per-actor teardown scopes (so the outer `scope` stays
-    // Idle and the shared teardown below is a no-op for it). Both yield the
-    // same `Result<(), StepError>` contract, so everything downstream —
-    // classification, sampling, phases, the ringing gate — is untouched.
-    let result = match &scenario {
-        Scenario::Linear(s) => AssertUnwindSafe(s.run(&env, &scope, &ctx)).catch_unwind().await,
-        Scenario::Actor(s) => {
-            AssertUnwindSafe(scenario_harness::actor::run_actor_scenario(s.as_ref(), &env, &ctx))
-                .catch_unwind()
-                .await
-        }
-    };
-
-    // Cleanup FIRST (release any dialog on the SUT), then classify/report.
-    scope.teardown().await;
     let failed = !matches!(result, Ok(Ok(())));
     if failed && !call.teardown_quiesce.is_zero() {
         for (_, agent) in &callee_agents {

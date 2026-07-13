@@ -1,8 +1,9 @@
 //! The load scenarios — fallible reuse of the functional choreography.
 //!
-//! The portable real-call scenarios + the trait + the shared `establish`/
-//! `hangup` choreography live in [`scenario_harness::realcall`] so the SAME
-//! flow serves the load fleet AND the in-process functional leak gate. The
+//! The portable actor-declared scenario bodies + their trait/runner live in
+//! [`scenario_harness::actor`] (the per-call environment in
+//! [`scenario_harness::realcall`]) so the SAME flow serves the load fleet AND
+//! the in-process functional leak gate. The
 //! **tables** that used to live here (`by_id` / `default_scenarios` /
 //! `failure_scenarios`) folded into the unified, open shape registry
 //! ([`e2e_model::ShapeRegistry`]): each shape is declared ONCE as a
@@ -29,24 +30,19 @@
 //! dependent 1xx count, and leave "rang twice" assertions to the
 //! functional/e2e surface where no absorber sits between the SUT and the UA.
 
-// The shared real-call trait + choreography (the load alias keeps the historic
-// `LoadScenario` name at the call sites). `establish`/`hangup` and the
-// per-call context types are re-exported so any downstream user reaches them
-// through this module unchanged.
-pub use scenario_harness::realcall::{
-    establish, establish_100rel, hangup, hangup_on, CallCtx, CallEnv, CallScope,
-    RealCallScenario as LoadScenario, ScenarioId,
-};
-// All scenario bodies live in the shared crate; re-export so a
-// `scenarios::BasicCall` user resolves.
-pub use scenario_harness::realcall::scenarios::{
+// The per-call context types are re-exported so any downstream user reaches
+// them through this module unchanged.
+pub use scenario_harness::realcall::{CallCtx, CallEnv, CallScope, ScenarioId};
+// The load bodies are ACTOR-declared (per-endpoint reactive actors the runner
+// joins); re-export the whole set plus their trait/runner under this module so
+// a `scenarios::BasicCall` user resolves. `LoadScenario` is the historic alias
+// for the load body's trait (now `ActorScenario`).
+pub use scenario_harness::actor::scenarios::{
     AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate, Refer,
     ReferCharlieReject, Reinvite, ReroutingPrack,
 };
-// The ACTOR-declared bodies (the executor fork's other arm — `refer` runs on
-// this since P1) plus their trait/runner, re-exported under the same roof.
 pub use scenario_harness::actor::{
-    run_actor_scenario, scenarios::Refer as ActorRefer, ActorCall, ActorScenario, Expect,
+    run_actor_scenario, ActorCall, ActorScenario, ActorScenario as LoadScenario, Expect,
 };
 
 // The unified shape registry + the per-run construction inputs (SUT auth data

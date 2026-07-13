@@ -64,7 +64,7 @@ pub fn default_bodies() -> Vec<(&'static str, Box<dyn CallflowShape>)> {
         ("basic-call-media", Box::new(BasicCallMedia)),
         ("rerouting", Box::new(Rerouting)),
         // The first DUAL-BODY shape: the same descriptor also carries the load
-        // body (`scenario_harness::realcall::scenarios::ReroutingPrack`).
+        // body (`scenario_harness::actor::scenarios::ReroutingPrack`).
         ("rerouting_prack", Box::new(ReroutingPrack)),
         ("transfer-refer-media", Box::new(TransferReferMedia)),
     ]

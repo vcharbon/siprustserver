@@ -1,25 +1,18 @@
-//! Real-call scenarios — the choreography shared by the load generator
-//! (`crates/loadgen`, fallible: a deviation is a counted [`StepError`]) and the
-//! in-process functional leak gate ([`run_asserting`], strict: a deviation is a
-//! `panic!`). Each scenario drives one full call through the SUT using the
-//! fallible `try_*` agent surface and registers its dialog in a [`CallScope`] so
-//! a failure mid-flow still tears the call down — the invariant that keeps a
-//! failed call from leaking SUT state under load AND lets the same flow serve as
-//! a deterministic no-leak assertion in CI.
+//! Real-call scenario support — the per-call environment ([`CallEnv`]), recorder
+//! ([`CallCtx`]), teardown scope ([`CallScope`]) and deferred-auth adapter
+//! ([`auth`]) shared by the load generator (`crates/loadgen`, fallible: a
+//! deviation is a counted [`StepError`]) and the in-process functional leak gate.
 //!
-//! A scenario is portable to load/endurance **iff** it lives here: it must be a
-//! "real call" expressible against `try_*` with no byte-exact assertions. The
-//! raw-bytes torture cases (`dsl::Scenario`) are deliberately NOT here.
+//! The scenario *bodies* themselves are ACTOR-declared — per-endpoint reactive
+//! actors the runner joins — and live in [`crate::actor::scenarios`]; this module
+//! provides the environment they build against plus the two functional-gate
+//! runners ([`run_actor_collecting`] / [`run_actor_asserting`]).
 
-use async_trait::async_trait;
-
-use crate::agent::{ClientInvite, ServerTxn};
-use crate::{Agent, Dialog, StepError, ANSWER_SDP, OFFER_SDP};
+use crate::StepError;
 
 pub mod auth;
 mod env;
 mod scope;
-pub mod scenarios;
 
 pub use auth::{Challenge, ChallengeResponder};
 pub use env::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp, InvitePlan};
@@ -28,81 +21,15 @@ pub use scope::CallScope;
 /// Stable scenario name — the Prometheus `scenario` label and report dir name.
 pub type ScenarioId = &'static str;
 
-/// A real-call scenario: one full call through the SUT. Implementations are
-/// `Send + Sync` and stateless (all per-call state is in the args), so the same
-/// instance can be shared across the load fleet and reused by a functional test.
-///
-/// The scenario is the shape's **load body** — pure choreography. Its load-side
-/// ATTRIBUTES (needs-charlie / needs-bob2 / emergency / mix weights) live on the
-/// shape's ONE declaration, the `e2e_model::ShapeDescriptor`, which the load
-/// driver consults per mix entry — never here, so a body reused under several
-/// ids (e.g. the emergency variants) is declared once.
-#[async_trait]
-pub trait RealCallScenario: Send + Sync {
-    /// The body's intrinsic name (panic messages, direct functional use). The
-    /// registry/report id is the DESCRIPTOR's — they coincide except when one
-    /// body serves several descriptors (`basic_call` vs `basic_call_em`).
-    fn id(&self) -> ScenarioId;
-    /// Drive one call. Return `Ok` on the happy path or a [`StepError`] on an
-    /// expected failure; the driver/leak-gate tears the call down regardless.
-    async fn run(
-        &self,
-        env: &CallEnv<'_>,
-        scope: &CallScope,
-        ctx: &CallCtx,
-    ) -> Result<(), StepError>;
-}
-
-/// Run a scenario once as an in-process functional leak gate and **return** its
-/// outcome (no panic). Drives the call with a fresh per-call `CallScope`/`CallCtx`,
-/// then ALWAYS tears the call down (release any dialog on the SUT) before
-/// returning — so the caller can assert on the SUT (`active_calls() == 0`,
-/// `assert_fully_reaped()`) with no leaked dialog left behind, whatever the
-/// outcome. This is the runner for the **voluntarily-failing** scenarios (an
-/// `Err` is the EXPECTED outcome): the leak-gate's most valuable assertion is
-/// that a FAILED call still cleans up, so it must observe the `Err` rather than
-/// `panic!` on it (which [`run_asserting`] does).
-///
-/// Use a fresh per-call `token` (the correlation value). Realistic dwell timing
-/// rides [`CallEnv::for_functional`]; under a paused clock it is free.
-pub async fn run_collecting(
-    scenario: &dyn RealCallScenario,
-    env: &CallEnv<'_>,
-) -> Result<(), StepError> {
-    let scope = CallScope::new();
-    let ctx = CallCtx::new();
-    let result = scenario.run(env, &scope, &ctx).await;
-    // Tear down first (release any dialog on the SUT), then hand the result back —
-    // so a failing assertion in the caller never leaves a leaked dialog that
-    // contaminates a later test.
-    scope.teardown().await;
-    result
-}
-
-/// Run a scenario as an **in-process functional leak gate**: drive it once, tear
-/// the call down, and `panic!` if it did not reach the happy path — the strict
-/// (assert-on-deviation) analogue of the load driver's count-and-classify. After
-/// this returns the caller asserts on the SUT (e.g. `active_calls() == 0`,
-/// `assert_fully_reaped()`), so a scenario that leaks state is caught
-/// deterministically without a cluster or a soak run.
-///
-/// The happy-path sibling of [`run_collecting`]: it delegates the run+teardown to
-/// it and `panic!`s on the `Err` a happy-path scenario must never return.
-///
-/// Use a fresh per-call `token` (the correlation value). Realistic dwell timing
-/// rides [`CallEnv::for_functional`]; under a paused clock it is free.
-pub async fn run_asserting(scenario: &dyn RealCallScenario, env: &CallEnv<'_>) {
-    if let Err(e) = run_collecting(scenario, env).await {
-        panic!("real-call scenario `{}` failed: {e:?}", scenario.id());
-    }
-}
-
 /// Run an [`ActorScenario`](crate::actor::ActorScenario) once and **return**
-/// its outcome — the actor twin of [`run_collecting`]. The runner owns the
-/// per-actor teardown scopes (they survive a body panic — see
+/// its outcome — the in-process functional leak gate that OBSERVES the result
+/// (an `Err` is the expected outcome for a voluntarily-failing body). The runner
+/// owns the per-actor teardown scopes (they survive a body panic — see
 /// [`run_call_with`](crate::actor::run_call_with)), so no outer `CallScope` is
 /// needed: after this returns, every leg the call opened on the SUT has been
-/// released (its own BYE on the happy path, best-effort CANCEL/BYE otherwise).
+/// released (its own BYE on the happy path, best-effort CANCEL/BYE otherwise),
+/// and the caller can assert on the SUT (`active_calls() == 0`,
+/// `assert_fully_reaped()`) with no leaked dialog left behind.
 pub async fn run_actor_collecting(
     scenario: &dyn crate::actor::ActorScenario,
     env: &CallEnv<'_>,
@@ -111,11 +38,11 @@ pub async fn run_actor_collecting(
     crate::actor::run_actor_scenario(scenario, env, &ctx).await
 }
 
-/// Run an [`ActorScenario`](crate::actor::ActorScenario) as an **in-process
-/// functional leak gate**: drive it once (teardown included) and `panic!` if it
-/// did not reach its declared happy outcome — the actor twin of
-/// [`run_asserting`]. The caller then asserts on the SUT
-/// (`active_calls() == 0`, `assert_fully_reaped()`).
+/// Run an [`ActorScenario`](crate::actor::ActorScenario) as a **strict**
+/// in-process functional leak gate: drive it once (teardown included) and
+/// `panic!` if it did not reach its declared happy outcome — the assert-on-
+/// deviation analogue of [`run_actor_collecting`]. The caller then asserts on the
+/// SUT (`active_calls() == 0`, `assert_fully_reaped()`).
 pub async fn run_actor_asserting(
     scenario: &dyn crate::actor::ActorScenario,
     env: &CallEnv<'_>,
@@ -123,269 +50,4 @@ pub async fn run_actor_asserting(
     if let Err(e) = run_actor_collecting(scenario, env).await {
         panic!("actor scenario `{}` failed: {e:?}", scenario.id());
     }
-}
-
-/// Shared INVITE/180/200/ACK establishment — the fallible analogue of
-/// `callflow::establish`. Registers the early CANCEL handle, then the confirmed
-/// dialog, in `scope`, and marks the `time_to_200` checkpoint. Returns the
-/// caller's confirmed [`Dialog`].
-pub async fn establish(
-    env: &CallEnv<'_>,
-    scope: &CallScope,
-    ctx: &CallCtx,
-) -> Result<Dialog, StepError> {
-    let inv = env.alice.invite(env.bob).with_sdp(OFFER_SDP);
-    let mut call = env.outgoing_invite(&["bob"], inv).send().await;
-    scope.set_early(call.cancel_handle());
-    let mut uas = admitted_uas(env, scope, &mut call, 180).await?;
-    // Canonical anchors (ADR-0019) on the shared choreography: a no-op unless
-    // the driver sampled this call (see `CallCtx::anchor`).
-    ctx.anchor(env.bob, "initialInvite", uas.request());
-    uas.respond(180, "Ringing").await;
-    // The 180 is a NON-PRACK provisional: best-effort, so it MAY be lost
-    // end-to-end — that is EXPECTED, not a call failure (RFC 3261 §13.2.2.4: the
-    // dialog/ACK rides the 2xx). So a TIMEOUT waiting for it is tolerated (the 18x
-    // was lost → proceed to the answer) and only COUNTED; the driver gates the
-    // cross-call 18x delivery rate (>99%) instead of failing the call. A genuinely
-    // wrong message (not a timeout) is still an error. We keep the strict ordering
-    // — the UAS answers only AFTER this resolves — so a late/reordered 180 can
-    // never strand in the caller's inbox (which would break the later BYE).
-    let saw_ringing = match call.try_expect(180).await {
-        Ok(ring) => {
-            ctx.anchor(env.alice, "firstProvisional", &ring);
-            true
-        }
-        Err(StepError::Timeout { .. }) => false,
-        Err(e) => return Err(e),
-    };
-    ctx.mark_ringing(saw_ringing);
-    // Realistic ring: dwell the early dialog before answering. Alice is parked
-    // (not awaiting a receive) for the duration, so this just ages the early
-    // dialog on the SUT; it stays well inside Timer C (180 s).
-    if !env.ring_delay.is_zero() {
-        tokio::time::sleep(env.ring_delay).await;
-    }
-    uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
-    let answer = call.try_expect(200).await?;
-    ctx.anchor(env.alice, "answer", &answer);
-    ctx.checkpoint("time_to_200");
-
-    let dialog = call.ack().await;
-    scope.set_confirmed(dialog.clone());
-    let ack = env.bob.try_receive("ACK").await?;
-    ctx.anchor(env.bob, "ack", ack.request());
-    ctx.phase("connected");
-    Ok(dialog)
-}
-
-/// The call may be ADMITTED (the SUT forwards our INVITE to bob) or SHED
-/// (under overload the SUT replies a final — e.g. 503 — directly to alice, and
-/// bob never sees it; an emergency call is force-admitted and never shed). We
-/// cannot know which up front, so race bob's inbound INVITE against alice's
-/// response. `try_expect(expect_1xx)` skips the auto-100 Trying and surfaces a
-/// shed final as `WrongStatus { got: 503 }`, which the driver buckets as
-/// `status_503`. (Only an admitted call reaches bob; an admitted call's own
-/// provisional arrives only after the scenario answers bob, so the second arm
-/// resolving is unambiguously the SUT's own final to alice.) Shared by
-/// [`establish`] (awaits a 180 next) and [`establish_100rel`] (a reliable 183).
-pub(crate) async fn admitted_uas(
-    env: &CallEnv<'_>,
-    scope: &CallScope,
-    call: &mut ClientInvite,
-    expect_1xx: u16,
-) -> Result<ServerTxn, StepError> {
-    // At most ONE authenticated resend (RFC 3261 §22.2): a challenge to the
-    // resent INVITE surfaces as a plain `status_401/407` deviation, never an
-    // unbounded loop.
-    let mut auth_retries_left: u8 = if env.challenge_responder.is_some() { 1 } else { 0 };
-    loop {
-        let raced = tokio::select! {
-            biased;
-            bob = env.bob.try_receive("INVITE") => return bob,
-            resp = call.try_recv_response() => resp,
-        };
-        // The alice arm resolved first: either the SUT's own final to alice (a
-        // shed 503 / a 401-407 challenge / any other final) or an early
-        // provisional that should not have preceded bob's INVITE.
-        let resp = match raced {
-            Ok(r) => r,
-            // A bare timeout / closed queue (no response) leaves the scope Early
-            // so the still-pending INVITE is CANCELed at teardown.
-            Err(e) => return Err(e),
-        };
-
-        // §22.2 challenge with a configured responder: ACK the challenge, add the
-        // credential, resend once, then re-race (bob may now see the authed
-        // INVITE, or another final may come back).
-        if matches!(resp.status, 401 | 407) && auth_retries_left > 0 {
-            if let Some(responder) = env.challenge_responder.as_deref() {
-                if call.ack_and_resend_with_auth(&resp, responder).await? {
-                    // The resent INVITE is a fresh transaction still pending — keep
-                    // the scope Early (its CANCEL handle already covers the resent
-                    // INVITE, which `ack_and_resend_with_auth` re-pointed).
-                    auth_retries_left -= 1;
-                    continue;
-                }
-                // Responder declined — fall through and surface the challenge as a
-                // plain deviation (status_401/407), exactly as with no responder.
-            }
-        }
-
-        // No retry: reproduce the historic `try_expect(expect_1xx)`
-        // classification byte-for-byte. A real FINAL (status ≥ 200) completes the
-        // INVITE transaction — nothing to CANCEL/BYE — so mark the scope
-        // terminated (teardown is a no-op) and surface `WrongStatus` (the driver
-        // buckets it `status_<code>`, e.g. `status_401` / `status_503`). A 1xx
-        // that raced ahead of bob is NOT a final: leave the scope Early (the
-        // pending INVITE is CANCELed). The `expect_1xx` provisional itself maps to
-        // `UnexpectedKind` (as `try_expect` returning `Ok` did); any OTHER 1xx to
-        // `WrongStatus` — exactly the two prior branches.
-        if resp.status >= 200 {
-            scope.mark_terminated();
-            return Err(StepError::WrongStatus {
-                who: env.alice.name().to_string(),
-                expected: expect_1xx,
-                got: resp.status,
-                reason: resp.reason.clone(),
-            });
-        }
-        if resp.status == expect_1xx {
-            return Err(StepError::UnexpectedKind {
-                who: env.alice.name().to_string(),
-                detail: format!("early {expect_1xx} before bob saw the INVITE"),
-            });
-        }
-        return Err(StepError::WrongStatus {
-            who: env.alice.name().to_string(),
-            expected: expect_1xx,
-            got: resp.status,
-            reason: resp.reason.clone(),
-        });
-    }
-}
-
-/// Shared RFC 3262 establishment — the reliable-provisional analogue of
-/// [`establish`]:
-///
-/// ```text
-///   INVITE(offer, Supported:100rel) → 183(Require:100rel, RSeq, answer)
-///     → PRACK(RAck) → 200(PRACK) → 200(INVITE) → ACK
-/// ```
-///
-/// The caller opts into 100rel on the INVITE (RFC 3262 §3); bob answers with a
-/// RELIABLE 183 carrying the SDP answer; alice PRACKs it (RAck derived from the
-/// 183's own RSeq/CSeq via [`ClientInvite::try_prack`]); bob 200s the PRACK and
-/// only then answers the INVITE (RFC 3262 MUST-014 ordering). Unlike the basic
-/// 180, a lost reliable 183 is a FAILURE (reliability is its point), so no
-/// timeout tolerance here. Registers the early CANCEL handle then the confirmed
-/// dialog in `scope`, marks `time_to_200` and the `pracked`/`connected` phases.
-pub async fn establish_100rel(
-    env: &CallEnv<'_>,
-    scope: &CallScope,
-    ctx: &CallCtx,
-) -> Result<Dialog, StepError> {
-    let inv = env
-        .alice
-        .invite(env.bob)
-        .with_sdp(OFFER_SDP)
-        .with_header("Supported", "100rel");
-    let mut call = env.outgoing_invite(&["bob"], inv).send().await;
-    scope.set_early(call.cancel_handle());
-    let uas = admitted_uas(env, scope, &mut call, 183).await?;
-    ctx.anchor(env.bob, "initialInvite", uas.request());
-    complete_100rel(env, scope, ctx, call, uas, env.bob).await
-}
-
-/// The RELIABLE-provisional half of [`establish_100rel`], parameterised over the
-/// answering callee — shared with the rerouting flow, where the leg that answers
-/// (`bob2`, after the primary's rejection drove the SUT's failover) is not the
-/// one the INVITE was aimed at:
-///
-/// ```text
-///   183(Require:100rel, RSeq, answer) → PRACK(RAck) → 200(PRACK)
-///     → 200(INVITE) → ACK
-/// ```
-///
-/// `callee` answers with a RELIABLE 183 carrying the SDP answer; alice PRACKs it
-/// (RAck derived from the 183's own RSeq/CSeq via [`ClientInvite::try_prack`]);
-/// the callee 200s the PRACK and only then answers the INVITE (RFC 3262 MUST-014
-/// ordering). Unlike the basic 180, a lost reliable 183 is a FAILURE
-/// (reliability is its point), so no timeout tolerance here. Registers the
-/// confirmed dialog in `scope`, marks `time_to_prack_200`/`time_to_200` and the
-/// `pracked`/`connected` phases.
-pub async fn complete_100rel(
-    env: &CallEnv<'_>,
-    scope: &CallScope,
-    ctx: &CallCtx,
-    mut call: ClientInvite,
-    mut uas: ServerTxn,
-    callee: &Agent,
-) -> Result<Dialog, StepError> {
-    // The callee answers RELIABLY: 183 + Require:100rel + RSeq:1 + the answer.
-    uas.respond(183, "Session Progress").reliable(1).with_sdp(ANSWER_SDP).try_send().await?;
-    let p183 = call.try_expect(183).await?;
-    ctx.anchor(env.alice, "firstProvisional", &p183);
-    // A RELIABLE provisional is guaranteed-delivery (the UAS retransmits it until
-    // PRACKed), so its arrival counts toward the cross-call 18x gate.
-    ctx.mark_ringing(true);
-
-    // Alice PRACKs the reliable 183 on the early dialog; the callee 200s it.
-    let mut prack = call.try_prack(&p183).await?;
-    let mut prack_uas = callee.try_receive("PRACK").await?;
-    ctx.anchor(callee, "prack", prack_uas.request());
-    prack_uas.respond(200, "OK").try_send().await?;
-    prack.try_expect(200).await?;
-    ctx.checkpoint("time_to_prack_200");
-    ctx.phase("pracked");
-
-    // Realistic ring: dwell the PRACKed early dialog before answering.
-    if !env.ring_delay.is_zero() {
-        tokio::time::sleep(env.ring_delay).await;
-    }
-    uas.respond(200, "OK").with_sdp(ANSWER_SDP).try_send().await?;
-    let answer = call.try_expect(200).await?;
-    ctx.anchor(env.alice, "answer", &answer);
-    ctx.checkpoint("time_to_200");
-
-    let dialog = call.ack().await;
-    scope.set_confirmed(dialog.clone());
-    let ack = callee.try_receive("ACK").await?;
-    ctx.anchor(callee, "ack", ack.request());
-    ctx.phase("connected");
-    Ok(dialog)
-}
-
-/// Shared BYE/200 teardown — the fallible analogue of `callflow::hangup`. On
-/// success marks the scope terminated (so the driver's teardown is a no-op) and
-/// records `time_to_bye_200`. The SUT relays the BYE to `env.bob`; a flow whose
-/// live downstream leg is another agent (the rerouted `bob2`) uses
-/// [`hangup_on`].
-pub async fn hangup(
-    env: &CallEnv<'_>,
-    scope: &CallScope,
-    dialog: &mut Dialog,
-    ctx: &CallCtx,
-) -> Result<(), StepError> {
-    hangup_on(env, scope, dialog, ctx, env.bob).await
-}
-
-/// [`hangup`] parameterised over the callee whose leg receives the relayed BYE
-/// (the WINNING leg of a rerouted call).
-pub async fn hangup_on(
-    _env: &CallEnv<'_>,
-    scope: &CallScope,
-    dialog: &mut Dialog,
-    ctx: &CallCtx,
-    callee: &Agent,
-) -> Result<(), StepError> {
-    let mut bye = dialog.bye().await;
-    scope.set_confirmed(dialog.clone()); // refresh CSeq so any teardown BYE stays valid
-    let mut bye_uas = callee.try_receive("BYE").await?;
-    ctx.anchor(callee, "bye", bye_uas.request());
-    bye_uas.respond(200, "OK").await;
-    bye.try_expect(200).await?;
-    scope.mark_terminated();
-    ctx.checkpoint("time_to_bye_200");
-    ctx.phase("bye_200");
-    Ok(())
 }

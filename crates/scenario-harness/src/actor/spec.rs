@@ -1,12 +1,11 @@
-//! The **actor-scenario adapter** — the trait fork beside
-//! [`RealCallScenario`](crate::realcall::RealCallScenario) (plan §4.1/§4.3/§4.4).
-//! An [`ActorScenario`] DECLARES a call (actor specs + barrier plan + settle
-//! barrier + expected outcome) from a borrowed [`CallEnv`], extracting OWNED
-//! state (cloned agents, copied knobs, an [`InvitePlan`](crate::realcall::InvitePlan))
-//! so the built [`ActorCall`] is `Send + 'static`; [`run_actor_scenario`] drives
-//! it and maps the [`CallVerdict`] back onto the EXACT `Result<(), StepError>`
-//! contract the linear body had — same variant, same `who` — so the load
-//! driver's classification (`loadgen/src/class.rs`) is untouched.
+//! The **actor-scenario adapter** (plan §4.1/§4.3/§4.4). An [`ActorScenario`]
+//! DECLARES a call (actor specs + barrier plan + settle barrier + expected
+//! outcome) from a borrowed [`CallEnv`], extracting OWNED state (cloned agents,
+//! copied knobs, an [`InvitePlan`](crate::realcall::InvitePlan)) so the built
+//! [`ActorCall`] is `Send + 'static`; [`run_actor_scenario`] drives it and maps
+//! the [`CallVerdict`] onto the EXACT `Result<(), StepError>` downstream
+//! contract — the `StepError` variant + `who` the load driver's classification
+//! (`loadgen/src/class.rs`) buckets on.
 //!
 //! The `who` strings minted here are load-report sample-directory keys — see
 //! `docs/todos/actor-harness-p1-contract-table.md`. Byte-for-byte:

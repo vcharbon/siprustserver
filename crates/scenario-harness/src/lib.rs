@@ -77,10 +77,11 @@ pub use dsl::{AgentId, Match, Scenario, Step};
 // `e2e_model::egress`): how a topology realizes a logical INVITE on its wire.
 pub use egress::{ApiCall, CalleeTarget, EgressPolicy, EgressRewrite};
 pub use run::{run, ExpectOutcome, RunReport};
-// The portable real-call scenarios shared by the load generator and the
-// in-process functional leak gate (`realcall::run_asserting` for happy-path
-// flows, `realcall::run_collecting` for the voluntarily-failing ones).
+// The per-call environment shared by the load generator and the in-process
+// functional leak gate, plus the actor-scenario runners
+// (`realcall::run_actor_asserting` for happy-path flows,
+// `realcall::run_actor_collecting` for the voluntarily-failing ones).
 pub use realcall::{
-    run_asserting, run_collecting, CallCtx, CallEnv, CallScope, Challenge, ChallengeResponder,
-    CoreIdentity, RealCallScenario, ScenarioId,
+    run_actor_asserting, run_actor_collecting, CallCtx, CallEnv, CallScope, Challenge,
+    ChallengeResponder, CoreIdentity, ScenarioId,
 };
