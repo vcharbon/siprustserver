@@ -227,10 +227,8 @@ impl ShapePlan {
         }
         for stage in &self.stages {
             if let Stage::Script(Script::Reinvite { n }) = stage {
-                if *n != 1 {
-                    return Err(err(
-                        "Reinvite n != 1 needs the per-cycle reneg barrier (phase C)",
-                    ));
+                if *n == 0 {
+                    return Err(err("Reinvite n must be >= 1"));
                 }
             }
         }
@@ -448,19 +446,28 @@ impl ShapePlan {
     fn compile_script(&self, env: &CallEnv<'_>, b: &mut Build, script: &Script) {
         match *script {
             Script::Reinvite { n } => {
-                // n > 1 is gated in validate(): SUBFLOW_RENEG is a MONOTONIC
-                // latch (state.rs advance_subflow is a max, and Reinvite
-                // origination never resets it), so a `reinvited` guard cannot
-                // serialize cycles — phase C lands a per-cycle (per-CSeq)
-                // completion barrier before the ×N matrix generates.
-                for _ in 0..n {
+                // C6: serialize N delayed-offer re-INVITE cycles. Cycle 0 fires
+                // on the incoming gate; cycle `i` (i>=1) waits until the leg has
+                // COMPLETED i prior cycles (`reneg_count() >= i`), so no two
+                // re-INVITEs are ever in flight (that would glare into a 491).
+                // `reneg_count` is the cardinality of the caller's grow-only
+                // completed-reneg set (state.rs `RenegCompleted`) — a real
+                // per-cycle counter, unlike the monotone SUBFLOW_RENEG latch.
+                // For n=1 this is byte-for-byte the old `reneg_done` gate (the
+                // count hits 1 the same instant the latch confirms).
+                for i in 0..n {
+                    let guard = if i == 0 {
+                        b.gate.clone()
+                    } else {
+                        Barrier::pred("reinvited", move |s| s.leg("alice").reneg_count() >= i)
+                    };
                     b.caller_goals
-                        .push(Goal::new(b.gate.clone(), GoalStep::Reinvite).after(env.reinvite_gap));
+                        .push(Goal::new(guard, GoalStep::Reinvite).after(env.reinvite_gap));
                 }
                 b.caller_feed.on_reinvite_ok =
                     Feed::new(Some("time_to_reinvite_200"), Some("reinvited"));
                 b.caller_needs_answer_sdp = true;
-                b.gate = Barrier::pred("reinvited", reneg_done);
+                b.gate = Barrier::pred("reinvited", move |s| s.leg("alice").reneg_count() >= n);
             }
             Script::UpdatePostConnect => {
                 b.caller_goals
@@ -604,6 +611,20 @@ mod tests {
         ] {
             plan.validate().unwrap_or_else(|e| panic!("{} invalid: {e:?}", plan.id));
         }
+    }
+
+    /// C6: an N-cycle re-INVITE script is now valid for any `n >= 1` (the
+    /// per-cycle reneg counter serializes it — the `n != 1` guardrail is gone);
+    /// only `n == 0` (a no-op script) is rejected.
+    #[test]
+    fn reinvite_n_validates_and_rejects_zero() {
+        shapes::reinvite_n(shapes::default_binder(), "reinvite10", 10)
+            .validate()
+            .expect("n=10 is valid now the per-cycle barrier exists");
+
+        let mut plan = shapes::reinvite_n(shapes::default_binder(), "reinvite0", 1);
+        plan.stages = vec![Stage::Script(Script::Reinvite { n: 0 })];
+        assert_eq!(detail(plan.validate().unwrap_err()), "Reinvite n must be >= 1");
     }
 
     /// A terminal establishment admits neither stages nor a teardown, and a

@@ -36,13 +36,23 @@ pub fn basic_call(binder: Arc<dyn RouteBinder>) -> ShapePlan {
 }
 
 /// `reinvite` — transparent establishment, one delayed-offer re-INVITE
-/// renegotiation, BYE (contract §5.2).
+/// renegotiation, BYE (contract §5.2). The n=1 special case of [`reinvite_n`].
 pub fn reinvite(binder: Arc<dyn RouteBinder>) -> ShapePlan {
+    reinvite_n(binder, "reinvite", 1)
+}
+
+/// `reinvite_n` — transparent establishment, then `n` **serialized**
+/// delayed-offer re-INVITE renegotiations (each gated on the previous one
+/// completing, so no two are ever in flight — C6), BYE. The shipped `reinvite10`
+/// shape (the "10 re-INVITEs" ask) is `reinvite_n(.., "reinvite10", 10)`; the
+/// `reinvite`/`reinvite_em` shapes are the n=1 case. `id` is the shape's stable
+/// id (report/metrics label) so each ×N variant is distinctly addressable.
+pub fn reinvite_n(binder: Arc<dyn RouteBinder>, id: &'static str, n: u32) -> ShapePlan {
     ShapePlan {
-        id: "reinvite",
+        id,
         binder,
         establish: Establishment::Transparent,
-        stages: vec![Stage::Script(Script::Reinvite { n: 1 })],
+        stages: vec![Stage::Script(Script::Reinvite { n })],
         teardown: Teardown::CallerBye {
             after: DwellKnob::ReinviteGap,
             feed: ByeFeed::CheckpointAndPhase,

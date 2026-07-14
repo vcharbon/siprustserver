@@ -70,6 +70,13 @@ pub struct LegObservation {
     /// origination can gate on an *observed* inbound request rather than a timed
     /// dwell (the MRF `INFO(EOF)` that must follow the worker's `INFO(play)`).
     received_methods: std::collections::BTreeSet<String>,
+    /// The CSeq numbers of caller-originated renegotiations (re-INVITEs) this
+    /// leg has COMPLETED (2xx received AND ACKed) — a grow-only set (commutative
+    /// fold) whose *cardinality* serializes an N-cycle re-INVITE script: cycle
+    /// `i` (0-based) waits until `reneg_count() >= i`, so no two re-INVITEs are
+    /// ever in flight (which would glare into a 491). Distinct from the monotone
+    /// SUBFLOW_RENEG latch, which cannot count.
+    reneg_cseqs: std::collections::BTreeSet<u32>,
 }
 
 impl LegObservation {
@@ -98,6 +105,13 @@ impl LegObservation {
     /// gates an origination on.
     pub fn received_method(&self, method: &str) -> bool {
         self.received_methods.contains(method)
+    }
+
+    /// How many caller-originated renegotiation cycles (re-INVITEs) this leg has
+    /// COMPLETED — the count an N-cycle re-INVITE script's per-cycle barrier
+    /// compares against to serialize the chain.
+    pub fn reneg_count(&self) -> u32 {
+        self.reneg_cseqs.len() as u32
     }
 
     /// Record an observed inbound in-dialog method name (idempotent — a set, so
@@ -204,6 +218,11 @@ pub enum Observation {
     LegFinal { leg: &'static str, status: u16, reason: String },
     /// A named sub-flow advanced (re-INVITE realign tracking; P1 realign use).
     Subflow { leg: &'static str, name: &'static str, to: SubflowState },
+    /// A caller-originated renegotiation (re-INVITE) this leg ORIGINATED
+    /// completed — its 2xx was received and ACKed. Folds into the leg's
+    /// grow-only completed-reneg set (keyed by CSeq, so a re-emitted 2xx cannot
+    /// double-count), whose cardinality serializes an N-cycle re-INVITE script.
+    RenegCompleted { leg: &'static str, cseq: u32 },
 }
 
 impl StateInner {
@@ -228,6 +247,9 @@ impl StateInner {
                 self.leg_mut(leg).finals.insert((status, reason));
             }
             Observation::Subflow { leg, name, to } => self.leg_mut(leg).advance_subflow(name, to),
+            Observation::RenegCompleted { leg, cseq } => {
+                self.leg_mut(leg).reneg_cseqs.insert(cseq);
+            }
         }
     }
 

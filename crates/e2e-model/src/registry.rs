@@ -454,6 +454,11 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .anchors(LOAD_REINVITE_ANCHORS)
             .default_weight(2.0)
             .load_actor_with(|_| Arc::new(cs::reinvite(cs::default_binder()))),
+        // C6: N serialized re-INVITE cycles (the "10 re-INVITEs" ask). No mix
+        // weight yet — id-addressable only; phase D assigns catalog weights.
+        ShapeDescriptor::new("reinvite10")
+            .anchors(LOAD_REINVITE_ANCHORS)
+            .load_actor_with(|_| Arc::new(cs::reinvite_n(cs::default_binder(), "reinvite10", 10))),
         // The first ACTOR-executed shape (plan §4.5 — the redesign's exemplar):
         // per-endpoint reactive actors + the ack-gated settle barrier replace
         // the one serialized coroutine. Same id, same anchors, same downstream
