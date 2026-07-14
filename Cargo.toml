@@ -30,6 +30,7 @@ members = [
     "crates/sip-proxy-runner",
     "crates/call-limiter-runner",
     "crates/cdr-consumer-runner",
+    "crates/callshapes",
     "crates/e2e-model",
     "crates/e2e-core",
     "crates/e2e-cli",

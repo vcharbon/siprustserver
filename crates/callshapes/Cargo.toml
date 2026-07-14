@@ -1,0 +1,7 @@
+[package]
+name = "callshapes"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+scenario-harness = { path = "../scenario-harness" }

@@ -739,6 +739,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "callshapes"
+version = "0.1.0"
+dependencies = [
+ "scenario-harness",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1185,6 +1192,7 @@ dependencies = [
 name = "e2e-model"
 version = "0.1.0"
 dependencies = [
+ "callshapes",
  "regex",
  "scenario-harness",
  "schemars",
