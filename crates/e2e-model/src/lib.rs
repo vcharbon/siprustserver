@@ -20,6 +20,7 @@ pub mod egress;
 pub mod endpoint;
 pub mod loadprofile;
 pub mod loadrun;
+pub mod matrix;
 pub mod model;
 pub mod registry;
 pub mod shape;

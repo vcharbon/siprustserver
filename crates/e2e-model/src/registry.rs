@@ -440,7 +440,7 @@ const TRANSFER_ANCHORS: &[Anchor] = &[
 ///    …), whose `!Send` bodies `e2e-core` attaches by id;
 ///  - **dual-body** — `rerouting_prack`: ONE descriptor, both bodies.
 fn default_shapes() -> Vec<ShapeDescriptor> {
-    vec![
+    let mut shapes = vec![
         // ── Load: the happy-path real-call scenarios ─────────────────────────
         // ACTOR-executed (plan §6 P3 order #7): same downstream contract
         // (table §5.1).
@@ -456,12 +456,16 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .load_actor_with(|_| Arc::new(cs::reinvite(cs::default_binder()))),
         // C6: N serialized re-INVITE cycles (the "10 re-INVITEs" ask). No mix
         // weight yet — id-addressable only; phase D assigns catalog weights.
+        // C6: N serialized re-INVITE cycles. Small default weight (a ×10 call
+        // carries ~10× the datagrams — keep it a light share of the mix).
         ShapeDescriptor::new("reinvite10")
             .anchors(LOAD_REINVITE_ANCHORS)
+            .default_weight(0.5)
             .load_actor_with(|_| Arc::new(cs::reinvite_n(cs::default_binder(), "reinvite10", 10))),
-        // C3/S3: crossing BYE (both ends hang up at once). Id-addressable only.
+        // C3/S3: crossing BYE (both ends hang up at once).
         ShapeDescriptor::new("crossing_bye")
             .anchors(LOAD_CALL_ANCHORS)
+            .default_weight(1.0)
             .load_actor_with(|_| Arc::new(cs::crossing_bye(cs::default_binder()))),
         // C1/E3: TRUE forking — bob emits distinct-tag 18x on one INVITE txn.
         // Only valid under the SUT's transparent CORE relay. Id-addressable
@@ -472,19 +476,22 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
         // tests cover it).
         ShapeDescriptor::new("forked")
             .anchors(LOAD_CALL_ANCHORS)
+            .default_weight(1.0)
             .load_actor_with(|_| Arc::new(cs::forked(cs::default_binder()))),
         ShapeDescriptor::new("forked_reliable")
             .anchors(PRACK_ANCHORS)
+            .default_weight(0.5)
             .load_actor_with(|_| Arc::new(cs::forked_reliable(cs::default_binder()))),
         // C2/E5: CANCEL×200 crossing — a branch-aware race (Ok OR abandoned
-        // timeout). Id-addressable only; phase D assigns catalog weights.
+        // timeout, both legal). A light share of the mix.
         ShapeDescriptor::new("cancel_answer_crossing")
             .anchors(LOAD_ESTABLISH_ANCHORS)
+            .default_weight(0.5)
             .load_actor_with(|_| Arc::new(cs::cancel_answer_crossing(cs::default_binder()))),
         // C5: early UPDATE on the reliable early dialog (RFC 3311 §5.1).
-        // Id-addressable only; phase D assigns catalog weights.
         ShapeDescriptor::new("prack_update_early")
             .anchors(PRACK_ANCHORS)
+            .default_weight(0.5)
             .load_actor_with(|_| Arc::new(cs::prack_update_early(cs::default_binder()))),
         // The first ACTOR-executed shape (plan §4.5 — the redesign's exemplar):
         // per-endpoint reactive actors + the ack-gated settle barrier replace
@@ -561,7 +568,13 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .anchors(PRACK_ANCHORS)
             .needs_bob2()
             .load_actor_with(|_| Arc::new(cs::rerouting_prack(cs::default_binder()))),
-    ]
+    ];
+    // Phase D1: the DECLARED-compatibility-matrix cross-product cells
+    // (`crate::matrix`) — id-addressable, no mix weight (the default mix samples
+    // the canonical + phase-C shapes; the full matrix is addressable by id for
+    // targeted runs and the loss soaks).
+    shapes.extend(crate::matrix::generated_shapes());
+    shapes
 }
 
 #[cfg(test)]
@@ -604,14 +617,31 @@ mod tests {
     }
 
     #[test]
-    fn default_and_failure_mixes_match_the_historic_tables() {
+    fn default_and_failure_mixes_preserve_canonical_weights_and_add_phase_c() {
         let reg = ShapeRegistry::with_defaults();
-        let mix: Vec<(&str, f64)> =
+        let mix: std::collections::BTreeMap<&str, f64> =
             reg.default_mix().iter().map(|d| (d.id, d.default_weight.unwrap())).collect();
-        assert_eq!(
-            mix,
-            vec![("basic_call", 4.0), ("options_hold", 1.0), ("refer", 1.0), ("reinvite", 2.0)]
-        );
+        // The historic canonical weights are unchanged (report/metrics compat).
+        assert_eq!(mix.get("basic_call"), Some(&4.0));
+        assert_eq!(mix.get("reinvite"), Some(&2.0));
+        assert_eq!(mix.get("options_hold"), Some(&1.0));
+        assert_eq!(mix.get("refer"), Some(&1.0));
+        // Phase D1: the phase-C shapes now carry catalog weights.
+        for (id, w) in [
+            ("crossing_bye", 1.0),
+            ("forked", 1.0),
+            ("forked_reliable", 0.5),
+            ("cancel_answer_crossing", 0.5),
+            ("prack_update_early", 0.5),
+            ("reinvite10", 0.5),
+        ] {
+            assert_eq!(mix.get(id), Some(&w), "{id} weight");
+        }
+        // The generated cross-product cells are id-addressable ONLY (no weight),
+        // so the default mix stays a representative sample (no bob2 in the mix).
+        assert!(!mix.contains_key("reroute+reinvite"), "generated cells are not in the default mix");
+        assert!(reg.get("reroute+reinvite").is_some(), "but they ARE registered by id");
+
         let failures: Vec<&str> = reg.failure_mix().iter().map(|d| d.id).collect();
         assert_eq!(failures, vec!["abandon_ringing", "invite_reject", "refer_charlie_reject"]);
     }
