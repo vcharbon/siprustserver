@@ -929,6 +929,74 @@ mod tests {
         h.finish().await;
     }
 
+    /// C4/S6 UPDATE-vs-re-INVITE collision (RFC 3311 §5.2): alice sends a
+    /// re-INVITE and bob an UPDATE at the same instant, both carrying offers.
+    /// Each has an outstanding offer when the peer's offer-bearing request
+    /// arrives, so BOTH are rejected 491 (the re-INVITE 491 is hop-ACKed, the
+    /// UPDATE 491 takes no ACK). Each retries after the back-off (owner alice
+    /// 2.5s, non-owner bob 1.0s): bob's UPDATE retry lands first (alice has no
+    /// pending offer → 200), then alice's re-INVITE (bob's UPDATE done → 200).
+    /// Both renegotiations complete; the RFC hard gate confirms the wire.
+    #[tokio::test(start_paused = true)]
+    async fn update_vs_reinvite_collision_491_then_retry_resolves() {
+        let h = Harness::new("actor-update-reinvite-glare").describe(
+            "C4/S6: alice re-INVITE × bob UPDATE at once → 491 both ways → \
+             back-off retries (bob UPDATE 1s, alice re-INVITE 2.5s) → both \
+             offers complete → BYE",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let both_confirmed = Barrier::AllConfirmed(&["alice", "bob"]);
+        let both_reneged = Barrier::pred("collision_resolved", |s| {
+            s.leg("alice").reneg_count() >= 1 && s.leg("bob").reneg_count() >= 1
+        });
+        let call = CallPlan {
+            actors: vec![
+                ActorSpec {
+                    role: "alice",
+                    agent: alice.clone(),
+                    media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                    disposition: Disposition::Caller,
+                    goals: vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(both_confirmed.clone(), GoalStep::Reinvite),
+                        Goal::new(both_reneged.clone(), GoalStep::Bye),
+                    ],
+                    invite_targets: vec![("bob", bob.clone())],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+                ActorSpec {
+                    role: "bob",
+                    agent: bob.clone(),
+                    disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(100) },
+                    media: MediaState::full(ANSWER_SDP, ANSWER_SDP),
+                    // Bob collides with an UPDATE on the same gate.
+                    goals: vec![Goal::new(both_confirmed.clone(), GoalStep::Update)],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+            ],
+            plan: vec![
+                phase("established", |s| {
+                    s.leg_at_least("alice", LegPhase::Confirmed)
+                        && s.leg_at_least("bob", LegPhase::Confirmed)
+                }),
+                phase("collision_resolved", |s| {
+                    s.leg("alice").reneg_count() >= 1 && s.leg("bob").reneg_count() >= 1
+                }),
+            ],
+            settle: SettleBarrier::default_ceiling(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(10)).await;
+        assert!(verdict.is_ok(), "the UPDATE×re-INVITE collision must resolve, got {verdict:?}");
+
+        h.finish().await;
+    }
+
     /// The generic in-dialog origination primitive (`GoalStep::InDialog`): alice
     /// establishes, sends an INFO carrying a typed body + an extra header on the
     /// confirmed dialog, and hangs up ONLY once the observed state shows bob
