@@ -81,6 +81,35 @@ pub enum Disposition {
     /// INVITE only after the caller PRACKs (MUST-014 ordering). The
     /// rerouting/prack winning-leg disposition.
     ReliableAnswer,
+    /// A **forking UAS** (C1/E3, RFC 3261 §12.1.2): emits one 18x per tag in
+    /// `tags` — DISTINCT explicit To-tags on the ONE retained INVITE server
+    /// transaction, as if a proxy downstream had forked — then answers `200`
+    /// under the `winner` tag. `reliable: false` → plain `180`s and a timed
+    /// answer after `ring` (a CANCEL mid-ring still yields 487, like
+    /// [`RingThenAnswer`](Self::RingThenAnswer)); `reliable: true` → each fork's
+    /// 18x is a reliable `183` (`Require:100rel`, `RSeq:1`, the answer SDP) and
+    /// the `200` waits for the WINNER fork's PRACK (`ring` is unused).
+    /// `loser_late_200: Some(tag)` additionally emits a LATE `200` under that
+    /// losing tag right after the winner's — the §13.2.2.4 loser the caller
+    /// must ACK then BYE. `winner` (and the late-200 loser, distinct from the
+    /// winner) must be members of `tags` — enforced at INVITE time.
+    ForkingRing {
+        tags: &'static [&'static str],
+        winner: &'static str,
+        ring: Duration,
+        reliable: bool,
+        loser_late_200: Option<&'static str>,
+    },
+}
+
+/// The forking-UAS answer plan carried from the 18x emission to the moment the
+/// INVITE is answered (the timed-answer arm, or the winner fork's PRACK): the
+/// `200` goes out under `winner_tag` (adopted as the transaction's dialog tag),
+/// then optionally a LATE `200` under `loser_late_200`.
+#[derive(Debug, Clone, Copy)]
+struct ForkAnswer {
+    winner_tag: &'static str,
+    loser_late_200: Option<&'static str>,
 }
 
 /// The offer/answer SDP an endpoint negotiates with.
@@ -205,6 +234,9 @@ struct TimedAnswer {
     /// The pending UAS INVITE transaction — answered `200` when the timer fires
     /// OR `487` if a CANCEL arrives first.
     uas: ServerTxn,
+    /// A forking callee's answer plan (`None` for the plain ring→answer): the
+    /// `200` goes out under the winning fork's tag (+ optional loser late 200).
+    fork: Option<ForkAnswer>,
 }
 
 /// A non-2xx final we sent to an initial INVITE, awaiting its §17.1.1.3
@@ -290,6 +322,16 @@ pub struct ActorState<'c> {
     /// RSeq values of reliable provisionals this caller has already PRACKed —
     /// so a retransmitted 183 is not double-PRACKed.
     pracked_rseqs: HashSet<u32>,
+    /// A held forking-UAS answer plan (C1/E3): set alongside
+    /// `pending_prack_answer` by a RELIABLE [`Disposition::ForkingRing`], so the
+    /// PRACK arm answers the INVITE only on the WINNER fork's PRACK (a losing
+    /// fork's PRACK is 200'd but does not release the 200-to-INVITE).
+    fork_answer: Option<ForkAnswer>,
+    /// The LOSING fork tags this forking callee emitted a late `200` under — an
+    /// inbound BYE addressed to one of these tears down only that early fork,
+    /// NOT this leg (the winning dialog lives on; the BYE is 200'd and its CSeq
+    /// folded into the dialog stream, but no `LegTerminated` is recorded).
+    fork_loser_tags: HashSet<String>,
     /// CSeq numbers of in-dialog re-INVITEs THIS caller has ORIGINATED whose
     /// `reneg` sub-flow has not yet been advanced (the `reinvite` body's
     /// delayed-offer re-INVITE). A set keyed by CSeq — NOT a one-shot bool — so
@@ -356,6 +398,8 @@ impl<'c> ActorState<'c> {
             answered_reinvites: HashSet::new(),
             pending_prack_answer: None,
             pracked_rseqs: HashSet::new(),
+            fork_answer: None,
+            fork_loser_tags: HashSet::new(),
             sent_reinvites: HashSet::new(),
             saw_options_200: false,
             expected_provisional: 180,
@@ -494,10 +538,24 @@ async fn respond_200_sdp(uas: &mut ServerTxn, sdp: &str) -> Result<(), StepError
 /// must be ACKed — the mux/SUT retransmit heals a dropped leg, and the settle
 /// barrier holds the verdict until it does), and stamp the declared
 /// answer-sent feed. Shared by the timed answer and the immediate disposition.
-async fn answer_initial_invite(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<(), StepError> {
+///
+/// A forking callee (`fork: Some`) answers under the WINNER fork's tag (adopted
+/// as the txn's dialog tag, so `uas.dialog()` keys the confirmed dialog under
+/// it), then optionally emits a losing fork's LATE `200` (distinct tag on the
+/// same transaction — §13.2.2.4: the caller ACKs then BYEs it). Both 200s share
+/// the INVITE's CSeq, so the ONE answered-awaiting-ACK obligation covers them
+/// (the wire-level per-fork ACK completeness is the RFC audit's to judge).
+async fn answer_initial_invite(
+    st: &mut ActorState<'_>,
+    mut uas: ServerTxn,
+    fork: Option<ForkAnswer>,
+) -> Result<(), StepError> {
     let call_id = uas.request().call_id.clone();
     let cseq = uas.request().cseq.seq;
     let sdp = st.answer_body();
+    if let Some(f) = &fork {
+        uas.adopt_to_tag(f.winner_tag);
+    }
     respond_200_sdp(&mut uas, sdp).await?;
     let now = Instant::now();
     st.dialogs.confirmed = Some(uas.dialog());
@@ -509,6 +567,11 @@ async fn answer_initial_invite(st: &mut ActorState<'_>, mut uas: ServerTxn) -> R
         },
         now,
     );
+    if let Some(loser) = fork.and_then(|f| f.loser_late_200) {
+        // The losing fork's LATE 200 — after the winner's, under the losing
+        // fork's own tag (the txn's sticky tag stays the winner's).
+        uas.respond(200, "OK").with_sdp(sdp).with_to_tag(loser).try_send().await?;
+    }
     st.feed.on_answer_sent.stamp(st.ctx);
     Ok(())
 }
@@ -519,7 +582,7 @@ async fn fire_timed_answer(st: &mut ActorState<'_>) -> Result<(), StepError> {
     let Some(ta) = st.pending_answer.take() else {
         return Ok(());
     };
-    answer_initial_invite(st, ta.uas).await
+    answer_initial_invite(st, ta.uas, ta.fork).await
 }
 
 /// The reactive answer policy — dispatch one inbound message. Extracted and
@@ -603,11 +666,24 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
                 st.feed.on_ack_rx.stamp(st.ctx);
             }
         }
-        // A BYE tears this leg down.
+        // A BYE tears this leg down — UNLESS it is addressed to a LOSING fork's
+        // tag (C1/E3: the caller ACK+BYEs a losing fork's late 200, §13.2.2.4):
+        // that BYE ends only the abandoned early fork, the winning dialog lives
+        // on, so it is 200'd (and its CSeq folded into the dialog stream) but
+        // the leg is NOT terminated.
         "BYE" => {
+            let is_fork_teardown = uas
+                .request()
+                .to
+                .tag
+                .as_deref()
+                .is_some_and(|t| st.fork_loser_tags.contains(t));
             st.ctx.anchor(&st.agent, "bye", uas.request());
             uas.respond(200, "OK").try_send().await?;
             st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
+            if is_fork_teardown {
+                return Ok(());
+            }
             // An in-dialog ack this leg still awaits (a re-INVITE it answered, a
             // PRACK/UPDATE, …) is moot now the dialog ends (§15) — discharge it so
             // settle does not wait 32 s for an ack the torn-down peer can never send.
@@ -668,13 +744,26 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
         }
         // A PRACK (RFC 3262) for our reliable 183: 200 it, then — MUST-014 — this
         // is the trigger to answer 200 to the HELD INVITE txn (the reliable
-        // provisional's whole point: no 200-to-INVITE before the PRACK).
+        // provisional's whole point: no 200-to-INVITE before the PRACK). A
+        // FORKING callee (C1/E3) answers only on the WINNER fork's PRACK — a
+        // losing fork's PRACK (identified by its To-tag) is 200'd and absorbed.
         "PRACK" => {
             st.ctx.anchor(&st.agent, "prack", uas.request());
+            let prack_tag = uas.request().to.tag.clone();
             uas.respond(200, "OK").try_send().await?;
             st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
-            if let Some(inv_txn) = st.pending_prack_answer.take() {
-                answer_initial_invite(st, inv_txn).await?;
+            let releases_answer = match (&st.fork_answer, prack_tag.as_deref()) {
+                // Forking: only the winner fork's PRACK releases the 200.
+                (Some(f), Some(tag)) => tag == f.winner_tag,
+                (Some(_), None) => false,
+                // Non-forking reliable answer: any PRACK releases (as before).
+                (None, _) => true,
+            };
+            if releases_answer {
+                if let Some(inv_txn) = st.pending_prack_answer.take() {
+                    let fork = st.fork_answer.take();
+                    answer_initial_invite(st, inv_txn, fork).await?;
+                }
             }
         }
         // Any other in-dialog method: a plain 200 (dialog-neutral).
@@ -698,12 +787,55 @@ async fn apply_disposition(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Resul
         // no-provisional answer.
         Disposition::Caller | Disposition::Answer => {
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
-            answer_initial_invite(st, uas).await?;
+            answer_initial_invite(st, uas, None).await?;
         }
         Disposition::RingThenAnswer { ring } => {
             uas.respond(180, "Ringing").try_send().await?;
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
-            st.pending_answer = Some(TimedAnswer { at: Instant::now() + ring, uas });
+            st.pending_answer = Some(TimedAnswer { at: Instant::now() + ring, uas, fork: None });
+        }
+        // C1/E3 forking UAS: one 18x per DISTINCT explicit To-tag on the ONE
+        // retained INVITE server txn (as if a downstream proxy forked), then the
+        // 200 under the winner's tag — timed (plain 180s) or on the winner's
+        // PRACK (reliable 183s, MUST-014).
+        Disposition::ForkingRing { tags, winner, ring, reliable, loser_late_200 } => {
+            let wired_ok = tags.contains(&winner)
+                && loser_late_200.is_none_or(|l| l != winner && tags.contains(&l));
+            if !wired_ok {
+                return Err(StepError::UnexpectedKind {
+                    who: st.role.to_string(),
+                    detail: "ForkingRing winner/loser must be distinct declared fork tags"
+                        .to_string(),
+                });
+            }
+            let sdp = st.answer_body();
+            for tag in tags {
+                if reliable {
+                    // RFC 3262 §3: each fork's reliable 183 carries its own RSeq
+                    // space (RSeq:1 per early dialog) + the answer SDP.
+                    uas.respond(183, "Session Progress")
+                        .with_to_tag(tag)
+                        .reliable(1)
+                        .with_sdp(sdp)
+                        .try_send()
+                        .await?;
+                } else {
+                    uas.respond(180, "Ringing").with_to_tag(tag).try_send().await?;
+                }
+            }
+            if let Some(loser) = loser_late_200 {
+                st.fork_loser_tags.insert(loser.to_string());
+            }
+            st.obs.record(Observation::LegEarly { leg: st.role }, now);
+            let fork = ForkAnswer { winner_tag: winner, loser_late_200 };
+            if reliable {
+                // The 200 waits for the WINNER fork's PRACK (see the PRACK arm).
+                st.fork_answer = Some(fork);
+                st.pending_prack_answer = Some(uas);
+            } else {
+                st.pending_answer =
+                    Some(TimedAnswer { at: Instant::now() + ring, uas, fork: Some(fork) });
+            }
         }
         Disposition::Reject(code) => {
             uas.respond(code, reject_reason(code)).try_send().await?;

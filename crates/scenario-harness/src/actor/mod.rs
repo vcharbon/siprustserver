@@ -356,6 +356,211 @@ mod tests {
         h.finish().await;
     }
 
+    /// A bob-only [`CallPlan`] with the given forking disposition — the C1(a)
+    /// machinery rig: alice is hand-rolled (the fork dance on the caller side is
+    /// the C1(b) capability; here the CALLEE's emission is the subject).
+    fn forking_bob_plan(bob: &crate::Agent, disposition: Disposition) -> CallPlan {
+        CallPlan {
+            actors: vec![ActorSpec {
+                role: "bob",
+                agent: bob.clone(),
+                disposition,
+                media: MediaState::answer(ANSWER_SDP),
+                goals: vec![],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed::default(),
+            }],
+            plan: vec![phase("established", |s| s.leg_at_least("bob", LegPhase::Confirmed))],
+            settle: SettleBarrier::default_ceiling(),
+        }
+    }
+
+    /// C1(a): a forking callee emits DISTINCT-tag 18x on the ONE INVITE server
+    /// transaction and answers 200 under the WINNING tag. The hand-rolled caller
+    /// sees two 180s with distinct To-tags (two early dialogs, RFC 3261
+    /// §12.1.2), the 200 carries the declared winner's tag, and the confirmed
+    /// dialog (ACK + BYE) rides that tag. The RFC hard gate at `finish()`
+    /// confirms the forked wire stayed compliant.
+    #[tokio::test(start_paused = true)]
+    async fn forking_ring_emits_distinct_tag_18x_and_answers_winner() {
+        let h = Harness::new("actor-forking-ring").describe(
+            "C1(a): bob (ForkingRing) emits 180(f1) + 180(f2) — distinct explicit \
+             To-tags on one INVITE server txn — then 200 under the winner f2; the \
+             hand-rolled alice confirms and BYEs the winning dialog",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let alice_task = {
+            let alice = alice.clone();
+            let bob = bob.clone();
+            tokio::spawn(async move {
+                let mut call = alice.invite(&bob).with_sdp(OFFER_SDP).send().await;
+                let p1 = call.expect(180).await;
+                let t1 = p1.to.tag.clone().expect("fork1 tag");
+                let p2 = call.expect(180).await;
+                let t2 = p2.to.tag.clone().expect("fork2 tag");
+                assert_ne!(t1, t2, "each fork's 18x carries a DISTINCT To-tag");
+                assert_eq!(t1, "f1");
+                assert_eq!(t2, "f2");
+                let ok = call.expect(200).await;
+                assert_eq!(ok.to.tag.as_deref(), Some("f2"), "the 200 is under the winner tag");
+                let mut dialog = call.ack().await;
+                let mut bye = dialog.bye().await;
+                bye.expect(200).await;
+            })
+        };
+
+        let call = forking_bob_plan(
+            &bob,
+            Disposition::ForkingRing {
+                tags: &["f1", "f2"],
+                winner: "f2",
+                ring: Duration::from_millis(200),
+                reliable: false,
+                loser_late_200: None,
+            },
+        );
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "the forked call must settle OK, got {verdict:?}");
+
+        alice_task.await.unwrap();
+        h.finish().await;
+    }
+
+    /// C1(a) loser-late-200 variant: after the winner's 200 (tag f2) the callee
+    /// emits a LATE 200 under the losing tag f1. The caller ACKs the loser's 200
+    /// on ITS OWN fork dialog and BYEs it (RFC 3261 §13.2.2.4) — the callee's
+    /// reactor 200s that BYE WITHOUT terminating its leg (the winning dialog
+    /// lives on and is BYE'd normally afterwards).
+    #[tokio::test(start_paused = true)]
+    async fn forking_ring_loser_late_200_is_acked_and_byed() {
+        let h = Harness::new("actor-forking-loser-200").describe(
+            "C1(a): bob answers 200 under winner f2 THEN emits a late 200 under \
+             loser f1; alice ACKs+BYEs the loser fork (bob's leg survives), then \
+             tears down the winning dialog",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let alice_task = {
+            let alice = alice.clone();
+            let bob = bob.clone();
+            tokio::spawn(async move {
+                let mut call = alice.invite(&bob).with_sdp(OFFER_SDP).send().await;
+                call.expect(180).await;
+                call.expect(180).await;
+                // The winner's 200 (f2): ACK, keep the confirmed dialog.
+                let ok = call.expect(200).await;
+                assert_eq!(ok.to.tag.as_deref(), Some("f2"));
+                let mut winner = call.ack().await;
+                // The loser's LATE 200 (f1): §13.2.2.4 — ACK it on its own fork
+                // dialog, then BYE that fork. (`expect(200)` re-points the
+                // ClientInvite's dialog at the latest 2xx's tag, so `ack()` here
+                // addresses the LOSER fork.)
+                let late = call.expect(200).await;
+                assert_eq!(late.to.tag.as_deref(), Some("f1"), "the late 200 is the loser's");
+                let mut loser = call.ack().await;
+                let mut loser_bye = loser.bye().await;
+                loser_bye.expect(200).await;
+                // The winning dialog is unaffected — tear it down normally.
+                let mut bye = winner.bye().await;
+                bye.expect(200).await;
+            })
+        };
+
+        let call = forking_bob_plan(
+            &bob,
+            Disposition::ForkingRing {
+                tags: &["f1", "f2"],
+                winner: "f2",
+                ring: Duration::from_millis(200),
+                reliable: false,
+                loser_late_200: Some("f1"),
+            },
+        );
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(
+            verdict.is_ok(),
+            "the loser-late-200 call must settle OK (bob's leg must survive the \
+             loser-fork BYE), got {verdict:?}",
+        );
+
+        alice_task.await.unwrap();
+        h.finish().await;
+    }
+
+    /// C1(a) reliable variant: each fork's 18x is a reliable 183 (Require:100rel,
+    /// RSeq:1, SDP) and the 200 waits for the WINNER fork's PRACK (MUST-014). A
+    /// losing fork's PRACK is 200'd but does NOT release the answer.
+    #[tokio::test(start_paused = true)]
+    async fn forking_ring_reliable_answers_on_winner_prack_only() {
+        use sip_message::generators::InDialogMethod;
+
+        let h = Harness::new("actor-forking-reliable").describe(
+            "C1(a): bob (ForkingRing reliable) emits reliable 183(f1)+183(f2); \
+             alice PRACKs each fork on its own early dialog; only the winner \
+             (f2) fork's PRACK releases the 200",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let alice_task = {
+            let alice = alice.clone();
+            let bob = bob.clone();
+            tokio::spawn(async move {
+                let mut call = alice
+                    .invite(&bob)
+                    .with_sdp(OFFER_SDP)
+                    .with_header("Supported", "100rel")
+                    .send()
+                    .await;
+                let p1 = call.expect(183).await;
+                assert_eq!(p1.to.tag.as_deref(), Some("f1"));
+                let p2 = call.expect(183).await;
+                assert_eq!(p2.to.tag.as_deref(), Some("f2"));
+                // PRACK the LOSER fork first — the answer must NOT be released.
+                let mut prack1 = call
+                    .send_request(InDialogMethod::Prack)
+                    .with_to_tag("f1")
+                    .with_rack("1 1 INVITE")
+                    .send()
+                    .await;
+                prack1.expect(200).await;
+                // PRACK the WINNER fork — this releases the 200 (under f2).
+                let mut prack2 = call
+                    .send_request(InDialogMethod::Prack)
+                    .with_to_tag("f2")
+                    .with_rack("1 1 INVITE")
+                    .send()
+                    .await;
+                prack2.expect(200).await;
+                let ok = call.expect(200).await;
+                assert_eq!(ok.to.tag.as_deref(), Some("f2"), "answered under the winner tag");
+                let mut dialog = call.ack().await;
+                let mut bye = dialog.bye().await;
+                bye.expect(200).await;
+            })
+        };
+
+        let call = forking_bob_plan(
+            &bob,
+            Disposition::ForkingRing {
+                tags: &["f1", "f2"],
+                winner: "f2",
+                ring: Duration::ZERO,
+                reliable: true,
+                loser_late_200: None,
+            },
+        );
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "the reliable forked call must settle OK, got {verdict:?}");
+
+        alice_task.await.unwrap();
+        h.finish().await;
+    }
+
     /// The generic in-dialog origination primitive (`GoalStep::InDialog`): alice
     /// establishes, sends an INFO carrying a typed body + an extra header on the
     /// confirmed dialog, and hangs up ONLY once the observed state shows bob
