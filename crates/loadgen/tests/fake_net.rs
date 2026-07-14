@@ -440,3 +440,99 @@ async fn loadgen_fake_net_loss_soak_recovers_with_retransmit() {
     settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }
+
+/// C1/E3 — TRUE forking end-to-end through the transparent-relay SUT. bob emits
+/// three distinct-To-tag 18x on its ONE INVITE server txn (as if a downstream
+/// proxy forked); the transparent CORE relay (`setup_fake`'s `route_all_with_
+/// refer` leaves `relay_first_18x_to_180 = None`) forwards each as its own
+/// a-facing early dialog; the fork-aware caller (C1b) tracks the early-dialog
+/// set and confirms on the winning fork's 2xx (§13.2.2.4). Every call OK, clean
+/// audit, no orphans (the C1d mux fix keeps the distinct-tag 18x from being
+/// deduped), reaped. `run` accepts each shape id so all three fork variants
+/// share this body.
+async fn fork_e2e(base: u16, shape: &'static str, seed: u64) {
+    let (_h, b2bua, core, transport) = setup_fake(base).await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    let driver =
+        Driver::new(cfg(b2bua.addr, 12.0, 2, 8, seed), vec![mix(shape, 1.0)], reporter.clone(), transport);
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    let ok = reporter.count(shape, &ResultClass::Ok);
+    assert!(total >= 8, "governor under-delivered forked calls: {total}");
+    assert_eq!(ok, total, "a forked call was NOK:\n{}", reporter.render_prometheus());
+    assert_eq!(
+        core.stats().orphan_no_header.load(Relaxed)
+            + core.stats().orphan_unknown_token.load(Relaxed)
+            + core.stats().orphan_stray.load(Relaxed),
+        0,
+        "orphans on a forked call (distinct-tag 18x mis-demuxed?):\n{}",
+        core.stats().samples().join("\n")
+    );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+#[tokio::test(start_paused = true)]
+async fn loadgen_fake_net_forked_plain() {
+    fork_e2e(7070, "forked", 0xF04C).await;
+}
+
+// `forked_loser_late_200` has NO through-SUT test: a terminating B2BUA absorbs
+// the loser's late 2xx, so the caller's ACK+BYE-the-loser path is unreachable
+// through a SUT. It is pinned SUT-less in `scenario_harness::actor::tests`.
+
+#[tokio::test(start_paused = true)]
+async fn loadgen_fake_net_forked_reliable() {
+    fork_e2e(7090, "forked_reliable", 0xF06A).await;
+}
+
+/// C1/E3 loss resilience: the forked establishment (three distinct-tag 18x +
+/// the winner's 2xx, all relayed through the SUT) under ~8%/datagram loss +
+/// auto-retransmit. A dropped best-effort 18x just means the caller observes
+/// one fewer early dialog (the winner still confirms); a dropped winner 2xx /
+/// ACK / BYE is recovered by the retransmit engine. A loss-model drop must
+/// never surface as an RFC-audit finding (the C1c fork-slice replication keeps
+/// non-first forks correctly judged), and every NOK is a bounded timeout.
+#[tokio::test(start_paused = true)]
+async fn loadgen_fake_net_forked_loss_soak() {
+    let (h, b2bua, core, transport) = setup_fake(7100).await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    let mut c = cfg(b2bua.addr, 10.0, 3, 8, 0xF0A2);
+    c.default_tuning = CallTuning { drop_rate: 0.08, retransmit: true, ..CallTuning::default() };
+    let driver = Driver::new(c, vec![mix("forked", 1.0)], reporter.clone(), transport);
+    driver.run().await;
+
+    let drops = core.stats().dropped_out.load(Relaxed) + core.stats().dropped_in.load(Relaxed);
+    let total = reporter.total_calls();
+    let ok = reporter.count("forked", &ResultClass::Ok);
+    let timeouts = reporter.count("forked", &ResultClass::Timeout);
+    assert!(drops > 0, "loss model dropped nothing — the soak is vacuous");
+    assert!(total >= 20, "too few forked calls: {total}");
+    assert!(ok > 0, "no forked call recovered under loss:\n{}", reporter.render_prometheus());
+    assert_eq!(
+        reporter.count("forked", &ResultClass::RfcAuditFail),
+        0,
+        "a loss-model drop surfaced as an RFC-audit finding on a fork:\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        ok + timeouts,
+        total,
+        "a forked call failed with a non-timeout class under loss:\n{}",
+        reporter.render_prometheus()
+    );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak under loss");
+    h.advance(Duration::from_secs(40)).await;
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
