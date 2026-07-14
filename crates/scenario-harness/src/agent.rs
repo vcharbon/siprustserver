@@ -2929,6 +2929,19 @@ impl InDialogTxn {
         })
     }
 
+    /// Hop-ACK a non-2xx final to a re-INVITE THIS transaction sent (RFC 3261
+    /// §17.1.1.3) — a `491 Request Pending` glare reject (§14.1), a 488. A no-op
+    /// for a non-INVITE transaction or a non-matching response. The reactive
+    /// actor's glare path needs this because `recv_any` surfaces the 491 as a
+    /// bare response (it does NOT auto-ACK, unlike the blocking `try_expect`),
+    /// yet the peer's server transaction still requires the hop ACK.
+    pub async fn ack_non_2xx(&self, resp: &SipResponse) -> Result<(), StepError> {
+        match self.ack_ctx() {
+            Some(ctx) => ctx.ack_non_2xx(resp).await,
+            None => Ok(()),
+        }
+    }
+
     /// Wait for and assert a response status. Panicking veneer over
     /// [`try_expect`](InDialogTxn::try_expect).
     pub async fn expect(&mut self, status: u16) -> SipResponse {

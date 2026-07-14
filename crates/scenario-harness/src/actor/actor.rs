@@ -346,6 +346,15 @@ pub struct ActorState<'c> {
     /// strand it (mirrors the mux's `(Call-ID, CSeq)` re-ACK). Empty for every
     /// non-`reinvite` leg.
     sent_reinvites: HashSet<u32>,
+    /// The client transaction handle of each outstanding originated re-INVITE,
+    /// keyed by CSeq — retained so a NON-2xx final (a `491 Request Pending`
+    /// glare reject, C4/S5) can be hop-ACKed (§17.1.1.3): `recv_any` surfaces
+    /// the 491 as a bare response without auto-ACKing it. Cleared in lockstep
+    /// with `sent_reinvites` on the 2xx OR the 491.
+    sent_reinvite_txns: HashMap<u32, crate::InDialogTxn>,
+    /// A pending §14.1 re-INVITE glare RETRY (C4/S5): set when our re-INVITE
+    /// drew a 491, fires after the owner/non-owner dwell to re-originate it.
+    reinvite_retry: Option<Instant>,
     /// Whether this caller has already stamped the first-OPTIONS-ping feed —
     /// so the looped `options_hold` pings stamp `keepalive_ack` exactly once.
     saw_options_200: bool,
@@ -408,6 +417,8 @@ impl<'c> ActorState<'c> {
             fork_answer: None,
             fork_loser_tags: HashSet::new(),
             sent_reinvites: HashSet::new(),
+            sent_reinvite_txns: HashMap::new(),
+            reinvite_retry: None,
             saw_options_200: false,
             expected_provisional: 180,
             pending_reject_ack: None,
@@ -465,6 +476,14 @@ pub async fn run_actor(mut st: ActorState<'_>) -> Result<(), StepError> {
                 if let Some(p) = st.pending_reject_ack.take() {
                     st.obs.record(Observation::ResponseObserved { key: p.key }, Instant::now());
                 }
+            }
+            // The §14.1 re-INVITE glare retry deadline (C4/S5): re-originate the
+            // re-INVITE now the owner/non-owner back-off has elapsed — the peer's
+            // own re-INVITE was 491'd and is no longer pending, so this retry is
+            // 200'd and the round completes.
+            _ = wait_reinvite_retry(&st.reinvite_retry), if st.reinvite_retry.is_some() => {
+                st.reinvite_retry = None;
+                originate_reinvite(&mut st).await?;
             }
         }
         // `ledger_closed` keeps a leg with an outstanding acknowledgement (its
@@ -734,6 +753,18 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
         // advances this leg's realign sub-flow; the matching ACK confirms it.
         "INVITE" => {
             st.ctx.anchor(&st.agent, "reInvite", uas.request());
+            // GLARE (C4/S5, RFC 3261 §14.1): if THIS leg has its OWN re-INVITE
+            // outstanding when the peer's arrives, reject the peer's with `491
+            // Request Pending` (never two overlapping offer/answer rounds on one
+            // dialog). Hop-ACK obligation armed like any non-2xx INVITE final;
+            // the peer closes it, backs off per §14.1, and retries. No realign
+            // sub-flow advances (the round did not complete).
+            if !st.sent_reinvites.is_empty() {
+                uas.respond(491, "Request Pending").try_send().await?;
+                arm_reject_final(st, &uas, 491);
+                st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
+                return Ok(());
+            }
             respond_200_sdp(&mut uas, st.answer_body()).await?;
             st.answered_reinvites.insert(cseq);
             st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.clone(), cseq, method: method.clone() }, now);
@@ -1000,6 +1031,42 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
         }
         return Ok(());
         }
+        // A NON-2xx final to a re-INVITE WE originated (C4/S5 glare): a `491
+        // Request Pending` (§14.1) the peer sent because it had its OWN re-INVITE
+        // outstanding when ours arrived. Hop-ACK it (§17.1.1.3 — `recv_any` does
+        // not), CLOSE its ReInvite obligation (so a 491'd re-INVITE leaves no
+        // open obligation), and schedule a RETRY after the §14.1 owner/non-owner
+        // dwell (the dialog owner — the caller — backs off longer, so the two
+        // retries no longer collide).
+        if resp.cseq.method == "INVITE"
+            && (300..700).contains(&resp.status)
+            && st.sent_reinvites.contains(&resp.cseq.seq)
+        {
+            if let Some(txn) = st.sent_reinvite_txns.remove(&resp.cseq.seq) {
+                txn.ack_non_2xx(&resp).await?;
+            }
+            st.sent_reinvites.remove(&resp.cseq.seq);
+            st.obs.record(
+                Observation::ResponseObserved {
+                    key: ObligationKey::new(st.role, ObligationKind::ReInvite, resp.cseq.seq),
+                },
+                now,
+            );
+            if resp.status == 491 {
+                // §14.1: the owner of the Call-ID (the dialog's original UAC —
+                // the caller here) waits a random T in [2.1, 4] s; a non-owner
+                // in [0, 2] s. Fixed in-range values keep the paused-clock test
+                // deterministic while preserving the owner>non-owner ordering
+                // that breaks the glare.
+                let dwell = if matches!(st.disposition, Disposition::Caller) {
+                    Duration::from_millis(2500)
+                } else {
+                    Duration::from_millis(1000)
+                };
+                st.reinvite_retry = Some(Instant::now() + dwell);
+            }
+            return Ok(());
+        }
         // A LATE 2xx from a LOSING fork (C1/E3, RFC 3261 §13.2.2.4): it echoes
         // the ESTABLISHING INVITE's CSeq but carries a DIFFERENT To-tag than the
         // confirmed (winner) dialog — a separate dialog this caller never chose.
@@ -1058,6 +1125,7 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
                 dialog.ack_for(resp.cseq.seq, Some(sdp)).await;
             }
             if st.sent_reinvites.remove(&resp.cseq.seq) {
+                st.sent_reinvite_txns.remove(&resp.cseq.seq);
                 let key = ObligationKey::new(st.role, ObligationKind::ReInvite, resp.cseq.seq);
                 st.obs.record(Observation::ResponseObserved { key }, now);
                 st.obs.record(
@@ -1224,24 +1292,7 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
         // obligation keyed on its CSeq; the reactor ACKs the 2xx with the answer
         // SDP and stamps `on_reinvite_ok` (see `react_response`).
         GoalStep::Reinvite => {
-            let now = Instant::now();
-            let (key, dialog_clone) = {
-                let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
-                    StepError::UnexpectedKind {
-                        who: st.role.to_string(),
-                        detail: "Reinvite goal with no confirmed dialog".to_string(),
-                    }
-                })?;
-                let _reinv = dialog.request(InDialogMethod::Invite, None).await;
-                let cseq = dialog.local_cseq();
-                (ObligationKey::new(st.role, ObligationKind::ReInvite, cseq), dialog.clone())
-            };
-            st.sent_reinvites.insert(key.cseq);
-            st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
-            st.obs.record(
-                Observation::RequestSent { key, detail: "re-INVITE awaiting 2xx".to_string() },
-                now,
-            );
+            originate_reinvite(st).await?;
         }
         // An in-dialog UPDATE (RFC 3311) carrying this leg's offer: send it, open
         // the Update obligation; its 200 closes it (no ACK) and stamps
@@ -1405,6 +1456,42 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
         }
     }
     Ok(())
+}
+
+/// Originate ONE delayed-offer (bodyless) re-INVITE on the confirmed dialog and
+/// register its bookkeeping: open the `ReInvite` obligation keyed on its CSeq,
+/// track the CSeq in `sent_reinvites` (the 2xx-ACK / completion path) and retain
+/// the client transaction in `sent_reinvite_txns` so a NON-2xx final (a 491
+/// glare reject, C4/S5) can be hop-ACKed. Shared by [`GoalStep::Reinvite`] and
+/// the §14.1 glare RETRY arm — so a retried re-INVITE is byte-identical to the
+/// first (fresh CSeq, same delayed-offer shape).
+async fn originate_reinvite(st: &mut ActorState<'_>) -> Result<(), StepError> {
+    let now = Instant::now();
+    let (key, dialog_clone, txn) = {
+        let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| StepError::UnexpectedKind {
+            who: st.role.to_string(),
+            detail: "Reinvite with no confirmed dialog".to_string(),
+        })?;
+        let txn = dialog.request(InDialogMethod::Invite, None).await;
+        let cseq = dialog.local_cseq();
+        (ObligationKey::new(st.role, ObligationKind::ReInvite, cseq), dialog.clone(), txn)
+    };
+    st.sent_reinvites.insert(key.cseq);
+    st.sent_reinvite_txns.insert(key.cseq, txn);
+    st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
+    st.obs.record(
+        Observation::RequestSent { key, detail: "re-INVITE awaiting 2xx".to_string() },
+        now,
+    );
+    Ok(())
+}
+
+/// Park until the pending §14.1 glare retry is due (or forever if none).
+async fn wait_reinvite_retry(retry: &Option<Instant>) {
+    match retry {
+        Some(at) => tokio::time::sleep_until(*at).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Send ONE in-dialog OPTIONS keepalive ping on the confirmed dialog and read
