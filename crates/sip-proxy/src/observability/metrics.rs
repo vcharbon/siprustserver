@@ -76,17 +76,19 @@ pub enum RoutingDecisionKind {
     LooseRoute,
     WorkerOutbound,
     Cancel,
+    AckHop,
     Reject,
 }
 
 impl RoutingDecisionKind {
-    const ALL: [RoutingDecisionKind; 7] = [
+    const ALL: [RoutingDecisionKind; 8] = [
         RoutingDecisionKind::SelectNew,
         RoutingDecisionKind::DecodeForward,
         RoutingDecisionKind::DecodeForwardBackup,
         RoutingDecisionKind::LooseRoute,
         RoutingDecisionKind::WorkerOutbound,
         RoutingDecisionKind::Cancel,
+        RoutingDecisionKind::AckHop,
         RoutingDecisionKind::Reject,
     ];
 
@@ -98,6 +100,7 @@ impl RoutingDecisionKind {
             RoutingDecisionKind::LooseRoute => "loose_route",
             RoutingDecisionKind::WorkerOutbound => "worker_outbound",
             RoutingDecisionKind::Cancel => "cancel",
+            RoutingDecisionKind::AckHop => "ack_hop",
             RoutingDecisionKind::Reject => "reject",
         }
     }
@@ -180,7 +183,7 @@ pub struct ProxyMetrics {
     /// 100..699 (else `other`) — both wire-controlled inputs bounded.
     responses: LabeledCounter,
     calls: AtomicU64,                // initial (dialog-creating, no To-tag) INVITEs
-    routing_decisions: [AtomicU64; 7], // indexed by RoutingDecisionKind
+    routing_decisions: [AtomicU64; RoutingDecisionKind::ALL.len()], // indexed by RoutingDecisionKind
     hmac_failures: LabeledCounter,   // keyed reason
     cancel_lookups: LabeledCounter,  // keyed outcome
     decode_forward_promoted: LabeledCounter, // keyed from-reason
@@ -206,7 +209,6 @@ pub struct ProxyMetrics {
     routing_duration_count: AtomicU64,
     routing_duration_sum_us: AtomicU64,
     record_route_inserted: AtomicU64,
-    ack_synthesized: AtomicU64,
     pending_invite_lru_size: AtomicU64,
     named_sends: LabeledCounter, // keyed outcome (crate::resolver::outcome — closed set)
     /// Proactive resolver refresh + startup prewarm events, keyed outcome
@@ -345,10 +347,6 @@ impl ProxyMetrics {
         self.record_route_inserted.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_ack_synthesized(&self) {
-        self.ack_synthesized.fetch_add(1, Ordering::Relaxed);
-    }
-
     pub fn set_pending_invite_lru_size(&self, n: u64) {
         self.pending_invite_lru_size.store(n, Ordering::Relaxed);
     }
@@ -432,9 +430,6 @@ impl ProxyMetrics {
     }
     pub fn record_route_inserted_total(&self) -> u64 {
         self.record_route_inserted.load(Ordering::Relaxed)
-    }
-    pub fn ack_synthesized_total(&self) -> u64 {
-        self.ack_synthesized.load(Ordering::Relaxed)
     }
     pub fn pending_invite_lru_size(&self) -> u64 {
         self.pending_invite_lru_size.load(Ordering::Relaxed)
@@ -549,7 +544,6 @@ impl ProxyMetrics {
         s.push_str(&format!("sip_routing_duration_seconds_count {cnt}\n"));
 
         g(&mut s, "sip_proxy_record_route_inserted_total", "Record-Route headers inserted.", "counter", self.record_route_inserted.load(Ordering::Relaxed));
-        g(&mut s, "sip_proxy_ack_synthesized_total", "Hop-by-hop ACKs synthesized for non-2xx.", "counter", self.ack_synthesized.load(Ordering::Relaxed));
         g(&mut s, "sip_proxy_pending_invite_lru_size", "Pending-INVITE LRU size.", "gauge", self.pending_invite_lru_size.load(Ordering::Relaxed));
         labeled(&mut s, "sip_proxy_named_sends_total", "Named-target (DNS) sends by outcome.", "counter", "outcome", &self.named_sends.snapshot());
         labeled(&mut s, "sip_proxy_resolver_refresh_total", "Proactive resolver refresh + startup prewarm events by outcome.", "counter", "outcome", &self.resolver_refresh.snapshot());

@@ -450,12 +450,48 @@ impl Harness {
         addr: &str,
         roles: HashSet<sip_net::UaRole>,
     ) -> Agent {
+        self.agent_with_opts(name, addr, roles, None).await
+    }
+
+    /// [`agent`](Self::agent) (default UAC/UAS roles) with an arrival-time
+    /// [`sip_net::PreIngressHook`] on the UA's bind — the deterministic
+    /// loss-model seam for scenario tests: drop selected datagrams BEFORE they
+    /// reach this agent's inbox (e.g. "lose the first copy of the non-2xx
+    /// final", forcing the peer's Timer G retransmit path). The fabric still
+    /// records the send; the drop is counted on the bind's
+    /// `pre_ingress_dropped`.
+    pub async fn agent_with_pre_ingress(
+        &self,
+        name: impl Into<String>,
+        addr: &str,
+        hook: sip_net::PreIngressHook,
+    ) -> Agent {
+        self.agent_with_opts(
+            name,
+            addr,
+            HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]),
+            Some(hook),
+        )
+        .await
+    }
+
+    async fn agent_with_opts(
+        &self,
+        name: impl Into<String>,
+        addr: &str,
+        roles: HashSet<sip_net::UaRole>,
+        pre_ingress: Option<sip_net::PreIngressHook>,
+    ) -> Agent {
         let name = name.into();
         let addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
         self.recorder.register_lane(addr, name.clone(), NetworkTag::Ext);
+        let mut opts = BindUdpOpts::new(addr, 64).with_roles(roles);
+        if let Some(hook) = pre_ingress {
+            opts = opts.with_pre_ingress(hook);
+        }
         let ep = self
             .network
-            .bind_udp(BindUdpOpts::new(addr, 64).with_roles(roles))
+            .bind_udp(opts)
             .await
             .unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
         let rr_fold = decide_rr_fold(&name);
