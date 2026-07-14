@@ -3015,6 +3015,16 @@ impl ServerTxn {
         }
     }
 
+    /// Pin this transaction's sticky local To-tag (the dialog-forming tag) to an
+    /// explicit value — the forking-UAS winner path (C1/E3): after emitting
+    /// per-fork 18x with explicit tags (`Respond::with_to_tag`, which
+    /// deliberately does NOT disturb the sticky tag), the winning fork's 200
+    /// must both carry the winner's tag AND leave [`dialog`](Self::dialog)
+    /// keyed under it. Call before responding the winning 2xx.
+    pub fn adopt_to_tag(&mut self, tag: &str) {
+        self.to_tag = Some(tag.to_string());
+    }
+
     /// Form the UAS-side confirmed [`Dialog`] for this transaction, so this UA
     /// can originate in-dialog requests (e.g. the callee sends the BYE). Call
     /// after responding 2xx (so the To-tag is minted). The remote target is the
