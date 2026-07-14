@@ -178,6 +178,129 @@ with the in-dialog material reusable over ANY established dialog context
   `tests/smoke.rs` (6560, 6490, 6600 each used by two tests → intermittent
   AddrInUse under full-suite runs; rebased to 6580/6590/6640).
 
+## Phase C findings (in progress — new protocol capabilities)
+
+Landed so far (each its own green commit; `just test` default lane green modulo
+the pre-existing real-clock smoke contention flake below):
+
+- **C6 — re-INVITE ×N serialization (S1)** — commit `c0ba501`. The per-cycle
+  counter the phase-B finding §5 called for is `LegObservation::reneg_cseqs`
+  (a grow-only `BTreeSet<u32>`; `reneg_count()` = its cardinality). The caller's
+  reactor records `Observation::RenegCompleted{leg,cseq}` in the SAME block that
+  removes from `sent_reinvites` (so it fires exactly once per CSeq — a
+  retransmitted 2xx under loss can't double-count). `compile_script` gates cycle
+  `i` on `reneg_count() >= i` (cycle 0 on the incoming gate), so no two re-INVITEs
+  overlap (which would glare into a 491); the teardown gate is `>= n`. n=1 is
+  byte-for-byte the old `reneg_done` gate. `validate()` now rejects only n==0.
+  New: `shapes::reinvite_n(binder, id, n)` + the id-addressable `reinvite10`
+  registry shape (NO mix weight — phase D assigns). Tests:
+  `plan.rs::reinvite_n_validates_and_rejects_zero`, fake-net
+  `loadgen_fake_net_reinvite_x10_serialized` + `…_x10_loss_soak`.
+  GOTCHA: a ×N call carries ~N× the datagrams, so under a paused loss soak the
+  governor's *delivered-call count* is variable under concurrent scheduling —
+  keep the `total >= …` floor conservative (5), and don't assert retransmit
+  *dominance* (only `ok > 0` + audit==0 + every-NOK-is-a-timeout).
+
+- **C3 — crossing BYE (S3)** — commit `4057e03`. The reactor already handles an
+  inbound BYE while its own BYE is in flight order-independently (it 200s the
+  inbound BYE, then `discharge_on_teardown` subsumes its own still-open BYE
+  obligation) — NO reactor fix was needed; pinned by the SUT-less machinery test
+  `actor::tests::two_actor_crossing_bye_both_terminate`. New pipeline type:
+  `Teardown::CrossingBye{after}` — the caller AND the winning callee (tracked as
+  `Build::winner`, "bob" or "bob2" after a reroute) both BYE on the final gate.
+  Shape `crossing_bye` + registry entry. The in-process B2BUA relays the crossing
+  BYEs cleanly (verified). Tests: `loadgen_fake_net_crossing_bye` +
+  `…_crossing_bye_recovers_dropped_byes` (drops BOTH crossing BYEs via
+  `leg:None, Outbound, permanent:false`; both recover by retransmit).
+
+- **C1(d) — mux fork-aware response dedup** — commit `bcacd4e`. `CallTxns::
+  on_inbound` keyed the response dedup on `(branch, status)`, so two 18x with
+  DISTINCT To-tags on ONE INVITE branch (a true fork, §12.1.2) were absorbed as
+  retransmits of each other, and a loser's late 200 never reached the body. Now
+  keyed `(branch, status, To-tag)` via a new `to_tag()` raw extractor. A genuine
+  same-tag retransmit still dedups (033 ask D2 unchanged). Tests:
+  `mux::tests::calltxns_distinct_fork_tags_are_not_deduped`,
+  `…::to_tag_extracts_the_to_parameter`. This is the transport half of C1 and is
+  independently correct — required before the caller/callee forking machinery.
+
+### Deferred — design notes for the C-completion / phase-D agent
+
+The following C sub-capabilities are DESIGNED here but NOT yet landed. They
+share a theme: each needs reactor-state surgery whose blast radius touches the
+~77-rule RFC audit that gates every test, so land each as its own green commit
+with the audit watched closely.
+
+- **C1(a,b,e) — TRUE FORKING caller+callee (E3).** Seams confirmed in the
+  pre-phase-C findings above (trust but re-verify lines). Concretely:
+  - Callee: add `Disposition::ForkingRing{tags:&[&str], winner:&str,
+    loser_late_200:bool}` (actor.rs ~68) + an `apply_disposition` arm that emits
+    one 18x per tag via `ServerTxn::respond(180,..).with_to_tag(tag)` (the seam
+    at agent.rs ~3076) on the ONE retained INVITE txn, then answers 200 under
+    `winner` (extend `answer_initial_invite`/`TimedAnswer` to carry a chosen
+    To-tag — today it uses the txn's sticky tag). `loser_late_200` emits a second
+    200 under a losing tag after the winner's.
+  - Caller: the actor's `DialogTable.pending_invite` is a single slot and
+    `pracked_rseqs` is RSeq-only. Re-key PRACK dedup to `(to_tag, rseq)` and let
+    the ONE `ClientInvite` (which already carries `fork_cseq: HashMap<tag,cseq>`
+    and `with_to_tag`/`with_fork_cseq` PRACK plumbing) PRACK each early dialog.
+    The 2xx's tag is the winner (§13.2.2.4 — `learn_from_response` already
+    overrides the early tag on a 2xx). A LOSING fork's late 200 → ACK then BYE,
+    but ONLY after that fork's own 2xx (a BYE on a never-2xx'd early fork
+    correctly trips `rfc3261.noByeOutsideOrEarlyDialog`).
+  - callshapes: `Establishment::Forked{forks, winner_reliable, loser_late_200}`.
+    E3 shapes MUST run under the SUT's transparent CORE relay
+    (`FeatureActivations.relay_first_18x_to_180 = None` — the default plain
+    `B2buaSut` config already is; any `relayFirst18x` masking COLLAPSES forks and
+    is incompatible — say so in the stage doc). C1(d) is already landed so the
+    mux won't collapse distinct-tag forks.
+  - C1(c) rfc_audit: in `dialog_model.rs::project_per_dialog` (~558-573) the
+    pending pre-tag INVITE+100 bucket is `remove`d on the FIRST fork's migration,
+    so later forks' slices lack the establishing INVITE (they UNDER-check — not a
+    false positive today). Fix: seed each new confirmed-fork bucket with a CLONE
+    of the pending bucket's `ordered` events (probe both `pending_key(ft)` and
+    `pending_key(tag)` orientations), and DROP a pending bucket only after it has
+    been cloned into ≥1 confirmed fork (a never-confirmed reject keeps its
+    pending slice, as today). `OrderedEvent`/`Bucket` will need `Clone`. Add
+    synthetic fork fixtures (distinct-tag 18x, reliable-18x-per-fork,
+    loser-late-200→ACK+BYE) asserting the fork-aware rules stay clean. HIGH RISK
+    to the whole suite — do this WITH real multi-fork traces from C1(a,b), not
+    synthetic-only, so the migration is validated end-to-end.
+  - Per-element TargetedDrop tests: each forked 18x, each PRACK, the loser late
+    200.
+
+- **C2 — branch oracle + CANCEL×200 crossing (E5).** New
+  `Expect::EitherOf(&'static [ExpectBranch])` in spec.rs, each branch carrying
+  its terminal `who`/detail; `into_result` maps whichever branch the observed
+  state shows (200-wins → the happy `Ok`; CANCEL-wins → the `abandon` terminal).
+  The reactor ALREADY confirms a 200 that crosses a CANCEL (the `Answered` arm
+  fires even after `GoalStep::Cancel`, which keeps `pending_invite`), so the
+  200-wins branch needs only a follow-through BYE goal gated on "confirmed after
+  cancel"; the CANCEL-wins branch is the existing 487→terminated path. New
+  `Establishment::CancelAnswerCrossing`: drive alice's CANCEL and bob's 200 from
+  timed goals under the paused clock, one transit quantum apart per branch. Keep
+  classification bounded — check which `ResultClass` each branch lands in
+  (loadgen `class.rs`) and pin it. TWO paused tests (one per branch, timing
+  varied by one transit quantum) + a loadgen fake-net test accepting either.
+
+- **C4 — glare (S5 re-INVITE 491, S6 UPDATE-vs-re-INVITE).** react_request's
+  INVITE arm always 200s; make it answer 491 when THIS leg has an unacked
+  re-INVITE it originated in flight (`!sent_reinvites.is_empty()`), then retry
+  after the §14.1 dwell (owner = higher Call-ID per §14.1; drive the retry timer
+  exactly under the paused clock). The 491 closes the txn, the retry opens a new
+  ReInvite obligation — ensure NO obligation is left open by the 491'd attempt
+  (close the ReInvite key on the 491, like a final). S6: UPDATE has no ACK —
+  resolve per §14.1/3311 §5.2 and pin the choice. Bounded new barrier vocab:
+  reuse `reinvited`.
+
+- **C5 — early UPDATE (RFC 3311 on the early dialog).** Scripts need a
+  required-dialog-state notion (Early vs Confirmed). `Script::UpdateEarly`
+  attaches to E2/Reliable's early dialog (after PRACK, before the 200 — 3311
+  §5.1 requires a reliable provisional first). `compile()`/`validate()` must
+  reject `UpdateEarly` on any establishment without a reliable early dialog. The
+  caller sends UPDATE within the early dialog (the `ClientInvite` knows the early
+  To-tag post-PRACK); the ReliableAnswer callee 200s it then proceeds to the
+  INVITE 200.
+
 ## Hard constraints (from CLAUDE.md — read before each phase)
 
 - `docs/testing/test-clock.md` before ANY timed test; `docs/testing/harness-layers.md`
