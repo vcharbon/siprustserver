@@ -245,12 +245,10 @@ the pre-existing real-clock smoke contention flake below):
   kept. `OrderedEvent`/`Bucket` gained `Clone`. Fork fixtures in
   `dialog_model.rs` + `rfc3264_cross.rs`.
 
-### Deferred — design notes for the C-completion / phase-D agent
+### Phase C COMPLETE — C1 (a–e), C2, C4 (S5+S6), C5 all landed
 
-The following C sub-capabilities are DESIGNED here but NOT yet landed. They
-share a theme: each needs reactor-state surgery whose blast radius touches the
-~77-rule RFC audit that gates every test, so land each as its own green commit
-with the audit watched closely.
+Every phase-C capability is landed and `just test`-green. C1 notes below (kept
+for the fork seams + the peer-to-peer loser-late-200 finding), then C2/C4/C5.
 
 - **C1(e) — TRUE FORKING pipeline wiring (E3)** — commit `e62a2f9`. C1 COMPLETE.
   `Establishment::Forked{tags, winner, reliable, loser_late_200}` compiles bob
@@ -310,38 +308,67 @@ with the audit watched closely.
   - Per-element TargetedDrop tests: each forked 18x, each PRACK, the loser late
     200.
 
-- **C2 — branch oracle + CANCEL×200 crossing (E5).** New
-  `Expect::EitherOf(&'static [ExpectBranch])` in spec.rs, each branch carrying
-  its terminal `who`/detail; `into_result` maps whichever branch the observed
-  state shows (200-wins → the happy `Ok`; CANCEL-wins → the `abandon` terminal).
-  The reactor ALREADY confirms a 200 that crosses a CANCEL (the `Answered` arm
-  fires even after `GoalStep::Cancel`, which keeps `pending_invite`), so the
-  200-wins branch needs only a follow-through BYE goal gated on "confirmed after
-  cancel"; the CANCEL-wins branch is the existing 487→terminated path. New
-  `Establishment::CancelAnswerCrossing`: drive alice's CANCEL and bob's 200 from
-  timed goals under the paused clock, one transit quantum apart per branch. Keep
-  classification bounded — check which `ResultClass` each branch lands in
-  (loadgen `class.rs`) and pin it. TWO paused tests (one per branch, timing
-  varied by one transit quantum) + a loadgen fake-net test accepting either.
+### Landed — C2 / C4 / C5 (the remaining new capabilities)
 
-- **C4 — glare (S5 re-INVITE 491, S6 UPDATE-vs-re-INVITE).** react_request's
-  INVITE arm always 200s; make it answer 491 when THIS leg has an unacked
-  re-INVITE it originated in flight (`!sent_reinvites.is_empty()`), then retry
-  after the §14.1 dwell (owner = higher Call-ID per §14.1; drive the retry timer
-  exactly under the paused clock). The 491 closes the txn, the retry opens a new
-  ReInvite obligation — ensure NO obligation is left open by the 491'd attempt
-  (close the ReInvite key on the 491, like a final). S6: UPDATE has no ACK —
-  resolve per §14.1/3311 §5.2 and pin the choice. Bounded new barrier vocab:
-  reuse `reinvited`.
+- **C2 — branch oracle + CANCEL×200 crossing (E5)** — commit `c261e6c`. New
+  `Expect::EitherOf(&'static [ExpectBranch])` (spec.rs): `into_result` reads the
+  observed state and maps whichever branch occurred to a BOUNDED class — a caller
+  that saw the 487 → the abandoned `Timeout` (load `timeout` class), a caller
+  that confirmed (no non-2xx final, discriminated via `saw_final(487)`) → `Ok`.
+  **Reactor fix (§9.2):** the CANCEL arm no longer unconditionally terminates —
+  it 487s + terminates ONLY when an INVITE is still PENDING (`pending_answer` or
+  `pending_prack_answer`); an already-answered leg 200s the late CANCEL and
+  ignores it (the confirmed dialog survives). New `GoalStep::ByeIfConfirmed`
+  (branch-conditional teardown, gated on the race resolving — placed on the
+  CALLEE so a 487 never trips the caller's incidental-failure WrongStatus path).
+  `Establishment::CancelAnswerCrossing` + `cancel_answer_crossing` shape. Tests:
+  two SUT-less paused tests pinning each branch (cancel-wins 2ms<20ms, answer-
+  wins 20ms>5ms — one transit quantum apart), an `into_result` oracle unit test,
+  and a fake-net test asserting {Ok, Timeout} bounded through the SUT.
+  GOTCHA for phase D: through the load env the CANCEL dwell == ring, so the
+  crossing resolves the SAME way each call (deterministic per-branch pinning is
+  the SUT-less tests' job); the fake-net cell just proves bounded classification.
 
-- **C5 — early UPDATE (RFC 3311 on the early dialog).** Scripts need a
-  required-dialog-state notion (Early vs Confirmed). `Script::UpdateEarly`
-  attaches to E2/Reliable's early dialog (after PRACK, before the 200 — 3311
-  §5.1 requires a reliable provisional first). `compile()`/`validate()` must
-  reject `UpdateEarly` on any establishment without a reliable early dialog. The
-  caller sends UPDATE within the early dialog (the `ClientInvite` knows the early
-  To-tag post-PRACK); the ReliableAnswer callee 200s it then proceeds to the
-  INVITE 200.
+- **C4/S5 — re-INVITE glare (491 + §14.1 retry)** — commit `9e19814`. The
+  reactor's re-INVITE arm now 491s when THIS leg has its own re-INVITE
+  outstanding (`!sent_reinvites.is_empty()`); the 491 arms the §17.1.1.3 hop-ACK
+  obligation. Receiving a 491 to our own re-INVITE: hop-ACK it (new
+  `InDialogTxn::ack_non_2xx` — `recv_any` surfaces it as a bare response and does
+  NOT auto-ACK; the per-CSeq txn handle is retained in `sent_reinvite_txns`),
+  CLOSE the ReInvite obligation, and schedule a retry after the §14.1 back-off
+  (owner = the caller, 2.5s; non-owner 1.0s — fixed in-range values, deterministic
+  under the paused clock). Shared `originate_reinvite()` for the first send + the
+  retry. SUT-less machinery test only (no callshapes shape/load cell — a glare
+  needs BOTH ends to re-INVITE at once, and driving it through a B2BUA is out of
+  this capability's scope; see phase-D note below).
+- **C4/S6 — UPDATE-vs-re-INVITE collision** — commit `d20d8fb`. RFC 3311 §5.2:
+  `sent_updates` tracks an outstanding UPDATE offer (mirrors `sent_reinvites`);
+  the re-INVITE arm 491s when EITHER is pending, the UPDATE arm 491s
+  symmetrically (an UPDATE's non-2xx takes NO hop-ACK — non-INVITE txn). A 491 to
+  our UPDATE closes its Update obligation and retries after the same back-off
+  (`originate_update()`). The Update-200 path clears `sent_updates` and records
+  `RenegCompleted` so a glare barrier gates on `reneg_count` regardless of
+  method. SUT-less machinery test.
+  PHASE-D NOTE: S5/S6 glare shapes are SUT-less-machinery capabilities (like
+  `forked_loser_late_200`) — do NOT generate through-SUT load cells for them; a
+  glare matrix cell must be a peer-to-peer harness shape.
+
+- **C5 — early UPDATE (RFC 3311 §5.1)** — commit `65d3e19`. `Script::UpdateEarly`
+  (dialog-state = Early); `validate()` rejects it on any non-`Reliable`
+  establishment. New `Disposition::ReliableAnswerEarlyUpdate`: the callee HOLDS
+  the INVITE 200 until BOTH the 183 is PRACKed (MUST-014) AND the early UPDATE is
+  200'd (`early_pracked`/`early_updated` + `maybe_answer_held_invite`, released by
+  whichever lands last). New `GoalStep::UpdateEarly` sends on the pending
+  `ClientInvite`'s early dialog, addressed to its learned To-tag
+  (`ClientInvite::early_remote_tag`) so it rides the early dialog's OWN CSeq
+  sequence — the same the PRACK used (§12.2.1.1); a shared-counter UPDATE reused
+  the PRACK's CSeq and tripped the audit on a SUT-less peer (the SUT masks it by
+  recomputing b-leg CSeq). New `SUBFLOW_EARLY`: the early UPDATE gates on the
+  caller having PRACKed (a real post-183 signal) — NOT `LegPhase::Early`, which a
+  caller reaches the instant she originates (that was firing the UPDATE before
+  the 183). `prack_update_early` shape + registry entry; the B2BUA relays the
+  early UPDATE end-to-end (unlike C4 glare / loser-late-200, this one DOES work
+  through the SUT — fake-net test `loadgen_fake_net_prack_update_early`).
 
 ## Hard constraints (from CLAUDE.md — read before each phase)
 
