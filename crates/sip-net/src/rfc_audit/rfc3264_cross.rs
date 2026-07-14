@@ -805,6 +805,48 @@ a=sendrecv\r\n";
         assert!(f[0].1.contains("MUST-018"), "{}", f[0].1);
     }
 
+    #[test]
+    fn m_line_count_judges_non_first_forks() {
+        // C1/E3 forking: the INVITE forks into b1 (rings, no answer body) and
+        // b2 (answers with a WRONG 2-m-line answer). The offer/answer pair for
+        // fork b2 only exists in its slice because project_per_dialog now
+        // REPLICATES the pre-tag INVITE(+100) into EVERY fork — before that,
+        // the INVITE migrated into the FIRST fork (b1) only and b2's violation
+        // was invisible (under-checked, no offer in its slice).
+        let evs = vec![
+            sent("alice", invite_with_sdp("z9hG4bK-i", OFFER_1AUDIO), "127.0.0.1:5070", 0),
+            // Fork b1's 180 — bodyless, tagged b1 (creates fork 1's slice).
+            recv("alice", resp_with_body(180, "z9hG4bK-i", 1, "INVITE", "b1", ""), "127.0.0.1:5070", 1),
+            // Fork b2's 200 with a 2-media answer to the 1-media offer.
+            recv("alice", resp_with_body(200, "z9hG4bK-i", 1, "INVITE", "b2", ANSWER_2MEDIA), "127.0.0.1:5070", 2),
+        ];
+        let f = AnswerMLineCountMatchesOfferRule.check(&evs);
+        assert_eq!(f.len(), 1, "the non-first fork's bad answer must be judged: {f:?}");
+        assert!(f[0].1.contains("MUST-018"), "{}", f[0].1);
+    }
+
+    #[test]
+    fn forked_clean_answers_stay_clean() {
+        // The compliant fork shape: b1 rings (no body), b2 answers correctly,
+        // b1's late 200 answers correctly too (each fork = its own offer/answer
+        // pair against the SAME replicated offer). No findings.
+        let evs = vec![
+            sent("alice", invite_with_sdp("z9hG4bK-i", OFFER_1AUDIO), "127.0.0.1:5070", 0),
+            recv("alice", resp_with_body(180, "z9hG4bK-i", 1, "INVITE", "b1", ""), "127.0.0.1:5070", 1),
+            recv("alice", resp_with_body(180, "z9hG4bK-i", 1, "INVITE", "b2", ""), "127.0.0.1:5070", 2),
+            recv("alice", resp_with_body(200, "z9hG4bK-i", 1, "INVITE", "b2", ANSWER_1AUDIO), "127.0.0.1:5070", 3),
+            recv("alice", resp_with_body(200, "z9hG4bK-i", 1, "INVITE", "b1", ANSWER_1AUDIO), "127.0.0.1:5070", 4),
+        ];
+        assert!(
+            AnswerMLineCountMatchesOfferRule.check(&evs).is_empty(),
+            "clean per-fork answers must stay clean",
+        );
+        assert!(
+            NoNewOfferWhileOfferPendingRule.check(&evs).is_empty(),
+            "one offer answered once per fork slice is not a glare",
+        );
+    }
+
     // ---- answerTLineEqualsOffer ----------------------------------------
 
     #[test]
