@@ -21,7 +21,7 @@ use std::time::Duration;
 use scenario_harness::actor::{
     phase, ActorCall, ActorScenario, ActorSpec, Barrier, BarrierPhase, CtxFeed, Disposition,
     Expect, ExpectBranch, Feed, Goal, GoalStep, LegPhase, MediaState, SettleBarrier, StateInner,
-    SubflowState, SUBFLOW_REALIGN, SUBFLOW_REFER, SUBFLOW_RENEG,
+    SubflowState, SUBFLOW_EARLY, SUBFLOW_REALIGN, SUBFLOW_REFER, SUBFLOW_RENEG,
 };
 use scenario_harness::realcall::{CallEnv, ScenarioId};
 use scenario_harness::{StepError, ANSWER_SDP, OFFER_SDP};
@@ -89,6 +89,13 @@ pub enum Script {
     /// One in-dialog UPDATE (RFC 3311) renegotiation (its 200 completes it —
     /// no ACK). Replaces the gate with `updated`.
     UpdatePostConnect,
+    /// EARLY UPDATE (C5, RFC 3311 §5.1): the caller renegotiates media on the
+    /// reliable establishment's EARLY dialog — after the PRACK, before the final
+    /// 200. REQUIRES a reliable early dialog (`Establishment::Reliable`); the
+    /// callee is upgraded to hold its INVITE 200 until the UPDATE is answered.
+    /// `validate()` rejects it on any other establishment. Gate unchanged (the
+    /// call still confirms via the establishment's `established` gate).
+    UpdateEarly,
     /// ONE in-dialog OPTIONS keepalive ping, its 200 read inline. Gate
     /// unchanged.
     KeepaliveOnce,
@@ -277,6 +284,13 @@ impl ShapePlan {
                 if *n == 0 {
                     return Err(err("Reinvite n must be >= 1"));
                 }
+            }
+            // C5: an early UPDATE needs a reliable early dialog to attach to
+            // (RFC 3311 §5.1 requires a PRACKed reliable provisional first).
+            if matches!(stage, Stage::Script(Script::UpdateEarly))
+                && !matches!(self.establish, Establishment::Reliable)
+            {
+                return Err(err("UpdateEarly requires a reliable establishment (early dialog)"));
             }
         }
         Ok(())
@@ -617,6 +631,19 @@ impl ShapePlan {
                     Feed::new(Some("time_to_update_200"), Some("updated"));
                 b.gate = Barrier::pred("updated", reneg_done);
             }
+            // C5 (RFC 3311 §5.1): the caller UPDATEs the reliable EARLY dialog
+            // BEFORE the final 200 (validate() guarantees Establishment::Reliable
+            // — bob is a ReliableAnswer callee we upgrade to hold its INVITE 200
+            // until the UPDATE completes). The UPDATE fires once the caller is
+            // Early (the 183 is in + PRACKed); the gate stays `established`.
+            Script::UpdateEarly => {
+                let early = |s: &StateInner| s.leg("alice").subflow(SUBFLOW_EARLY).is_some();
+                b.caller_goals
+                    .push(Goal::new(Barrier::pred("early", early), GoalStep::UpdateEarly));
+                b.caller_feed.on_update_ok =
+                    Feed::new(Some("time_to_update_200"), Some("updated"));
+                b.callee_mut("bob").disposition = Disposition::ReliableAnswerEarlyUpdate;
+            }
             Script::KeepaliveOnce => {
                 b.caller_goals.push(Goal::new(b.gate.clone(), GoalStep::Options));
                 b.caller_feed.on_options_ok =
@@ -755,6 +782,7 @@ mod tests {
             shapes::invite_reject(b()),
             shapes::abandon_ringing(b()),
             shapes::cancel_answer_crossing(b()),
+            shapes::prack_update_early(b()),
         ] {
             plan.validate().unwrap_or_else(|e| panic!("{} invalid: {e:?}", plan.id));
         }
@@ -772,6 +800,24 @@ mod tests {
         let mut plan = shapes::reinvite_n(shapes::default_binder(), "reinvite0", 1);
         plan.stages = vec![Stage::Script(Script::Reinvite { n: 0 })];
         assert_eq!(detail(plan.validate().unwrap_err()), "Reinvite n must be >= 1");
+    }
+
+    /// C5: an early UPDATE is valid only on a reliable establishment (it needs
+    /// the PRACKed reliable early dialog to attach to, RFC 3311 §5.1).
+    #[test]
+    fn update_early_requires_a_reliable_establishment() {
+        // Reliable: valid.
+        shapes::prack_update_early(shapes::default_binder())
+            .validate()
+            .expect("UpdateEarly on a Reliable establishment is valid");
+
+        // Transparent (no reliable early dialog): rejected.
+        let mut plan = shapes::prack_update_early(shapes::default_binder());
+        plan.establish = Establishment::Transparent;
+        assert_eq!(
+            detail(plan.validate().unwrap_err()),
+            "UpdateEarly requires a reliable establishment (early dialog)"
+        );
     }
 
     /// C1/E3: Forked validation — winner and loser must be declared tags,

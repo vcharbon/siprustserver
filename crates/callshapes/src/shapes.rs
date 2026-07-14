@@ -177,6 +177,25 @@ pub fn prack_update(binder: Arc<dyn RouteBinder>) -> ShapePlan {
     }
 }
 
+/// `prack_update_early` — reliable (100rel) establishment with an EARLY UPDATE
+/// (C5, RFC 3311 §5.1): the caller renegotiates media on the early dialog after
+/// the PRACK and before the final 200; the callee holds its INVITE 200 until the
+/// UPDATE completes. Then talk, BYE.
+pub fn prack_update_early(binder: Arc<dyn RouteBinder>) -> ShapePlan {
+    ShapePlan {
+        id: "prack_update_early",
+        binder,
+        establish: Establishment::Reliable,
+        stages: vec![Stage::Script(Script::UpdateEarly)],
+        teardown: Teardown::CallerBye {
+            after: DwellKnob::ReinviteGap,
+            feed: ByeFeed::CheckpointAndPhase,
+        },
+        ringing_gate: true,
+        stamp_connected: true,
+    }
+}
+
 /// `rerouting_prack` — bob 486s, the SUT fails over to bob2, which answers
 /// RELIABLY; talk, BYE (contract §5.7).
 pub fn rerouting_prack(binder: Arc<dyn RouteBinder>) -> ShapePlan {

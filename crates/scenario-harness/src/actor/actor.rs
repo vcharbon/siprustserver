@@ -60,6 +60,12 @@ pub const SUBFLOW_REFER: &str = "refer";
 /// the barrier the `reinvite` / `prack_update` teardown gates on so the BYE
 /// never races the renegotiation's completion.
 pub const SUBFLOW_RENEG: &str = "reneg";
+/// The sub-flow a CALLER advances once it has PRACKed the reliable provisional —
+/// the observed "the early dialog exists AND is acknowledged" fact an early
+/// UPDATE (C5, RFC 3311 §5.1) gates on. Distinct from `LegPhase::Early`, which
+/// a caller reaches the instant she originates (before any provisional), so it
+/// cannot mean "the reliable 183 is in".
+pub const SUBFLOW_EARLY: &str = "early_pracked";
 
 /// How an endpoint answers the INITIAL (dialog-creating) INVITE it receives —
 /// the endpoint state machine's entry policy (B6). Later in-dialog traffic is
@@ -81,6 +87,13 @@ pub enum Disposition {
     /// INVITE only after the caller PRACKs (MUST-014 ordering). The
     /// rerouting/prack winning-leg disposition.
     ReliableAnswer,
+    /// Like [`ReliableAnswer`](Self::ReliableAnswer) but HOLDS the `200` to the
+    /// INVITE until an EARLY UPDATE has been answered (C5, RFC 3311 §5.1): 183
+    /// reliable → PRACK (200'd, INVITE still held) → UPDATE (200'd) → THEN the
+    /// final 200 INVITE. The callee for an early-UPDATE (`Script::UpdateEarly`)
+    /// establishment, where the caller renegotiates media on the early dialog
+    /// before the call is answered.
+    ReliableAnswerEarlyUpdate,
     /// A **forking UAS** (C1/E3, RFC 3261 §12.1.2): emits one 18x per tag in
     /// `tags` — DISTINCT explicit To-tags on the ONE retained INVITE server
     /// transaction, as if a proxy downstream had forked — then answers `200`
@@ -364,6 +377,17 @@ pub struct ActorState<'c> {
     /// fires after the §14.1-style back-off to re-originate it (UPDATE has no
     /// ACK, so the 491 alone completes its transaction).
     update_retry: Option<Instant>,
+    /// C5: a [`Disposition::ReliableAnswerEarlyUpdate`] callee HOLDS the INVITE
+    /// 200 across the PRACK, answering it only after an early UPDATE is 200'd
+    /// (RFC 3311 §5.1). `true` only for that disposition.
+    hold_for_early_update: bool,
+    /// C5 ordering: whether this early-UPDATE callee has PRACKed its reliable
+    /// 183 (RFC 3262 MUST-014 — the 2xx must not precede the PRACK) and whether
+    /// the early UPDATE has been 200'd. The held INVITE 200 is released only
+    /// once BOTH hold, so a UPDATE that races ahead of the PRACK does not answer
+    /// the INVITE early.
+    early_pracked: bool,
+    early_updated: bool,
     /// Whether this caller has already stamped the first-OPTIONS-ping feed —
     /// so the looped `options_hold` pings stamp `keepalive_ack` exactly once.
     saw_options_200: bool,
@@ -430,6 +454,12 @@ impl<'c> ActorState<'c> {
             reinvite_retry: None,
             sent_updates: HashSet::new(),
             update_retry: None,
+            hold_for_early_update: matches!(
+                spec.disposition,
+                Disposition::ReliableAnswerEarlyUpdate
+            ),
+            early_pracked: false,
+            early_updated: false,
             saw_options_200: false,
             expected_provisional: 180,
             pending_reject_ack: None,
@@ -817,6 +847,14 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
             }
             respond_200_sdp(&mut uas, st.answer_body()).await?;
             st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
+            // C5 (RFC 3311 §5.1): the EARLY UPDATE's offer/answer completed —
+            // release the held INVITE 200, but only once the reliable 183 was
+            // also PRACKed (MUST-014); if the UPDATE raced ahead of the PRACK
+            // the PRACK arm releases it instead.
+            if st.hold_for_early_update {
+                st.early_updated = true;
+                maybe_answer_held_invite(st).await?;
+            }
         }
         // A PRACK (RFC 3262) for our reliable 183: 200 it, then — MUST-014 — this
         // is the trigger to answer 200 to the HELD INVITE txn (the reliable
@@ -828,6 +866,14 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
             let prack_tag = uas.request().to.tag.clone();
             uas.respond(200, "OK").try_send().await?;
             st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
+            // C5: this callee holds the INVITE for an early UPDATE — mark the
+            // 183 PRACKed and release the held 200 only once the UPDATE is also
+            // done (MUST-014 + RFC 3311 §5.1, in either arrival order).
+            if st.hold_for_early_update {
+                st.early_pracked = true;
+                maybe_answer_held_invite(st).await?;
+                return Ok(());
+            }
             let releases_answer = match (&st.fork_answer, prack_tag.as_deref()) {
                 // Forking: only the winner fork's PRACK releases the 200.
                 (Some(f), Some(tag)) => tag == f.winner_tag,
@@ -845,6 +891,19 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
         // Any other in-dialog method: a plain 200 (dialog-neutral).
         _ => {
             uas.respond(200, "OK").try_send().await?;
+        }
+    }
+    Ok(())
+}
+
+/// C5: release a [`Disposition::ReliableAnswerEarlyUpdate`] callee's HELD
+/// INVITE 200, but only once BOTH the reliable 183 is PRACKed (RFC 3262
+/// MUST-014) AND the early UPDATE is 200'd (RFC 3311 §5.1) — regardless of the
+/// order those two arrive in. A no-op otherwise.
+async fn maybe_answer_held_invite(st: &mut ActorState<'_>) -> Result<(), StepError> {
+    if st.hold_for_early_update && st.early_pracked && st.early_updated {
+        if let Some(inv_txn) = st.pending_prack_answer.take() {
+            answer_initial_invite(st, inv_txn, None).await?;
         }
     }
     Ok(())
@@ -922,7 +981,11 @@ async fn apply_disposition(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Resul
         // RFC 3262: answer RELIABLY with a 183 (Require:100rel + RSeq:1 + the
         // answer SDP) and HOLD the INVITE txn — the 200 to the INVITE waits for
         // the PRACK (MUST-014, fired from the PRACK arm of `react_request`).
-        Disposition::ReliableAnswer => {
+        // Both reliable-answer dispositions emit the same reliable 183 and HOLD
+        // the INVITE. They differ only in WHEN the held 200 is released: the
+        // plain one on the PRACK (MUST-014); the early-UPDATE one after the
+        // early UPDATE is answered (C5, RFC 3311 §5.1 — see the PRACK/UPDATE arms).
+        Disposition::ReliableAnswer | Disposition::ReliableAnswerEarlyUpdate => {
             let sdp = st.answer_body();
             uas.respond(183, "Session Progress").reliable(1).with_sdp(sdp).try_send().await?;
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
@@ -975,6 +1038,18 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
                                         req.cseq.seq,
                                     ),
                                     detail: "prack awaiting 200".to_string(),
+                                },
+                                now,
+                            );
+                            // C5: the reliable early dialog is now established
+                            // AND PRACKed — the observed fact an early UPDATE
+                            // (RFC 3311 §5.1) gates on (a real post-183 signal,
+                            // unlike `LegPhase::Early` which holds pre-183).
+                            st.obs.record(
+                                Observation::Subflow {
+                                    leg: st.role,
+                                    name: SUBFLOW_EARLY,
+                                    to: SubflowState::Answered,
                                 },
                                 now,
                             );
@@ -1358,6 +1433,40 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
         // `on_update_ok` (see `react_response`).
         GoalStep::Update => {
             originate_update(st).await?;
+        }
+        // C5 (RFC 3311 §5.1): an EARLY UPDATE on the still-pending INVITE's
+        // EARLY dialog (its reliable provisional already PRACKed). Sent through
+        // the pending `ClientInvite` (which learned the early To-tag from the
+        // 183), so it addresses the early dialog and rides its CSeq. Opens an
+        // `Update` obligation + marks the offer outstanding (`sent_updates`);
+        // its 200 closes it and releases the callee's held INVITE 200.
+        GoalStep::UpdateEarly => {
+            let now = Instant::now();
+            let offer = st.media.offer_sdp().unwrap_or(crate::OFFER_SDP);
+            let (key, req) = {
+                let inv = st.dialogs.pending_invite.as_mut().ok_or_else(|| {
+                    StepError::UnexpectedKind {
+                        who: st.role.to_string(),
+                        detail: "UpdateEarly with no pending early dialog".to_string(),
+                    }
+                })?;
+                // Address the early dialog's learned To-tag so the UPDATE rides
+                // that early dialog's OWN CSeq sequence (the same the PRACK used,
+                // §12.2.1.1) — else it reuses the shared counter's value and
+                // collides with the PRACK's CSeq on a SUT-less peer.
+                let tag = inv.early_remote_tag().to_string();
+                let mut req_builder = inv.send_request(InDialogMethod::Update).with_sdp(offer);
+                if !tag.is_empty() {
+                    req_builder = req_builder.with_to_tag(&tag);
+                }
+                let (_txn, req) = req_builder.try_send_with_request().await?;
+                (ObligationKey::new(st.role, ObligationKind::Update, req.cseq.seq), req)
+            };
+            st.sent_updates.insert(req.cseq.seq);
+            st.obs.record(
+                Observation::RequestSent { key, detail: "early update awaiting 200".to_string() },
+                now,
+            );
         }
         // One in-dialog OPTIONS keepalive ping, its 200 read inline (the reactor
         // has nothing else to do for this leg during the ping).

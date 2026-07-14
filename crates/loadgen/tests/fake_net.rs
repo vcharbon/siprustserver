@@ -288,6 +288,42 @@ async fn loadgen_fake_net_cancel_answer_crossing_accepts_either_branch() {
     b2bua.assert_fully_reaped();
 }
 
+/// C5: early UPDATE through the SUT — a reliable (100rel) establishment where
+/// the caller renegotiates media on the EARLY dialog (after the PRACK, before
+/// the final 200; RFC 3311 §5.1). Every call establishes, tears down and
+/// settles OK under the strict per-call audit, with a fully-reaped SUT.
+#[tokio::test(start_paused = true)]
+async fn loadgen_fake_net_prack_update_early() {
+    let (_h, b2bua, core, transport) = setup_fake(7080).await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    let driver = Driver::new(
+        cfg(b2bua.addr, 10.0, 2, 8, 0xE4E1),
+        vec![mix("prack_update_early", 1.0)],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    let ok = reporter.count("prack_update_early", &ResultClass::Ok);
+    assert!(total >= 8, "governor under-delivered: {total}");
+    assert_eq!(ok, total, "an early-UPDATE call was NOK:\n{}", reporter.render_prometheus());
+    assert_eq!(
+        core.stats().orphan_no_header.load(Relaxed)
+            + core.stats().orphan_unknown_token.load(Relaxed)
+            + core.stats().orphan_stray.load(Relaxed),
+        0,
+        "orphans on the fake net"
+    );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
 /// C3 (b): drop BOTH crossing BYEs (the caller's AND the callee's — `leg: None`
 /// arms every endpoint's first outbound BYE) and let auto-retransmit heal them.
 /// The Timer-E resend on each side recovers the loss, the ledger closes, and
