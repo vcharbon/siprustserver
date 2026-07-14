@@ -2,10 +2,19 @@
 //! call-layer-stateless rejects (overload 503, store-fault 500).
 
 use sip_message::generators::{generate_response, GenerateResponseOpts};
+use sip_message::types::SipHeader;
 use sip_txn::IdGen;
 
 use crate::overload::OverloadSignal;
 use crate::repl::{Readiness, ReadinessState};
+
+/// Build a plain extension header.
+fn hdr(name: &str, value: impl Into<String>) -> SipHeader {
+    SipHeader {
+        name: name.to_string(),
+        value: value.into(),
+    }
+}
 
 /// Build the self-reported readiness reply to an out-of-dialog OPTIONS
 /// keepalive (S7). Every reply mints a local To-tag: RFC 3261 §8.2.6.2 requires
@@ -31,13 +40,6 @@ pub(crate) fn build_options_health_response(
     id_gen: &IdGen,
     req: &sip_message::SipRequest,
 ) -> sip_message::SipResponse {
-    use sip_message::types::SipHeader;
-
-    let hdr = |name: &str, value: &str| SipHeader {
-        name: name.to_string(),
-        value: value.to_string(),
-    };
-
     let (status, reason, extra_headers): (u16, &str, Vec<SipHeader>) = match readiness.state() {
         ReadinessState::Ready => (
             200,
@@ -102,8 +104,6 @@ pub(super) fn build_stateless_overload_503(
     req: &sip_message::SipRequest,
     retry_after_sec: u32,
 ) -> sip_message::SipResponse {
-    use sip_message::types::SipHeader;
-    let hdr = |name: &str, value: String| SipHeader { name: name.to_string(), value };
     generate_response(
         req,
         503,
@@ -111,7 +111,7 @@ pub(super) fn build_stateless_overload_503(
         &GenerateResponseOpts {
             to_tag: Some(id_gen.new_tag()),
             extra_headers: vec![
-                hdr("Reason", "SIP;cause=503;text=\"overload\"".to_string()),
+                hdr("Reason", "SIP;cause=503;text=\"overload\""),
                 hdr("Retry-After", retry_after_sec.to_string()),
             ],
             ..Default::default()
