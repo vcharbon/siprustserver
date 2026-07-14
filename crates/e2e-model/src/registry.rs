@@ -26,13 +26,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use scenario_harness::actor::scenarios::{
-    AbandonRinging as ActorAbandonRinging, BasicCall as ActorBasicCall,
-    InviteReject as ActorInviteReject, LongCall as ActorLongCall, OptionsHold as ActorOptionsHold,
-    PrackUpdate as ActorPrackUpdate, Refer as ActorRefer,
-    ReferCharlieReject as ActorReferCharlieReject, Reinvite as ActorReinvite,
-    ReroutingPrack as ActorReroutingPrack,
-};
+// The shipped load bodies are COMPOSED through the callshapes pipeline algebra
+// (callshapes program phase B) — same ids, same downstream contract as the
+// historic hand-written `scenario_harness::actor::scenarios` bodies they
+// regenerate.
+use callshapes::shapes as cs;
 use scenario_harness::actor::ActorScenario;
 
 use crate::shape::{Anchor, ShapeSpec};
@@ -449,13 +447,13 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
         ShapeDescriptor::new("basic_call")
             .anchors(LOAD_CALL_ANCHORS)
             .default_weight(4.0)
-            .load_actor_with(|_| Arc::new(ActorBasicCall)),
+            .load_actor_with(|_| Arc::new(cs::basic_call(cs::default_binder()))),
         // ACTOR-executed (plan §6 P3 order #2): same downstream contract
         // (table §5.2).
         ShapeDescriptor::new("reinvite")
             .anchors(LOAD_REINVITE_ANCHORS)
             .default_weight(2.0)
-            .load_actor_with(|_| Arc::new(ActorReinvite)),
+            .load_actor_with(|_| Arc::new(cs::reinvite(cs::default_binder()))),
         // The first ACTOR-executed shape (plan §4.5 — the redesign's exemplar):
         // per-endpoint reactive actors + the ack-gated settle barrier replace
         // the one serialized coroutine. Same id, same anchors, same downstream
@@ -464,49 +462,53 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .anchors(LOAD_REFER_ANCHORS)
             .default_weight(1.0)
             .needs_charlie()
-            .load_actor_with(|inputs| Arc::new(ActorRefer::new(&inputs.refer_key))),
+            .load_actor_with(|inputs| {
+                Arc::new(cs::refer(cs::default_binder(), &inputs.refer_key))
+            }),
         // ACTOR-executed (plan §6 P3 order #3): same downstream contract
         // (table §5.4).
         ShapeDescriptor::new("options_hold")
             .anchors(LOAD_CALL_ANCHORS)
             .default_weight(1.0)
-            .load_actor_with(|_| Arc::new(ActorOptionsHold)),
+            .load_actor_with(|_| Arc::new(cs::options_hold(cs::default_binder()))),
         // ACTOR-executed (plan §6 P3 order #4): the reactors answer SUT
         // keepalives on both legs during the hold (table §5.5).
         ShapeDescriptor::new("long_call")
             .anchors(LOAD_ESTABLISH_ANCHORS)
-            .load_actor_with(|_| Arc::new(ActorLongCall)),
+            .load_actor_with(|_| Arc::new(cs::long_call(cs::default_binder()))),
         // ACTOR-executed (plan §6 P3 order #1): per-endpoint reactors + the
         // ack-gated settle barrier; same downstream contract (table §5.6).
         ShapeDescriptor::new("prack_update")
             .anchors(PRACK_ANCHORS)
-            .load_actor_with(|_| Arc::new(ActorPrackUpdate)),
+            .load_actor_with(|_| Arc::new(cs::prack_update(cs::default_binder()))),
         // ── Load: the emergency variants (same flows, force-admitted) ────────
         ShapeDescriptor::new("basic_call_em")
             .anchors(LOAD_CALL_ANCHORS)
             .emergency()
-            .load_actor_with(|_| Arc::new(ActorBasicCall)),
+            .load_actor_with(|_| Arc::new(cs::basic_call(cs::default_binder()))),
         ShapeDescriptor::new("reinvite_em")
             .anchors(LOAD_REINVITE_ANCHORS)
             .emergency()
-            .load_actor_with(|_| Arc::new(ActorReinvite)),
+            .load_actor_with(|_| Arc::new(cs::reinvite(cs::default_binder()))),
         // ── Load: the voluntarily-failing cleanup-coverage set ───────────────
         // ACTOR-executed (plan §6 P3 order #5): same downstream contract
         // (table §5.8).
         ShapeDescriptor::new("invite_reject")
             .failure_weight(1.0)
-            .load_actor_with(|_| Arc::new(ActorInviteReject)),
+            .load_actor_with(|_| Arc::new(cs::invite_reject(cs::default_binder()))),
         // ACTOR-executed (plan §6 P3 order #6): same downstream contract
         // (table §5.9).
         ShapeDescriptor::new("abandon_ringing")
             .failure_weight(1.0)
-            .load_actor_with(|_| Arc::new(ActorAbandonRinging)),
+            .load_actor_with(|_| Arc::new(cs::abandon_ringing(cs::default_binder()))),
         // ACTOR-executed (plan §6 P3 order #1): per-endpoint reactors + the
         // ack-gated settle barrier; same downstream contract (table §5.10).
         ShapeDescriptor::new("refer_charlie_reject")
             .failure_weight(1.0)
             .needs_charlie()
-            .load_actor_with(|inputs| Arc::new(ActorReferCharlieReject::new(&inputs.refer_key))),
+            .load_actor_with(|inputs| {
+                Arc::new(cs::refer_charlie_reject(cs::default_binder(), &inputs.refer_key))
+            }),
         // ── Functional: the anchored e2e shapes ──────────────────────────────
         ShapeDescriptor::new("basic-call").anchors(CALL_ANCHORS),
         ShapeDescriptor::new("basic-call-media").anchors(CALL_ANCHORS),
@@ -526,7 +528,7 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
         ShapeDescriptor::new("rerouting_prack")
             .anchors(PRACK_ANCHORS)
             .needs_bob2()
-            .load_actor_with(|_| Arc::new(ActorReroutingPrack)),
+            .load_actor_with(|_| Arc::new(cs::rerouting_prack(cs::default_binder()))),
     ]
 }
 

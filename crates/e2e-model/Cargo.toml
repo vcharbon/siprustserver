@@ -15,6 +15,9 @@ workspace = true
 # load generator already depends on scenario-harness, so this keeps the model
 # crate shareable across both run surfaces.
 scenario-harness = { path = "../scenario-harness" }
+# The composed shape catalog the shipped load bodies are regenerated from
+# (callshapes program phase B) — same ids, same downstream contract.
+callshapes = { path = "../callshapes" }
 sip-message = { path = "../sip-message" }
 # `RecordedSipEntry` only (the evaluator resolves anchors over the recording).
 sip-net = { path = "../sip-net" }
