@@ -1,6 +1,7 @@
 # Call-Shapes Program — reusable cross-platform load call shapes
 
-Status: SPEC AGREED (grill session 2026-07-14). Implementation phases A→D below.
+Status: **COMPLETE** (phases A→D all landed, `just test` green). Spec agreed in
+the grill session 2026-07-14; implementation phases A→D below.
 Reference consumer: `/home/vince/newkahsip` (consumes upstream loadgen as a
 pinned submodule; routes by dialed-number suffix, NOT X-Api-Call).
 
@@ -369,6 +370,59 @@ for the fork seams + the peer-to-peer loser-late-200 finding), then C2/C4/C5.
   the 183). `prack_update_early` shape + registry entry; the B2BUA relays the
   early UPDATE end-to-end (unlike C4 glare / loser-late-200, this one DOES work
   through the SUT — fake-net test `loadgen_fake_net_prack_update_early`).
+
+## Phase D findings (COMPLETE — matrix + soaks + README)
+
+- **D1 — matrix generation** — commit `4b94d1f`. New `crates/e2e-model/src/
+  matrix.rs` declares the establishment × in-dialog-script axes as DATA
+  (`ESTS` × `SCRS`) with a `compatible()` predicate; `generated_shapes()`
+  composes each legal cell through the callshapes `ShapePlan` algebra into a
+  `ShapeDescriptor` with a stable generated id (`"<est>+<script>"`). v1 cells:
+  `reliable+reinvite`, `forked+reinvite`, `forked+update`, `reroute+reinvite`,
+  `reroute+update` (reliable+update excluded — reproduces canonical
+  `prack_update`). Ids interned once in a process-lifetime `OnceLock<Vec<String>>`
+  (no per-`with_defaults()` leak). Cells are id-addressable (no mix weight) so
+  the default mix stays a representative sample (no bob2 in it); the full matrix
+  is addressable by id. **E4 confirmed**: `RerouteOnReject` already models
+  "reroute WITHOUT any 18x" — bob's `Disposition::Reject` answers the final
+  directly, no provisional; no distinct no-18x path needed. Assigned catalog
+  weights to the phase-C shapes (crossing_bye 1.0, forked 1.0, forked_reliable
+  0.5, cancel_answer_crossing 0.5, prack_update_early 0.5, reinvite10 0.5);
+  canonical weights unchanged (basic_call 4, reinvite 2, options_hold 1,
+  refer 1). GOTCHA for the next author: the real-UDP default-mix smoke tests RUN
+  the mix and bind bob/charlie but NOT bob2 — so a `needs_bob2` cell must NOT
+  carry a default_weight (it would fail the smoke run). reroute cells therefore
+  stay id-addressable.
+- **D2 — loss-soak matrix + targeted drops** — commit `ca5fa57`. A DRY
+  `loss_soak()` helper (7% drop + retransmit → recovery + audit==0 +
+  every-NOK-a-timeout + fully-reaped-past-32s) covers the new through-SUT shapes
+  without one: `prack_update_early` and two GENERATED cells (`forked+reinvite`,
+  `reliable+reinvite`). Per-new-element deterministic `TargetedDrop` recovery
+  tests for the SUT-reachable **requests**: the C5 early UPDATE and the C1b
+  per-fork PRACK. **`TargetedDrop` matches requests ONLY** — so 18x / 200 /
+  reject (responses), and the bob2-only reroute-reject / peer-to-peer glare 491 /
+  loser late-200 are not TargetedDrop-reachable through this rig; crossing-BYE's
+  drop test already exists (C3). forked/reinvite10/basic_call soaks pre-existed
+  (not duplicated).
+- **D3 — README** — commit `632d32b`. `crates/callshapes/README.md`: the
+  downstream-consumption + extension guide (pipeline algebra, the
+  RouteBinder/RouteIntent seam with newkahsip's dial-plan binder as the worked
+  example, the ~30-LOC registry bin, adding a new Establishment/Script/Transfer,
+  the fake-net paused-clock pattern, and the SUT-reachability rule).
+
+### Shipped matrix summary
+
+Through-SUT load cells (in the registry, id-addressable; weighted ones also in
+the default mix): the canonical set (basic_call, reinvite, refer, options_hold,
+long_call, prack_update, invite_reject, abandon_ringing, refer_charlie_reject,
+rerouting_prack, + emergency variants) · the phase-C shapes (reinvite10,
+crossing_bye, forked, forked_reliable, cancel_answer_crossing, prack_update_early)
+· the generated cross-product (reliable+reinvite, forked+reinvite, forked+update,
+reroute+reinvite, reroute+update). SUT-LESS-only (NO load cell, machinery tests
+only): `forked_loser_late_200`, re-INVITE glare (S5), UPDATE-vs-re-INVITE
+collision (S6). The `reroute+*` generated cells need a bob2-binding rig to run
+(the current fake-net rig binds bob/charlie only) — a phase-E follow-up if a
+reroute loss soak is wanted.
 
 ## Hard constraints (from CLAUDE.md — read before each phase)
 
