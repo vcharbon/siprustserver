@@ -617,3 +617,160 @@ async fn loadgen_fake_net_forked_loss_soak() {
     settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }
+
+// ── Phase D2: loss-soak matrix + per-new-element targeted drops ─────────────
+
+/// A standard paused-clock probabilistic loss soak for a through-SUT shape `id`:
+/// ~7%/datagram loss + auto-retransmit, then the graceful-degradation gates —
+/// retransmit recovers SOME calls, no drop surfaces as an RFC-audit finding,
+/// every NOK degrades to a bounded `timeout`, and after draining past the SUT's
+/// 32 s dead-call detection the strict release oracle holds. `ring_ms` gives a
+/// non-zero ring where the shape needs a race window (0 otherwise).
+async fn loss_soak(base: u16, id: &'static str, seed: u64, ring_ms: u64) {
+    let (h, b2bua, core, transport) = setup_fake(base).await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    let mut c = cfg(b2bua.addr, 10.0, 2, 8, seed);
+    c.call.ring_delay = Duration::from_millis(ring_ms);
+    c.default_tuning = CallTuning { drop_rate: 0.07, retransmit: true, ..CallTuning::default() };
+    let driver = Driver::new(c, vec![mix(id, 1.0)], reporter.clone(), transport);
+    driver.run().await;
+
+    let drops = core.stats().dropped_out.load(Relaxed) + core.stats().dropped_in.load(Relaxed);
+    let total = reporter.total_calls();
+    let ok = reporter.count(id, &ResultClass::Ok);
+    let timeouts = reporter.count(id, &ResultClass::Timeout);
+    assert!(drops > 0, "{id}: loss model dropped nothing — the soak is vacuous");
+    assert!(total >= 5, "{id}: too few calls: {total}");
+    assert!(
+        ok > 0,
+        "{id}: retransmit recovered NO call under loss: ok={ok} timeouts={timeouts} drops={drops}\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        reporter.count(id, &ResultClass::RfcAuditFail),
+        0,
+        "{id}: a loss-model drop surfaced as an RFC-audit finding:\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        ok + timeouts,
+        total,
+        "{id}: a call failed with a non-timeout class under loss:\n{}",
+        reporter.render_prometheus()
+    );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "{id}: mux registry leak under loss");
+    h.advance(Duration::from_secs(40)).await;
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// D2 loss soak: the C5 early-UPDATE shape under loss (the reliable 183, PRACK,
+/// early UPDATE and final 200 all subject to drop + retransmit recovery).
+#[tokio::test(start_paused = true)]
+async fn loadgen_fake_net_prack_update_early_loss_soak() {
+    loss_soak(7090, "prack_update_early", 0xE4E2, 0).await;
+}
+
+/// D2 loss soak: a GENERATED matrix cell (forked establishment + re-INVITE)
+/// through the SUT under loss — proves the composed cross-product cell is
+/// loss-resilient, not just the hand-written shapes.
+#[tokio::test(start_paused = true)]
+async fn loadgen_fake_net_forked_reinvite_loss_soak() {
+    loss_soak(7100, "forked+reinvite", 0xF012, 0).await;
+}
+
+/// D2 loss soak: a GENERATED reliable+re-INVITE cell under loss.
+#[tokio::test(start_paused = true)]
+async fn loadgen_fake_net_reliable_reinvite_loss_soak() {
+    loss_soak(7110, "reliable+reinvite", 0x5EA1, 0).await;
+}
+
+/// D2 targeted drop (recovery) — the C5 EARLY UPDATE: discard each call's first
+/// outbound UPDATE before the wire; the auto-retransmit Timer-E resend heals it,
+/// the callee releases its held INVITE 200, and every call is OK with a clean
+/// audit (`permanent: false`).
+#[tokio::test(start_paused = true)]
+async fn loadgen_fake_net_recovers_dropped_early_update() {
+    let (_h, b2bua, core, transport) = setup_fake(7120).await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    let mut c = cfg(b2bua.addr, 2.0, 2, 4, 0x0DDE);
+    c.default_tuning = CallTuning {
+        drop_rate: 0.0,
+        retransmit: true,
+        drop_nth: Some(TargetedDrop {
+            method: "UPDATE",
+            nth: 1,
+            permanent: false,
+            dir: DropDir::Outbound,
+            leg: None,
+        }),
+    };
+    let driver = Driver::new(c, vec![mix("prack_update_early", 1.0)], reporter.clone(), transport);
+    driver.run().await;
+
+    let drops = core.stats().dropped_out.load(Relaxed);
+    let total = reporter.total_calls();
+    let ok = reporter.count("prack_update_early", &ResultClass::Ok);
+    assert!(total >= 2, "no calls ran");
+    assert!(drops >= total, "the targeted UPDATE drop never fired: drops={drops} calls={total}");
+    assert_eq!(
+        ok, total,
+        "a dropped early UPDATE was not recovered by retransmit:\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(reporter.count("prack_update_early", &ResultClass::RfcAuditFail), 0);
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// D2 targeted drop (recovery) — the per-fork PRACK (C1b): discard each call's
+/// first outbound PRACK; the UAS keeps retransmitting its reliable 183 until the
+/// PRACK's Timer-E resend lands, then answers. Every forked-reliable call is OK
+/// with a clean audit (`permanent: false`).
+#[tokio::test(start_paused = true)]
+async fn loadgen_fake_net_recovers_dropped_prack() {
+    let (_h, b2bua, core, transport) = setup_fake(7130).await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    let mut c = cfg(b2bua.addr, 2.0, 2, 4, 0x9ACA);
+    c.default_tuning = CallTuning {
+        drop_rate: 0.0,
+        retransmit: true,
+        drop_nth: Some(TargetedDrop {
+            method: "PRACK",
+            nth: 1,
+            permanent: false,
+            dir: DropDir::Outbound,
+            leg: None,
+        }),
+    };
+    let driver = Driver::new(c, vec![mix("forked_reliable", 1.0)], reporter.clone(), transport);
+    driver.run().await;
+
+    let drops = core.stats().dropped_out.load(Relaxed);
+    let total = reporter.total_calls();
+    let ok = reporter.count("forked_reliable", &ResultClass::Ok);
+    assert!(total >= 2, "no calls ran");
+    assert!(drops >= total, "the targeted PRACK drop never fired: drops={drops} calls={total}");
+    assert_eq!(
+        ok, total,
+        "a dropped PRACK was not recovered by retransmit:\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(reporter.count("forked_reliable", &ResultClass::RfcAuditFail), 0);
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
