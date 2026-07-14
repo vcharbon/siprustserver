@@ -355,6 +355,15 @@ pub struct ActorState<'c> {
     /// A pending §14.1 re-INVITE glare RETRY (C4/S5): set when our re-INVITE
     /// drew a 491, fires after the owner/non-owner dwell to re-originate it.
     reinvite_retry: Option<Instant>,
+    /// CSeq numbers of in-dialog UPDATEs we originated awaiting their 200 — an
+    /// OUTSTANDING OFFER (RFC 3311 §5.1). Both this and `sent_reinvites`
+    /// represent an outstanding offer, so an incoming offer-bearing UPDATE or
+    /// re-INVITE while EITHER is non-empty is 491'd (C4/S6 collision).
+    sent_updates: HashSet<u32>,
+    /// A pending UPDATE-collision RETRY (C4/S6): set when our UPDATE drew a 491,
+    /// fires after the §14.1-style back-off to re-originate it (UPDATE has no
+    /// ACK, so the 491 alone completes its transaction).
+    update_retry: Option<Instant>,
     /// Whether this caller has already stamped the first-OPTIONS-ping feed —
     /// so the looped `options_hold` pings stamp `keepalive_ack` exactly once.
     saw_options_200: bool,
@@ -419,6 +428,8 @@ impl<'c> ActorState<'c> {
             sent_reinvites: HashSet::new(),
             sent_reinvite_txns: HashMap::new(),
             reinvite_retry: None,
+            sent_updates: HashSet::new(),
+            update_retry: None,
             saw_options_200: false,
             expected_provisional: 180,
             pending_reject_ack: None,
@@ -484,6 +495,12 @@ pub async fn run_actor(mut st: ActorState<'_>) -> Result<(), StepError> {
             _ = wait_reinvite_retry(&st.reinvite_retry), if st.reinvite_retry.is_some() => {
                 st.reinvite_retry = None;
                 originate_reinvite(&mut st).await?;
+            }
+            // The S6 UPDATE-collision retry deadline (C4/S6): re-originate the
+            // UPDATE now the peer's colliding offer has cleared.
+            _ = wait_update_retry(&st.update_retry), if st.update_retry.is_some() => {
+                st.update_retry = None;
+                originate_update(&mut st).await?;
             }
         }
         // `ledger_closed` keeps a leg with an outstanding acknowledgement (its
@@ -753,13 +770,14 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
         // advances this leg's realign sub-flow; the matching ACK confirms it.
         "INVITE" => {
             st.ctx.anchor(&st.agent, "reInvite", uas.request());
-            // GLARE (C4/S5, RFC 3261 §14.1): if THIS leg has its OWN re-INVITE
-            // outstanding when the peer's arrives, reject the peer's with `491
-            // Request Pending` (never two overlapping offer/answer rounds on one
-            // dialog). Hop-ACK obligation armed like any non-2xx INVITE final;
-            // the peer closes it, backs off per §14.1, and retries. No realign
-            // sub-flow advances (the round did not complete).
-            if !st.sent_reinvites.is_empty() {
+            // GLARE (C4/S5+S6, RFC 3261 §14.1 / RFC 3311 §5.2): if THIS leg has
+            // its OWN offer outstanding when the peer's re-INVITE arrives — an
+            // un-answered re-INVITE (S5) OR an un-answered UPDATE (S6) — reject
+            // the peer's with `491 Request Pending` (never two overlapping
+            // offer/answer rounds on one dialog). Hop-ACK obligation armed like
+            // any non-2xx INVITE final; the peer closes it, backs off, and
+            // retries. No realign sub-flow advances (the round did not complete).
+            if !st.sent_reinvites.is_empty() || !st.sent_updates.is_empty() {
                 uas.respond(491, "Request Pending").try_send().await?;
                 arm_reject_final(st, &uas, 491);
                 st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
@@ -785,8 +803,18 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
             );
         }
         // An UPDATE realign (RFC 3311) — answered 200 + SDP; its own 200
-        // completes it (no ACK), so no obligation opens.
+        // completes it (no ACK), so no obligation opens. COLLISION (C4/S6, RFC
+        // 3311 §5.2): if THIS leg has its OWN offer outstanding (a re-INVITE or
+        // UPDATE we sent, un-answered), the incoming UPDATE's offer glares —
+        // reject it 491. Unlike the re-INVITE 491, an UPDATE's non-2xx final
+        // takes NO hop-ACK (UPDATE is a non-INVITE transaction), so no
+        // reject-final obligation is armed.
         "UPDATE" => {
+            if !st.sent_reinvites.is_empty() || !st.sent_updates.is_empty() {
+                uas.respond(491, "Request Pending").try_send().await?;
+                st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
+                return Ok(());
+            }
             respond_200_sdp(&mut uas, st.answer_body()).await?;
             st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
         }
@@ -1144,6 +1172,29 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
         }
     }
 
+    // A 491 to an UPDATE WE originated (C4/S6 collision): close its Update
+    // obligation and RETRY after the back-off. UPDATE has NO ACK, so the 491
+    // alone completes the transaction — nothing to hop-ACK. (The owner/non-owner
+    // dwell mirrors §14.1 for a deterministic, glare-breaking retry order.)
+    if resp.cseq.method == "UPDATE"
+        && resp.status == 491
+        && st.sent_updates.remove(&resp.cseq.seq)
+    {
+        st.obs.record(
+            Observation::ResponseObserved {
+                key: ObligationKey::new(st.role, ObligationKind::Update, resp.cseq.seq),
+            },
+            now,
+        );
+        let dwell = if matches!(st.disposition, Disposition::Caller) {
+            Duration::from_millis(2500)
+        } else {
+            Duration::from_millis(1000)
+        };
+        st.update_retry = Some(Instant::now() + dwell);
+        return Ok(());
+    }
+
     // Otherwise it is a final to one of our sent in-dialog requests (our BYE's
     // 200, our REFER's 202, our NOTIFY's 200, our PRACK's 200, …) — close the
     // obligation it opened and stamp the declared feed for the flow-advancing ones.
@@ -1189,12 +1240,20 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
                 // Advance the caller's `reneg` sub-flow so the teardown barrier
                 // holds before the BYE.
                 ObligationKind::Update => {
+                    st.sent_updates.remove(&resp.cseq.seq);
                     st.obs.record(
                         Observation::Subflow {
                             leg: st.role,
                             name: SUBFLOW_RENEG,
                             to: SubflowState::Confirmed,
                         },
+                        now,
+                    );
+                    // Count the completed renegotiation uniformly with a
+                    // re-INVITE (C6/S6), so a glare barrier can gate on
+                    // `reneg_count` regardless of the offer's method.
+                    st.obs.record(
+                        Observation::RenegCompleted { leg: st.role, cseq: resp.cseq.seq },
                         now,
                     );
                     st.feed.on_update_ok.stamp(st.ctx);
@@ -1298,24 +1357,7 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
         // the Update obligation; its 200 closes it (no ACK) and stamps
         // `on_update_ok` (see `react_response`).
         GoalStep::Update => {
-            let now = Instant::now();
-            let offer = st.media.offer_sdp().unwrap_or(crate::OFFER_SDP);
-            let (key, dialog_clone) = {
-                let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
-                    StepError::UnexpectedKind {
-                        who: st.role.to_string(),
-                        detail: "Update goal with no confirmed dialog".to_string(),
-                    }
-                })?;
-                let _upd = dialog.send_request(InDialogMethod::Update).with_sdp(offer).try_send().await?;
-                let cseq = dialog.local_cseq();
-                (ObligationKey::new(st.role, ObligationKind::Update, cseq), dialog.clone())
-            };
-            st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
-            st.obs.record(
-                Observation::RequestSent { key, detail: "update awaiting 200".to_string() },
-                now,
-            );
+            originate_update(st).await?;
         }
         // One in-dialog OPTIONS keepalive ping, its 200 read inline (the reactor
         // has nothing else to do for this leg during the ping).
@@ -1488,6 +1530,37 @@ async fn originate_reinvite(st: &mut ActorState<'_>) -> Result<(), StepError> {
 
 /// Park until the pending §14.1 glare retry is due (or forever if none).
 async fn wait_reinvite_retry(retry: &Option<Instant>) {
+    match retry {
+        Some(at) => tokio::time::sleep_until(*at).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Originate ONE in-dialog UPDATE (RFC 3311) carrying this leg's offer, opening
+/// the `Update` obligation and marking the offer OUTSTANDING (`sent_updates`).
+/// Shared by [`GoalStep::Update`] and the S6 collision RETRY arm.
+async fn originate_update(st: &mut ActorState<'_>) -> Result<(), StepError> {
+    let now = Instant::now();
+    let offer = st.media.offer_sdp().unwrap_or(crate::OFFER_SDP);
+    let (key, dialog_clone) = {
+        let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| StepError::UnexpectedKind {
+            who: st.role.to_string(),
+            detail: "Update with no confirmed dialog".to_string(),
+        })?;
+        let _upd =
+            dialog.send_request(InDialogMethod::Update).with_sdp(offer).try_send().await?;
+        let cseq = dialog.local_cseq();
+        (ObligationKey::new(st.role, ObligationKind::Update, cseq), dialog.clone())
+    };
+    st.sent_updates.insert(key.cseq);
+    st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
+    st.obs
+        .record(Observation::RequestSent { key, detail: "update awaiting 200".to_string() }, now);
+    Ok(())
+}
+
+/// Park until the pending S6 UPDATE-collision retry is due (or forever if none).
+async fn wait_update_retry(retry: &Option<Instant>) {
     match retry {
         Some(at) => tokio::time::sleep_until(*at).await,
         None => std::future::pending().await,
