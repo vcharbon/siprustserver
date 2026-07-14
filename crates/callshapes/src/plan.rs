@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use scenario_harness::actor::{
     phase, ActorCall, ActorScenario, ActorSpec, Barrier, BarrierPhase, CtxFeed, Disposition,
-    Expect, Feed, Goal, GoalStep, LegPhase, MediaState, SettleBarrier, StateInner, SubflowState,
-    SUBFLOW_REALIGN, SUBFLOW_REFER, SUBFLOW_RENEG,
+    Expect, ExpectBranch, Feed, Goal, GoalStep, LegPhase, MediaState, SettleBarrier, StateInner,
+    SubflowState, SUBFLOW_REALIGN, SUBFLOW_REFER, SUBFLOW_RENEG,
 };
 use scenario_harness::realcall::{CallEnv, ScenarioId};
 use scenario_harness::{StepError, ANSWER_SDP, OFFER_SDP};
@@ -62,6 +62,13 @@ pub enum Establishment {
     /// TERMINAL: the caller CANCELs once ringing (RFC 3261 §9.1) — no dialog,
     /// no teardown ([`Expect::AbandonedEarly`]).
     AbandonAfterRinging,
+    /// CANCEL×200 CROSSING (C2/E5): the caller CANCELs while the callee answers,
+    /// so the terminal outcome is EITHER confirmed (the 200 crossed the CANCEL,
+    /// §9.2 — the call tears down) OR cancelled (the CANCEL won — 487). A
+    /// branch-aware race oracle ([`Expect::EitherOf`]); the load lane accepts
+    /// whichever legal branch occurred. Terminal-style (no stages, no separate
+    /// teardown): the branch-conditional teardown rides the callee.
+    CancelAnswerCrossing,
 }
 
 /// An in-dialog script or a dialog-changing transfer — the chainable stages
@@ -228,7 +235,9 @@ impl ShapePlan {
     fn is_terminal(&self) -> bool {
         matches!(
             self.establish,
-            Establishment::RejectTerminal { .. } | Establishment::AbandonAfterRinging
+            Establishment::RejectTerminal { .. }
+                | Establishment::AbandonAfterRinging
+                | Establishment::CancelAnswerCrossing
         )
     }
 
@@ -529,6 +538,48 @@ impl ShapePlan {
                 b.phases.push(phase("ringing", ringing));
                 b.expect = Expect::AbandonedEarly;
             }
+            Establishment::CancelAnswerCrossing => {
+                // C2/E5: alice INVITEs then CANCELs (gated on ringing, after a
+                // dwell timed near bob's answer), so the CANCEL and the 200
+                // cross. The outcome is a branch-aware race oracle; the load
+                // lane accepts whichever legal branch occurred. The
+                // branch-conditional teardown rides bob (ByeIfConfirmed), so a
+                // 487 never trips alice's incidental-failure path — she keeps
+                // only [Invite, Cancel].
+                const E5_BRANCHES: &[ExpectBranch] =
+                    &[ExpectBranch::Answered, ExpectBranch::Cancelled { code: 487 }];
+                let plan = self.binder.invite_plan(env, RouteIntent::Direct { target: "bob" });
+                let ringing = |s: &StateInner| s.leg_at_least("alice", LegPhase::Early);
+                b.caller_goals.push(Goal::new(
+                    Barrier::None,
+                    GoalStep::Invite { callee: "bob", plan: Some(plan) },
+                ));
+                b.caller_goals.push(
+                    Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel)
+                        .after(env.ring_delay),
+                );
+                b.caller_feed.on_provisional = Feed::new(Some("time_to_180"), None);
+                b.callees.push(ActorSpec {
+                    role: "bob",
+                    agent: env.bob.clone(),
+                    disposition: Disposition::RingThenAnswer { ring: env.ring_delay },
+                    media: MediaState::answer(ANSWER_SDP),
+                    // The branch-conditional teardown: the guard holds once bob
+                    // has RESOLVED (Confirmed, or the monotone Terminated after
+                    // a 487); ByeIfConfirmed BYEs the winning dialog or no-ops.
+                    goals: vec![Goal::new(
+                        Barrier::pred("bob_resolved", |s| {
+                            s.leg_at_least("bob", LegPhase::Confirmed)
+                        }),
+                        GoalStep::ByeIfConfirmed,
+                    )],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: CtxFeed::default(),
+                });
+                b.phases.push(phase("ringing", ringing));
+                b.expect = Expect::EitherOf(E5_BRANCHES);
+            }
         }
         Ok(())
     }
@@ -703,6 +754,7 @@ mod tests {
             shapes::refer_charlie_reject(b(), "k"),
             shapes::invite_reject(b()),
             shapes::abandon_ringing(b()),
+            shapes::cancel_answer_crossing(b()),
         ] {
             plan.validate().unwrap_or_else(|e| panic!("{} invalid: {e:?}", plan.id));
         }

@@ -698,17 +698,27 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
             st.obs.record(Observation::LegTerminated { leg: st.role }, now);
             st.scope.mark_terminated();
         }
-        // A CANCEL for a still-ringing INVITE: 200 the CANCEL, 487 the retained
-        // INVITE txn (else the peer waits Timer C and reaping hangs), terminate.
+        // A CANCEL (RFC 3261 §9.2): always 200 the CANCEL. If the INVITE is
+        // still PENDING (a ring not yet answered, or a reliable 183 held for its
+        // PRACK), 487 the retained INVITE txn (else the peer waits Timer C and
+        // reaping hangs) and terminate the leg. But if we have ALREADY answered
+        // — the 200 crossed the CANCEL (C2/E5) — the CANCEL "has no effect on the
+        // call" (§9.2): 200 it and IGNORE it, leaving the confirmed dialog up so
+        // the caller ACKs the 200 and BYEs. NEVER terminate an already-confirmed
+        // leg on a late CANCEL.
         "CANCEL" => {
             uas.respond(200, "OK").try_send().await?;
-            if let Some(ta) = st.pending_answer.take() {
-                let mut inv = ta.uas;
+            let held = st
+                .pending_answer
+                .take()
+                .map(|ta| ta.uas)
+                .or_else(|| st.pending_prack_answer.take());
+            if let Some(mut inv) = held {
                 inv.respond(487, "Request Terminated").try_send().await?;
                 arm_reject_final(st, &inv, 487);
+                st.obs.record(Observation::LegTerminated { leg: st.role }, now);
+                st.scope.mark_terminated();
             }
-            st.obs.record(Observation::LegTerminated { leg: st.role }, now);
-            st.scope.mark_terminated();
         }
         // In-dialog non-offer requests: 200 and fold the CSeq into the dialog's
         // gap detector (all methods share the dialog CSeq space, §12.2.1.1).
@@ -1348,6 +1358,25 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
                 (ObligationKey::new(st.role, ObligationKind::Bye, cseq), dialog.clone())
             };
             st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
+            st.obs.record(Observation::RequestSent { key, detail: "hangup".to_string() }, now);
+        }
+        // Branch-conditional teardown (C2/E5): BYE the confirmed dialog if one
+        // exists (the 200-wins branch), else a NO-OP (the CANCEL-wins branch —
+        // the leg was 487'd, there is nothing to tear down). Same obligation
+        // bookkeeping as `Bye` when a dialog exists.
+        GoalStep::ByeIfConfirmed => {
+            if st.dialogs.confirmed.is_none() {
+                return Ok(());
+            }
+            let now = Instant::now();
+            discharge_on_teardown(st, now);
+            let (key, dialog_clone) = {
+                let dialog = st.dialogs.confirmed.as_mut().expect("checked Some above");
+                let _bye = dialog.bye().await;
+                let cseq = dialog.local_cseq();
+                (ObligationKey::new(st.role, ObligationKind::Bye, cseq), dialog.clone())
+            };
+            st.scope.set_confirmed(dialog_clone);
             st.obs.record(Observation::RequestSent { key, detail: "hangup".to_string() }, now);
         }
         GoalStep::ByeWith { headers } => {

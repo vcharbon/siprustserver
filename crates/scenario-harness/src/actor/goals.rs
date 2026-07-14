@@ -140,6 +140,14 @@ pub enum GoalStep {
     },
     /// Hang up — send a BYE on the confirmed dialog.
     Bye,
+    /// Hang up IF the dialog confirmed, else a NO-OP — the branch-conditional
+    /// teardown for a race whose two legal outcomes differ in whether a dialog
+    /// exists (C2/E5 CANCEL×200: the 200-wins branch has a confirmed dialog to
+    /// BYE; the CANCEL-wins branch has none). Gated on a barrier that holds once
+    /// the race has RESOLVED (`leg_at_least(<leg>, Confirmed)`, which a
+    /// monotone Terminated also satisfies), so it fires exactly once in EITHER
+    /// branch and every shape still terminates.
+    ByeIfConfirmed,
     /// Hang up with EXTRA request headers on the BYE — the deliberate-deviation
     /// path (e.g. a `Contact` on the BYE, which RFC 3261 §15.1 forbids: the
     /// `bye_with_contact` load-audit-waiver case). Same obligation bookkeeping as
