@@ -1119,35 +1119,53 @@ async fn loadgen_post_call_cleanup_no_leak() {
 // Simulated packet loss + auto-retransmit (robustness knobs)
 // ---------------------------------------------------------------------------
 
-/// Baseline: with a lossy fabric and NO auto-retransmit, dropped datagrams break
-/// calls — establishing that the loss model actually bites (so the recovery test
-/// below is not vacuous) AND that a lost call still tears down with no leak.
+/// Baseline: a loss the SENDER never re-emits is unrecoverable by anyone —
+/// the caller's outbound INVITE is discarded BEFORE the wire (permanent
+/// targeted drop, no auto-retransmit), so no SUT behavior of any quality can
+/// save the call: the SUT never even sees it. This is the vacuity guard for
+/// the recovery twin below, made DETERMINISTIC (every call fails, always):
+/// it proves the loss model bites and that an unrecovered loss degrades to a
+/// bounded `timeout` — never a silent OK, never a mux leak. Deliberately NOT
+/// probabilistic and NOT an assertion about the SUT: as the SUT/harness grow
+/// more RFC-faithful re-emission, inbound-direction drops legitimately
+/// recover, and a rate-based "some calls must fail" would erode into a flake
+/// (it did, under full-suite contention).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_packet_drop_without_retransmit_breaks_calls() {
     let (_h, b2bua, core, transport) = setup(6480, Correlation::header("X-Loadgen-Id"), 3).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
-    let mut c = cfg(b2bua.addr, 10.0, 1, 8, 0xD40F);
-    // ~12%/datagram loss, no recovery: over a ~10-message call P(all delivered)
-    // ≈ 0.9^10 ≈ 0.35, so the majority of calls must fail.
-    c.default_tuning = CallTuning { drop_rate: 0.12, retransmit: false, ..CallTuning::default() };
+    let mut c = cfg(b2bua.addr, 4.0, 1, 4, 0xD40F);
+    c.default_tuning = CallTuning {
+        drop_rate: 0.0,
+        retransmit: false,
+        drop_nth: Some(TargetedDrop {
+            method: "INVITE",
+            nth: 1,
+            permanent: true,
+            dir: DropDir::Outbound,
+            leg: None,
+        }),
+    };
     let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
 
-    let drops = core.stats().dropped_out.load(std::sync::atomic::Ordering::Relaxed)
-        + core.stats().dropped_in.load(std::sync::atomic::Ordering::Relaxed);
-    assert!(drops > 0, "the loss model dropped nothing — the knob is not wired");
-    assert!(
-        reporter.count("basic_call", &ResultClass::Timeout) > 0,
-        "no call failed despite {drops} dropped datagrams:\n{}",
+    let drops = core.stats().dropped_out.load(std::sync::atomic::Ordering::Relaxed);
+    let total = reporter.total_calls();
+    assert!(total >= 1, "no calls ran");
+    assert!(drops >= total, "the targeted INVITE drop never fired: drops={drops} calls={total}");
+    // EVERY call fails, and every failure is the bounded timeout class —
+    // deterministic, no dominance ratio.
+    assert_eq!(
+        reporter.count("basic_call", &ResultClass::Timeout),
+        total,
+        "a call with its INVITE dropped at the sender did not time out:\n{}",
         reporter.render_prometheus()
     );
 
     // The loadgen's OWN mux state is always reclaimed once the call task ends,
-    // even for a failed lossy call. (SUT-side reap is NOT asserted here: with no
-    // retransmit the teardown BYE/CANCEL can itself be dropped, so the b2bua only
-    // reaps on its own transaction timers, well past this settle window — that is
-    // the very fragility the retransmit test proves is fixed.)
+    // even for a failed lossy call. (SUT-side reap is NOT asserted: the SUT
+    // never saw these calls at all.)
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak under loss");
 }
