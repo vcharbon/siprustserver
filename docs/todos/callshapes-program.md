@@ -223,6 +223,28 @@ the pre-existing real-clock smoke contention flake below):
   `…::to_tag_extracts_the_to_parameter`. This is the transport half of C1 and is
   independently correct — required before the caller/callee forking machinery.
 
+- **C1(a) — forking-UAS callee `Disposition::ForkingRing`** — commit `b9549d2`.
+- **C1(b) — fork-aware caller (multi-early-dialog set keyed by To-tag)** — commit
+  `ee7bc02`.
+- **C1(c) — rfc_audit: replicate the establishing INVITE into every fork's
+  slice** — commit `b66a6ca`. Landed differently from the deferred sketch below:
+  a simple "clone the pending `ordered` into each fork" over-includes in two
+  cases the sketch missed, so replication copies only the ESTABLISHING INVITE
+  transaction via `establishing_tail()`, keyed on the highest-CSeq empty-To-tag
+  INVITE (NOT the last INVITE *event*):
+  1. an AUTH RETRY accumulates INVITE CSeq1 (401'd) + INVITE CSeq2 in ONE
+     pending bucket (same From-tag, both empty To-tag) — cloning CSeq1 into the
+     confirmed dialog made the establishing retry look like an in-dialog
+     re-INVITE → false `rfc3261` §13.2.1/§20.37 SHOULD findings (regressed
+     `auth_retry_*`/`actor_caller_retries_through_a_401_challenge`).
+  2. a RELAY bind both RECEIVES and SENDS the one establishing INVITE (same
+     CSeq) — keying on the last INVITE *event* dropped the received copy, so the
+     SDP/route relay-skip logic no longer saw the slot as a relay → false
+     `SdpOriginContinuity` finding (regressed `sdp_origin_skips_relay_slots`).
+  CSeq-keying fixes both: a true fork has ONE INVITE CSeq so its whole bucket is
+  kept. `OrderedEvent`/`Bucket` gained `Clone`. Fork fixtures in
+  `dialog_model.rs` + `rfc3264_cross.rs`.
+
 ### Deferred — design notes for the C-completion / phase-D agent
 
 The following C sub-capabilities are DESIGNED here but NOT yet landed. They
@@ -230,7 +252,27 @@ share a theme: each needs reactor-state surgery whose blast radius touches the
 ~77-rule RFC audit that gates every test, so land each as its own green commit
 with the audit watched closely.
 
-- **C1(a,b,e) — TRUE FORKING caller+callee (E3).** Seams confirmed in the
+- **C1(e) — TRUE FORKING pipeline wiring (E3)** — commit `e62a2f9`. C1 COMPLETE.
+  `Establishment::Forked{tags, winner, reliable, loser_late_200}` compiles bob
+  to `Disposition::ForkingRing`; shapes `forked`/`forked_reliable` registered
+  and proven end-to-end through the transparent-CORE-relay `B2buaSut`
+  (`route_all_with_refer` leaves `relay_first_18x_to_180 = None` — verified) in
+  `loadgen/tests/fake_net.rs` (`loadgen_fake_net_forked_plain`,
+  `…_forked_reliable`, `…_forked_loss_soak`). The three distinct-tag 18x relay
+  through as three a-facing early dialogs and the caller confirms on the
+  winner's 2xx. `validate()` enforces ≥2 tags + winner/loser membership.
+  **KEY FINDING — `forked_loser_late_200` is PEER-TO-PEER ONLY.** A dialog-
+  terminating B2BUA forwards only the FIRST b-leg 2xx to the caller and absorbs
+  the loser's late 200, so the caller's ACK+BYE-the-loser path is UNREACHABLE
+  through a SUT (the losing fork dangles on the callee → settle NOK). It is a
+  valid composition (kept + documented, NOT in the loadgen registry); its
+  behavior is pinned SUT-less by
+  `actor::tests::{forking_ring_loser_late_200_is_acked_and_byed,
+  actor_caller_acks_and_byes_losing_fork_late_200}` (C1a/C1b). Phase D: any
+  loser-late-200 matrix cell must be a peer-to-peer harness shape, never a
+  through-SUT load cell.
+
+  (Historical seam notes for the now-landed a/b/c below; kept for reference.)
   pre-phase-C findings above (trust but re-verify lines). Concretely:
   - Callee: add `Disposition::ForkingRing{tags:&[&str], winner:&str,
     loser_late_200:bool}` (actor.rs ~68) + an `apply_disposition` arm that emits
