@@ -561,6 +561,160 @@ mod tests {
         h.finish().await;
     }
 
+    /// A two-actor plan pairing the ACTOR caller with a forking callee — the
+    /// C1(b) rig: alice is the reactive actor (the fork dance on the caller
+    /// side is the subject), bob the C1(a) `ForkingRing` UAS.
+    fn forked_pair_plan(
+        alice: &crate::Agent,
+        bob: &crate::Agent,
+        disposition: Disposition,
+        plan: Option<crate::realcall::InvitePlan>,
+    ) -> CallPlan {
+        CallPlan {
+            actors: vec![
+                ActorSpec {
+                    role: "alice",
+                    agent: alice.clone(),
+                    disposition: Disposition::Caller,
+                    media: MediaState::offer(OFFER_SDP),
+                    goals: vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan }),
+                        Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Bye),
+                    ],
+                    invite_targets: vec![("bob", bob.clone())],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+                ActorSpec {
+                    role: "bob",
+                    agent: bob.clone(),
+                    disposition,
+                    media: MediaState::answer(ANSWER_SDP),
+                    goals: vec![],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+            ],
+            plan: vec![phase("established", |s| {
+                s.leg_at_least("alice", LegPhase::Confirmed)
+                    && s.leg_at_least("bob", LegPhase::Confirmed)
+            })],
+            settle: SettleBarrier::default_ceiling(),
+        }
+    }
+
+    /// C1(b): the ACTOR caller absorbs a forked establishment — two distinct-tag
+    /// 180s (two early dialogs, §12.1.2), the 2xx's tag picks the winner
+    /// (§13.2.2.4), the confirmed dialog rides it, and the teardown BYE
+    /// addresses the winning fork. Verdict Ok + the RFC hard gate.
+    #[tokio::test(start_paused = true)]
+    async fn actor_caller_confirms_forked_winner() {
+        let h = Harness::new("actor-caller-forked-winner").describe(
+            "C1(b): the actor caller sees 180(f1)+180(f2) then 200(f2); the 2xx \
+             tag is the winner — the call confirms, tears down and settles OK",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let call = forked_pair_plan(
+            &alice,
+            &bob,
+            Disposition::ForkingRing {
+                tags: &["f1", "f2"],
+                winner: "f2",
+                ring: Duration::from_millis(200),
+                reliable: false,
+                loser_late_200: None,
+            },
+            None,
+        );
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "the forked call must settle OK, got {verdict:?}");
+        h.finish().await;
+    }
+
+    /// C1(b) loser-late-200: the actor caller confirms the winner (f2), then the
+    /// LOSING fork's late 200 (f1) arrives — the reactor ACKs it on the loser's
+    /// OWN fork dialog and BYEs that fork (§13.2.2.4), the fork BYE's 200
+    /// (recognised by its tag mismatch) closes the `ForkBye` obligation WITHOUT
+    /// terminating alice's leg, and the winning dialog tears down normally.
+    /// The fork-aware `unackedInvite2xxByed` audit rule gates the wire at
+    /// `finish()` — an unACKed or unBYEd loser 200 would fail there.
+    #[tokio::test(start_paused = true)]
+    async fn actor_caller_acks_and_byes_losing_fork_late_200() {
+        let h = Harness::new("actor-caller-loser-late-200").describe(
+            "C1(b): a losing fork's late 200 (f1) after the winner's (f2) is \
+             ACKed on its own fork dialog then BYE'd; the winning dialog and \
+             the verdict are unaffected",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let call = forked_pair_plan(
+            &alice,
+            &bob,
+            Disposition::ForkingRing {
+                tags: &["f1", "f2"],
+                winner: "f2",
+                ring: Duration::from_millis(200),
+                reliable: false,
+                loser_late_200: Some("f1"),
+            },
+            None,
+        );
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(
+            verdict.is_ok(),
+            "the loser-late-200 call must settle OK (fork ACK+BYE + ForkBye close), got {verdict:?}",
+        );
+        h.finish().await;
+    }
+
+    /// C1(b) reliable forks: each fork's reliable 183 (distinct tag, RSeq:1) is
+    /// PRACKed on its OWN early dialog — the `(to_tag, rseq)` dedup re-key: an
+    /// RSeq-only dedup would swallow the second fork's PRACK (both forks start
+    /// at RSeq 1) and the callee (which answers only on the WINNER's PRACK)
+    /// would never answer; the `prackOnReliable1xx` audit rule would also flag
+    /// the unPRACKed fork at `finish()`.
+    #[tokio::test(start_paused = true)]
+    async fn actor_caller_pracks_each_reliable_fork() {
+        let h = Harness::new("actor-caller-forked-prack").describe(
+            "C1(b): reliable 183(f1)+183(f2), both RSeq:1 — the actor caller \
+             PRACKs EACH fork on its own early dialog ((tag,rseq) dedup); the \
+             winner fork's PRACK releases the 200 and the call completes",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        // The caller must advertise 100rel for the UAS's reliable 183s to be
+        // legal (RFC 3262 §3) — a hand-built direct-to-bob plan carries it.
+        let plan = crate::realcall::InvitePlan {
+            via: bob.addr(),
+            from: None,
+            to: None,
+            ruri: None,
+            headers: vec![("Supported".to_string(), "100rel".to_string())],
+            rewrite: Default::default(),
+        };
+
+        let call = forked_pair_plan(
+            &alice,
+            &bob,
+            Disposition::ForkingRing {
+                tags: &["f1", "f2"],
+                winner: "f2",
+                ring: Duration::ZERO,
+                reliable: true,
+                loser_late_200: None,
+            },
+            Some(plan),
+        );
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "the reliable forked call must settle OK, got {verdict:?}");
+        h.finish().await;
+    }
+
     /// The generic in-dialog origination primitive (`GoalStep::InDialog`): alice
     /// establishes, sends an INFO carrying a typed body + an extra header on the
     /// confirmed dialog, and hangs up ONLY once the observed state shows bob

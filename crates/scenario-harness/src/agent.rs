@@ -2284,6 +2284,41 @@ impl ClientInvite {
         &self.original_invite.uri
     }
 
+    /// The establishing INVITE's CSeq number (the RETRIED INVITE's after a
+    /// §22.2 auth resend re-pointed the transaction). A fork's 2xx echoes it —
+    /// the fork-aware caller's discriminator for a LOSING fork's late 200
+    /// (same CSeq as the INVITE, different To-tag than the winner's).
+    pub fn invite_cseq(&self) -> u32 {
+        self.original_invite.cseq.seq
+    }
+
+    /// The confirmed [`Dialog`] a FORK's 2xx establishes — keyed by the
+    /// response's OWN To-tag rather than the shared dialog state (which tracks
+    /// the §13.2.2.4 winner). The losing-fork path: a late 2xx from a fork this
+    /// INVITE created must be ACKed and BYE'd on ITS OWN dialog — its tag, its
+    /// Contact, its route set (RFC 3261 §12.1.2). The CSeq continues from the
+    /// fork's own PRACK sequence when it had one (`fork_cseq`), mirroring the
+    /// winner promotion in [`ack`](Self::ack), so the fork's BYE stays
+    /// contiguous within its dialog (§12.2.1.1).
+    pub fn fork_dialog(&self, resp: &SipResponse) -> Dialog {
+        let mut dialog = self.dialog.clone();
+        if let Some(tag) = &resp.to.tag {
+            dialog.remote_tag = tag.clone();
+        }
+        if let Some(target) = first_contact_uri(resp) {
+            dialog.remote_target = target;
+        }
+        let rr = get_headers(&resp.headers, "record-route");
+        if !rr.is_empty() {
+            dialog.route_set = rr.iter().rev().map(|s| s.to_string()).collect();
+        }
+        if let Some(&fork) = self.fork_cseq.get(&dialog.remote_tag) {
+            dialog.local_cseq = dialog.local_cseq.max(fork);
+        }
+        let dst = next_hop(&dialog, self.fallback_addr);
+        Dialog { agent: self.agent.clone(), fallback_addr: dst, dialog }
+    }
+
     /// **RFC 3261 §22.2 authentication retry** — the ONE auth adapter point wired
     /// into the INVITE choreography (see [`crate::realcall::auth`]). Given the
     /// `401`/`407` `challenge` this INVITE just drew and a configured `responder`:
@@ -2425,6 +2460,14 @@ impl ClientInvite {
     /// sent — the reactive actor keys its "PRACK awaiting 200" ledger obligation
     /// on the returned request's CSeq (the 200 carries the same number). Same
     /// RAck derivation; the linear lane uses the request-less [`try_prack`].
+    ///
+    /// FORK-addressed (C1/E3): the PRACK belongs to the early dialog the
+    /// reliable 1xx CREATED (RFC 3262 §5), so it is addressed under the
+    /// response's own To-tag and rides that fork's independent CSeq sequence
+    /// (`fork_cseq`, seeded from the INVITE's CSeq). For the unforked reliable
+    /// answer this is byte-identical to the shared-counter path — the first
+    /// PRACK is `INVITE_CSeq + 1` either way, and [`ack`](Self::ack) promotes
+    /// the winning fork's sequence onto the confirmed dialog.
     pub async fn try_prack_with_request(
         &mut self,
         reliable_1xx: &SipResponse,
@@ -2436,7 +2479,12 @@ impl ClientInvite {
                 reliable_1xx.status, reliable_1xx.reason
             ),
         })?;
-        self.send_request(InDialogMethod::Prack).with_rack(&rack).try_send_with_request().await
+        let fork_tag = reliable_1xx.to.tag.clone();
+        let mut req = self.send_request(InDialogMethod::Prack).with_rack(&rack);
+        if let Some(tag) = &fork_tag {
+            req = req.with_to_tag(tag);
+        }
+        req.try_send_with_request().await
     }
 
     /// Generate and send the ACK for the 2xx (CSeq reused from the INVITE per
@@ -2537,6 +2585,14 @@ impl Dialog {
     /// phantom fork dialog.
     pub fn local_tag(&self) -> &str {
         &self.dialog.local_tag
+    }
+
+    /// The dialog's REMOTE tag (the peer's To-tag as a UAC / From-tag as a
+    /// UAS). Lets a fork-aware caller compare a late 2xx's To-tag against the
+    /// CONFIRMED (winner) dialog's — a mismatch identifies a losing fork's
+    /// late 200 (RFC 3261 §13.2.2.4).
+    pub fn remote_tag(&self) -> &str {
+        &self.dialog.remote_tag
     }
 
     /// Send a BYE (CSeq auto-incremented). Returns its client transaction.

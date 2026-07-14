@@ -266,6 +266,11 @@ struct DialogTable {
     pending_invite: Option<ClientInvite>,
     /// Our confirmed dialog (caller after ACK, or UAS after answering).
     confirmed: Option<Dialog>,
+    /// The caller's establishing INVITE, RETAINED after confirmation (C1/E3):
+    /// a LOSING fork's late 2xx (§13.2.2.4) arrives after the winner's and must
+    /// be ACK+BYE'd on ITS OWN fork dialog — derived from this transaction
+    /// ([`ClientInvite::fork_dialog`]), never from the confirmed (winner) one.
+    won_invite: Option<ClientInvite>,
 }
 
 /// The declarative spec for one endpoint — what a scenario DECLARES; the runner
@@ -319,9 +324,11 @@ pub struct ActorState<'c> {
     /// (MUST-014). `Some` for a [`Disposition::ReliableAnswer`] leg between its
     /// 183 and the PRACK.
     pending_prack_answer: Option<ServerTxn>,
-    /// RSeq values of reliable provisionals this caller has already PRACKed —
-    /// so a retransmitted 183 is not double-PRACKed.
-    pracked_rseqs: HashSet<u32>,
+    /// `(fork To-tag, RSeq)` pairs of reliable provisionals this caller has
+    /// already PRACKed — so a retransmitted 183 is not double-PRACKed, while
+    /// a FORKED reliable 183 (distinct tag, same RSeq space per §12.1.2 — each
+    /// fork typically starts at RSeq 1) still gets its OWN PRACK (C1/E3).
+    pracked_rseqs: HashSet<(String, u32)>,
     /// A held forking-UAS answer plan (C1/E3): set alongside
     /// `pending_prack_answer` by a RELIABLE [`Disposition::ForkingRing`], so the
     /// PRACK arm answers the INVITE only on the WINNER fork's PRACK (a losing
@@ -881,11 +888,15 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
                         }
                     }
                     // A RELIABLE provisional (RFC 3262: carries `RSeq`) must be
-                    // PRACKed — once per RSeq (a retransmitted 183 is not
-                    // double-PRACKed). The PRACK opens a "awaiting 200" ledger
-                    // obligation the settle barrier holds on.
+                    // PRACKed — once per `(fork tag, RSeq)` (a retransmitted 183
+                    // is not double-PRACKed, but a FORKED 183 with a distinct
+                    // To-tag gets its own PRACK on its own early dialog, C1/E3;
+                    // `try_prack_with_request` addresses the response's fork).
+                    // The PRACK opens a "awaiting 200" ledger obligation the
+                    // settle barrier holds on.
                     if let Some(rseq) = reliable_rseq(&resp) {
-                        if st.pracked_rseqs.insert(rseq) {
+                        let fork = resp.to.tag.clone().unwrap_or_default();
+                        if st.pracked_rseqs.insert((fork, rseq)) {
                             let (_txn, req) = inv.try_prack_with_request(&resp).await?;
                             st.obs.record(
                                 Observation::RequestSent {
@@ -919,6 +930,9 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
                 st.dialogs.confirmed = Some(dialog.clone());
                 st.scope.set_confirmed(dialog);
                 st.obs.record(Observation::LegConfirmed { leg: st.role }, now);
+                // RETAIN the establishing INVITE (C1/E3): a LOSING fork's late
+                // 2xx (§13.2.2.4) is ACK+BYE'd on a fork dialog derived from it.
+                st.dialogs.won_invite = Some(inv);
             }
             InviteResponseFate::Failed { status } => {
                 // RFC 3261 §22.2 authenticated retry: a `401`/`407` to this
@@ -976,6 +990,49 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
         }
         return Ok(());
         }
+        // A LATE 2xx from a LOSING fork (C1/E3, RFC 3261 §13.2.2.4): it echoes
+        // the ESTABLISHING INVITE's CSeq but carries a DIFFERENT To-tag than the
+        // confirmed (winner) dialog — a separate dialog this caller never chose.
+        // ACK it on ITS OWN fork dialog (the ACK carries the fork's tag) then
+        // terminate that fork with an immediate BYE. The BYE opens a `ForkBye`
+        // obligation (closed by its tag-mismatched 200 below — NEVER terminating
+        // this leg; the winning dialog lives on). Checked BEFORE the re-INVITE
+        // 2xx path: a re-INVITE's 2xx always carries the confirmed tag.
+        if (200..300).contains(&resp.status) {
+            let is_losing_fork = st
+                .dialogs
+                .won_invite
+                .as_ref()
+                .is_some_and(|inv| inv.invite_cseq() == resp.cseq.seq)
+                && st
+                    .dialogs
+                    .confirmed
+                    .as_ref()
+                    .zip(resp.to.tag.as_ref())
+                    .is_some_and(|(d, t)| d.remote_tag() != t.as_str());
+            if is_losing_fork {
+                if let Some(inv) = st.dialogs.won_invite.as_ref() {
+                    let mut fork = inv.fork_dialog(&resp);
+                    // Our INVITE carried the offer, so the fork's 200 carried
+                    // its answer — the ACK is bodyless (§13.2.2.4).
+                    fork.ack_for(resp.cseq.seq, None).await;
+                    let _bye =
+                        fork.send_request(InDialogMethod::Bye).try_send().await?;
+                    st.obs.record(
+                        Observation::RequestSent {
+                            key: ObligationKey::new(
+                                st.role,
+                                ObligationKind::ForkBye,
+                                fork.local_cseq(),
+                            ),
+                            detail: "losing-fork hangup awaiting 200".to_string(),
+                        },
+                        now,
+                    );
+                }
+                return Ok(());
+            }
+        }
         // A 2xx to an in-dialog INVITE with NO pending initial INVITE: this
         // caller's own delayed-offer re-INVITE (the `reinvite` body). ACK it WITH
         // the answer SDP (RFC 3264 §4 delayed offer) — IDEMPOTENTLY, re-derived
@@ -1013,6 +1070,19 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
     // 200, our REFER's 202, our NOTIFY's 200, our PRACK's 200, …) — close the
     // obligation it opened and stamp the declared feed for the flow-advancing ones.
     if let Some(kind) = ObligationKind::from_cseq_method(resp.cseq.method.as_str()) {
+        // The 200 to a LOSING-FORK BYE (C1/E3): same CSeq method (and possibly
+        // the same CSeq number — fork spaces are independent, §12.2.1.1) as the
+        // main BYE, but its To-tag echoes the LOSING fork's, not the confirmed
+        // (winner) dialog's. It closes the `ForkBye` obligation WITHOUT
+        // terminating this leg — the winning dialog lives on.
+        let fork_teardown = kind == ObligationKind::Bye
+            && st
+                .dialogs
+                .confirmed
+                .as_ref()
+                .zip(resp.to.tag.as_ref())
+                .is_some_and(|(d, t)| d.remote_tag() != t.as_str());
+        let kind = if fork_teardown { ObligationKind::ForkBye } else { kind };
         let key = ObligationKey::new(st.role, kind, resp.cseq.seq);
         st.obs.record(Observation::ResponseObserved { key }, now);
         if (200..300).contains(&resp.status) {
