@@ -3,11 +3,15 @@
 //! # Shape
 //!
 //! A [`MuxCore`] owns a small, fixed set of **named endpoints**, each = exactly
-//! one real UDP socket with a dispatcher recv-loop (no sharded pool). Each socket
-//! multiplexes *many* concurrent dialogs, routing inbound datagrams to the right
-//! call's inbox by dialog identity. So O(endpoints) sockets regardless of CPS —
-//! no fd / ephemeral-port exhaustion, and the SUT routes the callee leg to a
-//! **static** address (its own config), never a dynamic per-call one.
+//! one datagram endpoint on the underlying fabric with a dispatcher recv-loop
+//! (no sharded pool). The fabric is a [`SignalingNetwork`] seam: real UDP by
+//! default ([`MuxCore::bind`]), or any other impl — notably the simulated
+//! network under the paused-clock test lane — via [`MuxCore::bind_on`]. Each
+//! endpoint multiplexes *many* concurrent dialogs, routing inbound datagrams to
+//! the right call's inbox by dialog identity. So O(endpoints) sockets
+//! regardless of CPS — no fd / ephemeral-port exhaustion, and the SUT routes
+//! the callee leg to a **static** address (its own config), never a dynamic
+//! per-call one.
 //!
 //! # Correlation (pluggable strategy, per run)
 //!
@@ -54,7 +58,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use regex::Regex;
@@ -62,11 +66,14 @@ use scenario_harness::realcall::CorrelationStamp;
 use sip_clock::Clock;
 use sip_net::queue::PacketQueue;
 use sip_net::{
-    BindError, BindErrorReason, BindUdpOpts, ReEmitKind, SendError, SendTap, SignalingNetwork,
-    UdpEndpoint, UdpEndpointCounters, UdpPacket, UndeliveredPacket,
+    BindError, BindErrorReason, BindUdpOpts, RealSignalingNetwork, ReEmitKind, SendError, SendTap,
+    SignalingNetwork, UdpEndpoint, UdpEndpointCounters, UdpPacket, UndeliveredPacket,
 };
-use tokio::net::UdpSocket;
+// Monotonic time rides `tokio::time` so the pending-slot deadlines and the reap
+// sweep move with the (possibly paused) runtime clock — under `start_paused` a
+// `std::time::Instant` would barely advance and the reaper would go inert.
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 /// Whether a defined endpoint originates calls (UAC) or receives them (UAS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -476,11 +483,11 @@ struct SocketRegistry {
     by_token: HashMap<String, CallSlot>,
 }
 
-/// One defined endpoint = one real socket + dispatcher + per-socket registry.
+/// One defined endpoint = one fabric endpoint + dispatcher + per-socket registry.
 struct MuxSocket {
     addr: SocketAddr,
     role: Role,
-    socket: Arc<UdpSocket>,
+    endpoint: Arc<dyn UdpEndpoint>,
     reg: Mutex<SocketRegistry>,
     correlation: Correlation,
     queue_max: usize,
@@ -506,10 +513,43 @@ pub struct EndpointSpec {
     pub role: Role,
 }
 
+/// Bound on each defined endpoint's socket-level inbox (the pre-demux queue the
+/// fabric's recv pump feeds, drained by the dispatcher into per-call inboxes).
+/// One endpoint carries EVERY concurrent call's traffic, so it is much deeper
+/// than the per-call `queue_max`.
+const DISPATCH_QUEUE_MAX: usize = 4096;
+
 impl MuxCore {
-    /// Open every endpoint's socket + dispatcher and start the reaper. `queue_max`
-    /// bounds each call's inbox; `orphan_sample_cap` bounds stored orphan samples.
+    /// Open every endpoint on the REAL network + dispatcher and start the
+    /// reaper — the production/bin path. `queue_max` bounds each call's inbox;
+    /// `orphan_sample_cap` bounds stored orphan samples.
     pub async fn bind(
+        specs: Vec<EndpointSpec>,
+        correlation: Correlation,
+        queue_max: usize,
+        orphan_sample_cap: usize,
+        pending_ttl: Duration,
+        clock: Clock,
+    ) -> std::io::Result<Arc<Self>> {
+        Self::bind_on(
+            &RealSignalingNetwork::new(),
+            specs,
+            correlation,
+            queue_max,
+            orphan_sample_cap,
+            pending_ttl,
+            clock,
+        )
+        .await
+    }
+
+    /// [`bind`](Self::bind) over an explicit fabric — the transport seam. Pass
+    /// the `SimulatedSignalingNetwork` (shared with the in-process SUT's
+    /// harness) to run the REAL driver + mux + demux + loss-model stack under a
+    /// paused clock with no real sockets; the loss/retransmit knobs sit ABOVE
+    /// this seam and behave identically on either fabric.
+    pub async fn bind_on(
+        fabric: &dyn SignalingNetwork,
         specs: Vec<EndpointSpec>,
         correlation: Correlation,
         queue_max: usize,
@@ -520,15 +560,22 @@ impl MuxCore {
         let stats = Arc::new(MuxStats::new(orphan_sample_cap));
         let mut endpoints = HashMap::new();
         for spec in specs {
-            let socket = Arc::new(UdpSocket::bind(spec.addr).await?);
-            let local = socket.local_addr()?;
+            let endpoint: Arc<dyn UdpEndpoint> = Arc::from(
+                fabric
+                    .bind_udp(BindUdpOpts::new(spec.addr, DISPATCH_QUEUE_MAX))
+                    .await
+                    .map_err(|e| {
+                        std::io::Error::other(format!("mux bind {}: {}", e.addr, e.message))
+                    })?,
+            );
+            let local = endpoint.local_addr();
             let clock = clock.clone();
             let mux = Arc::new_cyclic(|weak: &std::sync::Weak<MuxSocket>| {
-                let dispatcher = tokio::spawn(dispatch_loop(weak.clone(), socket.clone()));
+                let dispatcher = tokio::spawn(dispatch_loop(weak.clone(), endpoint.clone()));
                 MuxSocket {
                     addr: local,
                     role: spec.role,
-                    socket: socket.clone(),
+                    endpoint: endpoint.clone(),
                     reg: Mutex::new(SocketRegistry::default()),
                     correlation: correlation.clone(),
                     queue_max,
@@ -774,7 +821,7 @@ impl SignalingNetwork for MuxNetwork {
         let drop = Arc::new(DropModel::new(self.drop_rate, self.next_drop_seed(), drop_nth));
         let txns = self
             .retransmit
-            .then(|| Arc::new(CallTxns::new(mux.socket.clone(), drop.clone(), mux.stats.clone())));
+            .then(|| Arc::new(CallTxns::new(mux.endpoint.clone(), drop.clone(), mux.stats.clone())));
 
         if let Some(label) = label {
             let token = self.token.clone();
@@ -889,12 +936,7 @@ impl UdpEndpoint for MuxEndpoint {
             self.mux.stats.dropped_out.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
-        self.mux
-            .socket
-            .send_to(buf, dst)
-            .await
-            .map(|_| ())
-            .map_err(|e| SendError { message: e.to_string() })
+        self.mux.endpoint.send_to(buf, dst).await
     }
 
     async fn recv(&self) -> Option<UdpPacket> {
@@ -967,12 +1009,12 @@ impl Drop for MuxEndpoint {
 }
 
 /// One socket's dispatcher: parse the routing key, deliver or count-and-drop.
-async fn dispatch_loop(mux: std::sync::Weak<MuxSocket>, socket: Arc<UdpSocket>) {
-    let mut buf = vec![0u8; 65_536];
-    while let Ok((n, src)) = socket.recv_from(&mut buf).await {
+/// Exits when the endpoint's inbox closes (fabric endpoint dropped) or the
+/// owning [`MuxSocket`] is gone.
+async fn dispatch_loop(mux: std::sync::Weak<MuxSocket>, endpoint: Arc<dyn UdpEndpoint>) {
+    while let Some(pkt) = endpoint.recv().await {
         let Some(mux) = mux.upgrade() else { return };
-        let raw = &buf[..n];
-        route(&mux, raw, src);
+        route(&mux, &pkt.raw, pkt.src);
     }
 }
 
@@ -1356,7 +1398,7 @@ impl ResendCtl {
 /// retransmit can itself be dropped (the point of the robustness test).
 fn spawn_resender(
     ctl: Arc<ResendCtl>,
-    socket: Arc<UdpSocket>,
+    endpoint: Arc<dyn UdpEndpoint>,
     drop: Arc<DropModel>,
     stats: Arc<MuxStats>,
     bytes: Vec<u8>,
@@ -1378,7 +1420,7 @@ fn spawn_resender(
             if drop.drops() {
                 stats.dropped_out.fetch_add(1, Ordering::Relaxed);
             } else {
-                let _ = socket.send_to(&bytes, dst).await;
+                let _ = endpoint.send_to(&bytes, dst).await;
                 // Record the re-emission (a frame that reached the wire) on the
                 // ladder — a proactive Timer A/E/G retransmit of our own frame.
                 if let Some(tap) = sendtap.get() {
@@ -1420,7 +1462,7 @@ fn spawn_resender(
 /// - **inbound duplicates**: absorbed, so the scripted agent's strict `expect`
 ///   never chokes on a retransmit.
 struct CallTxns {
-    socket: Arc<UdpSocket>,
+    endpoint: Arc<dyn UdpEndpoint>,
     drop: Arc<DropModel>,
     stats: Arc<MuxStats>,
     inner: Mutex<TxnInner>,
@@ -1468,9 +1510,9 @@ struct TxnInner {
 }
 
 impl CallTxns {
-    fn new(socket: Arc<UdpSocket>, drop: Arc<DropModel>, stats: Arc<MuxStats>) -> Self {
+    fn new(endpoint: Arc<dyn UdpEndpoint>, drop: Arc<DropModel>, stats: Arc<MuxStats>) -> Self {
         Self {
-            socket,
+            endpoint,
             drop,
             stats,
             inner: Mutex::new(TxnInner::default()),
@@ -1484,17 +1526,23 @@ impl CallTxns {
         let _ = self.sendtap.set(tap);
     }
 
-    /// Best-effort non-blocking send for the reactive resends (re-ACK / re-answer)
-    /// that run on the inbound (sync) path — re-applies the loss model. `kind`
-    /// classifies the re-emission for the ladder; a frame that actually reaches
-    /// the wire is reported to the send tap (a dropped one is invisible, like a
-    /// dropped first transmission).
+    /// Best-effort fire-and-forget send for the reactive resends (re-ACK /
+    /// re-answer) that run on the inbound (sync, lock-holding) path — re-applies
+    /// the loss model. The actual transmission is a detached task (the fabric's
+    /// `send_to` is async); best-effort exactly like the `try_send_to` it
+    /// replaces. `kind` classifies the re-emission for the ladder; a frame that
+    /// passed the loss model is reported to the send tap (a dropped one is
+    /// invisible, like a dropped first transmission).
     fn send(&self, bytes: &[u8], dst: SocketAddr, kind: ReEmitKind) {
         if self.drop.drops() {
             self.stats.dropped_out.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        let _ = self.socket.try_send_to(bytes, dst);
+        let endpoint = self.endpoint.clone();
+        let owned = bytes.to_vec();
+        tokio::spawn(async move {
+            let _ = endpoint.send_to(&owned, dst).await;
+        });
         if let Some(tap) = self.sendtap.get() {
             tap(bytes, dst, kind);
         }
@@ -1518,7 +1566,7 @@ impl CallTxns {
                         e.insert(ctl.clone());
                         spawn_resender(
                             ctl,
-                            self.socket.clone(),
+                            self.endpoint.clone(),
                             self.drop.clone(),
                             self.stats.clone(),
                             raw.to_vec(),
@@ -1542,7 +1590,7 @@ impl CallTxns {
                         e.insert(ctl.clone());
                         spawn_resender(
                             ctl,
-                            self.socket.clone(),
+                            self.endpoint.clone(),
                             self.drop.clone(),
                             self.stats.clone(),
                             raw.to_vec(),
@@ -1571,7 +1619,7 @@ impl CallTxns {
                         e.insert(ctl.clone());
                         spawn_resender(
                             ctl,
-                            self.socket.clone(),
+                            self.endpoint.clone(),
                             self.drop.clone(),
                             self.stats.clone(),
                             raw.to_vec(),
@@ -1602,7 +1650,7 @@ impl CallTxns {
         g.client.insert(branch, ctl.clone());
         spawn_resender(
             ctl,
-            self.socket.clone(),
+            self.endpoint.clone(),
             self.drop.clone(),
             self.stats.clone(),
             raw.to_vec(),
@@ -1870,11 +1918,17 @@ mod tests {
     use tokio::time::{timeout, Duration as TokioDuration};
 
     async fn txn_rig() -> (Arc<CallTxns>, TokioUdp, SocketAddr) {
-        let sock = Arc::new(TokioUdp::bind("127.0.0.1:0").await.unwrap());
+        // The engine sends through the same fabric seam the mux binds on.
+        let endpoint: Arc<dyn UdpEndpoint> = Arc::from(
+            RealSignalingNetwork::new()
+                .bind_udp(BindUdpOpts::new("127.0.0.1:0".parse().unwrap(), 64))
+                .await
+                .unwrap(),
+        );
         let peer = TokioUdp::bind("127.0.0.1:0").await.unwrap();
         let peer_addr = peer.local_addr().unwrap();
         let txns = Arc::new(CallTxns::new(
-            sock,
+            endpoint,
             Arc::new(DropModel::new(0.0, 1, None)),
             Arc::new(MuxStats::new(4)),
         ));

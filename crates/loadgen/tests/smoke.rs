@@ -1166,7 +1166,7 @@ async fn loadgen_auto_retransmit_recovers_packet_drop() {
     // The wide window only costs wall time on the deterministic doomed-call
     // tail, which idles the full window either way.
     let (_h, b2bua, core, transport) =
-        setup_recv(6490, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
+        setup_recv(6590, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 12.0, 2, 8, 0x5EED);
@@ -1361,7 +1361,7 @@ async fn loadgen_actor_refer_recovers_loss_without_false_audit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_settle_gate_recovers_dropped_bye() {
     let (_h, b2bua, core, transport) =
-        setup_recv(6560, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
+        setup_recv(6580, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 2.0, 1, 4, 0x2D07);
@@ -1408,7 +1408,7 @@ async fn loadgen_settle_gate_recovers_dropped_bye() {
 #[ignore = "real-clock UDP — slow lane (just test-slow); avoids default-lane bind contention"]
 async fn loadgen_reack_recovers_dropped_initial_b_leg_ack() {
     let (_h, b2bua, core, transport) =
-        setup_recv(6600, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
+        setup_recv(6640, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 1.0, 1, 4, 0x2AC0);
