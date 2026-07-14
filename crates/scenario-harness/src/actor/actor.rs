@@ -865,6 +865,12 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
                     Observation::Subflow { leg: st.role, name: SUBFLOW_RENEG, to: SubflowState::Confirmed },
                     now,
                 );
+                // Count this completed cycle so an N-cycle re-INVITE script's
+                // per-cycle barrier (reneg_count >= i) releases the next one —
+                // serializing the chain (C6). Keyed on CSeq: a re-emitted 2xx
+                // (a retransmit under loss) cannot double-count, and the
+                // sent_reinvites guard already fires this block once per CSeq.
+                st.obs.record(Observation::RenegCompleted { leg: st.role, cseq: resp.cseq.seq }, now);
                 st.feed.on_reinvite_ok.stamp(st.ctx);
             }
             return Ok(());

@@ -207,6 +207,97 @@ async fn loadgen_fake_net_recovers_targeted_dropped_bye() {
     b2bua.assert_fully_reaped();
 }
 
+/// C6 (a): ten SERIALIZED re-INVITE cycles per call (the "10 re-INVITEs" ask)
+/// through the real driver over the fake net. Each cycle is gated on the prior
+/// one COMPLETING (`reneg_count`), so no two re-INVITEs are ever in flight (no
+/// glare); every call reaches all ten renegotiations, tears down, and settles
+/// OK under the strict per-call audit — deterministically on virtual time.
+#[tokio::test(start_paused = true)]
+async fn loadgen_fake_net_reinvite_x10_serialized() {
+    let (_h, b2bua, core, transport) = setup_fake(7030).await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    let driver = Driver::new(
+        cfg(b2bua.addr, 10.0, 2, 8, 0x1010),
+        vec![mix("reinvite10", 1.0)],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    let ok = reporter.count("reinvite10", &ResultClass::Ok);
+    assert!(total >= 10, "governor under-delivered: {total}");
+    assert_eq!(ok, total, "a serialized ×10 re-INVITE call was NOK:\n{}", reporter.render_prometheus());
+    assert_eq!(
+        core.stats().orphan_no_header.load(Relaxed)
+            + core.stats().orphan_unknown_token.load(Relaxed)
+            + core.stats().orphan_stray.load(Relaxed),
+        0,
+        "orphans on the fake net"
+    );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// C6 (b): the ×10 re-INVITE serialization under ~6%/datagram loss +
+/// auto-retransmit. A dropped re-INVITE (or its 2xx/ACK) is healed by the
+/// retransmit engine + the reactor's idempotent re-ACK; the per-cycle barrier
+/// simply waits, so the chain never overlaps and never wedges. No loss-model
+/// drop may surface as an RFC-audit finding, and every NOK degrades to a
+/// bounded `timeout` (never a protocol-defect class). Afterwards the paused
+/// clock is advanced past the SUT's 32 s dead-call detection and the strict
+/// release oracle gates.
+#[tokio::test(start_paused = true)]
+async fn loadgen_fake_net_reinvite_x10_loss_soak() {
+    let (h, b2bua, core, transport) = setup_fake(7040).await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    let mut c = cfg(b2bua.addr, 8.0, 3, 6, 0xB10C);
+    c.default_tuning = CallTuning { drop_rate: 0.06, retransmit: true, ..CallTuning::default() };
+    let driver = Driver::new(c, vec![mix("reinvite10", 1.0)], reporter.clone(), transport);
+    driver.run().await;
+
+    let drops = core.stats().dropped_out.load(Relaxed) + core.stats().dropped_in.load(Relaxed);
+    let total = reporter.total_calls();
+    let ok = reporter.count("reinvite10", &ResultClass::Ok);
+    let timeouts = reporter.count("reinvite10", &ResultClass::Timeout);
+    assert!(drops > 0, "loss model dropped nothing — the soak is vacuous");
+    assert!(total >= 10, "too few calls: {total}");
+    // A ×10 re-INVITE call carries ~10× the datagrams of a basic call, so
+    // per-call loss compounds; the deterministic invariants are that retransmit
+    // recovers SOME calls (the chain heals, not wedges) and every failure is a
+    // bounded timeout — not that recovery dominates.
+    assert!(
+        ok > 0,
+        "retransmit recovered NO serialized ×10 chain under loss: ok={ok} timeouts={timeouts} drops={drops}\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        reporter.count("reinvite10", &ResultClass::RfcAuditFail),
+        0,
+        "a loss-model drop surfaced as an RFC-audit finding:\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        ok + timeouts,
+        total,
+        "a ×10 call failed with a non-timeout class under loss:\n{}",
+        reporter.render_prometheus()
+    );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak under loss");
+    h.advance(Duration::from_secs(40)).await;
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
 /// (c) Probabilistic loss soak on the fake net: ~8%/datagram loss +
 /// auto-retransmit over a basic-call mix. Seeded RNGs on a deterministic
 /// substrate → the run is reproducible; a loss-model drop must NEVER surface
