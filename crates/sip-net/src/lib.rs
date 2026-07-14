@@ -12,6 +12,7 @@
 //! `effect-layer-test` SKILL for the wrapper philosophy.
 
 pub mod contracts;
+pub mod loss;
 pub mod net;
 pub mod queue;
 pub mod real;
@@ -29,6 +30,7 @@ pub use rfc_audit::{
     bind_roles_of, evaluate_rfc_findings, rfc_cross_message_rules, rfc_peer_rules,
     CSeqInDialogOrderRule, RfcFinding,
 };
+pub use loss::RandomLoss;
 pub use net::{SignalingNetwork, UdpEndpoint};
 pub use report::{to_sip_entries, RecordedSipEntry, RecvNote};
 pub use real::RealSignalingNetwork;

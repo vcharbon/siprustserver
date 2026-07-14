@@ -176,3 +176,9 @@ debug = "line-tables-only"
 # and are unaffected. See ADR-discussion / jemalloc-stats/src/lib.rs SAFETY notes.
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# Function-size ceiling (threshold in clippy.toml, 200 lines initially): a
+# function past it is presumed to be several concepts and wants extraction.
+# `warn` only — surfaced by `cargo clippy`, not a build gate yet.
+[workspace.lints.clippy]
+too_many_lines = "warn"
