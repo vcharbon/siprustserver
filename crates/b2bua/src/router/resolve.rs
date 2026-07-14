@@ -57,7 +57,7 @@ pub(super) fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                         )
                     });
                 Resolution {
-                    direction: leg_direction(ctx, call_ref.as_deref(), &leg),
+                    direction: leg_direction(&leg),
                     call_ref,
                     source_leg_id: leg,
                     initial_invite: false,
@@ -65,21 +65,21 @@ pub(super) fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
             }
             SipMessage::Response(resp) => {
                 // Response: read our cr/lg from the top Via we stamped.
-                let (cr, lg) = via_cr_lg(resp.headers.first().map(|h| h.value.as_str()))
+                let ids = via_cr_lg(resp.headers.first().map(|h| h.value.as_str()))
                     .or_else(|| {
                         resp.headers
                             .iter()
                             .find(|h| h.name.eq_ignore_ascii_case("via"))
                             .and_then(|h| via_cr_lg(Some(&h.value)))
                     })
-                    .unwrap_or((None, "a".into()));
-                let call_ref = cr.or_else(|| {
+                    .unwrap_or(ViaIds { cr: None, lg: "a".into() });
+                let call_ref = ids.cr.or_else(|| {
                     ctx.state.resolve_from_sip_key_sync(&resp.call_id, resp.to.tag.as_deref().unwrap_or(""))
                 });
                 Resolution {
-                    direction: leg_direction(ctx, call_ref.as_deref(), &lg),
+                    direction: leg_direction(&ids.lg),
                     call_ref,
-                    source_leg_id: lg,
+                    source_leg_id: ids.lg,
                     initial_invite: false,
                 }
             }
@@ -118,7 +118,7 @@ pub(super) fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
         CallEvent::Timeout { call_ref, leg_id, .. } => {
             let leg = leg_id.clone().unwrap_or_else(|| "a".into());
             Resolution {
-                direction: leg_direction(ctx, call_ref.as_deref(), &leg),
+                direction: leg_direction(&leg),
                 call_ref: call_ref.clone(),
                 source_leg_id: leg,
                 initial_invite: false,
@@ -127,7 +127,7 @@ pub(super) fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
         CallEvent::Timer { call_ref, leg_id, .. } => {
             let leg = leg_id.clone().unwrap_or_else(|| "a".into());
             Resolution {
-                direction: leg_direction(ctx, Some(call_ref), &leg),
+                direction: leg_direction(&leg),
                 call_ref: Some(call_ref.clone()),
                 source_leg_id: leg,
                 initial_invite: false,
@@ -160,7 +160,7 @@ pub(super) async fn replica_takeover_call_ref(ctx: &RouterCtx, event: &CallEvent
         .await
 }
 
-fn leg_direction(_ctx: &RouterCtx, _call_ref: Option<&str>, leg: &str) -> Direction {
+fn leg_direction(leg: &str) -> Direction {
     if leg == "a" {
         Direction::FromA
     } else {
@@ -168,8 +168,14 @@ fn leg_direction(_ctx: &RouterCtx, _call_ref: Option<&str>, leg: &str) -> Direct
     }
 }
 
-/// Extract `(cr, lg)` from a Via header value's `;cr=`/`;lg=` params.
-fn via_cr_lg(via: Option<&str>) -> Option<(Option<String>, String)> {
+/// The `;cr=`/`;lg=` identity params stamped on a Via we emitted.
+struct ViaIds {
+    cr: Option<String>,
+    lg: String,
+}
+
+/// Extract the [`ViaIds`] from a Via header value's `;cr=`/`;lg=` params.
+fn via_cr_lg(via: Option<&str>) -> Option<ViaIds> {
     let via = via?;
     if !via.contains("cr=") && !via.contains("lg=") {
         return None;
@@ -184,5 +190,5 @@ fn via_cr_lg(via: Option<&str>) -> Option<(Option<String>, String)> {
             _ => {}
         }
     }
-    Some((cr, lg))
+    Some(ViaIds { cr, lg })
 }

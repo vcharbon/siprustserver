@@ -50,6 +50,22 @@ pub enum AdmitOutcome {
     Unavailable,
 }
 
+/// The cluster-wide hold(s) a call still owns: every recorded limiter entry
+/// whose admission increment succeeded (a fail-open admission records
+/// `increment_succeeded == Some(false)` and holds nothing). The decrement /
+/// refresh derived from this list matches the increment made at admission
+/// exactly once — every caller that replays a call's holds derives them here.
+pub(crate) fn live_holds(call: &call::Call) -> Vec<LimiterHold> {
+    call.limiter_entries
+        .iter()
+        .filter(|e| e.increment_succeeded != Some(false))
+        .map(|e| LimiterHold {
+            limiter_id: e.limiter_id.clone(),
+            window: e.origin_window,
+        })
+        .collect()
+}
+
 /// Admission/release/refresh seam for per-call concurrency limits.
 #[async_trait]
 pub trait CallLimiter: Send + Sync {

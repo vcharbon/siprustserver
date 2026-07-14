@@ -197,16 +197,7 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
 /// matches the increment the primary made on admission exactly once. The backup is
 /// the only node that can free this slot once its primary is dead for good.
 async fn release_orphaned_limiter_holds(ctx: &Arc<RouterCtx>, call: &Call) {
-    use crate::limiter::LimiterHold;
-    let holds: Vec<LimiterHold> = call
-        .limiter_entries
-        .iter()
-        .filter(|e| e.increment_succeeded != Some(false))
-        .map(|e| LimiterHold {
-            limiter_id: e.limiter_id.clone(),
-            window: e.origin_window,
-        })
-        .collect();
+    let holds = crate::limiter::live_holds(call);
     if !holds.is_empty() {
         ctx.limiter.release(&holds).await;
     }
@@ -264,10 +255,16 @@ pub(super) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
         .map(|t| (now_ms - t.fire_at).max(0))
         .max()
         .unwrap_or(0);
+    let smoothing = Smoothing {
+        now_ms,
+        l_max,
+        speedup: ctx.config.keepalive_catchup_speedup.max(1),
+        cap_ms: ctx.config.max_catchup_window_sec.map(|s| s * 1000),
+    };
     let mut materialized = 0u64;
     for (call, _skew) in calls {
         // Offset already applied above → 0 here (no double-correction).
-        if reclaim_into_live(ctx, call, 0, Some((now_ms, l_max))).await {
+        if reclaim_into_live(ctx, call, 0, Some(smoothing)).await {
             materialized += 1;
         }
     }
@@ -285,7 +282,7 @@ pub(super) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
 }
 
 /// Materialise one reclaimed call into the live map + re-arm its timers (ADR-0011
-/// X11). `smoothing = Some((now_ms, l_max))` re-spreads keepalives per
+/// X11). `smoothing = Some(_)` re-spreads keepalives per
 /// `restore_hygiene::smooth_keepalives` for the bulk reboot sweep ([`reclaim_all`]):
 /// past-due ones oldest-first, future-dated ones de-correlated within
 /// `[now, fire_at]`. `None` (a single reactive straggler) restores verbatim — no
@@ -297,7 +294,7 @@ async fn reclaim_into_live(
     ctx: &Arc<RouterCtx>,
     mut call: Call,
     skew_offset_ms: i64,
-    smoothing: Option<(i64, i64)>,
+    smoothing: Option<Smoothing>,
 ) -> bool {
     let call_ref = call.call_ref.clone();
     // Hold the per-call state lock across materialise + timer re-arm, exactly as
@@ -327,12 +324,6 @@ async fn reclaim_into_live(
     // Single restore-hygiene seam (clock-skew hardening): re-anchor by the
     // persisted skew offset, drop the stale keepalive-timeout, apply the
     // deep-past-due defensive floor, then (bulk sweep only) cohort-smooth.
-    let smoothing = smoothing.map(|(now_ms, l_max)| Smoothing {
-        now_ms,
-        l_max,
-        speedup: ctx.config.keepalive_catchup_speedup.max(1),
-        cap_ms: ctx.config.max_catchup_window_sec.map(|s| s * 1000),
-    });
     sanitize_restored_timers(
         &mut call.timers,
         &call_ref,
