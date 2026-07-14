@@ -1285,6 +1285,24 @@ fn call_id(raw: &[u8]) -> Option<String> {
     header_value(raw, "call-id").or_else(|| header_value(raw, "i"))
 }
 
+/// The `tag` parameter of the To header (the dialog's remote tag), or the empty
+/// string when absent. A FORKING UAS (RFC 3261 §12.1.2) emits several
+/// provisionals with DISTINCT To-tags on ONE INVITE branch — so the response
+/// dedup below must include the To-tag in its discriminator, else the second
+/// fork's 18x is wrongly absorbed as a retransmission of the first. A genuine
+/// retransmit (same branch, status AND To-tag) still dedups; a same-tag second
+/// ringing leg (a B2BUA collapsing forks to one a-leg tag) still dedups too.
+fn to_tag(raw: &[u8]) -> String {
+    let Some(v) = header_value(raw, "to").or_else(|| header_value(raw, "t")) else {
+        return String::new();
+    };
+    let lower = v.to_ascii_lowercase();
+    let Some(pos) = lower.find("tag=") else { return String::new() };
+    let rest = &v[pos + "tag=".len()..];
+    let end = rest.find([';', ',', ' ', '\t', '>']).unwrap_or(rest.len());
+    rest[..end].trim().to_string()
+}
+
 /// Whether `raw` is a SIP response (status line) vs a request.
 fn is_response(raw: &[u8]) -> bool {
     first_line(raw).starts_with("SIP/2.0")
@@ -1680,20 +1698,23 @@ impl CallTxns {
             // `ClientInvite::try_expect_final`, and the driver gates the cross-call
             // 18x delivery rate instead).
             //
-            // The `(branch, status)` dedup below also means a REPEATED
+            // The `(branch, status, To-tag)` dedup below means a REPEATED
             // byte-identical provisional — e.g. a B2BUA relaying a SECOND
             // ringing leg's 180 on the same a-leg early dialog (same branch,
-            // same To-tag) — is absorbed as a retransmission before any body
+            // SAME To-tag) — is absorbed as a retransmission before any body
             // sees it. That is CORRECT (on the wire it IS one), but it makes
             // "ring again" semantics unobservable from a load body — see the
-            // shape-authoring caveat in `crate::scenarios` (033 ask D2).
+            // shape-authoring caveat in `crate::scenarios` (033 ask D2). A TRUE
+            // fork (RFC 3261 §12.1.2) carries a DISTINCT To-tag per 18x, so
+            // keying on the tag (C1) lets each fork's provisional through
+            // instead of collapsing them.
             let stop = if is_invite { status >= 100 } else { status >= 200 };
             if stop {
                 if let Some(ctl) = g.client.remove(&branch) {
                     ctl.stop();
                 }
             }
-            let key = (branch, format!("r{status}"));
+            let key = (branch, format!("r{status}:{}", to_tag(raw)));
             if g.seen_in.contains(&key) {
                 // Duplicate response. A retransmitted INVITE 2xx means our ACK was
                 // lost → re-ACK it.
@@ -2037,6 +2058,67 @@ mod tests {
             "reliable-183 resender must stop on the matching PRACK"
         );
         txns.shutdown();
+    }
+
+    /// A response with an explicit To-tag (a forking UAS emits several 18x with
+    /// DISTINCT To-tags on one INVITE branch, RFC 3261 §12.1.2).
+    fn resp_tag(status: u16, branch: &str, cseq: &str, to_tag: &str) -> Vec<u8> {
+        format!(
+            "SIP/2.0 {status} X\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
+             Call-ID: ct1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag={to_tag}\r\nCSeq: {cseq}\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// C1(d): TRUE FORKING — two 18x with DISTINCT To-tags on ONE INVITE branch
+    /// must BOTH be delivered to the body (each is a separate early dialog,
+    /// §12.1.2), never collapsed as a retransmit. A same-tag repeat still dedups
+    /// (a genuine retransmission / a B2BUA's same-tag second ringing leg). The
+    /// discriminator is `(branch, status, To-tag)`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn calltxns_distinct_fork_tags_are_not_deduped() {
+        let (txns, _peer, peer_addr) = txn_rig().await;
+
+        // Fork 1's 180 (tag=f1) — delivered.
+        assert!(
+            txns.on_inbound(&resp_tag(180, "z9hG4bK-i1", "1 INVITE", "f1"), peer_addr),
+            "the first fork's 180 is delivered"
+        );
+        // Fork 2's 180 (tag=f2) on the SAME branch — a DISTINCT early dialog, so
+        // it must be delivered too (not absorbed as a retransmit).
+        assert!(
+            txns.on_inbound(&resp_tag(180, "z9hG4bK-i1", "1 INVITE", "f2"), peer_addr),
+            "a distinct-tag fork's 180 must NOT be deduped as a retransmit"
+        );
+        // Fork 1's 180 again (tag=f1) — a genuine retransmit, absorbed.
+        assert!(
+            !txns.on_inbound(&resp_tag(180, "z9hG4bK-i1", "1 INVITE", "f1"), peer_addr),
+            "a same-tag repeat is a true retransmit and IS deduped"
+        );
+        // A losing fork's LATE 200 (tag=f2) is also delivered (the winner is f1,
+        // but the body must see f2's 200 to ACK+BYE it, §13.2.2.4).
+        assert!(
+            txns.on_inbound(&resp_tag(200, "z9hG4bK-i1", "1 INVITE", "f2"), peer_addr),
+            "a losing fork's late 200 (distinct tag) reaches the body for ACK+BYE"
+        );
+        txns.shutdown();
+    }
+
+    /// The `to_tag` extractor parses the To-tag from responses (full + compact
+    /// `t` form) and yields the empty string when absent (a tagless 100 Trying).
+    #[test]
+    fn to_tag_extracts_the_to_parameter() {
+        assert_eq!(to_tag(&resp_tag(180, "b", "1 INVITE", "abc")), "abc");
+        assert_eq!(
+            to_tag(b"SIP/2.0 100 Trying\r\nTo: <sip:b@h>\r\n\r\n"),
+            "",
+            "a tagless To yields empty"
+        );
+        assert_eq!(
+            to_tag(b"SIP/2.0 200 OK\r\nt: <sip:b@h>;tag=Z9\r\n\r\n"),
+            "Z9",
+            "the compact To form is parsed"
+        );
     }
 
     fn ack_req(branch: &str, cseq: u32) -> Vec<u8> {
