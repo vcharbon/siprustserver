@@ -451,10 +451,11 @@ pub struct DialogSlice {
     pub per_agent: Vec<AgentSlot>,
 }
 
+#[derive(Clone)]
 struct Bucket {
     call_id: String,
     /// Establishing orientation as known to THIS bucket (the pending bucket's
-    /// single tag stays `from_tag` through migration). The slice recomputes
+    /// single tag stays `from_tag` through replication). The slice recomputes
     /// orientation across all its buckets; these are the per-bucket seed.
     from_tag: String,
     to_tag: Option<String>,
@@ -478,11 +479,55 @@ fn pending_key(bind: &str, call_id: &str, tag: &str) -> String {
 
 /// Group the recorded channel into per-`(bind, Call-ID, unordered tag-pair)`
 /// agent slots. One-tag messages sit in a pending bucket keyed by their single
-/// tag and migrate into the pair-keyed bucket when the second tag is observed
-/// (forked dialogs: the migration happens once, into the first pair observed;
-/// later pairs sharing the caller tag start fresh — distinct slices). Slots
+/// tag and are REPLICATED into the pair-keyed bucket when a second tag is
+/// observed — into EVERY pair (C1/E3 forking, RFC 3261 §12.1.2): one INVITE
+/// can create several early dialogs, and each fork's slice must contain the
+/// establishing INVITE(+100) so the rfc3264 offer/answer and per-dialog CSeq
+/// rules judge non-first forks too (pre-C1 the pending bucket MIGRATED into
+/// the first pair only, leaving later forks under-checked). A pending bucket
+/// replicated into ≥1 confirmed pair emits no slice of its own; a
+/// never-confirmed pending bucket keeps its single-tag slice as before. Slots
 /// that share a `(Call-ID, tag-pair)` are gathered under one [`DialogSlice`]
 /// whose tags are normalised to establishing orientation.
+/// The suffix of a pending bucket's events belonging to the dialog's
+/// ESTABLISHING INVITE transaction — the highest-CSeq empty-To-tag INVITE.
+/// Earlier, rejected attempts on the same From-tag (an auth retry: INVITE
+/// CSeq1 → 401 → INVITE CSeq2 → 2xx) are dropped, so the retry that actually
+/// establishes the dialog is not miscounted as an in-dialog re-INVITE (false
+/// §13.2.1/§20.37 SHOULD findings). Keyed on CSeq, NOT on the last INVITE
+/// event: a relay bind that both RECEIVES and SENDS the one establishing
+/// INVITE (same CSeq) must keep BOTH copies, or the relay-skip logic in the
+/// SDP/route rules can't recognize the slot as a relay. A true fork has ONE
+/// INVITE CSeq in the pending bucket, so the whole thing is kept and every
+/// fork's slice gets the establishing INVITE. Defensive: a bucket with no
+/// empty-To-tag INVITE is returned unchanged.
+fn establishing_tail(ordered: Vec<OrderedEvent>) -> Vec<OrderedEvent> {
+    let est_cseq = ordered
+        .iter()
+        .filter_map(|e| match &e.msg {
+            SipMessage::Request(r)
+                if r.method.as_str() == "INVITE"
+                    && r.to.tag.as_deref().is_none_or(str::is_empty) =>
+            {
+                Some(r.cseq.seq)
+            }
+            _ => None,
+        })
+        .max();
+    let Some(est_cseq) = est_cseq else { return ordered };
+    // Keep from the first event of the establishing INVITE transaction onward.
+    let start = ordered.iter().position(|e| {
+        matches!(&e.msg, SipMessage::Request(r)
+            if r.method.as_str() == "INVITE"
+                && r.to.tag.as_deref().is_none_or(str::is_empty)
+                && r.cseq.seq == est_cseq)
+    });
+    match start {
+        Some(i) => ordered.into_iter().skip(i).collect(),
+        None => ordered,
+    }
+}
+
 pub fn project_per_dialog(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<DialogSlice> {
     let parser = super::lenient_parser();
 
@@ -539,6 +584,10 @@ pub fn project_per_dialog(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Dial
     ordered.sort_by(|a, b| a.at_ms.cmp(&b.at_ms).then(a.seq.cmp(&b.seq)));
 
     let mut buckets: HashMap<String, Bucket> = HashMap::new();
+    // Pending (single-tag) bucket keys that were replicated into ≥1 confirmed
+    // pair — those emit no slice of their own (their content lives in every
+    // fork's slice); a never-confirmed pending bucket still becomes a slice.
+    let mut replicated: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (position, e) in ordered.into_iter().enumerate() {
         let cid = call_id(&e.msg);
         if cid.is_empty() {
@@ -550,18 +599,39 @@ pub fn project_per_dialog(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Dial
         };
         let tt = to_tag(&e.msg).map(str::to_string).filter(|t| !t.is_empty());
 
-        // Resolve the bucket, migrating a pending (single-tag) bucket if this
-        // is the first message to carry the dialog's second tag. The pending
-        // bucket is normally keyed on the message's From-tag (same orientation
-        // as the establishing INVITE), but a callee-initiated first two-tag
-        // message carries the caller's tag in **To** — probe both.
+        // Resolve the bucket, REPLICATING the pending (single-tag) bucket when
+        // this is the first message to carry a given second tag — into EVERY
+        // such pair, not just the first (one INVITE can fork into several early
+        // dialogs, §12.1.2; each fork's slice needs the establishing INVITE).
+        // The pending bucket is normally keyed on the message's From-tag (same
+        // orientation as the establishing INVITE), but a callee-initiated first
+        // two-tag message carries the caller's tag in **To** — probe both.
         let key = if let Some(ref tag) = tt {
             let confirmed = confirmed_key(&e.bind_key, cid, &ft, tag);
             if !buckets.contains_key(&confirmed) {
-                let migrated = buckets
-                    .remove(&pending_key(&e.bind_key, cid, &ft))
-                    .or_else(|| buckets.remove(&pending_key(&e.bind_key, cid, tag)));
-                if let Some(mut b) = migrated {
+                let pend_ft = pending_key(&e.bind_key, cid, &ft);
+                let pend_tt = pending_key(&e.bind_key, cid, tag);
+                let source = if buckets.contains_key(&pend_ft) {
+                    Some(pend_ft)
+                } else if buckets.contains_key(&pend_tt) {
+                    Some(pend_tt)
+                } else {
+                    None
+                };
+                if let Some(pend) = source {
+                    let mut b = buckets[&pend].clone();
+                    replicated.insert(pend);
+                    // Replicate only the ESTABLISHING attempt — the tail from the
+                    // last empty-To-tag INVITE request onward. A pending bucket
+                    // can hold SEVERAL sequential initial-INVITE attempts sharing
+                    // one From-tag (an auth retry: INVITE CSeq1 → 401 → INVITE
+                    // CSeq2 → 2xx); only the LAST attempt establishes this dialog,
+                    // and copying the earlier, rejected attempts in would make the
+                    // retry look like an in-dialog re-INVITE (false §13.2.1/§20.37
+                    // SHOULD findings). A true fork has ONE INVITE in the pending
+                    // bucket, so the tail is the whole thing — every fork's slice
+                    // still gets the establishing INVITE.
+                    b.ordered = establishing_tail(b.ordered);
                     // Establishing orientation: the pending bucket's single tag
                     // is the caller's; the OTHER tag of the pair is the callee's.
                     b.to_tag = Some(if b.from_tag == ft { tag.clone() } else { ft.clone() });
@@ -589,7 +659,12 @@ pub fn project_per_dialog(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Dial
     }
 
     let mut slices: HashMap<String, DialogSlice> = HashMap::new();
-    for b in buckets.into_values() {
+    for (bucket_key, b) in buckets {
+        // A pending bucket that was replicated into ≥1 confirmed fork emits no
+        // slice of its own — its INVITE(+100) lives in every fork's slice.
+        if b.to_tag.is_none() && replicated.contains(&bucket_key) {
+            continue;
+        }
         // Cross-bind grouping key: unordered pair for confirmed dialogs (both
         // orientations of one dialog gather under one slice), single tag for
         // pending ones.
@@ -820,8 +895,9 @@ mod tests {
     #[test]
     fn forked_to_tags_stay_distinct_slices() {
         // Two callee tags forked off one INVITE are two dialogs (two distinct
-        // tag pairs). The pending bucket migrates into the FIRST pair; the
-        // second fork starts its own slice.
+        // tag pairs). The pending bucket REPLICATES into EVERY pair (C1/E3):
+        // each fork's slice contains the establishing INVITE, so the rfc3264
+        // offer/answer and per-dialog CSeq rules judge non-first forks too.
         let evs = vec![
             sent("alice", raw_req("INVITE", "z9hG4bK-i", 1, "at", None), 0),
             recv("alice", raw_resp(180, 1, "INVITE", "z9hG4bK-i", "at", Some("b1")), 1),
@@ -833,8 +909,59 @@ mod tests {
         let fork2 = slices.iter().find(|s| s.to_tag.as_deref() == Some("b2")).unwrap();
         assert_eq!(fork1.from_tag, "at");
         assert_eq!(fork2.from_tag, "at");
-        assert_eq!(fork1.per_agent[0].ordered.len(), 2, "INVITE migrated with the first fork");
-        assert_eq!(fork2.per_agent[0].ordered.len(), 1);
+        assert_eq!(fork1.per_agent[0].ordered.len(), 2, "INVITE replicated into fork 1");
+        assert_eq!(fork2.per_agent[0].ordered.len(), 2, "INVITE replicated into fork 2 too");
+    }
+
+    #[test]
+    fn pending_bucket_replicates_into_every_fork() {
+        // The full C1/E3 shape: INVITE + 100 in the pending bucket, two
+        // distinct-tag 180s, the winner's 200 (b2), the loser's late 200 (b1)
+        // ACK+BYE'd. EVERY fork's slice gets the pre-tag INVITE(+100); the
+        // consumed pending bucket emits no slice of its own.
+        let evs = vec![
+            sent("alice", raw_req("INVITE", "z9hG4bK-i", 1, "at", None), 0),
+            recv("alice", raw_resp(100, 1, "INVITE", "z9hG4bK-i", "at", None), 1),
+            recv("alice", raw_resp(180, 1, "INVITE", "z9hG4bK-i", "at", Some("b1")), 2),
+            recv("alice", raw_resp(180, 1, "INVITE", "z9hG4bK-i", "at", Some("b2")), 3),
+            recv("alice", raw_resp(200, 1, "INVITE", "z9hG4bK-i", "at", Some("b2")), 4),
+            sent("alice", raw_req("ACK", "z9hG4bK-a2", 1, "at", Some("b2")), 5),
+            // The loser's late 200 → ACK then BYE on ITS OWN fork (§13.2.2.4).
+            recv("alice", raw_resp(200, 1, "INVITE", "z9hG4bK-i", "at", Some("b1")), 6),
+            sent("alice", raw_req("ACK", "z9hG4bK-a1", 1, "at", Some("b1")), 7),
+            sent("alice", raw_req("BYE", "z9hG4bK-b1", 2, "at", Some("b1")), 8),
+            recv("alice", raw_resp(200, 2, "BYE", "z9hG4bK-b1", "at", Some("b1")), 9),
+        ];
+        let slices = project_per_dialog(&evs);
+        assert_eq!(slices.len(), 2, "two fork slices, no leftover pending slice: {slices:?}");
+        let fork1 = slices.iter().find(|s| s.to_tag.as_deref() == Some("b1")).unwrap();
+        let fork2 = slices.iter().find(|s| s.to_tag.as_deref() == Some("b2")).unwrap();
+        // Fork 1 (loser): INVITE + 100 + 180 + late 200 + ACK + BYE + 200.
+        assert_eq!(fork1.per_agent[0].ordered.len(), 7, "{fork1:?}");
+        // Fork 2 (winner): INVITE + 100 + 180 + 200 + ACK.
+        assert_eq!(fork2.per_agent[0].ordered.len(), 5, "{fork2:?}");
+        // Both slices open with the establishing INVITE (offer/answer baseline).
+        for s in [fork1, fork2] {
+            let first = &s.per_agent[0].ordered[0].msg;
+            assert!(
+                matches!(first, SipMessage::Request(r) if r.method.as_str() == "INVITE"),
+                "fork slice must open with the establishing INVITE: {s:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn never_confirmed_pending_bucket_keeps_its_slice() {
+        // An INVITE that never drew a tagged response stays a single-tag
+        // pending slice (unchanged by the fork replication).
+        let evs = vec![
+            sent("alice", raw_req("INVITE", "z9hG4bK-i", 1, "at", None), 0),
+            recv("alice", raw_resp(100, 1, "INVITE", "z9hG4bK-i", "at", None), 1),
+        ];
+        let slices = project_per_dialog(&evs);
+        assert_eq!(slices.len(), 1, "{slices:?}");
+        assert_eq!(slices[0].to_tag, None, "still a pending (single-tag) slice");
+        assert_eq!(slices[0].per_agent[0].ordered.len(), 2);
     }
 
     #[test]
