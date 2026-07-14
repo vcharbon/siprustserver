@@ -4,6 +4,13 @@ Project is ultra early, not in production, do not worry about upgrade
 compatibility when designing solutions.
 To show a html file to user use tha bash alias  'firefox ./path/to/file/index.html' so that it works on wsl.
 
+## Coding rules
+
+Doc comments state present-tense contracts and invariants. History (dates, commit hashes, ticket IDs, "previously/replaces/no longer") lives in git and ADRs — a comment may cite ADR-00xx in one line, never retell it. If a comment needs more than ~5 lines to justify a behavior rather than describe it, either the behavior is wrong — write FIXME(scope): <one-line defect + one-line fix direction> — or the rationale is architectural and belongs in an ADR with a one-line pointer. By default however do not write FIXME, implement correct behavior unless specifically asked to delay specific corner cases.
+Each file must have it own concern. No not mix concerns.
+Never implement SIP header or message extraction in crates other than sip-message.
+
+
 ## Where the details live (progressive disclosure)
 
 Read the linked doc BEFORE the matching kind of work; the sections below are

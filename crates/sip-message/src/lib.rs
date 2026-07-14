@@ -16,6 +16,7 @@ pub mod sdp;
 pub mod generators;
 pub mod message_helpers;
 pub mod sipfrag;
+pub mod sniff;
 
 pub use error::SipParseError;
 pub use method::Method;

@@ -1,0 +1,3 @@
+# One concept per function: anything longer almost always wants extraction.
+# 200 is the INITIAL ceiling (2026-07-14) — ratchet down as offenders shrink.
+too-many-lines-threshold = 200
