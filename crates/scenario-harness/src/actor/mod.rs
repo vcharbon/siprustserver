@@ -824,6 +824,64 @@ mod tests {
         h.finish().await;
     }
 
+    /// 047 machinery: a `RingThenSilent` callee emits its 180 then holds the
+    /// INVITE server txn with NO answer ever scheduled — the peer's CANCEL (in
+    /// production, the SUT's no-answer timer firing) releases the held txn as a
+    /// `487`, the leg terminates, and the reject-final obligation closes on the
+    /// hop-ACK: a clean settle, no leaked server txn. SUT-less pin of the
+    /// silent primary a no-answer-triggered failover composes with.
+    #[tokio::test(start_paused = true)]
+    async fn ring_then_silent_487s_on_cancel_and_settles() {
+        let h = Harness::new("actor-ring-then-silent").describe(
+            "047: bob rings then stays silent (held INVITE txn, no answer ever); \
+             alice CANCELs — standing in for the SUT's no-answer timer — bob \
+             487s the held txn and both legs settle cleanly",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let ringing = |s: &StateInner| s.leg_at_least("alice", LegPhase::Early);
+        let call = CallPlan {
+            actors: vec![
+                ActorSpec {
+                    role: "alice",
+                    agent: alice.clone(),
+                    disposition: Disposition::Caller,
+                    media: MediaState::offer(OFFER_SDP),
+                    goals: vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        // The stand-in for the SUT's no-answer timer: CANCEL a
+                        // while after the ring (bob would ring forever).
+                        Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel)
+                            .after(Duration::from_millis(500)),
+                    ],
+                    invite_targets: vec![("bob", bob.clone())],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+                ActorSpec {
+                    role: "bob",
+                    agent: bob.clone(),
+                    disposition: Disposition::RingThenSilent,
+                    media: MediaState::none(),
+                    goals: vec![],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+            ],
+            plan: vec![phase("ringing", ringing)],
+            settle: SettleBarrier::default_ceiling(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(
+            verdict.is_ok(),
+            "the CANCELled silent ring must settle cleanly (487 + hop-ACK), got {verdict:?}"
+        );
+        h.finish().await;
+    }
+
     /// The `into_result` branch oracle maps each observed race outcome to its
     /// bounded downstream class: a caller that saw the 487 → the abandoned
     /// `Timeout` (the `timeout` load class); a caller that confirmed (no non-2xx

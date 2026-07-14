@@ -25,7 +25,7 @@ Compose a shape by filling three slots (`callshapes::plan`):
 
 | Slot | Type | Values (as landed) |
 |---|---|---|
-| **Establishment** | `Establishment` | `Transparent` · `Reliable` (100rel) · `RerouteOnReject{reject, winner_reliable}` (E4 — bob rejects with **no 18x**, SUT fails over to `bob2`) · `Forked{tags, winner, reliable, loser_late_200}` (E3 true forking) · `RejectTerminal{code}` · `AbandonAfterRinging` · `CancelAnswerCrossing` (E5 branch race) |
+| **Establishment** | `Establishment` | `Transparent` · `Reliable` (100rel) · `RerouteOnReject{reject, winner_reliable}` (E4 — bob rejects with **no 18x**, SUT fails over to `bob2`) · `RerouteOnNoAnswer{no_answer_sec, winner_reliable}` (E6/047 — bob rings then **never answers**; the SUT's own no-answer timer CANCELs it (487) and fails over to `bob2`; same `FailoverOnReject` binder intent, so a downstream `RouteBinder` maps it unchanged — `no_answer_sec` is the client-armed SUT ring-timer knob a platform whose SUT owns its own timer ignores) · `Forked{tags, winner, reliable, loser_late_200}` (E3 true forking) · `RejectTerminal{code}` · `AbandonAfterRinging` · `CancelAnswerCrossing` (E5 branch race) |
 | **Stage[]** | `Vec<Stage>` | `Stage::Script(...)`: `Reinvite{n}` (S1, N serialized) · `UpdatePostConnect` (S2) · `UpdateEarly` (C5, early dialog) · `KeepaliveOnce` · `KeepaliveLoop`. `Stage::Transfer(...)`: `Blind{refer_key}` (T1 REFER) · `BlindDeclined{refer_key, code}` |
 | **Teardown** | `Teardown` | `CallerBye{after, feed}` · `CrossingBye{after}` (S3 both ends hang up at once) · `None` (terminals only) |
 

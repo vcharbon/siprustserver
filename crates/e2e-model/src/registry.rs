@@ -568,6 +568,14 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .anchors(PRACK_ANCHORS)
             .needs_bob2()
             .load_actor_with(|_| Arc::new(cs::rerouting_prack(cs::default_binder()))),
+        // 047: NO-ANSWER-triggered failover — bob rings then never answers, the
+        // SUT's per-route no-answer timer CANCELs it (487) and fails over to
+        // bob2, which answers plainly. Id-addressable (no default mix weight),
+        // like the matrix reroute cells.
+        ShapeDescriptor::new("rerouting_noanswer")
+            .anchors(LOAD_CALL_ANCHORS)
+            .needs_bob2()
+            .load_actor_with(|_| Arc::new(cs::rerouting_noanswer(cs::default_binder()))),
     ];
     // Phase D1: the DECLARED-compatibility-matrix cross-product cells
     // (`crate::matrix`) — id-addressable, no mix weight (the default mix samples

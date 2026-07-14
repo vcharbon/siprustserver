@@ -52,6 +52,24 @@ fn mix(id: &str, weight: f64) -> MixEntry {
 async fn setup_fake(
     base: u16,
 ) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+    setup_fake_shaped(base, B2buaSut::route_all_with_refer).await
+}
+
+/// [`setup_fake`] whose SUT honors the full inbound `X-Api-Call` control
+/// surface (destination pin + ADR-0017 `routes` failover plan) — the
+/// deployed-cluster engine shape the `api-call-pin` egress addresses. The
+/// paused-clock reroute tests run over this (the fake-net mirror of the
+/// smoke lane's `setup_api_call`).
+async fn setup_fake_api_call(
+    base: u16,
+) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+    setup_fake_shaped(base, B2buaSut::route_api_call).await
+}
+
+async fn setup_fake_shaped(
+    base: u16,
+    make_sut: fn(&str, u16) -> b2bua_harness::B2buaSutBuilder,
+) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
     let sim = Arc::new(SimulatedSignalingNetwork::new(1));
     let clock = Clock::test_at(0);
     let h = Harness::with_network_and_clock(
@@ -64,7 +82,7 @@ async fn setup_fake(
     h.disarm_cseq_gate(); // infra harness; loadgen runs its own per-call audit
 
     let (uac, uas, refer) = (base, base + 1, base + 2);
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", uas)
+    let b2bua = make_sut("127.0.0.1", uas)
         .tune(|c| c.relay_headers = vec!["X-Loadgen-Id".to_string()])
         .start(&h, "b2bua", &format!("127.0.0.1:{}", base + 3))
         .await;
@@ -728,6 +746,63 @@ async fn loadgen_fake_net_recovers_dropped_early_update() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// 047 — NO-ANSWER-triggered failover end-to-end on the paused clock:
+///
+///   INVITE(routes plan, per-route `no_answer_timeout_sec`) → bob 180 …
+///   silence … → the SUT's OWN NoAnswer timer fires → CANCEL bob (487, the
+///   leg settles via the hop-ACK) → /call/failure walks the plan → bob2
+///   answers → talk → BYE.
+///
+/// Every call OK under the strict per-call audit (the SUT-timer-driven CANCEL
+/// of the silent primary is the EXPECTED teardown of that leg), zero orphans
+/// (the rerouted `sip:bob2@…` leg demuxes via the R-URI-user picker), no
+/// mux/SUT leak. The ~2 s ring dwell per call is free on virtual time.
+#[tokio::test(start_paused = true)]
+async fn loadgen_fake_net_rerouting_noanswer() {
+    let (h, b2bua, core, transport) = setup_fake_api_call(7140).await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 2 }));
+
+    // The pinned layout: the egress realizes [bob, bob2] as the X-Api-Call
+    // routes failover plan, each route arming the SUT's no-answer ring timer.
+    let mut c = cfg(b2bua.addr, 6.0, 2, 8, 0x0A47);
+    c.call.egress = EgressPolicy::ApiCallPin;
+
+    let driver =
+        Driver::new(c, vec![mix("rerouting_noanswer", 1.0)], reporter.clone(), transport);
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    let ok = reporter.count("rerouting_noanswer", &ResultClass::Ok);
+    assert!(total >= 5, "governor under-delivered: {total}");
+    assert_eq!(
+        ok, total,
+        "a no-answer reroute call was NOK:\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        reporter.count("rerouting_noanswer", &ResultClass::RfcAuditFail),
+        0,
+        "the SUT-timer-driven CANCEL surfaced as an RFC-audit finding:\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        core.stats().orphan_no_header.load(Relaxed)
+            + core.stats().orphan_unknown_token.load(Relaxed)
+            + core.stats().orphan_stray.load(Relaxed),
+        0,
+        "orphans on the no-answer reroute (failover-leg demux gap?)"
+    );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak (rerouting_noanswer)");
+    // Drain past the SUT's dead-call detection before the strict release oracle
+    // (a straggler CANCEL/487 tail settles on the paused timeline either way).
+    h.advance(Duration::from_secs(40)).await;
     settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }

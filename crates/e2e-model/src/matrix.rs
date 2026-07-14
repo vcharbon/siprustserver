@@ -63,7 +63,8 @@ const FORK_TAGS: &[&str] = &["fk1", "fk2", "fk3"];
 
 /// The establishment axis. Reliable (E2), true forking (E3), reroute-on-reject
 /// (E4 — the reject arm sends NO provisional, so this already models
-/// "reroute-no-18x": bob's `Disposition::Reject` answers the final directly).
+/// "reroute-no-18x": bob's `Disposition::Reject` answers the final directly),
+/// reroute-on-no-answer (E6/047 — ring-then-silent primary, SUT-timer-driven).
 const ESTS: &[Est] = &[
     Est { frag: "reliable", make: Establishment::Reliable, needs_bob2: false, reliable: true },
     Est {
@@ -80,6 +81,17 @@ const ESTS: &[Est] = &[
     Est {
         frag: "reroute",
         make: Establishment::RerouteOnReject { reject: 486, winner_reliable: false },
+        needs_bob2: true,
+        reliable: false,
+    },
+    // E6 (047): NO-ANSWER-triggered failover — bob rings then never answers,
+    // the SUT's per-route no-answer timer CANCELs it and walks to bob2.
+    Est {
+        frag: "reroute_noanswer",
+        make: Establishment::RerouteOnNoAnswer {
+            no_answer_sec: callshapes::shapes::NOANSWER_RING_SEC,
+            winner_reliable: false,
+        },
         needs_bob2: true,
         reliable: false,
     },
@@ -204,7 +216,7 @@ mod tests {
     #[test]
     fn matrix_generates_the_compatible_cross_product() {
         let ids: Vec<&str> = generated_ids().iter().map(String::as_str).collect();
-        // 3 establishments × 2 scripts − reliable+update (== prack_update) = 5.
+        // 4 establishments × 2 scripts − reliable+update (== prack_update) = 7.
         assert_eq!(
             ids,
             vec![
@@ -213,6 +225,8 @@ mod tests {
                 "forked+update",
                 "reroute+reinvite",
                 "reroute+update",
+                "reroute_noanswer+reinvite",
+                "reroute_noanswer+update",
             ],
             "the compatibility matrix generates exactly the legal cells",
         );
@@ -236,7 +250,15 @@ mod tests {
             .filter(|d| d.id.starts_with("reroute"))
             .map(|d| d.id)
             .collect();
-        assert_eq!(reroute, vec!["reroute+reinvite", "reroute+update"]);
+        assert_eq!(
+            reroute,
+            vec![
+                "reroute+reinvite",
+                "reroute+update",
+                "reroute_noanswer+reinvite",
+                "reroute_noanswer+update",
+            ]
+        );
         assert!(
             generated_shapes().iter().filter(|d| d.id.starts_with("reroute")).all(|d| d.needs_bob2),
             "reroute cells need bob2",
