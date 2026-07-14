@@ -47,6 +47,14 @@ pub enum ObligationKind {
     Notify,
     /// A BYE we sent, awaiting its 200.
     Bye,
+    /// A BYE we sent to tear down a LOSING fork after ACKing its late 2xx
+    /// (RFC 3261 §13.2.2.4 — C1/E3 forking), awaiting its 200. Distinct from
+    /// [`Bye`](Self::Bye) so its 200 does NOT terminate the leg (the winning
+    /// dialog lives on), and because the fork's BYE may share the main BYE's
+    /// CSeq number (each fork's CSeq space is independent, §12.2.1.1) — the
+    /// kind is the disambiguator. Dispatched by To-tag comparison in the
+    /// caller's reactor, so it is NOT in [`from_cseq_method`](Self::from_cseq_method).
+    ForkBye,
     /// A REFER we sent, awaiting its 202.
     Refer,
     /// A PRACK we sent, awaiting its 200.
@@ -79,6 +87,7 @@ impl ObligationKind {
             ObligationKind::ReInvite => "re-INVITE",
             ObligationKind::Notify => "NOTIFY",
             ObligationKind::Bye => "BYE",
+            ObligationKind::ForkBye => "fork-BYE",
             ObligationKind::Refer => "REFER",
             ObligationKind::Prack => "PRACK",
             ObligationKind::Update => "UPDATE",
@@ -224,15 +233,21 @@ impl ObligationLedger {
     /// [`RejectFinal`](ObligationKind::RejectFinal), the ONE obligation with
     /// UA-outlives-the-call recovery semantics (its leg is abandoned by a REROUTE,
     /// never a BYE, and its lost hop-ACK is still recoverable via the peer's
-    /// Timer-G retransmit + the SUT re-ACK — see the kind's doc). The CSeq gap
+    /// Timer-G retransmit + the SUT re-ACK — see the kind's doc), and
+    /// [`ForkBye`](ObligationKind::ForkBye): a losing FORK's teardown rides its
+    /// own dialog, independent of the main dialog being torn down here — its
+    /// 200 can still arrive (and a lost fork BYE is Timer-E-recoverable), so
+    /// settle must keep holding for it. The CSeq gap
     /// detector is deliberately untouched: a genuinely-lost fire-and-forget
     /// in-dialog request (a dropped NOTIFY the SUT never retransmits) is a REAL
     /// hole the terminal state does not fill.
     pub fn discharge_leg(&mut self, leg: &'static str) {
+        let preserved =
+            |k: &ObligationKind| matches!(k, ObligationKind::RejectFinal | ObligationKind::ForkBye);
         let stranded: Vec<ObligationKey> = self
             .opened
             .keys()
-            .filter(|k| k.leg == leg && k.kind != ObligationKind::RejectFinal && !self.closed.contains(k))
+            .filter(|k| k.leg == leg && !preserved(&k.kind) && !self.closed.contains(k))
             .copied()
             .collect();
         for key in stranded {
