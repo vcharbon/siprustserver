@@ -297,6 +297,65 @@ mod tests {
         h.finish().await;
     }
 
+    /// C3 crossing BYE (RFC 3261 §15.1.2): BOTH ends originate a BYE at the same
+    /// paused-clock instant (both gated on `AllConfirmed`), so each BYE is in
+    /// flight when the peer's BYE arrives. The reactor must 200 the inbound BYE
+    /// even though its own BYE is still outstanding — each end terminates, the
+    /// ledger closes (the own-BYE obligation is discharged when the peer's BYE
+    /// tears the dialog down), and the RFC hard gate confirms both crossing BYEs
+    /// rode the wire compliantly. Proves the reactor is order-independent here so
+    /// the S3 shape (and its SUT path) can rely on it.
+    #[tokio::test(start_paused = true)]
+    async fn two_actor_crossing_bye_both_terminate() {
+        let h = Harness::new("actor-crossing-bye").describe(
+            "C3/S3: alice and bob BOTH BYE on the AllConfirmed gate (same instant); \
+             the 1-transit crossing means each reactor 200s an inbound BYE while its \
+             own BYE is in flight — both legs terminate, the ledger settles OK",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let both = Barrier::AllConfirmed(&["alice", "bob"]);
+        let call = CallPlan {
+            actors: vec![
+                ActorSpec {
+                    role: "alice",
+                    agent: alice.clone(),
+                    disposition: Disposition::Caller,
+                    media: MediaState::offer(OFFER_SDP),
+                    goals: vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(both.clone(), GoalStep::Bye),
+                    ],
+                    invite_targets: vec![("bob", bob.clone())],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+                ActorSpec {
+                    role: "bob",
+                    agent: bob.clone(),
+                    disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(200) },
+                    media: MediaState::answer(ANSWER_SDP),
+                    // The callee ALSO hangs up on the same gate — the crossing.
+                    goals: vec![Goal::new(both.clone(), GoalStep::Bye)],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+            ],
+            plan: vec![phase("established", |s| {
+                s.leg_at_least("alice", LegPhase::Confirmed)
+                    && s.leg_at_least("bob", LegPhase::Confirmed)
+            })],
+            settle: SettleBarrier::default_ceiling(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "the crossing-BYE call must settle OK, got {verdict:?}");
+
+        h.finish().await;
+    }
+
     /// The generic in-dialog origination primitive (`GoalStep::InDialog`): alice
     /// establishes, sends an INFO carrying a typed body + an extra header on the
     /// confirmed dialog, and hangs up ONLY once the observed state shows bob

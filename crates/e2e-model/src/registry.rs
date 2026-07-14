@@ -459,6 +459,10 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
         ShapeDescriptor::new("reinvite10")
             .anchors(LOAD_REINVITE_ANCHORS)
             .load_actor_with(|_| Arc::new(cs::reinvite_n(cs::default_binder(), "reinvite10", 10))),
+        // C3/S3: crossing BYE (both ends hang up at once). Id-addressable only.
+        ShapeDescriptor::new("crossing_bye")
+            .anchors(LOAD_CALL_ANCHORS)
+            .load_actor_with(|_| Arc::new(cs::crossing_bye(cs::default_binder()))),
         // The first ACTOR-executed shape (plan §4.5 — the redesign's exemplar):
         // per-endpoint reactive actors + the ack-gated settle barrier replace
         // the one serialized coroutine. Same id, same anchors, same downstream

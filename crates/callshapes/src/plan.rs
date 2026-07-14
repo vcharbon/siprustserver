@@ -125,6 +125,12 @@ pub enum ByeFeed {
 pub enum Teardown {
     /// The caller BYEs once the final gate holds, after the dwell.
     CallerBye { after: DwellKnob, feed: ByeFeed },
+    /// CROSSING BYE (C3/S3, RFC 3261 §15.1.2): the caller AND the winning callee
+    /// both BYE on the final gate at the same instant, so each BYE is in flight
+    /// when the peer's arrives. Each reactor 200s the inbound BYE while its own
+    /// is outstanding; both legs terminate. The caller stamps the same
+    /// checkpoint/phase feed as a plain `CallerBye`.
+    CrossingBye { after: DwellKnob },
     /// No teardown goal — only legal for terminal establishments.
     None,
 }
@@ -160,6 +166,9 @@ struct Build {
     expect: Expect,
     /// The barrier gating the next deliberate action on the current dialog.
     gate: Barrier,
+    /// The winning callee role (`"bob"`, or `"bob2"` after a reroute) — the leg
+    /// a crossing-BYE teardown gives its own BYE goal to.
+    winner: &'static str,
 }
 
 impl Build {
@@ -245,6 +254,7 @@ impl ShapePlan {
             phases: Vec::new(),
             expect: Expect::HappyBye,
             gate: Barrier::None,
+            winner: "bob",
         };
 
         self.compile_establishment(env, &mut b)?;
@@ -267,6 +277,18 @@ impl ShapePlan {
                     ByeFeed::CheckpointOnly => Feed::new(Some("time_to_bye_200"), None),
                     ByeFeed::NoFeed => Feed::default(),
                 };
+            }
+            Teardown::CrossingBye { after } => {
+                let dwell = after.resolve(env);
+                // The caller AND the winning callee both BYE on the SAME final
+                // gate, dwelling identically, so the two BYEs cross (RFC 3261
+                // §15.1.2). Each reactor 200s the peer's inbound BYE while its
+                // own is in flight — verified order-independent in the actor
+                // machinery test `two_actor_crossing_bye_both_terminate`.
+                b.caller_goals.push(Goal::new(b.gate.clone(), GoalStep::Bye).after(dwell));
+                b.caller_feed.on_bye_ok = Feed::new(Some("time_to_bye_200"), Some("bye_200"));
+                let gate = b.gate.clone();
+                b.callee_mut(b.winner).goals.push(Goal::new(gate, GoalStep::Bye).after(dwell));
             }
             Teardown::None => {} // legal only for terminals — validate() gates
         }
@@ -393,6 +415,7 @@ impl ShapePlan {
                         ..CtxFeed::default()
                     },
                 });
+                b.winner = "bob2";
                 let est = established_pred("bob2");
                 b.phases.push(phase("established", est.clone()));
                 b.gate = Barrier::pred("established", est);
@@ -600,6 +623,8 @@ mod tests {
         for plan in [
             shapes::basic_call(b()),
             shapes::reinvite(b()),
+            shapes::reinvite_n(b(), "reinvite10", 10),
+            shapes::crossing_bye(b()),
             shapes::prack_update(b()),
             shapes::rerouting_prack(b()),
             shapes::options_hold(b()),

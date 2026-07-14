@@ -11,7 +11,9 @@
 use std::sync::Arc;
 
 use crate::binder::RouteBinder;
-use crate::plan::{ByeFeed, DwellKnob, Establishment, Script, ShapePlan, Stage, Teardown, Transfer};
+use crate::plan::{
+    ByeFeed, DwellKnob, Establishment, Script, ShapePlan, Stage, Teardown, Transfer,
+};
 use crate::EgressBinder;
 
 /// The upstream default binder, shared across the shipped catalog.
@@ -57,6 +59,21 @@ pub fn reinvite_n(binder: Arc<dyn RouteBinder>, id: &'static str, n: u32) -> Sha
             after: DwellKnob::ReinviteGap,
             feed: ByeFeed::CheckpointAndPhase,
         },
+        ringing_gate: true,
+        stamp_connected: true,
+    }
+}
+
+/// `crossing_bye` — transparent establishment, talk, then a CROSSING BYE (C3/S3,
+/// RFC 3261 §15.1.2): the caller and the winning callee both hang up at the same
+/// instant, so each BYE crosses the peer's in flight.
+pub fn crossing_bye(binder: Arc<dyn RouteBinder>) -> ShapePlan {
+    ShapePlan {
+        id: "crossing_bye",
+        binder,
+        establish: Establishment::Transparent,
+        stages: vec![],
+        teardown: Teardown::CrossingBye { after: DwellKnob::TalkTime },
         ringing_gate: true,
         stamp_connected: true,
     }
