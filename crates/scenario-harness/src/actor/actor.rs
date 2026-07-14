@@ -80,6 +80,13 @@ pub enum Disposition {
     /// answer (a CANCEL mid-ring yields `487`, not a stuck answer). A ZERO ring
     /// still emits the 180 (the linear bodies' 180-then-immediate-200 shape).
     RingThenAnswer { ring: Duration },
+    /// Rings (`180`) then stays SILENT forever — the ring-then-timeout stimulus
+    /// a NO-ANSWER-triggered failover needs (newkahneed-047): the INVITE server
+    /// transaction is held open so the SUT's OWN no-answer timer is what ends
+    /// the leg. The SUT's timer-driven CANCEL yields `487` (the same held-txn
+    /// path as a mid-ring CANCEL), so the leg settles cleanly under the reroute
+    /// with no stuck obligation or leaked server txn.
+    RingThenSilent,
     /// Rejects the initial INVITE with a final `code` (486/603/…).
     Reject(u16),
     /// Answers RELIABLY (RFC 3262): a `183` carrying `Require:100rel` + `RSeq` +
@@ -337,6 +344,11 @@ pub struct ActorState<'c> {
     /// (MUST-014). `Some` for a [`Disposition::ReliableAnswer`] leg between its
     /// 183 and the PRACK.
     pending_prack_answer: Option<ServerTxn>,
+    /// A [`Disposition::RingThenSilent`] leg's held INVITE server transaction
+    /// (180 sent, no final EVER originated by this leg): released only by an
+    /// inbound CANCEL — the SUT's no-answer timer firing — which 487s it
+    /// (newkahneed-047).
+    held_silent: Option<ServerTxn>,
     /// `(fork To-tag, RSeq)` pairs of reliable provisionals this caller has
     /// already PRACKed — so a retransmitted 183 is not double-PRACKed, while
     /// a FORKED reliable 183 (distinct tag, same RSeq space per §12.1.2 — each
@@ -446,6 +458,7 @@ impl<'c> ActorState<'c> {
             saw_provisional: false,
             answered_reinvites: HashSet::new(),
             pending_prack_answer: None,
+            held_silent: None,
             pracked_rseqs: HashSet::new(),
             fork_answer: None,
             fork_loser_tags: HashSet::new(),
@@ -778,7 +791,8 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
                 .pending_answer
                 .take()
                 .map(|ta| ta.uas)
-                .or_else(|| st.pending_prack_answer.take());
+                .or_else(|| st.pending_prack_answer.take())
+                .or_else(|| st.held_silent.take());
             if let Some(mut inv) = held {
                 inv.respond(487, "Request Terminated").try_send().await?;
                 arm_reject_final(st, &inv, 487);
@@ -928,6 +942,16 @@ async fn apply_disposition(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Resul
             uas.respond(180, "Ringing").try_send().await?;
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
             st.pending_answer = Some(TimedAnswer { at: Instant::now() + ring, uas, fork: None });
+        }
+        // Ring then SILENCE (047): the 180 goes out, the INVITE server txn is
+        // held with NO answer ever scheduled — the SUT's own no-answer timer
+        // must end this leg. Its CANCEL lands in `react_request`'s CANCEL arm,
+        // which takes the held txn and 487s it (arming the reject-final
+        // obligation).
+        Disposition::RingThenSilent => {
+            uas.respond(180, "Ringing").try_send().await?;
+            st.obs.record(Observation::LegEarly { leg: st.role }, now);
+            st.held_silent = Some(uas);
         }
         // C1/E3 forking UAS: one 18x per DISTINCT explicit To-tag on the ONE
         // retained INVITE server txn (as if a downstream proxy forked), then the

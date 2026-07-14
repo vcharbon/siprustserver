@@ -40,6 +40,18 @@ pub enum Establishment {
     /// The primary callee rejects with `reject` (no 18x) and the SUT fails
     /// over to `bob2`, which answers reliably (`winner_reliable`) or plainly.
     RerouteOnReject { reject: u16, winner_reliable: bool },
+    /// NO-ANSWER-triggered failover (newkahneed-047): the primary callee rings
+    /// (`180`) then NEVER answers ([`Disposition::RingThenSilent`]); the SUT's
+    /// own no-answer timer fires, CANCELs the primary (whose `487` settles the
+    /// leg cleanly) and fails over to `bob2`, which answers reliably
+    /// (`winner_reliable`) or plainly. Routing rides the SAME
+    /// [`RouteIntent::FailoverOnReject`](crate::binder::RouteIntent) seam as
+    /// [`RerouteOnReject`](Self::RerouteOnReject), so a downstream binder maps
+    /// it unchanged; `no_answer_sec` is the SUT ring-timer knob a binder MAY
+    /// arm client-side ([`RouteBinder::invite_plan_no_answer`]) — a platform
+    /// whose SUT owns its own ring timer ignores it. The primary's dwell is
+    /// bounded by the SUT timer, never by the callee.
+    RerouteOnNoAnswer { no_answer_sec: u32, winner_reliable: bool },
     /// TRUE forking (RFC 3261 §12.1.2): the callee `bob` emits one 18x per
     /// DISTINCT explicit To-tag in `tags` on its ONE INVITE server transaction
     /// (as if a downstream proxy had forked), then answers `200` under
@@ -409,7 +421,37 @@ impl ShapePlan {
                 b.phases.push(phase("established", est.clone()));
                 b.gate = Barrier::pred("established", est);
             }
-            Establishment::RerouteOnReject { reject, winner_reliable } => {
+            Establishment::RerouteOnReject { .. } | Establishment::RerouteOnNoAnswer { .. } => {
+                // The two failover triggers share the whole scaffolding — the
+                // [bob, bob2] intent, the bob2 winner, the `established` gate —
+                // and differ ONLY in the primary's stimulus (an immediate reject
+                // final vs ring-then-silence bounded by the SUT's no-answer
+                // timer) and in whether the plan arms that timer client-side.
+                let (winner_reliable, primary, plan) = match self.establish {
+                    Establishment::RerouteOnReject { reject, winner_reliable } => (
+                        winner_reliable,
+                        // The primary callee rejects (its reject-ACK absorbed
+                        // without confirming), triggering the SUT's failover.
+                        Disposition::Reject(reject),
+                        self.binder.invite_plan(
+                            env,
+                            RouteIntent::FailoverOnReject { targets: &["bob", "bob2"] },
+                        ),
+                    ),
+                    Establishment::RerouteOnNoAnswer { no_answer_sec, winner_reliable } => (
+                        winner_reliable,
+                        // 047: the primary rings then stays silent; the SUT's
+                        // no-answer timer CANCELs it (→ 487, a clean settle) and
+                        // walks the plan to bob2.
+                        Disposition::RingThenSilent,
+                        self.binder.invite_plan_no_answer(
+                            env,
+                            RouteIntent::FailoverOnReject { targets: &["bob", "bob2"] },
+                            i64::from(no_answer_sec),
+                        ),
+                    ),
+                    _ => unreachable!("outer match arm"),
+                };
                 let bob2 = env
                     .bob2
                     .ok_or_else(|| StepError::UnexpectedKind {
@@ -417,10 +459,7 @@ impl ShapePlan {
                         detail: "bound without a bob2 leg".to_string(),
                     })?
                     .clone();
-                let mut plan = self.binder.invite_plan(
-                    env,
-                    RouteIntent::FailoverOnReject { targets: &["bob", "bob2"] },
-                );
+                let mut plan = plan;
                 if winner_reliable {
                     plan = plan.with_supported_100rel();
                 }
@@ -433,12 +472,10 @@ impl ShapePlan {
                     b.caller_feed.on_prack_ok =
                         Feed::new(Some("time_to_prack_200"), Some("pracked"));
                 }
-                // The primary callee rejects (its reject-ACK absorbed without
-                // confirming), triggering the SUT's failover to bob2.
                 b.callees.push(ActorSpec {
                     role: "bob",
                     agent: env.bob.clone(),
-                    disposition: Disposition::Reject(reject),
+                    disposition: primary,
                     media: MediaState::none(),
                     goals: vec![],
                     invite_targets: vec![],
@@ -775,6 +812,7 @@ mod tests {
             shapes::forked_reliable(b()),
             shapes::prack_update(b()),
             shapes::rerouting_prack(b()),
+            shapes::rerouting_noanswer(b()),
             shapes::options_hold(b()),
             shapes::long_call(b()),
             shapes::refer(b(), "k"),

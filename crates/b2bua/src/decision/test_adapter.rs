@@ -248,6 +248,10 @@ fn route_from_obj(obj: &serde_json::Value) -> Option<RouteDecision> {
     r.new_ruri = obj.get("new_ruri").and_then(|v| v.as_str()).map(str::to_string);
     r.new_from = obj.get("new_from").and_then(|v| v.as_str()).map(str::to_string);
     r.new_to = obj.get("new_to").and_then(|v| v.as_str()).map(str::to_string);
+    // Per-route no-answer ring timer (047): `apply_route` arms
+    // `TimerType::NoAnswer` on the dialed b-leg, so a ring-forever hop advances
+    // the plan (the `no-answer` rule POSTs /call/failure) like a reject would.
+    r.no_answer_timeout_sec = obj.get("no_answer_timeout_sec").and_then(|v| v.as_i64());
     r.update_headers = parse_update_headers(obj.get("update_headers"));
     if let Some(arr) = obj.get("call_limiter").and_then(|v| v.as_array()) {
         for e in arr {
@@ -993,6 +997,32 @@ mod tests {
                 );
             }
             _ => panic!("expected exhaustion reject"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_route_carries_per_route_no_answer_timeout() {
+        // 047: each plan route's `no_answer_timeout_sec` reaches the
+        // RouteDecision — on the FIRST route (apply_route arms the NoAnswer
+        // ring timer) AND on the failover route popped by call_failure.
+        let eng = ScriptedDecisionEngine::numbering_plan();
+        let plan = serde_json::json!({
+            "action": "route",
+            "routes": [
+                {"destination": {"host": "10.0.0.1", "port": 5070}, "no_answer_timeout_sec": 2},
+                {"destination": {"host": "10.0.0.2", "port": 5070}, "no_answer_timeout_sec": 3}
+            ]
+        });
+        let ctx = match eng.new_call(plan_req(plan)).await.unwrap() {
+            NewCallResponse::Route(r) => {
+                assert_eq!(r.no_answer_timeout_sec, Some(2));
+                r.callback_context.expect("remainder context")
+            }
+            _ => panic!("expected route #1"),
+        };
+        match eng.call_failure(failure_req(Some(&ctx))).await.unwrap() {
+            CallTreatment::Route(r) => assert_eq!(r.no_answer_timeout_sec, Some(3)),
+            _ => panic!("expected route #2"),
         }
     }
 
