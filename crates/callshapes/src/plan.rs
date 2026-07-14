@@ -225,6 +225,15 @@ impl ShapePlan {
         } else if matches!(self.teardown, Teardown::None) {
             return Err(err("non-terminal shape with no teardown (calls must terminate)"));
         }
+        for stage in &self.stages {
+            if let Stage::Script(Script::Reinvite { n }) = stage {
+                if *n != 1 {
+                    return Err(err(
+                        "Reinvite n != 1 needs the per-cycle reneg barrier (phase C)",
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -439,18 +448,14 @@ impl ShapePlan {
     fn compile_script(&self, env: &CallEnv<'_>, b: &mut Build, script: &Script) {
         match *script {
             Script::Reinvite { n } => {
-                for i in 0..n {
-                    // The first re-INVITE waits on the incoming gate; each
-                    // subsequent one on the previous renegotiation completing
-                    // (origination resets the reneg sub-flow, so `reinvited`
-                    // re-arms per cycle).
-                    let guard = if i == 0 {
-                        b.gate.clone()
-                    } else {
-                        Barrier::pred("reinvited", reneg_done)
-                    };
+                // n > 1 is gated in validate(): SUBFLOW_RENEG is a MONOTONIC
+                // latch (state.rs advance_subflow is a max, and Reinvite
+                // origination never resets it), so a `reinvited` guard cannot
+                // serialize cycles — phase C lands a per-cycle (per-CSeq)
+                // completion barrier before the ×N matrix generates.
+                for _ in 0..n {
                     b.caller_goals
-                        .push(Goal::new(guard, GoalStep::Reinvite).after(env.reinvite_gap));
+                        .push(Goal::new(b.gate.clone(), GoalStep::Reinvite).after(env.reinvite_gap));
                 }
                 b.caller_feed.on_reinvite_ok =
                     Feed::new(Some("time_to_reinvite_200"), Some("reinvited"));
