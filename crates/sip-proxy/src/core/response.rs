@@ -2,13 +2,12 @@
 //! single-endpoint. Validate ≥2 Via and that the top is us; route to the next
 //! Via (received/rport precedence); reverse-path failover to the cookie's
 //! `w_bak` when the destination worker is no longer alive; pop the top Via
-//! entry (comma-aware); forward; synthesize a hop-by-hop ACK for a non-2xx
-//! INVITE final.
+//! entry (comma-aware); forward; remember the ACK-relay hop for a non-2xx
+//! INVITE final (the ACK itself travels end-to-end — see `core/request.rs`).
 
-use sip_message::generators::generate_proxy_ack_for_non_2xx;
 use sip_message::message_helpers::{parse_sip_uri, parse_uri_params};
 use sip_message::types::{ParamValue, SipResponse, Via};
-use sip_message::{serialize, SipMessage};
+use sip_message::SipMessage;
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::call_id_cseq_key;
@@ -111,42 +110,34 @@ impl ProxyCore {
         self.send_to(&sip_message::serialize_response_parts(&resp, &headers), &next_hop).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Forwarded);
 
-        // ── Hop-by-hop ACK for a non-2xx INVITE final (§17.1.1.3) ───────────
+        // ── Relayed non-2xx INVITE final: remember the ACK-relay hop ────────
+        // This transaction-less proxy (ADR-0022 X4) does NOT synthesize the
+        // §17.1.1.3 hop-by-hop ACK here — it used to, and that quenched the
+        // downstream UAS's Timer G (the only retransmitter in the system)
+        // while the relay above stays exactly-once: lose that one relayed
+        // copy and the caller never saw the final at all, wedging the reject
+        // until Timer B / the 32 s safety timer. Reliability is END-TO-END
+        // instead: the UAS retransmits the final through this stateless relay
+        // until the upstream's own ACK arrives, and the request path relays
+        // that ACK downstream on the INVITE's remembered hop (same target,
+        // same outbound branch) so the UAS's server transaction matches it.
+        //
+        // The marker written here is the routing memo for that relay: it says
+        // "a non-2xx final for this INVITE was relayed on this hop" and
+        // carries the hop to repeat. Gating the ACK-relay on it (rather than
+        // on the INVITE entry alone) keeps a takeover worker's 2xx ACK safe
+        // when its reset `IdGen` re-mints a branch aliasing the dead
+        // primary's INVITE (see `core/request.rs`). Short TTL: the upstream
+        // ACKs within its final-retransmit window (a re-sent final refreshes
+        // the marker).
         if (300..700).contains(&resp.status) && resp.cseq.method == "INVITE" {
             // The response echoes the request's From (tag included), so this
             // re-builds exactly the key the INVITE was remembered under.
             let key = call_id_cseq_key(&resp.call_id, resp.from.tag.as_deref(), resp.cseq.seq);
             if let Some(found) = self.cancel_lru.lookup(&key) {
-                // The synthesized hop ACK travels the SAME hop the INVITE was
-                // forwarded on, so its proxy Via carries THAT face's advertise
-                // (matching the branch-correlated INVITE Via the downstream
-                // UAS saw).
-                let ack_adv = self.egress_advertised(&found.target);
-                let ack = generate_proxy_ack_for_non_2xx(
-                    &resp,
-                    (&found.target.host, found.target.port),
-                    &found.branch,
-                    (&ack_adv.host, ack_adv.port),
-                    // §17.1.1.3: reuse the INVITE's Request-URI verbatim (the
-                    // remembered forward), so the downstream UAS sees the ACK
-                    // under the URI it was INVITEd on — not a user-stripped
-                    // `sip:{target}` (newkahneed-033 ask B).
-                    Some(&found.invite_ruri),
-                );
-                self.send_to(&serialize(&SipMessage::Request(ack)), &found.target).await;
-                self.metrics.record_ack_synthesized();
-
-                // Mark the transaction "we already ACKed downstream" so the
-                // request path absorbs the upstream's OWN ACK for this final
-                // (§17.1.1.3 — hop-by-hop) instead of relaying a second ACK
-                // to the callee. The upstream's ACK reuses ITS INVITE branch,
-                // which is exactly this relayed response's second Via branch
-                // (the hop the final is being forwarded to). Short TTL: the
-                // upstream ACKs within its final-retransmit window (a re-sent
-                // final refreshes the marker).
                 let upstream_branch = param_str(next, "branch").unwrap_or("").to_string();
                 self.cancel_lru.remember(
-                    &crate::cancel_lru::ack_absorb_key(
+                    &crate::cancel_lru::ack_hop_key(
                         &resp.call_id,
                         resp.from.tag.as_deref(),
                         resp.cseq.seq,
@@ -155,7 +146,6 @@ impl ProxyCore {
                         target: found.target.clone(),
                         branch: found.branch.clone(),
                         upstream_branch,
-                        invite_ruri: found.invite_ruri.clone(),
                     },
                     crate::cancel_lru::RTX_ENTRY_TTL_MS,
                 );
@@ -410,16 +400,16 @@ Content-Length: 0\r\n\r\n"
         assert!(!txt.contains("outbound:forwarded"), "the 100 must not be relayed upstream");
     }
 
-    /// Endpoint double capturing every sent datagram's bytes.
+    /// Endpoint double capturing every sent datagram's destination + bytes.
     #[derive(Default)]
     struct ByteCapturingEndpoint {
-        sent: std::sync::Mutex<Vec<Vec<u8>>>,
+        sent: std::sync::Mutex<Vec<(std::net::SocketAddr, Vec<u8>)>>,
     }
 
     #[async_trait::async_trait]
     impl sip_net::UdpEndpoint for ByteCapturingEndpoint {
-        async fn send_to(&self, buf: &[u8], _dst: std::net::SocketAddr) -> Result<(), sip_net::SendError> {
-            self.sent.lock().unwrap().push(buf.to_vec());
+        async fn send_to(&self, buf: &[u8], dst: std::net::SocketAddr) -> Result<(), sip_net::SendError> {
+            self.sent.lock().unwrap().push((dst, buf.to_vec()));
             Ok(())
         }
         async fn recv(&self) -> Option<sip_net::UdpPacket> {
@@ -442,14 +432,18 @@ Content-Length: 0\r\n\r\n"
         }
     }
 
-    // RFC 3261 §17.1.1.3 (newkahneed-033 ask B): the hop-by-hop ACK the proxy
-    // synthesizes for a relayed non-2xx INVITE final must carry the SAME
-    // Request-URI as the INVITE it acknowledges — the old `sip:{target}`
-    // fallback stripped the user-part (`sip:+0411…@uas:6001;user=phone` became
-    // `sip:uas:6001`), so any downstream R-URI-keyed demux (the loadgen mux's
-    // prefix picker) could no longer attribute the ACK to its leg.
+    // RFC 3261 §16.11 / ADR-0022 X4 — loss-recovery of a rejected call. The
+    // proxy must NOT synthesize the §17.1.1.3 hop ACK when relaying a non-2xx
+    // INVITE final: that quenched the downstream UAS's Timer G (the only
+    // retransmitter in the system) while the upstream relay stays
+    // exactly-once, so one lost relayed copy wedged the caller until Timer B
+    // / the 32 s safety timer. Reliability is end-to-end instead — the
+    // upstream's own ACK is relayed downstream on the INVITE's remembered
+    // hop: same target, same outbound Via branch (so the UAS's server
+    // transaction matches it, §17.2.3), the caller's message otherwise
+    // verbatim (R-URI included — the newkahneed-033 demux concern).
     #[tokio::test]
-    async fn synthesized_non_2xx_ack_reuses_the_invite_request_uri() {
+    async fn relayed_non_2xx_final_is_never_hop_acked_and_the_upstream_ack_relays() {
         let ep = Arc::new(ByteCapturingEndpoint::default());
         let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
         let metrics = Arc::new(ProxyMetrics::new());
@@ -475,9 +469,23 @@ Content-Length: 0\r\n\r\n"
         let msg = CustomParser::default().parse(raw_invite.as_bytes()).unwrap();
         core.handle_request(msg, format!("{UAC}:5060").parse().unwrap()).await;
 
+        // The branch the proxy stamped on its forwarded INVITE — the relayed
+        // ACK must repeat it exactly.
+        let forwarded_invite = {
+            let sent = ep.sent.lock().unwrap();
+            String::from_utf8_lossy(&sent[0].1).to_string()
+        };
+        let proxy_branch = forwarded_invite
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("via:"))
+            .and_then(|l| l.split("branch=").nth(1))
+            .map(|b| b.split(&[';', ',', ' '][..]).next().unwrap().to_string())
+            .expect("forwarded INVITE must carry a proxy Via branch");
+        ep.sent.lock().unwrap().clear();
+
         let raw_486 = format!(
             "SIP/2.0 486 Busy Here\r\n\
-Via: SIP/2.0/UDP {PROXY_VIP}:5060;branch=z9hG4bKout\r\n\
+Via: SIP/2.0/UDP {PROXY_VIP}:5060;branch={proxy_branch}\r\n\
 Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKackuri\r\n\
 From: <sip:worker@{UAC}>;tag=w1\r\n\
 To: <sip:+0411133166602012@uas.example>;tag=callee-1\r\n\
@@ -490,19 +498,47 @@ Content-Length: 0\r\n\r\n"
             panic!("expected response")
         };
         core.handle_response(resp).await;
-        assert_eq!(metrics.ack_synthesized_total(), 1, "the 486 relay must synthesize the hop ACK");
+        {
+            let sent = ep.sent.lock().unwrap();
+            assert_eq!(sent.len(), 1, "the 486 relay must be the ONLY send — no synthesized ACK");
+            let relayed = String::from_utf8_lossy(&sent[0].1).to_string();
+            assert!(
+                relayed.starts_with("SIP/2.0 486"),
+                "expected the relayed 486, got: {}",
+                relayed.lines().next().unwrap_or("")
+            );
+        }
+        ep.sent.lock().unwrap().clear();
+
+        // The upstream's own §17.1.1.3 ACK (same branch as its INVITE) is
+        // relayed downstream on the INVITE's hop.
+        let raw_ack = format!(
+            "ACK {invite_ruri} SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKackuri;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:worker@{UAC}>;tag=w1\r\n\
+To: <sip:+0411133166602012@uas.example>;tag=callee-1\r\n\
+Call-ID: ackuri-1@test\r\n\
+CSeq: 1 ACK\r\n\
+Content-Length: 0\r\n\r\n"
+        );
+        let ack_msg = CustomParser::default().parse(raw_ack.as_bytes()).unwrap();
+        core.handle_request(ack_msg, format!("{UAC}:5060").parse().unwrap()).await;
 
         let sent = ep.sent.lock().unwrap();
-        let ack = sent
-            .iter()
-            .map(|b| String::from_utf8_lossy(b).to_string())
-            .find(|s| s.starts_with("ACK "))
-            .expect("a synthesized ACK must have been sent");
-        let first_line = ack.lines().next().unwrap();
+        assert_eq!(sent.len(), 1, "the upstream's ACK must be relayed, not absorbed");
+        let (dst, bytes) = &sent[0];
+        assert_eq!(*dst, format!("{W1}:5060").parse::<std::net::SocketAddr>().unwrap(), "the ACK must repeat the INVITE's forward");
+        let ack = String::from_utf8_lossy(bytes).to_string();
         assert_eq!(
-            first_line,
+            ack.lines().next().unwrap(),
             format!("ACK {invite_ruri} SIP/2.0"),
-            "the synthesized ACK must reuse the INVITE's Request-URI verbatim"
+            "the relayed ACK must keep the upstream's Request-URI verbatim"
+        );
+        let top_via = ack.lines().find(|l| l.to_ascii_lowercase().starts_with("via:")).unwrap();
+        assert!(
+            top_via.contains(&format!("branch={proxy_branch}")),
+            "the relayed ACK must reuse the INVITE's outbound branch (got: {top_via})"
         );
     }
 

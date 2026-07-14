@@ -290,17 +290,23 @@ Content-Length: 0\r\n\r\n"
     assert_eq!(sent[0].1, format!("{W1}:5060").parse::<SocketAddr>().unwrap());
 }
 
-// ── (d) non-2xx hop ACK stays on the INVITE's face ──────────────────────────
+// ── (d) the relayed non-2xx hop ACK stays on the INVITE's face ──────────────
 
 #[tokio::test]
-async fn non_2xx_final_synthesizes_hop_ack_on_the_invite_face() {
+async fn relayed_non_2xx_ack_follows_the_invite_face() {
     let f = dual_face_core();
     f.core.route_request(&caller_invite("df-ack@test"), caller_src()).await;
-    f.take_sent();
+    let fwd_invite = f.take_sent();
+    let invite_via = header_lines(&fwd_invite[0].2, "Via");
+    let proxy_branch = invite_via[0]
+        .split("branch=")
+        .nth(1)
+        .map(|b| b.split(&[';', ',', ' '][..]).next().unwrap().to_string())
+        .expect("forwarded INVITE must carry a proxy Via branch");
 
     let raw = format!(
         "SIP/2.0 486 Busy Here\r\n\
-Via: SIP/2.0/UDP {INT_VIP}:{INT_PORT};branch=z9hG4bKout1\r\n\
+Via: SIP/2.0/UDP {INT_VIP}:{INT_PORT};branch={proxy_branch}\r\n\
 Via: SIP/2.0/UDP {CALLER}:5060;branch=z9hG4bKcaller1\r\n\
 From: <sip:alice@{CALLER}>;tag=tag-a\r\n\
 To: <sip:bob@{CALLEE}>;tag=w-1\r\n\
@@ -312,24 +318,42 @@ Content-Length: 0\r\n\r\n"
     f.core.handle_response(resp).await;
 
     let sent = f.take_sent();
-    assert_eq!(sent.len(), 2, "486 relay + synthesized hop ACK, got {}", sent.len());
-    // The 486 relays to the caller on the external face…
+    // No synthesized hop ACK (ADR-0022 X4: the proxy is transaction-less; the
+    // worker's Timer G + the caller's own relayed ACK are the reliability
+    // layer) — the 486 relay is the only send, to the caller's external face.
+    assert_eq!(sent.len(), 1, "486 relay must be the only send (no synthesized ACK), got {}", sent.len());
     assert_eq!(sent[0].0, "ext");
     assert_eq!(sent[0].1, caller_src());
-    // …and the hop ACK travels the INVITE's own (internal) hop, its proxy Via
-    // stamped with THAT face's advertise so the UAS correlates it (§17.1.1.3).
-    let (ack_face, ack_dst, ack_bytes) = &sent[1];
-    assert_eq!(*ack_face, "int", "the hop ACK must egress toward the worker on the internal face");
+
+    // The caller's own §17.1.1.3 ACK (same branch as its INVITE) relays on
+    // the INVITE's (internal) hop, its proxy Via stamped with THAT face's
+    // advertise AND the INVITE's outbound branch so the UAS correlates it.
+    let raw_ack = format!(
+        "ACK sip:bob@{CALLEE}:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {CALLER}:5060;branch=z9hG4bKcaller1;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{CALLER}>;tag=tag-a\r\n\
+To: <sip:bob@{CALLEE}>;tag=w-1\r\n\
+Call-ID: df-ack@test\r\n\
+CSeq: 1 ACK\r\n\
+Content-Length: 0\r\n\r\n"
+    );
+    let outcome = f.core.route_request(&parse_msg(&raw_ack), caller_src()).await;
+    assert_eq!(outcome.decision, RoutingDecisionKind::AckHop);
+
+    let sent = f.take_sent();
+    assert_eq!(sent.len(), 1);
+    let (ack_face, ack_dst, ack_bytes) = &sent[0];
+    assert_eq!(*ack_face, "int", "the relayed ACK must egress toward the worker on the internal face");
     assert_eq!(*ack_dst, format!("{W1}:5060").parse::<SocketAddr>().unwrap());
     let text = String::from_utf8_lossy(ack_bytes);
     assert!(text.starts_with("ACK "), "expected an ACK, got: {}", text.lines().next().unwrap_or(""));
     let vias = header_lines(ack_bytes, "Via");
     assert!(
-        vias[0].contains(&format!("{INT_VIP}:{INT_PORT}")),
-        "the synthesized ACK's Via must carry the internal-face advertise: {}",
+        vias[0].contains(&format!("{INT_VIP}:{INT_PORT}")) && vias[0].contains(&format!("branch={proxy_branch}")),
+        "the relayed ACK's Via must carry the internal-face advertise + the INVITE's branch: {}",
         vias[0],
     );
-    assert_eq!(f.metrics.ack_synthesized_total(), 1);
 }
 
 // ── (c) in-dialog requests pop BOTH self-Route halves, both directions ─────

@@ -1754,9 +1754,10 @@ impl CrossMessageAuditRule for UnackedInvite2xxByedRule {
 /// obligation (newkahneed-033 ask E): a bind that received an INVITE and
 /// answered it with a 3xx–6xx final must see the matching ACK — same Call-ID,
 /// same top-Via branch (the non-2xx ACK belongs to the INVITE transaction and
-/// reuses its branch; hop-by-hop, so through the LB the arriving ACK is the
-/// proxy's synthesized one, which carries the proxy's forward branch — exactly
-/// the branch this UAS saw on the INVITE). A final that is never ACKed means
+/// reuses its branch; through the LB the arriving ACK is the upstream's own,
+/// relayed on the INVITE's remembered hop with the proxy's forward branch —
+/// exactly the branch this UAS saw on the INVITE). A final that is never ACKed
+/// means
 /// the rejecting UAS retransmits it to Timer H and the reject path never
 /// cleanly completes — the exact class the `sipflow` pcap triage caught at
 /// load ("486 never ACKed at the UAS") that no per-step `expect` sees.

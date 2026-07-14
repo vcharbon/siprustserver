@@ -15,10 +15,11 @@
 //! other's entry, and the later CANCEL/ACK is forwarded to the wrong party
 //! with the wrong branch.
 //!
-//! The same cache also drives hop-by-hop ACK absorption (the proxy synthesized
-//! the ACK for a non-2xx final on the response path), the non-2xx ACK
-//! synthesis itself, and the retransmission branch memo (`rtx|`-prefixed keys,
-//! see `core/request.rs`).
+//! The same cache also drives the non-2xx ACK hop decision (`ackhop|` keys —
+//! relay the upstream's §17.1.1.3 ACK on the INVITE's remembered hop, or
+//! absorb it when the proxy itself generated the final; see `core/request.rs`
+//! and `core/response.rs`) and the retransmission branch memo (`rtx|`-prefixed
+//! keys, see `core/request.rs`).
 //!
 //! Reads are O(1) and lock-only (never block on I/O). Eviction is lazy on
 //! lookup plus an optional periodic [`sweep_expired`](CancelBranchLru::sweep_expired)
@@ -66,47 +67,42 @@ pub fn call_id_cseq_key(call_id: &str, from_tag: Option<&str>, cseq_num: u32) ->
     format!("{call_id}|{}|{cseq_num}", from_tag.unwrap_or(""))
 }
 
-/// Namespaced key for the hop-by-hop ACK-absorption marker: written on the
-/// RESPONSE path when the proxy relays a non-2xx INVITE final upstream and
-/// synthesizes its own ACK downstream (§17.1.1.3); consulted on the request
-/// path so the upstream's own ACK for that final terminates at this hop
-/// instead of reaching the callee twice. `ackabs|` keeps it disjoint from the
-/// plain INVITE keys and the `rtx|` memos sharing this store.
-pub fn ack_absorb_key(call_id: &str, from_tag: Option<&str>, cseq_num: u32) -> String {
-    format!("ackabs|{}", call_id_cseq_key(call_id, from_tag, cseq_num))
+/// Namespaced key for the non-2xx ACK hop memo, consulted on the request path
+/// when the upstream's §17.1.1.3 ACK arrives. Written in two flavours:
+///  • RESPONSE path, on relaying a non-2xx INVITE final upstream — carries
+///    the INVITE's forward (target + outbound branch) so the ACK is RELAYED
+///    on that exact hop (the downstream server transaction matches it and
+///    stops retransmitting the final);
+///  • request path `reply()`, on a final the proxy generated ITSELF — empty
+///    `branch`, so the ACK is ABSORBED here (the proxy is the UAS; no
+///    downstream exists).
+/// `ackhop|` keeps it disjoint from the plain INVITE keys and the `rtx|`
+/// memos sharing this store.
+pub fn ack_hop_key(call_id: &str, from_tag: Option<&str>, cseq_num: u32) -> String {
+    format!("ackhop|{}", call_id_cseq_key(call_id, from_tag, cseq_num))
 }
 
 /// What we cache per remembered INVITE: the downstream target + the branch we
 /// stamped on our outgoing Via (reused on the matching CANCEL) + the branch
 /// the UPSTREAM stamped on the top Via of the request as it arrived.
 ///
-/// `upstream_branch` is the §17.1.1.3 discriminator for hop-by-hop ACK
-/// absorption (consulted via the [`ack_absorb_key`] marker the response path
-/// writes when it relays a non-2xx final and synthesizes its own ACK): an ACK
-/// for a NON-2xx final reuses its INVITE's top-Via branch (same transaction),
-/// while an ACK for a 2xx is a new transaction with a fresh branch and must
-/// be forwarded end-to-end. Empty when the upstream request carried no branch
+/// `upstream_branch` is the §17.1.1.3 discriminator for the non-2xx ACK hop
+/// decision (consulted via the [`ack_hop_key`] memo): an ACK for a NON-2xx
+/// final reuses its INVITE's top-Via branch (same transaction), while an ACK
+/// for a 2xx is a new transaction with a fresh branch and takes the normal
+/// routing ladder. Empty when the upstream request carried no branch
 /// (pre-RFC-3261 UA) — never matched against.
-/// `invite_ruri` is the Request-URI of the INVITE **as this proxy forwarded
-/// it** — RFC 3261 §17.1.1.3 requires the ACK a client transaction generates
-/// for a non-2xx final to carry the *same* Request-URI as its INVITE, so the
-/// hop-by-hop ACK the response path synthesizes must reuse it verbatim (the
-/// old `sip:{target}` fallback stripped the user-part, which also broke any
-/// downstream R-URI-based demux — newkahneed-033 ask B). Empty on the `rtx|`
-/// memos and the `ackabs|` marker, which never source an ACK's R-URI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelEntry {
     pub target: ProxyAddr,
     pub branch: String,
     pub upstream_branch: String,
-    pub invite_ruri: String,
 }
 
 struct StoredEntry {
     target: ProxyAddr,
     branch: String,
     upstream_branch: String,
-    invite_ruri: String,
     expires_at_ms: u64,
 }
 
@@ -174,7 +170,6 @@ impl CancelBranchLru {
                 target: entry.target,
                 branch: entry.branch,
                 upstream_branch: entry.upstream_branch,
-                invite_ruri: entry.invite_ruri,
                 expires_at_ms,
             },
         );
@@ -194,7 +189,6 @@ impl CancelBranchLru {
                 target: e.target.clone(),
                 branch: e.branch.clone(),
                 upstream_branch: e.upstream_branch.clone(),
-                invite_ruri: e.invite_ruri.clone(),
             }),
             None => None,
         }
@@ -231,7 +225,6 @@ mod tests {
             target: ProxyAddr::new("10.0.0.2", 5070),
             branch: branch.to_string(),
             upstream_branch: String::new(),
-            invite_ruri: String::new(),
         }
     }
 

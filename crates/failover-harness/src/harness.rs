@@ -837,6 +837,19 @@ impl FailoverHarness {
         self.harness.agent(name, addr).await
     }
 
+    /// [`agent`](Self::agent) with an arrival-time [`sip_net::PreIngressHook`]
+    /// on the UA's bind — the deterministic loss seam (drop a chosen datagram
+    /// before it reaches the agent's inbox; see
+    /// `scenario_harness::Harness::agent_with_pre_ingress`).
+    pub async fn agent_with_pre_ingress(
+        &self,
+        name: &str,
+        addr: &str,
+        hook: sip_net::PreIngressHook,
+    ) -> Agent {
+        self.harness.agent_with_pre_ingress(name, addr, hook).await
+    }
+
     /// Stand up the real load-balancing proxy SUT at `addr` over a
     /// [`SimulatedWorkerRegistry`] holding both workers (alive). HRW selection
     /// keys off Call-ID + the alive set; the scenario marks a worker dead/alive
@@ -1692,6 +1705,24 @@ impl HarnessHandle {
             .take()
             .expect("harness taken (already finished?)");
         let a = h.agent(name, addr).await;
+        *self.inner.lock().unwrap() = Some(h);
+        a
+    }
+
+    /// [`agent`](Self::agent) with a pre-ingress hook on the UA's bind.
+    async fn agent_with_pre_ingress(
+        &self,
+        name: &str,
+        addr: &str,
+        hook: sip_net::PreIngressHook,
+    ) -> Agent {
+        let h = self
+            .inner
+            .lock()
+            .unwrap()
+            .take()
+            .expect("harness taken (already finished?)");
+        let a = h.agent_with_pre_ingress(name, addr, hook).await;
         *self.inner.lock().unwrap() = Some(h);
         a
     }
