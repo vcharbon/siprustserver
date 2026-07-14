@@ -107,17 +107,48 @@ with the in-dialog material reusable over ANY established dialog context
       crossing BYE, glare S5/S6, early UPDATE, reroute-no-18x stage.
     - **D** full matrix generation + loss soaks + the crate README.
 
-## Verify before phase C (user believes some may already exist)
+## Pre-phase-C verification findings (explored 2026-07-14 — seams confirmed)
 
-- Callee-side "emit 18x under an explicit distinct To-tag" primitive: the
-  explorer found only ONE linear early dialog per actor today; adjacent
-  machinery is the `AnswerALegNewDialog` fork-confirm primitive
-  (newkahneed-019, b8018e1). Inventory what exists in
-  `crates/scenario-harness/src/actor/actor.rs` before building.
-- RFC-audit rules that assume a single early dialog (`crates/sip-net/src/rfc_audit/`)
-  — inventory which rules need multi-early-dialog awareness.
-- b2bua transparent relay mode: confirm it relays multiple distinct-tag 18x
-  and mints one a-leg early dialog per fork.
+1. **Callee 18x tag control**: the chosen-tag primitive EXISTS at the agent
+   layer — `Respond::with_to_tag` (agent.rs ~3076/3111, per-fork override that
+   does not disturb the txn's sticky tag); two distinct-tag 18x on one
+   retained `ServerTxn` are legal today. Missing: the orchestration — add
+   `Disposition::ForkingRing{tags, winner, loser_late_200}` (actor.rs ~67-84),
+   an `apply_disposition` arm (~695-723), and teach
+   `TimedAnswer`/`answer_initial_invite` (~203-208, 497-523) to 200 under the
+   winning tag (+ optional losing-tag late 200). `AnswerALegNewDialog`
+   (newkahneed-019) is SUT-side (b2bua RuleAction), not reusable as the UAS
+   primitive — but proves the downstream wire shape.
+2. **Caller early-dialog model**: single linear slot —
+   `DialogTable.pending_invite: Option<ClientInvite>` (actor.rs ~225-237);
+   `learn_from_response` (agent.rs ~2255-2279) keeps the FIRST fork's tag and
+   silently drops later distinct-tag provisionals; only a 2xx overrides
+   (§13.2.2.4 winner). PRACK dedup is RSeq-only (`pracked_rseqs:
+   HashSet<u32>`) — must re-key to `(to_tag, rseq)`. Good news: per-fork CSeq
+   plumbing already exists (`ClientInvite.fork_cseq`,
+   `InDialogRequest::with_to_tag`/`with_fork_cseq` agent.rs ~2717-2823, winner
+   CSeq promotion in `ack` ~2468).
+3. **rfc_audit**: `project_per_dialog` already splits forks into per-To-tag
+   slices (newkahneed-029). ONE high-value fix: the pending (pre-tag)
+   INVITE+100 bucket migrates into the FIRST fork's slice only
+   (dialog_model.rs ~558-573) — replicate it into EVERY fork's slice so
+   rfc3264 offer/answer rules check non-first forks (today they under-check,
+   not false-positive). `cseqInDialogOrder`, `unackedInvite2xxByed` (the
+   loser-late-200→ACK+BYE case), `prackOnReliable1xx`,
+   `noByeOutsideOrEarlyDialog` are already fork-aware. Caller must only ever
+   BYE a fork AFTER its own 2xx (a BYE on a never-confirmed early fork
+   correctly trips `noByeOutsideOrEarlyDialog`).
+4. **SUT activation for E3**: transparent CORE relay
+   (`FeatureActivations.relay_first_18x_to_180 = None`, call/features.rs ~91)
+   relays each b-leg fork under its own a-facing tag (actions.rs ~1147-1206) —
+   exactly E3. The `relayFirst18x` masking service (any `Some{...}`) COLLAPSES
+   forks to one tag: E3 must NOT run under it (`Relay18xMessages::All` is not
+   the enabler).
+5. **S1 re-INVITE ×N**: `SUBFLOW_RENEG` is a monotonic max-latch
+   (state.rs `advance_subflow`), never reset by `GoalStep::Reinvite` — a
+   `reneg_done` guard CANNOT serialize N cycles. Phase C must add a per-cycle
+   completion barrier (per-CSeq, mirroring `sent_reinvites: HashSet<u32>`).
+   Until then `ShapePlan::validate()` rejects `Reinvite { n != 1 }`.
 
 ## Phase A findings (landed — the fake-net seam)
 
