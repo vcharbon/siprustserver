@@ -476,6 +476,11 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
         ShapeDescriptor::new("forked_reliable")
             .anchors(PRACK_ANCHORS)
             .load_actor_with(|_| Arc::new(cs::forked_reliable(cs::default_binder()))),
+        // C2/E5: CANCEL×200 crossing — a branch-aware race (Ok OR abandoned
+        // timeout). Id-addressable only; phase D assigns catalog weights.
+        ShapeDescriptor::new("cancel_answer_crossing")
+            .anchors(LOAD_ESTABLISH_ANCHORS)
+            .load_actor_with(|_| Arc::new(cs::cancel_answer_crossing(cs::default_binder()))),
         // The first ACTOR-executed shape (plan §4.5 — the redesign's exemplar):
         // per-endpoint reactive actors + the ack-gated settle barrier replace
         // the one serialized coroutine. Same id, same anchors, same downstream

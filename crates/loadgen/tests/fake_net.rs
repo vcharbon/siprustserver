@@ -243,6 +243,51 @@ async fn loadgen_fake_net_crossing_bye() {
     b2bua.assert_fully_reaped();
 }
 
+/// C2/E5: CANCEL×200 crossing through the SUT — a branch-aware race. Each call
+/// terminates in one of the two RFC-legal outcomes: confirmed + torn down (the
+/// 200 crossed the CANCEL → `Ok`) or abandoned (the CANCEL won → `timeout`). The
+/// load lane ACCEPTS EITHER; the assertion is that classification stays BOUNDED
+/// (every call lands in {Ok, Timeout} — never a protocol-defect class), no
+/// audit false positive, and the SUT fully reaps.
+#[tokio::test(start_paused = true)]
+async fn loadgen_fake_net_cancel_answer_crossing_accepts_either_branch() {
+    let (h, b2bua, core, transport) = setup_fake(7070).await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+
+    // A non-zero ring gives the CANCEL a window to race the 200.
+    let mut c = cfg(b2bua.addr, 8.0, 2, 8, 0xCA5C);
+    c.call.ring_delay = Duration::from_millis(30);
+    let driver = Driver::new(c, vec![mix("cancel_answer_crossing", 1.0)], reporter.clone(), transport);
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    let ok = reporter.count("cancel_answer_crossing", &ResultClass::Ok);
+    let timeouts = reporter.count("cancel_answer_crossing", &ResultClass::Timeout);
+    assert!(total >= 5, "governor under-delivered: {total}");
+    // Bounded classification: EVERY call is one of the two legal branches.
+    assert_eq!(
+        ok + timeouts,
+        total,
+        "a CANCEL×200 crossing landed outside {{Ok, Timeout}}:\n{}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        reporter.count("cancel_answer_crossing", &ResultClass::RfcAuditFail),
+        0,
+        "the crossing produced an RFC-audit finding:\n{}",
+        reporter.render_prometheus()
+    );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+    // A cancel-wins straggler may lean on the SUT's own dead-call detection —
+    // advance past it before the strict release oracle.
+    h.advance(Duration::from_secs(40)).await;
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+}
+
 /// C3 (b): drop BOTH crossing BYEs (the caller's AND the callee's — `leg: None`
 /// arms every endpoint's first outbound BYE) and let auto-retransmit heal them.
 /// The Timer-E resend on each side recovers the loss, the ledger closes, and

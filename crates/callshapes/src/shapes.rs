@@ -288,3 +288,20 @@ pub fn abandon_ringing(binder: Arc<dyn RouteBinder>) -> ShapePlan {
         stamp_connected: false,
     }
 }
+
+/// `cancel_answer_crossing` — the caller CANCELs while the callee answers (C2/E5,
+/// RFC 3261 §9.2): a branch-aware race whose terminal is EITHER a confirmed +
+/// torn-down call (the 200 crossed the CANCEL) OR the abandoned terminal (the
+/// CANCEL won). Terminal-style; the load lane accepts whichever legal branch
+/// occurred ([`Expect::EitherOf`](scenario_harness::actor::Expect::EitherOf)).
+pub fn cancel_answer_crossing(binder: Arc<dyn RouteBinder>) -> ShapePlan {
+    ShapePlan {
+        id: "cancel_answer_crossing",
+        binder,
+        establish: Establishment::CancelAnswerCrossing,
+        stages: vec![],
+        teardown: Teardown::None,
+        ringing_gate: false,
+        stamp_connected: false,
+    }
+}

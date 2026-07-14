@@ -44,6 +44,29 @@ pub enum Expect {
     /// The transfer target declines the REFER'd leg — the
     /// `refer_charlie_reject` synthetic terminal, byte-for-byte.
     TransferDeclined,
+    /// A **branch-aware race oracle** (C2/E5): the shape declares the SET of
+    /// RFC-legal terminal outcomes and [`into_result`] maps whichever branch the
+    /// observed state shows — a CANCEL×200 crossing terminates EITHER confirmed
+    /// (the 200 crossed/beat the CANCEL, §9.2 — the caller ACKed then BYE'd) OR
+    /// cancelled (the CANCEL won — 487+ACK). Both are legal; the load lane
+    /// accepts whichever occurred. Bounded: each branch maps to a fixed variant.
+    EitherOf(&'static [ExpectBranch]),
+}
+
+/// One RFC-legal terminal outcome of an [`Expect::EitherOf`] race (C2/E5). The
+/// actual branch is read from the observed state by [`into_result`]; each maps
+/// to a fixed, bounded downstream `Result` so the load classification stays
+/// low-cardinality.
+#[derive(Debug, Clone, Copy)]
+pub enum ExpectBranch {
+    /// The caller confirmed the call (a 2xx to its INVITE) and it tore down →
+    /// `Ok(())`. Selected when the caller leg has NO non-2xx final on its
+    /// establishing INVITE (the 200 crossed/beat the CANCEL, §9.2).
+    Answered,
+    /// The caller's establishing INVITE drew `code` (487 — the CANCEL won) →
+    /// the abandoned terminal (`Timeout`, bounded — the `abandon_ringing`
+    /// class). Selected when the caller leg saw `code`.
+    Cancelled { code: u16 },
 }
 
 /// A scenario expressed as per-endpoint actors — the fork twin of
@@ -106,6 +129,34 @@ pub fn into_result(
                 who: "refer_charlie_reject".to_string(),
                 detail: "transfer declined by charlie (603)".to_string(),
             }),
+            // C2/E5 branch oracle: pick the branch the observed state shows.
+            // A `Cancelled { code }` branch is selected iff the caller's
+            // establishing INVITE drew that non-2xx final (the CANCEL won);
+            // otherwise the `Answered` branch (the 200 crossed/beat the CANCEL,
+            // §9.2 — the call confirmed and tore down normally).
+            Expect::EitherOf(branches) => {
+                let cancelled = branches.iter().find_map(|b| match b {
+                    ExpectBranch::Cancelled { code } => obs
+                        .with_snapshot(|s| s.leg(caller).saw_final(*code))
+                        .then_some(*code),
+                    ExpectBranch::Answered => None,
+                });
+                if cancelled.is_some() {
+                    // The abandoned terminal — the SAME bounded class as
+                    // `AbandonedEarly` (the load lane's `timeout` bucket).
+                    return Err(StepError::Timeout {
+                        who: "alice-abandoned-after-ringing".to_string(),
+                    });
+                }
+                if branches.iter().any(|b| matches!(b, ExpectBranch::Answered)) {
+                    return Ok(());
+                }
+                // Neither declared branch was observed — a genuine deviation.
+                Err(StepError::UnexpectedKind {
+                    who: caller.to_string(),
+                    detail: "no declared EitherOf branch was observed".to_string(),
+                })
+            }
         },
     }
 }
