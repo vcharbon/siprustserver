@@ -109,6 +109,12 @@ pub enum GoalStep {
     /// dialog (the `prack_update` renegotiation). Opens an `Update` obligation;
     /// its 200 closes it (no ACK) and advances the caller's `reneg` sub-flow.
     Update,
+    /// Send an EARLY UPDATE (RFC 3311 §5.1) on the caller's EARLY dialog — the
+    /// still-pending INVITE's dialog, after its reliable provisional was PRACKed
+    /// and BEFORE the final 200 (C5). Renegotiates media pre-answer; the callee
+    /// (`ReliableAnswerEarlyUpdate`) answers it 200 and only THEN sends the final
+    /// 200 INVITE. Opens an `Update` obligation on the early dialog's CSeq.
+    UpdateEarly,
     /// Send ONE in-dialog OPTIONS keepalive ping on the confirmed dialog and
     /// read its 200 inline — the `long_call` single ping. The first ping stamps
     /// the `keepalive_ack` feed.

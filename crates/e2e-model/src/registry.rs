@@ -481,6 +481,11 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
         ShapeDescriptor::new("cancel_answer_crossing")
             .anchors(LOAD_ESTABLISH_ANCHORS)
             .load_actor_with(|_| Arc::new(cs::cancel_answer_crossing(cs::default_binder()))),
+        // C5: early UPDATE on the reliable early dialog (RFC 3311 §5.1).
+        // Id-addressable only; phase D assigns catalog weights.
+        ShapeDescriptor::new("prack_update_early")
+            .anchors(PRACK_ANCHORS)
+            .load_actor_with(|_| Arc::new(cs::prack_update_early(cs::default_binder()))),
         // The first ACTOR-executed shape (plan §4.5 — the redesign's exemplar):
         // per-endpoint reactive actors + the ack-gated settle barrier replace
         // the one serialized coroutine. Same id, same anchors, same downstream

@@ -2292,6 +2292,14 @@ impl ClientInvite {
         self.original_invite.cseq.seq
     }
 
+    /// The early dialog's learned remote (To) tag — from the first tagged
+    /// provisional / the confirming 2xx (RFC 3261 §12.1.2). Empty before any
+    /// tag is learned. The C5 early UPDATE addresses this so it rides the early
+    /// dialog's own CSeq sequence.
+    pub fn early_remote_tag(&self) -> &str {
+        &self.dialog.remote_tag
+    }
+
     /// The confirmed [`Dialog`] a FORK's 2xx establishes — keyed by the
     /// response's OWN To-tag rather than the shared dialog state (which tracks
     /// the §13.2.2.4 winner). The losing-fork path: a late 2xx from a fork this

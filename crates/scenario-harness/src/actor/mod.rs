@@ -43,8 +43,8 @@ use crate::realcall::{CallCtx, CallScope, ChallengeResponder};
 use crate::StepError;
 
 pub use actor::{
-    run_actor, ActorSpec, ActorState, CtxFeed, Disposition, Feed, MediaState, SUBFLOW_REALIGN,
-    SUBFLOW_RENEG, SUBFLOW_REFER,
+    run_actor, ActorSpec, ActorState, CtxFeed, Disposition, Feed, MediaState, SUBFLOW_EARLY,
+    SUBFLOW_REALIGN, SUBFLOW_RENEG, SUBFLOW_REFER,
 };
 pub use goals::{Barrier, Goal, GoalCursor, GoalStep};
 pub use ledger::{ObligationKey, ObligationKind, ObligationLedger};
@@ -993,6 +993,82 @@ mod tests {
 
         let verdict = run_call(call, Duration::from_secs(10)).await;
         assert!(verdict.is_ok(), "the UPDATE×re-INVITE collision must resolve, got {verdict:?}");
+
+        h.finish().await;
+    }
+
+    /// C5 early UPDATE (RFC 3311 §5.1): alice INVITEs with 100rel; bob answers
+    /// reliably (183) and HOLDS the INVITE. Alice PRACKs, then — while still in
+    /// the EARLY dialog, before the final 200 — sends an UPDATE renegotiating
+    /// media. Bob 200s the UPDATE and only THEN answers the INVITE 200. Alice
+    /// ACKs and the call tears down. The RFC hard gate confirms the pre-answer
+    /// UPDATE rode the early dialog compliantly.
+    #[tokio::test(start_paused = true)]
+    async fn early_update_on_the_reliable_early_dialog() {
+        let h = Harness::new("actor-early-update").describe(
+            "C5: 100rel INVITE → reliable 183 → PRACK → EARLY UPDATE (200) → \
+             final 200 INVITE → ACK → BYE; bob holds the INVITE until the early \
+             UPDATE completes (RFC 3311 §5.1)",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        // The caller advertises 100rel via a direct-to-bob plan.
+        let plan = crate::realcall::InvitePlan {
+            via: bob.addr(),
+            from: None,
+            to: None,
+            ruri: None,
+            headers: vec![("Supported".to_string(), "100rel".to_string())],
+            rewrite: Default::default(),
+        };
+        let alice_confirmed =
+            Barrier::pred("confirmed", |s| s.leg_at_least("alice", LegPhase::Confirmed));
+        let call = CallPlan {
+            actors: vec![
+                ActorSpec {
+                    role: "alice",
+                    agent: alice.clone(),
+                    media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                    disposition: Disposition::Caller,
+                    goals: vec![
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::Invite { callee: "bob", plan: Some(plan) },
+                        ),
+                        // The early UPDATE fires once alice has PRACKed the
+                        // reliable 183 (SUBFLOW_EARLY — a real post-183 signal,
+                        // NOT LegPhase::Early which holds the instant she
+                        // originates), before the final 200 (RFC 3311 §5.1).
+                        Goal::new(
+                            Barrier::pred("early", |s| {
+                                s.leg("alice").subflow(SUBFLOW_EARLY).is_some()
+                            }),
+                            GoalStep::UpdateEarly,
+                        ),
+                        Goal::new(alice_confirmed.clone(), GoalStep::Bye),
+                    ],
+                    invite_targets: vec![("bob", bob.clone())],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+                ActorSpec {
+                    role: "bob",
+                    agent: bob.clone(),
+                    disposition: Disposition::ReliableAnswerEarlyUpdate,
+                    media: MediaState::answer(ANSWER_SDP),
+                    goals: vec![],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+            ],
+            plan: vec![phase("confirmed", |s| s.leg_at_least("alice", LegPhase::Confirmed))],
+            settle: SettleBarrier::default_ceiling(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "the early-UPDATE call must settle OK, got {verdict:?}");
 
         h.finish().await;
     }
