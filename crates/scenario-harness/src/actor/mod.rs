@@ -860,6 +860,75 @@ mod tests {
         );
     }
 
+    /// C4/S5 re-INVITE glare (RFC 3261 §14.1): alice and bob BOTH originate a
+    /// re-INVITE at the same paused-clock instant (gated on `AllConfirmed`), so
+    /// each arrives while the peer's own re-INVITE is outstanding — BOTH get
+    /// `491 Request Pending`. Each end hop-ACKs the 491, closes its obligation,
+    /// and retries after the §14.1 back-off (owner alice: 2.5s; non-owner bob:
+    /// 1.0s), so bob's retry lands first (alice's re-INVITE no longer pending →
+    /// 200), then alice's. Both rounds complete; the RFC hard gate confirms both
+    /// 491s were ACKed and no obligation leaked.
+    #[tokio::test(start_paused = true)]
+    async fn reinvite_glare_491_both_ways_then_retry_resolves() {
+        let h = Harness::new("actor-reinvite-glare").describe(
+            "C4/S5: alice+bob re-INVITE at once → 491 both ways → §14.1 owner/\
+             non-owner back-off retries (bob 1s, alice 2.5s) → both rounds \
+             complete → BYE",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let both_confirmed = Barrier::AllConfirmed(&["alice", "bob"]);
+        let both_reneged = Barrier::pred("glare_resolved", |s| {
+            s.leg("alice").reneg_count() >= 1 && s.leg("bob").reneg_count() >= 1
+        });
+        let call = CallPlan {
+            actors: vec![
+                ActorSpec {
+                    role: "alice",
+                    agent: alice.clone(),
+                    // Alice answers bob's realign re-INVITE with SDP (full media).
+                    media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                    disposition: Disposition::Caller,
+                    goals: vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(both_confirmed.clone(), GoalStep::Reinvite),
+                        Goal::new(both_reneged.clone(), GoalStep::Bye),
+                    ],
+                    invite_targets: vec![("bob", bob.clone())],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+                ActorSpec {
+                    role: "bob",
+                    agent: bob.clone(),
+                    disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(100) },
+                    media: MediaState::full(ANSWER_SDP, ANSWER_SDP),
+                    // Bob ALSO re-INVITEs on the same gate — the glare.
+                    goals: vec![Goal::new(both_confirmed.clone(), GoalStep::Reinvite)],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+            ],
+            plan: vec![
+                phase("established", |s| {
+                    s.leg_at_least("alice", LegPhase::Confirmed)
+                        && s.leg_at_least("bob", LegPhase::Confirmed)
+                }),
+                phase("glare_resolved", |s| {
+                    s.leg("alice").reneg_count() >= 1 && s.leg("bob").reneg_count() >= 1
+                }),
+            ],
+            settle: SettleBarrier::default_ceiling(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(10)).await;
+        assert!(verdict.is_ok(), "the glare must resolve via §14.1 retry, got {verdict:?}");
+
+        h.finish().await;
+    }
+
     /// The generic in-dialog origination primitive (`GoalStep::InDialog`): alice
     /// establishes, sends an INFO carrying a typed body + an extra header on the
     /// confirmed dialog, and hangs up ONLY once the observed state shows bob
