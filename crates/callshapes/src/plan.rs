@@ -40,6 +40,22 @@ pub enum Establishment {
     /// The primary callee rejects with `reject` (no 18x) and the SUT fails
     /// over to `bob2`, which answers reliably (`winner_reliable`) or plainly.
     RerouteOnReject { reject: u16, winner_reliable: bool },
+    /// TRUE forking (RFC 3261 §12.1.2): the callee `bob` emits one 18x per
+    /// DISTINCT explicit To-tag in `tags` on its ONE INVITE server transaction
+    /// (as if a downstream proxy had forked), then answers `200` under
+    /// `winner`; `loser_late_200` optionally emits a late `200` under a losing
+    /// tag (§13.2.2.4 — the caller ACKs then BYEs it). `reliable` makes each
+    /// fork's 18x a `183` (`Require:100rel`) the caller PRACKs per early dialog.
+    /// **Only valid under the SUT's transparent CORE relay**
+    /// (`relay_first_18x_to_180 = None`, the default `B2buaSut`): any
+    /// `relayFirst18x` masking mode collapses the forks to one To-tag and the
+    /// distinct-early-dialog behavior cannot be exercised.
+    Forked {
+        tags: &'static [&'static str],
+        winner: &'static str,
+        reliable: bool,
+        loser_late_200: Option<&'static str>,
+    },
     /// TERMINAL: the callee rejects with `code` and that IS the call — no
     /// dialog, no teardown ([`Expect::Reject`]).
     RejectTerminal { code: u16 },
@@ -234,6 +250,19 @@ impl ShapePlan {
         } else if matches!(self.teardown, Teardown::None) {
             return Err(err("non-terminal shape with no teardown (calls must terminate)"));
         }
+        if let Establishment::Forked { tags, winner, loser_late_200, .. } = self.establish {
+            if tags.len() < 2 {
+                return Err(err("Forked needs >= 2 distinct fork tags"));
+            }
+            if !tags.contains(&winner) {
+                return Err(err("Forked winner must be one of the declared tags"));
+            }
+            if let Some(loser) = loser_late_200 {
+                if loser == winner || !tags.contains(&loser) {
+                    return Err(err("Forked loser_late_200 must be a declared tag != winner"));
+                }
+            }
+        }
         for stage in &self.stages {
             if let Stage::Script(Script::Reinvite { n }) = stage {
                 if *n == 0 {
@@ -417,6 +446,44 @@ impl ShapePlan {
                 });
                 b.winner = "bob2";
                 let est = established_pred("bob2");
+                b.phases.push(phase("established", est.clone()));
+                b.gate = Barrier::pred("established", est);
+            }
+            Establishment::Forked { tags, winner, reliable, loser_late_200 } => {
+                let mut plan = self.binder.invite_plan(env, RouteIntent::Direct { target: "bob" });
+                if reliable {
+                    plan = plan.with_supported_100rel();
+                }
+                b.caller_goals.push(Goal::new(
+                    Barrier::None,
+                    GoalStep::Invite { callee: "bob", plan: Some(plan) },
+                ));
+                b.caller_feed.on_answer_rx = Feed::new(Some("time_to_200"), None);
+                if reliable {
+                    b.caller_feed.on_prack_ok =
+                        Feed::new(Some("time_to_prack_200"), Some("pracked"));
+                }
+                // bob is the forking UAS: one 18x per distinct To-tag on its one
+                // INVITE server txn, then 200 under `winner` (+ optional
+                // losing-tag late 200). The fork-aware caller reactor (C1b) tracks
+                // the early-dialog set and ACK+BYEs a loser's late 200 itself.
+                b.callees.push(ActorSpec {
+                    role: "bob",
+                    agent: env.bob.clone(),
+                    disposition: Disposition::ForkingRing {
+                        tags,
+                        winner,
+                        ring: env.ring_delay,
+                        reliable,
+                        loser_late_200,
+                    },
+                    media: MediaState::answer(ANSWER_SDP),
+                    goals: vec![],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: connected_feed(self.stamp_connected),
+                });
+                let est = established_pred("bob");
                 b.phases.push(phase("established", est.clone()));
                 b.gate = Barrier::pred("established", est);
             }
@@ -625,6 +692,9 @@ mod tests {
             shapes::reinvite(b()),
             shapes::reinvite_n(b(), "reinvite10", 10),
             shapes::crossing_bye(b()),
+            shapes::forked(b()),
+            shapes::forked_loser_late_200(b()),
+            shapes::forked_reliable(b()),
             shapes::prack_update(b()),
             shapes::rerouting_prack(b()),
             shapes::options_hold(b()),
@@ -650,6 +720,34 @@ mod tests {
         let mut plan = shapes::reinvite_n(shapes::default_binder(), "reinvite0", 1);
         plan.stages = vec![Stage::Script(Script::Reinvite { n: 0 })];
         assert_eq!(detail(plan.validate().unwrap_err()), "Reinvite n must be >= 1");
+    }
+
+    /// C1/E3: Forked validation — winner and loser must be declared tags,
+    /// loser distinct from winner, ≥2 tags.
+    #[test]
+    fn forked_validates_tags() {
+        let mk = |tags, winner, loser| ShapePlan {
+            id: "fk",
+            binder: shapes::default_binder(),
+            establish: Establishment::Forked { tags, winner, reliable: false, loser_late_200: loser },
+            stages: vec![],
+            teardown: Teardown::CallerBye { after: DwellKnob::None, feed: ByeFeed::CheckpointAndPhase },
+            ringing_gate: true,
+            stamp_connected: true,
+        };
+        mk(&["a", "b"], "a", None).validate().expect("valid fork");
+        assert_eq!(
+            detail(mk(&["a"], "a", None).validate().unwrap_err()),
+            "Forked needs >= 2 distinct fork tags"
+        );
+        assert_eq!(
+            detail(mk(&["a", "b"], "c", None).validate().unwrap_err()),
+            "Forked winner must be one of the declared tags"
+        );
+        assert_eq!(
+            detail(mk(&["a", "b"], "a", Some("a")).validate().unwrap_err()),
+            "Forked loser_late_200 must be a declared tag != winner"
+        );
     }
 
     /// A terminal establishment admits neither stages nor a teardown, and a

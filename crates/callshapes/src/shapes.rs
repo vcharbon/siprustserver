@@ -79,6 +79,87 @@ pub fn crossing_bye(binder: Arc<dyn RouteBinder>) -> ShapePlan {
     }
 }
 
+/// `forked` — TRUE forking (RFC 3261 §12.1.2): bob emits three distinct-tag
+/// 18x on one INVITE server txn, wins under the middle tag; talk, BYE. Only
+/// valid under the SUT's transparent CORE relay (E3 — see
+/// [`Establishment::Forked`]).
+pub fn forked(binder: Arc<dyn RouteBinder>) -> ShapePlan {
+    ShapePlan {
+        id: "forked",
+        binder,
+        establish: Establishment::Forked {
+            tags: &["fk1", "fk2", "fk3"],
+            winner: "fk2",
+            reliable: false,
+            loser_late_200: None,
+        },
+        stages: vec![],
+        teardown: Teardown::CallerBye {
+            after: DwellKnob::TalkTime,
+            feed: ByeFeed::CheckpointAndPhase,
+        },
+        ringing_gate: true,
+        stamp_connected: true,
+    }
+}
+
+/// `forked_loser_late_200` — forking where a LOSING fork also sends a late 200
+/// (§13.2.2.4): the caller ACKs then BYEs the loser while the winning dialog
+/// lives on; talk, BYE.
+///
+/// **PEER-TO-PEER ONLY — not a loadgen-through-B2BUA shape.** A dialog-
+/// terminating B2BUA forwards only the FIRST 2xx of its b-leg INVITE to the
+/// caller and absorbs the loser's late 200, so the caller never sees it and
+/// the ACK+BYE-the-loser path is never exercised through a SUT (the losing
+/// fork then dangles on the callee and the call settles NOK). This shape is
+/// kept as a valid composition for a peer-to-peer harness; the actual
+/// loser-late-200 behavior is pinned SUT-less by
+/// `scenario_harness::actor::tests::{forking_ring_loser_late_200_is_acked_and_byed,
+/// actor_caller_acks_and_byes_losing_fork_late_200}`. It is deliberately NOT in
+/// the loadgen registry.
+pub fn forked_loser_late_200(binder: Arc<dyn RouteBinder>) -> ShapePlan {
+    ShapePlan {
+        id: "forked_loser_late_200",
+        binder,
+        establish: Establishment::Forked {
+            tags: &["fk1", "fk2", "fk3"],
+            winner: "fk2",
+            reliable: false,
+            loser_late_200: Some("fk3"),
+        },
+        stages: vec![],
+        teardown: Teardown::CallerBye {
+            after: DwellKnob::TalkTime,
+            feed: ByeFeed::CheckpointAndPhase,
+        },
+        ringing_gate: true,
+        stamp_connected: true,
+    }
+}
+
+/// `forked_reliable` — forking where each fork's 18x is a reliable 183 the
+/// caller PRACKs per early dialog (RFC 3262 §5); wins under the middle tag,
+/// talk, BYE.
+pub fn forked_reliable(binder: Arc<dyn RouteBinder>) -> ShapePlan {
+    ShapePlan {
+        id: "forked_reliable",
+        binder,
+        establish: Establishment::Forked {
+            tags: &["fk1", "fk2", "fk3"],
+            winner: "fk2",
+            reliable: true,
+            loser_late_200: None,
+        },
+        stages: vec![],
+        teardown: Teardown::CallerBye {
+            after: DwellKnob::TalkTime,
+            feed: ByeFeed::CheckpointAndPhase,
+        },
+        ringing_gate: true,
+        stamp_connected: true,
+    }
+}
+
 /// `prack_update` — reliable (100rel) establishment, one in-dialog UPDATE
 /// renegotiation, BYE (contract §5.6).
 pub fn prack_update(binder: Arc<dyn RouteBinder>) -> ShapePlan {

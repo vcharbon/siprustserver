@@ -463,6 +463,19 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
         ShapeDescriptor::new("crossing_bye")
             .anchors(LOAD_CALL_ANCHORS)
             .load_actor_with(|_| Arc::new(cs::crossing_bye(cs::default_binder()))),
+        // C1/E3: TRUE forking — bob emits distinct-tag 18x on one INVITE txn.
+        // Only valid under the SUT's transparent CORE relay. Id-addressable
+        // only; phase D assigns catalog weights.
+        // NOTE: `forked_loser_late_200` is intentionally NOT registered — a
+        // terminating B2BUA absorbs the loser's late 2xx, so it can't be
+        // exercised through a SUT (see the shape's doc; SUT-less machinery
+        // tests cover it).
+        ShapeDescriptor::new("forked")
+            .anchors(LOAD_CALL_ANCHORS)
+            .load_actor_with(|_| Arc::new(cs::forked(cs::default_binder()))),
+        ShapeDescriptor::new("forked_reliable")
+            .anchors(PRACK_ANCHORS)
+            .load_actor_with(|_| Arc::new(cs::forked_reliable(cs::default_binder()))),
         // The first ACTOR-executed shape (plan §4.5 — the redesign's exemplar):
         // per-endpoint reactive actors + the ack-gated settle barrier replace
         // the one serialized coroutine. Same id, same anchors, same downstream
