@@ -10,7 +10,7 @@
 //!   - [`via`] — Via value readers (branch + B2BUA `cr`/`lg` params)
 //!   - [`param_codec`] — percent-codec for B2BUA correlation params
 //!   - [`emergency`] — emergency-call classification (parsed + raw buffer)
-//!   - [`preparse`] — strict byte classifiers (INVITE line, To-tag presence)
+//!   - [`preparse`] — strict byte classifiers (INVITE request-line check)
 //!   - [`reject_503`] — stateless Tier-1 overload 503 templating
 
 mod bytes;
@@ -27,7 +27,7 @@ pub use emergency::{buffer_has_emergency_marker, is_emergency_request};
 pub use headers::{get_header, get_headers, remove_header, set_header, split_top_level_commas};
 pub use name_addr::{extract_contact_uri, extract_name_addr_uri, extract_tag, strip_tag};
 pub use param_codec::{decode_param, encode_param};
-pub use preparse::{buffer_has_to_tag, is_invite_request_buffer};
+pub use preparse::is_invite_request_buffer;
 pub use reject_503::{build_stateless_reject_503_buffer, jittered_retry_after};
 pub use uri::{extract_host_port, parse_sip_uri, parse_uri_params, ParsedSipUri};
 pub use via::{parse_via_params, ViaParams};
