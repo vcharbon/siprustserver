@@ -1,16 +1,17 @@
-//! sip-message — the pure SIP message layer (Rust port of sipjsserver's
-//! `src/sip` message core). Slice 1 of the migration: parse / serialize /
-//! strict-validate. No async, no I/O, no clock — a pure leaf crate.
+//! sip-message — the pure SIP message layer: parse / serialize /
+//! strict-validate plus read/rewrite helpers. No async, no I/O, no clock —
+//! a pure leaf crate.
 //!
-//! See MIGRATION_STATUS.md for what is ported vs. pending, and
-//! docs/MIGRATION_STRATEGY.md for the decisions behind this layout.
+//! This is the ONLY crate that extracts SIP headers/messages. Lenient
+//! raw-datagram scanning: [`sniff`]; strict pre-parse classifiers:
+//! [`message_helpers::preparse`]; parsed-header access:
+//! [`message_helpers`]; construction: [`generators`].
 
 pub mod error;
 pub mod method;
 pub mod types;
 pub mod parser;
 
-// Slice-1 modules, scaffolded; ported incrementally (see MIGRATION_STATUS.md).
 pub mod serializer;
 pub mod sdp;
 pub mod generators;

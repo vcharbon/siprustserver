@@ -6,7 +6,9 @@
 //! This module is the ONLY sanctioned home for raw SIP header extraction —
 //! never re-implement these scanners in another crate. If a scanner you need
 //! is missing, add it here. For anything richer than single-field extraction,
-//! use the real parser ([`crate::parser`]).
+//! use the real parser ([`crate::parser`]). Strict, allocation-free
+//! pre-parse *classifiers* (overload brake, dispatcher fast-path) live in
+//! [`crate::message_helpers::preparse`] and its sibling modules.
 
 use std::borrow::Cow;
 
