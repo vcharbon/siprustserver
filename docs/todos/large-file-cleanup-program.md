@@ -237,8 +237,9 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
 3. **`message_helpers/preparse.rs` — `buffer_has_to_tag` matches `To`/`t`
    case-sensitively** at line start; a `to:` header classifies an in-dialog
    request as initial. Latent: zero consumers today (the dispatcher
-   fast-path it was built for was never wired). Consider deleting the
-   function instead of fixing it.
+   fast-path it was built for was never wired).
+   `resolved:` 2026-07-15 — deleted per user (dead code; the lenient
+   `sniff::to_tag` covers real To-tag reads if a future fast-path needs one).
 4. **`message_helpers/reject_503.rs` — first-line guard only checks for the
    `SIP/2.0` substring**, so a *response* datagram fed to
    `build_stateless_reject_503_buffer` would be templated into a 503 reply.
