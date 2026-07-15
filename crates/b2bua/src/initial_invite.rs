@@ -147,14 +147,12 @@ pub fn build_initial_call(
         sampled: None,
         worker_index: None,
         topology,
-        // Port of `SipRouter.ts` L1181/L1215: `isEmergency = isEmergencyRequest(req)`
-        // then `emergency: isEmergency || undefined`. The `|| undefined` coercion
-        // means a non-emergency INVITE writes *absence* (`None`), never `Some(false)`
-        // — production only ever stamps `Some(true)` or leaves the field unset (see
-        // `call` codec_roundtrip emergency contract). Downstream consumers — the
-        // `;emerg=1`/`;em=1` URI/Via markers in `stack_identity` and the cheap
-        // in-dialog byte classifier (`buffer_has_emergency_marker`) — depend on this
-        // being live, so it must be derived from the INVITE here, not hard-coded.
+        // A non-emergency INVITE writes *absence* (`None`), never `Some(false)`
+        // — production only ever stamps `Some(true)` or leaves the field unset
+        // (see `call` codec_roundtrip emergency contract). Downstream consumers
+        // — the `;emerg=1`/`;em=1` URI/Via markers in `stack_identity` and the
+        // cheap in-dialog byte classifier (`buffer_has_emergency_marker`) —
+        // depend on this being derived from the INVITE here, not hard-coded.
         emergency: is_emergency_request(invite).then_some(true),
         features: None,
         policy_update_headers: None,
@@ -368,18 +366,15 @@ fn build_reject_headers(
 
 #[cfg(test)]
 mod emergency_on_invite_tests {
-    //! Pins the `SipRouter.ts` L1181/L1215 contract that the B2BUA's initial-INVITE
-    //! handler stamps `Call.emergency` from the inbound INVITE
-    //! (`isEmergency = isEmergencyRequest(req)`; `emergency: isEmergency || undefined`).
-    //! The Rust home — [`build_initial_call`] — previously hard-coded
-    //! `emergency: None`, so the field was dead on the worker and every downstream
+    //! Pins that [`build_initial_call`] stamps `Call.emergency` from the
+    //! inbound INVITE: `Some(true)` for an emergency Resource-Priority,
+    //! *absence* (`None`) otherwise — never `Some(false)`. Every downstream
     //! emergency consumer (the `;emerg=1`/`;em=1` markers, the in-dialog byte
-    //! classifier) was starved. The TS source has no dedicated unit test for this
-    //! wiring (it is covered end-to-end only); these pin it at the seam.
+    //! classifier) depends on this seam being live.
     //!
-    //! These assert the *wiring* (helper → field + `|| undefined` coercion), not the
+    //! These assert the *wiring* (helper → field + the None coercion), not the
     //! emergency-classification contract itself — that lives in
-    //! `sip_message::message_helpers::emergency_tests`. Pure builder, no clock.
+    //! `sip_message::message_helpers::emergency`. Pure builder, no clock.
 
     use super::build_initial_call;
     use crate::config::B2buaConfig;
@@ -436,10 +431,9 @@ mod emergency_on_invite_tests {
 
     #[test]
     fn non_emergency_invite_leaves_emergency_unset() {
-        // No Resource-Priority at all → field stays absent (`None`), NOT Some(false):
-        // this is the `isEmergency || undefined` coercion (SipRouter.ts L1215).
+        // No Resource-Priority at all → field stays absent (`None`), NOT Some(false).
         let call = build_initial_call(&invite_with_rph(None), src(), &config_for("w0"), 0);
-        assert_eq!(call.emergency, None, "no RPH → emergency stays None (|| undefined)");
+        assert_eq!(call.emergency, None, "no RPH → emergency stays None");
 
         // A well-formed but non-emergency RPH namespace.value also stays None.
         let call = build_initial_call(&invite_with_rph(Some("dsn.flash")), src(), &config_for("w0"), 0);
@@ -448,17 +442,19 @@ mod emergency_on_invite_tests {
 
     #[test]
     fn emergency_is_derived_through_the_real_helper() {
-        // Proves the field is wired to `is_emergency_request` (case-SENSITIVE value
-        // match) and not a naive header-presence check: an upper-cased token is not
-        // canonical, so it must leave the field unset.
+        // Proves the field is wired to `is_emergency_request` and not a naive
+        // header-presence check: r-values compare case-insensitively (RFC 4412)…
         let call = build_initial_call(&invite_with_rph(Some("ESNET.0")), src(), &config_for("w0"), 0);
-        assert_eq!(call.emergency, None, "non-canonical casing must NOT flag emergency");
+        assert_eq!(call.emergency, Some(true), "r-value casing must not gate emergency");
 
-        // And a canonical token embedded among multiple namespaces still flags it
-        // (substring match), mirroring the helper's indexOf contract.
+        // …an emergency r-value among multiple namespaces flags…
         let call =
             build_initial_call(&invite_with_rph(Some("dsn.flash, q735.0")), src(), &config_for("w0"), 0);
-        assert_eq!(call.emergency, Some(true), "embedded canonical token flags emergency");
+        assert_eq!(call.emergency, Some(true), "emergency r-value in a list flags emergency");
+
+        // …and an r-value merely embedding a token does not.
+        let call = build_initial_call(&invite_with_rph(Some("esnet.01")), src(), &config_for("w0"), 0);
+        assert_eq!(call.emergency, None, "embedded token is not an emergency r-value");
     }
 }
 

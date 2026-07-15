@@ -12,9 +12,20 @@ pub(super) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// Whether `haystack` contains `needle`, comparing ASCII-case-insensitively.
+pub(super) fn contains_subslice_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::find_subslice;
+    use super::{contains_subslice_ignore_ascii_case, find_subslice};
 
     #[test]
     fn finds_at_start_middle_and_absent() {
@@ -32,5 +43,13 @@ mod tests {
     #[test]
     fn needle_longer_than_haystack_is_none() {
         assert_eq!(find_subslice(b"ab", b"abc"), None);
+    }
+
+    #[test]
+    fn case_insensitive_containment_ignores_ascii_case_only() {
+        assert!(contains_subslice_ignore_ascii_case(b"xEsNeT.0y", b"esnet.0"));
+        assert!(contains_subslice_ignore_ascii_case(b"abc", b""));
+        assert!(!contains_subslice_ignore_ascii_case(b"esnet-0", b"esnet.0"));
+        assert!(!contains_subslice_ignore_ascii_case(b"ab", b"abc"));
     }
 }

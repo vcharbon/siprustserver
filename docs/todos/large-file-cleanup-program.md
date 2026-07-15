@@ -219,15 +219,21 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
    overload — the exact outcome the "NEVER 503 an emergency" contract
    forbids. The old comment justified it as "the upstream contract requires
    canonical casing, per docs/overload-protection.md" — that doc exists only
-   in the retired TS repo, not here. Pinned by test
-   `rph_header_name_is_case_sensitive`. Suggest: case-insensitive name scan
-   (value tokens can stay case-sensitive if the stamping contract is real —
-   but see #2).
+   in the retired TS repo, not here.
+   `resolved:` 2026-07-15 — user confirmed the casing was a TS-parser
+   workaround. Byte scan rewritten as a header-section line walk with
+   case-insensitive name match (and now body-spoof-proof); the b2bua
+   `initial_invite` pin updated.
 2. **`emergency.rs` — RPH value tokens matched case-sensitively**
    (`esnet.0`, not `ESNET.0`) in both `is_emergency_request` and the byte
    scan. RFC 4412 namespace names are case-insensitive. Same TS-doc
-   justification chain as #1. Pinned by `value_match_is_case_sensitive` /
-   `rph_token_match_is_case_sensitive`.
+   justification chain as #1.
+   `resolved:` 2026-07-15 — same commit. `is_emergency_request` now reads
+   every RP header as a comma-split r-value list, trimmed, compared
+   case-insensitively (whole r-value, so `esnet.01` no longer matches);
+   byte scan is case-insensitive substring within the field. The proxy's
+   duplicate classifier (`strategies/load_balancer.rs::is_emergency_invite`)
+   now delegates to the sip-message implementation.
 3. **`message_helpers/preparse.rs` — `buffer_has_to_tag` matches `To`/`t`
    case-sensitively** at line start; a `to:` header classifies an in-dialog
    request as initial. Latent: zero consumers today (the dispatcher

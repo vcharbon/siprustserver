@@ -3,21 +3,25 @@
 //! before any parse ([`buffer_has_emergency_marker`]) — the signal the
 //! Tier-1 overload brake consults to NEVER 503 an emergency packet.
 
-use super::bytes::find_subslice;
-use super::headers::get_header;
+use super::bytes::{contains_subslice_ignore_ascii_case, find_subslice};
+use super::headers::get_headers;
 use crate::types::SipRequest;
 
-/// The canonical emergency Resource-Priority namespace.value tokens. Matched
-/// case-SENSITIVELY — canonical casing is the upstream stamping contract.
+/// The emergency Resource-Priority r-values (RFC 4412 namespace.priority).
+/// Compared ASCII-case-insensitively, as RFC 4412 r-values are.
 const EMERGENCY_RPH_TOKENS: [&str; 3] = ["esnet.0", "wps.0", "q735.0"];
 
 /// Whether a request carries an emergency Resource-Priority header
-/// (esnet.0 / wps.0 / q735.0). Case-insensitive name, case-sensitive value.
+/// (esnet.0 / wps.0 / q735.0). Every `Resource-Priority` header is checked;
+/// each value is read as the comma-separated r-value list of RFC 4412 and
+/// each r-value compared whole (trimmed, case-insensitive) against the
+/// emergency tokens.
 pub fn is_emergency_request(req: &SipRequest) -> bool {
-    match get_header(&req.headers, "resource-priority") {
-        None => false,
-        Some(value) => EMERGENCY_RPH_TOKENS.iter().any(|tok| value.contains(tok)),
-    }
+    get_headers(&req.headers, "resource-priority").iter().any(|value| {
+        value
+            .split(',')
+            .any(|rv| EMERGENCY_RPH_TOKENS.iter().any(|tok| rv.trim().eq_ignore_ascii_case(tok)))
+    })
 }
 
 /// Cheap byte scan: does the raw datagram carry an emergency signal?
@@ -30,13 +34,17 @@ pub fn is_emergency_request(req: &SipRequest) -> bool {
 ///      admitted (see `b2bua::stack_identity`), which every subsequent
 ///      in-dialog packet carries — a plain substring match anywhere in the
 ///      buffer; then
-///   2. an **initial** INVITE's `Resource-Priority` header (case-sensitive
-///      canonical name) whose value contains one of the canonical emergency
-///      tokens (`esnet.0` / `wps.0` / `q735.0`). The token scan is confined
-///      to that header *field* — tolerant of HCOLON whitespace before the
-///      colon and of obs-fold continuation lines (RFC 3261 §7.3.1), and
-///      recognising both CRLF and bare-LF line endings — so a token on a
-///      *different* header line or in the body cannot spoof an emergency.
+///   2. an **initial** INVITE's `Resource-Priority` header, matched exactly
+///      like any other header lookup — name ASCII-case-insensitive, LWS
+///      tolerated before the colon (RFC 3261 §7.3.1) — whose value contains
+///      one of the emergency tokens (`esnet.0` / `wps.0` / `q735.0`,
+///      case-insensitive). The token scan is confined to that header's
+///      *field* — obs-fold-aware, recognising both CRLF and bare-LF line
+///      endings — and the line walk stops at the blank line ending the
+///      header section, so a token on a *different* header line or in the
+///      body cannot spoof an emergency. Within the field the match is
+///      substring-based: over-matching is the safe direction for a
+///      never-shed signal.
 pub fn buffer_has_emergency_marker(raw: &[u8]) -> bool {
     // Cheap path: dispatcher-side markers stamped on admitted calls.
     if find_subslice(raw, b";emerg=1").is_some() {
@@ -46,31 +54,50 @@ pub fn buffer_has_emergency_marker(raw: &[u8]) -> bool {
         return true;
     }
 
-    // Initial INVITE: Resource-Priority header (case-sensitive canonical name).
-    // Scan every occurrence of the canonical name — a textual hit is not
-    // guaranteed to be the actual header (it could be a substring elsewhere) —
-    // and for each that forms a real header (optional LWS then a colon),
-    // confine the token scan to that header's *field* via [`header_field_end`].
-    const RP_NAME: &[u8] = b"Resource-Priority";
-    let mut from = 0;
-    while let Some(rel) = find_subslice(&raw[from..], RP_NAME) {
-        let name_at = from + rel;
-        let after_name = name_at + RP_NAME.len();
-        from = after_name; // always advances (RP_NAME is non-empty) → no infinite loop
-
-        // HCOLON: optional whitespace then a mandatory colon. Anything else means
-        // this textual hit was not the header name (skip it, keep scanning).
-        let mut j = after_name;
-        while j < raw.len() && (raw[j] == b' ' || raw[j] == b'\t') {
-            j += 1;
+    // Initial INVITE: walk the header section line by line looking for a
+    // Resource-Priority header; scan each matching header's field (which
+    // [`header_field_end`] extends across obs-fold continuations).
+    let mut idx = 0;
+    while idx < raw.len() {
+        let line_start = idx;
+        let (line_end, next) = match find_subslice(&raw[line_start..], b"\n") {
+            Some(rel) => {
+                let nl = line_start + rel;
+                let end = if nl > line_start && raw[nl - 1] == b'\r' { nl - 1 } else { nl };
+                (end, nl + 1)
+            }
+            // Final unterminated line: still a header line, then the walk ends.
+            None => (raw.len(), raw.len()),
+        };
+        // The blank line terminating the header section — the body is not headers.
+        if line_end == line_start {
+            return false;
         }
-        if j >= raw.len() || raw[j] != b':' {
+        // An obs-fold continuation belongs to the previous header; the field
+        // scan below already followed it.
+        if raw[line_start] == b' ' || raw[line_start] == b'\t' {
+            idx = next;
             continue;
         }
-        let field = &raw[j + 1..header_field_end(raw, j + 1)];
-        if EMERGENCY_RPH_TOKENS.iter().any(|tok| find_subslice(field, tok.as_bytes()).is_some()) {
-            return true;
+        let line = &raw[line_start..line_end];
+        if let Some(colon) = find_subslice(line, b":") {
+            // HCOLON: the name may carry trailing LWS before the colon.
+            let mut name = &line[..colon];
+            while let [head @ .., b' ' | b'\t'] = name {
+                name = head;
+            }
+            if name.eq_ignore_ascii_case(b"Resource-Priority") {
+                let colon_abs = line_start + colon;
+                let field = &raw[colon_abs + 1..header_field_end(raw, colon_abs + 1)];
+                if EMERGENCY_RPH_TOKENS
+                    .iter()
+                    .any(|tok| contains_subslice_ignore_ascii_case(field, tok.as_bytes()))
+                {
+                    return true;
+                }
+            }
         }
+        idx = next;
     }
     false
 }
@@ -103,9 +130,9 @@ fn header_field_end(raw: &[u8], start: usize) -> usize {
 
 #[cfg(test)]
 mod parsed_tests {
-    //! Pins [`is_emergency_request`]: case-insensitive header lookup,
-    //! case-sensitive value match, substring match against the three
-    //! canonical RPH tokens, `false` when absent.
+    //! Pins [`is_emergency_request`]: case-insensitive header lookup and
+    //! r-value match, whole-r-value comparison over the comma-split list,
+    //! every Resource-Priority header checked, `false` when absent.
 
     use super::is_emergency_request;
     use crate::parser::SipParser;
@@ -151,11 +178,11 @@ Content-Length: 0\r\n\r\n"
     }
 
     #[test]
-    fn value_match_is_case_sensitive() {
-        // Canonical casing is required by the contract — an upper-cased token
-        // must NOT be treated as emergency.
+    fn value_match_is_case_insensitive() {
+        // RFC 4412 r-values are case-insensitive — an upper-cased token still
+        // classifies as emergency.
         let req = invite_with_rph(Some("Resource-Priority"), Some("ESNET.0"));
-        assert!(!is_emergency_request(&req));
+        assert!(is_emergency_request(&req));
     }
 
     #[test]
@@ -171,9 +198,41 @@ Content-Length: 0\r\n\r\n"
     }
 
     #[test]
-    fn token_matches_as_substring_among_multiple() {
-        // A canonical token embedded in a multi-namespace RPH value still flags.
+    fn token_matches_among_multiple_namespaces() {
+        // An emergency r-value anywhere in the comma-separated list flags.
         let req = invite_with_rph(Some("Resource-Priority"), Some("dsn.flash, q735.0"));
+        assert!(is_emergency_request(&req));
+    }
+
+    #[test]
+    fn embedded_token_is_not_an_r_value() {
+        // r-values are compared whole (comma-split, trimmed): a token embedded
+        // in a longer r-value does not classify.
+        let req = invite_with_rph(Some("Resource-Priority"), Some("esnet.01"));
+        assert!(!is_emergency_request(&req));
+    }
+
+    #[test]
+    fn every_resource_priority_header_is_checked() {
+        // Two Resource-Priority headers; only the second carries an emergency
+        // r-value — the request is still emergency.
+        let raw = "INVITE sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-emerg2\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=emerg-from\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: emerg-call2@10.0.0.1\r\n\
+CSeq: 1 INVITE\r\n\
+Resource-Priority: dsn.flash\r\n\
+Resource-Priority: wps.0\r\n\
+Content-Length: 0\r\n\r\n";
+        let req = match CustomParser::new()
+            .parse(raw.as_bytes())
+            .expect("fixture INVITE should parse")
+        {
+            SipMessage::Request(r) => r,
+            SipMessage::Response(_) => panic!("expected request"),
+        };
         assert!(is_emergency_request(&req));
     }
 }
@@ -223,16 +282,20 @@ Content-Length: 0\r\n\r\n"
     }
 
     #[test]
-    fn rph_header_name_is_case_sensitive() {
-        // Canonical-casing contract: a lower-cased header name is not matched.
+    fn rph_header_name_matches_case_insensitively() {
+        // Header names are case-insensitive (RFC 3261 §7.3.1) — a genuine
+        // emergency INVITE must never be shed over header-name casing.
         let buf = invite_buf(Some(("resource-priority", "esnet.0")));
-        assert!(!buffer_has_emergency_marker(&buf));
+        assert!(buffer_has_emergency_marker(&buf));
+        let buf = invite_buf(Some(("RESOURCE-PRIORITY", "esnet.0")));
+        assert!(buffer_has_emergency_marker(&buf));
     }
 
     #[test]
-    fn rph_token_match_is_case_sensitive() {
+    fn rph_token_matches_case_insensitively() {
+        // RFC 4412 r-values are case-insensitive.
         let buf = invite_buf(Some(("Resource-Priority", "ESNET.0")));
-        assert!(!buffer_has_emergency_marker(&buf));
+        assert!(buffer_has_emergency_marker(&buf));
     }
 
     #[test]
@@ -353,11 +416,24 @@ Content-Length: 0\n\n";
 
     #[test]
     fn bare_name_without_colon_is_not_a_header() {
-        // The canonical name appearing without a following colon (e.g. echoed in
-        // a Subject) is not the header and must not be scanned as one.
+        // The header name appearing mid-line without its own colon (e.g.
+        // echoed in a Subject) is not the header and must not be scanned as one.
         let raw = b"INVITE sip:bob SIP/2.0\r\n\
 Subject: Resource-Priority esnet.0 mention\r\n\
 Content-Length: 0\r\n\r\n";
+        assert!(!buffer_has_emergency_marker(raw));
+    }
+
+    #[test]
+    fn rph_header_line_in_body_does_not_flag() {
+        // The walk stops at the blank line ending the header section: a
+        // header-shaped Resource-Priority line in the *body* is not a header,
+        // so it cannot spoof the brake bypass.
+        let raw = b"INVITE sip:bob SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5555;branch=z9hG4bK-body\r\n\
+Content-Type: text/plain\r\n\
+Content-Length: 27\r\n\r\n\
+Resource-Priority: esnet.0\n";
         assert!(!buffer_has_emergency_marker(raw));
     }
 }

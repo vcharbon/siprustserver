@@ -37,13 +37,13 @@ const COOKIE_VERSION: &str = "3";
 const DEFAULT_DRAIN_GRACE_MS: u64 = 5_000;
 const DEFAULT_FRESH_POD_GUARD_MS: u64 = 20_000;
 
-/// Emergency RPH tokens we honour (RFC 4412), matching the source's regex.
+/// Emergency RPH classification (RFC 4412) — delegates to the single
+/// implementation in [`sip_message::message_helpers::emergency`].
 fn is_emergency_invite(msg: &SipMessage) -> bool {
-    let SipMessage::Request(_) = msg else { return false };
-    msg.get_header("resource-priority").iter().any(|v| {
-        let low = v.to_ascii_lowercase();
-        low.contains("esnet.0") || low.contains("wps.0") || low.contains("q735.0")
-    })
+    match msg {
+        SipMessage::Request(r) => sip_message::message_helpers::is_emergency_request(r),
+        SipMessage::Response(_) => false,
+    }
 }
 
 /// An in-dialog request carries a non-empty To-tag (AIMD/admission is a
