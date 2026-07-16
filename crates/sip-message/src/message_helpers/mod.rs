@@ -30,7 +30,7 @@ pub use param_codec::{decode_param, encode_param};
 pub use preparse::is_invite_request_buffer;
 pub use reject_503::{build_stateless_reject_503_buffer, jittered_retry_after};
 pub use uri::{extract_host_port, parse_sip_uri, parse_uri_params, ParsedSipUri};
-pub use via::{parse_via_params, ViaParams};
+pub use via::{parse_via_params, via_sent_by, ViaParams};
 
 #[cfg(test)]
 mod brake_composition_tests {

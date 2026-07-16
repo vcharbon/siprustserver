@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use sip_message::SipMessage;
 
-use super::extract::top_via_branch;
+use super::addressing::top_via_branch;
 
 /// RFC 3261 §17.2 **once-and-only-once receive view** — the transaction-layer
 /// dedup below the test-facing receive API. Without it a body would re-absorb

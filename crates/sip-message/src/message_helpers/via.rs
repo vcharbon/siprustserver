@@ -23,3 +23,14 @@ pub fn parse_via_params(via_value: &str) -> ViaParams {
     };
     ViaParams { branch: parsed.branch, cr: pick("cr"), lg: pick("lg") }
 }
+
+/// The sent-by `(host, port)` of a Via header value (RFC 3261 §18.2.2 —
+/// where a response to the request carrying this Via is sent). Port defaults
+/// to 5060 when absent; `None` when the value carries no parseable host.
+pub fn via_sent_by(via_value: &str) -> Option<(String, u64)> {
+    let parsed = parse_via(via_value);
+    if parsed.host.is_empty() {
+        return None;
+    }
+    Some((parsed.host, parsed.port.unwrap_or(5060)))
+}

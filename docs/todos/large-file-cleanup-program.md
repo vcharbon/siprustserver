@@ -264,6 +264,14 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
    `name_addr`/`extract_contact_uri`; `uri::extract_host_port`). Consolidated
    into ONE marked module during the split; migration onto the sip-message
    readers is the follow-up commit.
+   `resolved:` 2026-07-16 — follow-up commit: `agent/extract.rs` →
+   `agent/addressing.rs`, all parsing delegated (`parse_via_params`, new
+   `via_sent_by` added to `message_helpers::via`, `extract_host_port`,
+   `extract_contact_uri`); `unwrap_angle` deleted; `rack_for` +
+   `first_contact_uri` moved to their sole consumer (`client_invite.rs`).
+   Gotcha kept as a scheme-prefix guard in `uri_to_addr`:
+   `parse_sip_uri_string` reads everything before the first `:` as a scheme,
+   so a bare `host:port` must not be fed to it.
 6. **`agent/ua.rs::quiesce` answers EVERY queued request with a bodyless
    `200 OK`** — including an offer-carrying re-INVITE/UPDATE (RFC 3264 §5
    forbids the answerless 200) and even an ACK (which takes no response at

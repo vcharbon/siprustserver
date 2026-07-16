@@ -11,10 +11,10 @@ use sip_message::generators::{
 };
 use sip_message::{SipHeader, SipMessage, SipRequest, SipResponse};
 
+use super::addressing::next_hop;
 use super::client_txn::{
     try_expect_response, try_expect_response_tolerating, try_send_cancel, AckCtx,
 };
-use super::extract::next_hop;
 use super::step::{unwrap_step, StepError};
 use super::Agent;
 

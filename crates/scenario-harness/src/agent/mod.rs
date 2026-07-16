@@ -48,12 +48,13 @@
 //!   CANCEL build+send.
 //! - [`proxy`] — the minimal scripted loose-routing [`Proxy`].
 //! - [`rr_fold`] — the per-UA Record-Route folding coin flip.
-//! - [`extract`] — residual header/URI readers (quarantined; see its header).
+//! - [`addressing`] — wire-address resolution (next hop, Via sent-by); SIP
+//!   parsing does NOT live here — see `sip_message::message_helpers`.
 
+mod addressing;
 mod client_invite;
 mod client_txn;
 mod dialog;
-mod extract;
 mod harness;
 mod invite;
 mod out_of_dialog;
@@ -82,8 +83,8 @@ pub use ua::{Agent, Inbound};
 // Crate-internal seams: the Send agent factory (`loadbind`) and the shared-
 // socket callee group construct `Agent`s directly; the reactive actor
 // dispatches on the INVITE fate and the top-Via branch.
+pub(crate) use addressing::top_via_branch;
 pub(crate) use client_invite::InviteResponseFate;
-pub(crate) use extract::top_via_branch;
 pub(crate) use harness::Ids;
 pub(crate) use rr_fold::decide_rr_fold;
 pub(crate) use txn_view::{AckObligations, TxnView};
