@@ -179,18 +179,10 @@ async fn realcall_refer_no_leak() {
     settle_until(|| scene.b2bua.active_calls() == 0).await;
     scene.b2bua.assert_fully_reaped();
 
-    // Waive the §13.2.1/§20.37 SHOULD audit: the media-realign re-INVITEs the SUT
-    // sends to alice/charlie are answered by the test PEERS via the harness's
-    // best-effort auto-200 (`Agent::quiesce` → `generate_response`), which does not
-    // stamp Allow/Supported — a known test-PEER response-generation gap, not a SUT
-    // or scenario bug (the SUT's own 200s carry both; the alice/bob-only flows pass
-    // the audit unwaived). The existing hand-rolled `refer_allow` tests sidestep it
-    // by not gating `passed()`; waiving the one rule lets us keep the hard gate.
-    scene.h.allow_violation(
-        "rfc3261.allowSupportedOnInvite",
-        "realign re-INVITEs are 200'd by the harness peer auto-responder, which \
-         omits Allow/Supported (test-peer gap, not a SUT defect)",
-    );
+    // No waiver: every media-realign re-INVITE the SUT sends is answered by the
+    // alice/charlie ACTOR reactors (`ServerTxn::respond`, which stamps
+    // Allow/Supported per §13.2.1/§20.37), so the audit is clean unwaived — the
+    // straggler drain above only ever answers a relayed BYE.
     let report = scene.finish().await;
     assert!(report.passed(), "RFC audit failed for `{name}`");
 }
