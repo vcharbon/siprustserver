@@ -562,12 +562,21 @@ impl CrossMessageAuditRule for RecordRoutePlacementRule {
                 for ev in &slot.ordered {
                     if ev.kind == EventKind::Sent {
                         if let SipMessage::Request(req) = &ev.msg {
-                            if let Some(branch) = top_via_branch(&ev.msg) {
-                                let has_to_tag = to_tag(&ev.msg).is_some();
-                                sent_by_branch.insert(
-                                    branch,
-                                    (req.method.as_str().to_string(), has_to_tag),
-                                );
+                            // An ACK never elicits a response, so it is never a
+                            // valid response-correlation target. Recording it
+                            // would let a non-2xx ACK (which reuses the INVITE's
+                            // branch per §17.1.1.3 and carries the final's
+                            // To-tag) overwrite the INVITE entry, misattributing
+                            // a §17.2.1-retransmitted final crossing the ACK to
+                            // an "in-dialog ACK".
+                            if req.method.as_str() != "ACK" {
+                                if let Some(branch) = top_via_branch(&ev.msg) {
+                                    let has_to_tag = to_tag(&ev.msg).is_some();
+                                    sent_by_branch.insert(
+                                        branch,
+                                        (req.method.as_str().to_string(), has_to_tag),
+                                    );
+                                }
                             }
                         }
                         continue;
@@ -1267,6 +1276,60 @@ mod tests {
             recv("alice", ok200_with_rr(), "127.0.0.1:5070", 1),
         ];
         assert!(RecordRoutePlacementRule.check(&evs).is_empty());
+    }
+
+    #[test]
+    fn retransmitted_nonz2xx_final_crossing_ack_is_clean() {
+        // §17.1.1.3: the ACK for a non-2xx final reuses the INVITE's branch and
+        // carries the final's To-tag. A §17.2.1 retransmit of that final landing
+        // after the ACK must still correlate to the INVITE (not in-dialog), not
+        // to the ACK — an ACK never elicits a response.
+        let final_480 = || {
+            resp_full(
+                480,
+                1,
+                "INVITE",
+                "z9hG4bK-i",
+                "bt",
+                "Record-Route: <sip:p1@127.0.0.1;lr>\r\n",
+                "",
+            )
+        };
+        let ack = req_full("ACK", "sip:bob@127.0.0.1", "z9hG4bK-i", 1, "at", Some("bt"), "", "");
+        let evs = vec![
+            sent("alice", invite_no_route(), "127.0.0.1:5070", 0),
+            recv("alice", final_480(), "127.0.0.1:5070", 1),
+            sent("alice", ack, "127.0.0.1:5070", 2),
+            recv("alice", final_480(), "127.0.0.1:5070", 3),
+        ];
+        let f = RecordRoutePlacementRule.check(&evs);
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn record_route_on_in_dialog_response_is_flagged() {
+        // Route set is fixed at dialog establishment (§12.2.2): a 200 to an
+        // in-dialog re-INVITE carrying Record-Route flags.
+        let reinvite =
+            req_full("INVITE", "sip:bob@127.0.0.1", "z9hG4bK-r", 2, "at", Some("bt"), "", "");
+        let ok_rr = resp_full(
+            200,
+            2,
+            "INVITE",
+            "z9hG4bK-r",
+            "bt",
+            "Record-Route: <sip:p1@127.0.0.1;lr>\r\n",
+            "",
+        );
+        let evs = vec![
+            sent("alice", invite_no_route(), "127.0.0.1:5070", 0),
+            recv("alice", ok200_with_rr(), "127.0.0.1:5070", 1),
+            sent("alice", reinvite, "127.0.0.1:5070", 2),
+            recv("alice", ok_rr, "127.0.0.1:5070", 3),
+        ];
+        let f = RecordRoutePlacementRule.check(&evs);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].1.contains("response to in-dialog INVITE"), "{}", f[0].1);
     }
 
     #[test]
