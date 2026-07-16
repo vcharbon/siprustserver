@@ -10,16 +10,29 @@ use sip_message::generators::{
     generate_ack_for_2xx, GenerateAckFor2xxOpts, InDialogMethod,
     InviteClientTransactionHandle, StackDialog,
 };
-use sip_message::message_helpers::{get_headers, set_header};
+use sip_message::message_helpers::{extract_contact_uri, get_header, get_headers, set_header};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipHeader, SipMessage, SipParser, SipRequest, SipResponse};
 
+use super::addressing::next_hop;
 use super::client_txn::{try_expect_response, try_send_cancel, AckCtx};
 use super::dialog::{Dialog, InDialogRequest, InDialogTxn};
-use super::extract::{first_contact_uri, next_hop, rack_for};
 use super::step::{unwrap_step, StepError};
 use super::Agent;
 use crate::realcall::auth::{parse_challenge, ChallengeResponder};
+
+/// The first Contact URI on a response — the dialog remote target it teaches.
+fn first_contact_uri(resp: &SipResponse) -> Option<String> {
+    get_header(&resp.headers, "contact").map(extract_contact_uri)
+}
+
+/// The `RAck` value acknowledging a reliable provisional (RFC 3262 §7.2):
+/// `<RSeq> <CSeq-num> <CSeq-method>`, all read off the 1xx itself. `None` when
+/// the response carries no parseable `RSeq` (it is not a reliable provisional).
+fn rack_for(reliable_1xx: &SipResponse) -> Option<String> {
+    let rseq: u64 = get_header(&reliable_1xx.headers, "rseq")?.trim().parse().ok()?;
+    Some(format!("{rseq} {} {}", reliable_1xx.cseq.seq, reliable_1xx.cseq.method))
+}
 
 /// What a response fed to [`ClientInvite::absorb_response`] means for the
 /// INVITE transaction it belongs to — the reactor's caller-side dispatch. The

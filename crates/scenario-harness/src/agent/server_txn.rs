@@ -5,11 +5,11 @@
 use sip_message::generators::{
     generate_response, GenerateResponseOpts, StackDialog, B2BUA_ALLOW, B2BUA_SUPPORTED,
 };
-use sip_message::message_helpers::{get_header, get_headers};
+use sip_message::message_helpers::{extract_contact_uri, get_header, get_headers};
 use sip_message::{SipHeader, SipMessage, SipRequest};
 
+use super::addressing::{next_hop, top_via_addr, top_via_branch};
 use super::dialog::Dialog;
-use super::extract::{next_hop, top_via_addr, top_via_branch, unwrap_angle};
 use super::rr_fold::{fold_record_routes, RecordRouteFold};
 use super::step::{unwrap_step, StepError};
 use super::Agent;
@@ -132,7 +132,7 @@ impl ServerTxn {
         let req = &self.request;
         let local_tag = self.to_tag.clone().unwrap_or_default();
         let remote_target = get_header(&req.headers, "contact")
-            .map(unwrap_angle)
+            .map(extract_contact_uri)
             .unwrap_or_else(|| req.from.uri.clone());
         let dialog = StackDialog {
             call_id: req.call_id.clone(),

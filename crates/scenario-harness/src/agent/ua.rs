@@ -18,9 +18,9 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::{serialize, SipHeader, SipMessage, SipParser, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
+use super::addressing::{top_via_addr, top_via_branch};
 use super::client_txn::expect_response;
 use super::dialog::InDialogTxn;
-use super::extract::{top_via_addr, top_via_branch};
 use super::harness::Ids;
 use super::out_of_dialog::OutOfDialogRequest;
 use super::rr_fold::RecordRouteFold;

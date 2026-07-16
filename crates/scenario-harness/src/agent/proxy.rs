@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use sip_message::generators::strip_route_uri_to_request_uri;
 use sip_message::{SipHeader, SipMessage, SipRequest, SipResponse};
 
-use super::extract::{hostport_to_addr, uri_to_addr};
+use super::addressing::{uri_to_addr, via_addr};
 use super::Agent;
 
 /// A minimal loose-routing proxy. It does the load-bearing routing surgery
@@ -115,16 +115,8 @@ fn strip_top_via_if_self(headers: &mut Vec<SipHeader>, me: SocketAddr) {
         .iter()
         .position(|h| h.name.eq_ignore_ascii_case("via"))
     {
-        let sent_by = headers[pos]
-            .value
-            .split_whitespace()
-            .nth(1)
-            .and_then(|s| s.split(';').next())
-            .map(str::trim);
-        if let Some(addr) = sent_by.and_then(hostport_to_addr) {
-            if addr == me {
-                headers.remove(pos);
-            }
+        if via_addr(&headers[pos].value) == Some(me) {
+            headers.remove(pos);
         }
     }
 }
