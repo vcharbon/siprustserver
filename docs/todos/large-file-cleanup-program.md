@@ -119,10 +119,17 @@ scan time (2026-07-15). Sizes are line counts at scan time.
   TS-port references in the crate scrubbed (0 remain); lib.rs is now the
   extraction-authority index; sniff.rs cross-points to preparse. Four
   suspicions raised (see log).
-- [ ] **2. `crates/scenario-harness/src/agent.rs`** — 4083 L, 101 consumer
-  files, 19 smells. Largest file in the workspace; every test crate reads
-  it. Split along send/receive/expect/trace-audit seams; keep the `lib.rs`
-  re-export list (`pub use agent::{…}`) byte-compatible.
+- [x] **2. `crates/scenario-harness/src/agent.rs`** — DONE 2026-07-16:
+  4083 L → `agent/` (17 files, largest 512 L, all public paths unchanged via
+  mod.rs re-exports; lib.rs re-export list untouched). Concerns: harness /
+  run_guards / step / ua / tolerant_recv / txn_view / invite / client_invite /
+  out_of_dialog / dialog / server_txn / client_txn / proxy / rr_fold /
+  extract / tests. All TS-port + ticket-ID comments scrubbed (incl. the
+  crate lib.rs header); crate-internal seams (`Ids`, `TxnView`,
+  `AckObligations`, `decide_rr_fold`, `top_via_branch`,
+  `InviteResponseFate`) re-exported `pub(crate)` from mod.rs for loadbind /
+  callee_group / actor. Header-extraction residue quarantined in
+  `agent/extract.rs` (see suspicions).
 - [ ] **3. `crates/sip-message/src/generators.rs`** — 908 L, 56 direct
   refs. Do right after #1 so the two carve-ups agree on module vocabulary.
 - [ ] **4. `crates/call/src/model.rs` + `crates/call/src/helpers.rs`** —
@@ -245,3 +252,29 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
    `build_stateless_reject_503_buffer` would be templated into a 503 reply.
    Benign today (the brake only feeds it requests); noted in
    `first_line_without_sip_version_returns_none`.
+
+### 2026-07-16 — scenario-harness agent split
+
+5. **`agent/extract.rs` — the harness carries its own SIP header/URI readers**
+   (`top_via_branch`, `top_via_addr`, `unwrap_angle`, `first_contact_uri`,
+   `rack_for`, `uri_to_addr`, `hostport_to_addr`, plus an inline Via sent-by
+   split in `agent/proxy.rs::strip_top_via_if_self`), violating the
+   sip-message-only extraction rule. `sip_message` already exposes structured
+   equivalents (`parse_via` carries host/port/branch;
+   `name_addr`/`extract_contact_uri`; `uri::extract_host_port`). Consolidated
+   into ONE marked module during the split; migration onto the sip-message
+   readers is the follow-up commit.
+6. **`agent/ua.rs::quiesce` answers EVERY queued request with a bodyless
+   `200 OK`** — including an offer-carrying re-INVITE/UPDATE (RFC 3264 §5
+   forbids the answerless 200) and even an ACK (which takes no response at
+   all). Confined to the load driver's failed-call teardown window (those
+   calls are never RFC-audited), and
+   `try_receive_tolerating_blocking` exists as the assertable, compliant
+   replacement — but any new use of `quiesce` on an audited path would emit
+   non-compliant peer SIP. Candidate fix: skip ACKs and attach `ANSWER_SDP`
+   to offer-carrying INVITEs/UPDATEs inside `quiesce` itself.
+7. **`InDialogRequest::with_to_tag` doc said the shared CSeq counter still
+   advances and per-fork CSeq independence is not asserted** — stale: the
+   send path forks an independent per-fork CSeq sequence whenever the fork
+   map is wired (`ClientInvite::send_request`). Comment rewritten to the
+   actual contract during the split; no behavior change.

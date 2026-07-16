@@ -1,0 +1,149 @@
+//! [`Invite`] — the initial (dialog-creating) INVITE builder. Its `send`
+//! returns the UAC-side [`ClientInvite`](super::ClientInvite) transaction,
+//! which lives in [`super::client_invite`].
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+
+use sip_message::generators::{
+    generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
+    StackDialog,
+};
+use sip_message::{SipHeader, SipMessage};
+
+use super::client_invite::ClientInvite;
+use super::Agent;
+
+/// Builder for an outgoing INVITE (lets the SDP offer be attached fluently).
+pub struct Invite<'a> {
+    caller: &'a Agent,
+    peer: &'a Agent,
+    sdp: Option<String>,
+    extra_headers: Vec<SipHeader>,
+    /// Wire destination override — the INVITE is *addressed* to `peer` (its
+    /// Contact is the Request-URI) but *sent* here. Set by [`Invite::through`]
+    /// to route an initial INVITE via a proxy/LB.
+    wire_dst: Option<SocketAddr>,
+    /// Optional From/To/Request-URI overrides — the seam an E2E *Test case*
+    /// uses to drive From/To/R-URI from input data (numbers) instead of the
+    /// default `sip:name@ip` agent identities. `None` keeps the default.
+    from_uri: Option<String>,
+    to_uri: Option<String>,
+    request_uri: Option<String>,
+}
+
+impl<'a> Invite<'a> {
+    pub(super) fn new(caller: &'a Agent, peer: &'a Agent) -> Self {
+        Invite {
+            caller,
+            peer,
+            sdp: None,
+            extra_headers: vec![],
+            wire_dst: None,
+            from_uri: None,
+            to_uri: None,
+            request_uri: None,
+        }
+    }
+
+    /// Attach an SDP offer body.
+    pub fn with_sdp(mut self, sdp: &str) -> Self {
+        self.sdp = Some(sdp.to_string());
+        self
+    }
+
+    /// Attach an arbitrary extra header on the initial INVITE (e.g. `Supported:
+    /// 100rel, timer` to drive the 18x-management strategies).
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.extra_headers.push(SipHeader {
+            name: name.to_string(),
+            value: value.to_string(),
+        });
+        self
+    }
+
+    /// Override the From URI (e.g. `"sip:+33123456789@example.com"`) — drives
+    /// From from Test-case input instead of the default `sip:caller@ip`.
+    pub fn from(mut self, uri: impl Into<String>) -> Self {
+        self.from_uri = Some(uri.into());
+        self
+    }
+
+    /// Override the To URI — drives To from Test-case input. The To URI also
+    /// seeds the dialog's remote URI.
+    pub fn to(mut self, uri: impl Into<String>) -> Self {
+        self.to_uri = Some(uri.into());
+        self
+    }
+
+    /// Override the Request-URI — drives the R-URI from Test-case input. The
+    /// INVITE is still *sent* to the peer/`through` wire destination.
+    pub fn ruri(mut self, uri: impl Into<String>) -> Self {
+        self.request_uri = Some(uri.into());
+        self
+    }
+
+    /// Send the initial INVITE to `proxy` instead of directly to the peer (the
+    /// Request-URI still targets the peer). Used to drive an LB/record-routing
+    /// proxy; subsequent in-dialog requests then follow the route set learned
+    /// from the proxy's Record-Route automatically.
+    pub fn through(mut self, proxy: SocketAddr) -> Self {
+        self.wire_dst = Some(proxy);
+        self
+    }
+
+    /// Generate the INVITE (all headers filled in), send it, and return the
+    /// client transaction handle.
+    pub async fn send(self) -> ClientInvite {
+        let caller = self.caller;
+        let peer = self.peer;
+        let wire_dst = self.wire_dst.unwrap_or(peer.addr);
+        let call_id = format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip());
+        let from_tag = caller.tag();
+        // Default identities are the agent URIs / a peer-addressed R-URI; a Test
+        // case may override any of From/To/R-URI from its input data.
+        let request_uri = self
+            .request_uri
+            .clone()
+            .unwrap_or_else(|| format!("sip:{}@{}:{}", peer.name, peer.addr.ip(), peer.addr.port()));
+        let from_uri = self.from_uri.clone().unwrap_or_else(|| caller.uri.clone());
+        let to_uri = self.to_uri.clone().unwrap_or_else(|| peer.uri.clone());
+
+        let opts = GenerateOutOfDialogRequestOpts {
+            request_uri: request_uri.clone(),
+            call_id: call_id.clone(),
+            from_uri: from_uri.clone(),
+            from_tag: from_tag.clone(),
+            to_uri: to_uri.clone(),
+            to_tag: None,
+            cseq: 1,
+            via: Some(caller.via()),
+            contact: Some(caller.contact()),
+            max_forwards: Some(70),
+            body: self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
+            content_type: None,
+            extra_headers: self.extra_headers.clone(),
+        };
+        let invite = generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
+        caller.send(&SipMessage::Request(invite.clone()), wire_dst).await;
+
+        let dialog = StackDialog {
+            call_id,
+            local_tag: from_tag,
+            remote_tag: String::new(),
+            local_uri: from_uri,
+            remote_uri: to_uri,
+            remote_target: request_uri,
+            local_cseq: 1,
+            route_set: vec![],
+        };
+        ClientInvite {
+            agent: caller.clone(),
+            fallback_addr: peer.addr,
+            wire_dst,
+            original_invite: invite,
+            dialog,
+            fork_cseq: HashMap::new(),
+        }
+    }
+}
