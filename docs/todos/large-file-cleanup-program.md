@@ -281,6 +281,17 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
    replacement — but any new use of `quiesce` on an audited path would emit
    non-compliant peer SIP. Candidate fix: skip ACKs and attach `ANSWER_SDP`
    to offer-carrying INVITEs/UPDATEs inside `quiesce` itself.
+   `resolved:` 2026-07-16 — the blind primitive was hiding TWO distinct
+   situations. Split by lane: `Agent::release_failed_call` (failed-call
+   teardown, load driver) answers per a stateless-UA decision table
+   (`release_verdict`: ACK→absorb, BYE/CANCEL→200, INVITE/UPDATE→481,
+   other-in-dialog→481, out-of-dialog probe→200 — so a queued INVITE
+   retransmit can no longer be 200'd into a zombie leg); `Agent::drain_expecting`
+   (successful multi-leg transfer straggler drain, functional tests) answers
+   ONLY the whitelisted method (BYE) via a real `ServerTxn` 200 and PANICS on
+   anything else, because those legs are still live dialog members whose
+   behavior MUST stay asserted. `quiesce` deleted; both call sites migrated;
+   pin tests in `tolerant_recv::release_verdict_tests`.
 7. **`InDialogRequest::with_to_tag` doc said the shared CSeq counter still
    advances and per-fork CSeq independence is not asserted** — stale: the
    send path forks an independent per-fork CSeq sequence whenever the fork

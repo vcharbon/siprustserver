@@ -34,16 +34,20 @@ const REFER_KEY: &str = "refer-allow-c";
 /// Canonical charlie (transfer-target) port — distinct from alice/bob/b2bua.
 const CHARLIE_PORT: u16 = 5090;
 
-/// Pump both callee legs (bob + charlie) with a best-effort drain-and-200 until
-/// they go quiet, CONCURRENTLY. Used after a multi-leg (REFER) teardown so a
+/// Pump both callee legs (bob + charlie) for post-flow BYE stragglers,
+/// CONCURRENTLY and STRICTLY. Used after a multi-leg (REFER) teardown so a
 /// relayed b-leg BYE that lands just after the scenario's own short drain window
 /// is still answered, letting the SUT reap its downstream legs without waiting
-/// out a retransmit timer. A 1 s window comfortably outlasts the relayed BYE's
-/// transit + the first retransmit under the harness fabric. Concurrent (not
-/// sequential) so a BYE to one leg is not missed while we drain the other.
+/// out a retransmit timer. These legs are still LIVE dialog members of a
+/// successful call, so the drain answers ONLY a BYE (properly, via `ServerTxn`)
+/// and fails the test on any other traffic — never the failed-call release
+/// policy (`Agent::release_failed_call`). A 1 s window comfortably outlasts the
+/// relayed BYE's transit + the first retransmit under the harness fabric.
+/// Concurrent (not sequential) so a BYE to one leg is not missed while we drain
+/// the other.
 async fn drain_callees(bob: &Agent, charlie: &Agent) {
     let window = std::time::Duration::from_secs(1);
-    tokio::join!(bob.quiesce(window), charlie.quiesce(window));
+    tokio::join!(bob.drain_expecting(window, &["BYE"]), charlie.drain_expecting(window, &["BYE"]));
 }
 
 // ── Happy-path leak gate (alice/bob only) ──────────────────────────────────
