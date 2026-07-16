@@ -540,7 +540,7 @@ async fn run_one(
     let failed = !matches!(result, Ok(Ok(())));
     if failed && !call.teardown_quiesce.is_zero() {
         for (_, agent) in &callee_agents {
-            agent.quiesce(call.teardown_quiesce).await;
+            agent.release_failed_call(call.teardown_quiesce).await;
         }
     }
 

@@ -659,8 +659,8 @@ impl ActorScenario for OptionsHold {
 /// Long recorded call, actor-declared — the port of
 /// `LongCall`. Establish, send exactly ONE
 /// in-dialog OPTIONS keepalive ping, then simply SURVIVE for `long_hold` — the
-/// reactors answer the SUT's own in-dialog keepalives on BOTH legs concurrently
-/// (that is what the linear body's `quiesce` did) — then BYE tolerantly.
+/// reactors answer the SUT's own in-dialog keepalives on BOTH legs
+/// concurrently — then BYE tolerantly.
 ///
 /// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.5):
 /// phases `connected` → `keepalive_ack` (terminal — **no `bye_200`**);

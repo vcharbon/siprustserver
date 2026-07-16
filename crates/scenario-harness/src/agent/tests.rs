@@ -149,8 +149,8 @@ mod auth_seam {
 
     /// `try_receive_tolerating_blocking` waits for the sentinel method,
     /// 200-OKs the tolerated traffic in between, and RETURNS the absorbed
-    /// requests so the body can assert them — where `quiesce` blind-drains and
-    /// a lost sentinel becomes silent success (here it is a `Timeout` error,
+    /// requests so the body can assert them — where a blind drain would let a
+    /// lost sentinel become silent success (here it is a `Timeout` error,
     /// asserted first on an idle socket).
     #[tokio::test(start_paused = true)]
     async fn try_receive_tolerating_blocking_collects_absorbed_and_times_out() {

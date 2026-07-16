@@ -9,16 +9,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sip_message::generators::{
-    generate_in_dialog_request, generate_out_of_dialog_request, generate_response, ContactSpec,
-    GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts, GenerateResponseOpts,
-    InDialogMethod, OutOfDialogMethod, SipTransport, StackDialog, ViaSpec,
+    generate_in_dialog_request, generate_out_of_dialog_request, ContactSpec,
+    GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts, InDialogMethod,
+    OutOfDialogMethod, SipTransport, StackDialog, ViaSpec,
 };
 use sip_message::message_helpers::get_header;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{serialize, SipHeader, SipMessage, SipParser, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
-use super::addressing::{top_via_addr, top_via_branch};
+use super::addressing::top_via_branch;
 use super::client_txn::expect_response;
 use super::dialog::InDialogTxn;
 use super::harness::Ids;
@@ -264,33 +264,6 @@ impl Agent {
     /// as a bounded `select!` arm.
     pub(crate) async fn hop_ack_fulfilled(&self, call_id: &str, branch: &str) {
         self.acks.fulfilled(call_id, branch).await
-    }
-
-    /// Best-effort drain-and-200 for the load driver's teardown: for up to
-    /// `window`, receive any inbound request and answer it `200 OK` (Via-routed),
-    /// then return when the window elapses or the socket goes quiet. After a
-    /// failed call's a-leg has been BYE'd, this lets the in-process callee answer
-    /// the SUT's relayed b-leg BYE so the SUT closes its b-leg promptly instead of
-    /// waiting out a retransmit Timer. Never panics (sends are best-effort).
-    pub async fn quiesce(&self, window: Duration) {
-        let deadline = tokio::time::Instant::now() + window;
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return;
-            }
-            match tokio::time::timeout(remaining, self.ep.recv()).await {
-                Ok(Some(pkt)) => {
-                    if let Ok(SipMessage::Request(r)) = CustomParser::new().parse(&pkt.raw) {
-                        let resp =
-                            generate_response(&r, 200, "OK", &GenerateResponseOpts::default());
-                        let dst = top_via_addr(&r).unwrap_or(self.addr);
-                        let _ = self.try_send(&SipMessage::Response(resp), dst).await;
-                    }
-                }
-                _ => return, // timed out or queue closed
-            }
-        }
     }
 
     /// Begin an out-of-dialog INVITE to `peer`. Returns a builder; call
