@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use scenario_harness::claim::{resolve_claim, ClaimRule};
 use scenario_harness::legpick::LegInfo;
 use sip_message::message_helpers::is_invite_request_buffer;
 use sip_message::sniff::call_id;
@@ -61,44 +62,72 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
             mux.stats.orphan(OrphanReason::UnknownToken, raw);
             return;
         };
-        // Receiver selection: the single-receiver socket delivers directly; a
-        // shared socket asks the scenario-owned picker (handed the parsed leg).
-        // The mux itself reads nothing but the call token — leg routing is the
-        // scenario's to own.
-        let idx = match slot.receivers.len() {
-            0 => {
-                mux.stats.orphan(OrphanReason::NoRoute, raw);
-                return;
-            }
-            1 => 0,
-            _ => match &slot.picker {
-                Some(pick) => {
-                    // The picker runs while we hold `mux.reg`; isolate it under
-                    // `catch_unwind` so a panicking scenario callback degrades to
-                    // a `no_route` orphan instead of POISONING the socket's
-                    // registry mutex (which would cascade every subsequent
-                    // route/bind/drop on this endpoint). It must also not re-enter
-                    // the mux (it would self-deadlock on `reg`).
-                    let picked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        pick(&LegInfo::new(raw))
-                    }));
-                    match picked.ok().and_then(|want| slot.receivers.iter().position(|r| r.label == want)) {
-                        Some(i) => i,
-                        None => {
-                            mux.stats.orphan(OrphanReason::NoRoute, raw);
-                            tap_unrouted(mux, slot, raw, src);
-                            return;
-                        }
+        // Receiver selection. A claim-mode slot resolves by the scenario's
+        // declared per-leg rules (consumed once; a miss is `unclaimed`, never
+        // a misdelivery — even with a single pending receiver). Otherwise the
+        // single-receiver socket delivers directly and a shared socket asks
+        // the scenario-owned picker (handed the parsed leg). The mux itself
+        // reads nothing but the call token — leg routing is the scenario's to
+        // own.
+        let idx = if slot.claim_mode {
+            let claims: Vec<_> = slot
+                .receivers
+                .iter()
+                .map(|r| r.claim.as_ref().filter(|_| !r.claimed))
+                .collect();
+            match resolve_claim(&claims, &LegInfo::new(raw), slot.order_fired) {
+                Some(i) => {
+                    slot.receivers[i].claimed = true;
+                    if matches!(slot.receivers[i].claim, Some(ClaimRule::ArrivalOrder(_))) {
+                        slot.order_fired += 1;
                     }
+                    i
                 }
                 None => {
-                    // Several receivers but no picker to disambiguate — a
-                    // scenario bug, not a silent first-wins.
-                    mux.stats.orphan(OrphanReason::NoRoute, raw);
+                    mux.stats.unclaimed(raw);
                     tap_unrouted(mux, slot, raw, src);
                     return;
                 }
-            },
+            }
+        } else {
+            match slot.receivers.len() {
+                0 => {
+                    mux.stats.orphan(OrphanReason::NoRoute, raw);
+                    return;
+                }
+                1 => 0,
+                _ => match &slot.picker {
+                    Some(pick) => {
+                        // The picker runs while we hold `mux.reg`; isolate it under
+                        // `catch_unwind` so a panicking scenario callback degrades to
+                        // a `no_route` orphan instead of POISONING the socket's
+                        // registry mutex (which would cascade every subsequent
+                        // route/bind/drop on this endpoint). It must also not re-enter
+                        // the mux (it would self-deadlock on `reg`).
+                        let picked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            pick(&LegInfo::new(raw))
+                        }));
+                        match picked
+                            .ok()
+                            .and_then(|want| slot.receivers.iter().position(|r| r.label == want))
+                        {
+                            Some(i) => i,
+                            None => {
+                                mux.stats.orphan(OrphanReason::NoRoute, raw);
+                                tap_unrouted(mux, slot, raw, src);
+                                return;
+                            }
+                        }
+                    }
+                    None => {
+                        // Several receivers but no picker to disambiguate — a
+                        // scenario bug, not a silent first-wins.
+                        mux.stats.orphan(OrphanReason::NoRoute, raw);
+                        tap_unrouted(mux, slot, raw, src);
+                        return;
+                    }
+                },
+            }
         };
         slot.arrived = true;
         // Snapshot this receiver's delivery state, then (under the same lock)
@@ -197,6 +226,9 @@ pub(super) async fn reap_loop(sockets: Vec<Arc<MuxSocket>>, stats: Arc<MuxStats>
                 if let Some(s) = g.by_token.remove(&k) {
                     for r in &s.receivers {
                         r.queue.close();
+                        if r.claim.is_some() && !r.claimed {
+                            stats.claim_unfired.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                     stats.pending_expired.fetch_add(1, Ordering::Relaxed);
                 }

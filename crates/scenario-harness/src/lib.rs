@@ -17,6 +17,7 @@ pub mod agent;
 pub mod anchors;
 pub mod callee_group;
 pub mod callflow;
+pub mod claim;
 pub mod dsl;
 pub mod egress;
 pub mod legpick;
@@ -43,6 +44,9 @@ pub use agent::{
 // Multi-callee routing: several logical agents on one bound socket, demuxed by
 // the shared R-URI leg-picker (the transfer Bob/Charlie/David fabric).
 pub use callee_group::{CalleeGroup, CalleeGroupBuilder};
+// Data-driven inbound-leg claims: the runtime (per-call-instance) counterpart
+// of the compiled LegPicker, consumed by the load mux's claim demux tier.
+pub use claim::{resolve_claim, ClaimRule};
 pub use legpick::{labelled_prefix_leg_picker, prefix_leg_picker, LegInfo, LegPicker};
 // The Send agent factory for the load-test driver (`crates/loadgen`), plus the
 // dependency-light check-verdict projection a sampled page renders.
