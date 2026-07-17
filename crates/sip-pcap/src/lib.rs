@@ -23,9 +23,11 @@
 //! - everything dropped is counted in [`DecodeStats`], never silent.
 //!
 //! Datagram decoding is this file's whole concern. The SIP flow model built
-//! on top of it (legs, hops, call-group correlation) lives in [`flow`]; the
-//! `sipflow` bin is a text presenter over that model.
+//! on top of it (legs, hops, call-group correlation) lives in [`flow`], its
+//! JSON serialization in [`emit`]; the `sipflow` bin is a text presenter over
+//! that model.
 
+pub mod emit;
 pub mod flow;
 
 use std::collections::HashMap;
