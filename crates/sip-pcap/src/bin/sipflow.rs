@@ -17,6 +17,7 @@
 //!   sipflow /tmp/sipcap --call-id 7f3a... --full
 //!   sipflow /tmp/sipcap --final-status none
 //!   sipflow /tmp/sipcap --ruri 166601009 --final-status 5xx
+//!   sipflow /tmp/sipcap --json > flows.json
 
 use std::path::PathBuf;
 
@@ -78,6 +79,20 @@ struct Args {
     #[arg(long, default_value_t = false)]
     no_fromto_fallback: bool,
 
+    /// Emit the FULL flow model (raw payloads base64-encoded, parsed
+    /// summaries, hops, match evidence, decode counters) as JSON on stdout —
+    /// schema documented on `sip_pcap::emit::flows_to_json`. Whole-capture
+    /// emit: selection filters and text layout flags do not apply.
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = [
+            "call_id", "from", "to", "ruri", "method", "headers",
+            "final_status", "token", "list", "full", "limit",
+        ]
+    )]
+    json: bool,
+
     /// One summary line per call group instead of full ladders.
     #[arg(long, default_value_t = false)]
     list: bool,
@@ -112,6 +127,11 @@ fn main() {
         fromto_fallback: !args.no_fromto_fallback,
     };
     let flows = build_flows(&datagrams, &cfg);
+
+    if args.json {
+        println!("{}", sip_pcap::emit::flows_to_json(&flows, &stats));
+        return;
+    }
 
     let selected: Vec<&CallGroup> =
         flows.groups.iter().filter(|g| group_matches(g, &flows.legs, &args)).collect();
