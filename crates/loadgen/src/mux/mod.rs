@@ -21,7 +21,9 @@
 //!   tier demuxes EVERY in-dialog datagram with no token and no R-URI
 //!   cooperation; (2) **correlation token** — an initial INVITE spawning a new
 //!   leg (the SUT carries the token unchanged onto every originated leg, so
-//!   callee and transfer-target legs share one token); (3) orphan
+//!   callee and transfer-target legs share one token), assigned within the
+//!   call by the scenario's [`LegPicker`] (compiled shapes) or consumable
+//!   [`ClaimRule`]s (data-driven scenarios); (3) orphan
 //!   (count + bounded-sample + drop — never queued, never silent).
 //! - [`endpoint`] — the per-call [`SignalingNetwork`] view ([`MuxNetwork`]) and
 //!   each leg's endpoint. Every per-call endpoint deregisters its keys on
@@ -45,6 +47,9 @@ mod stats;
 
 pub use correlation::Correlation;
 pub use endpoint::{CallRouting, MuxNetwork};
+// The data-driven claim rules live in their shared home, `scenario-harness`
+// (like the LegPicker below); the mux consumes them as its claim demux tier.
+pub use scenario_harness::claim::ClaimRule;
 pub use loss::{DropDir, TargetedDrop};
 pub use stats::MuxStats;
 
@@ -76,7 +81,11 @@ pub use scenario_harness::legpick::{
     LegPicker,
 };
 
-/// Whether a defined endpoint originates calls (UAC) or receives them (UAS).
+/// Whether an endpoint originates calls (UAC) or receives them (UAS). On a
+/// defined endpoint ([`EndpointSpec`]) this is the DEFAULT for binds the call's
+/// [`CallRouting`] does not declare; each per-call bind resolves its own role,
+/// so a shared-vantage socket (the pcap mux cut: the SUT dials new legs back to
+/// the ip:port that originated leg A) carries both on one addr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     /// Caller: registers its dialog by the Call-ID sniffed from its outbound
@@ -115,15 +124,38 @@ pub(in crate::mux) struct ReceiverEntry {
     pub(in crate::mux) keyset: Arc<Mutex<Vec<Key>>>,
     pub(in crate::mux) drop: Arc<DropModel>,
     pub(in crate::mux) txns: Option<Arc<CallTxns>>,
+    /// The scenario-declared claim this receiver holds over its inbound
+    /// initial INVITE (claim-mode slots only — all receivers of a slot either
+    /// carry a claim or none do, enforced at bind).
+    pub(in crate::mux) claim: Option<ClaimRule>,
+    /// Set when this receiver's claim fires — a claim is consumed exactly
+    /// once; later INVITEs never re-match it.
+    pub(in crate::mux) claimed: bool,
 }
 
 /// All receivers for one call on one socket, sharing the call token. Usually a
 /// single receiver; >1 only when a scenario binds several endpoints on the same
-/// port, in which case `picker` disambiguates each arriving leg.
+/// port, in which case `picker` (compiled shapes) or the receivers' claims
+/// (data-driven scenarios) disambiguate each arriving leg.
 pub(in crate::mux) struct CallSlot {
     pub(in crate::mux) receivers: Vec<ReceiverEntry>,
     /// Scenario-owned disambiguation, used iff `receivers.len() > 1`.
     pub(in crate::mux) picker: Option<LegPicker>,
+    /// The owning call instance ([`MuxNetwork`] id). Claims are scoped
+    /// `(token, rule)`, never global: a SECOND call registering the same token
+    /// (To-user correlation + intentionally shared callee numbers) is an
+    /// explicit bind failure + `token_collision` count — never a shared slot
+    /// that could misdeliver a leg.
+    pub(in crate::mux) owner: u64,
+    /// Whether this slot resolves legs by claims (true) or by count/picker
+    /// (false); fixed by the first receiver, mixing is a bind error.
+    pub(in crate::mux) claim_mode: bool,
+    /// ArrivalOrder claims fired so far in this token scope — the ordinal
+    /// [`ClaimRule::ArrivalOrder`] consumes. Only order-claimed legs advance
+    /// it (specifically-claimed legs, retransmissions and unclaimed strays
+    /// never shift it), so order claims stay stable however the SUT
+    /// interleaves the other legs.
+    pub(in crate::mux) order_fired: usize,
     /// Set once any leg has arrived — the reaper then leaves the slot alone
     /// (a live call may outlast the pending deadline), so only never-arrived
     /// legs are swept.
@@ -158,6 +190,9 @@ pub struct MuxCore {
     pub(in crate::mux) endpoints: HashMap<SocketAddr, Arc<MuxSocket>>,
     stats: Arc<MuxStats>,
     pub(in crate::mux) pending_ttl: Duration,
+    /// Mints each per-call [`MuxNetwork`]'s owner id — the call-instance scope
+    /// that keeps token slots (and their claims) from ever spanning two calls.
+    call_seq: AtomicU64,
     _reaper: JoinHandle<()>,
 }
 
@@ -245,7 +280,13 @@ impl MuxCore {
             stats.clone(),
             pending_ttl,
         ));
-        Ok(Arc::new(Self { endpoints, stats, pending_ttl, _reaper: reaper }))
+        Ok(Arc::new(Self {
+            endpoints,
+            stats,
+            pending_ttl,
+            call_seq: AtomicU64::new(0),
+            _reaper: reaper,
+        }))
     }
 
     /// All bound endpoint addresses (handy for tests).
@@ -298,17 +339,19 @@ impl MuxCore {
         seed: u64,
         drop_nth: Option<TargetedDrop>,
     ) -> MuxNetwork {
-        // Per-callee-addr bind-order label queue: each `bind_udp(addr)` dispenses
-        // the next declared label for that addr (so several receivers can share a
-        // socket; the driver binds them in declaration order).
-        let mut labels: HashMap<SocketAddr, Vec<String>> = HashMap::new();
-        for (addr, label) in &routing.legs {
-            labels.entry(*addr).or_default().push(label.clone());
+        // Per-addr bind-order dispense queue: each `bind_udp(addr)` takes the
+        // next declared entry for that addr (so several receivers — and, on a
+        // shared-vantage socket, the caller too — can share a socket; the
+        // driver binds the agents in declaration order).
+        let mut dispense: HashMap<SocketAddr, Vec<endpoint::BindDecl>> = HashMap::new();
+        for (addr, decl) in routing.binds {
+            dispense.entry(addr).or_default().push(decl);
         }
         MuxNetwork {
             core: self.clone(),
+            owner: self.call_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             token: routing.token,
-            labels,
+            dispense,
             pickers: routing.pickers,
             cursor: Mutex::new(HashMap::new()),
             drop_rate,

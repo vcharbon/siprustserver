@@ -17,6 +17,17 @@ pub struct MuxStats {
     pub pending_expired: AtomicU64,
     pub inbox_drop: AtomicU64,
     pub delivered: AtomicU64,
+    /// Initial INVITEs whose token matched a claim-mode call but no PENDING
+    /// claim accepted them — a scenario/SUT mismatch on a KNOWN call, counted
+    /// apart from true orphans (which never correlated at all).
+    pub unclaimed: AtomicU64,
+    /// Token-slot registrations rejected because a CONCURRENT call already
+    /// owns the token (To-user correlation + intentionally shared callee
+    /// numbers) — the residual ambiguity surfaced as an explicit failure.
+    pub token_collision: AtomicU64,
+    /// Claims released (call teardown or pending-reap) without ever firing —
+    /// an expected inbound leg the SUT never dialed.
+    pub claim_unfired: AtomicU64,
     /// Datagrams the per-call loss model deliberately discarded, split by
     /// direction: `out` = never hit the wire (dropped in `send_to`); `in` =
     /// demuxed to the call but discarded before the app read it.
@@ -51,6 +62,16 @@ impl MuxStats {
             // Lead the sample with the CSeq (method + number) so a sampled orphan is
             // self-describing for troubleshooting, then the request/response line.
             g.push(format!("[{}] {} | {}", reason.label(), cseq_value(raw), first_line(raw)));
+        }
+    }
+
+    /// An initial INVITE on a KNOWN (claim-mode) call that no pending claim
+    /// accepted: counted apart from orphans, sampled on the same surface.
+    pub(super) fn unclaimed(&self, raw: &[u8]) {
+        self.unclaimed.fetch_add(1, Ordering::Relaxed);
+        let mut g = self.samples.lock().unwrap();
+        if g.len() < self.sample_cap {
+            g.push(format!("[unclaimed] {} | {}", cseq_value(raw), first_line(raw)));
         }
     }
 
@@ -115,6 +136,24 @@ impl MuxCore {
         out.push_str(&format!(
             "loadgen_mux_pending_expired_total {}\n",
             s.pending_expired.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP loadgen_mux_unclaimed_total Initial INVITEs on a known call that no pending claim accepted.\n");
+        out.push_str("# TYPE loadgen_mux_unclaimed_total counter\n");
+        out.push_str(&format!(
+            "loadgen_mux_unclaimed_total {}\n",
+            s.unclaimed.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP loadgen_mux_token_collision_total Token-slot registrations rejected: token already owned by a concurrent call.\n");
+        out.push_str("# TYPE loadgen_mux_token_collision_total counter\n");
+        out.push_str(&format!(
+            "loadgen_mux_token_collision_total {}\n",
+            s.token_collision.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP loadgen_mux_claim_unfired_total Claims released without firing (expected inbound leg never came).\n");
+        out.push_str("# TYPE loadgen_mux_claim_unfired_total counter\n");
+        out.push_str(&format!(
+            "loadgen_mux_claim_unfired_total {}\n",
+            s.claim_unfired.load(Ordering::Relaxed)
         ));
         out.push_str("# HELP loadgen_mux_inbox_drop_total Datagrams dropped on a full call inbox.\n");
         out.push_str("# TYPE loadgen_mux_inbox_drop_total counter\n");
