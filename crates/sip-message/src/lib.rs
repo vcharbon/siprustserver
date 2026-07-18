@@ -19,6 +19,7 @@ pub mod message_helpers;
 pub mod sipfrag;
 pub mod sniff;
 pub mod template;
+pub mod template_match;
 
 pub use error::SipParseError;
 pub use method::Method;
@@ -32,6 +33,7 @@ pub use parser::custom::{hydrate_request, hydrate_response, CustomParser};
 pub use template::{
     apply_name_forms, EmitOpts, HeaderClass, MessageTemplate, TemplateHeader, TemplateStart,
 };
+pub use template_match::{MatchOpts, Mismatch};
 pub use types::{
     Contact, ContactSet, CSeq, InDialogRequest, InviteRequest, NameAddr, NonEmpty, NotInDialog,
     OptionalHeaders, Params, ParamValue, Rack, ReferTo, Replaces, RequestUri, SipHeader,

@@ -14,7 +14,7 @@
 //! SUT-less — the §17.1.1.3 ACK-to-final and the minted To-tag, neither present
 //! in any template — are pinned in [`automatics_fire_though_absent_from_templates`].
 
-use scenario_harness::{EmitOpts, Harness, MessageTemplate, TemplateHeader};
+use scenario_harness::{EmitOpts, Harness, MatchOpts, MessageTemplate, Mismatch, TemplateHeader};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipHeader, SipMessage, SipParser};
 
@@ -663,6 +663,160 @@ async fn template_reinvite_compact_supported_not_duplicated() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    h.finish().await;
+}
+
+/// A captured 200 (SDP answer + a frozen `X-Custom`) for the loopback matcher.
+fn captured_200(x_custom: &str) -> MessageTemplate {
+    let raw = format!(
+        "SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP 9.9.9.9:5060;branch=z9hG4bK-cap\r\n\
+From: <sip:a@ex>;tag=at\r\n\
+To: <sip:b@ex>;tag=bt\r\n\
+Call-ID: cap@9\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:b@9.9.9.9:5060>\r\n\
+X-Custom: {}\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\r\n{}",
+        x_custom,
+        ANSWER.len(),
+        ANSWER,
+    );
+    MessageTemplate::from_message(&parse(raw.as_bytes()))
+}
+
+/// A captured INVITE (SDP offer + a frozen `Subject`) for the request-side matcher.
+fn captured_invite_tmpl(subject: &str) -> MessageTemplate {
+    let raw = format!(
+        "INVITE sip:+15559999@capture.example SIP/2.0\r\n\
+Via: SIP/2.0/UDP 9.9.9.9:5060;branch=z9hG4bK-cap\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:a@ex>;tag=at\r\n\
+To: <sip:b@ex>\r\n\
+Call-ID: cap@9\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:a@9.9.9.9:5060>\r\n\
+Subject: {}\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\r\n{}",
+        subject,
+        OFFER.len(),
+        OFFER,
+    );
+    MessageTemplate::from_message(&parse(raw.as_bytes()))
+}
+
+/// U4 loopback: a UAS replays a template 200 unchanged; the UAC's
+/// `match_inbound` against that template passes (tier-1 regenerated fields
+/// ignored, frozen headers + body byte-equal, remote-target params equal).
+#[tokio::test]
+async fn expect_template_response_unchanged_replay_passes() {
+    let h = Harness::new("expect-template-pass").describe(
+        "A replayed template 200 matches its own template: tier-1 ignored, frozen \
+         headers/body byte-equal, Contact params equal",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let tmpl = captured_200("original");
+    let mut call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond_template(&tmpl, EmitOpts::default()).send().await;
+
+    let ok = call.expect(200).await;
+    let got = SipMessage::Response(ok);
+    assert_eq!(
+        tmpl.match_inbound(&got, &MatchOpts::default()),
+        Ok(()),
+        "unchanged replay must match its template",
+    );
+
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    h.finish().await;
+}
+
+/// U4 loopback: a UAS replays a 200 with a CHANGED frozen header; matching the
+/// received response against the ORIGINAL template returns the precise Mismatch.
+#[tokio::test]
+async fn expect_template_response_frozen_drift_returns_mismatch() {
+    let h = Harness::new("expect-template-drift").describe(
+        "A replayed 200 with a changed frozen header fails match against the \
+         original template with a precise Value mismatch",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let tmpl_orig = captured_200("original");
+    let tmpl_drift = captured_200("changed");
+    let mut call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond_template(&tmpl_drift, EmitOpts::default()).send().await;
+
+    let ok = call.expect(200).await;
+    let got = SipMessage::Response(ok);
+    match tmpl_orig.match_inbound(&got, &MatchOpts::default()) {
+        Err(Mismatch::Value { name, expected, got, .. }) => {
+            assert_eq!(name, "x-custom");
+            assert_eq!(expected, "original");
+            assert_eq!(got, "changed");
+        }
+        other => panic!("expected a precise Value mismatch, got {other:?}"),
+    }
+
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    h.finish().await;
+}
+
+/// U4 request-side hook: `ServerTxn::expect_template` matches a replayed template
+/// INVITE, and returns a precise Mismatch against a drifted template.
+#[tokio::test]
+async fn server_txn_expect_template_matches_and_detects_drift() {
+    let h = Harness::new("expect-template-request").describe(
+        "ServerTxn::expect_template matches a replayed template INVITE and detects \
+         a drifted frozen header",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let tmpl = captured_invite_tmpl("plan-a");
+    let drift = captured_invite_tmpl("plan-b");
+    let mut call = alice.invite(&bob).template(&tmpl, EmitOpts::default()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+
+    assert_eq!(
+        uas.expect_template(&tmpl, &MatchOpts::default()),
+        Ok(()),
+        "the replayed INVITE matches its template",
+    );
+    match uas.expect_template(&drift, &MatchOpts::default()) {
+        Err(Mismatch::Value { name, expected, got, .. }) => {
+            assert_eq!(name, "subject");
+            assert_eq!(expected, "plan-b");
+            assert_eq!(got, "plan-a");
+        }
+        other => panic!("expected a Subject Value mismatch, got {other:?}"),
+    }
+
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
     h.finish().await;
 }
 
