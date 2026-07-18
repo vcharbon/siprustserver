@@ -50,6 +50,7 @@ impl ServerTxn {
             reason: reason.to_string(),
             sdp: None,
             template_body: None,
+            suppress_default_ct: false,
             extra_headers: vec![],
             to_tag: None,
         }
@@ -188,6 +189,9 @@ pub struct Respond<'a> {
     /// captured payload emitted verbatim, its Content-Type carried as a frozen
     /// header rather than stamped by the generator.
     template_body: Option<Vec<u8>>,
+    /// A template body carried NO Content-Type: suppress the generator's default
+    /// `application/sdp` stamp (see [`Invite::template`](super::Invite::template)).
+    suppress_default_ct: bool,
     extra_headers: Vec<SipHeader>,
     to_tag: Option<String>,
 }
@@ -207,7 +211,13 @@ impl<'a> Respond<'a> {
         // v1: casing + duplicate-header layout are always preserved for frozen
         // headers; `preserve_order` requests nothing further yet (see EmitOpts).
         let EmitOpts { preserve_order: _ } = opts;
-        self.extra_headers = tmpl.frozen_headers();
+        let frozen = tmpl.frozen_headers();
+        // Emitted Content-Type comes ONLY from the frozen headers; suppress the
+        // generator's default when none is frozen.
+        self.suppress_default_ct =
+            !frozen.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
+        // Append AFTER any prior `with_header` entries — never drop them.
+        self.extra_headers.extend(frozen);
         self.template_body = Some(tmpl.body().to_vec());
         self
     }
@@ -298,6 +308,10 @@ impl<'a> Respond<'a> {
             incoming_source: None,
         };
         let mut resp = generate_response(&txn.request, self.status, &self.reason, &opts);
+        if self.suppress_default_ct {
+            resp.headers =
+                sip_message::message_helpers::remove_header(&resp.headers, "content-type");
+        }
         // Real UAs may fold multiple echoed Record-Route rows into one comma-
         // separated header (RFC 3261 §7.3.1); reproduce that wire form for UAs the
         // harness picked `Combined` for, so the B2BUA's split-before-§12.1.2-reverse

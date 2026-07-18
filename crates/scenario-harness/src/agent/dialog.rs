@@ -87,7 +87,9 @@ impl Dialog {
     /// ACK echoes the re-INVITE's CSeq, which `request(INVITE, …)` left as the
     /// dialog's `local_cseq`). Carries an optional SDP answer (the delayed-offer
     /// case where the answer rides the ACK, RFC 3264 §4). Routed to the next hop
-    /// like any in-dialog request; the B2BUA relays it end-to-end.
+    /// like any in-dialog request; the B2BUA relays it end-to-end. The ACK is a
+    /// dedicated primitive: it takes no template in v1 (a captured ACK's
+    /// frozen-header quirks are not replayable yet).
     pub async fn ack(&mut self, sdp: Option<&str>) {
         self.ack_for(self.dialog.local_cseq, sdp).await;
     }
@@ -137,9 +139,10 @@ impl Dialog {
     /// line; the stack regenerates the tier-1 fields (Via + branch, the reused
     /// Call-ID / From-tag / To-tag, the next CSeq, Max-Forwards, Content-Length,
     /// Contact, Request-URI + Route set) while every frozen header rides verbatim.
-    /// Panics if the template is not a request of an admissible in-dialog method
-    /// (ACK/CANCEL and out-of-dialog-only methods are rejected — use the dedicated
-    /// primitives). See [`EmitOpts`] for the v1 header-order limitation.
+    /// Panics if the template is not a request of an admissible in-dialog method:
+    /// ACK/CANCEL are dedicated primitives that take no template in v1 (their
+    /// captured frozen-header quirks are not replayable yet), and out-of-dialog-
+    /// only methods are rejected. See [`EmitOpts`] for the v1 header-order limitation.
     pub async fn send_template(&mut self, tmpl: &MessageTemplate, opts: EmitOpts) -> InDialogTxn {
         let method = tmpl
             .method()
@@ -215,7 +218,9 @@ impl ClientReinvite {
     /// took. Returns a client transaction to `expect(200)` on; the matching
     /// `487 Request Terminated` for the re-INVITE arrives on this same UA via
     /// [`ClientReinvite::expect`]. Per §9, this ends only the renegotiation —
-    /// the established dialog (and the call through a B2BUA) must survive.
+    /// the established dialog (and the call through a B2BUA) must survive. CANCEL
+    /// is a dedicated primitive: it takes no template in v1 (a captured CANCEL's
+    /// frozen-header quirks are not replayable yet).
     pub async fn cancel(&self) -> InDialogTxn {
         unwrap_step(try_send_cancel(&self.agent, &self.original_invite, self.wire_dst).await);
         InDialogTxn::new(
@@ -242,6 +247,9 @@ pub struct InDialogRequest<'a> {
     content_type: Option<String>,
     rack: Option<String>,
     extra_headers: Vec<SipHeader>,
+    /// A template body carried NO Content-Type: suppress the generator's default
+    /// `application/sdp` stamp (see [`Invite::template`](super::Invite::template)).
+    suppress_default_ct: bool,
     to_tag: Option<String>,
     /// Per-fork CSeq map (see `ClientInvite`'s fork tracking). Present only on
     /// the early-dialog path; when a `with_to_tag` fork is addressed the CSeq
@@ -266,6 +274,7 @@ impl<'a> InDialogRequest<'a> {
             content_type: None,
             rack: None,
             extra_headers: vec![],
+            suppress_default_ct: false,
             to_tag: None,
             fork_cseq: None,
         }
@@ -324,7 +333,13 @@ impl<'a> InDialogRequest<'a> {
         // v1: casing + duplicate-header layout are always preserved for frozen
         // headers; `preserve_order` requests nothing further yet (see EmitOpts).
         let EmitOpts { preserve_order: _ } = opts;
-        self.extra_headers = tmpl.frozen_headers();
+        let frozen = tmpl.frozen_headers();
+        // Emitted Content-Type comes ONLY from the frozen headers; suppress the
+        // generator's default when none is frozen.
+        self.suppress_default_ct =
+            !frozen.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
+        // Append AFTER any prior `with_header` entries — never drop them.
+        self.extra_headers.extend(frozen);
         self.body = tmpl.body().to_vec();
         self.content_type = None;
         self
@@ -393,7 +408,13 @@ impl<'a> InDialogRequest<'a> {
         } else if let Some(t) = &self.to_tag {
             view.remote_tag = t.clone();
         }
-        let res = generate_in_dialog_request(self.method, &view, &opts);
+        let mut res = generate_in_dialog_request(self.method, &view, &opts);
+        if self.suppress_default_ct {
+            res.request.headers = sip_message::message_helpers::remove_header(
+                &res.request.headers,
+                "content-type",
+            );
+        }
         // Advance the SHARED dialog counter only for a non-forked request (a
         // forked request advanced its own per-fork entry above and must leave the
         // shared sequence untouched).
