@@ -22,6 +22,18 @@
 //! the normalization [`SipHeader`] already applies. This is stable across the
 //! extract → replay → re-extract loop but is not the original wire framing.
 //!
+//! # Compact header-name fidelity, and the ONE canonicalization source
+//!
+//! A message captured with RFC 3261 §7.3.3 compact names (`v` Via, `f` From,
+//! `t` To, `i` Call-ID, `m` Contact, `c` Content-Type, …) replays with those
+//! compact names — for frozen headers AND for the tier-1 headers the stack
+//! regenerates. The parser canonicalizes `SipHeader.name` (so all matching stays
+//! canonical), and [`from_message`](MessageTemplate::from_message) recovers the
+//! captured wire form from the exact bytes. Templates from captures MUST be built
+//! via `from_message` over wire bytes; the raw-line constructors are for tests.
+//! Header-name classification / canonicalization has ONE source of truth — the
+//! parser's compact-form table (`HeaderClass::of` expands through it).
+//!
 //! # Automatics are not template-overridable in v1
 //!
 //! Stack automatics and dedicated primitives — `100 Trying`, the `ACK` to a
@@ -85,31 +97,56 @@ impl HeaderClass {
     }
 }
 
-/// One header of a [`MessageTemplate`]: its original wire name (casing
-/// preserved), its value, and how the stack treats it on emission.
+/// One header of a [`MessageTemplate`]: its **canonical** name (compact forms
+/// expanded, casing preserved), its value, how the stack treats it on emission,
+/// and the as-wire name-form to emit under when the capture used a compact form
+/// (`wire_name = Some("v")` for a `v:` Via; `None` when the wire name already
+/// equals the canonical name).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplateHeader {
     pub name: String,
     pub value: String,
     pub class: HeaderClass,
+    /// The captured wire name-form when it differs from `name` (a §7.3.3 compact
+    /// form). `None` for the raw-line constructors and for headers captured under
+    /// their canonical name.
+    pub wire_name: Option<String>,
 }
 
 impl TemplateHeader {
-    /// A header classified by its name (the default tier model).
+    /// A header classified by its name (the default tier model). No wire-form
+    /// override — for the raw-line (test) constructors; captures set the wire
+    /// form via [`MessageTemplate::from_message`].
     pub fn classified(name: impl Into<String>, value: impl Into<String>) -> Self {
         let name = name.into();
         let class = HeaderClass::of(&name);
-        TemplateHeader { name, value: value.into(), class }
+        TemplateHeader { name, value: value.into(), class, wire_name: None }
     }
 
     /// A header forced [`Frozen`](HeaderClass::Frozen) regardless of name.
     pub fn frozen(name: impl Into<String>, value: impl Into<String>) -> Self {
-        TemplateHeader { name: name.into(), value: value.into(), class: HeaderClass::Frozen }
+        TemplateHeader {
+            name: name.into(),
+            value: value.into(),
+            class: HeaderClass::Frozen,
+            wire_name: None,
+        }
     }
 
     /// A header forced [`Regenerated`](HeaderClass::Regenerated) regardless of name.
     pub fn regenerated(name: impl Into<String>, value: impl Into<String>) -> Self {
-        TemplateHeader { name: name.into(), value: value.into(), class: HeaderClass::Regenerated }
+        TemplateHeader {
+            name: name.into(),
+            value: value.into(),
+            class: HeaderClass::Regenerated,
+            wire_name: None,
+        }
+    }
+
+    /// The name-form to EMIT under: the captured wire form if present, else the
+    /// canonical name.
+    fn emit_name(&self) -> &str {
+        self.wire_name.as_deref().unwrap_or(&self.name)
     }
 }
 
@@ -155,22 +192,57 @@ impl MessageTemplate {
         }
     }
 
-    /// Build a template from a parsed message, classifying every header by name
-    /// (the default tier model). The header list keeps the message's wire order,
-    /// casing, and duplicate-header layout.
+    /// Build a template from a parsed message, classifying every header by
+    /// (canonical) name and recovering each header's captured **wire** name-form
+    /// from the message's original bytes — so a §7.3.3 compact name (`v`, `f`,
+    /// `t`, `i`, `m`, `c`, …) replays compact. The header list keeps the message's
+    /// wire order, casing, and duplicate-header layout.
+    ///
+    /// This is THE capture path: it reads the exact wire bytes (`SipRequest.raw`
+    /// / `SipResponse.raw`). A message with no retained raw bytes (one the stack
+    /// generated rather than parsed) yields canonical names only. The raw-line
+    /// [`request`](Self::request) / [`response`](Self::response) constructors are
+    /// for tests.
     pub fn from_message(msg: &SipMessage) -> Self {
-        let headers = msg
-            .headers()
-            .iter()
-            .map(|h| TemplateHeader::classified(h.name.clone(), h.value.clone()))
-            .collect();
-        let (start, body) = match msg {
-            SipMessage::Request(r) => (TemplateStart::Request(r.method.clone()), r.body.clone()),
+        let (start, body, raw) = match msg {
+            SipMessage::Request(r) => {
+                (TemplateStart::Request(r.method.clone()), r.body.clone(), &r.raw)
+            }
             SipMessage::Response(r) => (
                 TemplateStart::Response { status: r.status, reason: r.reason.clone() },
                 r.body.clone(),
+                &r.raw,
             ),
         };
+        // Recover per-header wire names from the exact capture bytes; align 1:1
+        // with the parsed header list, else fall back to canonical (no compact).
+        let wire_names = if raw.is_empty() {
+            Vec::new()
+        } else {
+            crate::parser::custom::headers::scan_header_name_forms(
+                raw,
+                &crate::parser::SipParserLimits::default(),
+            )
+        };
+        let parsed = msg.headers();
+        let aligned = wire_names.len() == parsed.len();
+        let headers = parsed
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                let wire_name = if aligned && wire_names[i] != h.name {
+                    Some(wire_names[i].clone())
+                } else {
+                    None
+                };
+                TemplateHeader {
+                    name: h.name.clone(),
+                    value: h.value.clone(),
+                    class: HeaderClass::of(&h.name),
+                    wire_name,
+                }
+            })
+            .collect();
         MessageTemplate { start, headers, body }
     }
 
@@ -201,13 +273,32 @@ impl MessageTemplate {
     }
 
     /// The frozen headers as ready-to-emit [`SipHeader`]s, in captured order,
-    /// casing and duplicate layout preserved — the `extra_headers` a stack
-    /// generator appends verbatim after its regenerated block.
+    /// casing, duplicate layout, and **wire name-form** preserved (a compact
+    /// `c:` Content-Type emits `c:`) — the `extra_headers` a stack generator
+    /// appends verbatim after its regenerated block.
     pub fn frozen_headers(&self) -> Vec<SipHeader> {
         self.headers
             .iter()
             .filter(|h| h.class == HeaderClass::Frozen)
-            .map(|h| SipHeader { name: h.name.clone(), value: h.value.clone() })
+            .map(|h| SipHeader { name: h.emit_name().to_string(), value: h.value.clone() })
+            .collect()
+    }
+
+    /// The captured compact name-forms of the REGENERATED (tier-1) headers the
+    /// stack itself emits — `(canonical, wire)` pairs such as `("Via", "v")`,
+    /// `("From", "f")`, `("To", "t")`, `("Call-ID", "i")`, `("Contact", "m")`.
+    /// The emission path applies these (via [`apply_name_forms`]) so a capture
+    /// that used compact names replays compact on the stack-owned lines too.
+    ///
+    /// `Content-Length` is deliberately excluded: its name-form is serializer-
+    /// owned (the serializer enforces the value by the canonical name), so it
+    /// always emits under the canonical name.
+    pub fn regenerated_name_forms(&self) -> Vec<(String, String)> {
+        self.headers
+            .iter()
+            .filter(|h| h.class == HeaderClass::Regenerated)
+            .filter_map(|h| h.wire_name.as_ref().map(|w| (h.name.clone(), w.clone())))
+            .filter(|(canon, _)| !canon.eq_ignore_ascii_case("content-length"))
             .collect()
     }
 
@@ -226,6 +317,27 @@ impl MessageTemplate {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EmitOpts {
     pub preserve_order: bool,
+}
+
+/// Rewrite each header whose canonical name matches a `(canonical, wire)` entry
+/// to the mapped wire name-form (compact-name replay of the stack-regenerated
+/// headers). Non-matching headers pass through unchanged; an empty map is the
+/// identity (today's full names). Values are untouched. Used by the template
+/// emission path to write `v:`/`f:`/… for a capture that used compact names.
+pub fn apply_name_forms(headers: &[SipHeader], forms: &[(String, String)]) -> Vec<SipHeader> {
+    if forms.is_empty() {
+        return headers.to_vec();
+    }
+    headers
+        .iter()
+        .map(|h| {
+            let wire = forms
+                .iter()
+                .find(|(canon, _)| h.name.eq_ignore_ascii_case(canon))
+                .map(|(_, w)| w.clone());
+            SipHeader { name: wire.unwrap_or_else(|| h.name.clone()), value: h.value.clone() }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -319,6 +431,92 @@ Content-Length: 0\r\n\r\n";
         let names: Vec<String> = tmpl.frozen_headers().iter().map(|h| h.name.clone()).collect();
         // `v` and `i` are tier-1 (dropped); `c` (Content-Type) and Subject frozen.
         assert_eq!(names, vec!["c".to_string(), "Subject".to_string()]);
+    }
+
+    #[test]
+    fn from_message_recovers_compact_wire_names() {
+        let body = "hi";
+        let raw = format!(
+            "INVITE sip:bob@ex SIP/2.0\r\n\
+v: SIP/2.0/UDP 1.2.3.4:5060;branch=z9hG4bK-x\r\n\
+Max-Forwards: 70\r\n\
+f: <sip:a@ex>;tag=at\r\n\
+t: <sip:b@ex>\r\n\
+i: cid@1.2.3.4\r\n\
+CSeq: 1 INVITE\r\n\
+m: <sip:a@1.2.3.4:5060>\r\n\
+c: text/plain\r\n\
+l: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let msg = parse(raw.as_bytes());
+        let tmpl = MessageTemplate::from_message(&msg);
+        let find = |canon: &str| {
+            tmpl.headers().iter().find(|h| h.name.eq_ignore_ascii_case(canon)).unwrap()
+        };
+        // Compact tier-1 headers: canonical name, compact wire form, Regenerated.
+        assert_eq!(find("Via").wire_name.as_deref(), Some("v"));
+        assert_eq!(find("Via").class, HeaderClass::Regenerated);
+        assert_eq!(find("From").wire_name.as_deref(), Some("f"));
+        assert_eq!(find("To").wire_name.as_deref(), Some("t"));
+        assert_eq!(find("Call-ID").wire_name.as_deref(), Some("i"));
+        assert_eq!(find("Contact").wire_name.as_deref(), Some("m"));
+        assert_eq!(find("Content-Length").wire_name.as_deref(), Some("l"));
+        // Compact Content-Type is FROZEN and emits under `c`.
+        assert_eq!(find("Content-Type").wire_name.as_deref(), Some("c"));
+        assert_eq!(find("Content-Type").class, HeaderClass::Frozen);
+        assert_eq!(
+            tmpl.frozen_headers().iter().filter(|h| h.name == "c").count(),
+            1,
+            "frozen Content-Type emits compact",
+        );
+        // A header captured full stays canonical.
+        assert_eq!(find("Max-Forwards").wire_name, None);
+        // regenerated_name_forms: v/f/t/i/m present; content-length excluded.
+        let forms = tmpl.regenerated_name_forms();
+        for pair in [("Via", "v"), ("From", "f"), ("To", "t"), ("Call-ID", "i"), ("Contact", "m")] {
+            assert!(forms.contains(&(pair.0.to_string(), pair.1.to_string())), "missing {pair:?}");
+        }
+        assert!(
+            !forms.iter().any(|(c, _)| c.eq_ignore_ascii_case("content-length")),
+            "Content-Length name-form is serializer-owned, never rewritten",
+        );
+    }
+
+    #[test]
+    fn from_message_full_names_yield_no_wire_forms() {
+        let msg = parse(
+            b"INVITE sip:bob@ex SIP/2.0\r\n\
+Via: SIP/2.0/UDP 1.2.3.4:5060;branch=z9hG4bK-x\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:a@ex>;tag=at\r\n\
+To: <sip:b@ex>\r\n\
+Call-ID: cid@1.2.3.4\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:a@1.2.3.4:5060>\r\n\
+Content-Length: 0\r\n\r\n",
+        );
+        let tmpl = MessageTemplate::from_message(&msg);
+        assert!(tmpl.headers().iter().all(|h| h.wire_name.is_none()), "no compact forms");
+        assert!(tmpl.regenerated_name_forms().is_empty(), "nothing to rewrite");
+    }
+
+    #[test]
+    fn apply_name_forms_rewrites_only_mapped_headers() {
+        let headers = vec![
+            SipHeader { name: "Via".into(), value: "x".into() },
+            SipHeader { name: "From".into(), value: "y".into() },
+            SipHeader { name: "Subject".into(), value: "z".into() },
+        ];
+        let forms =
+            vec![("Via".to_string(), "v".to_string()), ("From".to_string(), "f".to_string())];
+        let out = apply_name_forms(&headers, &forms);
+        assert_eq!(out[0].name, "v");
+        assert_eq!(out[1].name, "f");
+        assert_eq!(out[2].name, "Subject", "unmapped header untouched");
+        // Empty map = identity (today's full names).
+        assert_eq!(apply_name_forms(&headers, &[]), headers);
     }
 
     #[test]

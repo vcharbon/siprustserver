@@ -29,7 +29,9 @@ pub use sdp::{
 };
 pub use parser::{SipParser, SipParserLimits};
 pub use parser::custom::{hydrate_request, hydrate_response, CustomParser};
-pub use template::{EmitOpts, HeaderClass, MessageTemplate, TemplateHeader, TemplateStart};
+pub use template::{
+    apply_name_forms, EmitOpts, HeaderClass, MessageTemplate, TemplateHeader, TemplateStart,
+};
 pub use types::{
     Contact, ContactSet, CSeq, InDialogRequest, InviteRequest, NameAddr, NonEmpty, NotInDialog,
     OptionalHeaders, Params, ParamValue, Rack, ReferTo, Replaces, RequestUri, SipHeader,
