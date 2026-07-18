@@ -13,7 +13,7 @@ use crate::DecodeStats;
 
 /// Value of the top-level `"schema"` field. Bumped on any breaking change to
 /// the emitted shape; consumers reject versions they do not know.
-pub const EMIT_SCHEMA_VERSION: u32 = 1;
+pub const EMIT_SCHEMA_VERSION: u32 = 2;
 
 /// Serialize the full flow model, plus the pcap decode counters, to JSON.
 ///
@@ -23,7 +23,7 @@ pub const EMIT_SCHEMA_VERSION: u32 = 1;
 ///
 /// ```text
 /// {
-///   "schema": 1,
+///   "schema": 2,
 ///   "decode_stats": { records, non_ip, non_udp, snap_truncated, datagrams,
 ///                     fragments, reassembled, frag_dropped, tail_truncated },
 ///   "flow_stats":   { sip_messages, capture_dups, parse_failed, non_sip },
@@ -41,8 +41,16 @@ pub const EMIT_SCHEMA_VERSION: u32 = 1;
 ///       "hop": idx,                 // into "hops" — filter on it for the
 ///                                   // per-hop stream (one vantage per leg)
 ///       "retx": bool,
-///       "raw_b64": str,             // exact wire bytes (header order and
-///                                   // casing preserved), standard base64
+///       // Exact wire bytes (header order and casing preserved) as EXACTLY
+///       // ONE of three forms, chosen purely from the bytes so re-emitting
+///       // a transformed model is deterministic. Reassembly: `raw` as UTF-8
+///       // | `head` as UTF-8 ++ decode(`body_b64`) | decode(`raw_b64`).
+///       "raw": str                  // whole payload is valid UTF-8 (JSON
+///                                   //   escaping is lossless) — the common,
+///                                   //   diff-readable case
+///       | "head": str,              // start line + headers + blank line …
+///         "body_b64": str           //   … and a binary body, standard base64
+///       | "raw_b64": str,           // even the head is not UTF-8 — opaque
 ///       "summary": {
 ///         "kind": "request" | "response",
 ///         "method": str, "uri": str,          // request only
@@ -113,15 +121,59 @@ fn leg_json(leg: &FlowLeg) -> Value {
 }
 
 fn msg_json(m: &FlowMsg) -> Value {
-    json!({
+    let mut v = json!({
         "ts_us": m.ts_us,
         "src": m.src.to_string(),
         "dst": m.dst.to_string(),
         "hop": m.hop,
         "retx": m.retx,
-        "raw_b64": BASE64.encode(m.raw()),
         "summary": summary_json(&m.parsed),
-    })
+    });
+    let obj = v.as_object_mut().expect("msg_json builds an object");
+    match payload_repr(m) {
+        Repr::Text(s) => {
+            obj.insert("raw".into(), Value::String(s.to_string()));
+        }
+        Repr::HeadBody { head, body } => {
+            obj.insert("head".into(), Value::String(head.to_string()));
+            obj.insert("body_b64".into(), Value::String(BASE64.encode(body)));
+        }
+        Repr::Opaque(raw) => {
+            obj.insert("raw_b64".into(), Value::String(BASE64.encode(raw)));
+        }
+    }
+    v
+}
+
+/// Payload representation, a pure function of the wire bytes (so re-emitting
+/// a transformed model is deterministic and idempotent downstream).
+enum Repr<'a> {
+    /// Whole payload is valid UTF-8.
+    Text(&'a str),
+    /// UTF-8 head (start line through the blank line), binary body.
+    HeadBody { head: &'a str, body: &'a [u8] },
+    /// Not splittable losslessly — emitted whole as base64.
+    Opaque(&'a [u8]),
+}
+
+fn payload_repr(m: &FlowMsg) -> Repr<'_> {
+    let raw = m.raw();
+    if let Ok(s) = std::str::from_utf8(raw) {
+        return Repr::Text(s);
+    }
+    let body = match &m.parsed {
+        SipMessage::Request(r) => &r.body,
+        SipMessage::Response(r) => &r.body,
+    };
+    // The split is trusted only when the parsed body is literally the raw
+    // tail — reassembly (head ++ body) must reproduce the exact wire bytes.
+    let head_len = raw.len().saturating_sub(body.len());
+    if !body.is_empty() && raw[head_len..] == body[..] {
+        if let Ok(head) = std::str::from_utf8(&raw[..head_len]) {
+            return Repr::HeadBody { head, body };
+        }
+    }
+    Repr::Opaque(raw)
 }
 
 fn summary_json(msg: &SipMessage) -> Value {
@@ -254,15 +306,59 @@ mod tests {
         assert_eq!(leg["msgs"][2]["summary"]["cseq"]["method"], "INVITE");
     }
 
-    /// `raw_b64` round-trips to the exact wire bytes.
+    /// A fully-UTF-8 payload is emitted as plain text (`raw`), byte-exact
+    /// through JSON string escaping, with no base64 form present.
     #[test]
-    fn raw_payload_base64_roundtrips() {
+    fn utf8_payload_emits_as_text() {
         let inv = sip_request("INVITE", "emit-raw", 1, "b1", "X-Mixed-Case-HDR: kept\r\n");
         let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv)];
         let flows = build_flows(&datagrams, &FlowConfig::default());
         let v = flows_to_json(&flows, &DecodeStats::default());
-        let b64 = v["legs"][0]["msgs"][0]["raw_b64"].as_str().unwrap();
-        assert_eq!(BASE64.decode(b64).unwrap(), inv);
+        let m = &v["legs"][0]["msgs"][0];
+        assert_eq!(m["raw"].as_str().unwrap().as_bytes(), &inv[..]);
+        assert!(m.get("raw_b64").is_none());
+        assert!(m.get("head").is_none());
+        // JSON round-trip preserves the exact bytes.
+        let s = serde_json::to_string_pretty(&v).unwrap();
+        let back: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(back["legs"][0]["msgs"][0]["raw"].as_str().unwrap().as_bytes(), &inv[..]);
+    }
+
+    /// A binary body splits into a UTF-8 `head` and a base64 `body_b64`;
+    /// reassembly (head ++ body) reproduces the exact wire bytes.
+    #[test]
+    fn binary_body_splits_into_head_and_body_b64() {
+        let body: Vec<u8> = vec![0x30, 0x82, 0xff, 0x00, 0x9c, 0x01]; // ASN.1-ish
+        let mut inv = format!(
+            "INVITE sip:bob@10.0.0.9 SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKmsd\r\n\
+             Max-Forwards: 70\r\n\
+             From: <sip:alice@10.0.0.1>;tag=f1\r\n\
+             To: <sip:bob@10.0.0.9>\r\n\
+             Call-ID: emit-msd\r\n\
+             CSeq: 1 INVITE\r\n\
+             Content-Type: application/octet-stream\r\n\
+             Content-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        let head_len = inv.len();
+        inv.extend_from_slice(&body);
+        let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv)];
+        let flows = build_flows(&datagrams, &FlowConfig::default());
+        assert_eq!(flows.stats.sip_messages, 1, "binary-body INVITE must parse");
+        let v = flows_to_json(&flows, &DecodeStats::default());
+        let m = &v["legs"][0]["msgs"][0];
+        let head = m["head"].as_str().unwrap();
+        assert_eq!(head.as_bytes(), &inv[..head_len]);
+        assert!(head.ends_with("\r\n\r\n"));
+        let decoded = BASE64.decode(m["body_b64"].as_str().unwrap()).unwrap();
+        assert_eq!(decoded, body);
+        let mut reassembled = head.as_bytes().to_vec();
+        reassembled.extend_from_slice(&decoded);
+        assert_eq!(reassembled, inv);
+        assert!(m.get("raw").is_none());
+        assert!(m.get("raw_b64").is_none());
     }
 
     /// Both evidence variants serialize with their discriminating `kind`.
