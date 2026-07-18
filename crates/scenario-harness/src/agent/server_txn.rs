@@ -2,6 +2,8 @@
 //! the [`Respond`] builder (To-tag minting, SDP answer, reliable 18x,
 //! Record-Route echo folding, §17.1.1.3 ACK-obligation arming).
 
+use std::collections::HashMap;
+
 use sip_message::generators::{
     generate_response, GenerateResponseOpts, StackDialog, B2BUA_ALLOW, B2BUA_SUPPORTED,
 };
@@ -24,6 +26,10 @@ pub struct ServerTxn {
     pub(super) request: SipRequest,
     to_tag: Option<String>,
     route_set: Vec<String>,
+    /// Early-dialog id → its minted To-tag. On ONE INVITE server transaction a
+    /// UAS drives several early dialogs (a simulated downstream fork), each an
+    /// id mapped to a distinct To-tag (RFC 3261 §12.1.2).
+    early_tags: HashMap<String, String>,
 }
 
 impl ServerTxn {
@@ -36,7 +42,7 @@ impl ServerTxn {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        ServerTxn { agent, request, to_tag: None, route_set }
+        ServerTxn { agent, request, to_tag: None, route_set, early_tags: HashMap::new() }
     }
 
     /// The received request (for inspecting headers / SDP).
@@ -164,6 +170,51 @@ impl ServerTxn {
     /// before responding the winning 2xx.
     pub fn adopt_to_tag(&mut self, tag: &str) {
         self.to_tag = Some(tag.to_string());
+    }
+
+    /// Open (or return) the early dialog `early_id` on THIS INVITE server
+    /// transaction: mint a distinct To-tag the first time it is named, stable
+    /// thereafter. A UAS drives arbitrary early dialogs by tagging its
+    /// provisionals with these — a simulated downstream fork presenting several
+    /// early dialogs to the caller on one server transaction (RFC 3261 §12.1.2).
+    pub fn early_tag(&mut self, early_id: &str) -> String {
+        if let Some(t) = self.early_tags.get(early_id) {
+            return t.clone();
+        }
+        let tag = self.agent.tag();
+        self.early_tags.insert(early_id.to_string(), tag.clone());
+        tag
+    }
+
+    /// Send a provisional (18x) on the early dialog `early_id`: its To-tag is
+    /// pinned via [`Respond::with_to_tag`] (which does NOT disturb the sticky
+    /// winner tag). Chain `.with_sdp` / `.reliable` / `.with_header`. The order of
+    /// early dialogs is arbitrary — the winner need not be the last created.
+    pub fn respond_early(&mut self, early_id: &str, status: u16, reason: &str) -> Respond<'_> {
+        let tag = self.early_tag(early_id);
+        self.respond(status, reason).with_to_tag(&tag)
+    }
+
+    /// Send a TEMPLATE provisional on the early dialog `early_id` — frozen
+    /// headers byte-preserved (U3 semantics), To-tag = the early dialog's.
+    pub fn respond_template_early<'t>(
+        &'t mut self,
+        early_id: &str,
+        tmpl: &MessageTemplate,
+        opts: EmitOpts,
+    ) -> Respond<'t> {
+        let tag = self.early_tag(early_id);
+        self.respond_template(tmpl, opts).with_to_tag(&tag)
+    }
+
+    /// Declare `early_id` the WINNER: adopt its To-tag as the sticky dialog tag
+    /// so the final 2xx carries it and [`dialog`](Self::dialog) is keyed under
+    /// it. The losing early dialogs settle by the stack's automatics — no final
+    /// is sent for them, and the caller's ACK addresses only the winner
+    /// (RFC 3261 §13.3.1.4). Call before responding the winning 2xx.
+    pub fn win(&mut self, early_id: &str) {
+        let tag = self.early_tag(early_id);
+        self.adopt_to_tag(&tag);
     }
 
     /// Form the UAS-side confirmed [`Dialog`] for this transaction, so this UA
