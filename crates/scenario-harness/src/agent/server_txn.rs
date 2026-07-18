@@ -6,7 +6,7 @@ use sip_message::generators::{
     generate_response, GenerateResponseOpts, StackDialog, B2BUA_ALLOW, B2BUA_SUPPORTED,
 };
 use sip_message::message_helpers::{extract_contact_uri, get_header, get_headers};
-use sip_message::{SipHeader, SipMessage, SipRequest};
+use sip_message::{EmitOpts, MessageTemplate, SipHeader, SipMessage, SipRequest};
 
 use super::addressing::{next_hop, top_via_addr, top_via_branch};
 use super::dialog::Dialog;
@@ -49,9 +49,29 @@ impl ServerTxn {
             status,
             reason: reason.to_string(),
             sdp: None,
+            template_body: None,
             extra_headers: vec![],
             to_tag: None,
         }
+    }
+
+    /// Answer this request from a captured [`MessageTemplate`]: the status /
+    /// reason come from the template's response start line; the stack regenerates
+    /// the echoed tier-1 fields (Via, From, To + minted tag, Call-ID, CSeq,
+    /// Contact, Content-Length) while every frozen header rides verbatim (value
+    /// bytes, name casing, duplicate-header layout). The captured `Content-Type`
+    /// is carried as a frozen header. Panics if the template is not a response.
+    /// See [`EmitOpts`] for the v1 header-order limitation.
+    pub fn respond_template<'t>(
+        &'t mut self,
+        tmpl: &MessageTemplate,
+        opts: EmitOpts,
+    ) -> Respond<'t> {
+        let (status, reason) = tmpl
+            .status()
+            .unwrap_or_else(|| panic!("respond_template requires a response template, got {:?}", tmpl.start()));
+        let reason = reason.to_string();
+        self.respond(status, &reason).template(tmpl, opts)
     }
 
     /// Assert the §17.1.1.3 hop ACK for THIS transaction's non-2xx final.
@@ -164,6 +184,10 @@ pub struct Respond<'a> {
     status: u16,
     reason: String,
     sdp: Option<String>,
+    /// Raw body bytes from a [`MessageTemplate`] (overrides `sdp` when set) — the
+    /// captured payload emitted verbatim, its Content-Type carried as a frozen
+    /// header rather than stamped by the generator.
+    template_body: Option<Vec<u8>>,
     extra_headers: Vec<SipHeader>,
     to_tag: Option<String>,
 }
@@ -171,6 +195,20 @@ pub struct Respond<'a> {
 impl<'a> Respond<'a> {
     pub fn with_sdp(mut self, sdp: &str) -> Self {
         self.sdp = Some(sdp.to_string());
+        self
+    }
+
+    /// Freeze a captured [`MessageTemplate`]'s non-tier-1 headers (verbatim
+    /// value/casing/duplicate layout) and its body onto this response; the stack
+    /// still echoes/regenerates Via/From/To(+tag)/Call-ID/CSeq/Contact/
+    /// Content-Length. Status and reason stay as given to [`ServerTxn::respond`]
+    /// (see [`ServerTxn::respond_template`] to derive them from the template).
+    pub fn template(mut self, tmpl: &MessageTemplate, opts: EmitOpts) -> Self {
+        // v1: casing + duplicate-header layout are always preserved for frozen
+        // headers; `preserve_order` requests nothing further yet (see EmitOpts).
+        let EmitOpts { preserve_order: _ } = opts;
+        self.extra_headers = tmpl.frozen_headers();
+        self.template_body = Some(tmpl.body().to_vec());
         self
     }
 
@@ -248,7 +286,13 @@ impl<'a> Respond<'a> {
         let opts = GenerateResponseOpts {
             to_tag,
             contact,
-            body: self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
+            // A captured template body (raw bytes, any Content-Type) overrides
+            // the SDP-string answer; its Content-Type rides as a frozen header.
+            body: self
+                .template_body
+                .clone()
+                .or_else(|| self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec))
+                .unwrap_or_default(),
             content_type: None,
             extra_headers,
             incoming_source: None,

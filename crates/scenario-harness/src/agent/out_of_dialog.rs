@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
-use sip_message::{SipHeader, SipMessage, SipResponse};
+use sip_message::{EmitOpts, MessageTemplate, SipHeader, SipMessage, SipResponse};
 
 use super::client_txn::recv_response_raw;
 use super::dialog::InDialogTxn;
@@ -67,6 +67,23 @@ impl<'a> OutOfDialogRequest<'a> {
     /// Attach an arbitrary extra header. Repeatable; order preserved.
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
         self.extra_headers.push(SipHeader { name: name.to_string(), value: value.to_string() });
+        self
+    }
+
+    /// Emit this out-of-dialog request from a captured [`MessageTemplate`]: freeze
+    /// the template's non-tier-1 headers (verbatim value/casing/duplicate layout)
+    /// and its body, leaving the stack to regenerate the mechanical fields (Via +
+    /// branch, Call-ID, From-tag, CSeq, Max-Forwards, Content-Length, Contact).
+    /// The request method stays the one this builder was constructed with; the
+    /// captured `Content-Type` rides as a frozen header. See [`EmitOpts`] for the
+    /// v1 header-order limitation.
+    pub fn template(mut self, tmpl: &MessageTemplate, opts: EmitOpts) -> Self {
+        // v1: casing + duplicate-header layout are always preserved for frozen
+        // headers; `preserve_order` requests nothing further yet (see EmitOpts).
+        let EmitOpts { preserve_order: _ } = opts;
+        self.extra_headers = tmpl.frozen_headers();
+        self.body = Some(tmpl.body().to_vec());
+        self.content_type = None;
         self
     }
 

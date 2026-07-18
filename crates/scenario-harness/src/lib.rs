@@ -41,6 +41,9 @@ pub use agent::{
     Agent, CancelHandle, ClientInvite, ClientReinvite, Dialog, Harness, InDialogRequest,
     InDialogTxn, Inbound, Invite, OutOfDialogRequest, Proxy, Respond, ServerTxn, StepError,
 };
+// Captured-message replay vocabulary (`sip_message::template`), re-exported so a
+// `send_template` caller reaches the harness and its templates from one crate.
+pub use sip_message::{EmitOpts, HeaderClass, MessageTemplate, TemplateHeader, TemplateStart};
 // Multi-callee routing: several logical agents on one bound socket, demuxed by
 // the shared R-URI leg-picker (the transfer Bob/Charlie/David fabric).
 pub use callee_group::{CalleeGroup, CalleeGroupBuilder};

@@ -9,7 +9,7 @@ use sip_message::generators::{
     generate_ack_for_2xx, generate_in_dialog_request, GenerateAckFor2xxOpts,
     GenerateInDialogRequestOpts, InDialogMethod, StackDialog,
 };
-use sip_message::{SipHeader, SipMessage, SipRequest, SipResponse};
+use sip_message::{EmitOpts, MessageTemplate, SipHeader, SipMessage, SipRequest, SipResponse};
 
 use super::addressing::next_hop;
 use super::client_txn::{
@@ -130,6 +130,24 @@ impl Dialog {
     /// the request needs an `RAck` header (PRACK) or other custom headers.
     pub fn send_request(&mut self, method: InDialogMethod) -> InDialogRequest<'_> {
         InDialogRequest::new(self.agent.clone(), &mut self.dialog, self.fallback_addr, method)
+    }
+
+    /// Emit an in-dialog request from a captured [`MessageTemplate`] on this
+    /// confirmed dialog. The request method is taken from the template's start
+    /// line; the stack regenerates the tier-1 fields (Via + branch, the reused
+    /// Call-ID / From-tag / To-tag, the next CSeq, Max-Forwards, Content-Length,
+    /// Contact, Request-URI + Route set) while every frozen header rides verbatim.
+    /// Panics if the template is not a request of an admissible in-dialog method
+    /// (ACK/CANCEL and out-of-dialog-only methods are rejected — use the dedicated
+    /// primitives). See [`EmitOpts`] for the v1 header-order limitation.
+    pub async fn send_template(&mut self, tmpl: &MessageTemplate, opts: EmitOpts) -> InDialogTxn {
+        let method = tmpl
+            .method()
+            .and_then(|m| InDialogMethod::try_from(m).ok())
+            .unwrap_or_else(|| {
+                panic!("Dialog::send_template requires an in-dialog request template, got {:?}", tmpl.start())
+            });
+        self.send_request(method).template(tmpl, opts).send().await
     }
 
     /// Send an in-dialog **re-INVITE** (optional SDP offer) and keep the
@@ -294,6 +312,21 @@ impl<'a> InDialogRequest<'a> {
     /// Set the `RAck` header (`<rseq> <cseq> <method>`, RFC 3262 §7.2).
     pub fn with_rack(mut self, rack: &str) -> Self {
         self.rack = Some(rack.to_string());
+        self
+    }
+
+    /// Emit this in-dialog request from a captured [`MessageTemplate`]: freeze the
+    /// template's non-tier-1 headers (verbatim value/casing/duplicate layout) and
+    /// its body, leaving the stack to regenerate the dialog-critical fields. The
+    /// captured `Content-Type` rides as a frozen header. See [`Dialog::send_template`]
+    /// for the ergonomic method-deriving entry point.
+    pub fn template(mut self, tmpl: &MessageTemplate, opts: EmitOpts) -> Self {
+        // v1: casing + duplicate-header layout are always preserved for frozen
+        // headers; `preserve_order` requests nothing further yet (see EmitOpts).
+        let EmitOpts { preserve_order: _ } = opts;
+        self.extra_headers = tmpl.frozen_headers();
+        self.body = tmpl.body().to_vec();
+        self.content_type = None;
         self
     }
 
