@@ -10,7 +10,8 @@ use sip_message::generators::{
     StackDialog,
 };
 use sip_message::{
-    apply_name_forms, apply_remote_target_emits, EmitOpts, MessageTemplate, SipHeader, SipMessage,
+    apply_name_forms, apply_remote_target_emits, DelayedAutomatic, EmitOpts, MessageTemplate,
+    SipHeader, SipMessage,
 };
 
 use super::client_invite::ClientInvite;
@@ -46,6 +47,9 @@ pub struct Invite<'a> {
     from_uri: Option<String>,
     to_uri: Option<String>,
     request_uri: Option<String>,
+    /// A declared `delayed-automatic` deviation (U5) carried onto the
+    /// [`ClientInvite`] for [`ack_delayed`](super::ClientInvite::ack_delayed).
+    delayed_automatic: Option<DelayedAutomatic>,
 }
 
 impl<'a> Invite<'a> {
@@ -63,12 +67,22 @@ impl<'a> Invite<'a> {
             from_uri: None,
             to_uri: None,
             request_uri: None,
+            delayed_automatic: None,
         }
     }
 
     /// Attach an SDP offer body.
     pub fn with_sdp(mut self, sdp: &str) -> Self {
         self.sdp = Some(sdp.to_string());
+        self
+    }
+
+    /// Declare a `delayed-automatic` deviation (U5) carried onto the resulting
+    /// [`ClientInvite`]: [`ack_delayed`](super::ClientInvite::ack_delayed) holds
+    /// the automatic ACK-to-2xx for this long (the peer retransmits the 2xx
+    /// meanwhile). Sugar over [`DelayedAutomatic::ack_after`].
+    pub fn delayed_ack(mut self, delay: std::time::Duration) -> Self {
+        self.delayed_automatic = Some(DelayedAutomatic::ack_after(delay.as_millis() as u64));
         self
     }
 
@@ -217,6 +231,7 @@ impl<'a> Invite<'a> {
             original_invite: invite,
             dialog,
             fork_cseq: HashMap::new(),
+            delayed_automatic: self.delayed_automatic,
         }
     }
 }

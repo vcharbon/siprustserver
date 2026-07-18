@@ -18,6 +18,7 @@ pub mod generators;
 pub mod message_helpers;
 pub mod sipfrag;
 pub mod sniff;
+pub mod deviation;
 pub mod remote_target;
 pub mod template;
 pub mod template_match;
@@ -36,6 +37,9 @@ pub use template::{
     TemplateHeader, TemplateStart,
 };
 pub use template_match::{MatchOpts, Mismatch};
+pub use deviation::{
+    Automatic, CseqDeviation, CseqOp, CseqOpAt, CseqPattern, DelayedAutomatic,
+};
 pub use types::{
     Contact, ContactSet, CSeq, InDialogRequest, InviteRequest, NameAddr, NonEmpty, NotInDialog,
     OptionalHeaders, Params, ParamValue, Rack, ReferTo, Replaces, RequestUri, SipHeader,

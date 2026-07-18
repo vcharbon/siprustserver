@@ -10,8 +10,8 @@ use sip_message::generators::{
     GenerateInDialogRequestOpts, InDialogMethod, StackDialog,
 };
 use sip_message::{
-    apply_name_forms, apply_remote_target_emits, EmitOpts, MessageTemplate, SipHeader, SipMessage,
-    SipRequest, SipResponse,
+    apply_name_forms, apply_remote_target_emits, CseqDeviation, CseqPattern, EmitOpts,
+    MessageTemplate, SipHeader, SipMessage, SipRequest, SipResponse,
 };
 
 use super::addressing::next_hop;
@@ -30,11 +30,30 @@ pub struct Dialog {
     agent: Agent,
     fallback_addr: SocketAddr,
     dialog: StackDialog,
+    /// A declared CSeq relative-pattern deviation for this dialog's outbound
+    /// in-dialog requests (U5). `None` = the stack's base numbering is
+    /// authoritative (zero-deviation dialogs are byte-identical to pre-U5).
+    cseq_dev: Option<CseqDeviation>,
 }
 
 impl Dialog {
     pub(super) fn new(agent: Agent, fallback_addr: SocketAddr, dialog: StackDialog) -> Self {
-        Dialog { agent, fallback_addr, dialog }
+        Dialog { agent, fallback_addr, dialog, cseq_dev: None }
+    }
+
+    /// Declare a CSeq relative-pattern deviation for this dialog's outbound
+    /// in-dialog requests (offset / jump / reuse relative to the stack's base).
+    /// Captured out-of-pattern CSeq anomalies replay without freezing absolute
+    /// numbers. ACK/CANCEL are unaffected (they reuse the related request's
+    /// CSeq, RFC 3261 §12.2.1.1).
+    pub fn set_cseq_pattern(&mut self, pattern: CseqPattern) {
+        self.cseq_dev = Some(CseqDeviation::new(pattern));
+    }
+
+    /// Builder form of [`set_cseq_pattern`](Self::set_cseq_pattern).
+    pub fn with_cseq_pattern(mut self, pattern: CseqPattern) -> Self {
+        self.set_cseq_pattern(pattern);
+        self
     }
 
     /// Set the dialog's local CSeq floor — the next in-dialog request uses
@@ -134,7 +153,11 @@ impl Dialog {
     /// [`InDialogRequest::send`]. Use this over [`request`](Dialog::request) when
     /// the request needs an `RAck` header (PRACK) or other custom headers.
     pub fn send_request(&mut self, method: InDialogMethod) -> InDialogRequest<'_> {
-        InDialogRequest::new(self.agent.clone(), &mut self.dialog, self.fallback_addr, method)
+        let agent = self.agent.clone();
+        let fallback = self.fallback_addr;
+        // Disjoint field borrows: the dialog state and the CSeq deviation.
+        let dev = self.cseq_dev.as_mut();
+        InDialogRequest::new(agent, &mut self.dialog, fallback, method).with_cseq_dev(dev)
     }
 
     /// Emit an in-dialog request from a captured [`MessageTemplate`] on this
@@ -265,6 +288,10 @@ pub struct InDialogRequest<'a> {
     /// comes from this independent per-fork sequence, not the shared dialog
     /// counter.
     fork_cseq: Option<&'a mut HashMap<String, u32>>,
+    /// The dialog's declared CSeq deviation (U5). Present only on the confirmed-
+    /// dialog path (never the forked early-dialog path); overrides the natural
+    /// CSeq for this request per the declared pattern.
+    cseq_dev: Option<&'a mut CseqDeviation>,
 }
 
 impl<'a> InDialogRequest<'a> {
@@ -288,6 +315,7 @@ impl<'a> InDialogRequest<'a> {
             remote_emits: vec![],
             to_tag: None,
             fork_cseq: None,
+            cseq_dev: None,
         }
     }
 
@@ -295,6 +323,13 @@ impl<'a> InDialogRequest<'a> {
     /// `with_to_tag` request uses that fork's independent sequence.
     pub(super) fn with_fork_cseq(mut self, map: &'a mut HashMap<String, u32>) -> Self {
         self.fork_cseq = Some(map);
+        self
+    }
+
+    /// Wire in the confirmed dialog's declared CSeq deviation (U5); `None` is a
+    /// no-op (the stack's base numbering stays authoritative).
+    pub(super) fn with_cseq_dev(mut self, dev: Option<&'a mut CseqDeviation>) -> Self {
+        self.cseq_dev = dev;
         self
     }
 
@@ -422,6 +457,16 @@ impl<'a> InDialogRequest<'a> {
             opts.cseq = Some(*entry);
         } else if let Some(t) = &self.to_tag {
             view.remote_tag = t.clone();
+        }
+        // U5: a declared CSeq deviation overrides the natural number for this
+        // confirmed-dialog request (never on the forked early-dialog path). The
+        // shared-counter update below picks up the deviated value from `res`.
+        if !forked {
+            if let Some(dev) = self.cseq_dev.as_deref_mut() {
+                if !dev.is_identity() {
+                    opts.cseq = Some(dev.next_cseq(self.dialog.local_cseq));
+                }
+            }
         }
         let mut res = generate_in_dialog_request(self.method, &view, &opts);
         if self.suppress_default_ct {

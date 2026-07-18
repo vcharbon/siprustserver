@@ -12,7 +12,9 @@ use sip_message::generators::{
 };
 use sip_message::message_helpers::{extract_contact_uri, get_header, get_headers, set_header};
 use sip_message::parser::custom::CustomParser;
-use sip_message::{SipHeader, SipMessage, SipParser, SipRequest, SipResponse};
+use sip_message::{
+    Automatic, DelayedAutomatic, SipHeader, SipMessage, SipParser, SipRequest, SipResponse,
+};
 
 use super::addressing::next_hop;
 use super::client_txn::{try_expect_response, try_send_cancel, AckCtx};
@@ -71,6 +73,10 @@ pub struct ClientInvite {
     /// per-dialog RFC 3261 §12.2.1.1 audit (correctly) rejects. Empty until a
     /// `with_to_tag` request fork is addressed.
     pub(super) fork_cseq: HashMap<String, u32>,
+    /// A declared `delayed-automatic` deviation (U5) — v1: hold the automatic
+    /// ACK to a 2xx for a declared duration ([`ack_delayed`](Self::ack_delayed)).
+    /// `None` = the ACK fires immediately when the caller sends it.
+    pub(super) delayed_automatic: Option<DelayedAutomatic>,
 }
 
 impl ClientInvite {
@@ -483,6 +489,23 @@ impl ClientInvite {
     /// The ACK-to-2xx is a dedicated primitive: it takes no template in v1 — a
     /// captured ACK's frozen-header quirks are not replayable yet.
     pub async fn ack(&mut self) -> Dialog {
+        self.ack_with(None).await
+    }
+
+    /// Send the ACK HONOURING a declared `delayed-automatic` deviation (U5): if
+    /// one holds the ACK-to-2xx for `delay_ms`, sleep that long on the (paused)
+    /// clock FIRST — the peer retransmits the 2xx meanwhile (RFC 3261 §13.3.1.4)
+    /// — then ACK. With no deviation declared this is exactly
+    /// [`ack`](Self::ack) (no delay; zero regression). The delay changes only
+    /// WHEN the ACK fires, never its content (the U3 automatics boundary).
+    pub async fn ack_delayed(&mut self) -> Dialog {
+        if let Some(dev) = self.delayed_automatic {
+            match dev.which {
+                Automatic::AckTo2xx => {
+                    tokio::time::sleep(std::time::Duration::from_millis(dev.delay_ms)).await;
+                }
+            }
+        }
         self.ack_with(None).await
     }
 
