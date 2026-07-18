@@ -9,7 +9,7 @@ use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
     StackDialog,
 };
-use sip_message::{SipHeader, SipMessage};
+use sip_message::{EmitOpts, MessageTemplate, SipHeader, SipMessage};
 
 use super::client_invite::ClientInvite;
 use super::Agent;
@@ -19,6 +19,10 @@ pub struct Invite<'a> {
     caller: &'a Agent,
     peer: &'a Agent,
     sdp: Option<String>,
+    /// Raw body bytes from a [`MessageTemplate`] (overrides `sdp` when set) — the
+    /// captured payload emitted verbatim, its Content-Type carried as a frozen
+    /// header rather than stamped by the generator.
+    template_body: Option<Vec<u8>>,
     extra_headers: Vec<SipHeader>,
     /// Wire destination override — the INVITE is *addressed* to `peer` (its
     /// Contact is the Request-URI) but *sent* here. Set by [`Invite::through`]
@@ -38,6 +42,7 @@ impl<'a> Invite<'a> {
             caller,
             peer,
             sdp: None,
+            template_body: None,
             extra_headers: vec![],
             wire_dst: None,
             from_uri: None,
@@ -49,6 +54,29 @@ impl<'a> Invite<'a> {
     /// Attach an SDP offer body.
     pub fn with_sdp(mut self, sdp: &str) -> Self {
         self.sdp = Some(sdp.to_string());
+        self
+    }
+
+    /// Emit this INVITE from a captured [`MessageTemplate`]: the stack
+    /// regenerates the tier-1 dialog fields (Via + branch, Call-ID, From/To tags,
+    /// CSeq, Max-Forwards, Content-Length, Contact, Request-URI) while every
+    /// frozen header rides verbatim (value bytes, name casing, duplicate-header
+    /// layout). The captured body is emitted as-is; its `Content-Type`, being a
+    /// frozen header, is carried rather than stamped by the generator.
+    ///
+    /// The template's start line must be a request of method `INVITE`. See
+    /// [`EmitOpts`] for the v1 header-order limitation.
+    pub fn template(mut self, tmpl: &MessageTemplate, opts: EmitOpts) -> Self {
+        // v1: casing + duplicate-header layout are always preserved for frozen
+        // headers; `preserve_order` requests nothing further yet (see EmitOpts).
+        let EmitOpts { preserve_order: _ } = opts;
+        assert!(
+            matches!(tmpl.method(), Some(sip_message::Method::Invite)),
+            "Invite::template requires an INVITE request template, got {:?}",
+            tmpl.start()
+        );
+        self.extra_headers = tmpl.frozen_headers();
+        self.template_body = Some(tmpl.body().to_vec());
         self
     }
 
@@ -120,7 +148,13 @@ impl<'a> Invite<'a> {
             via: Some(caller.via()),
             contact: Some(caller.contact()),
             max_forwards: Some(70),
-            body: self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
+            // A captured template body (raw bytes, any Content-Type) overrides
+            // the SDP-string offer; its Content-Type rides as a frozen header.
+            body: self
+                .template_body
+                .clone()
+                .or_else(|| self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec))
+                .unwrap_or_default(),
             content_type: None,
             extra_headers: self.extra_headers.clone(),
         };

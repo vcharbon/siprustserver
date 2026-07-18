@@ -18,6 +18,7 @@ pub mod generators;
 pub mod message_helpers;
 pub mod sipfrag;
 pub mod sniff;
+pub mod template;
 
 pub use error::SipParseError;
 pub use method::Method;
@@ -28,6 +29,7 @@ pub use sdp::{
 };
 pub use parser::{SipParser, SipParserLimits};
 pub use parser::custom::{hydrate_request, hydrate_response, CustomParser};
+pub use template::{EmitOpts, HeaderClass, MessageTemplate, TemplateHeader, TemplateStart};
 pub use types::{
     Contact, ContactSet, CSeq, InDialogRequest, InviteRequest, NameAddr, NonEmpty, NotInDialog,
     OptionalHeaders, Params, ParamValue, Rack, ReferTo, Replaces, RequestUri, SipHeader,
