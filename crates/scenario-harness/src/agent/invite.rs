@@ -47,8 +47,8 @@ pub struct Invite<'a> {
     from_uri: Option<String>,
     to_uri: Option<String>,
     request_uri: Option<String>,
-    /// A declared `delayed-automatic` deviation (U5) carried onto the
-    /// [`ClientInvite`] for [`ack_delayed`](super::ClientInvite::ack_delayed).
+    /// A declared `delayed-automatic` deviation carried onto the
+    /// [`ClientInvite`] (honoured by `ack`/`ack_delayed`).
     delayed_automatic: Option<DelayedAutomatic>,
 }
 
@@ -77,10 +77,10 @@ impl<'a> Invite<'a> {
         self
     }
 
-    /// Declare a `delayed-automatic` deviation (U5) carried onto the resulting
-    /// [`ClientInvite`]: [`ack_delayed`](super::ClientInvite::ack_delayed) holds
-    /// the automatic ACK-to-2xx for this long (the peer retransmits the 2xx
-    /// meanwhile). Sugar over [`DelayedAutomatic::ack_after`].
+    /// Declare a `delayed-automatic` deviation carried onto the resulting
+    /// [`ClientInvite`]: its `ack`/`ack_delayed` holds the automatic ACK-to-2xx
+    /// for this long (the peer retransmits the 2xx meanwhile). Sugar over
+    /// [`DelayedAutomatic::ack_after`].
     pub fn delayed_ack(mut self, delay: std::time::Duration) -> Self {
         self.delayed_automatic = Some(DelayedAutomatic::ack_after(delay.as_millis() as u64));
         self

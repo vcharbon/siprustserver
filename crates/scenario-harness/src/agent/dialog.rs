@@ -31,9 +31,30 @@ pub struct Dialog {
     fallback_addr: SocketAddr,
     dialog: StackDialog,
     /// A declared CSeq relative-pattern deviation for this dialog's outbound
-    /// in-dialog requests (U5). `None` = the stack's base numbering is
-    /// authoritative (zero-deviation dialogs are byte-identical to pre-U5).
+    /// in-dialog requests. `None` = the stack's base numbering is authoritative
+    /// (a dialog with no declared deviation numbers exactly as it would without
+    /// this field).
+    ///
+    /// CLONE HAZARD: cloning a `Dialog` forks the deviation's step counter, just
+    /// as it forks `local_cseq` — two clones then number (and consume ops)
+    /// independently. Drive one dialog per declared pattern.
     cseq_dev: Option<CseqDeviation>,
+}
+
+impl Drop for Dialog {
+    fn drop(&mut self) {
+        if let Some(dev) = &self.cseq_dev {
+            let unconsumed = dev.unconsumed_ops();
+            if !unconsumed.is_empty() {
+                eprintln!(
+                    "[scenario-harness] warning: Dialog dropped with {} unconsumed CSeq \
+                     deviation op(s): {unconsumed:?} — the dialog originated fewer in-dialog \
+                     requests than the pattern declares",
+                    unconsumed.len(),
+                );
+            }
+        }
+    }
 }
 
 impl Dialog {
@@ -45,7 +66,10 @@ impl Dialog {
     /// in-dialog requests (offset / jump / reuse relative to the stack's base).
     /// Captured out-of-pattern CSeq anomalies replay without freezing absolute
     /// numbers. ACK/CANCEL are unaffected (they reuse the related request's
-    /// CSeq, RFC 3261 §12.2.1.1).
+    /// CSeq, RFC 3261 §12.2.1.1). Panics if the pattern declares more than one
+    /// op at the same step. Ops at steps the dialog never reaches are surfaced
+    /// by [`assert_deviations_consumed`](Self::assert_deviations_consumed) and a
+    /// Drop-time warning.
     pub fn set_cseq_pattern(&mut self, pattern: CseqPattern) {
         self.cseq_dev = Some(CseqDeviation::new(pattern));
     }
@@ -54,6 +78,21 @@ impl Dialog {
     pub fn with_cseq_pattern(mut self, pattern: CseqPattern) -> Self {
         self.set_cseq_pattern(pattern);
         self
+    }
+
+    /// Assert every declared CSeq-deviation op was reached (the dialog
+    /// originated at least as many in-dialog requests as the pattern's highest
+    /// step). Panics naming the unconsumed ops otherwise. A no-op when no
+    /// pattern is declared. Call it before teardown in a deviation test.
+    pub fn assert_deviations_consumed(&self) {
+        if let Some(dev) = &self.cseq_dev {
+            let unconsumed = dev.unconsumed_ops();
+            assert!(
+                unconsumed.is_empty(),
+                "declared CSeq deviation ops were never reached: {unconsumed:?} — the dialog \
+                 originated fewer in-dialog requests than the pattern declares",
+            );
+        }
     }
 
     /// Set the dialog's local CSeq floor — the next in-dialog request uses
@@ -288,7 +327,7 @@ pub struct InDialogRequest<'a> {
     /// comes from this independent per-fork sequence, not the shared dialog
     /// counter.
     fork_cseq: Option<&'a mut HashMap<String, u32>>,
-    /// The dialog's declared CSeq deviation (U5). Present only on the confirmed-
+    /// The dialog's declared CSeq deviation. Present only on the confirmed-
     /// dialog path (never the forked early-dialog path); overrides the natural
     /// CSeq for this request per the declared pattern.
     cseq_dev: Option<&'a mut CseqDeviation>,
@@ -326,7 +365,7 @@ impl<'a> InDialogRequest<'a> {
         self
     }
 
-    /// Wire in the confirmed dialog's declared CSeq deviation (U5); `None` is a
+    /// Wire in the confirmed dialog's declared CSeq deviation; `None` is a
     /// no-op (the stack's base numbering stays authoritative).
     pub(super) fn with_cseq_dev(mut self, dev: Option<&'a mut CseqDeviation>) -> Self {
         self.cseq_dev = dev;
@@ -458,7 +497,7 @@ impl<'a> InDialogRequest<'a> {
         } else if let Some(t) = &self.to_tag {
             view.remote_tag = t.clone();
         }
-        // U5: a declared CSeq deviation overrides the natural number for this
+        // A declared CSeq deviation overrides the natural number for this
         // confirmed-dialog request (never on the forked early-dialog path). The
         // shared-counter update below picks up the deviated value from `res`.
         if !forked {

@@ -60,8 +60,24 @@ pub struct CseqDeviation {
     offset_applied: bool,
 }
 
+/// The maximum legal CSeq sequence number (RFC 3261 §8.1.1.5: a CSeq is a 32-bit
+/// unsigned integer that MUST be less than 2^31). Valid emitted values are
+/// `[1, MAX_CSEQ]` — a fresh in-dialog request is never 0.
+const MAX_CSEQ: i128 = i32::MAX as i128;
+
 impl CseqDeviation {
+    /// Build the applier, rejecting a malformed pattern loudly: at most one op
+    /// per step (a second op at the same step would be silently dead).
     pub fn new(pattern: CseqPattern) -> Self {
+        let mut seen = std::collections::BTreeSet::new();
+        for o in &pattern.ops {
+            if !seen.insert(o.at) {
+                panic!(
+                    "CseqPattern declares more than one op at step {} — a step carries at most one operation",
+                    o.at
+                );
+            }
+        }
         CseqDeviation { pattern, step: 0, offset_applied: false }
     }
 
@@ -70,33 +86,48 @@ impl CseqDeviation {
         self.pattern.is_identity()
     }
 
+    /// The ops declared at steps this deviation has NOT yet reached — a
+    /// scenario declared them but the dialog originated too few in-dialog
+    /// requests to consume them.
+    pub fn unconsumed_ops(&self) -> Vec<CseqOpAt> {
+        self.pattern.ops.iter().copied().filter(|o| o.at >= self.step).collect()
+    }
+
     /// The CSeq to emit for the NEXT in-dialog request, given the dialog's
     /// current running `local_cseq` (the last emitted number, or the INVITE's).
     /// Advances the internal step. The dialog then sets its `local_cseq` to the
     /// returned value, so subsequent natural increments continue from here.
+    ///
+    /// Panics if the pattern's arithmetic leaves the legal CSeq range
+    /// `[1, MAX_CSEQ]` (a clamp would put a bogus number on the wire silently),
+    /// naming the offending step, op, and computed value.
     pub fn next_cseq(&mut self, local_cseq: u32) -> u32 {
         let step = self.step;
         self.step += 1;
-        let offset = if self.offset_applied {
-            0
-        } else {
-            self.offset_applied = true;
-            self.pattern.offset
+        // The offset folds into the running baseline ONCE, regardless of which
+        // op consumes the first deviated step (a Reuse then reuses the
+        // offset-adjusted number). i128 keeps every intermediate overflow-free.
+        let base: i128 = local_cseq as i128
+            + if self.offset_applied {
+                0
+            } else {
+                self.offset_applied = true;
+                self.pattern.offset as i128
+            };
+        let op = self.pattern.op_at(step);
+        let emit: i128 = match op {
+            Some(CseqOp::Reuse) => base,
+            Some(CseqOp::Jump { by }) => base + 1 + by as i128,
+            None => base + 1,
         };
-        match self.pattern.op_at(step) {
-            // Reuse emits the previous number and does NOT advance (the dialog's
-            // local_cseq is set back to this same value, so the next natural
-            // request continues from it).
-            Some(CseqOp::Reuse) => local_cseq,
-            Some(CseqOp::Jump { by }) => shift(local_cseq, 1 + by + offset),
-            None => shift(local_cseq, 1 + offset),
+        if !(1..=MAX_CSEQ).contains(&emit) {
+            panic!(
+                "CSeq deviation produced out-of-range value {emit} at step {step} (op {op:?}) — \
+                 a CSeq must be in [1, {MAX_CSEQ}] (RFC 3261 §8.1.1.5)"
+            );
         }
+        emit as u32
     }
-}
-
-/// Apply a signed delta to a CSeq, clamped to the u32 range.
-fn shift(base: u32, delta: i64) -> u32 {
-    (base as i64 + delta).clamp(0, u32::MAX as i64) as u32
 }
 
 /// A stack protocol automatic a [`DelayedAutomatic`] can hold.
@@ -106,9 +137,9 @@ pub enum Automatic {
     AckTo2xx,
 }
 
-/// Hold a stack automatic for a declared duration before it fires. v1 delays
-/// only WHEN the automatic fires — its content is unchanged (the U3 boundary:
-/// automatics take no template).
+/// Hold a stack automatic for a declared duration before it fires. This delays
+/// only WHEN the automatic fires; its content is unchanged (the stack emits the
+/// automatic, never a template).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DelayedAutomatic {
     pub which: Automatic,
@@ -168,5 +199,87 @@ mod tests {
         assert_eq!(c0, 102, "2 + offset 100");
         let c1 = dev.next_cseq(c0);
         assert_eq!(c1, 103, "offset not re-applied; inherited via the running value");
+    }
+
+    #[test]
+    fn offset_survives_a_reuse_at_step_0() {
+        // The offset folds into the baseline even though a Reuse consumes step 0;
+        // step 1 continues from the offset-adjusted number.
+        let pat = CseqPattern { offset: 100, ops: vec![CseqOpAt { at: 0, op: CseqOp::Reuse }] };
+        let mut dev = CseqDeviation::new(pat);
+        let c0 = dev.next_cseq(1);
+        assert_eq!(c0, 101, "reuse of the offset-adjusted baseline (1 + 100)");
+        let c1 = dev.next_cseq(c0);
+        assert_eq!(c1, 102, "offset-shifted continuation");
+    }
+
+    #[test]
+    fn offset_and_jump_interplay() {
+        let pat = CseqPattern { offset: 10, ops: vec![CseqOpAt { at: 0, op: CseqOp::Jump { by: 5 } }] };
+        let mut dev = CseqDeviation::new(pat);
+        let c0 = dev.next_cseq(1);
+        assert_eq!(c0, 17, "1 + offset 10 + 1 + jump 5");
+        let c1 = dev.next_cseq(c0);
+        assert_eq!(c1, 18);
+    }
+
+    #[test]
+    #[should_panic(expected = "out-of-range")]
+    fn negative_result_is_rejected_loudly() {
+        let mut dev = CseqDeviation::new(CseqPattern::with_offset(-5));
+        // base = 1 - 5 = -4, +1 = -3 → below 1 → reject (never clamp to 0).
+        let _ = dev.next_cseq(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "out-of-range")]
+    fn over_max_is_rejected_loudly() {
+        let pat = CseqPattern {
+            offset: 0,
+            ops: vec![CseqOpAt { at: 0, op: CseqOp::Jump { by: i32::MAX as i64 } }],
+        };
+        let mut dev = CseqDeviation::new(pat);
+        // 1 + 1 + 2147483647 = 2147483649 > 2^31-1 → reject.
+        let _ = dev.next_cseq(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "out-of-range")]
+    fn jump_i64_max_rejects_without_overflow() {
+        let pat = CseqPattern {
+            offset: 0,
+            ops: vec![CseqOpAt { at: 0, op: CseqOp::Jump { by: i64::MAX } }],
+        };
+        let mut dev = CseqDeviation::new(pat);
+        let _ = dev.next_cseq(1); // i128 math → no overflow, a clean range reject.
+    }
+
+    #[test]
+    #[should_panic(expected = "more than one op at step")]
+    fn duplicate_at_is_rejected_loudly() {
+        let pat = CseqPattern {
+            offset: 0,
+            ops: vec![
+                CseqOpAt { at: 0, op: CseqOp::Reuse },
+                CseqOpAt { at: 0, op: CseqOp::Jump { by: 1 } },
+            ],
+        };
+        let _ = CseqDeviation::new(pat);
+    }
+
+    #[test]
+    fn unconsumed_ops_are_reported() {
+        let pat = CseqPattern {
+            offset: 0,
+            ops: vec![
+                CseqOpAt { at: 0, op: CseqOp::Jump { by: 1 } },
+                CseqOpAt { at: 5, op: CseqOp::Reuse },
+            ],
+        };
+        let mut dev = CseqDeviation::new(pat);
+        let _ = dev.next_cseq(1); // consumes step 0.
+        let un = dev.unconsumed_ops();
+        assert_eq!(un.len(), 1);
+        assert_eq!(un[0].at, 5, "the op at a step never reached is reported");
     }
 }
