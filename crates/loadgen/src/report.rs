@@ -710,6 +710,7 @@ mod tests {
             lane: "10.0.0.1:5060".to_string(),
             detail: detail.to_string(),
             advisory: false,
+            offending: None,
         }])
     }
 

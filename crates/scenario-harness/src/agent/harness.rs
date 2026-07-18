@@ -252,11 +252,12 @@ impl Harness {
         self.waivers.borrow_mut().push(WaiverState::new(scope));
     }
 
-    /// The recorded wire messages so far, one per delivered message, so a test
-    /// can locate the 1-based position of an offending message to scope a
-    /// [`WaiverScope::at_position`] before `finish`.
+    /// The recorded wire messages the AUDIT sees, one per message, so a test can
+    /// locate the 1-based index of an offending message to scope a
+    /// [`WaiverScope::at_position`] before `finish` — the SAME index a finding's
+    /// `offending` field carries.
     pub fn wire_entries(&self) -> Vec<sip_net::RecordedSipEntry> {
-        sip_net::to_sip_entries(&self.recording.channel().snapshot())
+        sip_net::audit_wire_entries(&self.recording.channel().snapshot())
     }
 
     /// Disarm the Drop-time RFC 3261 CSeq hard gate. For multi-SUT harnesses
@@ -535,7 +536,11 @@ impl Harness {
     /// (diagram, checks, findings table) rather than crash it report-less.
     /// The returned findings are exactly the set `finish` would have panicked
     /// on: non-advisory, subject-applicable to the originating bind's declared
-    /// roles, and not waived via [`allow_violation`](Self::allow_violation).
+    /// roles, and not waived via a scoped waiver / [`allow_violation`](Self::allow_violation).
+    ///
+    /// The unused-waiver check is [`finish`](Self::finish)-only: this collecting
+    /// path applies the waivers but does NOT error on one that filtered nothing
+    /// (an executor keeps the report over a dead-waiver abort).
     pub async fn finish_collecting(self) -> (RunReport, Vec<sip_net::RfcFinding>) {
         self.dump.disarm();
         self.cseq_gate.disarm();

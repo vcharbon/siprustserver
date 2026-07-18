@@ -174,6 +174,18 @@ pub trait CrossMessageAuditRule: Send + Sync {
         false
     }
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)>;
+
+    /// The findings with the 1-based wire-entry index of the OFFENDING message
+    /// (into `to_sip_entries(events)`), when the rule can pinpoint it. The
+    /// default derives from [`check`](Self::check) with no index; a rule that
+    /// knows the exact entry overrides THIS instead. Consumers scope waivers on
+    /// the index; a `None` finding is unattributable to a party/position.
+    fn check_positioned(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+    ) -> Vec<(LaneKey, String, Option<usize>)> {
+        self.check(events).into_iter().map(|(b, d)| (b, d, None)).collect()
+    }
 }
 
 use std::collections::HashSet;

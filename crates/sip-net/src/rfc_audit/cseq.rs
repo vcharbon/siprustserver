@@ -17,6 +17,7 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
 use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
+use crate::report::to_sip_entries;
 
 /// Per-request-stream state for the in-dialog CSeq audit. A *stream* is one
 /// `(receiving endpoint, Call-ID, From-tag)` — one originating UA's request flow
@@ -49,13 +50,15 @@ struct StreamState {
 /// a bug — the TEST-MODEL false positive this rule used to produce).
 #[derive(Default)]
 struct DialogCseqs {
-    /// Distinct new-transaction CSeq → `(top-Via branch, method)` of the FIRST new
-    /// transaction that carried it. A `BTreeMap`, so the keys come out ascending
-    /// for the contiguity scan. A *later* new transaction with a **different**
-    /// branch at the same CSeq is a genuine reuse — the dialog CSeq never advanced.
-    by_cseq: BTreeMap<u32, (String, String)>,
-    /// Reuse violations, in arrival order: `(reusing method, CSeq)`.
-    reuses: Vec<(String, u32)>,
+    /// Distinct new-transaction CSeq → `(top-Via branch, method, wire position)`
+    /// of the FIRST new transaction that carried it. A `BTreeMap`, so the keys
+    /// come out ascending for the contiguity scan. A *later* new transaction with
+    /// a **different** branch at the same CSeq is a genuine reuse — the dialog
+    /// CSeq never advanced. The wire position is the offending message's
+    /// 1-based index into `to_sip_entries`.
+    by_cseq: BTreeMap<u32, (String, String, Option<usize>)>,
+    /// Reuse violations, in arrival order: `(reusing method, CSeq, wire position)`.
+    reuses: Vec<(String, u32, Option<usize>)>,
 }
 
 /// **RFC 3261 §12.2.1.1 — in-dialog request sequencing.** Within a dialog the
@@ -115,11 +118,45 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        self.check_positioned(events).into_iter().map(|(b, d, _)| (b, d)).collect()
+    }
+
+    fn check_positioned(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+    ) -> Vec<(LaneKey, String, Option<usize>)> {
         // (receiving bind, Call-ID, From-tag) -> stream state, plus first-seen
         // order so findings come out deterministically (HashMap order is not).
         let mut streams: HashMap<(LaneKey, String, String), StreamState> = HashMap::new();
         let mut stream_order: Vec<(LaneKey, String, String)> = Vec::new();
         let parser = CustomParser::new();
+
+        // The 1-based wire-entry index of each received transaction, keyed by
+        // `(receiver, Call-ID, From-tag, CSeq, method, top-Via branch)` — the same
+        // `to_sip_entries` view a scoped waiver indexes, so a finding can point at
+        // its exact offending message. First occurrence wins (a retransmission
+        // repeats the key).
+        let mut positions: HashMap<(LaneKey, String, String, u32, String, String), usize> =
+            HashMap::new();
+        for (i, e) in to_sip_entries(events).into_iter().enumerate() {
+            let Some(receiver) = e.to_lane else { continue };
+            let Ok(SipMessage::Request(req)) = parser.parse(&e.raw) else { continue };
+            let (Some(cid), Some(ftag)) = (
+                get_header(&req.headers, "call-id").map(str::to_string),
+                get_header(&req.headers, "from").and_then(extract_tag),
+            ) else {
+                continue;
+            };
+            let branch = top_via_branch(&req).unwrap_or_default();
+            positions
+                .entry((receiver, cid, ftag, req.cseq.seq, req.method.to_string(), branch))
+                .or_insert(i + 1);
+        }
+        let pos_of = |key: &(LaneKey, String, String), seq: u32, method: &str, branch: &str| {
+            positions
+                .get(&(key.0.clone(), key.1.clone(), key.2.clone(), seq, method.to_string(), branch.to_string()))
+                .copied()
+        };
 
         // ── Pass 1: accumulate each dialog's new-transaction CSeq set. ──────────
         for s in events {
@@ -168,15 +205,17 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
             //    set, because arrival order is irrelevant to §12.2.1.1.
             let to_tag = req.to.tag.clone().unwrap_or_default();
             let branch = branch.unwrap_or_default();
+            let position = pos_of(&key, seq, &method, &branch);
             let dlg = st.dialogs.entry(to_tag).or_default();
-            match dlg.by_cseq.get(&seq).map(|(b, _)| b.clone()) {
+            match dlg.by_cseq.get(&seq).map(|(b, _, _)| b.clone()) {
                 None => {
-                    dlg.by_cseq.insert(seq, (branch, method));
+                    dlg.by_cseq.insert(seq, (branch, method, position));
                 }
                 Some(first_branch) if first_branch != branch => {
                     // A *different* transaction carried a CSeq the dialog already
-                    // spent → the dialog CSeq failed to increment (a reuse).
-                    dlg.reuses.push((method, seq));
+                    // spent → the dialog CSeq failed to increment (a reuse). The
+                    // offending message is THIS (reusing) request.
+                    dlg.reuses.push((method, seq, position));
                 }
                 Some(_) => {} // same branch/CSeq shape: nothing new to record.
             }
@@ -201,10 +240,11 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
                 let dlg = &st.dialogs[to_tag];
 
                 // Reuse: a CSeq spent by two distinct transactions on this dialog.
-                for (method, seq) in &dlg.reuses {
+                for (method, seq, pos) in &dlg.reuses {
                     findings.push((
                         key.0.clone(),
                         cseq_reuse_msg(method, *seq, &key.1, &key.2, to_tag),
+                        *pos,
                     ));
                 }
 
@@ -247,6 +287,7 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
                                         &key.2,
                                         to_tag,
                                     ),
+                                    dlg.by_cseq[&first].2,
                                 ));
                             } else if let Err(pos) = seqs.binary_search(&anchor) {
                                 seqs.insert(pos, anchor);
@@ -257,11 +298,14 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
                 for w in seqs.windows(2) {
                     let (lo, hi) = (w[0], w[1]);
                     if hi > lo + 1 {
-                        let method =
-                            dlg.by_cseq.get(&hi).map(|(_, m)| m.as_str()).unwrap_or("request");
+                        // The offending message is the one that SKIPPED ahead (at
+                        // `hi`); `anchor`, folded in above, has no by_cseq entry.
+                        let entry = dlg.by_cseq.get(&hi);
+                        let method = entry.map(|(_, m, _)| m.as_str()).unwrap_or("request");
                         findings.push((
                             key.0.clone(),
                             cseq_gap_msg(method, hi, lo, &key.1, &key.2, to_tag),
+                            entry.and_then(|(_, _, p)| *p),
                         ));
                     }
                 }
