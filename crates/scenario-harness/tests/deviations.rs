@@ -4,7 +4,9 @@
 
 use std::time::Duration;
 
-use scenario_harness::{CseqOp, CseqOpAt, CseqPattern, EmitOpts, Harness, MessageTemplate, TemplateHeader};
+use scenario_harness::{
+    CseqOp, CseqOpAt, CseqPattern, EmitOpts, Harness, MessageTemplate, TemplateHeader, WaiverScope,
+};
 use sip_message::generators::InDialogMethod;
 use sip_message::Method;
 
@@ -21,11 +23,14 @@ async fn cseq_jump_visible_on_the_wire() {
         "A declared CSeq jump at step 0 emits base+jump on the wire; the next \
          in-dialog request continues from there",
     );
-    // Replaying a captured out-of-pattern in-dialog CSeq (a jump) — the peer's
-    // anomaly, not the SUT's (there is no SUT here).
-    h.allow_violation(
-        "rfc3261.cseqInDialogOrder",
-        "replaying a captured out-of-pattern in-dialog CSeq (declared jump deviation)",
+    // Replaying a captured out-of-pattern in-dialog CSeq (a jump) — scoped to
+    // ALICE's emissions (the peer replaying the anomaly).
+    h.waive(
+        WaiverScope::rule(
+            "rfc3261.cseqInDialogOrder",
+            "replaying a captured out-of-pattern in-dialog CSeq (declared jump deviation)",
+        )
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -73,9 +78,12 @@ async fn cseq_reuse_emitted_as_declared() {
         "A declared CSeq reuse emits the previous number again; the audit fires \
          on the reuse and is waived with the deviation as justification",
     );
-    h.allow_violation(
-        "rfc3261.cseqInDialogOrder",
-        "replaying a captured in-dialog CSeq reuse (declared reuse deviation)",
+    h.waive(
+        WaiverScope::rule(
+            "rfc3261.cseqInDialogOrder",
+            "replaying a captured in-dialog CSeq reuse (declared reuse deviation)",
+        )
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -278,9 +286,12 @@ async fn templated_in_dialog_request_honors_the_pattern() {
     let h = Harness::new("template-plus-jump").describe(
         "a templated INFO honors the declared CSeq jump (base+jump), BYE continues",
     );
-    h.allow_violation(
-        "rfc3261.cseqInDialogOrder",
-        "replaying a captured out-of-pattern CSeq via a templated in-dialog request",
+    h.waive(
+        WaiverScope::rule(
+            "rfc3261.cseqInDialogOrder",
+            "replaying a captured out-of-pattern CSeq via a templated in-dialog request",
+        )
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;

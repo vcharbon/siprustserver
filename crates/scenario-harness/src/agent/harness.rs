@@ -19,6 +19,7 @@ use sip_net::{
 
 use super::run_guards::{render_rfc_panic, rfc_hard_gate_findings, CseqGate, PanicDump};
 use super::rr_fold::decide_rr_fold;
+use super::waiver::{unused_waivers, WaiverScope, WaiverState};
 use super::txn_view::{AckObligations, TxnView};
 use super::{Agent, Proxy};
 use crate::run::RunReport;
@@ -53,11 +54,11 @@ pub struct Harness {
     /// [`finish`](Harness::finish) (which enforces the same gate inline).
     /// `finish` disarms it (it has already run the gate itself).
     cseq_gate: CseqGate,
-    /// Rules a test is allowed to violate (a deliberate non-compliance fixture
-    /// where Alice/Bob intentionally emit non-conforming SIP). The hard gate
-    /// skips findings from these rule names. Shared (`Rc`) with [`CseqGate`] so a
-    /// `allow_violation` registered before `finish`/Drop is honoured by both.
-    allow_violations: Rc<RefCell<HashSet<String>>>,
+    /// Scoped RFC-audit waivers a test declared (a deliberate non-compliance
+    /// fixture where a simulated peer intentionally emits non-conforming SIP).
+    /// The hard gate drops each finding a waiver covers. Shared (`Rc`) with
+    /// [`CseqGate`] so waivers registered before `finish`/Drop are honoured by both.
+    waivers: Rc<RefCell<Vec<WaiverState>>>,
     /// Per-`recv` wait bound handed to every [`Agent`] this harness binds. Small
     /// under a paused (simulated) clock — a parked `recv` auto-advances virtual
     /// time, so the bound only catches a genuinely stuck flow. A *real*-clock
@@ -150,11 +151,12 @@ impl Harness {
             true,
         );
         let dump = PanicDump::new(name.clone(), wrapped.recording.channel(), recorder.clone());
-        let allow_violations: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
+        let waivers: Rc<RefCell<Vec<WaiverState>>> = Rc::new(RefCell::new(Vec::new()));
         let cseq_gate = CseqGate::new(
             name.clone(),
             wrapped.recording.channel(),
-            allow_violations.clone(),
+            waivers.clone(),
+            recorder.clone(),
         );
         Self {
             network: wrapped.network,
@@ -165,7 +167,7 @@ impl Harness {
             description: None,
             dump,
             cseq_gate,
-            allow_violations,
+            waivers,
             recv_timeout,
             anchors: Rc::new(RefCell::new(Vec::new())),
         }
@@ -223,14 +225,38 @@ impl Harness {
     ///
     /// `rule` is the rule's `name()` (e.g. `"rfc3261.byeOnlyInDialog"`). The
     /// finding is still recorded (advisory) so the report shows what was waived.
+    ///
+    /// This is the COARSE form, reimplemented over the scoped machinery: it
+    /// waives the rule for ANY emitting party and message and does not error if
+    /// it happens to filter nothing (a conditional waiver). Reach for
+    /// [`waive`](Self::waive) to scope a waiver to one party / message.
     pub fn allow_violation(&self, rule: impl Into<String>, justification: impl Into<String>) {
-        let rule = rule.into();
-        let justification = justification.into();
+        self.waive(WaiverScope::rule(rule, justification).conditional());
+    }
+
+    /// Register a scoped RFC-audit [`WaiverScope`] — waive exactly this named
+    /// violation on the chosen emitting party / message position; every other
+    /// finding (and the SAME rule on any other party) stays gated. A declared
+    /// waiver that filters nothing is an error at [`finish`](Self::finish)
+    /// unless it is [`conditional`](WaiverScope::conditional). The `justification`
+    /// is logged.
+    pub fn waive(&self, scope: WaiverScope) {
         eprintln!(
-            "[harness] RFC rule '{rule}' allowed to be violated on '{}': {justification}",
-            self.name
+            "[harness] waive '{}'{}{} on '{}': {}",
+            scope.rule,
+            scope.party.as_ref().map(|p| format!(" party={p}")).unwrap_or_default(),
+            scope.position.map(|p| format!(" @{p}")).unwrap_or_default(),
+            self.name,
+            scope.justification,
         );
-        self.allow_violations.borrow_mut().insert(rule);
+        self.waivers.borrow_mut().push(WaiverState::new(scope));
+    }
+
+    /// The recorded wire messages so far, one per delivered message, so a test
+    /// can locate the 1-based position of an offending message to scope a
+    /// [`WaiverScope::at_position`] before `finish`.
+    pub fn wire_entries(&self) -> Vec<sip_net::RecordedSipEntry> {
+        sip_net::to_sip_entries(&self.recording.channel().snapshot())
     }
 
     /// Disarm the Drop-time RFC 3261 CSeq hard gate. For multi-SUT harnesses
@@ -471,9 +497,32 @@ impl Harness {
         // violation must fail the test (a real UA would reject these). Skip if the
         // test is already unwinding so we never double-panic. The structural
         // close() anomalies are intentionally NOT gated.
-        let cseq_findings = rfc_hard_gate_findings(&events, &self.allow_violations.borrow());
-        if !cseq_findings.is_empty() && !std::thread::panicking() {
-            panic!("{}", render_rfc_panic(&self.name, &cseq_findings));
+        // The whole waiver gate sits in a scope so the `RefCell` borrow is
+        // released before the `close().await` below.
+        {
+            let waivers = self.waivers.borrow();
+            let names = super::run_guards::addr_names(&self.recorder);
+            let cseq_findings = rfc_hard_gate_findings(&events, &waivers, &names);
+            if !cseq_findings.is_empty() && !std::thread::panicking() {
+                panic!("{}", render_rfc_panic(&self.name, &cseq_findings));
+            }
+            // A declared, non-conditional waiver that filtered nothing is an
+            // error — a position-dependent waiver that stopped matching is
+            // silent otherwise.
+            let unused = unused_waivers(&waivers);
+            if !unused.is_empty() && !std::thread::panicking() {
+                panic!(
+                    "[{}] declared audit waiver(s) that matched no finding (a dead waiver — \
+                     the violation was fixed, the scope drifted, or it never applied; add \
+                     .conditional() if the shape is legitimately conditional):\n{}",
+                    self.name,
+                    unused
+                        .iter()
+                        .map(|w| format!("  • rule={} party={:?} position={:?}", w.rule, w.party, w.position))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
+            }
         }
         let audit = self.recording.close().await;
         let anchors = self.anchors.borrow().clone();
@@ -492,10 +541,19 @@ impl Harness {
         self.cseq_gate.disarm();
         self.settle_network().await;
         let events = self.recording.channel().snapshot();
-        let allow = self.allow_violations.borrow().clone();
+        // The gating set the scoped waivers leave unwaived — re-run the audit and
+        // drop the (lane, detail) pairs `rfc_hard_gate_findings` would waive, then
+        // keep the matching `RfcFinding`s so the caller gets the full objects.
+        // Compute the gating set in a scope so the borrow is released before the
+        // `close().await` below.
+        let gate: std::collections::HashSet<(String, String)> = {
+            let waivers = self.waivers.borrow();
+            let names = super::run_guards::addr_names(&self.recorder);
+            rfc_hard_gate_findings(&events, &waivers, &names).into_iter().collect()
+        };
         let gating: Vec<sip_net::RfcFinding> = sip_net::evaluate_rfc_findings(&events)
             .into_iter()
-            .filter(|f| !f.advisory && !allow.contains(&f.rule))
+            .filter(|f| !f.advisory && gate.contains(&(f.lane.clone(), f.detail.clone())))
             .collect();
         let audit = self.recording.close().await;
         let anchors = self.anchors.borrow().clone();
