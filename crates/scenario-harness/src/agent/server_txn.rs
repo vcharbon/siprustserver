@@ -6,7 +6,10 @@ use sip_message::generators::{
     generate_response, GenerateResponseOpts, StackDialog, B2BUA_ALLOW, B2BUA_SUPPORTED,
 };
 use sip_message::message_helpers::{extract_contact_uri, get_header, get_headers};
-use sip_message::{apply_name_forms, EmitOpts, MessageTemplate, SipHeader, SipMessage, SipRequest};
+use sip_message::{
+    apply_name_forms, EmitOpts, MatchOpts, MessageTemplate, Mismatch, SipHeader, SipMessage,
+    SipRequest,
+};
 
 use super::addressing::{next_hop, top_via_addr, top_via_branch};
 use super::dialog::Dialog;
@@ -39,6 +42,20 @@ impl ServerTxn {
     /// The received request (for inspecting headers / SDP).
     pub fn request(&self) -> &SipRequest {
         &self.request
+    }
+
+    /// Assert this received request matches `tmpl` under the tiered match model
+    /// ([`MessageTemplate::match_inbound`]): tier-1 fields structural-only,
+    /// remote-target headers compared by params modulo `opts.ignore_params`,
+    /// frozen headers + body byte-compared. Returns the first [`Mismatch`].
+    /// The response-side equivalent is `tmpl.match_inbound(&SipMessage::Response(resp), opts)`
+    /// on the response a client transaction's `expect` returned.
+    pub fn expect_template(
+        &self,
+        tmpl: &MessageTemplate,
+        opts: &MatchOpts,
+    ) -> Result<(), Mismatch> {
+        tmpl.match_inbound(&SipMessage::Request(self.request.clone()), opts)
     }
 
     /// Send a response. Returns a builder for attaching an SDP answer and/or
