@@ -4,7 +4,7 @@
 //! recording-wrapped simulated network. The deliberate violation exercised is a
 //! CSeq reuse (RFC 3261 §12.2.1.1), driven via the declared CSeq deviation.
 
-use scenario_harness::{Agent, CseqOp, CseqOpAt, CseqPattern, Harness, WaiverScope};
+use scenario_harness::{Agent, CseqOp, CseqOpAt, CseqPattern, Harness, Proxy, WaiverScope};
 use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
@@ -199,4 +199,141 @@ async fn unused_waiver_conditional_opts_out() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     h.finish().await; // conditional → no unused-waiver error
+}
+
+/// A relayed alice→mid→bob call where alice commits a CSeq reuse. The reuse is
+/// received at mid (emitted by alice) AND at bob (emitted by mid, which relayed
+/// it) — two findings, attributed to their true emitters via `from_lane`.
+async fn relay_call_with_alice_reuse(alice: &Agent, mid: &Proxy, bob: &Agent) {
+    let bob_addr = bob.addr();
+    let alice_addr = alice.addr();
+    let mut call = alice.invite(bob).with_sdp(OFFER).through(mid.addr()).send().await;
+    mid.forward_request(bob_addr).await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    mid.forward_response(alice_addr).await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    mid.forward_response(alice_addr).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    mid.forward_request(bob_addr).await;
+    bob.receive("ACK").await;
+
+    dialog.set_cseq_pattern(CseqPattern { offset: 0, ops: vec![CseqOpAt { at: 1, op: CseqOp::Reuse }] });
+    for _ in 0..2 {
+        let mut i = dialog.send_request(InDialogMethod::Info).send().await;
+        mid.forward_request(bob_addr).await;
+        bob.receive("INFO").await.respond(200, "OK").await;
+        mid.forward_response(alice_addr).await;
+        i.expect(200).await;
+    }
+    let mut bye = dialog.bye().await;
+    mid.forward_request(bob_addr).await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    mid.forward_response(alice_addr).await;
+    bye.expect(200).await;
+    dialog.assert_deviations_consumed();
+}
+
+/// Relay lane: waiving BOTH the alice-emitted and the mid-relayed finding passes
+/// — proving each is attributed to its TRUE emitter. (A real SUT lane would
+/// never waive the SUT/mid side; here mid is a stand-in relayer.)
+#[tokio::test]
+async fn relay_findings_attributed_to_their_true_emitters() {
+    let h = Harness::new("waiver-relay-both").describe("relay reuse: alice-emitted + mid-relayed, both waived");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let mid = h.proxy("mid", "127.0.0.1:5080").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    // alice's copy (received at mid) and mid's relayed copy (received at bob).
+    h.waive(WaiverScope::rule(CSEQ_RULE, "alice's replayed reuse").on_party("alice"));
+    h.waive(WaiverScope::rule(CSEQ_RULE, "mid relayed it (a real SUT lane never waives the SUT)").on_party("mid"));
+    relay_call_with_alice_reuse(&alice, &mid, &bob).await;
+    h.finish().await;
+}
+
+/// Relay lane, the SUT-safety property: an alice-scoped waiver filters ONLY the
+/// alice-emitted finding; the copy mid relayed (emitted by mid) still GATES — a
+/// peer waiver never un-audits the relayer/SUT.
+#[tokio::test]
+#[should_panic(expected = "RFC audit violation")]
+async fn relay_peer_waiver_leaves_relayed_copy_gated() {
+    let h = Harness::new("waiver-relay-alice").describe("alice-scoped waiver leaves the mid-relayed copy gated");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let mid = h.proxy("mid", "127.0.0.1:5080").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    h.waive(WaiverScope::rule(CSEQ_RULE, "only alice's copy").on_party("alice"));
+    relay_call_with_alice_reuse(&alice, &mid, &bob).await;
+    h.finish().await; // the mid-relayed finding gates → panic
+}
+
+/// Relay lane, symmetric: a mid-scoped waiver leaves the alice-emitted finding
+/// gated.
+#[tokio::test]
+#[should_panic(expected = "RFC audit violation")]
+async fn relay_mid_waiver_leaves_alice_finding_gated() {
+    let h = Harness::new("waiver-relay-mid").describe("mid-scoped waiver leaves the alice-emitted finding gated");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let mid = h.proxy("mid", "127.0.0.1:5080").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    h.waive(WaiverScope::rule(CSEQ_RULE, "only mid's relayed copy").on_party("mid"));
+    relay_call_with_alice_reuse(&alice, &mid, &bob).await;
+    h.finish().await; // the alice-emitted finding gates → panic
+}
+
+/// at_position pins the OFFENDER: waiving the compliant INVITE's wire position
+/// does NOT cover the INFO's reuse (which carries a different `offending` index).
+#[tokio::test]
+#[should_panic(expected = "RFC audit violation")]
+async fn position_waiver_pins_offender_not_a_compliant_neighbour() {
+    let h = Harness::new("waiver-pos-offender").describe("waiving the INVITE's position does not cover the reuse");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    call_with_alice_reuse(&alice, &bob).await;
+    let invite_pos = h
+        .wire_entries()
+        .iter()
+        .position(|e| e.raw.starts_with(b"INVITE "))
+        .map(|i| i + 1)
+        .expect("an INVITE on the wire");
+    h.waive(WaiverScope::rule(CSEQ_RULE, "waive the (compliant) INVITE").at_position(invite_pos));
+    h.finish().await; // the reuse's offending position is not the INVITE's → gates
+}
+
+/// Two reuses in ONE dialog: a position-scoped waiver covers exactly its
+/// offender; the second reuse still gates.
+#[tokio::test]
+#[should_panic(expected = "RFC audit violation")]
+async fn two_reuses_one_dialog_position_scopes_exactly_one() {
+    let h = Harness::new("waiver-two-reuse").describe("one position waiver covers one of two reuses in a dialog");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    // Reuse at step 1 (CSeq 2 twice) AND at step 3 (CSeq 3 twice).
+    dialog.set_cseq_pattern(CseqPattern {
+        offset: 0,
+        ops: vec![CseqOpAt { at: 1, op: CseqOp::Reuse }, CseqOpAt { at: 3, op: CseqOp::Reuse }],
+    });
+    for _ in 0..4 {
+        let mut i = dialog.send_request(InDialogMethod::Info).send().await;
+        bob.receive("INFO").await.respond(200, "OK").await;
+        i.expect(200).await;
+    }
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    dialog.assert_deviations_consumed();
+
+    // Waive only the FIRST reuse (the 2nd INFO on the wire); the second reuse
+    // (the 4th INFO) still gates.
+    let first_reuse_pos = info_positions(&h)[1];
+    h.waive(WaiverScope::rule(CSEQ_RULE, "only the first reuse").at_position(first_reuse_pos));
+    h.finish().await;
 }
