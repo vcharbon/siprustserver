@@ -9,7 +9,9 @@ use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
     StackDialog,
 };
-use sip_message::{apply_name_forms, EmitOpts, MessageTemplate, SipHeader, SipMessage};
+use sip_message::{
+    apply_name_forms, apply_remote_target_emits, EmitOpts, MessageTemplate, SipHeader, SipMessage,
+};
 
 use super::client_invite::ClientInvite;
 use super::Agent;
@@ -30,6 +32,9 @@ pub struct Invite<'a> {
     /// `(canonical, wire)` name-forms for the stack-regenerated headers the
     /// capture wrote compact (`("Via","v")`, …) — applied to the WIRE copy only.
     name_forms: Vec<(String, String)>,
+    /// `(canonical, captured_value)` remote-target headers (Contact) whose
+    /// captured user + params ride the bound socket's host:port — WIRE copy only.
+    remote_emits: Vec<(String, String)>,
     extra_headers: Vec<SipHeader>,
     /// Wire destination override — the INVITE is *addressed* to `peer` (its
     /// Contact is the Request-URI) but *sent* here. Set by [`Invite::through`]
@@ -52,6 +57,7 @@ impl<'a> Invite<'a> {
             template_body: None,
             suppress_default_ct: false,
             name_forms: vec![],
+            remote_emits: vec![],
             extra_headers: vec![],
             wire_dst: None,
             from_uri: None,
@@ -98,6 +104,8 @@ impl<'a> Invite<'a> {
         self.template_body = Some(tmpl.body().to_vec());
         // Compact wire name-forms for the stack-regenerated headers (Via/From/…).
         self.name_forms = tmpl.regenerated_name_forms();
+        // Remote-target (Contact) captured user + params over the bound host:port.
+        self.remote_emits = tmpl.remote_target_emits();
         self
     }
 
@@ -189,6 +197,7 @@ impl<'a> Invite<'a> {
         // header lookups (get_header, not compact-aware) still resolve.
         let mut wire = invite.clone();
         wire.headers = apply_name_forms(&invite.headers, &self.name_forms);
+        wire.headers = apply_remote_target_emits(&wire.headers, &self.remote_emits);
         caller.send(&SipMessage::Request(wire), wire_dst).await;
 
         let dialog = StackDialog {

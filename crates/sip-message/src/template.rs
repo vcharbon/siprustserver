@@ -331,6 +331,23 @@ impl MessageTemplate {
             .collect()
     }
 
+    /// The Regenerated remote-target headers (`Contact`/`Route`/`Record-Route`)
+    /// whose host:port is stack-owned (routing-critical) but whose user part +
+    /// ALL parameters are captured — `(canonical_lowercase_name, captured_value)`.
+    /// The emission path rewrites the generated header's host:port onto the
+    /// captured value (via [`apply_remote_target_emits`]), so a param'd/user'd
+    /// Contact round-trips. A remote-target header explicitly FROZEN rides
+    /// [`frozen_headers`](Self::frozen_headers) verbatim instead (host:port kept).
+    pub fn remote_target_emits(&self) -> Vec<(String, String)> {
+        self.headers
+            .iter()
+            .filter(|h| {
+                h.class == HeaderClass::Regenerated && crate::remote_target::is_remote_target(&h.name)
+            })
+            .map(|h| (crate::remote_target::canonical(&h.name), h.value.clone()))
+            .collect()
+    }
+
     /// The raw body bytes (opaque — SDP, multipart, or any captured payload).
     pub fn body(&self) -> &[u8] {
         &self.body
@@ -367,6 +384,31 @@ pub fn apply_name_forms(headers: &[SipHeader], forms: &[(String, String)]) -> Ve
             SipHeader { name: wire.unwrap_or_else(|| h.name.clone()), value: h.value.clone() }
         })
         .collect()
+}
+
+/// Rewrite each generated remote-target header to carry the CAPTURED user part +
+/// parameters while keeping the generated (bound-socket) host:port. `emits` are
+/// the `(canonical, captured_value)` pairs from
+/// [`MessageTemplate::remote_target_emits`]; an empty list is the identity. Only
+/// the first generated header of each name is rewritten (Contact is single; a
+/// Route the stack did not generate is left to the dialog route set).
+pub fn apply_remote_target_emits(
+    headers: &[SipHeader],
+    emits: &[(String, String)],
+) -> Vec<SipHeader> {
+    if emits.is_empty() {
+        return headers.to_vec();
+    }
+    let mut out = headers.to_vec();
+    for (canon, captured) in emits {
+        if let Some(h) = out.iter_mut().find(|h| crate::remote_target::canonical(&h.name) == *canon)
+        {
+            if let Some((host, port)) = crate::remote_target::first_hostport(&h.value) {
+                h.value = crate::remote_target::rewrite_hostport(captured, &host, port);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

@@ -18,6 +18,7 @@ pub mod generators;
 pub mod message_helpers;
 pub mod sipfrag;
 pub mod sniff;
+pub mod remote_target;
 pub mod template;
 pub mod template_match;
 
@@ -31,7 +32,8 @@ pub use sdp::{
 pub use parser::{SipParser, SipParserLimits};
 pub use parser::custom::{hydrate_request, hydrate_response, CustomParser};
 pub use template::{
-    apply_name_forms, EmitOpts, HeaderClass, MessageTemplate, TemplateHeader, TemplateStart,
+    apply_name_forms, apply_remote_target_emits, EmitOpts, HeaderClass, MessageTemplate,
+    TemplateHeader, TemplateStart,
 };
 pub use template_match::{MatchOpts, Mismatch};
 pub use types::{
