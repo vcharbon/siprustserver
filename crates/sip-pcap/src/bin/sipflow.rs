@@ -79,10 +79,11 @@ struct Args {
     #[arg(long, default_value_t = false)]
     no_fromto_fallback: bool,
 
-    /// Emit the FULL flow model (raw payloads base64-encoded, parsed
-    /// summaries, hops, match evidence, decode counters) as JSON on stdout —
-    /// schema documented on `sip_pcap::emit::flows_to_json`. Whole-capture
-    /// emit: selection filters and text layout flags do not apply.
+    /// Emit the FULL flow model (raw payloads as text where valid UTF-8,
+    /// base64 for binary parts, parsed summaries, hops, match evidence,
+    /// decode counters) as pretty-printed JSON on stdout — schema documented
+    /// on `sip_pcap::emit::flows_to_json`. Whole-capture emit: selection
+    /// filters and text layout flags do not apply.
     #[arg(
         long,
         default_value_t = false,
@@ -129,7 +130,10 @@ fn main() {
     let flows = build_flows(&datagrams, &cfg);
 
     if args.json {
-        println!("{}", sip_pcap::emit::flows_to_json(&flows, &stats));
+        // Pretty + deterministic field order: the emit is committed as
+        // fixtures downstream, so its git/jq diffs must stay line-readable.
+        let v = sip_pcap::emit::flows_to_json(&flows, &stats);
+        println!("{}", serde_json::to_string_pretty(&v).expect("model JSON serializes"));
         return;
     }
 
