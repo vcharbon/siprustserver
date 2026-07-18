@@ -820,6 +820,119 @@ async fn server_txn_expect_template_matches_and_detects_drift() {
     h.finish().await;
 }
 
+/// U4 round-trip invariant (REQUEST path): a template INVITE whose Contact has
+/// a user part + URI and header params replays with the CAPTURED user + params
+/// over the bound socket's host:port, and matches its own template — the
+/// captured-replay certification loop.
+#[tokio::test]
+async fn contact_round_trips_on_request_path() {
+    let h = Harness::new("contact-round-trip-req").describe(
+        "send_template(INVITE with a param'd/user'd Contact) → receive → \
+         expect_template(own template) == Ok; host:port is the bound socket",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let raw = format!(
+        "INVITE sip:+15559999@capture.example SIP/2.0\r\n\
+Via: SIP/2.0/UDP 9.9.9.9:5060;branch=z9hG4bK-cap\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:a@ex>;tag=at\r\n\
+To: <sip:b@ex>\r\n\
+Call-ID: cap@9\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:+48123@203.0.113.7:5060;transport=udp>;expires=3600\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\r\n{}",
+        OFFER.len(),
+        OFFER,
+    );
+    let tmpl = MessageTemplate::from_message(&parse(raw.as_bytes()));
+
+    let mut call = alice.invite(&bob).template(&tmpl, EmitOpts::default()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+
+    // Round-trip: the received INVITE matches its own template.
+    assert_eq!(uas.expect_template(&tmpl, &MatchOpts::default()), Ok(()));
+
+    // The emitted Contact keeps the captured user + params over alice's host:port.
+    let contact = sip_message::message_helpers::get_header(&uas.request().headers, "contact")
+        .expect("Contact present")
+        .to_string();
+    assert!(contact.contains("+48123"), "captured user preserved: {contact}");
+    assert!(contact.contains("transport=udp"), "captured URI param preserved: {contact}");
+    assert!(contact.contains("expires=3600"), "captured header param preserved: {contact}");
+    assert!(contact.contains("127.0.0.1:5060"), "bound socket host:port: {contact}");
+    assert!(!contact.contains("203.0.113.7"), "captured host:port dropped: {contact}");
+
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    h.finish().await;
+}
+
+/// U4 round-trip invariant (RESPONSE path): a template 200 whose Contact has a
+/// user part + params replays over the UAS socket's host:port and matches its
+/// own template.
+#[tokio::test]
+async fn contact_round_trips_on_response_path() {
+    let h = Harness::new("contact-round-trip-resp").describe(
+        "respond_template(200 with a param'd/user'd Contact) → receive → \
+         match_inbound(own template) == Ok; host:port is the bound socket",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let raw = format!(
+        "SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP 9.9.9.9:5060;branch=z9hG4bK-cap\r\n\
+From: <sip:a@ex>;tag=at\r\n\
+To: <sip:b@ex>;tag=bt\r\n\
+Call-ID: cap@9\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:svc@203.0.113.7:5060;transport=tcp>;q=0.7\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\r\n{}",
+        ANSWER.len(),
+        ANSWER,
+    );
+    let tmpl = MessageTemplate::from_message(&parse(raw.as_bytes()));
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond_template(&tmpl, EmitOpts::default()).send().await;
+
+    let ok = call.expect(200).await;
+    let contact = sip_message::message_helpers::get_header(&ok.headers, "contact")
+        .expect("Contact present")
+        .to_string();
+    assert!(contact.contains("svc"), "captured user preserved: {contact}");
+    assert!(contact.contains("transport=tcp"), "captured URI param preserved: {contact}");
+    assert!(contact.contains("q=0.7"), "captured header param preserved: {contact}");
+    assert!(contact.contains("127.0.0.1:5070"), "bound socket host:port: {contact}");
+    assert!(!contact.contains("203.0.113.7"), "captured host:port dropped: {contact}");
+
+    let got = SipMessage::Response(ok);
+    assert_eq!(
+        tmpl.match_inbound(&got, &MatchOpts::default()),
+        Ok(()),
+        "the replayed response matches its own template",
+    );
+
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    h.finish().await;
+}
+
 /// The stack-owned automatics fire though they appear in NO template: a UAS
 /// rejects a template INVITE from a template 486 (whose To-tag is minted, not
 /// templated), and the UAC's §17.1.1.3 ACK-to-final fires — the hop ACK the test

@@ -10,7 +10,8 @@ use sip_message::generators::{
     GenerateInDialogRequestOpts, InDialogMethod, StackDialog,
 };
 use sip_message::{
-    apply_name_forms, EmitOpts, MessageTemplate, SipHeader, SipMessage, SipRequest, SipResponse,
+    apply_name_forms, apply_remote_target_emits, EmitOpts, MessageTemplate, SipHeader, SipMessage,
+    SipRequest, SipResponse,
 };
 
 use super::addressing::next_hop;
@@ -255,6 +256,9 @@ pub struct InDialogRequest<'a> {
     /// `(canonical, wire)` name-forms for stack-regenerated headers the capture
     /// wrote compact — applied to the WIRE copy only.
     name_forms: Vec<(String, String)>,
+    /// `(canonical, captured_value)` remote-target headers (Contact) — captured
+    /// user + params over the bound socket's host:port; WIRE copy only.
+    remote_emits: Vec<(String, String)>,
     to_tag: Option<String>,
     /// Per-fork CSeq map (see `ClientInvite`'s fork tracking). Present only on
     /// the early-dialog path; when a `with_to_tag` fork is addressed the CSeq
@@ -281,6 +285,7 @@ impl<'a> InDialogRequest<'a> {
             extra_headers: vec![],
             suppress_default_ct: false,
             name_forms: vec![],
+            remote_emits: vec![],
             to_tag: None,
             fork_cseq: None,
         }
@@ -351,6 +356,7 @@ impl<'a> InDialogRequest<'a> {
         self.body = tmpl.body().to_vec();
         self.content_type = None;
         self.name_forms = tmpl.regenerated_name_forms();
+        self.remote_emits = tmpl.remote_target_emits();
         self
     }
 
@@ -437,6 +443,7 @@ impl<'a> InDialogRequest<'a> {
         let request = res.request;
         let mut wire = request.clone();
         wire.headers = apply_name_forms(&request.headers, &self.name_forms);
+        wire.headers = apply_remote_target_emits(&wire.headers, &self.remote_emits);
         self.agent.try_send(&SipMessage::Request(wire), dst).await?;
         Ok((
             InDialogTxn::new(

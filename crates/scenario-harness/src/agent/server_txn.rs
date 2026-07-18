@@ -7,8 +7,8 @@ use sip_message::generators::{
 };
 use sip_message::message_helpers::{extract_contact_uri, get_header, get_headers};
 use sip_message::{
-    apply_name_forms, EmitOpts, MatchOpts, MessageTemplate, Mismatch, SipHeader, SipMessage,
-    SipRequest,
+    apply_name_forms, apply_remote_target_emits, EmitOpts, MatchOpts, MessageTemplate, Mismatch,
+    SipHeader, SipMessage, SipRequest,
 };
 
 use super::addressing::{next_hop, top_via_addr, top_via_branch};
@@ -50,6 +50,9 @@ impl ServerTxn {
     /// frozen headers + body byte-compared. Returns the first [`Mismatch`].
     /// The response-side equivalent is `tmpl.match_inbound(&SipMessage::Response(resp), opts)`
     /// on the response a client transaction's `expect` returned.
+    // `Mismatch` is a rich diagnostic value, returned by-value so it reads
+    // directly in an assertion / test failure (see `match_inbound`).
+    #[allow(clippy::result_large_err)]
     pub fn expect_template(
         &self,
         tmpl: &MessageTemplate,
@@ -69,6 +72,7 @@ impl ServerTxn {
             template_body: None,
             suppress_default_ct: false,
             name_forms: vec![],
+            remote_emits: vec![],
             extra_headers: vec![],
             to_tag: None,
         }
@@ -213,6 +217,9 @@ pub struct Respond<'a> {
     /// `(canonical, wire)` name-forms for stack-regenerated headers the capture
     /// wrote compact (see [`Invite::template`](super::Invite::template)).
     name_forms: Vec<(String, String)>,
+    /// `(canonical, captured_value)` remote-target headers (Contact) — captured
+    /// user + params over the bound socket's host:port.
+    remote_emits: Vec<(String, String)>,
     extra_headers: Vec<SipHeader>,
     to_tag: Option<String>,
 }
@@ -243,6 +250,7 @@ impl<'a> Respond<'a> {
         self.extra_headers.extend(frozen);
         self.template_body = Some(tmpl.body().to_vec());
         self.name_forms = tmpl.regenerated_name_forms();
+        self.remote_emits = tmpl.remote_target_emits();
         self
     }
 
@@ -353,6 +361,9 @@ impl<'a> Respond<'a> {
         // From/To/…) when the template used them; identity for a full-name capture.
         if !self.name_forms.is_empty() {
             resp.headers = apply_name_forms(&resp.headers, &self.name_forms);
+        }
+        if !self.remote_emits.is_empty() {
+            resp.headers = apply_remote_target_emits(&resp.headers, &self.remote_emits);
         }
         // Responses are routed by Via, not Route (RFC 3261 §18.2.2): send to the
         // request's topmost Via sent-by. With a proxy in the path that Via is

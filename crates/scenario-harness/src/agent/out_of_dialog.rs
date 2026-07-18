@@ -7,7 +7,10 @@ use std::net::SocketAddr;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
-use sip_message::{apply_name_forms, EmitOpts, MessageTemplate, SipHeader, SipMessage, SipResponse};
+use sip_message::{
+    apply_name_forms, apply_remote_target_emits, EmitOpts, MessageTemplate, SipHeader, SipMessage,
+    SipResponse,
+};
 
 use super::client_txn::recv_response_raw;
 use super::dialog::InDialogTxn;
@@ -33,6 +36,9 @@ pub struct OutOfDialogRequest<'a> {
     /// `(canonical, wire)` name-forms for stack-regenerated headers the capture
     /// wrote compact — applied to the WIRE copy only.
     name_forms: Vec<(String, String)>,
+    /// `(canonical, captured_value)` remote-target headers (Contact) — captured
+    /// user + params over the bound socket's host:port; WIRE copy only.
+    remote_emits: Vec<(String, String)>,
     /// Wire destination override (send via a proxy/SUT; R-URI still targets peer).
     wire_dst: Option<SocketAddr>,
     from_uri: Option<String>,
@@ -51,6 +57,7 @@ impl<'a> OutOfDialogRequest<'a> {
             extra_headers: vec![],
             suppress_default_ct: false,
             name_forms: vec![],
+            remote_emits: vec![],
             wire_dst: None,
             from_uri: None,
             to_uri: None,
@@ -108,6 +115,7 @@ impl<'a> OutOfDialogRequest<'a> {
         self.body = Some(tmpl.body().to_vec());
         self.content_type = None;
         self.name_forms = tmpl.regenerated_name_forms();
+        self.remote_emits = tmpl.remote_target_emits();
         self
     }
 
@@ -172,6 +180,7 @@ impl<'a> OutOfDialogRequest<'a> {
         // `req` for the §17.1.1.3 ACK (its get_header lookups are not compact-aware).
         let mut wire = req.clone();
         wire.headers = apply_name_forms(&req.headers, &self.name_forms);
+        wire.headers = apply_remote_target_emits(&wire.headers, &self.remote_emits);
         caller.try_send(&SipMessage::Request(wire), wire_dst).await?;
         Ok(InDialogTxn::new(
             caller.clone(),
@@ -234,6 +243,7 @@ impl<'a> OutOfDialogRequest<'a> {
                     sip_message::message_helpers::remove_header(&req.headers, "content-type");
             }
             req.headers = apply_name_forms(&req.headers, &self.name_forms);
+            req.headers = apply_remote_target_emits(&req.headers, &self.remote_emits);
             caller.try_send(&SipMessage::Request(req), wire_dst).await?;
             // Raw-receive so a 401/407 keeps its challenge header (a real digest
             // responder reads `nonce`/`realm` off it); a matching final returns
