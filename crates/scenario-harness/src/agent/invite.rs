@@ -23,6 +23,10 @@ pub struct Invite<'a> {
     /// captured payload emitted verbatim, its Content-Type carried as a frozen
     /// header rather than stamped by the generator.
     template_body: Option<Vec<u8>>,
+    /// A template body carried NO Content-Type: suppress the generator's default
+    /// `application/sdp` stamp so a captured bodyless-typed / non-SDP payload
+    /// replays with the Content-Type the capture actually had (none).
+    suppress_default_ct: bool,
     extra_headers: Vec<SipHeader>,
     /// Wire destination override — the INVITE is *addressed* to `peer` (its
     /// Contact is the Request-URI) but *sent* here. Set by [`Invite::through`]
@@ -43,6 +47,7 @@ impl<'a> Invite<'a> {
             peer,
             sdp: None,
             template_body: None,
+            suppress_default_ct: false,
             extra_headers: vec![],
             wire_dst: None,
             from_uri: None,
@@ -65,7 +70,9 @@ impl<'a> Invite<'a> {
     /// frozen header, is carried rather than stamped by the generator.
     ///
     /// The template's start line must be a request of method `INVITE`. See
-    /// [`EmitOpts`] for the v1 header-order limitation.
+    /// [`EmitOpts`] for the v1 header-order limitation. Automatic/dedicated-
+    /// primitive messages (`ACK`/`CANCEL`) take no template in v1 (see
+    /// [`MessageTemplate`]).
     pub fn template(mut self, tmpl: &MessageTemplate, opts: EmitOpts) -> Self {
         // v1: casing + duplicate-header layout are always preserved for frozen
         // headers; `preserve_order` requests nothing further yet (see EmitOpts).
@@ -75,7 +82,13 @@ impl<'a> Invite<'a> {
             "Invite::template requires an INVITE request template, got {:?}",
             tmpl.start()
         );
-        self.extra_headers = tmpl.frozen_headers();
+        let frozen = tmpl.frozen_headers();
+        // The emitted Content-Type comes ONLY from the frozen headers: if none is
+        // frozen, suppress the generator's default so no CT is invented.
+        self.suppress_default_ct =
+            !frozen.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
+        // Append AFTER any prior `with_header` entries — never drop them.
+        self.extra_headers.extend(frozen);
         self.template_body = Some(tmpl.body().to_vec());
         self
     }
@@ -158,7 +171,11 @@ impl<'a> Invite<'a> {
             content_type: None,
             extra_headers: self.extra_headers.clone(),
         };
-        let invite = generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
+        let mut invite = generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
+        if self.suppress_default_ct {
+            invite.headers =
+                sip_message::message_helpers::remove_header(&invite.headers, "content-type");
+        }
         caller.send(&SipMessage::Request(invite.clone()), wire_dst).await;
 
         let dialog = StackDialog {

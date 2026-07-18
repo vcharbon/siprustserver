@@ -27,6 +27,9 @@ pub struct OutOfDialogRequest<'a> {
     /// Content-Type for a non-empty body (defaults to `application/sdp`).
     content_type: Option<String>,
     extra_headers: Vec<SipHeader>,
+    /// A template body carried NO Content-Type: suppress the generator's default
+    /// `application/sdp` stamp (see [`Invite::template`](super::Invite::template)).
+    suppress_default_ct: bool,
     /// Wire destination override (send via a proxy/SUT; R-URI still targets peer).
     wire_dst: Option<SocketAddr>,
     from_uri: Option<String>,
@@ -43,6 +46,7 @@ impl<'a> OutOfDialogRequest<'a> {
             body: None,
             content_type: None,
             extra_headers: vec![],
+            suppress_default_ct: false,
             wire_dst: None,
             from_uri: None,
             to_uri: None,
@@ -74,14 +78,27 @@ impl<'a> OutOfDialogRequest<'a> {
     /// the template's non-tier-1 headers (verbatim value/casing/duplicate layout)
     /// and its body, leaving the stack to regenerate the mechanical fields (Via +
     /// branch, Call-ID, From-tag, CSeq, Max-Forwards, Content-Length, Contact).
-    /// The request method stays the one this builder was constructed with; the
+    /// The template's request method must match this builder's method; the
     /// captured `Content-Type` rides as a frozen header. See [`EmitOpts`] for the
     /// v1 header-order limitation.
     pub fn template(mut self, tmpl: &MessageTemplate, opts: EmitOpts) -> Self {
         // v1: casing + duplicate-header layout are always preserved for frozen
         // headers; `preserve_order` requests nothing further yet (see EmitOpts).
         let EmitOpts { preserve_order: _ } = opts;
-        self.extra_headers = tmpl.frozen_headers();
+        assert_eq!(
+            tmpl.method().and_then(|m| OutOfDialogMethod::try_from(m).ok()),
+            Some(self.method),
+            "OutOfDialogRequest::template method mismatch: builder is {:?}, template is {:?}",
+            self.method,
+            tmpl.start()
+        );
+        let frozen = tmpl.frozen_headers();
+        // Emitted Content-Type comes ONLY from the frozen headers; suppress the
+        // generator's default when none is frozen.
+        self.suppress_default_ct =
+            !frozen.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
+        // Append AFTER any prior `with_header` entries — never drop them.
+        self.extra_headers.extend(frozen);
         self.body = Some(tmpl.body().to_vec());
         self.content_type = None;
         self
@@ -139,7 +156,11 @@ impl<'a> OutOfDialogRequest<'a> {
             content_type: self.content_type,
             extra_headers: self.extra_headers,
         };
-        let req = generate_out_of_dialog_request(self.method, &opts);
+        let mut req = generate_out_of_dialog_request(self.method, &opts);
+        if self.suppress_default_ct {
+            req.headers =
+                sip_message::message_helpers::remove_header(&req.headers, "content-type");
+        }
         let msg = SipMessage::Request(req);
         caller.try_send(&msg, wire_dst).await?;
         let SipMessage::Request(request) = msg else { unreachable!() };
@@ -198,7 +219,11 @@ impl<'a> OutOfDialogRequest<'a> {
         // At most ONE authenticated resend.
         let mut auth_retries_left: u8 = if responder.is_some() { 1 } else { 0 };
         loop {
-            let req = generate_out_of_dialog_request(method, &opts);
+            let mut req = generate_out_of_dialog_request(method, &opts);
+            if self.suppress_default_ct {
+                req.headers =
+                    sip_message::message_helpers::remove_header(&req.headers, "content-type");
+            }
             caller.try_send(&SipMessage::Request(req), wire_dst).await?;
             // Raw-receive so a 401/407 keeps its challenge header (a real digest
             // responder reads `nonce`/`realm` off it); a matching final returns

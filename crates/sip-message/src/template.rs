@@ -14,6 +14,22 @@
 //!   is deliberately frozen (a captured unusual media type must survive), even
 //!   though `Content-Length` is regenerated.
 //!
+//! # Fidelity is relative to the PARSED value
+//!
+//! "Byte-for-byte" preservation is of the *parsed* header value, not the raw
+//! capture bytes: a folded value (RFC 3261 §7.3.1 `\r\n`+WSP line continuation)
+//! is emitted unfolded, and surrounding optional whitespace is trimmed — exactly
+//! the normalization [`SipHeader`] already applies. This is stable across the
+//! extract → replay → re-extract loop but is not the original wire framing.
+//!
+//! # Automatics are not template-overridable in v1
+//!
+//! Stack automatics and dedicated primitives — `100 Trying`, the `ACK` to a
+//! final, `CANCEL`, and the `487` a CANCEL triggers — cannot carry template
+//! headers in v1: they are emitted by the stack / their own primitives, which
+//! take no template. A captured ACK's or CANCEL's frozen-header quirks are not
+//! replayable yet.
+//!
 //! # v1 emission limitation
 //!
 //! Header ORDER is canonical in v1: the stack emits its regenerated block first,
@@ -56,10 +72,12 @@ pub enum HeaderClass {
 impl HeaderClass {
     /// The default classification of a header by name (case-insensitive): a
     /// tier-1 dialog-critical name is [`Regenerated`](HeaderClass::Regenerated),
-    /// everything else is [`Frozen`](HeaderClass::Frozen).
+    /// everything else is [`Frozen`](HeaderClass::Frozen). RFC 3261 §7.3.3
+    /// compact forms are expanded first, so `"v"` classifies as `Via` (else a
+    /// templated compact tier-1 header would freeze and duplicate on the wire).
     pub fn of(name: &str) -> Self {
-        let lower = name.to_ascii_lowercase();
-        if REGENERATED_HEADERS.contains(&lower.as_str()) {
+        let expanded = crate::parser::custom::compact_forms::expand_compact_form(name);
+        if REGENERATED_HEADERS.contains(&expanded.to_ascii_lowercase().as_str()) {
             HeaderClass::Regenerated
         } else {
             HeaderClass::Frozen
@@ -107,7 +125,9 @@ pub enum TemplateStart {
 
 /// A captured SIP message prepared for near-verbatim replay. Holds the start
 /// line, an ordered list of classified headers (wire casing + duplicate layout
-/// preserved), and the raw body bytes.
+/// preserved), and the raw body bytes. A template describes a message a UA
+/// deliberately emits; the stack automatics and dedicated primitives (`100`,
+/// `ACK`, `CANCEL`, `487`) take no template in v1 (module doc).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageTemplate {
     start: TemplateStart,
@@ -261,6 +281,44 @@ Content-Length: 0\r\n\r\n";
         // Both duplicate rows preserved in order.
         assert_eq!(frozen[1].value, "one");
         assert_eq!(frozen[2].value, "two");
+    }
+
+    #[test]
+    fn classifies_rfc7011_compact_forms_before_freezing() {
+        // Compact tier-1 names expand and classify Regenerated — else a templated
+        // compact Via/From/… would freeze and DUPLICATE on the wire.
+        assert_eq!(HeaderClass::of("v"), HeaderClass::Regenerated, "v = Via");
+        assert_eq!(HeaderClass::of("V"), HeaderClass::Regenerated, "case-insensitive");
+        assert_eq!(HeaderClass::of("f"), HeaderClass::Regenerated, "f = From");
+        assert_eq!(HeaderClass::of("t"), HeaderClass::Regenerated, "t = To");
+        assert_eq!(HeaderClass::of("i"), HeaderClass::Regenerated, "i = Call-ID");
+        assert_eq!(HeaderClass::of("m"), HeaderClass::Regenerated, "m = Contact");
+        assert_eq!(HeaderClass::of("l"), HeaderClass::Regenerated, "l = Content-Length");
+        // `c` = Content-Type is FROZEN (like its long form), as are the other
+        // compact forms that map to non-tier-1 headers.
+        assert_eq!(HeaderClass::of("c"), HeaderClass::Frozen, "c = Content-Type (frozen)");
+        assert_eq!(HeaderClass::of("s"), HeaderClass::Frozen, "s = Subject");
+        assert_eq!(HeaderClass::of("k"), HeaderClass::Frozen, "k = Supported");
+        assert_eq!(HeaderClass::of("e"), HeaderClass::Frozen, "e = Content-Encoding");
+        // A non-compact single char is not a compact form.
+        assert_eq!(HeaderClass::of("x"), HeaderClass::Frozen);
+    }
+
+    #[test]
+    fn frozen_headers_excludes_compact_tier1() {
+        let tmpl = MessageTemplate::request(
+            Method::Invite,
+            vec![
+                TemplateHeader::classified("v", "SIP/2.0/UDP 1.2.3.4:5060;branch=z9hG4bK-x"),
+                TemplateHeader::classified("i", "cap@1.2.3.4"),
+                TemplateHeader::classified("c", "application/sdp"),
+                TemplateHeader::classified("Subject", "hi"),
+            ],
+            Vec::new(),
+        );
+        let names: Vec<String> = tmpl.frozen_headers().iter().map(|h| h.name.clone()).collect();
+        // `v` and `i` are tier-1 (dropped); `c` (Content-Type) and Subject frozen.
+        assert_eq!(names, vec!["c".to_string(), "Subject".to_string()]);
     }
 
     #[test]

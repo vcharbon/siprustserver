@@ -403,7 +403,9 @@ impl ClientInvite {
     /// [`Invite::through`] was used). Returns a client transaction so the caller
     /// can `expect` the `200 OK` to the CANCEL; the matching `487 Request
     /// Terminated` for the INVITE arrives on this same UA and is consumed via
-    /// [`ClientInvite::expect`].
+    /// [`ClientInvite::expect`]. CANCEL is a dedicated primitive: it takes no
+    /// template in v1 (a captured CANCEL's frozen-header quirks are not
+    /// replayable yet).
     pub async fn cancel(&self) -> InDialogTxn {
         unwrap_step(try_send_cancel(&self.agent, &self.original_invite, self.wire_dst).await);
         InDialogTxn::new(
@@ -478,6 +480,8 @@ impl ClientInvite {
     /// Generate and send the ACK for the 2xx (CSeq reused from the INVITE per
     /// RFC 3261 §13.2.2.4), then return the confirmed [`Dialog`]. With a route
     /// set the ACK carries Route headers and goes to the first hop (the proxy).
+    /// The ACK-to-2xx is a dedicated primitive: it takes no template in v1 — a
+    /// captured ACK's frozen-header quirks are not replayable yet.
     pub async fn ack(&mut self) -> Dialog {
         self.ack_with(None).await
     }

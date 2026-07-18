@@ -20,7 +20,7 @@ pub mod headers;
 pub mod structured_headers;
 pub mod extract_fields;
 pub mod optional_headers;
-mod compact_forms;
+pub(crate) mod compact_forms;
 
 use extract_fields::{
     extract_request_fields, extract_response_fields, ExtractMode, RequestEager,

@@ -244,6 +244,198 @@ async fn template_response_freezes_unusual_headers() {
     h.finish().await;
 }
 
+/// A compact-form tier-1 header (`v` = Via, RFC 3261 §7.3.3) in a template is
+/// classified regenerated — NOT frozen — so it does not DUPLICATE on the wire.
+#[tokio::test]
+async fn template_compact_via_does_not_duplicate_on_the_wire() {
+    let h = Harness::new("template-compact-via").describe(
+        "A template whose Via is written in the compact form `v` classifies as a \
+         regenerated tier-1 header, so the emitted INVITE carries exactly one Via",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let tmpl = MessageTemplate::request(
+        Method::Invite,
+        vec![
+            // Compact Via + Call-ID: MUST be regenerated (dropped), not frozen.
+            TemplateHeader::classified("v", "SIP/2.0/UDP 203.0.113.7:5060;branch=z9hG4bK-CAP"),
+            TemplateHeader::classified("i", "captured@203.0.113.7"),
+            TemplateHeader::frozen("Content-Type", "application/sdp"),
+        ],
+        OFFER.as_bytes().to_vec(),
+    );
+    let mut call = alice.invite(&bob).template(&tmpl, EmitOpts::default()).send().await;
+
+    let mut uas = bob.receive("INVITE").await;
+    let req = uas.request().clone();
+    assert_eq!(req.via.len(), 1, "exactly one Via on the wire (no frozen compact duplicate)");
+    assert_eq!(values_of(&req.headers, "Via").len(), 1, "exactly one raw Via header");
+    assert!(!req.via.first().branch.as_deref().unwrap().contains("CAP"), "Via branch regenerated");
+    assert_ne!(req.call_id, "captured@203.0.113.7", "compact Call-ID regenerated");
+
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    h.finish().await;
+}
+
+/// A frozen non-SDP Content-Type replays EXACTLY once, byte-equal — the stack
+/// never invents or overrides the `application/sdp` default. Driven as an
+/// in-dialog INFO (no offer/answer to complete).
+#[tokio::test]
+async fn template_frozen_non_sdp_content_type_emits_exactly_one() {
+    let h = Harness::new("template-frozen-ct").describe(
+        "An in-dialog INFO template freezing Content-Type: application/xml replays \
+         that CT exactly once at the receiver; the application/sdp default never fires",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    // Establish a normal call (SDP offer/answer complete).
+    let mut call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    // An in-dialog INFO carrying a non-SDP body under a frozen Content-Type.
+    let body = b"<msg>hello</msg>".to_vec();
+    let info = MessageTemplate::request(
+        Method::Info,
+        vec![TemplateHeader::frozen("Content-Type", "application/xml")],
+        body.clone(),
+    );
+    let mut info_txn = dialog.send_template(&info, EmitOpts::default()).await;
+
+    let mut ibob = bob.receive("INFO").await;
+    let ireq = ibob.request().clone();
+    assert_eq!(
+        values_of(&ireq.headers, "Content-Type"),
+        vec!["application/xml"],
+        "exactly one frozen Content-Type, no sdp default added",
+    );
+    assert_eq!(ireq.body, body, "non-SDP body carried verbatim");
+    ibob.respond(200, "OK").await;
+    info_txn.expect(200).await;
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    h.finish().await;
+}
+
+/// A captured body with NO Content-Type replays with NO Content-Type — the
+/// generator's `application/sdp` default is suppressed. Faithfully replaying the
+/// (RFC 3261 §7.4.1 non-compliant) capture is the point, so the peer-side audit
+/// rule is waived for alice — the SUT is never in this SUT-less path.
+#[tokio::test]
+async fn template_body_without_content_type_emits_no_content_type() {
+    let h = Harness::new("template-no-ct").describe(
+        "A template body with no Content-Type replays with no Content-Type: the \
+         generator's application/sdp default is suppressed (captured-message fidelity)",
+    );
+    // The captured message is intentionally §7.4.1 non-compliant; alice is the
+    // simulated peer replaying it (not a SUT), so the rule is sanctioned-waived.
+    h.allow_violation(
+        "rfc3261.contentType",
+        "faithful replay of a captured body-without-Content-Type message (peer side)",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let tmpl = MessageTemplate::request(
+        Method::Invite,
+        vec![TemplateHeader::frozen("Subject", "no-ct")],
+        b"opaque-bytes-no-ct".to_vec(),
+    );
+    let mut call = alice.invite(&bob).template(&tmpl, EmitOpts::default()).send().await;
+
+    let mut uas = bob.receive("INVITE").await;
+    let req = uas.request().clone();
+    assert!(
+        values_of(&req.headers, "Content-Type").is_empty(),
+        "no Content-Type invented (got {:?})",
+        values_of(&req.headers, "Content-Type"),
+    );
+    assert_eq!(req.body, b"opaque-bytes-no-ct", "body carried verbatim");
+
+    // Reject so the call terminates cleanly (no offer/answer to complete).
+    uas.respond(488, "Not Acceptable Here").await;
+    call.expect(488).await; // auto-ACKs the non-2xx final (§17.1.1.3)
+    uas.expect_ack().await; // ensure the hop ACK is recorded before the gate
+
+    h.finish().await;
+}
+
+/// `.template()` EXTENDS the builder's headers (a prior `with_header` survives)
+/// rather than replacing them, and `OutOfDialogRequest::template` validates the
+/// template method against the builder's method.
+#[tokio::test]
+async fn template_preserves_prior_with_header() {
+    let h = Harness::new("template-extend-headers").describe(
+        "A with_header set before .template() survives (extended, not replaced)",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let tmpl = MessageTemplate::request(
+        Method::Invite,
+        vec![
+            TemplateHeader::frozen("Content-Type", "application/sdp"),
+            TemplateHeader::frozen("X-Frozen", "from-template"),
+        ],
+        OFFER.as_bytes().to_vec(),
+    );
+    let mut call = alice
+        .invite(&bob)
+        .with_header("X-Pre", "kept")
+        .template(&tmpl, EmitOpts::default())
+        .send()
+        .await;
+
+    let mut uas = bob.receive("INVITE").await;
+    let req = uas.request().clone();
+    assert_eq!(values_of(&req.headers, "X-Pre"), vec!["kept"], "prior with_header survived .template()");
+    assert_eq!(values_of(&req.headers, "X-Frozen"), vec!["from-template"], "frozen header present");
+
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    h.finish().await;
+}
+
+/// `OutOfDialogRequest::template` rejects a method that mismatches the builder's.
+#[tokio::test]
+#[should_panic(expected = "method mismatch")]
+async fn out_of_dialog_template_method_mismatch_panics() {
+    use sip_message::generators::OutOfDialogMethod;
+
+    let h = Harness::new("template-ood-mismatch").describe("method mismatch panics");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    // An INVITE template handed to an OPTIONS builder must panic.
+    let invite_tmpl = MessageTemplate::request(Method::Invite, Vec::new(), Vec::new());
+    let _ = alice
+        .request(OutOfDialogMethod::Options, &bob)
+        .template(&invite_tmpl, EmitOpts::default());
+}
+
 /// The stack-owned automatics fire though they appear in NO template: a UAS
 /// rejects a template INVITE from a template 486 (whose To-tag is minted, not
 /// templated), and the UAC's §17.1.1.3 ACK-to-final fires — the hop ACK the test
