@@ -1,11 +1,12 @@
-//! U5 — declared deviations on the dialog handle: CSeq relative-pattern
+//! Declared deviations on the dialog handle: the CSeq relative-pattern
 //! (offset/jump/reuse) and the `delayed-automatic` ACK. SUT-less, through the
 //! recording-wrapped simulated network.
 
 use std::time::Duration;
 
-use scenario_harness::{CseqOp, CseqOpAt, CseqPattern, Harness};
+use scenario_harness::{CseqOp, CseqOpAt, CseqPattern, EmitOpts, Harness, MessageTemplate, TemplateHeader};
 use sip_message::generators::InDialogMethod;
+use sip_message::Method;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49180 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
@@ -59,6 +60,7 @@ async fn cseq_jump_visible_on_the_wire() {
     bbob.respond(200, "OK").await;
     bye.expect(200).await;
 
+    dialog.assert_deviations_consumed();
     h.finish().await;
 }
 
@@ -114,11 +116,12 @@ async fn cseq_reuse_emitted_as_declared() {
     bbob.respond(200, "OK").await;
     bye.expect(200).await;
 
+    dialog.assert_deviations_consumed();
     h.finish().await;
 }
 
 /// A dialog with NO declared deviation keeps the stack's base numbering
-/// (byte-identical to pre-U5); no waiver needed (the flow is RFC-compliant).
+/// (byte-identical to a dialog without a pattern); no waiver needed (compliant).
 #[tokio::test]
 async fn zero_deviation_cseq_is_natural() {
     let h = Harness::new("cseq-natural").describe(
@@ -192,6 +195,9 @@ async fn delayed_automatic_ack_provokes_retx_and_settles() {
                 biased;
                 _ack = bob.receive("ACK") => break retx,
                 _ = tokio::time::sleep(Duration::from_millis(1000)) => {
+                    // Cap the loop so a future refactor that never lands the ACK
+                    // fails loudly instead of hanging.
+                    assert!(retx < 8, "bob retransmitted the 200 {retx}× with no ACK — the held ACK never landed");
                     uas.respond(200, "OK").with_sdp(ANSWER).send().await;
                     retx += 1;
                 }
@@ -209,5 +215,114 @@ async fn delayed_automatic_ack_provokes_retx_and_settles() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    h.finish().await;
+}
+
+/// A declared `delayed-automatic` binds a PLAIN `ack()` too: the declaration
+/// owns the automatic, so `ack()` (not just `ack_delayed()`) holds the ACK —
+/// proven by the peer retransmitting the 200 before the ACK lands.
+#[tokio::test(start_paused = true)]
+async fn declared_delay_binds_plain_ack() {
+    let h = Harness::new("delayed-ack-plain").describe(
+        "a declared delayed_ack + a plain ack() still holds the ACK (the \
+         declaration owns the automatic); the peer retransmits the 200",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .delayed_ack(Duration::from_millis(1500))
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+
+    let alice_side = async {
+        call.expect(200).await;
+        call.ack().await // PLAIN ack() — must honour the declaration
+    };
+    let bob_side = async {
+        let mut retx = 0u32;
+        loop {
+            tokio::select! {
+                biased;
+                _ack = bob.receive("ACK") => break retx,
+                _ = tokio::time::sleep(Duration::from_millis(1000)) => {
+                    assert!(retx < 8, "held ACK never landed (got {retx} retx)");
+                    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+                    retx += 1;
+                }
+            }
+        }
+    };
+    let (mut dialog, retx) = tokio::join!(alice_side, bob_side);
+    assert!(retx >= 1, "plain ack() honoured the declared delay (peer retransmitted; got {retx})");
+
+    alice.drain().await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    h.finish().await;
+}
+
+/// A TEMPLATED in-dialog request honors the declared CSeq pattern: a templated
+/// INFO carries base+jump, and a subsequent BYE continues from there. (The
+/// out-of-pattern CSeq trips the §12.2.1.1 audit — waived as the replayed
+/// peer anomaly.)
+#[tokio::test]
+async fn templated_in_dialog_request_honors_the_pattern() {
+    let h = Harness::new("template-plus-jump").describe(
+        "a templated INFO honors the declared CSeq jump (base+jump), BYE continues",
+    );
+    h.allow_violation(
+        "rfc3261.cseqInDialogOrder",
+        "replaying a captured out-of-pattern CSeq via a templated in-dialog request",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    dialog.set_cseq_pattern(CseqPattern {
+        offset: 0,
+        ops: vec![CseqOpAt { at: 0, op: CseqOp::Jump { by: 48 } }],
+    });
+
+    // Step 0: a TEMPLATED INFO → base 2 + 48 = 50.
+    let info = MessageTemplate::request(
+        Method::Info,
+        vec![TemplateHeader::frozen("Content-Type", "application/xml")],
+        b"<info/>".to_vec(),
+    );
+    let mut i = dialog.send_template(&info, EmitOpts::default()).await;
+    let mut r = bob.receive("INFO").await;
+    assert_eq!(r.request().cseq.seq, 50, "the templated INFO honours the jump");
+    assert_eq!(
+        sip_message::message_helpers::get_header(&r.request().headers, "content-type"),
+        Some("application/xml"),
+        "the template's frozen header still rides",
+    );
+    r.respond(200, "OK").await;
+    i.expect(200).await;
+
+    // Step 1: BYE continues from the jump = 51.
+    let mut bye = dialog.bye().await;
+    let mut bbob = bob.receive("BYE").await;
+    assert_eq!(bbob.request().cseq.seq, 51, "the next request continues from the jump");
+    bbob.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    dialog.assert_deviations_consumed();
     h.finish().await;
 }

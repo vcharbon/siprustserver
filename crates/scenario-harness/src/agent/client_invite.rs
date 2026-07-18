@@ -73,9 +73,9 @@ pub struct ClientInvite {
     /// per-dialog RFC 3261 §12.2.1.1 audit (correctly) rejects. Empty until a
     /// `with_to_tag` request fork is addressed.
     pub(super) fork_cseq: HashMap<String, u32>,
-    /// A declared `delayed-automatic` deviation (U5) — v1: hold the automatic
-    /// ACK to a 2xx for a declared duration ([`ack_delayed`](Self::ack_delayed)).
-    /// `None` = the ACK fires immediately when the caller sends it.
+    /// A declared `delayed-automatic` deviation: hold the automatic ACK to a 2xx
+    /// for a declared duration ([`ack`](Self::ack) / [`ack_delayed`](Self::ack_delayed)
+    /// honour it). `None` = the ACK fires immediately when the caller sends it.
     pub(super) delayed_automatic: Option<DelayedAutomatic>,
 }
 
@@ -492,13 +492,23 @@ impl ClientInvite {
         self.ack_with(None).await
     }
 
-    /// Send the ACK HONOURING a declared `delayed-automatic` deviation (U5): if
-    /// one holds the ACK-to-2xx for `delay_ms`, sleep that long on the (paused)
-    /// clock FIRST — the peer retransmits the 2xx meanwhile (RFC 3261 §13.3.1.4)
-    /// — then ACK. With no deviation declared this is exactly
-    /// [`ack`](Self::ack) (no delay; zero regression). The delay changes only
-    /// WHEN the ACK fires, never its content (the U3 automatics boundary).
+    /// The EXPLICIT delayed-ACK form: asserts a `delayed-automatic` declaration
+    /// exists (declare it via [`Invite::delayed_ack`](super::Invite::delayed_ack))
+    /// and then ACKs — identical to [`ack`](Self::ack), which also honours the
+    /// declaration. Reach for it when a test states its intent to hold the ACK.
     pub async fn ack_delayed(&mut self) -> Dialog {
+        assert!(
+            self.delayed_automatic.is_some(),
+            "ack_delayed requires a declared delayed-automatic (Invite::delayed_ack) — use ack()",
+        );
+        self.ack_with(None).await
+    }
+
+    /// Hold the ACK-to-2xx for the declared duration (a `delayed-automatic`), if
+    /// any: sleep on the (paused) clock so the peer retransmits the 2xx
+    /// meanwhile (RFC 3261 §13.3.1.4). A no-op with no declaration — the ACK
+    /// fires immediately, so an undeclared call is unchanged.
+    async fn honour_delayed_automatic(&self) {
         if let Some(dev) = self.delayed_automatic {
             match dev.which {
                 Automatic::AckTo2xx => {
@@ -506,12 +516,14 @@ impl ClientInvite {
                 }
             }
         }
-        self.ack_with(None).await
     }
 
     /// ACK the 2xx carrying an optional SDP body — the delayed-offer answer
-    /// rides the ACK when the 200 OK carried the offer (RFC 3264 §4).
+    /// rides the ACK when the 200 OK carried the offer (RFC 3264 §4). Honours a
+    /// declared `delayed-automatic` (holds the ACK first), so a plain `ack()`
+    /// after a declaration still delays.
     pub async fn ack_with(&mut self, sdp: Option<&str>) -> Dialog {
+        self.honour_delayed_automatic().await;
         let handle = InviteClientTransactionHandle {
             original_invite: self.original_invite.clone(),
         };
