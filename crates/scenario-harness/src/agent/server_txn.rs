@@ -216,8 +216,10 @@ impl<'a> Respond<'a> {
         // headers; `preserve_order` requests nothing further yet (see EmitOpts).
         let EmitOpts { preserve_order: _ } = opts;
         let frozen = tmpl.frozen_headers();
-        // Emitted Content-Type comes ONLY from the frozen headers; suppress the
-        // generator's default when none is frozen.
+        // Intentionally LITERAL (not compact-aware): a frozen compact `c:` does
+        // not match "content-type" here, so suppress=true and the generator's
+        // added full Content-Type default is stripped below while the frozen `c:`
+        // survives (a compact-aware probe would wrongly leave both).
         self.suppress_default_ct =
             !frozen.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
         // Append AFTER any prior `with_header` entries — never drop them.
@@ -287,9 +289,15 @@ impl<'a> Respond<'a> {
         // RFC-compliant, matching the live SIPp endpoints.
         let mut extra_headers = self.extra_headers.clone();
         if (200..300).contains(&self.status) && txn.request.cseq.method.as_str() == "INVITE" {
-            let has_allow = extra_headers.iter().any(|h| h.name.eq_ignore_ascii_case("Allow"));
-            let has_supported =
-                extra_headers.iter().any(|h| h.name.eq_ignore_ascii_case("Supported"));
+            // Compact-aware probes: a frozen `k:` (compact Supported) must
+            // suppress the stack default, else the replayed 2xx advertises
+            // 100rel/timer the capture never did (RFC 3261 §7.3.3).
+            let has_allow = extra_headers
+                .iter()
+                .any(|h| sip_message::message_helpers::name_matches("Allow", &h.name));
+            let has_supported = extra_headers
+                .iter()
+                .any(|h| sip_message::message_helpers::name_matches("Supported", &h.name));
             if !has_allow {
                 extra_headers.push(SipHeader { name: "Allow".into(), value: B2BUA_ALLOW.into() });
             }

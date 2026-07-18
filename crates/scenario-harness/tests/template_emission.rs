@@ -552,6 +552,120 @@ async fn template_full_name_capture_replays_full_names() {
     h.finish().await;
 }
 
+/// A 200 captured with a compact `k:` (Supported) replays with exactly ONE
+/// supported-family header — the stack's presence probe is compact-aware, so it
+/// does not stamp its own `Supported: 100rel, timer, replaces` over the capture.
+#[tokio::test]
+async fn respond_template_compact_supported_not_duplicated() {
+    let h = Harness::new("template-compact-supported").describe(
+        "A UAS answers from a 200 captured with compact `k: replaces`; the stack's \
+         Supported probe is compact-aware and stamps no duplicate default",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    // A captured 200 with a compact Supported (`k`) + an SDP answer.
+    let cap = format!(
+        "SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP 9.9.9.9:5060;branch=z9hG4bK-cap\r\n\
+From: <sip:a@ex>;tag=at\r\n\
+To: <sip:b@ex>;tag=bt\r\n\
+Call-ID: cap@9\r\n\
+CSeq: 1 INVITE\r\n\
+k: replaces\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\r\n{}",
+        ANSWER.len(),
+        ANSWER,
+    );
+    let tmpl = MessageTemplate::from_message(&parse(cap.as_bytes()));
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond_template(&tmpl, EmitOpts::default()).send().await;
+
+    let ok = call.expect(200).await;
+    let text = String::from_utf8_lossy(&ok.raw).into_owned();
+    // Exactly one supported-family header, compact, byte-equal value.
+    assert!(text.contains("\r\nk: replaces"), "compact Supported on the wire:\n{text}");
+    assert!(!text.contains("\r\nSupported:"), "no full-name Supported stamped:\n{text}");
+    // Parsed (expanded) view: one Supported value, the captured one.
+    assert_eq!(
+        sip_message::message_helpers::get_headers(&ok.headers, "supported"),
+        vec!["replaces"],
+        "exactly one Supported value, not the stack default",
+    );
+
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    h.finish().await;
+}
+
+/// A template re-INVITE carrying a compact `k:` (Supported) does not draw the
+/// generator's stamped `Supported` default (generators.rs `carried` probe is
+/// compact-aware).
+#[tokio::test]
+async fn template_reinvite_compact_supported_not_duplicated() {
+    let h = Harness::new("template-reinvite-supported").describe(
+        "A template re-INVITE carrying compact `k: replaces` draws no stamped \
+         Supported default from the in-dialog generator",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    // Establish.
+    let mut call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    // A re-INVITE template with compact Supported (`k`) + SDP offer.
+    let reinvite = MessageTemplate::request(
+        Method::Invite,
+        vec![
+            TemplateHeader::frozen("k", "replaces"),
+            TemplateHeader::frozen("Content-Type", "application/sdp"),
+        ],
+        OFFER.as_bytes().to_vec(),
+    );
+    let mut re = dialog.send_template(&reinvite, EmitOpts::default()).await;
+
+    let mut rbob = bob.receive("INVITE").await;
+    let rreq = rbob.request().clone();
+    let text = String::from_utf8_lossy(&rreq.raw).into_owned();
+    assert!(text.contains("\r\nk: replaces"), "compact Supported on the re-INVITE:\n{text}");
+    assert!(
+        !text.contains("\r\nSupported: 100rel"),
+        "no stamped Supported default on the re-INVITE:\n{text}",
+    );
+    assert_eq!(
+        sip_message::message_helpers::get_headers(&rreq.headers, "supported"),
+        vec!["replaces"],
+        "exactly one Supported value",
+    );
+
+    rbob.respond(200, "OK").with_sdp(ANSWER).await;
+    re.expect(200).await;
+    dialog.ack(Some(ANSWER)).await;
+    bob.receive("ACK").await;
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    h.finish().await;
+}
+
 /// The stack-owned automatics fire though they appear in NO template: a UAS
 /// rejects a template INVITE from a template 486 (whose To-tag is minted, not
 /// templated), and the UAC's §17.1.1.3 ACK-to-final fires — the hop ACK the test

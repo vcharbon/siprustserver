@@ -32,7 +32,10 @@
 //! captured wire form from the exact bytes. Templates from captures MUST be built
 //! via `from_message` over wire bytes; the raw-line constructors are for tests.
 //! Header-name classification / canonicalization has ONE source of truth — the
-//! parser's compact-form table (`HeaderClass::of` expands through it).
+//! parser's compact-form table (`HeaderClass::of` and the presence probes both
+//! expand through it). v1 boundary: a REGENERATED header captured in mixed
+//! name-forms across duplicate rows (`Via:` + `v:`) replays under one compact
+//! form — see [`MessageTemplate::regenerated_name_forms`].
 //!
 //! # Automatics are not template-overridable in v1
 //!
@@ -109,7 +112,9 @@ pub struct TemplateHeader {
     pub class: HeaderClass,
     /// The captured wire name-form when it differs from `name` (a §7.3.3 compact
     /// form). `None` for the raw-line constructors and for headers captured under
-    /// their canonical name.
+    /// their canonical name. Attribution assumes the message's `headers` and
+    /// `raw` are the parse-time originals (the parse-then-template contract): a
+    /// post-parse header mutation could misalign this against the raw bytes.
     pub wire_name: Option<String>,
 }
 
@@ -203,7 +208,26 @@ impl MessageTemplate {
     /// generated rather than parsed) yields canonical names only. The raw-line
     /// [`request`](Self::request) / [`response`](Self::response) constructors are
     /// for tests.
+    ///
+    /// Scans under the default parser limits. If the message was parsed under
+    /// laxer limits, the re-scan may fail and every header falls back to its
+    /// canonical name (compact fidelity lost, not incorrect); use
+    /// [`from_message_with_limits`](Self::from_message_with_limits) with the
+    /// original limits to avoid that.
     pub fn from_message(msg: &SipMessage) -> Self {
+        Self::from_message_with_limits(msg, &crate::parser::SipParserLimits::default())
+    }
+
+    /// [`from_message`](Self::from_message) scanning the wire name-forms under an
+    /// explicit parser-limits set — pass the limits the message was PARSED under
+    /// so the re-scan of its raw bytes reproduces the same header split. A
+    /// mismatch (scanning stricter than the message was parsed) makes the scan
+    /// fail and every header fall back to its canonical name (no compact
+    /// fidelity, never wrong values).
+    pub fn from_message_with_limits(
+        msg: &SipMessage,
+        limits: &crate::parser::SipParserLimits,
+    ) -> Self {
         let (start, body, raw) = match msg {
             SipMessage::Request(r) => {
                 (TemplateStart::Request(r.method.clone()), r.body.clone(), &r.raw)
@@ -219,10 +243,7 @@ impl MessageTemplate {
         let wire_names = if raw.is_empty() {
             Vec::new()
         } else {
-            crate::parser::custom::headers::scan_header_name_forms(
-                raw,
-                &crate::parser::SipParserLimits::default(),
-            )
+            crate::parser::custom::headers::scan_header_name_forms(raw, limits)
         };
         let parsed = msg.headers();
         let aligned = wire_names.len() == parsed.len();
@@ -293,6 +314,14 @@ impl MessageTemplate {
     /// `Content-Length` is deliberately excluded: its name-form is serializer-
     /// owned (the serializer enforces the value by the canonical name), so it
     /// always emits under the canonical name.
+    ///
+    /// v1 boundary — mixed-form duplicate rows collapse: the map is keyed by
+    /// canonical name and [`apply_name_forms`] rewrites EVERY row of a matching
+    /// header, so a regenerated header captured in mixed forms across duplicate
+    /// rows (`Via:` + `v:`) replays entirely under the one compact form. This is
+    /// intrinsic to regenerating these headers (the stack emits its own count,
+    /// not the capture's rows) and is invisible to the parsed-value repro differ
+    /// (which compares canonicalized values). Per-row name-forms are deferred.
     pub fn regenerated_name_forms(&self) -> Vec<(String, String)> {
         self.headers
             .iter()
@@ -517,6 +546,53 @@ Content-Length: 0\r\n\r\n",
         assert_eq!(out[2].name, "Subject", "unmapped header untouched");
         // Empty map = identity (today's full names).
         assert_eq!(apply_name_forms(&headers, &[]), headers);
+    }
+
+    #[test]
+    fn name_matches_is_compact_aware() {
+        use crate::message_helpers::name_matches;
+        assert!(name_matches("Supported", "Supported"));
+        assert!(name_matches("Supported", "k"), "compact Supported");
+        assert!(name_matches("Supported", "K"), "compact, case-insensitive");
+        assert!(name_matches("Content-Type", "c"), "compact Content-Type");
+        assert!(name_matches("From", "f"));
+        // Allow has no compact form; `a` must not falsely match.
+        assert!(name_matches("Allow", "Allow"));
+        assert!(!name_matches("Allow", "a"));
+        // A different header never matches.
+        assert!(!name_matches("Supported", "Require"));
+        assert!(!name_matches("Supported", "x"));
+    }
+
+    #[test]
+    fn regenerated_name_forms_mixed_via_collapses() {
+        // A capture with one full `Via:` and one compact `v:` row (v1 boundary).
+        let raw = "INVITE sip:b@ex SIP/2.0\r\n\
+Via: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
+v: SIP/2.0/UDP 2.2.2.2:5060;branch=z9hG4bK-2\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:a@ex>;tag=at\r\n\
+To: <sip:b@ex>\r\n\
+Call-ID: c@1\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:a@1.1.1.1:5060>\r\n\
+Content-Length: 0\r\n\r\n";
+        let tmpl = MessageTemplate::from_message(&parse(raw.as_bytes()));
+        let forms = tmpl.regenerated_name_forms();
+        // Only the compact row yields a form (canonical Via -> v).
+        assert_eq!(
+            forms.iter().filter(|(c, _)| c.eq_ignore_ascii_case("via")).count(),
+            1,
+        );
+        assert!(forms.contains(&("Via".to_string(), "v".to_string())));
+        // apply_name_forms rewrites EVERY Via row to the one form (the collapse).
+        let headers = vec![
+            SipHeader { name: "Via".into(), value: "one".into() },
+            SipHeader { name: "Via".into(), value: "two".into() },
+        ];
+        let out = apply_name_forms(&headers, &forms);
+        assert_eq!(out[0].name, "v");
+        assert_eq!(out[1].name, "v", "v1: both rows collapse to the compact form");
     }
 
     #[test]
