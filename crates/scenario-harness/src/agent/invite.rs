@@ -9,7 +9,7 @@ use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
     StackDialog,
 };
-use sip_message::{EmitOpts, MessageTemplate, SipHeader, SipMessage};
+use sip_message::{apply_name_forms, EmitOpts, MessageTemplate, SipHeader, SipMessage};
 
 use super::client_invite::ClientInvite;
 use super::Agent;
@@ -27,6 +27,9 @@ pub struct Invite<'a> {
     /// `application/sdp` stamp so a captured bodyless-typed / non-SDP payload
     /// replays with the Content-Type the capture actually had (none).
     suppress_default_ct: bool,
+    /// `(canonical, wire)` name-forms for the stack-regenerated headers the
+    /// capture wrote compact (`("Via","v")`, …) — applied to the WIRE copy only.
+    name_forms: Vec<(String, String)>,
     extra_headers: Vec<SipHeader>,
     /// Wire destination override — the INVITE is *addressed* to `peer` (its
     /// Contact is the Request-URI) but *sent* here. Set by [`Invite::through`]
@@ -48,6 +51,7 @@ impl<'a> Invite<'a> {
             sdp: None,
             template_body: None,
             suppress_default_ct: false,
+            name_forms: vec![],
             extra_headers: vec![],
             wire_dst: None,
             from_uri: None,
@@ -84,12 +88,15 @@ impl<'a> Invite<'a> {
         );
         let frozen = tmpl.frozen_headers();
         // The emitted Content-Type comes ONLY from the frozen headers: if none is
-        // frozen, suppress the generator's default so no CT is invented.
+        // frozen (a compact `c:` does not match "content-type"), suppress the
+        // generator's default so no CT is invented / duplicated.
         self.suppress_default_ct =
             !frozen.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
         // Append AFTER any prior `with_header` entries — never drop them.
         self.extra_headers.extend(frozen);
         self.template_body = Some(tmpl.body().to_vec());
+        // Compact wire name-forms for the stack-regenerated headers (Via/From/…).
+        self.name_forms = tmpl.regenerated_name_forms();
         self
     }
 
@@ -176,7 +183,12 @@ impl<'a> Invite<'a> {
             invite.headers =
                 sip_message::message_helpers::remove_header(&invite.headers, "content-type");
         }
-        caller.send(&SipMessage::Request(invite.clone()), wire_dst).await;
+        // Send a WIRE copy with the captured compact names on the tier-1 lines;
+        // `invite` keeps canonical names so the §17.1.1.3 ACK / §9.1 CANCEL
+        // header lookups (get_header, not compact-aware) still resolve.
+        let mut wire = invite.clone();
+        wire.headers = apply_name_forms(&invite.headers, &self.name_forms);
+        caller.send(&SipMessage::Request(wire), wire_dst).await;
 
         let dialog = StackDialog {
             call_id,

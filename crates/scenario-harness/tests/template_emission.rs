@@ -436,6 +436,122 @@ async fn out_of_dialog_template_method_mismatch_panics() {
         .template(&invite_tmpl, EmitOpts::default());
 }
 
+/// U3b: an INVITE captured with all-compact names (v/f/t/i/m/c/l) replays with
+/// compact names on the wire for BOTH frozen (c) and stack-regenerated
+/// (v/f/t/i/m) headers; Content-Length stays full (serializer-owned); the
+/// receiving parser handles it and the RFC audit is green.
+#[tokio::test]
+async fn template_all_compact_invite_replays_with_compact_names() {
+    let h = Harness::new("template-compact-replay").describe(
+        "An all-compact captured INVITE replays with compact header names on the \
+         wire for frozen AND regenerated headers (Content-Length stays full)",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let compact = format!(
+        "INVITE sip:+15559999@capture.example SIP/2.0\r\n\
+v: SIP/2.0/UDP 203.0.113.7:5060;branch=z9hG4bK-CAP\r\n\
+Max-Forwards: 60\r\n\
+f: <sip:+15551234@capture.example>;tag=CAPF\r\n\
+t: <sip:+15559999@capture.example>\r\n\
+i: cap-cid@203.0.113.7\r\n\
+CSeq: 7 INVITE\r\n\
+m: <sip:+15551234@203.0.113.7:5060>\r\n\
+Subject: compact-cap\r\n\
+c: application/sdp\r\n\
+l: {}\r\n\r\n{}",
+        OFFER.len(),
+        OFFER,
+    );
+    let tmpl = MessageTemplate::from_message(&parse(compact.as_bytes()));
+
+    let mut call = alice.invite(&bob).template(&tmpl, EmitOpts::default()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let req = uas.request().clone();
+    let text = String::from_utf8_lossy(&req.raw).into_owned();
+
+    // Compact names on the wire for regenerated (v/f/t/i/m) + frozen (c).
+    for line in ["\r\nv: ", "\r\nf: ", "\r\nt: ", "\r\ni: ", "\r\nm: ", "\r\nc: application/sdp"] {
+        assert!(text.contains(line), "expected compact line {line:?} in:\n{text}");
+    }
+    // No duplicate FULL-name lines for those headers.
+    for full in ["\r\nVia:", "\r\nFrom:", "\r\nTo:", "\r\nCall-ID:", "\r\nContact:", "\r\nContent-Type:"] {
+        assert!(!text.contains(full), "unexpected full-name line {full:?} in:\n{text}");
+    }
+    // Content-Length is serializer-owned: emitted FULL, never compact `l:`.
+    assert!(text.contains("\r\nContent-Length: "), "Content-Length stays full");
+    assert!(!text.contains("\r\nl: "), "no compact Content-Length on the wire");
+    // The frozen Subject rides full (was full in the capture).
+    assert!(text.contains("\r\nSubject: compact-cap"));
+
+    // The receiving parser handled the compact names — regenerated fields valid.
+    assert!(req.via.first().branch.as_deref().unwrap().starts_with("z9hG4bK"));
+    assert!(req.from.tag.is_some());
+    assert_eq!(req.cseq.seq, 1, "CSeq regenerated");
+    assert!(!req.call_id.is_empty());
+    assert!(req.body.starts_with(b"v=0"), "SDP offer carried");
+
+    // Complete the call cleanly.
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    h.finish().await;
+}
+
+/// U3b regression: a FULL-name capture replays with full names (no compact
+/// name-form introduced) — no name-form change for the common case.
+#[tokio::test]
+async fn template_full_name_capture_replays_full_names() {
+    let h = Harness::new("template-fullname-replay").describe(
+        "A full-name captured INVITE replays with full header names (no name-form regression)",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let full = sip(
+        "INVITE sip:+15559999@capture.example SIP/2.0",
+        &[
+            ("Via", "SIP/2.0/UDP 203.0.113.7:5060;branch=z9hG4bK-CAP"),
+            ("Max-Forwards", "60"),
+            ("From", "<sip:+15551234@capture.example>;tag=CAPF"),
+            ("To", "<sip:+15559999@capture.example>"),
+            ("Call-ID", "cap-cid@203.0.113.7"),
+            ("CSeq", "7 INVITE"),
+            ("Contact", "<sip:+15551234@203.0.113.7:5060>"),
+            ("Content-Type", "application/sdp"),
+        ],
+        OFFER,
+    );
+    let tmpl = MessageTemplate::from_message(&parse(&full));
+
+    let mut call = alice.invite(&bob).template(&tmpl, EmitOpts::default()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let text = String::from_utf8_lossy(&uas.request().raw).into_owned();
+
+    for line in ["\r\nVia: ", "\r\nFrom: ", "\r\nTo: ", "\r\nCall-ID: ", "\r\nContact: ", "\r\nContent-Type: "] {
+        assert!(text.contains(line), "expected full-name line {line:?} in:\n{text}");
+    }
+    for compact in ["\r\nv: ", "\r\nf: ", "\r\nt: ", "\r\ni: ", "\r\nm: ", "\r\nc: "] {
+        assert!(!text.contains(compact), "unexpected compact line {compact:?} in:\n{text}");
+    }
+
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    h.finish().await;
+}
+
 /// The stack-owned automatics fire though they appear in NO template: a UAS
 /// rejects a template INVITE from a template 486 (whose To-tag is minted, not
 /// templated), and the UAC's §17.1.1.3 ACK-to-final fires — the hop ACK the test

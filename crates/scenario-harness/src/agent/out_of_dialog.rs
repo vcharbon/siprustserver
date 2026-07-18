@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
-use sip_message::{EmitOpts, MessageTemplate, SipHeader, SipMessage, SipResponse};
+use sip_message::{apply_name_forms, EmitOpts, MessageTemplate, SipHeader, SipMessage, SipResponse};
 
 use super::client_txn::recv_response_raw;
 use super::dialog::InDialogTxn;
@@ -30,6 +30,9 @@ pub struct OutOfDialogRequest<'a> {
     /// A template body carried NO Content-Type: suppress the generator's default
     /// `application/sdp` stamp (see [`Invite::template`](super::Invite::template)).
     suppress_default_ct: bool,
+    /// `(canonical, wire)` name-forms for stack-regenerated headers the capture
+    /// wrote compact — applied to the WIRE copy only.
+    name_forms: Vec<(String, String)>,
     /// Wire destination override (send via a proxy/SUT; R-URI still targets peer).
     wire_dst: Option<SocketAddr>,
     from_uri: Option<String>,
@@ -47,6 +50,7 @@ impl<'a> OutOfDialogRequest<'a> {
             content_type: None,
             extra_headers: vec![],
             suppress_default_ct: false,
+            name_forms: vec![],
             wire_dst: None,
             from_uri: None,
             to_uri: None,
@@ -101,6 +105,7 @@ impl<'a> OutOfDialogRequest<'a> {
         self.extra_headers.extend(frozen);
         self.body = Some(tmpl.body().to_vec());
         self.content_type = None;
+        self.name_forms = tmpl.regenerated_name_forms();
         self
     }
 
@@ -161,14 +166,16 @@ impl<'a> OutOfDialogRequest<'a> {
             req.headers =
                 sip_message::message_helpers::remove_header(&req.headers, "content-type");
         }
-        let msg = SipMessage::Request(req);
-        caller.try_send(&msg, wire_dst).await?;
-        let SipMessage::Request(request) = msg else { unreachable!() };
+        // Send a WIRE copy with the captured compact names; retain canonical
+        // `req` for the §17.1.1.3 ACK (its get_header lookups are not compact-aware).
+        let mut wire = req.clone();
+        wire.headers = apply_name_forms(&req.headers, &self.name_forms);
+        caller.try_send(&SipMessage::Request(wire), wire_dst).await?;
         Ok(InDialogTxn::new(
             caller.clone(),
             // An out-of-dialog INVITE's non-2xx final takes a txn-layer ACK
             // (§17.1.1.3) — retain the request so the txn can build it.
-            matches!(self.method, OutOfDialogMethod::Invite).then_some(request),
+            matches!(self.method, OutOfDialogMethod::Invite).then_some(req),
             wire_dst,
         ))
     }
@@ -224,6 +231,7 @@ impl<'a> OutOfDialogRequest<'a> {
                 req.headers =
                     sip_message::message_helpers::remove_header(&req.headers, "content-type");
             }
+            req.headers = apply_name_forms(&req.headers, &self.name_forms);
             caller.try_send(&SipMessage::Request(req), wire_dst).await?;
             // Raw-receive so a 401/407 keeps its challenge header (a real digest
             // responder reads `nonce`/`realm` off it); a matching final returns

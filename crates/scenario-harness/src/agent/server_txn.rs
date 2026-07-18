@@ -6,7 +6,7 @@ use sip_message::generators::{
     generate_response, GenerateResponseOpts, StackDialog, B2BUA_ALLOW, B2BUA_SUPPORTED,
 };
 use sip_message::message_helpers::{extract_contact_uri, get_header, get_headers};
-use sip_message::{EmitOpts, MessageTemplate, SipHeader, SipMessage, SipRequest};
+use sip_message::{apply_name_forms, EmitOpts, MessageTemplate, SipHeader, SipMessage, SipRequest};
 
 use super::addressing::{next_hop, top_via_addr, top_via_branch};
 use super::dialog::Dialog;
@@ -51,6 +51,7 @@ impl ServerTxn {
             sdp: None,
             template_body: None,
             suppress_default_ct: false,
+            name_forms: vec![],
             extra_headers: vec![],
             to_tag: None,
         }
@@ -192,6 +193,9 @@ pub struct Respond<'a> {
     /// A template body carried NO Content-Type: suppress the generator's default
     /// `application/sdp` stamp (see [`Invite::template`](super::Invite::template)).
     suppress_default_ct: bool,
+    /// `(canonical, wire)` name-forms for stack-regenerated headers the capture
+    /// wrote compact (see [`Invite::template`](super::Invite::template)).
+    name_forms: Vec<(String, String)>,
     extra_headers: Vec<SipHeader>,
     to_tag: Option<String>,
 }
@@ -219,6 +223,7 @@ impl<'a> Respond<'a> {
         // Append AFTER any prior `with_header` entries — never drop them.
         self.extra_headers.extend(frozen);
         self.template_body = Some(tmpl.body().to_vec());
+        self.name_forms = tmpl.regenerated_name_forms();
         self
     }
 
@@ -318,6 +323,11 @@ impl<'a> Respond<'a> {
         // path is exercised on the b-leg route-set capture (see `RecordRouteFold`).
         if txn.agent.rr_fold == RecordRouteFold::Combined {
             fold_record_routes(&mut resp.headers);
+        }
+        // Emit stack-regenerated headers under the captured compact names (Via/
+        // From/To/…) when the template used them; identity for a full-name capture.
+        if !self.name_forms.is_empty() {
+            resp.headers = apply_name_forms(&resp.headers, &self.name_forms);
         }
         // Responses are routed by Via, not Route (RFC 3261 §18.2.2): send to the
         // request's topmost Via sent-by. With a proxy in the path that Via is
