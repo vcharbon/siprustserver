@@ -87,9 +87,10 @@ impl<'a> Invite<'a> {
             tmpl.start()
         );
         let frozen = tmpl.frozen_headers();
-        // The emitted Content-Type comes ONLY from the frozen headers: if none is
-        // frozen (a compact `c:` does not match "content-type"), suppress the
-        // generator's default so no CT is invented / duplicated.
+        // Intentionally LITERAL (not compact-aware): a frozen compact `c:` does
+        // not match "content-type" here, so suppress=true and the generator's
+        // added full Content-Type default is stripped below while the frozen `c:`
+        // survives (a compact-aware probe would wrongly leave both).
         self.suppress_default_ct =
             !frozen.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
         // Append AFTER any prior `with_header` entries — never drop them.

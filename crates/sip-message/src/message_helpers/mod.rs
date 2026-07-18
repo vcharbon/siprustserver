@@ -24,7 +24,9 @@ pub mod uri;
 pub mod via;
 
 pub use emergency::{buffer_has_emergency_marker, is_emergency_request};
-pub use headers::{get_header, get_headers, remove_header, set_header, split_top_level_commas};
+pub use headers::{
+    get_header, get_headers, name_matches, remove_header, set_header, split_top_level_commas,
+};
 pub use name_addr::{extract_contact_uri, extract_name_addr_uri, extract_tag, strip_tag};
 pub use param_codec::{decode_param, encode_param};
 pub use preparse::is_invite_request_buffer;
