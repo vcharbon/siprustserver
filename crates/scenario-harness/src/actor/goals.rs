@@ -314,11 +314,16 @@ pub struct GoalCursor {
     /// goal arm's future is dropped and re-created every time another `select!`
     /// arm wins; without this anchor an inbound message would restart the dwell).
     ready_at: Option<Instant>,
+    /// The pending goal's guard-wait deadline, anchored at its FIRST poll and
+    /// kept across re-polls — without the anchor every reactor wake (e.g. the
+    /// 2 s recv timeout) would refresh the bound and a stuck guard could dodge
+    /// its timeout indefinitely.
+    deadline_at: Option<Instant>,
 }
 
 impl GoalCursor {
     pub fn new(goals: Vec<Goal>) -> Self {
-        Self { goals, cursor: 0, ready_at: None }
+        Self { goals, cursor: 0, ready_at: None, deadline_at: None }
     }
 
     /// Whether an un-fired goal remains.
@@ -357,8 +362,9 @@ impl GoalCursor {
         };
         // Lift the guard/delay out so the dwell anchor below can borrow `self`
         // mutably (the guard is Arc-backed, the clone is cheap).
-        let (guard, delay) = (goal.guard.clone(), goal.delay);
-        let deadline = Instant::now() + goal.deadline.unwrap_or(timeout);
+        let (guard, delay, bound) = (goal.guard.clone(), goal.delay, goal.deadline);
+        let deadline =
+            *self.deadline_at.get_or_insert_with(|| Instant::now() + bound.unwrap_or(timeout));
         await_pred(obs, guard.name(), |s| guard.holds(s), deadline).await?;
         if !delay.is_zero() {
             let at = *self.ready_at.get_or_insert(Instant::now() + delay);
@@ -367,10 +373,11 @@ impl GoalCursor {
         Ok(self.goals[self.cursor].step.clone())
     }
 
-    /// Advance past the goal that just fired (resets the dwell anchor for the
-    /// next goal).
+    /// Advance past the goal that just fired (resets the dwell and deadline
+    /// anchors for the next goal).
     pub fn advance(&mut self) {
         self.cursor += 1;
         self.ready_at = None;
+        self.deadline_at = None;
     }
 }
