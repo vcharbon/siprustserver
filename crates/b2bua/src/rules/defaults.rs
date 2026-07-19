@@ -354,6 +354,23 @@ fn core_rules() -> Vec<RuleDefinition> {
                 ])
             },
         ),
+        // A provisional (1xx) from a callee whose leg is being CANCELLed: the
+        // caller's INVITE server transaction has already completed (487 on the
+        // CANCEL), so relaying it would put a new 1xx after that final — forbidden
+        // (RFC 3261 §13.3.1.1 / §17.2.1). Absorb it; the crossing 2xx/487 is owned
+        // by `cancel-200-crossing` / `resolve-cancel-response`. The 1xx sibling of
+        // `cancel-200-crossing`; outranks `relay-provisional`, which is
+        // disposition-blind.
+        rule(
+            "absorb-1xx-crossing-cancel",
+            &["relay-provisional"],
+            Match::response()
+                .method("INVITE")
+                .status_class(1)
+                .leg_disposition(LegDisposition::Cancelling)
+                .direction(Direction::FromB),
+            |_ctx| ok(vec![]),
+        ),
         rule(
             "resolve-cancel-response",
             &["route-failure", "absorb-stale-failure"],
