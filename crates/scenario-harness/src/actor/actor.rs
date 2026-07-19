@@ -463,6 +463,11 @@ pub struct ActorState<'c> {
     /// This actor's cursor into its leg's ordered response-fact log — the
     /// consumption point of the reception goals.
     resp_seen: usize,
+    /// The ACK body resolved for each in-dialog INVITE 2xx we ACKed, keyed by
+    /// CSeq — the ACK to a RETRANSMITTED 2xx must be byte-identical
+    /// (RFC 3261 §13.2.2.4), so an `ack_body` override is resolved once and
+    /// re-emitted verbatim, never re-derived from the (advanced) goal cursor.
+    reinvite_ack_bodies: HashMap<u32, String>,
     /// The plan's lane-chosen stack automatics.
     automatics: Automatics,
     /// Whether this actor ORIGINATES the dialog — its first goal is an
@@ -532,6 +537,7 @@ impl<'c> ActorState<'c> {
             parked_initial_consumed: None,
             bound: None,
             resp_seen: 0,
+            reinvite_ack_bodies: HashMap::new(),
             automatics,
             originates,
         }
@@ -780,17 +786,40 @@ fn parked_matches(p: &ParkedRequest, kind: &RequestKind) -> bool {
 }
 
 /// Whether a remaining scripted goal will consume/answer the parked initial
-/// INVITE — an `ExpectRequest{Initial}`, or a binding `RespondTemplate`/
-/// `Respond` (which binds the parked initial absent an `ExpectRequest`).
+/// INVITE. Walks the remaining goals tracking the binding a `RespondTemplate`/
+/// `Respond` would take at that point: an `ExpectRequest{Initial}` always
+/// parks; a respond parks only when NO in-dialog `ExpectRequest` binding is
+/// pending before it (else it answers that bound request, not the initial) —
+/// so a stray initial never over-parks behind an in-dialog script tail.
 fn scripted_wants_initial(st: &ActorState<'_>) -> bool {
-    st.goals.remaining_steps().any(|s| {
-        matches!(
-            s,
-            GoalStep::ExpectRequest { kind: RequestKind::Initial, .. }
-                | GoalStep::RespondTemplate { .. }
-                | GoalStep::Respond { .. }
-        )
-    })
+    let mut bound_pending = st.bound.is_some();
+    for s in st.goals.remaining_steps() {
+        match s {
+            GoalStep::ExpectRequest { kind: RequestKind::Initial, .. } => return true,
+            GoalStep::ExpectRequest { kind: RequestKind::InDialog(_), .. } => {
+                bound_pending = true;
+            }
+            GoalStep::RespondTemplate { template, .. } => {
+                if !bound_pending {
+                    return true;
+                }
+                // A final consumes the pending binding; a provisional keeps it.
+                if template.status().is_some_and(|(s, _)| s >= 200) {
+                    bound_pending = false;
+                }
+            }
+            GoalStep::Respond { status } => {
+                if !bound_pending {
+                    return true;
+                }
+                if *status >= 200 {
+                    bound_pending = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Whether a remaining `ExpectRequest` will consume an in-dialog request of
@@ -1530,12 +1559,21 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
         // feed happen ONCE, keyed on the CSeq of a re-INVITE THIS leg originated.
         if (200..300).contains(&resp.status) && st.dialogs.confirmed.is_some() {
             // The engine-built minimal answer SDP for the delayed-offer ACK,
-            // overridable by a pending `ExpectResponse`'s `ack_body`.
-            let sdp = match st.goals.next_step() {
-                Some(GoalStep::ExpectResponse { ack_body: Some(b), .. }) => {
-                    String::from_utf8_lossy(b).into_owned()
+            // overridable by a pending `ExpectResponse`'s `ack_body`. Resolved
+            // ONCE per CSeq and cached: the ACK to a retransmitted 2xx must be
+            // byte-identical (§13.2.2.4) even after the goal cursor advanced.
+            let sdp = match st.reinvite_ack_bodies.get(&resp.cseq.seq) {
+                Some(cached) => cached.clone(),
+                None => {
+                    let resolved = match st.goals.next_step() {
+                        Some(GoalStep::ExpectResponse { ack_body: Some(b), .. }) => {
+                            String::from_utf8_lossy(b).into_owned()
+                        }
+                        _ => st.answer_body().to_string(),
+                    };
+                    st.reinvite_ack_bodies.insert(resp.cseq.seq, resolved.clone());
+                    resolved
                 }
-                _ => st.answer_body().to_string(),
             };
             if let Some(dialog) = st.dialogs.confirmed.as_mut() {
                 dialog.ack_for(resp.cseq.seq, Some(&sdp)).await;
