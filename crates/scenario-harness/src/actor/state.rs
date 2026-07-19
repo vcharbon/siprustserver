@@ -24,6 +24,39 @@ use tokio::time::Instant;
 use super::ledger::{ObligationKey, ObligationLedger};
 use crate::StepError;
 
+/// One observed inbound response on a leg — status, body presence, and the
+/// fork identity (`To`-tag) it carried. `typed` retains the full response only
+/// while a matcher-carrying reception goal is pending on the leg, so a content
+/// matcher can compare headers+body without a second receive.
+#[derive(Debug, Clone)]
+pub struct ResponseFact {
+    pub status: u16,
+    pub reason: String,
+    pub body_len: usize,
+    pub body_is_sdp: bool,
+    /// The `To`-tag — the early-dialog/fork identity a reception goal's
+    /// `early` binding matches (RFC 3261 §12.1.2).
+    pub early_tag: Option<String>,
+    pub typed: Option<sip_message::SipResponse>,
+}
+
+/// One `ObserveFinal`/`ExpectFinal` outcome: the capture-declared expectation
+/// beside what actually arrived. Divergence is data, never a verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedFinal {
+    pub key: u32,
+    pub expected: Option<u16>,
+    pub observed: u16,
+}
+
+/// One entry of the replay record — an observed final beside its expectation,
+/// or a request the reactor (not the script) serviced on a `Scripted` actor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayEntry {
+    Final(RecordedFinal),
+    ServicedStray { leg: &'static str, method: String, action: &'static str },
+}
+
 /// One endpoint leg's observed dialog lifecycle. Ordered so `max` gives the
 /// monotone fold: a fact can advance the phase but never retreat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -77,6 +110,11 @@ pub struct LegObservation {
     /// ever in flight (which would glare into a 491). Distinct from the monotone
     /// SUBFLOW_RENEG latch, which cannot count.
     reneg_cseqs: std::collections::BTreeSet<u32>,
+    /// Every inbound response this leg's reactor observed, in arrival order — an
+    /// append-only per-leg log with ONE writer (the leg's own reactor), so its
+    /// order is deterministic; reception goals consume it through a per-actor
+    /// cursor.
+    responses: Vec<ResponseFact>,
 }
 
 impl LegObservation {
@@ -114,6 +152,16 @@ impl LegObservation {
         self.reneg_cseqs.len() as u32
     }
 
+    /// Every response this leg observed, in arrival order.
+    pub fn responses(&self) -> &[ResponseFact] {
+        &self.responses
+    }
+
+    /// Whether this leg has observed a response of the given status.
+    pub fn saw_status(&self, status: u16) -> bool {
+        self.responses.iter().any(|f| f.status == status)
+    }
+
     /// Record an observed inbound in-dialog method name (idempotent — a set, so
     /// the fold stays commutative).
     fn record_method(&mut self, method: String) {
@@ -137,11 +185,14 @@ impl LegObservation {
 pub struct StateInner {
     legs: HashMap<&'static str, LegObservation>,
     ledger: ObligationLedger,
+    /// The replay record: observed-vs-expected finals + reactor-serviced strays
+    /// (append-only, diagnostic — never gates the verdict).
+    replay: Vec<ReplayEntry>,
 }
 
 impl StateInner {
     fn new() -> Self {
-        Self { legs: HashMap::new(), ledger: ObligationLedger::default() }
+        Self { legs: HashMap::new(), ledger: ObligationLedger::default(), replay: Vec::new() }
     }
 
     /// A leg's observation (an `Absent` default view if it has never been seen).
@@ -167,6 +218,27 @@ impl StateInner {
     pub fn all_terminated(&self) -> bool {
         !self.legs.is_empty()
             && self.legs.values().all(|l| l.phase() == LegPhase::Terminated)
+    }
+
+    /// Whether a leg has an unconsumed response fact at or beyond `from` —
+    /// `need_final` restricts to finals (>= 200); otherwise any non-100 fact
+    /// counts (100 is transaction plumbing). Borrow-based: the goal-arm gate
+    /// polls this every loop iteration.
+    pub fn leg_response_ready(&self, role: &str, from: usize, need_final: bool) -> bool {
+        self.legs.get(role).is_some_and(|l| {
+            l.responses.get(from..).unwrap_or(&[]).iter().any(|f| {
+                if need_final {
+                    f.status >= 200
+                } else {
+                    f.status != 100
+                }
+            })
+        })
+    }
+
+    /// The replay record (observed-vs-expected finals + serviced strays).
+    pub fn replay_record(&self) -> &[ReplayEntry] {
+        &self.replay
     }
 
     /// The ledger's verdict (every obligation acked, every dialog gap-free).
@@ -223,6 +295,15 @@ pub enum Observation {
     /// grow-only completed-reneg set (keyed by CSeq, so a re-emitted 2xx cannot
     /// double-count), whose cardinality serializes an N-cycle re-INVITE script.
     RenegCompleted { leg: &'static str, cseq: u32 },
+    /// An inbound response observed on `leg` — appended to the leg's ordered
+    /// response log (one writer: the leg's own reactor), which reception goals
+    /// consume through a per-actor cursor.
+    LegResponse { leg: &'static str, fact: ResponseFact },
+    /// An `ObserveFinal`/`ExpectFinal` outcome — appended to the replay record.
+    ReplayFinal { key: u32, expected: Option<u16>, observed: u16 },
+    /// A request the reactor (not the script) serviced on a `Scripted` actor —
+    /// appended to the replay record so divergence is never silent.
+    ServicedStray { leg: &'static str, method: String, action: &'static str },
 }
 
 impl StateInner {
@@ -249,6 +330,15 @@ impl StateInner {
             Observation::Subflow { leg, name, to } => self.leg_mut(leg).advance_subflow(name, to),
             Observation::RenegCompleted { leg, cseq } => {
                 self.leg_mut(leg).reneg_cseqs.insert(cseq);
+            }
+            Observation::LegResponse { leg, fact } => {
+                self.leg_mut(leg).responses.push(fact);
+            }
+            Observation::ReplayFinal { key, expected, observed } => {
+                self.replay.push(ReplayEntry::Final(RecordedFinal { key, expected, observed }));
+            }
+            Observation::ServicedStray { leg, method, action } => {
+                self.replay.push(ReplayEntry::ServicedStray { leg, method, action });
             }
         }
     }
@@ -296,6 +386,12 @@ impl ObservedState {
     /// Whether every appeared leg is terminated (the `torn_down` predicate).
     pub fn all_terminated(&self) -> bool {
         self.inner.lock().unwrap().all_terminated()
+    }
+
+    /// The replay record after a run — observed-vs-expected finals plus the
+    /// requests the reactor serviced on a `Scripted` actor.
+    pub fn replay_record(&self) -> Vec<ReplayEntry> {
+        self.inner.lock().unwrap().replay.clone()
     }
 }
 
