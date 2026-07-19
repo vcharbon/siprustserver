@@ -53,7 +53,8 @@ pub use spec::{
     into_result, run_actor_scenario, ActorCall, ActorScenario, Expect, ExpectBranch, STEP_TIMEOUT,
 };
 pub use state::{
-    await_pred, LegObservation, LegPhase, Observation, ObservedState, StateInner, SubflowState,
+    await_pred, LegObservation, LegPhase, Observation, ObservedState, RecordedFinal, ReplayEntry,
+    ResponseFact, StateInner, SubflowState,
 };
 
 /// One phase barrier in the controller's plan — a named predicate over the
