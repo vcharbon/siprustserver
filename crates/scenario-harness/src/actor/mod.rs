@@ -1574,4 +1574,874 @@ mod tests {
         server.await.unwrap();
         h.finish().await;
     }
+
+    // -----------------------------------------------------------------------
+    // Capture-replay verbs: template emission, Scripted park-or-react,
+    // reception goals, lane automatics.
+    // -----------------------------------------------------------------------
+
+    use sip_message::{EmitOpts, MessageTemplate, Method, TemplateHeader};
+
+    /// A captured-INVITE stand-in: frozen extra headers + an SDP offer body.
+    fn invite_template(extra: &[(&str, &str)]) -> MessageTemplate {
+        let mut headers = vec![TemplateHeader::frozen("Content-Type", "application/sdp")];
+        for (n, v) in extra {
+            headers.push(TemplateHeader::frozen(*n, *v));
+        }
+        MessageTemplate::request(Method::Invite, headers, OFFER_SDP.as_bytes().to_vec())
+    }
+
+    /// A captured-response stand-in — optionally carrying the answer SDP.
+    fn response_template(status: u16, reason: &str, sdp: bool) -> MessageTemplate {
+        if sdp {
+            MessageTemplate::response(
+                status,
+                reason,
+                vec![TemplateHeader::frozen("Content-Type", "application/sdp")],
+                ANSWER_SDP.as_bytes().to_vec(),
+            )
+        } else {
+            MessageTemplate::response(status, reason, vec![], Vec::new())
+        }
+    }
+
+    /// A plain caller spec with the given goals (offer media, no plan/via).
+    fn caller_spec(role: &'static str, agent: &crate::Agent, callee: (&'static str, crate::Agent), goals: Vec<Goal>) -> ActorSpec {
+        ActorSpec {
+            role,
+            agent: agent.clone(),
+            disposition: Disposition::Caller,
+            media: MediaState::offer(OFFER_SDP),
+            goals,
+            invite_targets: vec![callee],
+            via: None,
+            feed: CtxFeed::default(),
+        }
+    }
+
+    /// A Scripted callee spec with the given goals (answer media).
+    fn scripted_spec(role: &'static str, agent: &crate::Agent, goals: Vec<Goal>) -> ActorSpec {
+        ActorSpec {
+            role,
+            agent: agent.clone(),
+            disposition: Disposition::Scripted,
+            media: MediaState::answer(ANSWER_SDP),
+            goals,
+            invite_targets: vec![],
+            via: None,
+            feed: CtxFeed::default(),
+        }
+    }
+
+    fn established_phase() -> BarrierPhase {
+        phase("established", |s| {
+            s.leg_at_least("alice", LegPhase::Confirmed)
+                && s.leg_at_least("bob", LegPhase::Confirmed)
+        })
+    }
+
+    /// Scripted end-to-end template replay: a templated INVITE, a scripted 180
+    /// (provisional, binding NOT consumed) then 200 via `RespondTemplate` on
+    /// the ONE parked server transaction, the reactor's auto-ACK, and a BYE
+    /// teardown — verdict Ok, settle clean, RFC hard gate green.
+    #[tokio::test(start_paused = true)]
+    async fn scripted_template_replay_end_to_end() {
+        let h = Harness::new("actor-scripted-template-replay").describe(
+            "InviteTemplate → scripted RespondTemplate 180 (non-consuming) + 200 \
+             on the parked INVITE txn → auto-ACK → BYE; settles clean",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let call = CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    &alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::InviteTemplate {
+                                callee: "bob",
+                                plan: None,
+                                template: invite_template(&[("X-Replay", "cap-1")]),
+                                opts: EmitOpts::default(),
+                            },
+                        ),
+                        Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Bye),
+                    ],
+                ),
+                scripted_spec(
+                    "bob",
+                    &bob,
+                    vec![
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::RespondTemplate {
+                                template: response_template(180, "Ringing", false),
+                                opts: EmitOpts::default(),
+                                early: None,
+                            },
+                        ),
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::RespondTemplate {
+                                template: response_template(200, "OK", true),
+                                opts: EmitOpts::default(),
+                                early: None,
+                            },
+                        ),
+                    ],
+                ),
+            ],
+            plan: vec![established_phase()],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "the scripted template replay must settle OK, got {verdict:?}");
+        h.finish().await;
+    }
+
+    /// ObserveFinal divergence: the plan expected a 400 but the peer answers
+    /// 200 — the verdict stays Ok, the replay record disagrees, and the
+    /// follow-up ACK rides the OBSERVED 2xx (the RFC gate proves the ACK).
+    #[tokio::test(start_paused = true)]
+    async fn observe_final_records_divergence_and_acks_observed_2xx() {
+        let h = Harness::new("actor-observe-final-divergence").describe(
+            "ObserveFinal{expected 400} observes a 200: verdict Ok, \
+             RecordedFinal disagrees, the ACK follows the observed 2xx",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let call = CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    &alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(Barrier::None, GoalStep::ObserveFinal { key: 7, expected: Some(400) }),
+                        Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Bye),
+                    ],
+                ),
+                ActorSpec {
+                    role: "bob",
+                    agent: bob.clone(),
+                    disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(100) },
+                    media: MediaState::answer(ANSWER_SDP),
+                    goals: vec![],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+            ],
+            plan: vec![established_phase()],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let ctx = CallCtx::new();
+        let obs = ObservedState::new();
+        let verdict =
+            run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+        assert!(verdict.is_ok(), "divergence is data, never a failure — got {verdict:?}");
+        let replay = obs.replay_record();
+        assert!(
+            replay.contains(&ReplayEntry::Final(RecordedFinal {
+                key: 7,
+                expected: Some(400),
+                observed: 200,
+            })),
+            "the replay record carries the disagreement: {replay:?}",
+        );
+        h.finish().await;
+    }
+
+    /// Truncated flow: scripted goals up to the anchor, `ExpectFinal` with a
+    /// class assert, then policy `Respond` + BYE completion — the whole
+    /// truncated-variant lowering pattern on the engine's verbs.
+    #[tokio::test(start_paused = true)]
+    async fn truncated_flow_completes_after_class_assert() {
+        let h = Harness::new("actor-truncated-completes").describe(
+            "scripted Respond 180+200, ExpectFinal{Class(2)} at the anchor, \
+             then standard BYE completion — full post-call verification",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let call = CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    &alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(Barrier::None, GoalStep::ExpectFinal { assert: FinalAssert::Class(2) }),
+                        Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Bye),
+                    ],
+                ),
+                scripted_spec(
+                    "bob",
+                    &bob,
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Respond { status: 180 }),
+                        Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),
+                    ],
+                ),
+            ],
+            plan: vec![established_phase()],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "the truncated completion must settle OK, got {verdict:?}");
+        h.finish().await;
+    }
+
+    /// The truncated anchor's NEGATIVE: the fixed final never arrives (a 486
+    /// where a 2xx-class was asserted) — the goal fails fast with the assert's
+    /// own expectation (`expected: 200`), not the reactor's incidental shed
+    /// (`expected: 180`), and never by barrier timeout.
+    #[tokio::test(start_paused = true)]
+    async fn truncated_class_assert_fails_fast_on_wrong_class() {
+        let h = Harness::new("actor-truncated-assert-fails").describe(
+            "ExpectFinal{Class(2)} observes a scripted 486: fail-fast \
+             WrongStatus{expected 200, got 486} owned by the goal",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let call = CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    &alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(Barrier::None, GoalStep::ExpectFinal { assert: FinalAssert::Class(2) }),
+                    ],
+                ),
+                scripted_spec(
+                    "bob",
+                    &bob,
+                    vec![Goal::new(Barrier::None, GoalStep::Respond { status: 486 })],
+                ),
+            ],
+            plan: vec![],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        match verdict {
+            CallVerdict::Failed(StepError::WrongStatus { who, expected, got, .. }) => {
+                assert_eq!(
+                    (who.as_str(), expected, got),
+                    ("alice", 200, 486),
+                    "the assert (not the shed) owns the failure",
+                );
+            }
+            other => panic!("expected the class-assert WrongStatus, got {other:?}"),
+        }
+        h.finish().await;
+    }
+
+    /// Incidental-failure suppression: a non-2xx final on the establishing
+    /// INVITE with a RECEPTION goal next is the goal's to judge — verdict Ok,
+    /// never the reactor's `WrongStatus{expected: 180}` shed.
+    #[tokio::test(start_paused = true)]
+    async fn reception_goal_suppresses_incidental_shed() {
+        let h = Harness::new("actor-reception-suppresses-shed").describe(
+            "bob rejects 486 while alice's next goal is ObserveFinal: the goal \
+             owns the final (recorded), no incidental WrongStatus shed",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let call = CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    &alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(Barrier::None, GoalStep::ObserveFinal { key: 1, expected: Some(486) }),
+                    ],
+                ),
+                ActorSpec {
+                    role: "bob",
+                    agent: bob.clone(),
+                    disposition: Disposition::Reject(486),
+                    media: MediaState::none(),
+                    goals: vec![],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+            ],
+            plan: vec![],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let ctx = CallCtx::new();
+        let obs = ObservedState::new();
+        let verdict =
+            run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+        assert!(verdict.is_ok(), "the reception goal owns the 486, got {verdict:?}");
+        assert!(
+            obs.replay_record().contains(&ReplayEntry::Final(RecordedFinal {
+                key: 1,
+                expected: Some(486),
+                observed: 486,
+            })),
+            "the observed final is recorded: {:?}",
+            obs.replay_record(),
+        );
+        h.finish().await;
+    }
+
+    /// Parked-CANCEL fail-fast: the CANCEL automatic consumes the parked
+    /// initial INVITE (200 + 487); the later `RespondTemplate` bound to it
+    /// fails immediately with the bounded StepError naming the automatic —
+    /// never a 32 s goal timeout.
+    #[tokio::test(start_paused = true)]
+    async fn cancel_consumed_parked_invite_fails_respond_fast() {
+        let h = Harness::new("actor-parked-cancel-fail-fast").describe(
+            "alice CANCELs the parked INVITE (CANCEL→200+487 automatic); bob's \
+             later RespondTemplate fails fast with the bounded tombstone error",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let call = CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    &alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(Barrier::None, GoalStep::Cancel).after(Duration::from_millis(200)),
+                    ],
+                ),
+                scripted_spec(
+                    "bob",
+                    &bob,
+                    // Gated PAST the cancellation, so the automatic has already
+                    // consumed the parked INVITE when the script reaches it.
+                    vec![Goal::new(
+                        Barrier::pred("caller_gone", |s| {
+                            s.leg_at_least("alice", LegPhase::Terminated)
+                        }),
+                        GoalStep::RespondTemplate {
+                            template: response_template(200, "OK", true),
+                            opts: EmitOpts::default(),
+                            early: None,
+                        },
+                    )],
+                ),
+            ],
+            plan: vec![],
+            settle: SettleBarrier::default_ceiling(),
+            // The §5 automatic: the parked INVITE draws an immediate 100, so
+            // the CANCEL follows a provisional (RFC 3261 §9.1).
+            automatics: Automatics { answer_100_trying: true },
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        match verdict {
+            CallVerdict::Failed(StepError::UnexpectedKind { who, detail }) => {
+                assert_eq!(who, "bob");
+                assert!(
+                    detail.contains("consumed by an automatic"),
+                    "the bounded error names the automatic: {detail}",
+                );
+            }
+            other => panic!("expected the bounded tombstone StepError, got {other:?}"),
+        }
+        h.finish().await;
+    }
+
+    /// Requeue-on-advance: two INFOs park while one `ExpectRequest{Info}`
+    /// remains; consuming the first advances the cursor, and the second — now
+    /// matching no remaining goal — is auto-reacted (200) as a recorded stray
+    /// instead of starving behind the script.
+    #[tokio::test(start_paused = true)]
+    async fn requeue_on_advance_auto_reacts_passed_parked_request() {
+        use sip_message::generators::InDialogMethod;
+
+        let h = Harness::new("actor-requeue-on-advance").describe(
+            "two parked INFOs, one ExpectRequest{Info}: the consume advances \
+             the cursor and the second INFO is auto-reacted as a stray",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let info = |body: &[u8]| GoalStep::InDialog {
+            method: InDialogMethod::Info,
+            content_type: Some("application/x-cap-test".to_string()),
+            body: Some(body.to_vec()),
+            headers: vec![],
+        };
+        let call = CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    &alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), info(b"one")),
+                        Goal::new(Barrier::None, info(b"two")),
+                        Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Bye)
+                            .after(Duration::from_millis(400)),
+                    ],
+                ),
+                scripted_spec(
+                    "bob",
+                    &bob,
+                    vec![
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::ExpectRequest {
+                                kind: RequestKind::Initial,
+                                body: BodyExpect::SdpPresent,
+                                matcher: None,
+                            },
+                        ),
+                        Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),
+                        // Dwell long enough for BOTH INFOs to park before the
+                        // first is consumed — the requeue setup.
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::ExpectRequest {
+                                kind: RequestKind::InDialog(InDialogMethod::Info),
+                                body: BodyExpect::Present,
+                                matcher: None,
+                            },
+                        )
+                        .after(Duration::from_millis(100)),
+                        Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),
+                    ],
+                ),
+            ],
+            plan: vec![established_phase()],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let ctx = CallCtx::new();
+        let obs = ObservedState::new();
+        let verdict =
+            run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+        assert!(verdict.is_ok(), "both INFOs must be answered, got {verdict:?}");
+        let replay = obs.replay_record();
+        assert!(
+            replay.iter().any(|e| matches!(
+                e,
+                ReplayEntry::ServicedStray { leg: "bob", method, action }
+                    if method == "INFO" && action.contains("advance")
+            )),
+            "the requeued INFO is a recorded stray: {replay:?}",
+        );
+        h.finish().await;
+    }
+
+    /// ExpectResponse provisional strictness: expecting a 183 but the FINAL
+    /// (a 486) arrives first — fail-fast with the goal's own expectation.
+    #[tokio::test(start_paused = true)]
+    async fn expect_response_fails_fast_when_final_precedes_provisional() {
+        let h = Harness::new("actor-expect-provisional-strict").describe(
+            "ExpectResponse{183} sees the 486 final first: fail-fast \
+             WrongStatus{expected 183, got 486}, owned by the goal",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let call = CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    &alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::ExpectResponse {
+                                status: 183,
+                                body: BodyExpect::Any,
+                                early: None,
+                                ack_body: None,
+                                matcher: None,
+                            },
+                        ),
+                    ],
+                ),
+                ActorSpec {
+                    role: "bob",
+                    agent: bob.clone(),
+                    disposition: Disposition::Reject(486),
+                    media: MediaState::none(),
+                    goals: vec![],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+            ],
+            plan: vec![],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        match verdict {
+            CallVerdict::Failed(StepError::WrongStatus { who, expected, got, .. }) => {
+                assert_eq!(
+                    (who.as_str(), expected, got),
+                    ("alice", 183, 486),
+                    "the goal's expectation (183), never the shed's (180)",
+                );
+            }
+            other => panic!("expected the strict provisional WrongStatus, got {other:?}"),
+        }
+        h.finish().await;
+    }
+
+    /// Forked RespondTemplate early ids: two distinct fork ids emit
+    /// distinct-tag 180s on the ONE parked INVITE transaction; the final's id
+    /// names the winner (its tag becomes the dialog tag) and the loser fork
+    /// settles with no final — the caller's reception goals bind per fork.
+    #[tokio::test(start_paused = true)]
+    async fn forked_respond_template_early_ids_name_winner() {
+        let h = Harness::new("actor-scripted-forked-early-ids").describe(
+            "RespondTemplate early f1/f2 → 180(f1)+180(f2) on one txn, 200 \
+             under winner f2; alice's ExpectResponse binds each fork by id",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let expect_180 = |id: EarlyId| GoalStep::ExpectResponse {
+            status: 180,
+            body: BodyExpect::Any,
+            early: Some(id),
+            ack_body: None,
+            matcher: None,
+        };
+        let respond_180 = |id: EarlyId| GoalStep::RespondTemplate {
+            template: response_template(180, "Ringing", false),
+            opts: EmitOpts::default(),
+            early: Some(id),
+        };
+        let call = CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    &alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(Barrier::None, expect_180("f1")),
+                        Goal::new(Barrier::None, expect_180("f2")),
+                        Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Bye),
+                    ],
+                ),
+                scripted_spec(
+                    "bob",
+                    &bob,
+                    vec![
+                        Goal::new(Barrier::None, respond_180("f1")),
+                        Goal::new(Barrier::None, respond_180("f2")),
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::RespondTemplate {
+                                template: response_template(200, "OK", true),
+                                opts: EmitOpts::default(),
+                                early: Some("f2"),
+                            },
+                        ),
+                    ],
+                ),
+            ],
+            plan: vec![established_phase()],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "the forked scripted answer must settle OK, got {verdict:?}");
+        h.finish().await;
+    }
+
+    /// Scripted originator attribution: the caller is the actor whose FIRST
+    /// goal originates the dialog (`InviteTemplate`), not `Disposition::Caller`
+    /// and not the `"alice"` fallback — an `Expect::Reject` terminal carries
+    /// that actor's role.
+    #[tokio::test]
+    async fn scripted_originator_attribution_keys_on_first_goal() {
+        let h = Harness::new("actor-scripted-attribution").describe(
+            "originating_role keys on the first Invite/InviteTemplate goal: a \
+             Scripted carol originator is the attributed caller, not alice",
+        );
+        let carol = h.agent("carol", "127.0.0.1:5061").await;
+        let bob = h.agent("bob", "127.0.0.1:5071").await;
+
+        let actors = vec![
+            ActorSpec {
+                role: "carol",
+                agent: carol.clone(),
+                disposition: Disposition::Scripted,
+                media: MediaState::none(),
+                goals: vec![Goal::new(
+                    Barrier::None,
+                    GoalStep::InviteTemplate {
+                        callee: "bob",
+                        plan: None,
+                        template: invite_template(&[]),
+                        opts: EmitOpts::default(),
+                    },
+                )],
+                invite_targets: vec![("bob", bob.clone())],
+                via: None,
+                feed: CtxFeed::default(),
+            },
+            scripted_spec("bob", &bob, vec![]),
+        ];
+        assert_eq!(originating_role(&actors), "carol");
+
+        // The Reject terminal is attributed to carol, never "alice".
+        let obs = ObservedState::new();
+        obs.record(
+            Observation::LegFinal { leg: "carol", status: 486, reason: "Busy Here".into() },
+            tokio::time::Instant::now(),
+        );
+        match into_result(Expect::Reject(486), CallVerdict::Ok, &obs, originating_role(&actors)) {
+            Err(StepError::WrongStatus { who, expected, got, .. }) => {
+                assert_eq!((who.as_str(), expected, got), ("carol", 200, 486));
+            }
+            other => panic!("expected the Reject terminal under carol, got {other:?}"),
+        }
+        h.finish().await;
+    }
+
+    /// One `answer_100_trying` run: alice invites, Scripted bob answers by
+    /// policy, BYE teardown — returns whether alice observed a `100`.
+    async fn run_100_trying_case(name: &'static str, on: bool) -> bool {
+        let h = Harness::new(name).describe(
+            "Automatics{answer_100_trying}: the parked INVITE draws (or not) an \
+             immediate 100 Trying; the call settles clean either way",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let call = CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    &alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Bye),
+                    ],
+                ),
+                scripted_spec(
+                    "bob",
+                    &bob,
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Respond { status: 180 }),
+                        Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),
+                    ],
+                ),
+            ],
+            plan: vec![established_phase()],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics { answer_100_trying: on },
+        };
+
+        let ctx = CallCtx::new();
+        let obs = ObservedState::new();
+        let verdict =
+            run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+        assert!(verdict.is_ok(), "[{name}] must settle clean, got {verdict:?}");
+        h.finish().await;
+        obs.with_snapshot(|s| s.leg("alice").saw_status(100))
+    }
+
+    /// `Automatics{answer_100_trying}`: ON emits the immediate 100 on the
+    /// parked INVITE; OFF does not — both settle clean on the fake lane.
+    #[tokio::test(start_paused = true)]
+    async fn answer_100_trying_automatic_toggles_emission() {
+        assert!(
+            run_100_trying_case("actor-100-trying-on", true).await,
+            "with the automatic ON, alice observes the 100",
+        );
+        assert!(
+            !run_100_trying_case("actor-100-trying-off", false).await,
+            "with the automatic OFF, no 100 is emitted",
+        );
+    }
+
+    /// Content matcher POSITIVE: an `ExpectRequest` matcher holds on a frozen
+    /// header with the captured value, while the regenerated tier-1 headers
+    /// (Call-ID/Via/CSeq — fresh on the live INVITE, captured values on the
+    /// matcher) do NOT fail the match.
+    #[tokio::test(start_paused = true)]
+    async fn content_matcher_holds_on_frozen_header() {
+        let h = Harness::new("actor-content-matcher-holds").describe(
+            "ExpectRequest{matcher}: frozen X-Cap compared and held; captured \
+             tier-1 values (regenerated live) are structural-only",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        // The matcher pins the frozen header + body; its tier-1 rows carry
+        // CAPTURE-time values the live INVITE regenerates — never compared.
+        let matcher = MessageTemplate::request(
+            Method::Invite,
+            vec![
+                TemplateHeader::classified("Via", "SIP/2.0/UDP 9.9.9.9:9;branch=z9hG4bK-cap"),
+                TemplateHeader::classified("Call-ID", "captured@9.9.9.9"),
+                TemplateHeader::classified("CSeq", "7 INVITE"),
+                TemplateHeader::frozen("X-Cap", "v1"),
+                TemplateHeader::frozen("Content-Type", "application/sdp"),
+            ],
+            OFFER_SDP.as_bytes().to_vec(),
+        );
+        let call = CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    &alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::InviteTemplate {
+                                callee: "bob",
+                                plan: None,
+                                template: invite_template(&[("X-Cap", "v1")]),
+                                opts: EmitOpts::default(),
+                            },
+                        ),
+                        Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Bye),
+                    ],
+                ),
+                scripted_spec(
+                    "bob",
+                    &bob,
+                    vec![
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::ExpectRequest {
+                                kind: RequestKind::Initial,
+                                body: BodyExpect::SdpPresent,
+                                matcher: Some(matcher),
+                            },
+                        ),
+                        Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),
+                    ],
+                ),
+            ],
+            plan: vec![established_phase()],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "the matcher must hold, got {verdict:?}");
+        h.finish().await;
+    }
+
+    /// Content matcher NEGATIVE: a changed frozen-header value fails fast at
+    /// consume time with the match surface's detailed finding. Staged on an
+    /// in-dialog INFO so the establishment (and the wire) stays clean.
+    #[tokio::test(start_paused = true)]
+    async fn content_matcher_fails_fast_on_changed_value() {
+        use sip_message::generators::InDialogMethod;
+
+        let h = Harness::new("actor-content-matcher-fails").describe(
+            "ExpectRequest{matcher} on an INFO whose X-Cap drifted: fail-fast \
+             with the template-match finding naming header and values",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let matcher = MessageTemplate::request(
+            Method::Info,
+            vec![TemplateHeader::frozen("X-Cap", "v2")],
+            b"payload".to_vec(),
+        );
+        let call = CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    &alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(
+                            Barrier::AllConfirmed(&["alice", "bob"]),
+                            GoalStep::InDialog {
+                                method: InDialogMethod::Info,
+                                content_type: Some("application/x-cap-test".to_string()),
+                                body: Some(b"payload".to_vec()),
+                                headers: vec![("X-Cap".to_string(), "v1".to_string())],
+                            },
+                        ),
+                    ],
+                ),
+                scripted_spec(
+                    "bob",
+                    &bob,
+                    vec![
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::ExpectRequest {
+                                kind: RequestKind::Initial,
+                                body: BodyExpect::SdpPresent,
+                                matcher: None,
+                            },
+                        ),
+                        Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::ExpectRequest {
+                                kind: RequestKind::InDialog(InDialogMethod::Info),
+                                body: BodyExpect::Present,
+                                matcher: Some(matcher),
+                            },
+                        ),
+                        Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),
+                    ],
+                ),
+            ],
+            plan: vec![established_phase()],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        match verdict {
+            CallVerdict::Failed(StepError::UnexpectedKind { who, detail }) => {
+                assert_eq!(who, "bob");
+                assert!(
+                    detail.contains("x-cap") && detail.contains("v2") && detail.contains("v1"),
+                    "the match surface's finding names header and values: {detail}",
+                );
+            }
+            other => panic!("expected the matcher's fail-fast finding, got {other:?}"),
+        }
+        h.finish().await;
+    }
 }
