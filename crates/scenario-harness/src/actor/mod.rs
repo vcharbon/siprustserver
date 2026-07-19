@@ -2292,28 +2292,25 @@ mod tests {
         );
     }
 
-    /// Content matcher POSITIVE: an `ExpectRequest` matcher holds on a frozen
-    /// header with the captured value, while the regenerated tier-1 headers
-    /// (Call-ID/Via/CSeq — fresh on the live INVITE, captured values on the
-    /// matcher) do NOT fail the match.
-    #[tokio::test(start_paused = true)]
-    async fn content_matcher_holds_on_frozen_header() {
-        let h = Harness::new("actor-content-matcher-holds").describe(
-            "ExpectRequest{matcher}: frozen X-Cap compared and held; captured \
-             tier-1 values (regenerated live) are structural-only",
+    /// One initial-INVITE matcher run: alice's `InviteTemplate` carries a
+    /// frozen `X-Cap: v1`; bob's `ExpectRequest{Initial}` matcher pins
+    /// `X-Cap: expect_value` plus CAPTURE-time tier-1 rows (Call-ID/Via/CSeq —
+    /// regenerated live, never value-compared). Returns the verdict.
+    async fn run_initial_matcher_case(name: &'static str, expect_value: &str) -> CallVerdict {
+        let h = Harness::new(name).describe(
+            "ExpectRequest{matcher} on the initial INVITE: frozen X-Cap \
+             compared; captured tier-1 values are structural-only",
         );
         let alice = h.agent("alice", "127.0.0.1:5060").await;
         let bob = h.agent("bob", "127.0.0.1:5070").await;
 
-        // The matcher pins the frozen header + body; its tier-1 rows carry
-        // CAPTURE-time values the live INVITE regenerates — never compared.
         let matcher = MessageTemplate::request(
             Method::Invite,
             vec![
                 TemplateHeader::classified("Via", "SIP/2.0/UDP 9.9.9.9:9;branch=z9hG4bK-cap"),
                 TemplateHeader::classified("Call-ID", "captured@9.9.9.9"),
                 TemplateHeader::classified("CSeq", "7 INVITE"),
-                TemplateHeader::frozen("X-Cap", "v1"),
+                TemplateHeader::frozen("X-Cap", expect_value),
                 TemplateHeader::frozen("Content-Type", "application/sdp"),
             ],
             OFFER_SDP.as_bytes().to_vec(),
@@ -2359,7 +2356,613 @@ mod tests {
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
-        assert!(verdict.is_ok(), "the matcher must hold, got {verdict:?}");
+        if verdict.is_ok() {
+            h.finish().await;
+        }
+        verdict
+    }
+
+    /// Content matcher POSITIVE, paired with the sibling negative on the SAME
+    /// goal shape: the identical configuration failing on a drifted value
+    /// proves the matcher RUNS here, so the passing case demonstrably held
+    /// (a silently-skipped matcher would make the sibling pass too).
+    #[tokio::test(start_paused = true)]
+    async fn content_matcher_holds_on_frozen_header() {
+        let ok = run_initial_matcher_case("actor-content-matcher-holds", "v1").await;
+        assert!(ok.is_ok(), "the matching value must hold, got {ok:?}");
+
+        let bad = run_initial_matcher_case("actor-content-matcher-holds-neg", "v2").await;
+        match bad {
+            CallVerdict::Failed(StepError::UnexpectedKind { who, detail }) => {
+                assert_eq!(who, "bob");
+                assert!(
+                    detail.contains("x-cap") && detail.contains("v2") && detail.contains("v1"),
+                    "the same shape fails on a drifted value — the matcher runs: {detail}",
+                );
+            }
+            other => panic!("the sibling negative must fail the matcher, got {other:?}"),
+        }
+    }
+
+    /// A templated in-dialog re-INVITE (`RequestTemplate`, delayed offer):
+    /// frozen header rides, the ReInvite obligation opens, the peer's 2xx is
+    /// ACKed with the answer SDP, and the renegotiation completes — settle
+    /// clean.
+    #[tokio::test(start_paused = true)]
+    async fn request_template_reinvite_completes_renegotiation() {
+        let h = Harness::new("actor-request-template-reinvite").describe(
+            "RequestTemplate re-INVITE (bodyless, frozen X header) on the \
+             confirmed dialog: 2xx ACKed with the answer SDP, reneg completes",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let reinvite_tmpl = MessageTemplate::request(
+            Method::Invite,
+            vec![TemplateHeader::frozen("X-Renegotiate", "cap-1")],
+            Vec::new(),
+        );
+        let call = CallPlan {
+            actors: vec![
+                ActorSpec {
+                    role: "alice",
+                    agent: alice.clone(),
+                    disposition: Disposition::Caller,
+                    media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                    goals: vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(
+                            Barrier::AllConfirmed(&["alice", "bob"]),
+                            GoalStep::RequestTemplate {
+                                template: reinvite_tmpl,
+                                opts: EmitOpts::default(),
+                                early: false,
+                            },
+                        ),
+                        Goal::new(
+                            Barrier::pred("reneg_done", |s| s.leg("alice").reneg_count() >= 1),
+                            GoalStep::Bye,
+                        ),
+                    ],
+                    invite_targets: vec![("bob", bob.clone())],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+                ActorSpec {
+                    role: "bob",
+                    agent: bob.clone(),
+                    disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(100) },
+                    media: MediaState::full(ANSWER_SDP, ANSWER_SDP),
+                    goals: vec![],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+            ],
+            plan: vec![established_phase()],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "the templated re-INVITE must complete, got {verdict:?}");
+        h.finish().await;
+    }
+
+    /// A templated BYE (`RequestTemplate`): the teardown discharge runs, the
+    /// Bye obligation opens and its 200 terminates the leg — clean teardown.
+    #[tokio::test(start_paused = true)]
+    async fn request_template_bye_tears_down() {
+        let h = Harness::new("actor-request-template-bye").describe(
+            "RequestTemplate BYE (frozen X header) tears the call down with \
+             the semantic Bye goal's bookkeeping",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let bye_tmpl = MessageTemplate::request(
+            Method::Bye,
+            vec![TemplateHeader::frozen("X-Hangup", "cap-1")],
+            Vec::new(),
+        );
+        let call = CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    &alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(
+                            Barrier::AllConfirmed(&["alice", "bob"]),
+                            GoalStep::RequestTemplate {
+                                template: bye_tmpl,
+                                opts: EmitOpts::default(),
+                                early: false,
+                            },
+                        ),
+                    ],
+                ),
+                ActorSpec {
+                    role: "bob",
+                    agent: bob.clone(),
+                    disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(100) },
+                    media: MediaState::answer(ANSWER_SDP),
+                    goals: vec![],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+            ],
+            plan: vec![established_phase()],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "the templated BYE must tear down clean, got {verdict:?}");
+        h.finish().await;
+    }
+
+    /// A templated EARLY UPDATE (`RequestTemplate{early: true}`, RFC 3311
+    /// §5.1): rides the still-pending INVITE's early dialog after the PRACK,
+    /// its 200 releases the callee's held INVITE 200 — the template twin of
+    /// the `UpdateEarly` goal.
+    #[tokio::test(start_paused = true)]
+    async fn request_template_early_update_rides_early_dialog() {
+        let h = Harness::new("actor-request-template-early-update").describe(
+            "100rel INVITE → reliable 183 → PRACK → templated EARLY UPDATE \
+             (200) → final 200 INVITE → ACK → BYE",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let plan = crate::realcall::InvitePlan {
+            via: bob.addr(),
+            from: None,
+            to: None,
+            ruri: None,
+            headers: vec![("Supported".to_string(), "100rel".to_string())],
+            rewrite: Default::default(),
+        };
+        let update_tmpl = MessageTemplate::request(
+            Method::Update,
+            vec![TemplateHeader::frozen("Content-Type", "application/sdp")],
+            OFFER_SDP.as_bytes().to_vec(),
+        );
+        let call = CallPlan {
+            actors: vec![
+                ActorSpec {
+                    role: "alice",
+                    agent: alice.clone(),
+                    media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                    disposition: Disposition::Caller,
+                    goals: vec![
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::Invite { callee: "bob", plan: Some(plan) },
+                        ),
+                        Goal::new(
+                            Barrier::pred("early", |s| {
+                                s.leg("alice").subflow(SUBFLOW_EARLY).is_some()
+                            }),
+                            GoalStep::RequestTemplate {
+                                template: update_tmpl,
+                                opts: EmitOpts::default(),
+                                early: true,
+                            },
+                        ),
+                        Goal::new(
+                            Barrier::pred("confirmed", |s| {
+                                s.leg_at_least("alice", LegPhase::Confirmed)
+                            }),
+                            GoalStep::Bye,
+                        ),
+                    ],
+                    invite_targets: vec![("bob", bob.clone())],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+                ActorSpec {
+                    role: "bob",
+                    agent: bob.clone(),
+                    disposition: Disposition::ReliableAnswerEarlyUpdate,
+                    media: MediaState::answer(ANSWER_SDP),
+                    goals: vec![],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+            ],
+            plan: vec![phase("confirmed", |s| s.leg_at_least("alice", LegPhase::Confirmed))],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "the templated early UPDATE must settle OK, got {verdict:?}");
+        h.finish().await;
+    }
+
+    /// A TEMPLATED re-INVITE drawn into a §14.1 glare: both ends offer at
+    /// once, both get 491 — the templated transaction's retained handle
+    /// hop-ACKs the 491 (`sent_reinvite_txns`), the back-off retries resolve,
+    /// and both rounds complete.
+    #[tokio::test(start_paused = true)]
+    async fn request_template_reinvite_glare_491_hop_acks_and_retries() {
+        let h = Harness::new("actor-request-template-glare").describe(
+            "templated re-INVITE × bob re-INVITE at once → 491 both ways \
+             (templated txn hop-ACKs) → back-off retries → both complete → BYE",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let reinvite_tmpl = MessageTemplate::request(
+            Method::Invite,
+            vec![TemplateHeader::frozen("X-Renegotiate", "cap-1")],
+            Vec::new(),
+        );
+        let both_confirmed = Barrier::AllConfirmed(&["alice", "bob"]);
+        let both_reneged = Barrier::pred("glare_resolved", |s| {
+            s.leg("alice").reneg_count() >= 1 && s.leg("bob").reneg_count() >= 1
+        });
+        let call = CallPlan {
+            actors: vec![
+                ActorSpec {
+                    role: "alice",
+                    agent: alice.clone(),
+                    media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                    disposition: Disposition::Caller,
+                    goals: vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(
+                            both_confirmed.clone(),
+                            GoalStep::RequestTemplate {
+                                template: reinvite_tmpl,
+                                opts: EmitOpts::default(),
+                                early: false,
+                            },
+                        ),
+                        Goal::new(both_reneged.clone(), GoalStep::Bye),
+                    ],
+                    invite_targets: vec![("bob", bob.clone())],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+                ActorSpec {
+                    role: "bob",
+                    agent: bob.clone(),
+                    disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(100) },
+                    media: MediaState::full(ANSWER_SDP, ANSWER_SDP),
+                    goals: vec![Goal::new(both_confirmed.clone(), GoalStep::Reinvite)],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+            ],
+            plan: vec![
+                established_phase(),
+                phase("glare_resolved", |s| {
+                    s.leg("alice").reneg_count() >= 1 && s.leg("bob").reneg_count() >= 1
+                }),
+            ],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(10)).await;
+        assert!(verdict.is_ok(), "the templated glare must resolve via §14.1, got {verdict:?}");
+        h.finish().await;
+    }
+
+    /// A scripted 2xx answer to a RECEIVED re-INVITE (`ExpectRequest{InDialog
+    /// (Invite)}` + `Respond{200}`): opens the answered-awaiting-ACK
+    /// obligation — observed OPEN mid-call by a barrier probe — which the
+    /// peer's ACK then closes, so settle held exactly until the ACK.
+    #[tokio::test(start_paused = true)]
+    async fn scripted_reinvite_answer_holds_settle_until_ack() {
+        use sip_message::generators::InDialogMethod;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let h = Harness::new("actor-scripted-reinvite-answer").describe(
+            "scripted 200 to a received re-INVITE: the realign obligation is \
+             observed open until the peer's ACK closes it; settle clean",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let saw_open = Arc::new(AtomicBool::new(false));
+        let probe = saw_open.clone();
+        let call = CallPlan {
+            actors: vec![
+                ActorSpec {
+                    role: "alice",
+                    agent: alice.clone(),
+                    disposition: Disposition::Caller,
+                    media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                    goals: vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Reinvite),
+                        // The guard polls on every observed-state tick while
+                        // pending: it witnesses the scripted answer's
+                        // obligation OPEN (before alice's ACK closes it).
+                        Goal::new(
+                            Barrier::pred("reneg_done", move |s| {
+                                if s.describe_open()
+                                    .iter()
+                                    .any(|o| o.contains("bob:re-INVITE") && o.contains("realign"))
+                                {
+                                    probe.store(true, Ordering::SeqCst);
+                                }
+                                s.leg("alice").reneg_count() >= 1
+                            }),
+                            GoalStep::Bye,
+                        ),
+                    ],
+                    invite_targets: vec![("bob", bob.clone())],
+                    via: None,
+                    feed: CtxFeed::default(),
+                },
+                scripted_spec(
+                    "bob",
+                    &bob,
+                    vec![
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::ExpectRequest {
+                                kind: RequestKind::Initial,
+                                body: BodyExpect::SdpPresent,
+                                matcher: None,
+                            },
+                        ),
+                        Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),
+                        // The delayed-offer re-INVITE is bodyless.
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::ExpectRequest {
+                                kind: RequestKind::InDialog(InDialogMethod::Invite),
+                                body: BodyExpect::Any,
+                                matcher: None,
+                            },
+                        ),
+                        Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),
+                    ],
+                ),
+            ],
+            plan: vec![established_phase()],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "the scripted realign must settle OK, got {verdict:?}");
+        assert!(
+            saw_open.load(Ordering::SeqCst),
+            "the answered-awaiting-ACK obligation was observed OPEN mid-call — \
+             it held settle until the peer's ACK closed it",
+        );
+        h.finish().await;
+    }
+
+    /// A scripted 200 answer to a RECEIVED BYE (`ExpectRequest{InDialog(Bye)}`
+    /// + `Respond{200}`): the script — not the reactor — services the
+    /// teardown, with the leg-termination bookkeeping and no stray entry.
+    #[tokio::test(start_paused = true)]
+    async fn scripted_bye_answer_tears_down_cleanly() {
+        use sip_message::generators::InDialogMethod;
+
+        let h = Harness::new("actor-scripted-bye-answer").describe(
+            "scripted 200 to a received BYE: script-owned teardown, clean \
+             settle, no serviced-stray entry for the BYE",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let call = CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    &alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Bye),
+                    ],
+                ),
+                scripted_spec(
+                    "bob",
+                    &bob,
+                    vec![
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::ExpectRequest {
+                                kind: RequestKind::Initial,
+                                body: BodyExpect::SdpPresent,
+                                matcher: None,
+                            },
+                        ),
+                        Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::ExpectRequest {
+                                kind: RequestKind::InDialog(InDialogMethod::Bye),
+                                body: BodyExpect::Any,
+                                matcher: None,
+                            },
+                        ),
+                        Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),
+                    ],
+                ),
+            ],
+            plan: vec![established_phase()],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let ctx = CallCtx::new();
+        let obs = ObservedState::new();
+        let verdict =
+            run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+        assert!(verdict.is_ok(), "the scripted BYE answer must settle OK, got {verdict:?}");
+        assert!(
+            !obs.replay_record().iter().any(|e| matches!(
+                e,
+                ReplayEntry::ServicedStray { method, .. } if method == "BYE"
+            )),
+            "the SCRIPT serviced the BYE — no stray entry: {:?}",
+            obs.replay_record(),
+        );
+        h.finish().await;
+    }
+
+    /// The `ack_body` override end-to-end: the ACK to a delayed-offer
+    /// re-INVITE 2xx carries the `ExpectResponse{ack_body}` bytes instead of
+    /// the engine-built answer SDP. (A byte-identical retransmitted 2xx is
+    /// absorbed below `recv_any` by the fake lane's receive-view dedup, so the
+    /// re-surfacing idempotence is pinned by the unit test below.)
+    #[tokio::test(start_paused = true)]
+    async fn ack_body_override_rides_the_reinvite_ack() {
+        const CUSTOM_ACK_SDP: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 0\r\n";
+
+        let h = Harness::new("actor-ack-body-override").describe(
+            "ExpectResponse{ack_body} on a delayed-offer re-INVITE 2xx: the \
+             ACK carries the override bytes, not the engine answer SDP",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        // The hand-rolled peer answers, 2xx's the re-INVITE, and asserts the
+        // ACK body is the override.
+        let bob_srv = bob.clone();
+        let server = tokio::spawn(async move {
+            let bob = bob_srv;
+            let mut inv = bob.try_receive("INVITE").await.unwrap();
+            inv.respond(180, "Ringing").try_send().await.unwrap();
+            inv.respond(200, "OK").with_sdp(ANSWER_SDP).try_send().await.unwrap();
+            bob.try_receive("ACK").await.unwrap();
+            let mut re = bob.try_receive("INVITE").await.unwrap();
+            re.respond(200, "OK").with_sdp(ANSWER_SDP).try_send().await.unwrap();
+            let ack = bob.try_receive("ACK").await.unwrap();
+            assert_eq!(
+                ack.request().body,
+                CUSTOM_ACK_SDP.as_bytes(),
+                "the ACK carries the ack_body override",
+            );
+            bob.try_receive("BYE").await.unwrap().respond(200, "OK").try_send().await.unwrap();
+        });
+
+        let alice_confirmed =
+            Barrier::pred("alice_confirmed", |s| s.leg_at_least("alice", LegPhase::Confirmed));
+        let expect = |status: u16, ack_body: Option<Vec<u8>>| GoalStep::ExpectResponse {
+            status,
+            body: BodyExpect::Any,
+            early: None,
+            ack_body,
+            matcher: None,
+        };
+        let call = CallPlan {
+            actors: vec![caller_spec(
+                "alice",
+                &alice,
+                ("bob", bob.clone()),
+                vec![
+                    Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                    // Consume the establishment responses in order so the
+                    // re-INVITE reception goal aligns on ITS final.
+                    Goal::new(Barrier::None, expect(180, None)),
+                    Goal::new(Barrier::None, expect(200, None)),
+                    Goal::new(alice_confirmed, GoalStep::Reinvite),
+                    Goal::new(
+                        Barrier::None,
+                        expect(200, Some(CUSTOM_ACK_SDP.as_bytes().to_vec())),
+                    ),
+                    Goal::new(Barrier::None, GoalStep::Bye).after(Duration::from_millis(100)),
+                ],
+            )],
+            plan: vec![],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "the override call must settle OK, got {verdict:?}");
+        server.await.unwrap();
+        h.finish().await;
+    }
+
+    /// The ACK-body resolution is resolved ONCE per CSeq and cached: a 2xx
+    /// re-surfacing AFTER the goal cursor advanced past the override-carrying
+    /// goal still draws the identical override bytes (RFC 3261 §13.2.2.4),
+    /// and a different CSeq resolved later falls to the engine default.
+    #[test]
+    fn ack_body_resolution_is_cached_per_cseq() {
+        use std::collections::HashMap;
+
+        let mut cache: HashMap<u32, String> = HashMap::new();
+        let override_goal = GoalStep::ExpectResponse {
+            status: 200,
+            body: BodyExpect::Any,
+            early: None,
+            ack_body: Some(b"custom-answer".to_vec()),
+            matcher: None,
+        };
+        // First resolution: the pending override wins and is cached.
+        assert_eq!(
+            actor::resolve_ack_body(&mut cache, Some(&override_goal), "engine-sdp", 2),
+            "custom-answer",
+        );
+        // The 2xx re-surfaces after the cursor advanced (next goal is Bye):
+        // the CACHED bytes are re-emitted, never the engine default.
+        assert_eq!(
+            actor::resolve_ack_body(&mut cache, Some(&GoalStep::Bye), "engine-sdp", 2),
+            "custom-answer",
+        );
+        // A different CSeq with no pending override takes the engine default.
+        assert_eq!(
+            actor::resolve_ack_body(&mut cache, Some(&GoalStep::Bye), "engine-sdp", 3),
+            "engine-sdp",
+        );
+    }
+
+    /// The per-goal deadline override bounds the guard wait tighter than the
+    /// 32 s step timeout: a never-holding guard with `.deadline(2s)` fails the
+    /// actor with the barrier's bounded Timeout well before the ceiling.
+    #[tokio::test(start_paused = true)]
+    async fn per_goal_deadline_bounds_the_guard_wait() {
+        let h = Harness::new("actor-goal-deadline").describe(
+            "a capture-declared tighter bound: .deadline(2s) on a never-holding \
+             guard times the goal out long before the 32 s step timeout",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+
+        let call = CallPlan {
+            actors: vec![ActorSpec {
+                role: "alice",
+                agent: alice.clone(),
+                disposition: Disposition::Caller,
+                media: MediaState::none(),
+                goals: vec![Goal::new(Barrier::pred("never", |_| false), GoalStep::Bye)
+                    .deadline(Duration::from_secs(2))],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed::default(),
+            }],
+            plan: vec![],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+        };
+
+        let started = tokio::time::Instant::now();
+        let verdict = run_call(call, Duration::from_secs(32)).await;
+        let elapsed = started.elapsed();
+        match verdict {
+            CallVerdict::Failed(StepError::Timeout { who }) => assert_eq!(who, "never"),
+            other => panic!("expected the bounded guard Timeout, got {other:?}"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the 2 s per-goal deadline (not the 32 s ceiling) bounded the wait: {elapsed:?}",
+        );
         h.finish().await;
     }
 
