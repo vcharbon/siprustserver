@@ -45,7 +45,7 @@ pub use model::{
     load_load_profile, load_test_case, schemas, validate_case,
 };
 pub use registry::{
-    LegSpec, LoadFactory, ReroutingParams, Scenario, ScenarioInputs, ShapeDescriptor,
-    ShapeRegistry,
+    ImperativeFactory, ImperativeLoadBody, LegSpec, LoadFactory, ReroutingParams, Scenario,
+    ScenarioInputs, ShapeDescriptor, ShapeRegistry,
 };
 pub use shape::{Anchor, CoreInput, ShapeCatalog, ShapeSpec};
