@@ -221,7 +221,7 @@ impl ServerTxn {
     }
 
     /// Send a TEMPLATE provisional on the early dialog `early_id` — frozen
-    /// headers byte-preserved (U3 semantics), To-tag = the early dialog's.
+    /// headers byte-preserved (template-emission semantics), To-tag = the early dialog's.
     pub fn respond_template_early<'t>(
         &'t mut self,
         early_id: &str,

@@ -240,7 +240,7 @@ async fn provisional_after_final_panics() {
 }
 
 /// A TEMPLATE-driven provisional targeting a specific early dialog: e2's 180 is
-/// built from a template whose frozen headers are byte-preserved (U3 semantics)
+/// built from a template whose frozen headers are byte-preserved (template semantics)
 /// and carried under e2's minted To-tag.
 #[tokio::test]
 async fn template_provisional_targets_early_dialog() {
