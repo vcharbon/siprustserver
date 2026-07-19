@@ -436,7 +436,7 @@ async fn out_of_dialog_template_method_mismatch_panics() {
         .template(&invite_tmpl, EmitOpts::default());
 }
 
-/// U3b: an INVITE captured with all-compact names (v/f/t/i/m/c/l) replays with
+/// Compact-name fidelity: an INVITE captured with all-compact names (v/f/t/i/m/c/l) replays with
 /// compact names on the wire for BOTH frozen (c) and stack-regenerated
 /// (v/f/t/i/m) headers; Content-Length stays full (serializer-owned); the
 /// receiving parser handles it and the RFC audit is green.
@@ -504,7 +504,7 @@ l: {}\r\n\r\n{}",
     h.finish().await;
 }
 
-/// U3b regression: a FULL-name capture replays with full names (no compact
+/// Compact-name regression: a FULL-name capture replays with full names (no compact
 /// name-form introduced) — no name-form change for the common case.
 #[tokio::test]
 async fn template_full_name_capture_replays_full_names() {
@@ -780,7 +780,7 @@ async fn expect_template_response_frozen_drift_returns_mismatch() {
     h.finish().await;
 }
 
-/// U4 request-side hook: `ServerTxn::expect_template` matches a replayed template
+/// Request-side match hook: `ServerTxn::expect_template` matches a replayed template
 /// INVITE, and returns a precise Mismatch against a drifted template.
 #[tokio::test]
 async fn server_txn_expect_template_matches_and_detects_drift() {
@@ -820,7 +820,7 @@ async fn server_txn_expect_template_matches_and_detects_drift() {
     h.finish().await;
 }
 
-/// U4 round-trip invariant (REQUEST path): a template INVITE whose Contact has
+/// Match round-trip invariant (REQUEST path): a template INVITE whose Contact has
 /// a user part + URI and header params replays with the CAPTURED user + params
 /// over the bound socket's host:port, and matches its own template — the
 /// captured-replay certification loop.
@@ -875,7 +875,7 @@ Content-Length: {}\r\n\r\n{}",
     h.finish().await;
 }
 
-/// U4 round-trip invariant (RESPONSE path): a template 200 whose Contact has a
+/// Match round-trip invariant (RESPONSE path): a template 200 whose Contact has a
 /// user part + params replays over the UAS socket's host:port and matches its
 /// own template.
 #[tokio::test]
