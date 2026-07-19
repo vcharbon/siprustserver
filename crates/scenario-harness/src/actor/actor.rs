@@ -1558,23 +1558,13 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
         // obligation, advancing the `reneg` teardown barrier, and stamping the
         // feed happen ONCE, keyed on the CSeq of a re-INVITE THIS leg originated.
         if (200..300).contains(&resp.status) && st.dialogs.confirmed.is_some() {
-            // The engine-built minimal answer SDP for the delayed-offer ACK,
-            // overridable by a pending `ExpectResponse`'s `ack_body`. Resolved
-            // ONCE per CSeq and cached: the ACK to a retransmitted 2xx must be
-            // byte-identical (§13.2.2.4) even after the goal cursor advanced.
-            let sdp = match st.reinvite_ack_bodies.get(&resp.cseq.seq) {
-                Some(cached) => cached.clone(),
-                None => {
-                    let resolved = match st.goals.next_step() {
-                        Some(GoalStep::ExpectResponse { ack_body: Some(b), .. }) => {
-                            String::from_utf8_lossy(b).into_owned()
-                        }
-                        _ => st.answer_body().to_string(),
-                    };
-                    st.reinvite_ack_bodies.insert(resp.cseq.seq, resolved.clone());
-                    resolved
-                }
-            };
+            let default = st.answer_body();
+            let sdp = resolve_ack_body(
+                &mut st.reinvite_ack_bodies,
+                st.goals.next_step(),
+                default,
+                resp.cseq.seq,
+            );
             if let Some(dialog) = st.dialogs.confirmed.as_mut() {
                 dialog.ack_for(resp.cseq.seq, Some(&sdp)).await;
             }
@@ -1689,6 +1679,30 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
         }
     }
     Ok(())
+}
+
+/// The body of the ACK to an in-dialog INVITE 2xx: the pending
+/// `ExpectResponse`'s `ack_body` override, else `default` (the engine-built
+/// answer SDP) — resolved ONCE per CSeq and cached, so the ACK to a
+/// re-surfaced 2xx is byte-identical (RFC 3261 §13.2.2.4) even after the goal
+/// cursor advanced past the override-carrying goal.
+pub(super) fn resolve_ack_body(
+    cache: &mut HashMap<u32, String>,
+    next_step: Option<&GoalStep>,
+    default: &str,
+    cseq: u32,
+) -> String {
+    if let Some(cached) = cache.get(&cseq) {
+        return cached.clone();
+    }
+    let resolved = match next_step {
+        Some(GoalStep::ExpectResponse { ack_body: Some(b), .. }) => {
+            String::from_utf8_lossy(b).into_owned()
+        }
+        _ => default.to_string(),
+    };
+    cache.insert(cseq, resolved.clone());
+    resolved
 }
 
 /// The `RSeq` of a reliable provisional (RFC 3262) — `Some(rseq)` iff `resp`
