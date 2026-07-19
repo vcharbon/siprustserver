@@ -1266,6 +1266,108 @@ async fn apply_disposition(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Resul
     Ok(())
 }
 
+/// A provisional on the caller's establishing INVITE: anchor/feed the first
+/// over-100, and PRACK a reliable one exactly once per `(fork tag, RSeq)` — a
+/// retransmitted 183 is not double-PRACKed, while a FORKED 183 (distinct
+/// To-tag, RFC 3261 §12.1.2) gets its OWN PRACK on its own early dialog. The
+/// PRACK opens an "awaiting 200" ledger obligation the settle barrier holds on.
+async fn absorb_establishing_provisional(
+    st: &mut ActorState<'_>,
+    inv: &mut ClientInvite,
+    resp: &SipResponse,
+    status: u16,
+    now: Instant,
+) -> Result<(), StepError> {
+    // A 100 Trying is transaction plumbing, not an early dialog.
+    if status <= 100 {
+        return Ok(());
+    }
+    st.obs.record(Observation::LegEarly { leg: st.role }, now);
+    if !st.saw_provisional {
+        st.saw_provisional = true;
+        st.ctx.anchor(&st.agent, "firstProvisional", resp);
+        // The abandon body's `time_to_180` (default NONE on every other body).
+        st.feed.on_provisional.stamp(st.ctx);
+        if st.feed.ringing_gate {
+            st.ctx.mark_ringing(true);
+        }
+    }
+    if let Some(rseq) = reliable_rseq(resp) {
+        let fork = resp.to.tag.clone().unwrap_or_default();
+        if st.pracked_rseqs.insert((fork, rseq)) {
+            let (_txn, req) = inv.try_prack_with_request(resp).await?;
+            st.obs.record(
+                Observation::RequestSent {
+                    key: ObligationKey::new(st.role, ObligationKind::Prack, req.cseq.seq),
+                    detail: "prack awaiting 200".to_string(),
+                },
+                now,
+            );
+            // C5: the reliable early dialog is now established AND PRACKed —
+            // the observed fact an early UPDATE (RFC 3311 §5.1) gates on (a
+            // real post-183 signal, unlike `LegPhase::Early` which holds
+            // pre-183).
+            st.obs.record(
+                Observation::Subflow {
+                    leg: st.role,
+                    name: SUBFLOW_EARLY,
+                    to: SubflowState::Answered,
+                },
+                now,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A non-2xx final on the caller's establishing INVITE. Returns `true` when a
+/// §22.2 authenticated resend consumed the challenge (caller re-parks the
+/// INVITE); otherwise records the terminal and — unless the next pending goal
+/// is a RECEPTION goal, which then owns the verdict — surfaces the incidental
+/// establishment failure as the linear `WrongStatus{expected: <180|183>}`,
+/// never a 32 s barrier timeout.
+async fn absorb_establishing_failure(
+    st: &mut ActorState<'_>,
+    inv: &mut ClientInvite,
+    resp: &SipResponse,
+    status: u16,
+    now: Instant,
+) -> Result<bool, StepError> {
+    // RFC 3261 §22.2 authenticated retry: `absorb_response` already ACKed the
+    // challenge (§17.1.1.3), so this goes straight to asking the responder for
+    // a credential and resending ONCE (bumped CSeq, fresh branch). A second
+    // challenge has `auth_retries_left == 0` and classifies as a plain
+    // `status_401/407` deviation — never an unbounded loop.
+    if matches!(status, 401 | 407) && st.auth_retries_left > 0 {
+        if let Some(responder) = st.challenge_responder.clone() {
+            if inv.ack_and_resend_with_auth(resp, responder.as_ref()).await? {
+                st.auth_retries_left -= 1;
+                // Re-point the scope's early CANCEL handle at the retried
+                // transaction (its branch/CSeq changed).
+                st.scope.set_early(inv.cancel_handle());
+                return Ok(true);
+            }
+            // Responder DECLINED — surface the challenge as a plain deviation
+            // (status_401/407), exactly as with no responder.
+        }
+    }
+    st.obs.record(
+        Observation::LegFinal { leg: st.role, status, reason: resp.reason.clone() },
+        now,
+    );
+    st.obs.record(Observation::LegTerminated { leg: st.role }, now);
+    st.scope.mark_terminated();
+    if st.goals.has_pending() && !st.goals.next_step().is_some_and(GoalStep::is_reception) {
+        return Err(StepError::WrongStatus {
+            who: st.role.to_string(),
+            expected: st.expected_provisional,
+            got: status,
+            reason: resp.reason.clone(),
+        });
+    }
+    Ok(false)
+}
+
 /// Fold one inbound response into this leg's ordered response-fact log. The
 /// typed message is retained only while a matcher-carrying reception goal is
 /// still pending on this actor (the content matcher compares it later).
@@ -1286,7 +1388,7 @@ fn record_response_fact(st: &mut ActorState<'_>, resp: &SipResponse, now: Instan
                 body_len: resp.body.len(),
                 body_is_sdp,
                 early_tag: resp.to.tag.clone(),
-                typed: retain.then(|| resp.clone()),
+                typed: retain.then(|| Box::new(resp.clone())),
             },
         },
         now,
@@ -1305,56 +1407,7 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
         if let Some(mut inv) = st.dialogs.pending_invite.take() {
         match inv.absorb_response(&resp).await? {
             InviteResponseFate::Provisional { status } => {
-                // A 100 Trying is transaction plumbing, not an early dialog.
-                if status > 100 {
-                    st.obs.record(Observation::LegEarly { leg: st.role }, now);
-                    if !st.saw_provisional {
-                        st.saw_provisional = true;
-                        st.ctx.anchor(&st.agent, "firstProvisional", &resp);
-                        // The abandon body's `time_to_180` (default NONE on every
-                        // other body).
-                        st.feed.on_provisional.stamp(st.ctx);
-                        if st.feed.ringing_gate {
-                            st.ctx.mark_ringing(true);
-                        }
-                    }
-                    // A RELIABLE provisional (RFC 3262: carries `RSeq`) must be
-                    // PRACKed — once per `(fork tag, RSeq)` (a retransmitted 183
-                    // is not double-PRACKed, but a FORKED 183 with a distinct
-                    // To-tag gets its own PRACK on its own early dialog, C1/E3;
-                    // `try_prack_with_request` addresses the response's fork).
-                    // The PRACK opens a "awaiting 200" ledger obligation the
-                    // settle barrier holds on.
-                    if let Some(rseq) = reliable_rseq(&resp) {
-                        let fork = resp.to.tag.clone().unwrap_or_default();
-                        if st.pracked_rseqs.insert((fork, rseq)) {
-                            let (_txn, req) = inv.try_prack_with_request(&resp).await?;
-                            st.obs.record(
-                                Observation::RequestSent {
-                                    key: ObligationKey::new(
-                                        st.role,
-                                        ObligationKind::Prack,
-                                        req.cseq.seq,
-                                    ),
-                                    detail: "prack awaiting 200".to_string(),
-                                },
-                                now,
-                            );
-                            // C5: the reliable early dialog is now established
-                            // AND PRACKed — the observed fact an early UPDATE
-                            // (RFC 3311 §5.1) gates on (a real post-183 signal,
-                            // unlike `LegPhase::Early` which holds pre-183).
-                            st.obs.record(
-                                Observation::Subflow {
-                                    leg: st.role,
-                                    name: SUBFLOW_EARLY,
-                                    to: SubflowState::Answered,
-                                },
-                                now,
-                            );
-                        }
-                    }
-                }
+                absorb_establishing_provisional(st, &mut inv, &resp, status, now).await?;
                 st.dialogs.pending_invite = Some(inv);
             }
             InviteResponseFate::Answered => {
@@ -1378,60 +1431,10 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
                 st.dialogs.won_invite = Some(inv);
             }
             InviteResponseFate::Failed { status } => {
-                // RFC 3261 §22.2 authenticated retry: a `401`/`407` to this
-                // caller's establishing INVITE, with a configured responder and a
-                // retry still in budget. `absorb_response` already ACKed the
-                // challenge (§17.1.1.3) above, so `ack_and_resend_with_auth` goes
-                // straight to asking the responder for a credential and resending
-                // ONCE (bumped CSeq, fresh branch — a new client transaction). On
-                // a resend the leg stays Early: its next response arrives through
-                // the reactor and re-enters this path (a second challenge now has
-                // `auth_retries_left == 0`, so it classifies as a plain
-                // `status_401/407` deviation — never an unbounded loop). This
-                // reproduces the deleted linear `admitted_uas` classification.
-                if matches!(status, 401 | 407) && st.auth_retries_left > 0 {
-                    if let Some(responder) = st.challenge_responder.clone() {
-                        if inv.ack_and_resend_with_auth(&resp, responder.as_ref()).await? {
-                            st.auth_retries_left -= 1;
-                            // The resent INVITE is a fresh pending transaction —
-                            // re-point the scope's early CANCEL handle at it (its
-                            // branch/CSeq changed) before parking it back, then
-                            // continue reacting.
-                            st.scope.set_early(inv.cancel_handle());
-                            st.dialogs.pending_invite = Some(inv);
-                            return Ok(());
-                        }
-                        // Responder DECLINED — fall through and surface the
-                        // challenge as a plain deviation (status_401/407), exactly
-                        // as with no responder.
-                    }
-                }
-                st.obs.record(
-                    Observation::LegFinal { leg: st.role, status, reason: resp.reason.clone() },
-                    now,
-                );
-                st.obs.record(Observation::LegTerminated { leg: st.role }, now);
-                st.scope.mark_terminated();
-                // The establishing INVITE drew a non-2xx final. If this caller
-                // still has scripted goals that need the (now impossible)
-                // confirmed dialog, the establishment failed INCIDENTALLY — a
-                // happy body cannot proceed, so surface the shed/reject exactly
-                // as the linear `establish` did: `WrongStatus { who: caller,
-                // expected: <180|183>, got, reason }` (→ `status_<got>`), never a
-                // 32 s `established`-barrier timeout. A body whose reject IS the
-                // intended terminal (invite_reject / abandon_ringing) has no
-                // pending goal here, so it falls through to the `Expect` mapping.
-                // SUPPRESSED while the next pending goal is a reception goal —
-                // that goal owns the final's verdict (divergence is data).
-                if st.goals.has_pending()
-                    && !st.goals.next_step().is_some_and(GoalStep::is_reception)
-                {
-                    return Err(StepError::WrongStatus {
-                        who: st.role.to_string(),
-                        expected: st.expected_provisional,
-                        got: status,
-                        reason: resp.reason.clone(),
-                    });
+                if absorb_establishing_failure(st, &mut inv, &resp, status, now).await? {
+                    // §22.2 authenticated resend — the retried INVITE is a
+                    // fresh pending transaction, parked back.
+                    st.dialogs.pending_invite = Some(inv);
                 }
             }
         }
@@ -1826,47 +1829,7 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
         // dropped request or its 2xx holds the settle barrier until re-emitted,
         // exactly like a lost NOTIFY.
         GoalStep::InDialog { method, content_type, body, headers } => {
-            let now = Instant::now();
-            let (key, dialog_clone) = {
-                let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
-                    StepError::UnexpectedKind {
-                        who: st.role.to_string(),
-                        detail: format!("{} goal with no confirmed dialog", method.as_str()),
-                    }
-                })?;
-                let mut req = dialog.send_request(method);
-                match (body, content_type) {
-                    // A typed body rides `with_body` (Content-Type +
-                    // Content-Length); an untyped body still ships under a
-                    // generic type so Content-Length is emitted.
-                    (Some(bytes), ct) => {
-                        req = req.with_body(ct.as_deref().unwrap_or("application/octet-stream"), bytes);
-                    }
-                    // A content-type with no body: emit it as a header
-                    // (`with_body` only stamps Content-Type for a non-empty body).
-                    (None, Some(ct)) => req = req.with_header("Content-Type", &ct),
-                    (None, None) => {}
-                }
-                for (name, value) in &headers {
-                    req = req.with_header(name, value);
-                }
-                // The 2xx arrives through the reactor (recv_any); the returned
-                // transaction handle is not awaited on here.
-                let (_txn, request) = req.try_send_with_request().await?;
-                // INFO/MESSAGE map to InDialog; any other method routed through
-                // this goal opens under its own kind so its final still matches.
-                let kind = ObligationKind::from_cseq_method(method.as_str())
-                    .unwrap_or(ObligationKind::InDialog);
-                (ObligationKey::new(st.role, kind, request.cseq.seq), dialog.clone())
-            };
-            st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
-            st.obs.record(
-                Observation::RequestSent {
-                    key,
-                    detail: format!("{} awaiting 2xx", method.as_str()),
-                },
-                now,
-            );
+            originate_in_dialog(st, method, content_type, body, headers).await?;
         }
         GoalStep::Bye => {
             let now = Instant::now();
@@ -1935,6 +1898,57 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
             st.obs.record(Observation::RequestSent { key, detail: "hangup".to_string() }, now);
         }
     }
+    Ok(())
+}
+
+/// Originate a plain in-dialog request (INFO/MESSAGE) carrying an optional
+/// typed body + extra headers on the confirmed dialog, opening the method's
+/// ledger obligation — its 2xx alone closes it (the reactor observes it).
+async fn originate_in_dialog(
+    st: &mut ActorState<'_>,
+    method: InDialogMethod,
+    content_type: Option<String>,
+    body: Option<Vec<u8>>,
+    headers: Vec<(String, String)>,
+) -> Result<(), StepError> {
+    let now = Instant::now();
+    let (key, dialog_clone) = {
+        let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
+            StepError::UnexpectedKind {
+                who: st.role.to_string(),
+                detail: format!("{} goal with no confirmed dialog", method.as_str()),
+            }
+        })?;
+        let mut req = dialog.send_request(method);
+        match (body, content_type) {
+            // A typed body rides `with_body` (Content-Type + Content-Length);
+            // an untyped body still ships under a generic type so
+            // Content-Length is emitted.
+            (Some(bytes), ct) => {
+                req = req.with_body(ct.as_deref().unwrap_or("application/octet-stream"), bytes);
+            }
+            // A content-type with no body: emit it as a header (`with_body`
+            // only stamps Content-Type for a non-empty body).
+            (None, Some(ct)) => req = req.with_header("Content-Type", &ct),
+            (None, None) => {}
+        }
+        for (name, value) in &headers {
+            req = req.with_header(name, value);
+        }
+        // The 2xx arrives through the reactor (recv_any); the returned
+        // transaction handle is not awaited on here.
+        let (_txn, request) = req.try_send_with_request().await?;
+        // INFO/MESSAGE map to InDialog; any other method routed through this
+        // goal opens under its own kind so its final still matches.
+        let kind =
+            ObligationKind::from_cseq_method(method.as_str()).unwrap_or(ObligationKind::InDialog);
+        (ObligationKey::new(st.role, kind, request.cseq.seq), dialog.clone())
+    };
+    st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
+    st.obs.record(
+        Observation::RequestSent { key, detail: format!("{} awaiting 2xx", method.as_str()) },
+        now,
+    );
     Ok(())
 }
 
@@ -2299,7 +2313,7 @@ fn expect_response(
                 detail: "ExpectResponse matcher: the typed response was not retained".to_string(),
             });
         };
-        tmpl.match_inbound(&SipMessage::Response(resp.clone()), &MatchOpts::default()).map_err(
+        tmpl.match_inbound(&SipMessage::Response(resp.as_ref().clone()), &MatchOpts::default()).map_err(
             |m| StepError::UnexpectedKind {
                 who: st.role.to_string(),
                 detail: format!("response did not match its template: {m}"),
