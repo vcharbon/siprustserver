@@ -167,11 +167,13 @@ presence per recorded message, and the early id a provisional belongs to.
 /// with `ack_body`. `early` binds the expectation to a fork's early
 /// dialog.
 ExpectResponse { status: u16, body: BodyExpect,
-                 early: Option<EarlyId>, ack_body: Option<Vec<u8>> },
+                 early: Option<EarlyId>, ack_body: Option<Vec<u8>>,
+                 matcher: Option<MessageTemplate> },
 /// Strict: consume the next parked request of this kind into the actor's
 /// bound server transaction (the `RespondTemplate`/`Respond` that follows
 /// answers it). `Initial` names the dialog-creating INVITE.
-ExpectRequest { kind: RequestKind, body: BodyExpect },
+ExpectRequest { kind: RequestKind, body: BodyExpect,
+                matcher: Option<MessageTemplate> },
 /// Observed, never asserted: wait for the next final on this leg, record
 /// `(key, expected, observed)` into the observed state's replay record,
 /// and key the RFC-compliant follow-up (ACK a 2xx to an INVITE, hop-ACK a
@@ -190,8 +192,27 @@ pub enum BodyExpect { Any, Present, SdpPresent }
 pub enum RequestKind { Initial, InDialog(InDialogMethod) }
 ```
 
-Header-presence and multipart part-level matchers are follow-up
-reception-goal surface, deliberately not in this slice.
+**Detailed content verification.** A reception goal carrying a `matcher`
+verifies the received message's HEADERS AND BODY through the existing
+template-match surface (`match_inbound`/`expect_template`): frozen headers
+compared placement-aware by name and value, reason phrase compared,
+regenerated headers (Call-ID, Via/branch, tags, CSeq, Max-Forwards,
+Content-Length, Contact host:port) excluded by construction, remote-target
+comparison per its documented model. A mismatch fails fast with the match
+surface's detailed finding. WHAT is compared is decided where the matcher
+template is BUILT: lowering (or a hand author) includes only the headers
+and body parts that must hold, so identity remaps, rewritten bodies
+(e.g. session descriptions), and per-endpoint expected deltas are
+template-construction decisions — the engine has no exception vocabulary
+of its own. `matcher: None` keeps the status/kind + `BodyExpect` check
+only. For a `RespondTemplate`-consumed request, the matcher runs at
+consume time on the parked transaction's request; for responses, the
+observed-state fact retains the typed message while a matcher-carrying
+reception goal is pending on that leg.
+
+Multipart part-level matchers beyond the template surface's body
+comparison are follow-up reception-goal surface, deliberately not in this
+slice.
 
 **Incidental-failure suppression:** the reactor's shed heuristic (a non-2xx
 final on the establishing INVITE with goals still pending → fail the actor
