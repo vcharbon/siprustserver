@@ -13,10 +13,47 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use sip_message::generators::InDialogMethod;
+use sip_message::{EmitOpts, MessageTemplate};
 
 use super::state::{await_pred, LegPhase, ObservedState, StateInner};
 use crate::realcall::InvitePlan;
 use crate::StepError;
+
+/// A fork's early-dialog id on a scripted UAS. Used DIRECTLY as the fork's
+/// To-tag (RFC 3261 §12.1.2), so a peer's reception goal names the same fork
+/// by the tag it observes on the wire.
+pub type EarlyId = &'static str;
+
+/// What a reception goal requires of the received message's body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyExpect {
+    /// No body requirement.
+    Any,
+    /// A non-empty body of any type.
+    Present,
+    /// A non-empty body whose Content-Type is a session description.
+    SdpPresent,
+}
+
+/// Which kind of request an [`GoalStep::ExpectRequest`] consumes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestKind {
+    /// The dialog-creating INVITE (no To-tag).
+    Initial,
+    /// An in-dialog request of this method (To-tag present).
+    InDialog(InDialogMethod),
+}
+
+/// The truncated-variant anchor's assertion over the observed final.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalAssert {
+    /// Exactly this status.
+    Exact(u16),
+    /// This status class (`2` accepts any 2xx).
+    Class(u16),
+    /// Any non-error final (< 400).
+    NonError,
+}
 
 /// A barrier guard over the observed multi-endpoint state.
 #[derive(Clone)]
@@ -159,6 +196,77 @@ pub enum GoalStep {
     /// `bye_with_contact` load-audit-waiver case). Same obligation bookkeeping as
     /// [`GoalStep::Bye`]; the headers ride the outgoing request verbatim.
     ByeWith { headers: Vec<(String, String)> },
+    /// Originate the initial INVITE from a captured [`MessageTemplate`] — the
+    /// template twin of [`Invite`](Self::Invite): frozen headers/body ride
+    /// verbatim, the stack regenerates the tier-1 fields, and `plan`/`via`
+    /// route it exactly as a plain `Invite` goal's.
+    InviteTemplate {
+        callee: &'static str,
+        plan: Option<InvitePlan>,
+        template: MessageTemplate,
+        opts: EmitOpts,
+    },
+    /// Send an in-dialog (or, with `early`, early-dialog — RFC 3311 §5.1)
+    /// request from a template; the method is read from the template. Opens the
+    /// method's ledger obligation like its semantic twin would.
+    RequestTemplate { template: MessageTemplate, opts: EmitOpts, early: bool },
+    /// Answer this actor's BOUND server transaction from a template (status and
+    /// reason read from the template). The binding is the transaction the
+    /// nearest preceding [`ExpectRequest`](Self::ExpectRequest) consumed, else
+    /// the parked initial INVITE. A status < 200 responds WITHOUT consuming the
+    /// binding; >= 200 consumes it, with the same dialog/ACK bookkeeping as a
+    /// policy answer. `early` names the fork this response belongs to: each
+    /// distinct id is a distinct To-tag on the SAME server transaction
+    /// (RFC 3261 §12.1.2); the final's id names the winner.
+    RespondTemplate { template: MessageTemplate, opts: EmitOpts, early: Option<EarlyId> },
+    /// Answer the bound server transaction by POLICY — the completion verb for
+    /// flows that stop following a capture. SDP answer from the actor's
+    /// `MediaState`; same dialog/ACK bookkeeping as a disposition answer.
+    Respond { status: u16 },
+    /// Strict reception: the next response on this leg must match. `status <
+    /// 200` matches the next provisional of exactly that status (a final
+    /// arriving first fails fast); `status >= 200` matches the final. A
+    /// different status fails fast (`StepError::WrongStatus`), never by
+    /// barrier timeout. `ack_body` overrides the engine-built answer SDP on
+    /// the ACK to a delayed-offer re-INVITE 2xx; `early` binds the expectation
+    /// to a fork's early dialog; `matcher` verifies headers+body through the
+    /// template-match surface.
+    ExpectResponse {
+        status: u16,
+        body: BodyExpect,
+        early: Option<EarlyId>,
+        ack_body: Option<Vec<u8>>,
+        matcher: Option<MessageTemplate>,
+    },
+    /// Strict reception: consume the next parked request of this kind into the
+    /// actor's bound server transaction (the `RespondTemplate`/`Respond` that
+    /// follows answers it). `matcher` runs at consume time on the parked
+    /// transaction's request.
+    ExpectRequest { kind: RequestKind, body: BodyExpect, matcher: Option<MessageTemplate> },
+    /// Observed, never asserted: wait for the next final on this leg, record
+    /// `(key, expected, observed)` into the replay record, and key the
+    /// RFC-compliant follow-up on the OBSERVED status (the reactor's normal
+    /// handling — ACK a 2xx, hop-ACK a non-2xx INVITE final).
+    ObserveFinal { key: u32, expected: Option<u16> },
+    /// Strict with a class-shaped assertion — the truncated-variant anchor.
+    /// Follow-up keyed on the observed final like
+    /// [`ObserveFinal`](Self::ObserveFinal).
+    ExpectFinal { assert: FinalAssert },
+}
+
+impl GoalStep {
+    /// Whether this is a reception goal (an observation over the shared state).
+    /// While the next pending goal is one, the reactor's incidental-failure
+    /// shed is suppressed — the goal owns the final's verdict.
+    pub(super) fn is_reception(&self) -> bool {
+        matches!(
+            self,
+            GoalStep::ExpectResponse { .. }
+                | GoalStep::ExpectRequest { .. }
+                | GoalStep::ObserveFinal { .. }
+                | GoalStep::ExpectFinal { .. }
+        )
+    }
 }
 
 /// A goal: its barrier guard + an optional post-guard dwell + the step it
@@ -170,17 +278,26 @@ pub struct Goal {
     pub guard: Barrier,
     pub delay: Duration,
     pub step: GoalStep,
+    /// A per-goal override of the standard bounded guard wait — a
+    /// capture-declared tighter bound. `None` uses the actor's step timeout.
+    pub deadline: Option<Duration>,
 }
 
 impl Goal {
     pub fn new(guard: Barrier, step: GoalStep) -> Self {
-        Self { guard, delay: Duration::ZERO, step }
+        Self { guard, delay: Duration::ZERO, step, deadline: None }
     }
 
     /// Dwell this long AFTER the guard holds, before driving the step (e.g. the
     /// refer body's `reinvite_gap` talk time before the REFER).
     pub fn after(mut self, delay: Duration) -> Self {
         self.delay = delay;
+        self
+    }
+
+    /// Bound this goal's guard wait tighter than the actor's step timeout.
+    pub fn deadline(mut self, deadline: Duration) -> Self {
+        self.deadline = Some(deadline);
         self
     }
 }
@@ -212,6 +329,16 @@ impl GoalCursor {
         self.cursor >= self.goals.len()
     }
 
+    /// The next un-fired goal's step, if any.
+    pub(super) fn next_step(&self) -> Option<&GoalStep> {
+        self.goals.get(self.cursor).map(|g| &g.step)
+    }
+
+    /// The steps of every un-fired goal, in order — the park-or-react match set.
+    pub(super) fn remaining_steps(&self) -> impl Iterator<Item = &GoalStep> {
+        self.goals[self.cursor.min(self.goals.len())..].iter().map(|g| &g.step)
+    }
+
     /// Resolve once the next pending goal's guard holds (immediately for
     /// [`Barrier::None`]) and its post-guard dwell has elapsed, returning the
     /// step to drive — the guard wait is bounded by `timeout` so a genuinely
@@ -229,7 +356,7 @@ impl GoalCursor {
         // Lift the guard/delay out so the dwell anchor below can borrow `self`
         // mutably (the guard is Arc-backed, the clone is cheap).
         let (guard, delay) = (goal.guard.clone(), goal.delay);
-        let deadline = Instant::now() + timeout;
+        let deadline = Instant::now() + goal.deadline.unwrap_or(timeout);
         await_pred(obs, guard.name(), |s| guard.holds(s), deadline).await?;
         if !delay.is_zero() {
             let at = *self.ready_at.get_or_insert(Instant::now() + delay);

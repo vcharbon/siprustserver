@@ -43,14 +43,15 @@ use crate::realcall::{CallCtx, CallScope, ChallengeResponder};
 use crate::StepError;
 
 pub use actor::{
-    run_actor, ActorSpec, ActorState, CtxFeed, Disposition, Feed, MediaState, SUBFLOW_EARLY,
-    SUBFLOW_REALIGN, SUBFLOW_RENEG, SUBFLOW_REFER,
+    run_actor, ActorSpec, ActorState, Automatics, CtxFeed, Disposition, Feed, MediaState,
+    SUBFLOW_EARLY, SUBFLOW_REALIGN, SUBFLOW_RENEG, SUBFLOW_REFER,
 };
-pub use goals::{Barrier, Goal, GoalCursor, GoalStep};
+pub use goals::{Barrier, BodyExpect, EarlyId, FinalAssert, Goal, GoalCursor, GoalStep, RequestKind};
 pub use ledger::{ObligationKey, ObligationKind, ObligationLedger};
 pub use settle::{SettleBarrier, SettleVerdict, T1};
 pub use spec::{
-    into_result, run_actor_scenario, ActorCall, ActorScenario, Expect, ExpectBranch, STEP_TIMEOUT,
+    into_result, originating_role, run_actor_scenario, ActorCall, ActorScenario, Expect,
+    ExpectBranch, STEP_TIMEOUT,
 };
 pub use state::{
     await_pred, LegObservation, LegPhase, Observation, ObservedState, RecordedFinal, ReplayEntry,
@@ -101,6 +102,9 @@ pub struct CallPlan {
     pub actors: Vec<ActorSpec>,
     pub plan: Vec<BarrierPhase>,
     pub settle: SettleBarrier,
+    /// The lane-chosen stack automatics for scripted endpoints — emitted
+    /// identically on every lane (the cross-lane behavior contract).
+    pub automatics: Automatics,
 }
 
 /// The controller: owns the shared observed state, the barrier plan, the settle
@@ -194,6 +198,7 @@ pub async fn run_call_with(
 ) -> CallVerdict {
     let mut scopes = Vec::with_capacity(call.actors.len());
     let mut states = Vec::with_capacity(call.actors.len());
+    let automatics = call.automatics;
     for spec in call.actors {
         let scope = Arc::new(CallScope::new());
         states.push(ActorState::from_spec(
@@ -203,6 +208,7 @@ pub async fn run_call_with(
             ctx,
             step_timeout,
             challenge_responder.clone(),
+            automatics,
         ));
         scopes.push(scope);
     }
@@ -292,6 +298,7 @@ mod tests {
                     && s.leg_at_least("bob", LegPhase::Confirmed)
             })],
             settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -351,6 +358,7 @@ mod tests {
                     && s.leg_at_least("bob", LegPhase::Confirmed)
             })],
             settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -376,6 +384,7 @@ mod tests {
             }],
             plan: vec![phase("established", |s| s.leg_at_least("bob", LegPhase::Confirmed))],
             settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
         }
     }
 
@@ -604,6 +613,7 @@ mod tests {
                     && s.leg_at_least("bob", LegPhase::Confirmed)
             })],
             settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
         }
     }
 
@@ -768,6 +778,7 @@ mod tests {
             ],
             plan: vec![],
             settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
         }
     }
 
@@ -873,6 +884,7 @@ mod tests {
             ],
             plan: vec![phase("ringing", ringing)],
             settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -980,6 +992,7 @@ mod tests {
                 }),
             ],
             settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
         };
 
         let verdict = run_call(call, Duration::from_secs(10)).await;
@@ -1048,6 +1061,7 @@ mod tests {
                 }),
             ],
             settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
         };
 
         let verdict = run_call(call, Duration::from_secs(10)).await;
@@ -1124,6 +1138,7 @@ mod tests {
             ],
             plan: vec![phase("confirmed", |s| s.leg_at_least("alice", LegPhase::Confirmed))],
             settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -1197,6 +1212,7 @@ mod tests {
                     && s.leg_at_least("bob", LegPhase::Confirmed)
             })],
             settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -1452,6 +1468,7 @@ mod tests {
             }],
             plan: vec![phase("confirmed", alice_confirmed)],
             settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
         };
 
         let ctx = CallCtx::new();
@@ -1535,6 +1552,7 @@ mod tests {
             }],
             plan: vec![phase("confirmed", alice_confirmed)],
             settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
         };
 
         let ctx = CallCtx::new();
