@@ -192,6 +192,10 @@ pub enum BodyExpect { Any, Present, SdpPresent }
 pub enum RequestKind { Initial, InDialog(InDialogMethod) }
 ```
 
+An `early` id binds a SIMULATED peer's fork — the id IS the fork's emitted
+To-tag — so it can never match an SUT-originated fork's tag; binding an
+SUT fork by observed ordinal is follow-up reception-goal surface.
+
 **Detailed content verification.** A reception goal carrying a `matcher`
 verifies the received message's HEADERS AND BODY through the existing
 template-match surface (`match_inbound`/`expect_template`): frozen headers
