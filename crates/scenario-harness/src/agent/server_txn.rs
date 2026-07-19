@@ -2,7 +2,7 @@
 //! the [`Respond`] builder (To-tag minting, SDP answer, reliable 18x,
 //! Record-Route echo folding, §17.1.1.3 ACK-obligation arming).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sip_message::generators::{
     generate_response, GenerateResponseOpts, StackDialog, B2BUA_ALLOW, B2BUA_SUPPORTED,
@@ -30,6 +30,17 @@ pub struct ServerTxn {
     /// UAS drives several early dialogs (a simulated downstream fork), each an
     /// id mapped to a distinct To-tag (RFC 3261 §12.1.2).
     early_tags: HashMap<String, String>,
+    /// Early-dialog ids that have emitted at least one provisional. A winner may
+    /// only be one the caller actually saw an early dialog for; guards `win`.
+    emitted_early: HashSet<String>,
+    /// The declared winning early-dialog id, once `win` is called. A second,
+    /// different winner or a forked 2xx with none declared is a silent misuse
+    /// the wire audit cannot catch (both are wire-legal) — the surface rejects it.
+    winner: Option<String>,
+    /// This transaction's final response status, once one is sent. A new 1xx or a
+    /// different final after it is rejected here; a same-status retransmission
+    /// (RFC 3261 §13.3.1.4) is allowed through.
+    final_status: Option<u16>,
 }
 
 impl ServerTxn {
@@ -42,7 +53,16 @@ impl ServerTxn {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        ServerTxn { agent, request, to_tag: None, route_set, early_tags: HashMap::new() }
+        ServerTxn {
+            agent,
+            request,
+            to_tag: None,
+            route_set,
+            early_tags: HashMap::new(),
+            emitted_early: HashSet::new(),
+            winner: None,
+            final_status: None,
+        }
     }
 
     /// The received request (for inspecting headers / SDP).
@@ -191,6 +211,11 @@ impl ServerTxn {
     /// winner tag). Chain `.with_sdp` / `.reliable` / `.with_header`. The order of
     /// early dialogs is arbitrary — the winner need not be the last created.
     pub fn respond_early(&mut self, early_id: &str, status: u16, reason: &str) -> Respond<'_> {
+        assert!(
+            (101..=199).contains(&status),
+            "respond_early is for provisionals (101..=199), got {status}: send the final with win({early_id:?}) then respond({status})"
+        );
+        self.emitted_early.insert(early_id.to_string());
         let tag = self.early_tag(early_id);
         self.respond(status, reason).with_to_tag(&tag)
     }
@@ -203,6 +228,12 @@ impl ServerTxn {
         tmpl: &MessageTemplate,
         opts: EmitOpts,
     ) -> Respond<'t> {
+        let status = tmpl.status().map(|(s, _)| s).unwrap_or(0);
+        assert!(
+            (101..=199).contains(&status),
+            "respond_template_early requires a provisional (101..=199) response template, got {status}"
+        );
+        self.emitted_early.insert(early_id.to_string());
         let tag = self.early_tag(early_id);
         self.respond_template(tmpl, opts).with_to_tag(&tag)
     }
@@ -213,6 +244,18 @@ impl ServerTxn {
     /// is sent for them, and the caller's ACK addresses only the winner
     /// (RFC 3261 §13.3.1.4). Call before responding the winning 2xx.
     pub fn win(&mut self, early_id: &str) {
+        assert!(
+            self.emitted_early.contains(early_id),
+            "win({early_id:?}): no provisional was emitted on that early dialog — known early dialogs: {:?}",
+            self.emitted_early
+        );
+        if let Some(w) = &self.winner {
+            assert!(
+                w == early_id,
+                "win({early_id:?}): early dialog {w:?} already won this transaction — a transaction has one winner"
+            );
+        }
+        self.winner = Some(early_id.to_string());
         let tag = self.early_tag(early_id);
         self.adopt_to_tag(&tag);
     }
@@ -341,6 +384,26 @@ impl<'a> Respond<'a> {
     /// surfaces as [`StepError::Transport`] instead of a panic.
     pub async fn try_send(self) -> Result<(), StepError> {
         let txn = self.txn;
+        // Silent-misuse guards the wire audit cannot catch (all wire-legal): a
+        // response after the transaction's final, and a forked 2xx with no winner
+        // declared. A same-status retransmission of the final is legal
+        // (RFC 3261 §13.3.1.4) and passes through untouched.
+        if let Some(fin) = txn.final_status {
+            assert!(
+                self.status == fin,
+                "respond {} on an INVITE server transaction already finalized with {fin} (RFC 3261 §17.2.1): the transaction is complete",
+                self.status
+            );
+        } else {
+            assert!(
+                !((200..300).contains(&self.status) && !txn.early_tags.is_empty() && txn.winner.is_none()),
+                "{} early dialog(s) open — declare the winner with win(id) before the 2xx",
+                txn.early_tags.len()
+            );
+            if self.status >= 200 {
+                txn.final_status = Some(self.status);
+            }
+        }
         // An explicit per-fork To-tag overrides (and does not disturb) the txn's
         // sticky auto-minted tag, so distinct early dialogs keep distinct tags.
         let to_tag = if let Some(t) = self.to_tag {

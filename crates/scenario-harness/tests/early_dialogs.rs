@@ -161,6 +161,84 @@ async fn early_dialog_update_before_final() {
     h.finish().await;
 }
 
+// --- Silent-misuse guards -------------------------------------------------
+// These misuses are all wire-legal, so the audit cannot catch them; the send
+// surface must reject them at the point of misuse.
+
+/// Declaring a winner that never opened an early dialog (no provisional emitted)
+/// would silently mint a fresh tag and answer a fork the UAC never saw.
+#[tokio::test]
+#[should_panic(expected = "no provisional was emitted")]
+async fn win_without_provisional_panics() {
+    let h = Harness::new("win-no-provisional");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let _call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond_early("e1", 180, "Ringing").send().await;
+    uas.win("ghost"); // never emitted a provisional
+}
+
+/// A transaction has exactly one winner; a second, different `win` would
+/// last-win silently and answer the wrong early dialog.
+#[tokio::test]
+#[should_panic(expected = "already won this transaction")]
+async fn second_different_winner_panics() {
+    let h = Harness::new("two-winners");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let _call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond_early("e1", 180, "Ringing").send().await;
+    uas.respond_early("e2", 180, "Ringing").send().await;
+    uas.win("e1");
+    uas.win("e2"); // a second, different winner
+}
+
+/// Sending the final 2xx with early dialogs open and no winner declared would
+/// answer on a phantom fresh mint — a fork the UAC never saw.
+#[tokio::test]
+#[should_panic(expected = "declare the winner with win(id)")]
+async fn forked_final_without_winner_panics() {
+    let h = Harness::new("final-no-winner");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let _call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond_early("e1", 180, "Ringing").send().await;
+    uas.respond_early("e2", 180, "Ringing").send().await;
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await; // no win() first
+}
+
+/// `respond_early` is for provisionals; a final under an early tag never adopts
+/// the sticky dialog tag and detonates cryptically at the later BYE.
+#[tokio::test]
+#[should_panic(expected = "respond_early is for provisionals")]
+async fn respond_early_final_status_panics() {
+    let h = Harness::new("early-final");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let _call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond_early("e1", 200, "OK").with_sdp(ANSWER).send().await;
+}
+
+/// A new 1xx after the transaction's final is illegal (RFC 3261 §17.2.1) and
+/// audit-visible only via the new rule; the surface rejects it up front.
+#[tokio::test]
+#[should_panic(expected = "already finalized with 200")]
+async fn provisional_after_final_panics() {
+    let h = Harness::new("late-provisional");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let _call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond_early("e1", 180, "Ringing").send().await;
+    uas.win("e1");
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    uas.respond(181, "Queued").send().await; // a new 1xx after the final
+}
+
 /// A TEMPLATE-driven provisional targeting a specific early dialog: e2's 180 is
 /// built from a template whose frozen headers are byte-preserved (U3 semantics)
 /// and carried under e2's minted To-tag.

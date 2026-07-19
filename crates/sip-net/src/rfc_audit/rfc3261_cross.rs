@@ -14,7 +14,10 @@ use std::sync::Arc;
 
 use layer_harness::{LaneKey, Stamped};
 use sip_message::message_helpers::get_headers;
+use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
+
+use crate::report::to_sip_entries;
 
 use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
 use crate::types::UaRole;
@@ -1991,9 +1994,107 @@ fn routes_equal(a: &[&str], b: &[&str]) -> bool {
     a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
 }
 
+// ===========================================================================
+// rfc3261.no1xxAfterFinal  {Uas}
+// ===========================================================================
+
+/// **RFC 3261 §13.3.1.1 / §17.2.1 — no new 1xx after the final.** Once a UAS has
+/// sent a final (≥200) on an INVITE server transaction, that transaction is
+/// complete: it emits no further provisionals. A UAS that sends a NEW provisional
+/// afterwards presents the caller an early dialog past the point the offer was
+/// resolved. This is the general (any-1xx) sibling of
+/// [`super::rfc3262_cross::NoNewReliable1xxAfterFinalRule`] (reliable-only,
+/// keyed by RSeq); here a 1xx is identified by its (status, To-tag) — a distinct
+/// early dialog / provisional — so a retransmitted final (same status) and a
+/// retransmitted provisional (a 1xx whose FIRST emission was pre-final, even if
+/// a copy is recorded after by reordering) never false-positive. Partitioned per
+/// INVITE server transaction by (sender bind, top-Via branch); relay lanes are
+/// skipped (a B2BUA face forwards its upstream's 1xx, it does not originate it).
+pub struct No1xxAfterFinalRule;
+
+impl CrossMessageAuditRule for No1xxAfterFinalRule {
+    fn name(&self) -> &'static str {
+        "rfc3261.no1xxAfterFinal"
+    }
+
+    fn subject(&self) -> HashSet<UaRole> {
+        HashSet::from([UaRole::Uas])
+    }
+
+    fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        self.check_positioned(events).into_iter().map(|(b, d, _)| (b, d)).collect()
+    }
+
+    fn check_positioned(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+    ) -> Vec<(LaneKey, String, Option<usize>)> {
+        // Relay faces merely FORWARD provisionals/finals — a 1xx a B2BUA relays
+        // after a final is its upstream's emission, judged on the upstream lane,
+        // not here (mirrors the reliable-1xx sibling's relay skip).
+        let relay_lanes: HashSet<LaneKey> = project_per_dialog(events)
+            .iter()
+            .flat_map(|slice| slice.per_agent.iter())
+            .filter(|slot| slot_is_relay(slot))
+            .map(|slot| slot.bind_key.clone())
+            .collect();
+
+        // Per INVITE server transaction (sender, top-Via branch): the wire index
+        // of the first final, and the (status, To-tag) of every 1xx whose FIRST
+        // emission was seen — so a retransmission is never mistaken for a new one.
+        #[derive(Default)]
+        struct TxnState {
+            final_seen: bool,
+            seen_1xx: HashSet<(u16, String)>,
+        }
+        let mut txns: HashMap<(LaneKey, String), TxnState> = HashMap::new();
+        let parser = CustomParser::new();
+        let mut out = Vec::new();
+
+        for (i, entry) in to_sip_entries(events).into_iter().enumerate() {
+            let Some(sender) = entry.from_lane.clone() else { continue };
+            if relay_lanes.contains(&sender) {
+                continue;
+            }
+            let Ok(msg) = parser.parse(&entry.raw) else { continue };
+            if !matches!(msg, SipMessage::Response(_)) || !cseq_method(&msg).eq_ignore_ascii_case("INVITE") {
+                continue;
+            }
+            let Some(branch) = top_via_branch(&msg).filter(|b| !b.is_empty()) else { continue };
+            let st = txns.entry((sender.clone(), branch)).or_default();
+            let code = status(&msg);
+            if code >= 200 {
+                st.final_seen = true; // a retransmitted final repeats this — harmless
+                continue;
+            }
+            if code <= 100 {
+                continue; // 100 Trying establishes no early dialog
+            }
+            let ident = (code, to_tag(&msg).unwrap_or_default().to_string());
+            if st.seen_1xx.contains(&ident) {
+                continue; // a retransmission of an already-emitted provisional
+            }
+            if st.final_seen {
+                out.push((
+                    sender.clone(),
+                    format!(
+                        "Sent a new {code} provisional on an INVITE server transaction after its \
+                         final response — a completed transaction emits no further provisionals \
+                         (RFC 3261 §13.3.1.1 / §17.2.1)"
+                    ),
+                    Some(i + 1),
+                ));
+            }
+            st.seen_1xx.insert(ident);
+        }
+        out
+    }
+}
+
 /// The cross-message rules defined in this module. Aggregated by [`super::rfc_cross_message_rules`].
 pub(crate) fn cross_rules() -> Vec<Arc<dyn CrossMessageAuditRule>> {
     vec![
+        Arc::new(No1xxAfterFinalRule),
         Arc::new(UnknownDialog481Rule),
         Arc::new(UnsupportedMethod405AllowRule),
         Arc::new(UnsupportedExtension420Rule),
@@ -3019,10 +3120,61 @@ mod tests {
         assert!(FailedReinviteTearsDownDialogRule.check(&evs).is_empty());
     }
 
+    // ---- no1xxAfterFinal --------------------------------------------------
+
+    // `to_sip_entries` (the wire view the rule + waivers index) resolves lanes by
+    // ADDRESS, so these traces use addr bind keys — bob = the UAS at :5070
+    // sending to alice at :5060 (the harness uses the same addr lanes).
+    const BOB: &str = "127.0.0.1:5070";
+    const ALICE: &str = "127.0.0.1:5060";
+
+    #[test]
+    fn no_1xx_after_final_flags_new_provisional() {
+        // bob: 180 (e1) → 200 (winner) → a NEW 181 after the final. The 181 is a
+        // new provisional past transaction completion → flagged, pointing at it.
+        let evs = vec![
+            sent(BOB, resp(180, 1, "INVITE", A, B, "at", "bt1", "z9hG4bK-i", ""), ALICE, 0),
+            sent(BOB, resp(200, 1, "INVITE", A, B, "at", "bt1", "z9hG4bK-i", ""), ALICE, 1),
+            sent(BOB, resp(181, 1, "INVITE", A, B, "at", "bt1", "z9hG4bK-i", ""), ALICE, 2),
+        ];
+        let out = No1xxAfterFinalRule.check_positioned(&evs);
+        assert_eq!(out.len(), 1, "the new 1xx after the final is flagged");
+        assert_eq!(out[0].0, BOB, "attributed to the UAS lane");
+        assert_eq!(out[0].2, Some(3), "offending points at the 3rd wire entry (the late 181)");
+    }
+
+    #[test]
+    fn no_1xx_after_final_silent_on_retransmitted_final_and_provisional() {
+        // A retransmitted final (same status) and a retransmitted provisional (a
+        // 1xx first emitted PRE-final, its copy recorded after) must NOT fire.
+        let evs = vec![
+            sent(BOB, resp(180, 1, "INVITE", A, B, "at", "bt1", "z9hG4bK-i", ""), ALICE, 0),
+            sent(BOB, resp(200, 1, "INVITE", A, B, "at", "bt1", "z9hG4bK-i", ""), ALICE, 1),
+            sent(BOB, resp(200, 1, "INVITE", A, B, "at", "bt1", "z9hG4bK-i", ""), ALICE, 2),
+            sent(BOB, resp(180, 1, "INVITE", A, B, "at", "bt1", "z9hG4bK-i", ""), ALICE, 3),
+        ];
+        assert!(
+            No1xxAfterFinalRule.check_positioned(&evs).is_empty(),
+            "retransmitted final + reordered pre-final 1xx are not new emissions"
+        );
+    }
+
+    #[test]
+    fn no_1xx_after_final_silent_on_multi_early_dialog_before_final() {
+        // The multi-early-dialog happy path: two distinct early dialogs (180 on
+        // bt1, 183 on bt2) both BEFORE the 200 winner — no false positive.
+        let evs = vec![
+            sent(BOB, resp(180, 1, "INVITE", A, B, "at", "bt1", "z9hG4bK-i", ""), ALICE, 0),
+            sent(BOB, resp(183, 1, "INVITE", A, B, "at", "bt2", "z9hG4bK-i", ""), ALICE, 1),
+            sent(BOB, resp(200, 1, "INVITE", A, B, "at", "bt2", "z9hG4bK-i", ""), ALICE, 2),
+        ];
+        assert!(No1xxAfterFinalRule.check_positioned(&evs).is_empty());
+    }
+
     // ---- registration sanity ---------------------------------------------
 
     #[test]
     fn all_cross_rules_registered() {
-        assert_eq!(cross_rules().len(), 22);
+        assert_eq!(cross_rules().len(), 23);
     }
 }
