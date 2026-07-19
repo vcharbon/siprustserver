@@ -21,7 +21,9 @@ use crate::StepError;
 
 /// A fork's early-dialog id on a scripted UAS. Used DIRECTLY as the fork's
 /// To-tag (RFC 3261 §12.1.2), so a peer's reception goal names the same fork
-/// by the tag it observes on the wire.
+/// by the tag it observes on the wire. Early ids therefore bind
+/// SIMULATED-peer forks only — an SUT-generated fork tag can never equal a
+/// frozen id; observed-ordinal binding is follow-up reception-goal surface.
 pub type EarlyId = &'static str;
 
 /// What a reception goal requires of the received message's body.
