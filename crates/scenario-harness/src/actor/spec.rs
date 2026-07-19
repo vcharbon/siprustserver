@@ -13,7 +13,8 @@
 //! - `Expect::AbandonedEarly` → `Timeout { who: "alice-abandoned-after-ringing" }`;
 //! - `Expect::TransferDeclined` → `UnexpectedKind { who: "refer_charlie_reject" }`.
 
-use super::actor::Disposition;
+use super::actor::{Automatics, Disposition};
+use super::goals::GoalStep;
 use super::state::ObservedState;
 use super::{run_call_with, ActorSpec, BarrierPhase, CallPlan, CallVerdict, SettleBarrier};
 use crate::realcall::{CallCtx, CallEnv, ScenarioId};
@@ -80,6 +81,28 @@ pub trait ActorScenario: Send + Sync {
     fn id(&self) -> ScenarioId;
     /// Declare one call against the bound environment.
     fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError>;
+}
+
+/// The role whose FIRST goal originates the dialog (`Invite`/`InviteTemplate`)
+/// — the caller a terminal `Expect` is attributed to, and the §14.1 glare
+/// owner. Falls back to `Disposition::Caller`, then `"alice"`, so a purely
+/// reactive plan still attributes deterministically.
+pub fn originating_role(actors: &[ActorSpec]) -> &'static str {
+    actors
+        .iter()
+        .find(|a| {
+            a.goals.first().is_some_and(|g| {
+                matches!(g.step, GoalStep::Invite { .. } | GoalStep::InviteTemplate { .. })
+            })
+        })
+        .map(|a| a.role)
+        .or_else(|| {
+            actors
+                .iter()
+                .find(|a| matches!(a.disposition, Disposition::Caller))
+                .map(|a| a.role)
+        })
+        .unwrap_or("alice")
 }
 
 /// Map a finished call's [`CallVerdict`] + declared [`Expect`] onto the linear
@@ -175,18 +198,15 @@ pub async fn run_actor_scenario(
     ctx: &CallCtx,
 ) -> Result<(), StepError> {
     let ActorCall { actors, plan, settle, expect } = scenario.build(env)?;
-    // The originating leg — the role a Reject terminal is attributed to.
-    let caller = actors
-        .iter()
-        .find(|a| matches!(a.disposition, Disposition::Caller))
-        .map(|a| a.role)
-        .unwrap_or("alice");
+    // The originating leg — the role a Reject terminal is attributed to,
+    // keyed on which actor's first goal originates the dialog.
+    let caller = originating_role(&actors);
     let obs = ObservedState::new();
     // The deferred-auth adapter (RFC 3261 §22.2) reaches the caller's
     // establishing INVITE from the call env — `None` on every current surface
     // (no CLI flag mints one yet), so a challenge classifies unchanged.
     let verdict = run_call_with(
-        CallPlan { actors, plan, settle },
+        CallPlan { actors, plan, settle, automatics: Automatics::default() },
         obs.clone(),
         ctx,
         STEP_TIMEOUT,

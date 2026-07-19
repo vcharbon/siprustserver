@@ -40,11 +40,11 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use super::goals::{Goal, GoalCursor, GoalStep};
+use super::goals::{BodyExpect, EarlyId, FinalAssert, Goal, GoalCursor, GoalStep, RequestKind};
 use super::ledger::{ObligationKey, ObligationKind};
-use super::state::{Observation, ObservedState, SubflowState};
+use super::state::{Observation, ObservedState, ResponseFact, SubflowState};
 use sip_message::generators::InDialogMethod;
-use sip_message::SipResponse;
+use sip_message::{EmitOpts, MatchOpts, MessageTemplate, SipMessage, SipResponse};
 
 use crate::agent::{top_via_branch, InviteResponseFate};
 use crate::realcall::{CallCtx, CallScope, ChallengeResponder};
@@ -120,6 +120,29 @@ pub enum Disposition {
         reliable: bool,
         loser_late_200: Option<&'static str>,
     },
+    /// Never auto-answers by policy. Inbound requests PARK on a per-actor
+    /// queue when a remaining scripted goal will consume/answer them; anything
+    /// the script never consumes falls through to the reactive core (recorded
+    /// as a serviced stray) — peers stay RFC-compliant when the SUT relays
+    /// traffic the script never modeled.
+    Scripted,
+}
+
+/// Per-plan (lane-chosen) stack automatics for scripted endpoints. When set, an
+/// inbound INVITE parked on a [`Disposition::Scripted`] actor is answered
+/// `100 Trying` immediately (RFC 3261 §17.2.1) — identically on every lane; the
+/// `100` never consumes the transaction.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Automatics {
+    pub answer_100_trying: bool,
+}
+
+/// One inbound request parked on a [`Disposition::Scripted`] actor, awaiting
+/// the reception goal that consumes it (or a requeue-on-advance auto-react).
+struct ParkedRequest {
+    txn: ServerTxn,
+    /// Whether this is the dialog-creating INVITE (no To-tag).
+    initial: bool,
 }
 
 /// The forking-UAS answer plan carried from the 18x emission to the moment the
@@ -427,6 +450,25 @@ pub struct ActorState<'c> {
     /// Capped so a challenge to the *resent* INVITE surfaces as a plain
     /// `status_401/407` deviation, never an unbounded loop.
     auth_retries_left: u8,
+    /// A [`Disposition::Scripted`] actor's parked inbound requests, in arrival
+    /// order — reception goals consume them; requeue-on-advance auto-reacts
+    /// what no remaining goal can consume.
+    parked: Vec<ParkedRequest>,
+    /// The automatic that consumed the parked initial INVITE (CANCEL → 487): a
+    /// later scripted step bound to it fails fast naming this, never by timeout.
+    parked_initial_consumed: Option<&'static str>,
+    /// The server transaction the nearest preceding `ExpectRequest` consumed —
+    /// what a `RespondTemplate`/`Respond` goal answers.
+    bound: Option<ServerTxn>,
+    /// This actor's cursor into its leg's ordered response-fact log — the
+    /// consumption point of the reception goals.
+    resp_seen: usize,
+    /// The plan's lane-chosen stack automatics.
+    automatics: Automatics,
+    /// Whether this actor ORIGINATES the dialog — its first goal is an
+    /// `Invite`/`InviteTemplate` (fallback: `Disposition::Caller`). Keys the
+    /// §14.1 glare owner dwell and the caller attribution.
+    originates: bool,
 }
 
 impl<'c> ActorState<'c> {
@@ -439,7 +481,15 @@ impl<'c> ActorState<'c> {
         ctx: &'c CallCtx,
         step_timeout: Duration,
         challenge_responder: Option<Arc<dyn ChallengeResponder>>,
+        automatics: Automatics,
     ) -> Self {
+        let originates = spec
+            .goals
+            .first()
+            .is_some_and(|g| {
+                matches!(g.step, GoalStep::Invite { .. } | GoalStep::InviteTemplate { .. })
+            })
+            || matches!(spec.disposition, Disposition::Caller);
         Self {
             role: spec.role,
             agent: spec.agent,
@@ -478,6 +528,12 @@ impl<'c> ActorState<'c> {
             pending_reject_ack: None,
             auth_retries_left: if challenge_responder.is_some() { 1 } else { 0 },
             challenge_responder,
+            parked: Vec::new(),
+            parked_initial_consumed: None,
+            bound: None,
+            resp_seen: 0,
+            automatics,
+            originates,
         }
     }
 
@@ -514,10 +570,19 @@ pub async fn run_actor(mut st: ActorState<'_>) -> Result<(), StepError> {
                     Err(e) => return Err(e),
                 }
             }
-            ready = st.goals.next_ready(&obs, step_timeout), if st.goals.has_pending() => {
+            // Reception goals are additionally gated on their consumable being
+            // observable (a new response fact / a matching parked request / a
+            // bound transaction) — the wait rides THIS arm, never `drive_goal`
+            // (a wait inside the body would starve the reactor: the documented
+            // inline-pull hazard). Every consumable appears via this actor's
+            // own loop body, so the gate is re-evaluated on each iteration.
+            ready = st.goals.next_ready(&obs, step_timeout), if st.goals.has_pending() && goal_arm_enabled(&st) => {
                 let step = ready?;
                 drive_goal(&mut st, step).await?;
                 st.goals.advance();
+                // Requeue on advance: auto-react any parked request no
+                // remaining goal can consume, so it never starves.
+                requeue_parked(&mut st).await?;
             }
             _ = wait_timed_answer(&st.pending_answer), if st.pending_answer.is_some() => {
                 fire_timed_answer(&mut st).await?;
@@ -636,13 +701,28 @@ async fn answer_initial_invite(
     mut uas: ServerTxn,
     fork: Option<ForkAnswer>,
 ) -> Result<(), StepError> {
-    let call_id = uas.request().call_id.clone();
-    let cseq = uas.request().cseq.seq;
     let sdp = st.answer_body();
     if let Some(f) = &fork {
         uas.adopt_to_tag(f.winner_tag);
     }
     respond_200_sdp(&mut uas, sdp).await?;
+    note_uas_answered(st, &uas);
+    if let Some(loser) = fork.and_then(|f| f.loser_late_200) {
+        // The losing fork's LATE 200 — after the winner's, under the losing
+        // fork's own tag (the txn's sticky tag stays the winner's).
+        uas.respond(200, "OK").with_sdp(sdp).with_to_tag(loser).try_send().await?;
+    }
+    st.feed.on_answer_sent.stamp(st.ctx);
+    Ok(())
+}
+
+/// The bookkeeping a 2xx to a dialog-creating INVITE requires, response
+/// already sent: confirm the UAS dialog, seed the received-CSeq baseline
+/// (§12.2.1.1), and open the answered-awaiting-ACK obligation. Shared by the
+/// policy answer and the scripted `Respond`/`RespondTemplate` finals.
+fn note_uas_answered(st: &mut ActorState<'_>, uas: &ServerTxn) {
+    let call_id = uas.request().call_id.clone();
+    let cseq = uas.request().cseq.seq;
     let now = Instant::now();
     st.dialogs.confirmed = Some(uas.dialog());
     st.obs.record(Observation::SeedDialog { leg: st.role, call_id, cseq }, now);
@@ -653,13 +733,6 @@ async fn answer_initial_invite(
         },
         now,
     );
-    if let Some(loser) = fork.and_then(|f| f.loser_late_200) {
-        // The losing fork's LATE 200 — after the winner's, under the losing
-        // fork's own tag (the txn's sticky tag stays the winner's).
-        uas.respond(200, "OK").with_sdp(sdp).with_to_tag(loser).try_send().await?;
-    }
-    st.feed.on_answer_sent.stamp(st.ctx);
-    Ok(())
 }
 
 /// Fire a due timed answer: `200` + the answer SDP on the retained INVITE txn,
@@ -669,6 +742,97 @@ async fn fire_timed_answer(st: &mut ActorState<'_>) -> Result<(), StepError> {
         return Ok(());
     };
     answer_initial_invite(st, ta.uas, ta.fork).await
+}
+
+/// Whether the goal arm may fire the NEXT pending goal: a reception (or
+/// binding-consuming) goal additionally requires its consumable — a new
+/// response fact, a matching parked request, or a bound/parked transaction
+/// (a tombstoned binding enables the arm so it FAILS fast, never by timeout).
+fn goal_arm_enabled(st: &ActorState<'_>) -> bool {
+    match st.goals.next_step() {
+        Some(GoalStep::ExpectRequest { kind, .. }) => {
+            st.parked.iter().any(|p| parked_matches(p, kind))
+                || (matches!(kind, RequestKind::Initial) && st.parked_initial_consumed.is_some())
+        }
+        Some(GoalStep::RespondTemplate { .. } | GoalStep::Respond { .. }) => {
+            st.bound.is_some()
+                || st.parked.iter().any(|p| p.initial)
+                || st.parked_initial_consumed.is_some()
+        }
+        Some(GoalStep::ExpectResponse { status, .. }) => {
+            let need_final = *status >= 200;
+            st.obs
+                .with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, need_final))
+        }
+        Some(GoalStep::ObserveFinal { .. } | GoalStep::ExpectFinal { .. }) => {
+            st.obs.with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, true))
+        }
+        _ => true,
+    }
+}
+
+/// Whether a parked request satisfies an `ExpectRequest`'s kind.
+fn parked_matches(p: &ParkedRequest, kind: &RequestKind) -> bool {
+    match kind {
+        RequestKind::Initial => p.initial,
+        RequestKind::InDialog(m) => !p.initial && p.txn.request().method.as_str() == m.as_str(),
+    }
+}
+
+/// Whether a remaining scripted goal will consume/answer the parked initial
+/// INVITE — an `ExpectRequest{Initial}`, or a binding `RespondTemplate`/
+/// `Respond` (which binds the parked initial absent an `ExpectRequest`).
+fn scripted_wants_initial(st: &ActorState<'_>) -> bool {
+    st.goals.remaining_steps().any(|s| {
+        matches!(
+            s,
+            GoalStep::ExpectRequest { kind: RequestKind::Initial, .. }
+                | GoalStep::RespondTemplate { .. }
+                | GoalStep::Respond { .. }
+        )
+    })
+}
+
+/// Whether a remaining `ExpectRequest` will consume an in-dialog request of
+/// this method.
+fn scripted_wants_in_dialog(st: &ActorState<'_>, method: &str) -> bool {
+    st.goals.remaining_steps().any(|s| {
+        matches!(s, GoalStep::ExpectRequest { kind: RequestKind::InDialog(m), .. }
+            if m.as_str() == method)
+    })
+}
+
+/// Requeue-on-advance: auto-react every parked request no remaining goal can
+/// consume (recorded as a serviced stray) — a parked request never starves
+/// behind a script that moved past it.
+async fn requeue_parked(st: &mut ActorState<'_>) -> Result<(), StepError> {
+    let now = Instant::now();
+    let mut i = 0;
+    while i < st.parked.len() {
+        let keep = if st.parked[i].initial {
+            scripted_wants_initial(st)
+        } else {
+            let method = st.parked[i].txn.request().method.as_str().to_string();
+            scripted_wants_in_dialog(st, &method)
+        };
+        if keep {
+            i += 1;
+            continue;
+        }
+        let entry = st.parked.remove(i);
+        let method = entry.txn.request().method.as_str().to_string();
+        st.obs.record(
+            Observation::ServicedStray { leg: st.role, method, action: "auto-reacted on advance" },
+            now,
+        );
+        if entry.initial {
+            st.obs.record(Observation::LegEarly { leg: st.role }, now);
+            answer_initial_invite(st, entry.txn, None).await?;
+        } else {
+            react_in_dialog_request(st, entry.txn).await?;
+        }
+    }
+    Ok(())
 }
 
 /// The reactive answer policy — dispatch one inbound message. Extracted and
@@ -683,16 +847,56 @@ async fn default_react(st: &mut ActorState<'_>, msg: Inbound) -> Result<(), Step
     }
 }
 
-async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<(), StepError> {
+async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), StepError> {
     let method = uas.request().method.as_str().to_string();
     let is_initial_invite = method == "INVITE" && uas.request().to.tag.is_none();
-    let call_id = uas.request().call_id.clone();
-    let cseq = uas.request().cseq.seq;
-    let now = Instant::now();
 
     if is_initial_invite {
         return apply_disposition(st, uas).await;
     }
+
+    // A Scripted actor's in-dialog park-or-react (ACK and CANCEL are stack
+    // automatics, never parked): a request a remaining `ExpectRequest` matches
+    // waits for the script; anything else falls through to the reactive core,
+    // recorded as a serviced stray so divergence is never silent.
+    if matches!(st.disposition, Disposition::Scripted) && method != "ACK" && method != "CANCEL" {
+        let now = Instant::now();
+        if scripted_wants_in_dialog(st, &method) {
+            st.obs.record(
+                Observation::InDialogRequest {
+                    leg: st.role,
+                    call_id: uas.request().call_id.clone(),
+                    cseq: uas.request().cseq.seq,
+                    method,
+                },
+                now,
+            );
+            st.parked.push(ParkedRequest { txn: uas, initial: false });
+            return Ok(());
+        }
+        st.obs.record(
+            Observation::ServicedStray {
+                leg: st.role,
+                method: method.clone(),
+                action: "auto-reacted",
+            },
+            now,
+        );
+    }
+    react_in_dialog_request(st, uas).await
+}
+
+/// The reactive in-dialog answer table — shared by the live dispatch and the
+/// requeue-on-advance auto-react (a re-recorded `InDialogRequest` observation
+/// is idempotent, so re-entry for a previously parked request is harmless).
+async fn react_in_dialog_request(
+    st: &mut ActorState<'_>,
+    mut uas: ServerTxn,
+) -> Result<(), StepError> {
+    let method = uas.request().method.as_str().to_string();
+    let call_id = uas.request().call_id.clone();
+    let cseq = uas.request().cseq.seq;
+    let now = Instant::now();
 
     match method.as_str() {
         // An ACK completes a transaction — absorbed, never answered. It confirms
@@ -787,15 +991,35 @@ async fn react_request(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<()
         // leg on a late CANCEL.
         "CANCEL" => {
             uas.respond(200, "OK").try_send().await?;
+            let mut from_parked = false;
             let held = st
                 .pending_answer
                 .take()
                 .map(|ta| ta.uas)
                 .or_else(|| st.pending_prack_answer.take())
-                .or_else(|| st.held_silent.take());
+                .or_else(|| st.held_silent.take())
+                // A Scripted actor's PARKED initial INVITE: the CANCEL automatic
+                // consumes it (200 + 487) — a later scripted step bound to it
+                // fails fast via the tombstone, never by goal timeout.
+                .or_else(|| {
+                    let i = st.parked.iter().position(|p| p.initial)?;
+                    from_parked = true;
+                    Some(st.parked.remove(i).txn)
+                });
             if let Some(mut inv) = held {
                 inv.respond(487, "Request Terminated").try_send().await?;
                 arm_reject_final(st, &inv, 487);
+                if from_parked {
+                    st.parked_initial_consumed = Some("CANCEL answered 200 + 487");
+                    st.obs.record(
+                        Observation::ServicedStray {
+                            leg: st.role,
+                            method: "CANCEL".to_string(),
+                            action: "200 + 487 on the parked INVITE",
+                        },
+                        now,
+                    );
+                }
                 st.obs.record(Observation::LegTerminated { leg: st.role }, now);
                 st.scope.mark_terminated();
             }
@@ -1015,12 +1239,63 @@ async fn apply_disposition(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Resul
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
             st.pending_prack_answer = Some(uas);
         }
+        // Scripted park-or-react for the initial INVITE: park when a remaining
+        // goal will consume/answer it, else auto-answer 200 (the RFC-compliant
+        // react default) and record the stray. The §5 automatic answers `100
+        // Trying` in both cases — it never consumes the transaction.
+        Disposition::Scripted => {
+            if st.automatics.answer_100_trying {
+                uas.respond(100, "Trying").try_send().await?;
+            }
+            if scripted_wants_initial(st) {
+                st.parked.push(ParkedRequest { txn: uas, initial: true });
+            } else {
+                st.obs.record(
+                    Observation::ServicedStray {
+                        leg: st.role,
+                        method: "INVITE".to_string(),
+                        action: "auto-answered 200",
+                    },
+                    now,
+                );
+                st.obs.record(Observation::LegEarly { leg: st.role }, now);
+                answer_initial_invite(st, uas, None).await?;
+            }
+        }
     }
     Ok(())
 }
 
+/// Fold one inbound response into this leg's ordered response-fact log. The
+/// typed message is retained only while a matcher-carrying reception goal is
+/// still pending on this actor (the content matcher compares it later).
+fn record_response_fact(st: &mut ActorState<'_>, resp: &SipResponse, now: Instant) {
+    let retain = st
+        .goals
+        .remaining_steps()
+        .any(|s| matches!(s, GoalStep::ExpectResponse { matcher: Some(_), .. }));
+    let body_is_sdp = !resp.body.is_empty()
+        && sip_message::message_helpers::get_header(&resp.headers, "content-type")
+            .is_some_and(|v| v.to_ascii_lowercase().contains("sdp"));
+    st.obs.record(
+        Observation::LegResponse {
+            leg: st.role,
+            fact: ResponseFact {
+                status: resp.status,
+                reason: resp.reason.clone(),
+                body_len: resp.body.len(),
+                body_is_sdp,
+                early_tag: resp.to.tag.clone(),
+                typed: retain.then(|| resp.clone()),
+            },
+        },
+        now,
+    );
+}
+
 async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<(), StepError> {
     let now = Instant::now();
+    record_response_fact(st, &resp, now);
     // A response to our still-pending caller INVITE drives the establish flow —
     // but ONLY a response whose CSeq method is INVITE. A PRACK's 200 (or any
     // other in-dialog final) sharing the early dialog must NOT be fed to the
@@ -1146,7 +1421,11 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
                 // 32 s `established`-barrier timeout. A body whose reject IS the
                 // intended terminal (invite_reject / abandon_ringing) has no
                 // pending goal here, so it falls through to the `Expect` mapping.
-                if st.goals.has_pending() {
+                // SUPPRESSED while the next pending goal is a reception goal —
+                // that goal owns the final's verdict (divergence is data).
+                if st.goals.has_pending()
+                    && !st.goals.next_step().is_some_and(GoalStep::is_reception)
+                {
                     return Err(StepError::WrongStatus {
                         who: st.role.to_string(),
                         expected: st.expected_provisional,
@@ -1181,11 +1460,11 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
             );
             if resp.status == 491 {
                 // §14.1: the owner of the Call-ID (the dialog's original UAC —
-                // the caller here) waits a random T in [2.1, 4] s; a non-owner
-                // in [0, 2] s. Fixed in-range values keep the paused-clock test
-                // deterministic while preserving the owner>non-owner ordering
-                // that breaks the glare.
-                let dwell = if matches!(st.disposition, Disposition::Caller) {
+                // the ORIGINATING actor, keyed on its first goal) waits a random
+                // T in [2.1, 4] s; a non-owner in [0, 2] s. Fixed in-range
+                // values keep the paused-clock test deterministic while
+                // preserving the owner>non-owner ordering that breaks the glare.
+                let dwell = if st.originates {
                     Duration::from_millis(2500)
                 } else {
                     Duration::from_millis(1000)
@@ -1247,9 +1526,16 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
         // obligation, advancing the `reneg` teardown barrier, and stamping the
         // feed happen ONCE, keyed on the CSeq of a re-INVITE THIS leg originated.
         if (200..300).contains(&resp.status) && st.dialogs.confirmed.is_some() {
-            let sdp = st.answer_body();
+            // The engine-built minimal answer SDP for the delayed-offer ACK,
+            // overridable by a pending `ExpectResponse`'s `ack_body`.
+            let sdp = match st.goals.next_step() {
+                Some(GoalStep::ExpectResponse { ack_body: Some(b), .. }) => {
+                    String::from_utf8_lossy(b).into_owned()
+                }
+                _ => st.answer_body().to_string(),
+            };
             if let Some(dialog) = st.dialogs.confirmed.as_mut() {
-                dialog.ack_for(resp.cseq.seq, Some(sdp)).await;
+                dialog.ack_for(resp.cseq.seq, Some(&sdp)).await;
             }
             if st.sent_reinvites.remove(&resp.cseq.seq) {
                 st.sent_reinvite_txns.remove(&resp.cseq.seq);
@@ -1285,7 +1571,7 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
             },
             now,
         );
-        let dwell = if matches!(st.disposition, Disposition::Caller) {
+        let dwell = if st.originates {
             Duration::from_millis(2500)
         } else {
             Duration::from_millis(1000)
@@ -1374,48 +1660,67 @@ fn reliable_rseq(resp: &SipResponse) -> Option<u32> {
 async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepError> {
     match step {
         GoalStep::Invite { callee, plan } => {
-            let target = st.invite_targets.get(callee).cloned().ok_or_else(|| {
-                StepError::UnexpectedKind {
+            originate_initial_invite(st, callee, plan, None).await?;
+        }
+        // The template twin of `Invite`: frozen headers/body ride verbatim,
+        // routing and bookkeeping identical.
+        GoalStep::InviteTemplate { callee, plan, template, opts } => {
+            if template.method().map(|m| m.as_str()) != Some("INVITE") {
+                return Err(StepError::UnexpectedKind {
                     who: st.role.to_string(),
-                    detail: format!("Invite goal has no bound target {callee:?}"),
-                }
-            })?;
-            let mut builder = st.agent.invite(&target);
-            if let Some(offer) = st.media.offer_sdp() {
-                builder = builder.with_sdp(offer);
+                    detail: "InviteTemplate requires an INVITE request template".to_string(),
+                });
             }
-            builder = match &plan {
-                // The owned realization of `CallEnv::outgoing_invite` (route,
-                // correlation stamp, egress rewrite) — the load/SUT path.
-                Some(plan) => plan.apply(builder),
-                // Plan-less: the toy-call path (optional bare proxy hop).
-                None => match st.via {
-                    Some(via) => builder.through(via),
-                    None => builder,
-                },
+            originate_initial_invite(st, callee, plan, Some((template, opts))).await?;
+        }
+        // An in-dialog (or early-dialog) request from a template; method read
+        // from the template. Opens the method's ledger obligation.
+        GoalStep::RequestTemplate { template, opts, early } => {
+            send_request_template(st, &template, opts, early).await?;
+        }
+        // Answer the bound server transaction from the template (status/reason
+        // read from it) — provisional-non-consuming, final-consuming.
+        GoalStep::RespondTemplate { template, opts, early } => {
+            let Some((status, _)) = template.status() else {
+                return Err(StepError::UnexpectedKind {
+                    who: st.role.to_string(),
+                    detail: "RespondTemplate requires a response template".to_string(),
+                });
             };
-            // A caller advertising `Supported: 100rel` awaits a reliable `183`
-            // (not the `180`) — the `expected` of an incidental shed/reject
-            // WrongStatus (linear `establish_100rel` parity).
-            if plan
-                .as_ref()
-                .is_some_and(|p| p.headers.iter().any(|(n, v)| {
-                    n.eq_ignore_ascii_case("supported") && v.to_ascii_lowercase().contains("100rel")
-                }))
-            {
-                st.expected_provisional = 183;
+            drive_respond(st, status, Some((&template, opts)), early, "RespondTemplate").await?;
+        }
+        // Answer the bound server transaction by POLICY — the completion verb.
+        GoalStep::Respond { status } => {
+            drive_respond(st, status, None, None, "Respond").await?;
+        }
+        GoalStep::ExpectResponse { status, body, early, ack_body: _, matcher } => {
+            expect_response(st, status, body, early, matcher.as_ref())?;
+        }
+        GoalStep::ExpectRequest { kind, body, matcher } => {
+            expect_request(st, &kind, body, matcher.as_ref())?;
+        }
+        GoalStep::ObserveFinal { key, expected } => {
+            let fact = consume_final_fact(st)?;
+            st.obs.record(
+                Observation::ReplayFinal { key, expected, observed: fact.status },
+                Instant::now(),
+            );
+        }
+        GoalStep::ExpectFinal { assert } => {
+            let fact = consume_final_fact(st)?;
+            let (ok, want) = match assert {
+                FinalAssert::Exact(s) => (fact.status == s, s),
+                FinalAssert::Class(c) => (fact.status / 100 == c, c * 100),
+                FinalAssert::NonError => (fact.status < 400, 200),
+            };
+            if !ok {
+                return Err(StepError::WrongStatus {
+                    who: st.role.to_string(),
+                    expected: want,
+                    got: fact.status,
+                    reason: fact.reason,
+                });
             }
-            let call = builder.send().await;
-            st.scope.set_early(call.cancel_handle());
-            st.dialogs.pending_invite = Some(call);
-            // The caller APPEARS the moment she originates — so `all_terminated`
-            // cannot fire (and the runner exit) before she has processed her own
-            // INVITE's final. Without this, a callee that terminates immediately
-            // (the `invite_reject` 486) can make the obs "all terminated" while
-            // the caller's leg has not yet recorded a fact, so the runner exits
-            // before she ACKs the reject (RFC 3261 §17.1.1.3). Monotone: a later
-            // provisional/answer only advances the phase.
-            st.obs.record(Observation::LegEarly { leg: st.role }, Instant::now());
         }
         GoalStep::Refer { refer_to, authorization } => {
             let now = Instant::now();
@@ -1631,6 +1936,435 @@ async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Result<(), StepE
         }
     }
     Ok(())
+}
+
+/// Originate the initial INVITE (plain or template-driven) and register the
+/// caller bookkeeping — the shared realization of `Invite`/`InviteTemplate`.
+async fn originate_initial_invite(
+    st: &mut ActorState<'_>,
+    callee: &'static str,
+    plan: Option<crate::realcall::InvitePlan>,
+    template: Option<(MessageTemplate, EmitOpts)>,
+) -> Result<(), StepError> {
+    let target = st.invite_targets.get(callee).cloned().ok_or_else(|| {
+        StepError::UnexpectedKind {
+            who: st.role.to_string(),
+            detail: format!("Invite goal has no bound target {callee:?}"),
+        }
+    })?;
+    let mut builder = st.agent.invite(&target);
+    if let Some(offer) = st.media.offer_sdp() {
+        builder = builder.with_sdp(offer);
+    }
+    if let Some((tmpl, opts)) = &template {
+        builder = builder.template(tmpl, *opts);
+    }
+    builder = match &plan {
+        // The owned realization of `CallEnv::outgoing_invite` (route,
+        // correlation stamp, egress rewrite) — the load/SUT path.
+        Some(plan) => plan.apply(builder),
+        // Plan-less: the toy-call path (optional bare proxy hop).
+        None => match st.via {
+            Some(via) => builder.through(via),
+            None => builder,
+        },
+    };
+    // A caller advertising `Supported: 100rel` (on the plan or a frozen
+    // template header) awaits a reliable `183` — the `expected` of an
+    // incidental shed/reject WrongStatus (linear `establish_100rel` parity).
+    let advertises_100rel = plan.as_ref().is_some_and(|p| {
+        p.headers.iter().any(|(n, v)| {
+            n.eq_ignore_ascii_case("supported") && v.to_ascii_lowercase().contains("100rel")
+        })
+    }) || template.as_ref().is_some_and(|(t, _)| {
+        t.headers().iter().any(|h| {
+            sip_message::message_helpers::name_matches("Supported", &h.name)
+                && h.value.to_ascii_lowercase().contains("100rel")
+        })
+    });
+    if advertises_100rel {
+        st.expected_provisional = 183;
+    }
+    let call = builder.send().await;
+    st.scope.set_early(call.cancel_handle());
+    st.dialogs.pending_invite = Some(call);
+    // The caller APPEARS the moment she originates — so `all_terminated`
+    // cannot fire (and the runner exit) before she has processed her own
+    // INVITE's final. Without this, a callee that terminates immediately
+    // (the `invite_reject` 486) can make the obs "all terminated" while
+    // the caller's leg has not yet recorded a fact, so the runner exits
+    // before she ACKs the reject (RFC 3261 §17.1.1.3). Monotone: a later
+    // provisional/answer only advances the phase.
+    st.obs.record(Observation::LegEarly { leg: st.role }, Instant::now());
+    Ok(())
+}
+
+/// Send a templated request on the confirmed dialog (or, `early`, on the
+/// still-pending INVITE's early dialog — RFC 3311 §5.1) and open the method's
+/// ledger obligation, mirroring the semantic goal's bookkeeping (re-INVITE →
+/// outstanding offer + retained txn for the 491 hop-ACK; UPDATE → outstanding
+/// offer; BYE → teardown discharge first).
+async fn send_request_template(
+    st: &mut ActorState<'_>,
+    template: &MessageTemplate,
+    opts: EmitOpts,
+    early: bool,
+) -> Result<(), StepError> {
+    let now = Instant::now();
+    let method = template
+        .method()
+        .and_then(|m| InDialogMethod::try_from(m).ok())
+        .ok_or_else(|| StepError::UnexpectedKind {
+            who: st.role.to_string(),
+            detail: "RequestTemplate requires an in-dialog request template".to_string(),
+        })?;
+    if method == InDialogMethod::Bye && !early {
+        // A hangup subsumes this leg's pending in-dialog acks (§15) exactly
+        // like the semantic `Bye` goal.
+        discharge_on_teardown(st, now);
+    }
+    let (txn, req, dialog_clone) = if early {
+        let inv = st.dialogs.pending_invite.as_mut().ok_or_else(|| {
+            StepError::UnexpectedKind {
+                who: st.role.to_string(),
+                detail: "RequestTemplate{early} with no pending early dialog".to_string(),
+            }
+        })?;
+        let tag = inv.early_remote_tag().to_string();
+        let mut b = inv.send_request(method).template(template, opts);
+        if !tag.is_empty() {
+            b = b.with_to_tag(&tag);
+        }
+        let (txn, req) = b.try_send_with_request().await?;
+        (txn, req, None)
+    } else {
+        let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
+            StepError::UnexpectedKind {
+                who: st.role.to_string(),
+                detail: "RequestTemplate with no confirmed dialog".to_string(),
+            }
+        })?;
+        let (txn, req) =
+            dialog.send_request(method).template(template, opts).try_send_with_request().await?;
+        (txn, req, Some(dialog.clone()))
+    };
+    let cseq = req.cseq.seq;
+    let kind = ObligationKind::from_cseq_method(method.as_str()).unwrap_or(ObligationKind::InDialog);
+    match method {
+        InDialogMethod::Invite => {
+            st.sent_reinvites.insert(cseq);
+            st.sent_reinvite_txns.insert(cseq, txn);
+        }
+        InDialogMethod::Update => {
+            st.sent_updates.insert(cseq);
+        }
+        _ => {}
+    }
+    if let Some(d) = dialog_clone {
+        st.scope.set_confirmed(d); // refresh so a teardown BYE stays valid
+    }
+    st.obs.record(
+        Observation::RequestSent {
+            key: ObligationKey::new(st.role, kind, cseq),
+            detail: format!("templated {} awaiting final", method.as_str()),
+        },
+        now,
+    );
+    Ok(())
+}
+
+/// The stock reason phrase for a policy provisional.
+fn provisional_reason(status: u16) -> &'static str {
+    match status {
+        180 => "Ringing",
+        183 => "Session Progress",
+        _ => "Progress",
+    }
+}
+
+/// Answer the BOUND server transaction — the shared realization of
+/// `RespondTemplate` (template payload) and `Respond` (policy payload). The
+/// binding is the nearest preceding `ExpectRequest`'s consumed transaction,
+/// else the parked initial INVITE. A status < 200 responds WITHOUT consuming
+/// the binding; >= 200 consumes it with the disposition-equivalent bookkeeping
+/// (dialog confirm / reject hop-ACK / teardown), keyed on the bound request.
+async fn drive_respond(
+    st: &mut ActorState<'_>,
+    status: u16,
+    template: Option<(&MessageTemplate, EmitOpts)>,
+    early: Option<EarlyId>,
+    step_name: &'static str,
+) -> Result<(), StepError> {
+    let now = Instant::now();
+    let use_bound = st.bound.is_some();
+    let parked_initial = st.parked.iter().position(|p| p.initial);
+    if !use_bound && parked_initial.is_none() {
+        // Fail-fast, bounded: the target was consumed by an automatic
+        // (CANCEL → 487) or never existed — never a goal timeout.
+        let detail = match st.parked_initial_consumed {
+            Some(consumed) => format!(
+                "{step_name}: the bound initial INVITE was consumed by an automatic ({consumed})"
+            ),
+            None => format!("{step_name}: no bound or parked transaction to answer"),
+        };
+        return Err(StepError::UnexpectedKind { who: st.role.to_string(), detail });
+    }
+
+    if status < 200 {
+        // Provisional: respond in place, binding NOT consumed
+        // (provisional-then-final on ONE server transaction, §17.2.1).
+        let txn = match st.bound.as_mut() {
+            Some(t) => t,
+            None => &mut st.parked[parked_initial.expect("checked above")].txn,
+        };
+        let mut r = match template {
+            Some((tmpl, opts)) => txn.respond_template(tmpl, opts),
+            None => txn.respond(status, provisional_reason(status)),
+        };
+        if let Some(id) = early {
+            // The fork id IS the fork's To-tag (RFC 3261 §12.1.2) — distinct
+            // early dialogs on the one transaction.
+            r = r.with_to_tag(id);
+        }
+        r.try_send().await?;
+        st.obs.record(Observation::LegEarly { leg: st.role }, now);
+        return Ok(());
+    }
+
+    // Final: consume the binding.
+    let mut txn = match st.bound.take() {
+        Some(t) => t,
+        None => st.parked.remove(parked_initial.expect("checked above")).txn,
+    };
+    if let Some(id) = early {
+        // The final's fork id names the WINNER: its tag becomes the sticky
+        // dialog tag; the losing forks simply never receive a final (the
+        // existing forked-UAS surface settles them).
+        txn.adopt_to_tag(id);
+    }
+    let req_method = txn.request().method.as_str().to_string();
+    let is_initial = req_method == "INVITE" && txn.request().to.tag.is_none();
+    let cseq = txn.request().cseq.seq;
+
+    {
+        // `respond_template` derives status from the template; an early winner
+        // tag was adopted above, so no per-response tag is needed here.
+        let r = match template {
+            Some((tmpl, opts)) => txn.respond_template(tmpl, opts),
+            None if (200..300).contains(&status)
+                && (req_method == "INVITE" || req_method == "UPDATE") =>
+            {
+                // A policy 2xx to an offer is never bodyless (RFC 3264 §5).
+                txn.respond(status, "OK").with_sdp(st.media.answer_sdp().unwrap_or(crate::ANSWER_SDP))
+            }
+            None if (200..300).contains(&status) => txn.respond(status, "OK"),
+            None => txn.respond(status, reject_reason(status)),
+        };
+        r.try_send().await?;
+    }
+
+    if (200..300).contains(&status) {
+        if is_initial {
+            note_uas_answered(st, &txn);
+            st.feed.on_answer_sent.stamp(st.ctx);
+        } else if req_method == "INVITE" {
+            // A scripted 200 to a re-INVITE — same realign bookkeeping as the
+            // reactive answer (the ACK confirms the sub-flow).
+            st.answered_reinvites.insert(cseq);
+            st.obs.record(
+                Observation::RequestSent {
+                    key: ObligationKey::new(st.role, ObligationKind::ReInvite, cseq),
+                    detail: "realign 200 awaiting ACK".to_string(),
+                },
+                now,
+            );
+            st.obs.record(
+                Observation::Subflow {
+                    leg: st.role,
+                    name: SUBFLOW_REALIGN,
+                    to: SubflowState::Answered,
+                },
+                now,
+            );
+        } else if req_method == "BYE" {
+            // A scripted 200 to a BYE tears this leg down (§15).
+            discharge_on_teardown(st, now);
+            st.obs.record(Observation::LegTerminated { leg: st.role }, now);
+            st.scope.mark_terminated();
+        }
+    } else if req_method == "INVITE" {
+        // A non-2xx INVITE final awaits its hop-ACK (§17.2.1).
+        arm_reject_final(st, &txn, status);
+        if is_initial {
+            st.obs.record(Observation::LegTerminated { leg: st.role }, now);
+            st.scope.mark_terminated();
+        }
+    }
+    Ok(())
+}
+
+/// Consume this actor's next response facts up to (and including) the first
+/// FINAL on its leg — provisionals before it are passed over. The goal-arm
+/// gate guarantees one exists when a final-consuming goal fires.
+fn consume_final_fact(st: &mut ActorState<'_>) -> Result<ResponseFact, StepError> {
+    let facts: Vec<ResponseFact> =
+        st.obs.with_snapshot(|s| s.leg(st.role).responses()[st.resp_seen..].to_vec());
+    for (i, f) in facts.iter().enumerate() {
+        if f.status >= 200 {
+            st.resp_seen += i + 1;
+            return Ok(f.clone());
+        }
+    }
+    Err(StepError::UnexpectedKind {
+        who: st.role.to_string(),
+        detail: "final-consuming goal fired with no final observed".to_string(),
+    })
+}
+
+/// `ExpectResponse`: strict, fail-fast consumption of the next response fact.
+fn expect_response(
+    st: &mut ActorState<'_>,
+    status: u16,
+    body: BodyExpect,
+    early: Option<EarlyId>,
+    matcher: Option<&MessageTemplate>,
+) -> Result<(), StepError> {
+    let facts: Vec<ResponseFact> =
+        st.obs.with_snapshot(|s| s.leg(st.role).responses()[st.resp_seen..].to_vec());
+    let fact = if status < 200 {
+        // The NEXT response (100 Trying is transaction plumbing, skipped) must
+        // be a provisional of exactly this status — a final arriving first, or
+        // a different provisional, fails fast.
+        let mut found = None;
+        for (i, f) in facts.iter().enumerate() {
+            if f.status == 100 {
+                continue;
+            }
+            if f.status != status {
+                return Err(StepError::WrongStatus {
+                    who: st.role.to_string(),
+                    expected: status,
+                    got: f.status,
+                    reason: f.reason.clone(),
+                });
+            }
+            st.resp_seen += i + 1;
+            found = Some(f.clone());
+            break;
+        }
+        found
+    } else {
+        // Provisionals before the expected final are passed over.
+        let mut found = None;
+        for (i, f) in facts.iter().enumerate() {
+            if f.status < 200 {
+                continue;
+            }
+            if f.status != status {
+                return Err(StepError::WrongStatus {
+                    who: st.role.to_string(),
+                    expected: status,
+                    got: f.status,
+                    reason: f.reason.clone(),
+                });
+            }
+            st.resp_seen += i + 1;
+            found = Some(f.clone());
+            break;
+        }
+        found
+    };
+    let Some(fact) = fact else {
+        return Err(StepError::UnexpectedKind {
+            who: st.role.to_string(),
+            detail: "ExpectResponse fired with no consumable response observed".to_string(),
+        });
+    };
+    if let Some(id) = early {
+        if fact.early_tag.as_deref() != Some(id) {
+            return Err(StepError::UnexpectedKind {
+                who: st.role.to_string(),
+                detail: format!(
+                    "ExpectResponse: fork mismatch — expected early id {id:?}, got tag {:?}",
+                    fact.early_tag
+                ),
+            });
+        }
+    }
+    check_body_expect(st.role, body, fact.body_len, fact.body_is_sdp)?;
+    if let Some(tmpl) = matcher {
+        let Some(resp) = &fact.typed else {
+            return Err(StepError::UnexpectedKind {
+                who: st.role.to_string(),
+                detail: "ExpectResponse matcher: the typed response was not retained".to_string(),
+            });
+        };
+        tmpl.match_inbound(&SipMessage::Response(resp.clone()), &MatchOpts::default()).map_err(
+            |m| StepError::UnexpectedKind {
+                who: st.role.to_string(),
+                detail: format!("response did not match its template: {m}"),
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// `ExpectRequest`: consume the next parked request of this kind into the
+/// actor's bound transaction; the matcher runs at consume time on the parked
+/// transaction's request.
+fn expect_request(
+    st: &mut ActorState<'_>,
+    kind: &RequestKind,
+    body: BodyExpect,
+    matcher: Option<&MessageTemplate>,
+) -> Result<(), StepError> {
+    let Some(idx) = st.parked.iter().position(|p| parked_matches(p, kind)) else {
+        let detail = match (kind, st.parked_initial_consumed) {
+            (RequestKind::Initial, Some(consumed)) => format!(
+                "ExpectRequest: the parked initial INVITE was consumed by an automatic ({consumed})"
+            ),
+            _ => "ExpectRequest fired with no matching parked request".to_string(),
+        };
+        return Err(StepError::UnexpectedKind { who: st.role.to_string(), detail });
+    };
+    let entry = st.parked.remove(idx);
+    let req = entry.txn.request();
+    let body_is_sdp = !req.body.is_empty()
+        && sip_message::message_helpers::get_header(&req.headers, "content-type")
+            .is_some_and(|v| v.to_ascii_lowercase().contains("sdp"));
+    check_body_expect(st.role, body, req.body.len(), body_is_sdp)?;
+    if let Some(tmpl) = matcher {
+        entry.txn.expect_template(tmpl, &MatchOpts::default()).map_err(|m| {
+            StepError::UnexpectedKind {
+                who: st.role.to_string(),
+                detail: format!("request did not match its template: {m}"),
+            }
+        })?;
+    }
+    st.bound = Some(entry.txn);
+    Ok(())
+}
+
+/// Enforce a reception goal's [`BodyExpect`], fail-fast with a bounded detail.
+fn check_body_expect(
+    role: &'static str,
+    body: BodyExpect,
+    body_len: usize,
+    body_is_sdp: bool,
+) -> Result<(), StepError> {
+    let ok = match body {
+        BodyExpect::Any => true,
+        BodyExpect::Present => body_len > 0,
+        BodyExpect::SdpPresent => body_is_sdp,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(StepError::UnexpectedKind {
+            who: role.to_string(),
+            detail: format!("body expectation {body:?} not met (len {body_len})"),
+        })
+    }
 }
 
 /// Originate ONE delayed-offer (bodyless) re-INVITE on the confirmed dialog and
