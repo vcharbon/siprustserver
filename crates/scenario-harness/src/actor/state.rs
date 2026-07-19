@@ -37,7 +37,9 @@ pub struct ResponseFact {
     /// The `To`-tag — the early-dialog/fork identity a reception goal's
     /// `early` binding matches (RFC 3261 §12.1.2).
     pub early_tag: Option<String>,
-    pub typed: Option<sip_message::SipResponse>,
+    /// Boxed: retained only for a pending matcher, and kept off the
+    /// `Observation` fold's common-variant size.
+    pub typed: Option<Box<sip_message::SipResponse>>,
 }
 
 /// One `ObserveFinal`/`ExpectFinal` outcome: the capture-declared expectation
