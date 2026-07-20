@@ -45,9 +45,11 @@
 //!   a centred annotation in time order (e.g. `crash b1`, `reboot b1`).
 
 mod html;
+mod normalize;
 mod text;
 
 pub use html::{render_embed, render_html, render_svg};
+pub use normalize::{normalize, role_map_from_lanes};
 pub use text::render_global_txt;
 
 /// What an actor lane represents — drives only its styling/label decoration, not
