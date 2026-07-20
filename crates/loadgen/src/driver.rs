@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use e2e_model::{ImperativeLoadBody, LegSpec, Scenario, ScenarioInputs, ShapeDescriptor, ShapeRegistry};
+use e2e_model::{LegSpec, Scenario, ScenarioInputs, ShapeDescriptor, ShapeRegistry};
 use futures::FutureExt;
 use scenario_harness::{Agent, AgentBinder, EgressPolicy, WaiverScope};
 use sip_clock::Clock;
@@ -109,13 +109,10 @@ pub struct DriverCfg {
 }
 
 /// A load shape's per-call body: the declarative actor [`Scenario`] the runner
-/// drives, or a generic imperative call driver ([`ImperativeLoadBody`]) for a
-/// shape whose choreography is not expressible as an `ActorScenario`. `run_one`
-/// branches on it at the single body-invocation site.
+/// drives. `run_one` invokes it at the single body-invocation site.
 #[derive(Clone)]
 enum LoadBody {
     Actor(Scenario),
-    Imperative(ImperativeLoadBody),
 }
 
 /// One scenario mix entry: the shape's **report/metrics id** + load attributes
@@ -177,12 +174,8 @@ impl MixEntry {
         inputs: &ScenarioInputs,
         weight: f64,
     ) -> Option<Self> {
-        // Prefer an imperative body when the shape declares one; else the
-        // declarative actor scenario (functional-only shapes have neither → None).
-        let body = match shape.imperative_body(inputs) {
-            Some(drive) => LoadBody::Imperative(drive),
-            None => LoadBody::Actor(shape.load_scenario(inputs)?),
-        };
+        // The declarative actor scenario (functional-only shapes have none → None).
+        let body = LoadBody::Actor(shape.load_scenario(inputs)?);
         Some(MixEntry {
             id: shape.id,
             body,
@@ -548,13 +541,12 @@ async fn run_one(
     // classification, sampling, phases, the ringing gate — buckets on, inside a
     // `catch_unwind` boundary (a panic is a counted failure, never a worker abort).
     // The single body-invocation site: an actor scenario rides the per-endpoint
-    // reactor runner; an imperative body is an async call driver. Both yield the
-    // `Result<(), StepError>` contract inside the same `catch_unwind` boundary (a
-    // panic is a counted failure, never a worker abort).
-    // An actor body is built ONCE here so its declared waivers (ADR-0024 §6) can
-    // be read for the audit, then the BUILT call is run — never built twice. A
-    // build guard error is part of the downstream contract, surfaced as the
-    // call's Result (there is no panic to catch on that arm).
+    // reactor runner, yielding the `Result<(), StepError>` contract inside a
+    // `catch_unwind` boundary (a panic is a counted failure, never a worker abort).
+    // The body is built ONCE here so its declared waivers (ADR-0024 §6) can be
+    // read for the audit, then the BUILT call is run — never built twice. A build
+    // guard error is part of the downstream contract, surfaced as the call's
+    // Result (there is no panic to catch on that arm).
     let mut plan_waivers: Vec<WaiverScope> = Vec::new();
     let result = match &body {
         LoadBody::Actor(scenario) => match scenario.build(&env) {
@@ -566,7 +558,6 @@ async fn run_one(
             }
             Err(e) => Ok(Err(e)),
         },
-        LoadBody::Imperative(drive) => AssertUnwindSafe(drive(&env, &ctx)).catch_unwind().await,
     };
 
     let failed = !matches!(result, Ok(Ok(())));
@@ -845,29 +836,21 @@ fn query_get(query: &str, key: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod imperative_body_tests {
+mod load_body_tests {
     use super::*;
 
-    /// The load driver mints an IMPERATIVE body when the shape declares one, and
-    /// still mints the declarative actor body otherwise — the single seam branch
-    /// on `from_shape`.
+    /// The load driver mints the declarative actor body from a shape that
+    /// declares one, and nothing from a functional-only shape.
     #[test]
-    fn from_shape_routes_imperative_vs_actor() {
+    fn from_shape_mints_the_actor_body() {
         let inputs = ScenarioInputs::default();
-
-        let imp_body: ImperativeLoadBody = Arc::new(|_e: &crate::ctx::CallEnv, _c: &crate::ctx::CallCtx| {
-            Box::pin(async { Ok(()) })
-                as std::pin::Pin<
-                    Box<dyn std::future::Future<Output = Result<(), scenario_harness::StepError>> + Send>,
-                >
-        });
-        let imp = ShapeDescriptor::new("imp").load_imperative(imp_body);
-        let entry = MixEntry::from_shape(&imp, &inputs, 1.0).expect("imperative shape has a body");
-        assert!(matches!(entry.body, LoadBody::Imperative(_)), "imperative shape → imperative body");
 
         let actor = ShapeDescriptor::new("act")
             .load_shared(Arc::new(scenario_harness::actor::scenarios::BasicCall));
         let ae = MixEntry::from_shape(&actor, &inputs, 1.0).expect("actor shape has a body");
         assert!(matches!(ae.body, LoadBody::Actor(_)), "actor shape → actor body");
+
+        let bare = ShapeDescriptor::new("bare");
+        assert!(MixEntry::from_shape(&bare, &inputs, 1.0).is_none(), "functional-only shape has no body");
     }
 }

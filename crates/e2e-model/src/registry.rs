@@ -30,13 +30,8 @@ use std::sync::Arc;
 // (callshapes program phase B) — same ids, same downstream contract as the
 // historic hand-written `scenario_harness::actor::scenarios` bodies they
 // regenerate.
-use std::future::Future;
-use std::pin::Pin;
-
 use callshapes::shapes as cs;
 use scenario_harness::actor::ActorScenario;
-use scenario_harness::realcall::{CallCtx, CallEnv};
-use scenario_harness::StepError;
 
 use crate::shape::{Anchor, ShapeSpec};
 
@@ -71,24 +66,6 @@ pub type Scenario = Arc<dyn ActorScenario>;
 /// (the refer scenarios take the run's `refer_key` at construction; stateless
 /// bodies ignore the inputs).
 pub type LoadFactory = Arc<dyn Fn(&ScenarioInputs) -> Scenario + Send + Sync>;
-
-/// A generic **imperative load body**: an async call driver that takes the
-/// per-call [`CallEnv`] + [`CallCtx`] and yields the SAME `Result<(), StepError>`
-/// contract an actor body does. For shapes whose choreography is not expressible
-/// as a declarative [`ActorScenario`] (arbitrary in-dialog sends, verbatim
-/// templates, lenient expects). A std-only boxed future — no extra dependency.
-pub type ImperativeLoadBody = Arc<
-    dyn for<'a> Fn(
-            &'a CallEnv<'a>,
-            &'a CallCtx,
-        ) -> Pin<Box<dyn Future<Output = Result<(), StepError>> + Send + 'a>>
-        + Send
-        + Sync,
->;
-
-/// Factory minting a shape's [`ImperativeLoadBody`] from the per-run
-/// [`ScenarioInputs`] (stateless bodies ignore the inputs).
-pub type ImperativeFactory = Arc<dyn Fn(&ScenarioInputs) -> ImperativeLoadBody + Send + Sync>;
 
 /// One **named callee leg** of a load shape: which receiver the load driver
 /// binds on the shared UAS socket and which R-URI user-part prefixes select it
@@ -178,10 +155,6 @@ pub struct ShapeDescriptor {
     pub failure_weight: Option<f64>,
     /// The optional load body factory (`None` = functional-only shape).
     pub load: Option<LoadFactory>,
-    /// The optional IMPERATIVE load body factory (`None` = no imperative body).
-    /// Orthogonal to [`load`](Self::load): a shape carries at most one, and the
-    /// load driver prefers the imperative body when present.
-    pub load_imperative: Option<ImperativeFactory>,
 }
 
 impl std::fmt::Debug for ShapeDescriptor {
@@ -197,7 +170,6 @@ impl std::fmt::Debug for ShapeDescriptor {
             .field("default_weight", &self.default_weight)
             .field("failure_weight", &self.failure_weight)
             .field("has_load_body", &self.load.is_some())
-            .field("has_imperative_body", &self.load_imperative.is_some())
             .finish()
     }
 }
@@ -218,7 +190,6 @@ impl ShapeDescriptor {
             default_weight: None,
             failure_weight: None,
             load: None,
-            load_imperative: None,
         }
     }
 
@@ -302,20 +273,6 @@ impl ShapeDescriptor {
     /// functional-only shape).
     pub fn load_scenario(&self, inputs: &ScenarioInputs) -> Option<Scenario> {
         self.load.as_ref().map(|f| f(inputs))
-    }
-
-    /// Attach a stateless IMPERATIVE load body — an async call driver for a shape
-    /// whose choreography is not a declarative [`ActorScenario`]. Orthogonal to
-    /// [`load_shared`](Self::load_shared): a shape carries at most one body.
-    pub fn load_imperative(mut self, body: ImperativeLoadBody) -> Self {
-        self.load_imperative = Some(Arc::new(move |_| body.clone()));
-        self
-    }
-
-    /// Mint this shape's imperative load body from the per-run inputs (`None` =
-    /// no imperative body).
-    pub fn imperative_body(&self, inputs: &ScenarioInputs) -> Option<ImperativeLoadBody> {
-        self.load_imperative.as_ref().map(|f| f(inputs))
     }
 }
 
@@ -665,28 +622,6 @@ mod tests {
         let dual = reg.get("rerouting_prack").expect("dual-body shape registered");
         assert!(dual.load.is_some() && !dual.anchors.is_empty());
         assert!(dual.needs_bob2, "rerouting needs the second callee receiver");
-    }
-
-    /// A trivial imperative load body (returns Ok, drives no wire) for the attach
-    /// seam test.
-    fn trivial_imperative() -> ImperativeLoadBody {
-        Arc::new(|_e: &CallEnv, _c: &CallCtx| {
-            Box::pin(async { Ok(()) })
-                as std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), StepError>> + Send>>
-        })
-    }
-
-    #[test]
-    fn load_imperative_attaches_orthogonally_to_the_actor_body() {
-        let inputs = ScenarioInputs::default();
-        // An imperative shape carries an imperative body and NO actor body.
-        let imp = ShapeDescriptor::new("imp_shape").load_imperative(trivial_imperative());
-        assert!(imp.imperative_body(&inputs).is_some(), "imperative body attached");
-        assert!(imp.load_scenario(&inputs).is_none(), "imperative shape has no actor body");
-        // An actor shape is untouched by the new seam: actor body, no imperative.
-        let actor = ShapeDescriptor::new("actor_shape").load_shared(Arc::new(BasicCall));
-        assert!(actor.load_scenario(&inputs).is_some(), "actor body attached");
-        assert!(actor.imperative_body(&inputs).is_none(), "actor shape has no imperative body");
     }
 
     #[test]
