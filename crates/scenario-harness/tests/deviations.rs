@@ -164,6 +164,61 @@ async fn zero_deviation_cseq_is_natural() {
     h.finish().await;
 }
 
+/// ADR-0024 §6: the CSeq step counter is SHARED across a scope-refresh clone —
+/// the exact `dialog.clone()` the actor engine takes into its teardown scope.
+/// Consuming a deviation op on the LIVE dialog advances the ONE shared counter
+/// for the clone too, so a teardown BYE never re-consumes an op the live dialog
+/// already did. A FORKED counter (the pre-§6 hazard) would leave the clone's op
+/// pending, and `assert_deviations_consumed` on the clone would panic.
+#[tokio::test]
+async fn shared_cseq_counter_survives_a_scope_refresh_clone() {
+    let h = Harness::new("cseq-shared-clone").describe(
+        "consuming a CSeq-deviation op on the live dialog advances the SHARED \
+         counter for a scope-refresh clone too — no fork, no re-consumed op",
+    );
+    h.waive(
+        WaiverScope::rule("rfc3261.cseqInDialogOrder", "declared jump; shared-counter clone test")
+            .on_party("alice"),
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    // One op at step 0, then a scope-refresh clone taken BEFORE it is consumed —
+    // the exact shape of the actor engine's `set_confirmed(dialog.clone())`.
+    dialog.set_cseq_pattern(CseqPattern {
+        offset: 0,
+        ops: vec![CseqOpAt { at: 0, op: CseqOp::Jump { by: 48 } }],
+    });
+    let clone = dialog.clone();
+
+    // Consume step 0 on the LIVE dialog (OPTIONS → base 2 + jump 48 = 50).
+    let mut opt = dialog.send_request(InDialogMethod::Options).send().await;
+    let mut obob = bob.receive("OPTIONS").await;
+    assert_eq!(obob.request().cseq.seq, 50, "the jump is applied on the live dialog");
+    obob.respond(200, "OK").await;
+    opt.expect(200).await;
+
+    // The clone SHARES the counter, so it now sees the op consumed — a forked
+    // counter would still have step 0 pending here and this would panic.
+    clone.assert_deviations_consumed();
+
+    // Clean teardown from the live dialog; the BYE continues the shared counter.
+    let mut bye = dialog.bye().await;
+    let mut bbob = bob.receive("BYE").await;
+    assert_eq!(bbob.request().cseq.seq, 51, "the BYE continues from the jump (shared counter)");
+    bbob.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    h.finish().await;
+}
+
 /// The `delayed-automatic` ACK: alice holds the ACK to the 2xx for ~2.8 s
 /// (paused clock). bob retransmits the 200 meanwhile (RFC 3261 §13.3.1.4); the
 /// late ACK lands, retransmissions stop, the call terminates clean and the audit

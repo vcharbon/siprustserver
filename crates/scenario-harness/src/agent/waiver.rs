@@ -228,3 +228,106 @@ pub(super) fn unused_waivers(waivers: &[WaiverState]) -> Vec<&WaiverScope> {
         .map(|w| &w.scope)
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(from_lane: &str) -> RecordedSipEntry {
+        RecordedSipEntry {
+            from: "10.0.0.9:5070".parse().unwrap(),
+            to: "10.0.0.1:5060".parse().unwrap(),
+            raw: b"OPTIONS sip:x@h SIP/2.0\r\n\r\n".to_vec(),
+            sent_ms: 0,
+            received_ms: Some(1),
+            delivered: true,
+            recv_note: None,
+            reemit: None,
+            from_lane: Some(from_lane.to_string()),
+            to_lane: None,
+            seq: 0,
+        }
+    }
+
+    fn finding(rule: &str, offending: usize) -> RfcFinding {
+        RfcFinding {
+            rule: rule.into(),
+            lane: "x".into(),
+            detail: "d".into(),
+            advisory: false,
+            offending: Some(offending),
+        }
+    }
+
+    const RULE: &str = "rfc3261.cseqInDialogOrder";
+
+    /// ADR-0024 §6 load-lane specific: sub-lane party attribution. Two logical
+    /// legs share ONE mux socket; a party-scoped waiver covers ONLY the leg it
+    /// names, never its co-socketed sibling — because attribution resolves the
+    /// `ip:port#name` sub-lane key, not the addr.
+    #[test]
+    fn sublane_party_scope_isolates_co_socketed_siblings() {
+        let entries = vec![entry("10.0.0.9:5070#bob"), entry("10.0.0.9:5070#bob2")];
+        let bob = finding(RULE, 1); // offending = entry #1 (bob)
+        let bob2 = finding(RULE, 2); // offending = entry #2 (bob2, same socket)
+        let w = WaiverScope::rule(RULE, "only bob").on_party("bob");
+        let attr = Attribution::SubLane;
+        assert!(covers(&w, &bob, &entries, &attr), "covers bob's finding");
+        assert!(
+            !covers(&w, &bob2, &entries, &attr),
+            "does NOT cover the co-socketed sibling bob2's finding",
+        );
+    }
+
+    /// The plain addr→first-name map (the functional attribution) would
+    /// mis-attribute BOTH co-socketed legs to the first bind — the exact hazard
+    /// the load lane's sub-lane resolution avoids.
+    #[test]
+    fn addr_map_mis_attributes_co_socketed_legs() {
+        let entries = vec![entry("10.0.0.9:5070#bob"), entry("10.0.0.9:5070#bob2")];
+        let mut map = HashMap::new();
+        map.insert("10.0.0.9:5070".parse().unwrap(), "bob".to_string());
+        let attr = Attribution::AddrNames(&map);
+        let w = WaiverScope::rule(RULE, "bob").on_party("bob");
+        assert!(covers(&w, &finding(RULE, 1), &entries, &attr));
+        assert!(
+            covers(&w, &finding(RULE, 2), &entries, &attr),
+            "addr map wrongly covers the sibling (both resolve to the first bind)",
+        );
+    }
+
+    /// A party-scoped waiver on a DIFFERENT party (a SUT lane, an unnamed key)
+    /// never covers — the finding stays gated.
+    #[test]
+    fn sublane_party_scope_gates_other_parties() {
+        let entries = vec![entry("10.0.0.9:5070#bob")];
+        let attr = Attribution::SubLane;
+        assert!(!covers(
+            &WaiverScope::rule(RULE, "proxy").on_party("proxy"),
+            &finding(RULE, 1),
+            &entries,
+            &attr,
+        ));
+    }
+
+    /// A rule-only waiver covers by rule alone (byte-for-byte the old
+    /// `HashSet<String>` filter) regardless of attribution.
+    #[test]
+    fn rule_only_covers_by_rule_regardless_of_party() {
+        let entries = vec![entry("10.0.0.9:5070#bob")];
+        let attr = Attribution::SubLane;
+        assert!(covers(
+            &WaiverScope::rule(RULE, "coarse"),
+            &finding(RULE, 1),
+            &entries,
+            &attr,
+        ));
+        // A different rule is never covered.
+        assert!(!covers(
+            &WaiverScope::rule("rfc3261.other", "coarse"),
+            &finding(RULE, 1),
+            &entries,
+            &attr,
+        ));
+    }
+}
