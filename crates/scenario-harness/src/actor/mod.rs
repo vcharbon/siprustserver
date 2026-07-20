@@ -50,8 +50,8 @@ pub use goals::{Barrier, BodyExpect, EarlyId, FinalAssert, Goal, GoalCursor, Goa
 pub use ledger::{ObligationKey, ObligationKind, ObligationLedger};
 pub use settle::{SettleBarrier, SettleVerdict, T1};
 pub use spec::{
-    into_result, originating_role, run_actor_scenario, ActorCall, ActorScenario, Expect,
-    ExpectBranch, STEP_TIMEOUT,
+    into_result, originating_role, run_actor_scenario, run_built_actor_call, ActorCall,
+    ActorScenario, Expect, ExpectBranch, STEP_TIMEOUT,
 };
 pub use state::{
     await_pred, LegObservation, LegPhase, Observation, ObservedState, RecordedFinal, ReplayEntry,
@@ -279,6 +279,9 @@ mod tests {
                     invite_targets: vec![("bob", bob.clone())],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -291,6 +294,9 @@ mod tests {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
             ],
             plan: vec![phase("established", |s| {
@@ -340,6 +346,9 @@ mod tests {
                     invite_targets: vec![("bob", bob.clone())],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -351,6 +360,9 @@ mod tests {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
             ],
             plan: vec![phase("established", |s| {
@@ -381,6 +393,9 @@ mod tests {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
+            
+                cseq: None,
+                delayed: None,
             }],
             plan: vec![phase("established", |s| s.leg_at_least("bob", LegPhase::Confirmed))],
             settle: SettleBarrier::default_ceiling(),
@@ -596,6 +611,9 @@ mod tests {
                     invite_targets: vec![("bob", bob.clone())],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -606,6 +624,9 @@ mod tests {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
             ],
             plan: vec![phase("established", |s| {
@@ -754,6 +775,9 @@ mod tests {
                     invite_targets: vec![("bob", bob.clone())],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -774,6 +798,9 @@ mod tests {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
             ],
             plan: vec![],
@@ -870,6 +897,9 @@ mod tests {
                     invite_targets: vec![("bob", bob.clone())],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -880,6 +910,9 @@ mod tests {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
             ],
             plan: vec![phase("ringing", ringing)],
@@ -969,6 +1002,9 @@ mod tests {
                     invite_targets: vec![("bob", bob.clone())],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -980,6 +1016,9 @@ mod tests {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
             ],
             plan: vec![
@@ -1038,6 +1077,9 @@ mod tests {
                     invite_targets: vec![("bob", bob.clone())],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -1049,6 +1091,9 @@ mod tests {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
             ],
             plan: vec![
@@ -1124,6 +1169,9 @@ mod tests {
                     invite_targets: vec![("bob", bob.clone())],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -1134,6 +1182,9 @@ mod tests {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
             ],
             plan: vec![phase("confirmed", |s| s.leg_at_least("alice", LegPhase::Confirmed))],
@@ -1193,6 +1244,9 @@ mod tests {
                     invite_targets: vec![("bob", bob.clone())],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -1205,6 +1259,9 @@ mod tests {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
             ],
             plan: vec![phase("established", |s| {
@@ -1465,6 +1522,9 @@ mod tests {
                 invite_targets: vec![("bob", bob.clone())],
                 via: None,
                 feed: CtxFeed::default(),
+            
+                cseq: None,
+                delayed: None,
             }],
             plan: vec![phase("confirmed", alice_confirmed)],
             settle: SettleBarrier::default_ceiling(),
@@ -1549,6 +1609,9 @@ mod tests {
                 invite_targets: vec![("bob", bob.clone())],
                 via: None,
                 feed: CtxFeed::default(),
+            
+                cseq: None,
+                delayed: None,
             }],
             plan: vec![phase("confirmed", alice_confirmed)],
             settle: SettleBarrier::default_ceiling(),
@@ -1616,6 +1679,9 @@ mod tests {
             invite_targets: vec![callee],
             via: None,
             feed: CtxFeed::default(),
+        
+            cseq: None,
+            delayed: None,
         }
     }
 
@@ -1630,6 +1696,9 @@ mod tests {
             invite_targets: vec![],
             via: None,
             feed: CtxFeed::default(),
+        
+            cseq: None,
+            delayed: None,
         }
     }
 
@@ -1738,6 +1807,9 @@ mod tests {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
             ],
             plan: vec![established_phase()],
@@ -1886,6 +1958,9 @@ mod tests {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
             ],
             plan: vec![],
@@ -2097,6 +2172,9 @@ mod tests {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
             ],
             plan: vec![],
@@ -2214,6 +2292,9 @@ mod tests {
                 invite_targets: vec![("bob", bob.clone())],
                 via: None,
                 feed: CtxFeed::default(),
+            
+                cseq: None,
+                delayed: None,
             },
             scripted_spec("bob", &bob, vec![]),
         ];
@@ -2427,6 +2508,9 @@ mod tests {
                     invite_targets: vec![("bob", bob.clone())],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -2437,6 +2521,9 @@ mod tests {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
             ],
             plan: vec![established_phase()],
@@ -2492,6 +2579,9 @@ mod tests {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
             ],
             plan: vec![established_phase()],
@@ -2562,6 +2652,9 @@ mod tests {
                     invite_targets: vec![("bob", bob.clone())],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -2572,6 +2665,9 @@ mod tests {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
             ],
             plan: vec![phase("confirmed", |s| s.leg_at_least("alice", LegPhase::Confirmed))],
@@ -2628,6 +2724,9 @@ mod tests {
                     invite_targets: vec![("bob", bob.clone())],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -2638,6 +2737,9 @@ mod tests {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
             ],
             plan: vec![
@@ -2702,6 +2804,9 @@ mod tests {
                     invite_targets: vec![("bob", bob.clone())],
                     via: None,
                     feed: CtxFeed::default(),
+                
+                    cseq: None,
+                    delayed: None,
                 },
                 scripted_spec(
                     "bob",
@@ -2946,6 +3051,9 @@ mod tests {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
+            
+                cseq: None,
+                delayed: None,
             }],
             plan: vec![],
             settle: SettleBarrier::default_ceiling(),

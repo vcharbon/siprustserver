@@ -18,7 +18,7 @@ use super::goals::GoalStep;
 use super::state::ObservedState;
 use super::{run_call_with, ActorSpec, BarrierPhase, CallPlan, CallVerdict, SettleBarrier};
 use crate::realcall::{CallCtx, CallEnv, ScenarioId};
-use crate::StepError;
+use crate::{StepError, WaiverScope};
 
 /// A declarative multi-party call with its expected outcome — what an
 /// [`ActorScenario`] builds per call.
@@ -27,6 +27,39 @@ pub struct ActorCall {
     pub plan: Vec<BarrierPhase>,
     pub settle: SettleBarrier,
     pub expect: Expect,
+    /// Structural RFC-audit waivers that ride this plan (ADR-0024 §6). The load
+    /// lane merges them with the case-level waivers and filters findings through
+    /// the `WaiverScope` path; the functional lane's `Harness::waive` consumes
+    /// the same shape. Empty (the default) = no waiver.
+    pub waivers: Vec<WaiverScope>,
+    /// The lane-chosen stack automatics for this plan (ADR-0024 §5): plumbed
+    /// onto the [`CallPlan`] by [`run_actor_scenario`]. Default = none.
+    pub automatics: Automatics,
+}
+
+impl ActorCall {
+    /// A plan with no waivers and default automatics — the additive base every
+    /// existing scenario keeps, so only a plan that NEEDS them names them.
+    pub fn new(
+        actors: Vec<ActorSpec>,
+        plan: Vec<BarrierPhase>,
+        settle: SettleBarrier,
+        expect: Expect,
+    ) -> Self {
+        ActorCall { actors, plan, settle, expect, waivers: Vec::new(), automatics: Automatics::default() }
+    }
+
+    /// Attach the plan's structural RFC-audit waivers (ADR-0024 §6).
+    pub fn with_waivers(mut self, waivers: Vec<WaiverScope>) -> Self {
+        self.waivers = waivers;
+        self
+    }
+
+    /// Attach the plan's lane-chosen stack automatics (ADR-0024 §5).
+    pub fn with_automatics(mut self, automatics: Automatics) -> Self {
+        self.automatics = automatics;
+        self
+    }
 }
 
 /// The outcome a body DECLARES — mapped onto the linear bodies' exact
@@ -197,7 +230,19 @@ pub async fn run_actor_scenario(
     env: &CallEnv<'_>,
     ctx: &CallCtx,
 ) -> Result<(), StepError> {
-    let ActorCall { actors, plan, settle, expect } = scenario.build(env)?;
+    run_built_actor_call(scenario.build(env)?, env, ctx).await
+}
+
+/// Drive an ALREADY-built [`ActorCall`] — the load-lane seam: the driver builds
+/// the call ONCE (to read its [`ActorCall::waivers`] for the audit), then runs
+/// the same value here, so a plan is never built twice. Identical to
+/// [`run_actor_scenario`] past the build.
+pub async fn run_built_actor_call(
+    call: ActorCall,
+    env: &CallEnv<'_>,
+    ctx: &CallCtx,
+) -> Result<(), StepError> {
+    let ActorCall { actors, plan, settle, expect, waivers: _, automatics } = call;
     // The originating leg — the role a Reject terminal is attributed to,
     // keyed on which actor's first goal originates the dialog.
     let caller = originating_role(&actors);
@@ -206,7 +251,7 @@ pub async fn run_actor_scenario(
     // establishing INVITE from the call env — `None` on every current surface
     // (no CLI flag mints one yet), so a challenge classifies unchanged.
     let verdict = run_call_with(
-        CallPlan { actors, plan, settle, automatics: Automatics::default() },
+        CallPlan { actors, plan, settle, automatics },
         obs.clone(),
         ctx,
         STEP_TIMEOUT,

@@ -52,6 +52,15 @@ use sip_net::{
 
 use crate::agent::{decide_rr_fold, Agent, Ids};
 
+/// The result of applying the structural waivers to a sampled call's audit
+/// (ADR-0024 §6): the surviving findings plus a per-waiver "did it filter
+/// anything" mask aligned to the input scopes — the load driver buckets the
+/// findings by rule id and folds `used` into the per-CAMPAIGN unused gate.
+pub struct WaiverOutcome {
+    pub findings: Vec<sip_net::RfcFinding>,
+    pub used: Vec<bool>,
+}
+
 /// A `Send + Sync` factory that binds [`Agent`]s on a recording-wrapped (or, when
 /// not recording, raw) network — the load-driver analogue of [`Harness`]
 /// (crate::Harness) minus the `!Send` `Rc` state and the Drop-time panic gate.
@@ -266,21 +275,38 @@ impl AgentBinder {
     }
 
     /// The non-advisory RFC 3261/3262/3264 findings over this call's recorded
-    /// trace (empty if clean or the call was not sampled) — the load-driver
+    /// trace that SURVIVE the structural waivers (ADR-0024 §6) — the load-driver
     /// analogue of the harness hard gate, surfaced as data instead of a panic so
-    /// the driver can classify an otherwise-OK call as RFC-dirty. `allow` is the
-    /// per-call waived rule-name set (the Test case's `allowViolations` — the
-    /// load-surface analogue of [`Harness::allow_violation`]): findings from
-    /// those rules are exempt, exactly like the harness hard gate skips waived
-    /// rules. Pass an empty set for the historic behaviour.
-    pub fn rfc_findings(&self, allow: &HashSet<String>) -> Vec<sip_net::RfcFinding> {
+    /// the driver can classify an otherwise-OK call as RFC-dirty. `waivers` are
+    /// the merged plan + case waivers; attribution resolves the mux sub-lane key
+    /// (`ip:port#name` → `name`) of each finding's OFFENDING wire entry, so a
+    /// party-scoped waiver never covers a co-socketed sibling's or the SUT's
+    /// finding. A rule-only scope reproduces the historic `allowViolations`
+    /// filter byte-for-byte. The returned [`WaiverOutcome::used`] mask (aligned
+    /// to `waivers`) folds into the per-CAMPAIGN unused-waiver gate — NOT
+    /// enforced per call (a divergent branch may legitimately never trip a rule).
+    pub fn rfc_findings(&self, waivers: &[crate::WaiverScope]) -> WaiverOutcome {
+        use crate::agent::waiver::{apply_waivers_findings, Attribution, WaiverState};
         match &self.recording {
-            Some(rec) => sip_net::evaluate_rfc_findings(&rec.channel().snapshot())
-                .into_iter()
-                .filter(|f| !f.advisory && !allow.contains(&f.rule))
-                .collect(),
-            None => Vec::new(),
+            Some(rec) => {
+                let events = rec.channel().snapshot();
+                let states: Vec<WaiverState> =
+                    waivers.iter().cloned().map(WaiverState::new).collect();
+                let findings = apply_waivers_findings(&events, &states, &Attribution::SubLane);
+                let used = states.iter().map(|s| s.used.get()).collect();
+                WaiverOutcome { findings, used }
+            }
+            None => WaiverOutcome { findings: Vec::new(), used: vec![false; waivers.len()] },
         }
+    }
+
+    /// The NORMALIZED projection of this call's recorded trace (ADR-0024 §7) —
+    /// the load-lane entry into the ONE shared [`seq_report::normalize`], so a
+    /// plan's report is comparable byte-for-byte with the functional lane's
+    /// ([`crate::report::project::normalized_sip_doc`]). `None` if not sampled.
+    pub fn normalized_seq_doc(&self, title: &str, passed: bool) -> Option<seq_report::SeqDoc> {
+        let doc = self.seq_doc(title, passed, None, None, &[], &[])?;
+        Some(crate::report::project::normalize_doc(&doc))
     }
 
     /// The wire trace of this call's recording, projected exactly like
