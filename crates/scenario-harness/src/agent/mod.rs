@@ -63,7 +63,7 @@ mod rr_fold;
 mod run_guards;
 mod server_txn;
 mod step;
-mod waiver;
+pub(crate) mod waiver;
 #[cfg(test)]
 mod tests;
 mod tolerant_recv;

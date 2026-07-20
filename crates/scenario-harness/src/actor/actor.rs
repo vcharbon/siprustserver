@@ -35,7 +35,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -44,7 +44,10 @@ use super::goals::{BodyExpect, EarlyId, FinalAssert, Goal, GoalCursor, GoalStep,
 use super::ledger::{ObligationKey, ObligationKind};
 use super::state::{Observation, ObservedState, ResponseFact, SubflowState};
 use sip_message::generators::InDialogMethod;
-use sip_message::{EmitOpts, MatchOpts, MessageTemplate, SipMessage, SipResponse};
+use sip_message::{
+    CseqDeviation, CseqPattern, DelayedAutomatic, EmitOpts, MatchOpts, MessageTemplate, SipMessage,
+    SipResponse,
+};
 
 use crate::agent::{top_via_branch, InviteResponseFate};
 use crate::realcall::{CallCtx, CallScope, ChallengeResponder};
@@ -339,6 +342,13 @@ pub struct ActorSpec {
     /// Which reactive events feed phases/checkpoints/the ringing gate — the
     /// per-body downstream contract (defaults stamp nothing).
     pub feed: CtxFeed,
+    /// A declared CSeq relative-pattern deviation (ADR-0024 §6). Attached at
+    /// EVERY dialog-formation point of this actor with ONE shared step counter,
+    /// so a scope-refresh clone never forks it. `None` = stack numbering.
+    pub cseq: Option<CseqPattern>,
+    /// A declared delayed automatic (ADR-0024 §6): hold this actor's originated
+    /// INVITE's automatic ACK-to-2xx for a duration. `None` = fire immediately.
+    pub delayed: Option<DelayedAutomatic>,
 }
 
 /// The live per-endpoint state driven by [`run_actor`].
@@ -470,6 +480,14 @@ pub struct ActorState<'c> {
     reinvite_ack_bodies: HashMap<u32, String>,
     /// The plan's lane-chosen stack automatics.
     automatics: Automatics,
+    /// This actor's ONE CSeq deviation counter (ADR-0024 §6): a shared handle
+    /// attached at EVERY dialog-formation point, so all of the leg's dialogs and
+    /// their scope-refresh clones number from one step sequence. `None` = stack
+    /// numbering.
+    cseq_dev: Option<Arc<Mutex<CseqDeviation>>>,
+    /// A declared delayed automatic (ADR-0024 §6) wired onto this actor's
+    /// originated INVITE's ACK-to-2xx. `None` = the ACK fires immediately.
+    delayed: Option<DelayedAutomatic>,
     /// Whether this actor ORIGINATES the dialog — its first goal is an
     /// `Invite`/`InviteTemplate` (fallback: `Disposition::Caller`). Keys the
     /// §14.1 glare owner dwell and the caller attribution.
@@ -539,6 +557,11 @@ impl<'c> ActorState<'c> {
             resp_seen: 0,
             reinvite_ack_bodies: HashMap::new(),
             automatics,
+            cseq_dev: spec
+                .cseq
+                .filter(|p| !p.is_identity())
+                .map(|p| Arc::new(Mutex::new(CseqDeviation::new(p)))),
+            delayed: spec.delayed,
             originates,
         }
     }
@@ -730,7 +753,10 @@ fn note_uas_answered(st: &mut ActorState<'_>, uas: &ServerTxn) {
     let call_id = uas.request().call_id.clone();
     let cseq = uas.request().cseq.seq;
     let now = Instant::now();
-    st.dialogs.confirmed = Some(uas.dialog());
+    let mut dialog = uas.dialog();
+    // Dialog-formation point: attach this leg's shared CSeq counter (ADR-0024 §6).
+    dialog.set_shared_cseq_dev(st.cseq_dev.clone());
+    st.dialogs.confirmed = Some(dialog);
     st.obs.record(Observation::SeedDialog { leg: st.role, call_id, cseq }, now);
     st.obs.record(
         Observation::RequestSent {
@@ -1451,7 +1477,11 @@ async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<()
                 // ACK the 2xx then register the confirmed dialog with NO await in
                 // between, so a mid-window cancellation can never leave a
                 // confirmed-but-unregistered dialog (the drop-safety rule).
-                let dialog = inv.ack().await;
+                let mut dialog = inv.ack().await;
+                // Dialog-formation point: attach this leg's shared CSeq counter
+                // BEFORE the scope-refresh clone, so both share ONE step counter
+                // (ADR-0024 §6 — the teardown BYE never re-consumes an op).
+                dialog.set_shared_cseq_dev(st.cseq_dev.clone());
                 st.dialogs.confirmed = Some(dialog.clone());
                 st.scope.set_confirmed(dialog);
                 st.obs.record(Observation::LegConfirmed { leg: st.role }, now);
@@ -2021,6 +2051,11 @@ async fn originate_initial_invite(
     let mut builder = st.agent.invite(&target);
     if let Some(offer) = st.media.offer_sdp() {
         builder = builder.with_sdp(offer);
+    }
+    // A declared delayed automatic (ADR-0024 §6): hold this INVITE's automatic
+    // ACK-to-2xx for the declared duration (the reactor's `inv.ack()` honours it).
+    if let Some(d) = st.delayed {
+        builder = builder.delayed_ack(Duration::from_millis(d.delay_ms));
     }
     if let Some((tmpl, opts)) = &template {
         builder = builder.template(tmpl, *opts);

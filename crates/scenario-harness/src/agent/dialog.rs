@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 use sip_message::generators::{
     generate_ack_for_2xx, generate_in_dialog_request, GenerateAckFor2xxOpts,
@@ -35,16 +36,28 @@ pub struct Dialog {
     /// (a dialog with no declared deviation numbers exactly as it would without
     /// this field).
     ///
-    /// CLONE HAZARD: cloning a `Dialog` forks the deviation's step counter, just
-    /// as it forks `local_cseq` — two clones then number (and consume ops)
-    /// independently. Drive one dialog per declared pattern.
-    cseq_dev: Option<CseqDeviation>,
+    /// The step counter is SHARED (`Arc<Mutex>`), so cloning a `Dialog` — the
+    /// scope-refresh clone the actor engine takes for teardown — does NOT fork
+    /// it: every clone consumes ONE counter, so the teardown BYE never
+    /// re-consumes an op the live dialog already did (ADR-0024 §6, the
+    /// documented clone hazard).
+    cseq_dev: Option<SharedCseqDev>,
 }
+
+/// A CSeq deviation whose step counter is shared across a dialog's scope-refresh
+/// clones (ADR-0024 §6). `Mutex` (not `RefCell`) because a `Dialog` crosses
+/// threads on the load lane; access is always uncontended (one actor task).
+pub type SharedCseqDev = Arc<Mutex<CseqDeviation>>;
 
 impl Drop for Dialog {
     fn drop(&mut self) {
+        // Only the LAST holder of the shared counter judges completeness — an
+        // intermediate scope-refresh clone shares it and must not warn.
         if let Some(dev) = &self.cseq_dev {
-            let unconsumed = dev.unconsumed_ops();
+            if Arc::strong_count(dev) > 1 {
+                return;
+            }
+            let unconsumed = dev.lock().map(|d| d.unconsumed_ops()).unwrap_or_default();
             if !unconsumed.is_empty() {
                 eprintln!(
                     "[scenario-harness] warning: Dialog dropped with {} unconsumed CSeq \
@@ -71,7 +84,7 @@ impl Dialog {
     /// by [`assert_deviations_consumed`](Self::assert_deviations_consumed) and a
     /// Drop-time warning.
     pub fn set_cseq_pattern(&mut self, pattern: CseqPattern) {
-        self.cseq_dev = Some(CseqDeviation::new(pattern));
+        self.cseq_dev = Some(Arc::new(Mutex::new(CseqDeviation::new(pattern))));
     }
 
     /// Builder form of [`set_cseq_pattern`](Self::set_cseq_pattern).
@@ -80,13 +93,23 @@ impl Dialog {
         self
     }
 
+    /// Attach an ALREADY-shared CSeq deviation counter — the actor engine's one
+    /// counter per actor, wired at every dialog-formation point so all of a
+    /// leg's dialogs (and their scope-refresh clones) number from ONE step
+    /// sequence. `None` is a no-op.
+    pub fn set_shared_cseq_dev(&mut self, dev: Option<SharedCseqDev>) {
+        if dev.is_some() {
+            self.cseq_dev = dev;
+        }
+    }
+
     /// Assert every declared CSeq-deviation op was reached (the dialog
     /// originated at least as many in-dialog requests as the pattern's highest
     /// step). Panics naming the unconsumed ops otherwise. A no-op when no
     /// pattern is declared. Call it before teardown in a deviation test.
     pub fn assert_deviations_consumed(&self) {
         if let Some(dev) = &self.cseq_dev {
-            let unconsumed = dev.unconsumed_ops();
+            let unconsumed = dev.lock().expect("cseq deviation lock").unconsumed_ops();
             assert!(
                 unconsumed.is_empty(),
                 "declared CSeq deviation ops were never reached: {unconsumed:?} — the dialog \
@@ -194,8 +217,9 @@ impl Dialog {
     pub fn send_request(&mut self, method: InDialogMethod) -> InDialogRequest<'_> {
         let agent = self.agent.clone();
         let fallback = self.fallback_addr;
-        // Disjoint field borrows: the dialog state and the CSeq deviation.
-        let dev = self.cseq_dev.as_mut();
+        // The CSeq deviation counter is a shared handle (cheap Arc clone), so the
+        // request builder borrows only the dialog state — no field-borrow clash.
+        let dev = self.cseq_dev.clone();
         InDialogRequest::new(agent, &mut self.dialog, fallback, method).with_cseq_dev(dev)
     }
 
@@ -327,10 +351,10 @@ pub struct InDialogRequest<'a> {
     /// comes from this independent per-fork sequence, not the shared dialog
     /// counter.
     fork_cseq: Option<&'a mut HashMap<String, u32>>,
-    /// The dialog's declared CSeq deviation. Present only on the confirmed-
-    /// dialog path (never the forked early-dialog path); overrides the natural
-    /// CSeq for this request per the declared pattern.
-    cseq_dev: Option<&'a mut CseqDeviation>,
+    /// The dialog's declared CSeq deviation (a shared-counter handle). Present
+    /// only on the confirmed-dialog path (never the forked early-dialog path);
+    /// overrides the natural CSeq for this request per the declared pattern.
+    cseq_dev: Option<SharedCseqDev>,
 }
 
 impl<'a> InDialogRequest<'a> {
@@ -365,9 +389,9 @@ impl<'a> InDialogRequest<'a> {
         self
     }
 
-    /// Wire in the confirmed dialog's declared CSeq deviation; `None` is a
-    /// no-op (the stack's base numbering stays authoritative).
-    pub(super) fn with_cseq_dev(mut self, dev: Option<&'a mut CseqDeviation>) -> Self {
+    /// Wire in the confirmed dialog's declared CSeq deviation (shared handle);
+    /// `None` is a no-op (the stack's base numbering stays authoritative).
+    pub(super) fn with_cseq_dev(mut self, dev: Option<SharedCseqDev>) -> Self {
         self.cseq_dev = dev;
         self
     }
@@ -501,7 +525,8 @@ impl<'a> InDialogRequest<'a> {
         // confirmed-dialog request (never on the forked early-dialog path). The
         // shared-counter update below picks up the deviated value from `res`.
         if !forked {
-            if let Some(dev) = self.cseq_dev.as_deref_mut() {
+            if let Some(dev) = &self.cseq_dev {
+                let mut dev = dev.lock().expect("cseq deviation lock");
                 if !dev.is_identity() {
                     opts.cseq = Some(dev.next_cseq(self.dialog.local_cseq));
                 }

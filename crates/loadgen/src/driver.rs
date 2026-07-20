@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use e2e_model::{ImperativeLoadBody, LegSpec, Scenario, ScenarioInputs, ShapeDescriptor, ShapeRegistry};
 use futures::FutureExt;
-use scenario_harness::{Agent, AgentBinder, EgressPolicy};
+use scenario_harness::{Agent, AgentBinder, EgressPolicy, WaiverScope};
 use sip_clock::Clock;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -551,12 +551,21 @@ async fn run_one(
     // reactor runner; an imperative body is an async call driver. Both yield the
     // `Result<(), StepError>` contract inside the same `catch_unwind` boundary (a
     // panic is a counted failure, never a worker abort).
+    // An actor body is built ONCE here so its declared waivers (ADR-0024 §6) can
+    // be read for the audit, then the BUILT call is run — never built twice. A
+    // build guard error is part of the downstream contract, surfaced as the
+    // call's Result (there is no panic to catch on that arm).
+    let mut plan_waivers: Vec<WaiverScope> = Vec::new();
     let result = match &body {
-        LoadBody::Actor(scenario) => {
-            AssertUnwindSafe(scenario_harness::actor::run_actor_scenario(scenario.as_ref(), &env, &ctx))
-                .catch_unwind()
-                .await
-        }
+        LoadBody::Actor(scenario) => match scenario.build(&env) {
+            Ok(call) => {
+                plan_waivers = call.waivers.clone();
+                AssertUnwindSafe(scenario_harness::actor::run_built_actor_call(call, &env, &ctx))
+                    .catch_unwind()
+                    .await
+            }
+            Err(e) => Ok(Err(e)),
+        },
         LoadBody::Imperative(drive) => AssertUnwindSafe(drive(&env, &ctx)).catch_unwind().await,
     };
 
@@ -567,22 +576,27 @@ async fn run_one(
         }
     }
 
-    // The per-call audit policy: the attached case's `allowViolations` exempt
-    // those rule names from the RFC hard gate (the load analogue of
-    // `Harness::allow_violation`); no case / empty list = the full audit.
-    static NO_WAIVERS: std::sync::LazyLock<std::collections::HashSet<String>> =
-        std::sync::LazyLock::new(std::collections::HashSet::new);
-    let allow = case.as_ref().map(|c| c.allow_violations()).unwrap_or(&NO_WAIVERS);
+    // The per-call audit policy (ADR-0024 §6): the merged structural waivers —
+    // the attached case's lowered `allowViolations` PLUS the plan's declared
+    // scopes — filter the findings through the `WaiverScope` path (party
+    // attribution over each finding's offending mux sub-lane). Stable per
+    // scenario, so the per-CAMPAIGN unused-waiver tally aligns.
+    let mut merged_waivers: Vec<WaiverScope> =
+        case.as_ref().map(|c| c.waivers().to_vec()).unwrap_or_default();
+    merged_waivers.extend(plan_waivers);
 
     let outcome = match result {
         Ok(Ok(())) => {
-            let findings = binder.rfc_findings(allow);
-            if findings.is_empty() {
+            let wo = binder.rfc_findings(&merged_waivers);
+            // Fold this sampled call's per-waiver use into the CAMPAIGN tally
+            // (never per call — a call exercises only its own branch).
+            reporter.record_waiver_use(id, &merged_waivers, &wo.used);
+            if wo.findings.is_empty() {
                 CallOutcome::Ok
             } else {
                 // Carried structured (not pre-joined) so the report can bucket
                 // the first-N samples by rule id, not by "first rfc error seen".
-                CallOutcome::RfcAuditFail(findings)
+                CallOutcome::RfcAuditFail(wo.findings)
             }
         }
         Ok(Err(e)) => CallOutcome::Step(e),

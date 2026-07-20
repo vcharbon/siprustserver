@@ -188,6 +188,28 @@ pub fn sip_doc_with_overlay(
     }
 }
 
+/// The NORMALIZED projection of a run's report doc (ADR-0024 §7) — the
+/// functional-lane entry point into the ONE shared [`seq_report::normalize`], so
+/// a plan's report is comparable byte-for-byte against the load lane's
+/// ([`crate::AgentBinder::normalized_seq_doc`]). Both lanes derive the lane-id →
+/// role map the same way (from the doc's own lanes).
+pub fn normalized_sip_doc(
+    scenario_name: &str,
+    description: Option<&str>,
+    entries: &[RecordedSipEntry],
+    scenario: &RecordedScenario,
+    passed: bool,
+    extra_anomalies: &[Anomaly],
+) -> SeqDoc {
+    let doc = sip_doc(scenario_name, description, entries, scenario, passed, extra_anomalies);
+    normalize_doc(&doc)
+}
+
+/// Normalize an already-built [`SeqDoc`] through the shared projection.
+pub fn normalize_doc(doc: &SeqDoc) -> SeqDoc {
+    seq_report::normalize(doc, &seq_report::role_map_from_lanes(&doc.lanes))
+}
+
 /// Project the recorder lanes into seq-report columns. A `proxy`/`core` lane is
 /// an SUT; everything else is a UA. Any address that appears in the trace but
 /// was never registered as a lane (rare) is appended so its rows resolve.
@@ -235,7 +257,7 @@ fn project_lanes(rec_lanes: &[RecLane], entries: &[RecordedSipEntry]) -> Vec<Lan
         let (from_id, to_id) = entry_lane_ids(e);
         for id in [from_id, to_id] {
             if seen.insert(id.clone()) {
-                let mut lane = match id.split_once('#') {
+                let lane = match id.split_once('#') {
                     Some((addr, "noendpoint")) => {
                         Lane::new(id.clone(), "(no endpoint)", LaneKind::Ua).with_group(addr)
                     }

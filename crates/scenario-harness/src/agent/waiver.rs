@@ -82,23 +82,45 @@ impl WaiverScope {
 }
 
 /// A registered waiver plus whether it has filtered a finding this run.
-pub(super) struct WaiverState {
+pub(crate) struct WaiverState {
     pub scope: WaiverScope,
     pub used: Cell<bool>,
 }
 
 impl WaiverState {
-    pub(super) fn new(scope: WaiverScope) -> Self {
+    pub(crate) fn new(scope: WaiverScope) -> Self {
         WaiverState { scope, used: Cell::new(false) }
     }
 }
 
-/// The party name of a `from_lane` bind key (`ip:port` or `ip:port#label`),
-/// resolved through the recorder's addr→name map.
-fn party_of(from_lane: &Option<String>, addr_names: &HashMap<SocketAddr, String>) -> Option<String> {
+/// How a finding's OFFENDING message maps to an emitting party (ADR-0024 §6).
+/// Attribution always references the offending wire-entry's `from_lane`
+/// structurally — never a detail string — differing only in how a bind key
+/// resolves to a party name.
+pub(crate) enum Attribution<'a> {
+    /// Functional lane: resolve the `from_lane` addr through the recorder's
+    /// addr→first-name map (one logical endpoint per socket).
+    AddrNames(&'a HashMap<SocketAddr, String>),
+    /// Load lane: the `from_lane` sub-lane suffix (`ip:port#name` → `name`). Mux
+    /// sockets carry SEVERAL logical legs, so the addr→first-name map would
+    /// mis-attribute every co-socketed leg to the first bind — the sub-lane key
+    /// is the leg's true identity.
+    SubLane,
+}
+
+/// The party name of a `from_lane` bind key under an [`Attribution`].
+fn party_of(from_lane: &Option<String>, attr: &Attribution) -> Option<String> {
     let key = from_lane.as_ref()?;
-    let addr: SocketAddr = key.split('#').next()?.parse().ok()?;
-    addr_names.get(&addr).filter(|n| !n.is_empty()).cloned()
+    match attr {
+        Attribution::AddrNames(map) => {
+            let addr: SocketAddr = key.split('#').next()?.parse().ok()?;
+            map.get(&addr).filter(|n| !n.is_empty()).cloned()
+        }
+        Attribution::SubLane => key
+            .split_once('#')
+            .map(|(_, name)| name.to_string())
+            .filter(|n| !n.is_empty()),
+    }
 }
 
 /// The emitting party of a finding — the `from_lane` party of its offending
@@ -106,11 +128,11 @@ fn party_of(from_lane: &Option<String>, addr_names: &HashMap<SocketAddr, String>
 fn finding_party(
     f: &RfcFinding,
     entries: &[RecordedSipEntry],
-    addr_names: &HashMap<SocketAddr, String>,
+    attr: &Attribution,
 ) -> Option<String> {
     let idx = f.offending?;
     let entry = entries.get(idx.checked_sub(1)?)?;
-    party_of(&entry.from_lane, addr_names)
+    party_of(&entry.from_lane, attr)
 }
 
 /// Whether `w` covers `finding`, referencing the offending message directly.
@@ -118,7 +140,7 @@ fn covers(
     w: &WaiverScope,
     finding: &RfcFinding,
     entries: &[RecordedSipEntry],
-    addr_names: &HashMap<SocketAddr, String>,
+    attr: &Attribution,
 ) -> bool {
     if w.rule != finding.rule {
         return false;
@@ -139,22 +161,21 @@ fn covers(
         }
     }
     if let Some(party) = &w.party {
-        if finding_party(finding, entries, addr_names).as_ref() != Some(party) {
+        if finding_party(finding, entries, attr).as_ref() != Some(party) {
             return false;
         }
     }
     true
 }
 
-/// Apply the waivers to the audit findings: drop every non-advisory finding a
-/// waiver covers (marking that waiver used), returning the remaining gating
-/// `(lane, detail)` pairs. Attribution references each finding's `offending`
-/// wire-entry index directly (no detail-string parsing).
-pub(super) fn apply_waivers(
+/// The non-advisory findings that SURVIVE the waivers (marking each covering
+/// waiver used) — the shared core of both apply variants. Attribution
+/// references each finding's `offending` wire-entry index directly.
+fn survivors(
     events: &[Stamped<SignalingNetworkEvent>],
     waivers: &[WaiverState],
-    addr_names: &HashMap<SocketAddr, String>,
-) -> Vec<(String, String)> {
+    attr: &Attribution,
+) -> Vec<RfcFinding> {
     let entries = audit_wire_entries(events);
     sip_net::evaluate_rfc_findings(events)
         .into_iter()
@@ -162,15 +183,40 @@ pub(super) fn apply_waivers(
         .filter(|f| {
             let mut waived = false;
             for w in waivers {
-                if covers(&w.scope, f, &entries, addr_names) {
+                if covers(&w.scope, f, &entries, attr) {
                     w.used.set(true);
                     waived = true;
                 }
             }
             !waived
         })
+        .collect()
+}
+
+/// Apply the waivers to the audit findings: drop every non-advisory finding a
+/// waiver covers (marking that waiver used), returning the remaining gating
+/// `(lane, detail)` pairs — the functional-lane (addr→name) attribution.
+pub(super) fn apply_waivers(
+    events: &[Stamped<SignalingNetworkEvent>],
+    waivers: &[WaiverState],
+    addr_names: &HashMap<SocketAddr, String>,
+) -> Vec<(String, String)> {
+    survivors(events, waivers, &Attribution::AddrNames(addr_names))
+        .into_iter()
         .map(|f| (f.lane, f.detail))
         .collect()
+}
+
+/// The finding-preserving apply variant (ADR-0024 §6): the surviving structured
+/// [`RfcFinding`]s, so the load driver can bucket them by rule id (not by "first
+/// error seen"). Marks each covering waiver used (read `WaiverState::used`
+/// after, per campaign). `attr` is the lane's party attribution.
+pub(crate) fn apply_waivers_findings(
+    events: &[Stamped<SignalingNetworkEvent>],
+    waivers: &[WaiverState],
+    attr: &Attribution,
+) -> Vec<RfcFinding> {
+    survivors(events, waivers, attr)
 }
 
 /// The declared waivers that filtered NOTHING and are not `conditional` — an

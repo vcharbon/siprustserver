@@ -49,6 +49,7 @@ pub mod rate;
 pub mod report;
 pub mod scenarios;
 pub mod scope;
+pub mod waiver;
 
 pub use case::{DwellOverrides, LoadCase, ResolvedCall};
 pub use chaos::{ChaosLog, ChaosTag};
