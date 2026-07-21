@@ -385,6 +385,7 @@ impl ShapePlan {
         
             waivers: Vec::new(),
             automatics: Default::default(),
+            ceiling: None,
         })
     }
 
