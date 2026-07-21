@@ -9,7 +9,10 @@ use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
     StackDialog,
 };
-use sip_message::{SipHeader, SipMessage};
+use sip_message::{
+    apply_name_forms, apply_remote_target_emits, DelayedAutomatic, EmitOpts, MessageTemplate,
+    SipHeader, SipMessage,
+};
 
 use super::client_invite::ClientInvite;
 use super::Agent;
@@ -19,6 +22,20 @@ pub struct Invite<'a> {
     caller: &'a Agent,
     peer: &'a Agent,
     sdp: Option<String>,
+    /// Raw body bytes from a [`MessageTemplate`] (overrides `sdp` when set) — the
+    /// captured payload emitted verbatim, its Content-Type carried as a frozen
+    /// header rather than stamped by the generator.
+    template_body: Option<Vec<u8>>,
+    /// A template body carried NO Content-Type: suppress the generator's default
+    /// `application/sdp` stamp so a captured bodyless-typed / non-SDP payload
+    /// replays with the Content-Type the capture actually had (none).
+    suppress_default_ct: bool,
+    /// `(canonical, wire)` name-forms for the stack-regenerated headers the
+    /// capture wrote compact (`("Via","v")`, …) — applied to the WIRE copy only.
+    name_forms: Vec<(String, String)>,
+    /// `(canonical, captured_value)` remote-target headers (Contact) whose
+    /// captured user + params ride the bound socket's host:port — WIRE copy only.
+    remote_emits: Vec<(String, String)>,
     extra_headers: Vec<SipHeader>,
     /// Wire destination override — the INVITE is *addressed* to `peer` (its
     /// Contact is the Request-URI) but *sent* here. Set by [`Invite::through`]
@@ -30,6 +47,9 @@ pub struct Invite<'a> {
     from_uri: Option<String>,
     to_uri: Option<String>,
     request_uri: Option<String>,
+    /// A declared `delayed-automatic` deviation carried onto the
+    /// [`ClientInvite`] (honoured by `ack`/`ack_delayed`).
+    delayed_automatic: Option<DelayedAutomatic>,
 }
 
 impl<'a> Invite<'a> {
@@ -38,17 +58,68 @@ impl<'a> Invite<'a> {
             caller,
             peer,
             sdp: None,
+            template_body: None,
+            suppress_default_ct: false,
+            name_forms: vec![],
+            remote_emits: vec![],
             extra_headers: vec![],
             wire_dst: None,
             from_uri: None,
             to_uri: None,
             request_uri: None,
+            delayed_automatic: None,
         }
     }
 
     /// Attach an SDP offer body.
     pub fn with_sdp(mut self, sdp: &str) -> Self {
         self.sdp = Some(sdp.to_string());
+        self
+    }
+
+    /// Declare a `delayed-automatic` deviation carried onto the resulting
+    /// [`ClientInvite`]: its `ack`/`ack_delayed` holds the automatic ACK-to-2xx
+    /// for this long (the peer retransmits the 2xx meanwhile). Sugar over
+    /// [`DelayedAutomatic::ack_after`].
+    pub fn delayed_ack(mut self, delay: std::time::Duration) -> Self {
+        self.delayed_automatic = Some(DelayedAutomatic::ack_after(delay.as_millis() as u64));
+        self
+    }
+
+    /// Emit this INVITE from a captured [`MessageTemplate`]: the stack
+    /// regenerates the tier-1 dialog fields (Via + branch, Call-ID, From/To tags,
+    /// CSeq, Max-Forwards, Content-Length, Contact, Request-URI) while every
+    /// frozen header rides verbatim (value bytes, name casing, duplicate-header
+    /// layout). The captured body is emitted as-is; its `Content-Type`, being a
+    /// frozen header, is carried rather than stamped by the generator.
+    ///
+    /// The template's start line must be a request of method `INVITE`. See
+    /// [`EmitOpts`] for the v1 header-order limitation. Automatic/dedicated-
+    /// primitive messages (`ACK`/`CANCEL`) take no template in v1 (see
+    /// [`MessageTemplate`]).
+    pub fn template(mut self, tmpl: &MessageTemplate, opts: EmitOpts) -> Self {
+        // v1: casing + duplicate-header layout are always preserved for frozen
+        // headers; `preserve_order` requests nothing further yet (see EmitOpts).
+        let EmitOpts { preserve_order: _ } = opts;
+        assert!(
+            matches!(tmpl.method(), Some(sip_message::Method::Invite)),
+            "Invite::template requires an INVITE request template, got {:?}",
+            tmpl.start()
+        );
+        let frozen = tmpl.frozen_headers();
+        // Intentionally LITERAL (not compact-aware): a frozen compact `c:` does
+        // not match "content-type" here, so suppress=true and the generator's
+        // added full Content-Type default is stripped below while the frozen `c:`
+        // survives (a compact-aware probe would wrongly leave both).
+        self.suppress_default_ct =
+            !frozen.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
+        // Append AFTER any prior `with_header` entries — never drop them.
+        self.extra_headers.extend(frozen);
+        self.template_body = Some(tmpl.body().to_vec());
+        // Compact wire name-forms for the stack-regenerated headers (Via/From/…).
+        self.name_forms = tmpl.regenerated_name_forms();
+        // Remote-target (Contact) captured user + params over the bound host:port.
+        self.remote_emits = tmpl.remote_target_emits();
         self
     }
 
@@ -120,12 +191,28 @@ impl<'a> Invite<'a> {
             via: Some(caller.via()),
             contact: Some(caller.contact()),
             max_forwards: Some(70),
-            body: self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
+            // A captured template body (raw bytes, any Content-Type) overrides
+            // the SDP-string offer; its Content-Type rides as a frozen header.
+            body: self
+                .template_body
+                .clone()
+                .or_else(|| self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec))
+                .unwrap_or_default(),
             content_type: None,
             extra_headers: self.extra_headers.clone(),
         };
-        let invite = generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
-        caller.send(&SipMessage::Request(invite.clone()), wire_dst).await;
+        let mut invite = generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
+        if self.suppress_default_ct {
+            invite.headers =
+                sip_message::message_helpers::remove_header(&invite.headers, "content-type");
+        }
+        // Send a WIRE copy with the captured compact names on the tier-1 lines;
+        // `invite` keeps canonical names so the §17.1.1.3 ACK / §9.1 CANCEL
+        // header lookups (get_header, not compact-aware) still resolve.
+        let mut wire = invite.clone();
+        wire.headers = apply_name_forms(&invite.headers, &self.name_forms);
+        wire.headers = apply_remote_target_emits(&wire.headers, &self.remote_emits);
+        caller.send(&SipMessage::Request(wire), wire_dst).await;
 
         let dialog = StackDialog {
             call_id,
@@ -144,6 +231,7 @@ impl<'a> Invite<'a> {
             original_invite: invite,
             dialog,
             fork_cseq: HashMap::new(),
+            delayed_automatic: self.delayed_automatic,
         }
     }
 }

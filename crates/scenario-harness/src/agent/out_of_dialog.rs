@@ -7,7 +7,10 @@ use std::net::SocketAddr;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
-use sip_message::{SipHeader, SipMessage, SipResponse};
+use sip_message::{
+    apply_name_forms, apply_remote_target_emits, EmitOpts, MessageTemplate, SipHeader, SipMessage,
+    SipResponse,
+};
 
 use super::client_txn::recv_response_raw;
 use super::dialog::InDialogTxn;
@@ -27,6 +30,15 @@ pub struct OutOfDialogRequest<'a> {
     /// Content-Type for a non-empty body (defaults to `application/sdp`).
     content_type: Option<String>,
     extra_headers: Vec<SipHeader>,
+    /// A template body carried NO Content-Type: suppress the generator's default
+    /// `application/sdp` stamp (see [`Invite::template`](super::Invite::template)).
+    suppress_default_ct: bool,
+    /// `(canonical, wire)` name-forms for stack-regenerated headers the capture
+    /// wrote compact — applied to the WIRE copy only.
+    name_forms: Vec<(String, String)>,
+    /// `(canonical, captured_value)` remote-target headers (Contact) — captured
+    /// user + params over the bound socket's host:port; WIRE copy only.
+    remote_emits: Vec<(String, String)>,
     /// Wire destination override (send via a proxy/SUT; R-URI still targets peer).
     wire_dst: Option<SocketAddr>,
     from_uri: Option<String>,
@@ -43,6 +55,9 @@ impl<'a> OutOfDialogRequest<'a> {
             body: None,
             content_type: None,
             extra_headers: vec![],
+            suppress_default_ct: false,
+            name_forms: vec![],
+            remote_emits: vec![],
             wire_dst: None,
             from_uri: None,
             to_uri: None,
@@ -67,6 +82,40 @@ impl<'a> OutOfDialogRequest<'a> {
     /// Attach an arbitrary extra header. Repeatable; order preserved.
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
         self.extra_headers.push(SipHeader { name: name.to_string(), value: value.to_string() });
+        self
+    }
+
+    /// Emit this out-of-dialog request from a captured [`MessageTemplate`]: freeze
+    /// the template's non-tier-1 headers (verbatim value/casing/duplicate layout)
+    /// and its body, leaving the stack to regenerate the mechanical fields (Via +
+    /// branch, Call-ID, From-tag, CSeq, Max-Forwards, Content-Length, Contact).
+    /// The template's request method must match this builder's method; the
+    /// captured `Content-Type` rides as a frozen header. See [`EmitOpts`] for the
+    /// v1 header-order limitation.
+    pub fn template(mut self, tmpl: &MessageTemplate, opts: EmitOpts) -> Self {
+        // v1: casing + duplicate-header layout are always preserved for frozen
+        // headers; `preserve_order` requests nothing further yet (see EmitOpts).
+        let EmitOpts { preserve_order: _ } = opts;
+        assert_eq!(
+            tmpl.method().and_then(|m| OutOfDialogMethod::try_from(m).ok()),
+            Some(self.method),
+            "OutOfDialogRequest::template method mismatch: builder is {:?}, template is {:?}",
+            self.method,
+            tmpl.start()
+        );
+        let frozen = tmpl.frozen_headers();
+        // Intentionally LITERAL (not compact-aware): a frozen compact `c:` does
+        // not match "content-type" here, so suppress=true and the generator's
+        // added full Content-Type default is stripped below while the frozen `c:`
+        // survives (a compact-aware probe would wrongly leave both).
+        self.suppress_default_ct =
+            !frozen.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
+        // Append AFTER any prior `with_header` entries — never drop them.
+        self.extra_headers.extend(frozen);
+        self.body = Some(tmpl.body().to_vec());
+        self.content_type = None;
+        self.name_forms = tmpl.regenerated_name_forms();
+        self.remote_emits = tmpl.remote_target_emits();
         self
     }
 
@@ -122,15 +171,22 @@ impl<'a> OutOfDialogRequest<'a> {
             content_type: self.content_type,
             extra_headers: self.extra_headers,
         };
-        let req = generate_out_of_dialog_request(self.method, &opts);
-        let msg = SipMessage::Request(req);
-        caller.try_send(&msg, wire_dst).await?;
-        let SipMessage::Request(request) = msg else { unreachable!() };
+        let mut req = generate_out_of_dialog_request(self.method, &opts);
+        if self.suppress_default_ct {
+            req.headers =
+                sip_message::message_helpers::remove_header(&req.headers, "content-type");
+        }
+        // Send a WIRE copy with the captured compact names; retain canonical
+        // `req` for the §17.1.1.3 ACK (its get_header lookups are not compact-aware).
+        let mut wire = req.clone();
+        wire.headers = apply_name_forms(&req.headers, &self.name_forms);
+        wire.headers = apply_remote_target_emits(&wire.headers, &self.remote_emits);
+        caller.try_send(&SipMessage::Request(wire), wire_dst).await?;
         Ok(InDialogTxn::new(
             caller.clone(),
             // An out-of-dialog INVITE's non-2xx final takes a txn-layer ACK
             // (§17.1.1.3) — retain the request so the txn can build it.
-            matches!(self.method, OutOfDialogMethod::Invite).then_some(request),
+            matches!(self.method, OutOfDialogMethod::Invite).then_some(req),
             wire_dst,
         ))
     }
@@ -181,7 +237,13 @@ impl<'a> OutOfDialogRequest<'a> {
         // At most ONE authenticated resend.
         let mut auth_retries_left: u8 = if responder.is_some() { 1 } else { 0 };
         loop {
-            let req = generate_out_of_dialog_request(method, &opts);
+            let mut req = generate_out_of_dialog_request(method, &opts);
+            if self.suppress_default_ct {
+                req.headers =
+                    sip_message::message_helpers::remove_header(&req.headers, "content-type");
+            }
+            req.headers = apply_name_forms(&req.headers, &self.name_forms);
+            req.headers = apply_remote_target_emits(&req.headers, &self.remote_emits);
             caller.try_send(&SipMessage::Request(req), wire_dst).await?;
             // Raw-receive so a 401/407 keeps its challenge header (a real digest
             // responder reads `nonce`/`realm` off it); a matching final returns

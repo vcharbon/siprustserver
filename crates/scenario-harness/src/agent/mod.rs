@@ -63,6 +63,7 @@ mod rr_fold;
 mod run_guards;
 mod server_txn;
 mod step;
+pub(crate) mod waiver;
 #[cfg(test)]
 mod tests;
 mod tolerant_recv;
@@ -79,6 +80,7 @@ pub use rr_fold::RecordRouteFold;
 pub use server_txn::{Respond, ServerTxn};
 pub use step::StepError;
 pub use ua::{Agent, Inbound};
+pub use waiver::WaiverScope;
 
 // Crate-internal seams: the Send agent factory (`loadbind`) and the shared-
 // socket callee group construct `Agent`s directly; the reactive actor

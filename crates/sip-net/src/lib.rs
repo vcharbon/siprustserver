@@ -27,8 +27,8 @@ pub use contracts::{
     SignalingNetworkEvent, WrappedNetwork, SIGNALING_TAG,
 };
 pub use rfc_audit::{
-    bind_roles_of, evaluate_rfc_findings, rfc_cross_message_rules, rfc_peer_rules,
-    CSeqInDialogOrderRule, RfcFinding,
+    audit_wire_entries, bind_roles_of, evaluate_rfc_findings, rfc_cross_message_rules,
+    rfc_peer_rules, CSeqInDialogOrderRule, RfcFinding,
 };
 pub use loss::RandomLoss;
 pub use net::{SignalingNetwork, UdpEndpoint};

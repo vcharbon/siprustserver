@@ -2048,6 +2048,9 @@ impl ActorScenario for ByeWithContact {
                     on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
             ActorSpec {
                 role: "bob",
@@ -2058,6 +2061,9 @@ impl ActorScenario for ByeWithContact {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed { on_ack_rx: Feed::new(None, Some("connected")), ..CtxFeed::default() },
+            
+                cseq: None,
+                delayed: None,
             },
         ];
         let plan = vec![phase("established", |s: &StateInner| {
@@ -2068,6 +2074,10 @@ impl ActorScenario for ByeWithContact {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
+        
+            waivers: Vec::new(),
+            automatics: Default::default(),
+            ceiling: None,
         })
     }
 }
@@ -2200,6 +2210,9 @@ impl ActorScenario for NumberPlanRefer {
                     on_answer_rx: Feed::new(Some("time_to_200"), None),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
             // Bob rings then answers, then — established + a talk dwell — REFERs
             // the call to the number-addressed xfer leg.
@@ -2219,6 +2232,9 @@ impl ActorScenario for NumberPlanRefer {
                     on_refer_accepted: Feed::new(Some("time_to_202"), Some("referred")),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
             // The number-addressed transfer target answers the transfer INVITE
             // (180 then an immediate 200) and the c-realign re-INVITE reactively.
@@ -2234,6 +2250,9 @@ impl ActorScenario for NumberPlanRefer {
                     on_answer_sent: Feed::new(Some("time_to_charlie_200"), Some("transferred")),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
         ];
 
@@ -2250,6 +2269,10 @@ impl ActorScenario for NumberPlanRefer {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
+        
+            waivers: Vec::new(),
+            automatics: Default::default(),
+            ceiling: None,
         })
     }
 }

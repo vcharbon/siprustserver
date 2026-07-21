@@ -152,6 +152,10 @@ struct Inner {
     /// `(passed_all, failed_any)`. Fed only for calls whose attached case had
     /// checks that were actually evaluated (sampled OK/check-fail calls).
     check_verdicts: BTreeMap<ScenarioId, (u64, u64)>,
+    /// Per-scenario structural-waiver campaign tally (ADR-0024 §6): a waiver's
+    /// "was ever used" OR-aggregated across the scenario's sampled calls, so the
+    /// unused-waiver gate is per CAMPAIGN, never per call.
+    waivers: BTreeMap<ScenarioId, crate::waiver::CampaignWaivers>,
 }
 
 /// The bounded-memory load-test reporter. Cloneable handle via `Arc`.
@@ -209,6 +213,35 @@ impl Reporter {
     }
 
     /// `(received, expected)` for the cross-call 18x-delivery gate.
+    /// Fold one sampled call's per-waiver used mask into its scenario's CAMPAIGN
+    /// tally (ADR-0024 §6). `waivers` is the call's stable merged waiver list
+    /// (case + plan); `used` is aligned to it. Idempotent to call on an
+    /// unsampled call (its mask is all-false → a no-op).
+    pub fn record_waiver_use(&self, scenario: ScenarioId, waivers: &[scenario_harness::WaiverScope], used: &[bool]) {
+        if waivers.is_empty() {
+            return;
+        }
+        let mut g = self.inner.lock().unwrap();
+        g.waivers
+            .entry(scenario)
+            .or_insert_with(|| crate::waiver::CampaignWaivers::new(waivers.to_vec()))
+            .record(used);
+    }
+
+    /// The stale non-conditional waivers per scenario at campaign end (unused all
+    /// run long) — `(scenario, rule, justification)`, surfaced by the runner.
+    pub fn unused_waivers(&self) -> Vec<(ScenarioId, String, String)> {
+        let g = self.inner.lock().unwrap();
+        g.waivers
+            .iter()
+            .flat_map(|(id, cw)| {
+                cw.unused()
+                    .into_iter()
+                    .map(move |w| (*id, w.rule.clone(), w.justification.clone()))
+            })
+            .collect()
+    }
+
     pub fn ringing_totals(&self) -> (u64, u64) {
         (
             self.ringing_received.load(Ordering::Relaxed),
@@ -710,6 +743,7 @@ mod tests {
             lane: "10.0.0.1:5060".to_string(),
             detail: detail.to_string(),
             advisory: false,
+            offending: None,
         }])
     }
 

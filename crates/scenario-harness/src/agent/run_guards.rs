@@ -4,14 +4,27 @@
 //! runs the same gate inline and disarms both.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::rc::Rc;
 
 use layer_harness::{Channel, Recorder};
 use sip_net::{to_sip_entries, SignalingNetworkEvent};
 
+use super::waiver::{apply_waivers, WaiverState};
 use crate::report::wire::{facets, format_relative};
+
+/// The recorder's addr → party-name map (first name per bind) — resolves the
+/// `from_lane` bind key on a recorded entry to the emitting party for waiver
+/// attribution.
+pub(super) fn addr_names(recorder: &Recorder) -> HashMap<SocketAddr, String> {
+    recorder
+        .snapshot()
+        .lanes
+        .into_iter()
+        .map(|l| (l.addr, l.names.first().cloned().unwrap_or_default()))
+        .collect()
+}
 
 /// The RFC 3261 / 3262 / 3264 audit findings over a recorded trace that MUST
 /// fail the test — the `(lane, detail)` pairs the hard gate panics on. Runs the
@@ -21,7 +34,9 @@ use crate::report::wire::{facets, format_relative};
 ///   - any finding whose rule `subject()` does not intersect the originating
 ///     bind's declared roles (default = all roles, so this only narrows when a
 ///     test sets roles);
-///   - any rule a test explicitly waived via
+///   - any finding a test waived via a scoped
+///     [`WaiverScope`](super::WaiverScope) (attributed to the emitting party via
+///     the recorder's `from_lane`), including the coarse
 ///     [`Harness::allow_violation`](super::Harness::allow_violation).
 ///
 /// ONLY the audit rules run here (the structural layer-close anomalies —
@@ -31,17 +46,15 @@ use crate::report::wire::{facets, format_relative};
 /// per-test opt-in. Empty ⇒ clean.
 pub(super) fn rfc_hard_gate_findings(
     events: &[layer_harness::Stamped<SignalingNetworkEvent>],
-    allow: &HashSet<String>,
+    waivers: &[WaiverState],
+    addr_names: &HashMap<SocketAddr, String>,
 ) -> Vec<(String, String)> {
-    // One shared evaluator (sip-net) runs the suite with subject dispatch —
-    // the SAME pass the report projection lists — so the gate and the report
-    // can never disagree on which endpoint a rule applies to. The gate keeps
-    // only the non-advisory, non-waived subset.
-    sip_net::evaluate_rfc_findings(events)
-        .into_iter()
-        .filter(|f| !f.advisory && !allow.contains(&f.rule))
-        .map(|f| (f.lane, f.detail))
-        .collect()
+    // One shared evaluator (sip-net) runs the suite with subject dispatch — the
+    // SAME pass the report projection lists — so the gate and the report can
+    // never disagree on which endpoint a rule applies to. Scoped waivers drop
+    // the covered non-advisory findings (attribution resolves the emitting party
+    // from the recorded `from_lane`).
+    apply_waivers(events, waivers, addr_names)
 }
 
 /// Format the hard-gate panic message listing every RFC audit violation.
@@ -164,18 +177,22 @@ pub(super) struct CseqGate {
     name: String,
     channel: Channel<SignalingNetworkEvent>,
     armed: Cell<bool>,
-    /// Shared with the owning `Harness` so a deliberate-violation waiver
-    /// registered via `allow_violation` is honoured by this Drop backstop too.
-    allow: Rc<RefCell<HashSet<String>>>,
+    /// Shared with the owning `Harness` so scoped waivers registered before
+    /// `finish`/Drop are honoured by this Drop backstop too.
+    waivers: Rc<RefCell<Vec<WaiverState>>>,
+    /// Resolves the emitting party from a recorded `from_lane` for waiver
+    /// attribution (same source the `Harness` uses at `finish`).
+    recorder: Recorder,
 }
 
 impl CseqGate {
     pub(super) fn new(
         name: String,
         channel: Channel<SignalingNetworkEvent>,
-        allow: Rc<RefCell<HashSet<String>>>,
+        waivers: Rc<RefCell<Vec<WaiverState>>>,
+        recorder: Recorder,
     ) -> Self {
-        Self { name, channel, armed: Cell::new(true), allow }
+        Self { name, channel, armed: Cell::new(true), waivers, recorder }
     }
 
     pub(super) fn disarm(&self) {
@@ -190,9 +207,10 @@ impl Drop for CseqGate {
         }
         // Reading the snapshot + running the rules is panic-free in practice, but
         // guard it so a render fault can never turn into a double-panic abort.
-        let allow = self.allow.borrow().clone();
+        let waivers = self.waivers.borrow();
+        let names = addr_names(&self.recorder);
         let findings = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            rfc_hard_gate_findings(&self.channel.snapshot(), &allow)
+            rfc_hard_gate_findings(&self.channel.snapshot(), &waivers, &names)
         })) {
             Ok(f) => f,
             Err(_) => return,

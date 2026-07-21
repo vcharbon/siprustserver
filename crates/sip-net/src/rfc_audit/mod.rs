@@ -112,6 +112,27 @@ pub struct RfcFinding {
     pub detail: String,
     /// `true` ⇒ informational only; `false` ⇒ a gating violation.
     pub advisory: bool,
+    /// The 1-based wire-entry index of the OFFENDING message (into
+    /// [`audit_wire_entries`]) when the rule can pinpoint it — the structural
+    /// reference a scoped waiver attributes on (emitter = that entry's sender,
+    /// position = the index). `None` ⇒ the rule does not (yet) populate it; such
+    /// a finding is unattributable to a party/position and stays gated.
+    pub offending: Option<usize>,
+}
+
+/// The recorded wire entries THE AUDIT SEES — `to_sip_entries` over the
+/// audit-visible events, the SAME view [`evaluate_rfc_findings`] hands the rules,
+/// so a finding's [`RfcFinding::offending`] index lines up with this list.
+/// Consumers scoping waivers on a message position index into it.
+pub fn audit_wire_entries(
+    events: &[Stamped<SignalingNetworkEvent>],
+) -> Vec<crate::report::RecordedSipEntry> {
+    let visible: Vec<Stamped<SignalingNetworkEvent>> = events
+        .iter()
+        .filter(|s| crate::contracts::audit_visible_event(&s.event))
+        .cloned()
+        .collect();
+    crate::report::to_sip_entries(&visible)
 }
 
 /// The declared roles of every bind in a recorded trace, reconstructed from the
@@ -162,13 +183,14 @@ pub fn evaluate_rfc_findings(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<R
     // Cross-message rules — one pass over the whole channel each.
     for rule in rfc_cross_message_rules() {
         let subject = rule.subject();
-        for (bind, detail) in rule.check(events) {
+        for (bind, detail, offending) in rule.check_positioned(events) {
             if subject_hits(&subject, &bind) {
                 findings.push(RfcFinding {
                     rule: rule.name().to_string(),
                     lane: bind,
                     detail,
                     advisory: rule.force_advisory(),
+                    offending,
                 });
             }
         }
@@ -200,6 +222,7 @@ pub fn evaluate_rfc_findings(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<R
                         lane: bind.clone(),
                         detail,
                         advisory: rule.force_advisory(),
+                        offending: None,
                     });
                 }
             }

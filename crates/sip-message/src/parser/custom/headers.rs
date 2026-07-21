@@ -79,6 +79,42 @@ pub struct ParsedHeaders {
     pub content_length: u64,
 }
 
+/// Scan the ordered **as-wire** header names from a raw datagram — RFC 3261
+/// §7.3.3 compact forms are NOT expanded (`v` stays `v`). Mirrors
+/// [`parse_headers`]'s line loop but reads names only (no value validation), so
+/// name-scanning stays a single source of truth. Returns the names in wire
+/// order aligned 1:1 with [`parse_headers`]'s `headers`; an empty Vec when the
+/// start line or any header line is malformed (the caller falls back to
+/// canonical names). Used to recover the captured name-form for near-verbatim
+/// replay after the parser has already canonicalized `SipHeader.name`.
+pub fn scan_header_name_forms(raw: &[u8], limits: &SipParserLimits) -> Vec<String> {
+    let mut s = Scanner::new(raw);
+    if super::start_line::parse_start_line(&mut s, limits).is_err() {
+        return Vec::new();
+    }
+    let mut names: Vec<String> = Vec::new();
+    loop {
+        if s.at_end_of_headers() {
+            s.consume_end_of_headers();
+            break;
+        }
+        if s.pos >= s.buf.len() {
+            break;
+        }
+        let raw_name = match read_header_name(&mut s) {
+            Ok(n) if !n.is_empty() => n,
+            _ => return Vec::new(),
+        };
+        if s.expect(COLON).is_err() {
+            return Vec::new();
+        }
+        s.skip_lws();
+        let _ = s.read_header_value();
+        names.push(raw_name);
+    }
+    names
+}
+
 /// Parse all headers from the current position until the blank line, which is
 /// consumed.
 pub fn parse_headers(s: &mut Scanner, limits: &SipParserLimits) -> Result<ParsedHeaders, SipParseError> {

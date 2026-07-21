@@ -600,8 +600,12 @@ pub fn generate_in_dialog_request(
         // carries through `extra_headers` (e.g. a transparently-relayed re-INVITE
         // whose inbound Allow/Supported are passed through verbatim). Emitting it
         // twice is a malformed-adjacent header (values merge per RFC 3261 §7.3.1).
-        let carried =
-            |name: &str| opts.extra_headers.iter().any(|hdr| hdr.name.eq_ignore_ascii_case(name));
+        // Compact-aware probe: a carried `k:` (compact Supported) must suppress
+        // the stack default, else the replayed re-INVITE advertises capabilities
+        // the capture never carried (RFC 3261 §7.3.3).
+        let carried = |name: &str| {
+            opts.extra_headers.iter().any(|hdr| crate::message_helpers::name_matches(name, &hdr.name))
+        };
         if !carried("Allow") {
             headers.push(h("Allow", B2BUA_ALLOW));
         }

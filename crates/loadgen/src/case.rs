@@ -21,7 +21,7 @@
 //!   the call to `check_fail`; its **allowViolations** exempt the named RFC
 //!   audit rules per call.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
@@ -30,7 +30,7 @@ use e2e_model::checks::Bindings;
 use e2e_model::model::{CheckSet, Input, TestCase, load_test_case};
 use e2e_model::{BindingResolver, CheckVerdict, ResolvedBinding};
 use scenario_harness::realcall::CoreIdentity;
-use scenario_harness::AnchorTag;
+use scenario_harness::{AnchorTag, WaiverScope};
 use sip_net::RecordedSipEntry;
 
 /// The recognized per-call dwell overrides carried in a resolved Input's
@@ -100,8 +100,12 @@ pub struct LoadCase {
     /// The run's Check-set store (`--check-sets-dir`); referenced ids were
     /// validated present at construction.
     check_sets: BTreeMap<String, CheckSet>,
-    /// The case's `allowViolations`, as the set the per-call RFC audit exempts.
-    allow_violations: HashSet<String>,
+    /// The case's `allowViolations`, LOWERED to structural [`WaiverScope`]s
+    /// (ADR-0024 §6): rule-only + `.conditional()`, so filtering matches on the
+    /// rule name alone AND an author's defensive list never trips the
+    /// per-campaign unused-waiver gate (like the functional lane's
+    /// `Harness::allow_violation`).
+    waivers: Vec<WaiverScope>,
     resolver: BindingResolver,
 }
 
@@ -139,7 +143,13 @@ impl LoadCase {
         }
         let resolver = BindingResolver::new(case.input.clone(), case.bindings.clone(), seed);
         Ok(Self {
-            allow_violations: case.allow_violations.iter().cloned().collect(),
+            waivers: case
+                .allow_violations
+                .iter()
+                .map(|rule| {
+                    WaiverScope::rule(rule.clone(), "case allowViolations").conditional()
+                })
+                .collect(),
             // Keep only the sets the case references (bounded per-case store).
             check_sets: case
                 .check_sets
@@ -156,9 +166,10 @@ impl LoadCase {
         &self.case.id
     }
 
-    /// The RFC audit rules this case waives per call (`allowViolations`).
-    pub fn allow_violations(&self) -> &HashSet<String> {
-        &self.allow_violations
+    /// The structural RFC-audit waivers this case declares (its `allowViolations`
+    /// lowered to rule-only conditional [`WaiverScope`]s).
+    pub fn waivers(&self) -> &[WaiverScope] {
+        &self.waivers
     }
 
     /// Does this case bind any checks (inline or via Check sets)?
