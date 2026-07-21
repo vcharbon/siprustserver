@@ -105,15 +105,18 @@ async fn zero_pauses_and_raise_resumes() {
 /// value. (Real loopback TCP — the same hand-rolled server the smoke suite drives.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn post_rate_retargets_the_running_server() {
-    use loadgen::serve_metrics;
+    use loadgen::serve_metrics_on;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let rate = RateHandle::new(10.0);
-    let bind: std::net::SocketAddr = "127.0.0.1:9411".parse().unwrap();
+    // Port-0 bind: a fixed port can collide with an unrelated host listener,
+    // and the retry-connect loop below would then talk to the foreign server.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bind = listener.local_addr().unwrap();
     let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(|| "render-body\n".to_string());
     let srv_rate = rate.clone();
     tokio::spawn(async move {
-        let _ = serve_metrics(bind, render, None, Some(srv_rate)).await;
+        let _ = serve_metrics_on(listener, render, None, Some(srv_rate)).await;
     });
 
     // Retry-connect + one HTTP round-trip helper.

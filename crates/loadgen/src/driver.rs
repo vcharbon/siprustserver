@@ -535,18 +535,16 @@ async fn run_one(
         reinvite_gap: dwells.reinvite_gap.unwrap_or(call.reinvite_gap),
         long_hold: dwells.long_hold.unwrap_or(call.long_hold),
     };
-    // An ACTOR body is joined per-endpoint reactors whose runner owns its own
-    // per-actor teardown scopes (so no outer `CallScope` is needed here); it
-    // yields the `Result<(), StepError>` contract everything downstream —
-    // classification, sampling, phases, the ringing gate — buckets on, inside a
-    // `catch_unwind` boundary (a panic is a counted failure, never a worker abort).
     // The single body-invocation site: an actor scenario rides the per-endpoint
-    // reactor runner, yielding the `Result<(), StepError>` contract inside a
-    // `catch_unwind` boundary (a panic is a counted failure, never a worker abort).
-    // The body is built ONCE here so its declared waivers (ADR-0024 §6) can be
-    // read for the audit, then the BUILT call is run — never built twice. A build
-    // guard error is part of the downstream contract, surfaced as the call's
-    // Result (there is no panic to catch on that arm).
+    // reactor runner (each runner owns its per-actor teardown scopes, so no
+    // outer `CallScope` is needed), yielding the `Result<(), StepError>`
+    // contract everything downstream — classification, sampling, phases, the
+    // ringing gate — buckets on, inside a `catch_unwind` boundary (a panic is a
+    // counted failure, never a worker abort). The body is built ONCE here so
+    // its declared waivers (ADR-0024 §6) can be read for the audit, then the
+    // BUILT call is run — never built twice. A build guard error is part of the
+    // downstream contract, surfaced as the call's Result (there is no panic to
+    // catch on that arm).
     let mut plan_waivers: Vec<WaiverScope> = Vec::new();
     let result = match &body {
         LoadBody::Actor(scenario) => match scenario.build(&env) {
@@ -744,8 +742,20 @@ pub async fn serve_metrics(
     chaos: Option<Arc<ChaosLog>>,
     rate: Option<RateHandle>,
 ) -> std::io::Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_metrics_on(listener, render, chaos, rate).await
+}
+
+/// [`serve_metrics`] over an already-bound listener. Callers that need the
+/// actual bound address — port-0 binds in tests, where a fixed port can
+/// collide with an unrelated listener — bind first and hand the listener over.
+pub async fn serve_metrics_on(
+    listener: tokio::net::TcpListener,
+    render: Arc<dyn Fn() -> String + Send + Sync>,
+    chaos: Option<Arc<ChaosLog>>,
+    rate: Option<RateHandle>,
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     loop {
         let (mut sock, _) = listener.accept().await?;
         let render = render.clone();
