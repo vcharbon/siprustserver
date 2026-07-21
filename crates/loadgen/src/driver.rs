@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use e2e_model::{LegSpec, Scenario, ScenarioInputs, ShapeDescriptor, ShapeRegistry};
 use futures::FutureExt;
-use scenario_harness::{Agent, AgentBinder, EgressPolicy};
+use scenario_harness::{Agent, AgentBinder, EgressPolicy, WaiverScope};
 use sip_clock::Clock;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -108,6 +108,13 @@ pub struct DriverCfg {
     pub tuning: HashMap<String, CallTuning>,
 }
 
+/// A load shape's per-call body: the declarative actor [`Scenario`] the runner
+/// drives. `run_one` invokes it at the single body-invocation site.
+#[derive(Clone)]
+enum LoadBody {
+    Actor(Scenario),
+}
+
 /// One scenario mix entry: the shape's **report/metrics id** + load attributes
 /// (from its [`ShapeDescriptor`] — the shape's ONE declaration), the load body,
 /// its pick weight, and an optional attached Test case
@@ -123,10 +130,10 @@ pub struct MixEntry {
     /// The report/metrics id — the DESCRIPTOR's id (may differ from the body's
     /// intrinsic `id()` when one body serves several shapes, e.g. `basic_call_em`).
     pub id: crate::scenarios::ScenarioId,
-    /// The load body — an ACTOR-declared [`Scenario`] (per-endpoint reactors).
-    /// `run_one` drives it; everything after (teardown, classification,
-    /// sampling) is shared.
-    pub scenario: Scenario,
+    /// The load body — a declarative actor [`Scenario`] the runner drives.
+    /// `run_one` invokes it at the single body-invocation site; everything after
+    /// (teardown, classification, sampling) is shared.
+    body: LoadBody,
     pub weight: f64,
     pub case: Option<Arc<LoadCase>>,
     /// The callee legs bound for this shape's calls
@@ -148,7 +155,7 @@ impl From<(Arc<dyn ActorScenario>, f64)> for MixEntry {
     fn from((scenario, weight): (Arc<dyn ActorScenario>, f64)) -> Self {
         MixEntry {
             id: scenario.id(),
-            scenario,
+            body: LoadBody::Actor(scenario),
             weight,
             case: None,
             legs: LegSpec::historic(false, false),
@@ -167,10 +174,11 @@ impl MixEntry {
         inputs: &ScenarioInputs,
         weight: f64,
     ) -> Option<Self> {
-        let scenario = shape.load_scenario(inputs)?;
+        // The declarative actor scenario (functional-only shapes have none → None).
+        let body = LoadBody::Actor(shape.load_scenario(inputs)?);
         Some(MixEntry {
             id: shape.id,
-            scenario,
+            body,
             weight,
             case: None,
             legs: shape.callee_legs(),
@@ -400,7 +408,7 @@ async fn run_one(
     reporter.inc_inflight();
     let MixEntry {
         id,
-        scenario,
+        body,
         case,
         legs,
         emergency,
@@ -527,15 +535,28 @@ async fn run_one(
         reinvite_gap: dwells.reinvite_gap.unwrap_or(call.reinvite_gap),
         long_hold: dwells.long_hold.unwrap_or(call.long_hold),
     };
-    // An ACTOR body is joined per-endpoint reactors whose runner owns its own
-    // per-actor teardown scopes (so no outer `CallScope` is needed here); it
-    // yields the `Result<(), StepError>` contract everything downstream —
-    // classification, sampling, phases, the ringing gate — buckets on, inside a
-    // `catch_unwind` boundary (a panic is a counted failure, never a worker abort).
-    let result =
-        AssertUnwindSafe(scenario_harness::actor::run_actor_scenario(scenario.as_ref(), &env, &ctx))
-            .catch_unwind()
-            .await;
+    // The single body-invocation site: an actor scenario rides the per-endpoint
+    // reactor runner (each runner owns its per-actor teardown scopes, so no
+    // outer `CallScope` is needed), yielding the `Result<(), StepError>`
+    // contract everything downstream — classification, sampling, phases, the
+    // ringing gate — buckets on, inside a `catch_unwind` boundary (a panic is a
+    // counted failure, never a worker abort). The body is built ONCE here so
+    // its declared waivers (ADR-0024 §6) can be read for the audit, then the
+    // BUILT call is run — never built twice. A build guard error is part of the
+    // downstream contract, surfaced as the call's Result (there is no panic to
+    // catch on that arm).
+    let mut plan_waivers: Vec<WaiverScope> = Vec::new();
+    let result = match &body {
+        LoadBody::Actor(scenario) => match scenario.build(&env) {
+            Ok(call) => {
+                plan_waivers = call.waivers.clone();
+                AssertUnwindSafe(scenario_harness::actor::run_built_actor_call(call, &env, &ctx))
+                    .catch_unwind()
+                    .await
+            }
+            Err(e) => Ok(Err(e)),
+        },
+    };
 
     let failed = !matches!(result, Ok(Ok(())));
     if failed && !call.teardown_quiesce.is_zero() {
@@ -544,22 +565,27 @@ async fn run_one(
         }
     }
 
-    // The per-call audit policy: the attached case's `allowViolations` exempt
-    // those rule names from the RFC hard gate (the load analogue of
-    // `Harness::allow_violation`); no case / empty list = the full audit.
-    static NO_WAIVERS: std::sync::LazyLock<std::collections::HashSet<String>> =
-        std::sync::LazyLock::new(std::collections::HashSet::new);
-    let allow = case.as_ref().map(|c| c.allow_violations()).unwrap_or(&NO_WAIVERS);
+    // The per-call audit policy (ADR-0024 §6): the merged structural waivers —
+    // the attached case's lowered `allowViolations` PLUS the plan's declared
+    // scopes — filter the findings through the `WaiverScope` path (party
+    // attribution over each finding's offending mux sub-lane). Stable per
+    // scenario, so the per-CAMPAIGN unused-waiver tally aligns.
+    let mut merged_waivers: Vec<WaiverScope> =
+        case.as_ref().map(|c| c.waivers().to_vec()).unwrap_or_default();
+    merged_waivers.extend(plan_waivers);
 
     let outcome = match result {
         Ok(Ok(())) => {
-            let findings = binder.rfc_findings(allow);
-            if findings.is_empty() {
+            let wo = binder.rfc_findings(&merged_waivers);
+            // Fold this sampled call's per-waiver use into the CAMPAIGN tally
+            // (never per call — a call exercises only its own branch).
+            reporter.record_waiver_use(id, &merged_waivers, &wo.used);
+            if wo.findings.is_empty() {
                 CallOutcome::Ok
             } else {
                 // Carried structured (not pre-joined) so the report can bucket
                 // the first-N samples by rule id, not by "first rfc error seen".
-                CallOutcome::RfcAuditFail(findings)
+                CallOutcome::RfcAuditFail(wo.findings)
             }
         }
         Ok(Err(e)) => CallOutcome::Step(e),
@@ -716,8 +742,20 @@ pub async fn serve_metrics(
     chaos: Option<Arc<ChaosLog>>,
     rate: Option<RateHandle>,
 ) -> std::io::Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_metrics_on(listener, render, chaos, rate).await
+}
+
+/// [`serve_metrics`] over an already-bound listener. Callers that need the
+/// actual bound address — port-0 binds in tests, where a fixed port can
+/// collide with an unrelated listener — bind first and hand the listener over.
+pub async fn serve_metrics_on(
+    listener: tokio::net::TcpListener,
+    render: Arc<dyn Fn() -> String + Send + Sync>,
+    chaos: Option<Arc<ChaosLog>>,
+    rate: Option<RateHandle>,
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     loop {
         let (mut sock, _) = listener.accept().await?;
         let render = render.clone();
@@ -805,4 +843,24 @@ fn query_get(query: &str, key: &str) -> Option<String> {
         let (k, v) = kv.split_once('=')?;
         (k == key && !v.is_empty()).then(|| v.to_string())
     })
+}
+
+#[cfg(test)]
+mod load_body_tests {
+    use super::*;
+
+    /// The load driver mints the declarative actor body from a shape that
+    /// declares one, and nothing from a functional-only shape.
+    #[test]
+    fn from_shape_mints_the_actor_body() {
+        let inputs = ScenarioInputs::default();
+
+        let actor = ShapeDescriptor::new("act")
+            .load_shared(Arc::new(scenario_harness::actor::scenarios::BasicCall));
+        let ae = MixEntry::from_shape(&actor, &inputs, 1.0).expect("actor shape has a body");
+        assert!(matches!(ae.body, LoadBody::Actor(_)), "actor shape → actor body");
+
+        let bare = ShapeDescriptor::new("bare");
+        assert!(MixEntry::from_shape(&bare, &inputs, 1.0).is_none(), "functional-only shape has no body");
+    }
 }

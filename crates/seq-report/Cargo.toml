@@ -13,3 +13,8 @@ workspace = true
 # serde stays the ONLY dependency (external, cycle-free): the neutral SeqDoc is
 # the persisted diagram half of the E2E result.json (ADR-0018 Phase F).
 serde = { workspace = true }
+
+[dev-dependencies]
+# Tests only: the normalized-projection contract is "serialize identically", so
+# the normalize tests compare/inspect JSON. Not a production dependency.
+serde_json = { workspace = true }

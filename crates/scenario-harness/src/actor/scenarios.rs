@@ -126,6 +126,9 @@ impl ActorScenario for Refer {
                     on_answer_rx: Feed::new(Some("time_to_200"), None),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
             // Bob rings then answers, then — established + a realistic talk
             // dwell — REFERs the call to charlie. His REFER-progress NOTIFYs
@@ -146,6 +149,9 @@ impl ActorScenario for Refer {
                     on_refer_accepted: Feed::new(Some("time_to_202"), Some("referred")),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
             // Charlie answers the transfer INVITE (180 then an immediate 200,
             // the linear shape) and the c-realign re-INVITE reactively.
@@ -161,6 +167,9 @@ impl ActorScenario for Refer {
                     on_answer_sent: Feed::new(Some("time_to_charlie_200"), Some("transferred")),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
         ];
 
@@ -183,6 +192,10 @@ impl ActorScenario for Refer {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
+        
+            waivers: Vec::new(),
+            automatics: Default::default(),
+            ceiling: None,
         })
     }
 }
@@ -262,6 +275,9 @@ impl ActorScenario for ReferCharlieReject {
                     on_answer_rx: Feed::new(Some("time_to_200"), None),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
             // Bob rings then answers, then REFERs the call to charlie; his
             // REFER-progress NOTIFYs (incl. the failure sipfrag) are answered
@@ -279,6 +295,9 @@ impl ActorScenario for ReferCharlieReject {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
+            
+                cseq: None,
+                delayed: None,
             },
             // Charlie DECLINES the transfer INVITE with 603 (the contract's
             // TransferDeclined outcome).
@@ -291,6 +310,9 @@ impl ActorScenario for ReferCharlieReject {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
+            
+                cseq: None,
+                delayed: None,
             },
         ];
 
@@ -310,6 +332,10 @@ impl ActorScenario for ReferCharlieReject {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::TransferDeclined,
+        
+            waivers: Vec::new(),
+            automatics: Default::default(),
+            ceiling: None,
         })
     }
 }
@@ -374,6 +400,9 @@ impl ActorScenario for ReroutingPrack {
                     on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
             // The primary callee REJECTS its b-leg (486), triggering the SUT's
             // failover to bob2. Its reject-ACK is absorbed without confirming.
@@ -386,6 +415,9 @@ impl ActorScenario for ReroutingPrack {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
+            
+                cseq: None,
+                delayed: None,
             },
             // The rerouted winning leg answers RELIABLY (183/PRACK/200/ACK).
             ActorSpec {
@@ -403,6 +435,9 @@ impl ActorScenario for ReroutingPrack {
                     on_ack_rx: Feed::new(None, Some("connected")),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
         ];
 
@@ -418,6 +453,10 @@ impl ActorScenario for ReroutingPrack {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
+        
+            waivers: Vec::new(),
+            automatics: Default::default(),
+            ceiling: None,
         })
     }
 }
@@ -476,6 +515,9 @@ impl ActorScenario for PrackUpdate {
                     on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
             // Bob answers RELIABLY (183/PRACK/200/ACK) and reacts to the UPDATE
             // (200 + SDP) reactively; his ACK receipt stamps `connected`.
@@ -491,6 +533,9 @@ impl ActorScenario for PrackUpdate {
                     on_ack_rx: Feed::new(None, Some("connected")),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
         ];
 
@@ -503,6 +548,10 @@ impl ActorScenario for PrackUpdate {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
+        
+            waivers: Vec::new(),
+            automatics: Default::default(),
+            ceiling: None,
         })
     }
 }
@@ -553,6 +602,9 @@ impl ActorScenario for Reinvite {
                     on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
             // Bob rings then answers, then answers alice's re-INVITE (200 + SDP)
             // reactively; his ACK receipt stamps `connected`, and receiving the
@@ -569,6 +621,9 @@ impl ActorScenario for Reinvite {
                     on_ack_rx: Feed::new(None, Some("connected")),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
         ];
 
@@ -579,6 +634,10 @@ impl ActorScenario for Reinvite {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
+        
+            waivers: Vec::new(),
+            automatics: Default::default(),
+            ceiling: None,
         })
     }
 }
@@ -629,6 +688,9 @@ impl ActorScenario for OptionsHold {
                     on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
             ActorSpec {
                 role: "bob",
@@ -642,6 +704,9 @@ impl ActorScenario for OptionsHold {
                     on_ack_rx: Feed::new(None, Some("connected")),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
         ];
 
@@ -652,6 +717,10 @@ impl ActorScenario for OptionsHold {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
+        
+            waivers: Vec::new(),
+            automatics: Default::default(),
+            ceiling: None,
         })
     }
 }
@@ -704,6 +773,9 @@ impl ActorScenario for LongCall {
                     on_bye_ok: Feed::new(Some("time_to_bye_200"), None),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
             ActorSpec {
                 role: "bob",
@@ -717,6 +789,9 @@ impl ActorScenario for LongCall {
                     on_ack_rx: Feed::new(None, Some("connected")),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
         ];
 
@@ -727,6 +802,10 @@ impl ActorScenario for LongCall {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
+        
+            waivers: Vec::new(),
+            automatics: Default::default(),
+            ceiling: None,
         })
     }
 }
@@ -766,6 +845,9 @@ impl ActorScenario for InviteReject {
                 via: None,
                 // NO phases / checkpoints / ringing gate (contract table §5.8).
                 feed: CtxFeed::default(),
+            
+                cseq: None,
+                delayed: None,
             },
             // Bob rejects the initial INVITE with 486; its reject-ACK is absorbed
             // without confirming.
@@ -778,6 +860,9 @@ impl ActorScenario for InviteReject {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
+            
+                cseq: None,
+                delayed: None,
             },
         ];
 
@@ -789,6 +874,10 @@ impl ActorScenario for InviteReject {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::Reject(486),
+        
+            waivers: Vec::new(),
+            automatics: Default::default(),
+            ceiling: None,
         })
     }
 }
@@ -835,6 +924,9 @@ impl ActorScenario for AbandonRinging {
                     on_provisional: Feed::new(Some("time_to_180"), None),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
             // Bob rings (180) then would answer — but the CANCEL arrives first, so
             // his CANCEL reactor 200s the CANCEL + 487s the held INVITE and reaps.
@@ -847,6 +939,9 @@ impl ActorScenario for AbandonRinging {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
+            
+                cseq: None,
+                delayed: None,
             },
         ];
 
@@ -858,6 +953,10 @@ impl ActorScenario for AbandonRinging {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::AbandonedEarly,
+        
+            waivers: Vec::new(),
+            automatics: Default::default(),
+            ceiling: None,
         })
     }
 }
@@ -902,6 +1001,9 @@ impl ActorScenario for BasicCall {
                     on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
             ActorSpec {
                 role: "bob",
@@ -915,6 +1017,9 @@ impl ActorScenario for BasicCall {
                     on_ack_rx: Feed::new(None, Some("connected")),
                     ..CtxFeed::default()
                 },
+            
+                cseq: None,
+                delayed: None,
             },
         ];
 
@@ -925,6 +1030,10 @@ impl ActorScenario for BasicCall {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
+        
+            waivers: Vec::new(),
+            automatics: Default::default(),
+            ceiling: None,
         })
     }
 }

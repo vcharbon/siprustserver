@@ -2,11 +2,16 @@
 //! the [`Respond`] builder (To-tag minting, SDP answer, reliable 18x,
 //! Record-Route echo folding, §17.1.1.3 ACK-obligation arming).
 
+use std::collections::{HashMap, HashSet};
+
 use sip_message::generators::{
     generate_response, GenerateResponseOpts, StackDialog, B2BUA_ALLOW, B2BUA_SUPPORTED,
 };
 use sip_message::message_helpers::{extract_contact_uri, get_header, get_headers};
-use sip_message::{SipHeader, SipMessage, SipRequest};
+use sip_message::{
+    apply_name_forms, apply_remote_target_emits, EmitOpts, MatchOpts, MessageTemplate, Mismatch,
+    SipHeader, SipMessage, SipRequest,
+};
 
 use super::addressing::{next_hop, top_via_addr, top_via_branch};
 use super::dialog::Dialog;
@@ -21,6 +26,21 @@ pub struct ServerTxn {
     pub(super) request: SipRequest,
     to_tag: Option<String>,
     route_set: Vec<String>,
+    /// Early-dialog id → its minted To-tag. On ONE INVITE server transaction a
+    /// UAS drives several early dialogs (a simulated downstream fork), each an
+    /// id mapped to a distinct To-tag (RFC 3261 §12.1.2).
+    early_tags: HashMap<String, String>,
+    /// Early-dialog ids that have emitted at least one provisional. A winner may
+    /// only be one the caller actually saw an early dialog for; guards `win`.
+    emitted_early: HashSet<String>,
+    /// The declared winning early-dialog id, once `win` is called. A second,
+    /// different winner or a forked 2xx with none declared is a silent misuse
+    /// the wire audit cannot catch (both are wire-legal) — the surface rejects it.
+    winner: Option<String>,
+    /// This transaction's final response status, once one is sent. A new 1xx or a
+    /// different final after it is rejected here; a same-status retransmission
+    /// (RFC 3261 §13.3.1.4) is allowed through.
+    final_status: Option<u16>,
 }
 
 impl ServerTxn {
@@ -33,12 +53,38 @@ impl ServerTxn {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        ServerTxn { agent, request, to_tag: None, route_set }
+        ServerTxn {
+            agent,
+            request,
+            to_tag: None,
+            route_set,
+            early_tags: HashMap::new(),
+            emitted_early: HashSet::new(),
+            winner: None,
+            final_status: None,
+        }
     }
 
     /// The received request (for inspecting headers / SDP).
     pub fn request(&self) -> &SipRequest {
         &self.request
+    }
+
+    /// Assert this received request matches `tmpl` under the tiered match model
+    /// ([`MessageTemplate::match_inbound`]): tier-1 fields structural-only,
+    /// remote-target headers compared by params modulo `opts.ignore_params`,
+    /// frozen headers + body byte-compared. Returns the first [`Mismatch`].
+    /// The response-side equivalent is `tmpl.match_inbound(&SipMessage::Response(resp), opts)`
+    /// on the response a client transaction's `expect` returned.
+    // `Mismatch` is a rich diagnostic value, returned by-value so it reads
+    // directly in an assertion / test failure (see `match_inbound`).
+    #[allow(clippy::result_large_err)]
+    pub fn expect_template(
+        &self,
+        tmpl: &MessageTemplate,
+        opts: &MatchOpts,
+    ) -> Result<(), Mismatch> {
+        tmpl.match_inbound(&SipMessage::Request(self.request.clone()), opts)
     }
 
     /// Send a response. Returns a builder for attaching an SDP answer and/or
@@ -49,9 +95,32 @@ impl ServerTxn {
             status,
             reason: reason.to_string(),
             sdp: None,
+            template_body: None,
+            suppress_default_ct: false,
+            name_forms: vec![],
+            remote_emits: vec![],
             extra_headers: vec![],
             to_tag: None,
         }
+    }
+
+    /// Answer this request from a captured [`MessageTemplate`]: the status /
+    /// reason come from the template's response start line; the stack regenerates
+    /// the echoed tier-1 fields (Via, From, To + minted tag, Call-ID, CSeq,
+    /// Contact, Content-Length) while every frozen header rides verbatim (value
+    /// bytes, name casing, duplicate-header layout). The captured `Content-Type`
+    /// is carried as a frozen header. Panics if the template is not a response.
+    /// See [`EmitOpts`] for the v1 header-order limitation.
+    pub fn respond_template<'t>(
+        &'t mut self,
+        tmpl: &MessageTemplate,
+        opts: EmitOpts,
+    ) -> Respond<'t> {
+        let (status, reason) = tmpl
+            .status()
+            .unwrap_or_else(|| panic!("respond_template requires a response template, got {:?}", tmpl.start()));
+        let reason = reason.to_string();
+        self.respond(status, &reason).template(tmpl, opts)
     }
 
     /// Assert the §17.1.1.3 hop ACK for THIS transaction's non-2xx final.
@@ -123,6 +192,74 @@ impl ServerTxn {
         self.to_tag = Some(tag.to_string());
     }
 
+    /// Open (or return) the early dialog `early_id` on THIS INVITE server
+    /// transaction: mint a distinct To-tag the first time it is named, stable
+    /// thereafter. A UAS drives arbitrary early dialogs by tagging its
+    /// provisionals with these — a simulated downstream fork presenting several
+    /// early dialogs to the caller on one server transaction (RFC 3261 §12.1.2).
+    pub fn early_tag(&mut self, early_id: &str) -> String {
+        if let Some(t) = self.early_tags.get(early_id) {
+            return t.clone();
+        }
+        let tag = self.agent.tag();
+        self.early_tags.insert(early_id.to_string(), tag.clone());
+        tag
+    }
+
+    /// Send a provisional (18x) on the early dialog `early_id`: its To-tag is
+    /// pinned via [`Respond::with_to_tag`] (which does NOT disturb the sticky
+    /// winner tag). Chain `.with_sdp` / `.reliable` / `.with_header`. The order of
+    /// early dialogs is arbitrary — the winner need not be the last created.
+    pub fn respond_early(&mut self, early_id: &str, status: u16, reason: &str) -> Respond<'_> {
+        assert!(
+            (101..=199).contains(&status),
+            "respond_early is for provisionals (101..=199), got {status}: send the final with win({early_id:?}) then respond({status})"
+        );
+        self.emitted_early.insert(early_id.to_string());
+        let tag = self.early_tag(early_id);
+        self.respond(status, reason).with_to_tag(&tag)
+    }
+
+    /// Send a TEMPLATE provisional on the early dialog `early_id` — frozen
+    /// headers byte-preserved (template-emission semantics), To-tag = the early dialog's.
+    pub fn respond_template_early<'t>(
+        &'t mut self,
+        early_id: &str,
+        tmpl: &MessageTemplate,
+        opts: EmitOpts,
+    ) -> Respond<'t> {
+        let status = tmpl.status().map(|(s, _)| s).unwrap_or(0);
+        assert!(
+            (101..=199).contains(&status),
+            "respond_template_early requires a provisional (101..=199) response template, got {status}"
+        );
+        self.emitted_early.insert(early_id.to_string());
+        let tag = self.early_tag(early_id);
+        self.respond_template(tmpl, opts).with_to_tag(&tag)
+    }
+
+    /// Declare `early_id` the WINNER: adopt its To-tag as the sticky dialog tag
+    /// so the final 2xx carries it and [`dialog`](Self::dialog) is keyed under
+    /// it. The losing early dialogs settle by the stack's automatics — no final
+    /// is sent for them, and the caller's ACK addresses only the winner
+    /// (RFC 3261 §13.3.1.4). Call before responding the winning 2xx.
+    pub fn win(&mut self, early_id: &str) {
+        assert!(
+            self.emitted_early.contains(early_id),
+            "win({early_id:?}): no provisional was emitted on that early dialog — known early dialogs: {:?}",
+            self.emitted_early
+        );
+        if let Some(w) = &self.winner {
+            assert!(
+                w == early_id,
+                "win({early_id:?}): early dialog {w:?} already won this transaction — a transaction has one winner"
+            );
+        }
+        self.winner = Some(early_id.to_string());
+        let tag = self.early_tag(early_id);
+        self.adopt_to_tag(&tag);
+    }
+
     /// Form the UAS-side confirmed [`Dialog`] for this transaction, so this UA
     /// can originate in-dialog requests (e.g. the callee sends the BYE). Call
     /// after responding 2xx (so the To-tag is minted). The remote target is the
@@ -164,6 +301,19 @@ pub struct Respond<'a> {
     status: u16,
     reason: String,
     sdp: Option<String>,
+    /// Raw body bytes from a [`MessageTemplate`] (overrides `sdp` when set) — the
+    /// captured payload emitted verbatim, its Content-Type carried as a frozen
+    /// header rather than stamped by the generator.
+    template_body: Option<Vec<u8>>,
+    /// A template body carried NO Content-Type: suppress the generator's default
+    /// `application/sdp` stamp (see [`Invite::template`](super::Invite::template)).
+    suppress_default_ct: bool,
+    /// `(canonical, wire)` name-forms for stack-regenerated headers the capture
+    /// wrote compact (see [`Invite::template`](super::Invite::template)).
+    name_forms: Vec<(String, String)>,
+    /// `(canonical, captured_value)` remote-target headers (Contact) — captured
+    /// user + params over the bound socket's host:port.
+    remote_emits: Vec<(String, String)>,
     extra_headers: Vec<SipHeader>,
     to_tag: Option<String>,
 }
@@ -171,6 +321,30 @@ pub struct Respond<'a> {
 impl<'a> Respond<'a> {
     pub fn with_sdp(mut self, sdp: &str) -> Self {
         self.sdp = Some(sdp.to_string());
+        self
+    }
+
+    /// Freeze a captured [`MessageTemplate`]'s non-tier-1 headers (verbatim
+    /// value/casing/duplicate layout) and its body onto this response; the stack
+    /// still echoes/regenerates Via/From/To(+tag)/Call-ID/CSeq/Contact/
+    /// Content-Length. Status and reason stay as given to [`ServerTxn::respond`]
+    /// (see [`ServerTxn::respond_template`] to derive them from the template).
+    pub fn template(mut self, tmpl: &MessageTemplate, opts: EmitOpts) -> Self {
+        // v1: casing + duplicate-header layout are always preserved for frozen
+        // headers; `preserve_order` requests nothing further yet (see EmitOpts).
+        let EmitOpts { preserve_order: _ } = opts;
+        let frozen = tmpl.frozen_headers();
+        // Intentionally LITERAL (not compact-aware): a frozen compact `c:` does
+        // not match "content-type" here, so suppress=true and the generator's
+        // added full Content-Type default is stripped below while the frozen `c:`
+        // survives (a compact-aware probe would wrongly leave both).
+        self.suppress_default_ct =
+            !frozen.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
+        // Append AFTER any prior `with_header` entries — never drop them.
+        self.extra_headers.extend(frozen);
+        self.template_body = Some(tmpl.body().to_vec());
+        self.name_forms = tmpl.regenerated_name_forms();
+        self.remote_emits = tmpl.remote_target_emits();
         self
     }
 
@@ -210,6 +384,26 @@ impl<'a> Respond<'a> {
     /// surfaces as [`StepError::Transport`] instead of a panic.
     pub async fn try_send(self) -> Result<(), StepError> {
         let txn = self.txn;
+        // Silent-misuse guards the wire audit cannot catch (all wire-legal): a
+        // response after the transaction's final, and a forked 2xx with no winner
+        // declared. A same-status retransmission of the final is legal
+        // (RFC 3261 §13.3.1.4) and passes through untouched.
+        if let Some(fin) = txn.final_status {
+            assert!(
+                self.status == fin,
+                "respond {} on an INVITE server transaction already finalized with {fin} (RFC 3261 §17.2.1): the transaction is complete",
+                self.status
+            );
+        } else {
+            assert!(
+                !((200..300).contains(&self.status) && !txn.early_tags.is_empty() && txn.winner.is_none()),
+                "{} early dialog(s) open — declare the winner with win(id) before the 2xx",
+                txn.early_tags.len()
+            );
+            if self.status >= 200 {
+                txn.final_status = Some(self.status);
+            }
+        }
         // An explicit per-fork To-tag overrides (and does not disturb) the txn's
         // sticky auto-minted tag, so distinct early dialogs keep distinct tags.
         let to_tag = if let Some(t) = self.to_tag {
@@ -234,9 +428,15 @@ impl<'a> Respond<'a> {
         // RFC-compliant, matching the live SIPp endpoints.
         let mut extra_headers = self.extra_headers.clone();
         if (200..300).contains(&self.status) && txn.request.cseq.method.as_str() == "INVITE" {
-            let has_allow = extra_headers.iter().any(|h| h.name.eq_ignore_ascii_case("Allow"));
-            let has_supported =
-                extra_headers.iter().any(|h| h.name.eq_ignore_ascii_case("Supported"));
+            // Compact-aware probes: a frozen `k:` (compact Supported) must
+            // suppress the stack default, else the replayed 2xx advertises
+            // 100rel/timer the capture never did (RFC 3261 §7.3.3).
+            let has_allow = extra_headers
+                .iter()
+                .any(|h| sip_message::message_helpers::name_matches("Allow", &h.name));
+            let has_supported = extra_headers
+                .iter()
+                .any(|h| sip_message::message_helpers::name_matches("Supported", &h.name));
             if !has_allow {
                 extra_headers.push(SipHeader { name: "Allow".into(), value: B2BUA_ALLOW.into() });
             }
@@ -248,18 +448,36 @@ impl<'a> Respond<'a> {
         let opts = GenerateResponseOpts {
             to_tag,
             contact,
-            body: self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
+            // A captured template body (raw bytes, any Content-Type) overrides
+            // the SDP-string answer; its Content-Type rides as a frozen header.
+            body: self
+                .template_body
+                .clone()
+                .or_else(|| self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec))
+                .unwrap_or_default(),
             content_type: None,
             extra_headers,
             incoming_source: None,
         };
         let mut resp = generate_response(&txn.request, self.status, &self.reason, &opts);
+        if self.suppress_default_ct {
+            resp.headers =
+                sip_message::message_helpers::remove_header(&resp.headers, "content-type");
+        }
         // Real UAs may fold multiple echoed Record-Route rows into one comma-
         // separated header (RFC 3261 §7.3.1); reproduce that wire form for UAs the
         // harness picked `Combined` for, so the B2BUA's split-before-§12.1.2-reverse
         // path is exercised on the b-leg route-set capture (see `RecordRouteFold`).
         if txn.agent.rr_fold == RecordRouteFold::Combined {
             fold_record_routes(&mut resp.headers);
+        }
+        // Emit stack-regenerated headers under the captured compact names (Via/
+        // From/To/…) when the template used them; identity for a full-name capture.
+        if !self.name_forms.is_empty() {
+            resp.headers = apply_name_forms(&resp.headers, &self.name_forms);
+        }
+        if !self.remote_emits.is_empty() {
+            resp.headers = apply_remote_target_emits(&resp.headers, &self.remote_emits);
         }
         // Responses are routed by Via, not Route (RFC 3261 §18.2.2): send to the
         // request's topmost Via sent-by. With a proxy in the path that Via is

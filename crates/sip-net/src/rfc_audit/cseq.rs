@@ -17,6 +17,7 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
 use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
+use crate::report::to_sip_entries;
 
 /// Per-request-stream state for the in-dialog CSeq audit. A *stream* is one
 /// `(receiving endpoint, Call-ID, From-tag)` — one originating UA's request flow
@@ -49,13 +50,15 @@ struct StreamState {
 /// a bug — the TEST-MODEL false positive this rule used to produce).
 #[derive(Default)]
 struct DialogCseqs {
-    /// Distinct new-transaction CSeq → `(top-Via branch, method)` of the FIRST new
-    /// transaction that carried it. A `BTreeMap`, so the keys come out ascending
-    /// for the contiguity scan. A *later* new transaction with a **different**
-    /// branch at the same CSeq is a genuine reuse — the dialog CSeq never advanced.
-    by_cseq: BTreeMap<u32, (String, String)>,
-    /// Reuse violations, in arrival order: `(reusing method, CSeq)`.
-    reuses: Vec<(String, u32)>,
+    /// Distinct new-transaction CSeq → `(top-Via branch, method, wire position)`
+    /// of the FIRST new transaction that carried it. A `BTreeMap`, so the keys
+    /// come out ascending for the contiguity scan. A *later* new transaction with
+    /// a **different** branch at the same CSeq is a genuine reuse — the dialog
+    /// CSeq never advanced. The wire position is the offending message's
+    /// 1-based index into `to_sip_entries`.
+    by_cseq: BTreeMap<u32, (String, String, Option<usize>)>,
+    /// Reuse violations, in arrival order: `(reusing method, CSeq, wire position)`.
+    reuses: Vec<(String, u32, Option<usize>)>,
 }
 
 /// **RFC 3261 §12.2.1.1 — in-dialog request sequencing.** Within a dialog the
@@ -115,11 +118,45 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        self.check_positioned(events).into_iter().map(|(b, d, _)| (b, d)).collect()
+    }
+
+    fn check_positioned(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+    ) -> Vec<(LaneKey, String, Option<usize>)> {
         // (receiving bind, Call-ID, From-tag) -> stream state, plus first-seen
         // order so findings come out deterministically (HashMap order is not).
         let mut streams: HashMap<(LaneKey, String, String), StreamState> = HashMap::new();
         let mut stream_order: Vec<(LaneKey, String, String)> = Vec::new();
         let parser = CustomParser::new();
+
+        // The 1-based wire-entry index of each received transaction, keyed by
+        // `(receiver, Call-ID, From-tag, CSeq, method, top-Via branch)` — the same
+        // `to_sip_entries` view a scoped waiver indexes, so a finding can point at
+        // its exact offending message. First occurrence wins (a retransmission
+        // repeats the key).
+        let mut positions: HashMap<(LaneKey, String, String, u32, String, String), usize> =
+            HashMap::new();
+        for (i, e) in to_sip_entries(events).into_iter().enumerate() {
+            let Some(receiver) = e.to_lane else { continue };
+            let Ok(SipMessage::Request(req)) = parser.parse(&e.raw) else { continue };
+            let (Some(cid), Some(ftag)) = (
+                get_header(&req.headers, "call-id").map(str::to_string),
+                get_header(&req.headers, "from").and_then(extract_tag),
+            ) else {
+                continue;
+            };
+            let branch = top_via_branch(&req).unwrap_or_default();
+            positions
+                .entry((receiver, cid, ftag, req.cseq.seq, req.method.to_string(), branch))
+                .or_insert(i + 1);
+        }
+        let pos_of = |key: &(LaneKey, String, String), seq: u32, method: &str, branch: &str| {
+            positions
+                .get(&(key.0.clone(), key.1.clone(), key.2.clone(), seq, method.to_string(), branch.to_string()))
+                .copied()
+        };
 
         // ── Pass 1: accumulate each dialog's new-transaction CSeq set. ──────────
         for s in events {
@@ -168,15 +205,17 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
             //    set, because arrival order is irrelevant to §12.2.1.1.
             let to_tag = req.to.tag.clone().unwrap_or_default();
             let branch = branch.unwrap_or_default();
+            let position = pos_of(&key, seq, &method, &branch);
             let dlg = st.dialogs.entry(to_tag).or_default();
-            match dlg.by_cseq.get(&seq).map(|(b, _)| b.clone()) {
+            match dlg.by_cseq.get(&seq).map(|(b, _, _)| b.clone()) {
                 None => {
-                    dlg.by_cseq.insert(seq, (branch, method));
+                    dlg.by_cseq.insert(seq, (branch, method, position));
                 }
                 Some(first_branch) if first_branch != branch => {
                     // A *different* transaction carried a CSeq the dialog already
-                    // spent → the dialog CSeq failed to increment (a reuse).
-                    dlg.reuses.push((method, seq));
+                    // spent → the dialog CSeq failed to increment (a reuse). The
+                    // offending message is THIS (reusing) request.
+                    dlg.reuses.push((method, seq, position));
                 }
                 Some(_) => {} // same branch/CSeq shape: nothing new to record.
             }
@@ -201,10 +240,11 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
                 let dlg = &st.dialogs[to_tag];
 
                 // Reuse: a CSeq spent by two distinct transactions on this dialog.
-                for (method, seq) in &dlg.reuses {
+                for (method, seq, pos) in &dlg.reuses {
                     findings.push((
                         key.0.clone(),
                         cseq_reuse_msg(method, *seq, &key.1, &key.2, to_tag),
+                        *pos,
                     ));
                 }
 
@@ -219,8 +259,37 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
                 let mut seqs: Vec<u32> = dlg.by_cseq.keys().copied().collect();
                 if !to_tag.is_empty() {
                     if let Some(&first) = seqs.first() {
-                        if let Some(&anchor) = creating_cseqs.iter().filter(|&&c| c <= first).max() {
-                            if let Err(pos) = seqs.binary_search(&anchor) {
+                        // The dialog-creating request this dialog advanced FROM: the
+                        // largest empty-To-tag attempt ≤ this dialog's first in-dialog
+                        // request. If the first request is at or below EVERY recorded
+                        // attempt, fall back to the smallest so a regression is still
+                        // measured against a real anchor rather than escaping unjudged.
+                        let anchor = creating_cseqs
+                            .iter()
+                            .copied()
+                            .filter(|&c| c <= first)
+                            .max()
+                            .or_else(|| creating_cseqs.iter().copied().min());
+                        if let Some(anchor) = anchor {
+                            if first <= anchor {
+                                // The first in-dialog request did NOT advance past the
+                                // dialog-creating CSeq (§12.2.1.1): it reuses the
+                                // INVITE's own number — a cross-dialog reuse the
+                                // per-To-tag bucketing otherwise hides — or regresses
+                                // below it (a CSeq that went backwards; CSeq 0 always).
+                                findings.push((
+                                    key.0.clone(),
+                                    cseq_below_anchor_msg(
+                                        dlg.by_cseq[&first].1.as_str(),
+                                        first,
+                                        anchor,
+                                        &key.1,
+                                        &key.2,
+                                        to_tag,
+                                    ),
+                                    dlg.by_cseq[&first].2,
+                                ));
+                            } else if let Err(pos) = seqs.binary_search(&anchor) {
                                 seqs.insert(pos, anchor);
                             }
                         }
@@ -229,11 +298,14 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
                 for w in seqs.windows(2) {
                     let (lo, hi) = (w[0], w[1]);
                     if hi > lo + 1 {
-                        let method =
-                            dlg.by_cseq.get(&hi).map(|(_, m)| m.as_str()).unwrap_or("request");
+                        // The offending message is the one that SKIPPED ahead (at
+                        // `hi`); `anchor`, folded in above, has no by_cseq entry.
+                        let entry = dlg.by_cseq.get(&hi);
+                        let method = entry.map(|(_, m, _)| m.as_str()).unwrap_or("request");
                         findings.push((
                             key.0.clone(),
                             cseq_gap_msg(method, hi, lo, &key.1, &key.2, to_tag),
+                            entry.and_then(|(_, _, p)| *p),
                         ));
                     }
                 }
@@ -284,6 +356,32 @@ fn cseq_gap_msg(
          of CSeq {prev}; the UAC MUST increment the dialog CSeq by exactly one (expected \
          {}) on {dialog}",
         prev + 1,
+    )
+}
+
+/// Phrase a §12.2.1.1 **below-anchor** violation: a dialog's FIRST in-dialog
+/// request did not advance past the dialog-creating request's CSeq. Either it
+/// reuses the INVITE's own sequence number — a reuse the per-To-tag bucketing
+/// hides because the tag-less INVITE and the tagged in-dialog request never
+/// share a bucket — or it regressed below it (a CSeq that went backwards; CSeq 0
+/// is always below a ≥1 anchor). A confirmed/forked dialog's first request MUST
+/// be exactly `anchor + 1`.
+fn cseq_below_anchor_msg(
+    method: &str,
+    seq: u32,
+    anchor: u32,
+    call_id: &str,
+    from_tag: &str,
+    to_tag: &str,
+) -> String {
+    let dialog = dialog_desc(call_id, from_tag, to_tag);
+    format!(
+        "in-dialog CSeq did not advance (RFC 3261 §12.2.1.1): {method} CSeq {seq} does not \
+         exceed the dialog-creating CSeq {anchor} on {dialog}; the first in-dialog request MUST \
+         increment the dialog CSeq by exactly one (expected {}) — a value at or below the \
+         INVITE's own CSeq reuses or regresses it, which a real UAS rejects (the test UA answers \
+         it, hiding the bug)",
+        anchor + 1,
     )
 }
 
@@ -435,8 +533,13 @@ impl CrossMessageAuditRule for AckCseqMatchesInviteRule {
 }
 
 /// The in-dialog CSeq / response-CSeq / ACK-CSeq cross-message rules (the
-/// original three RFC 3261 §8/§12/§13 wire invariants). Aggregated into the
-/// full default set by [`super::rfc_cross_message_rules`].
+/// RFC 3261 §8/§12/§13 wire invariants). Aggregated into the full default set by
+/// [`super::rfc_cross_message_rules`].
+///
+/// **§8.1.1.5 (CSeq < 2^31) is NOT a rule here on purpose:** the parser's
+/// registry-driven numeric pass (ADR-0007) rejects a CSeq ≥ 2^31 at ingest
+/// unconditionally, so such a message never becomes a recorded, re-parseable
+/// event — a cross-message rule over the strict-parsed trace could never fire.
 pub(crate) fn cross_rules() -> Vec<Arc<dyn CrossMessageAuditRule>> {
     vec![
         Arc::new(CSeqInDialogOrderRule),
@@ -831,6 +934,61 @@ mod tests {
         let findings = CSeqInDialogOrderRule.check(&evs);
         assert_eq!(findings.len(), 1, "a CSeq gap (+2) must be flagged");
         assert!(findings[0].1.contains("not contiguous"), "{}", findings[0].1);
+    }
+
+    #[test]
+    fn cross_dialog_reuse_of_the_invite_cseq_is_flagged() {
+        // Blind spot (b): the dialog-creating INVITE is CSeq 1 (empty To-tag
+        // bucket); a later in-dialog INFO reuses CSeq 1 in the To-tagged bucket.
+        // The per-To-tag split means the two never collide as a same-bucket reuse,
+        // yet the INFO failed to advance the dialog CSeq past the INVITE — a
+        // §12.2.1.1 violation a real UAS drops as a retransmission.
+        let evs = vec![
+            recv_at("bob", req_to("INVITE", "cid-1", "ft", 1, "z9hG4bK-i", None), 0),
+            recv_at("bob", req_to("INFO", "cid-1", "ft", 1, "z9hG4bK-info", Some("btag")), 1),
+        ];
+        let findings = CSeqInDialogOrderRule.check(&evs);
+        assert_eq!(findings.len(), 1, "the cross-dialog INVITE-CSeq reuse must be flagged");
+        assert!(findings[0].1.contains("did not advance"), "{}", findings[0].1);
+    }
+
+    #[test]
+    fn in_dialog_request_below_the_invite_cseq_is_flagged() {
+        // Blind spot (a): the dialog-creating INVITE is CSeq 5; the confirmed
+        // dialog's first in-dialog request is CSeq 3 — BELOW the anchor. The old
+        // `c <= first` filter found no anchor and let it pass; a CSeq that
+        // regressed below the INVITE is a §12.2.1.1 violation.
+        let evs = vec![
+            recv_at("bob", req_to("INVITE", "cid-1", "ft", 5, "z9hG4bK-i", None), 0),
+            recv_at("bob", req_to("BYE", "cid-1", "ft", 3, "z9hG4bK-b", Some("btag")), 1),
+        ];
+        let findings = CSeqInDialogOrderRule.check(&evs);
+        assert_eq!(findings.len(), 1, "a below-anchor in-dialog CSeq must be flagged");
+        assert!(findings[0].1.contains("did not advance"), "{}", findings[0].1);
+    }
+
+    #[test]
+    fn in_dialog_cseq_zero_is_flagged() {
+        // CSeq 0 as an in-dialog request is below any ≥1 dialog-creating anchor —
+        // the nonsensical below-anchor value the sharpened check now catches.
+        let evs = vec![
+            recv_at("bob", req_to("INVITE", "cid-1", "ft", 1, "z9hG4bK-i", None), 0),
+            recv_at("bob", req_to("INFO", "cid-1", "ft", 0, "z9hG4bK-info", Some("btag")), 1),
+        ];
+        let findings = CSeqInDialogOrderRule.check(&evs);
+        assert_eq!(findings.len(), 1, "an in-dialog CSeq 0 must be flagged");
+        assert!(findings[0].1.contains("did not advance"), "{}", findings[0].1);
+    }
+
+    #[test]
+    fn parser_rejects_cseq_at_or_above_2pow31() {
+        // §8.1.1.5 (CSeq < 2^31) is enforced at the PARSER (ADR-0007 numeric
+        // registry), unconditionally — so a magnitude cross-message rule would be
+        // dead. This pins that enforcement: 2^31 is rejected, 2^31 - 1 parses.
+        let over = req("INFO", "cid-1", "ft", 2_147_483_648, "z9hG4bK-m");
+        assert!(CustomParser::new().parse(&over).is_err(), "CSeq 2^31 must be rejected at parse");
+        let max = req("INFO", "cid-1", "ft", 2_147_483_647, "z9hG4bK-m");
+        assert!(CustomParser::new().parse(&max).is_ok(), "CSeq 2^31 - 1 is the largest legal value");
     }
 }
 

@@ -371,6 +371,9 @@ impl ShapePlan {
             invite_targets: vec![("bob", env.bob.clone())],
             via: None,
             feed: b.caller_feed,
+
+            cseq: None,
+            delayed: None,
         }];
         actors.extend(b.callees);
 
@@ -379,6 +382,10 @@ impl ShapePlan {
             plan: b.phases,
             settle: SettleBarrier::default_ceiling(),
             expect: b.expect,
+
+            waivers: Vec::new(),
+            automatics: Default::default(),
+            ceiling: None,
         })
     }
 
@@ -416,6 +423,9 @@ impl ShapePlan {
                     invite_targets: vec![],
                     via: None,
                     feed: connected_feed(self.stamp_connected),
+
+                    cseq: None,
+                    delayed: None,
                 });
                 let est = established_pred("bob");
                 b.phases.push(phase("established", est.clone()));
@@ -481,6 +491,9 @@ impl ShapePlan {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+
+                    cseq: None,
+                    delayed: None,
                 });
                 b.callees.push(ActorSpec {
                     role: "bob2",
@@ -503,6 +516,9 @@ impl ShapePlan {
                         },
                         ..CtxFeed::default()
                     },
+
+                    cseq: None,
+                    delayed: None,
                 });
                 b.winner = "bob2";
                 let est = established_pred("bob2");
@@ -542,6 +558,9 @@ impl ShapePlan {
                     invite_targets: vec![],
                     via: None,
                     feed: connected_feed(self.stamp_connected),
+
+                    cseq: None,
+                    delayed: None,
                 });
                 let est = established_pred("bob");
                 b.phases.push(phase("established", est.clone()));
@@ -562,6 +581,9 @@ impl ShapePlan {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+
+                    cseq: None,
+                    delayed: None,
                 });
                 b.phases
                     .push(phase("rejected", |s| s.leg_at_least("bob", LegPhase::Terminated)));
@@ -585,6 +607,9 @@ impl ShapePlan {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+
+                    cseq: None,
+                    delayed: None,
                 });
                 b.phases.push(phase("ringing", ringing));
                 b.expect = Expect::AbandonedEarly;
@@ -627,6 +652,9 @@ impl ShapePlan {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
+
+                    cseq: None,
+                    delayed: None,
                 });
                 b.phases.push(phase("ringing", ringing));
                 b.expect = Expect::EitherOf(E5_BRANCHES);
@@ -753,6 +781,9 @@ impl ShapePlan {
             } else {
                 CtxFeed::default()
             },
+
+            cseq: None,
+            delayed: None,
         });
 
         // The caller answers the post-transfer realign re-INVITE reactively

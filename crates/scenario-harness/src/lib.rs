@@ -40,6 +40,14 @@ pub const SIMULATED_TRANSIT_DELAY_MS: u64 = 100;
 pub use agent::{
     Agent, CancelHandle, ClientInvite, ClientReinvite, Dialog, Harness, InDialogRequest,
     InDialogTxn, Inbound, Invite, OutOfDialogRequest, Proxy, Respond, ServerTxn, StepError,
+    WaiverScope,
+};
+// Captured-message replay vocabulary (`sip_message::template` + matching),
+// re-exported so a `send_template`/`expect_template` caller reaches the harness
+// and its templates from one crate.
+pub use sip_message::{
+    Automatic, CseqOp, CseqOpAt, CseqPattern, DelayedAutomatic, EmitOpts, HeaderClass, MatchOpts,
+    MessageTemplate, Mismatch, TemplateHeader, TemplateStart,
 };
 // Multi-callee routing: several logical agents on one bound socket, demuxed by
 // the shared R-URI leg-picker (the transfer Bob/Charlie/David fabric).

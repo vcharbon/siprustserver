@@ -3690,6 +3690,7 @@ name = "seq-report"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3877,7 +3878,9 @@ dependencies = [
 name = "sip-pcap"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "clap",
+ "serde_json",
  "sip-message",
 ]
 
