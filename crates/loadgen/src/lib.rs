@@ -55,7 +55,10 @@ pub use case::{DwellOverrides, LoadCase, ResolvedCall};
 pub use chaos::{ChaosLog, ChaosTag};
 pub use class::{CallOutcome, ResultClass};
 pub use ctx::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp};
-pub use driver::{serve_metrics, CallConfig, CallTuning, Driver, DriverCfg, MixEntry, MuxTransport};
+pub use driver::{
+    serve_metrics, serve_metrics_on, CallConfig, CallTuning, Driver, DriverCfg, MixEntry,
+    MuxTransport,
+};
 pub use mux::{
     labelled_prefix_leg_picker, prefix_leg_picker, CallRouting, ClaimRule, Correlation,
     DropDir, EndpointSpec, LegInfo, LegPicker, MuxCore, Role, TargetedDrop,
