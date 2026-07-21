@@ -101,10 +101,10 @@ pub struct LoadCase {
     /// validated present at construction.
     check_sets: BTreeMap<String, CheckSet>,
     /// The case's `allowViolations`, LOWERED to structural [`WaiverScope`]s
-    /// (ADR-0024 §6): rule-only + `.conditional()`, so filtering is byte-for-byte
-    /// the historic `HashSet<String>` behaviour AND an author's defensive list
-    /// never trips the per-campaign unused-waiver gate (like the functional
-    /// lane's `Harness::allow_violation`).
+    /// (ADR-0024 §6): rule-only + `.conditional()`, so filtering matches on the
+    /// rule name alone AND an author's defensive list never trips the
+    /// per-campaign unused-waiver gate (like the functional lane's
+    /// `Harness::allow_violation`).
     waivers: Vec<WaiverScope>,
     resolver: BindingResolver,
 }

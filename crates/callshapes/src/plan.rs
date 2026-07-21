@@ -371,7 +371,7 @@ impl ShapePlan {
             invite_targets: vec![("bob", env.bob.clone())],
             via: None,
             feed: b.caller_feed,
-        
+
             cseq: None,
             delayed: None,
         }];
@@ -382,7 +382,7 @@ impl ShapePlan {
             plan: b.phases,
             settle: SettleBarrier::default_ceiling(),
             expect: b.expect,
-        
+
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
@@ -423,7 +423,7 @@ impl ShapePlan {
                     invite_targets: vec![],
                     via: None,
                     feed: connected_feed(self.stamp_connected),
-                
+
                     cseq: None,
                     delayed: None,
                 });
@@ -491,7 +491,7 @@ impl ShapePlan {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
-                
+
                     cseq: None,
                     delayed: None,
                 });
@@ -516,7 +516,7 @@ impl ShapePlan {
                         },
                         ..CtxFeed::default()
                     },
-                
+
                     cseq: None,
                     delayed: None,
                 });
@@ -558,7 +558,7 @@ impl ShapePlan {
                     invite_targets: vec![],
                     via: None,
                     feed: connected_feed(self.stamp_connected),
-                
+
                     cseq: None,
                     delayed: None,
                 });
@@ -581,7 +581,7 @@ impl ShapePlan {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
-                
+
                     cseq: None,
                     delayed: None,
                 });
@@ -607,7 +607,7 @@ impl ShapePlan {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
-                
+
                     cseq: None,
                     delayed: None,
                 });
@@ -652,7 +652,7 @@ impl ShapePlan {
                     invite_targets: vec![],
                     via: None,
                     feed: CtxFeed::default(),
-                
+
                     cseq: None,
                     delayed: None,
                 });
@@ -781,7 +781,7 @@ impl ShapePlan {
             } else {
                 CtxFeed::default()
             },
-        
+
             cseq: None,
             delayed: None,
         });

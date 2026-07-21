@@ -1296,7 +1296,7 @@ async fn apply_disposition(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Resul
         }
         // Scripted park-or-react for the initial INVITE: park when a remaining
         // goal will consume/answer it, else auto-answer 200 (the RFC-compliant
-        // react default) and record the stray. The §5 automatic answers `100
+        // react default) and record the stray. The ADR-0024 §5 automatic answers `100
         // Trying` in both cases — it never consumes the transaction.
         Disposition::Scripted => {
             if st.automatics.answer_100_trying {
