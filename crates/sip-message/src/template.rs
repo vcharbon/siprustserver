@@ -467,7 +467,7 @@ Content-Length: 0\r\n\r\n";
     }
 
     #[test]
-    fn classifies_rfc7011_compact_forms_before_freezing() {
+    fn classifies_rfc3261_compact_forms_before_freezing() {
         // Compact tier-1 names expand and classify Regenerated — else a templated
         // compact Via/From/… would freeze and DUPLICATE on the wire.
         assert_eq!(HeaderClass::of("v"), HeaderClass::Regenerated, "v = Via");
