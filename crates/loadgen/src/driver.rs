@@ -130,9 +130,9 @@ pub struct MixEntry {
     /// The report/metrics id — the DESCRIPTOR's id (may differ from the body's
     /// intrinsic `id()` when one body serves several shapes, e.g. `basic_call_em`).
     pub id: crate::scenarios::ScenarioId,
-    /// The load body — a declarative actor [`Scenario`] or a generic imperative
-    /// call driver. `run_one` branches on it at the single body-invocation site;
-    /// everything after (teardown, classification, sampling) is shared.
+    /// The load body — a declarative actor [`Scenario`] the runner drives.
+    /// `run_one` invokes it at the single body-invocation site; everything after
+    /// (teardown, classification, sampling) is shared.
     body: LoadBody,
     pub weight: f64,
     pub case: Option<Arc<LoadCase>>,

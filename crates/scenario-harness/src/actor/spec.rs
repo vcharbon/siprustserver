@@ -35,18 +35,40 @@ pub struct ActorCall {
     /// The lane-chosen stack automatics for this plan (ADR-0024 §5): plumbed
     /// onto the [`CallPlan`] by [`run_actor_scenario`]. Default = none.
     pub automatics: Automatics,
+    /// The controller's per-barrier / goal-guard wait ceiling for this call.
+    /// `None` uses [`STEP_TIMEOUT`] (`64·T1 = 32 s`, the protocol re-emission
+    /// bound). A plan whose honoured inter-message dwells span longer than that
+    /// (a capture-replay honouring the wire timing) sets a larger ceiling so a
+    /// long-but-healthy call does not trip `torn_down`; free under a paused clock,
+    /// the honest wall duration on a real one.
+    pub ceiling: Option<std::time::Duration>,
 }
 
 impl ActorCall {
-    /// A plan with no waivers and default automatics — the additive base every
-    /// existing scenario keeps, so only a plan that NEEDS them names them.
+    /// A plan with no waivers, default automatics, and the standard ceiling — the
+    /// additive base every existing scenario keeps, so only a plan that NEEDS them
+    /// names them.
     pub fn new(
         actors: Vec<ActorSpec>,
         plan: Vec<BarrierPhase>,
         settle: SettleBarrier,
         expect: Expect,
     ) -> Self {
-        ActorCall { actors, plan, settle, expect, waivers: Vec::new(), automatics: Automatics::default() }
+        ActorCall {
+            actors,
+            plan,
+            settle,
+            expect,
+            waivers: Vec::new(),
+            automatics: Automatics::default(),
+            ceiling: None,
+        }
+    }
+
+    /// Set the controller wait ceiling (see [`ActorCall::ceiling`]).
+    pub fn with_ceiling(mut self, ceiling: std::time::Duration) -> Self {
+        self.ceiling = Some(ceiling);
+        self
     }
 
     /// Attach the plan's structural RFC-audit waivers (ADR-0024 §6).
@@ -242,11 +264,14 @@ pub async fn run_built_actor_call(
     env: &CallEnv<'_>,
     ctx: &CallCtx,
 ) -> Result<(), StepError> {
-    let ActorCall { actors, plan, settle, expect, waivers: _, automatics } = call;
+    let ActorCall { actors, plan, settle, expect, waivers: _, automatics, ceiling } = call;
     // The originating leg — the role a Reject terminal is attributed to,
     // keyed on which actor's first goal originates the dialog.
     let caller = originating_role(&actors);
     let obs = ObservedState::new();
+    // A plan whose honoured dwells span longer than the standard re-emission
+    // bound raises the controller ceiling; the default is `STEP_TIMEOUT`.
+    let step_timeout = ceiling.unwrap_or(STEP_TIMEOUT);
     // The deferred-auth adapter (RFC 3261 §22.2) reaches the caller's
     // establishing INVITE from the call env — `None` on every current surface
     // (no CLI flag mints one yet), so a challenge classifies unchanged.
@@ -254,7 +279,7 @@ pub async fn run_built_actor_call(
         CallPlan { actors, plan, settle, automatics },
         obs.clone(),
         ctx,
-        STEP_TIMEOUT,
+        step_timeout,
         env.challenge_responder.clone(),
     )
     .await;
