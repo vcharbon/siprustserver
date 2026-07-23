@@ -52,11 +52,24 @@ pub struct RecordedFinal {
 }
 
 /// One entry of the replay record — an observed final beside its expectation,
-/// or a request the reactor (not the script) serviced on a `Scripted` actor.
+/// a request the reactor (not the script) serviced on a `Scripted` actor, or a
+/// policy-blessed substitution (ADR-0024 §6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayEntry {
     Final(RecordedFinal),
     ServicedStray { leg: &'static str, method: String, action: &'static str },
+    /// An accepted-delta policy blessed a non-matching inbound as satisfying
+    /// the due scripted expectation: `step` is the goal-cursor index of that
+    /// expectation on `leg`; `expected`/`observed` are the confrontation's
+    /// bounded labels (method or status); `rule` the policy's rule name. An
+    /// acceptance is never silent — the report side classifies on this entry.
+    AcceptedDelta {
+        leg: &'static str,
+        step: usize,
+        expected: String,
+        observed: String,
+        rule: &'static str,
+    },
 }
 
 /// One endpoint leg's observed dialog lifecycle. Ordered so `max` gives the
@@ -306,6 +319,16 @@ pub enum Observation {
     /// A request the reactor (not the script) serviced on a `Scripted` actor —
     /// appended to the replay record so divergence is never silent.
     ServicedStray { leg: &'static str, method: String, action: &'static str },
+    /// An accepted-delta policy blessed a non-matching inbound as satisfying
+    /// the due scripted expectation (ADR-0024 §6) — appended to the replay
+    /// record so an acceptance is never silent.
+    AcceptedDelta {
+        leg: &'static str,
+        step: usize,
+        expected: String,
+        observed: String,
+        rule: &'static str,
+    },
 }
 
 impl StateInner {
@@ -341,6 +364,15 @@ impl StateInner {
             }
             Observation::ServicedStray { leg, method, action } => {
                 self.replay.push(ReplayEntry::ServicedStray { leg, method, action });
+            }
+            Observation::AcceptedDelta { leg, step, expected, observed, rule } => {
+                self.replay.push(ReplayEntry::AcceptedDelta {
+                    leg,
+                    step,
+                    expected,
+                    observed,
+                    rule,
+                });
             }
         }
     }
@@ -394,6 +426,20 @@ impl ObservedState {
     /// requests the reactor serviced on a `Scripted` actor.
     pub fn replay_record(&self) -> Vec<ReplayEntry> {
         self.inner.lock().unwrap().replay.clone()
+    }
+
+    /// The run's accepted deltas (ADR-0024 §6) — the replay record filtered to
+    /// its [`ReplayEntry::AcceptedDelta`] entries, the list a report consumer
+    /// classifies on (e.g. an `ok-with-accepted-delta` bucket).
+    pub fn accepted_deltas(&self) -> Vec<ReplayEntry> {
+        self.inner
+            .lock()
+            .unwrap()
+            .replay
+            .iter()
+            .filter(|e| matches!(e, ReplayEntry::AcceptedDelta { .. }))
+            .cloned()
+            .collect()
     }
 }
 

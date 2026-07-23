@@ -347,6 +347,12 @@ impl GoalCursor {
         self.goals.get(self.cursor).map(|g| &g.step)
     }
 
+    /// The cursor's index — the goal-list position of the next un-fired goal
+    /// (the `step` an `AcceptedDelta` observation names).
+    pub(super) fn position(&self) -> usize {
+        self.cursor
+    }
+
     /// The steps of every un-fired goal, in order — the park-or-react match set.
     pub(super) fn remaining_steps(&self) -> impl Iterator<Item = &GoalStep> {
         self.goals[self.cursor.min(self.goals.len())..].iter().map(|g| &g.step)

@@ -26,6 +26,7 @@
 //! (the [`crate::realcall`] bodies keep their linear form until P1's adapter).
 
 mod actor;
+mod delta;
 mod goals;
 mod ledger;
 pub mod scenarios;
@@ -45,6 +46,10 @@ use crate::StepError;
 pub use actor::{
     run_actor, ActorSpec, ActorState, Automatics, CtxFeed, Disposition, Feed, MediaState,
     SUBFLOW_EARLY, SUBFLOW_REALIGN, SUBFLOW_RENEG, SUBFLOW_REFER,
+};
+pub use delta::{
+    AcceptedDelta, AcceptedDeltaPolicy, DeltaContext, DeltaDecision, DeltaReaction, DialogSnapshot,
+    ExpectedStimulus, ObservedStimulus,
 };
 pub use goals::{Barrier, BodyExpect, EarlyId, FinalAssert, Goal, GoalCursor, GoalStep, RequestKind};
 pub use ledger::{ObligationKey, ObligationKind, ObligationLedger};
@@ -105,6 +110,11 @@ pub struct CallPlan {
     /// The lane-chosen stack automatics for scripted endpoints — emitted
     /// identically on every lane (the cross-lane behavior contract).
     pub automatics: Automatics,
+    /// The plan's accepted-delta policy (ADR-0024 §6): consulted by every
+    /// actor when a due reception expectation meets a non-matching but
+    /// classifiable inbound. `None` (the default) = hook absent, behavior
+    /// unchanged.
+    pub delta_policy: Option<AcceptedDeltaPolicy>,
 }
 
 /// The controller: owns the shared observed state, the barrier plan, the settle
@@ -209,6 +219,7 @@ pub async fn run_call_with(
             step_timeout,
             challenge_responder.clone(),
             automatics,
+            call.delta_policy.clone(),
         ));
         scopes.push(scope);
     }
@@ -305,6 +316,7 @@ mod tests {
             })],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -371,6 +383,7 @@ mod tests {
             })],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -400,6 +413,7 @@ mod tests {
             plan: vec![phase("established", |s| s.leg_at_least("bob", LegPhase::Confirmed))],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         }
     }
 
@@ -635,6 +649,7 @@ mod tests {
             })],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         }
     }
 
@@ -806,6 +821,7 @@ mod tests {
             plan: vec![],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         }
     }
 
@@ -918,6 +934,7 @@ mod tests {
             plan: vec![phase("ringing", ringing)],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -1032,6 +1049,7 @@ mod tests {
             ],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(10)).await;
@@ -1107,6 +1125,7 @@ mod tests {
             ],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(10)).await;
@@ -1190,6 +1209,7 @@ mod tests {
             plan: vec![phase("confirmed", |s| s.leg_at_least("alice", LegPhase::Confirmed))],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -1270,6 +1290,7 @@ mod tests {
             })],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -1529,6 +1550,7 @@ mod tests {
             plan: vec![phase("confirmed", alice_confirmed)],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let ctx = CallCtx::new();
@@ -1616,6 +1638,7 @@ mod tests {
             plan: vec![phase("confirmed", alice_confirmed)],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let ctx = CallCtx::new();
@@ -1767,6 +1790,7 @@ mod tests {
             plan: vec![established_phase()],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -1815,6 +1839,7 @@ mod tests {
             plan: vec![established_phase()],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let ctx = CallCtx::new();
@@ -1870,6 +1895,7 @@ mod tests {
             plan: vec![established_phase()],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -1910,6 +1936,7 @@ mod tests {
             plan: vec![],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -1966,6 +1993,7 @@ mod tests {
             plan: vec![],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let ctx = CallCtx::new();
@@ -2031,6 +2059,7 @@ mod tests {
             // The §5 automatic: the parked INVITE draws an immediate 100, so
             // the CANCEL follows a provisional (RFC 3261 §9.1).
             automatics: Automatics { answer_100_trying: true },
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -2140,6 +2169,7 @@ mod tests {
             plan: vec![],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -2207,6 +2237,7 @@ mod tests {
             plan: vec![],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let ctx = CallCtx::new();
@@ -2302,6 +2333,7 @@ mod tests {
             plan: vec![],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let ctx = CallCtx::new();
@@ -2318,6 +2350,570 @@ mod tests {
             "the automatic must never fire when the script claims the CANCEL: {:?}",
             obs.replay_record(),
         );
+        h.finish().await;
+    }
+
+    /// The BC01-shape plan: alice rings bob then abandons with a CANCEL,
+    /// while bob's script — lowered from a capture whose caller sent a
+    /// pre-answer BYE — expects a BYE and scripts its 200. Only an installed
+    /// accepted-delta policy can bridge the two.
+    fn bye_expecting_cancel_plan(
+        alice: &crate::Agent,
+        bob: &crate::Agent,
+        delta_policy: Option<AcceptedDeltaPolicy>,
+    ) -> CallPlan {
+        use sip_message::generators::InDialogMethod;
+        let expect_resp = |status: u16| GoalStep::ExpectResponse {
+            status,
+            body: BodyExpect::Any,
+            early: None,
+            ack_body: None,
+            matcher: None,
+        };
+        CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(Barrier::None, expect_resp(180)),
+                        Goal::new(Barrier::None, GoalStep::Cancel),
+                        Goal::new(Barrier::None, expect_resp(200)),
+                        Goal::new(Barrier::None, expect_resp(487)),
+                    ],
+                ),
+                scripted_spec(
+                    "bob",
+                    bob,
+                    vec![
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::ExpectRequest {
+                                kind: RequestKind::Initial,
+                                body: BodyExpect::SdpPresent,
+                                matcher: None,
+                            },
+                        ),
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::RespondTemplate {
+                                template: response_template(180, "Ringing", false),
+                                opts: EmitOpts::default(),
+                                early: None,
+                            },
+                        ),
+                        // The captured choreography: a pre-answer BYE, 200'd
+                        // by script — what the live peer never sends.
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::ExpectRequest {
+                                kind: RequestKind::InDialog(InDialogMethod::Bye),
+                                body: BodyExpect::Any,
+                                matcher: None,
+                            },
+                        ),
+                        Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),
+                    ],
+                ),
+            ],
+            plan: vec![],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+            delta_policy,
+        }
+    }
+
+    /// The caller-side BYE ≈ CANCEL rule, installed FROM TEST CODE (the crate
+    /// ships only the hook): blessed ONLY with exactly one early dialog
+    /// (RFC 3261 §15.1.2 vs §9 — under forking the two are not equivalent);
+    /// satisfies the BYE expectation AND its scripted 200 with the given
+    /// mechanical reaction.
+    fn bye_for_cancel_policy_with(reaction: DeltaReaction) -> AcceptedDeltaPolicy {
+        Arc::new(move |ctx: &DeltaContext<'_>| {
+            let expects_bye = matches!(
+                &ctx.expected,
+                ExpectedStimulus::Request(RequestKind::InDialog(m)) if m.as_str() == "BYE"
+            );
+            let observed_cancel = matches!(
+                &ctx.observed,
+                ObservedStimulus::Request(r) if r.method.as_str() == "CANCEL"
+            );
+            if expects_bye && observed_cancel && ctx.dialog.early_dialog_count == 1 {
+                DeltaDecision::Accepted(AcceptedDelta {
+                    rule: "bye-approx-cancel-single-early-dialog",
+                    satisfies_steps: 2,
+                    reaction,
+                })
+            } else {
+                DeltaDecision::NotAccepted
+            }
+        })
+    }
+
+    /// The BYE ≈ CANCEL rule with the CANCEL-automatic mechanics (200 + 487
+    /// on the bound INVITE).
+    fn bye_for_cancel_policy() -> AcceptedDeltaPolicy {
+        bye_for_cancel_policy_with(DeltaReaction::TerminatePendingInitial)
+    }
+
+    /// Accepted delta, the concrete BYE → CANCEL case: bob's script
+    /// expects a BYE (+ scripted 200) on a ringing call; the peer CANCELs
+    /// instead; the installed policy (checking `early_dialog_count == 1` from
+    /// the provided context) accepts — the stack 200s the CANCEL, 487s the
+    /// BOUND INVITE via the CANCEL-automatic mechanics, the scripted BYE steps
+    /// are satisfied, and the run completes with the `AcceptedDelta`
+    /// observation (rule name included) in the replay record. NEVER as a
+    /// serviced stray — a blessed substitution is not divergence.
+    #[tokio::test(start_paused = true)]
+    async fn accepted_delta_bye_for_cancel_completes_script() {
+        let h = Harness::new("actor-accepted-delta-bye-cancel").describe(
+            "ADR-0024 §6: script expects BYE, peer sends CANCEL; the plan's accepted-delta \
+             policy blesses it (one early dialog) → 200 + 487 on the bound INVITE, \
+             BYE steps satisfied, AcceptedDelta recorded",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let call = bye_expecting_cancel_plan(&alice, &bob, Some(bye_for_cancel_policy()));
+        let ctx = CallCtx::new();
+        let obs = ObservedState::new();
+        let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+        assert!(verdict.is_ok(), "the accepted delta must complete the run, got {verdict:?}");
+        assert!(
+            obs.replay_record().contains(&ReplayEntry::AcceptedDelta {
+                leg: "bob",
+                step: 2,
+                expected: "BYE".to_string(),
+                observed: "CANCEL".to_string(),
+                rule: "bye-approx-cancel-single-early-dialog",
+            }),
+            "the acceptance is never silent — the AcceptedDelta entry must carry \
+             the rule: {:?}",
+            obs.replay_record(),
+        );
+        assert!(
+            obs.replay_record()
+                .iter()
+                .all(|e| !matches!(e, ReplayEntry::ServicedStray { method, .. } if method == "CANCEL")),
+            "a blessed substitution must not double-book as a serviced stray: {:?}",
+            obs.replay_record(),
+        );
+        h.finish().await;
+    }
+
+    /// `NotAccepted`: the SAME plan with a policy that declines —
+    /// behavior is byte-identical to today's mismatch path (and to the
+    /// no-policy run below): the CANCEL automatic services the abandon as a
+    /// recorded stray, no `AcceptedDelta` appears, and the scripted BYE steps
+    /// stay unsatisfied (the consumed-target tombstone guards them).
+    #[tokio::test(start_paused = true)]
+    async fn not_accepted_delta_keeps_todays_mismatch_path() {
+        let h = Harness::new("actor-delta-not-accepted").describe(
+            "ADR-0024 §6: the policy declines the BYE→CANCEL substitution — the CANCEL \
+             automatic (stray) fires exactly as with no policy installed",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let decline: AcceptedDeltaPolicy = Arc::new(|_| DeltaDecision::NotAccepted);
+        let call = bye_expecting_cancel_plan(&alice, &bob, Some(decline));
+        let ctx = CallCtx::new();
+        let obs = ObservedState::new();
+        let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+        assert!(verdict.is_ok(), "the automatic still tears the call down, got {verdict:?}");
+        assert!(
+            obs.accepted_deltas().is_empty(),
+            "NotAccepted must record no acceptance: {:?}",
+            obs.replay_record(),
+        );
+        assert!(
+            obs.replay_record().contains(&ReplayEntry::ServicedStray {
+                leg: "bob",
+                method: "CANCEL".to_string(),
+                action: "200 + 487 on the bound INVITE",
+            }),
+            "the mismatch stays the automatic's recorded stray: {:?}",
+            obs.replay_record(),
+        );
+        h.finish().await;
+    }
+
+    /// No policy installed: the hook is absent — zero behavior change
+    /// from today, and NO `AcceptedDelta` observation exists (the never-silent
+    /// contract's converse).
+    #[tokio::test(start_paused = true)]
+    async fn no_policy_bye_for_cancel_unchanged_and_silent_free() {
+        let h = Harness::new("actor-delta-no-policy").describe(
+            "ADR-0024 §6: no accepted-delta policy — the BYE-expecting script meets a \
+             CANCEL exactly as today (automatic + stray), no AcceptedDelta entry",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let call = bye_expecting_cancel_plan(&alice, &bob, None);
+        let ctx = CallCtx::new();
+        let obs = ObservedState::new();
+        let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+        assert!(verdict.is_ok(), "the automatic still tears the call down, got {verdict:?}");
+        assert!(
+            obs.accepted_deltas().is_empty(),
+            "no policy → no acceptance may appear: {:?}",
+            obs.replay_record(),
+        );
+        assert!(
+            obs.replay_record().contains(&ReplayEntry::ServicedStray {
+                leg: "bob",
+                method: "CANCEL".to_string(),
+                action: "200 + 487 on the bound INVITE",
+            }),
+            "the mismatch stays the automatic's recorded stray: {:?}",
+            obs.replay_record(),
+        );
+        h.finish().await;
+    }
+
+    /// `DeltaReaction::Default` on an observed CANCEL: the standard handling
+    /// IS the CANCEL automatic (200 + 487 on the bound INVITE), run with the
+    /// stray record suppressed — the acceptance records ONLY the
+    /// `AcceptedDelta` entry, never a double-booked `ServicedStray`.
+    #[tokio::test(start_paused = true)]
+    async fn accepted_delta_default_reaction_on_cancel_never_strays() {
+        let h = Harness::new("actor-delta-default-cancel").describe(
+            "ADR-0024 §6: a Default-reaction acceptance of an observed CANCEL \
+             runs the automatic's mechanics without recording a serviced stray",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let call = bye_expecting_cancel_plan(
+            &alice,
+            &bob,
+            Some(bye_for_cancel_policy_with(DeltaReaction::Default)),
+        );
+        let ctx = CallCtx::new();
+        let obs = ObservedState::new();
+        let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+        assert!(verdict.is_ok(), "the Default-reaction acceptance must complete, got {verdict:?}");
+        assert!(
+            obs.replay_record().iter().any(|e| matches!(
+                e,
+                ReplayEntry::AcceptedDelta { rule: "bye-approx-cancel-single-early-dialog", .. }
+            )),
+            "the acceptance is recorded: {:?}",
+            obs.replay_record(),
+        );
+        assert!(
+            obs.replay_record()
+                .iter()
+                .all(|e| !matches!(e, ReplayEntry::ServicedStray { method, .. } if method == "CANCEL")),
+            "a Default-reaction acceptance must not double-book as a stray: {:?}",
+            obs.replay_record(),
+        );
+        h.finish().await;
+    }
+
+    /// The RFC scoping under FORKING (the reason the blessing is conditional):
+    /// bob's script rings TWO early dialogs (the transaction's default tag +
+    /// an explicit fork tag), so `early_dialog_count == 2` — the `== 1` policy
+    /// declines and today's behavior stands (the CANCEL automatic as a
+    /// recorded stray, no acceptance). Pins the per-tag counting.
+    #[tokio::test(start_paused = true)]
+    async fn forked_early_dialogs_decline_bye_for_cancel() {
+        use sip_message::generators::InDialogMethod;
+        let h = Harness::new("actor-delta-forked-decline").describe(
+            "ADR-0024 §6: two early dialogs (forked 180s) → the single-early-\
+             dialog BYE≈CANCEL rule declines; the CANCEL automatic services it",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let expect_resp = |status: u16| GoalStep::ExpectResponse {
+            status,
+            body: BodyExpect::Any,
+            early: None,
+            ack_body: None,
+            matcher: None,
+        };
+        let ring = |early: Option<EarlyId>| GoalStep::RespondTemplate {
+            template: response_template(180, "Ringing", false),
+            opts: EmitOpts::default(),
+            early,
+        };
+        let call = CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    &alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(Barrier::None, expect_resp(180)),
+                        Goal::new(Barrier::None, expect_resp(180)),
+                        Goal::new(Barrier::None, GoalStep::Cancel),
+                        Goal::new(Barrier::None, expect_resp(200)),
+                        Goal::new(Barrier::None, expect_resp(487)),
+                    ],
+                ),
+                scripted_spec(
+                    "bob",
+                    &bob,
+                    vec![
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::ExpectRequest {
+                                kind: RequestKind::Initial,
+                                body: BodyExpect::SdpPresent,
+                                matcher: None,
+                            },
+                        ),
+                        // Two early dialogs on the ONE transaction (§12.1.2).
+                        Goal::new(Barrier::None, ring(None)),
+                        Goal::new(Barrier::None, ring(Some("fork-b"))),
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::ExpectRequest {
+                                kind: RequestKind::InDialog(InDialogMethod::Bye),
+                                body: BodyExpect::Any,
+                                matcher: None,
+                            },
+                        ),
+                        Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),
+                    ],
+                ),
+            ],
+            plan: vec![],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+            delta_policy: Some(bye_for_cancel_policy()),
+        };
+        let ctx = CallCtx::new();
+        let obs = ObservedState::new();
+        let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+        assert!(verdict.is_ok(), "the automatic still tears the call down, got {verdict:?}");
+        assert!(
+            obs.accepted_deltas().is_empty(),
+            "two early dialogs must decline the == 1 rule: {:?}",
+            obs.replay_record(),
+        );
+        assert!(
+            obs.replay_record().contains(&ReplayEntry::ServicedStray {
+                leg: "bob",
+                method: "CANCEL".to_string(),
+                action: "200 + 487 on the bound INVITE",
+            }),
+            "the declined mismatch stays the automatic's recorded stray: {:?}",
+            obs.replay_record(),
+        );
+        h.finish().await;
+    }
+
+    /// The reject plan for the response-side confrontation: alice's script
+    /// strictly expects a 486 final; bob rejects with 603.
+    fn reject_drift_plan(
+        alice: &crate::Agent,
+        bob: &crate::Agent,
+        delta_policy: Option<AcceptedDeltaPolicy>,
+    ) -> CallPlan {
+        CallPlan {
+            actors: vec![
+                caller_spec(
+                    "alice",
+                    alice,
+                    ("bob", bob.clone()),
+                    vec![
+                        Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                        Goal::new(
+                            Barrier::None,
+                            GoalStep::ExpectResponse {
+                                status: 486,
+                                body: BodyExpect::Any,
+                                early: None,
+                                ack_body: None,
+                                matcher: None,
+                            },
+                        ),
+                    ],
+                ),
+                ActorSpec {
+                    role: "bob",
+                    agent: bob.clone(),
+                    disposition: Disposition::Reject(603),
+                    media: MediaState::answer(ANSWER_SDP),
+                    goals: vec![],
+                    invite_targets: vec![],
+                    via: None,
+                    feed: CtxFeed::default(),
+                    cseq: None,
+                    delayed: None,
+                },
+            ],
+            plan: vec![],
+            settle: SettleBarrier::default_ceiling(),
+            automatics: Automatics::default(),
+            delta_policy,
+        }
+    }
+
+    /// Response-side accepted delta: the due `ExpectResponse{486}` meets
+    /// a 603 — the policy blesses the status drift (`DeltaReaction::Default`:
+    /// the reactive follow-up already ACKed the observed final) and the run
+    /// completes with the acceptance recorded.
+    #[tokio::test(start_paused = true)]
+    async fn accepted_delta_response_status_drift_recorded() {
+        let h = Harness::new("actor-delta-response-drift").describe(
+            "response side: ExpectResponse{486} confronted with a 603 — the \
+             policy accepts, the fact is consumed, AcceptedDelta recorded",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let drift: AcceptedDeltaPolicy = Arc::new(|ctx: &DeltaContext<'_>| {
+            if matches!(
+                ctx.expected,
+                ExpectedStimulus::Response { status: 486 }
+            ) && matches!(ctx.observed, ObservedStimulus::Response { status: 603, .. })
+            {
+                DeltaDecision::Accepted(AcceptedDelta {
+                    rule: "reject-code-drift",
+                    satisfies_steps: 1,
+                    reaction: DeltaReaction::Default,
+                })
+            } else {
+                DeltaDecision::NotAccepted
+            }
+        });
+        let call = reject_drift_plan(&alice, &bob, Some(drift));
+        let ctx = CallCtx::new();
+        let obs = ObservedState::new();
+        let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+        assert!(verdict.is_ok(), "the accepted status drift must complete, got {verdict:?}");
+        assert!(
+            obs.replay_record().contains(&ReplayEntry::AcceptedDelta {
+                leg: "alice",
+                step: 1,
+                expected: "486".to_string(),
+                observed: "603".to_string(),
+                rule: "reject-code-drift",
+            }),
+            "the response acceptance is never silent: {:?}",
+            obs.replay_record(),
+        );
+        h.finish().await;
+    }
+
+    /// Response-side `NotAccepted`: the declined status drift fails
+    /// exactly as today — the pinned `WrongStatus{expected: 486, got: 603}`
+    /// fail-fast, and no acceptance is recorded.
+    #[tokio::test(start_paused = true)]
+    async fn not_accepted_response_delta_pins_wrong_status() {
+        let h = Harness::new("actor-delta-response-declined").describe(
+            "response-side decline: ExpectResponse{486} vs 603 keeps the \
+             fail-fast WrongStatus verdict",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let decline: AcceptedDeltaPolicy = Arc::new(|_| DeltaDecision::NotAccepted);
+        let call = reject_drift_plan(&alice, &bob, Some(decline));
+        let ctx = CallCtx::new();
+        let obs = ObservedState::new();
+        let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+        match &verdict {
+            CallVerdict::Failed(StepError::WrongStatus { who, expected, got, reason }) => {
+                assert_eq!(who, "alice");
+                assert_eq!(*expected, 486);
+                assert_eq!(*got, 603);
+                assert_eq!(reason, "Decline");
+            }
+            other => panic!("expected the pinned WrongStatus fail-fast, got {other:?}"),
+        }
+        assert!(
+            obs.accepted_deltas().is_empty(),
+            "a declined substitution must record no acceptance: {:?}",
+            obs.replay_record(),
+        );
+        h.finish().await;
+    }
+
+    /// A `satisfies_steps` overrun (a policy typo: 20 with one goal left) is
+    /// bounded fail-fast — the shared check both hook points run — never a
+    /// silent script exhaustion, and no acceptance is recorded. Pinned on the
+    /// response-side hook, where the wire is already complete when the policy
+    /// bug trips (the 603 was ACKed), so the flow stays terminal.
+    #[tokio::test(start_paused = true)]
+    async fn satisfies_steps_overrun_fails_fast_bounded() {
+        let h = Harness::new("actor-delta-overrun").describe(
+            "ADR-0024 §6: satisfies_steps beyond the remaining goals is a \
+             bounded StepError, never a silent pass",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let typo: AcceptedDeltaPolicy = Arc::new(|_| {
+            DeltaDecision::Accepted(AcceptedDelta {
+                rule: "overrun-typo",
+                satisfies_steps: 20,
+                reaction: DeltaReaction::Default,
+            })
+        });
+        let call = reject_drift_plan(&alice, &bob, Some(typo));
+        let ctx = CallCtx::new();
+        let obs = ObservedState::new();
+        let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+        match &verdict {
+            CallVerdict::Failed(StepError::UnexpectedKind { who, detail }) => {
+                assert_eq!(who, "alice");
+                assert!(
+                    detail.contains("must satisfy 1..=1") && detail.contains("got 20"),
+                    "the bounded error names the valid range and the typo: {detail}",
+                );
+            }
+            other => panic!("expected the bounded overrun StepError, got {other:?}"),
+        }
+        assert!(
+            obs.accepted_deltas().is_empty(),
+            "an out-of-bounds acceptance must record nothing: {:?}",
+            obs.replay_record(),
+        );
+        h.finish().await;
+    }
+
+    /// A response substitution declaring `TerminatePendingInitial` is a
+    /// bounded fail-fast (its RFC follow-up already keyed on the observed
+    /// status — there is nothing to terminate), pinning the reaction
+    /// validation.
+    #[tokio::test(start_paused = true)]
+    async fn response_delta_rejects_terminate_reaction() {
+        let h = Harness::new("actor-delta-response-bad-reaction").describe(
+            "ADR-0024 §6: a response substitution must take DeltaReaction::\
+             Default — TerminatePendingInitial fails fast",
+        );
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+        let bad: AcceptedDeltaPolicy = Arc::new(|_| {
+            DeltaDecision::Accepted(AcceptedDelta {
+                rule: "bad-reaction",
+                satisfies_steps: 1,
+                reaction: DeltaReaction::TerminatePendingInitial,
+            })
+        });
+        let call = reject_drift_plan(&alice, &bob, Some(bad));
+        let ctx = CallCtx::new();
+        let obs = ObservedState::new();
+        let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+        match &verdict {
+            CallVerdict::Failed(StepError::UnexpectedKind { who, detail }) => {
+                assert_eq!(who, "alice");
+                assert!(
+                    detail.contains("DeltaReaction::Default"),
+                    "the bounded error names the required reaction: {detail}",
+                );
+            }
+            other => panic!("expected the bounded reaction StepError, got {other:?}"),
+        }
         h.finish().await;
     }
 
@@ -2387,6 +2983,7 @@ mod tests {
             plan: vec![established_phase()],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let ctx = CallCtx::new();
@@ -2454,6 +3051,7 @@ mod tests {
             plan: vec![],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -2528,6 +3126,7 @@ mod tests {
             plan: vec![established_phase()],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -2622,6 +3221,7 @@ mod tests {
             plan: vec![established_phase()],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics { answer_100_trying: on },
+            delta_policy: None,
         };
 
         let ctx = CallCtx::new();
@@ -2708,6 +3308,7 @@ mod tests {
             plan: vec![established_phase()],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -2803,6 +3404,7 @@ mod tests {
             plan: vec![established_phase()],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -2861,6 +3463,7 @@ mod tests {
             plan: vec![established_phase()],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -2947,6 +3550,7 @@ mod tests {
             plan: vec![phase("confirmed", |s| s.leg_at_least("alice", LegPhase::Confirmed))],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -3024,6 +3628,7 @@ mod tests {
             ],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(10)).await;
@@ -3111,6 +3716,7 @@ mod tests {
             plan: vec![established_phase()],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -3176,6 +3782,7 @@ mod tests {
             plan: vec![established_phase()],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let ctx = CallCtx::new();
@@ -3261,6 +3868,7 @@ mod tests {
             plan: vec![],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -3332,6 +3940,7 @@ mod tests {
             plan: vec![],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let started = tokio::time::Instant::now();
@@ -3414,6 +4023,7 @@ mod tests {
             plan: vec![established_phase()],
             settle: SettleBarrier::default_ceiling(),
             automatics: Automatics::default(),
+            delta_policy: None,
         };
 
         let verdict = run_call(call, Duration::from_secs(5)).await;

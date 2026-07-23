@@ -40,13 +40,17 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
+use super::delta::{
+    AcceptedDelta, AcceptedDeltaPolicy, DeltaContext, DeltaDecision, DeltaReaction, DialogSnapshot,
+    ExpectedStimulus, ObservedStimulus,
+};
 use super::goals::{BodyExpect, EarlyId, FinalAssert, Goal, GoalCursor, GoalStep, RequestKind};
 use super::ledger::{ObligationKey, ObligationKind};
 use super::state::{Observation, ObservedState, ResponseFact, SubflowState};
 use sip_message::generators::InDialogMethod;
 use sip_message::{
     CseqDeviation, CseqPattern, DelayedAutomatic, EmitOpts, MatchOpts, MessageTemplate, SipMessage,
-    SipResponse,
+    SipRequest, SipResponse,
 };
 
 use crate::agent::{top_via_branch, InviteResponseFate};
@@ -493,11 +497,22 @@ pub struct ActorState<'c> {
     /// `Invite`/`InviteTemplate` (fallback: `Disposition::Caller`). Keys the
     /// §14.1 glare owner dwell and the caller attribution.
     originates: bool,
+    /// The plan's accepted-delta policy (ADR-0024 §6): consulted when a due
+    /// reception expectation is confronted with a non-matching but
+    /// classifiable inbound, BEFORE the mismatch path. `None` = the hook is
+    /// absent and behavior is unchanged.
+    delta_policy: Option<AcceptedDeltaPolicy>,
+    /// The distinct To-tags this UAS has emitted >100 provisionals under on
+    /// its pending initial INVITE (`""` = the transaction's default sticky
+    /// tag) — the [`DialogSnapshot::early_dialog_count`] source. Read only
+    /// while an initial-INVITE target is still pending.
+    early_provisionals: HashSet<String>,
 }
 
 impl<'c> ActorState<'c> {
     /// Wire a declarative [`ActorSpec`] to the shared observed state, teardown
     /// scope, and timing context. `step_timeout` bounds each goal-guard wait.
+    #[allow(clippy::too_many_arguments)] // the plan-knob fan-out mirrors `CallPlan`
     pub fn from_spec(
         spec: ActorSpec,
         obs: ObservedState,
@@ -506,6 +521,7 @@ impl<'c> ActorState<'c> {
         step_timeout: Duration,
         challenge_responder: Option<Arc<dyn ChallengeResponder>>,
         automatics: Automatics,
+        delta_policy: Option<AcceptedDeltaPolicy>,
     ) -> Self {
         let originates = spec
             .goals
@@ -564,6 +580,8 @@ impl<'c> ActorState<'c> {
                 .map(|p| Arc::new(Mutex::new(CseqDeviation::new(p)))),
             delayed: spec.delayed,
             originates,
+            delta_policy,
+            early_provisionals: HashSet::new(),
         }
     }
 
@@ -878,8 +896,14 @@ fn scripted_wants_cancel(st: &ActorState<'_>) -> bool {
 /// terminate the leg. When the target was script-claimed (bound or parked),
 /// the tombstone makes a later scripted step bound to it fail fast, never by
 /// goal timeout. No-op when nothing is pending (the leg already answered — a
-/// late CANCEL "has no effect on the call", §9.2).
-async fn cancel_pending_initial(st: &mut ActorState<'_>, now: Instant) -> Result<(), StepError> {
+/// late CANCEL "has no effect on the call", §9.2). `record_stray: false` on the
+/// accepted-delta path: the acceptance's own `AcceptedDelta` entry is the
+/// record (a blessed substitution must not double-book as divergence).
+async fn cancel_pending_initial(
+    st: &mut ActorState<'_>,
+    now: Instant,
+    record_stray: bool,
+) -> Result<(), StepError> {
     let mut consumed: Option<&'static str> = None;
     let held = st
         .pending_answer
@@ -912,10 +936,16 @@ async fn cancel_pending_initial(st: &mut ActorState<'_>, now: Instant) -> Result
         arm_reject_final(st, &inv, 487);
         if let Some(action) = consumed {
             st.parked_initial_consumed = Some("CANCEL answered 200 + 487");
-            st.obs.record(
-                Observation::ServicedStray { leg: st.role, method: "CANCEL".to_string(), action },
-                now,
-            );
+            if record_stray {
+                st.obs.record(
+                    Observation::ServicedStray {
+                        leg: st.role,
+                        method: "CANCEL".to_string(),
+                        action,
+                    },
+                    now,
+                );
+            }
         }
         st.obs.record(Observation::LegTerminated { leg: st.role }, now);
         st.scope.mark_terminated();
@@ -958,7 +988,7 @@ async fn requeue_parked(st: &mut ActorState<'_>) -> Result<(), StepError> {
         } else if method == "CANCEL" {
             // Its 200 went out at park time — only the automatic's 487 half
             // remains for the still-pending INVITE target.
-            cancel_pending_initial(st, now).await?;
+            cancel_pending_initial(st, now, true).await?;
         } else {
             react_in_dialog_request(st, entry.txn).await?;
         }
@@ -1006,12 +1036,13 @@ async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), St
 
     // A Scripted actor's in-dialog park-or-react (ACK stays a stack automatic,
     // never parked; CANCEL parks only via its dedicated claim above): a request
-    // a remaining `ExpectRequest` matches waits for the script; anything else
-    // falls through to the reactive core, recorded as a serviced stray so
-    // divergence is never silent.
-    if matches!(st.disposition, Disposition::Scripted) && method != "ACK" && method != "CANCEL" {
+    // a remaining `ExpectRequest` matches waits for the script; an unclaimed
+    // one is offered to the plan's accepted-delta policy (ADR-0024 §6) and,
+    // not accepted, falls through to the reactive core, recorded as a serviced
+    // stray so divergence is never silent.
+    if matches!(st.disposition, Disposition::Scripted) && method != "ACK" {
         let now = Instant::now();
-        if scripted_wants_in_dialog(st, &method) {
+        if method != "CANCEL" && scripted_wants_in_dialog(st, &method) {
             st.obs.record(
                 Observation::InDialogRequest {
                     leg: st.role,
@@ -1024,16 +1055,220 @@ async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), St
             st.parked.push(ParkedRequest { txn: uas, initial: false });
             return Ok(());
         }
-        st.obs.record(
-            Observation::ServicedStray {
-                leg: st.role,
-                method: method.clone(),
-                action: "auto-reacted",
-            },
-            now,
-        );
+        let Some(uas) = try_accept_request_delta(st, uas).await? else {
+            return Ok(());
+        };
+        // The unclaimed CANCEL keeps its dedicated automatic (200 + 487 in the
+        // reactive core) — never a plain stray record.
+        if method != "CANCEL" {
+            st.obs.record(
+                Observation::ServicedStray {
+                    leg: st.role,
+                    method: method.clone(),
+                    action: "auto-reacted",
+                },
+                now,
+            );
+        }
+        return react_in_dialog_request(st, uas).await;
     }
     react_in_dialog_request(st, uas).await
+}
+
+/// Whether an inbound request satisfies an `ExpectRequest`'s kind — the raw
+/// twin of [`parked_matches`], evaluated before parking.
+fn request_matches_kind(req: &SipRequest, kind: &RequestKind) -> bool {
+    let initial = req.method.as_str() == "INVITE" && req.to.tag.is_none();
+    match kind {
+        RequestKind::Initial => initial,
+        RequestKind::InDialog(m) => !initial && req.method.as_str() == m.as_str(),
+        RequestKind::Cancel => !initial && req.method.as_str() == "CANCEL",
+    }
+}
+
+/// The actor's dialog state offered to the accepted-delta policy: the count of
+/// early dialogs open on the pending initial INVITE (UAS side: the tags this
+/// leg emitted >100 provisionals under; caller side: the distinct fork tags
+/// observed on >100 provisionals), plus the confirmed/phase facts.
+fn dialog_snapshot(st: &ActorState<'_>) -> DialogSnapshot {
+    let phase = st.obs.with_snapshot(|s| s.leg(st.role).phase());
+    let uas_initial_pending = st.pending_answer.is_some()
+        || st.pending_prack_answer.is_some()
+        || st.held_silent.is_some()
+        || st.bound.as_ref().is_some_and(|t| {
+            t.request().method.as_str() == "INVITE" && t.request().to.tag.is_none()
+        })
+        || st.parked.iter().any(|p| p.initial);
+    let early_dialog_count = if uas_initial_pending {
+        st.early_provisionals.len()
+    } else if st.dialogs.pending_invite.is_some() {
+        st.obs.with_snapshot(|s| {
+            s.leg(st.role)
+                .responses()
+                .iter()
+                .filter(|f| f.status > 100 && f.status < 200)
+                .map(|f| f.early_tag.clone().unwrap_or_default())
+                .collect::<HashSet<_>>()
+                .len()
+        })
+    } else {
+        0
+    };
+    DialogSnapshot { early_dialog_count, confirmed: st.dialogs.confirmed.is_some(), phase }
+}
+
+/// Bound an acceptance's `satisfies_steps` to `1..=remaining` (the due
+/// expectation through the script tail) — a policy typo must fail fast with a
+/// bounded error, never silently exhaust the script.
+fn check_satisfies_bound(
+    st: &ActorState<'_>,
+    rule: &'static str,
+    satisfies_steps: usize,
+) -> Result<(), StepError> {
+    let remaining = st.goals.remaining_steps().count();
+    if satisfies_steps == 0 || satisfies_steps > remaining {
+        return Err(StepError::UnexpectedKind {
+            who: st.role.to_string(),
+            detail: format!(
+                "accepted-delta rule {rule:?} must satisfy 1..={remaining} steps (the due \
+                 expectation through the script tail), got {satisfies_steps}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The accepted-delta hook for an observed REQUEST (ADR-0024 §6): when this
+/// actor's DUE goal is an `ExpectRequest` of a different kind, the plan's
+/// policy decides whether the substitution satisfies the script. Acceptance
+/// records the `AcceptedDelta` observation (never silent), advances the cursor
+/// past the satisfied steps — so they neither fire nor trip the
+/// consumed-target tombstone — performs the declared reaction, and re-scans
+/// the parked queue. Returns `None` when the inbound was consumed here,
+/// `Some(uas)` to continue the normal mismatch path (no policy, no due request
+/// expectation, or `NotAccepted`).
+async fn try_accept_request_delta(
+    st: &mut ActorState<'_>,
+    uas: ServerTxn,
+) -> Result<Option<ServerTxn>, StepError> {
+    let Some(policy) = st.delta_policy.clone() else { return Ok(Some(uas)) };
+    let Some(GoalStep::ExpectRequest { kind, .. }) = st.goals.next_step() else {
+        return Ok(Some(uas));
+    };
+    let kind = *kind;
+    if request_matches_kind(uas.request(), &kind) {
+        // A matching inbound is never a delta (it parks for the script).
+        return Ok(Some(uas));
+    }
+    let expected = ExpectedStimulus::Request(&kind);
+    let observed = ObservedStimulus::Request(uas.request());
+    let (expected_label, observed_label) = (expected.describe(), observed.describe());
+    let decision = policy(&DeltaContext {
+        role: st.role,
+        expected,
+        observed,
+        dialog: dialog_snapshot(st),
+    });
+    let DeltaDecision::Accepted(AcceptedDelta { rule, satisfies_steps, reaction }) = decision
+    else {
+        return Ok(Some(uas));
+    };
+    check_satisfies_bound(st, rule, satisfies_steps)?;
+    let now = Instant::now();
+    st.obs.record(
+        Observation::AcceptedDelta {
+            leg: st.role,
+            step: st.goals.position(),
+            expected: expected_label,
+            observed: observed_label,
+            rule,
+        },
+        now,
+    );
+    for _ in 0..satisfies_steps {
+        st.goals.advance();
+    }
+    match reaction {
+        // The CANCEL-automatic mechanics riding the observed request: 200 its
+        // hop, then 487 + terminate via the shared `cancel_pending_initial`
+        // (no stray record — the `AcceptedDelta` entry is the record).
+        DeltaReaction::TerminatePendingInitial => {
+            let mut uas = uas;
+            uas.respond(200, "OK").try_send().await?;
+            cancel_pending_initial(st, now, false).await?;
+        }
+        // The reactive core's standard answer table for the method. An
+        // observed CANCEL's standard handling IS the automatic (200 + 487) —
+        // run it with the stray record suppressed, exactly like
+        // `TerminatePendingInitial`: an accepted substitution never
+        // double-books as divergence.
+        DeltaReaction::Default => {
+            if uas.request().method.as_str() == "CANCEL" {
+                let mut uas = uas;
+                uas.respond(200, "OK").try_send().await?;
+                cancel_pending_initial(st, now, false).await?;
+            } else {
+                react_in_dialog_request(st, uas).await?;
+            }
+        }
+    }
+    // The cursor moved: a parked request only the satisfied steps could
+    // consume must not starve.
+    requeue_parked(st).await?;
+    Ok(None)
+}
+
+/// The accepted-delta hook for an observed RESPONSE (ADR-0024 §6): consulted
+/// by `ExpectResponse` on a status mismatch BEFORE failing `WrongStatus`.
+/// Acceptance records the observation, consumes the response facts through the
+/// observed one, and advances the cursor past the satisfied steps beyond the
+/// due expectation (which the goal loop itself advances). A response
+/// substitution's reaction must be [`DeltaReaction::Default`] — the reactive
+/// follow-up (ACK / hop-ACK) already keyed on the observed status. Returns
+/// `true` when accepted.
+fn try_accept_response_delta(
+    st: &mut ActorState<'_>,
+    expected_status: u16,
+    fact: &ResponseFact,
+    consumed_through: usize,
+) -> Result<bool, StepError> {
+    let Some(policy) = st.delta_policy.clone() else { return Ok(false) };
+    let decision = policy(&DeltaContext {
+        role: st.role,
+        expected: ExpectedStimulus::Response { status: expected_status },
+        observed: ObservedStimulus::Response { status: fact.status, reason: &fact.reason },
+        dialog: dialog_snapshot(st),
+    });
+    let DeltaDecision::Accepted(AcceptedDelta { rule, satisfies_steps, reaction }) = decision
+    else {
+        return Ok(false);
+    };
+    check_satisfies_bound(st, rule, satisfies_steps)?;
+    if !matches!(reaction, DeltaReaction::Default) {
+        return Err(StepError::UnexpectedKind {
+            who: st.role.to_string(),
+            detail: format!(
+                "accepted-delta rule {rule:?}: a response substitution takes DeltaReaction::Default"
+            ),
+        });
+    }
+    st.obs.record(
+        Observation::AcceptedDelta {
+            leg: st.role,
+            step: st.goals.position(),
+            expected: expected_status.to_string(),
+            observed: fact.status.to_string(),
+            rule,
+        },
+        Instant::now(),
+    );
+    st.resp_seen = consumed_through;
+    // The due `ExpectResponse` is advanced by the goal loop; only the further
+    // satisfied steps advance here.
+    for _ in 1..satisfies_steps {
+        st.goals.advance();
+    }
+    Ok(true)
 }
 
 /// The reactive in-dialog answer table — shared by the live dispatch and the
@@ -1141,7 +1376,7 @@ async fn react_in_dialog_request(
         // leg on a late CANCEL.
         "CANCEL" => {
             uas.respond(200, "OK").try_send().await?;
-            cancel_pending_initial(st, now).await?;
+            cancel_pending_initial(st, now, true).await?;
         }
         // In-dialog non-offer requests: 200 and fold the CSeq into the dialog's
         // gap detector (all methods share the dialog CSeq space, §12.2.1.1).
@@ -1269,6 +1504,10 @@ async fn maybe_answer_held_invite(st: &mut ActorState<'_>) -> Result<(), StepErr
 /// Apply the endpoint's initial-INVITE disposition (B6 entry policy).
 async fn apply_disposition(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Result<(), StepError> {
     let now = Instant::now();
+    // A fresh initial INVITE opens a fresh early-dialog space — a stale count
+    // from a previous initial (a reroute-retry to this actor) must not leak
+    // into the policy snapshot. A retransmit re-inserts the same tags.
+    st.early_provisionals.clear();
     st.ctx.anchor(&st.agent, "initialInvite", uas.request());
     // The rerouted winning leg stamps `rerouted` on receiving its INVITE
     // (default NONE for every other body — see `CtxFeed::on_invite_rx`).
@@ -1283,6 +1522,7 @@ async fn apply_disposition(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Resul
         }
         Disposition::RingThenAnswer { ring } => {
             uas.respond(180, "Ringing").try_send().await?;
+            st.early_provisionals.insert(String::new());
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
             st.pending_answer = Some(TimedAnswer { at: Instant::now() + ring, uas, fork: None });
         }
@@ -1293,6 +1533,7 @@ async fn apply_disposition(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Resul
         // obligation).
         Disposition::RingThenSilent => {
             uas.respond(180, "Ringing").try_send().await?;
+            st.early_provisionals.insert(String::new());
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
             st.held_silent = Some(uas);
         }
@@ -1324,6 +1565,7 @@ async fn apply_disposition(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Resul
                 } else {
                     uas.respond(180, "Ringing").with_to_tag(tag).try_send().await?;
                 }
+                st.early_provisionals.insert((*tag).to_string());
             }
             if let Some(loser) = loser_late_200 {
                 st.fork_loser_tags.insert(loser.to_string());
@@ -1355,6 +1597,7 @@ async fn apply_disposition(st: &mut ActorState<'_>, mut uas: ServerTxn) -> Resul
         Disposition::ReliableAnswer | Disposition::ReliableAnswerEarlyUpdate => {
             let sdp = st.answer_body();
             uas.respond(183, "Session Progress").reliable(1).with_sdp(sdp).try_send().await?;
+            st.early_provisionals.insert(String::new());
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
             st.pending_prack_answer = Some(uas);
         }
@@ -2282,6 +2525,14 @@ async fn drive_respond(
             Some(t) => t,
             None => &mut st.parked[parked_initial.expect("checked above")].txn,
         };
+        // A >100 provisional on the initial INVITE opens (or re-rides) an early
+        // dialog — tracked per tag for `DialogSnapshot::early_dialog_count`.
+        if status > 100
+            && txn.request().method.as_str() == "INVITE"
+            && txn.request().to.tag.is_none()
+        {
+            st.early_provisionals.insert(early.unwrap_or("").to_string());
+        }
         let mut r = match template {
             Some((tmpl, opts)) => txn.respond_template(tmpl, opts),
             None => txn.respond(status, provisional_reason(status)),
@@ -2406,6 +2657,10 @@ fn expect_response(
                 continue;
             }
             if f.status != status {
+                // Accepted-delta consult (ADR-0024 §6) before the fail-fast.
+                if try_accept_response_delta(st, status, f, st.resp_seen + i + 1)? {
+                    return Ok(());
+                }
                 return Err(StepError::WrongStatus {
                     who: st.role.to_string(),
                     expected: status,
@@ -2426,6 +2681,10 @@ fn expect_response(
                 continue;
             }
             if f.status != status {
+                // Accepted-delta consult (ADR-0024 §6) before the fail-fast.
+                if try_accept_response_delta(st, status, f, st.resp_seen + i + 1)? {
+                    return Ok(());
+                }
                 return Err(StepError::WrongStatus {
                     who: st.role.to_string(),
                     expected: status,
