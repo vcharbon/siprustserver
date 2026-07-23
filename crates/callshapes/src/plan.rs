@@ -386,6 +386,7 @@ impl ShapePlan {
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
+            delta_policy: None,
         })
     }
 

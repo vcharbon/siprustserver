@@ -14,8 +14,9 @@
 //! - `Expect::TransferDeclined` → `UnexpectedKind { who: "refer_charlie_reject" }`.
 
 use super::actor::{Automatics, Disposition};
+use super::delta::AcceptedDeltaPolicy;
 use super::goals::GoalStep;
-use super::state::ObservedState;
+use super::state::{ObservedState, ReplayEntry};
 use super::{run_call_with, ActorSpec, BarrierPhase, CallPlan, CallVerdict, SettleBarrier};
 use crate::realcall::{CallCtx, CallEnv, ScenarioId};
 use crate::{StepError, WaiverScope};
@@ -42,6 +43,9 @@ pub struct ActorCall {
     /// long-but-healthy call does not trip `torn_down`; free under a paused clock,
     /// the honest wall duration on a real one.
     pub ceiling: Option<std::time::Duration>,
+    /// The plan's accepted-delta policy (ADR-0024 §6), riding the plan like
+    /// `waivers`. `None` (the default) = hook absent, behavior unchanged.
+    pub delta_policy: Option<AcceptedDeltaPolicy>,
 }
 
 impl ActorCall {
@@ -62,6 +66,7 @@ impl ActorCall {
             waivers: Vec::new(),
             automatics: Automatics::default(),
             ceiling: None,
+            delta_policy: None,
         }
     }
 
@@ -80,6 +85,12 @@ impl ActorCall {
     /// Attach the plan's lane-chosen stack automatics (ADR-0024 §5).
     pub fn with_automatics(mut self, automatics: Automatics) -> Self {
         self.automatics = automatics;
+        self
+    }
+
+    /// Attach the plan's accepted-delta policy (ADR-0024 §6).
+    pub fn with_delta_policy(mut self, policy: AcceptedDeltaPolicy) -> Self {
+        self.delta_policy = Some(policy);
         self
     }
 }
@@ -264,7 +275,8 @@ pub async fn run_built_actor_call(
     env: &CallEnv<'_>,
     ctx: &CallCtx,
 ) -> Result<(), StepError> {
-    let ActorCall { actors, plan, settle, expect, waivers: _, automatics, ceiling } = call;
+    let ActorCall { actors, plan, settle, expect, waivers: _, automatics, ceiling, delta_policy } =
+        call;
     // The originating leg — the role a Reject terminal is attributed to,
     // keyed on which actor's first goal originates the dialog.
     let caller = originating_role(&actors);
@@ -276,7 +288,7 @@ pub async fn run_built_actor_call(
     // establishing INVITE from the call env — `None` on every current surface
     // (no CLI flag mints one yet), so a challenge classifies unchanged.
     let verdict = run_call_with(
-        CallPlan { actors, plan, settle, automatics },
+        CallPlan { actors, plan, settle, automatics, delta_policy },
         obs.clone(),
         ctx,
         step_timeout,
@@ -289,6 +301,15 @@ pub async fn run_built_actor_call(
     if let CallVerdict::Settle(open) = &verdict {
         for o in open {
             ctx.note(format!("settle: {o}"));
+        }
+    }
+    // Every accepted delta rides the sample DETAIL channel too — a blessed
+    // substitution is never silent on any lane (a consumer buckets on it).
+    for e in obs.accepted_deltas() {
+        if let ReplayEntry::AcceptedDelta { leg, step, expected, observed, rule } = e {
+            ctx.note(format!(
+                "accepted-delta: {leg} step {step} expected {expected} observed {observed} rule {rule}"
+            ));
         }
     }
     into_result(expect, verdict, &obs, caller)

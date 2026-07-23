@@ -196,6 +196,7 @@ impl ActorScenario for Refer {
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
+            delta_policy: None,
         })
     }
 }
@@ -336,6 +337,7 @@ impl ActorScenario for ReferCharlieReject {
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
+            delta_policy: None,
         })
     }
 }
@@ -457,6 +459,7 @@ impl ActorScenario for ReroutingPrack {
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
+            delta_policy: None,
         })
     }
 }
@@ -552,6 +555,7 @@ impl ActorScenario for PrackUpdate {
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
+            delta_policy: None,
         })
     }
 }
@@ -638,6 +642,7 @@ impl ActorScenario for Reinvite {
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
+            delta_policy: None,
         })
     }
 }
@@ -721,6 +726,7 @@ impl ActorScenario for OptionsHold {
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
+            delta_policy: None,
         })
     }
 }
@@ -806,6 +812,7 @@ impl ActorScenario for LongCall {
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
+            delta_policy: None,
         })
     }
 }
@@ -878,6 +885,7 @@ impl ActorScenario for InviteReject {
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
+            delta_policy: None,
         })
     }
 }
@@ -957,6 +965,7 @@ impl ActorScenario for AbandonRinging {
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
+            delta_policy: None,
         })
     }
 }
@@ -1034,6 +1043,7 @@ impl ActorScenario for BasicCall {
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
+            delta_policy: None,
         })
     }
 }

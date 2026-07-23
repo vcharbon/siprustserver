@@ -371,3 +371,45 @@ unchanged:
   (claimed by `ExpectRequest{Initial}`, provisionals already sent on the bound
   transaction), mirroring the parked-initial path — the same fail-fast
   tombstone applies to later scripted steps bound to it.
+
+## Amendment — accepted-delta policy hook (2026-07-23, request 054)
+
+Cross-stack replay surfaces legitimate behavioral deltas between the capture's
+choreography and what the SUT under replay emits (the BC01 family: the
+captured stack relays a pre-answer BYE, the replayed SUT translates it into a
+CANCEL). §6 gains one more plan-riding carrier — an ACCEPTED-DELTA policy:
+
+- `CallPlan.delta_policy` / `ActorCall.delta_policy` (builder
+  `with_delta_policy`): `AcceptedDeltaPolicy = Arc<dyn Fn(&DeltaContext<'_>)
+  -> DeltaDecision + Send + Sync>`. The registry of blessed substitutions is
+  CALLER-side code; the crate ships only the hook point, the context, the
+  reaction vocabulary, and the mechanics.
+- Confrontation points, both consulted BEFORE the mismatch path: (1) a
+  `Scripted` actor's inbound request that matches NO remaining `ExpectRequest`
+  while the DUE (next pending) goal is an `ExpectRequest` of another kind —
+  after the park checks, before the auto-react/stray fallthrough; (2) an
+  `ExpectResponse` status mismatch — before the `WrongStatus` fail-fast.
+  Scripted claims always win: an inbound that some remaining expectation
+  matches parks for the script and is never offered to the policy.
+- The policy sees `DeltaContext { role, expected: ExpectedStimulus, observed:
+  ObservedStimulus, dialog: DialogSnapshot }`. `DialogSnapshot` carries
+  `early_dialog_count` — the RFC scoping seat (BYE ≈ CANCEL only with exactly
+  one early dialog: §15.1.2 terminates that one early dialog and the INVITE
+  answers 487, while a CANCEL under forking kills EVERY fork, §9) — plus
+  `confirmed` and `phase`.
+- `AcceptedDelta { rule, satisfies_steps, reaction }`: `satisfies_steps`
+  (bounded `1..=remaining`, enforced fail-fast) counts scripted steps starting
+  AT the due expectation; the cursor
+  advances past them un-driven, so a satisfied step neither fires nor trips
+  the consumed-target tombstone (steps BEYOND the satisfied ones still fail
+  fast on it). `DeltaReaction::TerminatePendingInitial` = 200 the observed
+  request's hop + the CANCEL automatic's shared 487-and-terminate mechanics;
+  `DeltaReaction::Default` = the reactive core's standard handling (the only
+  valid reaction for a response substitution — its RFC follow-up already keyed
+  on the observed status).
+- Every acceptance records `ReplayEntry::AcceptedDelta { leg, step, expected,
+  observed, rule }` — never silent — and suppresses the serviced-stray record
+  for the same message (a blessed substitution must not double-book as
+  divergence). The list is queryable post-run (`ObservedState::
+  accepted_deltas`) and rides the scenario runner's sample notes, so a report
+  consumer can classify an `ok-with-accepted-delta` outcome.

@@ -2078,6 +2078,7 @@ impl ActorScenario for ByeWithContact {
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
+            delta_policy: None,
         })
     }
 }
@@ -2273,6 +2274,7 @@ impl ActorScenario for NumberPlanRefer {
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
+            delta_policy: None,
         })
     }
 }
