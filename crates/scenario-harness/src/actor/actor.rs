@@ -464,8 +464,9 @@ pub struct ActorState<'c> {
     /// order — reception goals consume them; requeue-on-advance auto-reacts
     /// what no remaining goal can consume.
     parked: Vec<ParkedRequest>,
-    /// The automatic that consumed the parked initial INVITE (CANCEL → 487): a
-    /// later scripted step bound to it fails fast naming this, never by timeout.
+    /// The automatic that consumed the script-claimed initial INVITE — parked
+    /// OR bound (CANCEL → 487): a later scripted step bound to it fails fast
+    /// naming this, never by timeout.
     parked_initial_consumed: Option<&'static str>,
     /// The server transaction the nearest preceding `ExpectRequest` consumed —
     /// what a `RespondTemplate`/`Respond` goal answers.
@@ -808,6 +809,7 @@ fn parked_matches(p: &ParkedRequest, kind: &RequestKind) -> bool {
     match kind {
         RequestKind::Initial => p.initial,
         RequestKind::InDialog(m) => !p.initial && p.txn.request().method.as_str() == m.as_str(),
+        RequestKind::Cancel => !p.initial && p.txn.request().method.as_str() == "CANCEL",
     }
 }
 
@@ -825,6 +827,8 @@ fn scripted_wants_initial(st: &ActorState<'_>) -> bool {
             GoalStep::ExpectRequest { kind: RequestKind::InDialog(_), .. } => {
                 bound_pending = true;
             }
+            // A Cancel expectation consumes the parked CANCEL, never a binding.
+            GoalStep::ExpectRequest { kind: RequestKind::Cancel, .. } => {}
             GoalStep::RespondTemplate { template, .. } => {
                 if !bound_pending {
                     return true;
@@ -857,6 +861,68 @@ fn scripted_wants_in_dialog(st: &ActorState<'_>, method: &str) -> bool {
     })
 }
 
+/// Whether a remaining `ExpectRequest{Cancel}` claims the inbound CANCEL —
+/// the precedence gate: a scripted claim always parks the CANCEL; only
+/// without one does the automatic (200 + 487) fire.
+fn scripted_wants_cancel(st: &ActorState<'_>) -> bool {
+    st.goals
+        .remaining_steps()
+        .any(|s| matches!(s, GoalStep::ExpectRequest { kind: RequestKind::Cancel, .. }))
+}
+
+/// The CANCEL automatic's 487 half (RFC 3261 §9.2), shared by the live CANCEL
+/// arm (right after its 200) and the requeue of a stale parked CANCEL (whose
+/// 200 went out at park time): take the pending initial-INVITE target — a
+/// disposition hold (timed / reliable / silent), the script-BOUND initial
+/// INVITE, or the parked initial — answer `487 Request Terminated` on it and
+/// terminate the leg. When the target was script-claimed (bound or parked),
+/// the tombstone makes a later scripted step bound to it fail fast, never by
+/// goal timeout. No-op when nothing is pending (the leg already answered — a
+/// late CANCEL "has no effect on the call", §9.2).
+async fn cancel_pending_initial(st: &mut ActorState<'_>, now: Instant) -> Result<(), StepError> {
+    let mut consumed: Option<&'static str> = None;
+    let held = st
+        .pending_answer
+        .take()
+        .map(|ta| ta.uas)
+        .or_else(|| st.pending_prack_answer.take())
+        .or_else(|| st.held_silent.take())
+        // A script-BOUND initial INVITE (claimed by `ExpectRequest{Initial}`,
+        // provisionals already sent on the bound txn) with no scripted CANCEL
+        // claim: the automatic mirrors the parked path so the peer never
+        // wedges in INVITE retransmits. A bound IN-DIALOG request is not the
+        // CANCEL's target and stays bound.
+        .or_else(|| {
+            let is_initial = st.bound.as_ref().is_some_and(|t| {
+                t.request().method.as_str() == "INVITE" && t.request().to.tag.is_none()
+            });
+            if !is_initial {
+                return None;
+            }
+            consumed = Some("200 + 487 on the bound INVITE");
+            st.bound.take()
+        })
+        .or_else(|| {
+            let i = st.parked.iter().position(|p| p.initial)?;
+            consumed = Some("200 + 487 on the parked INVITE");
+            Some(st.parked.remove(i).txn)
+        });
+    if let Some(mut inv) = held {
+        inv.respond(487, "Request Terminated").try_send().await?;
+        arm_reject_final(st, &inv, 487);
+        if let Some(action) = consumed {
+            st.parked_initial_consumed = Some("CANCEL answered 200 + 487");
+            st.obs.record(
+                Observation::ServicedStray { leg: st.role, method: "CANCEL".to_string(), action },
+                now,
+            );
+        }
+        st.obs.record(Observation::LegTerminated { leg: st.role }, now);
+        st.scope.mark_terminated();
+    }
+    Ok(())
+}
+
 /// Requeue-on-advance: auto-react every parked request no remaining goal can
 /// consume (recorded as a serviced stray) — a parked request never starves
 /// behind a script that moved past it.
@@ -866,6 +932,8 @@ async fn requeue_parked(st: &mut ActorState<'_>) -> Result<(), StepError> {
     while i < st.parked.len() {
         let keep = if st.parked[i].initial {
             scripted_wants_initial(st)
+        } else if st.parked[i].txn.request().method.as_str() == "CANCEL" {
+            scripted_wants_cancel(st)
         } else {
             let method = st.parked[i].txn.request().method.as_str().to_string();
             scripted_wants_in_dialog(st, &method)
@@ -877,12 +945,20 @@ async fn requeue_parked(st: &mut ActorState<'_>) -> Result<(), StepError> {
         let entry = st.parked.remove(i);
         let method = entry.txn.request().method.as_str().to_string();
         st.obs.record(
-            Observation::ServicedStray { leg: st.role, method, action: "auto-reacted on advance" },
+            Observation::ServicedStray {
+                leg: st.role,
+                method: method.clone(),
+                action: "auto-reacted on advance",
+            },
             now,
         );
         if entry.initial {
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
             answer_initial_invite(st, entry.txn, None).await?;
+        } else if method == "CANCEL" {
+            // Its 200 went out at park time — only the automatic's 487 half
+            // remains for the still-pending INVITE target.
+            cancel_pending_initial(st, now).await?;
         } else {
             react_in_dialog_request(st, entry.txn).await?;
         }
@@ -910,10 +986,29 @@ async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), St
         return apply_disposition(st, uas).await;
     }
 
-    // A Scripted actor's in-dialog park-or-react (ACK and CANCEL are stack
-    // automatics, never parked): a request a remaining `ExpectRequest` matches
-    // waits for the script; anything else falls through to the reactive core,
-    // recorded as a serviced stray so divergence is never silent.
+    // Scripted CANCEL park-or-react (ADR-0024): the CANCEL hop's `200` stays
+    // a stack automatic, but the CANCEL itself PARKS when a remaining
+    // `ExpectRequest{Cancel}` claims it — the script sequences the 487 on the
+    // bound INVITE. The expectation always wins over the automatic; without
+    // one, the automatic (200 + 487) fires in `react_in_dialog_request`
+    // below. A retransmit is absorbed by its 200 alone — one parks at most.
+    if matches!(st.disposition, Disposition::Scripted)
+        && method == "CANCEL"
+        && scripted_wants_cancel(st)
+    {
+        let mut uas = uas;
+        uas.respond(200, "OK").try_send().await?;
+        if !st.parked.iter().any(|p| p.txn.request().method.as_str() == "CANCEL") {
+            st.parked.push(ParkedRequest { txn: uas, initial: false });
+        }
+        return Ok(());
+    }
+
+    // A Scripted actor's in-dialog park-or-react (ACK stays a stack automatic,
+    // never parked; CANCEL parks only via its dedicated claim above): a request
+    // a remaining `ExpectRequest` matches waits for the script; anything else
+    // falls through to the reactive core, recorded as a serviced stray so
+    // divergence is never silent.
     if matches!(st.disposition, Disposition::Scripted) && method != "ACK" && method != "CANCEL" {
         let now = Instant::now();
         if scripted_wants_in_dialog(st, &method) {
@@ -1046,38 +1141,7 @@ async fn react_in_dialog_request(
         // leg on a late CANCEL.
         "CANCEL" => {
             uas.respond(200, "OK").try_send().await?;
-            let mut from_parked = false;
-            let held = st
-                .pending_answer
-                .take()
-                .map(|ta| ta.uas)
-                .or_else(|| st.pending_prack_answer.take())
-                .or_else(|| st.held_silent.take())
-                // A Scripted actor's PARKED initial INVITE: the CANCEL automatic
-                // consumes it (200 + 487) — a later scripted step bound to it
-                // fails fast via the tombstone, never by goal timeout.
-                .or_else(|| {
-                    let i = st.parked.iter().position(|p| p.initial)?;
-                    from_parked = true;
-                    Some(st.parked.remove(i).txn)
-                });
-            if let Some(mut inv) = held {
-                inv.respond(487, "Request Terminated").try_send().await?;
-                arm_reject_final(st, &inv, 487);
-                if from_parked {
-                    st.parked_initial_consumed = Some("CANCEL answered 200 + 487");
-                    st.obs.record(
-                        Observation::ServicedStray {
-                            leg: st.role,
-                            method: "CANCEL".to_string(),
-                            action: "200 + 487 on the parked INVITE",
-                        },
-                        now,
-                    );
-                }
-                st.obs.record(Observation::LegTerminated { leg: st.role }, now);
-                st.scope.mark_terminated();
-            }
+            cancel_pending_initial(st, now).await?;
         }
         // In-dialog non-offer requests: 200 and fold the CSeq into the dialog's
         // gap detector (all methods share the dialog CSeq space, §12.2.1.1).
@@ -2441,6 +2505,12 @@ fn expect_request(
                 detail: format!("request did not match its template: {m}"),
             }
         })?;
+    }
+    if matches!(kind, RequestKind::Cancel) {
+        // The CANCEL hop is already answered (its 200 stays a stack automatic,
+        // sent at park time); the binding stays the INVITE the CANCEL targets,
+        // so the following scripted 487 rides the BOUND INVITE transaction.
+        return Ok(());
     }
     st.bound = Some(entry.txn);
     Ok(())
