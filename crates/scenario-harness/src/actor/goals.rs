@@ -44,6 +44,11 @@ pub enum RequestKind {
     Initial,
     /// An in-dialog request of this method (To-tag present).
     InDialog(InDialogMethod),
+    /// The CANCEL targeting this actor's pending initial INVITE (RFC 3261
+    /// §9.2). The CANCEL hop's `200` stays a stack automatic; consuming the
+    /// expectation does NOT rebind, so a following `487` rides the bound
+    /// INVITE transaction. Precedence vs the CANCEL automatic: ADR-0024.
+    Cancel,
 }
 
 /// The truncated-variant anchor's assertion over the observed final.
@@ -242,8 +247,9 @@ pub enum GoalStep {
     },
     /// Strict reception: consume the next parked request of this kind into the
     /// actor's bound server transaction (the `RespondTemplate`/`Respond` that
-    /// follows answers it). `matcher` runs at consume time on the parked
-    /// transaction's request.
+    /// follows answers it). [`RequestKind::Cancel`] consumes WITHOUT rebinding
+    /// — the binding stays the INVITE the CANCEL targets. `matcher` runs at
+    /// consume time on the parked transaction's request.
     ExpectRequest { kind: RequestKind, body: BodyExpect, matcher: Option<MessageTemplate> },
     /// Observed, never asserted: wait for the next final on this leg, record
     /// `(key, expected, observed)` into the replay record, and key the

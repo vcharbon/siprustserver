@@ -352,3 +352,22 @@ sampling does not apply to it.
   switch would silently fork emissions.
 - **Templated PRACK.** A frozen `RAck` cannot reference the live dialog's
   RSeq/CSeq; PRACK stays a stack automatic.
+
+## Amendment — scripted CANCEL reception (2026-07-23, request 053)
+
+The "ACK and CANCEL are stack automatics, never parked" rule gains ONE carved
+exception on the reception side; ACK and every CANCEL *emission* automatic are
+unchanged:
+
+- `RequestKind` gains `Cancel`: an `ExpectRequest { kind: Cancel }` claims the
+  CANCEL targeting the actor's pending initial INVITE. The CANCEL hop's `200`
+  stays automatic (sent when the CANCEL parks); consuming the expectation does
+  NOT rebind — the binding stays the INVITE the CANCEL targets, so the
+  following `RespondTemplate`/`Respond` `487` rides the BOUND INVITE
+  transaction with verbatim frozen headers. Precedence: a remaining `Cancel`
+  expectation always parks the CANCEL; only without one does the automatic
+  fire.
+- The CANCEL automatic's 487 additionally covers a script-BOUND initial INVITE
+  (claimed by `ExpectRequest{Initial}`, provisionals already sent on the bound
+  transaction), mirroring the parked-initial path — the same fail-fast
+  tombstone applies to later scripted steps bound to it.
