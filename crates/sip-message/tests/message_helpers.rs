@@ -5,8 +5,9 @@
 //! generators port depends on.
 
 use sip_message::message_helpers::{
-    extract_contact_uri, extract_name_addr_uri, extract_tag, get_header, get_headers, parse_sip_uri,
-    parse_via_params, remove_header, set_header, strip_tag,
+    extract_contact_uri, extract_name_addr_uri, extract_tag, get_header, get_headers,
+    header_param_value, parse_sip_uri, parse_via_params, remove_header, same_user_identity,
+    set_header, strip_tag, uri_user_identity,
 };
 use sip_message::SipHeader;
 
@@ -83,4 +84,81 @@ fn parse_via_params_extracts_branch_cr_lg() {
     assert_eq!(p.branch.as_deref(), Some("z9hG4bK1"));
     assert_eq!(p.cr.as_deref(), Some("cref1"));
     assert_eq!(p.lg.as_deref(), Some("a"));
+}
+
+// --- header_param_value (P-Charging-Vector icid-value readout) --------------
+
+const ICID: &str = "8agh3007ghb23oo5h9cc3ns6hpj4l0p96qsq28l5kqn651d8g6-5";
+
+#[test]
+fn header_param_value_reads_icid_from_leading_position() {
+    // PCV's FIRST item is already a name=value pair (no leading `;`).
+    let pcv = format!("icid-value={ICID};icid-generated-at=10.15.252.63");
+    assert_eq!(header_param_value(&pcv, "icid-value").as_deref(), Some(ICID));
+    assert_eq!(header_param_value(&pcv, "ICID-Value").as_deref(), Some(ICID), "name is case-insensitive");
+}
+
+#[test]
+fn header_param_value_is_order_independent_and_ignores_mutating_siblings() {
+    // The other PCV params mutate across an AS; only the named param matters.
+    let a = format!("icid-value={ICID};icid-generated-at=10.15.252.63;orig-ioi=orange.fr");
+    let b = format!("orig-ioi=btip.orange-business.com;term-ioi=x;icid-value={ICID}");
+    assert_eq!(header_param_value(&a, "icid-value"), header_param_value(&b, "icid-value"));
+    assert_eq!(header_param_value(&b, "icid-value").as_deref(), Some(ICID));
+}
+
+#[test]
+fn header_param_value_unquotes_quoted_gen_value() {
+    // gen-value = token / host / quoted-string (RFC 7315): quoted forms with
+    // escapes (and an embedded `;`) resolve to the inner text.
+    let pcv = r#"icid-value="quoted;icid\"x";orig-ioi=y"#;
+    assert_eq!(header_param_value(pcv, "icid-value").as_deref(), Some(r#"quoted;icid"x"#));
+}
+
+#[test]
+fn header_param_value_absent_vs_flag() {
+    assert_eq!(header_param_value("icid-generated-at=10.0.0.1", "icid-value"), None);
+    assert_eq!(header_param_value("lr;maddr=10.0.0.1", "lr").as_deref(), Some(""));
+}
+
+// --- uri_user_identity / same_user_identity ---------------------------------
+
+#[test]
+fn user_identity_matches_tel_and_sip_forms_across_hosts() {
+    // The MOH01 shape: same subscriber, every URI byte-different.
+    assert!(same_user_identity(
+        "tel:+33772589500",
+        "sip:+33772589500@ims.mnc001.mcc208.3gppnetwork.org;user=phone",
+    ));
+    assert!(same_user_identity("<tel:+33772589500>", "sip:+33772589500@anything:5070"));
+}
+
+#[test]
+fn user_identity_drops_userinfo_params_and_uri_params() {
+    // Real capture form: `verstat` rides the USER part, before the `@`.
+    let a = "sip:+33969979518;verstat=TN-Validation-Passed@btip.orange-business.com:5060;user=phone";
+    let b = "sip:+33969979518;verstat=No-TN-Validation@orange-multimedia.fr;user=phone";
+    assert_eq!(uri_user_identity(a).as_deref(), Some("+33969979518"));
+    assert!(same_user_identity(a, b));
+}
+
+#[test]
+fn user_identity_normalizes_phone_visual_separators() {
+    // RFC 3966 visual separators are not significant for phone identities,
+    // and the scheme is case-normalized — TEL: ≡ tel: ≡ sip: forms.
+    assert!(same_user_identity("tel:+1-408-555-1212", "sip:+14085551212@gw.example.com"));
+    assert!(same_user_identity("TEL:+333", "tel:+333"));
+    assert_eq!(uri_user_identity("tel:(408)555.1212").as_deref(), Some("4085551212"));
+    // ...but a non-phone user keeps its literal form, compared byte-exact —
+    // the user part is case-SENSITIVE (RFC 3261 §19.1.4).
+    assert_eq!(uri_user_identity("sip:a.smith@example.com").as_deref(), Some("a.smith"));
+    assert!(!same_user_identity("sip:Alice@a.example", "sip:alice@b.example"));
+    assert!(same_user_identity("sip:alice@a.example", "sip:alice@b.example"));
+}
+
+#[test]
+fn user_identity_negative_cases() {
+    assert!(!same_user_identity("tel:+33772589500", "sip:+33772589501@host"));
+    assert!(!same_user_identity("sip:host-only.example", "sip:host-only.example"), "userless never matches");
+    assert_eq!(uri_user_identity("sip:10.0.0.1:5060"), None);
 }

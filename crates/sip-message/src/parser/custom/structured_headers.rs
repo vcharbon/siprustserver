@@ -641,6 +641,18 @@ fn parse_host_port(s: &str, i: usize) -> (String, Option<u64>, usize) {
     (host, port, j)
 }
 
+/// Parse a header value that IS a `;`-separated parameter list
+/// (`param *(";" param)`, quote-aware) — the shape of P-Charging-Vector and
+/// similar IMS headers whose FIRST item is already a `name=value` pair with
+/// no leading `;`. Any leading free-form segment (e.g. a Via's sent-protocol)
+/// falls out as a flag param and is simply not looked up by callers.
+pub fn parse_param_list(value: &str) -> Params {
+    let mut prefixed = String::with_capacity(value.len() + 1);
+    prefixed.push(';');
+    prefixed.push_str(value);
+    parse_header_params(&prefixed, 0)
+}
+
 /// Parse header-level parameters (after `>` or after addr-spec). This is where
 /// `tag=` lives — semicolon-separated `key[=value]` at the HEADER level.
 fn parse_header_params(s: &str, mut i: usize) -> Params {

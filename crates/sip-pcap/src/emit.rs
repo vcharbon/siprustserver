@@ -13,7 +13,7 @@ use crate::DecodeStats;
 
 /// Value of the top-level `"schema"` field. Bumped on any breaking change to
 /// the emitted shape; consumers reject versions they do not know.
-pub const EMIT_SCHEMA_VERSION: u32 = 2;
+pub const EMIT_SCHEMA_VERSION: u32 = 3;
 
 /// Serialize the full flow model, plus the pcap decode counters, to JSON.
 ///
@@ -23,7 +23,7 @@ pub const EMIT_SCHEMA_VERSION: u32 = 2;
 ///
 /// ```text
 /// {
-///   "schema": 2,
+///   "schema": 3,
 ///   "decode_stats": { records, non_ip, non_udp, snap_truncated, datagrams,
 ///                     fragments, reassembled, frag_dropped, tail_truncated },
 ///   "flow_stats":   { sip_messages, capture_dups, parse_failed, non_sip },
@@ -34,7 +34,9 @@ pub const EMIT_SCHEMA_VERSION: u32 = 2;
 ///     "final_status": u16 | null,
 ///     "saw_180": bool,
 ///     "terminated_by": "BYE" | "CANCEL" | null,
-///     "tokens": [ str ],
+///     "tokens": [ str ],            // union over all token strategies
+///                                   // (sorted, deduped); which strategy a
+///                                   // value came from is in the evidence
 ///     "msgs": [ {                   // capture-time order across all hops
 ///       "ts_us": u64,
 ///       "src": addr, "dst": addr,
@@ -65,10 +67,15 @@ pub const EMIT_SCHEMA_VERSION: u32 = 2;
 ///     "legs": [ idx ],              // every leg is in exactly one group
 ///     "evidence": [                 // why members were joined (empty for a
 ///                                   // single-leg group) — heuristic, meant
-///                                   // for human confirm/override downstream
-///       { "kind": "shared_token", "token": str, "legs": [idx] }
-///       | { "kind": "fromto_adjacency", "legs": [idx, idx],
-///           "shared_host": ip, "dt_us": u64 }
+///                                   // for human confirm/override downstream.
+///                                   // "strategy" = index into the correlation
+///                                   // pipeline that fired (first wins)
+///       { "kind": "shared_token", "strategy": idx, "token": str,
+///         "legs": [idx] }
+///       | { "kind": "shared_header_param", "strategy": idx, "header": str,
+///           "param": str, "token": str, "legs": [idx] }
+///       | { "kind": "identity_adjacency", "strategy": idx,
+///           "legs": [idx, idx], "shared_host": ip, "dt_us": u64 }
 ///     ]
 ///   } ]
 /// }
@@ -115,7 +122,7 @@ fn leg_json(leg: &FlowLeg) -> Value {
         "final_status": leg.final_status,
         "saw_180": leg.saw_180,
         "terminated_by": leg.terminated_by.map(|t| t.as_str()),
-        "tokens": leg.tokens.iter().collect::<Vec<_>>(),
+        "tokens": leg.tokens().iter().collect::<Vec<_>>(),
         "msgs": leg.msgs.iter().map(msg_json).collect::<Vec<_>>(),
     })
 }
@@ -206,13 +213,23 @@ fn group_json(group: &CallGroup) -> Value {
 
 fn evidence_json(ev: &MatchEvidence) -> Value {
     match ev {
-        MatchEvidence::SharedToken { token, legs } => json!({
+        MatchEvidence::SharedToken { strategy, token, legs } => json!({
             "kind": "shared_token",
+            "strategy": strategy,
             "token": token,
             "legs": legs,
         }),
-        MatchEvidence::FromToAdjacency { legs, shared_host, dt_us } => json!({
-            "kind": "fromto_adjacency",
+        MatchEvidence::SharedHeaderParam { strategy, header, param, token, legs } => json!({
+            "kind": "shared_header_param",
+            "strategy": strategy,
+            "header": header,
+            "param": param,
+            "token": token,
+            "legs": legs,
+        }),
+        MatchEvidence::IdentityAdjacency { strategy, legs, shared_host, dt_us } => json!({
+            "kind": "identity_adjacency",
+            "strategy": strategy,
             "legs": legs,
             "shared_host": shared_host.to_string(),
             "dt_us": dt_us,
@@ -361,29 +378,43 @@ mod tests {
         assert!(m.get("raw_b64").is_none());
     }
 
-    /// Both evidence variants serialize with their discriminating `kind`.
+    /// All three evidence variants serialize with their discriminating
+    /// `kind` and the pipeline strategy index that fired.
     #[test]
     fn match_evidence_variants_are_emitted() {
         let tok_a = sip_request("INVITE", "ev-a", 1, "ba", "X-Api-Call: call-9\r\n");
         let tok_b = sip_request("INVITE", "ev-b", 1, "bb", "X-Api-Call: call-9\r\n");
+        let icid_a = sip_request("INVITE", "ev-e", 1, "be", "P-Charging-Vector: icid-value=icid-7;orig-ioi=a\r\n");
+        let icid_b = sip_request("INVITE", "ev-f", 1, "bf", "P-Charging-Vector: orig-ioi=b;icid-value=icid-7\r\n");
         let adj_a = sip_request("INVITE", "ev-c", 1, "bc", "");
         let adj_b = sip_request("INVITE", "ev-d", 1, "bd", "");
         let datagrams = vec![
             dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060", &tok_a),
             dg(2_000, "10.0.0.2:5062", "10.0.0.9:5060", &tok_b),
-            dg(3_000, "10.0.1.1:5060", "10.0.1.5:5060", &adj_a),
-            dg(4_000, "10.0.1.5:5062", "10.0.1.9:5060", &adj_b),
+            dg(3_000, "10.0.2.1:5060", "10.0.2.5:5060", &icid_a),
+            dg(4_000, "10.0.2.5:5062", "10.0.2.9:5060", &icid_b),
+            dg(5_000, "10.0.1.1:5060", "10.0.1.5:5060", &adj_a),
+            dg(6_000, "10.0.1.5:5062", "10.0.1.9:5060", &adj_b),
         ];
         let flows = build_flows(&datagrams, &FlowConfig::default());
         let v = flows_to_json(&flows, &DecodeStats::default());
-        assert_eq!(v["groups"].as_array().unwrap().len(), 2);
+        assert_eq!(v["groups"].as_array().unwrap().len(), 3);
         let tok_ev = &v["groups"][0]["evidence"][0];
         assert_eq!(tok_ev["kind"], "shared_token");
+        assert_eq!(tok_ev["strategy"], 0);
         assert_eq!(tok_ev["token"], "call-9");
         assert_eq!(tok_ev["legs"], json!([0, 1]));
-        let adj_ev = &v["groups"][1]["evidence"][0];
-        assert_eq!(adj_ev["kind"], "fromto_adjacency");
-        assert_eq!(adj_ev["legs"], json!([2, 3]));
+        let icid_ev = &v["groups"][1]["evidence"][0];
+        assert_eq!(icid_ev["kind"], "shared_header_param");
+        assert_eq!(icid_ev["strategy"], 1);
+        assert_eq!(icid_ev["header"], "P-Charging-Vector");
+        assert_eq!(icid_ev["param"], "icid-value");
+        assert_eq!(icid_ev["token"], "icid-7");
+        assert_eq!(icid_ev["legs"], json!([2, 3]));
+        let adj_ev = &v["groups"][2]["evidence"][0];
+        assert_eq!(adj_ev["kind"], "identity_adjacency");
+        assert_eq!(adj_ev["strategy"], 2);
+        assert_eq!(adj_ev["legs"], json!([4, 5]));
         assert_eq!(adj_ev["shared_host"], "10.0.1.5");
         assert_eq!(adj_ev["dt_us"], 1_000);
     }
