@@ -1,17 +1,12 @@
 //! Upward events the transaction layer emits to its consumer (the proxy's or
 //! B2BUA's router), and the client-transaction handles `send_request` returns.
-//! Port of the `TransactionEvent` / `ClientTransactionHandle` types in
-//! `TransactionLayer.ts`.
 
 use std::net::SocketAddr;
 
 use sip_message::SipMessage;
 
-/// A deduplicated/processed event for the upstream router.
-///
-/// Note: unlike the source, there is no `rinfo` arm carrying a JS `RemoteInfo`
-/// — the peer address is a `SocketAddr` (sip-net's everywhere-`SocketAddr`
-/// convention, ADR-0005).
+/// A deduplicated/processed event for the upstream router. The peer address is
+/// a `SocketAddr` (sip-net's everywhere-`SocketAddr` convention, ADR-0005).
 #[derive(Debug, Clone)]
 pub enum TransactionEvent {
     /// A SIP message that survived dedup/absorption and should reach the app.
@@ -55,7 +50,7 @@ pub enum TransactionEvent {
     },
     /// **The last transaction for a *watched* call reached a terminal state** —
     /// every transaction attributed to `call_ref` has left the map (final response
-    /// + ACK→Timer H for an INVITE, Timer J for a non-INVITE, or Timer B/F on
+    /// and ACK→Timer H for an INVITE, Timer J for a non-INVITE, or Timer B/F on
     /// failure). Emitted only for call_refs the consumer registered via
     /// [`watch_self_release`](crate::TransactionLayer::watch_self_release); the
     /// B2BUA's acting-backup self-release (ADR-0014) keys on it to shed its live

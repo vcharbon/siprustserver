@@ -1,7 +1,7 @@
-//! Observability surface — the port of `TransactionLayerMetrics`. Backed by
-//! shared atomics so callers read it synchronously off the actor thread (the
-//! owner task updates the atomics before it replies to a command, so a read
-//! right after an `await` reflects the mutation — see `layer.rs`).
+//! Observability surface. Backed by shared atomics so callers read it
+//! synchronously off the actor thread (the owner task updates the atomics
+//! before it replies to a command, so a read right after an `await` reflects
+//! the mutation — see `layer`).
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;

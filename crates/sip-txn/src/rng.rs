@@ -1,10 +1,6 @@
-//! Identifier generation seam — the port of `MessageHelpers.ts`
-//! `newTag`/`newBranch` (deferred from the message slice; MIGRATION_STATUS §1
-//! "Un-ported: MessageHelpers-random.test.ts").
-//!
-//! The source read a fiber-local Effect `Random`. We mirror the clock seam's
-//! shape: a small **injectable value** (not a trait) — `IdGen::seeded(seed)`
-//! for deterministic tests, `IdGen::from_entropy()` in production. The
+//! Identifier generation seam. Mirrors the clock seam's shape: a small
+//! **injectable value** (not a trait) — `IdGen::seeded(seed)` for
+//! deterministic tests, `IdGen::from_entropy()` in production. The
 //! transaction layer needs only `new_tag` (UAS To-tag fabricated on CANCEL
 //! before any 1xx, RFC 3261 §17.2.1) and `new_branch` (fallback when an
 //! outbound request carries no Via branch).
@@ -37,12 +33,12 @@ impl IdGen {
     /// Production generator, seeded with per-process OS entropy at construction.
     ///
     /// `RandomState` is seeded once per process from the OS RNG, so two pods that
-    /// start in the same clock-nanosecond still get DISTINCT id streams. The old
-    /// `SystemTime`-nanos-only seed collided under coarse clocks (WSL2/VM), and
-    /// because all b-leg traffic is masqueraded behind one LB VIP (identical
+    /// start in the same clock-nanosecond still get DISTINCT id streams — a
+    /// `SystemTime`-nanos-only seed collides under coarse clocks (WSL2/VM),
+    /// and because all b-leg traffic is masqueraded behind one LB VIP (identical
     /// sent-by at the peer), two workers emitting the same Via-branch / To-tag
-    /// sequence would have their transactions merged at the common UAS. We still
-    /// fold in the wall clock + PID so a single process's seed is also time-varying.
+    /// sequence would have their transactions merged at the common UAS. The wall
+    /// clock + PID are still folded in so a single process's seed is time-varying.
     pub fn from_entropy() -> Self {
         use std::hash::{BuildHasher, Hasher};
         let nanos = std::time::SystemTime::now()
@@ -75,13 +71,13 @@ impl IdGen {
         }
     }
 
-    /// RFC 3261 From/To tag — 8 base-36 chars (port of `newTag`).
+    /// RFC 3261 From/To tag — 8 base-36 chars.
     pub fn new_tag(&self) -> String {
         to_base36(self.next_u64(), 8)
     }
 
-    /// RFC 3261 Via branch with the mandatory magic cookie (port of
-    /// `newBranch`): `z9hG4bK` + 16 hex chars.
+    /// RFC 3261 Via branch with the mandatory magic cookie:
+    /// `z9hG4bK` + 16 hex chars.
     pub fn new_branch(&self) -> String {
         format!("{MAGIC_COOKIE}{:016x}", self.next_u64())
     }

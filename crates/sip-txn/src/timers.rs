@@ -1,6 +1,5 @@
-//! RFC 3261 §17 transaction timer constants. Verbatim port of the source
-//! `TransactionLayer.ts` constants — behaviour rides `tokio::time` (via the
-//! [`tokio_util::time::DelayQueue`] driver), so a single
+//! RFC 3261 §17 transaction timer constants. Behaviour rides `tokio::time`
+//! (via the [`tokio_util::time::DelayQueue`] driver), so a single
 //! `tokio::time::advance` moves all of these together in tests.
 
 use std::time::Duration;

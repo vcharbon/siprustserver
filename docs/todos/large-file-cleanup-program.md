@@ -156,9 +156,20 @@ scan time (2026-07-15). Sizes are line counts at scan time.
   Gotcha: a submodule named `call` inside the `call` crate makes
   `use call::model::*;` shadow the extern crate at every glob-import site
   (E0659), so the master-record modules are named `record.rs`.
-- [ ] **5. `crates/sip-txn/src/layer.rs`** — 1644 L, 29 consumer crates via
-  root re-export. Recent Timer-G work (f592c71) lives here — keep the RFC
-  §17 citations.
+- [x] **5. `crates/sip-txn/src/layer.rs`** — DONE 2026-07-24: 1644 L →
+  `layer/` (6 files + mod, largest 417 L; all public paths unchanged via
+  mod.rs re-exports, and every consumer already imported via the crate root).
+  Concerns: handle (public API + Command funnel) / owner (select! loop +
+  lockstep map/wheel bookkeeping + sweep) / client (§17.1 UAC FSM incl.
+  non-2xx auto-ACK + Timer D hold + per-call eviction) / server (§17.2 UAS
+  FSM incl. Timer-G non-2xx final retransmit — RFC citations kept) / events
+  (lossy `emit` vs lossless `emit_critical` + ADR-0014 CallQuiesced
+  end-of-turn ordering) / txn (per-transaction state + sweep-age policy).
+  Dead items deleted (rule 1): `TxnState::Terminated` (never set) and
+  `Transaction.method` (never read) — both justified only as source-FSM
+  fidelity. TS-port comments scrubbed crate-wide (lib.rs → grouped TOC,
+  event.rs, timers.rs, rng.rs, metrics.rs, Cargo.toml description + dev-dep
+  note); the crate's test files untouched — Lane 4. No new suspicions.
 
 ### Lane 2 — hot paths & rule engines
 
