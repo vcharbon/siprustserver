@@ -4,9 +4,10 @@
 //! Pipeline: decode pcaps (`sip_pcap`, with IP-fragment reassembly) → build
 //! the flow model (`sip_pcap::flow`: parse with the real `sip-message`
 //! parser, group messages into **legs** by Call-ID, correlate legs into
-//! **calls** by relayed token with a conservative From/To+host fallback) →
-//! filter and print. This bin is a presenter — selection and text layout
-//! only; everything model-shaped lives in the library.
+//! **calls** through the ordered strategy pipeline — relayed token headers,
+//! header-param tokens such as the IMS P-Charging-Vector icid, identity
+//! adjacency) → filter and print. This bin is a presenter — selection and
+//! text layout only; everything model-shaped lives in the library.
 //!
 //! Filters select whole call groups (give an a-leg Call-ID, get the b-leg
 //! ladder too). `--final-status none` finds calls whose initial INVITE never
@@ -23,7 +24,7 @@ use std::path::PathBuf;
 
 use clap::Parser as ClapParser;
 use sip_message::SipMessage;
-use sip_pcap::flow::{build_flows, CallGroup, FlowConfig, FlowLeg};
+use sip_pcap::flow::{build_flows, CallGroup, CorrelateStrategy, FlowConfig, FlowLeg};
 
 #[derive(ClapParser, Debug)]
 #[command(
@@ -71,13 +72,27 @@ struct Args {
     #[arg(long)]
     token: Option<String>,
 
-    /// Correlation headers whose (relayed) value ties B2BUA legs together.
+    /// Correlation headers whose (relayed) value ties B2BUA legs together —
+    /// whole-value equality, the pipeline's first strategy.
     #[arg(long = "correlate", default_values_t = ["X-Loadgen-Id".to_string(), "X-Api-Call".to_string()])]
     correlate: Vec<String>,
 
-    /// Disable the From/To+host adjacency fallback (token-only correlation).
+    /// Header-param correlation as `Header:param` — equality of one named
+    /// `;`-param (sibling params may mutate). Repeatable; each spec appends
+    /// one strategy, in order, after the token headers and before identity
+    /// adjacency. Default: the IMS end-to-end charging id.
+    #[arg(long = "correlate-param", default_values_t = ["P-Charging-Vector:icid-value".to_string()])]
+    correlate_param: Vec<String>,
+
+    /// Disable header-param correlation (drop those strategies from the
+    /// pipeline).
     #[arg(long, default_value_t = false)]
-    no_fromto_fallback: bool,
+    no_param_correlate: bool,
+
+    /// Disable the identity-adjacency fallback (drop the last pipeline
+    /// strategy — token/param-only correlation).
+    #[arg(long, default_value_t = false)]
+    no_identity_adjacency: bool,
 
     /// Emit the FULL flow model (raw payloads as text where valid UTF-8,
     /// base64 for binary parts, parsed summaries, hops, match evidence,
@@ -123,10 +138,24 @@ fn main() {
         }
     };
 
-    let cfg = FlowConfig {
-        correlate_headers: args.correlate.clone(),
-        fromto_fallback: !args.no_fromto_fallback,
-    };
+    let mut strategies = vec![CorrelateStrategy::HeaderToken { headers: args.correlate.clone() }];
+    if !args.no_param_correlate {
+        for spec in &args.correlate_param {
+            let Some((header, param)) = spec.split_once(':').filter(|(h, p)| !h.is_empty() && !p.is_empty())
+            else {
+                eprintln!("--correlate-param wants Header:param, got {spec:?}");
+                std::process::exit(2);
+            };
+            strategies.push(CorrelateStrategy::HeaderParam {
+                header: header.to_string(),
+                param: param.to_string(),
+            });
+        }
+    }
+    if !args.no_identity_adjacency {
+        strategies.push(CorrelateStrategy::IdentityAdjacency);
+    }
+    let cfg = FlowConfig { strategies };
     let flows = build_flows(&datagrams, &cfg);
 
     if args.json {
@@ -231,7 +260,7 @@ fn group_matches(group: &CallGroup, legs: &[FlowLeg], args: &Args) -> bool {
         }
     }
     if let Some(tok) = &args.token {
-        if !any_leg(&|l| l.tokens.iter().any(|t| t.contains(tok.as_str()))) {
+        if !any_leg(&|l| l.tokens().iter().any(|t| t.contains(tok.as_str()))) {
             return false;
         }
     }
@@ -316,7 +345,8 @@ fn invite_strs(leg: &FlowLeg) -> (&str, &str, &str) {
 
 fn print_list_line(n: usize, group: &CallGroup, legs: &[FlowLeg]) {
     let a = &legs[group.legs[0]];
-    let token = a.tokens.iter().next().map(|s| s.as_str()).unwrap_or("-");
+    let a_tokens = a.tokens();
+    let token = a_tokens.iter().next().copied().unwrap_or("-");
     let (ruri, from, to) = invite_strs(a);
     let dur_ms = (legs[group.legs.last().copied().unwrap_or(group.legs[0])].t_last())
         .saturating_sub(a.t_first())
@@ -343,7 +373,7 @@ fn print_ladder(n: usize, group: &CallGroup, legs: &[FlowLeg], full: bool) {
     println!("\n━━━ call group #{n} ─ {} ─ legs={} ━━━", fmt_ts(t0), group.legs.len());
     for (pos, &l) in group.legs.iter().enumerate() {
         let leg = &legs[l];
-        let tokens: Vec<&str> = leg.tokens.iter().map(|s| s.as_str()).collect();
+        let tokens: Vec<&str> = leg.tokens().into_iter().collect();
         let (ruri, from, to) = invite_strs(leg);
         println!(
             "  leg {}: Call-ID {}\n         INVITE {}  {} -> {}\n         final: {}  term: {}  msgs: {}{}",

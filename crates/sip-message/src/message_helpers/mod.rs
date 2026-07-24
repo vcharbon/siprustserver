@@ -5,8 +5,9 @@
 //!
 //! Concern map:
 //!   - [`headers`] — lookup / set / remove on a parsed header list
+//!   - [`header_params`] — named `;`-param readout from one header value
 //!   - [`name_addr`] — From/To/Contact value readers (tag, URI)
-//!   - [`uri`] — SIP-URI string parsing (host, port, params)
+//!   - [`uri`] — SIP-URI string parsing (host, port, params, user identity)
 //!   - [`via`] — Via value readers (branch + B2BUA `cr`/`lg` params)
 //!   - [`param_codec`] — percent-codec for B2BUA correlation params
 //!   - [`emergency`] — emergency-call classification (parsed + raw buffer)
@@ -15,6 +16,7 @@
 
 mod bytes;
 pub mod emergency;
+pub mod header_params;
 pub mod headers;
 pub mod name_addr;
 pub mod param_codec;
@@ -24,6 +26,7 @@ pub mod uri;
 pub mod via;
 
 pub use emergency::{buffer_has_emergency_marker, is_emergency_request};
+pub use header_params::header_param_value;
 pub use headers::{
     get_header, get_headers, name_matches, remove_header, set_header, split_top_level_commas,
 };
@@ -31,7 +34,10 @@ pub use name_addr::{extract_contact_uri, extract_name_addr_uri, extract_tag, str
 pub use param_codec::{decode_param, encode_param};
 pub use preparse::is_invite_request_buffer;
 pub use reject_503::{build_stateless_reject_503_buffer, jittered_retry_after};
-pub use uri::{extract_host_port, parse_sip_uri, parse_uri_params, ParsedSipUri};
+pub use uri::{
+    extract_host_port, parse_sip_uri, parse_uri_params, same_user_identity, uri_user_identity,
+    ParsedSipUri,
+};
 pub use via::{parse_via_params, via_sent_by, ViaParams};
 
 #[cfg(test)]
