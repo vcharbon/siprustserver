@@ -8,7 +8,8 @@
 //!   - [`header_params`] — named `;`-param readout from one header value
 //!   - [`name_addr`] — From/To/Contact value readers (tag, URI)
 //!   - [`uri`] — SIP-URI string parsing (host, port, params, user identity)
-//!   - [`via`] — Via value readers (branch + B2BUA `cr`/`lg` params)
+//!   - [`route`] — Route/Record-Route value readers (loose-route, strict URI)
+//!   - [`via`] — Via value readers/rewriters (branch, `cr`/`lg`, received/rport)
 //!   - [`param_codec`] — percent-codec for B2BUA correlation params
 //!   - [`emergency`] — emergency-call classification (parsed + raw buffer)
 //!   - [`preparse`] — strict byte classifiers (INVITE request-line check)
@@ -22,6 +23,7 @@ pub mod name_addr;
 pub mod param_codec;
 pub mod preparse;
 pub mod reject_503;
+pub mod route;
 pub mod uri;
 pub mod via;
 
@@ -38,7 +40,8 @@ pub use uri::{
     extract_host_port, parse_sip_uri, parse_uri_params, same_user_identity, uri_user_identity,
     ParsedSipUri,
 };
-pub use via::{parse_via_params, via_sent_by, ViaParams};
+pub use route::{first_route_is_loose, strip_route_uri_to_request_uri};
+pub use via::{parse_via_params, stamp_received_rport_on_via, via_sent_by, ViaParams};
 
 #[cfg(test)]
 mod brake_composition_tests {

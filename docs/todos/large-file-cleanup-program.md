@@ -130,8 +130,18 @@ scan time (2026-07-15). Sizes are line counts at scan time.
   `InviteResponseFate`) re-exported `pub(crate)` from mod.rs for loadbind /
   callee_group / actor. Header-extraction residue quarantined in
   `agent/extract.rs` (see suspicions).
-- [ ] **3. `crates/sip-message/src/generators.rs`** — 908 L, 56 direct
-  refs. Do right after #1 so the two carve-ups agree on module vocabulary.
+- [x] **3. `crates/sip-message/src/generators.rs`** — DONE 2026-07-24:
+  912 L → `generators/` (9 files + mod, largest 139 L, all public paths
+  unchanged via mod.rs re-exports). Concerns: spec / methods / emit (crate-
+  internal) / out_of_dialog / in_dialog / ack / cancel / response / relay.
+  Vocabulary aligned with #1: the read/rewrite items that lived in
+  generators moved to message_helpers — `first_route_is_loose` +
+  `strip_route_uri_to_request_uri` → new `message_helpers/route.rs`,
+  `stamp_received_rport_on_via` → `message_helpers/via.rs` — with
+  `generators::` re-exports keeping every old consumer path. TS-port +
+  slice-2 port-plan comments scrubbed; `build_via_value`/`build_contact_value`
+  became `ViaSpec::header_value`/`ContactSpec::header_value` (pub(crate)).
+  One suspicion raised (see log).
 - [ ] **4. `crates/call/src/model.rs` + `crates/call/src/helpers.rs`** —
   833 + 756 L, `call` crate has 92 consumer files. `helpers.rs` is a
   grab-bag by name; bucket by type per discoverability rule 4.
@@ -297,3 +307,17 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
    send path forks an independent per-fork CSeq sequence whenever the fork
    map is wired (`ClientInvite::send_request`). Comment rewritten to the
    actual contract during the split; no behavior change.
+
+### 2026-07-24 — generators split
+
+8. **`generators/in_dialog.rs` + `generators/ack.rs` — an in-dialog request /
+   2xx-ACK built from a dialog with an EMPTY `remote_tag` omits the To tag
+   entirely** (RFC 3261 §12.2.1.1 requires it). The old ~10-line comments
+   justified this as the mid-confirm failover-takeover hydrate path (a replica
+   copy whose relayed 2xx had not yet established the remote tag): emitting
+   `;tag=` with an empty value is malformed and panics `hydrate_request`.
+   Assessed deliberate degenerate-path safety — well-formed-but-tagless beats
+   a panicking worker, and "the degenerate dialog is handled elsewhere" — so
+   behavior kept; comments condensed to the contract. Worth a check some day
+   that the recorded-trace audit would flag a tagless in-dialog request if
+   this path ever fired outside the takeover corner.

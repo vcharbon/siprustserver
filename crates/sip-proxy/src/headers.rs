@@ -181,10 +181,9 @@ pub fn via_sent_by_addr(via_entry: &str) -> Option<ProxyAddr> {
     via_sent_by(via_entry).and_then(ProxyAddr::parse)
 }
 
-// received/rport stamping: the verbatim local copy of
-// `generators::stamp_received_rport_on_via` is gone — one implementation in
-// sip-message now serves both the proxy hop and the B2BUA response path, so a
-// fix in one can no longer silently miss the other.
+// received/rport stamping delegates to sip-message (`message_helpers::via`):
+// ONE implementation serves both the proxy hop and the B2BUA response path,
+// so a fix in one cannot silently miss the other.
 
 #[cfg(test)]
 mod tests {
