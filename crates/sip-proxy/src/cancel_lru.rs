@@ -17,9 +17,9 @@
 //!
 //! The same cache also drives the non-2xx ACK hop decision (`ackhop|` keys —
 //! relay the upstream's §17.1.1.3 ACK on the INVITE's remembered hop, or
-//! absorb it when the proxy itself generated the final; see `core/request.rs`
+//! absorb it when the proxy itself generated the final; see `core/request`
 //! and `core/response.rs`) and the retransmission branch memo (`rtx|`-prefixed
-//! keys, see `core/request.rs`).
+//! keys, see `core/request`).
 //!
 //! Reads are O(1) and lock-only (never block on I/O). Eviction is lazy on
 //! lookup plus an optional periodic [`sweep_expired`](CancelBranchLru::sweep_expired)

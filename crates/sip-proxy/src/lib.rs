@@ -1,5 +1,4 @@
-//! `sip-proxy` — the stateless SIP front proxy + its load balancer (Rust port of
-//! `src/sip-front-proxy/`, MIGRATION_STATUS slice 9).
+//! `sip-proxy` — the stateless SIP front proxy + its load balancer.
 //!
 //! The proxy is a **stateless** RFC 3261 §16 proxy: it fans new dialogs across a
 //! pool of B2BUA workers, pins in-dialog traffic to the chosen worker via a
@@ -9,19 +8,18 @@
 //! `sip-txn::IdGen` only for Via branch generation and `sip-clock::Clock` for
 //! timestamps. See [ADR-0009](../../docs/adr/0009-front-proxy-rust-shape.md).
 //!
-//! ## Scope of this slice
-//! - Ported: the proxy data path, the load balancer (HRW + signed cookie +
-//!   routing matrix), the worker registry (static + simulated), OPTIONS health
-//!   probing toward the B2BUA, and the metrics layer (counters + a Prometheus
-//!   HTTP endpoint).
-//! - Ported (migration/14): [`self_gate`] is now the real ELU/CPS admission gate
-//!   ([`self_gate::EluCpsGate`] — EWMA-smoothed proxy ELU + per-class CPS token
-//!   bucket + load sampler), shedding external new-dialog non-emergency INVITEs
-//!   under self-overload. The always-admit [`self_gate::AlwaysAdmitGate`] remains
-//!   the no-protection default. It layers on the OPTIONS-driven worker health/band
-//!   classification and `sip-net`'s receive-buffer tail-drop.
-//! - Deferred: the SIP registrar/REGISTER path, the per-worker AIMD rate-cap
-//!   token bucket (band classification only here), and the kubernetes registry.
+//! ## Scope
+//! - Included: the proxy data path ([`core`]), the load balancer (HRW + signed
+//!   cookie + routing matrix, [`strategies`]), the worker registry (static +
+//!   simulated), OPTIONS health probing toward the B2BUA, the metrics layer
+//!   (counters + a Prometheus HTTP endpoint), and [`self_gate`] — the ELU/CPS
+//!   admission gate ([`self_gate::EluCpsGate`]: EWMA-smoothed proxy ELU +
+//!   per-class CPS token bucket + load sampler) shedding external new-dialog
+//!   non-emergency INVITEs under self-overload, with the always-admit
+//!   [`self_gate::AlwaysAdmitGate`] as the no-protection default.
+//! - Out of scope: the SIP registrar/REGISTER path, the per-worker AIMD
+//!   rate-cap token bucket (band classification only here), and the
+//!   kubernetes registry.
 
 pub mod addr;
 pub mod cancel_lru;

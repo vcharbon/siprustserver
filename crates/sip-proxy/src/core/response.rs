@@ -1,9 +1,9 @@
-//! Response path — port of `handleResponseImpl` (ProxyCore.ts L1246-1449),
-//! single-endpoint. Validate ≥2 Via and that the top is us; route to the next
-//! Via (received/rport precedence); reverse-path failover to the cookie's
-//! `w_bak` when the destination worker is no longer alive; pop the top Via
-//! entry (comma-aware); forward; remember the ACK-relay hop for a non-2xx
-//! INVITE final (the ACK itself travels end-to-end — see `core/request.rs`).
+//! Response path, single-endpoint: validate ≥2 Via and that the top is us;
+//! route to the next Via (received/rport precedence); reverse-path failover
+//! to the cookie's `w_bak` when the destination worker is confirmed Dead; pop
+//! the top Via entry (comma-aware); forward; remember the ACK-relay hop for a
+//! non-2xx INVITE final (the ACK itself travels end-to-end — see
+//! `core/request`).
 
 use sip_message::message_helpers::{parse_sip_uri, parse_uri_params};
 use sip_message::types::{ParamValue, SipResponse, Via};
@@ -112,10 +112,10 @@ impl ProxyCore {
 
         // ── Relayed non-2xx INVITE final: remember the ACK-relay hop ────────
         // This transaction-less proxy (ADR-0022 X4) does NOT synthesize the
-        // §17.1.1.3 hop-by-hop ACK here — it used to, and that quenched the
+        // §17.1.1.3 hop-by-hop ACK here — a synthesized hop ACK quenches the
         // downstream UAS's Timer G (the only retransmitter in the system)
         // while the relay above stays exactly-once: lose that one relayed
-        // copy and the caller never saw the final at all, wedging the reject
+        // copy and the caller never sees the final at all, wedging the reject
         // until Timer B / the 32 s safety timer. Reliability is END-TO-END
         // instead: the UAS retransmits the final through this stateless relay
         // until the upstream's own ACK arrives, and the request path relays
@@ -127,7 +127,7 @@ impl ProxyCore {
         // carries the hop to repeat. Gating the ACK-relay on it (rather than
         // on the INVITE entry alone) keeps a takeover worker's 2xx ACK safe
         // when its reset `IdGen` re-mints a branch aliasing the dead
-        // primary's INVITE (see `core/request.rs`). Short TTL: the upstream
+        // primary's INVITE (see `core/request`). Short TTL: the upstream
         // ACKs within its final-retransmit window (a re-sent final refreshes
         // the marker).
         if (300..700).contains(&resp.status) && resp.cseq.method == "INVITE" {
@@ -441,7 +441,7 @@ Content-Length: 0\r\n\r\n"
     // upstream's own ACK is relayed downstream on the INVITE's remembered
     // hop: same target, same outbound Via branch (so the UAS's server
     // transaction matches it, §17.2.3), the caller's message otherwise
-    // verbatim (R-URI included — the upstreamneed-033 demux concern).
+    // verbatim (R-URI included — the downstream demux keys on it).
     #[tokio::test]
     async fn relayed_non_2xx_final_is_never_hop_acked_and_the_upstream_ack_relays() {
         let ep = Arc::new(ByteCapturingEndpoint::default());

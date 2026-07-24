@@ -173,10 +173,23 @@ scan time (2026-07-15). Sizes are line counts at scan time.
 
 ### Lane 2 — hot paths & rule engines
 
-- [ ] **6. `crates/sip-proxy/src/core/request.rs`** — 1630 L, 11 smells.
-  ADR-0022 danger zone (stateless final-response contract). Sibling
-  `core/response.rs` (573 L) and `core/mod.rs` (640 L) get the comment pass
-  in the same sitting even though they're under/near the line bar.
+- [x] **6. `crates/sip-proxy/src/core/request.rs`** — DONE 2026-07-24:
+  1630 L → `core/request/` (9 files, largest 459 L; entry points stay
+  crate-internal — `route_request` is `pub(in crate::core)`, nothing was
+  ever exported past the crate, so zero consumer churn). Concerns: mod
+  (RouteOutcome + `top_via_branch` correlator + `handle_request` metering
+  shell) / route (the §16 ladder) / record_route (double-RR insertion,
+  carved out of the ladder as `insert_double_record_route`) / reply
+  (self-generated UAS finals + `ackhop|` absorb memo + select-failure 503);
+  the five embedded test modules became sibling files (worker_outbound /
+  retransmission / cookie_identity / rfc_small_fix / ack_hop). ADR-0022 X4
+  contract comments kept verbatim. Comment pass on `core/mod.rs`,
+  `core/response.rs`, the crate `lib.rs` header (TS-port/slice framing →
+  present-tense scope), `cancel_lru.rs` + `tests/self_gate_admission.rs`
+  stale-path/ticket refs. All ProxyCore.ts / migration/14 / upstreamneed
+  ticket comments in src/core + lib.rs scrubbed. No new suspicions
+  (headers.rs is documented as proxy *policy* composers over sip-message
+  primitives — no extraction violation).
 - [ ] **7. `crates/b2bua/src/rules/actions.rs`** — 2295 L. The rules/
   directory is already modular; this is the oversized member. Split by
   action family; `rules/defaults.rs` (1390 L), `relay.rs` (1039 L),

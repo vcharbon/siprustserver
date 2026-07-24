@@ -1,7 +1,7 @@
-//! Proxy-self-gate admission suite — the on-wire half of the migration/14 gate.
+//! Proxy-self-gate admission suite — the gate's on-wire half.
 //!
 //! The 13 `self_gate::tests` unit tests prove [`EluCpsGate`] returns the right
-//! [`AdmitDecision`]; this suite pins the **glue** in `core/request.rs` that turns
+//! [`AdmitDecision`]; this suite pins the **glue** in `core/request` that turns
 //! a gate decision into the user-visible contract: a rejected NEW external
 //! new-dialog INVITE gets a `503 Service Unavailable` with `Retry-After: <n>` and
 //! `Reason: SIP;cause=503;text="<phrase>"`, while emergency / worker-outbound
@@ -107,7 +107,7 @@ async fn recv_response(client: &dyn sip_net::UdpEndpoint) -> sip_message::SipRes
 // ── The 503 wire contract — the slice's user-visible output ──────────────────
 //
 // A force-reject gate makes EVERY external new-dialog INVITE shed. This pins the
-// reject branch of `core/request.rs` (L262-272): RouteOutcome.decision==Reject,
+// self-gate reject branch of `core/request/route.rs`: RouteOutcome.decision==Reject,
 // the source gets a 503 with Retry-After=<gate value> and the exact Reason
 // header, AND the `reason.unwrap_or_else("proxy_overload_cps")` fallback fires
 // when the gate hands back a `None` reason.

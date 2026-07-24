@@ -1,14 +1,13 @@
-//! [`ProxyCore`] — the stateless proxy data path (port of `ProxyCore.ts`,
-//! single-endpoint K8s-LB mode; the dual-fabric registrar mode is out of scope).
+//! [`ProxyCore`] — the stateless proxy data path (single-endpoint K8s-LB
+//! mode; a SIP registrar does NOT live here).
 //!
 //! It binds one UDP endpoint, runs a recv loop, parses each datagram, and
 //! dispatches to [`request`](self) / [`response`](self) handling. It owns the
 //! routing-policy seam ([`RoutingStrategy`]), the worker registry, the
 //! `(Call-ID|CSeq#)` LRU, an [`IdGen`] for Via branches, a [`Clock`], metrics,
-//! a logger, and the self-gate (the real ELU/CPS admission gate as of
-//! migration/14). The handlers mutate the raw header
-//! list and re-serialize — `sip-message::serialize` renders from `headers`, so
-//! Via/Record-Route/Route surgery takes effect directly.
+//! a logger, and the self-gate (ELU/CPS admission). The handlers mutate the
+//! raw header list and re-serialize — `sip-message::serialize` renders from
+//! `headers`, so Via/Record-Route/Route surgery takes effect directly.
 
 mod request;
 mod response;
