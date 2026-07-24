@@ -1,10 +1,6 @@
-//! `callRef` derivation/parsing + Redis index-key computation — port of the
-//! `deriveCallRef` / `parseCallRef` / `callIndexKeys` / `callIndexKeysFromUnknown`
-//! helpers in `src/call/CallModel.ts`.
-//!
-//! Pure over the [`Call`] shape; ported now (ahead of the stateful CallState
-//! slice) so the persistence write-path and the recovery read-path stay in
-//! lock-step, exactly as the source intends.
+//! `callRef` derivation/parsing + index-key computation. Pure over the
+//! [`Call`] shape, so the persistence write-path and the recovery read-path
+//! stay in lock-step.
 
 use crate::model::Call;
 
@@ -86,8 +82,7 @@ pub fn call_index_keys(call: &Call) -> Vec<String> {
 ///
 /// Field names are the crate's serde names (snake_case) — the msgpack body
 /// itself is positional and carries no names, so the schema-tolerant walk only
-/// makes sense over this JSON projection (the source's replication puller does
-/// the analogous walk over its JSON `bak:` body).
+/// makes sense over this JSON projection.
 pub fn call_index_keys_from_unknown(state: &serde_json::Value) -> Vec<String> {
     let obj = match state.as_object() {
         Some(o) => o,

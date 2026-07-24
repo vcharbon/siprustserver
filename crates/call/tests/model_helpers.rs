@@ -150,12 +150,6 @@ fn ext_and_rule_helpers() {
 }
 
 #[test]
-fn a_leg_invite_cseq_extraction() {
-    let call = representative_call();
-    assert_eq!(a_leg_invite_cseq_num(&call), 1); // "1 INVITE"
-}
-
-#[test]
 fn dialog_constructors() {
     let ctx = MakeDialogLegCtx {
         call_id: "cid",

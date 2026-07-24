@@ -1,16 +1,14 @@
-//! Canonical `FeatureActivations` — port of
-//! `src/decision/schemas/features.ts` (the closed union from
-//! SplitServiceLogic.md §D5).
+//! Canonical `FeatureActivations` — the closed union of decision-engine
+//! feature activations.
 //!
-//! Embedded in the `call` crate for now: `Call.features` carries it, so the
-//! data model needs the type to round-trip. The decision/rules layer will own
-//! the canonical version once it is ported — until a cross-layer cycle forces a
-//! shared crate, keeping it here respects ADR-0002 ("no premature shared types
+//! Embedded in the `call` crate: `Call.features` carries it, so the data model
+//! needs the type to round-trip. Until a cross-layer cycle forces a shared
+//! crate, keeping it here respects ADR-0002 ("no premature shared types
 //! crate").
 //!
-//! Source semantics preserved: `platform` is mandatory; every feature arm is
-//! optional, and **absence means "explicitly disabled," not "default enabled"**
-//! (the policy guard keys on presence). Optional → `Option<T>`.
+//! `platform` is mandatory; every feature arm is optional, and **absence means
+//! "explicitly disabled," not "default enabled"** (the policy guard keys on
+//! presence).
 
 use serde::{Deserialize, Serialize};
 

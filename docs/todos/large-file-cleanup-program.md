@@ -142,9 +142,20 @@ scan time (2026-07-15). Sizes are line counts at scan time.
   slice-2 port-plan comments scrubbed; `build_via_value`/`build_contact_value`
   became `ViaSpec::header_value`/`ContactSpec::header_value` (pub(crate)).
   One suspicion raised (see log).
-- [ ] **4. `crates/call/src/model.rs` + `crates/call/src/helpers.rs`** —
-  833 + 756 L, `call` crate has 92 consumer files. `helpers.rs` is a
-  grab-bag by name; bucket by type per discoverability rule 4.
+- [x] **4. `crates/call/src/model.rs` + `crates/call/src/helpers.rs`** —
+  DONE 2026-07-24: 833 L → `model/` (8 files + mod, largest 209 L) and
+  756 L → `helpers/` (7 files + mod, largest 196 L); all public paths
+  unchanged via mod.rs re-exports. model concerns: record / leg / dialog /
+  invite_txn / timer / cdr / services / sm; helpers bucketed by the type
+  acted on (rule 4): lens / leg / dialog / peering / services / record /
+  timer. Dead pub helpers deleted: `transfer_phase`,
+  `a_leg_invite_cseq_num` (see log). lib.rs rewritten as grouped TOC;
+  TS-port comments + upstreamneed/GAP ticket IDs scrubbed across src
+  (incl. features.rs / codec.rs / callref.rs / Cargo.toml description);
+  the crate's *test* files still carry TS wire-parity comments — Lane 4.
+  Gotcha: a submodule named `call` inside the `call` crate makes
+  `use call::model::*;` shadow the extern crate at every glob-import site
+  (E0659), so the master-record modules are named `record.rs`.
 - [ ] **5. `crates/sip-txn/src/layer.rs`** — 1644 L, 29 consumer crates via
   root re-export. Recent Timer-G work (f592c71) lives here — keep the RFC
   §17 citations.
@@ -321,3 +332,14 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
    behavior kept; comments condensed to the contract. Worth a check some day
    that the recorded-trace audit would flag a tagless in-dialog request if
    this path ever fired outside the takeover corner.
+
+### 2026-07-24 — call model/helpers split
+
+9. **`helpers.rs::a_leg_invite_cseq_num` parsed the CSeq header value inside
+   the `call` crate** (name match + `split_whitespace().parse()` over the
+   retained a-leg INVITE's `SipHeader` list) — SIP header extraction outside
+   `sip-message`, in a crate whose stated design is "SIP payloads stay raw
+   bytes, no sip-message dep". Zero non-test consumers.
+   `resolved:` 2026-07-24 — deleted in the split (dead code, per procedure
+   rule 1). If a future consumer needs the snapshot's CSeq, derive it via
+   sip-message at the call site instead of re-adding value parsing here.

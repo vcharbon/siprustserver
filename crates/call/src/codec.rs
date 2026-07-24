@@ -1,20 +1,17 @@
-//! Pluggable call-body codec — port of `src/call/codec/` (the `CallBodyCodec`
-//! tag + the msgpack impl) and `CallCodec.ts`.
+//! Pluggable call-body codec.
 //!
-//! [`CallBodyCodec`] is the DI seam (the Rust analogue of the source's Effect
-//! `CallBodyCodec` tag). [`MsgpackCodec`] is the one production impl in this
-//! slice: `rmp-serde`'s **default positional/array** encoding, which keeps field
+//! [`CallBodyCodec`] is the DI seam; [`MsgpackCodec`] is the one production
+//! impl: `rmp-serde`'s **default positional/array** encoding, which keeps field
 //! names off the wire (smallest payload + least CPU). The schema-coupling that
 //! buys — field order is the contract — is acceptable because the project
-//! redeploys from scratch each release. The protobuf codec and the parity
-//! comparison are deferred (see ADR-0008 / MIGRATION_STATUS).
+//! redeploys from scratch each release (ADR-0008).
 
 use crate::model::Call;
 
 /// Failure decoding a call body.
 #[derive(Debug, thiserror::Error)]
 pub enum CallDecodeError {
-    /// Empty input (the source's PA2 paranoid-decode precondition).
+    /// Empty input (paranoid-decode precondition).
     #[error("decode received an empty buffer")]
     Empty,
     /// The bytes were not a valid encoded [`Call`].
@@ -26,7 +23,7 @@ pub enum CallDecodeError {
 /// protobuf impl slots in behind the same trait.
 pub trait CallBodyCodec {
     /// Pack a call for storage. Takes `&Call`, so it cannot mutate its input
-    /// (the source's P10/P11 no-mutation properties hold by construction).
+    /// (the P10/P11 no-mutation codec properties hold by construction).
     fn encode(&self, call: &Call) -> Vec<u8>;
     /// Unpack a previously-encoded body.
     fn decode(&self, bytes: &[u8]) -> Result<Call, CallDecodeError>;
