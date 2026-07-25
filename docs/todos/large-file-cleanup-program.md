@@ -190,10 +190,23 @@ scan time (2026-07-15). Sizes are line counts at scan time.
   ticket comments in src/core + lib.rs scrubbed. No new suspicions
   (headers.rs is documented as proxy *policy* composers over sip-message
   primitives — no extraction violation).
-- [ ] **7. `crates/b2bua/src/rules/actions.rs`** — 2295 L. The rules/
-  directory is already modular; this is the oversized member. Split by
-  action family; `rules/defaults.rs` (1390 L), `relay.rs` (1039 L),
-  `refer_transfer.rs` (1041 L) follow in the same lane.
+- [x] **7. `crates/b2bua/src/rules/actions.rs`** — DONE 2026-07-25: 2295 L →
+  `actions/` (9 files, largest 402 L; the only public item, `ActionExecutor`,
+  re-exported unchanged from mod.rs — zero consumer churn). Concerns: mod
+  (struct + `execute` + the ONE timer-schedule recipe) / dispatch (the
+  `RuleAction` → handler table; state-mutation arms inline, everything that
+  builds SIP delegates — the exhaustive 46-variant match is 328 code lines
+  and stays on the `too_many_lines` warn ratchet, same as
+  `defaults::core_rules`) / relay_request (incl. `ack_leg`, deduped from the
+  AckLeg arm + relay ACK branch) / relay_response (incl. bare-180 downgrade)
+  / dialog_track / originate (CreateLeg admission gate + B2BUA-originated
+  requests) / respond (a-facing finals/provisionals/2xx-retransmits) /
+  teardown / select (leg/dialog selection views). TS-port (`ActionExecutor.ts`
+  ports, "mirrors the TS leg iteration") + ticket-ID (GAP-P7-1, GAP-P8b-2,
+  upstreamneed-021/027/028) comments scrubbed; doubled `#[allow]` removed. One
+  suspicion raised (see log #10: wire-reader extraction residue).
+  `rules/defaults.rs` (1407 L), `relay.rs` (1039 L), `refer_transfer.rs`
+  (1041 L) still follow in this lane.
 - [ ] **8. `crates/scenario-harness/src/actor/actor.rs` + `actor/mod.rs`**
   — 1734 + 1558 L. Treat as one job; the actor/ dir is already a module
   tree, so this is intra-directory rebalancing + comment scrub.
@@ -367,3 +380,18 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
    `resolved:` 2026-07-24 — deleted in the split (dead code, per procedure
    rule 1). If a future consumer needs the snapshot's CSeq, derive it via
    sip-message at the call site instead of re-adding value parsing here.
+
+### 2026-07-25 — b2bua rules/actions split
+
+10. **The action executor carries four hand-rolled SIP wire readers** —
+    extraction outside sip-message (same class as #5). Kept verbatim in the
+    split, each private beside its sole consumer: `via_sent_by` + the
+    `top_via_dest` twin (whitespace-split Via sent-by;
+    `actions/relay_response.rs`, `actions/respond.rs`), `unwrap_angle`
+    (angle-bracket Contact unwrap; `actions/dialog_track.rs`, 3 call sites),
+    `rewrite_rack` (RAck middle-token rewrite; `actions/relay_request.rs`).
+    sip-message already exposes structured equivalents:
+    `message_helpers::via::via_sent_by`, `name_addr::extract_contact_uri`,
+    `parse_rack`. Migration is NOT byte-neutral — e.g. `unwrap_angle` keeps
+    `;params` on a non-angle Contact where `parse_contact` splits them off
+    the URI — so it needs its own commit with the delta reasoned per site.
