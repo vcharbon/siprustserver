@@ -91,7 +91,7 @@ impl HeaderClass {
     /// compact forms are expanded first, so `"v"` classifies as `Via` (else a
     /// templated compact tier-1 header would freeze and duplicate on the wire).
     pub fn of(name: &str) -> Self {
-        let expanded = crate::parser::custom::compact_forms::expand_compact_form(name);
+        let expanded = crate::parser::custom::compact_forms::expanded_name(name);
         if REGENERATED_HEADERS.contains(&expanded.to_ascii_lowercase().as_str()) {
             HeaderClass::Regenerated
         } else {
@@ -233,7 +233,7 @@ impl MessageTemplate {
                 (TemplateStart::Request(r.method.clone()), r.body.clone(), &r.raw)
             }
             SipMessage::Response(r) => (
-                TemplateStart::Response { status: r.status, reason: r.reason.clone() },
+                TemplateStart::Response { status: r.status, reason: r.reason.to_string() },
                 r.body.clone(),
                 &r.raw,
             ),
@@ -257,14 +257,14 @@ impl MessageTemplate {
                     None
                 };
                 TemplateHeader {
-                    name: h.name.clone(),
-                    value: h.value.clone(),
+                    name: h.name.to_string(),
+                    value: h.value.to_string(),
                     class: HeaderClass::of(&h.name),
                     wire_name,
                 }
             })
             .collect();
-        MessageTemplate { start, headers, body }
+        MessageTemplate { start, headers, body: body.to_vec() }
     }
 
     /// The start line this template reproduces.
@@ -301,7 +301,7 @@ impl MessageTemplate {
         self.headers
             .iter()
             .filter(|h| h.class == HeaderClass::Frozen)
-            .map(|h| SipHeader { name: h.emit_name().to_string(), value: h.value.clone() })
+            .map(|h| SipHeader::new(h.emit_name(), h.value.as_str()))
             .collect()
     }
 
@@ -381,7 +381,7 @@ pub fn apply_name_forms(headers: &[SipHeader], forms: &[(String, String)]) -> Ve
                 .iter()
                 .find(|(canon, _)| h.name.eq_ignore_ascii_case(canon))
                 .map(|(_, w)| w.clone());
-            SipHeader { name: wire.unwrap_or_else(|| h.name.clone()), value: h.value.clone() }
+            SipHeader::new(wire.unwrap_or_else(|| h.name.to_string()), h.value.clone())
         })
         .collect()
 }
@@ -404,7 +404,7 @@ pub fn apply_remote_target_emits(
         if let Some(h) = out.iter_mut().find(|h| crate::remote_target::canonical(&h.name) == *canon)
         {
             if let Some((host, port)) = crate::remote_target::first_hostport(&h.value) {
-                h.value = crate::remote_target::rewrite_hostport(captured, &host, port);
+                h.value = crate::remote_target::rewrite_hostport(captured, &host, port).into();
             }
         }
     }
@@ -499,7 +499,8 @@ Content-Length: 0\r\n\r\n";
             ],
             Vec::new(),
         );
-        let names: Vec<String> = tmpl.frozen_headers().iter().map(|h| h.name.clone()).collect();
+        let names: Vec<String> =
+            tmpl.frozen_headers().iter().map(|h| h.name.to_string()).collect();
         // `v` and `i` are tier-1 (dropped); `c` (Content-Type) and Subject frozen.
         assert_eq!(names, vec!["c".to_string(), "Subject".to_string()]);
     }

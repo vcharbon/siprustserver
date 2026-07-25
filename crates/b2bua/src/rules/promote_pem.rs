@@ -150,13 +150,13 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                         leg_id: leg,
                         rseq,
                         invite_cseq,
-                        b_tag,
+                        b_tag: b_tag.to_string(),
                     });
                 }
                 actions.push(RuleAction::SetPromotePem {
                     state: Some(PromotePemState {
                         promoted: true,
-                        promoted_sdp,
+                        promoted_sdp: promoted_sdp.to_vec(),
                         window_open: true,
                         resync_reinvite_cseq: None,
                     }),
@@ -190,7 +190,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                         leg_id: leg,
                         rseq,
                         invite_cseq,
-                        b_tag,
+                        b_tag: b_tag.to_string(),
                     });
                 }
                 ok(actions)
@@ -231,7 +231,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                         actions.push(RuleAction::AddTagMapping {
                             a_tag: a_tag.clone(),
                             b_leg_id: b.clone(),
-                            b_tag: b_tag.clone(),
+                            b_tag: b_tag.to_string(),
                         });
                     }
                 }
@@ -288,7 +288,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 let next_cseq = a_dialog_cseq + 1;
                 actions.push(RuleAction::SendReinvite {
                     leg_id: a,
-                    body: final_sdp,
+                    body: final_sdp.to_vec(),
                     add_headers: a_facing_advert(),
                 });
                 actions.push(RuleAction::AddCdrEvent {

@@ -127,8 +127,8 @@ impl<'a> Invite<'a> {
     /// 100rel, timer` to drive the 18x-management strategies).
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
         self.extra_headers.push(SipHeader {
-            name: name.to_string(),
-            value: value.to_string(),
+            name: name.to_string().into(),
+            value: value.to_string().into(),
         });
         self
     }

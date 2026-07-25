@@ -5,9 +5,13 @@
 
 use super::compact_forms::expand_compact_form;
 use super::structured_headers::split_top_level_commas;
-use super::scanner::{decode, is_token_char, is_wsp, strict_non_negative_decimal, Scanner, COLON, CR, HTAB, LF};
+use super::scanner::{
+    decode, is_token_char, is_wsp, strict_non_negative_decimal, trim_span, HeaderValue, Scanner,
+    Span, COLON, CR, HTAB, LF,
+};
 use crate::error::SipParseError;
 use crate::parser::SipParserLimits;
+use crate::sip_str::{SharedText, SipStr};
 use crate::types::SipHeader;
 
 const UINT_32_MAX: u64 = (1u64 << 32) - 1;
@@ -88,8 +92,9 @@ pub struct ParsedHeaders {
 /// canonical names). Used to recover the captured name-form for near-verbatim
 /// replay after the parser has already canonicalized `SipHeader.name`.
 pub fn scan_header_name_forms(raw: &[u8], limits: &SipParserLimits) -> Vec<String> {
-    let mut s = Scanner::new(raw);
-    if super::start_line::parse_start_line(&mut s, limits).is_err() {
+    let image = decode(raw);
+    let mut s = Scanner::new(image.as_bytes());
+    if super::start_line::parse_start_line(&mut s, &image, limits).is_err() {
         return Vec::new();
     }
     let mut names: Vec<String> = Vec::new();
@@ -110,15 +115,24 @@ pub fn scan_header_name_forms(raw: &[u8], limits: &SipParserLimits) -> Vec<Strin
         }
         s.skip_lws();
         let _ = s.read_header_value();
-        names.push(raw_name);
+        names.push(image[raw_name.start..raw_name.end].to_string());
     }
     names
 }
 
 /// Parse all headers from the current position until the blank line, which is
-/// consumed.
-pub fn parse_headers(s: &mut Scanner, limits: &SipParserLimits) -> Result<ParsedHeaders, SipParseError> {
-    let mut headers: Vec<SipHeader> = Vec::new();
+/// consumed. `text` is the message image the scanner walks; every name/value
+/// comes back as a span of it, so a header costs no allocation.
+pub fn parse_headers(
+    s: &mut Scanner,
+    text: &SharedText,
+    lines: usize,
+    limits: &SipParserLimits,
+) -> Result<ParsedHeaders, SipParseError> {
+    let image = text.as_str();
+    // Size the list up front from the block's line count — growing it from
+    // empty cost one reallocation per doubling, several per message.
+    let mut headers: Vec<SipHeader> = Vec::with_capacity(lines);
     let mut content_length: u64 = 0;
 
     loop {
@@ -139,8 +153,14 @@ pub fn parse_headers(s: &mut Scanner, limits: &SipParserLimits) -> Result<Parsed
         s.skip_lws();
 
         let value = s.read_header_value();
-        let name = expand_compact_form(&raw_name);
-        let trimmed_value = trim_in_place(value);
+        let name = expand_compact_form(text, raw_name);
+        let trimmed_value = match value {
+            HeaderValue::Span(range) => {
+                let t = trim_span(image, range);
+                text.span(t.start, t.len())
+            }
+            HeaderValue::Unfolded(v) => SipStr::owned(v.trim()),
+        };
 
         // Bound per-header memory: name + ": " + value, post-unfold/trim.
         let header_len = name.len() + 2 + trimmed_value.len();
@@ -183,19 +203,6 @@ pub fn parse_headers(s: &mut Scanner, limits: &SipParserLimits) -> Result<Parsed
     }
 
     Ok(ParsedHeaders { headers, content_length })
-}
-
-/// Trim surrounding whitespace in place — `read_header_value` already
-/// allocated the value; `value.trim().to_string()` would mint a second copy
-/// per header on the hot path. Same Unicode whitespace set as `str::trim`.
-fn trim_in_place(mut value: String) -> String {
-    let end = value.trim_end().len();
-    value.truncate(end);
-    let start = value.len() - value.trim_start().len();
-    if start > 0 {
-        value.drain(..start);
-    }
-    value
 }
 
 /// Headers whose RFC 3261 grammar can carry a quoted-string. Case-insensitive
@@ -256,7 +263,7 @@ fn has_unbalanced_quotes(value: &str) -> bool {
 /// bytes (CTL except HTAB, DEL) — preserves the RFC 4475 wide-range torture
 /// test while catching CVE-2023-27598. Trailing WSP before the colon is
 /// permitted (RFC 4475 §3.1.1.1).
-fn read_header_name(s: &mut Scanner) -> Result<String, SipParseError> {
+fn read_header_name(s: &mut Scanner) -> Result<Span, SipParseError> {
     let start = s.pos;
     while s.pos < s.buf.len() {
         let b = s.buf[s.pos];
@@ -274,7 +281,7 @@ fn read_header_name(s: &mut Scanner) -> Result<String, SipParseError> {
         }
         s.pos += 1;
     }
-    let name = decode(&s.buf[start..s.pos]);
+    let name = start..s.pos;
     s.skip_wsp();
     Ok(name)
 }

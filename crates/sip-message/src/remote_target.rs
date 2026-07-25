@@ -12,13 +12,14 @@
 use std::collections::BTreeMap;
 
 use crate::message_helpers::split_top_level_commas;
-use crate::parser::custom::compact_forms::expand_compact_form;
+use crate::parser::custom::compact_forms::expanded_name;
+use crate::sip_str::SipStr;
 use crate::parser::custom::structured_headers::{parse_name_addr, parse_sip_uri_string};
 use crate::types::ParamValue;
 
 /// Canonical, case-folded header name (compact forms expanded).
 pub(crate) fn canonical(name: &str) -> String {
-    expand_compact_form(name).to_ascii_lowercase()
+    expanded_name(name).to_ascii_lowercase()
 }
 
 /// Header names whose routing-critical part is host:port only.
@@ -46,7 +47,7 @@ fn params_to_map(params: crate::types::Params) -> BTreeMap<String, String> {
         .map(|(k, v)| {
             let val = match v {
                 ParamValue::Flag => String::new(),
-                ParamValue::Value(s) => s,
+                ParamValue::Value(s) => s.to_string(),
             };
             (k.to_ascii_lowercase(), val)
         })
@@ -54,11 +55,14 @@ fn params_to_map(params: crate::types::Params) -> BTreeMap<String, String> {
 }
 
 fn parse_element(elem: &str) -> RtElement {
-    let na = parse_name_addr(elem.trim());
+    let na = parse_name_addr(&SipStr::owned(elem.trim()));
     let (user, uri_params) = match parse_sip_uri_string(&na.uri) {
         Some(u) => (
-            u.user,
-            u.params.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect(),
+            u.user.map(String::from),
+            u.params
+                .into_iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), String::from(v)))
+                .collect(),
         ),
         None => (None, BTreeMap::new()),
     };
@@ -74,9 +78,9 @@ pub fn parse_elements(value: &str) -> Vec<RtElement> {
 /// generated header so the captured value can be rewritten onto it.
 pub fn first_hostport(value: &str) -> Option<(String, u16)> {
     let first = split_top_level_commas(value).into_iter().next()?;
-    let na = parse_name_addr(first.trim());
+    let na = parse_name_addr(&SipStr::owned(first.trim()));
     let u = parse_sip_uri_string(&na.uri)?;
-    Some((u.host, u.port.unwrap_or(5060) as u16))
+    Some((u.host.into(), u.port.unwrap_or(5060) as u16))
 }
 
 /// Replace the host:port span of a single SIP-URI string, preserving scheme,

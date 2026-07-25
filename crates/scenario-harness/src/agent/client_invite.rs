@@ -154,7 +154,7 @@ impl ClientInvite {
                             who: self.agent.name.clone(),
                             expected: status,
                             got: r.status,
-                            reason: r.reason.clone(),
+                            reason: r.reason.to_string(),
                         });
                     }
                     self.learn_from_response(&r);
@@ -249,7 +249,7 @@ impl ClientInvite {
         let is_2xx_invite = (200..300).contains(&resp.status) && resp.cseq.method == "INVITE";
         if let Some(tag) = &resp.to.tag {
             if is_2xx_invite || self.dialog.remote_tag.is_empty() {
-                self.dialog.remote_tag = tag.clone();
+                self.dialog.remote_tag = tag.to_string();
             }
         }
         if let Some(target) = first_contact_uri(resp) {
@@ -298,7 +298,7 @@ impl ClientInvite {
     pub fn fork_dialog(&self, resp: &SipResponse) -> Dialog {
         let mut dialog = self.dialog.clone();
         if let Some(tag) = &resp.to.tag {
-            dialog.remote_tag = tag.clone();
+            dialog.remote_tag = tag.to_string();
         }
         if let Some(target) = first_contact_uri(resp) {
             dialog.remote_target = target;
@@ -365,8 +365,8 @@ impl ClientInvite {
         // would replace it) then add this one.
         headers.retain(|h| !h.name.eq_ignore_ascii_case(parsed.credential_header()));
         headers.push(SipHeader {
-            name: parsed.credential_header().to_string(),
-            value: credential,
+            name: parsed.credential_header().to_string().into(),
+            value: credential.into(),
         });
 
         let bytes = sip_message::serialize_request_parts(&self.original_invite, &headers);

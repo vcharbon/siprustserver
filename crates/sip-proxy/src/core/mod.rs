@@ -357,12 +357,15 @@ impl ProxyCore {
             };
             let Some(pkt) = pkt else { break };
             self.metrics.record_face_ingress(face);
-            let Ok(msg) = self.parser.parse(&pkt.raw) else {
+            let src = pkt.src;
+            // Hand the receive buffer to the parser instead of lending it: the
+            // message's `raw`/`body` then share it and no packet byte is copied.
+            let Ok(msg) = self.parser.parse_shared(bytes::Bytes::from(pkt.raw)) else {
                 // Malformed datagram — drop silently.
                 continue;
             };
             match msg {
-                SipMessage::Request(_) => self.handle_request(msg, pkt.src).await,
+                SipMessage::Request(_) => self.handle_request(msg, src).await,
                 SipMessage::Response(resp) => self.handle_response(resp).await,
             }
         }

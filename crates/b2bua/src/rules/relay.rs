@@ -26,8 +26,8 @@ pub fn to_msg_headers(headers: &[call::SipHeader]) -> Vec<MsgHeader> {
     headers
         .iter()
         .map(|h| MsgHeader {
-            name: h.name.clone(),
-            value: h.value.clone(),
+            name: h.name.clone().into(),
+            value: h.value.clone().into(),
         })
         .collect()
 }
@@ -176,8 +176,8 @@ pub fn apply_b_leg_egress(
         return (req, dest);
     };
     let route = MsgHeader {
-        name: "Route".to_string(),
-        value: format!("<sip:{host}:{port};lr>"),
+        name: "Route".to_string().into(),
+        value: format!("<sip:{host}:{port};lr>").into(),
     };
     req.headers.insert(0, route);
     (req, (host, port))
@@ -245,12 +245,12 @@ pub fn build_b_leg(
     let branch = id_gen.new_branch();
     let from_tag = id_gen.new_tag();
     let b_call_id = format!("{}-{}@{}", leg_id, id_gen.new_tag(), config.sip_local_ip);
-    let request_uri = new_ruri.map(str::to_string).unwrap_or_else(|| a_leg_invite.uri.clone());
-    let from_uri = new_from.map(str::to_string).unwrap_or_else(|| a_leg_invite.from.uri.clone());
-    let to_uri = new_to.map(str::to_string).unwrap_or_else(|| a_leg_invite.to.uri.clone());
+    let request_uri = new_ruri.map(str::to_string).unwrap_or_else(|| a_leg_invite.uri.to_string());
+    let from_uri = new_from.map(str::to_string).unwrap_or_else(|| a_leg_invite.from.uri.to_string());
+    let to_uri = new_to.map(str::to_string).unwrap_or_else(|| a_leg_invite.to.uri.to_string());
     let body = match body_override {
         Some(b) => b.to_vec(),
-        None => a_leg_invite.body.clone(),
+        None => a_leg_invite.body.to_vec(),
     };
     let content_type = if body.is_empty() {
         None
@@ -263,7 +263,7 @@ pub fn build_b_leg(
     let mut extra_headers: Vec<MsgHeader> = header_updates
         .iter()
         .filter_map(|(n, v)| {
-            v.as_ref().map(|val| MsgHeader { name: n.clone(), value: val.clone() })
+            v.as_ref().map(|val| MsgHeader { name: n.clone().into(), value: val.clone().into() })
         })
         .collect();
     // Advertise accepted methods + understood extensions on the originated b-leg
@@ -275,12 +275,12 @@ pub fn build_b_leg(
     // caller-supplied value from `header_updates`.
     if !extra_headers.iter().any(|h| h.name.eq_ignore_ascii_case("Allow")) {
         extra_headers
-            .push(MsgHeader { name: "Allow".to_string(), value: generators::B2BUA_ALLOW.to_string() });
+            .push(MsgHeader { name: "Allow".to_string().into(), value: generators::B2BUA_ALLOW.to_string().into() });
     }
     if !extra_headers.iter().any(|h| h.name.eq_ignore_ascii_case("Supported")) {
         extra_headers.push(MsgHeader {
-            name: "Supported".to_string(),
-            value: generators::B2BUA_SUPPORTED.to_string(),
+            name: "Supported".to_string().into(),
+            value: generators::B2BUA_SUPPORTED.to_string().into(),
         });
     }
 
@@ -314,7 +314,7 @@ pub fn build_b_leg(
             continue;
         }
         if let Some(v) = get_header(&a_leg_invite.headers, name) {
-            extra_headers.push(MsgHeader { name: name.clone(), value: v.to_string() });
+            extra_headers.push(MsgHeader { name: name.clone().into(), value: v.to_string().into() });
         }
     }
 
@@ -464,7 +464,7 @@ pub fn stamp_a_facing_invite_advert(
         }
         // Replace any passed-through value with the B2BUA default, exactly once.
         headers.retain(|h| !h.name.eq_ignore_ascii_case(name));
-        headers.push(MsgHeader { name: name.to_string(), value: default.to_string() });
+        headers.push(MsgHeader { name: name.to_string().into(), value: default.to_string().into() });
     }
 }
 

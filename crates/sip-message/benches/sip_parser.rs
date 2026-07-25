@@ -19,6 +19,7 @@
 //!
 //! Run: `cargo bench -p sip-message`
 
+use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use sip_message::{serialize, CustomParser, SipHeader, SipMessage, SipParser};
 
@@ -80,6 +81,21 @@ fn bench_decode(c: &mut Criterion) {
     group.bench_function("invite_sdp", |b| b.iter(|| parser.parse(black_box(invite_sdp.as_slice())).unwrap()));
     group.bench_function("200_ok", |b| b.iter(|| parser.parse(black_box(OK_200)).unwrap()));
     group.finish();
+
+    // The receive path: the caller owns the datagram and hands it over, so the
+    // message shares that buffer instead of copying it. `Bytes::clone` here is
+    // a refcount bump standing in for the socket's per-datagram buffer.
+    let shared_invite = Bytes::from_static(INVITE);
+    let shared_sdp = Bytes::from(invite_sdp);
+    let mut group = c.benchmark_group("decode_shared");
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("invite", |b| {
+        b.iter(|| parser.parse_shared(black_box(shared_invite.clone())).unwrap())
+    });
+    group.bench_function("invite_sdp", |b| {
+        b.iter(|| parser.parse_shared(black_box(shared_sdp.clone())).unwrap())
+    });
+    group.finish();
 }
 
 /// One proxy forwarding hop: decode → clone → rewrite R-URI → add Record-Route
@@ -92,12 +108,12 @@ fn proxy_hop(parser: &CustomParser, raw: &[u8]) -> Vec<u8> {
     let mut out = req.clone();
 
     // Rewrite the Request-URI to the next-hop target.
-    out.uri = "sip:bob@192.0.2.99:5060".to_string();
+    out.uri = "sip:bob@192.0.2.99:5060".to_string().into();
 
     // Insert our Record-Route at the top of the header set (RFC 3261 §16.6).
     out.headers.insert(
         0,
-        SipHeader { name: "Record-Route".to_string(), value: "<sip:proxy.example.com;lr>".to_string() },
+        SipHeader { name: "Record-Route".to_string().into(), value: "<sip:proxy.example.com;lr>".to_string().into() },
     );
 
     serialize(&SipMessage::Request(out))

@@ -32,9 +32,9 @@ Content-Length: 0\r\n\r\n";
 /// Set (or insert) a header value by case-insensitive name.
 fn set_header(resp: &mut SipResponse, name: &str, value: &str) {
     if let Some(h) = resp.headers.iter_mut().find(|h| h.name.eq_ignore_ascii_case(name)) {
-        h.value = value.to_string();
+        h.value = value.to_string().into();
     } else {
-        resp.headers.push(SipHeader { name: name.to_string(), value: value.to_string() });
+        resp.headers.push(SipHeader { name: name.to_string().into(), value: value.to_string().into() });
     }
 }
 
@@ -60,7 +60,7 @@ fn extract_header(buf: &[u8], name: &str) -> Option<String> {
 fn correct_content_length_passes_through() {
     let mut resp = base_response();
     set_header(&mut resp, "Content-Length", &SDP_BODY.len().to_string());
-    resp.body = SDP_BODY.to_vec();
+    resp.body = SDP_BODY.to_vec().into();
 
     let buf = serialize(&SipMessage::Response(resp));
     assert_eq!(extract_header(&buf, "Content-Length"), Some(SDP_BODY.len().to_string()));
@@ -70,7 +70,7 @@ fn correct_content_length_passes_through() {
 fn content_length_mismatch_is_auto_corrected() {
     let mut resp = base_response();
     set_header(&mut resp, "Content-Length", "999");
-    resp.body = SDP_BODY.to_vec();
+    resp.body = SDP_BODY.to_vec().into();
 
     let buf = serialize(&SipMessage::Response(resp));
     assert_eq!(extract_header(&buf, "Content-Length"), Some(SDP_BODY.len().to_string()));
@@ -80,7 +80,7 @@ fn content_length_mismatch_is_auto_corrected() {
 fn missing_content_length_with_body_adds_the_header() {
     let mut resp = base_response();
     remove_header(&mut resp, "Content-Length");
-    resp.body = SDP_BODY.to_vec();
+    resp.body = SDP_BODY.to_vec().into();
 
     let buf = serialize(&SipMessage::Response(resp));
     assert_eq!(extract_header(&buf, "Content-Length"), Some(SDP_BODY.len().to_string()));
@@ -107,7 +107,7 @@ fn empty_body_with_content_length_zero_passes_through() {
 fn content_length_zero_with_non_empty_body_is_corrected() {
     let mut resp = base_response();
     set_header(&mut resp, "Content-Length", "0");
-    resp.body = SDP_BODY.to_vec();
+    resp.body = SDP_BODY.to_vec().into();
 
     let buf = serialize(&SipMessage::Response(resp));
     assert_eq!(extract_header(&buf, "Content-Length"), Some(SDP_BODY.len().to_string()));
@@ -117,7 +117,7 @@ fn content_length_zero_with_non_empty_body_is_corrected() {
 fn body_is_appended_verbatim() {
     let mut resp = base_response();
     set_header(&mut resp, "Content-Length", &SDP_BODY.len().to_string());
-    resp.body = SDP_BODY.to_vec();
+    resp.body = SDP_BODY.to_vec().into();
 
     let buf = serialize(&SipMessage::Response(resp));
     assert!(buf.ends_with(SDP_BODY), "body appended unmodified");

@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 use crate::parser::custom::structured_headers::parse_sip_uri_string;
+use crate::sip_str::SipStr;
 
 /// Parsed SIP URI fields (port default 5060).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,13 +26,17 @@ pub fn parse_sip_uri(uri: &str) -> Option<ParsedSipUri> {
             None => &uri[lt + 1..],
         };
     }
-    let parsed = parse_sip_uri_string(cleaned)?;
+    let parsed = parse_sip_uri_string(&SipStr::owned(cleaned))?;
     Some(ParsedSipUri {
-        scheme: parsed.scheme,
-        user: parsed.user,
-        host: parsed.host,
+        scheme: parsed.scheme.into(),
+        user: parsed.user.map(String::from),
+        host: parsed.host.into(),
         port: parsed.port.unwrap_or(5060),
-        params: parsed.params,
+        params: parsed
+            .params
+            .into_iter()
+            .map(|(k, v)| (String::from(k), String::from(v)))
+            .collect(),
     })
 }
 

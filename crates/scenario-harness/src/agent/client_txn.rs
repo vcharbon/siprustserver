@@ -130,7 +130,7 @@ pub(super) async fn try_expect_response_tolerating(
                         who: agent.name.clone(),
                         expected: status,
                         got: r.status,
-                        reason: r.reason.clone(),
+                        reason: r.reason.to_string(),
                     });
                 }
                 return Ok(r);

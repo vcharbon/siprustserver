@@ -20,7 +20,7 @@ pub use crate::parser::custom::structured_headers::split_top_level_commas;
 pub fn name_matches(canonical: &str, candidate: &str) -> bool {
     candidate.eq_ignore_ascii_case(canonical)
         || (candidate.len() == 1
-            && crate::parser::custom::compact_forms::expand_compact_form(candidate)
+            && crate::parser::custom::compact_forms::expanded_name(candidate)
                 .eq_ignore_ascii_case(canonical))
 }
 
@@ -46,10 +46,10 @@ pub fn set_header(headers: &[SipHeader], name: &str, value: &str) -> Vec<SipHead
     let mut result = headers.to_vec();
     match result.iter_mut().find(|h| h.name.eq_ignore_ascii_case(name)) {
         Some(h) => {
-            h.name = name.to_string();
-            h.value = value.to_string();
+            h.name = name.into();
+            h.value = value.into();
         }
-        None => result.push(SipHeader { name: name.to_string(), value: value.to_string() }),
+        None => result.push(SipHeader::new(name, value)),
     }
     result
 }

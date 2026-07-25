@@ -9,6 +9,7 @@
 
 pub mod error;
 pub mod method;
+pub mod sip_str;
 pub mod types;
 pub mod parser;
 
@@ -31,6 +32,7 @@ pub use sdp::{
     BuildAnswerOptions, BuildHeldSdpOptions, CodecProfile, SdpBuildResult, SdpValidationError,
 };
 pub use parser::{SipParser, SipParserLimits};
+pub use sip_str::{SharedText, SipStr};
 pub use parser::custom::{hydrate_request, hydrate_response, CustomParser};
 pub use template::{
     apply_name_forms, apply_remote_target_emits, EmitOpts, HeaderClass, MessageTemplate,

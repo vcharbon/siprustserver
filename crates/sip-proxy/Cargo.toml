@@ -9,6 +9,9 @@ publish = false
 workspace = true
 
 [dependencies]
+# Ingress hands the receive buffer to the parser as a refcounted `Bytes`, so
+# the parsed message shares it rather than copying the datagram.
+bytes.workspace = true
 sip-message = { path = "../sip-message" }
 sip-net = { path = "../sip-net" }
 sip-clock = { path = "../sip-clock" }

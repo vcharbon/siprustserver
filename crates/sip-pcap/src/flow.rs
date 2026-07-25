@@ -325,9 +325,9 @@ pub fn build_flows(datagrams: &[Datagram], cfg: &FlowConfig) -> Flows {
             SipMessage::Request(r) => r.call_id.clone(),
             SipMessage::Response(r) => r.call_id.clone(),
         };
-        let idx = *leg_by_call_id.entry(call_id.clone()).or_insert_with(|| {
+        let idx = *leg_by_call_id.entry(call_id.to_string()).or_insert_with(|| {
             legs.push(FlowLeg {
-                call_id,
+                call_id: call_id.to_string(),
                 hops: Vec::new(),
                 msgs: Vec::new(),
                 invite: None,
@@ -400,9 +400,9 @@ fn ingest(
         SipMessage::Request(r) => {
             if r.method == Method::Invite && leg.invite.is_none() {
                 leg.invite = Some(InviteSummary {
-                    ruri: r.uri.clone(),
-                    from_uri: r.from.uri.clone(),
-                    to_uri: r.to.uri.clone(),
+                    ruri: r.uri.to_string(),
+                    from_uri: r.from.uri.to_string(),
+                    to_uri: r.to.uri.to_string(),
                     cseq: r.cseq.seq,
                 });
             }

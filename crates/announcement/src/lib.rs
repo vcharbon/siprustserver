@@ -98,7 +98,7 @@ fn on_media_answer(ctx: &RuleContext) -> Option<RuleHandleResult> {
             leg_id: "a".to_string(),
             status: 183,
             reason: "Session Progress".to_string(),
-            body: mrf_sdp,
+            body: mrf_sdp.to_vec(),
             content_type: None,
             to_tag: None,
             p_early_media: Some("sendrecv".to_string()),
@@ -234,7 +234,7 @@ fn on_media_failure(ctx: &RuleContext) -> Option<RuleHandleResult> {
         // The caller's INVITE is still unanswered (early media only) — answer it
         // with the MRF's failure before tearing the call down (begin-termination
         // assumes the firing rule already replied to a Trying/Early a-leg).
-        RuleAction::RelayFailureToALeg { status, reason },
+        RuleAction::RelayFailureToALeg { status, reason: reason.to_string() },
         RuleAction::BeginTermination {
             reason: Some("announcement-mrf-failure".to_string()),
         },

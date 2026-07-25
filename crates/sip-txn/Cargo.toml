@@ -10,6 +10,9 @@ description = "SIP transaction layer (RFC 3261 §17 client/server FSMs + retrans
 workspace = true
 
 [dependencies]
+# Ingress hands the receive buffer to the parser as a refcounted `Bytes`, so
+# the parsed message shares it rather than copying the datagram.
+bytes.workspace = true
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 sip-message = { path = "../sip-message" }

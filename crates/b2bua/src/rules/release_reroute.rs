@@ -218,7 +218,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     RuleAction::cancel_timer(&TimerType::NoAnswer, Some(&new_leg)),
                     RuleAction::SendReinvite {
                         leg_id: "a".to_string(),
-                        body: resp.body.clone(),
+                        body: resp.body.to_vec(),
                         add_headers: vec![],
                     },
                     RuleAction::AddCdrEvent {

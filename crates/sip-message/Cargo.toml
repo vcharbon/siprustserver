@@ -20,11 +20,18 @@ rvoip-oracle = ["dep:rvoip-sip-core"]
 rvoip-sip-core = { version = "0.1.26", optional = true }
 thiserror.workspace = true
 serde = { workspace = true, features = ["derive"] }
+# The message's raw datagram + body are refcounted slices of ONE buffer, so a
+# parse (and a forwarding-hop clone) copies no packet bytes. See `sip_str`.
+bytes.workspace = true
 
 [dev-dependencies]
+bytes.workspace = true
 proptest.workspace = true
 criterion.workspace = true
 serde_json.workspace = true
+# Counting #[global_allocator] behind `tests/alloc_budget.rs` — the deterministic
+# allocs-per-message budget on the parse + proxy-hop paths.
+alloc-counter = { path = "../alloc-counter" }
 
 [[bench]]
 name = "sip_parser"

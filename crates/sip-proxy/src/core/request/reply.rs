@@ -65,8 +65,8 @@ impl ProxyCore {
             }
         };
         let extra = [
-            SipHeader { name: "Retry-After".into(), value: retry_after.to_string() },
-            SipHeader { name: "Reason".into(), value: format!("SIP;cause=503;text=\"{reason_text}\"") },
+            SipHeader { name: "Retry-After".into(), value: retry_after.to_string().into() },
+            SipHeader { name: "Reason".into(), value: format!("SIP;cause=503;text=\"{reason_text}\"").into() },
         ];
         self.reply(req, src, 503, "Service Unavailable", &extra).await;
         RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }

@@ -20,29 +20,54 @@
 use std::collections::BTreeMap;
 use std::ops::Deref;
 
+use bytes::Bytes;
+
 use crate::error::SipParseError;
 use crate::method::Method;
+use crate::sip_str::SipStr;
 
 // ---------------------------------------------------------------------------
 // Primitives
 // ---------------------------------------------------------------------------
 
+/// One header line. Both halves are [`SipStr`], so a parsed header points into
+/// the message image instead of owning a copy of its bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SipHeader {
     /// Original case.
-    pub name: String,
+    pub name: SipStr,
     /// Trimmed value.
-    pub value: String,
+    pub value: SipStr,
+}
+
+impl SipHeader {
+    /// Build a header from anything string-like — the construction path for
+    /// generated (as opposed to parsed) headers.
+    pub fn new(name: impl Into<SipStr>, value: impl Into<SipStr>) -> Self {
+        Self { name: name.into(), value: value.into() }
+    }
 }
 
 /// A structured-header parameter: a bare flag (`;lr`) or `;k=v`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParamValue {
     Flag,
-    Value(String),
+    Value(SipStr),
 }
 
-pub type Params = BTreeMap<String, ParamValue>;
+impl ParamValue {
+    /// The parameter's value, or `None` for a bare flag.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            ParamValue::Flag => None,
+            ParamValue::Value(v) => Some(v.as_str()),
+        }
+    }
+}
+
+/// Structured-header parameters. Keyed by [`SipStr`], which `Borrow<str>`s, so
+/// lookups still take a plain `&str` (`params.get("tag")`).
+pub type Params = BTreeMap<SipStr, ParamValue>;
 
 /// A list guaranteed to hold at least one element — the port of the source's
 /// `NonEmptyReadonlyArray`. `first()` returns `&T`, never `Option`.
@@ -82,25 +107,25 @@ impl<T> NonEmpty<T> {
 /// is context-dependent — guaranteed only on a refined view (see [`InDialogRequest`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NameAddr {
-    pub display_name: Option<String>,
-    pub uri: String,
-    pub tag: Option<String>,
+    pub display_name: Option<SipStr>,
+    pub uri: SipStr,
+    pub tag: Option<SipStr>,
     pub params: Params,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Via {
-    pub transport: String,
-    pub host: String,
+    pub transport: SipStr,
+    pub host: SipStr,
     pub port: Option<u16>,
-    pub branch: Option<String>,
+    pub branch: Option<SipStr>,
     pub params: Params,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Contact {
-    pub display_name: Option<String>,
-    pub uri: String,
+    pub display_name: Option<SipStr>,
+    pub uri: SipStr,
     pub params: Params,
 }
 
@@ -120,11 +145,11 @@ pub struct CSeq {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestUri {
-    pub scheme: String,
-    pub user: Option<String>,
-    pub host: String,
+    pub scheme: SipStr,
+    pub user: Option<SipStr>,
+    pub host: SipStr,
     pub port: Option<u16>,
-    pub params: BTreeMap<String, String>,
+    pub params: BTreeMap<SipStr, SipStr>,
 }
 
 /// A parsed SIP URI as it appears in an optional header (e.g. Refer-To). Port
@@ -132,11 +157,11 @@ pub struct RequestUri {
 /// not range-validated here (kept as the raw parsed value), so it is `u64`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Uri {
-    pub scheme: String,
-    pub user: Option<String>,
-    pub host: String,
+    pub scheme: SipStr,
+    pub user: Option<SipStr>,
+    pub host: SipStr,
     pub port: Option<u64>,
-    pub params: BTreeMap<String, String>,
+    pub params: BTreeMap<SipStr, SipStr>,
 }
 
 /// RFC 3262 RAck value: `response-num CSeq-num method`.
@@ -150,20 +175,20 @@ pub struct Rack {
 /// RFC 3891 Replaces value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Replaces {
-    pub call_id: String,
-    pub to_tag: String,
-    pub from_tag: String,
+    pub call_id: SipStr,
+    pub to_tag: SipStr,
+    pub from_tag: SipStr,
     pub early_only: bool,
 }
 
 /// RFC 3515 Refer-To value (with RFC 3891 embedded Replaces).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReferTo {
-    pub display_name: Option<String>,
-    pub uri: String,
+    pub display_name: Option<SipStr>,
+    pub uri: SipStr,
     pub parsed_uri: Option<Uri>,
     pub params: Params,
-    pub embedded_headers: BTreeMap<String, String>,
+    pub embedded_headers: BTreeMap<SipStr, SipStr>,
     pub replaces: Option<Replaces>,
 }
 
@@ -193,13 +218,13 @@ pub struct OptionalHeaders {
 pub struct SipRequest {
     pub method: Method,
     /// Request-URI (raw string, on the wire).
-    pub uri: String,
+    pub uri: SipStr,
     pub request_uri: RequestUri,
-    pub version: String,
+    pub version: SipStr,
     // Eager mandatory fields — parser rejects the message if any is missing.
     pub from: NameAddr,
     pub to: NameAddr,
-    pub call_id: String,
+    pub call_id: SipStr,
     pub cseq: CSeq,
     pub via: NonEmpty<Via>,
     pub contacts: ContactSet,
@@ -207,21 +232,22 @@ pub struct SipRequest {
     pub optional: OptionalHeaders,
     /// Full header list in wire order — for raw access + faithful serialization.
     pub headers: Vec<SipHeader>,
-    /// Raw body bytes — opaque to the B2BUA.
-    pub body: Vec<u8>,
+    /// Raw body bytes — opaque to the B2BUA. A slice of [`raw`](Self::raw) on a
+    /// parsed message, so it costs a refcount, not a copy.
+    pub body: Bytes,
     /// Original packet bytes.
-    pub raw: Vec<u8>,
+    pub raw: Bytes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SipResponse {
-    pub version: String,
+    pub version: SipStr,
     pub status: u16,
-    pub reason: String,
+    pub reason: SipStr,
     pub from: NameAddr,
     /// `to.tag` is absent on `100 Trying`, present otherwise — see [`SipResponseTagged`].
     pub to: NameAddr,
-    pub call_id: String,
+    pub call_id: SipStr,
     pub cseq: CSeq,
     pub via: NonEmpty<Via>,
     /// Contacts carried on the response — multiple on a 3xx redirect (the
@@ -231,8 +257,8 @@ pub struct SipResponse {
     /// Optional structured headers, eagerly + non-fatally parsed.
     pub optional: OptionalHeaders,
     pub headers: Vec<SipHeader>,
-    pub body: Vec<u8>,
-    pub raw: Vec<u8>,
+    pub body: Bytes,
+    pub raw: Bytes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,17 +278,15 @@ impl SipMessage {
     /// Raw escape hatch (Mechanism E). Case-insensitive, wire order preserved.
     /// For unknown/extension headers; built-ins have typed accessors above.
     pub fn get_header(&self, name: &str) -> Vec<&str> {
-        let lower = name.to_ascii_lowercase();
         self.headers()
             .iter()
-            .filter(|h| h.name.to_ascii_lowercase() == lower)
+            .filter(|h| h.name.eq_ignore_ascii_case(name))
             .map(|h| h.value.as_str())
             .collect()
     }
 
     pub fn has_header(&self, name: &str) -> bool {
-        let lower = name.to_ascii_lowercase();
-        self.headers().iter().any(|h| h.name.to_ascii_lowercase() == lower)
+        self.headers().iter().any(|h| h.name.eq_ignore_ascii_case(name))
     }
 
     /// The eagerly-parsed optional structured headers.

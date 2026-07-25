@@ -156,14 +156,14 @@ define_service! {
                     leg_id: leg.clone(),
                     rseq,
                     invite_cseq,
-                    b_tag: b_tag.clone(),
+                    b_tag: b_tag.to_string(),
                 });
                 // fake-prack: cache bob's SDP per dialog when 100rel is in play.
                 let cache_action = if fake_prack && rseq.is_some() && !resp.body.is_empty() {
                     Some(RuleAction::CacheSdpOnLegDialog {
                         leg_id: leg.clone(),
-                        b_tag: b_tag.clone(),
-                        body: resp.body.clone(),
+                        b_tag: b_tag.to_string(),
+                        body: resp.body.to_vec(),
                     })
                 } else {
                     None
@@ -210,7 +210,7 @@ define_service! {
                 let mut actions = vec![
                     RuleAction::RelayFirstBare180 {
                         leg_id: leg.clone(),
-                        b_tag: b_tag.clone(),
+                        b_tag: b_tag.to_string(),
                     },
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Provisional,
@@ -271,7 +271,7 @@ define_service! {
                     actions.push(RuleAction::AddTagMapping {
                         a_tag: stored.to_string(),
                         b_leg_id: leg.clone(),
-                        b_tag: b_tag.clone(),
+                        b_tag: b_tag.to_string(),
                     });
                 }
 
@@ -372,8 +372,8 @@ define_service! {
                         },
                         RuleAction::CacheSdpOnLegDialog {
                             leg_id: leg,
-                            b_tag,
-                            body: req.body.clone(),
+                            b_tag: b_tag.to_string(),
+                            body: req.body.to_vec(),
                         },
                     ]),
                     _ => ok(vec![RuleAction::Respond {

@@ -708,7 +708,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                         event_type: CdrEventType::Reject,
                         leg_id: b.clone(),
                         status_code: Some(status),
-                        reason: Some(reason.clone()),
+                        reason: Some(reason.to_string()),
                     },
                     RuleAction::TerminateLeg {
                         leg_id: b.clone(),

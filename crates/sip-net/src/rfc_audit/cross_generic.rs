@@ -364,7 +364,7 @@ fn check_wire_destination(
         extract_route_uri(first)
     } else {
         match msg {
-            SipMessage::Request(r) => r.uri.clone(),
+            SipMessage::Request(r) => r.uri.to_string(),
             SipMessage::Response(_) => return,
         }
     };

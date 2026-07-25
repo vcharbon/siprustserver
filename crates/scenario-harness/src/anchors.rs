@@ -42,11 +42,11 @@ pub struct AnchorKeys {
 impl From<&SipRequest> for AnchorKeys {
     fn from(r: &SipRequest) -> Self {
         AnchorKeys {
-            call_id: r.call_id.clone(),
+            call_id: r.call_id.to_string(),
             cseq_seq: r.cseq.seq,
             cseq_method: r.cseq.method.to_string(),
             kind: AnchorMsgKind::Request { method: r.method.to_string() },
-            via_branch: r.via.first().branch.clone(),
+            via_branch: r.via.first().branch.as_deref().map(str::to_string),
         }
     }
 }
@@ -54,11 +54,11 @@ impl From<&SipRequest> for AnchorKeys {
 impl From<&SipResponse> for AnchorKeys {
     fn from(r: &SipResponse) -> Self {
         AnchorKeys {
-            call_id: r.call_id.clone(),
+            call_id: r.call_id.to_string(),
             cseq_seq: r.cseq.seq,
             cseq_method: r.cseq.method.to_string(),
             kind: AnchorMsgKind::Response { status: r.status },
-            via_branch: r.via.first().branch.clone(),
+            via_branch: r.via.first().branch.as_deref().map(str::to_string),
         }
     }
 }

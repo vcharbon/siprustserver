@@ -81,7 +81,7 @@ impl<'a> OutOfDialogRequest<'a> {
 
     /// Attach an arbitrary extra header. Repeatable; order preserved.
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
-        self.extra_headers.push(SipHeader { name: name.to_string(), value: value.to_string() });
+        self.extra_headers.push(SipHeader { name: name.to_string().into(), value: value.to_string().into() });
         self
     }
 
@@ -260,7 +260,7 @@ impl<'a> OutOfDialogRequest<'a> {
                     who: caller.name.clone(),
                     expected: expect,
                     got: resp.status,
-                    reason: resp.reason.clone(),
+                    reason: resp.reason.to_string(),
                 });
             }
             let responder = responder.expect("guarded above");
@@ -276,7 +276,7 @@ impl<'a> OutOfDialogRequest<'a> {
                     who: caller.name.clone(),
                     expected: expect,
                     got: resp.status,
-                    reason: resp.reason.clone(),
+                    reason: resp.reason.to_string(),
                 });
             };
             // A non-INVITE final needs no ACK (§17.1.2.2). Resend with the
@@ -287,8 +287,8 @@ impl<'a> OutOfDialogRequest<'a> {
             opts.extra_headers
                 .retain(|h| !h.name.eq_ignore_ascii_case(challenge.credential_header()));
             opts.extra_headers.push(SipHeader {
-                name: challenge.credential_header().to_string(),
-                value: credential,
+                name: challenge.credential_header().to_string().into(),
+                value: credential.into(),
             });
             auth_retries_left -= 1;
         }

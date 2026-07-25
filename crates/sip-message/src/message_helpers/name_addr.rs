@@ -3,17 +3,24 @@
 //! structured-header parser.
 
 use crate::parser::custom::structured_headers::{parse_contact, parse_name_addr};
+use crate::sip_str::SipStr;
 use crate::types::ParamValue;
 
 /// Extract the `tag` parameter from a From/To header value.
 pub fn extract_tag(header_value: &str) -> Option<String> {
+    tag_of(&SipStr::owned(header_value)).map(String::from)
+}
+
+/// [`extract_tag`] over an already-shared value — the zero-copy form the
+/// message layer uses internally.
+pub fn tag_of(header_value: &SipStr) -> Option<SipStr> {
     parse_name_addr(header_value).tag
 }
 
 /// Strip the `tag` parameter from a From/To header value, reconstructing the
 /// remaining name-addr + params.
 pub fn strip_tag(header_value: &str) -> String {
-    let parsed = parse_name_addr(header_value);
+    let parsed = parse_name_addr(&SipStr::owned(header_value));
     if parsed.tag.is_none() {
         return header_value.to_string();
     }
@@ -37,10 +44,10 @@ pub fn strip_tag(header_value: &str) -> String {
 
 /// Extract the URI from a From/To header value (name-addr).
 pub fn extract_name_addr_uri(header_value: &str) -> String {
-    parse_name_addr(header_value).uri
+    parse_name_addr(&SipStr::owned(header_value)).uri.into()
 }
 
 /// Extract the URI from a Contact header value.
 pub fn extract_contact_uri(contact_value: &str) -> String {
-    parse_contact(contact_value).uri
+    parse_contact(&SipStr::owned(contact_value)).uri.into()
 }

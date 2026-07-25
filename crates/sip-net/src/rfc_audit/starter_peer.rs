@@ -153,7 +153,7 @@ fn track_received(ds: &mut PeerDialog, msg: &SipMessage) {
     if let SipMessage::Request(req) = msg {
         if req.method.as_str() == "INVITE" {
             ds.recv_invite = true;
-            ds.received_invites.push((top_via_branch(msg), req.uri.clone()));
+            ds.received_invites.push((top_via_branch(msg), req.uri.to_string()));
             if ds.dialog_remote_uri.is_none() {
                 ds.dialog_remote_uri = Some(from_uri(msg).to_string());
             }

@@ -69,7 +69,7 @@ impl Owner {
         let buf = serialize(&SipMessage::Response(msg.clone()));
 
         if let Some(branch) = branch {
-            if let Some(txn) = self.txns.get_mut(&branch) {
+            if let Some(txn) = self.txns.get_mut(branch.as_str()) {
                 if txn.role == TxnRole::Server {
                     // RFC 3261 §17.2.1: a Completed server txn has already sent its
                     // final and now only retransmits the STORED response on a
@@ -84,7 +84,8 @@ impl Owner {
                     }
 
                     let is_final = status >= 200;
-                    let outbound_to_tag = if status > 100 { msg.to.tag.clone() } else { None };
+                    let outbound_to_tag =
+                        if status > 100 { msg.to.tag.as_deref().map(str::to_string) } else { None };
                     // Pin the UAS To-tag on the first >100 response (§17.2.1).
                     if txn.uas_to_tag.is_none() {
                         txn.uas_to_tag = outbound_to_tag;
@@ -115,12 +116,12 @@ impl Owner {
                         // TU owns §13.3.1.4 2xx retransmission); non-INVITE (Timer J) only
                         // absorbs, never retransmits.
                         let arm_timer_g = matches!(txn.kind, TxnKind::Invite) && status >= 300;
-                        let key = self.timers.insert(Timer::Cleanup(branch.clone()), ms(delay));
+                        let key = self.timers.insert(Timer::Cleanup(branch.to_string()), ms(delay));
                         let g_key = arm_timer_g.then(|| {
                             self.timers
-                                .insert(Timer::ServerRetransmit(branch.clone()), ms(T1))
+                                .insert(Timer::ServerRetransmit(branch.to_string()), ms(T1))
                         });
-                        if let Some(txn) = self.txns.get_mut(&branch) {
+                        if let Some(txn) = self.txns.get_mut(branch.as_str()) {
                             txn.cleanup_key = Some(key);
                             if let Some(g_key) = g_key {
                                 txn.retransmit_key = Some(g_key);
@@ -155,7 +156,7 @@ impl Owner {
 
         // ── ACK ──────────────────────────────────────────────────────────────
         if req.method == "ACK" {
-            if let Some(existing) = self.txns.get(&branch) {
+            if let Some(existing) = self.txns.get(branch.as_str()) {
                 if existing.role == TxnRole::Server
                     && existing.kind == TxnKind::Invite
                     && existing.state == TxnState::Completed
@@ -199,7 +200,7 @@ impl Owner {
         }
 
         // ── Duplicate detection for other requests ─────────────────────────────
-        if let Some(existing) = self.txns.get(&branch) {
+        if let Some(existing) = self.txns.get(branch.as_str()) {
             if let Some(cached) = existing.last_response.clone() {
                 self.send_buffer(endpoint, &cached, src).await;
             }
@@ -229,11 +230,11 @@ impl Owner {
         let call_ref = extract_ruri_call_ref(&req);
 
         let txn = Transaction {
-            branch: branch.clone(),
+            branch: branch.to_string(),
             role: TxnRole::Server,
             kind,
-            call_id: req.call_id.clone(),
-            from_tag: req.from.tag.clone().unwrap_or_default(),
+            call_id: req.call_id.to_string(),
+            from_tag: req.from.tag.clone().unwrap_or_default().to_string(),
             // INVITE server txns keep the request for the CANCEL→487 path; a
             // non-INVITE server txn never reads it, so skip that clone.
             original_request: is_invite.then(|| req.clone()),
@@ -260,7 +261,7 @@ impl Owner {
             let trying = generate_response(&req, 100, "Trying", &GenerateResponseOpts::default());
             let trying_buf = serialize(&SipMessage::Response(trying));
             self.send_buffer(endpoint, &trying_buf, src).await;
-            if let Some(txn) = self.txns.get_mut(&branch) {
+            if let Some(txn) = self.txns.get_mut(branch.as_str()) {
                 txn.state = TxnState::Proceeding;
                 // Cache the 100 as the latest provisional so a retransmitted INVITE
                 // replays it (RFC 3261 §17.2.1) instead of being absorbed silently —
@@ -304,9 +305,9 @@ impl Owner {
         };
         let matched_branch = self
             .txns
-            .get(&cancel_branch)
+            .get(cancel_branch.as_str())
             .filter(|t| is_cancel_target(t))
-            .map(|_| cancel_branch.clone())
+            .map(|_| cancel_branch.to_string())
             .or_else(|| {
                 self.txns
                     .iter()
@@ -341,16 +342,16 @@ impl Owner {
         // transaction it targets instead of tearing the whole call down.
         let (invite_cseq, in_dialog) = self
             .txns
-            .get(&branch)
+            .get(branch.as_str())
             .and_then(|t| t.original_request.as_ref())
             .map(|r| (Some(r.cseq.seq), r.to.tag.is_some()))
             .unwrap_or((None, false));
 
         // Resolve (and lazily pin) the UAS To-tag on the matched INVITE.
-        let mut uas_to_tag = self.txns.get(&branch).and_then(|t| t.uas_to_tag.clone());
+        let mut uas_to_tag = self.txns.get(branch.as_str()).and_then(|t| t.uas_to_tag.clone());
         if uas_to_tag.is_none() {
             let pinned = self.id_gen.new_tag();
-            if let Some(txn) = self.txns.get_mut(&branch) {
+            if let Some(txn) = self.txns.get_mut(branch.as_str()) {
                 txn.uas_to_tag = Some(pinned.clone());
             }
             uas_to_tag = Some(pinned);
@@ -372,7 +373,7 @@ impl Owner {
         // 487 Request Terminated on the matched INVITE.
         let original = self
             .txns
-            .get(&branch)
+            .get(branch.as_str())
             .and_then(|t| t.original_request.clone());
         if let Some(original) = original {
             let terminated = generate_response(
@@ -386,22 +387,22 @@ impl Owner {
             );
             let terminated_buf = serialize(&SipMessage::Response(terminated));
             self.send_buffer(endpoint, &terminated_buf, src).await;
-            if let Some(txn) = self.txns.get_mut(&branch) {
+            if let Some(txn) = self.txns.get_mut(branch.as_str()) {
                 txn.state = TxnState::Completed;
                 txn.last_response = Some(terminated_buf);
                 txn.last_response_status = Some(487);
                 txn.original_request = None;
             }
             // Timer-H-487 cleanup if the ACK for 487 never arrives.
-            let key = self.timers.insert(Timer::Cleanup(branch.clone()), ms(TIMER_H));
-            if let Some(txn) = self.txns.get_mut(&branch) {
+            let key = self.timers.insert(Timer::Cleanup(branch.to_string()), ms(TIMER_H));
+            if let Some(txn) = self.txns.get_mut(branch.as_str()) {
                 txn.cleanup_key = Some(key);
             }
         }
 
         // Critical: we already answered 200 + 487 on the wire; a dropped Cancelled
         // would leave the b-leg ringing a cancelled call (no other signal upstream).
-        self.emit_critical(TransactionEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog });
+        self.emit_critical(TransactionEvent::Cancelled { call_id: call_id.to_string(), from_tag: from_tag.to_string(), invite_cseq, in_dialog });
     }
 }
 

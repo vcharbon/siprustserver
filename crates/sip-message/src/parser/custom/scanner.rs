@@ -54,14 +54,72 @@ pub(crate) fn decode(bytes: &[u8]) -> String {
     }
 }
 
-/// Append a lenient-UTF-8 decode of `bytes` onto `out` without minting an
-/// intermediate owned `String` (the previous `push_str(&decode(..))` shape
-/// allocated a throwaway per header-value segment on the hot path).
-fn push_decoded(out: &mut String, bytes: &[u8]) {
-    match std::str::from_utf8(bytes) {
-        Ok(s) => out.push_str(s),
-        Err(_) => out.push_str(&String::from_utf8_lossy(bytes)),
+/// A byte range of the message image. Every token the scanner reads is one of
+/// these — the parser slices the image by index and never copies a token.
+pub type Span = std::ops::Range<usize>;
+
+/// Where the header block ends and how many lines it holds.
+pub struct HeaderBlock {
+    /// Byte offset just past the blank line, in raw-datagram coordinates.
+    pub end: usize,
+    /// Line count, including the start line — the header list's capacity.
+    pub lines: usize,
+}
+
+/// Locate the blank line that ends the header block — the message's
+/// header/body split. `end` is `raw.len()` when the datagram ends without a
+/// blank line (the lenient EOF case [`Scanner::at_end_of_headers`] accepts).
+///
+/// Splitting first is what lets the body stay raw bytes while the header block
+/// alone becomes the decoded text image: a binary body can never be mangled by
+/// the decode, and the body is a slice of the original packet, not a copy. The
+/// line count rides along so the header list can be sized without a second scan.
+pub fn header_block(raw: &[u8]) -> HeaderBlock {
+    let mut i = 0;
+    let mut lines = 0;
+    loop {
+        if i >= raw.len() {
+            return HeaderBlock { end: raw.len(), lines };
+        }
+        let line_start = i;
+        while i < raw.len() && raw[i] != CR && raw[i] != LF {
+            i += 1;
+        }
+        let empty = i == line_start;
+        if i < raw.len() && raw[i] == CR {
+            i += 1;
+        }
+        if i < raw.len() && raw[i] == LF {
+            i += 1;
+        }
+        if empty {
+            return HeaderBlock { end: i, lines };
+        }
+        if i == line_start {
+            return HeaderBlock { end: raw.len(), lines }; // unterminated final line
+        }
+        lines += 1;
     }
+}
+
+/// What one header line's value occupies in the image: the common case is a
+/// plain [`Span`]; a line folded across CRLF+WSP has to be rebuilt (the fold
+/// collapses to a single SP), so it comes back owned.
+pub enum HeaderValue {
+    Span(Span),
+    Unfolded(String),
+}
+
+/// `range` with leading/trailing whitespace excluded. Trimming a span is index
+/// arithmetic — no copy, unlike trimming an owned value.
+pub fn trim_span(image: &str, range: Span) -> Span {
+    let slice = &image[range.start..range.end];
+    let trimmed = slice.trim();
+    if trimmed.is_empty() {
+        return range.start..range.start;
+    }
+    let lead = trimmed.as_ptr() as usize - slice.as_ptr() as usize;
+    (range.start + lead)..(range.start + lead + trimmed.len())
 }
 
 pub struct Scanner<'a> {
@@ -120,76 +178,82 @@ impl<'a> Scanner<'a> {
     }
 
     /// Read bytes until the given delimiter byte. Does not consume it.
-    pub fn read_until(&mut self, byte: u8) -> String {
+    pub fn read_until(&mut self, byte: u8) -> Span {
         let start = self.pos;
         while self.pos < self.buf.len() && self.buf[self.pos] != byte {
             self.pos += 1;
         }
-        decode(&self.buf[start..self.pos])
+        start..self.pos
     }
 
     /// Read an RFC 3261 token (alphanum + special chars).
-    pub fn read_token(&mut self) -> String {
+    pub fn read_token(&mut self) -> Span {
         let start = self.pos;
         while self.pos < self.buf.len() && is_token_char(self.buf[self.pos]) {
             self.pos += 1;
         }
-        decode(&self.buf[start..self.pos])
+        start..self.pos
     }
 
     /// Read 1+ digits as an integer. Errors if no digits found.
     pub fn read_digits(&mut self) -> Result<u64, SipParseError> {
         let start = self.pos;
+        let mut n: u64 = 0;
         while self.pos < self.buf.len() && is_digit(self.buf[self.pos]) {
+            n = n
+                .checked_mul(10)
+                .and_then(|n| n.checked_add((self.buf[self.pos] - b'0') as u64))
+                .ok_or_else(|| SipParseError::new(format!("Invalid integer at position {start}")))?;
             self.pos += 1;
         }
         if self.pos == start {
             return Err(SipParseError::new(format!("Expected digit at position {}", self.pos)));
         }
-        // ASCII digits only in range → valid UTF-8, safe to parse.
-        decode(&self.buf[start..self.pos])
-            .parse::<u64>()
-            .map_err(|_| SipParseError::new(format!("Invalid integer at position {start}")))
+        Ok(n)
     }
 
     /// Read the rest of the line until CRLF, unfolding continuation lines
     /// (CRLF + WSP) to a single SP. Consumes the final CRLF. Accepts bare LF.
-    pub fn read_header_value(&mut self) -> String {
-        let mut result = String::new();
+    /// An unfolded line is the only shape that cannot be expressed as a span.
+    pub fn read_header_value(&mut self) -> HeaderValue {
         let start = self.pos;
         while self.pos < self.buf.len() {
             let b = self.buf[self.pos];
-            if b == CR {
-                push_decoded(&mut result, &self.buf[start..self.pos]);
-                if self.pos + 1 < self.buf.len() && self.buf[self.pos + 1] == LF {
-                    // Continuation line?
-                    if self.pos + 2 < self.buf.len() && is_wsp(self.buf[self.pos + 2]) {
-                        result.push(' ');
-                        self.pos += 3; // skip CR LF WSP
-                        result.push_str(&self.read_header_value());
-                        return result;
-                    }
-                    self.pos += 2; // consume CRLF
-                    return result;
+            if b == CR && self.pos + 1 < self.buf.len() && self.buf[self.pos + 1] == LF {
+                let end = self.pos;
+                if self.pos + 2 < self.buf.len() && is_wsp(self.buf[self.pos + 2]) {
+                    self.pos += 3; // skip CR LF WSP
+                    return HeaderValue::Unfolded(self.unfold_from(start..end));
                 }
+                self.pos += 2; // consume CRLF
+                return HeaderValue::Span(start..end);
             }
             if b == LF {
                 // Bare LF (lenient).
-                push_decoded(&mut result, &self.buf[start..self.pos]);
+                let end = self.pos;
                 if self.pos + 1 < self.buf.len() && is_wsp(self.buf[self.pos + 1]) {
-                    result.push(' ');
                     self.pos += 2;
-                    result.push_str(&self.read_header_value());
-                    return result;
+                    return HeaderValue::Unfolded(self.unfold_from(start..end));
                 }
                 self.pos += 1; // consume LF
-                return result;
+                return HeaderValue::Span(start..end);
             }
             self.pos += 1;
         }
-        // EOF without CRLF — return what we have.
-        push_decoded(&mut result, &self.buf[start..self.pos]);
-        result
+        // EOF without CRLF — the line runs to the end of the image.
+        HeaderValue::Span(start..self.pos)
+    }
+
+    /// Continue a folded header value: `first` is the text before the fold, the
+    /// cursor already sits past `CRLF WSP`, and the fold itself becomes one SP.
+    fn unfold_from(&mut self, first: Span) -> String {
+        let mut out = decode(&self.buf[first.start..first.end]);
+        out.push(' ');
+        match self.read_header_value() {
+            HeaderValue::Span(rest) => out.push_str(&decode(&self.buf[rest.start..rest.end])),
+            HeaderValue::Unfolded(rest) => out.push_str(&rest),
+        }
+        out
     }
 
     /// Expect and consume CRLF (also accepts bare LF). Errors otherwise.

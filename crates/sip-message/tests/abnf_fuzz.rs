@@ -15,6 +15,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use sip_message::SipStr;
 use sip_message::parser::custom::structured_headers::{
     find_uri_embedded_headers_start, parse_contact, parse_cseq, parse_name_addr, parse_rack,
     parse_refer_to, parse_replaces, parse_sip_uri_string, parse_via, split_top_level_commas,
@@ -79,7 +80,7 @@ fn fuzz_sip_uri(line: &str, s: &mut Stat) {
     }
     s.accepted += 1;
     if line.contains('@') {
-        if let Some(parsed) = parse_sip_uri_string(line) {
+        if let Some(parsed) = parse_sip_uri_string(&SipStr::owned(line)) {
             if parsed.user.is_none() {
                 s.silent(line);
             }
@@ -88,7 +89,7 @@ fn fuzz_sip_uri(line: &str, s: &mut Stat) {
 }
 
 fn fuzz_name_addr(line: &str, header: &str, s: &mut Stat) {
-    let parsed = parse_name_addr(line);
+    let parsed = parse_name_addr(&SipStr::owned(line));
     if parsed.uri.is_empty() {
         s.reject(line, "empty parsed.uri".to_string());
         return;
@@ -110,7 +111,7 @@ fn fuzz_name_addr(line: &str, header: &str, s: &mut Stat) {
 }
 
 fn fuzz_pai_entry(entry: &str, s: &mut Stat) {
-    let parsed = parse_name_addr(entry);
+    let parsed = parse_name_addr(&SipStr::owned(entry));
     if parsed.uri.is_empty() {
         s.reject(entry, "empty parsed.uri".to_string());
         return;
@@ -131,7 +132,7 @@ fn fuzz_contact(line: &str, s: &mut Stat) {
         if entry.is_empty() {
             continue;
         }
-        let parsed = parse_contact(&entry);
+        let parsed = parse_contact(&SipStr::owned(entry));
         if parsed.uri.is_empty() {
             s.reject(&entry, "empty parsed.uri".to_string());
             return;
@@ -149,7 +150,7 @@ fn fuzz_via(line: &str, s: &mut Stat) {
         if entry.is_empty() {
             continue;
         }
-        let parsed = parse_via(&entry);
+        let parsed = parse_via(&SipStr::owned(entry));
         if parsed.transport.is_empty() || parsed.host.is_empty() {
             s.reject(
                 &entry,
@@ -168,7 +169,7 @@ fn fuzz_via(line: &str, s: &mut Stat) {
 }
 
 fn fuzz_cseq(line: &str, s: &mut Stat) {
-    let parsed = parse_cseq(line);
+    let parsed = parse_cseq(&SipStr::owned(line));
     if parsed.method.is_empty() {
         s.reject(line, "empty method".to_string());
         return;
@@ -177,7 +178,7 @@ fn fuzz_cseq(line: &str, s: &mut Stat) {
 }
 
 fn fuzz_rack(line: &str, s: &mut Stat) {
-    if parse_rack(line).is_none() {
+    if parse_rack(&SipStr::owned(line)).is_none() {
         s.reject(line, "parse_rack returned None".to_string());
         return;
     }
@@ -185,7 +186,7 @@ fn fuzz_rack(line: &str, s: &mut Stat) {
 }
 
 fn fuzz_replaces(line: &str, s: &mut Stat) {
-    if parse_replaces(line).is_none() {
+    if parse_replaces(&SipStr::owned(line)).is_none() {
         s.reject(line, "parse_replaces returned None".to_string());
         return;
     }
@@ -193,7 +194,7 @@ fn fuzz_replaces(line: &str, s: &mut Stat) {
 }
 
 fn fuzz_refer_to(line: &str, s: &mut Stat) {
-    let Some(parsed) = parse_refer_to(line) else {
+    let Some(parsed) = parse_refer_to(&SipStr::owned(line)) else {
         s.reject(line, "parse_refer_to returned None".to_string());
         return;
     };
@@ -226,7 +227,7 @@ fn fuzz_request_line(line: &str, s: &mut Stat) {
         return;
     }
     if req_uri.contains('@') {
-        if let Some(parsed) = parse_sip_uri_string(req_uri) {
+        if let Some(parsed) = parse_sip_uri_string(&SipStr::owned(req_uri)) {
             if parsed.user.is_none() {
                 s.silent(line);
             }

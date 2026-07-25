@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/sip-message",
+    "crates/alloc-counter",
     "crates/sip-clock",
     "crates/layer-harness",
     "crates/sip-net",

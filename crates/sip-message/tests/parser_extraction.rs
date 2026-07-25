@@ -284,7 +284,7 @@ fn parsed_contact_and_request_uri() {
     assert_eq!(r.request_uri.scheme, "sip");
     assert_eq!(r.request_uri.user.as_deref(), Some("bob"));
     assert_eq!(r.request_uri.host, "example.com");
-    assert_eq!(r.request_uri.params.get("transport").map(String::as_str), Some("udp"));
+    assert_eq!(r.request_uri.params.get("transport").map(|v| v.as_str()), Some("udp"));
 }
 
 #[test]

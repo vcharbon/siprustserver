@@ -87,8 +87,8 @@ pub fn build_initial_call(
     );
     let a_leg = Leg {
         leg_id: "a".to_string(),
-        call_id: invite.call_id.clone(),
-        from_tag: invite.from.tag.clone().unwrap_or_default(),
+        call_id: invite.call_id.to_string(),
+        from_tag: invite.from.tag.clone().unwrap_or_default().to_string(),
         source: RemoteInfo {
             address: src.ip().to_string(),
             port: src.port(),
@@ -98,9 +98,9 @@ pub fn build_initial_call(
         dialogs: vec![],
         no_answer_timeout_sec: None,
         bye_disposition: None,
-        local_uri: Some(invite.to.uri.clone()),
-        remote_uri: Some(invite.from.uri.clone()),
-        invite_request_uri: Some(invite.uri.clone()),
+        local_uri: Some(invite.to.uri.to_string()),
+        remote_uri: Some(invite.from.uri.to_string()),
+        invite_request_uri: Some(invite.uri.to_string()),
         pending_invite_txn: None,
         ext: None,
         kind: Some(LegKind::A),
@@ -109,16 +109,16 @@ pub fn build_initial_call(
     };
     let topology = topology_from_cookie(invite, &config.self_ordinal);
     let a_leg_invite = ALegInviteSnapshot {
-        uri: invite.uri.clone(),
+        uri: invite.uri.to_string(),
         headers: invite
             .headers
             .iter()
             .map(|h| call::SipHeader {
-                name: h.name.clone(),
-                value: h.value.clone(),
+                name: h.name.to_string(),
+                value: h.value.to_string(),
             })
             .collect(),
-        body: invite.body.clone(),
+        body: invite.body.to_vec(),
     };
     Call {
         call_ref,
@@ -301,11 +301,11 @@ fn build_request(invite: &SipRequest) -> NewCallRequest {
         if STANDARD_HEADERS.contains(&h.name.to_ascii_lowercase().as_str()) {
             continue;
         }
-        sip_headers.entry(h.name.clone()).or_default().push(h.value.clone());
+        sip_headers.entry(h.name.to_string()).or_default().push(h.value.to_string());
     }
     NewCallRequest {
-        call_id: invite.call_id.clone(),
-        ruri: invite.uri.clone(),
+        call_id: invite.call_id.to_string(),
+        ruri: invite.uri.to_string(),
         from: get_header(&invite.headers, "from").unwrap_or("").to_string(),
         to: get_header(&invite.headers, "to").unwrap_or("").to_string(),
         via: get_headers(&invite.headers, "via").iter().map(|s| s.to_string()).collect(),
@@ -350,7 +350,7 @@ fn build_reject_headers(
             let is_structural = REJECT_STRUCTURAL_HEADERS
                 .contains(&name.to_ascii_lowercase().as_str());
             if let (Some(v), false) = (val, is_structural) {
-                out.push(sip_message::SipHeader { name: name.clone(), value: v.clone() });
+                out.push(sip_message::SipHeader { name: name.clone().into(), value: v.clone().into() });
             }
         }
     }
@@ -359,7 +359,7 @@ fn build_reject_headers(
             Some(q) => format!("<{}>;q={q}", c.uri),
             None => format!("<{}>", c.uri),
         };
-        out.push(sip_message::SipHeader { name: "Contact".to_string(), value });
+        out.push(sip_message::SipHeader { name: "Contact".to_string().into(), value: value.into() });
     }
     out
 }

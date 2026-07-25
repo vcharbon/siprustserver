@@ -108,7 +108,7 @@ fn extract_sip_headers(req: &sip_message::SipRequest) -> serde_json::Map<String,
         if SKIP.contains(&name.as_str()) {
             continue;
         }
-        out.insert(h.name.clone(), serde_json::Value::String(h.value.clone()));
+        out.insert(h.name.to_string(), serde_json::Value::String(h.value.to_string()));
     }
     out
 }
@@ -503,7 +503,7 @@ define_service! {
                 let leg = st.referrer_leg_id.clone();
 
                 // Capture C's 200 SDP (drives the a-realign re-INVITE in 5b).
-                let c_initial_sdp = (!resp.body.is_empty()).then(|| resp.body.clone());
+                let c_initial_sdp = (!resp.body.is_empty()).then(|| resp.body.to_vec());
                 // A's SDP for the c-realign re-INVITE-C offer.
                 let a_sdp = super::relay::rebuild_a_leg_invite(ctx.call.a_leg_invite()).body;
 
@@ -529,7 +529,7 @@ define_service! {
                     },
                     RuleAction::SendReinvite {
                         leg_id: c_leg_id.clone(),
-                        body: a_sdp,
+                        body: a_sdp.to_vec(),
                         add_headers: vec![],
                     },
                     RuleAction::AddCdrEvent {
@@ -577,7 +577,7 @@ define_service! {
                         event_type: CdrEventType::Reject,
                         leg_id: c_leg_id.clone(),
                         status_code: Some(resp.status as i64),
-                        reason: Some(resp.reason.clone()),
+                        reason: Some(resp.reason.to_string()),
                     });
                     actions.push(RuleAction::TerminateLeg {
                         leg_id: c_leg_id,
@@ -675,7 +675,7 @@ define_service! {
                     },
                     RuleAction::SendReinvite {
                         leg_id: "a".to_string(),
-                        body: c_realign_sdp,
+                        body: c_realign_sdp.to_vec(),
                         add_headers: vec![],
                     },
                     RuleAction::SetTransfer { state: Some(new_state) },

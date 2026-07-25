@@ -734,6 +734,11 @@ fn phase_annotated_detail(detail: Option<String>, ctx: &CallCtx) -> Option<Strin
 ///   The governor re-anchors its grid on the next slot. Responds with the applied
 ///   value.
 /// - **`GET /rate`** → the current target cps.
+/// - **`GET /debug/flamegraph[?seconds=N]`** → on-demand pprof CPU flamegraph
+///   SVG of this process (default 20 s, max 120). The load driver runs the same
+///   shared `sip-message` parse path the SUT tiers do, at a saturated core, so
+///   it is the high-signal vantage for parse/allocation cost. Sampled on a
+///   blocking thread; zero overhead when no capture is in flight.
 ///
 /// Runs until the task is cancelled.
 pub async fn serve_metrics(
@@ -765,6 +770,27 @@ pub async fn serve_metrics_on(
             let mut buf = [0u8; 2048];
             let n = sock.read(&mut buf).await.unwrap_or(0);
             let (method, path, query) = parse_request_line(&buf[..n]);
+
+            // CPU flamegraph: binary SVG body, so it answers ahead of the
+            // text/plain routes below. Sampled on a blocking thread, leaving the
+            // call-driving async workers to keep offering load.
+            if path == "/debug/flamegraph" {
+                let secs = flamegraph_util::parse_seconds(&format!("?{query}"), 20, 120);
+                let svg = tokio::task::spawn_blocking(move || flamegraph_util::capture_svg(secs, 99))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("join error: {e}")));
+                let (status, ctype, body) = match svg {
+                    Ok(svg) => ("200 OK", "image/svg+xml", svg),
+                    Err(e) => ("500 Internal Server Error", "text/plain", format!("flamegraph failed: {e}\n").into_bytes()),
+                };
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&body).await;
+                return;
+            }
 
             let (status, body) = if method == "POST" && path == "/chaos" {
                 let body = if let Some(log) = &chaos {

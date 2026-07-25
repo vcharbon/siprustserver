@@ -113,7 +113,7 @@ async fn generic_out_of_dialog_message_fallible() -> Result<(), StepError> {
         Some("text/plain"),
         "caller-supplied Content-Type is used",
     );
-    assert_eq!(req.body, b"hello via the generic surface");
+    assert_eq!(&req.body[..], b"hello via the generic surface");
     uas.respond(200, "OK").try_send().await?;
     msg.try_expect(200).await?;
 

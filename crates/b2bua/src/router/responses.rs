@@ -11,8 +11,8 @@ use crate::repl::{Readiness, ReadinessState};
 /// Build a plain extension header.
 fn hdr(name: &str, value: impl Into<String>) -> SipHeader {
     SipHeader {
-        name: name.to_string(),
-        value: value.into(),
+        name: name.to_string().into(),
+        value: value.into().into(),
     }
 }
 

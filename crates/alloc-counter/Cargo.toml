@@ -1,0 +1,15 @@
+[package]
+name = "alloc-counter"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Counting #[global_allocator] wrapper for allocation-budget tests: exact allocation-event and byte counts for a measured region, so a test can pin allocs-per-operation as a regression budget."
+
+# A `GlobalAlloc` implementation is irreducibly `unsafe` (the trait's methods
+# are unsafe by definition), so this crate does NOT opt into the workspace
+# `forbid(unsafe_code)` lint (which cannot be locally overridden). It pins
+# `deny` instead — every other crate's guarantee still holds here — and the one
+# impl block carries a narrow `#[allow(unsafe_code)]` with a SAFETY comment.
+[lints.rust]
+unsafe_code = "deny"

@@ -5,6 +5,7 @@
 //! values with a leading non-param segment (which is skipped).
 
 use crate::parser::custom::structured_headers::parse_param_list;
+use crate::sip_str::SipStr;
 use crate::types::ParamValue;
 
 /// Value of the named `;`-parameter within one header VALUE (not a header
@@ -16,8 +17,9 @@ use crate::types::ParamValue;
 /// re-interpreted, so From/Contact display names are out of scope — use the
 /// name-addr readers for those.
 pub fn header_param_value(value: &str, name: &str) -> Option<String> {
-    match parse_param_list(value).get(&name.to_ascii_lowercase())? {
-        ParamValue::Value(v) => Some(v.clone()),
+    let params = parse_param_list(&SipStr::owned(value));
+    match params.get(name.to_ascii_lowercase().as_str())? {
+        ParamValue::Value(v) => Some(v.to_string()),
         ParamValue::Flag => Some(String::new()),
     }
 }

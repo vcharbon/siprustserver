@@ -12,7 +12,7 @@ use sip_message::message_helpers::{get_header, get_headers};
 use sip_message::{hydrate_request, SipHeader, SipMessage, SipRequest};
 
 fn hdr(name: &str, value: &str) -> SipHeader {
-    SipHeader { name: name.to_string(), value: value.to_string() }
+    SipHeader { name: name.to_string().into(), value: value.to_string().into() }
 }
 
 fn via() -> ViaSpec {
@@ -185,7 +185,7 @@ fn passes_extra_headers_through_verbatim() {
             via: Some(via()),
             contact: Some(contact()),
             extra_headers: transparent,
-            body: a_leg.body.clone(),
+            body: a_leg.body.to_vec(),
             ..Default::default()
         },
     );
@@ -496,7 +496,7 @@ fn cancel_echoes_the_invite_route_set_verbatim() {
         .headers
         .iter()
         .filter(|h| h.name.eq_ignore_ascii_case("Route"))
-        .map(|h| h.value.clone())
+        .map(|h| h.value.to_string())
         .collect();
     assert_eq!(
         cancel_routes,
@@ -570,7 +570,7 @@ fn preserves_already_present_to_tag() {
     let mut req = make_a_leg_invite();
     for h in req.headers.iter_mut() {
         if h.name == "To" {
-            h.value = "<sip:bob@biloxi.example.com>;tag=existing".to_string();
+            h.value = "<sip:bob@biloxi.example.com>;tag=existing".to_string().into();
         }
     }
     let resp = generate_response(
@@ -665,7 +665,7 @@ fn ack_non_2xx_echoes_the_invite_route_set_verbatim() {
         .headers
         .iter()
         .filter(|h| h.name.eq_ignore_ascii_case("Route"))
-        .map(|h| h.value.clone())
+        .map(|h| h.value.to_string())
         .collect();
     assert_eq!(
         ack_routes,

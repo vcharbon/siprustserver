@@ -461,8 +461,8 @@ impl<'a> InDialogRequest<'a> {
     /// Attach an arbitrary extra header.
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
         self.extra_headers.push(SipHeader {
-            name: name.to_string(),
-            value: value.to_string(),
+            name: name.to_string().into(),
+            value: value.to_string().into(),
         });
         self
     }

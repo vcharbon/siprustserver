@@ -13,67 +13,83 @@ use crate::types::{SipHeader, SipMessage, SipRequest, SipResponse};
 /// proxy's header-surgery path): first line + body from `req`, headers from
 /// the caller — no whole-message clone just to swap the header vector.
 pub fn serialize_request_parts(req: &SipRequest, headers: &[SipHeader]) -> Vec<u8> {
-    serialize_with_first_line(&format!("{} {} {}", req.method, req.uri, req.version), headers, &req.body)
+    let mut out = Vec::with_capacity(wire_size(headers, req.body.len()));
+    write_request_line(&mut out, req);
+    finish(out, headers, &req.body)
 }
 
 /// Response twin of [`serialize_request_parts`].
 pub fn serialize_response_parts(resp: &SipResponse, headers: &[SipHeader]) -> Vec<u8> {
-    serialize_with_first_line(&format!("{} {} {}", resp.version, resp.status, resp.reason), headers, &resp.body)
+    let mut out = Vec::with_capacity(wire_size(headers, resp.body.len()));
+    write_status_line(&mut out, resp);
+    finish(out, headers, &resp.body)
 }
 
 /// Serialize a structured SIP message to wire-format bytes.
 pub fn serialize(msg: &SipMessage) -> Vec<u8> {
-    let first_line = match msg {
-        SipMessage::Request(r) => format!("{} {} {}", r.method, r.uri, r.version),
-        SipMessage::Response(r) => format!("{} {} {}", r.version, r.status, r.reason),
-    };
-    let (headers, body) = match msg {
-        SipMessage::Request(r) => (&r.headers, &r.body),
-        SipMessage::Response(r) => (&r.headers, &r.body),
-    };
-    serialize_with_first_line(&first_line, headers, body)
+    match msg {
+        SipMessage::Request(r) => serialize_request_parts(r, &r.headers),
+        SipMessage::Response(r) => serialize_response_parts(r, &r.headers),
+    }
 }
 
-/// Serialize from components (first line, headers, body), enforcing
-/// Content-Length correctness.
-fn serialize_with_first_line(first_line: &str, headers: &[SipHeader], body: &[u8]) -> Vec<u8> {
+fn write_request_line(out: &mut Vec<u8>, req: &SipRequest) {
+    use std::io::Write;
+    let _ = write!(out, "{} {} {}", req.method, req.uri, req.version);
+}
+
+fn write_status_line(out: &mut Vec<u8>, resp: &SipResponse) {
+    use std::io::Write;
+    let _ = write!(out, "{} {} {}", resp.version, resp.status, resp.reason);
+}
+
+/// Exact-enough capacity for the whole datagram, so a serialization is ONE
+/// allocation: no per-header `format!`, no intermediate join.
+fn wire_size(headers: &[SipHeader], body_len: usize) -> usize {
+    const FIRST_LINE_HINT: usize = 96;
+    let header_bytes: usize =
+        headers.iter().map(|h| h.name.len() + h.value.len() + 4).sum::<usize>();
+    FIRST_LINE_HINT + header_bytes + 32 + body_len
+}
+
+/// Append the header block + body to a buffer already holding the first line,
+/// enforcing Content-Length correctness at this single boundary.
+fn finish(mut out: Vec<u8>, headers: &[SipHeader], body: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+
     let actual_length = body.len();
-    // Borrow the original headers unless we must rewrite/extend them.
-    let mut corrected: Option<Vec<SipHeader>> = None;
-
-    let cl_index = headers
-        .iter()
-        .position(|h| h.name.eq_ignore_ascii_case("content-length"));
-
+    let first_line_end = out.len();
+    let cl_index = headers.iter().position(|h| h.name.eq_ignore_ascii_case("content-length"));
+    let declared_ok = match cl_index {
+        Some(i) => headers[i].value.trim().parse::<usize>().ok() == Some(actual_length),
+        None => actual_length == 0,
+    };
     if let Some(i) = cl_index {
-        let declared = headers[i].value.trim().parse::<usize>().ok();
-        if declared != Some(actual_length) {
+        if !declared_ok {
             eprintln!(
-                "[Serializer] Content-Length mismatch: header={}, body={}. Auto-correcting. \
-                 First line: {}",
-                headers[i].value, actual_length, first_line
+                "[Serializer] Content-Length mismatch: header={}, body={actual_length}. \
+                 Auto-correcting. First line: {}",
+                headers[i].value,
+                String::from_utf8_lossy(&out[..first_line_end])
             );
-            let mut hs = headers.to_vec();
-            hs[i].value = actual_length.to_string();
-            corrected = Some(hs);
         }
-    } else if actual_length > 0 {
-        let mut hs = headers.to_vec();
-        hs.push(SipHeader {
-            name: "Content-Length".to_string(),
-            value: actual_length.to_string(),
-        });
-        corrected = Some(hs);
     }
 
-    let effective: &[SipHeader] = corrected.as_deref().unwrap_or(headers);
-    let header_lines = effective
-        .iter()
-        .map(|h| format!("{}: {}", h.name, h.value))
-        .collect::<Vec<_>>()
-        .join("\r\n");
-
-    let mut out = format!("{first_line}\r\n{header_lines}\r\n\r\n").into_bytes();
+    out.extend_from_slice(b"\r\n");
+    for (i, h) in headers.iter().enumerate() {
+        out.extend_from_slice(h.name.as_bytes());
+        out.extend_from_slice(b": ");
+        if cl_index == Some(i) && !declared_ok {
+            let _ = write!(out, "{actual_length}");
+        } else {
+            out.extend_from_slice(h.value.as_bytes());
+        }
+        out.extend_from_slice(b"\r\n");
+    }
+    if cl_index.is_none() && actual_length > 0 {
+        let _ = write!(out, "Content-Length: {actual_length}\r\n");
+    }
+    out.extend_from_slice(b"\r\n");
     out.extend_from_slice(body);
     out
 }

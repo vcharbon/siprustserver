@@ -44,12 +44,12 @@ impl Owner {
             let branch = msg.via.first().branch.clone().unwrap_or_default();
             return match txn_type {
                 TxnKind::Invite => ClientTransactionHandle::Invite {
-                    branch,
+                    branch: branch.to_string(),
                     original_invite: msg,
                     destination: dest,
                 },
                 TxnKind::NonInvite => ClientTransactionHandle::NonInvite {
-                    branch,
+                    branch: branch.to_string(),
                     original_request: msg,
                     destination: dest,
                 },
@@ -62,15 +62,15 @@ impl Owner {
             .branch
             .clone()
             .filter(|b| !b.is_empty())
-            .unwrap_or_else(|| self.id_gen.new_branch());
+            .unwrap_or_else(|| self.id_gen.new_branch().into());
         let (call_ref, leg_id) = extract_via_custom_params(&msg);
 
         let txn = Transaction {
-            branch: branch.clone(),
+            branch: branch.to_string(),
             role: TxnRole::Client,
             kind: txn_type,
-            call_id: msg.call_id.clone(),
-            from_tag: msg.from.tag.clone().unwrap_or_default(),
+            call_id: msg.call_id.to_string(),
+            from_tag: msg.from.tag.clone().unwrap_or_default().to_string(),
             original_request: matches!(txn_type, TxnKind::Invite).then(|| msg.clone()),
             last_response: None,
             last_response_status: None,
@@ -95,12 +95,12 @@ impl Owner {
 
         match txn_type {
             TxnKind::Invite => ClientTransactionHandle::Invite {
-                branch,
+                branch: branch.to_string(),
                 original_invite: msg,
                 destination: dest,
             },
             TxnKind::NonInvite => ClientTransactionHandle::NonInvite {
-                branch,
+                branch: branch.to_string(),
                 original_request: msg,
                 destination: dest,
             },
@@ -246,7 +246,7 @@ impl Owner {
         for branch in branches {
             let (is_client, is_completed, is_non_invite) = self
                 .txns
-                .get(&branch)
+                .get(branch.as_str())
                 .map_or((false, false, false), |t| {
                     (
                         t.role == TxnRole::Client,
@@ -258,7 +258,7 @@ impl Owner {
                 continue;
             }
             if is_completed || is_non_invite {
-                let cr = self.txns.get_mut(&branch).and_then(|t| t.call_ref.take());
+                let cr = self.txns.get_mut(branch.as_str()).and_then(|t| t.call_ref.take());
                 self.untrack_call_ref(&cr, &branch);
             } else if self.delete_txn(&branch) {
                 self.metrics
@@ -282,7 +282,7 @@ impl Owner {
         // so leave its timer running.
         if resp.status == 100 {
             if !branch.is_empty() {
-                let key = match self.txns.get_mut(&branch) {
+                let key = match self.txns.get_mut(branch.as_str()) {
                     Some(txn) if txn.role == TxnRole::Client => {
                         txn.state = TxnState::Proceeding;
                         (txn.kind == TxnKind::Invite).then(|| txn.retransmit_key.take()).flatten()
@@ -308,7 +308,7 @@ impl Owner {
             // Snapshot what we need before mutating.
             let client_match = self
                 .txns
-                .get(&branch)
+                .get(branch.as_str())
                 .filter(|t| t.role == TxnRole::Client)
                 .map(|t| (t.kind, t.state, t.original_request.clone(), t.destination));
 
@@ -319,7 +319,7 @@ impl Owner {
                     // final). INVITE stops retransmitting (§17.1.1.2); non-INVITE
                     // continues at T2 (§17.1.2.2), so only cancel retransmit for INVITE.
                     if state != TxnState::Completed {
-                        let key = match self.txns.get_mut(&branch) {
+                        let key = match self.txns.get_mut(branch.as_str()) {
                             Some(txn) => {
                                 txn.state = TxnState::Proceeding;
                                 (kind == TxnKind::Invite).then(|| txn.retransmit_key.take()).flatten()
@@ -346,7 +346,7 @@ impl Owner {
                     // without Timer D a lost ACK would have the UAS resend the final
                     // unanswered until its own Timer H, each resend re-emitting
                     // upstream as a duplicate.
-                    let (r, t) = match self.txns.get_mut(&branch) {
+                    let (r, t) = match self.txns.get_mut(branch.as_str()) {
                         Some(txn) => {
                             txn.state = TxnState::Completed;
                             (txn.retransmit_key.take(), txn.timeout_key.take())
@@ -355,8 +355,8 @@ impl Owner {
                     };
                     self.cancel_timer(r);
                     self.cancel_timer(t);
-                    let key = self.timers.insert(Timer::Cleanup(branch.clone()), ms(TIMER_D));
-                    if let Some(txn) = self.txns.get_mut(&branch) {
+                    let key = self.timers.insert(Timer::Cleanup(branch.to_string()), ms(TIMER_D));
+                    if let Some(txn) = self.txns.get_mut(branch.as_str()) {
                         txn.cleanup_key = Some(key);
                     }
                     // Critical: we auto-ACKed (silenced the UAS's resend), so this is

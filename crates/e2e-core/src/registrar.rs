@@ -316,11 +316,11 @@ impl RegisterProxy {
                 extra_headers: vec![
                     SipHeader {
                         name: "Contact".into(),
-                        value: format!("{contact_raw};expires={expires_sec}"),
+                        value: format!("{contact_raw};expires={expires_sec}").into(),
                     },
                     SipHeader {
                         name: "Expires".into(),
-                        value: expires_sec.to_string(),
+                        value: expires_sec.to_string().into(),
                     },
                 ],
                 incoming_source: Some((src.ip().to_string(), src.port())),
@@ -423,12 +423,12 @@ fn decrement_max_forwards(headers: &mut Vec<SipHeader>) -> Result<(), ()> {
         if cur == 0 {
             return Err(());
         }
-        h.value = (cur - 1).to_string();
+        h.value = (cur - 1).to_string().into();
         return Ok(());
     }
     headers.push(SipHeader {
-        name: "Max-Forwards".to_string(),
-        value: "69".to_string(),
+        name: "Max-Forwards".to_string().into(),
+        value: "69".to_string().into(),
     });
     Ok(())
 }
@@ -437,8 +437,8 @@ fn prepend_header(headers: &mut Vec<SipHeader>, name: &str, value: &str) {
     headers.insert(
         0,
         SipHeader {
-            name: name.to_string(),
-            value: value.to_string(),
+            name: name.to_string().into(),
+            value: value.to_string().into(),
         },
     );
 }
@@ -508,7 +508,7 @@ mod tests {
         headers
             .iter()
             .find(|h| h.name.eq_ignore_ascii_case("max-forwards"))
-            .map(|h| h.value.clone())
+            .map(|h| h.value.to_string())
     }
 
     #[test]

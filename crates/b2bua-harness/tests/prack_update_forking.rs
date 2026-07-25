@@ -285,7 +285,7 @@ async fn fake_prack_fork_prelude(
     assert_eq!(rack_of(&prack2.request().headers), "1 1 INVITE", "fork2 RAck (own dialog CSeq space)");
     prack2.respond(200, "OK").await;
 
-    (uas, a_tag)
+    (uas, a_tag.to_string())
 }
 
 /// Fake-prack forked b-leg answered on **fork 1**: its cached SDP must survive

@@ -267,8 +267,8 @@ impl ProxyCore {
                 if !decision.admit {
                     let reason = decision.reason.unwrap_or_else(|| "proxy_overload_cps".to_string());
                     let extra = [
-                        SipHeader { name: "Retry-After".into(), value: decision.retry_after_sec.to_string() },
-                        SipHeader { name: "Reason".into(), value: format!("SIP;cause=503;text=\"{reason}\"") },
+                        SipHeader { name: "Retry-After".into(), value: decision.retry_after_sec.to_string().into() },
+                        SipHeader { name: "Reason".into(), value: format!("SIP;cause=503;text=\"{reason}\"").into() },
                     ];
                     self.reply(req, src, 503, "Service Unavailable", &extra).await;
                     return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };

@@ -224,7 +224,7 @@ pub async fn apply_route(
                     d.ext.cached_sdp = None;
                 }
             }
-            BodyUpdate::Replace(s) => req.body = s.clone().into_bytes(),
+            BodyUpdate::Replace(s) => req.body = s.clone().into_bytes().into(),
         }
     }
 
@@ -396,8 +396,8 @@ fn apply_supported_for_18x(invite: &mut SipRequest, a_invite: &SipRequest, call:
     invite.headers.retain(|h| !h.name.eq_ignore_ascii_case("supported"));
     if let Some(val) = supported_out {
         invite.headers.push(sip_message::SipHeader {
-            name: "Supported".to_string(),
-            value: val,
+            name: "Supported".to_string().into(),
+            value: val.into(),
         });
     }
 }

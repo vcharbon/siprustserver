@@ -87,8 +87,8 @@ fn prepend_header(headers: &mut Vec<SipHeader>, name: &str, value: &str) {
     headers.insert(
         0,
         SipHeader {
-            name: name.to_string(),
-            value: value.to_string(),
+            name: name.to_string().into(),
+            value: value.to_string().into(),
         },
     );
 }

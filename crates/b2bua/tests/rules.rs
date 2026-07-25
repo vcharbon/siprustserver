@@ -782,7 +782,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         .headers
         .iter()
         .filter(|h| h.name.eq_ignore_ascii_case("route"))
-        .map(|h| h.value.clone())
+        .map(|h| h.value.to_string())
         .collect();
     assert_eq!(
         routes,
@@ -859,7 +859,7 @@ mod media_primitives {
         info.to.tag = Some("svc".into());
         info.cseq.seq = 2;
         info.cseq.method = "INFO".into();
-        info.body = b"Signal=5\r\nDuration=160\r\n".to_vec();
+        info.body = b"Signal=5\r\nDuration=160\r\n".to_vec().into();
         info.headers.push(SipHeader {
             name: "Content-Type".into(),
             value: "application/dtmf-relay".into(),

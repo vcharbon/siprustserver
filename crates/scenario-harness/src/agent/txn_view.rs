@@ -103,7 +103,7 @@ impl TxnView {
                 if !branch.starts_with("z9hG4bK") {
                     return TxnVerdict::Surface;
                 }
-                let key = (r.call_id.clone(), branch, r.method.to_string());
+                let key = (r.call_id.to_string(), branch, r.method.to_string());
                 let mut seen = self.requests.lock().unwrap();
                 match seen.get(&key) {
                     Some(first) if first.as_slice() == raw => TxnVerdict::Absorb,
@@ -121,7 +121,7 @@ impl TxnView {
                     return TxnVerdict::Surface;
                 };
                 let key =
-                    (r.call_id.clone(), branch, r.cseq.seq, r.cseq.method.to_string(), r.status);
+                    (r.call_id.to_string(), branch, r.cseq.seq, r.cseq.method.to_string(), r.status);
                 let mut seen = self.finals.lock().unwrap();
                 match seen.get(&key) {
                     None => {

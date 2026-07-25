@@ -266,7 +266,7 @@ impl MessageTemplate {
                 if r.reason != *reason {
                     return Err(Mismatch::ReasonPhrase {
                         expected: reason.clone(),
-                        got: r.reason.clone(),
+                        got: r.reason.to_string(),
                     });
                 }
             }
@@ -356,8 +356,8 @@ impl MessageTemplate {
         // inbound (no opt-out in v1).
         let tb = self.body();
         let ib = match msg {
-            SipMessage::Request(r) => r.body.as_slice(),
-            SipMessage::Response(r) => r.body.as_slice(),
+            SipMessage::Request(r) => &r.body,
+            SipMessage::Response(r) => &r.body,
         };
         if tb != ib {
             let first_diff = tb.iter().zip(ib.iter()).position(|(a, b)| a != b).or({

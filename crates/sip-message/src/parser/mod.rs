@@ -12,6 +12,8 @@
 //! `Err(SipParseError)`, never panics. There is no async / Effect runtime at
 //! this layer.
 
+use bytes::Bytes;
+
 use crate::error::SipParseError;
 use crate::types::SipMessage;
 use std::collections::BTreeSet;
@@ -29,6 +31,13 @@ pub trait SipParser {
     /// Parse raw wire bytes into a `SipMessage`. Never panics; failures are
     /// returned as `Err`.
     fn parse(&self, raw: &[u8]) -> Result<SipMessage, SipParseError>;
+
+    /// Parse a datagram the caller already owns as [`Bytes`]. The message's
+    /// `raw` and `body` then SHARE that buffer instead of copying it — the
+    /// receive path should prefer this. Defaults to a copy via [`parse`].
+    fn parse_shared(&self, raw: Bytes) -> Result<SipMessage, SipParseError> {
+        self.parse(&raw)
+    }
 }
 
 /// Length caps and grammar policy bounding adversarial input. Port of

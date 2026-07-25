@@ -374,7 +374,10 @@ impl Owner {
 
     async fn handle_packet(&mut self, endpoint: &dyn UdpEndpoint, packet: sip_net::UdpPacket) {
         use std::sync::atomic::Ordering::Relaxed;
-        let parsed = match self.parser.parse(&packet.raw) {
+        let (src, byte_len) = (packet.src, packet.raw.len());
+        // Hand the receive buffer to the parser instead of lending it: the
+        // message's `raw`/`body` then share it and no packet byte is copied.
+        let parsed = match self.parser.parse_shared(bytes::Bytes::from(packet.raw)) {
             Ok(m) => m,
             Err(_e) => {
                 // Parse error: the datagram is dropped. Count it so a
@@ -384,15 +387,11 @@ impl Owner {
             }
         };
         self.metrics.messages_processed.fetch_add(1, Relaxed);
-        self.metrics
-            .inbound_message_bytes_total
-            .fetch_add(packet.raw.len() as u64, Relaxed);
+        self.metrics.inbound_message_bytes_total.fetch_add(byte_len as u64, Relaxed);
 
         match parsed {
-            SipMessage::Request(req) => self.handle_inbound_request(endpoint, req, packet.src).await,
-            SipMessage::Response(resp) => {
-                self.handle_inbound_response(endpoint, resp, packet.src).await
-            }
+            SipMessage::Request(req) => self.handle_inbound_request(endpoint, req, src).await,
+            SipMessage::Response(resp) => self.handle_inbound_response(endpoint, resp, src).await,
         }
     }
 }

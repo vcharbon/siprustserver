@@ -3,10 +3,11 @@
 //! hydration boundary.
 
 use crate::parser::custom::{hydrate_request, hydrate_response};
+use crate::sip_str::SipStr;
 use crate::types::{SipHeader, SipRequest, SipResponse};
 
-pub(super) fn h(name: &str, value: impl Into<String>) -> SipHeader {
-    SipHeader { name: name.to_string(), value: value.into() }
+pub(super) fn h(name: &'static str, value: impl Into<SipStr>) -> SipHeader {
+    SipHeader { name: SipStr::from_static(name), value: value.into() }
 }
 
 /// `hydrate_request` cannot fail for stack-built (well-formed) input; a

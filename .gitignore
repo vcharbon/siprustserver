@@ -8,6 +8,7 @@
 # Editor / OS
 *.swp
 .DS_Store
+__pycache__/
 
 # Load-test / SIPp run outputs (never commit logs, traces, stats)
 **/results/

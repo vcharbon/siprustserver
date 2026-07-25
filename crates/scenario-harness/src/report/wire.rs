@@ -114,7 +114,7 @@ pub fn facets(raw: &[u8]) -> Facets {
 
     Facets {
         label,
-        call_id,
+        call_id: call_id.to_string(),
         tag_label: parts.join(" "),
         is_response,
     }

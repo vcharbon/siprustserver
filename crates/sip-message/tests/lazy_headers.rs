@@ -231,7 +231,7 @@ fn refer_to_replaces_missing_tags_keeps_raw_but_no_struct() {
     let msg = refer("Refer-To: <sip:carol@example.com?Replaces=just-callid>\r\n");
     let r = msg.optional().refer_to.as_ref().unwrap().as_ref().unwrap();
     assert!(r.replaces.is_none());
-    assert_eq!(r.embedded_headers.get("Replaces").map(String::as_str), Some("just-callid"));
+    assert_eq!(r.embedded_headers.get("Replaces").map(|v| v.as_str()), Some("just-callid"));
 }
 
 #[test]

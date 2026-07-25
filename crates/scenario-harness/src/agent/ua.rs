@@ -393,7 +393,7 @@ impl Agent {
             // The requested binding lifetime (RFC 3261 §10.2.1.1).
             extra_headers: vec![SipHeader {
                 name: "Expires".into(),
-                value: ttl_sec.to_string(),
+                value: ttl_sec.to_string().into(),
             }],
         };
         let req = generate_out_of_dialog_request(OutOfDialogMethod::Register, &opts);

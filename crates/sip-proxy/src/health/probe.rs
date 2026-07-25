@@ -218,7 +218,7 @@ impl HealthProbe {
                     // Timer F (32 s) backstop — the reap normally cancelled the
                     // transaction long before; count it only if still pending.
                     Some(TransactionEvent::Timeout { branch, .. }) => {
-                        if let Some(p) = state.pending.remove(&branch) {
+                        if let Some(p) = state.pending.remove(branch.as_str()) {
                             self.count_miss(p, &mut state.misses);
                         }
                     }
@@ -237,7 +237,7 @@ impl HealthProbe {
         let expired: Vec<String> =
             state.pending.iter().filter(|(_, p)| p.deadline_ms <= now).map(|(b, _)| b.clone()).collect();
         for branch in expired {
-            let p = state.pending.remove(&branch).expect("collected above");
+            let p = state.pending.remove(branch.as_str()).expect("collected above");
             self.txn.cancel_txns_for_call(&probe_call_ref(&branch)).await?;
             self.count_miss(p, &mut state.misses);
         }
@@ -279,7 +279,7 @@ impl HealthProbe {
 
     async fn handle_reply(&self, resp: SipResponse, state: &mut ProbeState) {
         let Some(branch) = resp.via.first().branch.clone() else { return };
-        let Some(p) = state.pending.remove(&branch) else { return };
+        let Some(p) = state.pending.remove(branch.as_str()) else { return };
 
         // A reply proves liveness — retire any other in-flight probes to the
         // same worker so their later reap can't count a spurious miss against

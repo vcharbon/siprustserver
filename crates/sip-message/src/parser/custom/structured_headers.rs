@@ -14,75 +14,79 @@
 
 use std::collections::BTreeMap;
 
+use crate::sip_str::SipStr;
 use crate::types::{ParamValue, Params};
 
 // ---------------------------------------------------------------------------
 // Parsed types (parser-internal; mapped to public field types in extract_fields)
 // ---------------------------------------------------------------------------
+//
+// Every field is a [`SipStr`] cut from the header value handed in, so parsing a
+// structured header allocates nothing beyond the param map itself.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedNameAddr {
-    pub display_name: Option<String>,
-    pub uri: String,
-    pub tag: Option<String>,
+    pub display_name: Option<SipStr>,
+    pub uri: SipStr,
+    pub tag: Option<SipStr>,
     pub params: Params,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedVia {
-    pub protocol: String,
-    pub version: String,
-    pub transport: String,
-    pub host: String,
+    pub protocol: SipStr,
+    pub version: SipStr,
+    pub transport: SipStr,
+    pub host: SipStr,
     pub port: Option<u64>,
-    pub branch: Option<String>,
+    pub branch: Option<SipStr>,
     pub params: Params,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedContact {
-    pub display_name: Option<String>,
-    pub uri: String,
+    pub display_name: Option<SipStr>,
+    pub uri: SipStr,
     pub params: Params,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedCSeq {
     pub seq: u64,
-    pub method: String,
+    pub method: SipStr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedRack {
     pub rseq: u64,
     pub seq: u64,
-    pub method: String,
+    pub method: SipStr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedReplaces {
-    pub call_id: String,
-    pub to_tag: String,
-    pub from_tag: String,
+    pub call_id: SipStr,
+    pub to_tag: SipStr,
+    pub from_tag: SipStr,
     pub early_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedUri {
-    pub scheme: String,
-    pub user: Option<String>,
-    pub host: String,
+    pub scheme: SipStr,
+    pub user: Option<SipStr>,
+    pub host: SipStr,
     pub port: Option<u64>,
-    pub params: BTreeMap<String, String>,
+    pub params: BTreeMap<SipStr, SipStr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedReferTo {
-    pub display_name: Option<String>,
-    pub uri: String,
+    pub display_name: Option<SipStr>,
+    pub uri: SipStr,
     pub parsed_uri: Option<ParsedUri>,
     pub params: Params,
-    pub embedded_headers: BTreeMap<String, String>,
+    pub embedded_headers: BTreeMap<SipStr, SipStr>,
     pub replaces: Option<ParsedReplaces>,
 }
 
@@ -149,13 +153,13 @@ pub fn split_top_level_commas(value: &str) -> Vec<&str> {
 // From / To parsing (name-addr with tag)
 // ---------------------------------------------------------------------------
 
-pub fn parse_name_addr(value: &str) -> ParsedNameAddr {
+pub fn parse_name_addr(value: &SipStr) -> ParsedNameAddr {
     let s = value.as_bytes();
     let len = s.len();
     let mut i = skip_ws(s, 0);
 
-    let mut display_name: Option<String> = None;
-    let uri: String;
+    let mut display_name: Option<SipStr> = None;
+    let uri: SipStr;
 
     if i < len && s[i] == b'"' {
         // Quoted display name.
@@ -165,7 +169,7 @@ pub fn parse_name_addr(value: &str) -> ParsedNameAddr {
         if i < len && s[i] == b'<' {
             match index_of(s, b'>', i + 1) {
                 None => {
-                    let uri = subslice(value, i + 1, len).trim().to_string();
+                    let uri = slice_trimmed(value, i + 1, len);
                     return ParsedNameAddr { display_name, uri, tag: None, params: Params::new() };
                 }
                 Some(close) => {
@@ -174,15 +178,15 @@ pub fn parse_name_addr(value: &str) -> ParsedNameAddr {
                 }
             }
         } else {
-            let uri = subslice(value, i, len).trim().to_string();
+            let uri = slice_trimmed(value, i, len);
             return ParsedNameAddr { display_name, uri, tag: None, params: Params::new() };
         }
     } else if let Some(open) = index_of(s, b'<', i) {
-        let before = subslice(value, i, open).trim();
-        display_name = if before.is_empty() { None } else { Some(before.to_string()) };
+        let before = slice_trimmed(value, i, open);
+        display_name = if before.is_empty() { None } else { Some(before) };
         match index_of(s, b'>', open + 1) {
             None => {
-                let uri = subslice(value, open + 1, len).trim().to_string();
+                let uri = slice_trimmed(value, open + 1, len);
                 return ParsedNameAddr { display_name, uri, tag: None, params: Params::new() };
             }
             Some(close) => {
@@ -194,11 +198,11 @@ pub fn parse_name_addr(value: &str) -> ParsedNameAddr {
         // addr-spec (bare URI).
         match index_of(s, b';', i) {
             None => {
-                let uri = subslice(value, i, len).trim().to_string();
+                let uri = slice_trimmed(value, i, len);
                 return ParsedNameAddr { display_name: None, uri, tag: None, params: Params::new() };
             }
             Some(semi) => {
-                uri = subslice(value, i, semi).trim().to_string();
+                uri = slice_trimmed(value, i, semi);
                 i = semi;
             }
         }
@@ -217,22 +221,22 @@ pub fn parse_name_addr(value: &str) -> ParsedNameAddr {
 // Via parsing
 // ---------------------------------------------------------------------------
 
-pub fn parse_via(value: &str) -> ParsedVia {
+pub fn parse_via(value: &SipStr) -> ParsedVia {
     let s = value.as_bytes();
     let mut i = skip_ws(s, 0);
 
     // sent-protocol: "SIP/2.0/UDP" or "SIP / 2.0 / TCP".
     let proto_end = scan_until_one_of(s, i, b"/");
-    let protocol = subslice(value, i, proto_end).trim().to_string();
+    let protocol = slice_trimmed(value, i, proto_end);
     i = proto_end + 1;
 
     let ver_end = scan_until_one_of(s, i, b"/");
-    let version = subslice(value, i, ver_end).trim().to_string();
+    let version = slice_trimmed(value, i, ver_end);
     i = ver_end + 1;
 
     i = skip_ws(s, i);
     let trans_end = scan_until_ws_or_semi(s, i);
-    let transport = subslice(value, i, trans_end).trim().to_string();
+    let transport = slice_trimmed(value, i, trans_end);
     i = trans_end;
 
     i = skip_ws(s, i);
@@ -252,7 +256,7 @@ pub fn parse_via(value: &str) -> ParsedVia {
 // Contact parsing
 // ---------------------------------------------------------------------------
 
-pub fn parse_contact(value: &str) -> ParsedContact {
+pub fn parse_contact(value: &SipStr) -> ParsedContact {
     let parsed = parse_name_addr(value);
     ParsedContact { display_name: parsed.display_name, uri: parsed.uri, params: parsed.params }
 }
@@ -261,7 +265,7 @@ pub fn parse_contact(value: &str) -> ParsedContact {
 // CSeq parsing: "number method"
 // ---------------------------------------------------------------------------
 
-pub fn parse_cseq(value: &str) -> ParsedCSeq {
+pub fn parse_cseq(value: &SipStr) -> ParsedCSeq {
     let s = value.as_bytes();
     let mut i = skip_ws(s, 0);
     let num_start = i;
@@ -270,7 +274,7 @@ pub fn parse_cseq(value: &str) -> ParsedCSeq {
     }
     let seq = fold_digits(s, num_start, i);
     i = skip_ws(s, i);
-    let method = subslice(value, i, s.len()).trim().to_string();
+    let method = slice_trimmed(value, i, s.len());
     ParsedCSeq { seq, method }
 }
 
@@ -278,7 +282,7 @@ pub fn parse_cseq(value: &str) -> ParsedCSeq {
 // RAck parsing (RFC 3262 §7.2): "response-num CSeq-num method"
 // ---------------------------------------------------------------------------
 
-pub fn parse_rack(value: &str) -> Option<ParsedRack> {
+pub fn parse_rack(value: &SipStr) -> Option<ParsedRack> {
     let s = value.as_bytes();
     let mut i = skip_ws(s, 0);
 
@@ -310,7 +314,7 @@ pub fn parse_rack(value: &str) -> Option<ParsedRack> {
         return None;
     }
 
-    let method = subslice(value, i, s.len()).trim().to_string();
+    let method = slice_trimmed(value, i, s.len());
     if method.is_empty() {
         return None;
     }
@@ -325,7 +329,7 @@ pub fn parse_rack(value: &str) -> Option<ParsedRack> {
 // Replaces parsing (RFC 3891 §6.1)
 // ---------------------------------------------------------------------------
 
-pub fn parse_replaces(value: &str) -> Option<ParsedReplaces> {
+pub fn parse_replaces(value: &SipStr) -> Option<ParsedReplaces> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
@@ -333,8 +337,8 @@ pub fn parse_replaces(value: &str) -> Option<ParsedReplaces> {
 
     let semi_idx = trimmed.find(';');
     let call_id = match semi_idx {
-        None => trimmed.trim().to_string(),
-        Some(idx) => trimmed[..idx].trim().to_string(),
+        None => span_of(value, trimmed.trim()),
+        Some(idx) => span_of(value, trimmed[..idx].trim()),
     };
     if call_id.is_empty() {
         return None;
@@ -344,8 +348,8 @@ pub fn parse_replaces(value: &str) -> Option<ParsedReplaces> {
         Some(idx) => idx,
     };
 
-    let mut to_tag: Option<String> = None;
-    let mut from_tag: Option<String> = None;
+    let mut to_tag: Option<SipStr> = None;
+    let mut from_tag: Option<SipStr> = None;
     let mut early_only = false;
 
     let param_str = &trimmed[semi_idx + 1..];
@@ -363,9 +367,9 @@ pub fn parse_replaces(value: &str) -> Option<ParsedReplaces> {
             Some(eq) => {
                 let k = part[..eq].trim();
                 if k.eq_ignore_ascii_case("to-tag") {
-                    to_tag = Some(part[eq + 1..].trim().to_string());
+                    to_tag = Some(span_of(value, part[eq + 1..].trim()));
                 } else if k.eq_ignore_ascii_case("from-tag") {
-                    from_tag = Some(part[eq + 1..].trim().to_string());
+                    from_tag = Some(span_of(value, part[eq + 1..].trim()));
                 }
             }
         }
@@ -384,7 +388,7 @@ pub fn parse_replaces(value: &str) -> Option<ParsedReplaces> {
 // Refer-To parsing (RFC 3515 §2.1, RFC 3891 §3 for embedded Replaces)
 // ---------------------------------------------------------------------------
 
-pub fn parse_refer_to(value: &str) -> Option<ParsedReferTo> {
+pub fn parse_refer_to(value: &SipStr) -> Option<ParsedReferTo> {
     let name_addr = parse_name_addr(value);
     if name_addr.uri.is_empty() {
         return None;
@@ -394,10 +398,10 @@ pub fn parse_refer_to(value: &str) -> Option<ParsedReferTo> {
     let q_idx = find_uri_embedded_headers_start(&uri);
 
     let mut uri_head = uri.clone();
-    let mut embedded_headers: BTreeMap<String, String> = BTreeMap::new();
+    let mut embedded_headers: BTreeMap<SipStr, SipStr> = BTreeMap::new();
 
     if let Some(q) = q_idx {
-        uri_head = uri[..q].to_string();
+        uri_head = uri.subspan(0, q);
         let header_str = &uri[q + 1..];
         for pair in header_str.split('&') {
             if pair.is_empty() {
@@ -409,9 +413,11 @@ pub fn parse_refer_to(value: &str) -> Option<ParsedReferTo> {
             };
             let raw_key = &pair[..eq];
             let raw_val = &pair[eq + 1..];
+            // Percent-decoding is the one branch that must own its output;
+            // an un-escaped key/value stays a span of the URI.
             let (key, val) = match (decode_uri_component(raw_key), decode_uri_component(raw_val)) {
-                (Ok(k), Ok(v)) => (k, v),
-                _ => (raw_key.to_string(), raw_val.to_string()),
+                (Ok(k), Ok(v)) => (SipStr::owned(&k), SipStr::owned(&v)),
+                _ => (span_of(&uri, raw_key), span_of(&uri, raw_val)),
             };
             embedded_headers.insert(key, val);
         }
@@ -456,15 +462,15 @@ pub fn find_uri_embedded_headers_start(uri: &str) -> Option<usize> {
     index_of(s, b'?', host_start)
 }
 
-pub fn parse_sip_uri_string(uri: &str) -> Option<ParsedUri> {
+pub fn parse_sip_uri_string(uri: &SipStr) -> Option<ParsedUri> {
     let s = uri.as_bytes();
     let len = s.len();
 
     let colon_idx = index_of(s, b':', 0)?;
-    let scheme = uri[..colon_idx].to_lowercase();
+    let scheme = slice_lowercased(uri, 0, colon_idx);
     let mut i = colon_idx + 1;
 
-    let user: Option<String>;
+    let user: Option<SipStr>;
     let host_start: usize;
 
     let at_idx = scan_until_one_of(s, i, b"@>");
@@ -479,11 +485,11 @@ pub fn parse_sip_uri_string(uri: &str) -> Option<ParsedUri> {
     let (host, port, host_end) = parse_host_port(uri, host_start);
     i = host_end;
 
-    let mut params: BTreeMap<String, String> = BTreeMap::new();
+    let mut params: BTreeMap<SipStr, SipStr> = BTreeMap::new();
     while i < len && s[i] == b';' {
         i += 1;
         let name_end = scan_until_one_of(s, i, b"=;>? \t");
-        let pname = uri[i..name_end].to_lowercase();
+        let pname = slice_lowercased(uri, i, name_end);
         i = name_end;
         if i < len && s[i] == b'=' {
             i += 1;
@@ -491,7 +497,7 @@ pub fn parse_sip_uri_string(uri: &str) -> Option<ParsedUri> {
             params.insert(pname, slice(uri, i, val_end));
             i = val_end;
         } else {
-            params.insert(pname, String::new());
+            params.insert(pname, SipStr::EMPTY);
         }
     }
 
@@ -513,9 +519,33 @@ fn subslice(s: &str, a: usize, b: usize) -> &str {
     &s[a.min(s.len())..b.min(s.len())]
 }
 
-/// Owned copy of `s[a..b]`, clamped like [`subslice`].
-fn slice(s: &str, a: usize, b: usize) -> String {
-    subslice(s, a, b).to_string()
+/// `base[a..b]` as a span of `base`, clamped like [`subslice`] — the single
+/// materialization point for every structured field, and the reason a parsed
+/// From/Via/Contact copies no bytes.
+fn slice(base: &SipStr, a: usize, b: usize) -> SipStr {
+    span_of(base, subslice(base.as_str(), a, b))
+}
+
+/// [`slice`] with surrounding whitespace excluded.
+fn slice_trimmed(base: &SipStr, a: usize, b: usize) -> SipStr {
+    span_of(base, subslice(base.as_str(), a, b).trim())
+}
+
+/// `base[a..b]` lowercased — a span when it is already lowercase (the common
+/// case for wire param names), an owned copy only when a fold is needed.
+fn slice_lowercased(base: &SipStr, a: usize, b: usize) -> SipStr {
+    let s = subslice(base.as_str(), a, b);
+    if s.chars().any(char::is_uppercase) {
+        SipStr::owned(&s.to_lowercase())
+    } else {
+        span_of(base, s)
+    }
+}
+
+/// Re-express `sub` — a slice of `base`'s text — as a span sharing `base`'s
+/// buffer.
+fn span_of(base: &SipStr, sub: &str) -> SipStr {
+    base.reslice(sub)
 }
 
 fn index_of(s: &[u8], needle: u8, from: usize) -> Option<usize> {
@@ -530,31 +560,51 @@ fn skip_ws(s: &[u8], mut i: usize) -> usize {
 }
 
 /// Read a quoted string whose opening `"` is at byte `i`. Returns the
-/// unescaped text and the byte position after the closing `"`.
-fn read_quoted_string(s: &str, mut i: usize) -> (String, usize) {
+/// unescaped text and the byte position after the closing `"`. An unescaped
+/// run — the common case — comes back as a span; only a `\`-escape forces the
+/// rebuilt owned copy.
+fn read_quoted_string(base: &SipStr, mut i: usize) -> (SipStr, usize) {
+    let s = base.as_str();
     let bytes = s.as_bytes();
     i += 1; // skip opening "
-    let mut result = String::new();
+    let mut result: Option<String> = None;
     let mut run_start = i;
     while i < bytes.len() {
         let c = bytes[i];
         if c == b'\\' && i + 1 < bytes.len() {
-            result.push_str(&s[run_start..i]);
+            let out = result.get_or_insert_with(String::new);
+            out.push_str(&s[run_start..i]);
             // The escaped char may be multi-byte — copy it whole.
             let esc = s[i + 1..].chars().next().unwrap();
-            result.push(esc);
+            out.push(esc);
             i += 1 + esc.len_utf8();
             run_start = i;
             continue;
         }
         if c == b'"' {
-            result.push_str(&s[run_start..i]);
-            return (result, i + 1);
+            return (finish_quoted(base, result, s, run_start, i), i + 1);
         }
         i += 1;
     }
-    result.push_str(&s[run_start..]);
-    (result, i)
+    (finish_quoted(base, result, s, run_start, bytes.len()), i)
+}
+
+/// Close out [`read_quoted_string`]: append the final unescaped run to the
+/// rebuilt copy, or hand back the whole run as a span when there was none.
+fn finish_quoted(
+    base: &SipStr,
+    rebuilt: Option<String>,
+    s: &str,
+    run_start: usize,
+    end: usize,
+) -> SipStr {
+    match rebuilt {
+        Some(mut out) => {
+            out.push_str(&s[run_start..end]);
+            SipStr::owned(&out)
+        }
+        None => span_of(base, &s[run_start..end]),
+    }
 }
 
 /// Scan forward until one of the (ASCII) delimiter bytes; returns its index
@@ -593,16 +643,17 @@ fn fold_digits(s: &[u8], from: usize, to: usize) -> u64 {
 
 /// Parse host[:port] from byte `i`. Host can be IPv4, bracketed IPv6, or
 /// hostname.
-fn parse_host_port(s: &str, i: usize) -> (String, Option<u64>, usize) {
+fn parse_host_port(base: &SipStr, i: usize) -> (SipStr, Option<u64>, usize) {
+    let s = base.as_str();
     let bytes = s.as_bytes();
     let len = bytes.len();
 
     // IPv6: [address]
     if i < len && bytes[i] == b'[' {
         match index_of(bytes, b']', i + 1) {
-            None => return (slice(s, i + 1, len), None, len),
+            None => return (slice(base, i + 1, len), None, len),
             Some(close) => {
-                let host = slice(s, i + 1, close);
+                let host = slice(base, i + 1, close);
                 let mut j = close + 1;
                 let mut port: Option<u64> = None;
                 if j < len && bytes[j] == b':' {
@@ -623,7 +674,7 @@ fn parse_host_port(s: &str, i: usize) -> (String, Option<u64>, usize) {
 
     // IPv4 or hostname: scan until : ; , > SP HTAB ?
     let host_end = scan_until_one_of(bytes, i, b":;,> \t?");
-    let host = slice(s, i, host_end);
+    let host = slice(base, i, host_end);
 
     let mut j = host_end;
     let mut port: Option<u64> = None;
@@ -646,20 +697,27 @@ fn parse_host_port(s: &str, i: usize) -> (String, Option<u64>, usize) {
 /// similar IMS headers whose FIRST item is already a `name=value` pair with
 /// no leading `;`. Any leading free-form segment (e.g. a Via's sent-protocol)
 /// falls out as a flag param and is simply not looked up by callers.
-pub fn parse_param_list(value: &str) -> Params {
-    let mut prefixed = String::with_capacity(value.len() + 1);
-    prefixed.push(';');
-    prefixed.push_str(value);
-    parse_header_params(&prefixed, 0)
+pub fn parse_param_list(value: &SipStr) -> Params {
+    let mut params: Params = Params::new();
+    // The first item carries no leading `;` — read it in place instead of
+    // building a `;`-prefixed copy of the value.
+    let i = read_one_param(value, skip_ws(value.as_bytes(), 0), &mut params);
+    collect_params_from(value, i, &mut params);
+    params
 }
 
 /// Parse header-level parameters (after `>` or after addr-spec). This is where
 /// `tag=` lives — semicolon-separated `key[=value]` at the HEADER level.
-fn parse_header_params(s: &str, mut i: usize) -> Params {
-    let bytes = s.as_bytes();
+fn parse_header_params(base: &SipStr, i: usize) -> Params {
     let mut params: Params = Params::new();
-    let len = bytes.len();
+    collect_params_from(base, i, &mut params);
+    params
+}
 
+/// Read `;`-separated params from byte `i` to the end of `base`.
+fn collect_params_from(base: &SipStr, mut i: usize, params: &mut Params) {
+    let bytes = base.as_bytes();
+    let len = bytes.len();
     while i < len {
         i = skip_ws(bytes, i);
         if i >= len {
@@ -671,32 +729,38 @@ fn parse_header_params(s: &str, mut i: usize) -> Params {
             continue;
         }
         i += 1; // skip ;
-        i = skip_ws(bytes, i);
-
-        let name_end = scan_until_one_of(bytes, i, b"=; \t,>");
-        let pname = s[i..name_end].to_lowercase();
-        i = name_end;
-
-        // RFC 3261 EQUAL permits surrounding LWS: `SWS "=" SWS`.
-        i = skip_ws(bytes, i);
-        if i < len && bytes[i] == b'=' {
-            i += 1;
-            i = skip_ws(bytes, i);
-            if i < len && bytes[i] == b'"' {
-                let (text, end) = read_quoted_string(s, i);
-                params.insert(pname, ParamValue::Value(text));
-                i = end;
-            } else {
-                let val_end = scan_until_one_of(bytes, i, b";, \t>");
-                params.insert(pname, ParamValue::Value(slice(s, i, val_end)));
-                i = val_end;
-            }
-        } else if !pname.is_empty() {
-            params.insert(pname, ParamValue::Flag);
-        }
+        i = read_one_param(base, skip_ws(bytes, i), params);
     }
+}
 
-    params
+/// Read one `key[=value]` starting at byte `i`; returns the position after it.
+fn read_one_param(base: &SipStr, mut i: usize, params: &mut Params) -> usize {
+    let s = base.as_str();
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+
+    let name_end = scan_until_one_of(bytes, i, b"=; \t,>");
+    let pname = slice_lowercased(base, i, name_end);
+    i = name_end;
+
+    // RFC 3261 EQUAL permits surrounding LWS: `SWS "=" SWS`.
+    i = skip_ws(bytes, i);
+    if i < len && bytes[i] == b'=' {
+        i += 1;
+        i = skip_ws(bytes, i);
+        if i < len && bytes[i] == b'"' {
+            let (text, end) = read_quoted_string(base, i);
+            params.insert(pname, ParamValue::Value(text));
+            i = end;
+        } else {
+            let val_end = scan_until_one_of(bytes, i, b";, \t>");
+            params.insert(pname, ParamValue::Value(slice(base, i, val_end)));
+            i = val_end;
+        }
+    } else if !pname.is_empty() {
+        params.insert(pname, ParamValue::Flag);
+    }
+    i
 }
 
 // ---------------------------------------------------------------------------

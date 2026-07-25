@@ -6,6 +6,7 @@ use super::emit::{append_body_headers, h, make_response};
 use super::spec::ContactSpec;
 use crate::message_helpers::{get_header, stamp_received_rport_on_via};
 use crate::parser::custom::structured_headers::parse_name_addr;
+use crate::sip_str::SipStr;
 use crate::types::{SipHeader, SipRequest, SipResponse};
 
 /// Deterministic fallback To-tag for a non-100 response whose request carried a
@@ -53,7 +54,7 @@ pub fn generate_response(
     // otherwise `opts.to_tag` is added when supplied, else the deterministic
     // fallback — a worker must never panic building a response (that kills the
     // handler task and leaks the dialog).
-    let to = if status > 100 && parse_name_addr(raw_to).tag.is_none() {
+    let to = if status > 100 && parse_name_addr(&SipStr::owned(raw_to)).tag.is_none() {
         let tag = opts
             .to_tag
             .clone()
@@ -72,7 +73,9 @@ pub fn generate_response(
             continue;
         }
         let value = match (&opts.incoming_source, stamped_top_via) {
-            (Some((ip, port)), false) => stamp_received_rport_on_via(&hdr.value, ip, *port),
+            (Some((ip, port)), false) => {
+                SipStr::owned(&stamp_received_rport_on_via(&hdr.value, ip, *port))
+            }
             _ => hdr.value.clone(),
         };
         stamped_top_via = true;

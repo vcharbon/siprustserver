@@ -270,11 +270,11 @@ impl ServerTxn {
         let local_tag = self.to_tag.clone().unwrap_or_default();
         let remote_target = get_header(&req.headers, "contact")
             .map(extract_contact_uri)
-            .unwrap_or_else(|| req.from.uri.clone());
+            .unwrap_or_else(|| req.from.uri.to_string());
         let dialog = StackDialog {
-            call_id: req.call_id.clone(),
+            call_id: req.call_id.to_string(),
             local_tag,
-            remote_tag: req.from.tag.clone().unwrap_or_default(),
+            remote_tag: req.from.tag.clone().unwrap_or_default().to_string(),
             // From the UAS's view, "local" is itself and "remote" is the caller.
             // RFC 3261 §12.1.1: the dialog LOCAL URI is the To field of the
             // request, NOT the agent's own AOR — they coincide in the usual
@@ -283,8 +283,8 @@ impl ServerTxn {
             // leg carries To:dest): the callee's in-dialog requests must then
             // carry From:dest, and the recorded-trace midDialogUri audit — which
             // merges both tag orientations into one dialog slice — checks it.
-            local_uri: req.to.uri.clone(),
-            remote_uri: req.from.uri.clone(),
+            local_uri: req.to.uri.to_string(),
+            remote_uri: req.from.uri.to_string(),
             remote_target,
             local_cseq: 0, // UAS originates its own CSeq space; first request → 1
             route_set: self.route_set.clone(),
@@ -360,8 +360,8 @@ impl<'a> Respond<'a> {
     /// provisional, RFC 3262). Repeatable; order is preserved.
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
         self.extra_headers.push(SipHeader {
-            name: name.to_string(),
-            value: value.to_string(),
+            name: name.to_string().into(),
+            value: value.to_string().into(),
         });
         self
     }
@@ -491,7 +491,7 @@ impl<'a> Respond<'a> {
         // `unackedInviteNon2xxFinal` wire rule settles it at finish.
         if (300..700).contains(&self.status) && txn.request.method.as_str() == "INVITE" {
             if let Some(branch) = top_via_branch(&txn.request.headers) {
-                txn.agent.acks.arm(txn.request.call_id.clone(), branch);
+                txn.agent.acks.arm(txn.request.call_id.to_string(), branch);
             }
         }
         Ok(())

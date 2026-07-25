@@ -356,12 +356,12 @@ fn extract(
         }
         let ru = &r.request_uri;
         return Ok(match sub {
-            None | Some("uri") => Some(r.uri.clone()),
-            Some("userInfo") => ru.user.clone(),
-            Some("host") => Some(ru.host.clone()),
+            None | Some("uri") => Some(r.uri.to_string()),
+            Some("userInfo") => ru.user.as_deref().map(str::to_string),
+            Some("host") => Some(ru.host.to_string()),
             Some("port") => Some(ru.port.unwrap_or(5060).to_string()),
             Some(other) => match param_selector(other)? {
-                Some(p) => ru.params.get(p).cloned(),
+                Some(p) => ru.params.get(p).map(|v| v.to_string()),
                 None => return Err(format!("unknown ruri subfield {other:?} in {field:?}")),
             },
         });
@@ -372,9 +372,9 @@ fn extract(
     let parsed = parse_sip_uri(&addr.uri);
     Ok(match sub {
         // Bare name (or `.uri`): the URI itself — present/absent/regex over it.
-        None | Some("uri") => Some(addr.uri.clone()),
-        Some("displayName") => addr.display_name.clone(),
-        Some("tag") => addr.tag.clone(),
+        None | Some("uri") => Some(addr.uri.to_string()),
+        Some("displayName") => addr.display_name.as_deref().map(str::to_string),
+        Some("tag") => addr.tag.as_deref().map(str::to_string),
         Some("userInfo") => parsed.as_ref().and_then(|p| p.user.clone()),
         Some("host") => parsed.as_ref().map(|p| p.host.clone()),
         Some("port") => parsed.as_ref().map(|p| p.port.to_string()),
@@ -382,7 +382,7 @@ fn extract(
             // Header param first (`;tag=`-style), then URI param. A bare flag
             // param extracts as "" (use `exists`).
             Some(p) => match addr.params.get(p) {
-                Some(ParamValue::Value(v)) => Some(v.clone()),
+                Some(ParamValue::Value(v)) => Some(v.to_string()),
                 Some(ParamValue::Flag) => Some(String::new()),
                 None => parsed.as_ref().and_then(|u| u.params.get(p).cloned()),
             },
@@ -422,7 +422,7 @@ fn uri_header(name: &str, index: usize, msg: &SipMessage) -> Result<Option<NameA
             match contacts {
                 ContactSet::Wildcard => Ok((index == 0).then(|| NameAddr {
                     display_name: None,
-                    uri: "*".to_string(),
+                    uri: "*".to_string().into(),
                     tag: None,
                     params: Default::default(),
                 })),

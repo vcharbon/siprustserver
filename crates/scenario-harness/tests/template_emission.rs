@@ -367,7 +367,7 @@ async fn template_body_without_content_type_emits_no_content_type() {
         "no Content-Type invented (got {:?})",
         values_of(&req.headers, "Content-Type"),
     );
-    assert_eq!(req.body, b"opaque-bytes-no-ct", "body carried verbatim");
+    assert_eq!(&req.body[..], b"opaque-bytes-no-ct", "body carried verbatim");
 
     // Reject so the call terminates cleanly (no offer/answer to complete).
     uas.respond(488, "Not Acceptable Here").await;

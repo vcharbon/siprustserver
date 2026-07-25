@@ -63,7 +63,7 @@ fn rseq_values(msg: &SipMessage) -> Vec<u64> {
 fn rack_of(msg: &SipMessage) -> Option<ParsedRack> {
     get_headers(msg_headers(msg), "rack")
         .into_iter()
-        .find_map(parse_rack)
+        .find_map(|v| parse_rack(&sip_message::SipStr::owned(v)))
 }
 
 /// A reliable 1xx INVITE response: status in `101..=199`, CSeq method INVITE,

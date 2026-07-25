@@ -736,8 +736,8 @@ impl<'a> ActionExecutor<'a> {
         let extra: Vec<sip_message::SipHeader> = add_headers
             .iter()
             .map(|(n, v)| sip_message::SipHeader {
-                name: (*n).to_string(),
-                value: v.clone(),
+                name: (*n).to_string().into(),
+                value: v.clone().into(),
             })
             .collect();
         let opts = GenerateInDialogRequestOpts {
@@ -830,7 +830,7 @@ impl<'a> ActionExecutor<'a> {
                     call.emergency == Some(true),
                     self.config,
                     self.id_gen,
-                    req.body.clone(),
+                    req.body.to_vec(),
                     content_type,
                 )
             });
@@ -901,7 +901,7 @@ impl<'a> ActionExecutor<'a> {
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, &call.call_ref, target_leg, call.emergency == Some(true), branch.clone())),
             contact: Some(relay::leg_contact(self.config, &call.call_ref, target_leg, call.emergency == Some(true))),
-            body: req.body.clone(),
+            body: req.body.to_vec(),
             content_type: get_header(&req.headers, "content-type").map(str::to_string),
             rack,
             cseq: Some(outbound_cseq as u32),
@@ -949,7 +949,7 @@ impl<'a> ActionExecutor<'a> {
                     .iter()
                     .map(|s| s.to_string())
                     .collect(),
-                source_call_id: req.call_id.clone(),
+                source_call_id: req.call_id.to_string(),
                 source_from: get_header(&req.headers, "from").unwrap_or_default().to_string(),
                 source_to: get_header(&req.headers, "to").unwrap_or_default().to_string(),
                 direction: ctx.direction,
@@ -985,7 +985,7 @@ impl<'a> ActionExecutor<'a> {
         resp: &sip_message::SipResponse,
     ) {
         let status = transform.status.unwrap_or(resp.status);
-        let reason = transform.reason.clone().unwrap_or_else(|| resp.reason.clone());
+        let reason = transform.reason.clone().unwrap_or_else(|| resp.reason.to_string());
         // The body relayed toward alice: dropped (bare-180 downgrade), replaced
         // by a staged policy body (fake-prack cached SDP on the 200 OK), or the
         // response's own body verbatim.
@@ -995,7 +995,7 @@ impl<'a> ActionExecutor<'a> {
             (b, Some("application/sdp".to_string()))
         } else {
             (
-                resp.body.clone(),
+                resp.body.to_vec(),
                 get_header(&resp.headers, "content-type").map(str::to_string),
             )
         };
@@ -1017,8 +1017,8 @@ impl<'a> ActionExecutor<'a> {
                 .collect();
             for (name, value) in &add_headers {
                 out.push(sip_message::SipHeader {
-                    name: (*name).to_string(),
-                    value: value.clone(),
+                    name: (*name).to_string().into(),
+                    value: value.clone().into(),
                 });
             }
             out
@@ -1174,7 +1174,7 @@ impl<'a> ActionExecutor<'a> {
                         TagMapping {
                             a_tag: a_face.clone(),
                             b_leg_id: source_leg_id.clone(),
-                            b_tag: to_tag.clone(),
+                            b_tag: to_tag.to_string(),
                         },
                     );
                     a_face
@@ -1396,7 +1396,7 @@ impl<'a> ActionExecutor<'a> {
                 {
                     let d = &mut leg.dialogs[idx];
                     if !remote_tag.is_empty() {
-                        d.sip.remote_tag = remote_tag;
+                        d.sip.remote_tag = remote_tag.to_string();
                     }
                     if !remote_target.is_empty() {
                         d.sip.remote_target = remote_target;
@@ -1433,7 +1433,7 @@ impl<'a> ActionExecutor<'a> {
         // body choice (policy override else the callee's 200 body).
         let answer_body = match call.policy_update_body.clone() {
             Some(call::PolicyUpdateBody::Bytes(b)) => Some(b),
-            _ if !resp.body.is_empty() => Some(resp.body.clone()),
+            _ if !resp.body.is_empty() => Some(resp.body.to_vec()),
             _ => None,
         };
         if let (Some(body), Some(d)) = (answer_body, call.a_leg.dialogs.first_mut()) {
@@ -1492,7 +1492,7 @@ impl<'a> ActionExecutor<'a> {
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let remote_target = get_header(&a_invite.headers, "contact")
             .map(unwrap_angle)
-            .unwrap_or_else(|| a_invite.from.uri.clone());
+            .unwrap_or_else(|| a_invite.from.uri.to_string());
         // §12.1.1: the a-leg is a UAS dialog — route set is the INVITE's
         // Record-Route values in forward order. Split top-level commas so a
         // comma-combined header (the proxy's double-record-route halves) becomes
@@ -1509,8 +1509,8 @@ impl<'a> ActionExecutor<'a> {
                 call_id: call.a_leg.call_id.clone(),
                 local_tag: tag.clone(),
                 remote_tag: call.a_leg.from_tag.clone(),
-                local_uri: a_invite.to.uri.clone(),
-                remote_uri: a_invite.from.uri.clone(),
+                local_uri: a_invite.to.uri.to_string(),
+                remote_uri: a_invite.from.uri.to_string(),
                 remote_target,
                 local_cseq: a_invite.cseq.seq as i64,
                 route_set,
@@ -1771,7 +1771,7 @@ impl<'a> ActionExecutor<'a> {
             .filter(|(n, _)| {
                 !n.eq_ignore_ascii_case("content-type") && !n.eq_ignore_ascii_case("content-length")
             })
-            .map(|(name, value)| sip_message::SipHeader { name: name.clone(), value: value.clone() })
+            .map(|(name, value)| sip_message::SipHeader { name: name.clone().into(), value: value.clone().into() })
             .collect();
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&dialog.sip);
@@ -1835,8 +1835,8 @@ impl<'a> ActionExecutor<'a> {
         let mut extra_headers = Vec::new();
         if let Some(pem) = p_early_media {
             extra_headers.push(sip_message::SipHeader {
-                name: "P-Early-Media".to_string(),
-                value: pem.to_string(),
+                name: "P-Early-Media".to_string().into(),
+                value: pem.to_string().into(),
             });
         }
         fx.outbound.push(relay::response_to_a_leg(
@@ -2041,8 +2041,8 @@ impl<'a> ActionExecutor<'a> {
         let extra_headers = reason
             .map(|r| {
                 vec![sip_message::SipHeader {
-                    name: "Reason".to_string(),
-                    value: r.to_string(),
+                    name: "Reason".to_string().into(),
+                    value: r.to_string().into(),
                 }]
             })
             .unwrap_or_default();
@@ -2281,7 +2281,7 @@ fn build_a_leg_response_headers(
         let is_structural =
             A_LEG_RESPONSE_STRUCTURAL.contains(&name.to_ascii_lowercase().as_str());
         if let (Some(v), false) = (val, is_structural) {
-            out.push(sip_message::SipHeader { name: name.clone(), value: v.clone() });
+            out.push(sip_message::SipHeader { name: name.clone().into(), value: v.clone().into() });
         }
     }
     for (uri, q) in contacts {
@@ -2289,7 +2289,7 @@ fn build_a_leg_response_headers(
             Some(q) => format!("<{uri}>;q={q}"),
             None => format!("<{uri}>"),
         };
-        out.push(sip_message::SipHeader { name: "Contact".to_string(), value });
+        out.push(sip_message::SipHeader { name: "Contact".to_string().into(), value: value.into() });
     }
     out
 }

@@ -14,6 +14,7 @@ use super::structured_headers::{
 use crate::error::SipParseError;
 use crate::method::Method;
 use crate::parser::SipParserLimits;
+use crate::sip_str::SipStr;
 use crate::types::{Contact, ContactSet, CSeq, NameAddr, RequestUri, Via};
 
 /// RFC 3261 §8.1.1.7 — top-Via branch MUST start with this magic cookie.
@@ -33,7 +34,7 @@ pub enum ExtractMode {
 pub struct CommonEager {
     pub from: NameAddr,
     pub to: NameAddr,
-    pub call_id: String,
+    pub call_id: SipStr,
     pub cseq: CSeq,
     pub vias: Vec<Via>,
     pub contact: Option<Contact>,
@@ -51,26 +52,21 @@ pub struct RequestEager {
 // Header lookup helpers
 // ---------------------------------------------------------------------------
 
-fn get_header_value<'a>(headers: &'a [crate::types::SipHeader], name: &str) -> Option<&'a str> {
+/// The matching header's value. Returned as the `SipStr` itself, not a `&str`,
+/// because every structured sub-field is cut FROM it as a span.
+fn get_header_value<'a>(headers: &'a [crate::types::SipHeader], name: &str) -> Option<&'a SipStr> {
     // eq_ignore_ascii_case, not to_lowercase(): matches the sibling
     // `get_header_values` — avoids a lowercased-String alloc for the probe name
     // AND one per header scanned (SIP names are ASCII tokens; folding is ASCII).
-    headers
-        .iter()
-        .find(|h| h.name.eq_ignore_ascii_case(name))
-        .map(|h| h.value.as_str())
+    headers.iter().find(|h| h.name.eq_ignore_ascii_case(name)).map(|h| &h.value)
 }
 
-fn get_header_values<'a>(headers: &'a [crate::types::SipHeader], name: &str) -> Vec<&'a str> {
+fn get_header_values<'a>(headers: &'a [crate::types::SipHeader], name: &str) -> Vec<&'a SipStr> {
     // eq_ignore_ascii_case, not to_lowercase(): this probe runs ~10x per
     // parsed datagram (once per optional header), and two String allocations
     // per header per probe was ~100+ dead allocs per packet on the proxy's
     // single hot task.
-    headers
-        .iter()
-        .filter(|h| h.name.eq_ignore_ascii_case(name))
-        .map(|h| h.value.as_str())
-        .collect()
+    headers.iter().filter(|h| h.name.eq_ignore_ascii_case(name)).map(|h| &h.value).collect()
 }
 
 /// RFC 3261 / RFC 3986 §3.2.3: SIP ports are 1..=65535.
@@ -413,7 +409,7 @@ pub fn extract_common_fields(
     }
 
     let call_id = match get_header_value(headers, "Call-ID") {
-        Some(v) if !v.is_empty() => v.to_string(),
+        Some(v) if !v.is_empty() => v.clone(),
         _ => return Err(SipParseError::new("Missing mandatory Call-ID header")),
     };
 
@@ -450,8 +446,12 @@ pub fn extract_common_fields(
     }
     // Split each Via value ONCE — the validation pass below and the parse pass
     // share the segment list (this used to re-split every value a second time).
-    let via_segments: Vec<&str> =
-        via_values.iter().flat_map(|v| split_top_level_commas(v)).collect();
+    // Each segment stays a span of its header value, so folding a comma-list
+    // into the ordered Via list copies nothing.
+    let via_segments: Vec<SipStr> = via_values
+        .iter()
+        .flat_map(|v| split_top_level_commas(v.as_str()).into_iter().map(|seg| v.reslice(seg)))
+        .collect();
     for segment in &via_segments {
         if has_via_port_trailing_garbage(segment) {
             return Err(SipParseError::new(format!("Trailing non-digit after Via port: \"{segment}\"")));
@@ -462,10 +462,10 @@ pub fn extract_common_fields(
             }
         }
     }
-    let vias_parsed: Vec<_> = via_segments.iter().map(|seg| parse_via(seg)).collect();
+    let vias_parsed: Vec<_> = via_segments.iter().map(parse_via).collect();
 
     for (idx, v) in vias_parsed.iter().enumerate() {
-        let raw = via_segments[idx];
+        let raw = via_segments[idx].as_str();
         if let Some(p) = v.port {
             if !is_valid_port(p) {
                 return Err(SipParseError::new(format!("Via port out of range: {p}")));
@@ -541,9 +541,9 @@ pub fn extract_common_fields(
     // Contact — parse + validate every value; fold comma-list and repeated
     // lines; `Contact: *` must stand alone.
     let mut contact_wildcard = false;
-    let mut contact_entries: Vec<&str> = Vec::new();
+    let mut contact_entries: Vec<SipStr> = Vec::new();
     for v in get_header_values(headers, "Contact") {
-        for seg in split_top_level_commas(v) {
+        for seg in split_top_level_commas(v.as_str()) {
             if seg.is_empty() {
                 continue;
             }
@@ -551,7 +551,7 @@ pub fn extract_common_fields(
                 contact_wildcard = true;
                 continue;
             }
-            contact_entries.push(seg);
+            contact_entries.push(v.reslice(seg));
         }
     }
     if contact_wildcard && !contact_entries.is_empty() {
@@ -594,7 +594,7 @@ pub fn extract_common_fields(
 
 pub fn extract_request_fields(
     headers: &[crate::types::SipHeader],
-    request_uri: &str,
+    request_uri: &SipStr,
     limits: &SipParserLimits,
     method: Option<&str>,
     mode: ExtractMode,

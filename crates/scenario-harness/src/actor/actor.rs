@@ -702,7 +702,7 @@ fn arm_reject_final(st: &mut ActorState<'_>, uas: &ServerTxn, code: u16) {
         Observation::RequestSent { key, detail: format!("{code} final awaiting hop-ACK") },
         Instant::now(),
     );
-    st.pending_reject_ack = Some(PendingRejectAck { key, call_id, branch });
+    st.pending_reject_ack = Some(PendingRejectAck { key, call_id: call_id.to_string(), branch });
 }
 
 /// Discharge this leg's still-open in-dialog acknowledgement obligations because
@@ -776,7 +776,7 @@ fn note_uas_answered(st: &mut ActorState<'_>, uas: &ServerTxn) {
     // Dialog-formation point: attach this leg's shared CSeq counter (ADR-0024 §6).
     dialog.set_shared_cseq_dev(st.cseq_dev.clone());
     st.dialogs.confirmed = Some(dialog);
-    st.obs.record(Observation::SeedDialog { leg: st.role, call_id, cseq }, now);
+    st.obs.record(Observation::SeedDialog { leg: st.role, call_id: call_id.to_string(), cseq }, now);
     st.obs.record(
         Observation::RequestSent {
             key: ObligationKey::new(st.role, ObligationKind::ReInvite, cseq),
@@ -1046,7 +1046,7 @@ async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), St
             st.obs.record(
                 Observation::InDialogRequest {
                     leg: st.role,
-                    call_id: uas.request().call_id.clone(),
+                    call_id: uas.request().call_id.to_string(),
                     cseq: uas.request().cseq.seq,
                     method,
                 },
@@ -1355,7 +1355,7 @@ async fn react_in_dialog_request(
                 .is_some_and(|t| st.fork_loser_tags.contains(t));
             st.ctx.anchor(&st.agent, "bye", uas.request());
             uas.respond(200, "OK").try_send().await?;
-            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
+            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.to_string(), cseq, method: method.clone() }, now);
             if is_fork_teardown {
                 return Ok(());
             }
@@ -1382,7 +1382,7 @@ async fn react_in_dialog_request(
         // gap detector (all methods share the dialog CSeq space, §12.2.1.1).
         "NOTIFY" | "OPTIONS" | "INFO" | "MESSAGE" => {
             uas.respond(200, "OK").try_send().await?;
-            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
+            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.to_string(), cseq, method: method.clone() }, now);
         }
         // An in-dialog (re-)INVITE — an offer realign. Answer 200 WITH SDP; a
         // delayed-offer bodyless re-INVITE still gets 200 + our SDP (B6-c: no
@@ -1402,12 +1402,12 @@ async fn react_in_dialog_request(
             if !st.sent_reinvites.is_empty() || !st.sent_updates.is_empty() {
                 uas.respond(491, "Request Pending").try_send().await?;
                 arm_reject_final(st, &uas, 491);
-                st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
+                st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.to_string(), cseq, method: method.clone() }, now);
                 return Ok(());
             }
             respond_200_sdp(&mut uas, st.answer_body()).await?;
             st.answered_reinvites.insert(cseq);
-            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.clone(), cseq, method: method.clone() }, now);
+            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.to_string(), cseq, method: method.clone() }, now);
             st.obs.record(
                 Observation::RequestSent {
                     key: ObligationKey::new(st.role, ObligationKind::ReInvite, cseq),
@@ -1434,11 +1434,11 @@ async fn react_in_dialog_request(
         "UPDATE" => {
             if !st.sent_reinvites.is_empty() || !st.sent_updates.is_empty() {
                 uas.respond(491, "Request Pending").try_send().await?;
-                st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
+                st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.to_string(), cseq, method: method.clone() }, now);
                 return Ok(());
             }
             respond_200_sdp(&mut uas, st.answer_body()).await?;
-            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
+            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.to_string(), cseq, method: method.clone() }, now);
             // C5 (RFC 3311 §5.1): the EARLY UPDATE's offer/answer completed —
             // release the held INVITE 200, but only once the reliable 183 was
             // also PRACKed (MUST-014); if the UPDATE raced ahead of the PRACK
@@ -1457,7 +1457,7 @@ async fn react_in_dialog_request(
             st.ctx.anchor(&st.agent, "prack", uas.request());
             let prack_tag = uas.request().to.tag.clone();
             uas.respond(200, "OK").try_send().await?;
-            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id, cseq, method: method.clone() }, now);
+            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.to_string(), cseq, method: method.clone() }, now);
             // C5: this callee holds the INVITE for an early UPDATE — mark the
             // 183 PRACKed and release the held 200 only once the UPDATE is also
             // done (MUST-014 + RFC 3311 §5.1, in either arrival order).
@@ -1656,7 +1656,7 @@ async fn absorb_establishing_provisional(
     }
     if let Some(rseq) = reliable_rseq(resp) {
         let fork = resp.to.tag.clone().unwrap_or_default();
-        if st.pracked_rseqs.insert((fork, rseq)) {
+        if st.pracked_rseqs.insert((fork.to_string(), rseq)) {
             let (_txn, req) = inv.try_prack_with_request(resp).await?;
             st.obs.record(
                 Observation::RequestSent {
@@ -1714,7 +1714,7 @@ async fn absorb_establishing_failure(
         }
     }
     st.obs.record(
-        Observation::LegFinal { leg: st.role, status, reason: resp.reason.clone() },
+        Observation::LegFinal { leg: st.role, status, reason: resp.reason.to_string() },
         now,
     );
     st.obs.record(Observation::LegTerminated { leg: st.role }, now);
@@ -1724,7 +1724,7 @@ async fn absorb_establishing_failure(
             who: st.role.to_string(),
             expected: st.expected_provisional,
             got: status,
-            reason: resp.reason.clone(),
+            reason: resp.reason.to_string(),
         });
     }
     Ok(false)
@@ -1746,10 +1746,10 @@ fn record_response_fact(st: &mut ActorState<'_>, resp: &SipResponse, now: Instan
             leg: st.role,
             fact: ResponseFact {
                 status: resp.status,
-                reason: resp.reason.clone(),
+                reason: resp.reason.to_string(),
                 body_len: resp.body.len(),
                 body_is_sdp,
-                early_tag: resp.to.tag.clone(),
+                early_tag: resp.to.tag.as_deref().map(str::to_string),
                 typed: retain.then(|| Box::new(resp.clone())),
             },
         },

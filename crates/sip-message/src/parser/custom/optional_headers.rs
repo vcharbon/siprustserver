@@ -16,18 +16,15 @@ use super::structured_headers::{
 };
 use crate::error::SipParseError;
 use crate::method::Method;
+use crate::sip_str::SipStr;
 use crate::types::{NameAddr, OptionalHeaders, Rack, ReferTo, Replaces, SipHeader, Uri};
 
-fn get_header_values<'a>(headers: &'a [SipHeader], name: &str) -> Vec<&'a str> {
+fn get_header_values<'a>(headers: &'a [SipHeader], name: &str) -> Vec<&'a SipStr> {
     // eq_ignore_ascii_case, not to_lowercase(): this probe runs ~10x per
     // parsed datagram (once per optional header), and two String allocations
     // per header per probe was ~100+ dead allocs per packet on the proxy's
     // single hot task.
-    headers
-        .iter()
-        .filter(|h| h.name.eq_ignore_ascii_case(name))
-        .map(|h| h.value.as_str())
-        .collect()
+    headers.iter().filter(|h| h.name.eq_ignore_ascii_case(name)).map(|h| &h.value).collect()
 }
 
 fn to_name_addr(p: ParsedNameAddr) -> NameAddr {
@@ -47,11 +44,11 @@ fn parse_name_addr_list(headers: &[SipHeader], header_name: &str) -> Result<Vec<
     }
     let mut out = Vec::new();
     for v in values {
-        for entry in split_top_level_commas(v) {
+        for entry in split_top_level_commas(v.as_str()) {
             if entry.is_empty() {
                 continue;
             }
-            let parsed = parse_name_addr(&entry);
+            let parsed = parse_name_addr(&v.reslice(entry));
             if parsed.uri.is_empty() {
                 return Err(SipParseError::new(format!("Malformed {header_name} entry: \"{entry}\"")));
             }
@@ -218,7 +215,10 @@ fn parse_date_header_strict(headers: &[SipHeader]) -> Result<(), SipParseError> 
         return Ok(());
     }
     // sip-parser-style split at the day-of-week comma is rejoined with ", ".
-    let joined = if values.len() == 1 { values[0].to_string() } else { values.join(", ") };
+    if values.len() == 1 {
+        return parse_date_value_strict(values[0]);
+    }
+    let joined = values.iter().map(|v| v.as_str()).collect::<Vec<_>>().join(", ");
     parse_date_value_strict(&joined)
 }
 

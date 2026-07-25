@@ -18,16 +18,16 @@ use crate::addr::ProxyAddr;
 /// Insert a header at the top of the list — RFC 3261 §16.6 prepend semantics for
 /// Via / Record-Route.
 pub fn prepend_header(headers: &mut Vec<SipHeader>, name: &str, value: &str) {
-    headers.insert(0, SipHeader { name: name.to_string(), value: value.to_string() });
+    headers.insert(0, SipHeader { name: name.to_string().into(), value: value.to_string().into() });
 }
 
 /// Replace the value of the first header named `name` (case-insensitive), or
 /// append it if absent (upsert). Used for Max-Forwards.
 pub fn upsert_header(headers: &mut Vec<SipHeader>, name: &str, value: &str) {
     if let Some(h) = headers.iter_mut().find(|h| h.name.eq_ignore_ascii_case(name)) {
-        h.value = value.to_string();
+        h.value = value.to_string().into();
     } else {
-        headers.push(SipHeader { name: name.to_string(), value: value.to_string() });
+        headers.push(SipHeader { name: name.to_string().into(), value: value.to_string().into() });
     }
 }
 
@@ -43,7 +43,7 @@ pub fn first_header_value<'a>(headers: &'a [SipHeader], name: &str) -> Option<&'
 /// value if one was removed.
 pub fn remove_first_header(headers: &mut Vec<SipHeader>, name: &str) -> Option<String> {
     let pos = headers.iter().position(|h| h.name.eq_ignore_ascii_case(name))?;
-    Some(headers.remove(pos).value)
+    Some(headers.remove(pos).value.to_string())
 }
 
 /// Pop the **first entry** of the first header named `name`, honouring
@@ -56,12 +56,12 @@ pub fn remove_first_header_entry(headers: &mut Vec<SipHeader>, name: &str) -> Op
     let value = headers[pos].value.clone();
     match split_top_level_commas(&value).split_first() {
         Some((first, rest)) if !rest.is_empty() => {
-            headers[pos].value = rest.join(", ");
+            headers[pos].value = rest.join(", ").into();
             Some((*first).to_string())
         }
         _ => {
             headers.remove(pos);
-            Some(value)
+            Some(value.to_string())
         }
     }
 }
@@ -107,7 +107,7 @@ pub fn populate_received_rport_on_top_via(headers: &mut [SipHeader], src_ip: &st
         stamped.push_str(", ");
         stamped.push_str(r);
     }
-    h.value = stamped;
+    h.value = stamped.into();
 }
 
 /// Build a loose-route Record-Route value: `<sip:host:port;k=v;...;lr>`. The
@@ -190,7 +190,7 @@ mod tests {
     use super::*;
 
     fn hdr(name: &str, value: &str) -> SipHeader {
-        SipHeader { name: name.to_string(), value: value.to_string() }
+        SipHeader { name: name.to_string().into(), value: value.to_string().into() }
     }
 
     #[test]

@@ -94,7 +94,7 @@ fn rr_values(headers: &[SipHeader]) -> Vec<String> {
     headers
         .iter()
         .filter(|h| h.name.eq_ignore_ascii_case("record-route"))
-        .map(|h| h.value.clone())
+        .map(|h| h.value.to_string())
         .collect()
 }
 

@@ -69,26 +69,42 @@ impl Method {
         }
     }
 
-    /// Parse a wire method token. Known methods fold case-insensitively to their
-    /// canonical variant; anything else is preserved verbatim as
-    /// [`Other`](Method::Other) (case as given).
+    /// Parse a wire method token. Known methods fold case-insensitively to
+    /// their canonical variant — without minting an uppercased copy, since this
+    /// runs on the request line AND the CSeq of every message; anything else is
+    /// preserved verbatim as [`Other`](Method::Other) (case as given).
     pub fn from_wire(s: &str) -> Self {
-        match s.to_ascii_uppercase().as_str() {
-            "INVITE" => Method::Invite,
-            "ACK" => Method::Ack,
-            "BYE" => Method::Bye,
-            "CANCEL" => Method::Cancel,
-            "OPTIONS" => Method::Options,
-            "REGISTER" => Method::Register,
-            "INFO" => Method::Info,
-            "UPDATE" => Method::Update,
-            "PRACK" => Method::Prack,
-            "SUBSCRIBE" => Method::Subscribe,
-            "NOTIFY" => Method::Notify,
-            "PUBLISH" => Method::Publish,
-            "MESSAGE" => Method::Message,
-            "REFER" => Method::Refer,
-            _ => Method::Other(s.to_string()),
+        let eq = |lit: &str| s.eq_ignore_ascii_case(lit);
+        if eq("INVITE") {
+            Method::Invite
+        } else if eq("ACK") {
+            Method::Ack
+        } else if eq("BYE") {
+            Method::Bye
+        } else if eq("CANCEL") {
+            Method::Cancel
+        } else if eq("OPTIONS") {
+            Method::Options
+        } else if eq("REGISTER") {
+            Method::Register
+        } else if eq("INFO") {
+            Method::Info
+        } else if eq("UPDATE") {
+            Method::Update
+        } else if eq("PRACK") {
+            Method::Prack
+        } else if eq("SUBSCRIBE") {
+            Method::Subscribe
+        } else if eq("NOTIFY") {
+            Method::Notify
+        } else if eq("PUBLISH") {
+            Method::Publish
+        } else if eq("MESSAGE") {
+            Method::Message
+        } else if eq("REFER") {
+            Method::Refer
+        } else {
+            Method::Other(s.to_string())
         }
     }
 

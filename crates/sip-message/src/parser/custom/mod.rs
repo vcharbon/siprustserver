@@ -10,8 +10,11 @@
 //!
 //! STATUS: scaffolded, not yet ported. See MIGRATION_STATUS.md.
 
+use bytes::Bytes;
+
 use crate::error::SipParseError;
 use crate::parser::{SipParser, SipParserLimits};
+use crate::sip_str::{SharedText, SipStr};
 use crate::types::{NonEmpty, SipMessage, SipRequest, SipResponse};
 
 pub mod scanner;
@@ -39,18 +42,19 @@ pub fn hydrate_request(
     method: &str,
     uri: &str,
     headers: Vec<SipHeader>,
-    body: Vec<u8>,
+    body: impl Into<Bytes>,
 ) -> Result<SipRequest, SipParseError> {
     let limits = SipParserLimits::default();
-    let eager = extract_request_fields(&headers, uri, &limits, Some(method), ExtractMode::Hydrate)?;
+    let uri = SipStr::owned(uri);
+    let eager = extract_request_fields(&headers, &uri, &limits, Some(method), ExtractMode::Hydrate)?;
     let c = eager.common;
     let via = non_empty_vias(c.vias)?;
     let optional = optional_headers::extract_optional(&headers);
     Ok(SipRequest {
         method: crate::method::Method::from_wire(method),
-        uri: uri.to_string(),
+        uri,
         request_uri: eager.request_uri,
-        version: "SIP/2.0".to_string(),
+        version: SipStr::from_static("SIP/2.0"),
         from: c.from,
         to: c.to,
         call_id: c.call_id,
@@ -59,8 +63,8 @@ pub fn hydrate_request(
         contacts: c.contacts,
         optional,
         headers,
-        body,
-        raw: Vec::new(),
+        body: body.into(),
+        raw: Bytes::new(),
     })
 }
 
@@ -70,16 +74,16 @@ pub fn hydrate_response(
     status: u16,
     reason: &str,
     headers: Vec<SipHeader>,
-    body: Vec<u8>,
+    body: impl Into<Bytes>,
 ) -> Result<SipResponse, SipParseError> {
     let limits = SipParserLimits::default();
     let c = extract_response_fields(&headers, status, &limits, ExtractMode::Hydrate)?;
     let via = non_empty_vias(c.vias)?;
     let optional = optional_headers::extract_optional(&headers);
     Ok(SipResponse {
-        version: "SIP/2.0".to_string(),
+        version: SipStr::from_static("SIP/2.0"),
         status,
-        reason: reason.to_string(),
+        reason: SipStr::owned(reason),
         from: c.from,
         to: c.to,
         call_id: c.call_id,
@@ -88,8 +92,8 @@ pub fn hydrate_response(
         contacts: c.contacts,
         optional,
         headers,
-        body,
-        raw: Vec::new(),
+        body: body.into(),
+        raw: Bytes::new(),
     })
 }
 
@@ -121,46 +125,54 @@ impl SipParser for CustomParser {
     }
 
     fn parse(&self, raw: &[u8]) -> Result<SipMessage, SipParseError> {
+        self.parse_shared(Bytes::copy_from_slice(raw))
+    }
+
+    fn parse_shared(&self, raw: Bytes) -> Result<SipMessage, SipParseError> {
         let limits = &self.limits;
 
-        let mut s = Scanner::new(raw);
-        let start = parse_start_line(&mut s, limits)?;
-        let parsed = headers::parse_headers(&mut s, limits)?;
+        // Split first, decode second: the body stays raw bytes (binary-safe,
+        // and a slice of `raw` rather than a copy), and only the header block
+        // becomes the text image every span points into.
+        let block = scanner::header_block(&raw);
+        let body_at = block.end;
+        let text = decode_image(&raw[..body_at]);
+        let image = text.as_str();
+
+        let mut s = Scanner::new(image.as_bytes());
+        let start = parse_start_line(&mut s, image, limits)?;
+        let parsed = headers::parse_headers(&mut s, &text, block.lines, limits)?;
         let headers_vec = parsed.headers;
         let content_length = parsed.content_length as usize;
 
-        let body: Vec<u8> = if content_length > 0 {
-            if s.remaining() < content_length {
+        let available = raw.len() - body_at;
+        let body: Bytes = if content_length > 0 {
+            if available < content_length {
                 return Err(SipParseError::new(format!(
-                    "Content-Length {} exceeds remaining bytes {}",
-                    content_length,
-                    s.remaining()
+                    "Content-Length {content_length} exceeds remaining bytes {available}"
                 )));
             }
-            raw[s.pos..s.pos + content_length].to_vec()
+            raw.slice(body_at..body_at + content_length)
         } else {
-            Vec::new()
+            Bytes::new()
         };
 
         let mode = if limits.wire_grammar { ExtractMode::Wire } else { ExtractMode::Hydrate };
 
         match start {
             StartLine::Request(rl) => {
-                let eager: RequestEager = extract_request_fields(
-                    &headers_vec,
-                    &rl.uri,
-                    limits,
-                    Some(&rl.method),
-                    mode,
-                )?;
+                let method = start_line::canonical_method(image, rl.method);
+                let uri = text.span(rl.uri.start, rl.uri.len());
+                let eager: RequestEager =
+                    extract_request_fields(&headers_vec, &uri, limits, Some(&method), mode)?;
                 let c = eager.common;
                 let via = non_empty_vias(c.vias)?;
                 let optional = optional_headers::extract_optional(&headers_vec);
                 Ok(SipMessage::Request(SipRequest {
-                    method: crate::method::Method::from_wire(&rl.method),
-                    uri: rl.uri,
+                    method: crate::method::Method::from_wire(&method),
+                    uri,
                     request_uri: eager.request_uri,
-                    version: rl.version,
+                    version: text.span(rl.version.start, rl.version.len()),
                     from: c.from,
                     to: c.to,
                     call_id: c.call_id,
@@ -170,7 +182,7 @@ impl SipParser for CustomParser {
                     optional,
                     headers: headers_vec,
                     body,
-                    raw: raw.to_vec(),
+                    raw,
                 }))
             }
             StartLine::Status(sl) => {
@@ -178,9 +190,9 @@ impl SipParser for CustomParser {
                 let via = non_empty_vias(c.vias)?;
                 let optional = optional_headers::extract_optional(&headers_vec);
                 Ok(SipMessage::Response(SipResponse {
-                    version: sl.version,
+                    version: text.span(sl.version.start, sl.version.len()),
                     status: sl.status,
-                    reason: sl.reason,
+                    reason: text.span(sl.reason.start, sl.reason.len()),
                     from: c.from,
                     to: c.to,
                     call_id: c.call_id,
@@ -190,10 +202,21 @@ impl SipParser for CustomParser {
                     optional,
                     headers: headers_vec,
                     body,
-                    raw: raw.to_vec(),
+                    raw,
                 }))
             }
         }
+    }
+}
+
+/// The header block as one shared text image. Predominantly-ASCII input takes
+/// the `str::from_utf8` validation fast path; genuinely invalid bytes fall back
+/// to the same lossy decode the per-field path used, so the image is
+/// byte-identical either way.
+fn decode_image(header_block: &[u8]) -> SharedText {
+    match std::str::from_utf8(header_block) {
+        Ok(s) => SharedText::new(s),
+        Err(_) => SharedText::from(String::from_utf8_lossy(header_block).into_owned()),
     }
 }
 

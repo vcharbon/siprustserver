@@ -203,7 +203,7 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
             //    that has none yet); each dialog owns an independent CSeq space. We
             //    only ACCUMULATE here — contiguity is judged below, over the whole
             //    set, because arrival order is irrelevant to §12.2.1.1.
-            let to_tag = req.to.tag.clone().unwrap_or_default();
+            let to_tag = req.to.tag.as_deref().unwrap_or_default().to_string();
             let branch = branch.unwrap_or_default();
             let position = pos_of(&key, seq, &method, &branch);
             let dlg = st.dialogs.entry(to_tag).or_default();

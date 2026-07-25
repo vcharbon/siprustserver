@@ -60,6 +60,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloc-counter"
+version = "0.1.0"
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2353,6 +2357,7 @@ dependencies = [
  "b2bua-sdk",
  "clap",
  "e2e-model",
+ "flamegraph-util",
  "futures",
  "layer-harness",
  "regex",
@@ -3853,6 +3858,8 @@ dependencies = [
 name = "sip-message"
 version = "0.1.0"
 dependencies = [
+ "alloc-counter",
+ "bytes",
  "criterion",
  "proptest",
  "rvoip-sip-core",
@@ -3891,6 +3898,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "hmac",
  "layer-harness",
  "scenario-harness",
@@ -3928,6 +3936,7 @@ dependencies = [
 name = "sip-txn"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "sip-message",
  "sip-net",
  "tokio",

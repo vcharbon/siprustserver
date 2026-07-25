@@ -12,7 +12,7 @@ use sip_message::message_helpers::{
 use sip_message::SipHeader;
 
 fn hdr(name: &str, value: &str) -> SipHeader {
-    SipHeader { name: name.to_string(), value: value.to_string() }
+    SipHeader { name: name.to_string().into(), value: value.to_string().into() }
 }
 
 fn headers() -> Vec<SipHeader> {
