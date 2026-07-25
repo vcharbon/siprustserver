@@ -23,7 +23,7 @@ pub const EMIT_SCHEMA_VERSION: u32 = 4;
 ///
 /// ```text
 /// {
-///   "schema": 3,
+///   "schema": 4,
 ///   "decode_stats": { records, non_ip, non_udp, snap_truncated, datagrams,
 ///                     fragments, reassembled, frag_dropped, tail_truncated },
 ///   "flow_stats":   { sip_messages, capture_dups, parse_failed, non_sip },
@@ -86,6 +86,26 @@ pub const EMIT_SCHEMA_VERSION: u32 = 4;
 /// }
 /// ```
 pub fn flows_to_json(flows: &Flows, decode: &DecodeStats) -> Value {
+    let all: Vec<usize> = (0..flows.groups.len()).collect();
+    flows_to_json_selected(flows, decode, &all)
+}
+
+/// The same document restricted to `groups` — the extraction phase, where a
+/// query has already decided which calls are wanted and only those should
+/// carry their raw payloads.
+///
+/// Legs are renumbered to the emitted set so the document keeps its
+/// invariants: `groups[*].legs` and every evidence leg reference index into
+/// the emitted `legs`, and each emitted leg belongs to exactly one group.
+/// Decode and flow counters describe the WHOLE capture regardless — they
+/// report what was read, not what was selected.
+pub fn flows_to_json_selected(flows: &Flows, decode: &DecodeStats, groups: &[usize]) -> Value {
+    let mut keep: Vec<usize> =
+        groups.iter().filter_map(|&g| flows.groups.get(g)).flat_map(|g| g.legs.clone()).collect();
+    keep.sort_unstable();
+    keep.dedup();
+    let remap = |old: usize| keep.binary_search(&old).unwrap_or(usize::MAX);
+
     json!({
         "schema": EMIT_SCHEMA_VERSION,
         "decode_stats": {
@@ -105,8 +125,12 @@ pub fn flows_to_json(flows: &Flows, decode: &DecodeStats) -> Value {
             "parse_failed": flows.stats.parse_failed,
             "non_sip": flows.stats.non_sip,
         },
-        "legs": flows.legs.iter().map(leg_json).collect::<Vec<_>>(),
-        "groups": flows.groups.iter().map(group_json).collect::<Vec<_>>(),
+        "legs": keep.iter().map(|&l| leg_json(&flows.legs[l])).collect::<Vec<_>>(),
+        "groups": groups
+            .iter()
+            .filter_map(|&g| flows.groups.get(g))
+            .map(|g| group_json(g, &remap))
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -209,20 +233,21 @@ fn summary_json(msg: &SipMessage) -> Value {
     }
 }
 
-fn group_json(group: &CallGroup) -> Value {
+fn group_json(group: &CallGroup, remap: &impl Fn(usize) -> usize) -> Value {
     json!({
-        "legs": group.legs,
-        "evidence": group.evidence.iter().map(evidence_json).collect::<Vec<_>>(),
+        "legs": group.legs.iter().map(|&l| remap(l)).collect::<Vec<_>>(),
+        "evidence": group.evidence.iter().map(|e| evidence_json(e, remap)).collect::<Vec<_>>(),
     })
 }
 
-fn evidence_json(ev: &MatchEvidence) -> Value {
+fn evidence_json(ev: &MatchEvidence, remap: &impl Fn(usize) -> usize) -> Value {
+    let legs_of = |ls: &[usize]| ls.iter().map(|&l| remap(l)).collect::<Vec<_>>();
     match ev {
         MatchEvidence::SharedToken { strategy, token, legs } => json!({
             "kind": "shared_token",
             "strategy": strategy,
             "token": token,
-            "legs": legs,
+            "legs": legs_of(legs),
         }),
         MatchEvidence::SharedHeaderParam { strategy, header, param, token, legs } => json!({
             "kind": "shared_header_param",
@@ -230,7 +255,7 @@ fn evidence_json(ev: &MatchEvidence) -> Value {
             "header": header,
             "param": param,
             "token": token,
-            "legs": legs,
+            "legs": legs_of(legs),
         }),
         MatchEvidence::DerivedCallId {
             strategy,
@@ -243,7 +268,7 @@ fn evidence_json(ev: &MatchEvidence) -> Value {
         } => json!({
             "kind": "derived_call_id",
             "strategy": strategy,
-            "legs": legs,
+            "legs": legs_of(legs),
             "prefix": prefix,
             "as_socket": as_socket.to_string(),
             "peer_socket": peer_socket.to_string(),
@@ -253,7 +278,7 @@ fn evidence_json(ev: &MatchEvidence) -> Value {
         MatchEvidence::IdentityAdjacency { strategy, legs, shared_host, dt_us } => json!({
             "kind": "identity_adjacency",
             "strategy": strategy,
-            "legs": legs,
+            "legs": legs_of(legs),
             "shared_host": shared_host.to_string(),
             "dt_us": dt_us,
         }),

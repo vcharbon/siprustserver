@@ -78,11 +78,19 @@ pub enum CorrelateStrategy {
 #[derive(Debug, Clone)]
 pub struct FlowConfig {
     pub strategies: Vec<CorrelateStrategy>,
+    /// Identical `(src, dst, payload)` closer together than this is the
+    /// capture stack seeing one packet twice, not a retransmission — how far
+    /// back to look is a property of the capture, so it is configuration.
+    pub dedup_window_us: u64,
 }
 
 /// Default pairing window for the strategies that bound one: two legs of one
 /// call start within seconds of each other, never minutes.
 pub const DEFAULT_PAIR_WINDOW_US: u64 = 5_000_000;
+
+/// Default capture-dedup window: a genuine SIP retransmission is >=500 ms
+/// (Timer T1) away, so anything closer is the capture stack, not the wire.
+pub const DEFAULT_DEDUP_WINDOW_US: u64 = 200_000;
 
 impl Default for FlowConfig {
     fn default() -> Self {
@@ -102,6 +110,7 @@ impl Default for FlowConfig {
                 },
                 CorrelateStrategy::IdentityAdjacency { window_us: DEFAULT_PAIR_WINDOW_US },
             ],
+            dedup_window_us: DEFAULT_DEDUP_WINDOW_US,
         }
     }
 }
@@ -323,9 +332,7 @@ pub struct Flows {
     pub stats: FlowStats,
 }
 
-/// A genuine SIP retransmission is >=500 ms (Timer T1) away; an identical
-/// datagram closer than this is the capture stack seeing the packet twice.
-const CAPTURE_DUP_WINDOW_US: u64 = 200_000;
+
 
 /// Build the flow model: dedup + SIP filter + parse + leg ingest + correlate.
 /// Datagrams are processed in capture-time order regardless of input order.
@@ -347,7 +354,7 @@ pub fn build_flows(datagrams: &[Datagram], cfg: &FlowConfig) -> Flows {
         }
         let key = hash_datagram(d);
         if let Some(prev) = dedup.get(&key) {
-            if d.ts_us.saturating_sub(*prev) < CAPTURE_DUP_WINDOW_US {
+            if d.ts_us.saturating_sub(*prev) < cfg.dedup_window_us {
                 stats.capture_dups += 1;
                 continue;
             }
@@ -945,6 +952,7 @@ mod tests {
                 .filter(|s| !matches!(s, CorrelateStrategy::IdentityAdjacency { .. }))
                 .cloned()
                 .collect(),
+            ..FlowConfig::default()
         };
         let flows = build_flows(&datagrams, &token_only);
         assert_eq!(flows.groups.len(), 2, "fallback disabled → legs stay apart");
@@ -1288,6 +1296,7 @@ mod tests {
                 require_shared_hop: true,
                 min_base_len: 8,
             }],
+            ..FlowConfig::default()
         };
         assert_eq!(build_flows(&datagrams, &strict).groups.len(), 2, "no loopback → no pairing");
 
@@ -1297,6 +1306,7 @@ mod tests {
                 require_shared_hop: false,
                 min_base_len: 8,
             }],
+            ..FlowConfig::default()
         };
         let flows = build_flows(&datagrams, &relaxed);
         assert_eq!(flows.groups.len(), 1);
@@ -1320,6 +1330,7 @@ mod tests {
                 require_shared_hop: true,
                 min_base_len: 8,
             }],
+            ..FlowConfig::default()
         };
         let base = sip_request("INVITE", "abc", 1, "ba", "");
         let derived = sip_request("INVITE", "xyzabc", 1, "bb", "");

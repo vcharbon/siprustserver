@@ -6,12 +6,17 @@
 //! parser, group messages into **legs** by Call-ID, correlate legs into
 //! **calls** through the ordered strategy pipeline — relayed token headers,
 //! header-param tokens such as the IMS P-Charging-Vector icid, identity
-//! adjacency) → filter and print. This bin is a presenter — selection and
-//! text layout only; everything model-shaped lives in the library.
+//! adjacency, Call-ID derivation) → filter and print. This bin is a presenter
+//! — selection and text layout only; everything model-shaped lives in the
+//! library.
 //!
-//! Filters select whole call groups (give an a-leg Call-ID, get the b-leg
-//! ladder too). `--final-status none` finds calls whose initial INVITE never
-//! got a final response — the "everything times out" triage query.
+//! Two selection surfaces. The FLAGS are leg-level and independent: handy for
+//! triage, but they cannot express a predicate that spans a request and its
+//! response. `--query` runs a JSON predicate tree (`sip_pcap::query`) that
+//! can — it binds to a transaction, so "the UPDATE that was rejected" and
+//! "the re-INVITE whose 200 carried this SDP" mean what they say. A query
+//! also chooses its own projection: named fields per match for a screening
+//! sweep, or the full model for extraction.
 //!
 //! Examples:
 //!   sipflow /tmp/sipcap --list
@@ -19,12 +24,18 @@
 //!   sipflow /tmp/sipcap --final-status none
 //!   sipflow /tmp/sipcap --ruri 166601009 --final-status 5xx
 //!   sipflow /tmp/sipcap --json > flows.json
+//!   sipflow /tmp/sipcap --query update-rejected.json
+//!   sipflow corpus/ --query-json '{"select":{"evidence_kind":"derived_call_id"},
+//!                                  "project":{"mode":"summary","fields":["as_socket"]}}'
 
 use std::path::PathBuf;
 
 use clap::Parser as ClapParser;
 use sip_message::SipMessage;
-use sip_pcap::flow::{build_flows, CallGroup, CorrelateStrategy, FlowConfig, FlowLeg};
+use sip_pcap::flow::{
+    build_flows, CallGroup, CorrelateStrategy, FlowConfig, FlowLeg, DEFAULT_DEDUP_WINDOW_US,
+};
+use sip_pcap::query::{neighbours_of, select_groups, summary_row, Projection, Query};
 
 #[derive(ClapParser, Debug)]
 #[command(
@@ -125,6 +136,17 @@ struct Args {
     )]
     json: bool,
 
+    /// Run a JSON query (see `sip_pcap::query`): a predicate tree over calls,
+    /// legs, transactions and messages, plus the projection of a match. The
+    /// query's own `correlate` block, when present, replaces the pipeline the
+    /// flags above build.
+    #[arg(long, conflicts_with_all = ["json", "list", "full"])]
+    query: Option<PathBuf>,
+
+    /// The same, given inline instead of in a file.
+    #[arg(long, conflicts_with_all = ["json", "list", "full", "query"])]
+    query_json: Option<String>,
+
     /// One summary line per call group instead of full ladders.
     #[arg(long, default_value_t = false)]
     list: bool,
@@ -179,7 +201,17 @@ fn main() {
     if !args.no_identity_adjacency {
         strategies.push(CorrelateStrategy::IdentityAdjacency { window_us });
     }
-    let cfg = FlowConfig { strategies };
+    let cfg = FlowConfig { strategies, dedup_window_us: DEFAULT_DEDUP_WINDOW_US };
+
+    if let Some(query) = load_query(&args) {
+        // The query owns correlation when it says so: which strategies ran is
+        // part of what a recorded query means, not ambient CLI state.
+        let cfg = query.correlate.clone().unwrap_or(cfg);
+        let flows = build_flows(&datagrams, &cfg);
+        run_query(&flows, &stats, &query);
+        return;
+    }
+
     let flows = build_flows(&datagrams, &cfg);
 
     if args.json {
@@ -218,6 +250,80 @@ fn main() {
                 "… {} more matching call groups (raise --limit or add filters; --list shows all)",
                 selected.len() - args.limit
             );
+        }
+    }
+}
+
+/// Load `--query` / `--query-json`, exiting with the parse error's own path
+/// and reason — a mistyped predicate must never widen the match set silently.
+fn load_query(args: &Args) -> Option<Query> {
+    let text = match (&args.query, &args.query_json) {
+        (Some(path), _) => match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("cannot read query {}: {e}", path.display());
+                std::process::exit(2);
+            }
+        },
+        (None, Some(inline)) => inline.clone(),
+        (None, None) => return None,
+    };
+    let value: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("query is not valid JSON: {e}");
+            std::process::exit(2);
+        }
+    };
+    match Query::from_json(&value) {
+        Ok(q) => Some(q),
+        Err(e) => {
+            eprintln!("query rejected at {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Select, expand to neighbours, project. The three phases stay visible here
+/// because they are what the query document is made of.
+fn run_query(flows: &sip_pcap::flow::Flows, decode: &sip_pcap::DecodeStats, query: &Query) {
+    let hits = select_groups(flows, query);
+    eprintln!(
+        "# legs={} call-groups={} matched={}{}",
+        flows.legs.len(),
+        flows.groups.len(),
+        hits.len(),
+        query.name.as_ref().map(|n| format!(" query={n}")).unwrap_or_default(),
+    );
+
+    let expanded = query.neighbours.as_ref().map(|spec| neighbours_of(flows, &hits, spec));
+
+    match &query.project {
+        Projection::Count => println!("{}", hits.len()),
+        Projection::Summary { fields } => {
+            for (n, &g) in hits.iter().enumerate() {
+                let mut row = summary_row(flows, g, fields);
+                if let Some(near) = expanded.as_ref().and_then(|e| e.get(n)) {
+                    let rows: Vec<_> =
+                        near.1.iter().map(|&x| summary_row(flows, x, fields)).collect();
+                    if let Some(obj) = row.as_object_mut() {
+                        obj.insert("neighbours".into(), serde_json::Value::Array(rows));
+                    }
+                }
+                println!("{row}");
+            }
+        }
+        Projection::Full => {
+            // Neighbours join the emitted set: a hit's context is part of what
+            // was asked for, and the document must stay self-consistent.
+            let mut wanted = hits.clone();
+            if let Some(e) = &expanded {
+                wanted.extend(e.iter().flat_map(|(_, near)| near.iter().copied()));
+            }
+            wanted.sort_unstable();
+            wanted.dedup();
+            let v = sip_pcap::emit::flows_to_json_selected(flows, decode, &wanted);
+            println!("{}", serde_json::to_string_pretty(&v).expect("model JSON serializes"));
         }
     }
 }

@@ -15,10 +15,11 @@
 //! Everything dropped is counted in [`DecodeStats`], never silent — a lossy
 //! or odd capture must be visible rather than silently thinning the callflow.
 //!
-//! Container and frame decoding are this module tree's whole concern. The SIP
-//! flow model built on top of it (legs, hops, call-group correlation) lives in
-//! [`flow`], its JSON serialization in [`emit`]; the `sipflow` bin is a text
-//! presenter over that model.
+//! Container and frame decoding are this module tree's whole concern. On top
+//! of it sit three separable phases: [`flow`] correlates legs into calls,
+//! [`query`] selects and projects the calls answering a question (over the
+//! transaction view in [`txn`]), and [`emit`] serializes the model. The
+//! `sipflow` bin is a presenter over all four.
 
 mod bytes;
 mod classic;
@@ -26,8 +27,10 @@ pub mod emit;
 pub mod flow;
 mod frame;
 mod pcapng;
+pub mod query;
 mod reassembly;
 mod source;
+pub mod txn;
 
 pub use reassembly::{MAX_PENDING_REASSEMBLIES, MAX_REASSEMBLED_LEN, REASSEMBLY_TTL_US};
 
