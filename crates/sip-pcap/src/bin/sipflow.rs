@@ -90,6 +90,21 @@ struct Args {
     #[arg(long, default_value_t = false)]
     no_param_correlate: bool,
 
+    /// Disable Call-ID derivation correlation (the `1-<original>` application
+    /// server loopback).
+    #[arg(long, default_value_t = false)]
+    no_derived_call_id: bool,
+
+    /// Pair a derived Call-ID even when its INVITE does not depart on a hop
+    /// the base leg traversed — looser, and no longer evidence of a loopback.
+    #[arg(long, default_value_t = false)]
+    derived_call_id_any_hop: bool,
+
+    /// Max first-activity distance, in milliseconds, for the strategies that
+    /// bound one (Call-ID derivation, identity adjacency).
+    #[arg(long, default_value_t = 5_000)]
+    pair_window_ms: u64,
+
     /// Disable the identity-adjacency fallback (drop the last pipeline
     /// strategy — token/param-only correlation).
     #[arg(long, default_value_t = false)]
@@ -153,8 +168,16 @@ fn main() {
             });
         }
     }
+    let window_us = args.pair_window_ms.saturating_mul(1_000);
+    if !args.no_derived_call_id {
+        strategies.push(CorrelateStrategy::DerivedCallId {
+            window_us,
+            require_shared_hop: !args.derived_call_id_any_hop,
+            min_base_len: 8,
+        });
+    }
     if !args.no_identity_adjacency {
-        strategies.push(CorrelateStrategy::IdentityAdjacency);
+        strategies.push(CorrelateStrategy::IdentityAdjacency { window_us });
     }
     let cfg = FlowConfig { strategies };
     let flows = build_flows(&datagrams, &cfg);

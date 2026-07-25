@@ -13,7 +13,7 @@ use crate::DecodeStats;
 
 /// Value of the top-level `"schema"` field. Bumped on any breaking change to
 /// the emitted shape; consumers reject versions they do not know.
-pub const EMIT_SCHEMA_VERSION: u32 = 3;
+pub const EMIT_SCHEMA_VERSION: u32 = 4;
 
 /// Serialize the full flow model, plus the pcap decode counters, to JSON.
 ///
@@ -74,6 +74,11 @@ pub const EMIT_SCHEMA_VERSION: u32 = 3;
 ///         "legs": [idx] }
 ///       | { "kind": "shared_header_param", "strategy": idx, "header": str,
 ///           "param": str, "token": str, "legs": [idx] }
+///       | { "kind": "derived_call_id", "strategy": idx,
+///           "legs": [base, derived], "prefix": str,
+///           "as_socket": addr,      // emitted the derived INVITE
+///           "peer_socket": addr,    // received it — the loopback peer
+///           "shared_hop": bool, "dt_us": u64 }
 ///       | { "kind": "identity_adjacency", "strategy": idx,
 ///           "legs": [idx, idx], "shared_host": ip, "dt_us": u64 }
 ///     ]
@@ -226,6 +231,24 @@ fn evidence_json(ev: &MatchEvidence) -> Value {
             "param": param,
             "token": token,
             "legs": legs,
+        }),
+        MatchEvidence::DerivedCallId {
+            strategy,
+            legs,
+            prefix,
+            as_socket,
+            peer_socket,
+            shared_hop,
+            dt_us,
+        } => json!({
+            "kind": "derived_call_id",
+            "strategy": strategy,
+            "legs": legs,
+            "prefix": prefix,
+            "as_socket": as_socket.to_string(),
+            "peer_socket": peer_socket.to_string(),
+            "shared_hop": shared_hop,
+            "dt_us": dt_us,
         }),
         MatchEvidence::IdentityAdjacency { strategy, legs, shared_host, dt_us } => json!({
             "kind": "identity_adjacency",
@@ -386,6 +409,8 @@ mod tests {
         let tok_b = sip_request("INVITE", "ev-b", 1, "bb", "X-Api-Call: call-9\r\n");
         let icid_a = sip_request("INVITE", "ev-e", 1, "be", "P-Charging-Vector: icid-value=icid-7;orig-ioi=a\r\n");
         let icid_b = sip_request("INVITE", "ev-f", 1, "bf", "P-Charging-Vector: orig-ioi=b;icid-value=icid-7\r\n");
+        let der_a = sip_request("INVITE", "ev-derived-base", 1, "bg", "");
+        let der_b = sip_request("INVITE", "1-ev-derived-base", 1, "bh", "");
         let adj_a = sip_request("INVITE", "ev-c", 1, "bc", "");
         let adj_b = sip_request("INVITE", "ev-d", 1, "bd", "");
         let datagrams = vec![
@@ -393,12 +418,16 @@ mod tests {
             dg(2_000, "10.0.0.2:5062", "10.0.0.9:5060", &tok_b),
             dg(3_000, "10.0.2.1:5060", "10.0.2.5:5060", &icid_a),
             dg(4_000, "10.0.2.5:5062", "10.0.2.9:5060", &icid_b),
-            dg(5_000, "10.0.1.1:5060", "10.0.1.5:5060", &adj_a),
-            dg(6_000, "10.0.1.5:5062", "10.0.1.9:5060", &adj_b),
+            // The application-server loopback: the derived INVITE goes back
+            // out the socket pair the base INVITE arrived on.
+            dg(5_000, "10.0.3.1:5060", "10.0.3.5:5060", &der_a),
+            dg(6_000, "10.0.3.5:5060", "10.0.3.1:5060", &der_b),
+            dg(7_000, "10.0.1.1:5060", "10.0.1.5:5060", &adj_a),
+            dg(8_000, "10.0.1.5:5062", "10.0.1.9:5060", &adj_b),
         ];
         let flows = build_flows(&datagrams, &FlowConfig::default());
         let v = flows_to_json(&flows, &DecodeStats::default());
-        assert_eq!(v["groups"].as_array().unwrap().len(), 3);
+        assert_eq!(v["groups"].as_array().unwrap().len(), 4);
         let tok_ev = &v["groups"][0]["evidence"][0];
         assert_eq!(tok_ev["kind"], "shared_token");
         assert_eq!(tok_ev["strategy"], 0);
@@ -411,10 +440,19 @@ mod tests {
         assert_eq!(icid_ev["param"], "icid-value");
         assert_eq!(icid_ev["token"], "icid-7");
         assert_eq!(icid_ev["legs"], json!([2, 3]));
-        let adj_ev = &v["groups"][2]["evidence"][0];
+        let der_ev = &v["groups"][2]["evidence"][0];
+        assert_eq!(der_ev["kind"], "derived_call_id");
+        assert_eq!(der_ev["strategy"], 2);
+        assert_eq!(der_ev["legs"], json!([4, 5]));
+        assert_eq!(der_ev["prefix"], "1-");
+        assert_eq!(der_ev["as_socket"], "10.0.3.5:5060");
+        assert_eq!(der_ev["peer_socket"], "10.0.3.1:5060");
+        assert_eq!(der_ev["shared_hop"], true);
+        assert_eq!(der_ev["dt_us"], 1_000);
+        let adj_ev = &v["groups"][3]["evidence"][0];
         assert_eq!(adj_ev["kind"], "identity_adjacency");
-        assert_eq!(adj_ev["strategy"], 2);
-        assert_eq!(adj_ev["legs"], json!([4, 5]));
+        assert_eq!(adj_ev["strategy"], 3);
+        assert_eq!(adj_ev["legs"], json!([6, 7]));
         assert_eq!(adj_ev["shared_host"], "10.0.1.5");
         assert_eq!(adj_ev["dt_us"], 1_000);
     }

@@ -50,20 +50,39 @@ pub enum CorrelateStrategy {
     /// charging id): sibling params mutate across an AS, so whole-header
     /// equality can never work — only the param value is compared.
     HeaderParam { header: String, param: String },
+    /// Call-ID derivation: an application server that loops a call back to
+    /// the peer it arrived from re-emits it under `<prefix><original>` (the
+    /// `1-` / `term1-` relay convention). The socket the derived INVITE
+    /// departs on IS the AS; requiring it to be a socket pair the base leg
+    /// also traversed is what separates a loopback from a coincidence.
+    DerivedCallId {
+        /// Max |first-activity| distance between the two legs.
+        window_us: u64,
+        /// Require the derived INVITE to depart on a hop of the base leg.
+        require_shared_hop: bool,
+        /// Shortest base Call-ID that may carry a derivation — a short id is
+        /// a suffix of an unrelated one too easily.
+        min_base_len: usize,
+    },
     /// Identity adjacency for token-less pairs: same From/To USER identity
     /// on both INVITEs (`tel:`⇄`sip:` insensitive, host/params ignored), the
     /// pair crossing one shared host at ANY traversed hop (IP-level,
     /// port-insensitive), first activity within the pairing window.
-    IdentityAdjacency,
+    IdentityAdjacency { window_us: u64 },
 }
 
 /// Correlation configuration for [`build_flows`]: the ordered strategy
-/// pipeline. The default is the loadgen relayed-token headers, then the IMS
-/// P-Charging-Vector icid, then identity adjacency.
+/// pipeline. The default runs the most specific evidence first — loadgen
+/// relayed-token headers, the IMS P-Charging-Vector icid, Call-ID derivation
+/// — and falls back to identity adjacency.
 #[derive(Debug, Clone)]
 pub struct FlowConfig {
     pub strategies: Vec<CorrelateStrategy>,
 }
+
+/// Default pairing window for the strategies that bound one: two legs of one
+/// call start within seconds of each other, never minutes.
+pub const DEFAULT_PAIR_WINDOW_US: u64 = 5_000_000;
 
 impl Default for FlowConfig {
     fn default() -> Self {
@@ -76,7 +95,12 @@ impl Default for FlowConfig {
                     header: "P-Charging-Vector".to_string(),
                     param: "icid-value".to_string(),
                 },
-                CorrelateStrategy::IdentityAdjacency,
+                CorrelateStrategy::DerivedCallId {
+                    window_us: DEFAULT_PAIR_WINDOW_US,
+                    require_shared_hop: true,
+                    min_base_len: 8,
+                },
+                CorrelateStrategy::IdentityAdjacency { window_us: DEFAULT_PAIR_WINDOW_US },
             ],
         }
     }
@@ -199,9 +223,15 @@ impl FlowLeg {
 
     /// (src, dst) of the first INVITE — the leg's direction of establishment.
     pub fn invite_addrs(&self) -> Option<(SocketAddr, SocketAddr)> {
+        self.invite_observations().next()
+    }
+
+    /// Every INVITE observation as `(src, dst)`, in capture order — one entry
+    /// per traversed hop, so a relayed INVITE appears once per vantage.
+    pub fn invite_observations(&self) -> impl Iterator<Item = (SocketAddr, SocketAddr)> + '_ {
         self.msgs
             .iter()
-            .find(|m| matches!(&m.parsed, SipMessage::Request(r) if r.method == Method::Invite))
+            .filter(|m| matches!(&m.parsed, SipMessage::Request(r) if r.method == Method::Invite))
             .map(|m| (m.src, m.dst))
     }
 
@@ -240,6 +270,20 @@ pub enum MatchEvidence {
     /// The [`CorrelateStrategy::HeaderParam`] `header`'s `param` carried the
     /// same value on all `legs`.
     SharedHeaderParam { strategy: usize, header: String, param: String, token: String, legs: Vec<LegId> },
+    /// [`CorrelateStrategy::DerivedCallId`]: `legs[1]`'s Call-ID is `prefix`
+    /// ++ `legs[0]`'s. `as_socket` emitted the derived INVITE, `peer_socket`
+    /// received it — the application server and the peer it looped back to.
+    DerivedCallId {
+        strategy: usize,
+        legs: [LegId; 2],
+        prefix: String,
+        as_socket: SocketAddr,
+        peer_socket: SocketAddr,
+        /// The derived INVITE departed on a socket pair the base leg also
+        /// traversed — the loopback proof, absent when not required.
+        shared_hop: bool,
+        dt_us: u64,
+    },
     /// [`CorrelateStrategy::IdentityAdjacency`]: same From/To user identity
     /// on both INVITEs, the pair crossing `shared_host` at some traversed
     /// hop, first activity within the pairing window.
@@ -282,9 +326,6 @@ pub struct Flows {
 /// A genuine SIP retransmission is >=500 ms (Timer T1) away; an identical
 /// datagram closer than this is the capture stack seeing the packet twice.
 const CAPTURE_DUP_WINDOW_US: u64 = 200_000;
-
-/// Max first-activity distance for identity-adjacency pairing.
-const FROMTO_PAIR_WINDOW_US: u64 = 5_000_000;
 
 /// Build the flow model: dedup + SIP filter + parse + leg ingest + correlate.
 /// Datagrams are processed in capture-time order regardless of input order.
@@ -393,7 +434,7 @@ fn ingest(
                     }
                 }
             }
-            CorrelateStrategy::IdentityAdjacency => {}
+            CorrelateStrategy::DerivedCallId { .. } | CorrelateStrategy::IdentityAdjacency { .. } => {}
         }
     }
     match &msg {
@@ -487,8 +528,19 @@ fn correlate(legs: &[FlowLeg], cfg: &FlowConfig) -> Vec<CallGroup> {
             CorrelateStrategy::HeaderToken { .. } | CorrelateStrategy::HeaderParam { .. } => {
                 token_pass(si, strat, legs, &mut parent, &mut evidence);
             }
-            CorrelateStrategy::IdentityAdjacency => {
-                adjacency_pass(si, legs, &mut parent, &mut evidence);
+            CorrelateStrategy::DerivedCallId { window_us, require_shared_hop, min_base_len } => {
+                derived_call_id_pass(
+                    si,
+                    *window_us,
+                    *require_shared_hop,
+                    *min_base_len,
+                    legs,
+                    &mut parent,
+                    &mut evidence,
+                );
+            }
+            CorrelateStrategy::IdentityAdjacency { window_us } => {
+                adjacency_pass(si, *window_us, legs, &mut parent, &mut evidence);
             }
         }
     }
@@ -516,7 +568,8 @@ fn correlate(legs: &[FlowLeg], cfg: &FlowConfig) -> Vec<CallGroup> {
         let first_leg = match &ev {
             MatchEvidence::SharedToken { legs, .. }
             | MatchEvidence::SharedHeaderParam { legs, .. } => legs[0],
-            MatchEvidence::IdentityAdjacency { legs, .. } => legs[0],
+            MatchEvidence::DerivedCallId { legs, .. }
+            | MatchEvidence::IdentityAdjacency { legs, .. } => legs[0],
         };
         let pos = pos_of_root[&find(&mut parent, first_leg)];
         groups[pos].evidence.push(ev);
@@ -571,8 +624,72 @@ fn token_pass(
                 token,
                 legs: ls,
             },
-            CorrelateStrategy::IdentityAdjacency => unreachable!("not a token strategy"),
+            _ => unreachable!("not a token strategy"),
         });
+    }
+}
+
+/// `derived = <non-empty prefix> + base` on the Call-ID — the relayed-leg
+/// naming convention (`1-`, `term1-`) an application server applies when it
+/// re-originates a call it just received.
+fn derivation_prefix<'a>(base: &str, derived: &'a str) -> Option<&'a str> {
+    (derived.len() > base.len() && derived.ends_with(base))
+        .then(|| &derived[..derived.len() - base.len()])
+}
+
+/// Call-ID derivation pass (strategy `si`). For every ordered leg pair whose
+/// Call-IDs are in the derivation relation, within `window_us` and with the
+/// base id at least `min_base_len` long, locate the derived leg's INVITE
+/// observation whose socket pair the base leg also traversed: its source is
+/// the application server, its destination the peer looped back to. With
+/// `require_shared_hop` that observation is mandatory — without it the first
+/// INVITE observation stands in and `shared_hop` records which held.
+fn derived_call_id_pass(
+    si: usize,
+    window_us: u64,
+    require_shared_hop: bool,
+    min_base_len: usize,
+    legs: &[FlowLeg],
+    parent: &mut [usize],
+    evidence: &mut Vec<MatchEvidence>,
+) {
+    for (base, base_leg) in legs.iter().enumerate() {
+        if base_leg.call_id.len() < min_base_len {
+            continue;
+        }
+        for (derived, derived_leg) in legs.iter().enumerate() {
+            let Some(prefix) = derivation_prefix(&base_leg.call_id, &derived_leg.call_id) else {
+                continue;
+            };
+            if find(parent, base) == find(parent, derived) {
+                continue; // an earlier strategy already paired these
+            }
+            let dt = derived_leg.t_first().abs_diff(base_leg.t_first());
+            if dt > window_us {
+                continue;
+            }
+            let looped = derived_leg
+                .invite_observations()
+                .find(|(s, d)| base_leg.hops.contains(&Hop::normalized(*s, *d)));
+            let (as_socket, peer_socket) = match (looped, require_shared_hop) {
+                (Some(pair), _) => pair,
+                (None, true) => continue,
+                (None, false) => match derived_leg.invite_addrs() {
+                    Some(pair) => pair,
+                    None => continue,
+                },
+            };
+            union(parent, base, derived);
+            evidence.push(MatchEvidence::DerivedCallId {
+                strategy: si,
+                legs: [base, derived],
+                prefix: prefix.to_string(),
+                as_socket,
+                peer_socket,
+                shared_hop: looped.is_some(),
+                dt_us: dt,
+            });
+        }
     }
 }
 
@@ -587,6 +704,7 @@ fn token_pass(
 /// one partner per leg.
 fn adjacency_pass(
     si: usize,
+    window_us: u64,
     legs: &[FlowLeg],
     parent: &mut [usize],
     evidence: &mut Vec<MatchEvidence>,
@@ -637,7 +755,7 @@ fn adjacency_pass(
                 },
             };
             let dt = legs[j].t_first().abs_diff(legs[i].t_first());
-            if dt <= FROMTO_PAIR_WINDOW_US {
+            if dt <= window_us {
                 pairs.push((dt, i, j, shared_host));
             }
         }
@@ -814,7 +932,7 @@ mod tests {
         else {
             panic!("expected adjacency evidence, got {:?}", g.evidence)
         };
-        assert_eq!(*strategy, 2, "identity adjacency is the default pipeline's third strategy");
+        assert_eq!(*strategy, 3, "identity adjacency is the default pipeline's last strategy");
         assert_eq!(legs, &[0, 1]);
         assert_eq!(*shared_host, "10.0.0.5".parse::<IpAddr>().unwrap());
         assert_eq!(*dt_us, 200_000);
@@ -824,7 +942,7 @@ mod tests {
             strategies: cfg
                 .strategies
                 .iter()
-                .filter(|s| !matches!(s, CorrelateStrategy::IdentityAdjacency))
+                .filter(|s| !matches!(s, CorrelateStrategy::IdentityAdjacency { .. }))
                 .cloned()
                 .collect(),
         };
@@ -942,7 +1060,7 @@ mod tests {
         else {
             panic!("expected adjacency evidence, got {:?}", g.evidence)
         };
-        assert_eq!(*strategy, 2);
+        assert_eq!(*strategy, 3);
         assert_eq!(legs, &[0, 1]);
         assert_eq!(*shared_host, "10.0.0.9".parse::<IpAddr>().unwrap());
     }
@@ -1031,7 +1149,7 @@ mod tests {
         assert_eq!(flows.groups.len(), 1, "an unechoed token must not block the pairing");
         assert!(matches!(
             &flows.groups[0].evidence[0],
-            MatchEvidence::IdentityAdjacency { strategy: 2, legs: [0, 1], .. }
+            MatchEvidence::IdentityAdjacency { strategy: 3, legs: [0, 1], .. }
         ));
     }
 
@@ -1115,6 +1233,132 @@ mod tests {
             panic!("expected header-param evidence, got {:?}", flows.groups[0].evidence)
         };
         assert_eq!(legs, &vec![0, 1, 2]);
+    }
+
+    /// The application-server loopback: the AS answers the base leg and
+    /// re-originates it as `1-<original>` back out the same socket pair. The
+    /// evidence names the AS socket and the peer it looped back to.
+    #[test]
+    fn derived_call_id_pairs_an_as_loopback() {
+        let base = sip_request("INVITE", "SDq1u9502-36a5c334-v300g00040", 1, "ba", "");
+        let derived = sip_request("INVITE", "1-SDq1u9502-36a5c334-v300g00040", 1, "bb", "");
+        let datagrams = vec![
+            dg(1_000_000, "192.0.2.9:5061", "192.0.2.67:5060", &base),
+            dg(1_040_000, "192.0.2.67:5060", "192.0.2.9:5061", &derived),
+        ];
+        let flows = build_flows(&datagrams, &FlowConfig::default());
+        assert_eq!(flows.groups.len(), 1, "the loopback must pair the legs");
+        let g = &flows.groups[0];
+        assert_eq!(g.legs, vec![0, 1]);
+        let MatchEvidence::DerivedCallId {
+            strategy,
+            legs,
+            prefix,
+            as_socket,
+            peer_socket,
+            shared_hop,
+            dt_us,
+        } = &g.evidence[0]
+        else {
+            panic!("expected derivation evidence, got {:?}", g.evidence)
+        };
+        assert_eq!(*strategy, 2, "Call-ID derivation is the default pipeline's third strategy");
+        assert_eq!(legs, &[0, 1]);
+        assert_eq!(prefix, "1-");
+        assert_eq!(as_socket.to_string(), "192.0.2.67:5060", "the AS emitted the derived INVITE");
+        assert_eq!(peer_socket.to_string(), "192.0.2.9:5061");
+        assert!(*shared_hop);
+        assert_eq!(*dt_us, 40_000);
+    }
+
+    /// The derivation alone is not enough: a same-named leg that never
+    /// departs on a hop the base leg traversed is a different call — until
+    /// the shared-hop requirement is lifted, which the evidence then records.
+    #[test]
+    fn derived_call_id_without_a_shared_hop_needs_the_relaxed_strategy() {
+        let base = sip_request("INVITE", "SDq1u9502-36a5c334-v300g00040", 1, "ba", "");
+        let derived = sip_request("INVITE", "1-SDq1u9502-36a5c334-v300g00040", 1, "bb", "");
+        let datagrams = vec![
+            dg(1_000_000, "192.0.2.9:5061", "192.0.2.67:5060", &base),
+            dg(1_040_000, "10.20.9.1:5060", "10.20.9.2:5060", &derived),
+        ];
+        let strict = FlowConfig {
+            strategies: vec![CorrelateStrategy::DerivedCallId {
+                window_us: DEFAULT_PAIR_WINDOW_US,
+                require_shared_hop: true,
+                min_base_len: 8,
+            }],
+        };
+        assert_eq!(build_flows(&datagrams, &strict).groups.len(), 2, "no loopback → no pairing");
+
+        let relaxed = FlowConfig {
+            strategies: vec![CorrelateStrategy::DerivedCallId {
+                window_us: DEFAULT_PAIR_WINDOW_US,
+                require_shared_hop: false,
+                min_base_len: 8,
+            }],
+        };
+        let flows = build_flows(&datagrams, &relaxed);
+        assert_eq!(flows.groups.len(), 1);
+        let MatchEvidence::DerivedCallId { shared_hop, as_socket, .. } = &flows.groups[0].evidence[0]
+        else {
+            panic!("expected derivation evidence")
+        };
+        assert!(!shared_hop, "the pairing must not claim a loopback it did not see");
+        assert_eq!(as_socket.to_string(), "10.20.9.1:5060");
+    }
+
+    /// Two guards against a coincidental suffix: a base Call-ID under
+    /// `min_base_len`, and a derived leg outside the pairing window. Asserted
+    /// on a derivation-only pipeline — a later strategy pairing these legs on
+    /// other evidence would mask the guard, not exercise it.
+    #[test]
+    fn short_call_ids_and_distant_legs_never_derive() {
+        let only_derivation = FlowConfig {
+            strategies: vec![CorrelateStrategy::DerivedCallId {
+                window_us: DEFAULT_PAIR_WINDOW_US,
+                require_shared_hop: true,
+                min_base_len: 8,
+            }],
+        };
+        let base = sip_request("INVITE", "abc", 1, "ba", "");
+        let derived = sip_request("INVITE", "xyzabc", 1, "bb", "");
+        let short = vec![
+            dg(1_000_000, "192.0.2.9:5061", "192.0.2.67:5060", &base),
+            dg(1_040_000, "192.0.2.67:5060", "192.0.2.9:5061", &derived),
+        ];
+        let flows = build_flows(&short, &only_derivation);
+        assert_eq!(flows.groups.len(), 2, "a 3-char base Call-ID must not derive");
+
+        let base = sip_request("INVITE", "SDq1u9502-36a5c334-v300g00040", 1, "ba", "");
+        let derived = sip_request("INVITE", "1-SDq1u9502-36a5c334-v300g00040", 1, "bb", "");
+        let distant = vec![
+            dg(1_000_000, "192.0.2.9:5061", "192.0.2.67:5060", &base),
+            dg(9_000_000, "192.0.2.67:5060", "192.0.2.9:5061", &derived),
+        ];
+        let flows = build_flows(&distant, &only_derivation);
+        assert_eq!(flows.groups.len(), 2, "8s apart is past the 5s pairing window");
+    }
+
+    /// A chain of application servers (`X` → `1-X` → `1-1-X`) collapses into
+    /// one group, each hop recorded with its own AS socket.
+    #[test]
+    fn chained_derivations_form_one_group() {
+        let a = sip_request("INVITE", "SDq1u9502-36a5c334-v300g00040", 1, "ba", "");
+        let b = sip_request("INVITE", "1-SDq1u9502-36a5c334-v300g00040", 1, "bb", "");
+        let c = sip_request("INVITE", "1-1-SDq1u9502-36a5c334-v300g00040", 1, "bc", "");
+        let datagrams = vec![
+            dg(1_000_000, "192.0.2.9:5061", "192.0.2.67:5060", &a),
+            dg(1_040_000, "192.0.2.67:5060", "192.0.2.9:5061", &b),
+            dg(1_080_000, "192.0.2.9:5061", "192.0.2.67:5060", &c),
+        ];
+        let flows = build_flows(&datagrams, &FlowConfig::default());
+        assert_eq!(flows.groups.len(), 1);
+        assert_eq!(flows.groups[0].legs, vec![0, 1, 2]);
+        assert!(flows.groups[0]
+            .evidence
+            .iter()
+            .all(|e| matches!(e, MatchEvidence::DerivedCallId { .. })));
     }
 
     /// A later strategy can still join a NOT-yet-paired leg into a group an
