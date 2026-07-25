@@ -22,8 +22,17 @@
 //!
 //! Correlation is a configurable ordered STRATEGY PIPELINE
 //! ([`FlowConfig::strategies`]): per-deployment specificity (which relayed
-//! headers, which header params) is config, not code. Strategies run in
-//! order; the first that pairs a leg wins.
+//! headers, which header params) is config, not code.
+//!
+//! GROUPING is first-wins — a later strategy never re-unions legs an earlier
+//! one already joined. EVIDENCE is not: every strategy that independently
+//! attests a pairing records it. The two differ because evidence is read, not
+//! just displayed — resolving which socket of an application-server loopback
+//! is the AS needs the derivation attestation even when a charging-id header
+//! already merged the same legs. `IdentityAdjacency` is the exception and
+//! stays gated to still-unpaired legs: it is the weakest fallback, and
+//! attesting a pairing a specific strategy already explained would assert an
+//! identity match on no better ground than "nothing else fired".
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
@@ -521,11 +530,11 @@ fn union(parent: &mut [usize], a: usize, b: usize) {
 }
 
 /// Union-find correlation over the configured strategy pipeline, in order.
-/// A later strategy never re-pairs legs an earlier one already joined (the
-/// first strategy that pairs a leg wins — its evidence is the only one
-/// recorded for that join), so evidence lands in pipeline order. Returns the
-/// final group list, ordered by first activity, with the evidence that
-/// joined each group's members.
+/// A later strategy never re-pairs legs an earlier one already joined, but it
+/// still records what it independently attests (see the module doc), so
+/// evidence lands in pipeline order and a group may carry several
+/// corroborating entries. Returns the final group list, ordered by first
+/// activity, with the evidence for each group's members.
 fn correlate(legs: &[FlowLeg], cfg: &FlowConfig) -> Vec<CallGroup> {
     let mut parent: Vec<usize> = (0..legs.len()).collect();
     let mut evidence: Vec<MatchEvidence> = Vec::new();
@@ -586,9 +595,8 @@ fn correlate(legs: &[FlowLeg], cfg: &FlowConfig) -> Vec<CallGroup> {
 
 /// Token-equality pass (strategy `si`): legs sharing a value in
 /// `tokens_by_strategy[si]` are one call. Evidence keeps every leg the value
-/// was seen on (first-seen value order — deterministic), but ONLY when the
-/// union actually merges legs an earlier strategy had not already joined —
-/// the first strategy that pairs a leg wins.
+/// was seen on (first-seen value order — deterministic) whether or not this
+/// pass is the one that merged them.
 fn token_pass(
     si: usize,
     strat: &CorrelateStrategy,
@@ -613,12 +621,17 @@ fn token_pass(
         if ls.len() < 2 {
             continue;
         }
+        // Union only when this strategy actually merges something; the evidence
+        // is recorded either way, because a strategy that INDEPENDENTLY attests
+        // a pairing an earlier one already made is corroboration, not noise —
+        // and a consumer that resolves ambiguity from evidence (which socket of
+        // a loopback is the application server) needs every attestation, not
+        // just the first.
         let roots: BTreeSet<usize> = ls.iter().map(|&l| find(parent, l)).collect();
-        if roots.len() < 2 {
-            continue; // already one group — an earlier strategy paired these
-        }
-        for w in ls.windows(2) {
-            union(parent, w[0], w[1]);
+        if roots.len() >= 2 {
+            for w in ls.windows(2) {
+                union(parent, w[0], w[1]);
+            }
         }
         evidence.push(match strat {
             CorrelateStrategy::HeaderToken { .. } => {
@@ -668,9 +681,6 @@ fn derived_call_id_pass(
             let Some(prefix) = derivation_prefix(&base_leg.call_id, &derived_leg.call_id) else {
                 continue;
             };
-            if find(parent, base) == find(parent, derived) {
-                continue; // an earlier strategy already paired these
-            }
             let dt = derived_leg.t_first().abs_diff(base_leg.t_first());
             if dt > window_us {
                 continue;
@@ -1073,11 +1083,11 @@ mod tests {
         assert_eq!(*shared_host, "10.0.0.9".parse::<IpAddr>().unwrap());
     }
 
-    /// Pipeline order: when both a relayed token and identity adjacency
-    /// would pair the same two legs, the evidence records the EARLIER
-    /// strategy — and only that one.
+    /// Identity adjacency is the gated exception to "every attesting strategy
+    /// records": when a relayed token already paired the legs, the fallback
+    /// stays silent rather than asserting an identity match on weaker ground.
     #[test]
-    fn earlier_strategy_wins_and_is_the_only_evidence() {
+    fn identity_adjacency_stays_silent_once_a_token_paired_the_legs() {
         let a = sip_request("INVITE", "ord-a", 1, "ba", "X-Api-Call: call-42\r\n");
         let b = sip_request("INVITE", "ord-b", 1, "bb", "X-Api-Call: call-42\r\n");
         let datagrams = vec![
@@ -1094,6 +1104,32 @@ mod tests {
         };
         assert_eq!(*strategy, 0);
         assert_eq!(token, "call-42");
+    }
+
+    /// Two strategies that INDEPENDENTLY attest the same pairing both record
+    /// it: the icid merges the legs, and the Call-ID derivation — which alone
+    /// names which socket is the application server — must still be attested,
+    /// or a consumer resolving the loopback from evidence goes blind.
+    #[test]
+    fn every_attesting_strategy_records_its_evidence() {
+        let icid = format!("P-Charging-Vector: icid-value={ICID}\r\n");
+        let base = sip_request("INVITE", "SDq1u9502-36a5c334-v300g00040", 1, "ba", &icid);
+        let derived = sip_request("INVITE", "1-SDq1u9502-36a5c334-v300g00040", 1, "bb", &icid);
+        let datagrams = vec![
+            dg(1_000_000, "192.0.2.9:5061", "192.0.2.67:5060", &base),
+            dg(1_040_000, "192.0.2.67:5060", "192.0.2.9:5061", &derived),
+        ];
+        let flows = build_flows(&datagrams, &FlowConfig::default());
+        assert_eq!(flows.groups.len(), 1);
+        let g = &flows.groups[0];
+        assert_eq!(g.evidence.len(), 2, "icid AND derivation must both record: {:?}", g.evidence);
+        assert!(matches!(&g.evidence[0], MatchEvidence::SharedHeaderParam { strategy: 1, .. }));
+        let MatchEvidence::DerivedCallId { strategy: 2, as_socket, peer_socket, .. } = &g.evidence[1]
+        else {
+            panic!("the derivation must be attested even though the icid merged first")
+        };
+        assert_eq!(as_socket.to_string(), "192.0.2.67:5060");
+        assert_eq!(peer_socket.to_string(), "192.0.2.9:5061");
     }
 
     /// No over-grouping: different icids, different users, no crossing —
