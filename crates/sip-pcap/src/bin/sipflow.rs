@@ -1,7 +1,7 @@
 //! sipflow — extract full SIP callflows (including the B2BUA a-leg/b-leg
-//! crossing) from tcpdump ring files.
+//! crossing) from capture files: classic pcap or pcapng, plain or gzipped.
 //!
-//! Pipeline: decode pcaps (`sip_pcap`, with IP-fragment reassembly) → build
+//! Pipeline: decode captures (`sip_pcap`, with IP-fragment reassembly) → build
 //! the flow model (`sip_pcap::flow`: parse with the real `sip-message`
 //! parser, group messages into **legs** by Call-ID, correlate legs into
 //! **calls** through the ordered strategy pipeline — relayed token headers,
@@ -29,11 +29,12 @@ use sip_pcap::flow::{build_flows, CallGroup, CorrelateStrategy, FlowConfig, Flow
 #[derive(ClapParser, Debug)]
 #[command(
     name = "sipflow",
-    about = "pcap → SIP callflow extractor with B2BUA leg correlation (see module doc)"
+    about = "capture → SIP callflow extractor with B2BUA leg correlation (see module doc)"
 )]
 struct Args {
-    /// pcap files or directories (a directory expands to its *.pcap* files).
-    /// Ring files are ordered oldest-first automatically.
+    /// Capture files or directories — pcap/pcapng, plain or `.gz` (a directory
+    /// expands to its capture files). Ring files are ordered oldest-first
+    /// automatically.
     #[arg(required = true)]
     inputs: Vec<PathBuf>,
 
@@ -126,14 +127,14 @@ fn main() {
     let args = Args::parse();
     let files = expand_inputs(&args.inputs);
     if files.is_empty() {
-        eprintln!("no pcap files found under {:?}", args.inputs);
+        eprintln!("no capture files found under {:?}", args.inputs);
         std::process::exit(2);
     }
 
-    let (datagrams, stats) = match sip_pcap::read_pcap_files(&files) {
+    let (datagrams, stats) = match sip_pcap::read_capture_files(&files) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("pcap read failed: {e}");
+            eprintln!("capture read failed: {e}");
             std::process::exit(2);
         }
     };
@@ -206,6 +207,9 @@ fn expand_inputs(inputs: &[PathBuf]) -> Vec<PathBuf> {
                 .map(|rd| {
                     rd.filter_map(|e| e.ok().map(|e| e.path()))
                         .filter(|p| {
+                            // Name-based, and deliberately loose: `.pcap`,
+                            // `.pcapng` and either gzipped. The container and
+                            // compression are re-detected from the bytes.
                             p.file_name()
                                 .and_then(|n| n.to_str())
                                 .map(|n| n.contains(".pcap"))

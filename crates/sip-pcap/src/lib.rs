@@ -1,39 +1,41 @@
-//! Classic-pcap decoder for SIP triage (test tooling, never in a runner).
+//! Capture decoder for SIP triage (test tooling, never in a runner).
 //!
-//! Reads tcpdump ring files (see `deploy/k8s/sip-capture.sh`), walks the link
-//! layer (Ethernet / Linux SLL / SLL2 / raw-IP / null-loopback), the IP layer
-//! (IPv4 + IPv6, **with fragment reassembly** — a full INVITE with SDP
-//! regularly exceeds the MTU), and UDP, yielding `(timestamp, src, dst,
-//! payload)` datagrams ready for the real `sip-message` parser.
+//! Reads tcpdump ring files and archived capture corpora — **classic pcap and
+//! pcapng, plain or gzipped, detected from the bytes** ([`source`],
+//! [`classic`], [`pcapng`]) — walks the link layer (Ethernet / Linux SLL /
+//! SLL2 / raw-IP / null-loopback), the IP layer (IPv4 + IPv6, **with fragment
+//! reassembly** — a full INVITE with SDP regularly exceeds the MTU), and UDP,
+//! yielding `(timestamp, src, dst, payload)` datagrams ready for the real
+//! `sip-message` parser.
 //!
-//! Deliberately hand-rolled instead of pulling a pcap crate: the format is
-//! tiny, we need zero capture (live) support, and workspace policy keeps
-//! dependencies lean. pcapng is NOT supported — tcpdump writes classic pcap
-//! by default; the reader rejects pcapng with a clear error.
+//! Deliberately hand-rolled instead of pulling a pcap crate: both container
+//! formats are tiny, we need zero capture (live) support, and workspace
+//! policy keeps dependencies lean.
 //!
-//! Fragment-reassembly protection (lossy captures are the norm — the ring
-//! rotates and the BPF filter sees only some ports):
-//! - a datagram is emitted ONLY when every byte `0..total_len` is covered;
-//!   a hole (missed fragment) is never padded or passed to the SIP stack,
-//! - pending reassemblies are bounded ([`MAX_PENDING_REASSEMBLIES`], oldest
-//!   evicted first) and size-capped ([`MAX_REASSEMBLED_LEN`]),
-//! - pending entries expire after [`REASSEMBLY_TTL_US`] of *capture* time
-//!   (pcap timestamps, not wall clock, so offline analysis behaves the same
-//!   as live capture would),
-//! - everything dropped is counted in [`DecodeStats`], never silent.
+//! Everything dropped is counted in [`DecodeStats`], never silent — a lossy
+//! or odd capture must be visible rather than silently thinning the callflow.
 //!
-//! Datagram decoding is this file's whole concern. The SIP flow model built
-//! on top of it (legs, hops, call-group correlation) lives in [`flow`], its
-//! JSON serialization in [`emit`]; the `sipflow` bin is a text presenter over
-//! that model.
+//! Container and frame decoding are this module tree's whole concern. The SIP
+//! flow model built on top of it (legs, hops, call-group correlation) lives in
+//! [`flow`], its JSON serialization in [`emit`]; the `sipflow` bin is a text
+//! presenter over that model.
 
+mod bytes;
+mod classic;
 pub mod emit;
 pub mod flow;
+mod frame;
+mod pcapng;
+mod reassembly;
+mod source;
 
-use std::collections::HashMap;
+pub use reassembly::{MAX_PENDING_REASSEMBLIES, MAX_REASSEMBLED_LEN, REASSEMBLY_TTL_US};
+
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::Path;
+
+use reassembly::Reassembler;
 
 /// One decoded UDP datagram from a capture.
 #[derive(Debug, Clone)]
@@ -49,13 +51,13 @@ pub struct Datagram {
 /// instead of silently thinning the callflow.
 #[derive(Debug, Default, Clone)]
 pub struct DecodeStats {
-    /// pcap records seen (all files).
+    /// Packet records seen (all files).
     pub records: u64,
     /// Records whose L2/L3 we could not walk (unknown linktype payload, ARP, …).
     pub non_ip: u64,
     /// IP packets that were not UDP (TCP, ICMP, …).
     pub non_udp: u64,
-    /// Records truncated by the snaplen (incl_len < orig_len) and dropped.
+    /// Records truncated by the snaplen (captured < original) and dropped.
     pub snap_truncated: u64,
     /// UDP datagrams emitted (post-reassembly).
     pub datagrams: u64,
@@ -93,15 +95,16 @@ impl fmt::Display for DecodeStats {
 #[derive(Debug)]
 pub enum PcapError {
     Io(std::io::Error),
-    /// Not a classic pcap file (magic mismatch). Carries a hint (e.g. pcapng).
-    BadMagic(String),
+    /// Not a capture we can walk, or corrupt past the point of resync.
+    /// Carries the path and a human-facing reason.
+    Format(String),
 }
 
 impl fmt::Display for PcapError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PcapError::Io(e) => write!(f, "io: {e}"),
-            PcapError::BadMagic(m) => write!(f, "{m}"),
+            PcapError::Format(m) => write!(f, "{m}"),
         }
     }
 }
@@ -114,448 +117,51 @@ impl From<std::io::Error> for PcapError {
     }
 }
 
-// --- reassembly guards ------------------------------------------------------
-
-/// Max concurrent in-progress reassemblies before the oldest is evicted.
-pub const MAX_PENDING_REASSEMBLIES: usize = 4096;
-/// Hard cap on a reassembled IP datagram (RFC limit is 64 KiB; SIP is far
-/// smaller — anything bigger is garbage or an attack capture).
-pub const MAX_REASSEMBLED_LEN: usize = 128 * 1024;
-/// A pending reassembly older than this (in capture time) is dropped — its
-/// missing fragment was never captured.
-pub const REASSEMBLY_TTL_US: u64 = 30_000_000;
-
-/// Reassembly key: RFC 791 (src, dst, protocol, identification); IPv6 uses
-/// the fragment-header ident with proto folded in the same way.
-#[derive(Hash, PartialEq, Eq, Clone)]
-struct FragKey {
-    src: IpAddr,
-    dst: IpAddr,
-    proto: u8,
-    ident: u32,
-}
-
-struct FragBuf {
-    first_seen_us: u64,
-    /// (offset, bytes) pieces as captured, in arrival order. Overlaps are
-    /// resolved last-writer-wins at assembly time.
-    pieces: Vec<(usize, Vec<u8>)>,
-    /// Total payload length, known once the MF=0 fragment arrives.
-    total_len: Option<usize>,
-    bytes_buffered: usize,
-}
-
-impl FragBuf {
-    /// Assemble iff every byte `0..total` is covered. Holes → `None`.
-    fn try_assemble(&self) -> Option<Vec<u8>> {
-        let total = self.total_len?;
-        if total > MAX_REASSEMBLED_LEN {
-            return None;
-        }
-        let mut buf = vec![0u8; total];
-        let mut covered = vec![false; total];
-        for (off, bytes) in &self.pieces {
-            let end = off.checked_add(bytes.len())?;
-            if end > total {
-                return None; // fragment past the declared end — corrupt
-            }
-            buf[*off..end].copy_from_slice(bytes);
-            for c in &mut covered[*off..end] {
-                *c = true;
-            }
-        }
-        covered.iter().all(|c| *c).then_some(buf)
-    }
-}
-
-/// IP-fragment reassembler shared across every record of a run (a datagram's
-/// fragments may straddle two ring files — feed files in time order).
-struct Reassembler {
-    pending: HashMap<FragKey, FragBuf>,
-    /// Insertion order for oldest-first eviction (coarse; entries may already
-    /// be gone when popped — that's fine, we skip them).
-    order: Vec<FragKey>,
-}
-
-enum FragOutcome {
-    /// Complete IP payload (proto, payload).
-    Complete(Vec<u8>),
-    /// Buffered; more fragments needed.
-    Pending,
-}
-
-impl Reassembler {
-    fn new() -> Self {
-        Self { pending: HashMap::new(), order: Vec::new() }
-    }
-
-    fn push(
-        &mut self,
-        stats: &mut DecodeStats,
-        ts_us: u64,
-        key: FragKey,
-        frag_off: usize,
-        more_fragments: bool,
-        bytes: &[u8],
-    ) -> FragOutcome {
-        stats.fragments += 1;
-        self.expire(stats, ts_us);
-
-        if !self.pending.contains_key(&key) {
-            self.order.push(key.clone());
-            self.pending.insert(
-                key.clone(),
-                FragBuf { first_seen_us: ts_us, pieces: Vec::new(), total_len: None, bytes_buffered: 0 },
-            );
-        }
-        let (over_cap, assembled) = {
-            let entry = self.pending.get_mut(&key).expect("just inserted");
-            entry.bytes_buffered += bytes.len();
-            entry.pieces.push((frag_off, bytes.to_vec()));
-            if !more_fragments {
-                entry.total_len = Some(frag_off + bytes.len());
-            }
-            // Size guard: a runaway (or hostile) fragment stream is dropped whole.
-            let over = entry.bytes_buffered > MAX_REASSEMBLED_LEN;
-            (over, if over { None } else { entry.try_assemble() })
-        };
-        if over_cap {
-            self.pending.remove(&key);
-            stats.frag_dropped += 1;
-            return FragOutcome::Pending;
-        }
-        if let Some(assembled) = assembled {
-            self.pending.remove(&key);
-            stats.reassembled += 1;
-            return FragOutcome::Complete(assembled);
-        }
-        // Table-size guard: evict oldest pending entries beyond the cap.
-        while self.pending.len() > MAX_PENDING_REASSEMBLIES {
-            match self.order.first().cloned() {
-                Some(oldest) => {
-                    self.order.remove(0);
-                    if self.pending.remove(&oldest).is_some() {
-                        stats.frag_dropped += 1;
-                    }
-                }
-                None => break,
-            }
-        }
-        FragOutcome::Pending
-    }
-
-    /// Drop pending entries whose missing fragments were never captured.
-    fn expire(&mut self, stats: &mut DecodeStats, now_us: u64) {
-        if self.pending.is_empty() {
-            return;
-        }
-        let before = self.pending.len();
-        self.pending.retain(|_, b| now_us.saturating_sub(b.first_seen_us) <= REASSEMBLY_TTL_US);
-        stats.frag_dropped += (before - self.pending.len()) as u64;
-        if self.pending.is_empty() {
-            self.order.clear();
-        }
-    }
-}
-
-// --- byte helpers -----------------------------------------------------------
-
-fn u16be(b: &[u8], off: usize) -> Option<u16> {
-    Some(u16::from_be_bytes([*b.get(off)?, *b.get(off + 1)?]))
-}
-
-fn u32at(b: &[u8], off: usize, le: bool) -> Option<u32> {
-    let raw = [*b.get(off)?, *b.get(off + 1)?, *b.get(off + 2)?, *b.get(off + 3)?];
-    Some(if le { u32::from_le_bytes(raw) } else { u32::from_be_bytes(raw) })
-}
-
-// --- the reader -------------------------------------------------------------
-
-/// Read one or more classic-pcap files (in the given order — pass them
-/// oldest-first so fragment reassembly can straddle ring-file boundaries) and
-/// return every UDP datagram plus decode counters.
-pub fn read_pcap_files<P: AsRef<Path>>(paths: &[P]) -> Result<(Vec<Datagram>, DecodeStats), PcapError> {
+/// Read one or more capture files (in the given order — pass them oldest-first
+/// so fragment reassembly can straddle ring-file boundaries) and return every
+/// UDP datagram plus decode counters. Each file's container format and
+/// compression are detected from its own bytes, so a mixed corpus reads in one
+/// call.
+pub fn read_capture_files<P: AsRef<Path>>(
+    paths: &[P],
+) -> Result<(Vec<Datagram>, DecodeStats), PcapError> {
     let mut out = Vec::new();
     let mut stats = DecodeStats::default();
     let mut reasm = Reassembler::new();
     for p in paths {
-        let bytes = std::fs::read(p)?;
+        let bytes = source::load(p.as_ref())?;
         read_one(&bytes, &mut out, &mut stats, &mut reasm)
-            .map_err(|m| PcapError::BadMagic(format!("{}: {m}", p.as_ref().display())))?;
+            .map_err(|m| PcapError::Format(format!("{}: {m}", p.as_ref().display())))?;
     }
-    stats.frag_dropped += reasm.pending.len() as u64; // still-incomplete at EOF
+    stats.frag_dropped += reasm.pending_len() as u64; // still-incomplete at EOF
     Ok((out, stats))
 }
 
+/// Dispatch on the container magic: pcapng's Section Header Block type is
+/// byte-order agnostic (`0a 0d 0d 0a`), classic pcap has four magics.
 fn read_one(
     bytes: &[u8],
     out: &mut Vec<Datagram>,
     stats: &mut DecodeStats,
     reasm: &mut Reassembler,
 ) -> Result<(), String> {
-    if bytes.len() < 24 {
-        return Err("file shorter than a pcap global header".into());
-    }
-    let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    let (le, ns) = match magic {
-        0xa1b2_c3d4 => (true, false),
-        0xa1b2_3c4d => (true, true),
-        0xd4c3_b2a1 => (false, false),
-        0x4d3c_b2a1 => (false, true),
-        0x0a0d_0d0a => {
-            return Err("pcapng file — not supported; capture with plain tcpdump (classic pcap)".into())
-        }
-        m => return Err(format!("not a pcap file (magic {m:#010x})")),
+    let magic = match bytes.get(..4) {
+        Some(m) => u32::from_le_bytes([m[0], m[1], m[2], m[3]]),
+        None => return Err("file shorter than a capture header".into()),
     };
-    let linktype = u32at(bytes, 20, le).ok_or("bad global header")?;
-
-    let mut off = 24usize;
-    loop {
-        if off + 16 > bytes.len() {
-            if off != bytes.len() {
-                stats.tail_truncated += 1;
-            }
-            return Ok(());
-        }
-        let ts_sec = u32at(bytes, off, le).unwrap_or(0) as u64;
-        let ts_frac = u32at(bytes, off + 4, le).unwrap_or(0) as u64;
-        let incl = u32at(bytes, off + 8, le).unwrap_or(0) as usize;
-        let orig = u32at(bytes, off + 12, le).unwrap_or(0) as usize;
-        off += 16;
-        if off + incl > bytes.len() {
-            stats.tail_truncated += 1;
-            return Ok(());
-        }
-        let frame = &bytes[off..off + incl];
-        off += incl;
-        stats.records += 1;
-        let ts_us = ts_sec * 1_000_000 + if ns { ts_frac / 1_000 } else { ts_frac };
-        if incl < orig {
-            // Snapped short: a partial SIP message would parse as garbage (or,
-            // worse, as a truncated body) — drop it loudly instead.
-            stats.snap_truncated += 1;
-            continue;
-        }
-        decode_frame(linktype, frame, ts_us, out, stats, reasm);
-    }
-}
-
-fn decode_frame(
-    linktype: u32,
-    frame: &[u8],
-    ts_us: u64,
-    out: &mut Vec<Datagram>,
-    stats: &mut DecodeStats,
-    reasm: &mut Reassembler,
-) {
-    // Walk L2 → an IP packet (version told by ethertype or first nibble).
-    let ip: &[u8] = match linktype {
-        // Ethernet, with 802.1Q/802.1ad VLAN tag skipping.
-        1 => {
-            let mut o = 12usize;
-            let mut ethertype = match u16be(frame, o) {
-                Some(t) => t,
-                None => return void_non_ip(stats),
-            };
-            while ethertype == 0x8100 || ethertype == 0x88a8 || ethertype == 0x9100 {
-                o += 4;
-                ethertype = match u16be(frame, o) {
-                    Some(t) => t,
-                    None => return void_non_ip(stats),
-                };
-            }
-            if ethertype != 0x0800 && ethertype != 0x86dd {
-                return void_non_ip(stats);
-            }
-            &frame[o + 2..]
-        }
-        // Linux cooked v1 (`-i any` on older libpcap): proto at 14, data at 16.
-        113 => {
-            match u16be(frame, 14) {
-                Some(0x0800) | Some(0x86dd) => {}
-                _ => return void_non_ip(stats),
-            }
-            if frame.len() < 16 {
-                return void_non_ip(stats);
-            }
-            &frame[16..]
-        }
-        // Linux cooked v2 (`-i any` on current libpcap): proto at 0, data at 20.
-        276 => {
-            match u16be(frame, 0) {
-                Some(0x0800) | Some(0x86dd) => {}
-                _ => return void_non_ip(stats),
-            }
-            if frame.len() < 20 {
-                return void_non_ip(stats);
-            }
-            &frame[20..]
-        }
-        // Raw IP.
-        101 | 12 => frame,
-        // BSD null / loopback: 4-byte AF, either byte order.
-        0 | 108 => {
-            if frame.len() < 4 {
-                return void_non_ip(stats);
-            }
-            &frame[4..]
-        }
-        _ => return void_non_ip(stats),
-    };
-
-    match ip.first().map(|b| b >> 4) {
-        Some(4) => decode_ipv4(ip, ts_us, out, stats, reasm),
-        Some(6) => decode_ipv6(ip, ts_us, out, stats, reasm),
-        _ => void_non_ip(stats),
-    }
-}
-
-fn void_non_ip(stats: &mut DecodeStats) {
-    stats.non_ip += 1;
-}
-
-fn decode_ipv4(
-    ip: &[u8],
-    ts_us: u64,
-    out: &mut Vec<Datagram>,
-    stats: &mut DecodeStats,
-    reasm: &mut Reassembler,
-) {
-    if ip.len() < 20 {
-        return void_non_ip(stats);
-    }
-    let ihl = ((ip[0] & 0x0f) as usize) * 4;
-    let total = u16be(ip, 2).unwrap_or(0) as usize;
-    if ihl < 20 || total < ihl || ip.len() < total {
-        return void_non_ip(stats);
-    }
-    let proto = ip[9];
-    let src = IpAddr::V4(Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15]));
-    let dst = IpAddr::V4(Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]));
-    let payload = &ip[ihl..total];
-
-    let flags_frag = u16be(ip, 6).unwrap_or(0);
-    let more_fragments = flags_frag & 0x2000 != 0;
-    let frag_off = ((flags_frag & 0x1fff) as usize) * 8;
-
-    if more_fragments || frag_off != 0 {
-        let ident = u16be(ip, 4).unwrap_or(0) as u32;
-        let key = FragKey { src, dst, proto, ident };
-        match reasm.push(stats, ts_us, key, frag_off, more_fragments, payload) {
-            FragOutcome::Complete(full) => emit_udp(proto, &full, src, dst, ts_us, out, stats),
-            FragOutcome::Pending => {}
-        }
+    if magic == pcapng::SHB_TYPE {
+        pcapng::walk(bytes, out, stats, reasm)
+    } else if classic::MAGICS.contains(&magic) {
+        classic::walk(bytes, out, stats, reasm)
     } else {
-        emit_udp(proto, payload, src, dst, ts_us, out, stats);
+        Err(format!("not a pcap or pcapng capture (magic {magic:#010x})"))
     }
-}
-
-fn decode_ipv6(
-    ip: &[u8],
-    ts_us: u64,
-    out: &mut Vec<Datagram>,
-    stats: &mut DecodeStats,
-    reasm: &mut Reassembler,
-) {
-    if ip.len() < 40 {
-        return void_non_ip(stats);
-    }
-    let payload_len = u16be(ip, 4).unwrap_or(0) as usize;
-    if ip.len() < 40 + payload_len {
-        return void_non_ip(stats);
-    }
-    let mut src16 = [0u8; 16];
-    let mut dst16 = [0u8; 16];
-    src16.copy_from_slice(&ip[8..24]);
-    dst16.copy_from_slice(&ip[24..40]);
-    let src = IpAddr::V6(Ipv6Addr::from(src16));
-    let dst = IpAddr::V6(Ipv6Addr::from(dst16));
-
-    let mut nh = ip[6];
-    let mut off = 40usize;
-    let end = 40 + payload_len;
-    // Walk extension headers; a fragment header hands the rest to the reassembler.
-    loop {
-        match nh {
-            // hop-by-hop / routing / destination options
-            0 | 43 | 60 => {
-                if off + 2 > end {
-                    return void_non_ip(stats);
-                }
-                let next = ip[off];
-                let len = (ip[off + 1] as usize + 1) * 8;
-                nh = next;
-                off += len;
-                if off > end {
-                    return void_non_ip(stats);
-                }
-            }
-            // fragment header
-            44 => {
-                if off + 8 > end {
-                    return void_non_ip(stats);
-                }
-                let next = ip[off];
-                let fo = u16be(ip, off + 2).unwrap_or(0);
-                let frag_off = ((fo >> 3) as usize) * 8;
-                let more_fragments = fo & 0x1 != 0;
-                let ident = u32at(ip, off + 4, false).unwrap_or(0);
-                let frag_payload = &ip[off + 8..end];
-                let key = FragKey { src, dst, proto: next, ident };
-                match reasm.push(stats, ts_us, key, frag_off, more_fragments, frag_payload) {
-                    FragOutcome::Complete(full) => {
-                        emit_udp(next, &full, src, dst, ts_us, out, stats)
-                    }
-                    FragOutcome::Pending => {}
-                }
-                return;
-            }
-            17 => {
-                emit_udp(17, &ip[off..end], src, dst, ts_us, out, stats);
-                return;
-            }
-            _ => return void_non_udp(stats),
-        }
-    }
-}
-
-fn void_non_udp(stats: &mut DecodeStats) {
-    stats.non_udp += 1;
-}
-
-fn emit_udp(
-    proto: u8,
-    payload: &[u8],
-    src_ip: IpAddr,
-    dst_ip: IpAddr,
-    ts_us: u64,
-    out: &mut Vec<Datagram>,
-    stats: &mut DecodeStats,
-) {
-    if proto != 17 {
-        return void_non_udp(stats);
-    }
-    if payload.len() < 8 {
-        return void_non_udp(stats);
-    }
-    let sport = u16be(payload, 0).unwrap_or(0);
-    let dport = u16be(payload, 2).unwrap_or(0);
-    let ulen = u16be(payload, 4).unwrap_or(0) as usize;
-    if ulen < 8 || payload.len() < ulen {
-        return void_non_udp(stats);
-    }
-    stats.datagrams += 1;
-    out.push(Datagram {
-        ts_us,
-        src: SocketAddr::new(src_ip, sport),
-        dst: SocketAddr::new(dst_ip, dport),
-        payload: payload[8..ulen].to_vec(),
-    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     /// Build a classic-pcap (LE, µs, LINKTYPE_RAW=101) file in memory.
     fn pcap_raw_ip(records: &[(u64, Vec<u8>)]) -> Vec<u8> {
@@ -574,6 +180,52 @@ mod tests {
             f.extend_from_slice(pkt);
         }
         f
+    }
+
+    /// Build a pcapng (LE) file: SHB, one IDB, then one EPB per record.
+    /// `tsresol` is written as `if_tsresol` when `Some`.
+    fn pcapng_raw_ip(records: &[(u64, Vec<u8>)], linktype: u16, tsresol: Option<u8>) -> Vec<u8> {
+        let mut f = Vec::new();
+        // Section Header Block.
+        let mut shb = Vec::new();
+        shb.extend_from_slice(&0x1a2b_3c4du32.to_le_bytes());
+        shb.extend_from_slice(&1u16.to_le_bytes()); // major
+        shb.extend_from_slice(&0u16.to_le_bytes()); // minor
+        shb.extend_from_slice(&(-1i64).to_le_bytes()); // section length: unknown
+        push_block(&mut f, 0x0a0d_0d0a, &shb);
+        // Interface Description Block.
+        let mut idb = Vec::new();
+        idb.extend_from_slice(&linktype.to_le_bytes());
+        idb.extend_from_slice(&0u16.to_le_bytes()); // reserved
+        idb.extend_from_slice(&65535u32.to_le_bytes()); // snaplen
+        if let Some(r) = tsresol {
+            idb.extend_from_slice(&9u16.to_le_bytes()); // if_tsresol
+            idb.extend_from_slice(&1u16.to_le_bytes());
+            idb.extend_from_slice(&[r, 0, 0, 0]); // value + padding
+            idb.extend_from_slice(&[0u8; 4]); // opt_endofopt
+        }
+        push_block(&mut f, 0x0000_0001, &idb);
+        for (ticks, pkt) in records {
+            let mut epb = Vec::new();
+            epb.extend_from_slice(&0u32.to_le_bytes()); // interface id
+            epb.extend_from_slice(&((ticks >> 32) as u32).to_le_bytes());
+            epb.extend_from_slice(&(*ticks as u32).to_le_bytes());
+            epb.extend_from_slice(&(pkt.len() as u32).to_le_bytes()); // captured
+            epb.extend_from_slice(&(pkt.len() as u32).to_le_bytes()); // original
+            epb.extend_from_slice(pkt);
+            epb.resize(epb.len().div_ceil(4) * 4, 0); // packet data padding
+            push_block(&mut f, 0x0000_0006, &epb);
+        }
+        f
+    }
+
+    /// Frame a pcapng block: type, total_length, body, total_length.
+    fn push_block(out: &mut Vec<u8>, btype: u32, body: &[u8]) {
+        let total = (12 + body.len()) as u32;
+        out.extend_from_slice(&btype.to_le_bytes());
+        out.extend_from_slice(&total.to_le_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(&total.to_le_bytes());
     }
 
     fn udp_packet(payload: &[u8], sport: u16, dport: u16) -> Vec<u8> {
@@ -603,10 +255,29 @@ mod tests {
         p
     }
 
+    /// Ethernet header with one 802.1Q VLAN tag, carrying IPv4 — the shape
+    /// the archived pcapng corpus uses.
+    fn eth_vlan(ip: &[u8]) -> Vec<u8> {
+        let mut f = Vec::new();
+        f.extend_from_slice(&[0x3c, 0xfd, 0xfe, 0x81, 0x7f, 0x68]); // dst
+        f.extend_from_slice(&[0xe0, 0x2f, 0x6d, 0x4a, 0xa8, 0x11]); // src
+        f.extend_from_slice(&0x8100u16.to_be_bytes()); // 802.1Q
+        f.extend_from_slice(&0x0028u16.to_be_bytes()); // vid
+        f.extend_from_slice(&0x0800u16.to_be_bytes()); // IPv4
+        f.extend_from_slice(ip);
+        f
+    }
+
     fn write_tmp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("sip-pcap-test-{}-{name}", std::process::id()));
         std::fs::write(&p, bytes).unwrap();
         p
+    }
+
+    fn write_tmp_gz(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(bytes).unwrap();
+        write_tmp(name, &enc.finish().unwrap())
     }
 
     #[test]
@@ -614,7 +285,7 @@ mod tests {
         let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
         let pkt = ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false);
         let file = write_tmp("plain", &pcap_raw_ip(&[(1_000_000, pkt)]));
-        let (dgs, stats) = read_pcap_files(&[&file]).unwrap();
+        let (dgs, stats) = read_capture_files(&[&file]).unwrap();
         std::fs::remove_file(&file).ok();
         assert_eq!(dgs.len(), 1);
         assert_eq!(dgs[0].payload, msg);
@@ -633,7 +304,7 @@ mod tests {
         let f1 = ipv4(&udp[..cut], 7, 0, true);
         let f2 = ipv4(&udp[cut..], 7, cut, false);
         let file = write_tmp("frag", &pcap_raw_ip(&[(1_000_000, f2), (1_000_500, f1)]));
-        let (dgs, stats) = read_pcap_files(&[&file]).unwrap();
+        let (dgs, stats) = read_capture_files(&[&file]).unwrap();
         std::fs::remove_file(&file).ok();
         assert_eq!(dgs.len(), 1, "stats: {stats}");
         assert_eq!(dgs[0].payload, body);
@@ -647,7 +318,7 @@ mod tests {
         let udp = udp_packet(&body, 6001, 5060);
         let f2 = ipv4(&udp[600..], 9, 600, false); // last fragment only
         let file = write_tmp("hole", &pcap_raw_ip(&[(1_000_000, f2)]));
-        let (dgs, stats) = read_pcap_files(&[&file]).unwrap();
+        let (dgs, stats) = read_capture_files(&[&file]).unwrap();
         std::fs::remove_file(&file).ok();
         assert!(dgs.is_empty());
         assert_eq!(stats.frag_dropped, 1); // counted at EOF
@@ -661,12 +332,115 @@ mod tests {
         // A later unrelated fragment 60s on (past REASSEMBLY_TTL_US) triggers expiry.
         let other = udp_packet(&[1u8; 16], 1, 2);
         let g1 = ipv4(&other[..8], 12, 0, true);
-        let file =
-            write_tmp("stale", &pcap_raw_ip(&[(1_000_000, f1), (61_000_000, g1)]));
-        let (dgs, stats) = read_pcap_files(&[&file]).unwrap();
+        let file = write_tmp("stale", &pcap_raw_ip(&[(1_000_000, f1), (61_000_000, g1)]));
+        let (dgs, stats) = read_capture_files(&[&file]).unwrap();
         std::fs::remove_file(&file).ok();
         assert!(dgs.is_empty());
         // f1's entry expired (1) + g1 still pending at EOF (1).
         assert_eq!(stats.frag_dropped, 2);
+    }
+
+    /// A pcapng capture decodes to the same datagrams as the classic form,
+    /// through the Ethernet+VLAN link layer the archived corpus uses.
+    #[test]
+    fn decodes_a_pcapng_capture() {
+        let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+        let frame = eth_vlan(&ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false));
+        let file = write_tmp("ng", &pcapng_raw_ip(&[(1_638_412_000_000_000, frame)], 1, None));
+        let (dgs, stats) = read_capture_files(&[&file]).unwrap();
+        std::fs::remove_file(&file).ok();
+        assert_eq!(dgs.len(), 1, "stats: {stats}");
+        assert_eq!(dgs[0].payload, msg);
+        // No if_tsresol option → pcapng's microsecond default, used verbatim.
+        assert_eq!(dgs[0].ts_us, 1_638_412_000_000_000);
+    }
+
+    /// `if_tsresol` is honoured in both decimal and binary form: the same
+    /// wall-clock instant expressed in ns / µs / ms / 2^-32 s decodes alike.
+    #[test]
+    fn pcapng_timestamp_resolution_is_honoured() {
+        let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+        let frame = eth_vlan(&ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false));
+        let secs = 1_638_412_000u64;
+        let cases = [
+            (9u8, secs * 1_000_000_000), // nanoseconds
+            (6u8, secs * 1_000_000),     // microseconds
+            (3u8, secs * 1_000),         // milliseconds
+            (0x80 | 32, secs << 32),     // binary, 2^-32 s
+        ];
+        for (resol, ticks) in cases {
+            let file = write_tmp(
+                &format!("ngres{resol}"),
+                &pcapng_raw_ip(&[(ticks, frame.clone())], 1, Some(resol)),
+            );
+            let (dgs, _) = read_capture_files(&[&file]).unwrap();
+            std::fs::remove_file(&file).ok();
+            assert_eq!(dgs.len(), 1, "resol {resol:#x}");
+            assert_eq!(dgs[0].ts_us, secs * 1_000_000, "resol {resol:#x}");
+        }
+    }
+
+    /// Compression is detected from the stream, not the file name: the same
+    /// bytes gzipped decode identically, for both containers.
+    #[test]
+    fn gzipped_captures_decode_identically() {
+        let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+        let ip = ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false);
+        let classic = pcap_raw_ip(&[(1_000_000, ip.clone())]);
+        let ng = pcapng_raw_ip(&[(1_000_000, eth_vlan(&ip))], 1, None);
+        for (name, bytes) in [("gzclassic", classic), ("gzng", ng)] {
+            let plain = write_tmp(name, &bytes);
+            let gz = write_tmp_gz(&format!("{name}z"), &bytes);
+            let (a, _) = read_capture_files(&[&plain]).unwrap();
+            let (b, _) = read_capture_files(&[&gz]).unwrap();
+            std::fs::remove_file(&plain).ok();
+            std::fs::remove_file(&gz).ok();
+            assert_eq!(a.len(), 1, "{name}");
+            assert_eq!(a[0].payload, b[0].payload, "{name}");
+            assert_eq!(a[0].ts_us, b[0].ts_us, "{name}");
+        }
+    }
+
+    /// A corpus mixing both containers and both compressions reads in one
+    /// call — the format is per-file, never a mode the caller must declare.
+    #[test]
+    fn mixed_container_corpus_reads_in_one_call() {
+        let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+        let ip = ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false);
+        let a = write_tmp("mixa", &pcap_raw_ip(&[(1_000_000, ip.clone())]));
+        let b = write_tmp_gz("mixb", &pcapng_raw_ip(&[(2_000_000, eth_vlan(&ip))], 1, None));
+        let (dgs, stats) = read_capture_files(&[&a, &b]).unwrap();
+        std::fs::remove_file(&a).ok();
+        std::fs::remove_file(&b).ok();
+        assert_eq!(dgs.len(), 2, "stats: {stats}");
+        assert_eq!(stats.records, 2);
+        assert_eq!(dgs[0].ts_us, 1_000_000);
+        assert_eq!(dgs[1].ts_us, 2_000_000);
+    }
+
+    /// A truncated tail (the capture was still being written) is counted, not
+    /// an error: the datagrams before the cut are still returned.
+    #[test]
+    fn truncated_pcapng_tail_is_counted_not_fatal() {
+        let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+        let frame = eth_vlan(&ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false));
+        let mut bytes = pcapng_raw_ip(&[(1_000_000, frame.clone()), (2_000_000, frame)], 1, None);
+        bytes.truncate(bytes.len() - 40); // cut into the second EPB
+        let file = write_tmp("ngtrunc", &bytes);
+        let (dgs, stats) = read_capture_files(&[&file]).unwrap();
+        std::fs::remove_file(&file).ok();
+        assert_eq!(dgs.len(), 1);
+        assert_eq!(stats.tail_truncated, 1);
+    }
+
+    #[test]
+    fn unknown_container_is_a_clear_error() {
+        let file = write_tmp("junk", b"not a capture at all, just bytes");
+        let err = read_capture_files(&[&file]).unwrap_err();
+        std::fs::remove_file(&file).ok();
+        assert!(
+            format!("{err}").contains("not a pcap or pcapng capture"),
+            "unhelpful error: {err}"
+        );
     }
 }

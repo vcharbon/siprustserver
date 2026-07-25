@@ -119,6 +119,10 @@ sha2 = "0.10"
 sha1 = "0.10"
 base64 = "0.22"
 subtle = "2"
+# `flate2` (pure-Rust `miniz_oxide` backend, no C zlib) lets `sip-pcap` read
+# archived capture corpora — routinely shipped gzipped — without a decompress
+# step on the side. Offline triage tooling only, never linked into a runner.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 arc-swap = "1"
 # `socket2` builds the proxy's SO_REUSEPORT recv shards (tokio's UdpSocket has
 # no reuse-port knob): N sockets on one port, kernel flow-hashing keeps a given
