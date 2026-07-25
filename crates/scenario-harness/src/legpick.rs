@@ -64,6 +64,19 @@ impl<'a> LegInfo<'a> {
     pub fn ruri_user(&self) -> Option<String> {
         self.ruri().as_deref().and_then(uri_user)
     }
+    /// Whether this leg is a dialog-CREATING (out-of-dialog) INVITE — method
+    /// INVITE with a tag-less To (RFC 3261 §12.1). The test every dispatcher
+    /// applies before assigning a new leg to a receiver.
+    pub fn is_initial_invite(&self) -> bool {
+        self.method().is_some_and(|m| m.eq_ignore_ascii_case("INVITE"))
+            && !self
+                .header("to")
+                .or_else(|| self.header("t"))
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .contains(";tag=")
+    }
+
     /// The To header user-part.
     pub fn to_user(&self) -> Option<String> {
         self.header("to").or_else(|| self.header("t")).as_deref().and_then(uri_user)

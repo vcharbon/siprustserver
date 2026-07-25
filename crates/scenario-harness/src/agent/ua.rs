@@ -75,6 +75,14 @@ impl Agent {
         self.addr
     }
 
+    /// The identity of the UA STACK behind this handle: equal for clones of one
+    /// agent, distinct for agents that merely share a bound address (the logical
+    /// agents of a [`CalleeGroup`](crate::CalleeGroup) each keep their own). A
+    /// consumer that must run ONE receive pump per stack groups actors on it.
+    pub fn stack_id(&self) -> usize {
+        Arc::as_ptr(&self.txn) as *const () as usize
+    }
+
     /// Drop this UA to the **raw wire surface**: disable the §17.2
     /// once-and-only-once receive view ([`TxnView`]) so EVERY duplicate
     /// datagram surfaces again. Reach for this ONLY when retransmission is

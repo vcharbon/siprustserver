@@ -22,11 +22,22 @@
 //! collapse the join — the B1 correction). Everything is `Send`; both lanes use
 //! plain `tokio::time` (no `SettleDriver` — B2/B4).
 //!
+//! # Endpoints may host SEVERAL actors ([`endpoint`])
+//!
+//! Actors whose [`ActorSpec::agent`] is the same UA stack share one endpoint —
+//! a peer socket that both originates a call and receives one (an application
+//! server looping a call back to it). That endpoint gets ONE receive pump,
+//! joined with the actors here, which demultiplexes each inbound to its owner:
+//! by dialog identity, and for an initial INVITE by the actors'
+//! [`ActorSpec::claim`] rules. An actor that owns its endpoint outright pulls
+//! [`Agent::recv_any`](crate::Agent::recv_any) itself, unchanged.
+//!
 //! P0 ships the substrate only; nothing outside this module references it yet
 //! (the [`crate::realcall`] bodies keep their linear form until P1's adapter).
 
 mod actor;
 mod delta;
+pub mod endpoint;
 mod goals;
 mod ledger;
 pub mod scenarios;
@@ -47,6 +58,7 @@ pub use actor::{
     run_actor, ActorSpec, ActorState, Automatics, CtxFeed, Disposition, Feed, MediaState,
     SUBFLOW_EARLY, SUBFLOW_REALIGN, SUBFLOW_RENEG, SUBFLOW_REFER,
 };
+pub use endpoint::{EndpointHandle, EndpointPump, Inbox};
 pub use delta::{
     AcceptedDelta, AcceptedDeltaPolicy, DeltaContext, DeltaDecision, DeltaReaction, DialogSnapshot,
     ExpectedStimulus, ObservedStimulus,
@@ -209,9 +221,13 @@ pub async fn run_call_with(
     let mut scopes = Vec::with_capacity(call.actors.len());
     let mut states = Vec::with_capacity(call.actors.len());
     let automatics = call.automatics;
+    // Actors sharing ONE UA stack get ONE receive pump that demultiplexes to
+    // them; an actor that owns its endpoint keeps pulling `recv_any` itself.
+    let (pumps, mut seats) = endpoint::wire_shared_endpoints(&call.actors, &obs);
     for spec in call.actors {
         let scope = Arc::new(CallScope::new());
-        states.push(ActorState::from_spec(
+        let seat = seats.remove(spec.role);
+        let mut state = ActorState::from_spec(
             spec,
             obs.clone(),
             scope.clone(),
@@ -220,7 +236,11 @@ pub async fn run_call_with(
             challenge_responder.clone(),
             automatics,
             call.delta_policy.clone(),
-        ));
+        );
+        if let Some((inbox, handle)) = seat {
+            state = state.on_shared_endpoint(inbox, handle);
+        }
+        states.push(state);
         scopes.push(scope);
     }
 
@@ -232,7 +252,14 @@ pub async fn run_call_with(
     };
 
     let drive = async {
-        let actors: FuturesUnordered<_> = states.into_iter().map(run_actor).collect();
+        // The pumps are joined with the actors: one task, one `select!` — a pump
+        // is as reactive as the actors it feeds, and a fatal receive surfaces
+        // through the same arm an actor's would.
+        let actors: FuturesUnordered<futures::future::BoxFuture<'_, Result<(), StepError>>> =
+            states.into_iter().map(|s| run_actor(s).boxed()).collect();
+        for pump in pumps {
+            actors.push(pump.run().boxed());
+        }
         tokio::select! {
             v = controller.drive_to_verdict() => v,
             e = drive_actors(actors) => CallVerdict::Failed(e),
@@ -293,6 +320,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -308,6 +336,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![phase("established", |s| {
@@ -361,6 +390,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -375,6 +405,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![phase("established", |s| {
@@ -409,6 +440,7 @@ mod tests {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             }],
             plan: vec![phase("established", |s| s.leg_at_least("bob", LegPhase::Confirmed))],
             settle: SettleBarrier::default_ceiling(),
@@ -628,6 +660,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -641,6 +674,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![phase("established", |s| {
@@ -793,6 +827,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -816,6 +851,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![],
@@ -916,6 +952,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -929,6 +966,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![phase("ringing", ringing)],
@@ -1022,6 +1060,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -1036,6 +1075,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![
@@ -1098,6 +1138,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -1112,6 +1153,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![
@@ -1191,6 +1233,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -1204,6 +1247,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![phase("confirmed", |s| s.leg_at_least("alice", LegPhase::Confirmed))],
@@ -1267,6 +1311,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -1282,6 +1327,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![phase("established", |s| {
@@ -1546,6 +1592,7 @@ mod tests {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             }],
             plan: vec![phase("confirmed", alice_confirmed)],
             settle: SettleBarrier::default_ceiling(),
@@ -1634,6 +1681,7 @@ mod tests {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             }],
             plan: vec![phase("confirmed", alice_confirmed)],
             settle: SettleBarrier::default_ceiling(),
@@ -1705,6 +1753,7 @@ mod tests {
         
             cseq: None,
             delayed: None,
+            claim: None,
         }
     }
 
@@ -1722,6 +1771,7 @@ mod tests {
         
             cseq: None,
             delayed: None,
+            claim: None,
         }
     }
 
@@ -1834,6 +1884,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![established_phase()],
@@ -1988,6 +2039,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![],
@@ -2747,6 +2799,7 @@ mod tests {
                     feed: CtxFeed::default(),
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![],
@@ -3046,6 +3099,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![],
@@ -3168,6 +3222,7 @@ mod tests {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             scripted_spec("bob", &bob, vec![]),
         ];
@@ -3386,6 +3441,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -3399,6 +3455,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![established_phase()],
@@ -3458,6 +3515,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![established_phase()],
@@ -3532,6 +3590,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -3545,6 +3604,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![phase("confirmed", |s| s.leg_at_least("alice", LegPhase::Confirmed))],
@@ -3605,6 +3665,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
                 ActorSpec {
                     role: "bob",
@@ -3618,6 +3679,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
             ],
             plan: vec![
@@ -3686,6 +3748,7 @@ mod tests {
                 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 },
                 scripted_spec(
                     "bob",
@@ -3936,6 +3999,7 @@ mod tests {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             }],
             plan: vec![],
             settle: SettleBarrier::default_ceiling(),

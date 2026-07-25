@@ -44,6 +44,7 @@ use super::delta::{
     AcceptedDelta, AcceptedDeltaPolicy, DeltaContext, DeltaDecision, DeltaReaction, DialogSnapshot,
     ExpectedStimulus, ObservedStimulus,
 };
+use super::endpoint::{EndpointHandle, Inbox};
 use super::goals::{BodyExpect, EarlyId, FinalAssert, Goal, GoalCursor, GoalStep, RequestKind};
 use super::ledger::{ObligationKey, ObligationKind};
 use super::state::{Observation, ObservedState, ResponseFact, SubflowState};
@@ -353,6 +354,12 @@ pub struct ActorSpec {
     /// A declared delayed automatic (ADR-0024 §6): hold this actor's originated
     /// INVITE's automatic ACK-to-2xx for a duration. `None` = fire immediately.
     pub delayed: Option<DelayedAutomatic>,
+    /// The rule by which an inbound INITIAL INVITE arriving on this actor's
+    /// endpoint is THIS actor's, when several actors share the endpoint (see
+    /// [`crate::actor::endpoint`]). `None` = the actor claims no inbound leg: it
+    /// receives only the dialogs it originates. Ignored on an unshared endpoint,
+    /// where every inbound is the sole actor's.
+    pub claim: Option<crate::claim::ClaimRule>,
 }
 
 /// The live per-endpoint state driven by [`run_actor`].
@@ -507,6 +514,13 @@ pub struct ActorState<'c> {
     /// tag) — the [`DialogSnapshot::early_dialog_count`] source. Read only
     /// while an initial-INVITE target is still pending.
     early_provisionals: HashSet<String>,
+    /// Where this actor's inbound comes from: its own UA (the unshared default)
+    /// or the shared endpoint's pump. Taken by [`run_actor`] at entry.
+    inbox: Option<Inbox>,
+    /// This actor's registration on its SHARED endpoint — a dialog it
+    /// originates is bound to it here so the dialog's traffic comes back.
+    /// `None` on an unshared endpoint.
+    endpoint: Option<EndpointHandle>,
 }
 
 impl<'c> ActorState<'c> {
@@ -582,7 +596,18 @@ impl<'c> ActorState<'c> {
             originates,
             delta_policy,
             early_provisionals: HashSet::new(),
+            inbox: None,
+            endpoint: None,
         }
+    }
+
+    /// Seat this actor at a SHARED endpoint: inbound arrives through the
+    /// endpoint's one pump, and every dialog this actor originates is bound to
+    /// it so the dialog's responses and in-dialog requests come back here.
+    pub(super) fn on_shared_endpoint(mut self, inbox: Inbox, handle: EndpointHandle) -> Self {
+        self.inbox = Some(inbox);
+        self.endpoint = Some(handle);
+        self
     }
 
     /// The SDP body to answer an INVITE/UPDATE with — this endpoint's answer (or
@@ -605,9 +630,12 @@ pub async fn run_actor(mut st: ActorState<'_>) -> Result<(), StepError> {
     let agent = st.agent.clone();
     let obs = st.obs.clone();
     let step_timeout = st.step_timeout;
+    // Inbound source: this actor's own UA, or — when several actors share the
+    // endpoint — the seat its pump delivers to. Same vocabulary either way.
+    let mut inbox = st.inbox.take().unwrap_or_else(|| Inbox::Own(agent.clone()));
     loop {
         tokio::select! {
-            inbound = agent.recv_any() => {
+            inbound = inbox.recv() => {
                 match inbound {
                     Ok(m) => default_react(&mut st, m).await?,
                     // B3: a reactor recv deadline is NOT fatal — loop again (a
@@ -2394,6 +2422,11 @@ async fn originate_initial_invite(
         st.expected_provisional = 183;
     }
     let call = builder.send().await;
+    // Bind the new dialog to this actor at its shared endpoint, in the same poll
+    // as the send — before the actor yields, so no response can precede it.
+    if let Some(ep) = &st.endpoint {
+        ep.own_dialog(call.call_id());
+    }
     st.scope.set_early(call.cancel_handle());
     st.dialogs.pending_invite = Some(call);
     // The caller APPEARS the moment she originates — so `all_terminated`

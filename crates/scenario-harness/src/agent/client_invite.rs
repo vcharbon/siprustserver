@@ -80,6 +80,12 @@ pub struct ClientInvite {
 }
 
 impl ClientInvite {
+    /// The Call-ID of the dialog this INVITE creates — the identity a
+    /// per-endpoint demux binds the originating actor to.
+    pub fn call_id(&self) -> String {
+        self.original_invite.call_id.to_string()
+    }
+
     /// Wait for and assert a response status. Learns the remote tag (from the
     /// first tagged response) and the remote target (from Contact), so the
     /// later ACK/BYE route and address correctly. Returns the response.

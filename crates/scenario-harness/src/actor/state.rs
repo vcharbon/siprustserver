@@ -70,6 +70,12 @@ pub enum ReplayEntry {
         observed: String,
         rule: &'static str,
     },
+    /// An inbound a SHARED endpoint's demux could hand to no actor — an initial
+    /// INVITE no pending claim owns, a response no member's dialog owns, or a
+    /// message for an actor that has already finished. `endpoint` names the UA
+    /// it arrived on, `detail` the message. Counted and recorded, never
+    /// silently dropped.
+    UnclaimedInbound { endpoint: String, detail: String },
 }
 
 /// One endpoint leg's observed dialog lifecycle. Ordered so `max` gives the
@@ -329,6 +335,9 @@ pub enum Observation {
         observed: String,
         rule: &'static str,
     },
+    /// A shared endpoint's demux found no actor for an inbound (see
+    /// [`ReplayEntry::UnclaimedInbound`]).
+    UnclaimedInbound { endpoint: String, detail: String },
 }
 
 impl StateInner {
@@ -373,6 +382,9 @@ impl StateInner {
                     observed,
                     rule,
                 });
+            }
+            Observation::UnclaimedInbound { endpoint, detail } => {
+                self.replay.push(ReplayEntry::UnclaimedInbound { endpoint, detail });
             }
         }
     }
@@ -438,6 +450,20 @@ impl ObservedState {
             .replay
             .iter()
             .filter(|e| matches!(e, ReplayEntry::AcceptedDelta { .. }))
+            .cloned()
+            .collect()
+    }
+
+    /// The run's undelivered inbounds on shared endpoints — the replay record
+    /// filtered to its [`ReplayEntry::UnclaimedInbound`] entries, the list a
+    /// report consumer counts (an unclaimed leg is a scenario wiring defect).
+    pub fn unclaimed_inbound(&self) -> Vec<ReplayEntry> {
+        self.inner
+            .lock()
+            .unwrap()
+            .replay
+            .iter()
+            .filter(|e| matches!(e, ReplayEntry::UnclaimedInbound { .. }))
             .cloned()
             .collect()
     }
