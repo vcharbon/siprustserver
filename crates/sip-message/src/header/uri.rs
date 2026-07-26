@@ -264,6 +264,15 @@ impl Uri {
         self.normalized()
     }
 
+    /// This URI with its `?a=b` escaped-header list dropped — what a
+    /// Request-URI may carry (RFC 3261 §19.1.1 forbids escaped headers there,
+    /// so a URI taken from Refer-To or a redirect Contact is reduced by this
+    /// before it becomes one).
+    pub fn without_escaped_headers(mut self) -> Self {
+        self.headers.clear();
+        self.normalized()
+    }
+
     /// Read a whole URI. The value must carry a scheme colon; anything looser
     /// is [`opaque`](Self::opaque) territory, not a URI.
     pub fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
@@ -359,6 +368,16 @@ mod tests {
         assert_eq!(u.param("transport").and_then(ParamValue::as_str), Some("tls"));
         assert!(u.is_loose_route());
         assert_eq!(u.escaped_header("replaces").as_deref(), Some("abc"));
+    }
+
+    // A URI headed for a Request-URI sheds its `?headers` list (RFC 3261
+    // §19.1.1) and keeps everything a Request-URI may carry.
+    #[test]
+    fn dropping_escaped_headers_keeps_the_rest_of_the_uri() {
+        let bare = uri("sip:carol@chicago.com:5062;transport=tcp?Replaces=abc%3Bto-tag%3Dx")
+            .without_escaped_headers();
+        assert_eq!(bare.to_string(), "sip:carol@chicago.com:5062;transport=tcp");
+        assert_eq!(bare.escaped_header("Replaces"), None);
     }
 
     #[test]
