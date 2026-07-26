@@ -163,7 +163,7 @@ helpers listed above, run capped workspace test, tick tracker, commit.
 - [x] M7 scenario-harness
 - [x] M8 e2e-core + e2e-model + announcement
 - [x] M9 sip-net rfc_audit
-- [ ] M10 sip-pcap + loadgen
+- [x] M10 sip-pcap + loadgen
 - [ ] M11 harness/test crates
 - [ ] M12 teardown (delete legacy, privatize, MessageCore)
 - [ ] M13 perf re-baseline
@@ -1049,3 +1049,83 @@ before and after (3 lib + 1 test, all pre-existing SDP/loop-index categories).
   grammar read, so it stayed raw — but `RecordRouteEntry::uri().param("callRef")`
   would say it exactly, and would stop a display name containing the text from
   firing it.
+
+### M10 — sip-pcap + loadgen
+
+`sip-pcap` has **zero** `message_helpers::*` / `get_header` call sites left,
+`src`, `bin` and `tests` alike. **`loadgen` needed no port** — the plan's guess
+was right: its mux reads unparsed datagrams by design, so every sip-message call
+it makes is `sniff::*` plus `message_helpers::is_invite_request_buffer`
+(`preparse`, the Tier-1 brake's classifier, not on the M12 list). Nothing in it
+touches a header value, a typed field or a header name string.
+
+Three readers were missing and landed in their own sip-message commit:
+`Uri::user_identity` / `Uri::same_user_identity` (the canonical subscriber a URI
+names), `Uri::text` (the wire text, borrowed while the URI still carries the
+bytes it was read from) and `Params::parse_list` (a header VALUE that is itself
+a parameter list). `SipMessage::raw_text` completes the enum's share of the read
+surface. `message_helpers::{uri_user_identity, header_param_value}` now delegate
+to them, so each rule has one implementation.
+
+**Every deletion target the plan listed is gone**, plus what the sweep found:
+
+| deleted | replaced by |
+|---|---|
+| `query/project.rs` `uri_user` (the `<`/`sip:`/`tel:`/`@`/`;` peel) | `Uri::user_identity()`, host as the userless fallback |
+| `flow.rs` `same_user_identity(&str, &str)` on the identity-adjacency pass | `inv_i.from_uri.same_user_identity(&inv_j.from_uri)` — no re-parse |
+| `flow.rs` `header_param_value` on the `HeaderParam` correlation strategy | `Params::parse_list(&msg.raw_text(name))` → `value(param)` |
+| `flow.rs` / `query/eval.rs` / `bin/sipflow.rs` `get_header(name)` ×4 | `msg.raw(HeaderName::from(name))` |
+| `query/eval.rs` `get_header("Reason") + header_param_value(v, "cause")` | `msg.list::<Reason>()` → `param("cause")` |
+| `query/eval.rs` `r.from` / `r.to` field reads (the request/response match) | `msg.from()` / `msg.to()` on the enum — the direction match disappears |
+| `txn.rs` `branch_of(&sip_message::Via)` over `r.via.first().branch`, `r.to.tag` ×2 | `msg.top_via().branch()`, `r.to().tag()` |
+| `flow.rs` retransmission key `a.via.first().branch` ×2 | `a.top_via().branch()` |
+| `emit.rs` `r.from.uri` / `r.from.tag` / `r.to.*` / `r.uri` summary fields | `msg.from()`/`to()`/`cseq()`, `r.request_uri()` |
+
+**`InviteSummary` carries parsed `Uri` values**, not URI text: the model is what
+a consumer asks for a user identity, and the re-parse the old shape forced on
+every projection and every adjacency comparison is gone. `Uri::text()` is what
+the JSON and the ladder print, and it returns the source bytes verbatim, so the
+emitted document is byte-identical and `EMIT_SCHEMA_VERSION` stays at 4.
+
+**Behaviour deltas, all deliberate:**
+- **`ruri_user` / `from_user` / `to_user` are the URI's user IDENTITY.** The
+  userinfo `;`-params (`verstat`, `phone-context`) drop out, `tel:` and `sip:`
+  forms of one subscriber agree, and RFC 3966 visual separators normalize — so
+  `tel:+1-408-555-1212` and `sip:+14085551212@gw` now share a neighbour key,
+  which is what the field exists to do. A userless URI yields its host WITHOUT
+  the port, where the old peel returned `host:port`.
+- **A comma-folded `Reason` line yields every cause, not just the first.** RFC
+  3326 makes Reason foldable; the old param scan read the whole line and
+  stopped at its first `cause=`. A Reason no reader accepts is now silent
+  rather than scanned as a flat param list.
+- **Header predicates are `HeaderName`-keyed and therefore compact-form aware**
+  (`{"header": {"name": "Contact"}}` and `sipflow --header Contact` now answer
+  for an `m:` line), where `get_header` matched the long spelling only.
+- A `HeaderParam` correlation value that is a bare FLAG no longer yields a
+  token. It never did in effect — the old `Some("")` was filtered by the
+  emptiness check on the next line.
+
+Workspace: 2127 tests passed, 0 failed. Clippy on `sip-pcap`: clean before and
+after (the lane's only warnings are the pre-existing sip-message parser ones).
+
+**Suspicions raised, not fixed:**
+- **`flow.rs::looks_like_sip` is a raw SIP datagram classifier living in a
+  consumer crate**, and `sniff` is the sanctioned home for those. It reads no
+  header, so it is not an ADR-0025 item and porting it would touch nobody else
+  — but it is the last raw SIP scan outside sip-message on this path, and
+  `sniff` has no "is this datagram SIP at all" entry point for it to use.
+- **`parse_param_list` (`parser::custom::structured_headers`) now has zero
+  consumers**, and `message_helpers::{header_param_value, uri_user_identity,
+  same_user_identity}` have none outside `tests/message_helpers.rs`. Same shape
+  as the `parse_rack` note M9 left: they belong on the M12 deletion list.
+- **`InviteSummary` holds three `Uri` values (272 B each on this branch) where
+  it held three `String`s** — the `size_of`-of-the-value-model debt M5 and M8
+  logged, now paid three times per leg of a capture. A capture with tens of
+  thousands of legs is the case to watch; M12's value-storage pass owns it.
+- `Node::FromUri` / `Node::ToUri` at a message binding clone the URI out of the
+  transitional `from()`/`to()` accessor once per evaluated message, because the
+  accessor builds a value rather than borrowing one. M12's stored `MessageCore`
+  turns that back into a borrow.
+- `Node::Ruri` at a message binding still text-matches `r.uri` (the raw
+  Request-URI field) rather than `r.request_uri().text()`. Identical bytes and
+  one less value built, but it is a public field M12 privatizes.

@@ -37,7 +37,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
 
-use sip_message::message_helpers::{header_param_value, same_user_identity};
+use sip_message::header::{HeaderName, Params, Uri};
 use sip_message::parser::SipParser;
 use sip_message::{CustomParser, Method, SipMessage};
 
@@ -176,12 +176,13 @@ impl FlowMsg {
     }
 }
 
-/// Initial-INVITE summary of a leg.
+/// Initial-INVITE summary of a leg. The addresses are the parsed values, so a
+/// consumer asks them for a user identity instead of peeling their text.
 #[derive(Debug, Clone)]
 pub struct InviteSummary {
-    pub ruri: String,
-    pub from_uri: String,
-    pub to_uri: String,
+    pub ruri: Uri,
+    pub from_uri: Uri,
+    pub to_uri: Uri,
     pub cseq: u32,
 }
 
@@ -433,7 +434,7 @@ fn ingest(
         match strat {
             CorrelateStrategy::HeaderToken { headers } => {
                 for name in headers {
-                    for v in msg.get_header(name) {
+                    for v in msg.raw(HeaderName::from(name.as_str())) {
                         let v = v.trim();
                         if !v.is_empty() {
                             leg.tokens_by_strategy[si].insert(v.to_string());
@@ -442,11 +443,10 @@ fn ingest(
                 }
             }
             CorrelateStrategy::HeaderParam { header, param } => {
-                for v in msg.get_header(header) {
-                    if let Some(t) = header_param_value(v, param) {
-                        if !t.is_empty() {
-                            leg.tokens_by_strategy[si].insert(t);
-                        }
+                for v in msg.raw_text(HeaderName::from(header.as_str())) {
+                    let params = Params::parse_list(&v);
+                    if let Some(t) = params.value(param).filter(|t| !t.is_empty()) {
+                        leg.tokens_by_strategy[si].insert(t.to_string());
                     }
                 }
             }
@@ -457,9 +457,9 @@ fn ingest(
         SipMessage::Request(r) => {
             if r.method == Method::Invite && leg.invite.is_none() {
                 leg.invite = Some(InviteSummary {
-                    ruri: r.uri.to_string(),
-                    from_uri: r.from.uri.to_string(),
-                    to_uri: r.to.uri.to_string(),
+                    ruri: r.request_uri(),
+                    from_uri: r.from().uri().clone(),
+                    to_uri: r.to().uri().clone(),
                     cseq: r.cseq.seq,
                 });
             }
@@ -493,12 +493,12 @@ fn ingest(
                 (SipMessage::Request(a), SipMessage::Request(b)) => {
                     a.method == b.method
                         && a.cseq.seq == b.cseq.seq
-                        && a.via.first().branch == b.via.first().branch
+                        && a.top_via().branch() == b.top_via().branch()
                 }
                 (SipMessage::Response(a), SipMessage::Response(b)) => {
                     a.status == b.status
                         && a.cseq == b.cseq
-                        && a.via.first().branch == b.via.first().branch
+                        && a.top_via().branch() == b.top_via().branch()
                 }
                 _ => false,
             }
@@ -746,8 +746,8 @@ fn adjacency_pass(
                 continue;
             }
             let inv_j = legs[j].invite.as_ref().expect("checked above");
-            if !same_user_identity(&inv_i.from_uri, &inv_j.from_uri)
-                || !same_user_identity(&inv_i.to_uri, &inv_j.to_uri)
+            if !inv_i.from_uri.same_user_identity(&inv_j.from_uri)
+                || !inv_i.to_uri.same_user_identity(&inv_j.to_uri)
             {
                 continue;
             }

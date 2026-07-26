@@ -143,9 +143,9 @@ fn leg_json(leg: &FlowLeg) -> Value {
             .map(|h| json!({ "a": h.a.to_string(), "b": h.b.to_string() }))
             .collect::<Vec<_>>(),
         "invite": leg.invite.as_ref().map(|inv| json!({
-            "ruri": inv.ruri,
-            "from_uri": inv.from_uri,
-            "to_uri": inv.to_uri,
+            "ruri": inv.ruri.text(),
+            "from_uri": inv.from_uri.text(),
+            "to_uri": inv.to_uri.text(),
             "cseq": inv.cseq,
         })),
         "final_status": leg.final_status,
@@ -213,22 +213,26 @@ fn payload_repr(m: &FlowMsg) -> Repr<'_> {
 }
 
 fn summary_json(msg: &SipMessage) -> Value {
+    let (from, to, cseq) = (msg.from(), msg.to(), msg.cseq());
+    let from = json!({ "uri": from.uri().text(), "tag": from.tag() });
+    let to = json!({ "uri": to.uri().text(), "tag": to.tag() });
+    let cseq = json!({ "seq": cseq.seq(), "method": cseq.method().as_str() });
     match msg {
         SipMessage::Request(r) => json!({
             "kind": "request",
             "method": r.method.as_str(),
-            "uri": r.uri,
-            "cseq": { "seq": r.cseq.seq, "method": r.cseq.method.as_str() },
-            "from": { "uri": r.from.uri, "tag": r.from.tag },
-            "to": { "uri": r.to.uri, "tag": r.to.tag },
+            "uri": r.request_uri().text(),
+            "cseq": cseq,
+            "from": from,
+            "to": to,
         }),
         SipMessage::Response(r) => json!({
             "kind": "response",
             "status": r.status,
             "reason": r.reason,
-            "cseq": { "seq": r.cseq.seq, "method": r.cseq.method.as_str() },
-            "from": { "uri": r.from.uri, "tag": r.from.tag },
-            "to": { "uri": r.to.uri, "tag": r.to.tag },
+            "cseq": cseq,
+            "from": from,
+            "to": to,
         }),
     }
 }

@@ -13,7 +13,7 @@
 //! Quantifier nodes narrow the binding; they never widen it, and applying one
 //! at a level it has already reached is the identity.
 
-use sip_message::message_helpers::header_param_value;
+use sip_message::header::{HeaderName, Reason};
 use sip_message::{Method, SipMessage};
 
 use crate::flow::{CallGroup, FlowLeg, Flows, LegId, MatchEvidence};
@@ -145,7 +145,9 @@ fn eval(ctx: &Ctx, bind: Bind, node: &Node) -> bool {
                 .is_some_and(|r| m.test(r.uri.as_str())),
             _ => legs_of(bind)
                 .iter()
-                .any(|&l| ctx.flows.legs[l].invite.as_ref().is_some_and(|inv| m.test(&inv.ruri))),
+                .any(|&l| {
+                    ctx.flows.legs[l].invite.as_ref().is_some_and(|inv| m.test(&inv.ruri.text()))
+                }),
         },
         Node::FromUri(m) => uri_leaf(ctx, bind, m, true),
         Node::ToUri(m) => uri_leaf(ctx, bind, m, false),
@@ -183,10 +185,10 @@ fn eval(ctx: &Ctx, bind: Bind, node: &Node) -> bool {
             msgs_of(ctx, bind).iter().any(|&(l, i)| ctx.flows.legs[l].msgs[i].retx == *want)
         }
         Node::Header { name, value } => msgs_of(ctx, bind).iter().any(|&(l, i)| {
-            let values = ctx.flows.legs[l].msgs[i].parsed.get_header(name);
+            let mut values = ctx.flows.legs[l].msgs[i].parsed.raw(HeaderName::from(name.as_str()));
             match value {
-                StrMatch::Absent => values.is_empty(),
-                _ => values.iter().any(|v| value.test(v)),
+                StrMatch::Absent => values.next().is_none(),
+                _ => values.any(|v| value.test(v)),
             }
         }),
         Node::Body(m) => msgs_of(ctx, bind).iter().any(|&(l, i)| {
@@ -210,9 +212,10 @@ fn eval(ctx: &Ctx, bind: Bind, node: &Node) -> bool {
         Node::ReasonCause(cmp) => msgs_of(ctx, bind).iter().any(|&(l, i)| {
             ctx.flows.legs[l].msgs[i]
                 .parsed
-                .get_header("Reason")
+                .list::<Reason>()
+                .unwrap_or_default()
                 .iter()
-                .filter_map(|v| header_param_value(v, "cause"))
+                .filter_map(|r| r.param("cause")?.as_str())
                 .filter_map(|c| c.trim().parse::<u64>().ok())
                 .any(|c| cmp.test(c))
         }),
@@ -223,30 +226,16 @@ fn eval(ctx: &Ctx, bind: Bind, node: &Node) -> bool {
 fn uri_leaf(ctx: &Ctx, bind: Bind, m: &StrMatch, from: bool) -> bool {
     match bind {
         Bind::Msg(l, i) => {
-            let party = match &ctx.flows.legs[l].msgs[i].parsed {
-                SipMessage::Request(r) => {
-                    if from {
-                        &r.from
-                    } else {
-                        &r.to
-                    }
-                }
-                SipMessage::Response(r) => {
-                    if from {
-                        &r.from
-                    } else {
-                        &r.to
-                    }
-                }
-            };
-            m.test(party.uri.as_str())
+            let msg = &ctx.flows.legs[l].msgs[i].parsed;
+            let uri = if from { msg.from().uri().clone() } else { msg.to().uri().clone() };
+            m.test(&uri.text())
         }
         Bind::Txn(l, t) => t.request.is_some_and(|i| uri_leaf(ctx, Bind::Msg(l, i), m, from)),
         _ => legs_of(bind).iter().any(|&l| {
             ctx.flows.legs[l]
                 .invite
                 .as_ref()
-                .is_some_and(|inv| m.test(if from { &inv.from_uri } else { &inv.to_uri }))
+                .is_some_and(|inv| m.test(&if from { &inv.from_uri } else { &inv.to_uri }.text()))
         }),
     }
 }

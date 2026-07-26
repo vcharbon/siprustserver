@@ -28,9 +28,11 @@
 //!   sipflow corpus/ --query-json '{"select":{"evidence_kind":"derived_call_id"},
 //!                                  "project":{"mode":"summary","fields":["as_socket"]}}'
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use clap::Parser as ClapParser;
+use sip_message::header::HeaderName;
 use sip_message::SipMessage;
 use sip_pcap::flow::{
     build_flows, CallGroup, CorrelateStrategy, FlowConfig, FlowLeg, DEFAULT_DEDUP_WINDOW_US,
@@ -369,17 +371,23 @@ fn group_matches(group: &CallGroup, legs: &[FlowLeg], args: &Args) -> bool {
         }
     }
     if let Some(f) = &args.from {
-        if !any_leg(&|l| l.invite.as_ref().is_some_and(|inv| inv.from_uri.contains(f.as_str()))) {
+        if !any_leg(&|l| {
+            l.invite.as_ref().is_some_and(|inv| inv.from_uri.text().contains(f.as_str()))
+        }) {
             return false;
         }
     }
     if let Some(t) = &args.to {
-        if !any_leg(&|l| l.invite.as_ref().is_some_and(|inv| inv.to_uri.contains(t.as_str()))) {
+        if !any_leg(&|l| {
+            l.invite.as_ref().is_some_and(|inv| inv.to_uri.text().contains(t.as_str()))
+        }) {
             return false;
         }
     }
     if let Some(r) = &args.ruri {
-        if !any_leg(&|l| l.invite.as_ref().is_some_and(|inv| inv.ruri.contains(r.as_str()))) {
+        if !any_leg(&|l| {
+            l.invite.as_ref().is_some_and(|inv| inv.ruri.text().contains(r.as_str()))
+        }) {
             return false;
         }
     }
@@ -405,8 +413,7 @@ fn group_matches(group: &CallGroup, legs: &[FlowLeg], args: &Args) -> bool {
         if !any_leg(&|l| {
             l.msgs.iter().any(|rec| {
                 rec.parsed
-                    .get_header(name)
-                    .iter()
+                    .raw(HeaderName::from(name))
                     .any(|v| want.is_none_or(|w| v.contains(w)))
             })
         }) {
@@ -469,11 +476,11 @@ fn final_str(leg: &FlowLeg) -> String {
     }
 }
 
-fn invite_strs(leg: &FlowLeg) -> (&str, &str, &str) {
-    leg.invite
-        .as_ref()
-        .map(|inv| (inv.ruri.as_str(), inv.from_uri.as_str(), inv.to_uri.as_str()))
-        .unwrap_or(("-", "-", "-"))
+fn invite_strs(leg: &FlowLeg) -> (Cow<'_, str>, Cow<'_, str>, Cow<'_, str>) {
+    match &leg.invite {
+        Some(inv) => (inv.ruri.text(), inv.from_uri.text(), inv.to_uri.text()),
+        None => (Cow::Borrowed("-"), Cow::Borrowed("-"), Cow::Borrowed("-")),
+    }
 }
 
 fn print_list_line(n: usize, group: &CallGroup, legs: &[FlowLeg]) {

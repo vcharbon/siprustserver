@@ -100,10 +100,10 @@ pub fn transactions(leg: &FlowLeg) -> Vec<Txn> {
     for (mi, msg) in leg.msgs.iter().enumerate() {
         let (branch, method, cseq, is_request) = match &msg.parsed {
             SipMessage::Request(r) => {
-                (branch_of(r.via.first()), r.cseq.method.clone(), r.cseq.seq, true)
+                (branch_of(&msg.parsed), r.cseq.method.clone(), r.cseq.seq, true)
             }
             SipMessage::Response(r) => {
-                (branch_of(r.via.first()), r.cseq.method.clone(), r.cseq.seq, false)
+                (branch_of(&msg.parsed), r.cseq.method.clone(), r.cseq.seq, false)
             }
         };
         let slot = index
@@ -150,11 +150,11 @@ pub fn transactions(leg: &FlowLeg) -> Vec<Txn> {
     txns
 }
 
-/// A Via's branch, or the empty string when it carries none — an unbranched
-/// Via cannot key a transaction, so those messages share one bucket per
-/// method rather than being dropped.
-fn branch_of(via: &sip_message::Via) -> String {
-    via.branch.as_ref().map(|b| b.as_str().to_string()).unwrap_or_default()
+/// The branch of a message's top Via, or the empty string when it carries none
+/// — an unbranched Via cannot key a transaction, so those messages share one
+/// bucket per method rather than being dropped.
+fn branch_of(msg: &SipMessage) -> String {
+    msg.top_via().branch().unwrap_or_default().to_string()
 }
 
 /// A request's place in its dialog. A response never reclassifies a
@@ -176,12 +176,12 @@ fn classify(
     if *method == Method::Invite {
         // The dialog-creating INVITE carries no To-tag; everything else on the
         // same leg is a re-INVITE.
-        return match (r.to.tag.is_none(), initial_cseq == Some(cseq)) {
+        return match (r.to().tag().is_none(), initial_cseq == Some(cseq)) {
             (true, _) | (_, true) => TxnKind::InitialInvite,
             _ => TxnKind::ReInvite,
         };
     }
-    if r.to.tag.is_some() {
+    if r.to().tag().is_some() {
         TxnKind::InDialog
     } else {
         TxnKind::OutOfDialog

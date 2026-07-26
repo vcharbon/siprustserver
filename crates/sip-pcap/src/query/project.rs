@@ -6,6 +6,7 @@
 //! the same way, and a new field serves both without a second language.
 
 use serde_json::{json, Value};
+use sip_message::header::Uri;
 
 use crate::flow::{CallGroup, Flows, MatchEvidence};
 
@@ -74,12 +75,12 @@ fn field(flows: &Flows, group_idx: usize, group: &CallGroup, f: KeyField) -> Val
         }
         KeyField::LegCount => json!(group.legs.len()),
         KeyField::CallId => json!(legs().map(|l| l.call_id.clone()).collect::<Vec<_>>()),
-        KeyField::Ruri => json!(invite_field(flows, group, |inv| inv.ruri.clone())),
-        KeyField::RuriUser => {
-            json!(invite_field(flows, group, |inv| uri_user(&inv.ruri)))
+        KeyField::Ruri => json!(invite_field(flows, group, |inv| inv.ruri.text().into_owned())),
+        KeyField::RuriUser => json!(invite_field(flows, group, |inv| uri_user(&inv.ruri))),
+        KeyField::FromUri => {
+            json!(invite_field(flows, group, |inv| inv.from_uri.text().into_owned()))
         }
-        KeyField::FromUri => json!(invite_field(flows, group, |inv| inv.from_uri.clone())),
-        KeyField::ToUri => json!(invite_field(flows, group, |inv| inv.to_uri.clone())),
+        KeyField::ToUri => json!(invite_field(flows, group, |inv| inv.to_uri.text().into_owned())),
         KeyField::FromUser => json!(invite_field(flows, group, |inv| uri_user(&inv.from_uri))),
         KeyField::ToUser => json!(invite_field(flows, group, |inv| uri_user(&inv.to_uri))),
         KeyField::Src => json!(legs()
@@ -129,15 +130,12 @@ fn invite_field(
     group.legs.iter().map(|&l| flows.legs[l].invite.as_ref().map(&pick)).collect()
 }
 
-/// The user part of a URI — the dialed number, host- and param-insensitive,
-/// so grouping by callee is not defeated by a rewritten host. Non-URI input
-/// yields the input trimmed.
-fn uri_user(uri: &str) -> String {
-    let s = uri.trim().trim_start_matches('<').trim_end_matches('>');
-    let s = s.strip_prefix("sip:").or_else(|| s.strip_prefix("sips:")).unwrap_or(s);
-    let s = s.strip_prefix("tel:").unwrap_or(s);
-    let s = s.split('@').next().unwrap_or(s);
-    s.split(';').next().unwrap_or(s).to_string()
+/// The user a URI names — the dialed number, host-, scheme- and
+/// param-insensitive, so grouping by callee is not defeated by a rewritten
+/// host or a `tel:`⇄`sip:` swap. A URI naming no user yields its host, which
+/// is the whole value for input no reader accepts.
+fn uri_user(uri: &Uri) -> String {
+    uri.user_identity().unwrap_or_else(|| uri.host().to_string())
 }
 
 fn evidence_kind(e: &MatchEvidence) -> &'static str {
