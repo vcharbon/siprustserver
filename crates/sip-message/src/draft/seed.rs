@@ -21,6 +21,10 @@ pub type RequestDraft = Draft<kind::Request>;
 /// A response under construction.
 pub type ResponseDraft = Draft<kind::Response>;
 
+/// The header count a blank draft is sized for: enough that an ordinary
+/// origination fills its entry list without a regrowth.
+const TYPICAL_HEADERS: usize = 12;
+
 fn seed(headers: &[SipHeader], keep: impl Fn(&HeaderName) -> bool) -> Vec<Entry> {
     headers
         .iter()
@@ -37,7 +41,7 @@ impl RequestDraft {
     pub fn new(method: Method, uri: Uri) -> Self {
         Self::from_parts(
             RequestLine { method, uri, version: SipStr::from_static(SIP_VERSION) },
-            Vec::new(),
+            Vec::with_capacity(TYPICAL_HEADERS),
             Bytes::new(),
         )
     }
@@ -89,7 +93,7 @@ impl ResponseDraft {
                 status,
                 reason: reason.into(),
             },
-            Vec::new(),
+            Vec::with_capacity(TYPICAL_HEADERS),
             Bytes::new(),
         )
     }

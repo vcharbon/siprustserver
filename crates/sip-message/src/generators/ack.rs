@@ -2,11 +2,26 @@
 //! request — RFC 3261 §13.2.2.4) and for a non-2xx final (inside the INVITE
 //! client transaction — §17.1.1.3).
 
-use super::emit::{append_body_headers, h, make_request, wrap_uri};
-use super::in_dialog::route_for_in_dialog;
+use super::emit;
+use super::in_dialog::{route_for_in_dialog, with_dialog_identity, with_routes};
 use super::spec::{InviteClientTransactionHandle, StackDialog, ViaSpec};
-use crate::message_helpers::{get_header, get_headers};
+use crate::draft::RequestDraft;
+use crate::header::{CSeq, ContentLength, HeaderName, MaxForwards, MediaType, Uri, Via};
+use crate::method::Method;
+use crate::sip_str::SipStr;
 use crate::types::{SipHeader, SipRequest, SipResponse};
+
+/// The typed twin of the stringly fields of [`GenerateAckFor2xxOpts`]: each
+/// value supersedes the text that names the same header.
+#[derive(Debug, Clone, Default)]
+pub struct AckFor2xxValues {
+    /// Supersedes `request_uri`.
+    pub uri: Option<Uri>,
+    /// Supersedes `via`.
+    pub hop: Option<Via>,
+    /// Supersedes `content_type`.
+    pub content_type: Option<MediaType>,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct GenerateAckFor2xxOpts {
@@ -18,6 +33,8 @@ pub struct GenerateAckFor2xxOpts {
     pub cseq: Option<u32>,
     /// Request-URI override; defaults to `dialog.remote_target`.
     pub request_uri: Option<String>,
+    /// Typed values, each superseding its stringly counterpart above.
+    pub values: AckFor2xxValues,
 }
 
 /// Build an ACK for a 2xx response. The CSeq number comes from the INVITE
@@ -29,41 +46,25 @@ pub fn generate_ack_for_2xx(
     dialog: &StackDialog,
     opts: &GenerateAckFor2xxOpts,
 ) -> SipRequest {
-    let body = opts.body.clone();
+    let values = &opts.values;
     let invite_cseq = opts
         .cseq
         .or_else(|| invite_txn.map(|t| t.original_invite.cseq.seq))
         .expect("generate_ack_for_2xx: either invite_txn or opts.cseq must be provided");
     let remote_target = opts.request_uri.clone().unwrap_or_else(|| dialog.remote_target.clone());
-    let (request_uri, route_values) = route_for_in_dialog(&remote_target, &dialog.route_set);
-    let via = opts.via.as_ref().expect("ViaSpec required");
+    let (request_uri, routes) = route_for_in_dialog(&remote_target, &dialog.route_set);
+    let uri = values.uri.clone().unwrap_or_else(|| emit::uri(&request_uri));
+    let hop =
+        values.hop.clone().unwrap_or_else(|| opts.via.as_ref().expect("ViaSpec required").value());
 
-    // RFC 3261 §12.2.1.1: the To header carries the remote tag. A dialog
-    // hydrated mid-confirm by a reactive failover takeover (relayed 2xx not
-    // yet seen) can have an EMPTY `remote_tag`; `;tag=` with an empty value is
-    // malformed (hydrate_request rejects it), so the tag is skipped when
-    // absent — same contract as `generate_in_dialog_request`.
-    let to_value = if dialog.remote_tag.is_empty() {
-        wrap_uri(&dialog.remote_uri)
-    } else {
-        format!("{};tag={}", wrap_uri(&dialog.remote_uri), dialog.remote_tag)
-    };
+    let draft = RequestDraft::new(Method::Ack, uri)
+        .push(hop)
+        .push(MaxForwards::new(emit::DEFAULT_MAX_FORWARDS));
+    let draft = with_dialog_identity(draft, dialog).push(CSeq::new(invite_cseq, Method::Ack));
+    let draft = emit::extra_headers(with_routes(draft, &routes), &opts.extra_headers);
 
-    let mut headers: Vec<SipHeader> = vec![
-        h("Via", via.header_value()),
-        h("Max-Forwards", "70"),
-        h("From", format!("{};tag={}", wrap_uri(&dialog.local_uri), dialog.local_tag)),
-        h("To", to_value),
-        h("Call-ID", dialog.call_id.clone()),
-        h("CSeq", format!("{invite_cseq} ACK")),
-    ];
-    for route in &route_values {
-        headers.push(h("Route", route.clone()));
-    }
-    headers.extend(opts.extra_headers.iter().cloned());
-    append_body_headers(&mut headers, &body, opts.content_type.as_deref());
-
-    make_request("ACK", &request_uri, headers, body)
+    let content_type = emit::media_type(&values.content_type, &opts.content_type);
+    emit::request(emit::framed(draft, opts.body.clone(), content_type))
 }
 
 /// Build an ACK for a non-2xx final response inside the INVITE client
@@ -77,25 +78,22 @@ pub fn generate_ack_for_non_2xx(
     original_invite: &SipRequest,
     final_response: &SipResponse,
 ) -> SipRequest {
-    let via = get_header(&original_invite.headers, "via")
+    let via = original_invite
+        .raw_text(HeaderName::Via)
+        .next()
         .expect("generate_ack_for_non_2xx: INVITE missing Via");
-    let from = get_header(&final_response.headers, "from").unwrap_or("");
-    let to = get_header(&final_response.headers, "to").unwrap_or("");
-    let call_id = get_header(&final_response.headers, "call-id").unwrap_or("");
-    let cseq_num = original_invite.cseq.seq;
+    let echoed = |name: HeaderName| final_response.raw_text(name).next().unwrap_or(SipStr::EMPTY);
 
-    let mut headers: Vec<SipHeader> = vec![
-        h("Via", via),
-        h("Max-Forwards", "70"),
-        h("From", from),
-        h("To", to),
-        h("Call-ID", call_id),
-        h("CSeq", format!("{cseq_num} ACK")),
-    ];
-    for route in get_headers(&original_invite.headers, "route") {
-        headers.push(h("Route", route));
+    let mut draft = RequestDraft::new(Method::Ack, original_invite.request_uri())
+        .push_raw(HeaderName::Via, via)
+        .push(MaxForwards::new(emit::DEFAULT_MAX_FORWARDS))
+        .push_raw(HeaderName::From, echoed(HeaderName::From))
+        .push_raw(HeaderName::To, echoed(HeaderName::To))
+        .push_raw(HeaderName::CallId, echoed(HeaderName::CallId))
+        .push(CSeq::new(original_invite.cseq.seq, Method::Ack));
+    for route in original_invite.raw_text(HeaderName::Route) {
+        draft = draft.push_raw(HeaderName::Route, route);
     }
-    headers.push(h("Content-Length", "0"));
 
-    make_request("ACK", &original_invite.uri, headers, Vec::new())
+    emit::request(draft.push(ContentLength::new(0)))
 }

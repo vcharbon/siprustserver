@@ -2,10 +2,10 @@
 //! request being answered (RFC 3261 §8.2.6.2). Rebuilding a response from
 //! B2BUA-snapshotted fields lives in [`super::relay`].
 
-use super::emit::{append_body_headers, h, make_response};
+use super::emit;
 use super::spec::ContactSpec;
-use crate::message_helpers::{get_header, stamp_received_rport_on_via};
-use crate::parser::custom::structured_headers::parse_name_addr;
+use crate::draft::ResponseDraft;
+use crate::header::{self, HeaderName, HeaderValue, MediaType, To, Via};
 use crate::sip_str::SipStr;
 use crate::types::{SipHeader, SipRequest, SipResponse};
 
@@ -21,6 +21,16 @@ fn fallback_to_tag(call_id: &str) -> String {
     format!("b2bua-fb-{:016x}", hasher.finish())
 }
 
+/// The typed twin of the stringly fields of [`GenerateResponseOpts`]: each
+/// value supersedes the text that names the same header.
+#[derive(Debug, Clone, Default)]
+pub struct ResponseValues {
+    /// Supersedes `contact`.
+    pub contact: Option<header::Contact>,
+    /// Supersedes `content_type`.
+    pub content_type: Option<MediaType>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GenerateResponseOpts {
     /// Tag added to To when status > 100 and the request's To lacks one.
@@ -32,6 +42,55 @@ pub struct GenerateResponseOpts {
     /// Source the request arrived from — stamps `received=` / `rport=` on the
     /// topmost echoed Via (RFC 3261 §18.2.1 + RFC 3581 §4).
     pub incoming_source: Option<(String, u16)>,
+    /// Typed values, each superseding its stringly counterpart above.
+    pub values: ResponseValues,
+}
+
+/// Echo one Via line. The topmost records what the receiving side observed
+/// (RFC 3261 §18.2.1, RFC 3581 §4); a line needing no stamp — or folding
+/// several hops onto one line — is echoed byte for byte.
+fn echo_via(draft: ResponseDraft, line: SipStr, source: Option<&(String, u16)>) -> ResponseDraft {
+    let Some((host, port)) = source else {
+        return draft.push_raw(HeaderName::Via, line);
+    };
+    let single = Via::parse_line(&line).ok().filter(|hops| hops.len() == 1);
+    match single.map(|mut hops| hops.remove(0)) {
+        Some(hop) => {
+            let stamped = hop.clone().stamped_from(host, *port);
+            if stamped == hop {
+                draft.push_raw(HeaderName::Via, line)
+            } else {
+                draft.push(stamped)
+            }
+        }
+        None => draft.push_raw(HeaderName::Via, line),
+    }
+}
+
+/// Echo the request's To, tagged as the dialog requires. A non-100 response
+/// MUST carry a To-tag (RFC 3261 §8.2.6.2): a To that already has one (in
+/// dialog) is echoed, otherwise `to_tag` is added when supplied, else a
+/// deterministic fallback — a worker must never panic building a response
+/// (that kills the handler task and leaks the dialog).
+fn echo_to(
+    draft: ResponseDraft,
+    line: SipStr,
+    status: u16,
+    call_id: &str,
+    to_tag: Option<&str>,
+) -> ResponseDraft {
+    if status <= 100 {
+        return draft.push_raw(HeaderName::To, line);
+    }
+    let tag = || to_tag.map(str::to_owned).unwrap_or_else(|| fallback_to_tag(call_id));
+    match To::parse(&line) {
+        Ok(to) if to.tag().is_some() => draft.push_raw(HeaderName::To, line),
+        Ok(to) => draft.push(to.with_tag(SipStr::owned(&tag()))),
+        // A To the strict reader cannot read still leaves tagged, so the peer
+        // rejects the address it sent rather than a tag this stack dropped.
+        Err(_) => draft
+            .push_raw(HeaderName::To, SipStr::owned(&format!("{};tag={}", line.as_str(), tag()))),
+    }
 }
 
 /// Build a UAS response to `incoming_request`, echoing Via / From / To /
@@ -42,68 +101,37 @@ pub fn generate_response(
     reason: &str,
     opts: &GenerateResponseOpts,
 ) -> SipResponse {
-    let body = opts.body.clone();
+    let values = &opts.values;
+    let line = |name: HeaderName| incoming_request.raw_text(name).next().unwrap_or(SipStr::EMPTY);
+    let call_id = line(HeaderName::CallId);
 
-    let raw_to = get_header(&incoming_request.headers, "to").unwrap_or("");
-    let from = get_header(&incoming_request.headers, "from").unwrap_or("");
-    let call_id = get_header(&incoming_request.headers, "call-id").unwrap_or("");
-    let cseq = get_header(&incoming_request.headers, "cseq").unwrap_or("");
-
-    // A non-100 response MUST carry a To-tag (RFC 3261 §8.2.6.2); hydrate_response
-    // rejects one that doesn't. A To that already has a tag (in-dialog) is echoed;
-    // otherwise `opts.to_tag` is added when supplied, else the deterministic
-    // fallback — a worker must never panic building a response (that kills the
-    // handler task and leaks the dialog).
-    let to = if status > 100 && parse_name_addr(&SipStr::owned(raw_to)).tag.is_none() {
-        let tag = opts
-            .to_tag
-            .clone()
-            .unwrap_or_else(|| fallback_to_tag(call_id));
-        format!("{raw_to};tag={tag}")
-    } else {
-        raw_to.to_string()
-    };
-
-    let mut headers: Vec<SipHeader> = Vec::new();
-
-    // Echo every Via in order; stamp the topmost from `incoming_source`.
-    let mut stamped_top_via = false;
-    for hdr in &incoming_request.headers {
-        if !hdr.name.eq_ignore_ascii_case("via") {
-            continue;
-        }
-        let value = match (&opts.incoming_source, stamped_top_via) {
-            (Some((ip, port)), false) => {
-                SipStr::owned(&stamp_received_rport_on_via(&hdr.value, ip, *port))
-            }
-            _ => hdr.value.clone(),
-        };
-        stamped_top_via = true;
-        headers.push(h("Via", value));
+    let mut draft = ResponseDraft::new(status, SipStr::owned(reason));
+    for (i, via) in incoming_request.raw_text(HeaderName::Via).enumerate() {
+        let source = (i == 0).then_some(opts.incoming_source.as_ref()).flatten();
+        draft = echo_via(draft, via, source);
     }
 
     // Echo Record-Route verbatim (RFC 3261 §16.6) — but NOT on a 100 Trying: a
     // 100 establishes no dialog, so its Record-Route is inert (the UAC ignores it)
     // and merely bloats the provisional. Dialog-establishing 18x/2xx still carry it.
     if status != 100 {
-        for hdr in &incoming_request.headers {
-            if hdr.name.eq_ignore_ascii_case("record-route") {
-                headers.push(h("Record-Route", hdr.value.clone()));
-            }
+        for record_route in incoming_request.raw_text(HeaderName::RecordRoute) {
+            draft = draft.push_raw(HeaderName::RecordRoute, record_route);
         }
     }
 
-    headers.push(h("From", from));
-    headers.push(h("To", to));
-    headers.push(h("Call-ID", call_id));
-    headers.push(h("CSeq", cseq));
+    draft = draft.push_raw(HeaderName::From, line(HeaderName::From));
+    draft = echo_to(draft, line(HeaderName::To), status, call_id.as_str(), opts.to_tag.as_deref());
+    draft = draft
+        .push_raw(HeaderName::CallId, call_id)
+        .push_raw(HeaderName::CSeq, line(HeaderName::CSeq));
 
-    if let Some(contact) = &opts.contact {
-        headers.push(h("Contact", contact.header_value()));
+    let contact = values.contact.clone().or_else(|| opts.contact.as_ref().map(ContactSpec::value));
+    if let Some(contact) = contact {
+        draft = draft.push(contact);
     }
 
-    headers.extend(opts.extra_headers.iter().cloned());
-    append_body_headers(&mut headers, &body, opts.content_type.as_deref());
-
-    make_response(status, reason, headers, body)
+    draft = emit::extra_headers(draft, &opts.extra_headers);
+    let content_type = emit::media_type(&values.content_type, &opts.content_type);
+    emit::response(emit::framed(draft, opts.body.clone(), content_type))
 }

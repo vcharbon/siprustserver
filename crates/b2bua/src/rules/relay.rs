@@ -332,6 +332,7 @@ pub fn build_b_leg(
         body,
         content_type,
         extra_headers,
+        ..Default::default()
     };
     let invite = generators::generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
     // Behind the front proxy, the b-leg INVITE traverses the proxy: preload a
@@ -521,6 +522,7 @@ pub fn response_to_a_leg(
         content_type,
         extra_headers,
         incoming_source,
+        ..Default::default()
     };
     let resp = generators::generate_response(a_leg_invite, status, reason, &opts);
     // Routed by the txn layer to the a-leg server transaction; dest is alice

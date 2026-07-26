@@ -15,10 +15,17 @@
 //! - `decode/*` — parse only (raw bytes → `SipMessage`).
 //! - `proxy_hop/*` — decode → clone → rewrite R-URI → insert Record-Route →
 //!   serialize, the per-message cost of one forwarding hop.
+//! - `build/*` — the generator recipes: a blank-draft origination (INVITE with
+//!   an SDP offer, in-dialog BYE) and a response echoing a parsed request.
 //!
 //! Run with output: `cargo test -p sip-message --test alloc_budget -- --nocapture`.
 
 use alloc_counter::{measure, AllocCost, CountingAlloc};
+use sip_message::generators::{
+    generate_in_dialog_request, generate_out_of_dialog_request, generate_response, ContactSpec,
+    GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts, GenerateResponseOpts,
+    InDialogMethod, OutOfDialogMethod, SipTransport, StackDialog, ViaSpec,
+};
 use sip_message::{serialize, CustomParser, SipHeader, SipMessage, SipParser};
 
 /// Counts every allocation the test binary performs. The single test below runs
@@ -94,6 +101,58 @@ fn proxy_hop(parser: &CustomParser, raw: &[u8]) -> Vec<u8> {
     serialize(&SipMessage::Request(out))
 }
 
+/// The Via, Contact and dialog the build cases originate from — the shape a
+/// B2BUA b-leg carries (custom correlation params on both).
+fn build_via() -> ViaSpec {
+    ViaSpec {
+        local_ip: "10.0.0.1".to_string(),
+        local_port: 5060,
+        transport: SipTransport::Udp,
+        branch: "z9hG4bK-abc123".to_string(),
+        custom_params: vec![("cr".to_string(), "cref1".to_string())],
+    }
+}
+
+fn build_contact() -> ContactSpec {
+    ContactSpec {
+        user: "b2bua".to_string(),
+        host: "10.0.0.1".to_string(),
+        port: 5060,
+        uri_params: vec![("callRef".to_string(), "cref1".to_string())],
+    }
+}
+
+fn build_dialog() -> StackDialog {
+    StackDialog {
+        call_id: "a84b4c76e66710@pc33.example.com".to_string(),
+        local_tag: "1928".to_string(),
+        remote_tag: "as83kf".to_string(),
+        local_uri: "sip:alice@example.com".to_string(),
+        remote_uri: "sip:bob@example.com".to_string(),
+        remote_target: "sip:bob@192.0.2.99:5060".to_string(),
+        local_cseq: 314159,
+        route_set: vec!["<sip:proxy.example.com;lr>".to_string()],
+    }
+}
+
+/// The options one blank-draft origination is built from: an INVITE carrying
+/// the same SDP offer the decode cases parse. Built once, so the measurement is
+/// the construction cost and not the caller's own bookkeeping.
+fn invite_opts(sdp: &[u8]) -> GenerateOutOfDialogRequestOpts {
+    GenerateOutOfDialogRequestOpts {
+        request_uri: "sip:bob@example.com".to_string(),
+        call_id: "a84b4c76e66710@pc33.example.com".to_string(),
+        from_uri: "sip:alice@example.com".to_string(),
+        from_tag: "1928".to_string(),
+        to_uri: "sip:bob@example.com".to_string(),
+        cseq: 314159,
+        via: Some(build_via()),
+        contact: Some(build_contact()),
+        body: sdp.to_vec(),
+        ..Default::default()
+    }
+}
+
 /// The per-operation allocation cost of running `op` [`ITERS`] times, after one
 /// warm-up call so any one-time initialization is charged outside the region.
 fn cost_per_op<T>(mut op: impl FnMut() -> T) -> AllocCost {
@@ -116,17 +175,21 @@ struct Budget {
     bytes: usize,
 }
 
-/// The pre-zero-copy allocation budget. Each entry is the cost measured on the
-/// owning (`String`-per-header-value) parser, rounded up by ~20% so ordinary
-/// allocator/`std` variation does not fail the lane. The borrow-don't-own parse
-/// path is expected to slash these — when it lands, re-measure and lower every
-/// entry to the new cost, keeping the same headroom.
+/// The allocation budget. Each entry is a measured cost rounded up by ~20% so
+/// ordinary allocator/`std` variation does not fail the lane. The `decode` and
+/// `proxy_hop` entries still carry the pre-zero-copy numbers and gate nothing;
+/// the `build` entries are measured on the draft recipes. A build case costs
+/// more bytes than the path it replaced because a built message now carries its
+/// rendered image, exactly as a parsed one does.
 const BUDGETS: &[Budget] = &[
     Budget { case: "decode/invite", allocs: 87, bytes: 4300 },
     Budget { case: "decode/invite_sdp", allocs: 93, bytes: 5300 },
     Budget { case: "decode/200_ok", allocs: 82, bytes: 4800 },
     Budget { case: "proxy_hop/invite", allocs: 176, bytes: 9500 },
     Budget { case: "proxy_hop/invite_sdp", allocs: 189, bytes: 11400 },
+    Budget { case: "build/invite_sdp", allocs: 58, bytes: 7900 },
+    Budget { case: "build/bye", allocs: 65, bytes: 7200 },
+    Budget { case: "build/response_200", allocs: 45, bytes: 8800 },
 ];
 
 fn budget(case: &str) -> &'static Budget {
@@ -137,6 +200,24 @@ fn budget(case: &str) -> &'static Budget {
 fn parse_and_proxy_hop_stay_within_the_allocation_budget() {
     let parser = CustomParser::new();
     let invite_sdp = invite_with_sdp();
+    let sdp = {
+        let body_at = invite_sdp.windows(4).position(|w| w == b"\r\n\r\n").expect("blank line") + 4;
+        invite_sdp[body_at..].to_vec()
+    };
+    let dialog = build_dialog();
+    let invite_opts = invite_opts(&sdp);
+    let bye_opts =
+        GenerateInDialogRequestOpts { via: Some(build_via()), ..Default::default() };
+    let response_opts = GenerateResponseOpts {
+        to_tag: Some("as83kf".to_string()),
+        contact: Some(build_contact()),
+        incoming_source: Some(("192.0.2.10".to_string(), 33000)),
+        ..Default::default()
+    };
+    let parsed_invite = match parser.parse(INVITE).expect("parse") {
+        SipMessage::Request(req) => req,
+        SipMessage::Response(_) => panic!("expected request"),
+    };
 
     let measured: Vec<(&str, AllocCost)> = vec![
         ("decode/invite", cost_per_op(|| parser.parse(INVITE).unwrap())),
@@ -144,6 +225,18 @@ fn parse_and_proxy_hop_stay_within_the_allocation_budget() {
         ("decode/200_ok", cost_per_op(|| parser.parse(OK_200).unwrap())),
         ("proxy_hop/invite", cost_per_op(|| proxy_hop(&parser, INVITE))),
         ("proxy_hop/invite_sdp", cost_per_op(|| proxy_hop(&parser, &invite_sdp))),
+        (
+            "build/invite_sdp",
+            cost_per_op(|| generate_out_of_dialog_request(OutOfDialogMethod::Invite, &invite_opts)),
+        ),
+        (
+            "build/bye",
+            cost_per_op(|| generate_in_dialog_request(InDialogMethod::Bye, &dialog, &bye_opts)),
+        ),
+        (
+            "build/response_200",
+            cost_per_op(|| generate_response(&parsed_invite, 200, "OK", &response_opts)),
+        ),
     ];
 
     println!("\nsip-message allocation budget ({ITERS} ops per case)");

@@ -220,9 +220,15 @@ impl<S: StartKind> Draft<S> {
     }
 
     /// Carry `body`, described by `content_type`.
-    pub fn body(mut self, body: Bytes, content_type: MediaType) -> Self {
+    pub fn body(self, body: Bytes, content_type: MediaType) -> Self {
+        self.with_body(body).set(content_type)
+    }
+
+    /// Carry `body` and leave the media type alone — for a recipe that has
+    /// already stated the type, or is about to.
+    pub fn with_body(mut self, body: Bytes) -> Self {
         self.body = body;
-        self.set(content_type)
+        self
     }
 
     pub fn without_body(mut self) -> Self {

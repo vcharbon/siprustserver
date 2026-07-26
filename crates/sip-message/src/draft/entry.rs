@@ -64,8 +64,10 @@ impl Entry {
         &self.name
     }
 
+    /// Whether this line carries `name`. An entry that kept a caller's own
+    /// spelling still answers to the header it names.
     pub fn is(&self, name: &HeaderName) -> bool {
-        &self.name == name
+        self.name.same_header(name)
     }
 
     /// Whether this entry still holds untouched wire bytes.

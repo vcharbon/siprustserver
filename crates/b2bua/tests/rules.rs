@@ -50,6 +50,7 @@ fn invite() -> SipRequest {
         body: b"v=0\r\n".to_vec(),
         content_type: None,
         extra_headers: vec![],
+        ..Default::default()
     };
     generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts)
 }

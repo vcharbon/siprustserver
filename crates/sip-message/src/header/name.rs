@@ -132,6 +132,18 @@ impl HeaderName {
         Self::known(name.as_str()).unwrap_or_else(|| HeaderName::Other(name.clone()))
     }
 
+    /// Whether both spellings name the same header. An extension name that
+    /// happens to be a known spelling — a compact form, an odd casing — IS that
+    /// known name: identity is the header, not the bytes that wrote it.
+    pub fn same_header(&self, other: &HeaderName) -> bool {
+        match (self, other) {
+            (HeaderName::Other(a), HeaderName::Other(b)) => a.eq_ignore_ascii_case(b),
+            (HeaderName::Other(a), known) => Self::known(a.as_str()).as_ref() == Some(known),
+            (known, HeaderName::Other(b)) => Self::known(b.as_str()).as_ref() == Some(known),
+            (a, b) => a == b,
+        }
+    }
+
     /// Whether `wire` — a header name exactly as it appeared — is this name.
     /// Allocation-free, and casing- and compact-form-insensitive, so it is the
     /// probe a header-list scan runs per line.
@@ -185,6 +197,19 @@ mod tests {
         assert_eq!(HeaderName::known("c"), Some(HeaderName::ContentType));
         assert_eq!(HeaderName::known("e"), Some(HeaderName::ContentEncoding));
         assert_eq!(HeaderName::known("s"), Some(HeaderName::Subject));
+    }
+
+    #[test]
+    fn a_name_kept_verbatim_still_identifies_its_header() {
+        let odd = HeaderName::Other(SipStr::owned("p-AsSeRtEd-IdEnTiTy"));
+        assert!(odd.same_header(&HeaderName::PAssertedIdentity));
+        assert!(HeaderName::PAssertedIdentity.same_header(&odd));
+        let compact = HeaderName::Other(SipStr::owned("c"));
+        assert!(compact.same_header(&HeaderName::ContentType));
+        assert!(!compact.same_header(&HeaderName::ContentLength));
+        let extension = HeaderName::Other(SipStr::owned("X-Overload"));
+        assert!(extension.same_header(&HeaderName::Other(SipStr::owned("x-overload"))));
+        assert!(!extension.same_header(&HeaderName::Subject));
     }
 
     #[test]

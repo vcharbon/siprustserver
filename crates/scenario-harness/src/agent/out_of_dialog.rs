@@ -170,6 +170,7 @@ impl<'a> OutOfDialogRequest<'a> {
             body: self.body.unwrap_or_default(),
             content_type: self.content_type,
             extra_headers: self.extra_headers,
+            ..Default::default()
         };
         let mut req = generate_out_of_dialog_request(self.method, &opts);
         if self.suppress_default_ct {
@@ -231,6 +232,7 @@ impl<'a> OutOfDialogRequest<'a> {
             body: self.body.clone().unwrap_or_default(),
             content_type: self.content_type.clone(),
             extra_headers: self.extra_headers.clone(),
+            ..Default::default()
         };
         let method = self.method;
 

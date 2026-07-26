@@ -155,7 +155,7 @@ helpers listed above, run capped workspace test, tick tracker, commit.
 
 - [x] M1 HeaderName + one-pass dispatch
 - [x] M2 value hierarchy + draft engine
-- [ ] M3 generators → recipes
+- [x] M3 generators → recipes
 - [ ] M4 sip-txn
 - [ ] M5 sip-proxy
 - [ ] M6 b2bua-sdk + b2bua
@@ -349,3 +349,90 @@ text happens on the freeze path.
   coexistence, but it is a readability trap until M12 privatizes the field.
 - `alloc_budget.rs` still has no build-path or freeze-path case, so this
   phase's "one buffer per freeze" claim is unmeasured. M13 owns it.
+
+### M3 — generators → recipes
+
+Every generator body is now a draft recipe; `hydrate_request`/`hydrate_response`
+are gone from the build path (they survive for genuinely raw input), and a built
+message carries its rendered image like a parsed one.
+
+**Measurements — the first build-path budget** (`cargo test -p sip-message
+--test alloc_budget --release`, 1000 ops/case, same box, hydrate path → draft
+recipes). The three `build/*` cases are new; the options are built once outside
+the measured region, so the number is construction cost, not the caller's own
+bookkeeping.
+
+| case | allocs/msg | bytes/msg |
+|---|---|---|
+| build/invite_sdp (blank draft, SDP offer) | 53 → **48** | 3892 → **6576** |
+| build/bye (in-dialog, one Route) | 56 → **54** | 4045 → **5966** |
+| build/response_200 (echo + stamp) | 46 → **37** | 3991 → **7316** |
+
+Budgets are set at measured + ~20 %. Workspace: 2111 tests passed, 0 failed.
+
+**Bytes are up because a built message now carries its image** — the rendered
+datagram plus the shared text its header spans point into, which is exactly what
+the ADR asks for. It is not yet a saving: every sender still calls `serialize()`
+on the way out, so the render happens twice. The first consumer port that sends
+`msg.raw` instead reclaims it.
+
+**Allocs barely moved because `freeze` still runs the eager extraction.** Split
+on the INVITE case: recipe ≈ 25 allocs, render 3, `assemble` ≈ 17 — the last is
+the same one-pass extraction a parse runs, and it exists only to populate the
+legacy typed fields (M2 note, M12 owns it). The old path's ~20 `format!`-String
+→ `Arc<str>` double copies are gone; what replaced them is one box per typed
+entry plus one owned copy per generated text value.
+
+**Typed twins landed as one `values` field per opts struct**, not as per-field
+twins: `opts.values.from = Some(header::From…)` supersedes `from_uri`/`from_tag`,
+`values.hops` supersedes `vias`, and so on. Per-field twins would have to be
+named around the stringly names they replace; a `values` group keeps the final
+names free, so M12 deletes the stringly fields and flattens. Adding the field
+broke 12 exhaustive struct literals in b2bua / scenario-harness / e2e-core —
+patched with `..Default::default()`, the only edits outside sip-message.
+
+**Stringly options ride `push_raw`, so no existing caller's wire bytes change.**
+A Raw entry is memcpy'd at freeze, never parsed, which is what keeps CANCEL's
+"Via copied verbatim" and the relay's transparent headers byte-exact. Three
+deliberate deltas, all typed paths:
+- the topmost echoed Via in `generate_response` is stamped as a value
+  (`Via::stamped_from`) and re-rendered — but only when the stamp actually
+  changes it, and never for a comma-folded line, which is echoed verbatim;
+- `Via::stamped_from` no longer overwrites a `received` another hop recorded.
+  M2 wrote it corrective; the string helper it replaces is idempotent, and
+  idempotent is right — a hop records what it saw, it does not correct history;
+- a To that reads cleanly is tagged typed (`to.with_tag`), so a bare
+  `addr-spec` To gains angle brackets before the tag — which is what makes the
+  tag a header parameter instead of a URI one. A To the reader rejects still
+  leaves tagged, by text, so the peer is answered about the address it sent.
+
+**`extra_headers` keep the caller's exact header-name spelling.** The
+scenario-harness template lane replays a captured message byte for byte —
+compact `c:`/`k:`, `p-AsSeRtEd-IdEnTiTy` — and canonicalizing those names broke
+four of its tests. Caller lines are therefore `HeaderName::Other(verbatim)`, and
+`HeaderName::same_header` (used by `Entry::is`) resolves casing and compact forms
+so such a line still answers to the header it names: identity is the header, the
+bytes are only its spelling. Consequence, strictly better: the stack-default
+probes are now compact-aware for Content-Type too, so a caller who froze `c:`
+no longer receives a second, canonical Content-Type line.
+
+**Engine additions this phase needed:** `Draft::with_body` (carry a body without
+touching the media type; `Draft::body` delegates), `SipRequest/SipResponse::
+raw_text(HeaderName)` (the verbatim-echo seam — CANCEL, the non-2xx ACK and the
+response echo copy no bytes, every echoed line is a span of the source image),
+blank drafts pre-size their entry list, and `Uri::sip`/`sip_user` stop allocating
+the scheme.
+
+**Suspicions raised, not fixed:**
+- `StackDialog` and its route set are still `String`s, so `build/bye` is the
+  most allocation-heavy build case (a String clone per route, plus the remote
+  target). The dialog shape is not a `Generate*Opts` field, so typing it was out
+  of this phase; it is the next real build-path win.
+- `route_for_in_dialog` still computes over text via `message_helpers::route`.
+  It belongs on `RouteEntry`/`Uri` once the dialog is typed.
+- Nothing reads the image a built message now carries, so the build path pays
+  for it twice (see above). Worth a port-order note for M4–M11.
+- `emit::name_addr_text` treats an empty tag as no tag on From as well as To.
+  The old path emitted `;tag=` and let hydrate reject it (a panic); no caller
+  passes an empty local tag, and neither outcome is defensible — the typed
+  `values.from` is the way out.

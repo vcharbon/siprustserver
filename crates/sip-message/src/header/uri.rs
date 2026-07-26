@@ -104,15 +104,18 @@ pub struct Uri {
     headers: Vec<(SipStr, SipStr)>,
 }
 
+/// The scheme this stack originates URIs under.
+const SIP_SCHEME: SipStr = SipStr::from_static("sip");
+
 impl Uri {
     /// A `sip:host` URI.
     pub fn sip(host: impl Into<SipStr>) -> Self {
-        Self::new("sip", None::<SipStr>, HostPort::new(host, None))
+        Self::new(SIP_SCHEME, None::<SipStr>, HostPort::new(host, None))
     }
 
     /// A `sip:user@host` URI.
     pub fn sip_user(user: impl Into<SipStr>, host: impl Into<SipStr>) -> Self {
-        Self::new("sip", Some(user), HostPort::new(host, None))
+        Self::new(SIP_SCHEME, Some(user), HostPort::new(host, None))
     }
 
     pub fn new(

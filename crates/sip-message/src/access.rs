@@ -9,6 +9,7 @@
 use crate::draft::{HeaderList, RequestDraft, ResponseDraft};
 use crate::error::SipParseError;
 use crate::header::{self, HeaderName, HeaderValue, HostPort, NameAddr, ParamValue, Uri};
+use crate::sip_str::SipStr;
 use crate::types::{self, NonEmpty, SipHeader, SipMessage, SipRequest, SipResponse};
 
 // ---------------------------------------------------------------------------
@@ -20,6 +21,13 @@ fn raw_values<'a>(
     name: HeaderName,
 ) -> impl Iterator<Item = &'a str> + 'a {
     headers.iter().filter(move |h| name.matches(&h.name)).map(|h| h.value.as_str())
+}
+
+fn raw_text_values<'a>(
+    headers: &'a [SipHeader],
+    name: HeaderName,
+) -> impl Iterator<Item = SipStr> + 'a {
+    headers.iter().filter(move |h| name.matches(&h.name)).map(|h| h.value.clone())
 }
 
 fn values_of<H: HeaderValue>(headers: &[SipHeader]) -> Result<Vec<H>, SipParseError> {
@@ -128,6 +136,12 @@ macro_rules! typed_read_surface {
             /// hatch for a header that genuinely stays opaque.
             pub fn raw(&self, name: HeaderName) -> impl Iterator<Item = &str> {
                 raw_values(&self.headers, name)
+            }
+
+            /// The unparsed values of one header as shared text — the seam a
+            /// verbatim echo seeds from, copying no bytes.
+            pub fn raw_text(&self, name: HeaderName) -> impl Iterator<Item = SipStr> + '_ {
+                raw_text_values(&self.headers, name)
             }
 
             pub fn has(&self, name: &HeaderName) -> bool {

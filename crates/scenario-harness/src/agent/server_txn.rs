@@ -458,6 +458,7 @@ impl<'a> Respond<'a> {
             content_type: None,
             extra_headers,
             incoming_source: None,
+            ..Default::default()
         };
         let mut resp = generate_response(&txn.request, self.status, &self.reason, &opts);
         if self.suppress_default_ct {

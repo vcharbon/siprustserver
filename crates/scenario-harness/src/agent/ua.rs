@@ -395,6 +395,7 @@ impl Agent {
                 name: "Expires".into(),
                 value: ttl_sec.to_string().into(),
             }],
+            ..Default::default()
         };
         let req = generate_out_of_dialog_request(OutOfDialogMethod::Register, &opts);
         self.send(&SipMessage::Request(req), registrar).await;

@@ -122,6 +122,7 @@ impl ActionExecutor<'_> {
                     transparent_headers,
                     content_type: relay_content_type.clone(),
                     contact: Some(contact),
+                    ..Default::default()
                 };
                 let relayed = generators::generate_relayed_response(status, &reason, &opts);
                 let s_id = dialog_identity_tag(&source_leg_id, &src_dialog);

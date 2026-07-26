@@ -1,9 +1,11 @@
 //! CANCEL generation for an outstanding INVITE (RFC 3261 §9.1).
 
-use super::emit::{h, make_request};
+use super::emit;
 use super::spec::InviteClientTransactionHandle;
-use crate::message_helpers::{get_header, get_headers};
-use crate::types::{SipHeader, SipRequest};
+use crate::draft::RequestDraft;
+use crate::header::{CSeq, ContentLength, HeaderName, MaxForwards};
+use crate::method::Method;
+use crate::types::SipRequest;
 
 /// Build a CANCEL for the outstanding INVITE (RFC 3261 §9.1): the CANCEL "MUST
 /// have a single Via header field value, and that value MUST equal the top Via
@@ -18,25 +20,23 @@ use crate::types::{SipHeader, SipRequest};
 /// is missing a required header.
 pub fn generate_cancel(invite_txn: &InviteClientTransactionHandle) -> SipRequest {
     let invite = &invite_txn.original_invite;
-    let via = get_header(&invite.headers, "via").expect("generate_cancel: INVITE missing Via");
-    let from = get_header(&invite.headers, "from").expect("generate_cancel: INVITE missing From");
-    let to = get_header(&invite.headers, "to").expect("generate_cancel: INVITE missing To");
-    let call_id =
-        get_header(&invite.headers, "call-id").expect("generate_cancel: INVITE missing Call-ID");
-    let invite_cseq = invite.cseq.seq;
+    let echoed = |name: HeaderName| {
+        invite
+            .raw_text(name.clone())
+            .next()
+            .unwrap_or_else(|| panic!("generate_cancel: INVITE missing {name}"))
+    };
 
-    let mut headers: Vec<SipHeader> = vec![
-        h("Via", via),
-        h("Max-Forwards", "70"),
-        h("From", from),
-        h("To", to),
-        h("Call-ID", call_id),
-        h("CSeq", format!("{invite_cseq} CANCEL")),
-    ];
-    for route in get_headers(&invite.headers, "route") {
-        headers.push(h("Route", route));
+    let mut draft = RequestDraft::new(Method::Cancel, invite.request_uri())
+        .push_raw(HeaderName::Via, echoed(HeaderName::Via))
+        .push(MaxForwards::new(emit::DEFAULT_MAX_FORWARDS))
+        .push_raw(HeaderName::From, echoed(HeaderName::From))
+        .push_raw(HeaderName::To, echoed(HeaderName::To))
+        .push_raw(HeaderName::CallId, echoed(HeaderName::CallId))
+        .push(CSeq::new(invite.cseq.seq, Method::Cancel));
+    for route in invite.raw_text(HeaderName::Route) {
+        draft = draft.push_raw(HeaderName::Route, route);
     }
-    headers.push(h("Content-Length", "0"));
 
-    make_request("CANCEL", &invite.uri, headers, Vec::new())
+    emit::request(draft.push(ContentLength::new(0)))
 }

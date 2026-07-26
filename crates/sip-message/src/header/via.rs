@@ -163,9 +163,10 @@ impl Via {
 
     /// Stamp what the receiving side observed: `received` whenever the source
     /// address differs from the sent-by host, and `rport` only when the sender
-    /// asked for it (RFC 3261 §18.2.1, RFC 3581 §4).
+    /// asked for it (RFC 3261 §18.2.1, RFC 3581 §4). A `received` another hop
+    /// already recorded stands — stamping is idempotent, never corrective.
     pub fn stamped_from(mut self, source_host: &str, source_port: u16) -> Self {
-        if self.host() != source_host {
+        if self.received().is_none() && self.host() != source_host {
             self = self.with_received(SipStr::owned(source_host));
         }
         if matches!(self.rport(), Some(Rport::Requested)) {
@@ -285,6 +286,13 @@ mod tests {
             asked.stamped_from("10.0.0.1", 33000).to_wire(),
             "SIP/2.0/UDP 10.0.0.1:5060;branch=z1;rport=33000"
         );
+    }
+
+    #[test]
+    fn stamping_leaves_a_received_another_hop_recorded() {
+        let stamped = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z1;received=192.0.2.7")
+            .stamped_from("198.51.100.4", 33000);
+        assert_eq!(stamped.received(), Some("192.0.2.7"));
     }
 
     #[test]

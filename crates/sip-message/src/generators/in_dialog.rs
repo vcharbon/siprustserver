@@ -2,10 +2,17 @@
 //! NOTIFY, INFO, UPDATE, MESSAGE, REFER — plus the loose/strict Request-URI +
 //! Route-set computation shared with the ACK generator.
 
-use super::emit::{append_body_headers, h, make_request, wrap_uri};
+use super::emit;
 use super::methods::{InDialogMethod, B2BUA_ALLOW, B2BUA_SUPPORTED};
 use super::spec::{ContactSpec, StackDialog, ViaSpec};
+use crate::draft::RequestDraft;
+use crate::header::{
+    self, CSeq, CallId, Event, HeaderName, MaxForwards, MediaType, RAck, SubscriptionState, Uri,
+    Via,
+};
 use crate::message_helpers::route::{first_route_is_loose, strip_route_uri_to_request_uri};
+use crate::method::Method;
+use crate::sip_str::SipStr;
 use crate::types::{SipHeader, SipRequest};
 
 /// Compute the Request-URI and ordered Route header values for an in-dialog
@@ -31,6 +38,49 @@ pub(super) fn route_for_in_dialog(
     }
 }
 
+/// Put a route set on the request, one Route line per entry, in order.
+pub(super) fn with_routes(mut draft: RequestDraft, routes: &[String]) -> RequestDraft {
+    for route in routes {
+        draft = draft.push_raw(HeaderName::Route, SipStr::owned(route));
+    }
+    draft
+}
+
+/// The dialog's identity headers (RFC 3261 §12.2.1.1): local identity plus
+/// local tag in From, remote identity plus remote tag in To, then the Call-ID.
+/// A dialog hydrated mid-confirm by a reactive failover takeover can carry an
+/// EMPTY remote tag; the To then goes out tag-less rather than malformed, and
+/// the degenerate dialog is handled elsewhere.
+pub(super) fn with_dialog_identity(draft: RequestDraft, dialog: &StackDialog) -> RequestDraft {
+    draft
+        .push_raw(HeaderName::From, emit::name_addr_text(&dialog.local_uri, Some(&dialog.local_tag)))
+        .push_raw(
+            HeaderName::To,
+            emit::name_addr_text(&dialog.remote_uri, Some(&dialog.remote_tag)),
+        )
+        .push(CallId::new(SipStr::owned(&dialog.call_id)))
+}
+
+/// The typed twin of the stringly fields of [`GenerateInDialogRequestOpts`]:
+/// each value supersedes the text that names the same header.
+#[derive(Debug, Clone, Default)]
+pub struct InDialogValues {
+    /// Supersedes `request_uri`.
+    pub uri: Option<Uri>,
+    /// Supersedes `via`.
+    pub hop: Option<Via>,
+    /// Supersedes `contact`.
+    pub contact: Option<header::Contact>,
+    /// Supersedes `rack`.
+    pub rack: Option<RAck>,
+    /// Supersedes `event`.
+    pub event: Option<Event>,
+    /// Supersedes `subscription_state`.
+    pub subscription_state: Option<SubscriptionState>,
+    /// Supersedes `content_type`.
+    pub content_type: Option<MediaType>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GenerateInDialogRequestOpts {
     pub via: Option<ViaSpec>,
@@ -48,6 +98,8 @@ pub struct GenerateInDialogRequestOpts {
     pub cseq: Option<u32>,
     /// Request-URI override; defaults to `dialog.remote_target`.
     pub request_uri: Option<String>,
+    /// Typed values, each superseding its stringly counterpart above.
+    pub values: InDialogValues,
 }
 
 /// Result of [`generate_in_dialog_request`]: the request plus the dialog with
@@ -63,74 +115,67 @@ pub fn generate_in_dialog_request(
     dialog: &StackDialog,
     opts: &GenerateInDialogRequestOpts,
 ) -> InDialogResult {
-    let body = opts.body.clone();
+    let values = &opts.values;
     let next_cseq = opts.cseq.unwrap_or(dialog.local_cseq + 1);
     let remote_target = opts.request_uri.clone().unwrap_or_else(|| dialog.remote_target.clone());
-    let (request_uri, route_values) = route_for_in_dialog(&remote_target, &dialog.route_set);
-    let via = opts.via.as_ref().expect("ViaSpec required");
+    let (request_uri, routes) = route_for_in_dialog(&remote_target, &dialog.route_set);
+    let uri = values.uri.clone().unwrap_or_else(|| emit::uri(&request_uri));
+    let hop =
+        values.hop.clone().unwrap_or_else(|| opts.via.as_ref().expect("ViaSpec required").value());
+    let verb = Method::from(method);
 
-    // RFC 3261 §12.2.1.1: the To header carries the remote tag. A dialog
-    // hydrated mid-confirm by a failover takeover can have an EMPTY
-    // `remote_tag`; `;tag=` with an empty value is malformed (hydrate_request
-    // rejects it), so the tag is skipped when absent — the request stays
-    // well-formed and the degenerate dialog is handled elsewhere.
-    let to_value = if dialog.remote_tag.is_empty() {
-        wrap_uri(&dialog.remote_uri)
-    } else {
-        format!("{};tag={}", wrap_uri(&dialog.remote_uri), dialog.remote_tag)
-    };
-    let mut headers: Vec<SipHeader> = vec![
-        h("Via", via.header_value()),
-        h("Max-Forwards", "70"),
-        h("From", format!("{};tag={}", wrap_uri(&dialog.local_uri), dialog.local_tag)),
-        h("To", to_value),
-        h("Call-ID", dialog.call_id.clone()),
-        h("CSeq", format!("{} {}", next_cseq, method.as_str())),
-    ];
+    let mut draft = RequestDraft::new(verb.clone(), uri)
+        .push(hop)
+        .push(MaxForwards::new(emit::DEFAULT_MAX_FORWARDS));
+    draft = with_dialog_identity(draft, dialog).push(CSeq::new(next_cseq, verb));
 
     // Contact for every in-dialog method EXCEPT BYE (RFC 3261 §15.1).
     if method != InDialogMethod::Bye {
-        let contact = opts.contact.as_ref().expect("ContactSpec required");
-        headers.push(h("Contact", contact.header_value()));
+        let contact = values
+            .contact
+            .clone()
+            .unwrap_or_else(|| opts.contact.as_ref().expect("ContactSpec required").value());
+        draft = draft.push(contact);
     }
 
-    for route in &route_values {
-        headers.push(h("Route", route.clone()));
-    }
+    draft = with_routes(draft, &routes);
 
     if method == InDialogMethod::Prack {
-        if let Some(rack) = &opts.rack {
-            headers.push(h("RAck", rack.clone()));
-        }
+        draft = match (&values.rack, &opts.rack) {
+            (Some(rack), _) => draft.push(rack.clone()),
+            (None, Some(text)) => draft.push_raw(HeaderName::RAck, SipStr::owned(text)),
+            (None, None) => draft,
+        };
     }
     if method == InDialogMethod::Notify {
-        if let Some(event) = &opts.event {
-            headers.push(h("Event", event.clone()));
-        }
-        if let Some(ss) = &opts.subscription_state {
-            headers.push(h("Subscription-State", ss.clone()));
-        }
+        draft = match (&values.event, &opts.event) {
+            (Some(event), _) => draft.push(event.clone()),
+            (None, Some(text)) => draft.push_raw(HeaderName::Event, SipStr::owned(text)),
+            (None, None) => draft,
+        };
+        draft = match (&values.subscription_state, &opts.subscription_state) {
+            (Some(state), _) => draft.push(state.clone()),
+            (None, Some(text)) => {
+                draft.push_raw(HeaderName::SubscriptionState, SipStr::owned(text))
+            }
+            (None, None) => draft,
+        };
     }
     if method == InDialogMethod::Invite {
         // Advertise capabilities — but never duplicate a header the caller
         // already carries through `extra_headers` (duplicated values merge per
-        // RFC 3261 §7.3.1). The probe is compact-form-aware (§7.3.3): a
-        // carried `k:` (compact Supported) suppresses the stack default.
-        let carried = |name: &str| {
-            opts.extra_headers.iter().any(|hdr| crate::message_helpers::name_matches(name, &hdr.name))
-        };
-        if !carried("Allow") {
-            headers.push(h("Allow", B2BUA_ALLOW));
+        // RFC 3261 §7.3.1).
+        if !emit::carries(&opts.extra_headers, &HeaderName::Allow) {
+            draft = draft.push_raw(HeaderName::Allow, SipStr::from_static(B2BUA_ALLOW));
         }
-        if !carried("Supported") {
-            headers.push(h("Supported", B2BUA_SUPPORTED));
+        if !emit::carries(&opts.extra_headers, &HeaderName::Supported) {
+            draft = draft.push_raw(HeaderName::Supported, SipStr::from_static(B2BUA_SUPPORTED));
         }
     }
 
-    headers.extend(opts.extra_headers.iter().cloned());
-    append_body_headers(&mut headers, &body, opts.content_type.as_deref());
-
-    let request = make_request(method.as_str(), &request_uri, headers, body);
+    draft = emit::extra_headers(draft, &opts.extra_headers);
+    let content_type = emit::media_type(&values.content_type, &opts.content_type);
+    let request = emit::request(emit::framed(draft, opts.body.clone(), content_type));
     let next_dialog = StackDialog { local_cseq: next_cseq, ..dialog.clone() };
     InDialogResult { request, dialog: next_dialog }
 }

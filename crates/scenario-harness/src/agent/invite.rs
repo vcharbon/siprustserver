@@ -200,6 +200,7 @@ impl<'a> Invite<'a> {
                 .unwrap_or_default(),
             content_type: None,
             extra_headers: self.extra_headers.clone(),
+            ..Default::default()
         };
         let mut invite = generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
         if self.suppress_default_ct {

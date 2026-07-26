@@ -6,6 +6,14 @@
 //! messages does NOT live here — see [`crate::message_helpers`]; lenient raw
 //! scanning is [`crate::sniff`].
 //!
+//! Each generator is a recipe over a [`Draft`](crate::draft::Draft): it knows
+//! the dialog rules — CSeq stepping, route-set application, tag placement — and
+//! leaves the wire bytes to one render at freeze, so a built message carries a
+//! real image and is read back exactly like a parsed one. Every `Generate*Opts`
+//! carries a `values` twin holding the same headers typed; a typed value
+//! supersedes the text naming its header and reaches the wire without a
+//! re-parse.
+//!
 //! Concern map:
 //!   - [`spec`] — input shapes (transport, Via/Contact specs, dialog/txn views)
 //!   - [`methods`] — admissible-method views + advertised Allow/Supported
@@ -27,15 +35,22 @@ pub mod relay;
 pub mod response;
 pub mod spec;
 
-pub use ack::{generate_ack_for_2xx, generate_ack_for_non_2xx, GenerateAckFor2xxOpts};
+pub use ack::{
+    generate_ack_for_2xx, generate_ack_for_non_2xx, AckFor2xxValues, GenerateAckFor2xxOpts,
+};
 pub use cancel::generate_cancel;
-pub use in_dialog::{generate_in_dialog_request, GenerateInDialogRequestOpts, InDialogResult};
+pub use in_dialog::{
+    generate_in_dialog_request, GenerateInDialogRequestOpts, InDialogResult, InDialogValues,
+};
 pub use methods::{InDialogMethod, OutOfDialogMethod, B2BUA_ALLOW, B2BUA_SUPPORTED};
-pub use out_of_dialog::{generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts};
+pub use out_of_dialog::{
+    generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogValues,
+};
 pub use relay::{
     extract_non_structural_headers, generate_relayed_response, GenerateRelayedResponseOpts,
+    RelayedResponseValues,
 };
-pub use response::{generate_response, GenerateResponseOpts};
+pub use response::{generate_response, GenerateResponseOpts, ResponseValues};
 pub use spec::{ContactSpec, InviteClientTransactionHandle, SipTransport, StackDialog, ViaSpec};
 
 // Route/Via value readers and rewriters live on the read/rewrite side
