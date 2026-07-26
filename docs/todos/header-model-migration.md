@@ -239,3 +239,50 @@ iterator rather than staging segments in a `Vec`.
   workspace run and passed both standalone and on rerun. It samples CPU stacks,
   has no sip-message dependency, and starves under the capped parallel lane —
   infra flake, not a SUT finding.
+
+### M2 — value hierarchy + draft engine
+
+Landed as two commits (`sip_message::header` values, then `sip_message::draft`
++ message accessors); the workspace is green at both.
+
+**Part 1 — `sip_message::header` value hierarchy.**
+
+Shape as specified: `Wire` (the one build buffer), ordered small-vec `Params`,
+unified `Uri`/`HostPort`, `NameAddr`, `NameAddrHeader<K>` with the kind axis
+(`NameAddrKind` / `RichParams` / `TaggedKind`), full-surface `Via`,
+`TokenListHeader<K>`, `TokenParamsHeader<K>`, `NumericHeader<K>`,
+`Credentials<K>`, plus the scalar identity values `CallId` / `CSeq` / `RAck`.
+`smallvec` joins the workspace dependencies for `Params`.
+
+**Round-trip pin: 100 % of the frozen ABNF corpus, zero fixpoint failures.**
+`tests/header_round_trip.rs` drives every generated line through
+`parse(render(v)) == v`; acceptance was 1000/1000 inputs for From, CSeq, RAck,
+Refer-To and SIP-URI, 1038 values for Contact/Route (comma folds), 1890 for Via
+and 1989 for P-Asserted-Identity. Floors are pinned at 900 so a parser that
+started rejecting could not pass vacuously.
+
+**Three deliberate value-model choices, all fixpoint-forced:**
+- `ParamValue` grows a `Quoted` variant beside `Flag`/`Token` (the old
+  `types::ParamValue` has only `Flag`/`Value`). Without it, unescaping at parse
+  and re-rendering bare loses a value whose text carries a separator, and the
+  fixpoint fails on the corpus.
+- `Params` keeps the wire spelling of a parameter name and compares
+  case-insensitively; the old parser lowercase-*copied* mixed-case names.
+- A `NameAddr` always renders `<uri>`, even when the wire had a bare addr-spec.
+  Unconditional brackets are always legal and stop a URI parameter being read
+  back as a header parameter.
+
+**Ports are `u16` and out-of-range digits are a parse error**, not the old
+saturating `u64`. A stack that rounds a port silently misroutes; the ABNF
+corpus's `port=88161` lines are simply rejected (and skipped by the pin).
+
+**Deviation — `PAssertedIdentity`/`PPreferredIdentity` keep parsed parameters.**
+ADR-0025 §2 says the accessors must not exist on them, which is what the
+`RichParams` bound does. Parsed parameters are still *stored* and re-rendered:
+dropping them would make a thawed edit lose peer bytes, and the ADR asks for an
+API-surface policy, not a lossy parse.
+
+**Naming — `header::From`/`header::To` shadow the prelude's `From` trait inside
+any module that imports them unqualified.** The ADR names are kept; the module
+doc directs consumers to `header::From`. Port agents in M4–M11 that need
+`impl From<…>` in the same file must qualify.

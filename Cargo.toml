@@ -68,6 +68,10 @@ publish = false
 # docs/adr/0001-port-custom-parser-rvoip-as-parity-oracle.md.
 # rvoip-sip-core = { path = "portsource/sipjsserver/repos/rvoip/crates/rvoip-sip-core" }
 thiserror = "2"
+# Ordered header/URI parameter lists (ADR-0025): the one- and two-parameter
+# case — the overwhelming majority on the wire — stays inline, so a parsed
+# name-addr allocates nothing for its parameters.
+smallvec = "1"
 proptest = "1"
 criterion = "0.5"
 # Network layer onward: all async I/O + logic-path time goes through tokio

@@ -1033,7 +1033,7 @@ fn validate_port_digits(s: &[u8], from: usize, to: usize) -> Option<String> {
 
 /// Mimic JS `decodeURIComponent`: decode `%XX` as UTF-8 bytes; `Err` on a
 /// malformed escape or invalid UTF-8 (the caller falls back to the raw form).
-fn decode_uri_component(s: &str) -> Result<String, ()> {
+pub(crate) fn decode_uri_component(s: &str) -> Result<String, ()> {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;

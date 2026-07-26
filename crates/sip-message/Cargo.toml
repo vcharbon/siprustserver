@@ -23,6 +23,7 @@ serde = { workspace = true, features = ["derive"] }
 # The message's raw datagram + body are refcounted slices of ONE buffer, so a
 # parse (and a forwarding-hop clone) copies no packet bytes. See `sip_str`.
 bytes.workspace = true
+smallvec.workspace = true
 
 [dev-dependencies]
 bytes.workspace = true
