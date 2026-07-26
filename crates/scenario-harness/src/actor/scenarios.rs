@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use super::actor::{
+use super::endpoint::{
     CtxFeed, Disposition, Feed, MediaState, SUBFLOW_REALIGN, SUBFLOW_RENEG, SUBFLOW_REFER,
 };
 use super::goals::{Barrier, Goal, GoalStep};

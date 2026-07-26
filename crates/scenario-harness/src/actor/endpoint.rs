@@ -1,280 +1,268 @@
-//! Per-endpoint inbound demultiplexing — several actors on ONE bound UA.
+//! The declarative per-endpoint vocabulary: how an endpoint answers its initial
+//! INVITE ([`Disposition`]), the media it negotiates ([`MediaState`]), which
+//! reactive events feed the load report ([`CtxFeed`]/[`Feed`]), the sub-flow
+//! names, and the full endpoint declaration ([`ActorSpec`]). The LIVE state a
+//! spec is wired into does NOT live here — see [`super::runner::ActorState`].
 //!
-//! An [`Agent`] is one UA stack: one socket, one §17.2 receive view, one ACK
-//! obligation table. A production peer plays SEVERAL roles on that one stack —
-//! it originates a call and, under a different Call-ID, receives one the far end
-//! re-originates back to the same socket pair (an application-server loopback).
-//! Two actors both pulling [`Agent::recv_any`] would race for every datagram, so
-//! an endpoint with more than one actor gets ONE receive pump ([`EndpointPump`])
-//! that owns the pull and hands each inbound to its owner:
+//! # Downstream-contract feeding is DECLARATIVE ([`CtxFeed`])
 //!
-//! * a message whose Call-ID a member already owns follows that member — the
-//!   dialog identity, learned when the member ORIGINATED the dialog
-//!   ([`EndpointHandle::own_dialog`]) or when its claim took the inbound leg;
-//! * an inbound INITIAL INVITE is assigned by [`resolve_claim`] over the members'
-//!   pending [`ClaimRule`]s — the shared precedence, never re-decided here — and
-//!   the winning claim is consumed, binding the new dialog to that member;
-//! * an initial INVITE no pending claim owns is COUNTED and recorded
-//!   ([`Observation::UnclaimedInbound`]), never silently dropped;
-//! * any other REQUEST on an unknown dialog goes to the endpoint's
-//!   first-declared actor, whose reactor services it exactly as on an unshared
-//!   endpoint — stray servicing (a 481, an OPTIONS 200) is member-agnostic, so
-//!   the pick cannot cross-wire a dialog;
-//! * a RESPONSE on an unknown dialog answers a request no member originated
-//!   here — delivering it could satisfy the WRONG actor's pending expectation,
-//!   so it is counted and recorded, never guessed at.
-//!
-//! An actor that owns its endpoint outright keeps pulling `recv_any` directly
-//! ([`Inbox::Own`]) — the pump exists only where an endpoint is shared.
+//! Phases / checkpoints / the 18x ringing gate key the load report's case
+//! buckets and the chaos classifier's phase-transition proximity (see
+//! `docs/todos/actor-harness-p1-contract-table.md`), and each call body stamps
+//! a DIFFERENT trail (the refer body stamps only `referred`/`transferred` and
+//! never feeds `mark_ringing`; basic stamps `connected`/`bye_200` and does).
+//! So the reactor stamps NOTHING on its own — each [`ActorSpec`] declares
+//! exactly which reactive event feeds which label, and an undeclared event
+//! feeds nothing. Message ANCHORS are the exception: they are attached
+//! generically at reaction time with the message in hand (they are inert
+//! unless the shape publishes them and the call is sampled).
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::net::SocketAddr;
 use std::time::Duration;
 
-use sip_message::{serialize, SipMessage};
-use tokio::sync::mpsc;
-use tokio::time::Instant;
+use sip_message::{CseqPattern, DelayedAutomatic};
 
-use super::actor::ActorSpec;
-use super::state::{Observation, ObservedState};
-use crate::agent::{Agent, Inbound};
-use crate::claim::{resolve_claim, ClaimRule};
-use crate::legpick::LegInfo;
-use crate::StepError;
+use super::goals::Goal;
+use crate::realcall::CallCtx;
+use crate::Agent;
 
-/// Where one actor's inbound messages come from.
-pub enum Inbox {
-    /// The actor owns its endpoint — it pulls the UA's receive view itself
-    /// (the unshared default; behaviour identical to a direct `recv_any`).
-    Own(Agent),
-    /// The actor shares its endpoint — the endpoint's ONE pump delivers here.
-    Shared {
-        role: &'static str,
-        rx: mpsc::UnboundedReceiver<Inbound>,
-        /// The wait bound a silent inbox reports as a (non-fatal) timeout, so a
-        /// sharing actor re-evaluates its exit condition exactly as often as an
-        /// unshared one.
-        idle: Duration,
+/// The realign sub-flow name every leg's re-INVITE confirm progress is tracked
+/// under (the refer `merged` barrier is a conjunction over these).
+pub const SUBFLOW_REALIGN: &str = "realign";
+/// The sub-flow name a REFER's acceptance (202) advances on the sending leg.
+pub const SUBFLOW_REFER: &str = "refer";
+/// The sub-flow name a CALLER-initiated in-dialog renegotiation (a re-INVITE's
+/// answered-and-ACKed 2xx, or an UPDATE's 200) advances on the sending leg —
+/// the barrier the `reinvite` / `prack_update` teardown gates on so the BYE
+/// never races the renegotiation's completion.
+pub const SUBFLOW_RENEG: &str = "reneg";
+/// The sub-flow a CALLER advances once it has PRACKed the reliable provisional —
+/// the observed "the early dialog exists AND is acknowledged" fact an early
+/// UPDATE (C5, RFC 3311 §5.1) gates on. Distinct from `LegPhase::Early`, which
+/// a caller reaches the instant she originates (before any provisional), so it
+/// cannot mean "the reliable 183 is in".
+pub const SUBFLOW_EARLY: &str = "early_pracked";
+
+/// How an endpoint answers the INITIAL (dialog-creating) INVITE it receives —
+/// the endpoint state machine's entry policy. Later in-dialog traffic is always
+/// handled reactively by [`super::react::default_react`], regardless of
+/// disposition.
+#[derive(Debug, Clone, Copy)]
+pub enum Disposition {
+    /// Originates the call; never answers an initial INVITE.
+    Caller,
+    /// Answers immediately with `200` + the answer SDP (no provisional).
+    Answer,
+    /// Rings (`180`) then answers `200` after `ring` — an interruptible timed
+    /// answer (a CANCEL mid-ring yields `487`, not a stuck answer). A ZERO ring
+    /// still emits the 180 (the linear bodies' 180-then-immediate-200 shape).
+    RingThenAnswer { ring: Duration },
+    /// Rings (`180`) then stays SILENT forever — the ring-then-timeout stimulus
+    /// a NO-ANSWER-triggered failover needs: the INVITE server
+    /// transaction is held open so the SUT's OWN no-answer timer is what ends
+    /// the leg. The SUT's timer-driven CANCEL yields `487` (the same held-txn
+    /// path as a mid-ring CANCEL), so the leg settles cleanly under the reroute
+    /// with no stuck obligation or leaked server txn.
+    RingThenSilent,
+    /// Rejects the initial INVITE with a final `code` (486/603/…).
+    Reject(u16),
+    /// Answers RELIABLY (RFC 3262): a `183` carrying `Require:100rel` + `RSeq` +
+    /// the answer SDP, then HOLDS the INVITE transaction, answering `200` to the
+    /// INVITE only after the caller PRACKs (MUST-014 ordering). The
+    /// rerouting/prack winning-leg disposition.
+    ReliableAnswer,
+    /// Like [`ReliableAnswer`](Self::ReliableAnswer) but HOLDS the `200` to the
+    /// INVITE until an EARLY UPDATE has been answered (C5, RFC 3311 §5.1): 183
+    /// reliable → PRACK (200'd, INVITE still held) → UPDATE (200'd) → THEN the
+    /// final 200 INVITE. The callee for an early-UPDATE (`Script::UpdateEarly`)
+    /// establishment, where the caller renegotiates media on the early dialog
+    /// before the call is answered.
+    ReliableAnswerEarlyUpdate,
+    /// A **forking UAS** (C1/E3, RFC 3261 §12.1.2): emits one 18x per tag in
+    /// `tags` — DISTINCT explicit To-tags on the ONE retained INVITE server
+    /// transaction, as if a proxy downstream had forked — then answers `200`
+    /// under the `winner` tag. `reliable: false` → plain `180`s and a timed
+    /// answer after `ring` (a CANCEL mid-ring still yields 487, like
+    /// [`RingThenAnswer`](Self::RingThenAnswer)); `reliable: true` → each fork's
+    /// 18x is a reliable `183` (`Require:100rel`, `RSeq:1`, the answer SDP) and
+    /// the `200` waits for the WINNER fork's PRACK (`ring` is unused).
+    /// `loser_late_200: Some(tag)` additionally emits a LATE `200` under that
+    /// losing tag right after the winner's — the §13.2.2.4 loser the caller
+    /// must ACK then BYE. `winner` (and the late-200 loser, distinct from the
+    /// winner) must be members of `tags` — enforced at INVITE time.
+    ForkingRing {
+        tags: &'static [&'static str],
+        winner: &'static str,
+        ring: Duration,
+        reliable: bool,
+        loser_late_200: Option<&'static str>,
     },
+    /// Never auto-answers by policy. Inbound requests PARK on a per-actor
+    /// queue when a remaining scripted goal will consume/answer them; anything
+    /// the script never consumes falls through to the reactive core (recorded
+    /// as a serviced stray) — peers stay RFC-compliant when the SUT relays
+    /// traffic the script never modeled.
+    Scripted,
 }
 
-impl Inbox {
-    /// The next inbound for this actor. A silent wait is
-    /// [`StepError::Timeout`] and a gone endpoint [`StepError::QueueClosed`] —
-    /// the same vocabulary [`Agent::recv_any`] returns, so the reactor's arm is
-    /// source-agnostic. Cancel-safe: nothing is consumed unless it is returned.
-    pub async fn recv(&mut self) -> Result<Inbound, StepError> {
-        match self {
-            Inbox::Own(agent) => agent.recv_any().await,
-            Inbox::Shared { role, rx, idle } => match tokio::time::timeout(*idle, rx.recv()).await {
-                Ok(Some(m)) => Ok(m),
-                Ok(None) => Err(StepError::QueueClosed { who: role.to_string() }),
-                Err(_) => Err(StepError::Timeout { who: role.to_string() }),
-            },
+/// Per-plan (lane-chosen) stack automatics for scripted endpoints. When set, an
+/// inbound INVITE parked on a [`Disposition::Scripted`] actor is answered
+/// `100 Trying` immediately (RFC 3261 §17.2.1) — identically on every lane; the
+/// `100` never consumes the transaction.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Automatics {
+    pub answer_100_trying: bool,
+}
+
+/// The offer/answer SDP an endpoint negotiates with.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MediaState {
+    offer: Option<&'static str>,
+    answer: Option<&'static str>,
+}
+
+impl MediaState {
+    /// A caller's media (carries the offer on the INVITE).
+    pub fn offer(sdp: &'static str) -> Self {
+        Self { offer: Some(sdp), answer: None }
+    }
+
+    /// A callee's media (carries the answer on the 2xx).
+    pub fn answer(sdp: &'static str) -> Self {
+        Self { offer: None, answer: Some(sdp) }
+    }
+
+    /// Both sides: `offer` rides an originated INVITE, `answer` every answer we
+    /// send (a caller that also answers realign re-INVITEs — the refer alice).
+    pub fn full(offer: &'static str, answer: &'static str) -> Self {
+        Self { offer: Some(offer), answer: Some(answer) }
+    }
+
+    /// No media (a signalling-only endpoint).
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The SDP to answer an inbound offer with — the answer if set, else the
+    /// offer (a symmetric endpoint). Used for the 2xx and for reactive re-INVITE
+    /// answers; NEVER a bodyless 200 to an offer (RFC 3264 §5).
+    pub(super) fn answer_sdp(&self) -> Option<&'static str> {
+        self.answer.or(self.offer)
+    }
+
+    /// The SDP to offer on an originated INVITE.
+    pub(super) fn offer_sdp(&self) -> Option<&'static str> {
+        self.offer
+    }
+}
+
+/// One optional `(checkpoint, phase)` stamp pair a reactive event feeds — both
+/// default to "stamp nothing" (see the module doc on declarative feeding).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Feed {
+    pub checkpoint: Option<&'static str>,
+    pub phase: Option<&'static str>,
+}
+
+impl Feed {
+    pub const NONE: Feed = Feed { checkpoint: None, phase: None };
+
+    pub fn new(checkpoint: Option<&'static str>, phase: Option<&'static str>) -> Self {
+        Self { checkpoint, phase }
+    }
+
+    pub(super) fn stamp(&self, ctx: &CallCtx) {
+        if let Some(cp) = self.checkpoint {
+            ctx.checkpoint(cp);
+        }
+        if let Some(ph) = self.phase {
+            ctx.phase(ph);
         }
     }
 }
 
-/// One actor's seat at a shared endpoint.
-struct Member {
-    role: &'static str,
-    /// The rule by which an inbound initial INVITE is this actor's. `None` = the
-    /// actor claims nothing: it receives only the dialogs it originates.
-    claim: Option<ClaimRule>,
-    /// Set once the claim has fired — a claim is consumed exactly once.
-    fired: bool,
-    tx: mpsc::UnboundedSender<Inbound>,
+/// Which reactive events feed the per-call [`CallCtx`] — the per-body
+/// downstream contract (phases / checkpoints / the 18x gate), declared on the
+/// spec instead of hardwired in the reactor. Defaults stamp NOTHING.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CtxFeed {
+    /// Feed `ctx.mark_ringing` from this caller's 18x/answer observations (the
+    /// cross-call >99% gate). ONLY the shared-establishment bodies feed it —
+    /// the hand-rolled refer/abandon bodies must NOT (contract table §3).
+    pub ringing_gate: bool,
+    /// Stamped when this caller's establishing INVITE is answered (2xx
+    /// received) — `time_to_200` on every current body.
+    pub on_answer_rx: Feed,
+    /// Stamped on this caller's FIRST >100 provisional (18x/183) — the abandon
+    /// body's `time_to_180`. Distinct from the ringing gate (which is a rate,
+    /// not a checkpoint).
+    pub on_provisional: Feed,
+    /// Stamped when the 2xx to this caller's delayed-offer re-INVITE arrives
+    /// (after it is ACKed) — the `reinvite` flow's `time_to_reinvite_200` +
+    /// `reinvited`.
+    pub on_reinvite_ok: Feed,
+    /// Stamped when the 200 to this caller's in-dialog UPDATE arrives — the
+    /// `prack_update` flow's `time_to_update_200` + `updated`.
+    pub on_update_ok: Feed,
+    /// Stamped when the 200 to this caller's FIRST in-dialog OPTIONS keepalive
+    /// ping arrives — the keepalive flows' `time_to_options_200` +
+    /// `keepalive_ack` (first ping only).
+    pub on_options_ok: Feed,
+    /// Stamped when this UAS leg's answer is confirmed (ACK received) — the
+    /// shared establishment's `connected`.
+    pub on_ack_rx: Feed,
+    /// Stamped when this UAS leg SENDS its 200 to the initial INVITE — the
+    /// refer charlie's `time_to_charlie_200` + `transferred`.
+    pub on_answer_sent: Feed,
+    /// Stamped when this leg RECEIVES its initial (dialog-creating) INVITE — the
+    /// rerouted winning leg's `rerouted` (`rerouting_prack.rs:73`).
+    pub on_invite_rx: Feed,
+    /// Stamped when the `200` to this caller's PRACK arrives — the 100rel
+    /// flows' `time_to_prack_200` + `pracked`.
+    pub on_prack_ok: Feed,
+    /// Stamped when a 2xx to this leg's sent REFER arrives — the refer bob's
+    /// `time_to_202` + `referred`.
+    pub on_refer_accepted: Feed,
+    /// Stamped when the 200 to this leg's own BYE arrives — the shared
+    /// teardown's `time_to_bye_200` + `bye_200`.
+    pub on_bye_ok: Feed,
 }
 
-/// A shared endpoint's routing table: which member owns which dialog, and which
-/// claims are still pending.
-struct Demux {
-    /// The UA's name — the endpoint's identity in the observed record.
-    endpoint: String,
-    members: Vec<Member>,
-    /// Call-ID → owning member. Grow-only for the life of the call.
-    owner: HashMap<String, usize>,
-    /// How many [`ClaimRule::ArrivalOrder`] claims have fired (the ordinal
-    /// `resolve_claim` compares against).
-    ordinal: usize,
-    obs: ObservedState,
-}
-
-impl Demux {
-    /// Hand `msg` to its owner, recording it when no owner exists (or the owner
-    /// has finished). Synchronous throughout — the decision never awaits.
-    fn deliver(&mut self, msg: Inbound) {
-        let detail = describe(&msg);
-        match self.owner_of(&msg) {
-            Ok(i) => {
-                let role = self.members[i].role;
-                if self.members[i].tx.send(msg).is_err() {
-                    self.record(format!("{detail} (actor {role} finished)"));
-                }
-            }
-            Err(reason) => self.record(format!("{detail} ({reason})")),
-        }
-    }
-
-    /// The member owning `msg`: the dialog's, else — for a dialog-creating
-    /// INVITE — whichever pending claim takes it (consumed here). A stray
-    /// REQUEST on an unknown dialog goes to the endpoint's first-declared actor
-    /// (stray servicing is member-agnostic); a RESPONSE on an unknown dialog is
-    /// refused — no member originated its request, so delivering it could
-    /// satisfy the wrong actor's expectation. `Err` names the refusal.
-    fn owner_of(&mut self, msg: &Inbound) -> Result<usize, &'static str> {
-        let call_id = call_id_of(msg);
-        if let Some(&i) = self.owner.get(&call_id) {
-            return Ok(i);
-        }
-        match msg {
-            Inbound::Request(txn) => {
-                let raw = serialize(&SipMessage::Request(txn.request().clone()));
-                let leg = LegInfo::new(&raw);
-                if leg.is_initial_invite() {
-                    let i = self.claim_leg(&leg).ok_or("no pending claim")?;
-                    self.owner.insert(call_id, i);
-                    return Ok(i);
-                }
-                Ok(0)
-            }
-            Inbound::Response(_) => Err("no owning dialog"),
-        }
-    }
-
-    /// Resolve the pending claim owning this initial INVITE, consuming it.
-    fn claim_leg(&mut self, leg: &LegInfo<'_>) -> Option<usize> {
-        let pending: Vec<Option<&ClaimRule>> = self
-            .members
-            .iter()
-            .map(|m| if m.fired { None } else { m.claim.as_ref() })
-            .collect();
-        let i = resolve_claim(&pending, leg, self.ordinal)?;
-        if matches!(self.members[i].claim, Some(ClaimRule::ArrivalOrder(_))) {
-            self.ordinal += 1;
-        }
-        self.members[i].fired = true;
-        Some(i)
-    }
-
-    /// Record an inbound this endpoint could hand to no actor.
-    fn record(&self, detail: String) {
-        self.obs.record(
-            Observation::UnclaimedInbound { endpoint: self.endpoint.clone(), detail },
-            Instant::now(),
-        );
-    }
-}
-
-/// One shared endpoint's receive pump: the ONE consumer of its UA's receive
-/// view. Runs alongside the actors for the life of the call.
-pub struct EndpointPump {
-    agent: Agent,
-    demux: Arc<Mutex<Demux>>,
-}
-
-impl EndpointPump {
-    /// Pull this endpoint's inbounds and deliver each to its owner until the
-    /// endpoint's queue closes. A silent wait is not fatal (the actors' own exit
-    /// conditions end the call); an unparseable datagram is, exactly as it is
-    /// for an unshared actor.
-    pub async fn run(self) -> Result<(), StepError> {
-        loop {
-            match self.agent.recv_any().await {
-                Ok(m) => self.demux.lock().unwrap().deliver(m),
-                Err(StepError::Timeout { .. }) => {}
-                Err(StepError::QueueClosed { .. }) => return Ok(()),
-                Err(e) => return Err(e),
-            }
-        }
-    }
-}
-
-/// An actor's registration handle on its shared endpoint.
-#[derive(Clone)]
-pub struct EndpointHandle {
-    demux: Arc<Mutex<Demux>>,
-    member: usize,
-}
-
-impl EndpointHandle {
-    /// Bind a dialog this actor ORIGINATED to it, so the dialog's responses and
-    /// in-dialog requests come back to this actor rather than to the endpoint's
-    /// first-declared one. Called in the same poll as the origination, before
-    /// the actor yields again — no inbound for the new dialog can precede it.
-    pub fn own_dialog(&self, call_id: impl Into<String>) {
-        self.demux.lock().unwrap().owner.insert(call_id.into(), self.member);
-    }
-}
-
-/// Wire the actors that SHARE a UA stack ([`Agent::stack_id`]): one
-/// [`EndpointPump`] per shared endpoint, plus each sharing actor's inbox and
-/// registration handle keyed by role. An actor that owns its endpoint outright
-/// appears in neither — it keeps pulling `recv_any`, byte-for-byte as before.
-pub fn wire_shared_endpoints(
-    specs: &[ActorSpec],
-    obs: &ObservedState,
-) -> (Vec<EndpointPump>, HashMap<&'static str, (Inbox, EndpointHandle)>) {
-    let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
-    for (i, spec) in specs.iter().enumerate() {
-        let stack = spec.agent.stack_id();
-        match groups.iter_mut().find(|(s, _)| *s == stack) {
-            Some((_, members)) => members.push(i),
-            None => groups.push((stack, vec![i])),
-        }
-    }
-
-    let mut pumps = Vec::new();
-    let mut wiring = HashMap::new();
-    for (_, indices) in groups.into_iter().filter(|(_, m)| m.len() > 1) {
-        let agent = specs[indices[0]].agent.clone();
-        // The seat's silent-wait bound is the UA's own `recv_timeout`, so a
-        // sharing actor wakes to re-check its exit condition exactly as often
-        // as one pulling `recv_any` itself.
-        let idle = agent.recv_timeout;
-        let mut members = Vec::with_capacity(indices.len());
-        let mut inboxes = Vec::with_capacity(indices.len());
-        for &i in &indices {
-            let (tx, rx) = mpsc::unbounded_channel();
-            let spec = &specs[i];
-            members.push(Member {
-                role: spec.role,
-                claim: spec.claim.clone(),
-                fired: false,
-                tx,
-            });
-            inboxes.push((spec.role, Inbox::Shared { role: spec.role, rx, idle }));
-        }
-        let demux = Arc::new(Mutex::new(Demux {
-            endpoint: agent.name().to_string(),
-            members,
-            owner: HashMap::new(),
-            ordinal: 0,
-            obs: obs.clone(),
-        }));
-        for (member, (role, inbox)) in inboxes.into_iter().enumerate() {
-            wiring.insert(role, (inbox, EndpointHandle { demux: demux.clone(), member }));
-        }
-        pumps.push(EndpointPump { agent, demux });
-    }
-    (pumps, wiring)
-}
-
-/// This inbound's dialog identity.
-fn call_id_of(msg: &Inbound) -> String {
-    match msg {
-        Inbound::Request(txn) => txn.request().call_id.to_string(),
-        Inbound::Response(r) => r.call_id.to_string(),
-    }
-}
-
-/// This inbound in one bounded line — what a record names it by.
-fn describe(msg: &Inbound) -> String {
-    match msg {
-        Inbound::Request(txn) => {
-            let r = txn.request();
-            format!("{} request (Call-ID {})", r.method, r.call_id)
-        }
-        Inbound::Response(r) => format!("{} response (Call-ID {})", r.status, r.call_id),
-    }
+/// The declarative spec for one endpoint — what a scenario DECLARES; the runner
+/// turns it into an [`super::runner::ActorState`] wired to the shared observed
+/// state.
+pub struct ActorSpec {
+    /// The leg name (`"alice"`, `"bob"`, …) — the observed-state key.
+    pub role: &'static str,
+    /// The endpoint's bound agent.
+    pub agent: Agent,
+    /// How it answers its initial INVITE.
+    pub disposition: Disposition,
+    /// The media it negotiates with.
+    pub media: MediaState,
+    /// Its scripted goals (empty for a purely reactive callee).
+    pub goals: Vec<Goal>,
+    /// The agents an `Invite` goal can target, by callee role.
+    pub invite_targets: Vec<(&'static str, Agent)>,
+    /// Route a plan-less `Invite` goal through this address (a proxy/LB);
+    /// `None` sends directly to the peer (the SUT-less toy call). An
+    /// [`InvitePlan`](crate::realcall::InvitePlan)-carrying goal ignores it
+    /// (the plan owns the route).
+    pub via: Option<SocketAddr>,
+    /// Which reactive events feed phases/checkpoints/the ringing gate — the
+    /// per-body downstream contract (defaults stamp nothing).
+    pub feed: CtxFeed,
+    /// A declared CSeq relative-pattern deviation (ADR-0024 §6). Attached at
+    /// EVERY dialog-formation point of this actor with ONE shared step counter,
+    /// so a scope-refresh clone never forks it. `None` = stack numbering.
+    pub cseq: Option<CseqPattern>,
+    /// A declared delayed automatic (ADR-0024 §6): hold this actor's originated
+    /// INVITE's automatic ACK-to-2xx for a duration. `None` = fire immediately.
+    pub delayed: Option<DelayedAutomatic>,
+    /// The rule by which an inbound INITIAL INVITE arriving on this actor's
+    /// endpoint is THIS actor's, when several actors share the endpoint (see
+    /// [`crate::actor::shared_endpoint`]). `None` = the actor claims no inbound
+    /// leg: it receives only the dialogs it originates. Ignored on an unshared
+    /// endpoint, where every inbound is the sole actor's.
+    pub claim: Option<crate::claim::ClaimRule>,
 }

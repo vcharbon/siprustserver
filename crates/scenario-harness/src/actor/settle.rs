@@ -8,7 +8,7 @@
 //! bound on re-emission, so ALL recovery (the peer's and the SUT's own
 //! Timer-E/G retransmits) has completed in every case. It is not a knob.
 //!
-//! **No `SettleDriver` trait (B2/B4).** Both lanes use plain `tokio::time`.
+//! **No settle-driver abstraction.** Both lanes use plain `tokio::time`.
 //! Under `#[tokio::test(start_paused)]` tokio auto-advances to the earliest
 //! pending timer *only while the reactors are idle*, so a re-emit that lands
 //! mid-window wakes the reactors first and the ledger closes before the ceiling

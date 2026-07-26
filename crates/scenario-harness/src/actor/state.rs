@@ -5,14 +5,14 @@
 //! Two properties make the N-reactor fold safe (see also [`super::ledger`]):
 //! - **Monotone** — a leg phase only ever advances (`Absent → Early →
 //!   Confirmed → Terminated`); an [`Observation`] that would downgrade is a
-//!   no-op (`LegEarly` never demotes a `Confirmed` leg, the B2 invariant).
+//!   no-op (`LegEarly` never demotes a `Confirmed` leg).
 //! - **Idempotent & commutative** — re-applying a fact, or applying two facts
 //!   in either order, yields the same state (phase folds by `max`; the ledger
 //!   is grow-only). So a double-observation is harmless and the fold-order
 //!   determinism gate holds by construction.
 //!
 //! The single wait primitive is [`await_pred`]: register on the tick BEFORE
-//! reading the predicate (the B5 lost-wake fix), so a fact recorded in the
+//! reading the predicate (the lost-wake hazard), so a fact recorded in the
 //! check→await gap is never lost.
 
 use std::collections::HashMap;
@@ -97,7 +97,7 @@ pub enum LegPhase {
 
 /// A named sub-dialog's confirm progress — the a-realign / c-realign re-INVITEs
 /// tracked as their own confirm points, so a `merged` barrier can be a
-/// conjunction of two parallel sub-flows (the P1 refer payoff; defined here so
+/// conjunction of two parallel sub-flows (defined here so
 /// the state shape is stable across phases).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SubflowState {
@@ -189,7 +189,7 @@ impl LegObservation {
         self.received_methods.insert(method);
     }
 
-    /// Monotone phase advance — never retreats (the B2 no-downgrade invariant).
+    /// Monotone phase advance — never retreats (the no-downgrade invariant).
     fn advance(&mut self, to: LegPhase) {
         self.phase = Some(self.phase().max(to));
     }
@@ -309,7 +309,7 @@ pub enum Observation {
     /// `leg`'s establishing INVITE drew a non-2xx final (the reject path) —
     /// grow-only, read by the `Expect::Reject` verdict mapping.
     LegFinal { leg: &'static str, status: u16, reason: String },
-    /// A named sub-flow advanced (re-INVITE realign tracking; P1 realign use).
+    /// A named sub-flow advanced (re-INVITE realign / refer / early-PRACK tracking).
     Subflow { leg: &'static str, name: &'static str, to: SubflowState },
     /// A caller-originated renegotiation (re-INVITE) this leg ORIGINATED
     /// completed — its 2xx was received and ACKed. Folds into the leg's
@@ -479,7 +479,7 @@ impl Default for ObservedState {
 /// bounded by `deadline`. `who` names the barrier for the timeout `StepError`
 /// (a bounded label the case-keyer accepts — never free-form gap text).
 ///
-/// **B5 lost-wake fix**: `Notify::notified()` only registers the waiter when it
+/// **Lost-wake hazard**: `Notify::notified()` only registers the waiter when it
 /// is first polled, not at creation, so a naive `if !pred { notified().await }`
 /// loses a `notify_waiters` fired in the check→await gap. We pin the future and
 /// `enable()` it — registering NOW — *before* reading the predicate, so no tick

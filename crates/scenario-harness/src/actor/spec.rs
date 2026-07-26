@@ -13,7 +13,7 @@
 //! - `Expect::AbandonedEarly` → `Timeout { who: "alice-abandoned-after-ringing" }`;
 //! - `Expect::TransferDeclined` → `UnexpectedKind { who: "refer_charlie_reject" }`.
 
-use super::actor::{Automatics, Disposition};
+use super::endpoint::{Automatics, Disposition};
 use super::delta::AcceptedDeltaPolicy;
 use super::goals::GoalStep;
 use super::state::{ObservedState, ReplayEntry};
