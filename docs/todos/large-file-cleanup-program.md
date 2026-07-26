@@ -229,10 +229,25 @@ scan time (2026-07-15). Sizes are line counts at scan time.
   the C*/S*/E* scenario-shape codes KEPT (living vocabulary shared with
   `crates/callshapes`). `scenarios.rs` (1049 L) is still >500 — outside
   this entry's scope, queue it with the Lane 3 remainder.
-- [ ] **9. `crates/sip-proxy/src/load_observer.rs`** — 1157 L, 16 smells
-  (highest smell density in the workspace). ELU/overload seams — the
-  panic-ELU cold-start lesson means suspicious comments here get logged,
-  not deleted.
+- [x] **9. `crates/sip-proxy/src/load_observer.rs`** — DONE 2026-07-26:
+  1157 L → `load_observer/` (5 files + mod, largest 398 L; all surviving
+  public paths unchanged via mod.rs re-exports). Concerns: payload (the
+  `X-Overload` value codec — header *extraction* stays in sip-message) /
+  band (EluBand + the hysteresis walk, moved beside the thresholds that
+  drive it) / config (tunables + `validate_bands` + the calibration-
+  starting-point defaults) / observer (WorkerState + AIMD ladder + token
+  bucket + sweep + snapshot) / tests (the observer-driven suite; pure
+  parse/validator tests inline in their modules — all 34 kept). Dead pub
+  deleted (rule 1): `note_rejection_payload` — unwired on BOTH wire ends
+  (see log #11). `AimdAction`/`AimdSnapshot`/`snapshot` stay pub: the
+  diagnostics surface is test-only today but demotion just trades API
+  for dead-code allows. TS-port comments scrubbed (module header,
+  every "port of TS x" method doc, migration/32 refs in Default +
+  test assertions, `it("…")` test-name citations); the stale
+  "load_observer.rs TODO(metrics)" pointer + `bin/proxy.ts` /
+  HealthProbe.ts / LoadBalancer.ts refs in sip-proxy-runner main.rs,
+  health/probe.rs and strategies/load_balancer.rs rewritten present-tense.
+  The explicit-`now_ms` clock contract kept as the module-doc centerpiece.
 - [ ] **10. `crates/b2bua/src/overload.rs`** — 1129 L, 13 smells. Pairs
   with #9 conceptually; do back-to-back.
 
@@ -414,3 +429,18 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
     `parse_rack`. Migration is NOT byte-neutral — e.g. `unwrap_angle` keeps
     `;params` on a non-angle Contact where `parse_contact` splits them off
     the URI — so it needs its own commit with the delta reasoned per site.
+
+### 2026-07-26 — sip-proxy load_observer split
+
+11. **The X-Overload-on-503 fast path is unwired on BOTH ends of the wire.**
+    `WorkerLoadObserver::note_rejection_payload` ("a payload that rode a 503
+    reply to a forwarded INVITE") had zero callers, and the worker side
+    deliberately stamps `X-Overload` on the OPTIONS **200 path only** — a 503
+    already removes the node from selection, so the band signal is not stamped
+    there (pinned by `options_200_stamps_x_overload_503_does_not`, tracked in
+    b2bua `router/responses.rs` as a divergence to revisit with the AIMD
+    rate-cap consumer). Deleted the dead entry point per procedure rule 1; if
+    the fast path is ever wired, re-adding a distinct entry beside
+    `apply_payload` is one line, and the real work is (a) stamping the header
+    on worker 503s and (b) teaching the LB response path to sniff relayed 503s
+    without violating its transaction-less design (ADR-0022 X4).

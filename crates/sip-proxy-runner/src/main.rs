@@ -770,9 +770,8 @@ async fn main() {
         });
     }
 
-    // Stale-payload sweep (port of bin/proxy.ts:336-350 `loadObserverSweepLayer`).
-    // A 1 s `tokio::time::interval` (NOT the TS raw `Effect.sleep` loop) ticks the
-    // observer's `sweep_stale(now_ms)`: any Alive worker whose OPTIONS replies stop
+    // Stale-payload sweep. A 1 s `tokio::time::interval` ticks the observer's
+    // `sweep_stale(now_ms)`: any Alive worker whose OPTIONS replies stop
     // carrying a fresh `X-Overload` payload (or whose probe stalls) is conservatively
     // decreased once `payload_stale_ms` (8000) is exceeded, instead of keeping its
     // last AIMD cap forever while the LB admits at full rate into a worker it has
@@ -781,8 +780,8 @@ async fn main() {
     // only fires when telemetry actually dries up. Shares the probe's observer
     // `Arc`; owns no per-call state, so no release path. Each sweep's floored-worker
     // count feeds the coarse `stale_decrease` aggregate counter so a silently
-    // floored cap is diagnosable in Prometheus (the per-worker push is a deferred
-    // slice; see load_observer.rs TODO(metrics)).
+    // floored cap is diagnosable in Prometheus (the per-worker `worker_id`-labelled
+    // push is a deferred slice — awaits a per-worker Prometheus surface).
     {
         let obs = sweep_observer;
         let clk = clock.clone();
@@ -790,7 +789,7 @@ async fn main() {
         tokio::spawn(async move {
             let mut t = tokio::time::interval(Duration::from_secs(1));
             t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            t.tick().await; // skip the immediate first tick (TS first fire is +1s)
+            t.tick().await; // skip the immediate first tick — first sweep fires at +1s
             loop {
                 t.tick().await;
                 let floored = obs.sweep_stale(clk.now_ms());

@@ -193,9 +193,8 @@ impl RoutingStrategy for LoadBalancerStrategy {
         } else if !self.observer.try_consume_for(&winner.id, now_ms) {
             self.metrics.record_overload_rejection("bucket_empty");
             // `retry_after_sec_for` gives a real per-bucket Retry-After (seconds
-            // until ≥1 token refills) — a deliberate refinement over the TS
-            // constant `retryAfterSec: 1` (LoadBalancer.ts:345), since the bucket
-            // already knows its own cap/fill rate. See load_observer.rs.
+            // until ≥1 token refills) derived from the bucket's own cap/fill
+            // rate, not a constant. See `crate::load_observer`.
             let retry_after_sec = self.observer.retry_after_sec_for(&winner.id, now_ms).max(1);
             return Err(SelectError::RateCapExhausted { worker_id: winner.id.clone(), retry_after_sec });
         } else {
