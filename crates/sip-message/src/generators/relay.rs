@@ -4,36 +4,23 @@
 
 use super::emit::{append_body_headers, h, make_response};
 use super::spec::ContactSpec;
+use crate::header::{HeaderClass, HeaderName};
 use crate::types::{SipHeader, SipMessage, SipResponse};
 
-// RFC 3261 §16.6 — stack-owned headers; never copied transparently.
-const STRUCTURAL_HEADERS: &[&str] = &[
-    "via",
-    "contact",
-    "from",
-    "to",
-    "call-id",
-    "cseq",
-    "max-forwards",
-    "content-length",
-    "content-type",
-    "record-route",
-    "route",
-];
+/// True iff the relay owns this header rather than copying the peer's (RFC 3261
+/// §16.6): the stack-owned structural set, plus `Content-Type` — the relay
+/// emits its own body, so the media type describing it is the relay's to state.
+fn relay_owns(name: &str) -> bool {
+    HeaderName::class_of(name) == HeaderClass::Structural
+        || HeaderName::known(name) == Some(HeaderName::ContentType)
+}
 
-/// Every header from `msg` whose name is NOT in the stack-owned structural set
-/// — callers pass the result through `extra_headers` when relaying so
-/// transparent fields (Allow, Supported, P-Asserted-Identity, …) flow through
-/// unchanged while the generator owns the dialog headers.
+/// Every header from `msg` the relay does NOT own — callers pass the result
+/// through `extra_headers` when relaying so transparent fields (Allow,
+/// Supported, P-Asserted-Identity, …) flow through unchanged while the
+/// generator owns the dialog headers.
 pub fn extract_non_structural_headers(msg: &SipMessage) -> Vec<SipHeader> {
-    msg.headers()
-        .iter()
-        .filter(|hdr| {
-            let lower = hdr.name.to_ascii_lowercase();
-            !STRUCTURAL_HEADERS.contains(&lower.as_str())
-        })
-        .cloned()
-        .collect()
+    msg.headers().iter().filter(|hdr| !relay_owns(&hdr.name)).cloned().collect()
 }
 
 #[derive(Debug, Clone, Default)]

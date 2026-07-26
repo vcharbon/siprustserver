@@ -1,15 +1,18 @@
 //! Mandatory-header extraction + the ADR-0007 strict-grammar gates
 //! (`Wire` vs `Hydrate` mode). Port of `src/sip/parsers/extract-fields.ts`.
 //!
-//! Produces the public eager-field model ([`crate::types`]) from the parsed
-//! header list. `Wire` runs every gate (the security boundary on wire bytes);
+//! Produces the public eager-field model ([`crate::types`]) from the
+//! [`HeaderIndex`] of one dispatch pass — this module locates nothing itself,
+//! it validates and parses what the index holds. `Wire` runs every gate (the
+//! security boundary on wire bytes);
 //! `Hydrate` runs only the baseline presence/range/tag checks for already-
 //! trusted internal construction.
 
+use super::header_index::HeaderIndex;
 use super::scanner::{is_token_char, strict_non_negative_decimal};
 use super::structured_headers::{
     parse_contact, parse_cseq, parse_name_addr, parse_sip_uri_string, parse_via,
-    split_top_level_commas, validate_strict_host, validate_strict_sip_uri,
+    top_level_comma_entries, validate_strict_host, validate_strict_sip_uri,
 };
 use crate::error::SipParseError;
 use crate::method::Method;
@@ -37,7 +40,6 @@ pub struct CommonEager {
     pub call_id: SipStr,
     pub cseq: CSeq,
     pub vias: Vec<Via>,
-    pub contact: Option<Contact>,
     pub contacts: ContactSet,
 }
 
@@ -46,27 +48,6 @@ pub struct CommonEager {
 pub struct RequestEager {
     pub common: CommonEager,
     pub request_uri: RequestUri,
-}
-
-// ---------------------------------------------------------------------------
-// Header lookup helpers
-// ---------------------------------------------------------------------------
-
-/// The matching header's value. Returned as the `SipStr` itself, not a `&str`,
-/// because every structured sub-field is cut FROM it as a span.
-fn get_header_value<'a>(headers: &'a [crate::types::SipHeader], name: &str) -> Option<&'a SipStr> {
-    // eq_ignore_ascii_case, not to_lowercase(): matches the sibling
-    // `get_header_values` — avoids a lowercased-String alloc for the probe name
-    // AND one per header scanned (SIP names are ASCII tokens; folding is ASCII).
-    headers.iter().find(|h| h.name.eq_ignore_ascii_case(name)).map(|h| &h.value)
-}
-
-fn get_header_values<'a>(headers: &'a [crate::types::SipHeader], name: &str) -> Vec<&'a SipStr> {
-    // eq_ignore_ascii_case, not to_lowercase(): this probe runs ~10x per
-    // parsed datagram (once per optional header), and two String allocations
-    // per header per probe was ~100+ dead allocs per packet on the proxy's
-    // single hot task.
-    headers.iter().filter(|h| h.name.eq_ignore_ascii_case(name)).map(|h| &h.value).collect()
 }
 
 /// RFC 3261 / RFC 3986 §3.2.3: SIP ports are 1..=65535.
@@ -340,46 +321,28 @@ fn check_sent_protocol(via: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 pub fn extract_common_fields(
-    headers: &[crate::types::SipHeader],
+    idx: &HeaderIndex,
     limits: &SipParserLimits,
     mode: ExtractMode,
 ) -> Result<CommonEager, SipParseError> {
     let wire = mode == ExtractMode::Wire;
 
     // From/To/Call-ID/CSeq appear exactly once; only Via may repeat.
-    {
-        let (mut n_from, mut n_to, mut n_call_id, mut n_cseq) = (0, 0, 0, 0);
-        // eq_ignore_ascii_case, not to_lowercase(): this loop runs once per
-        // header per parsed message — the lowercased String per header was one
-        // of the largest remaining parse-path allocation sources.
-        for hdr in headers {
-            let n = hdr.name.as_str();
-            if n.eq_ignore_ascii_case("from") {
-                n_from += 1;
-            } else if n.eq_ignore_ascii_case("to") {
-                n_to += 1;
-            } else if n.eq_ignore_ascii_case("call-id") {
-                n_call_id += 1;
-            } else if n.eq_ignore_ascii_case("cseq") {
-                n_cseq += 1;
-            }
-        }
-        if n_from > 1 {
-            return Err(SipParseError::new("Multiple From headers (RFC 3261 §8.1.1 — exactly one required)"));
-        }
-        if n_to > 1 {
-            return Err(SipParseError::new("Multiple To headers (RFC 3261 §8.1.1 — exactly one required)"));
-        }
-        if n_call_id > 1 {
-            return Err(SipParseError::new("Multiple Call-ID headers (RFC 3261 §8.1.1 — exactly one required)"));
-        }
-        if n_cseq > 1 {
-            return Err(SipParseError::new("Multiple CSeq headers (RFC 3261 §8.1.1 — exactly one required)"));
-        }
+    if idx.from.count > 1 {
+        return Err(SipParseError::new("Multiple From headers (RFC 3261 §8.1.1 — exactly one required)"));
+    }
+    if idx.to.count > 1 {
+        return Err(SipParseError::new("Multiple To headers (RFC 3261 §8.1.1 — exactly one required)"));
+    }
+    if idx.call_id.count > 1 {
+        return Err(SipParseError::new("Multiple Call-ID headers (RFC 3261 §8.1.1 — exactly one required)"));
+    }
+    if idx.cseq.count > 1 {
+        return Err(SipParseError::new("Multiple CSeq headers (RFC 3261 §8.1.1 — exactly one required)"));
     }
 
-    let from_val = get_header_value(headers, "From")
-        .ok_or_else(|| SipParseError::new("Missing mandatory From header"))?;
+    let from_val =
+        idx.from.first.ok_or_else(|| SipParseError::new("Missing mandatory From header"))?;
     let from_parsed = parse_name_addr(from_val);
     if from_parsed.tag.as_deref() == Some("") {
         return Err(SipParseError::new("Empty From tag parameter"));
@@ -393,8 +356,7 @@ pub fn extract_common_fields(
         }
     }
 
-    let to_val = get_header_value(headers, "To")
-        .ok_or_else(|| SipParseError::new("Missing mandatory To header"))?;
+    let to_val = idx.to.first.ok_or_else(|| SipParseError::new("Missing mandatory To header"))?;
     let to_parsed = parse_name_addr(to_val);
     if to_parsed.tag.as_deref() == Some("") {
         return Err(SipParseError::new("Empty To tag parameter"));
@@ -408,13 +370,13 @@ pub fn extract_common_fields(
         }
     }
 
-    let call_id = match get_header_value(headers, "Call-ID") {
+    let call_id = match idx.call_id.first {
         Some(v) if !v.is_empty() => v.clone(),
         _ => return Err(SipParseError::new("Missing mandatory Call-ID header")),
     };
 
-    let cseq_val = get_header_value(headers, "CSeq")
-        .ok_or_else(|| SipParseError::new("Missing mandatory CSeq header"))?;
+    let cseq_val =
+        idx.cseq.first.ok_or_else(|| SipParseError::new("Missing mandatory CSeq header"))?;
     let cseq_parsed = parse_cseq(cseq_val);
     if wire {
         let cseq_raw = cseq_val.trim();
@@ -439,20 +401,13 @@ pub fn extract_common_fields(
     }
 
     // Via — at least one required; both comma-list and repeated-line encodings
-    // fold into one ordered list.
-    let via_values = get_header_values(headers, "Via");
-    if via_values.is_empty() {
+    // fold into one ordered list. Each segment stays a span of its header
+    // value, so folding a comma-list into the ordered Via list copies nothing.
+    if idx.via.is_empty() {
         return Err(SipParseError::new("Missing mandatory Via header"));
     }
-    // Split each Via value ONCE — the validation pass below and the parse pass
-    // share the segment list (this used to re-split every value a second time).
-    // Each segment stays a span of its header value, so folding a comma-list
-    // into the ordered Via list copies nothing.
-    let via_segments: Vec<SipStr> = via_values
-        .iter()
-        .flat_map(|v| split_top_level_commas(v.as_str()).into_iter().map(|seg| v.reslice(seg)))
-        .collect();
-    for segment in &via_segments {
+    let via_segments = || idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()));
+    for segment in via_segments() {
         if has_via_port_trailing_garbage(segment) {
             return Err(SipParseError::new(format!("Trailing non-digit after Via port: \"{segment}\"")));
         }
@@ -462,10 +417,9 @@ pub fn extract_common_fields(
             }
         }
     }
-    let vias_parsed: Vec<_> = via_segments.iter().map(parse_via).collect();
-
-    for (idx, v) in vias_parsed.iter().enumerate() {
-        let raw = via_segments[idx].as_str();
+    let mut vias: Vec<Via> = Vec::with_capacity(idx.via.len());
+    for (value, raw) in idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()).map(move |s| (*v, s))) {
+        let v = parse_via(&value.reslice(raw));
         if let Some(p) = v.port {
             if !is_valid_port(p) {
                 return Err(SipParseError::new(format!("Via port out of range: {p}")));
@@ -474,92 +428,60 @@ pub fn extract_common_fields(
         if v.branch.as_deref() == Some("") {
             return Err(SipParseError::new("Empty Via branch parameter"));
         }
-        if !wire {
-            continue;
-        }
-        // Top-Via magic cookie (RFC 3261 §8.1.1.7) — topmost Via only.
-        if idx == 0 {
-            match &v.branch {
-                Some(b) if b.starts_with(VIA_BRANCH_MAGIC_COOKIE) => {}
-                other => {
-                    let shown = match other {
-                        None => "<no branch>".to_string(),
-                        Some(b) => format!("\"{b}\""),
-                    };
-                    return Err(SipParseError::new(format!(
-                        "Top Via branch missing magic cookie \"{VIA_BRANCH_MAGIC_COOKIE}\": {shown}"
-                    )));
+        if wire {
+            // Top-Via magic cookie (RFC 3261 §8.1.1.7) — topmost Via only.
+            if vias.is_empty() {
+                match &v.branch {
+                    Some(b) if b.starts_with(VIA_BRANCH_MAGIC_COOKIE) => {}
+                    other => {
+                        let shown = match other {
+                            None => "<no branch>".to_string(),
+                            Some(b) => format!("\"{b}\""),
+                        };
+                        return Err(SipParseError::new(format!(
+                            "Top Via branch missing magic cookie \"{VIA_BRANCH_MAGIC_COOKIE}\": {shown}"
+                        )));
+                    }
                 }
             }
-        }
-        if let Some(reason) = validate_strict_host(&v.host) {
-            return Err(SipParseError::new(format!("Strict Via sent-by host: {reason} (\"{}\")", v.host)));
-        }
-        // Multiple-colon sent-by (outside `[...]`, before `;`).
-        {
-            let mut in_bracket = false;
-            let mut colon_count = 0i32;
-            for c in raw.bytes() {
-                if c == b'[' {
-                    in_bracket = true;
-                    continue;
-                }
-                if c == b']' {
-                    in_bracket = false;
-                    continue;
-                }
-                if c == b';' && !in_bracket {
-                    break;
-                }
-                if !in_bracket && c == b':' {
-                    colon_count += 1;
-                }
+            if let Some(reason) = validate_strict_host(&v.host) {
+                return Err(SipParseError::new(format!("Strict Via sent-by host: {reason} (\"{}\")", v.host)));
             }
-            if colon_count > 1 {
+            if let Some(colon_count) = sent_by_extra_colons(raw) {
                 return Err(SipParseError::new(format!(
                     "Via sent-by has {colon_count} colons (must be ≤ 1): \"{raw}\""
                 )));
             }
+            // The allowlist is documented case-insensitive; probe without minting
+            // an uppercased String per Via (set is ≤6 entries — linear is fine).
+            if !limits.allowed_transports.iter().any(|t| t.eq_ignore_ascii_case(&v.transport)) {
+                return Err(SipParseError::new(format!("Via transport \"{}\" not in allowed set", v.transport)));
+            }
         }
-        // The allowlist is documented case-insensitive; probe without minting
-        // an uppercased String per Via (set is ≤6 entries — linear is fine).
-        if !limits.allowed_transports.iter().any(|t| t.eq_ignore_ascii_case(&v.transport)) {
-            return Err(SipParseError::new(format!("Via transport \"{}\" not in allowed set", v.transport)));
-        }
-    }
-    let vias: Vec<Via> = vias_parsed
-        .into_iter()
-        .map(|v| Via {
+        vias.push(Via {
             transport: v.transport,
             host: v.host,
             port: v.port.map(|p| p as u16),
             branch: v.branch,
             params: v.params,
-        })
-        .collect();
-
-    // Contact — parse + validate every value; fold comma-list and repeated
-    // lines; `Contact: *` must stand alone.
-    let mut contact_wildcard = false;
-    let mut contact_entries: Vec<SipStr> = Vec::new();
-    for v in get_header_values(headers, "Contact") {
-        for seg in split_top_level_commas(v.as_str()) {
-            if seg.is_empty() {
-                continue;
-            }
-            if seg == "*" {
-                contact_wildcard = true;
-                continue;
-            }
-            contact_entries.push(v.reslice(seg));
-        }
+        });
     }
-    if contact_wildcard && !contact_entries.is_empty() {
+
+    // Contact — fold comma-list and repeated lines. `Contact: *` must stand
+    // alone, which is settled over every entry before any is parsed.
+    let contact_segments = || {
+        idx.contact
+            .iter()
+            .flat_map(|v| top_level_comma_entries(v.as_str()).map(move |s| (*v, s)))
+            .filter(|(_, seg)| !seg.is_empty())
+    };
+    let contact_wildcard = contact_segments().any(|(_, seg)| seg == "*");
+    if contact_wildcard && contact_segments().any(|(_, seg)| seg != "*") {
         return Err(SipParseError::new("Contact: * wildcard must be the only value (RFC 3261 §10.2.2)"));
     }
     let mut contact_list: Vec<Contact> = Vec::new();
-    for entry in &contact_entries {
-        let parsed = parse_contact(entry);
+    for (value, seg) in contact_segments().filter(|(_, seg)| *seg != "*") {
+        let parsed = parse_contact(&value.reslice(seg));
         if wire {
             if let Some(reason) = validate_strict_sip_uri(&parsed.uri) {
                 return Err(SipParseError::new(format!("Strict Contact URI: {reason} (\"{}\")", parsed.uri)));
@@ -567,12 +489,8 @@ pub fn extract_common_fields(
         }
         contact_list.push(to_contact(parsed));
     }
-    let contacts = if contact_wildcard {
-        ContactSet::Wildcard
-    } else {
-        ContactSet::Contacts(contact_list.clone())
-    };
-    let contact = if contact_wildcard { None } else { contact_list.first().cloned() };
+    let contacts =
+        if contact_wildcard { ContactSet::Wildcard } else { ContactSet::Contacts(contact_list) };
 
     Ok(CommonEager {
         from: to_name_addr(from_parsed),
@@ -583,9 +501,33 @@ pub fn extract_common_fields(
             method: Method::from_wire(&cseq_parsed.method),
         },
         vias,
-        contact,
         contacts,
     })
+}
+
+/// The sent-by colon count when a Via segment carries more than one colon
+/// outside `[...]` and before the first `;` — IPv6 without brackets, or a
+/// second port. `None` when the segment is well-formed.
+fn sent_by_extra_colons(raw: &str) -> Option<i32> {
+    let mut in_bracket = false;
+    let mut colon_count = 0i32;
+    for c in raw.bytes() {
+        if c == b'[' {
+            in_bracket = true;
+            continue;
+        }
+        if c == b']' {
+            in_bracket = false;
+            continue;
+        }
+        if c == b';' && !in_bracket {
+            break;
+        }
+        if !in_bracket && c == b':' {
+            colon_count += 1;
+        }
+    }
+    (colon_count > 1).then_some(colon_count)
 }
 
 // ---------------------------------------------------------------------------
@@ -593,13 +535,13 @@ pub fn extract_common_fields(
 // ---------------------------------------------------------------------------
 
 pub fn extract_request_fields(
-    headers: &[crate::types::SipHeader],
+    idx: &HeaderIndex,
     request_uri: &SipStr,
     limits: &SipParserLimits,
     method: Option<&str>,
     mode: ExtractMode,
 ) -> Result<RequestEager, SipParseError> {
-    let common = extract_common_fields(headers, limits, mode)?;
+    let common = extract_common_fields(idx, limits, mode)?;
     let wire = mode == ExtractMode::Wire;
 
     // Contact cardinality on dialog-creating requests.
@@ -631,7 +573,7 @@ pub fn extract_request_fields(
 
     // CSeq method must match the request method.
     if let Some(method) = method {
-        if let Some(cseq_val) = get_header_value(headers, "CSeq") {
+        if let Some(cseq_val) = idx.cseq.first {
             let trimmed = cseq_val.trim();
             // First SP/HTAB is ASCII → a valid slice boundary.
             let cseq_method = match trimmed.bytes().position(|c| c == b' ' || c == b'\t') {
@@ -690,12 +632,12 @@ pub fn extract_request_fields(
 // ---------------------------------------------------------------------------
 
 pub fn extract_response_fields(
-    headers: &[crate::types::SipHeader],
+    idx: &HeaderIndex,
     status: u16,
     limits: &SipParserLimits,
     mode: ExtractMode,
 ) -> Result<CommonEager, SipParseError> {
-    let common = extract_common_fields(headers, limits, mode)?;
+    let common = extract_common_fields(idx, limits, mode)?;
     if status > 100 && common.to.tag.is_none() {
         return Err(SipParseError::new(format!(
             "Non-100 response (status={status}) missing mandatory To-tag"

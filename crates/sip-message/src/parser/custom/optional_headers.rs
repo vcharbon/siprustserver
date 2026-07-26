@@ -2,30 +2,25 @@
 //! `src/sip/parsers/custom/lazy-parsers.ts`.
 //!
 //! Two roles:
-//!  1. [`extract_optional`] — eagerly + non-fatally parses every optional
-//!     structured header into an [`OptionalHeaders`] of `Result`s (per
-//!     docs/adr/0003: a malformed optional header does not reject the message).
+//!  1. [`extract_optional_indexed`] — eagerly + non-fatally parses every
+//!     optional structured header the dispatch pass located into an
+//!     [`OptionalHeaders`] of `Result`s (per docs/adr/0003: a malformed
+//!     optional header does not reject the message).
 //!  2. [`run_all_strict`] — the port of `runAllStrictLazyParsers`: re-validates
 //!     Date/From/To/Contact grammar + every optional structured header and
 //!     returns the first violation. Backs [`crate::types::SipMessage::validate_strict`].
 
+use super::header_index::HeaderIndex;
 use super::scanner::is_token_char;
 use super::structured_headers::{
     find_uri_embedded_headers_start, parse_name_addr, parse_rack, parse_refer_to,
-    split_top_level_commas, validate_strict_sip_uri, ParsedNameAddr, ParsedReferTo,
+    top_level_comma_entries, validate_strict_sip_uri, ParsedNameAddr, ParsedReferTo,
 };
 use crate::error::SipParseError;
+use crate::header::HeaderName;
 use crate::method::Method;
 use crate::sip_str::SipStr;
 use crate::types::{NameAddr, OptionalHeaders, Rack, ReferTo, Replaces, SipHeader, Uri};
-
-fn get_header_values<'a>(headers: &'a [SipHeader], name: &str) -> Vec<&'a SipStr> {
-    // eq_ignore_ascii_case, not to_lowercase(): this probe runs ~10x per
-    // parsed datagram (once per optional header), and two String allocations
-    // per header per probe was ~100+ dead allocs per packet on the proxy's
-    // single hot task.
-    headers.iter().filter(|h| h.name.eq_ignore_ascii_case(name)).map(|h| &h.value).collect()
-}
 
 fn to_name_addr(p: ParsedNameAddr) -> NameAddr {
     NameAddr { display_name: p.display_name, uri: p.uri, tag: p.tag, params: p.params }
@@ -37,14 +32,13 @@ fn to_name_addr(p: ParsedNameAddr) -> NameAddr {
 
 /// Parse a multi-value name-addr header (flattened across instances and
 /// comma-separated entries). Any malformed entry → `Err`.
-fn parse_name_addr_list(headers: &[SipHeader], header_name: &str) -> Result<Vec<NameAddr>, SipParseError> {
-    let values = get_header_values(headers, header_name);
-    if values.is_empty() {
-        return Ok(Vec::new());
-    }
+fn parse_name_addr_list(
+    values: &[&SipStr],
+    header_name: HeaderName,
+) -> Result<Vec<NameAddr>, SipParseError> {
     let mut out = Vec::new();
     for v in values {
-        for entry in split_top_level_commas(v.as_str()) {
+        for entry in top_level_comma_entries(v.as_str()) {
             if entry.is_empty() {
                 continue;
             }
@@ -65,12 +59,11 @@ fn parse_name_addr_list(headers: &[SipHeader], header_name: &str) -> Result<Vec<
 }
 
 /// `Geolocation-Routing` (RFC 6442 §4.2): token "yes"/"no". Absent → `Ok(None)`.
-fn parse_geolocation_routing(headers: &[SipHeader]) -> Result<Option<bool>, SipParseError> {
-    let values = get_header_values(headers, "Geolocation-Routing");
-    if values.is_empty() {
+fn parse_geolocation_routing(value: Option<&SipStr>) -> Result<Option<bool>, SipParseError> {
+    let Some(value) = value else {
         return Ok(None);
-    }
-    let v = values[0].trim().to_lowercase();
+    };
+    let v = value.trim().to_lowercase();
     match v.as_str() {
         "yes" => Ok(Some(true)),
         "no" => Ok(Some(false)),
@@ -78,14 +71,13 @@ fn parse_geolocation_routing(headers: &[SipHeader]) -> Result<Option<bool>, SipP
     }
 }
 
-fn parse_rack_header(headers: &[SipHeader]) -> Result<Option<Rack>, SipParseError> {
-    let values = get_header_values(headers, "RAck");
-    if values.is_empty() {
+fn parse_rack_header(value: Option<&SipStr>) -> Result<Option<Rack>, SipParseError> {
+    let Some(value) = value else {
         return Ok(None);
-    }
-    match parse_rack(values[0]) {
+    };
+    match parse_rack(value) {
         Some(r) => Ok(Some(Rack { rseq: r.rseq, seq: r.seq, method: Method::from_wire(&r.method) })),
-        None => Err(SipParseError::new(format!("Malformed RAck: \"{}\"", values[0]))),
+        None => Err(SipParseError::new(format!("Malformed RAck: \"{value}\""))),
     }
 }
 
@@ -111,14 +103,13 @@ fn to_refer_to(rt: ParsedReferTo) -> ReferTo {
     }
 }
 
-fn parse_refer_to_header(headers: &[SipHeader]) -> Result<Option<ReferTo>, SipParseError> {
-    let values = get_header_values(headers, "Refer-To");
-    if values.is_empty() {
+fn parse_refer_to_header(value: Option<&SipStr>) -> Result<Option<ReferTo>, SipParseError> {
+    let Some(value) = value else {
         return Ok(None);
-    }
-    let parsed = match parse_refer_to(values[0]) {
+    };
+    let parsed = match parse_refer_to(value) {
         Some(rt) => rt,
-        None => return Err(SipParseError::new(format!("Malformed Refer-To: \"{}\"", values[0]))),
+        None => return Err(SipParseError::new(format!("Malformed Refer-To: \"{value}\""))),
     };
     // Strict SIP-URI on the target URI head (without embedded headers).
     // `find_uri_embedded_headers_start` returns a byte index at the `?` (ASCII
@@ -133,20 +124,36 @@ fn parse_refer_to_header(headers: &[SipHeader]) -> Result<Option<ReferTo>, SipPa
     Ok(Some(to_refer_to(parsed)))
 }
 
-/// Parse every optional structured header eagerly + non-fatally.
-pub fn extract_optional(headers: &[SipHeader]) -> OptionalHeaders {
+/// Parse every optional structured header eagerly + non-fatally, from the
+/// values the one dispatch pass already located.
+pub fn extract_optional_indexed(idx: &HeaderIndex) -> OptionalHeaders {
     OptionalHeaders {
-        p_asserted_identity: parse_name_addr_list(headers, "P-Asserted-Identity"),
-        p_preferred_identity: parse_name_addr_list(headers, "P-Preferred-Identity"),
-        diversion: parse_name_addr_list(headers, "Diversion"),
-        history_info: parse_name_addr_list(headers, "History-Info"),
-        remote_party_id: parse_name_addr_list(headers, "Remote-Party-ID"),
-        geolocation: parse_name_addr_list(headers, "Geolocation"),
-        geolocation_error: parse_name_addr_list(headers, "Geolocation-Error"),
-        geolocation_routing: parse_geolocation_routing(headers),
-        rack: parse_rack_header(headers),
-        refer_to: parse_refer_to_header(headers),
+        p_asserted_identity: parse_name_addr_list(
+            &idx.p_asserted_identity,
+            HeaderName::PAssertedIdentity,
+        ),
+        p_preferred_identity: parse_name_addr_list(
+            &idx.p_preferred_identity,
+            HeaderName::PPreferredIdentity,
+        ),
+        diversion: parse_name_addr_list(&idx.diversion, HeaderName::Diversion),
+        history_info: parse_name_addr_list(&idx.history_info, HeaderName::HistoryInfo),
+        remote_party_id: parse_name_addr_list(&idx.remote_party_id, HeaderName::RemotePartyId),
+        geolocation: parse_name_addr_list(&idx.geolocation, HeaderName::Geolocation),
+        geolocation_error: parse_name_addr_list(
+            &idx.geolocation_error,
+            HeaderName::GeolocationError,
+        ),
+        geolocation_routing: parse_geolocation_routing(idx.geolocation_routing.first),
+        rack: parse_rack_header(idx.rack.first),
+        refer_to: parse_refer_to_header(idx.refer_to.first),
     }
+}
+
+/// Parse every optional structured header of a header list — the entry point
+/// for callers that hold no [`HeaderIndex`].
+pub fn extract_optional(headers: &[SipHeader]) -> OptionalHeaders {
+    extract_optional_indexed(&HeaderIndex::build(headers))
 }
 
 // ---------------------------------------------------------------------------
@@ -209,14 +216,13 @@ fn parse_date_value_strict(value: &str) -> Result<(), SipParseError> {
     Ok(())
 }
 
-fn parse_date_header_strict(headers: &[SipHeader]) -> Result<(), SipParseError> {
-    let values = get_header_values(headers, "Date");
-    if values.is_empty() {
+fn parse_date_header_strict(values: &[&SipStr]) -> Result<(), SipParseError> {
+    let Some(first) = values.first() else {
         return Ok(());
-    }
+    };
     // sip-parser-style split at the day-of-week comma is rejoined with ", ".
     if values.len() == 1 {
-        return parse_date_value_strict(values[0]);
+        return parse_date_value_strict(first);
     }
     let joined = values.iter().map(|v| v.as_str()).collect::<Vec<_>>().join(", ");
     parse_date_value_strict(&joined)
@@ -333,23 +339,9 @@ fn validate_name_addr_strict(value: &str, header_name: &str) -> Result<(), SipPa
     Ok(())
 }
 
-fn validate_from_strict(headers: &[SipHeader]) -> Result<(), SipParseError> {
-    match get_header_values(headers, "From").first() {
-        None => Ok(()),
-        Some(v) => validate_name_addr_strict(v, "From"),
-    }
-}
-
-fn validate_to_strict(headers: &[SipHeader]) -> Result<(), SipParseError> {
-    match get_header_values(headers, "To").first() {
-        None => Ok(()),
-        Some(v) => validate_name_addr_strict(v, "To"),
-    }
-}
-
-fn validate_contact_strict(headers: &[SipHeader]) -> Result<(), SipParseError> {
-    for v in get_header_values(headers, "Contact") {
-        for entry in split_top_level_commas(v) {
+fn validate_contact_strict(values: &[&SipStr]) -> Result<(), SipParseError> {
+    for v in values {
+        for entry in top_level_comma_entries(v) {
             if entry.is_empty() {
                 continue;
             }
@@ -362,11 +354,16 @@ fn validate_contact_strict(headers: &[SipHeader]) -> Result<(), SipParseError> {
 /// Run every strict re-parser + optional-header parser; return the first
 /// failure. Port of `runAllStrictLazyParsers`.
 pub fn run_all_strict(headers: &[SipHeader]) -> Result<(), SipParseError> {
-    parse_date_header_strict(headers)?;
-    validate_from_strict(headers)?;
-    validate_to_strict(headers)?;
-    validate_contact_strict(headers)?;
-    let opt = extract_optional(headers);
+    let idx = HeaderIndex::build(headers);
+    parse_date_header_strict(&idx.date)?;
+    if let Some(from) = idx.from.first {
+        validate_name_addr_strict(from, "From")?;
+    }
+    if let Some(to) = idx.to.first {
+        validate_name_addr_strict(to, "To")?;
+    }
+    validate_contact_strict(&idx.contact)?;
+    let opt = extract_optional_indexed(&idx);
     opt.p_asserted_identity?;
     opt.p_preferred_identity?;
     opt.diversion?;

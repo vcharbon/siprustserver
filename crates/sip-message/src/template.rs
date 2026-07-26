@@ -54,25 +54,9 @@
 //! frozen headers regardless) — it does NOT yet restore the original interleaving
 //! of frozen and regenerated headers. The flag is threaded for API stability.
 
+use crate::header::HeaderName;
 use crate::method::Method;
 use crate::types::{SipHeader, SipMessage};
-
-/// The tier-1 headers the stack regenerates from live dialog/transaction state.
-/// Everything else is [`HeaderClass::Frozen`]. Note this is NOT the relay
-/// "structural" set: `Content-Type` is absent here (frozen), while
-/// `Content-Length` (serializer-owned) is present.
-const REGENERATED_HEADERS: &[&str] = &[
-    "via",
-    "from",
-    "to",
-    "call-id",
-    "cseq",
-    "max-forwards",
-    "content-length",
-    "contact",
-    "route",
-    "record-route",
-];
 
 /// How the stack treats one templated header when the message is emitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,16 +70,15 @@ pub enum HeaderClass {
 
 impl HeaderClass {
     /// The default classification of a header by name (case-insensitive): a
-    /// tier-1 dialog-critical name is [`Regenerated`](HeaderClass::Regenerated),
-    /// everything else is [`Frozen`](HeaderClass::Frozen). RFC 3261 §7.3.3
-    /// compact forms are expanded first, so `"v"` classifies as `Via` (else a
-    /// templated compact tier-1 header would freeze and duplicate on the wire).
+    /// stack-owned name ([`crate::header::HeaderClass::Structural`]) is
+    /// [`Regenerated`](HeaderClass::Regenerated), everything else is
+    /// [`Frozen`](HeaderClass::Frozen). RFC 3261 §7.3.3 compact forms resolve
+    /// first, so `"v"` classifies as `Via` (else a templated compact tier-1
+    /// header would freeze and duplicate on the wire).
     pub fn of(name: &str) -> Self {
-        let expanded = crate::parser::custom::compact_forms::expanded_name(name);
-        if REGENERATED_HEADERS.contains(&expanded.to_ascii_lowercase().as_str()) {
-            HeaderClass::Regenerated
-        } else {
-            HeaderClass::Frozen
+        match HeaderName::class_of(name) {
+            crate::header::HeaderClass::Structural => HeaderClass::Regenerated,
+            crate::header::HeaderClass::EndToEnd => HeaderClass::Frozen,
         }
     }
 }

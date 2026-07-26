@@ -11,6 +11,7 @@ pub mod error;
 pub mod method;
 pub mod sip_str;
 pub mod types;
+pub mod header;
 pub mod parser;
 
 pub mod serializer;
@@ -25,6 +26,10 @@ pub mod template;
 pub mod template_match;
 
 pub use error::SipParseError;
+/// Header identity (ADR-0025). The classification enum stays namespaced as
+/// [`header::HeaderClass`] — the root `HeaderClass` is the template's
+/// regenerate-vs-freeze axis.
+pub use header::HeaderName;
 pub use method::Method;
 pub use serializer::{message_summary, serialize, serialize_request_parts, serialize_response_parts, sip_summary};
 pub use sdp::{

@@ -94,59 +94,82 @@ pub struct ParsedReferTo {
 // Top-level comma splitter — quote-aware and angle-bracket-aware.
 // ---------------------------------------------------------------------------
 
-pub fn split_top_level_commas(value: &str) -> Vec<&str> {
+/// The comma-separated entries of one header value, trimmed and borrowed. A
+/// comma inside a quoted-string or `<...>` is data, not a separator. An empty
+/// value yields nothing; an empty entry between two commas is yielded.
+pub fn top_level_comma_entries(value: &str) -> TopLevelCommaEntries<'_> {
+    TopLevelCommaEntries { value, pos: 0, emitted: 0, done: false }
+}
+
+pub struct TopLevelCommaEntries<'a> {
+    value: &'a str,
+    pos: usize,
+    emitted: usize,
+    done: bool,
+}
+
+impl<'a> Iterator for TopLevelCommaEntries<'a> {
+    type Item = &'a str;
+
     // Byte-scan rather than collecting a `Vec<char>` (4x the bytes, and the
     // single hottest parse frame under load). Every structural delimiter here
     // (`" \ < > ,`) is ASCII, so a UTF-8 lead/continuation byte can never alias
     // one, and each split index lands on a `,` — always a char boundary — so
-    // slicing the original `&str` by byte index is panic-free and byte-identical
-    // to the old scalar walk. Entries are trimmed *borrowed* subslices — the
-    // splitter runs several times per parsed message (Via, Contact, every
-    // optional name-addr list), and a `String` per entry was the remaining
-    // self-time after the byte-scan rewrite; callers that store an entry call
-    // `.to_string()` at the point of ownership.
-    let bytes = value.as_bytes();
-    let mut out: Vec<&str> = Vec::new();
-    let mut depth: i32 = 0;
-    let mut in_quote = false;
-    let mut start = 0usize;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_quote {
-            if c == b'\\' && i + 1 < bytes.len() {
-                i += 2;
+    // slicing by byte index is panic-free. Entries are trimmed *borrowed*
+    // subslices; a caller that stores one calls `.to_string()` at the point of
+    // ownership. Scanning resumes with depth 0 and no open quote because a
+    // separator is only recognised in exactly that state.
+    fn next(&mut self) -> Option<&'a str> {
+        if self.done {
+            return None;
+        }
+        let bytes = self.value.as_bytes();
+        let start = self.pos;
+        let mut depth: i32 = 0;
+        let mut in_quote = false;
+        let mut i = start;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if in_quote {
+                if c == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                    continue;
+                }
+                if c == b'"' {
+                    in_quote = false;
+                }
+                i += 1;
                 continue;
             }
-            if c == b'"' {
-                in_quote = false;
+            match c {
+                b'"' => in_quote = true,
+                b'<' => depth += 1,
+                b'>' if depth > 0 => depth -= 1,
+                b',' if depth == 0 => {
+                    self.pos = i + 1;
+                    self.emitted += 1;
+                    return Some(self.value[start..i].trim());
+                }
+                _ => {}
             }
             i += 1;
-            continue;
         }
-        match c {
-            b'"' => {
-                in_quote = true;
-            }
-            b'<' => {
-                depth += 1;
-            }
-            b'>' if depth > 0 => {
-                depth -= 1;
-            }
-            b',' if depth == 0 => {
-                out.push(value[start..i].trim());
-                start = i + 1;
-            }
-            _ => {}
+        self.done = true;
+        let tail = self.value[start..].trim();
+        // A lone empty value has no entries; a trailing empty entry after a
+        // separator is one.
+        if tail.is_empty() && self.emitted == 0 {
+            return None;
         }
-        i += 1;
+        self.emitted += 1;
+        Some(tail)
     }
-    let tail = value[start..].trim();
-    if !tail.is_empty() || !out.is_empty() {
-        out.push(tail);
-    }
-    out
+}
+
+/// The entries of [`top_level_comma_entries`] collected — for callers that need
+/// the list twice or by index.
+pub fn split_top_level_commas(value: &str) -> Vec<&str> {
+    top_level_comma_entries(value).collect()
 }
 
 // ---------------------------------------------------------------------------

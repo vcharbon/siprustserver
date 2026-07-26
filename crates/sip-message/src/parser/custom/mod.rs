@@ -20,6 +20,7 @@ use crate::types::{NonEmpty, SipMessage, SipRequest, SipResponse};
 pub mod scanner;
 pub mod start_line;
 pub mod headers;
+pub mod header_index;
 pub mod structured_headers;
 pub mod extract_fields;
 pub mod optional_headers;
@@ -28,6 +29,7 @@ pub(crate) mod compact_forms;
 use extract_fields::{
     extract_request_fields, extract_response_fields, ExtractMode, RequestEager,
 };
+use header_index::HeaderIndex;
 use scanner::Scanner;
 use start_line::{parse_start_line, StartLine};
 
@@ -46,10 +48,11 @@ pub fn hydrate_request(
 ) -> Result<SipRequest, SipParseError> {
     let limits = SipParserLimits::default();
     let uri = SipStr::owned(uri);
-    let eager = extract_request_fields(&headers, &uri, &limits, Some(method), ExtractMode::Hydrate)?;
+    let idx = HeaderIndex::build(&headers);
+    let eager = extract_request_fields(&idx, &uri, &limits, Some(method), ExtractMode::Hydrate)?;
+    let optional = optional_headers::extract_optional_indexed(&idx);
     let c = eager.common;
     let via = non_empty_vias(c.vias)?;
-    let optional = optional_headers::extract_optional(&headers);
     Ok(SipRequest {
         method: crate::method::Method::from_wire(method),
         uri,
@@ -77,9 +80,10 @@ pub fn hydrate_response(
     body: impl Into<Bytes>,
 ) -> Result<SipResponse, SipParseError> {
     let limits = SipParserLimits::default();
-    let c = extract_response_fields(&headers, status, &limits, ExtractMode::Hydrate)?;
+    let idx = HeaderIndex::build(&headers);
+    let c = extract_response_fields(&idx, status, &limits, ExtractMode::Hydrate)?;
+    let optional = optional_headers::extract_optional_indexed(&idx);
     let via = non_empty_vias(c.vias)?;
-    let optional = optional_headers::extract_optional(&headers);
     Ok(SipResponse {
         version: SipStr::from_static("SIP/2.0"),
         status,
@@ -159,15 +163,19 @@ impl SipParser for CustomParser {
 
         let mode = if limits.wire_grammar { ExtractMode::Wire } else { ExtractMode::Hydrate };
 
+        // One dispatch pass over the header list feeds both the mandatory field
+        // extraction and the optional-header parse.
+        let idx = HeaderIndex::build(&headers_vec);
+
         match start {
             StartLine::Request(rl) => {
                 let method = start_line::canonical_method(image, rl.method);
                 let uri = text.span(rl.uri.start, rl.uri.len());
                 let eager: RequestEager =
-                    extract_request_fields(&headers_vec, &uri, limits, Some(&method), mode)?;
+                    extract_request_fields(&idx, &uri, limits, Some(&method), mode)?;
+                let optional = optional_headers::extract_optional_indexed(&idx);
                 let c = eager.common;
                 let via = non_empty_vias(c.vias)?;
-                let optional = optional_headers::extract_optional(&headers_vec);
                 Ok(SipMessage::Request(SipRequest {
                     method: crate::method::Method::from_wire(&method),
                     uri,
@@ -186,9 +194,9 @@ impl SipParser for CustomParser {
                 }))
             }
             StartLine::Status(sl) => {
-                let c = extract_response_fields(&headers_vec, sl.status, limits, mode)?;
+                let c = extract_response_fields(&idx, sl.status, limits, mode)?;
+                let optional = optional_headers::extract_optional_indexed(&idx);
                 let via = non_empty_vias(c.vias)?;
-                let optional = optional_headers::extract_optional(&headers_vec);
                 Ok(SipMessage::Response(SipResponse {
                     version: text.span(sl.version.start, sl.version.len()),
                     status: sl.status,

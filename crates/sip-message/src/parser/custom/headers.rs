@@ -10,6 +10,7 @@ use super::scanner::{
     Span, COLON, CR, HTAB, LF,
 };
 use crate::error::SipParseError;
+use crate::header::HeaderName;
 use crate::parser::SipParserLimits;
 use crate::sip_str::{SharedText, SipStr};
 use crate::types::SipHeader;
@@ -25,33 +26,15 @@ struct NumericHeaderRule {
 
 /// Numeric-header registry — every header whose value must be a non-negative
 /// decimal integer within a defined range (see ADR-0007). `None` if not numeric.
-/// Case-insensitive on the raw wire name (`eq_ignore_ascii_case`) so the caller
-/// need not mint a lowercased `String` per header just to probe the registry.
-fn numeric_header_rule(name: &str) -> Option<NumericHeaderRule> {
+fn numeric_header_rule(name: &HeaderName) -> Option<NumericHeaderRule> {
     let r = |max, allow_param_tail| Some(NumericHeaderRule { max, allow_param_tail });
-    if name.eq_ignore_ascii_case("content-length") {
-        r(INT_32_MAX, false)
-    } else if name.eq_ignore_ascii_case("cseq") {
-        r(INT_32_MAX, false)
-    } else if name.eq_ignore_ascii_case("max-forwards") {
-        r(255, false)
-    } else if name.eq_ignore_ascii_case("expires") {
-        r(UINT_32_MAX, false)
-    } else if name.eq_ignore_ascii_case("min-expires") {
-        r(UINT_32_MAX, false)
-    } else if name.eq_ignore_ascii_case("session-expires") {
-        r(UINT_32_MAX, true)
-    } else if name.eq_ignore_ascii_case("min-se") {
-        r(UINT_32_MAX, true)
-    } else {
-        None
+    match name {
+        HeaderName::ContentLength | HeaderName::CSeq => r(INT_32_MAX, false),
+        HeaderName::MaxForwards => r(255, false),
+        HeaderName::Expires | HeaderName::MinExpires => r(UINT_32_MAX, false),
+        HeaderName::SessionExpires | HeaderName::MinSe => r(UINT_32_MAX, true),
+        _ => None,
     }
-}
-
-/// ASCII-case-insensitive membership against a set of already-lowercase
-/// candidates — no allocation (contrast `name.to_lowercase()` then `match`).
-fn eq_any_ignore_ascii_case(name: &str, candidates: &[&str]) -> bool {
-    candidates.iter().any(|c| name.eq_ignore_ascii_case(c))
 }
 
 /// Strict numeric extraction with optional param tail. The digit prefix is
@@ -171,32 +154,37 @@ pub fn parse_headers(
             )));
         }
 
-        // Registry-driven paranoid digit-only pass (ADR-0007).
-        if let Some(rule) = numeric_header_rule(&name) {
-            match extract_strict_numeric_prefix(&trimmed_value, &rule) {
-                Some(parsed) => {
-                    if name.eq_ignore_ascii_case("content-length") {
-                        content_length = parsed;
+        // Header identity is resolved once, here, from bytes the scanner has
+        // just walked; every gate below dispatches on it instead of re-probing
+        // the name against a candidate list.
+        if let Some(known) = HeaderName::known(&name) {
+            // Registry-driven paranoid digit-only pass (ADR-0007).
+            if let Some(rule) = numeric_header_rule(&known) {
+                match extract_strict_numeric_prefix(&trimmed_value, &rule) {
+                    Some(parsed) => {
+                        if known == HeaderName::ContentLength {
+                            content_length = parsed;
+                        }
+                    }
+                    None => {
+                        return Err(SipParseError::new(format!(
+                            "Invalid {name} numeric value: \"{trimmed_value}\""
+                        )));
                     }
                 }
-                None => {
-                    return Err(SipParseError::new(format!(
-                        "Invalid {name} numeric value: \"{trimmed_value}\""
-                    )));
-                }
             }
-        }
 
-        // Reject unterminated quoted-strings on quoted-string-bearing headers
-        // (CVE-2023-27599).
-        if is_quoted_string_header(&name) && has_unbalanced_quotes(&trimmed_value) {
-            return Err(SipParseError::new(format!("Unterminated quoted-string in {name} header")));
-        }
+            // Reject unterminated quoted-strings on quoted-string-bearing headers
+            // (CVE-2023-27599).
+            if is_quoted_string_header(&known) && has_unbalanced_quotes(&trimmed_value) {
+                return Err(SipParseError::new(format!("Unterminated quoted-string in {name} header")));
+            }
 
-        // Digest credentials must be comma-separated name=value pairs
-        // (CVE-2023-28098).
-        if is_authorization_header(&name) && !is_valid_digest_credentials(&trimmed_value) {
-            return Err(SipParseError::new(format!("Malformed Digest credentials in {name} header")));
+            // Digest credentials must be comma-separated name=value pairs
+            // (CVE-2023-28098).
+            if is_authorization_header(&known) && !is_valid_digest_credentials(&trimmed_value) {
+                return Err(SipParseError::new(format!("Malformed Digest credentials in {name} header")));
+            }
         }
 
         headers.push(SipHeader { name, value: trimmed_value });
@@ -205,33 +193,30 @@ pub fn parse_headers(
     Ok(ParsedHeaders { headers, content_length })
 }
 
-/// Headers whose RFC 3261 grammar can carry a quoted-string. Case-insensitive
-/// on the raw wire name — no lowercased `String` allocation.
-fn is_quoted_string_header(name: &str) -> bool {
-    eq_any_ignore_ascii_case(
+/// Headers whose RFC 3261 grammar can carry a quoted-string.
+fn is_quoted_string_header(name: &HeaderName) -> bool {
+    matches!(
         name,
-        &[
-            "to",
-            "from",
-            "contact",
-            "reply-to",
-            "refer-to",
-            "subject",
-            "authorization",
-            "proxy-authorization",
-            "www-authenticate",
-            "proxy-authenticate",
-            "authentication-info",
-            "warning",
-            "alert-info",
-            "call-info",
-            "error-info",
-        ],
+        HeaderName::To
+            | HeaderName::From
+            | HeaderName::Contact
+            | HeaderName::ReplyTo
+            | HeaderName::ReferTo
+            | HeaderName::Subject
+            | HeaderName::Authorization
+            | HeaderName::ProxyAuthorization
+            | HeaderName::WwwAuthenticate
+            | HeaderName::ProxyAuthenticate
+            | HeaderName::AuthenticationInfo
+            | HeaderName::Warning
+            | HeaderName::AlertInfo
+            | HeaderName::CallInfo
+            | HeaderName::ErrorInfo
     )
 }
 
-fn is_authorization_header(name: &str) -> bool {
-    eq_any_ignore_ascii_case(name, &["authorization", "proxy-authorization"])
+fn is_authorization_header(name: &HeaderName) -> bool {
+    matches!(name, HeaderName::Authorization | HeaderName::ProxyAuthorization)
 }
 
 /// True iff `value` contains an unterminated quoted-string. Inside a quote,
