@@ -207,9 +207,28 @@ scan time (2026-07-15). Sizes are line counts at scan time.
   suspicion raised (see log #10: wire-reader extraction residue).
   `rules/defaults.rs` (1407 L), `relay.rs` (1039 L), `refer_transfer.rs`
   (1041 L) still follow in this lane.
-- [ ] **8. `crates/scenario-harness/src/actor/actor.rs` + `actor/mod.rs`**
-  — 1734 + 1558 L. Treat as one job; the actor/ dir is already a module
-  tree, so this is intra-directory rebalancing + comment scrub.
+- [x] **8. `crates/scenario-harness/src/actor/actor.rs` + `actor/mod.rs`**
+  — DONE 2026-07-26 (grown to 2898 + 4043 L since scan). actor.rs dissolved
+  into nine sibling concern modules, largest 475 L; every `actor::` public
+  path unchanged (mod.rs re-exports from `endpoint` + `runner`). Concerns:
+  endpoint (declarative vocabulary — Disposition / MediaState / CtxFeed /
+  ActorSpec / SUBFLOW names + the declarative-feeding contract) / runner
+  (ActorState + holder structs + the `select!` loop; fields `pub(super)`) /
+  react (reactive request answer table + CANCEL automatic) / answer (UAS
+  answer/reject primitives + disposition entry) / response (reactive
+  response fold: establish, fork late-2xx, glare completion, obligation
+  closing) / drive (goal-step dispatcher) / originate (every sent request +
+  glare-retry wait arms) / script (Scripted parking + reception/respond
+  goals) / accept_delta (ADR-0024 §6 consult). mod.rs's 3.8 kL embedded
+  test module became `actor/tests/` — 12 concern files + a shared `testkit`
+  (substrate / forking / cancel_race / reneg / auth / scripted_replay /
+  scripted_cancel / delta_request / delta_response / script_flow /
+  template_request / template_respond). Comment scrub: impl-plan review IDs
+  (B1–B7), build-phase codes (P0/P1/P3), ticket refs (036/044/047,
+  upstreamneed), design-artifact/memory pointers → present-tense contracts;
+  the C*/S*/E* scenario-shape codes KEPT (living vocabulary shared with
+  `crates/callshapes`). `scenarios.rs` (1049 L) is still >500 — outside
+  this entry's scope, queue it with the Lane 3 remainder.
 - [ ] **9. `crates/sip-proxy/src/load_observer.rs`** — 1157 L, 16 smells
   (highest smell density in the workspace). ELU/overload seams — the
   panic-ELU cold-start lesson means suspicious comments here get logged,

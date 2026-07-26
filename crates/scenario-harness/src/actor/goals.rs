@@ -1,6 +1,6 @@
 //! The **goal cursor** — one endpoint's scripted *intent*, shrunk to an ordered
 //! list of goals with barrier guards. The reactive answering is NOT scripted
-//! (it lives in [`super::actor::default_react`]); a goal is only the deliberate
+//! (it lives in [`super::react::default_react`]); a goal is only the deliberate
 //! action an endpoint takes (originate the call, hang up, transfer). A goal may
 //! wait on a barrier over the observed state before it fires — and because the
 //! reactor runs concurrently in the same `select!`, a goal parked on a barrier
@@ -72,7 +72,7 @@ pub enum Barrier {
     AllConfirmed(&'static [&'static str]),
     /// Fire once a named predicate over the observed state holds — the open
     /// form (the refer `merged` conjunction is `Pred`). The name is the bounded
-    /// label a guard-timeout `StepError::who` carries (B7: never free-form).
+    /// label a guard-timeout `StepError::who` carries (never free-form).
     Pred {
         name: &'static str,
         pred: Arc<dyn Fn(&StateInner) -> bool + Send + Sync>,
@@ -93,7 +93,7 @@ impl Barrier {
     /// orders an origination AFTER a specific inbound request (an MRF's
     /// `INFO(EOF)` following the worker's `INFO(play)`), replacing a timed
     /// post-confirm dwell. `name` is the bounded barrier label a guard-timeout
-    /// [`StepError::who`](crate::StepError) carries (B7: never free-form).
+    /// [`StepError::who`](crate::StepError) carries (never free-form).
     pub fn received(name: &'static str, leg: &'static str, method: &'static str) -> Self {
         Barrier::pred(name, move |s| s.leg_received_method(leg, method))
     }
