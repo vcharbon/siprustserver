@@ -37,7 +37,7 @@ pub struct B2buaCore {
     /// Readiness handle (the supervisor-backed one when replication is wired,
     /// else the always-ready legacy one). Kept so [`begin_draining`] can latch it.
     readiness: Readiness,
-    /// Worker-side overload signal (migration/08). Re-exposed via
+    /// Worker-side overload signal. Re-exposed via
     /// [`overload`](Self::overload) so callers/tests can read the published
     /// header and advance the `adm` counter; a periodic task drives its EWMAs.
     overload: OverloadSignal,
@@ -149,11 +149,10 @@ impl B2buaCore {
     }
 
     /// Like [`spawn_with_services`](Self::spawn_with_services) but lets the caller
-    /// **inject the worker-side [`OverloadSignal`]** (migration/08) the periodic
-    /// sampler task drives and every OPTIONS-200 `X-Overload` header reads. `None`
-    /// reproduces today's behaviour exactly: a fresh [`OverloadSignal::live`]
-    /// backed by the [`LiveLoadSampler`](crate::overload::LiveLoadSampler), which
-    /// reads ~0 ELU under a healthy/paused runtime.
+    /// **inject the worker-side [`OverloadSignal`]** the periodic sampler task
+    /// drives and every OPTIONS-200 `X-Overload` header reads. `None` builds a
+    /// fresh [`OverloadSignal::live`], whose live busy-ratio sampler reads ~0
+    /// ELU under a healthy/paused runtime.
     ///
     /// This is the sampler-injection seam (mirroring `start_with_config` /
     /// `spawn_with_services`): a `start_paused` test passes an `OverloadSignal`
@@ -161,8 +160,8 @@ impl B2buaCore {
     /// control, advances a few [`SAMPLE_PERIOD`](OverloadSignal::SAMPLE_PERIOD)s,
     /// and observes the published header's `elu` rise above 0 — driving the
     /// injected value THROUGH the running sampler task into the EWMA and the
-    /// header (the faithful `start_paused` port of the TS `it.live` test, which
-    /// the live sampler alone cannot exercise because its busy proxy stays ~0).
+    /// header (the live sampler alone cannot exercise this: its busy ratio
+    /// stays ~0 under a paused runtime).
     pub fn spawn_with_overload(
         endpoint: Box<dyn UdpEndpoint>,
         deps: B2buaDeps,
@@ -320,13 +319,13 @@ impl B2buaCore {
         // this list; `services` here is for `init`-seeded services (e.g. the
         // out-of-tree `announcement` capstone).
         let rules = compose_rules(&services, default_rules_with(&compose));
-        // Worker-side overload signal (migration/08). A live ELU/GC sampler backs
+        // Worker-side overload signal. A live ELU/GC sampler backs
         // it by default; the periodic task below drives `sample()` at the 100 ms
         // cadence so the EWMAs published on every OPTIONS-200 `X-Overload` header
         // track load. A test may inject one over the `simulated()` sampler (the
         // sampler-injection seam) to drive a known ELU through the running task.
         let overload = overload.unwrap_or_else(OverloadSignal::live);
-        // Tier-3 admission gate (migration/09): seed the CPS token bucket + the
+        // Tier-3 admission gate: seed the CPS token bucket + the
         // panic-ELU / Retry-After knobs from the now-final config (the harness
         // `tune` seam ran in `spawn_b2bua_core` before this). Must happen before
         // `config` is moved into the ctx below.
@@ -409,9 +408,9 @@ impl B2buaCore {
             }));
         }
 
-        // The worker-side overload sampler (migration/08). Rides
-        // `tokio::time::interval` (NOT the TS raw `setInterval`) so a paused-clock
-        // test advances it with `tokio::time::advance` like every other behaviour
+        // The worker-side overload sampler. Rides `tokio::time::interval` so a
+        // paused-clock test advances it with `tokio::time::advance` like every
+        // other behaviour
         // timer (CLAUDE.md: behaviour rides `tokio::time` directly). Each tick
         // reads the ELU/GC sampler and feeds the EWMAs published on `X-Overload`.
         // Aborted with the other tasks on a simulated `crash()`. This task owns no
@@ -499,7 +498,7 @@ impl B2buaCore {
         self.supervisor.as_ref()
     }
 
-    /// The worker-side overload signal (migration/08). Callers advance the `adm`
+    /// The worker-side overload signal. Callers advance the `adm`
     /// counter on a non-emergency new-dialog admit
     /// ([`OverloadSignal::increment_non_emergency_admitted`]) and read the
     /// published `X-Overload` header; a periodic task drives its EWMAs.

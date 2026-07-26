@@ -248,8 +248,24 @@ scan time (2026-07-15). Sizes are line counts at scan time.
   HealthProbe.ts / LoadBalancer.ts refs in sip-proxy-runner main.rs,
   health/probe.rs and strategies/load_balancer.rs rewritten present-tense.
   The explicit-`now_ms` clock contract kept as the module-doc centerpiece.
-- [ ] **10. `crates/b2bua/src/overload.rs`** — 1129 L, 13 smells. Pairs
-  with #9 conceptually; do back-to-back.
+- [x] **10. `crates/b2bua/src/overload.rs`** — DONE 2026-07-26: 1129 L →
+  `overload/` (7 files + mod, largest 300 L; all public paths unchanged via
+  mod.rs re-exports). Concerns: sampler (the LoadSampler read seam — live
+  tokio busy-ratio + the injectable simulated pair) / ewma / bucket (the
+  CPS TokenBucket + its tokio::time clock contract) / admission (verdict
+  types + tunables + seed defaults) / signal (OverloadSignal: EWMAs,
+  counters, header builder, should_admit) / prometheus (text exposition) /
+  tests (the signal-driven suite; primitive tests inline beside their
+  module — the externally referenced names `the_bucket_refills_over_time`
+  and `panic_elu_*` stay under `overload::tests`). Rule 1: `LiveLoadSampler`
+  demoted to pub(super) (zero code consumers outside the module; only
+  `OverloadSignal::live` constructs it) and its dead `_sample_window`
+  parameter deleted. TS-port (OverloadController.ts / LoadSampler.ts /
+  toFixed(3) / it.live) + migration/08-09-32 + slice refs scrubbed, incl.
+  the six overload-seam comment sites in b2bua_core.rs; the stale module-doc
+  claim that the token bucket / shouldAdmit gate "is intentionally absent
+  here" corrected (both live here now). The tokio::time-vs-real-wall clock
+  contract kept as the mod.rs centerpiece. No new suspicions.
 
 ### Lane 3 — big but self-contained (internal fan-in only)
 
