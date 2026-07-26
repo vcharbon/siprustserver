@@ -23,6 +23,25 @@ pub(crate) struct Rendered {
 /// Render `line`, `entries` and `body` into one buffer, recording spans as it
 /// writes.
 pub(crate) fn render<S: StartKind>(line: &S::Line, entries: &[Entry], body: &[u8]) -> Rendered {
+    write::<S>(line, entries, body, true)
+}
+
+/// The datagram alone. A relay forwards bytes and reads no field of what it
+/// forwarded, so it records no spans either.
+pub(crate) fn render_bytes<S: StartKind>(
+    line: &S::Line,
+    entries: &[Entry],
+    body: &[u8],
+) -> Vec<u8> {
+    write::<S>(line, entries, body, false).bytes
+}
+
+fn write<S: StartKind>(
+    line: &S::Line,
+    entries: &[Entry],
+    body: &[u8],
+    record: bool,
+) -> Rendered {
     const FIRST_LINE_HINT: usize = 96;
     const ENTRY_HINT: usize = 72;
     let capacity = FIRST_LINE_HINT + entries.len() * ENTRY_HINT + body.len() + 4;
@@ -31,7 +50,7 @@ pub(crate) fn render<S: StartKind>(line: &S::Line, entries: &[Entry], body: &[u8
     let start = S::render_start(line, &mut out);
     out.str("\r\n");
 
-    let mut headers = Vec::with_capacity(entries.len());
+    let mut headers = if record { Vec::with_capacity(entries.len()) } else { Vec::new() };
     for entry in entries {
         let name_at = out.len();
         out.str(entry.name().as_wire_str());
@@ -39,7 +58,9 @@ pub(crate) fn render<S: StartKind>(line: &S::Line, entries: &[Entry], body: &[u8
         out.str(": ");
         let value_at = out.len();
         entry.render_value(&mut out);
-        headers.push((name, (value_at, out.len() - value_at)));
+        if record {
+            headers.push((name, (value_at, out.len() - value_at)));
+        }
         out.str("\r\n");
     }
 

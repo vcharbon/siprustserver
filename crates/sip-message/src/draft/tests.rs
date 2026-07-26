@@ -126,6 +126,47 @@ fn a_line_that_does_not_read_fails_the_edit_loudly() {
 }
 
 #[test]
+fn a_top_line_edit_leaves_the_lines_below_it_unread() {
+    // A hop stamps its own Via while a lower hop's line is one no reader can
+    // make sense of: the relay must still leave, and that line must survive
+    // byte for byte.
+    let hop = invite()
+        .thaw()
+        .push_raw(HeaderName::Via, "SIP/2.0")
+        .update_top::<Via>(|via| via.with_received("192.0.2.7"))
+        .expect("only the top line is read")
+        .freeze()
+        .expect("still complete");
+    let vias: Vec<&str> = hop.raw(HeaderName::Via).collect();
+    assert_eq!(vias[0], "SIP/2.0/UDP client.atlanta.com:5060;branch=z9hG4bK74bf9;received=192.0.2.7");
+    assert_eq!(vias[1], "SIP/2.0");
+}
+
+#[test]
+fn popping_the_top_entry_keeps_the_rest_of_a_folded_line() {
+    let popped = invite().thaw().pop_top::<header::RouteEntry>().expect("the top line reads");
+    let routes = popped.values::<header::RouteEntry>().expect("reads");
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].uri().host(), "p2.example.com");
+}
+
+#[test]
+fn popping_the_only_entry_of_a_line_removes_the_line() {
+    let popped = invite().thaw().pop_top::<Via>().expect("the top line reads");
+    assert!(!popped.has(&HeaderName::Via), "the message's only Via line is gone");
+}
+
+#[test]
+fn freeze_bytes_is_the_frozen_message_without_the_message() {
+    let draft = invite().thaw();
+    let frozen = draft.clone().freeze().expect("complete");
+    assert_eq!(draft.freeze_bytes().expect("complete"), frozen.raw);
+
+    let blank = RequestDraft::new(Method::Options, Uri::sip("biloxi.com"));
+    assert!(blank.freeze_bytes().is_err(), "an incomplete draft yields no wire bytes");
+}
+
+#[test]
 fn prepending_a_header_the_draft_lacks_appends_it() {
     let draft = RequestDraft::new(Method::Options, Uri::sip("biloxi.com"))
         .push(header::CallId::new("call-1@atlanta.com"))

@@ -17,7 +17,7 @@ use crate::types::SipHeader;
 
 use super::entry::Entry;
 use super::list::HeaderList;
-use super::render::render;
+use super::render::{render, render_bytes};
 use super::start::StartKind;
 
 /// Why a draft could not become a message.
@@ -222,11 +222,48 @@ impl<S: StartKind> Draft<S> {
         Ok(self)
     }
 
-    /// Rewrite the first value of one header, parsing that line on this first
-    /// touch. A header the draft does not carry is left as it stands; one that
+    /// Rewrite the first value of one header, reading every line the header
+    /// has. A header the draft does not carry is left as it stands; a line that
     /// does not read as `H` is an error, per [`list`](Self::list).
     pub fn update<H: HeaderValue>(self, f: impl FnOnce(H) -> H) -> Result<Self, SipParseError> {
         self.list::<H>(|list| list.map_first(f))
+    }
+
+    /// Rewrite the first value of one header, reading only the LINE that
+    /// carries it — a router stamps its own hop without parsing hops it has no
+    /// business parsing. Lines below the first are left byte-untouched.
+    pub fn update_top<H: HeaderValue>(
+        self,
+        f: impl FnOnce(H) -> H,
+    ) -> Result<Self, SipParseError> {
+        self.edit_top_line::<H>(|list| list.map_first(f))
+    }
+
+    /// Drop the first value of one header — the RFC 3261 §7.3.1 aware entry
+    /// pop. A comma-folded line keeps the values below the one removed; a line
+    /// carrying only that value goes away. Only that line is read.
+    pub fn pop_top<H: HeaderValue>(self) -> Result<Self, SipParseError> {
+        self.edit_top_line::<H>(|mut list| {
+            list.pop_front();
+            list
+        })
+    }
+
+    /// Replace the first line of one header with the values `f` yields, at the
+    /// position that line held. Every other line is left as it stands.
+    fn edit_top_line<H: HeaderValue>(
+        mut self,
+        f: impl FnOnce(HeaderList<H>) -> HeaderList<H>,
+    ) -> Result<Self, SipParseError> {
+        let name = H::header_name();
+        let Some(at) = self.entries.iter().position(|e| e.is(&name)) else { return Ok(self) };
+        let values = self.entries[at].read::<H>()?;
+        let updated = f(HeaderList::new(values)).into_vec();
+        self.entries.remove(at);
+        for (offset, value) in updated.into_iter().enumerate() {
+            self.entries.insert(at + offset, Entry::typed(value));
+        }
+        Ok(self)
     }
 
     /// Edit the Via list — the hop rewrite every router performs. Adding this
@@ -262,12 +299,7 @@ impl<S: StartKind> Draft<S> {
     /// header present on the draft cannot be read as the value its name
     /// promises.
     pub fn freeze(self) -> Result<S::Message, IncompleteDraft> {
-        let draft = self.with_content_length();
-        let missing: Vec<HeaderName> =
-            S::REQUIRED.iter().filter(|name| !draft.has(name)).cloned().collect();
-        if !missing.is_empty() {
-            return Err(IncompleteDraft::Missing(missing));
-        }
+        let draft = self.complete()?;
 
         let rendered = render::<S>(&draft.start, &draft.entries, &draft.body);
         let image = decode(&rendered.bytes[..rendered.body_at]);
@@ -285,12 +317,34 @@ impl<S: StartKind> Draft<S> {
             .map_err(IncompleteDraft::Unreadable)
     }
 
+    /// The wire bytes of a message this draft is complete enough to BE: the
+    /// same mandatory-header check and the same single render as
+    /// [`freeze`](Self::freeze), without assembling the typed message a relay
+    /// never reads. Byte-identical to `freeze()?.raw`.
+    pub fn freeze_bytes(self) -> Result<Bytes, IncompleteDraft> {
+        let draft = self.complete()?;
+        Ok(Bytes::from(render_bytes::<S>(&draft.start, &draft.entries, &draft.body)))
+    }
+
     /// The wire bytes of this draft in whatever state it is in: no mandatory
     /// header check, no Content-Length correction, no typed message produced.
     /// Invalidity can leave the stack this way and no other, which is what
     /// keeps "a typed message is always valid" true.
     pub fn render_unchecked(self) -> Bytes {
         Bytes::from(render::<S>(&self.start, &self.entries, &self.body).bytes)
+    }
+
+    /// This draft with its Content-Length restated, once every header RFC 3261
+    /// requires of this direction is present.
+    fn complete(self) -> Result<Self, IncompleteDraft> {
+        let draft = self.with_content_length();
+        let missing: Vec<HeaderName> =
+            S::REQUIRED.iter().filter(|name| !draft.has(name)).cloned().collect();
+        if missing.is_empty() {
+            Ok(draft)
+        } else {
+            Err(IncompleteDraft::Missing(missing))
+        }
     }
 
     /// Declare the body length the message actually carries. A bodiless message

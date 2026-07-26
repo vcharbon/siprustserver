@@ -26,13 +26,16 @@ pub type ResponseDraft = Draft<kind::Response>;
 const TYPICAL_HEADERS: usize = 12;
 
 fn seed(headers: &[SipHeader], keep: impl Fn(&HeaderName) -> bool) -> Vec<Entry> {
-    headers
-        .iter()
-        .filter_map(|header| {
-            let name = HeaderName::of(&header.name);
-            keep(&name).then(|| Entry::raw(name, header.value.clone()))
-        })
-        .collect()
+    // Sized for the whole header list up front: a relay thaws every message it
+    // forwards, so the entry list must not grow its way there.
+    let mut entries = Vec::with_capacity(headers.len());
+    for header in headers {
+        let name = HeaderName::of(&header.name);
+        if keep(&name) {
+            entries.push(Entry::raw(name, header.value.clone()));
+        }
+    }
+    entries
 }
 
 impl RequestDraft {

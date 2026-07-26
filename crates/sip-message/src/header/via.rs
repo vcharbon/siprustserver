@@ -17,6 +17,12 @@ use super::wire::Wire;
 /// with.
 pub const BRANCH_MAGIC_COOKIE: &str = "z9hG4bK";
 
+/// The parameter names a router writes, spelled once so stamping a hop copies
+/// no name text.
+const BRANCH: SipStr = SipStr::from_static("branch");
+const RECEIVED: SipStr = SipStr::from_static("received");
+const RPORT: SipStr = SipStr::from_static("rport");
+
 /// What a Via's `rport` parameter says (RFC 3581).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rport {
@@ -135,20 +141,20 @@ impl Via {
     }
 
     pub fn with_branch(self, branch: impl Into<SipStr>) -> Self {
-        self.with_param("branch", ParamValue::Token(branch.into()))
+        self.with_param(BRANCH, ParamValue::Token(branch.into()))
     }
 
     pub fn with_received(self, host: impl Into<SipStr>) -> Self {
-        self.with_param("received", ParamValue::Token(host.into()))
+        self.with_param(RECEIVED, ParamValue::Token(host.into()))
     }
 
     /// Ask the next hop to report the source port back (`;rport`).
     pub fn requesting_rport(self) -> Self {
-        self.with_param("rport", ParamValue::Flag)
+        self.with_param(RPORT, ParamValue::Flag)
     }
 
     pub fn with_rport(self, port: u16) -> Self {
-        self.with_param("rport", ParamValue::Token(SipStr::owned(&port.to_string())))
+        self.with_param(RPORT, ParamValue::Token(SipStr::owned(&port.to_string())))
     }
 
     pub fn with_param(mut self, name: impl Into<SipStr>, value: ParamValue) -> Self {

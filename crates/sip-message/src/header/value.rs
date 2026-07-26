@@ -48,9 +48,16 @@ pub trait HeaderValue: Sized + Clone + std::fmt::Debug + Send + Sync + 'static {
     /// Every value carried on one header line.
     fn parse_line(raw: &SipStr) -> Result<Vec<Self>, SipParseError> {
         match Self::folding() {
-            Folding::Comma => top_level_comma_entries(raw.as_str())
-                .map(|entry| Self::parse(&raw.reslice(entry)))
-                .collect(),
+            Folding::Comma => {
+                // Sized for the one-value line the wire almost always carries:
+                // a value type is a wide struct, so a growth step costs real
+                // bytes on the relay path.
+                let mut values = Vec::with_capacity(1);
+                for entry in top_level_comma_entries(raw.as_str()) {
+                    values.push(Self::parse(&raw.reslice(entry))?);
+                }
+                Ok(values)
+            }
             Folding::Single | Folding::LinePerValue => Ok(vec![Self::parse(raw)?]),
         }
     }

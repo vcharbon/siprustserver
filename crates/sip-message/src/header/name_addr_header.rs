@@ -102,7 +102,7 @@ impl<K: TaggedKind> NameAddrHeader<K> {
     }
 
     pub fn with_tag(self, tag: impl Into<SipStr>) -> Self {
-        Self::new(self.addr.with_param("tag", ParamValue::Token(tag.into())))
+        Self::new(self.addr.with_param(SipStr::from_static("tag"), ParamValue::Token(tag.into())))
     }
 
     pub fn without_tag(self) -> Self {
