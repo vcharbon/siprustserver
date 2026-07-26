@@ -113,7 +113,7 @@ pub(super) async fn originate_initial_invite(
         })
     }) || template.as_ref().is_some_and(|(t, _)| {
         t.headers().iter().any(|h| {
-            sip_message::message_helpers::name_matches("Supported", &h.name)
+            sip_message::header::HeaderName::Supported.matches(&h.name)
                 && h.value.to_ascii_lowercase().contains("100rel")
         })
     });

@@ -1,15 +1,16 @@
 //! [`Proxy`] — a minimal, *scripted* loose-routing proxy (the test stand-in
-//! for the LB front proxy) and its RFC 3261 §16 header surgery.
+//! for the LB front proxy) and its RFC 3261 §16 hop rewrite.
 
 use std::net::SocketAddr;
 
-use sip_message::generators::strip_route_uri_to_request_uri;
-use sip_message::{SipHeader, SipMessage, SipRequest, SipResponse};
+use sip_message::header::{HeaderName, RecordRouteEntry, RouteEntry, Uri, Via};
+use sip_message::{SipMessage, SipRequest, SipResponse};
 
-use super::addressing::{uri_to_addr, via_addr};
+use super::addressing::{hostport_to_addr, via_addr};
+use super::step::unwrap_step;
 use super::Agent;
 
-/// A minimal loose-routing proxy. It does the load-bearing routing surgery
+/// A minimal loose-routing proxy. It does the load-bearing routing rewrite
 /// per RFC 3261 §16:
 ///   - adds its own **Via** (top) to forwarded requests so responses route back
 ///     through it (§16.6), and strips that Via from responses (§16.7);
@@ -37,86 +38,76 @@ impl Proxy {
         &self.agent.name
     }
 
-    fn record_route_value(&self) -> String {
-        format!("<sip:{}:{};lr>", self.agent.addr.ip(), self.agent.addr.port())
+    /// The loose-route entry this proxy records on a dialog (§16.6.4).
+    fn record_route(&self) -> RecordRouteEntry {
+        let uri = Uri::sip(self.agent.addr.ip().to_string())
+            .with_port(self.agent.addr.port())
+            .with_flag("lr");
+        RecordRouteEntry::from_uri(uri)
     }
 
-    /// Receive one request, apply the §16 surgery, and forward it to `next`.
+    /// This proxy's own hop, with a fresh branch (§16.6 step 8).
+    fn via(&self) -> Via {
+        Via::udp(self.agent.addr.ip().to_string(), self.agent.addr.port())
+            .with_branch(self.agent.branch())
+    }
+
+    /// Whether the request's first Route entry names this proxy — the
+    /// precondition for the §16.4 self-pop.
+    fn owns_top_route(&self, req: &SipRequest) -> bool {
+        let Ok(routes) = req.route_set() else { return false };
+        let Some(top) = routes.first() else { return false };
+        let (host, port) = top.uri().host_port();
+        hostport_to_addr(&format!("{host}:{port}")) == Some(self.agent.addr)
+    }
+
+    /// Receive one request, apply the §16 rewrite, and forward it to `next`.
     /// Returns the (rewritten) request for assertions.
     pub async fn forward_request(&self, next: SocketAddr) -> SipRequest {
-        let SipMessage::Request(mut req) = self.agent.recv().await else {
+        let SipMessage::Request(req) = self.agent.recv().await else {
             panic!("{} expected a request to forward", self.agent.name);
         };
+        let mut draft = req.thaw();
         // Loose router popping itself off the route set (§16.4) — in-dialog
         // requests (ACK/BYE/…) arrive with our Record-Route as the top Route.
-        strip_top_route_if_self(&mut req, self.agent.addr);
+        if self.owns_top_route(&req) {
+            draft = draft
+                .pop_top::<RouteEntry>()
+                .expect("the top Route just read as a route entry");
+        }
         // Record-Route dialog-creating requests so in-dialog traffic returns
-        // through us (§16.6.4). A dialog-creating INVITE has no To-tag yet.
+        // through us (§16.6.4). A dialog-creating INVITE has no To-tag yet. Ours
+        // is the topmost entry, and §7.3 asks a proxy to write what it processes
+        // near the top — so a first Record-Route opens the header block.
         if req.method == "INVITE" && req.to.tag.is_none() {
-            prepend_header(&mut req.headers, "Record-Route", &self.record_route_value());
+            let entry = self.record_route();
+            draft = if draft.has(&HeaderName::RecordRoute) {
+                draft.prepend(entry)
+            } else {
+                draft.push_front(entry)
+            };
         }
         // Add our Via on top so the response comes back to us (§16.6).
-        prepend_header(&mut req.headers, "Via", &self.via_value());
-        self.agent.send(&SipMessage::Request(req.clone()), next).await;
-        req
+        draft = draft.prepend(self.via());
+        let forwarded =
+            draft.freeze().expect("a thawed request stays complete through a §16 rewrite");
+        unwrap_step(self.agent.try_send_wire(&forwarded.raw, next).await);
+        forwarded
     }
 
     /// Receive one response, strip our Via, and forward it to `next`.
     pub async fn forward_response(&self, next: SocketAddr) -> SipResponse {
-        let SipMessage::Response(mut resp) = self.agent.recv().await else {
+        let SipMessage::Response(resp) = self.agent.recv().await else {
             panic!("{} expected a response to forward", self.agent.name);
         };
-        strip_top_via_if_self(&mut resp.headers, self.agent.addr);
-        self.agent.send(&SipMessage::Response(resp.clone()), next).await;
-        resp
-    }
-
-    fn via_value(&self) -> String {
-        format!(
-            "SIP/2.0/UDP {}:{};branch={}",
-            self.agent.addr.ip(),
-            self.agent.addr.port(),
-            self.agent.branch()
-        )
-    }
-}
-
-/// Insert a header at the top of the list (RFC 3261 §16.6 prepend semantics for
-/// Via / Record-Route).
-fn prepend_header(headers: &mut Vec<SipHeader>, name: &str, value: &str) {
-    headers.insert(
-        0,
-        SipHeader {
-            name: name.to_string().into(),
-            value: value.to_string().into(),
-        },
-    );
-}
-
-/// Strip the first Route header if it routes to `me` (the loose router removing
-/// itself, §16.4).
-fn strip_top_route_if_self(req: &mut SipRequest, me: SocketAddr) {
-    if let Some(pos) = req
-        .headers
-        .iter()
-        .position(|h| h.name.eq_ignore_ascii_case("route"))
-    {
-        let uri = strip_route_uri_to_request_uri(&req.headers[pos].value);
-        if uri_to_addr(&uri) == Some(me) {
-            req.headers.remove(pos);
+        let mut draft = resp.thaw();
+        // §16.7 step 3: the response's topmost Via is ours — drop it.
+        if via_addr(&resp.top_via()) == Some(self.agent.addr) {
+            draft = draft.pop_top::<Via>().expect("the top Via parsed on the way in");
         }
-    }
-}
-
-/// Strip the topmost Via if it is `me`'s (the proxy removing its own Via from a
-/// response before forwarding upstream, §16.7).
-fn strip_top_via_if_self(headers: &mut Vec<SipHeader>, me: SocketAddr) {
-    if let Some(pos) = headers
-        .iter()
-        .position(|h| h.name.eq_ignore_ascii_case("via"))
-    {
-        if via_addr(&headers[pos].value) == Some(me) {
-            headers.remove(pos);
-        }
+        let forwarded =
+            draft.freeze().expect("a thawed response stays complete through a §16.7 pop");
+        unwrap_step(self.agent.try_send_wire(&forwarded.raw, next).await);
+        forwarded
     }
 }

@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
+use sip_message::header::HeaderName;
 use sip_message::{
     apply_name_forms, apply_remote_target_emits, EmitOpts, MessageTemplate, SipHeader, SipMessage,
     SipResponse,
@@ -104,12 +105,11 @@ impl<'a> OutOfDialogRequest<'a> {
             tmpl.start()
         );
         let frozen = tmpl.frozen_headers();
-        // Intentionally LITERAL (not compact-aware): a frozen compact `c:` does
-        // not match "content-type" here, so suppress=true and the generator's
-        // added full Content-Type default is stripped below while the frozen `c:`
-        // survives (a compact-aware probe would wrongly leave both).
+        // A replay emits the header block it captured: a template that states a
+        // media type in ANY spelling keeps that line and the stack adds none, and
+        // one that states none must not gain the stack's default.
         self.suppress_default_ct =
-            !frozen.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
+            !frozen.iter().any(|h| HeaderName::ContentType.matches(&h.name));
         // Append AFTER any prior `with_header` entries — never drop them.
         self.extra_headers.extend(frozen);
         self.body = Some(tmpl.body().to_vec());
@@ -174,11 +174,14 @@ impl<'a> OutOfDialogRequest<'a> {
         };
         let mut req = generate_out_of_dialog_request(self.method, &opts);
         if self.suppress_default_ct {
-            req.headers =
-                sip_message::message_helpers::remove_header(&req.headers, "content-type");
+            req = req
+                .thaw()
+                .remove(&HeaderName::ContentType)
+                .freeze()
+                .expect("dropping the stack's media type leaves a complete request");
         }
         // Send a WIRE copy with the captured compact names; retain canonical
-        // `req` for the §17.1.1.3 ACK (its get_header lookups are not compact-aware).
+        // `req` for the §17.1.1.3 ACK.
         let mut wire = req.clone();
         wire.headers = apply_name_forms(&req.headers, &self.name_forms);
         wire.headers = apply_remote_target_emits(&wire.headers, &self.remote_emits);
@@ -241,8 +244,11 @@ impl<'a> OutOfDialogRequest<'a> {
         loop {
             let mut req = generate_out_of_dialog_request(method, &opts);
             if self.suppress_default_ct {
-                req.headers =
-                    sip_message::message_helpers::remove_header(&req.headers, "content-type");
+                req = req
+                    .thaw()
+                    .remove(&HeaderName::ContentType)
+                    .freeze()
+                    .expect("dropping the stack's media type leaves a complete request");
             }
             req.headers = apply_name_forms(&req.headers, &self.name_forms);
             req.headers = apply_remote_target_emits(&req.headers, &self.remote_emits);
@@ -286,8 +292,8 @@ impl<'a> OutOfDialogRequest<'a> {
             // transaction, §22.2).
             opts.cseq += 1;
             opts.via = Some(caller.via());
-            opts.extra_headers
-                .retain(|h| !h.name.eq_ignore_ascii_case(challenge.credential_header()));
+            let credential_name = HeaderName::from(challenge.credential_header());
+            opts.extra_headers.retain(|h| !credential_name.matches(&h.name));
             opts.extra_headers.push(SipHeader {
                 name: challenge.credential_header().to_string().into(),
                 value: credential.into(),

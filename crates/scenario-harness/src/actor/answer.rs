@@ -21,7 +21,7 @@ use crate::{ServerTxn, StepError};
 /// call has moved on). Skipped for a branch-less request, exactly like the
 /// agent's own ACK-obligation table (nothing to match the hop-ACK by).
 pub(super) fn arm_reject_final(st: &mut ActorState<'_>, uas: &ServerTxn, code: u16) {
-    let Some(branch) = top_via_branch(&uas.request().headers) else { return };
+    let Some(branch) = top_via_branch(uas.request()) else { return };
     let call_id = uas.request().call_id.clone();
     let key = ObligationKey::new(st.role, ObligationKind::RejectFinal, uas.request().cseq.seq);
     st.obs.record(

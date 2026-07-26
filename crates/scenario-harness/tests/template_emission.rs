@@ -593,7 +593,7 @@ Content-Length: {}\r\n\r\n{}",
     assert!(!text.contains("\r\nSupported:"), "no full-name Supported stamped:\n{text}");
     // Parsed (expanded) view: one Supported value, the captured one.
     assert_eq!(
-        sip_message::message_helpers::get_headers(&ok.headers, "supported"),
+        ok.raw(sip_message::header::HeaderName::Supported).collect::<Vec<_>>(),
         vec!["replaces"],
         "exactly one Supported value, not the stack default",
     );
@@ -649,7 +649,7 @@ async fn template_reinvite_compact_supported_not_duplicated() {
         "no stamped Supported default on the re-INVITE:\n{text}",
     );
     assert_eq!(
-        sip_message::message_helpers::get_headers(&rreq.headers, "supported"),
+        rreq.raw(sip_message::header::HeaderName::Supported).collect::<Vec<_>>(),
         vec!["replaces"],
         "exactly one Supported value",
     );
@@ -856,7 +856,10 @@ Content-Length: {}\r\n\r\n{}",
     assert_eq!(uas.expect_template(&tmpl, &MatchOpts::default()), Ok(()));
 
     // The emitted Contact keeps the captured user + params over alice's host:port.
-    let contact = sip_message::message_helpers::get_header(&uas.request().headers, "contact")
+    let contact = uas
+        .request()
+        .raw(sip_message::header::HeaderName::Contact)
+        .next()
         .expect("Contact present")
         .to_string();
     assert!(contact.contains("+48123"), "captured user preserved: {contact}");
@@ -909,7 +912,9 @@ Content-Length: {}\r\n\r\n{}",
     uas.respond_template(&tmpl, EmitOpts::default()).send().await;
 
     let ok = call.expect(200).await;
-    let contact = sip_message::message_helpers::get_header(&ok.headers, "contact")
+    let contact = ok
+        .raw(sip_message::header::HeaderName::Contact)
+        .next()
         .expect("Contact present")
         .to_string();
     assert!(contact.contains("svc"), "captured user preserved: {contact}");

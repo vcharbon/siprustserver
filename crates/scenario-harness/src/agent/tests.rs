@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use sip_message::generators::{InDialogMethod, OutOfDialogMethod};
-use sip_message::message_helpers::get_header;
+use sip_message::header::HeaderName;
 use sip_message::SipMessage;
 
 use super::{Harness, StepError};
@@ -92,7 +92,10 @@ mod auth_seam {
         let mut admit = server.try_receive("INVITE").await.unwrap();
         assert_eq!(admit.request().cseq.seq, 2, "the retried INVITE bumps the CSeq (§22.2)");
         assert!(
-            get_header(&admit.request().headers, "authorization")
+            admit
+                .request()
+                .raw(HeaderName::Authorization)
+                .next()
                 .is_some_and(|v| v.starts_with("Digest ")),
             "the retried INVITE carries the responder's Authorization",
         );
@@ -220,7 +223,7 @@ mod auth_seam {
             // First OPTIONS → 401.
             let mut c = server.try_receive("OPTIONS").await.unwrap();
             assert_eq!(c.request().cseq.seq, 1);
-            assert!(get_header(&c.request().headers, "authorization").is_none());
+            assert!(c.request().raw(HeaderName::Authorization).next().is_none());
             c.respond(401, "Unauthorized")
                 .with_header("WWW-Authenticate", "Digest realm=\"sip\", nonce=\"n\"")
                 .try_send()
@@ -230,7 +233,7 @@ mod auth_seam {
             let mut c2 = server.try_receive("OPTIONS").await.unwrap();
             assert_eq!(c2.request().cseq.seq, 2, "the authed resend bumps the CSeq");
             assert!(
-                get_header(&c2.request().headers, "authorization").is_some(),
+                c2.request().raw(HeaderName::Authorization).next().is_some(),
                 "the resend carries the Authorization",
             );
             c2.respond(200, "OK").try_send().await.unwrap();

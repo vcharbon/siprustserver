@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use sip_message::generators::{
     generate_response, GenerateResponseOpts, StackDialog, B2BUA_ALLOW, B2BUA_SUPPORTED,
 };
-use sip_message::message_helpers::{extract_contact_uri, get_header, get_headers};
+use sip_message::header::{self, HeaderName, HeaderValue};
 use sip_message::{
     apply_name_forms, apply_remote_target_emits, EmitOpts, MatchOpts, MessageTemplate, Mismatch,
     SipHeader, SipMessage, SipRequest,
@@ -49,10 +49,12 @@ impl ServerTxn {
     /// used if this UAS later originates in-dialog requests (e.g. bob sends
     /// the BYE).
     pub(super) fn from_request(agent: Agent, request: SipRequest) -> Self {
-        let route_set = get_headers(&request.headers, "record-route")
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        // §12.1.1: the UAS route set is the request's Record-Route rows in
+        // RECEIVED order. A row the strict reader rejects teaches no route.
+        let route_set = request
+            .record_route_set()
+            .map(|set| set.iter().map(HeaderValue::to_wire).collect())
+            .unwrap_or_default();
         ServerTxn {
             agent,
             request,
@@ -139,7 +141,7 @@ impl ServerTxn {
 
     /// Fallible core of [`expect_ack`](Self::expect_ack).
     pub async fn try_expect_ack(&self) -> Result<(), StepError> {
-        let Some(branch) = top_via_branch(&self.request.headers) else {
+        let Some(branch) = top_via_branch(&self.request) else {
             return Err(StepError::UnexpectedKind {
                 who: self.agent.name.clone(),
                 detail: "expect_ack on a request with no top-Via branch".to_string(),
@@ -268,8 +270,10 @@ impl ServerTxn {
     pub fn dialog(&self) -> Dialog {
         let req = &self.request;
         let local_tag = self.to_tag.clone().unwrap_or_default();
-        let remote_target = get_header(&req.headers, "contact")
-            .map(extract_contact_uri)
+        let remote_target = req
+            .header::<header::Contact>()
+            .and_then(Result::ok)
+            .map(|contact| contact.uri().to_string())
             .unwrap_or_else(|| req.from.uri.to_string());
         let dialog = StackDialog {
             call_id: req.call_id.to_string(),
@@ -334,12 +338,11 @@ impl<'a> Respond<'a> {
         // headers; `preserve_order` requests nothing further yet (see EmitOpts).
         let EmitOpts { preserve_order: _ } = opts;
         let frozen = tmpl.frozen_headers();
-        // Intentionally LITERAL (not compact-aware): a frozen compact `c:` does
-        // not match "content-type" here, so suppress=true and the generator's
-        // added full Content-Type default is stripped below while the frozen `c:`
-        // survives (a compact-aware probe would wrongly leave both).
+        // A replay emits the header block it captured: a template that states a
+        // media type in ANY spelling keeps that line and the stack adds none, and
+        // one that states none must not gain the stack's default.
         self.suppress_default_ct =
-            !frozen.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
+            !frozen.iter().any(|h| HeaderName::ContentType.matches(&h.name));
         // Append AFTER any prior `with_header` entries — never drop them.
         self.extra_headers.extend(frozen);
         self.template_body = Some(tmpl.body().to_vec());
@@ -431,12 +434,9 @@ impl<'a> Respond<'a> {
             // Compact-aware probes: a frozen `k:` (compact Supported) must
             // suppress the stack default, else the replayed 2xx advertises
             // 100rel/timer the capture never did (RFC 3261 §7.3.3).
-            let has_allow = extra_headers
-                .iter()
-                .any(|h| sip_message::message_helpers::name_matches("Allow", &h.name));
-            let has_supported = extra_headers
-                .iter()
-                .any(|h| sip_message::message_helpers::name_matches("Supported", &h.name));
+            let has_allow = extra_headers.iter().any(|h| HeaderName::Allow.matches(&h.name));
+            let has_supported =
+                extra_headers.iter().any(|h| HeaderName::Supported.matches(&h.name));
             if !has_allow {
                 extra_headers.push(SipHeader { name: "Allow".into(), value: B2BUA_ALLOW.into() });
             }
@@ -462,8 +462,11 @@ impl<'a> Respond<'a> {
         };
         let mut resp = generate_response(&txn.request, self.status, &self.reason, &opts);
         if self.suppress_default_ct {
-            resp.headers =
-                sip_message::message_helpers::remove_header(&resp.headers, "content-type");
+            resp = resp
+                .thaw()
+                .remove(&HeaderName::ContentType)
+                .freeze()
+                .expect("dropping the stack's media type leaves a complete response");
         }
         // Real UAs may fold multiple echoed Record-Route rows into one comma-
         // separated header (RFC 3261 §7.3.1); reproduce that wire form for UAs the
@@ -491,7 +494,7 @@ impl<'a> Respond<'a> {
         // the body's next receive; `expect_ack` asserts it and the gating
         // `unackedInviteNon2xxFinal` wire rule settles it at finish.
         if (300..700).contains(&self.status) && txn.request.method.as_str() == "INVITE" {
-            if let Some(branch) = top_via_branch(&txn.request.headers) {
+            if let Some(branch) = top_via_branch(&txn.request) {
                 txn.agent.acks.arm(txn.request.call_id.to_string(), branch);
             }
         }

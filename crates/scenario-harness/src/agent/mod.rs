@@ -49,7 +49,7 @@
 //! - [`proxy`] — the minimal scripted loose-routing [`Proxy`].
 //! - [`rr_fold`] — the per-UA Record-Route folding coin flip.
 //! - [`addressing`] — wire-address resolution (next hop, Via sent-by); SIP
-//!   parsing does NOT live here — see `sip_message::message_helpers`.
+//!   parsing does NOT live here — the values come from `sip_message::header`.
 
 mod addressing;
 mod client_invite;

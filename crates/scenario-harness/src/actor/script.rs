@@ -431,8 +431,10 @@ pub(super) fn expect_request(
     let entry = st.parked.remove(idx);
     let req = entry.txn.request();
     let body_is_sdp = !req.body.is_empty()
-        && sip_message::message_helpers::get_header(&req.headers, "content-type")
-            .is_some_and(|v| v.to_ascii_lowercase().contains("sdp"));
+        && req
+            .header::<sip_message::header::MediaType>()
+            .and_then(Result::ok)
+            .is_some_and(|media| media.token().to_ascii_lowercase().contains("sdp"));
     check_body_expect(st.role, body, req.body.len(), body_is_sdp)?;
     if let Some(tmpl) = matcher {
         entry.txn.expect_template(tmpl, &MatchOpts::default()).map_err(|m| {

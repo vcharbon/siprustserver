@@ -15,6 +15,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use sip_message::header::{HeaderValue, ReferTo, Uri};
+use sip_message::sip_str::SipStr;
+
 use crate::anchors::{AnchorKeys, AnchorTag};
 use crate::egress::{ApiCall, CalleeTarget, EgressPolicy};
 use crate::realcall::auth::ChallengeResponder;
@@ -349,15 +352,13 @@ impl<'a> CallEnv<'a> {
     /// (To-user stamp), never this user-part. `None` if no charlie.
     pub fn refer_to(&self) -> Option<String> {
         let target = self.refer_target()?;
-        // Splice the transfer role into the policy-resolved URI
-        // (`sip:charlie@<rest>`), keeping the topology-correct host part.
-        let user = target.role.as_str();
-        let rest = target
-            .uri
-            .split_once('@')
-            .map(|(_, rest)| rest.to_string())
-            .unwrap_or_else(|| target.addr.to_string());
-        Some(format!("<sip:{user}@{rest}>"))
+        // Splice the transfer role into the policy-resolved URI, keeping the
+        // topology-correct host part. A URI no reader accepts falls back to
+        // charlie's own socket.
+        let uri = Uri::parse(&SipStr::owned(&target.uri)).unwrap_or_else(|_| {
+            Uri::sip(target.addr.ip().to_string()).with_port(target.addr.port())
+        });
+        Some(ReferTo::from_uri(uri.with_user(target.role.as_str())).to_wire())
     }
 }
 

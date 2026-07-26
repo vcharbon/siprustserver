@@ -41,7 +41,7 @@
 //! the retry primitive (`ClientInvite::ack_and_resend_with_auth`) is already
 //! wired; only the actor caller's INVITE path has to call it.
 
-use sip_message::message_helpers::get_header;
+use sip_message::header::HeaderName;
 use sip_message::SipResponse;
 
 /// A parsed authentication challenge — the input a [`ChallengeResponder`] needs
@@ -82,14 +82,14 @@ impl Challenge {
 /// rather than dropping the challenge, so a fixture responder that ignores the
 /// header (a static credential) still fires.
 pub fn parse_challenge(resp: &SipResponse) -> Option<Challenge> {
-    let hdr = match resp.status {
-        401 => "www-authenticate",
-        407 => "proxy-authenticate",
+    let name = match resp.status {
+        401 => HeaderName::WwwAuthenticate,
+        407 => HeaderName::ProxyAuthenticate,
         _ => return None,
     };
     Some(Challenge {
         status: resp.status,
-        header_value: get_header(&resp.headers, hdr).unwrap_or("").to_string(),
+        header_value: resp.raw(name).next().unwrap_or_default().to_string(),
     })
 }
 

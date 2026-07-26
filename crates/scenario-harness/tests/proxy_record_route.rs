@@ -13,7 +13,7 @@
 //! `sip-message::generators` + the route-set construction in the fluent harness.
 
 use scenario_harness::Harness;
-use sip_message::message_helpers::{get_header, get_headers};
+use sip_message::header::HeaderName;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
@@ -41,7 +41,9 @@ async fn record_routed_call_through_proxy() {
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy_addr).send().await;
     let fwd_invite = proxy.forward_request(bob_addr).await; // proxy RRs + Vias, → bob
     assert!(
-        get_header(&fwd_invite.headers, "record-route")
+        fwd_invite
+            .raw(HeaderName::RecordRoute)
+            .next()
             .is_some_and(|rr| rr.contains("127.0.0.1:5080") && rr.contains(";lr")),
         "proxy must insert a ;lr Record-Route"
     );
@@ -49,7 +51,7 @@ async fn record_routed_call_through_proxy() {
     let mut uas = bob.receive("INVITE").await;
     // bob's INVITE carries the proxy's Record-Route (which it echoes on responses).
     assert!(
-        get_header(&uas.request().headers, "record-route").is_some(),
+        uas.request().raw(HeaderName::RecordRoute).next().is_some(),
         "the INVITE bob received must carry the proxy's Record-Route"
     );
 
@@ -61,7 +63,7 @@ async fn record_routed_call_through_proxy() {
     proxy.forward_response(alice_addr).await;
     let ok = call.expect(200).await;
     assert!(
-        get_header(&ok.headers, "record-route").is_some(),
+        ok.raw(HeaderName::RecordRoute).next().is_some(),
         "200 OK must echo the proxy's Record-Route so alice can build its route set"
     );
 
@@ -71,7 +73,7 @@ async fn record_routed_call_through_proxy() {
     let fwd_ack = proxy.forward_request(bob_addr).await; // proxy strips its Route, → bob
     bob.receive("ACK").await;
     assert!(
-        get_headers(&fwd_ack.headers, "route").is_empty(),
+        fwd_ack.raw(HeaderName::Route).next().is_none(),
         "proxy must strip its own Route from the in-dialog ACK"
     );
 
@@ -104,7 +106,7 @@ async fn record_routed_call_through_proxy() {
 
     // Sanity on the proxy-forwarded BYE we captured above: Route stripped, RURI
     // unchanged (loose routing — RURI is never the route).
-    assert!(get_headers(&fwd_bye.headers, "route").is_empty());
+    assert!(fwd_bye.raw(HeaderName::Route).next().is_none());
     assert!(fwd_bye.uri.contains("bob@127.0.0.1:5070"));
 
     // The dialog CSeq still increments correctly through the proxy: BYE = 2.

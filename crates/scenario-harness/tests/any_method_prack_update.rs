@@ -5,7 +5,7 @@
 
 use scenario_harness::{Harness, StepError};
 use sip_message::generators::{InDialogMethod, OutOfDialogMethod};
-use sip_message::message_helpers::get_header;
+use sip_message::header::{HeaderName, RAck, RSeq};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -37,14 +37,23 @@ async fn prack_then_update_both_directions_fallible() -> Result<(), StepError> {
     let mut uas = bob.try_receive("INVITE").await?;
     uas.respond(183, "Session Progress").reliable(1).with_sdp(ANSWER).try_send().await?;
     let p183 = call.try_expect(183).await?;
-    assert_eq!(get_header(&p183.headers, "rseq").as_deref(), Some("1"));
+    assert_eq!(
+        p183.header::<RSeq>().and_then(Result::ok).map(|r| r.value()),
+        Some(1),
+        "the reliable 183 carries RSeq 1 (RFC 3262 §7.1)",
+    );
 
     // Alice PRACKs it — RAck (`<RSeq> <CSeq> INVITE`) derived from the 183.
     let mut prack = call.try_prack(&p183).await?;
     let mut prack_uas = bob.try_receive("PRACK").await?;
+    let rack = prack_uas
+        .request()
+        .header::<RAck>()
+        .and_then(Result::ok)
+        .expect("the PRACK carries a readable RAck");
     assert_eq!(
-        get_header(&prack_uas.request().headers, "rack").as_deref(),
-        Some("1 1 INVITE"),
+        (rack.rseq(), rack.seq(), rack.method().as_str()),
+        (1, 1, "INVITE"),
         "RAck must reference the 183's RSeq + the INVITE's CSeq (RFC 3262 §7.2)",
     );
     prack_uas.respond(200, "OK").try_send().await?;
@@ -107,9 +116,9 @@ async fn generic_out_of_dialog_message_fallible() -> Result<(), StepError> {
     let mut uas = bob.try_receive("MESSAGE").await?;
     let req = uas.request();
     assert_eq!(req.cseq.method, "MESSAGE", "CSeq method auto-filled");
-    assert_eq!(get_header(&req.headers, "subject").as_deref(), Some("any-method"));
+    assert_eq!(req.raw(HeaderName::Subject).next(), Some("any-method"));
     assert_eq!(
-        get_header(&req.headers, "content-type").as_deref(),
+        req.raw(HeaderName::ContentType).next(),
         Some("text/plain"),
         "caller-supplied Content-Type is used",
     );

@@ -131,8 +131,10 @@ pub(super) fn record_response_fact(st: &mut ActorState<'_>, resp: &SipResponse, 
         .remaining_steps()
         .any(|s| matches!(s, GoalStep::ExpectResponse { matcher: Some(_), .. }));
     let body_is_sdp = !resp.body.is_empty()
-        && sip_message::message_helpers::get_header(&resp.headers, "content-type")
-            .is_some_and(|v| v.to_ascii_lowercase().contains("sdp"));
+        && resp
+            .header::<sip_message::header::MediaType>()
+            .and_then(Result::ok)
+            .is_some_and(|media| media.token().to_ascii_lowercase().contains("sdp"));
     st.obs.record(
         Observation::LegResponse {
             leg: st.role,
@@ -437,5 +439,5 @@ pub(super) fn resolve_ack_body(
 /// The `RSeq` of a reliable provisional (RFC 3262) — `Some(rseq)` iff `resp`
 /// carries a parseable `RSeq` header (marking it PRACK-required), else `None`.
 fn reliable_rseq(resp: &SipResponse) -> Option<u32> {
-    sip_message::message_helpers::get_header(&resp.headers, "rseq").and_then(|v| v.trim().parse().ok())
+    Some(resp.header::<sip_message::header::RSeq>()?.ok()?.value())
 }

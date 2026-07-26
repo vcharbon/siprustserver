@@ -160,7 +160,7 @@ helpers listed above, run capped workspace test, tick tracker, commit.
 - [x] M4 sip-txn
 - [x] M5 sip-proxy
 - [x] M6 b2bua-sdk + b2bua
-- [ ] M7 scenario-harness
+- [x] M7 scenario-harness
 - [ ] M8 e2e-core + e2e-model + announcement
 - [ ] M9 sip-net rfc_audit
 - [ ] M10 sip-pcap + loadgen
@@ -779,3 +779,103 @@ warnings in the lane are pre-existing `sip-message` parser ones).
   target) are still `String`s in the `call` crate, so the relay re-parses them
   on every response. That is the ADR's out-of-scope `call`-crate decision, and
   it is now the only string round-trip left on the b2bua's hot path.
+
+### M7 — scenario-harness
+
+`scenario-harness` has **zero** `message_helpers::*` / `get_header` /
+`set_header` / `remove_header` / `serialize_*_parts` call sites left, `src` and
+`tests` alike. One reader was missing and landed in its own sip-message commit:
+`sniff::request_uri` (the second request-line token) — the leg-picker's demux
+tier reads an unparsed datagram, which is `sniff`'s concern, not the parser's.
+
+**Every deletion target the plan listed is gone**, plus what the sweep found:
+
+| deleted | replaced by |
+|---|---|
+| `client_invite.rs` mutate → `serialize_request_parts` → re-parse (§22.2 auth resend) | `thaw` → `set(Via)` / `set(CSeq)` / `remove`+`push_raw(credential)` → `freeze` |
+| `agent/proxy.rs` `prepend_header`, `strip_top_route_if_self`, `strip_top_via_if_self` | `thaw` → `pop_top::<RouteEntry>` / `push_front`+`prepend` / `pop_top::<Via>` → `freeze` |
+| `addressing.rs` `top_via_branch` over a header vec, `via_addr(&str)`, `strip_route_uri_to_request_uri` + `extract_host_port` + `via_sent_by` + `parse_via_params` | `req.top_via().branch()`, `via.sent_by()`, `NameAddr::parse(..).uri().authority()` |
+| `ua.rs` `via_header()` (the one hand-assembled Via string) | `ViaSpec::value()` — the typed hop the generators already build |
+| route-set reconstruction ×3 (`client_invite` ×2 UAC-reversed, `server_txn` ×1 UAS-order) | `record_route_set()` / `.reversed()` |
+| `extract_contact_uri` ×2 (dialog remote target) | `msg.header::<Contact>()` → `uri()` |
+| `legpick.rs` `first_line` / `ruri` / `header_value` / `uri_user` byte scanners | `sniff::{first_line,request_uri,req_method,header_value}` + `Uri`/`NameAddr` for the user-part |
+| `callee_group.rs` `to.contains(";tag=")` | `To::parse(..).tag()` |
+| `realcall/env.rs` `refer_to` `split_once('@')` URI splice | `Uri::with_user` + `ReferTo::from_uri` |
+| `realcall/auth.rs` challenge-header string lookup | `resp.raw(HeaderName::WwwAuthenticate / ProxyAuthenticate)` |
+| `name_matches("Allow"/"Supported", …)` ×3, `eq_ignore_ascii_case` on header names ×3 | `HeaderName::{Allow,Supported,RecordRoute}.matches` / `HeaderName::from(name).matches` |
+| RSeq / RAck / Expires / Content-Type string reads (×7 incl. the actor lane and the report renderer) | `header::<RSeq>()`, `RAck::new(..).to_wire()`, `header::<Expires>()`, `header::<MediaType>()` |
+| `resp.cseq.method.eq_ignore_ascii_case("INVITE")`, `leg.method() == "INVITE"` | `Method::Invite` comparisons |
+
+**The harness proxy hop stops rendering twice.** `Agent::try_send_wire` sends an
+already-rendered datagram, and `try_send` is now its `serialize` veneer — so the
+two messages this crate freezes itself (the §16 forwarded request/response and
+the §22.2 retried INVITE) go out as their own image. The recorder's input is the
+same bytes either way, so the trace and the RFC audit see no difference. Without
+it the port would have made the proxy hop *slower* than the header-vec surgery
+it replaces (thaw + freeze-render + serialize-render).
+
+**Behaviour deltas, all deliberate:**
+- **A comma-folded Record-Route line now teaches several routes, not one.** The
+  old path stored raw header *values*, so a §7.3.1 fold entered the dialog route
+  set as a single opaque string; `record_route_set()` splits it. This is the
+  long-call-loss class, on the harness side — the fold the harness itself emits
+  for `RecordRouteFold::Combined` UAs was previously mis-read by the harness's
+  own UAC. Route-set entries are now rendered name-addrs (`<sip:…;lr>`), so an
+  unbracketed captured entry gains brackets.
+- The proxy's own Record-Route opens the header block when the request carries
+  none (RFC 3261 §7.3: a proxy writes what it processes near the top), instead
+  of riding at wire position 0 above the Via. Its Via is still the topmost Via.
+- Loose-route self-detection reads the first Route ENTRY's URI authority rather
+  than scanning the first Route LINE, so a fold whose second entry names the
+  proxy no longer makes the first one look like ours.
+- A Route or Record-Route the strict reader rejects yields no pop and no route
+  (the same tolerant read M5/M6 took), where the old text path routed on it.
+- `suppress_default_ct` is now compact-aware. M3 made the generator's own
+  Content-Type probe compact-aware, so the "frozen `c:` plus a stamped
+  `Content-Type`" case it guarded can no longer arise; the flag's live case is
+  the one it names — a captured message with a body and no media type at all.
+- `refer_to` keeps the policy-resolved host of a USERLESS target URI instead of
+  falling back to the resolved socket address; the fallback now fires only for a
+  URI no reader accepts.
+
+**Suspicions raised, not fixed:**
+- **`thaw`/`freeze` canonicalizes header-name spelling, which the template lane
+  exists to preserve.** Three of the new freeze sites sit on template-capable
+  paths (`suppress_default_ct` on the INVITE / in-dialog / response builders).
+  It is invisible today because the flag only fires when the capture states no
+  media type, and no fixture combines that with a compact spelling elsewhere —
+  but a capture with a body, no Content-Type and a `k:`/`p-AsSeRtEd-IdEnTiTy`
+  line would come out canonicalized. The same applies to any template-emitted
+  message forwarded through the harness `Proxy`. The clean fix is a
+  spelling-preserving seed (`thaw` keeping `HeaderName::Other(verbatim)` when
+  the wire spelling is not canonical), which is M12 territory because it changes
+  what every ported crate's relay emits.
+- **`rr_fold::fold_record_routes` is the one header-vec surgery left**, and it
+  stays because no draft primitive can place a comma-folded RAW line at a chosen
+  position: `set`/`update_top`/`list` all take typed values and render one line
+  per value, and `push_raw` only appends. Folding it through the draft would
+  move the header to the end of the block AND canonicalize the response (see
+  above). Its identity test is typed now (`HeaderName::RecordRoute.matches`).
+  A `Draft::fold::<H>()` (or a `HeaderList` fold flag, which M2 already logged
+  as "not worth it until a consumer wants it") is the primitive that would
+  retire it — this is the consumer that wants it.
+- `apply_name_forms` / `apply_remote_target_emits` still rewrite a cloned header
+  vec after generation (the template lane's compact-name and Contact re-spelling
+  passes). They live in sip-message and are not on the M12 deletion list, but
+  they are the reason the wire copy and the retained canonical message diverge —
+  the same divergence a spelling-preserving `thaw` would make unnecessary.
+- `GenerateResponseOpts::extra_headers` and friends are still `Vec<SipHeader>`.
+  The plan's "template `frozen_headers` → `push_raw` entries" is already true
+  *inside* the generators (M3 lowers every extra header to a `push_raw` entry
+  under its verbatim name); flipping the opts field to `Vec<Entry>` would break
+  b2bua / e2e-core construction sites in this step, so it belongs to M12's
+  `Generate*Opts` flattening, where every consumer moves at once.
+- `StackDialog` is still stringly (route set, remote target, URIs), so the
+  harness renders typed values back to text at every dialog boundary —
+  `record_route_set()` → `to_wire()` → `NameAddr::parse` again in `next_hop`.
+  That is the same `call`-crate-adjacent debt M6 logged for `PendingRequest`;
+  typing the dialog is the next real win on this path.
+
+Workspace: 2123 tests passed, 0 failed. Clippy on `scenario-harness`: 18
+warnings, down from 23, all pre-existing categories (doc indentation, type
+complexity, variant size).

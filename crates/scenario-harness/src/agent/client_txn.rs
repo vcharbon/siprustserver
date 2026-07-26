@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use sip_message::generators::{
     generate_ack_for_non_2xx, generate_cancel, InviteClientTransactionHandle,
 };
-use sip_message::{SipMessage, SipRequest, SipResponse};
+use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 
 use super::server_txn::ServerTxn;
 use super::step::{unwrap_step, StepError};
@@ -37,7 +37,7 @@ impl AckCtx<'_> {
     /// act the scenario performs, §13.2.2.4) — is left alone.
     pub(super) async fn ack_non_2xx(&self, resp: &SipResponse) -> Result<(), StepError> {
         if resp.status < 300
-            || !resp.cseq.method.as_str().eq_ignore_ascii_case("INVITE")
+            || resp.cseq().method() != &Method::Invite
             || resp.cseq.seq != self.invite.cseq.seq
         {
             return Ok(());

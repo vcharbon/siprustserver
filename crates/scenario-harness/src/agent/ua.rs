@@ -13,7 +13,7 @@ use sip_message::generators::{
     GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts, InDialogMethod,
     OutOfDialogMethod, SipTransport, StackDialog, ViaSpec,
 };
-use sip_message::message_helpers::get_header;
+use sip_message::header;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{serialize, SipHeader, SipMessage, SipParser, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
@@ -101,16 +101,6 @@ impl Agent {
             custom_params: vec![],
         }
     }
-    /// A fresh top `Via` header value (new branch) — a new client transaction
-    /// (RFC 3261 §8.1.1.7) for a resend (e.g. the §22.2 authenticated INVITE).
-    pub(super) fn via_header(&self) -> String {
-        format!(
-            "SIP/2.0/UDP {}:{};branch={}",
-            self.addr.ip(),
-            self.addr.port(),
-            self.branch()
-        )
-    }
     pub(super) fn contact(&self) -> ContactSpec {
         ContactSpec {
             user: self.name.clone(),
@@ -141,8 +131,20 @@ impl Agent {
         msg: &SipMessage,
         dst: SocketAddr,
     ) -> Result<(), StepError> {
+        self.try_send_wire(&serialize(msg), dst).await
+    }
+
+    /// Send an ALREADY-rendered datagram. A message this UA froze carries its
+    /// own image, and that image is its wire form — sending it needs no second
+    /// render. The wire bytes are the recorder's input either way, so the trace
+    /// is identical to the [`try_send`](Agent::try_send) path.
+    pub(crate) async fn try_send_wire(
+        &self,
+        wire: &[u8],
+        dst: SocketAddr,
+    ) -> Result<(), StepError> {
         self.ep
-            .send_to(&serialize(msg), dst)
+            .send_to(wire, dst)
             .await
             .map_err(|e| StepError::Transport { who: self.name.clone(), detail: e.to_string() })
     }
@@ -184,7 +186,7 @@ impl Agent {
     /// a body.
     pub(crate) fn ack_obligation_claims(&self, r: &SipRequest) -> bool {
         r.method.as_str() == "ACK"
-            && top_via_branch(&r.headers).is_some_and(|b| self.acks.note_ack(&r.call_id, &b))
+            && top_via_branch(r).is_some_and(|b| self.acks.note_ack(&r.call_id, &b))
     }
 
     /// THE request-receive core: receive the next request and check its method,
@@ -402,8 +404,9 @@ impl Agent {
         let resp = expect_response(self, 200, None).await;
         // Echo back the Expires the registrar actually granted (RFC 3261 §10.3
         // step 8): the registrar may clamp our request; the UA refreshes on it.
-        get_header(&resp.headers, "expires")
-            .and_then(|v| v.trim().parse::<u32>().ok())
+        resp.header::<header::Expires>()
+            .and_then(Result::ok)
+            .map(|expires| expires.value())
             .unwrap_or(ttl_sec)
     }
 }

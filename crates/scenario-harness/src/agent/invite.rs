@@ -9,6 +9,7 @@ use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
     StackDialog,
 };
+use sip_message::header::HeaderName;
 use sip_message::{
     apply_name_forms, apply_remote_target_emits, DelayedAutomatic, EmitOpts, MessageTemplate,
     SipHeader, SipMessage,
@@ -107,12 +108,11 @@ impl<'a> Invite<'a> {
             tmpl.start()
         );
         let frozen = tmpl.frozen_headers();
-        // Intentionally LITERAL (not compact-aware): a frozen compact `c:` does
-        // not match "content-type" here, so suppress=true and the generator's
-        // added full Content-Type default is stripped below while the frozen `c:`
-        // survives (a compact-aware probe would wrongly leave both).
+        // A replay emits the header block it captured: a template that states a
+        // media type in ANY spelling keeps that line and the stack adds none, and
+        // one that states none must not gain the stack's default.
         self.suppress_default_ct =
-            !frozen.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
+            !frozen.iter().any(|h| HeaderName::ContentType.matches(&h.name));
         // Append AFTER any prior `with_header` entries — never drop them.
         self.extra_headers.extend(frozen);
         self.template_body = Some(tmpl.body().to_vec());
@@ -204,12 +204,15 @@ impl<'a> Invite<'a> {
         };
         let mut invite = generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
         if self.suppress_default_ct {
-            invite.headers =
-                sip_message::message_helpers::remove_header(&invite.headers, "content-type");
+            invite = invite
+                .thaw()
+                .remove(&HeaderName::ContentType)
+                .freeze()
+                .expect("dropping the stack's media type leaves a complete INVITE");
         }
         // Send a WIRE copy with the captured compact names on the tier-1 lines;
-        // `invite` keeps canonical names so the §17.1.1.3 ACK / §9.1 CANCEL
-        // header lookups (get_header, not compact-aware) still resolve.
+        // `invite` keeps the canonical spelling the §17.1.1.3 ACK / §9.1 CANCEL
+        // are built from.
         let mut wire = invite.clone();
         wire.headers = apply_name_forms(&invite.headers, &self.name_forms);
         wire.headers = apply_remote_target_emits(&wire.headers, &self.remote_emits);

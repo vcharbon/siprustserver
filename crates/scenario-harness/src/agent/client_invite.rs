@@ -10,11 +10,9 @@ use sip_message::generators::{
     generate_ack_for_2xx, GenerateAckFor2xxOpts, InDialogMethod,
     InviteClientTransactionHandle, StackDialog,
 };
-use sip_message::message_helpers::{extract_contact_uri, get_header, get_headers, set_header};
-use sip_message::parser::custom::CustomParser;
-use sip_message::{
-    Automatic, DelayedAutomatic, SipHeader, SipMessage, SipParser, SipRequest, SipResponse,
-};
+use sip_message::header::{self, CSeq, HeaderName, HeaderValue};
+use sip_message::sip_str::SipStr;
+use sip_message::{Automatic, DelayedAutomatic, SipMessage, SipRequest, SipResponse};
 
 use super::addressing::next_hop;
 use super::client_txn::{try_expect_response, try_send_cancel, AckCtx};
@@ -25,15 +23,26 @@ use crate::realcall::auth::{parse_challenge, ChallengeResponder};
 
 /// The first Contact URI on a response — the dialog remote target it teaches.
 fn first_contact_uri(resp: &SipResponse) -> Option<String> {
-    get_header(&resp.headers, "contact").map(extract_contact_uri)
+    let contact = resp.header::<header::Contact>()?.ok()?;
+    Some(contact.uri().to_string())
 }
 
-/// The `RAck` value acknowledging a reliable provisional (RFC 3262 §7.2):
+/// The dialog route set a UAC learns from a response: its Record-Route rows
+/// reversed (RFC 3261 §12.1.2). Empty when the response records none — or
+/// carries an entry the strict reader rejects, which teaches no route.
+fn uac_route_set(resp: &SipResponse) -> Vec<String> {
+    resp.record_route_set()
+        .map(|set| set.reversed().iter().map(HeaderValue::to_wire).collect())
+        .unwrap_or_default()
+}
+
+/// The `RAck` acknowledging a reliable provisional (RFC 3262 §7.2):
 /// `<RSeq> <CSeq-num> <CSeq-method>`, all read off the 1xx itself. `None` when
 /// the response carries no parseable `RSeq` (it is not a reliable provisional).
 fn rack_for(reliable_1xx: &SipResponse) -> Option<String> {
-    let rseq: u64 = get_header(&reliable_1xx.headers, "rseq")?.trim().parse().ok()?;
-    Some(format!("{rseq} {} {}", reliable_1xx.cseq.seq, reliable_1xx.cseq.method))
+    let rseq = reliable_1xx.header::<header::RSeq>()?.ok()?;
+    let cseq = reliable_1xx.cseq();
+    Some(header::RAck::new(rseq.value(), cseq.seq(), cseq.method().clone()).to_wire())
 }
 
 /// What a response fed to [`ClientInvite::absorb_response`] means for the
@@ -258,9 +267,9 @@ impl ClientInvite {
         // Build the dialog route set from the response's Record-Route, REVERSED
         // (UAC, RFC 3261 §12.1.2), once — so a later 200 doesn't re-seed it.
         if self.dialog.route_set.is_empty() {
-            let rr = get_headers(&resp.headers, "record-route");
-            if !rr.is_empty() {
-                self.dialog.route_set = rr.iter().rev().map(|s| s.to_string()).collect();
+            let route_set = uac_route_set(resp);
+            if !route_set.is_empty() {
+                self.dialog.route_set = route_set;
             }
         }
     }
@@ -303,9 +312,9 @@ impl ClientInvite {
         if let Some(target) = first_contact_uri(resp) {
             dialog.remote_target = target;
         }
-        let rr = get_headers(&resp.headers, "record-route");
-        if !rr.is_empty() {
-            dialog.route_set = rr.iter().rev().map(|s| s.to_string()).collect();
+        let route_set = uac_route_set(resp);
+        if !route_set.is_empty() {
+            dialog.route_set = route_set;
         }
         if let Some(&fork) = self.fork_cseq.get(&dialog.remote_tag) {
             dialog.local_cseq = dialog.local_cseq.max(fork);
@@ -353,35 +362,29 @@ impl ClientInvite {
         };
 
         // 3. Rebuild THIS INVITE as a new transaction: bump CSeq, fresh Via
-        //    branch, add the credential header (RFC 3261 §22.2). Serialization is
-        //    driven by the header list + first line + body, so rewriting the
-        //    header vector (and re-parsing to keep the structured fields in step
-        //    for the later ACK/CANCEL) is a faithful resend.
+        //    branch, add the credential header (RFC 3261 §22.2). The challenged
+        //    INVITE is thawed, so every header it does not touch rides through
+        //    byte-verbatim and the retried message's typed fields (which the
+        //    later ACK / CANCEL read) come from the edit itself.
         let new_cseq = self.original_invite.cseq.seq + 1;
-        let mut headers = self.original_invite.headers.clone();
-        headers = set_header(&headers, "Via", &self.agent.via_header());
-        headers = set_header(&headers, "CSeq", &format!("{new_cseq} {method}"));
-        // Drop any prior credential of the same header (a second challenge round
-        // would replace it) then add this one.
-        headers.retain(|h| !h.name.eq_ignore_ascii_case(parsed.credential_header()));
-        headers.push(SipHeader {
-            name: parsed.credential_header().to_string().into(),
-            value: credential.into(),
-        });
-
-        let bytes = sip_message::serialize_request_parts(&self.original_invite, &headers);
-        let resent = CustomParser::new().parse(&bytes).map_err(|e| StepError::Unparseable {
-            who: self.agent.name.clone(),
-            detail: format!("rebuilt authed INVITE did not parse: {e}"),
-        })?;
-        let SipMessage::Request(resent) = resent else {
-            return Err(StepError::UnexpectedKind {
+        let credential_name = HeaderName::from(parsed.credential_header());
+        let resent = self
+            .original_invite
+            .thaw()
+            .set(self.agent.via().value())
+            .set(CSeq::new(new_cseq, self.original_invite.method.clone()))
+            // Drop any prior credential of the same header (a second challenge
+            // round would replace it) then add this one.
+            .remove(&credential_name)
+            .push_raw(credential_name, SipStr::owned(&credential))
+            .freeze()
+            .map_err(|e| StepError::Unparseable {
                 who: self.agent.name.clone(),
-                detail: "rebuilt authed INVITE parsed as a response".to_string(),
-            });
-        };
+                detail: format!("rebuilt authed INVITE did not freeze: {e}"),
+            })?;
 
-        self.agent.try_send(&SipMessage::Request(resent.clone()), self.wire_dst).await?;
+        // The retried INVITE was frozen here, so its image is the wire form.
+        self.agent.try_send_wire(&resent.raw, self.wire_dst).await?;
         // Re-point the transaction state at the retried INVITE: the CANCEL / ACK /
         // dialog CSeq must all follow the new transaction, not the challenged one.
         self.original_invite = resent;

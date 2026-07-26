@@ -10,6 +10,7 @@ use sip_message::generators::{
     generate_ack_for_2xx, generate_in_dialog_request, GenerateAckFor2xxOpts,
     GenerateInDialogRequestOpts, InDialogMethod, StackDialog,
 };
+use sip_message::header::HeaderName;
 use sip_message::{
     apply_name_forms, apply_remote_target_emits, CseqDeviation, CseqPattern, EmitOpts,
     MessageTemplate, SipHeader, SipMessage, SipRequest, SipResponse,
@@ -443,12 +444,11 @@ impl<'a> InDialogRequest<'a> {
         // headers; `preserve_order` requests nothing further yet (see EmitOpts).
         let EmitOpts { preserve_order: _ } = opts;
         let frozen = tmpl.frozen_headers();
-        // Intentionally LITERAL (not compact-aware): a frozen compact `c:` does
-        // not match "content-type" here, so suppress=true and the generator's
-        // added full Content-Type default is stripped below while the frozen `c:`
-        // survives (a compact-aware probe would wrongly leave both).
+        // A replay emits the header block it captured: a template that states a
+        // media type in ANY spelling keeps that line and the stack adds none, and
+        // one that states none must not gain the stack's default.
         self.suppress_default_ct =
-            !frozen.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
+            !frozen.iter().any(|h| HeaderName::ContentType.matches(&h.name));
         // Append AFTER any prior `with_header` entries — never drop them.
         self.extra_headers.extend(frozen);
         self.body = tmpl.body().to_vec();
@@ -534,10 +534,12 @@ impl<'a> InDialogRequest<'a> {
         }
         let mut res = generate_in_dialog_request(self.method, &view, &opts);
         if self.suppress_default_ct {
-            res.request.headers = sip_message::message_helpers::remove_header(
-                &res.request.headers,
-                "content-type",
-            );
+            res.request = res
+                .request
+                .thaw()
+                .remove(&HeaderName::ContentType)
+                .freeze()
+                .expect("dropping the stack's media type leaves a complete request");
         }
         // Advance the SHARED dialog counter only for a non-forked request (a
         // forked request advanced its own per-fork entry above and must leave the
@@ -547,8 +549,8 @@ impl<'a> InDialogRequest<'a> {
         }
         let dst = next_hop(self.dialog, self.fallback);
         // Send a WIRE copy carrying the captured compact names (Via/From/…);
-        // the canonical `request` is retained/returned so the §17.1.1.3 ACK's
-        // header lookups (get_header, not compact-aware) still resolve.
+        // the canonical `request` is retained/returned as the message the
+        // §17.1.1.3 ACK is built from.
         let request = res.request;
         let mut wire = request.clone();
         wire.headers = apply_name_forms(&request.headers, &self.name_forms);

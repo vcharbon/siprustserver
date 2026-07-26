@@ -6,7 +6,7 @@
 
 use scenario_harness::{EmitOpts, Harness, MessageTemplate, TemplateHeader};
 use sip_message::generators::InDialogMethod;
-use sip_message::message_helpers::get_header;
+use sip_message::header::HeaderName;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49180 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
@@ -272,8 +272,16 @@ async fn template_provisional_targets_early_dialog() {
     let t2 = p2.to.tag.clone().expect("e2");
     assert_ne!(t1, t2, "distinct early dialogs");
     // e2's template provisional: frozen headers byte-preserved, own To-tag.
-    assert_eq!(get_header(&p2.headers, "subject"), Some("fork-e2"), "frozen Subject preserved");
-    assert_eq!(get_header(&p2.headers, "x-trace"), Some("kept"), "frozen X-Trace preserved");
+    assert_eq!(
+        p2.raw(HeaderName::Subject).next(),
+        Some("fork-e2"),
+        "frozen Subject preserved"
+    );
+    assert_eq!(
+        p2.raw(HeaderName::from("X-Trace")).next(),
+        Some("kept"),
+        "frozen X-Trace preserved"
+    );
 
     uas.win("e2");
     uas.respond(200, "OK").with_sdp(ANSWER).send().await;

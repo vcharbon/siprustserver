@@ -53,9 +53,9 @@ fn has_sdp(msg: &SipMessage) -> bool {
     if body.is_empty() {
         return false;
     }
-    msg.get_header("content-type")
-        .iter()
-        .any(|v| v.contains("application/sdp"))
+    msg.header::<sip_message::header::MediaType>()
+        .and_then(Result::ok)
+        .is_some_and(|media| media.is("application/sdp"))
         || body.starts_with(b"v=0")
 }
 

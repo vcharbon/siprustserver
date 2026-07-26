@@ -61,12 +61,12 @@ async fn actor_caller_retries_through_a_401_challenge() {
     // authenticated resend (180/200), read its ACK, and answer the BYE.
     let bob_srv = bob.clone();
     let server = tokio::spawn(async move {
-        use sip_message::message_helpers::get_header;
+        use sip_message::header::HeaderName;
         let bob = bob_srv;
         let mut c = bob.try_receive("INVITE").await.unwrap();
         assert_eq!(c.request().cseq.seq, 1, "the first INVITE is CSeq 1");
         assert!(
-            get_header(&c.request().headers, "authorization").is_none(),
+            c.request().raw(HeaderName::Authorization).next().is_none(),
             "the first INVITE carries no credential",
         );
         c.respond(401, "Unauthorized")
@@ -81,7 +81,10 @@ async fn actor_caller_retries_through_a_401_challenge() {
         let mut admit = bob.try_receive("INVITE").await.unwrap();
         assert_eq!(admit.request().cseq.seq, 2, "the retried INVITE bumps the CSeq (§22.2)");
         assert!(
-            get_header(&admit.request().headers, "authorization")
+            admit
+                .request()
+                .raw(HeaderName::Authorization)
+                .next()
                 .is_some_and(|v| v.starts_with("Digest ")),
             "the retried INVITE carries the responder's Authorization",
         );

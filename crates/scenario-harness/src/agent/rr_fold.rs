@@ -5,6 +5,7 @@
 use std::collections::hash_map::RandomState;
 use std::sync::OnceLock;
 
+use sip_message::header::HeaderName;
 use sip_message::SipHeader;
 
 /// How a simulated UA, acting as UAS, echoes multiple Record-Route header rows
@@ -64,7 +65,7 @@ pub(super) fn fold_record_routes(headers: &mut Vec<SipHeader>) {
     let idxs: Vec<usize> = headers
         .iter()
         .enumerate()
-        .filter(|(_, h)| h.name.eq_ignore_ascii_case("record-route"))
+        .filter(|(_, h)| HeaderName::RecordRoute.matches(&h.name))
         .map(|(i, _)| i)
         .collect();
     if idxs.len() < 2 {

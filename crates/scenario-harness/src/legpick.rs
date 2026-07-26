@@ -22,6 +22,10 @@
 
 use std::sync::Arc;
 
+use sip_message::header::{NameAddr, Uri};
+use sip_message::sip_str::SipStr;
+use sip_message::sniff;
+
 /// A read-only view of an inbound datagram handed to a [`LegPicker`]. It exists
 /// purely so a scenario can disambiguate which of its receivers should own a new
 /// leg, keying on whatever it likes (R-URI, To, `X-Api-Call`, a custom header) —
@@ -43,30 +47,30 @@ impl<'a> LegInfo<'a> {
     }
     /// Value of header `name` (case-insensitive), or `None`.
     pub fn header(&self, name: &str) -> Option<String> {
-        header_value(self.raw, name)
+        sniff::header_value(self.raw, name)
     }
     /// The Request-URI (the full 2nd token of the request line).
     pub fn ruri(&self) -> Option<String> {
-        ruri(self.raw)
+        sniff::request_uri(self.raw)
     }
     /// The request method (first token of the start line), or `None` for a
     /// response — lets a dispatcher tell an out-of-dialog INVITE (which the
     /// picker routes) from an in-dialog request or a response (which follow the
     /// dialog's owner).
     pub fn method(&self) -> Option<String> {
-        let line = first_line(self.raw);
-        if line.starts_with("SIP/2.0") {
-            return None; // response
-        }
-        line.split_whitespace().next().map(str::to_string)
+        sniff::req_method(self.raw)
     }
     /// The Request-URI user-part (e.g. `dave` from `sip:dave@host`).
     pub fn ruri_user(&self) -> Option<String> {
-        self.ruri().as_deref().and_then(uri_user)
+        let ruri = self.ruri()?;
+        let uri = Uri::parse(&SipStr::owned(&ruri)).ok()?;
+        uri.user().filter(|user| !user.is_empty()).map(str::to_string)
     }
     /// The To header user-part.
     pub fn to_user(&self) -> Option<String> {
-        self.header("to").or_else(|| self.header("t")).as_deref().and_then(uri_user)
+        let to = self.header("to").or_else(|| self.header("t"))?;
+        let addr = NameAddr::parse(&SipStr::owned(&to)).ok()?;
+        addr.uri().user().filter(|user| !user.is_empty()).map(str::to_string)
     }
 }
 
@@ -154,64 +158,6 @@ pub fn labelled_prefix_leg_picker_defaulting(
         }
         best.map(|(_, label)| label.clone()).unwrap_or_default()
     })
-}
-
-// ---------------------------------------------------------------------------
-// Byte-level header/URI scanners (header block is ASCII/UTF-8; the body — which
-// may be binary — is never inspected by these).
-// ---------------------------------------------------------------------------
-
-fn as_str(raw: &[u8]) -> std::borrow::Cow<'_, str> {
-    String::from_utf8_lossy(raw)
-}
-
-fn first_line(raw: &[u8]) -> String {
-    as_str(raw).lines().next().unwrap_or("").trim().to_string()
-}
-
-/// The Request-URI (2nd token of the request line), or `None` for a response.
-fn ruri(raw: &[u8]) -> Option<String> {
-    let line = first_line(raw);
-    if line.starts_with("SIP/2.0") {
-        return None; // response
-    }
-    line.split_whitespace().nth(1).map(str::to_string)
-}
-
-/// The user-part of a SIP URI (handles `<sip:user@host>`, `sip:user@host`,
-/// name-addr with a display name). A userless URI (`sip:host`) yields `None`.
-fn uri_user(value: &str) -> Option<String> {
-    let v = value.trim();
-    let inner = match (v.find('<'), v.find('>')) {
-        (Some(a), Some(b)) if b > a + 1 => &v[a + 1..b],
-        _ => v,
-    };
-    let no_scheme = inner
-        .strip_prefix("sips:")
-        .or_else(|| inner.strip_prefix("sip:"))
-        .unwrap_or(inner);
-    let (user, _host) = no_scheme.split_once('@')?;
-    if user.is_empty() || user.contains(' ') {
-        None
-    } else {
-        Some(user.to_string())
-    }
-}
-
-/// Value of header `name` (case-insensitive), scanning the header block only.
-fn header_value(raw: &[u8], name: &str) -> Option<String> {
-    let s = as_str(raw);
-    for line in s.lines() {
-        if line.is_empty() {
-            break; // end of headers
-        }
-        if let Some((h, v)) = line.split_once(':') {
-            if h.trim().eq_ignore_ascii_case(name) {
-                return Some(v.trim().to_string());
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]

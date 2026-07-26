@@ -344,7 +344,12 @@ impl<'h> CalleeGroupBuilder<'h> {
 /// Whether `leg` is a dialog-creating (out-of-dialog) INVITE — method INVITE
 /// with a tag-less To (RFC 3261 §12.1: an initial INVITE's To carries no tag).
 fn is_out_of_dialog_invite(leg: &LegInfo) -> bool {
-    let is_invite = leg.method().is_some_and(|m| m.eq_ignore_ascii_case("INVITE"));
+    let is_invite =
+        leg.method().is_some_and(|m| sip_message::Method::from_wire(&m) == sip_message::Method::Invite);
     let to = leg.header("to").or_else(|| leg.header("t")).unwrap_or_default();
-    is_invite && !to.to_ascii_lowercase().contains(";tag=")
+    let tagged = <sip_message::header::To as sip_message::header::HeaderValue>::parse(
+        &sip_message::sip_str::SipStr::owned(&to),
+    )
+    .is_ok_and(|to| to.tag().is_some());
+    is_invite && !tagged
 }

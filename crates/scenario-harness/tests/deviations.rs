@@ -375,7 +375,7 @@ async fn templated_in_dialog_request_honors_the_pattern() {
     let mut r = bob.receive("INFO").await;
     assert_eq!(r.request().cseq.seq, 50, "the templated INFO honours the jump");
     assert_eq!(
-        sip_message::message_helpers::get_header(&r.request().headers, "content-type"),
+        r.request().raw(sip_message::header::HeaderName::ContentType).next(),
         Some("application/xml"),
         "the template's frozen header still rides",
     );

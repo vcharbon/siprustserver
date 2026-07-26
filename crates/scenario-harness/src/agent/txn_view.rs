@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use sip_message::SipMessage;
 
-use super::addressing::top_via_branch;
+use super::addressing::{response_via_branch, top_via_branch};
 
 /// RFC 3261 §17.2 **once-and-only-once receive view** — the transaction-layer
 /// dedup below the test-facing receive API. Without it a body would re-absorb
@@ -97,7 +97,7 @@ impl TxnView {
             SipMessage::Request(r) => {
                 // Unkeyable (no top-Via branch / pre-RFC3261 cookie): surface —
                 // graceful degradation to the raw behaviour.
-                let Some(branch) = top_via_branch(&r.headers) else {
+                let Some(branch) = top_via_branch(r) else {
                     return TxnVerdict::Surface;
                 };
                 if !branch.starts_with("z9hG4bK") {
@@ -117,7 +117,7 @@ impl TxnView {
                 }
             }
             SipMessage::Response(r) if r.status >= 200 => {
-                let Some(branch) = top_via_branch(&r.headers) else {
+                let Some(branch) = response_via_branch(r) else {
                     return TxnVerdict::Surface;
                 };
                 let key =
