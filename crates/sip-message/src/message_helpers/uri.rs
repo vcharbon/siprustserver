@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::header::Uri;
 use crate::parser::custom::structured_headers::parse_sip_uri_string;
 use crate::sip_str::SipStr;
 
@@ -17,16 +18,20 @@ pub struct ParsedSipUri {
     pub params: BTreeMap<String, String>,
 }
 
-/// Parse a SIP URI (angle brackets stripped if present).
-pub fn parse_sip_uri(uri: &str) -> Option<ParsedSipUri> {
-    let mut cleaned = uri;
-    if let Some(lt) = uri.find('<') {
-        cleaned = match uri[lt + 1..].find('>') {
+/// The addr-spec inside surrounding angle brackets, or the value itself.
+fn addr_spec(uri: &str) -> &str {
+    match uri.find('<') {
+        Some(lt) => match uri[lt + 1..].find('>') {
             Some(rel) => &uri[lt + 1..lt + 1 + rel],
             None => &uri[lt + 1..],
-        };
+        },
+        None => uri,
     }
-    let parsed = parse_sip_uri_string(&SipStr::owned(cleaned))?;
+}
+
+/// Parse a SIP URI (angle brackets stripped if present).
+pub fn parse_sip_uri(uri: &str) -> Option<ParsedSipUri> {
+    let parsed = parse_sip_uri_string(&SipStr::owned(addr_spec(uri)))?;
     Some(ParsedSipUri {
         scheme: parsed.scheme.into(),
         user: parsed.user.map(String::from),
@@ -61,24 +66,7 @@ pub fn parse_uri_params(uri: &str) -> BTreeMap<String, String> {
 /// URI params never participate. `None` for a userless sip URI or an
 /// unparsable value.
 pub fn uri_user_identity(uri: &str) -> Option<String> {
-    let p = parse_sip_uri(uri)?;
-    let raw = match p.scheme.as_str() {
-        // tel: has no userinfo — the subscriber number sits in the host slot
-        // (tel params were already split off into `params`).
-        "tel" => p.host,
-        _ => p.user?,
-    };
-    // Userinfo params (`;verstat=…`, `;phone-context=…`) are not identity.
-    let user = raw.split(';').next().unwrap_or("");
-    if user.is_empty() {
-        return None;
-    }
-    let stripped: String = user.chars().filter(|c| !matches!(c, '-' | '.' | '(' | ')')).collect();
-    let phone_shaped = {
-        let digits = stripped.strip_prefix('+').unwrap_or(&stripped);
-        !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
-    };
-    Some(if phone_shaped { stripped } else { user.to_string() })
+    Uri::parse(&SipStr::owned(addr_spec(uri))).ok()?.user_identity()
 }
 
 /// Whether two URIs (any mix of `sip:`/`sips:`/`tel:` forms) name the same

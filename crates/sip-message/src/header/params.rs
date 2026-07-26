@@ -85,6 +85,20 @@ impl Params {
         self.0.is_empty()
     }
 
+    /// Read a header VALUE that is itself a parameter list — the first item
+    /// carries no leading `;` (the P-Charging-Vector family,
+    /// `icid-value=…;icid-generated-at=…`), the rest are `;`-separated. A
+    /// leading segment that is not a `name=value` pair reads as a flag named
+    /// after it, so a value with a leading token (`Q.850;cause=16`) still
+    /// answers for its parameters.
+    pub fn parse_list(raw: &SipStr) -> Self {
+        let value = raw.trimmed();
+        let mut params = Self::new();
+        let after_first = read_one(&value, skip_ws(value.as_bytes(), 0), &HEADER_PARAMS, &mut params);
+        collect_semicolon_params(&value, after_first, &HEADER_PARAMS, &mut params);
+        params
+    }
+
     /// The first parameter named `name`, case-insensitively.
     pub fn get(&self, name: &str) -> Option<&ParamValue> {
         self.0.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v)
@@ -183,17 +197,29 @@ pub(crate) const URI_PARAMS: ParamStyle =
 /// position after the last one.
 pub(crate) fn parse_semicolon_params(
     base: &SipStr,
-    mut i: usize,
+    i: usize,
     style: &ParamStyle,
 ) -> (Params, usize) {
-    let bytes = base.as_bytes();
     let mut params = Params::new();
+    let end = collect_semicolon_params(base, i, style, &mut params);
+    (params, end)
+}
+
+/// Append every `;`-separated parameter from byte `i` onto `params`; yields the
+/// position after the last one.
+fn collect_semicolon_params(
+    base: &SipStr,
+    mut i: usize,
+    style: &ParamStyle,
+    params: &mut Params,
+) -> usize {
+    let bytes = base.as_bytes();
     loop {
         let at = skip_ws(bytes, i);
         if at >= bytes.len() || bytes[at] != b';' {
-            return (params, i);
+            return i;
         }
-        i = read_one(base, skip_ws(bytes, at + 1), style, &mut params);
+        i = read_one(base, skip_ws(bytes, at + 1), style, params);
     }
 }
 
@@ -286,6 +312,28 @@ mod tests {
         let mut w = Wire::new();
         p.render(&mut w);
         assert_eq!(w.as_str(), ";branch=z2;rport;received=1.2.3.4");
+    }
+
+    // The P-Charging-Vector shape: the value IS the parameter list, so the
+    // first item carries no leading `;`.
+    #[test]
+    fn a_whole_value_parameter_list_reads_its_leading_item() {
+        let p = Params::parse_list(&SipStr::owned(
+            r#"icid-value="a;b";icid-generated-at=10.0.0.1;orig-ioi=x"#,
+        ));
+        assert_eq!(p.value("ICID-Value"), Some("a;b"));
+        assert_eq!(p.value("orig-ioi"), Some("x"));
+        assert_eq!(p.get("term-ioi"), None);
+    }
+
+    // A leading token (the Reason shape) reads as a flag, so the parameters
+    // after it still answer.
+    #[test]
+    fn a_leading_token_does_not_hide_the_parameters_after_it() {
+        let p = Params::parse_list(&SipStr::owned("Q.850;cause=16;text=\"normal\""));
+        assert_eq!(p.get("Q.850"), Some(&ParamValue::Flag));
+        assert_eq!(p.value("cause"), Some("16"));
+        assert_eq!(p.value("text"), Some("normal"));
     }
 
     #[test]

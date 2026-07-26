@@ -5,6 +5,8 @@
 //! sent-by) is this type: a reader asks the value for its host and port instead
 //! of peeling a string.
 
+use std::borrow::Cow;
+
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
@@ -228,6 +230,57 @@ impl Uri {
         self.source.as_ref().map(SipStr::as_str)
     }
 
+    /// The wire text of this URI: borrowed while it still carries the bytes it
+    /// was read from, rendered from its parts otherwise. The read a consumer
+    /// wants when it displays or text-matches a URI it never edits.
+    pub fn text(&self) -> Cow<'_, str> {
+        match &self.source {
+            Some(source) => Cow::Borrowed(source.as_str()),
+            None => {
+                let mut out = Wire::new();
+                self.render(&mut out);
+                Cow::Owned(out.as_str().to_owned())
+            }
+        }
+    }
+
+    /// The canonical USER identity this URI names, for comparison across
+    /// entities: the userinfo of a sip URI with its `;`-params (`verstat`,
+    /// `phone-context`) dropped, or the subscriber part of a tel URI. A
+    /// phone-shaped identity — optional `+` then digits, RFC 3966 visual
+    /// separators `-`, `.`, `(`, `)` allowed — normalizes by dropping the
+    /// separators, so `tel:+1-408-555-1212` and `sip:+14085551212@host` name
+    /// the same subscriber. Scheme, host, port and parameters never
+    /// participate. `None` for a userless sip URI.
+    pub fn user_identity(&self) -> Option<String> {
+        // tel: has no userinfo — the subscriber number sits in the host slot.
+        let raw = if self.scheme.eq_ignore_ascii_case("tel") {
+            self.authority.host()
+        } else {
+            self.user()?
+        };
+        let user = raw.split(';').next().unwrap_or("");
+        if user.is_empty() {
+            return None;
+        }
+        let stripped: String =
+            user.chars().filter(|c| !matches!(c, '-' | '.' | '(' | ')')).collect();
+        let digits = stripped.strip_prefix('+').unwrap_or(&stripped);
+        let phone_shaped = !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
+        Some(if phone_shaped { stripped } else { user.to_string() })
+    }
+
+    /// Whether two URIs name the same user identity. The comparison is
+    /// BYTE-EXACT because the user part is case-sensitive (RFC 3261 §19.1.4);
+    /// phone-shaped identities are already normalized, so case plays no part
+    /// in them. `false` when either side names no user.
+    pub fn same_user_identity(&self, other: &Uri) -> bool {
+        match (self.user_identity(), other.user_identity()) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
+    }
+
     /// This URI rendered from its parsed parts instead of the text it was read
     /// from — canonical spelling, for a caller that wants one.
     pub fn normalized(mut self) -> Self {
@@ -425,6 +478,38 @@ mod tests {
     fn spelling_is_not_identity() {
         assert_eq!(uri("SIP:bob@biloxi.com"), uri("sip:bob@biloxi.com"));
         assert_eq!(uri("sip:bob@biloxi.com"), Uri::sip_user("bob", "biloxi.com"));
+    }
+
+    #[test]
+    fn text_borrows_the_source_and_renders_an_edited_uri() {
+        let text = "SIP:Bob@biloxi.com;Transport=TCP";
+        assert!(matches!(uri(text).text(), Cow::Borrowed(t) if t == text));
+        assert_eq!(uri(text).with_port(5070).text(), "sip:Bob@biloxi.com:5070;Transport=TCP");
+    }
+
+    // Same subscriber, every URI byte different: scheme, host, port, params and
+    // RFC 3966 visual separators all drop out of the identity.
+    #[test]
+    fn user_identity_is_scheme_host_and_separator_insensitive() {
+        assert!(uri("tel:+1-408-555-1212").same_user_identity(&uri("sip:+14085551212@gw.com")));
+        assert!(uri("TEL:+333").same_user_identity(&uri("tel:+333")));
+        assert_eq!(uri("tel:(408)555.1212").user_identity().as_deref(), Some("4085551212"));
+        assert_eq!(
+            uri("sip:+33000900012;verstat=TN-Validation-Passed@bar.example.com:5060;user=phone")
+                .user_identity()
+                .as_deref(),
+            Some("+33000900012"),
+        );
+    }
+
+    // A non-phone user is compared byte-exact (RFC 3261 §19.1.4), and a URI
+    // naming no user names no identity — so two userless URIs never match.
+    #[test]
+    fn user_identity_is_case_sensitive_and_absent_without_a_user() {
+        assert_eq!(uri("sip:a.smith@example.com").user_identity().as_deref(), Some("a.smith"));
+        assert!(!uri("sip:Alice@a.example").same_user_identity(&uri("sip:alice@b.example")));
+        assert_eq!(uri("sip:10.0.0.1:5060").user_identity(), None);
+        assert!(!uri("sip:host-only.example").same_user_identity(&uri("sip:host-only.example")));
     }
 
     #[test]

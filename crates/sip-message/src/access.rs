@@ -241,6 +241,10 @@ impl SipMessage {
         raw_values(self.headers(), name)
     }
 
+    pub fn raw_text(&self, name: HeaderName) -> impl Iterator<Item = SipStr> + '_ {
+        raw_text_values(self.headers(), name)
+    }
+
     pub fn has(&self, name: &HeaderName) -> bool {
         self.headers().iter().any(|h| name.matches(&h.name))
     }
