@@ -154,7 +154,7 @@ helpers listed above, run capped workspace test, tick tracker, commit.
 ## Tracker
 
 - [x] M1 HeaderName + one-pass dispatch
-- [ ] M2 value hierarchy + draft engine
+- [x] M2 value hierarchy + draft engine
 - [ ] M3 generators → recipes
 - [ ] M4 sip-txn
 - [ ] M5 sip-proxy
@@ -286,3 +286,66 @@ API-surface policy, not a lossy parse.
 any module that imports them unqualified.** The ADR names are kept; the module
 doc directs consumers to `header::From`. Port agents in M4–M11 that need
 `impl From<…>` in the same file must qualify.
+
+**Part 2 — `sip_message::draft` + the message read surface.**
+
+`Draft<S: StartKind>` with `Entry`, `HeaderList<H>`, `thaw`/`keep`/`freeze`/
+`render_unchecked`/`push_raw`, rendering into one pre-sized buffer with span
+recording. `StartKind` contributes only the start line, the mandatory header set
+and the frozen-message assembly, so request and response share one engine.
+`SipRequest`/`SipResponse`/`SipMessage` grow the ADR read surface
+(`from()`, `to()`, `call_id()`, `cseq()`, `via()`, `top_via()`, `header::<H>()`,
+`list::<H>()`, `raw(HeaderName)`, `has()`, `route_set()`,
+`record_route_set()`, `thaw()`) beside the untouched public fields.
+
+**Round-trip pin: 31 of 31 parsed torture fixtures survive `thaw → freeze`**
+(`tests/draft_round_trip.rs`, over rfc4475-valid/-invalid, strict-valid, ipv6,
+param-gaps and cve). Per fixture the pin asserts header order/duplicates/values,
+body, typed core, that the frozen bytes re-parse to the same header list (the
+built message carries a real image), and that a second freeze is byte-identical.
+
+**`Entry::Typed` is a boxed `dyn` value, not the closed `KnownHeader` enum** the
+ADR sketches. A closed enum would have to name every value type and grow with
+every new header; the trait object keeps `update::<H>`/`list::<H>` open to
+extension headers, renders straight into the freeze buffer (no per-value
+`String`), and costs one box per *edited* header — which is the ADR's stated
+"O(edited) value allocations" budget either way.
+
+**`freeze` re-runs the eager field extraction, but never re-lexes.** It renders
+once, files the recorded spans into a `Vec<SipHeader>` over the new image, and
+hands that to the existing one-pass `HeaderIndex` + `extract_*_fields`. Building
+the typed core straight from the entries in hand is M12 work: until
+`MessageCore` exists, the frozen message still has to populate the old eager
+fields, and deriving them twice would be the real duplication. No re-parse of
+text happens on the freeze path.
+
+**Deviations and deliberate choices, all logged rather than silently taken:**
+- `freeze` writes the CANONICAL spelling of every header name, so thawing a
+  message that used a compact form or odd casing normalizes it. That is
+  ADR-0025 §1 working as designed; the identity pin therefore compares
+  canonicalized names, not raw bytes.
+- `freeze` restates Content-Length from the body and adds one only when a body
+  is present — the same contract `serializer::finish` has always had, so a
+  bodiless message does not silently grow a header.
+- Request `freeze` requires Max-Forwards (RFC 3261 §8.1.1), so a blank draft
+  that forgets it fails loudly instead of emitting a non-compliant request.
+- `Draft::list::<H>` replaces every line of the header with one line per value
+  when the view is used, so a comma-folded line that is *edited* expands. The
+  ADR's "untouched lines keep their byte layout" still holds for lines nothing
+  touches; preserving the fold across an edit needs a per-item kept/edited flag
+  on `HeaderList` and is not worth it until a consumer wants it.
+- `list`/`update` are no-ops when a line does not read as `H`. Reading with an
+  error is `Draft::values::<H>()`, which returns the `Result`.
+
+**Suspicions raised, not fixed:**
+- The mandatory read accessors (`from()`, `to()`, `via()`, …) convert the OLD
+  typed fields into new values on every call, so each is a small allocation and
+  the parameter list comes back in the old `BTreeMap`'s sorted order with
+  lowercased names. Reads do not care, but nothing should round-trip a value
+  obtained this way back onto the wire before M12 stores the real core —
+  `msg.thaw()` (which seeds from raw spans) is the lossless path.
+- `SipRequest::raw` is now both a field (`Bytes`) and a method
+  (`raw(HeaderName)`). Legal, and the migration plan anticipated field/accessor
+  coexistence, but it is a readability trap until M12 privatizes the field.
+- `alloc_budget.rs` still has no build-path or freeze-path case, so this
+  phase's "one buffer per freeze" claim is unmeasured. M13 owns it.

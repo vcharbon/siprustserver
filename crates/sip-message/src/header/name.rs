@@ -131,6 +131,16 @@ impl HeaderName {
     pub fn of(name: &SipStr) -> HeaderName {
         Self::known(name.as_str()).unwrap_or_else(|| HeaderName::Other(name.clone()))
     }
+
+    /// Whether `wire` — a header name exactly as it appeared — is this name.
+    /// Allocation-free, and casing- and compact-form-insensitive, so it is the
+    /// probe a header-list scan runs per line.
+    pub fn matches(&self, wire: &str) -> bool {
+        match Self::known(wire) {
+            Some(known) => known == *self,
+            None => matches!(self, HeaderName::Other(name) if name.eq_ignore_ascii_case(wire)),
+        }
+    }
 }
 
 impl std::fmt::Display for HeaderName {
