@@ -8,7 +8,7 @@ use call::{Call, CdrEvent, LegKind, TimerType};
 use sip_message::generators::{
     self, GenerateInDialogRequestOpts, InDialogMethod,
 };
-use sip_message::{Method, SipMessage};
+use sip_message::Method;
 use sip_txn::TxnKind;
 
 use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
@@ -138,7 +138,7 @@ impl ActionExecutor<'_> {
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(InDialogMethod::Notify, &gen_dialog, &opts);
-        let dest = relay::dest_of(&relay::strip_uri(&gen_dialog.remote_target));
+        let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) =
             relay::apply_b_leg_egress(self.config, leg_id, &gen_dialog.route_set, res.request, dest);
         fx.outbound.push(OutboundSipEffect {
@@ -162,7 +162,7 @@ impl ActionExecutor<'_> {
         fx: &mut HandlerEffects,
         leg_id: &str,
         body: &[u8],
-        add_headers: &[(&'static str, String)],
+        add_headers: &[sip_message::draft::Entry],
     ) {
         let idx = match leg_index(call, leg_id) {
             Some(i) => i,
@@ -184,9 +184,9 @@ impl ActionExecutor<'_> {
         let gen_dialog = relay::to_gen_dialog(&dialog.sip);
         let extra: Vec<sip_message::SipHeader> = add_headers
             .iter()
-            .map(|(n, v)| sip_message::SipHeader {
-                name: (*n).to_string().into(),
-                value: v.clone().into(),
+            .map(|e| sip_message::SipHeader {
+                name: sip_message::SipStr::owned(e.name().as_wire_str()),
+                value: e.text(),
             })
             .collect();
         let opts = GenerateInDialogRequestOpts {
@@ -199,7 +199,7 @@ impl ActionExecutor<'_> {
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(InDialogMethod::Invite, &gen_dialog, &opts);
-        let dest = relay::dest_of(&relay::strip_uri(&gen_dialog.remote_target));
+        let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) =
             relay::apply_b_leg_egress(self.config, leg_id, &gen_dialog.route_set, res.request, dest);
 
@@ -210,7 +210,7 @@ impl ActionExecutor<'_> {
         *call = call::helpers::update_dialog(call.clone(), leg_id, &t_id, |d| {
             d.ext.pending_invite_txn = Some(call::InviteTxnHandle {
                 branch: branch.clone(),
-                original_invite: sip_message::serialize(&SipMessage::Request(out_req.clone())),
+                original_invite: out_req.raw.to_vec(),
                 destination: call::HostPort { host: dest.0.clone(), port: dest.1 },
             });
             d.ext.ack_branch = None;
@@ -305,7 +305,9 @@ impl ActionExecutor<'_> {
         let extra_headers: Vec<sip_message::SipHeader> = headers
             .iter()
             .filter(|(n, _)| {
-                !n.eq_ignore_ascii_case("content-type") && !n.eq_ignore_ascii_case("content-length")
+                let named = sip_message::HeaderName::from(n.as_str());
+                named != sip_message::HeaderName::ContentType
+                    && named != sip_message::HeaderName::ContentLength
             })
             .map(|(name, value)| sip_message::SipHeader { name: name.clone().into(), value: value.clone().into() })
             .collect();
@@ -321,7 +323,7 @@ impl ActionExecutor<'_> {
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(m, &gen_dialog, &opts);
-        let dest = relay::dest_of(&relay::strip_uri(&gen_dialog.remote_target));
+        let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) =
             relay::apply_b_leg_egress(self.config, leg_id, &gen_dialog.route_set, res.request, dest);
         let kind = if m == InDialogMethod::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
@@ -388,7 +390,7 @@ impl ActionExecutor<'_> {
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(InDialogMethod::Prack, &gen_dialog, &opts);
-        let dest = relay::dest_of(&relay::strip_uri(&gen_dialog.remote_target));
+        let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) =
             relay::apply_b_leg_egress(self.config, leg_id, &gen_dialog.route_set, res.request, dest);
         fx.outbound.push(OutboundSipEffect {

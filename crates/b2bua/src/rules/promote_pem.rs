@@ -11,7 +11,8 @@
 
 use call::features::RelayFirst18xStrategy;
 use call::{CdrEventType, Direction, LegDisposition, LegState, PromotePemState, TimerType};
-use sip_message::message_helpers::{get_header, get_headers};
+use sip_message::draft::Entry;
+use sip_message::header::{Allow, HeaderName, RSeq, Require, Supported};
 use sip_message::SipResponse;
 
 use super::model::{
@@ -42,17 +43,15 @@ fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
 
 /// RFC 3262: a reliable 1xx carries `Require: 100rel` and a numeric `RSeq`.
 fn reliable_rseq(resp: &SipResponse) -> Option<i64> {
-    let has_100rel = get_headers(&resp.headers, "require")
-        .iter()
-        .any(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("100rel")));
-    if !has_100rel {
+    let requires = resp.header::<Require>()?.ok()?;
+    if !requires.contains("100rel") {
         return None;
     }
-    get_header(&resp.headers, "rseq").and_then(|r| r.trim().parse::<i64>().ok())
+    Some(resp.header::<RSeq>()?.ok()?.value() as i64)
 }
 
 fn has_p_early_media(resp: &SipResponse) -> bool {
-    get_header(&resp.headers, "p-early-media").is_some()
+    resp.has(&HeaderName::PEarlyMedia)
 }
 
 /// RFC 3326 Reason value from a SIP status + phrase.
@@ -76,10 +75,10 @@ fn window_open(ctx: &RuleContext) -> bool {
 }
 
 /// Allow + Supported header updates for messages we mint toward Alice.
-fn a_facing_advert() -> Vec<(&'static str, String)> {
+fn a_facing_advert() -> Vec<Entry> {
     vec![
-        ("Allow", B2BUA_ALLOW.to_string()),
-        ("Supported", B2BUA_SUPPORTED_NO_100REL.to_string()),
+        Entry::typed(Allow::of(B2BUA_ALLOW.split(',').map(str::trim))),
+        Entry::typed(Supported::of(B2BUA_SUPPORTED_NO_100REL.split(',').map(str::trim))),
     ]
 }
 
@@ -107,9 +106,9 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 }),
             |ctx| {
                 let resp = ctx.response()?;
-                let b_tag = resp.to.tag.clone().unwrap_or_default();
+                let b_tag = resp.to().tag().unwrap_or_default().to_string();
                 let rseq = reliable_rseq(resp);
-                let invite_cseq = resp.cseq.seq as i64;
+                let invite_cseq = resp.cseq().seq() as i64;
                 let leg = ctx.source_leg_id.to_string();
                 let promoted_sdp = resp.body.clone();
 
@@ -124,7 +123,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     status: Some(200),
                     reason: Some("OK".to_string()),
                     drop_body: false,
-                    remove_headers: vec!["Require", "RSeq"],
+                    remove_headers: vec![HeaderName::Require, HeaderName::RSeq],
                     add_headers: a_facing_advert(),
                 };
 
@@ -175,9 +174,9 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 .filter(|ctx| promote_pem_active(ctx) && promoted(ctx)),
             |ctx| {
                 let resp = ctx.response()?;
-                let b_tag = resp.to.tag.clone().unwrap_or_default();
+                let b_tag = resp.to().tag().unwrap_or_default().to_string();
                 let rseq = reliable_rseq(resp);
-                let invite_cseq = resp.cseq.seq as i64;
+                let invite_cseq = resp.cseq().seq() as i64;
                 let leg = ctx.source_leg_id.to_string();
                 let mut actions = vec![RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Provisional,
@@ -210,7 +209,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 let resp = ctx.response()?;
                 let b = ctx.source_leg_id.to_string();
                 let a = ctx.call.a_leg().leg_id.clone();
-                let b_tag = resp.to.tag.clone().unwrap_or_default();
+                let b_tag = resp.to().tag().unwrap_or_default().to_string();
                 let final_sdp = resp.body.clone();
                 let state = ctx.call.promote_pem_state().cloned().unwrap_or_default();
                 let promoted_sdp = state.promoted_sdp.clone();

@@ -35,6 +35,8 @@ pub mod rules {
         Effect, EffectKind, Match, MatchKind, MessageTransform, RuleAction, RuleCall,
         RuleContext, RuleDefinition, RuleHandleResult, StatusMatch, CORE_LAYER, SERVICE_LAYER,
     };
+    pub use sip_message::draft::Entry;
+    pub use sip_message::header::HeaderName;
     pub use sip_message::Method;
     pub use crate::service::{ServiceDef, ServiceSeed, Terminal};
     // NOTE: `Call` is deliberately NOT re-exported here (ADR-0020 X8) — rules

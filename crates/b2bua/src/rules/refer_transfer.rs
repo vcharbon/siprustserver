@@ -29,9 +29,9 @@ use b2bua_sdk::{define_service, sm_rule};
 use call::{
     Call, CdrEventType, Direction, LegState, StateLabel, TransferPhase, TransferState,
 };
-use sip_message::message_helpers::get_header;
+use sip_message::header::{HeaderName, HeaderValue, ReferTo};
 use sip_message::sipfrag::sipfrag_from_status;
-use sip_message::Method;
+use sip_message::{Method, SipStr};
 
 use super::model::{
     Effect, Match, RuleAction, RuleContext, RuleDefinition, CORE_LAYER,
@@ -76,36 +76,45 @@ fn state<'a>(ctx: &'a RuleContext<'a>) -> Option<&'a TransferState> {
     ctx.call.transfer_state()
 }
 
-/// Refer-To URI carries a `Replaces=` parameter → attended transfer (RFC 3891).
+/// Refer-To names a dialog to replace (`?Replaces=`, RFC 3891 §3) → attended
+/// transfer. A Refer-To no reader accepts is not an attended transfer.
 fn refer_to_has_replaces(ctx: &RuleContext) -> bool {
-    match ctx.request().and_then(|r| get_header(&r.headers, "refer-to")) {
-        Some(v) => v.to_ascii_lowercase().contains("replaces"),
-        None => false,
+    ctx.request()
+        .and_then(|r| r.header::<ReferTo>())
+        .and_then(Result::ok)
+        .is_some_and(|refer_to| refer_to.uri().escaped_header("Replaces").is_some())
+}
+
+/// Reduce a Refer-To to the bare `sip:user@host:port;params` URI a
+/// Request-URI may carry: the display name and the `?headers` list drop
+/// (RFC 3261 §19.1.1 forbids escaped headers in a Request-URI).
+fn to_bare_uri(refer_to: &str) -> String {
+    match ReferTo::parse(&SipStr::owned(refer_to)) {
+        Ok(value) => value.uri().clone().without_escaped_headers().to_string(),
+        Err(_) => refer_to.trim().to_string(),
     }
 }
 
-/// Reduce a Refer-To header (`<sip:user@host:port;params>?headers` / display
-/// name) to its bare `sip:user@host:port` URI (port of TS `toBareUri`).
-fn to_bare_uri(refer_to: &str) -> String {
-    let inner = match (refer_to.find('<'), refer_to.find('>')) {
-        (Some(a), Some(b)) if b > a + 1 => &refer_to[a + 1..b],
-        _ => refer_to.trim(),
-    };
-    // Drop any embedded URI headers (`?...`) — keep scheme:user@host:port;params.
-    inner.split('?').next().unwrap_or(inner).trim().to_string()
-}
-
 /// Non-structural REFER headers forwarded verbatim to `/call/refer`
-/// (port of TS `extractSipHeaders`).
+/// (port of TS `extractSipHeaders`). The transfer's own payload headers ride
+/// as typed request fields, so they are excluded alongside the stack-owned set.
 fn extract_sip_headers(req: &sip_message::SipRequest) -> serde_json::Map<String, serde_json::Value> {
-    const SKIP: [&str; 11] = [
-        "from", "to", "via", "contact", "content-type", "call-id", "cseq",
-        "max-forwards", "content-length", "refer-to", "referred-by",
+    const SKIP: &[HeaderName] = &[
+        HeaderName::From,
+        HeaderName::To,
+        HeaderName::Via,
+        HeaderName::Contact,
+        HeaderName::ContentType,
+        HeaderName::CallId,
+        HeaderName::CSeq,
+        HeaderName::MaxForwards,
+        HeaderName::ContentLength,
+        HeaderName::ReferTo,
+        HeaderName::ReferredBy,
     ];
     let mut out = serde_json::Map::new();
     for h in &req.headers {
-        let name = h.name.to_ascii_lowercase();
-        if SKIP.contains(&name.as_str()) {
+        if SKIP.iter().any(|n| n.matches(&h.name)) {
             continue;
         }
         out.insert(h.name.to_string(), serde_json::Value::String(h.value.to_string()));
@@ -197,8 +206,9 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
             |ctx| {
                 let req = ctx.request()?;
                 let leg_id = ctx.source_leg_id.to_string();
-                let refer_to = get_header(&req.headers, "refer-to").unwrap_or_default().to_string();
-                let referred_by = get_header(&req.headers, "referred-by").map(str::to_string);
+                let refer_to =
+                    req.raw(HeaderName::ReferTo).next().unwrap_or_default().to_string();
+                let referred_by = req.raw(HeaderName::ReferredBy).next().map(str::to_string);
 
                 // Seed the transfer slice (phase refer-authorizing).
                 let seed = TransferState {
@@ -208,7 +218,7 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                     effective_refer_to_uri: None,
                     callback_context: None,
                     c_leg_id: None,
-                    refer_cseq: Some(req.cseq.seq),
+                    refer_cseq: Some(req.cseq().seq()),
                     started_at_ms: ctx.now_ms,
                     last_c_leg_notified_status: None,
                     c_initial_sdp: None,

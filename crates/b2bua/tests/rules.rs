@@ -811,7 +811,7 @@ mod media_primitives {
     use super::*;
     use b2bua::effects::OutboundBody;
     use b2bua::rules::MessageTransform;
-    use sip_message::message_helpers::get_header;
+    use sip_message::HeaderName;
     use sip_message::SipHeader;
 
     /// A confirmed b-leg of the given role; its single dialog carries the callee
@@ -980,7 +980,7 @@ mod media_primitives {
                 assert_eq!(r.method, "INFO");
                 assert_eq!(r.body, mscml, "MSCML body passes through opaquely");
                 assert_eq!(
-                    get_header(&r.headers, "content-type"),
+                    r.raw(HeaderName::ContentType).next(),
                     Some("application/mediaservercontrol+xml")
                 );
             }
@@ -1033,8 +1033,8 @@ mod media_primitives {
                 assert_eq!(r.method, "INFO");
                 assert_eq!(r.body, body, "opaque body passes through unchanged");
                 // Forwarded application headers survive verbatim.
-                assert_eq!(get_header(&r.headers, "user-to-user"), Some(uui));
-                assert_eq!(get_header(&r.headers, "x-example-trace"), Some("abc-123"));
+                assert_eq!(r.raw(HeaderName::from("user-to-user")).next(), Some(uui));
+                assert_eq!(r.raw(HeaderName::from("x-example-trace")).next(), Some("abc-123"));
                 // Content-Type is owned by `content_type`: exactly one, from the
                 // body — NOT the bogus forwarded one (dedup guard).
                 let cts: Vec<&str> = r
@@ -1090,11 +1090,11 @@ mod media_primitives {
                 assert_eq!(r.body, sdp, "the MRF SDP is brokered onto A");
                 assert!(r.to.tag.is_some(), "183 carries a B2BUA-minted early to-tag");
                 assert_eq!(
-                    get_header(&r.headers, "content-type"),
+                    r.raw(HeaderName::ContentType).next(),
                     Some("application/sdp"),
                     "an SDP body defaults to application/sdp"
                 );
-                assert_eq!(get_header(&r.headers, "p-early-media"), Some("sendrecv"));
+                assert_eq!(r.raw(HeaderName::PEarlyMedia).next(), Some("sendrecv"));
             }
             _ => panic!("expected an outbound response"),
         }
@@ -1146,7 +1146,7 @@ mod media_primitives {
 mod answer_a_leg_new_dialog {
     use super::*;
     use b2bua::effects::OutboundBody;
-    use sip_message::message_helpers::get_header;
+    use sip_message::HeaderName;
 
     /// A call whose a-leg already carries the MRF early-media dialog A1 (the tag
     /// pinned by the media-leg `ConfirmDialog` / a prior 183).
@@ -1238,7 +1238,7 @@ mod answer_a_leg_new_dialog {
                 assert_eq!(r.status, 200);
                 assert_eq!(r.body, sdp_b, "the callee SDP-B rides the 200");
                 assert_eq!(
-                    get_header(&r.headers, "content-type"),
+                    r.raw(HeaderName::ContentType).next(),
                     Some("application/sdp"),
                     "an SDP body defaults to application/sdp"
                 );
@@ -1285,7 +1285,7 @@ mod answer_a_leg_new_dialog {
         match &eff.body {
             OutboundBody::Response(r) => {
                 assert_eq!(r.to.tag.as_deref(), Some("A2explicit"), "the supplied A2 is used verbatim");
-                assert_eq!(get_header(&r.headers, "x-served-by"), Some("mrf"));
+                assert_eq!(r.raw(HeaderName::from("x-served-by")).next(), Some("mrf"));
             }
             _ => panic!("expected an outbound response"),
         }
@@ -1354,11 +1354,11 @@ mod answer_a_leg_new_dialog {
         match &result.effects.outbound[0].body {
             OutboundBody::Response(r) => {
                 assert_eq!(
-                    get_header(&r.headers, "allow"),
+                    r.raw(HeaderName::Allow).next(),
                     Some(sip_message::generators::B2BUA_ALLOW),
                 );
                 assert_eq!(
-                    get_header(&r.headers, "supported"),
+                    r.raw(HeaderName::Supported).next(),
                     Some(sip_message::generators::B2BUA_SUPPORTED),
                 );
                 for name in ["allow", "supported"] {
@@ -1400,14 +1400,14 @@ mod answer_a_leg_new_dialog {
         match &result.effects.outbound[0].body {
             OutboundBody::Response(r) => {
                 assert_eq!(
-                    get_header(&r.headers, "supported"),
+                    r.raw(HeaderName::Supported).next(),
                     Some("timer"),
                     "a set value replaces the default verbatim"
                 );
                 let n = r.headers.iter().filter(|h| h.name.eq_ignore_ascii_case("supported")).count();
                 assert_eq!(n, 1, "the service value is not duplicated by the default");
                 assert_eq!(
-                    get_header(&r.headers, "allow"),
+                    r.raw(HeaderName::Allow).next(),
                     None,
                     "an explicit removal keeps the header absent"
                 );
@@ -1428,7 +1428,7 @@ mod answer_a_leg_new_dialog {
 mod ack_leg_body {
     use super::*;
     use b2bua::effects::OutboundBody;
-    use sip_message::message_helpers::get_header;
+    use sip_message::HeaderName;
 
     /// A confirmed b-leg (callee tag learned) whose first dialog `AckLeg` addresses.
     fn b_leg_confirmed() -> Leg {
@@ -1496,7 +1496,7 @@ mod ack_leg_body {
             "the delayed-offer answer rides the ACK byte-for-byte (binary-safe)"
         );
         assert_eq!(
-            get_header(&ack.headers, "content-type"),
+            ack.raw(HeaderName::ContentType).next(),
             Some("application/sdp"),
             "a body-bearing ACK defaults Content-Type to application/sdp (§13.2.2.4)"
         );
@@ -1509,7 +1509,7 @@ mod ack_leg_body {
         let ack = ack_request(body.clone(), Some("application/custom".to_string()));
         assert_eq!(ack.body, body);
         assert_eq!(
-            get_header(&ack.headers, "content-type"),
+            ack.raw(HeaderName::ContentType).next(),
             Some("application/custom"),
             "an explicit content_type is used verbatim (not coerced to application/sdp)"
         );
@@ -1522,7 +1522,7 @@ mod ack_leg_body {
         let ack = ack_request(Vec::new(), None);
         assert!(ack.body.is_empty(), "an empty AckLeg body sends a bodyless ACK");
         assert_eq!(
-            get_header(&ack.headers, "content-type"),
+            ack.raw(HeaderName::ContentType).next(),
             None,
             "a bare ACK carries no Content-Type (no regression vs the pre-body AckLeg)"
         );
@@ -1681,7 +1681,7 @@ mod create_leg_admission {
 mod default_sdp_create_leg {
     use super::*;
     use b2bua::effects::OutboundBody;
-    use sip_message::message_helpers::get_header;
+    use sip_message::HeaderName;
 
     #[test]
     fn create_leg_sources_body_override_from_config_default_sdp() {
@@ -1739,7 +1739,7 @@ mod default_sdp_create_leg {
             "the b-leg INVITE carries the config default_sdp sourced via body_override"
         );
         assert_eq!(
-            get_header(&inv.headers, "content-type"),
+            inv.raw(HeaderName::ContentType).next(),
             Some("application/sdp"),
             "the fake-offer INVITE advertises Content-Type: application/sdp"
         );

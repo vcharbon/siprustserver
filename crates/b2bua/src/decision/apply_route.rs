@@ -4,6 +4,8 @@
 
 use call::helpers::set_call_ext;
 use call::{Call, CallLimiterState, CdrEvent, CdrEventType, TimerEntry, TimerType};
+use sip_message::draft::RequestDraft;
+use sip_message::header::{HeaderName, MediaType, Supported};
 use sip_message::SipRequest;
 use sip_txn::IdGen;
 
@@ -214,27 +216,30 @@ pub async fn apply_route(
         None,
     );
 
-    // Body substitution on the b-leg INVITE (route.update_body).
+    // Body substitution on the b-leg INVITE (route.update_body), then the
+    // relayFirst18xTo180 Supported rewrite — one thaw/freeze, so the INVITE the
+    // wire sees and the image it carries stay the same message.
     if let crate::effects::OutboundBody::Request(req) = &mut effect.body {
+        let mut draft = req.thaw();
         match &route.update_body {
             BodyUpdate::Keep => {}
             BodyUpdate::Drop => {
-                req.body.clear();
+                draft = draft.without_body();
                 if let Some(d) = leg.dialogs.first_mut() {
                     d.ext.cached_sdp = None;
                 }
             }
-            BodyUpdate::Replace(s) => req.body = s.clone().into_bytes().into(),
+            BodyUpdate::Replace(s) => draft = draft.with_body(s.clone().into_bytes().into()),
         }
-    }
-
-    // ── relayFirst18xTo180 → strategy-aware Supported: 100rel + self-disable ─
-    //
-    // The B2BUA forwards alice's `Supported` to bob; the 18x-management policy
-    // then strips `100rel` (and self-disables) depending on the strategy and
-    // whether alice offered SDP. Port of `applyRoute.ts`'s Supported handling.
-    if let crate::effects::OutboundBody::Request(req) = &mut effect.body {
-        apply_supported_for_18x(req, a_invite, &mut call);
+        // ── relayFirst18xTo180 → strategy-aware Supported: 100rel + self-disable ─
+        //
+        // The B2BUA forwards alice's `Supported` to bob; the 18x-management policy
+        // then strips `100rel` (and self-disables) depending on the strategy and
+        // whether alice offered SDP. Port of `applyRoute.ts`'s Supported handling.
+        draft = apply_supported_for_18x(draft, a_invite, &mut call);
+        if let Ok(edited) = draft.freeze() {
+            *req = edited;
+        }
     }
 
     call.b_legs.push(leg);
@@ -344,22 +349,26 @@ fn defers_routing(call: &Call) -> bool {
 ///   - `fake-prack` with NO alice SDP (delayed offer): strip `100rel` AND
 ///     disable the policy (fall back to plain relay; no half-active state).
 /// `promote-pem-to-200` is owned by the PEM service (Slice 4) and is left alone.
-fn apply_supported_for_18x(invite: &mut SipRequest, a_invite: &SipRequest, call: &mut Call) {
+fn apply_supported_for_18x(
+    draft: RequestDraft,
+    a_invite: &SipRequest,
+    call: &mut Call,
+) -> RequestDraft {
     use call::features::RelayFirst18xStrategy;
     let strategy = match call::helpers::relay_first_18x_strategy(call) {
         Some(s) => s,
-        None => return,
+        None => return draft,
     };
     if strategy == RelayFirst18xStrategy::PromotePemTo200 {
-        return; // PEM service owns this.
+        return draft; // PEM service owns this.
     }
 
-    let alice_supported =
-        sip_message::message_helpers::get_header(&a_invite.headers, "supported").map(str::to_string);
-    let ct = sip_message::message_helpers::get_header(&a_invite.headers, "content-type")
-        .unwrap_or("");
-    let alice_has_sdp =
-        !a_invite.body.is_empty() && ct.to_ascii_lowercase().contains("application/sdp");
+    let alice_supported = a_invite.header::<Supported>().and_then(Result::ok);
+    let alice_has_sdp = !a_invite.body.is_empty()
+        && a_invite
+            .header::<MediaType>()
+            .and_then(Result::ok)
+            .is_some_and(|ct| ct.is("application/sdp"));
 
     let keep_100rel = strategy == RelayFirst18xStrategy::FakePrack && alice_has_sdp;
 
@@ -371,33 +380,16 @@ fn apply_supported_for_18x(invite: &mut SipRequest, a_invite: &SipRequest, call:
     }
 
     // Compute the Supported value to forward to bob.
-    let supported_out: Option<String> = match &alice_supported {
-        None => None,
-        Some(v) => {
-            if keep_100rel {
-                Some(v.clone())
-            } else {
-                let kept: Vec<&str> = v
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|t| !t.eq_ignore_ascii_case("100rel") && !t.is_empty())
-                    .collect();
-                if kept.is_empty() {
-                    None
-                } else {
-                    Some(kept.join(", "))
-                }
-            }
-        }
-    };
+    let supported_out = alice_supported.and_then(|offered| {
+        let kept = if keep_100rel { offered } else { offered.without("100rel") };
+        (!kept.is_empty()).then_some(kept)
+    });
 
     // build_b_leg stamped a default Supported; this strategy path rewrites it
-    // from alice's value (or drops it entirely). Clear then set-or-drop.
-    invite.headers.retain(|h| !h.name.eq_ignore_ascii_case("supported"));
-    if let Some(val) = supported_out {
-        invite.headers.push(sip_message::SipHeader {
-            name: "Supported".to_string().into(),
-            value: val.into(),
-        });
+    // from alice's value (or drops it entirely).
+    let draft = draft.remove(&HeaderName::Supported);
+    match supported_out {
+        Some(val) => draft.push(val),
+        None => draft,
     }
 }

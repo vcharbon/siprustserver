@@ -7,8 +7,8 @@
 use call::helpers::{add_tag_mapping, find_by_b_tag, remove_pending_request, find_pending_request};
 use call::{Call, TagMapping, TimerType};
 use sip_message::generators::{self, GenerateRelayedResponseOpts};
-use sip_message::message_helpers::get_header;
-use sip_message::SipMessage;
+use sip_message::header::{HeaderName, HeaderValue, Via};
+use sip_message::{SipHeader, SipStr};
 
 use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
 use crate::rules::model::{MessageTransform, RuleContext};
@@ -47,7 +47,7 @@ impl ActionExecutor<'_> {
         } else {
             (
                 resp.body.to_vec(),
-                get_header(&resp.headers, "content-type").map(str::to_string),
+                resp.raw(HeaderName::ContentType).next().map(str::to_string),
             )
         };
         // Passthrough headers minus any the transform suppresses (e.g.
@@ -55,32 +55,30 @@ impl ActionExecutor<'_> {
         // with replace semantics (Allow/Supported on the synthetic 200 / resync
         // re-INVITE, `promote18xPemTo200`).
         let add_headers = transform.add_headers.clone();
-        let filter_passthrough = move |hs: Vec<sip_message::SipHeader>| -> Vec<sip_message::SipHeader> {
-            let mut out: Vec<sip_message::SipHeader> = hs
+        let filter_passthrough = move |hs: Vec<SipHeader>| -> Vec<SipHeader> {
+            let mut out: Vec<SipHeader> = hs
                 .into_iter()
                 .filter(|h| {
-                    !transform
-                        .remove_headers
-                        .iter()
-                        .any(|r| r.eq_ignore_ascii_case(&h.name))
-                        && !add_headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(&h.name))
+                    !transform.remove_headers.iter().any(|r| r.matches(&h.name))
+                        && !add_headers.iter().any(|e| e.name().matches(&h.name))
                 })
                 .collect();
-            for (name, value) in &add_headers {
-                out.push(sip_message::SipHeader {
-                    name: (*name).to_string().into(),
-                    value: value.clone().into(),
+            for entry in &add_headers {
+                out.push(SipHeader {
+                    name: SipStr::owned(entry.name().as_wire_str()),
+                    value: entry.text(),
                 });
             }
             out
         };
-        let cseq_num = resp.cseq.seq as i64;
-        let cseq_method = if resp.cseq.method.as_str().is_empty() {
+        let cseq = resp.cseq();
+        let cseq_num = cseq.seq() as i64;
+        let cseq_method = if cseq.method().as_str().is_empty() {
             "INVITE".to_string()
         } else {
-            resp.cseq.method.to_string()
+            cseq.method().to_string()
         };
-        let to_tag = resp.to.tag.clone().unwrap_or_default();
+        let to_tag = resp.to().tag().unwrap_or_default().to_string();
         let source_leg_id = ctx.source_leg_id.to_string();
 
         // ── Pending transparent-relay correlation (§8.1.3.3) ──
@@ -139,7 +137,7 @@ impl ActionExecutor<'_> {
                 let dest = pending
                     .source_vias
                     .first()
-                    .map(|v| via_sent_by(v))
+                    .and_then(|v| via_sent_by(v))
                     .unwrap_or_else(|| ("127.0.0.1".to_string(), 5060));
                 // RFC 3261 §13.3.1.4 (in-dialog): a **2xx to a re-INVITE the
                 // originator (a-leg) issued** was relayed via the a-leg server
@@ -158,10 +156,9 @@ impl ActionExecutor<'_> {
                     && target_leg == call.a_leg.leg_id
                     && self.config.ack_timeout_sec > 0
                 {
-                    let bytes = sip_message::serialize(&SipMessage::Response(relayed.clone()));
                     if let Some(d) = call.a_leg.dialogs.first_mut() {
                         d.ext.pending_reinvite_2xx = Some(call::PendingReinvite2xx {
-                            response: bytes,
+                            response: relayed.raw.to_vec(),
                             dest_host: dest.0.clone(),
                             dest_port: dest.1,
                             // The relayed 2xx echoes the originator's re-INVITE
@@ -327,7 +324,7 @@ impl ActionExecutor<'_> {
             status: Some(180),
             reason: Some("Ringing".to_string()),
             drop_body: true,
-            remove_headers: vec!["Require", "RSeq"],
+            remove_headers: vec![HeaderName::Require, HeaderName::RSeq],
             add_headers: vec![],
         };
         let (peer, target_to_tag) = resolve_peer(call, ctx);
@@ -337,12 +334,11 @@ impl ActionExecutor<'_> {
     }
 }
 
-/// Parse a Via header's sent-by `host:port` (RFC 3261 §18.2.2) for response
-/// routing.
-fn via_sent_by(via: &str) -> (String, u16) {
-    via.split_whitespace()
-        .nth(1)
-        .and_then(|s| s.split(';').next())
-        .map(|hp| relay::dest_of(hp.trim()))
-        .unwrap_or_else(|| ("127.0.0.1".to_string(), 5060))
+/// The sent-by a response to this hop is routed to (RFC 3261 §18.2.2). The
+/// snapshot the pending-request correlation holds is text (the `call` crate has
+/// no sip-message dependency), so reading one back is a parse.
+fn via_sent_by(via: &str) -> Option<(String, u16)> {
+    let hop = Via::parse(&SipStr::owned(via)).ok()?;
+    let (host, port) = hop.sent_by().pair();
+    Some((host.to_string(), port))
 }

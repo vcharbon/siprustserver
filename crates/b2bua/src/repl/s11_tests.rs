@@ -21,7 +21,7 @@ use std::sync::Arc;
 use call::{Call, CallBodyCodec, MsgpackCodec};
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
-use sip_message::message_helpers::get_header;
+
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
 
@@ -341,9 +341,9 @@ async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
          ────────────────────────────────────────────────────────────────\n",
         the_481.status,
         the_481.reason,
-        the_481.cseq.seq,
-        the_481.cseq.method,
-        get_header(&the_481.headers, "call-id").unwrap_or(""),
+        the_481.cseq().seq(),
+        the_481.cseq().method(),
+        the_481.call_id().as_str(),
     );
     assert_eq!(the_481.status, 481, "the UAC gets 481, not the 200 it expects");
 

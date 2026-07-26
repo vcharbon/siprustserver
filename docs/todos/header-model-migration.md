@@ -159,7 +159,7 @@ helpers listed above, run capped workspace test, tick tracker, commit.
 - [x] M1–M3 review findings addressed (fallible edits, Request-URI fidelity)
 - [x] M4 sip-txn
 - [x] M5 sip-proxy
-- [ ] M6 b2bua-sdk + b2bua
+- [x] M6 b2bua-sdk + b2bua
 - [ ] M7 scenario-harness
 - [ ] M8 e2e-core + e2e-model + announcement
 - [ ] M9 sip-net rfc_audit
@@ -683,3 +683,99 @@ property of the value type rather than a call-site check.
   fields, exactly as `parse_uri_params` did. The strategy names the fields it
   decodes, so nothing reads them — but a cookie signature computed over "all
   params" would.
+
+### M6 — b2bua-sdk + b2bua
+
+One step, as the plan called it: `MessageTransform` is the seam and both crates
+had to move together. `b2bua` + `b2bua-sdk` have **zero**
+`message_helpers::{headers,name_addr,via,uri}` call sites left, tests included;
+the survivors are `is_emergency_request` (the `emergency` module, not on the
+M12 list), the `param_codec` re-export in `stack_identity.rs` (same reason as
+M4's `decode_param`) and the four buffer scanners the Tier-1 brake uses
+(`sniff`-side, also off the list).
+
+**`MessageTransform` is typed at both axes.** `remove_headers: Vec<&'static str>`
+→ `Vec<HeaderName>` and `add_headers: Vec<(&'static str, String)>` →
+`Vec<Entry>` — a draft entry names its own header, so a stamp cannot disagree
+with the value it carries, and the four `eq_ignore_ascii_case(&h.name)` scans it
+fed become `HeaderName::matches`. `RuleAction::SendReinvite`'s `add_headers`
+follows. `Entry` and `HeaderName` join the `b2bua_sdk::rules` façade so an
+out-of-tree service crate can build a transform without reaching past the SDK.
+
+**Every deletion target the plan listed is gone**, plus what the sweep found:
+
+| deleted | replaced by |
+|---|---|
+| `relay.rs` `top_via_host_port`, `respond.rs` `top_via_dest`, `relay_response.rs` `via_sent_by` | `msg.top_via().sent_by().pair()` / `Via::parse` on the pending-request snapshot |
+| `relay.rs` `strip_uri` + `dest_of` (7 call sites) | `relay::target_dest` — one `NameAddr::parse` → `uri().host_port()` |
+| `relay_request.rs` `rewrite_rack` | `req.header::<RAck>()` → `RAck::new(rseq, target_cseq, method)` on the typed opts seam |
+| `dialog_track.rs` `unwrap_angle` | `msg.header::<Contact>()` → `uri()` |
+| `refer_transfer.rs` `to_bare_uri` + the `contains("replaces")` probe | `ReferTo::parse(..).uri().without_escaped_headers()` / `uri().escaped_header("Replaces")` |
+| `reliable_rseq` ×2 (`relay_first_18x.rs`, `promote_pem.rs`) | `header::<Require>()?.contains("100rel")` + `header::<RSeq>()` |
+| route-set reconstruction ×3 (get→comma-split→trim→reverse) | `list::<RecordRouteEntry>()` → `uac_route_set` / `uas_route_set` |
+| the six header-name arrays | `HeaderName::class()` where the set IS the structural set; `&[HeaderName]` where it is genuinely policy |
+| four `serialize(&SipMessage::…(msg.clone()))` caches | `msg.raw.to_vec()` — a freeze-built message's image IS its wire form |
+| `resolve.rs` `via_cr_lg` (hand-rolled `;`-split) + `parse_uri_params` | `via.param("cr"/"lg")`, `req.request_uri().param("callRef")` |
+| `apply_route.rs` `invite.headers.retain/push` + `req.body =` | one `thaw` → body/`Supported` edits → `freeze` |
+| `relay.rs` `to_msg_headers` (only caller was `rebuild_a_leg_invite`) | — |
+
+**`rebuild_a_leg_invite` builds a draft instead of `hydrate_request`.** Every
+snapshot header rides as a `push_raw` line, so the rebuild carries the caller's
+bytes exactly as they arrived and the result carries a real image. It no longer
+runs the eager extraction twice (hydrate parsed the header list it was handed);
+it renders once.
+
+**Behaviour deltas, all deliberate:**
+- The two "structural headers a service may not set on a response" arrays
+  (`respond.rs`, `initial_invite.rs` — the same nine names) are now
+  `class() == Structural`, which additionally blocks `Route`. A Route header on
+  a response is not a thing RFC 3261 defines; a service naming one was
+  previously let through.
+- `STANDARD_HEADERS` (the decision-request field list) and the REFER
+  `/call/refer` skip list stay policy lists — as `&[HeaderName]`, not strings.
+  Both genuinely differ from `class()` (neither excludes Route/Record-Route),
+  and folding them in would silently drop headers the decision backend sees.
+- `BodyUpdate::Drop` on the b-leg INVITE now drops `Content-Type` with the body
+  (`Draft::without_body`). A bodiless message describing a media type is a
+  §7.4.1 contradiction; the old path cleared only `body`.
+- `rebuild_a_leg_invite` states `Max-Forwards: 70` when the snapshot has none.
+  `freeze` requires it (RFC 3261 §8.1.1.6) and `hydrate_request` did not, so
+  without this an INVITE from a peer that omitted the hop count would panic the
+  worker. Nothing reads the hop count off the rebuild.
+- The relay-header forbidden set is `class() == Structural || Content-Type`,
+  identical to the eleven names it replaces.
+
+**The bootstrap Route preload is a draft edit** (`thaw().prepend(route)
+.freeze()`), so it lands below the Via rather than at wire position 0, and the
+INVITE's image stays the message that goes out. `prepend` is the right
+primitive here per the M1–M3 review: a hop adds its own Route without reading
+routes below it.
+
+Workspace: 2121 tests passed, 0 failed. Clippy clean on both crates (the only
+warnings in the lane are pre-existing `sip-message` parser ones).
+
+**Suspicions raised, not fixed:**
+- `list::<RecordRouteEntry>()` failing yields an EMPTY route set
+  (`unwrap_or_default`), where the old text path stored the unreadable line
+  verbatim. An empty dialog route set sends in-dialog requests pod-direct — the
+  long-call-loss class. Unreachable behind our own front proxy (it records what
+  the reader accepts), but a `try_list`-style tolerant read — the same gap M5
+  logged for `Draft::list` — would remove the cliff.
+- `InviteTxnHandle::original_invite` is still snapshotted inside `build_b_leg`,
+  i.e. BEFORE `apply_route` substitutes the body and rewrites `Supported`. The
+  cached INVITE therefore differs from the one sent; it feeds CANCEL generation
+  and `acked_invite_cseq`, which read only the CSeq and the Request-URI, so
+  nothing is wrong today. Pre-existing, surfaced by this port.
+- `interpret.rs` still calls `serialize(&SipMessage::…(msg.clone()))` on the two
+  raw-send paths, and `send_request`/`send_response` render again inside
+  sip-txn. Every b2bua-produced message now carries a faithful image, so those
+  are the next `msg.raw` reclaims — deliberately left out of this step because
+  the producers are spread across the rule set and a stale image there would
+  send wrong bytes silently.
+- `apply_b_leg_egress` swallows a `freeze` error by forwarding the unmodified
+  request to the un-preloaded destination. A thawed draft cannot be incomplete,
+  so the arm is unreachable; the alternative was a panic on the relay path.
+- `PendingRequest` (Via/From/To/Call-ID) and `StackDialog` (route set, remote
+  target) are still `String`s in the `call` crate, so the relay re-parses them
+  on every response. That is the ADR's out-of-scope `call`-crate decision, and
+  it is now the only string round-trip left on the b2bua's hot path.

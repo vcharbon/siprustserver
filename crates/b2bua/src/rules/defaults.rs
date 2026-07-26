@@ -734,7 +734,8 @@ fn core_rules() -> Vec<RuleDefinition> {
                                     .iter()
                                     .filter(|h| {
                                         !crate::initial_invite::STANDARD_HEADERS
-                                            .contains(&h.name.to_ascii_lowercase().as_str())
+                                            .iter()
+                                            .any(|n| n.matches(&h.name))
                                     })
                                     .map(|h| serde_json::json!([h.name, h.value]))
                                     .collect()

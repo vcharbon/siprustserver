@@ -11,10 +11,9 @@ use call::{
     ALegInviteSnapshot, Call, CallModelState, CallTopology, CdrEvent, CdrEventType, Leg,
     LegDisposition, LegKind, LegState, RemoteInfo,
 };
-use sip_message::message_helpers::{
-    get_header, get_headers, is_emergency_request, parse_uri_params,
-};
-use sip_message::{SipMessage, SipRequest};
+use sip_message::header::{HeaderClass, HeaderName, ParamValue, RecordRouteEntry};
+use sip_message::message_helpers::is_emergency_request;
+use sip_message::{SipHeader, SipMessage, SipRequest, SipStr};
 use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
@@ -31,9 +30,16 @@ use crate::rules::{relay, seed_services, ActionExecutor, ServiceDef};
 /// `sip_headers`). Shared with the failure path: `route-failure` applies the
 /// same exclusion to the failed final response's headers, so "the
 /// non-structural remainder" means one thing across the decision seam.
-pub(crate) const STANDARD_HEADERS: &[&str] = &[
-    "from", "to", "via", "contact", "content-type", "call-id", "cseq", "max-forwards",
-    "content-length",
+pub(crate) const STANDARD_HEADERS: &[HeaderName] = &[
+    HeaderName::From,
+    HeaderName::To,
+    HeaderName::Via,
+    HeaderName::Contact,
+    HeaderName::ContentType,
+    HeaderName::CallId,
+    HeaderName::CSeq,
+    HeaderName::MaxForwards,
+    HeaderName::ContentLength,
 ];
 
 /// Derive the HA [`CallTopology`] from the proxy's stickiness cookie, carried as
@@ -58,16 +64,18 @@ pub(crate) const STANDARD_HEADERS: &[&str] = &[
 fn topology_from_cookie(invite: &SipRequest, self_ordinal: &str) -> Option<CallTopology> {
     // Find the Record-Route that carries the stickiness cookie; the partner
     // `;outbound` half (direction only) has no `w_pri`/`w_bak`.
-    let params = get_headers(&invite.headers, "record-route")
-        .into_iter()
-        .map(parse_uri_params)
-        .find(|p| p.contains_key("w_pri") || p.contains_key("w_bak"))?;
-    let pri = params
-        .get("w_pri")
+    let recorded = invite.list::<RecordRouteEntry>().ok()?;
+    let cookie = recorded
+        .iter()
+        .map(|entry| entry.uri())
+        .find(|uri| uri.param("w_pri").is_some() || uri.param("w_bak").is_some())?;
+    let pri = cookie
+        .param("w_pri")
+        .and_then(ParamValue::as_str)
         .filter(|s| !s.is_empty())
-        .cloned()
-        .unwrap_or_else(|| self_ordinal.to_string());
-    let bak = params.get("w_bak").cloned().unwrap_or_default();
+        .unwrap_or(self_ordinal)
+        .to_string();
+    let bak = cookie.param("w_bak").and_then(ParamValue::as_str).unwrap_or("").to_string();
     // Brand-new call: primary counter p = 1 (the primary "created" it), backup
     // counter b = 0 (no takeover yet). See `CallTopology` / ADR-0014.
     Some(CallTopology { pri, bak, gen: 1, bak_gen: 0 })
@@ -298,19 +306,19 @@ fn build_request(invite: &SipRequest) -> NewCallRequest {
     let mut sip_headers: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     for h in &invite.headers {
-        if STANDARD_HEADERS.contains(&h.name.to_ascii_lowercase().as_str()) {
+        if STANDARD_HEADERS.iter().any(|n| n.matches(&h.name)) {
             continue;
         }
         sip_headers.entry(h.name.to_string()).or_default().push(h.value.to_string());
     }
     NewCallRequest {
-        call_id: invite.call_id.to_string(),
+        call_id: invite.call_id().as_str().to_string(),
         ruri: invite.uri.to_string(),
-        from: get_header(&invite.headers, "from").unwrap_or("").to_string(),
-        to: get_header(&invite.headers, "to").unwrap_or("").to_string(),
-        via: get_headers(&invite.headers, "via").iter().map(|s| s.to_string()).collect(),
-        contact: get_headers(&invite.headers, "contact").iter().map(|s| s.to_string()).collect(),
-        content_type: get_header(&invite.headers, "content-type").map(str::to_string),
+        from: invite.raw(HeaderName::From).next().unwrap_or("").to_string(),
+        to: invite.raw(HeaderName::To).next().unwrap_or("").to_string(),
+        via: invite.raw(HeaderName::Via).map(str::to_string).collect(),
+        contact: invite.raw(HeaderName::Contact).map(str::to_string).collect(),
+        content_type: invite.raw(HeaderName::ContentType).next().map(str::to_string),
         sip_headers,
         sip_body: (!invite.body.is_empty()).then(|| String::from_utf8_lossy(&invite.body).into_owned()),
     }
@@ -329,37 +337,26 @@ fn default_reason(status: u16) -> String {
     .to_string()
 }
 
-/// Structural headers the response generator owns — never settable via the flat
-/// header map (ADR-0017 X2). `Contact` is excluded too: on a redirect it is
-/// authored from the typed `contacts` list, elsewhere the B2BUA owns it.
-const REJECT_STRUCTURAL_HEADERS: &[&str] = &[
-    "from", "to", "via", "call-id", "cseq", "max-forwards", "content-length", "record-route",
-    "contact",
-];
-
 /// Build the extra response headers for a reject/redirect: the non-structural
 /// `update_headers` *sets* (e.g. `Reason:`) plus one `Contact: <uri>;q=…` per
-/// redirect target. Removals and structural keys are dropped.
+/// redirect target. Removals and stack-owned keys are dropped — the response
+/// generator owns the structural set (ADR-0017 X2), including the Contact a
+/// redirect authors from its typed target list.
 fn build_reject_headers(
     update_headers: Option<&SipHeaderUpdates>,
     contacts: &[RedirectContact],
-) -> Vec<sip_message::SipHeader> {
-    let mut out: Vec<sip_message::SipHeader> = Vec::new();
+) -> Vec<SipHeader> {
+    let mut out: Vec<SipHeader> = Vec::new();
     if let Some(map) = update_headers {
         for (name, val) in map {
-            let is_structural = REJECT_STRUCTURAL_HEADERS
-                .contains(&name.to_ascii_lowercase().as_str());
-            if let (Some(v), false) = (val, is_structural) {
-                out.push(sip_message::SipHeader { name: name.clone().into(), value: v.clone().into() });
+            let named = HeaderName::from(name.as_str());
+            if let (Some(v), HeaderClass::EndToEnd) = (val, named.class()) {
+                out.push(SipHeader { name: SipStr::owned(name), value: SipStr::owned(v) });
             }
         }
     }
     for c in contacts {
-        let value = match c.q {
-            Some(q) => format!("<{}>;q={q}", c.uri),
-            None => format!("<{}>", c.uri),
-        };
-        out.push(sip_message::SipHeader { name: "Contact".to_string().into(), value: value.into() });
+        out.push(relay::redirect_contact(&c.uri, c.q));
     }
     out
 }

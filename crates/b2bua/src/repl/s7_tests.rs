@@ -21,7 +21,7 @@ use sip_message::generators::{
     generate_out_of_dialog_request, ContactSpec, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
     SipTransport, ViaSpec,
 };
-use sip_message::message_helpers::get_header;
+use sip_message::HeaderName;
 use sip_message::SipRequest;
 use sip_txn::IdGen;
 
@@ -88,7 +88,12 @@ fn options_probe() -> SipRequest {
 }
 
 fn reason_of(resp: &sip_message::SipResponse) -> Option<String> {
-    get_header(&resp.headers, "reason").map(|s| s.to_string())
+    resp.raw(HeaderName::Reason).next().map(str::to_string)
+}
+
+/// The `X-Overload` band signal a self-report carries, if any.
+fn x_overload(resp: &sip_message::SipResponse) -> Option<&str> {
+    resp.raw(HeaderName::from("X-Overload")).next()
 }
 
 /// A zero-state overload signal for the responder calls below. These tests pin
@@ -138,7 +143,7 @@ fn options_reports_not_ready_then_ready_then_draining() {
         !reason.to_ascii_lowercase().contains("not-ready"),
         "draining must NOT key as not-ready in classify_503"
     );
-    assert_eq!(get_header(&resp.headers, "retry-after"), Some("0"));
+    assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("0"));
 }
 
 /// Once Ready, a transient peer blip (source goes non-current) keeps OPTIONS at
@@ -216,7 +221,7 @@ fn options_200_stamps_x_overload_503_does_not() {
     let ready = Readiness::always_ready();
     let resp = build_options_health_response(&ready, &overload, &id_gen, &req);
     assert_eq!(resp.status, 200);
-    let xo = get_header(&resp.headers, "x-overload")
+    let xo = x_overload(&resp)
         .expect("OPTIONS 200 must advertise the worker load signal");
     assert_eq!(xo, "v=1; elu=0.000; gc=0.000; adm=0");
 
@@ -224,7 +229,7 @@ fn options_200_stamps_x_overload_503_does_not() {
     overload.increment_non_emergency_admitted();
     overload.increment_non_emergency_admitted();
     let resp = build_options_health_response(&ready, &overload, &id_gen, &req);
-    let xo = get_header(&resp.headers, "x-overload").unwrap();
+    let xo = x_overload(&resp).unwrap();
     assert_eq!(
         xo, "v=1; elu=0.000; gc=0.000; adm=2",
         "adm must track increment_non_emergency_admitted"
@@ -235,7 +240,7 @@ fn options_200_stamps_x_overload_503_does_not() {
     let resp = build_options_health_response(&not_ready, &overload, &id_gen, &req);
     assert_eq!(resp.status, 503);
     assert!(
-        get_header(&resp.headers, "x-overload").is_none(),
+        x_overload(&resp).is_none(),
         "a 503 (not-ready) self-report must not carry the band signal"
     );
 
@@ -244,7 +249,7 @@ fn options_200_stamps_x_overload_503_does_not() {
     let resp = build_options_health_response(&draining, &overload, &id_gen, &req);
     assert_eq!(resp.status, 503);
     assert!(
-        get_header(&resp.headers, "x-overload").is_none(),
+        x_overload(&resp).is_none(),
         "a 503 (draining) self-report must not carry the band signal"
     );
 }
@@ -339,7 +344,7 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
     let resp = build_options_health_response(&readiness, &ov(), &id_gen, &req);
     assert_eq!(resp.status, 503);
     assert!(reason_of(&resp).unwrap().to_ascii_lowercase().contains("draining"));
-    assert_eq!(get_header(&resp.headers, "retry-after"), Some("0"));
+    assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("0"));
 }
 
 /// Cold double-restart readiness deadlock regression (handoff

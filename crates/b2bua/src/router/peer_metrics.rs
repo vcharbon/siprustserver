@@ -30,7 +30,7 @@ pub(super) fn keepalive_timeout_peer(
     };
     let d = leg.dialogs.first()?;
     let gd = relay::to_gen_dialog(&d.sip);
-    let base = relay::dest_of(&relay::strip_uri(&gd.remote_target));
+    let base = relay::target_dest(&gd.remote_target);
     Some(relay::leg_egress_dest(config, leg_id, &gd.route_set, base))
 }
 

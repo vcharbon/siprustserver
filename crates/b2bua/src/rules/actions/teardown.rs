@@ -237,7 +237,7 @@ impl ActionExecutor<'_> {
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(InDialogMethod::Bye, &dialog, &opts);
-        let dest = relay::dest_of(&relay::strip_uri(&dialog.remote_target));
+        let dest = relay::target_dest(&dialog.remote_target);
         let (req, dest) =
             relay::apply_b_leg_egress(self.config, leg_id, &dialog.route_set, res.request, dest);
         Some(OutboundSipEffect {

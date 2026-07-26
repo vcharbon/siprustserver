@@ -41,7 +41,7 @@
 use b2bua_sdk::{define_service, sm_rule};
 use call::features::RelayFirst18xStrategy;
 use call::{Call, CdrEventType, Direction, LegDisposition, LegState, TimerType};
-use sip_message::message_helpers::{get_header, get_headers};
+use sip_message::header::{RSeq, Require};
 use sip_message::{Method, SipResponse};
 
 use super::model::{
@@ -55,13 +55,11 @@ fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
 
 /// RFC 3262: a reliable 1xx carries `Require: 100rel` and a numeric `RSeq`.
 fn reliable_rseq(resp: &SipResponse) -> Option<i64> {
-    let has_100rel = get_headers(&resp.headers, "require")
-        .iter()
-        .any(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("100rel")));
-    if !has_100rel {
+    let requires = resp.header::<Require>()?.ok()?;
+    if !requires.contains("100rel") {
         return None;
     }
-    get_header(&resp.headers, "rseq").and_then(|r| r.trim().parse::<i64>().ok())
+    Some(resp.header::<RSeq>()?.ok()?.value() as i64)
 }
 
 /// True iff an 18x-masking strategy this machine owns is active (`drop-sdp` /

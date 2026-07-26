@@ -3,8 +3,8 @@
 //! re-key from the replica store's SIP index.
 
 use call::Direction;
-use sip_message::message_helpers::parse_uri_params;
-use sip_message::SipMessage;
+use sip_message::header::{ParamValue, Via};
+use sip_message::{Method, SipMessage};
 
 use super::RouterCtx;
 use crate::event::CallEvent;
@@ -22,7 +22,7 @@ pub(super) fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
     match event {
         CallEvent::Sip { message, .. } => match message.as_ref() {
             SipMessage::Request(req) => {
-                if req.method == "INVITE" && req.to.tag.is_none() {
+                if req.method == Method::Invite && req.to().tag().is_none() {
                     let call_ref = call::derive_call_ref(
                         &ctx.config.self_ordinal,
                         &req.call_id,
@@ -36,24 +36,25 @@ pub(super) fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                     };
                 }
                 // In-dialog request: read our cr/lg from the Request-URI params.
-                // NB `parse_uri_params` lower-cases param NAMES (URI params are
-                // case-insensitive per RFC 3261 §19.1.1), so the stamped `callRef`
-                // is keyed as `callref`. The primary path masks a mismatch via the
-                // in-memory `sip_index` fallback below; the acting-backup takeover
-                // path has no such index, so the param IS the only key — read it by
-                // its normalised (lower-case) name.
-                let params = parse_uri_params(&req.uri);
-                let leg = params
-                    .get("leg")
-                    .map(|v| crate::stack_identity::decode_param(v))
+                // URI parameter names are case-insensitive (RFC 3261 §19.1.1), so
+                // the stamped `callRef` answers to any spelling. The primary path
+                // masks a miss via the in-memory `sip_index` fallback below; the
+                // acting-backup takeover path has no such index, so the param IS
+                // the only key.
+                let uri = req.request_uri();
+                let leg = uri
+                    .param("leg")
+                    .and_then(ParamValue::as_str)
+                    .map(crate::stack_identity::decode_param)
                     .unwrap_or_else(|| "a".into());
-                let call_ref = params
-                    .get("callref")
-                    .map(|v| crate::stack_identity::decode_param(v))
+                let call_ref = uri
+                    .param("callRef")
+                    .and_then(ParamValue::as_str)
+                    .map(crate::stack_identity::decode_param)
                     .or_else(|| {
                         ctx.state.resolve_from_sip_key_sync(
-                            &req.call_id,
-                            req.from.tag.as_deref().unwrap_or(""),
+                            req.call_id().as_str(),
+                            req.from().tag().unwrap_or(""),
                         )
                     });
                 Resolution {
@@ -65,16 +66,13 @@ pub(super) fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
             }
             SipMessage::Response(resp) => {
                 // Response: read our cr/lg from the top Via we stamped.
-                let ids = via_cr_lg(resp.headers.first().map(|h| h.value.as_str()))
-                    .or_else(|| {
-                        resp.headers
-                            .iter()
-                            .find(|h| h.name.eq_ignore_ascii_case("via"))
-                            .and_then(|h| via_cr_lg(Some(&h.value)))
-                    })
+                let ids = via_cr_lg(&resp.top_via())
                     .unwrap_or(ViaIds { cr: None, lg: "a".into() });
                 let call_ref = ids.cr.or_else(|| {
-                    ctx.state.resolve_from_sip_key_sync(&resp.call_id, resp.to.tag.as_deref().unwrap_or(""))
+                    ctx.state.resolve_from_sip_key_sync(
+                        resp.call_id().as_str(),
+                        resp.to().tag().unwrap_or(""),
+                    )
                 });
                 Resolution {
                     direction: leg_direction(&ids.lg),
@@ -175,20 +173,14 @@ struct ViaIds {
 }
 
 /// Extract the [`ViaIds`] from a Via header value's `;cr=`/`;lg=` params.
-fn via_cr_lg(via: Option<&str>) -> Option<ViaIds> {
-    let via = via?;
-    if !via.contains("cr=") && !via.contains("lg=") {
+fn via_cr_lg(via: &Via) -> Option<ViaIds> {
+    let cr = via.param("cr").and_then(ParamValue::as_str);
+    let lg = via.param("lg").and_then(ParamValue::as_str);
+    if cr.is_none() && lg.is_none() {
         return None;
     }
-    let mut cr = None;
-    let mut lg = "a".to_string();
-    for part in via.split(';').skip(1) {
-        let (k, v) = part.split_once('=').unwrap_or((part.trim(), ""));
-        match k.trim() {
-            "cr" => cr = Some(crate::stack_identity::decode_param(v.trim())),
-            "lg" => lg = crate::stack_identity::decode_param(v.trim()),
-            _ => {}
-        }
-    }
-    Some(ViaIds { cr, lg })
+    Some(ViaIds {
+        cr: cr.map(crate::stack_identity::decode_param),
+        lg: lg.map(crate::stack_identity::decode_param).unwrap_or_else(|| "a".into()),
+    })
 }

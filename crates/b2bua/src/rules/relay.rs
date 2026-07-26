@@ -9,27 +9,41 @@
 use call::{
     B2buaDialogExt, Dialog, InviteTxnHandle, Leg, LegDisposition, LegState, RemoteInfo, StackDialog,
 };
+use sip_message::draft::{Entry, RequestDraft};
 use sip_message::generators::{
     self, ContactSpec, GenerateAckFor2xxOpts, GenerateOutOfDialogRequestOpts, GenerateResponseOpts,
     OutOfDialogMethod, ViaSpec,
 };
-use sip_message::message_helpers::get_header;
-use sip_message::{hydrate_request, SipHeader as MsgHeader, SipMessage, SipRequest};
+use sip_message::header::{
+    self, HeaderClass, HeaderName, HeaderValue, HostPort, MaxForwards, NameAddr, ParamValue,
+    RouteEntry, Uri,
+};
+use sip_message::{Method, SipHeader as MsgHeader, SipRequest, SipStr};
 use sip_txn::{IdGen, TxnKind};
 
 use crate::config::B2buaConfig;
 use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode};
 use crate::stack_identity::{build_call_contact, build_call_via, StackIdentityOpts};
 
-/// Convert `call`-crate headers to message-crate headers.
-pub fn to_msg_headers(headers: &[call::SipHeader]) -> Vec<MsgHeader> {
-    headers
-        .iter()
-        .map(|h| MsgHeader {
-            name: h.name.clone().into(),
-            value: h.value.clone().into(),
-        })
-        .collect()
+/// Whether the generator owns this header on a message the B2BUA mints: the
+/// stack-owned structural set (RFC 3261 §16.6) plus `Content-Type` — the B2BUA
+/// states its own body, so the media type describing it is the stack's.
+fn stack_owned(name: &HeaderName) -> bool {
+    name.class() == HeaderClass::Structural || *name == HeaderName::ContentType
+}
+
+/// One `Contact: <uri>;q=…` redirect target (RFC 3261 §20.10) for a 3xx the
+/// B2BUA authors.
+pub fn redirect_contact(uri: &str, q: Option<f32>) -> MsgHeader {
+    let mut contact =
+        header::Contact::new(NameAddr::new(Uri::parse_or_opaque(&SipStr::owned(uri))));
+    if let Some(q) = q {
+        contact = contact.with_param("q", ParamValue::text(SipStr::owned(&q.to_string())));
+    }
+    MsgHeader {
+        name: SipStr::owned(HeaderName::Contact.as_wire_str()),
+        value: SipStr::owned(&contact.to_wire()),
+    }
 }
 
 /// Convert a `call` dialog to the generators' `StackDialog` input shape.
@@ -47,14 +61,22 @@ pub fn to_gen_dialog(d: &StackDialog) -> generators::StackDialog {
 }
 
 /// Rebuild the a-leg's original INVITE as a `SipRequest` (for `generate_response`).
+/// Every header rides as an unparsed line, so the rebuilt message carries the
+/// caller's bytes exactly as they arrived. A caller that omitted `Max-Forwards`
+/// gets RFC 3261 §8.1.1.6's default — the rebuild is a request the type system
+/// holds, and nothing reads the hop count off it.
 pub fn rebuild_a_leg_invite(snap: &call::ALegInviteSnapshot) -> SipRequest {
-    hydrate_request(
-        "INVITE",
-        &snap.uri,
-        to_msg_headers(&snap.headers),
-        snap.body.clone(),
-    )
-    .expect("a-leg INVITE snapshot is well-formed")
+    let mut draft = RequestDraft::new(Method::Invite, Uri::parse_or_opaque(&SipStr::owned(&snap.uri)));
+    for h in &snap.headers {
+        draft = draft.push_raw(HeaderName::from(h.name.as_str()), SipStr::owned(&h.value));
+    }
+    if !draft.has(&HeaderName::MaxForwards) {
+        draft = draft.push(MaxForwards::new(70));
+    }
+    draft
+        .with_body(snap.body.clone().into())
+        .freeze()
+        .expect("a-leg INVITE snapshot is well-formed")
 }
 
 /// The B2BUA's Via for a leg's outbound message. `is_emergency` is the call's
@@ -100,15 +122,18 @@ pub fn leg_contact(
     })
 }
 
-/// Parse `"host:port"` (or `host`) into `(host, port)`.
-pub fn dest_of(uri_host_port: &str) -> (String, u16) {
-    let hp = uri_host_port.trim();
-    if let Some((h, p)) = hp.rsplit_once(':') {
-        if let Ok(port) = p.parse::<u16>() {
-            return (h.to_string(), port);
+/// The transport destination the address `target` names. The `call` crate keeps
+/// dialog targets and route sets as text (it has no sip-message dependency by
+/// design, ADR-0008), so reading one back is a parse; an address no reader
+/// accepts falls back to its own text on the default port.
+pub fn target_dest(target: &str) -> (String, u16) {
+    match NameAddr::parse(&SipStr::owned(target)) {
+        Ok(addr) => {
+            let (host, port) = addr.uri().host_port();
+            (host.to_string(), port)
         }
+        Err(_) => (target.trim().to_string(), HostPort::DEFAULT_PORT),
     }
-    (hp.to_string(), 5060)
 }
 
 /// Apply the egress routing policy to an outbound in-dialog request (port of
@@ -138,16 +163,12 @@ pub fn apply_b_leg_egress(
     config: &B2buaConfig,
     leg_id: &str,
     route_set: &[String],
-    mut req: SipRequest,
+    req: SipRequest,
     dest: (String, u16),
 ) -> (SipRequest, (String, u16)) {
     // (1) Loose-route: send to the top route's host:port (R-URI unchanged).
     if let Some(first) = route_set.first() {
-        if generators::first_route_is_loose(first) {
-            // The route value is an angle-bracketed name-addr (`<sip:host;lr>`);
-            // unwrap to the bare URI before reducing to host:port.
-            let uri = generators::strip_route_uri_to_request_uri(first);
-            let dest = dest_of(&strip_uri(&uri));
+        if let Some(uri) = loose_route_uri(first) {
             // The worker no longer stamps `;outbound`: the front proxy double-
             // record-routes, so the worker-facing half of the dialog route set —
             // captured from the dialog-creating message (§12.1.1/§12.1.2) — is
@@ -155,7 +176,8 @@ pub fn apply_b_leg_egress(
             // reads direction from its own self-issued RR (registry- and pod-IP-
             // independent, so it survives a worker reboot), not from anything the
             // worker adds. We just forward the route set verbatim to the proxy.
-            return (req, dest);
+            let (host, port) = uri.host_port();
+            return (req, (host.to_string(), port));
         }
         // Strict routing is handled by the generator's R-URI rewrite; the wire
         // destination already resolves to the first route via `remote_target`.
@@ -175,12 +197,17 @@ pub fn apply_b_leg_egress(
     let Some((host, port)) = config.b2b_outbound_proxy.clone() else {
         return (req, dest);
     };
-    let route = MsgHeader {
-        name: "Route".to_string().into(),
-        value: format!("<sip:{host}:{port};lr>").into(),
-    };
-    req.headers.insert(0, route);
-    (req, (host, port))
+    let route = RouteEntry::from_uri(Uri::sip(host.clone()).with_port(port).with_flag("lr"));
+    match req.thaw().prepend(route).freeze() {
+        Ok(preloaded) => (preloaded, (host, port)),
+        Err(_) => (req, dest),
+    }
+}
+
+/// The URI of `route` when it names a loose router (RFC 3261 §19.1.1 `;lr`).
+fn loose_route_uri(route: &str) -> Option<Uri> {
+    let entry = RouteEntry::parse(&SipStr::owned(route)).ok()?;
+    entry.uri().is_loose_route().then(|| entry.uri().clone())
 }
 
 /// Egress-aware wire destination for a leg's in-dialog request, WITHOUT mutating
@@ -195,9 +222,9 @@ pub fn leg_egress_dest(
     base_dest: (String, u16),
 ) -> (String, u16) {
     if let Some(first) = route_set.first() {
-        if generators::first_route_is_loose(first) {
-            let uri = generators::strip_route_uri_to_request_uri(first);
-            return dest_of(&strip_uri(&uri));
+        if let Some(uri) = loose_route_uri(first) {
+            let (host, port) = uri.host_port();
+            return (host.to_string(), port);
         }
         return base_dest;
     }
@@ -255,7 +282,10 @@ pub fn build_b_leg(
     let content_type = if body.is_empty() {
         None
     } else {
-        get_header(&a_leg_invite.headers, "content-type").map(str::to_string)
+        a_leg_invite
+            .raw(HeaderName::ContentType)
+            .next()
+            .map(str::to_string)
             .or_else(|| body_override.map(|_| "application/sdp".to_string()))
     };
     // `(name, Some(v))` sets, `(name, None)` removes. Removals never apply to
@@ -273,15 +303,16 @@ pub fn build_b_leg(
     // `apply_supported_for_18x` runs after this and rewrites it from alice's value
     // (stripping `100rel` as the strategy dictates). Neither clobbers a
     // caller-supplied value from `header_updates`.
-    if !extra_headers.iter().any(|h| h.name.eq_ignore_ascii_case("Allow")) {
-        extra_headers
-            .push(MsgHeader { name: "Allow".to_string().into(), value: generators::B2BUA_ALLOW.to_string().into() });
-    }
-    if !extra_headers.iter().any(|h| h.name.eq_ignore_ascii_case("Supported")) {
-        extra_headers.push(MsgHeader {
-            name: "Supported".to_string().into(),
-            value: generators::B2BUA_SUPPORTED.to_string().into(),
-        });
+    for (name, default) in [
+        (HeaderName::Allow, generators::B2BUA_ALLOW),
+        (HeaderName::Supported, generators::B2BUA_SUPPORTED),
+    ] {
+        if !extra_headers.iter().any(|h| name.matches(&h.name)) {
+            extra_headers.push(MsgHeader {
+                name: SipStr::owned(name.as_wire_str()),
+                value: SipStr::from_static(default),
+            });
+        }
     }
 
     // Opt-in transparent header relay (config.relay_headers, empty = no-op
@@ -293,28 +324,13 @@ pub fn build_b_leg(
     // clobber a value already set via `header_updates` (case-insensitive), and
     // never relay a structural header the generator owns (so a misconfig can't
     // corrupt the dialog).
-    const RELAY_FORBIDDEN: &[&str] = &[
-        "via",
-        "from",
-        "to",
-        "contact",
-        "call-id",
-        "cseq",
-        "max-forwards",
-        "route",
-        "record-route",
-        "content-length",
-        "content-type",
-    ];
-    for name in &config.relay_headers {
-        if extra_headers.iter().any(|h| h.name.eq_ignore_ascii_case(name)) {
+    for configured in &config.relay_headers {
+        let name = HeaderName::from(configured.as_str());
+        if extra_headers.iter().any(|h| name.matches(&h.name)) || stack_owned(&name) {
             continue;
         }
-        if RELAY_FORBIDDEN.iter().any(|f| name.eq_ignore_ascii_case(f)) {
-            continue;
-        }
-        if let Some(v) = get_header(&a_leg_invite.headers, name) {
-            extra_headers.push(MsgHeader { name: name.clone().into(), value: v.to_string().into() });
+        if let Some(v) = a_leg_invite.raw_text(name.clone()).next() {
+            extra_headers.push(MsgHeader { name: SipStr::owned(configured), value: v });
         }
     }
 
@@ -360,7 +376,7 @@ pub fn build_b_leg(
             ack_branch: None,
             pending_invite_txn: Some(InviteTxnHandle {
                 branch: branch.clone(),
-                original_invite: sip_message::serialize(&SipMessage::Request(invite.clone())),
+                original_invite: invite.raw.to_vec(),
                 destination: call::HostPort {
                     host: wire_dest.0.clone(),
                     port: wire_dest.1,
@@ -419,14 +435,17 @@ pub fn build_b_leg(
 /// 18x-management *policies* (`relayFirst18xTo180`/`promote18xPemTo200`), which
 /// would instead *rewrite* these provisionals.
 pub fn relay_response_passthrough_headers(resp: &sip_message::SipResponse) -> Vec<MsgHeader> {
-    const PASSTHROUGH: [&str; 3] = ["require", "rseq", "supported"];
-    resp.headers
+    const PASSTHROUGH: &[HeaderName] =
+        &[HeaderName::Require, HeaderName::RSeq, HeaderName::Supported];
+    copy_named(&resp.headers, PASSTHROUGH)
+}
+
+/// The lines of `headers` naming one of `wanted`, in wire order.
+fn copy_named(headers: &[MsgHeader], wanted: &[HeaderName]) -> Vec<MsgHeader> {
+    headers
         .iter()
-        .filter(|h| PASSTHROUGH.contains(&h.name.to_ascii_lowercase().as_str()))
-        .map(|h| MsgHeader {
-            name: h.name.clone(),
-            value: h.value.clone(),
-        })
+        .filter(|h| wanted.iter().any(|n| n.matches(&h.name)))
+        .cloned()
         .collect()
 }
 
@@ -441,19 +460,16 @@ pub fn relay_response_passthrough_headers(resp: &sip_message::SipResponse) -> Ve
 /// the rest we drop the callee's passed-through value and append the B2BUA
 /// default. Either way exactly one of each results (no §7.3.1 duplicate);
 /// `Require`/`RSeq` (reliable-provisional negotiation) are untouched.
-pub fn stamp_a_facing_invite_advert(
-    headers: &mut Vec<MsgHeader>,
-    rule_stamped: &[(&'static str, String)],
-) {
-    let stamped = |name: &str| rule_stamped.iter().any(|(n, _)| n.eq_ignore_ascii_case(name));
-    for (name, default) in
-        [("Allow", generators::B2BUA_ALLOW), ("Supported", generators::B2BUA_SUPPORTED)]
-    {
-        if stamped(name) {
+pub fn stamp_a_facing_invite_advert(headers: &mut Vec<MsgHeader>, rule_stamped: &[Entry]) {
+    for (name, default) in [
+        (HeaderName::Allow, generators::B2BUA_ALLOW),
+        (HeaderName::Supported, generators::B2BUA_SUPPORTED),
+    ] {
+        if rule_stamped.iter().any(|e| e.is(&name)) {
             // The rule owns this value; just collapse any duplicate to one.
             let mut seen = false;
             headers.retain(|h| {
-                if h.name.eq_ignore_ascii_case(name) {
+                if name.matches(&h.name) {
                     let keep = !seen;
                     seen = true;
                     keep
@@ -464,8 +480,11 @@ pub fn stamp_a_facing_invite_advert(
             continue;
         }
         // Replace any passed-through value with the B2BUA default, exactly once.
-        headers.retain(|h| !h.name.eq_ignore_ascii_case(name));
-        headers.push(MsgHeader { name: name.to_string().into(), value: default.to_string().into() });
+        headers.retain(|h| !name.matches(&h.name));
+        headers.push(MsgHeader {
+            name: SipStr::owned(name.as_wire_str()),
+            value: SipStr::from_static(default),
+        });
     }
 }
 
@@ -483,22 +502,15 @@ pub fn stamp_a_facing_invite_advert(
 /// B2BUA-originated NOTIFY (`opts.event`/`subscription_state`), which the relay
 /// path leaves unset — so these pass through here without duplicating.
 pub fn relay_request_passthrough_headers(req: &SipRequest) -> Vec<MsgHeader> {
-    const PASSTHROUGH: [&str; 6] = [
-        "require",
-        "supported",
-        "refer-to",
-        "referred-by",
-        "event",
-        "subscription-state",
+    const PASSTHROUGH: &[HeaderName] = &[
+        HeaderName::Require,
+        HeaderName::Supported,
+        HeaderName::ReferTo,
+        HeaderName::ReferredBy,
+        HeaderName::Event,
+        HeaderName::SubscriptionState,
     ];
-    req.headers
-        .iter()
-        .filter(|h| PASSTHROUGH.contains(&h.name.to_ascii_lowercase().as_str()))
-        .map(|h| MsgHeader {
-            name: h.name.clone(),
-            value: h.value.clone(),
-        })
-        .collect()
+    copy_named(&req.headers, PASSTHROUGH)
 }
 
 /// Build a UAS response on a leg's inbound INVITE (toward alice). `to_tag` pins
@@ -526,8 +538,10 @@ pub fn response_to_a_leg(
     };
     let resp = generators::generate_response(a_leg_invite, status, reason, &opts);
     // Routed by the txn layer to the a-leg server transaction; dest is alice
-    // (top Via sent-by of her INVITE).
-    let dest = top_via_host_port(a_leg_invite).unwrap_or_else(|| ("127.0.0.1".into(), 5060));
+    // (top Via sent-by of her INVITE, RFC 3261 §18.2.2).
+    let hop = a_leg_invite.top_via();
+    let (host, port) = hop.sent_by().pair();
+    let dest = (host.to_string(), port);
     OutboundSipEffect {
         body: OutboundBody::Response(resp),
         mode: OutboundTxnMode::ServerResponse,
@@ -582,7 +596,7 @@ pub fn ack_b_leg(
         ..Default::default()
     };
     let ack = generators::generate_ack_for_2xx(None, &gen_dialog, &opts);
-    let dest = dest_of(&strip_uri(&dialog.sip.remote_target));
+    let dest = target_dest(&dialog.sip.remote_target);
     let (ack, dest) = apply_b_leg_egress(config, &leg.leg_id, &gen_dialog.route_set, ack, dest);
     Some((
         OutboundSipEffect {
@@ -606,38 +620,27 @@ pub(crate) fn acked_invite_cseq(dialog: &Dialog) -> Option<u32> {
         .parse(&handle.original_invite)
         .ok()?
     {
-        SipMessage::Request(r) => Some(r.cseq.seq),
+        sip_message::SipMessage::Request(r) => Some(r.cseq().seq()),
         _ => None,
     }
-}
-
-/// The address a response to `req` is sent to (its topmost Via sent-by).
-fn top_via_host_port(req: &SipRequest) -> Option<(String, u16)> {
-    let via = get_header(&req.headers, "via")?;
-    let after_transport = via.split_whitespace().nth(1)?;
-    let sent_by = after_transport.split(';').next()?.trim();
-    Some(dest_of(sent_by))
-}
-
-/// Reduce a SIP URI (`sip:user@host:port;params`) to its `host:port`.
-pub fn strip_uri(uri: &str) -> String {
-    let no_scheme = uri.strip_prefix("sips:").or_else(|| uri.strip_prefix("sip:")).unwrap_or(uri);
-    let host_part = no_scheme.rsplit('@').next().unwrap_or(no_scheme);
-    host_part.split([';', '?', '>']).next().unwrap_or(host_part).trim().to_string()
 }
 
 #[cfg(test)]
 mod egress_tests {
     use super::*;
-    use sip_message::message_helpers::parse_uri_params;
     use sip_message::parser::custom::CustomParser;
-    use sip_message::SipParser;
+    use sip_message::{SipMessage, SipParser};
 
     fn parse(raw: &str) -> SipRequest {
         match CustomParser::new().parse(raw.as_bytes()).unwrap() {
             SipMessage::Request(r) => r,
             _ => panic!("expected request"),
         }
+    }
+
+    /// The one Route line the request carries.
+    fn top_route(req: &SipRequest) -> String {
+        req.raw(HeaderName::Route).next().expect("route header").to_string()
     }
 
     fn in_dialog_options(route: &str) -> SipRequest {
@@ -671,9 +674,8 @@ Content-Length: 0\r\n\r\n"
             in_dialog_options(route),
             ("10.244.2.7".to_string(), 5060),
         );
-        let top_route = get_header(&out.headers, "route").expect("route header");
         // The top Route is unchanged (the proxy issued the `;outbound`, not us).
-        assert_eq!(top_route, route, "egress must forward the captured route set verbatim");
+        assert_eq!(top_route(&out), route, "egress must forward the captured route set verbatim");
         // Loose route → wire destination is the proxy (top route); R-URI unchanged.
         assert_eq!(dest, ("10.0.0.9".to_string(), 5060));
     }
@@ -692,10 +694,11 @@ Content-Length: 0\r\n\r\n"
             in_dialog_options(route),
             ("10.244.2.7".to_string(), 5060),
         );
-        let top_route = get_header(&out.headers, "route").expect("route header");
+        let forwarded = top_route(&out);
+        let uri = loose_route_uri(&forwarded).expect("a loose route");
         assert!(
-            !parse_uri_params(top_route).contains_key("outbound"),
-            "egress must not stamp ;outbound; got {top_route}"
+            uri.param("outbound").is_none(),
+            "egress must not stamp ;outbound; got {forwarded}"
         );
         assert_eq!(dest, ("10.0.0.9".to_string(), 5060));
     }
@@ -719,9 +722,10 @@ CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n",
         );
         let (out, dest) = apply_b_leg_egress(&config, "b-1", &[], invite, ("10.244.2.7".to_string(), 5060));
-        let top_route = get_header(&out.headers, "route").expect("preloaded route");
-        assert_eq!(top_route, "<sip:10.0.0.9:5060;lr>", "bootstrap preload must be a plain loose Route");
-        assert!(!parse_uri_params(top_route).contains_key("outbound"), "no ;outbound on the bootstrap preload");
+        let preloaded = top_route(&out);
+        assert_eq!(preloaded, "<sip:10.0.0.9:5060;lr>", "bootstrap preload must be a plain loose Route");
+        let uri = loose_route_uri(&preloaded).expect("a loose route");
+        assert!(uri.param("outbound").is_none(), "no ;outbound on the bootstrap preload");
         assert_eq!(dest, ("10.0.0.9".to_string(), 5060), "wire destination is the outbound proxy");
     }
 
@@ -785,8 +789,9 @@ mod identity_tests {
     //! exactly what a transparent proxy (not a B2BUA) would do. Asserted directly
     //! against [`build_b_leg`] (the single mint point, `relay.rs`).
     use super::*;
+    use sip_message::header::Contact;
     use sip_message::parser::custom::CustomParser;
-    use sip_message::SipParser;
+    use sip_message::{SipMessage, SipParser};
 
     fn parse(raw: &str) -> SipRequest {
         match CustomParser::new().parse(raw.as_bytes()).unwrap() {
@@ -811,13 +816,9 @@ Content-Length: 0\r\n\r\n",
         )
     }
 
-    /// The Contact user from the b-leg INVITE's first Contact URI.
-    fn contact_user(req: &SipRequest) -> String {
-        let c = get_header(&req.headers, "contact").expect("b-leg INVITE has a Contact");
-        // `<sip:user@host:port;params>` → user
-        let inside = c.trim_start_matches('<').trim_end_matches('>');
-        let no_scheme = inside.strip_prefix("sip:").or_else(|| inside.strip_prefix("sips:")).unwrap_or(inside);
-        no_scheme.split('@').next().unwrap_or("").to_string()
+    /// The b-leg INVITE's Contact.
+    fn contact_of(req: &SipRequest) -> Contact {
+        req.header::<Contact>().expect("b-leg INVITE has a Contact").expect("a readable Contact")
     }
 
     // The b-leg INVITE's dialog identity is independent of the a-leg's: a fresh
@@ -851,33 +852,39 @@ Content-Length: 0\r\n\r\n",
         };
 
         // (a) ID-1 — fresh Call-ID, NOT the a-leg's.
-        assert_ne!(invite.call_id, a.call_id, "b-leg Call-ID must not be the a-leg's");
-        assert_eq!(invite.call_id, leg.call_id, "leg + INVITE Call-IDs agree");
+        let call_id = invite.call_id();
+        let call_id = call_id.as_str();
+        assert_ne!(call_id, a.call_id().as_str(), "b-leg Call-ID must not be the a-leg's");
+        assert_eq!(call_id, leg.call_id, "leg + INVITE Call-IDs agree");
         // The mint shape is `<leg>-<tag>@<local_ip>` (relay.rs), so it carries the
         // leg id and the B2BUA's own host — never alice's Call-ID host.
-        assert!(invite.call_id.starts_with("b-1-"), "Call-ID carries the leg id: {}", invite.call_id);
-        assert!(invite.call_id.ends_with("@127.0.0.1"), "Call-ID host is the B2BUA's: {}", invite.call_id);
+        assert!(call_id.starts_with("b-1-"), "Call-ID carries the leg id: {call_id}");
+        assert!(call_id.ends_with("@127.0.0.1"), "Call-ID host is the B2BUA's: {call_id}");
 
         // (b) ID-2 — fresh From-tag (B2BUA-owned), NOT the a-leg's; To-tag absent
         // on the initial INVITE (the callee mints it in its 2xx, RFC 3261 §12.1.1).
-        let from_tag = invite.from.tag.as_deref().expect("b-leg From carries a tag");
+        let from = invite.from();
+        let from_tag = from.tag().expect("b-leg From carries a tag");
         assert_ne!(from_tag, "alice-from-tag", "b-leg From-tag must not be the a-leg's");
         assert_eq!(from_tag, leg.from_tag, "leg + INVITE From-tags agree");
-        assert!(invite.to.tag.is_none(), "initial b-leg INVITE has no To-tag, got {:?}", invite.to.tag);
+        let to = invite.to();
+        assert!(to.tag().is_none(), "initial b-leg INVITE has no To-tag, got {:?}", to.tag());
 
         // (c) ID-3 — the b-leg dialog starts a fresh CSeq space at 1 (the a-leg's
         // INVITE was CSeq 314).
-        assert_eq!(invite.cseq.seq, 1, "b-leg CSeq starts at 1, independent of the a-leg's 314");
+        assert_eq!(invite.cseq().seq(), 1, "b-leg CSeq starts at 1, independent of the a-leg's 314");
 
         // (d) HDR-2 — Contact is the B2BUA's own address (host = local_ip), and its
         // user is the B2BUA's, NOT the a-leg caller's ("alice").
-        let cuser = contact_user(&invite);
+        let contact = contact_of(&invite);
+        let cuser = contact.uri().user().unwrap_or("");
         assert_ne!(cuser, "alice", "b-leg Contact user must not be the a-leg caller's");
         assert_eq!(cuser, "b2bua", "b-leg Contact is the B2BUA's own identity");
-        let contact = get_header(&invite.headers, "contact").unwrap();
-        assert!(
-            contact.contains("127.0.0.1"),
-            "b-leg Contact host must be the B2BUA local addr: {contact}"
+        assert_eq!(
+            contact.uri().host(),
+            "127.0.0.1",
+            "b-leg Contact host must be the B2BUA local addr: {}",
+            contact.uri()
         );
     }
 
@@ -905,8 +912,8 @@ Content-Length: 0\r\n\r\n",
             OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
         };
         (
-            get_header(&invite.headers, "via").expect("b-leg INVITE has a Via").to_string(),
-            get_header(&invite.headers, "contact").expect("b-leg INVITE has a Contact").to_string(),
+            invite.top_via().to_string(),
+            contact_of(&invite).to_wire(),
         )
     }
 

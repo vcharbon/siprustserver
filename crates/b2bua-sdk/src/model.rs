@@ -11,6 +11,8 @@ use call::{
     Direction, ExtMap, Leg, LegDisposition, LegKind, LegState, MachineId, PromotePemState,
     StateLabel, TagMapping, TimerType, TransferState,
 };
+use sip_message::draft::Entry;
+use sip_message::header::HeaderName;
 use sip_message::{Method, SipRequest, SipResponse};
 
 use crate::config::B2buaConfig;
@@ -338,12 +340,14 @@ pub struct MessageTransform {
     pub reason: Option<String>,
     /// Drop the body (+ Content-Type) — bare-180 downgrade (`relayFirst18x`).
     pub drop_body: bool,
-    /// Passthrough headers to suppress on the relayed message (case-insensitive),
-    /// e.g. `Require`/`RSeq` when downgrading a reliable 18x to a bare 180.
-    pub remove_headers: Vec<&'static str>,
-    /// Headers to stamp on the relayed message with replace semantics (the
+    /// Passthrough headers to suppress on the relayed message, e.g.
+    /// `Require`/`RSeq` when downgrading a reliable 18x to a bare 180.
+    pub remove_headers: Vec<HeaderName>,
+    /// Header lines to stamp on the relayed message with replace semantics (the
     /// synthetic-200 / resync-reINVITE Allow + Supported, `promote18xPemTo200`).
-    pub add_headers: Vec<(&'static str, String)>,
+    /// Each entry names its own header, so a stamp cannot disagree with the
+    /// value it carries.
+    pub add_headers: Vec<Entry>,
 }
 
 /// The category every [`RuleAction`] belongs to (ADR-0016 X9). [`RuleAction::
@@ -621,7 +625,7 @@ pub enum RuleAction {
     SendReinvite {
         leg_id: String,
         body: Vec<u8>,
-        add_headers: Vec<(&'static str, String)>,
+        add_headers: Vec<Entry>,
     },
     /// Overwrite the per-call PEM runtime slice (`None` → pre-promotion state).
     SetPromotePem { state: Option<call::PromotePemState> },

@@ -6,10 +6,11 @@
 
 use call::helpers::set_leg_state;
 use call::{Call, LegState};
+use sip_message::draft::Entry;
 use sip_message::generators::{self, GenerateResponseOpts};
-use sip_message::message_helpers::get_header;
+use sip_message::header::{HeaderClass, HeaderName};
 use sip_message::parser::custom::CustomParser;
-use sip_message::{SipMessage, SipParser};
+use sip_message::{SipHeader, SipMessage, SipParser, SipStr};
 
 use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
 use crate::rules::model::RuleContext;
@@ -37,7 +38,11 @@ impl ActionExecutor<'_> {
                 ..Default::default()
             };
             let resp = generators::generate_response(req, status, reason, &opts);
-            let dest = top_via_dest(req);
+            // RFC 3261 §18.2.2 — a response goes back to the request's top-Via
+            // sent-by.
+            let hop = req.top_via();
+            let (host, port) = hop.sent_by().pair();
+            let dest = (host.to_string(), port);
             fx.outbound.push(OutboundSipEffect {
                 body: OutboundBody::Response(resp),
                 mode: OutboundTxnMode::ServerResponse,
@@ -124,7 +129,7 @@ impl ActionExecutor<'_> {
         // A 2xx INVITE answer carries the B2BUA's own Allow/Supported (RFC 3261
         // §13.2.1/§20.37), exactly as the original confirm-dialog relay stamped —
         // so the retransmit is byte-faithful and the RFC audit stays clean.
-        let mut extra: Vec<sip_message::SipHeader> = Vec::new();
+        let mut extra: Vec<SipHeader> = Vec::new();
         relay::stamp_a_facing_invite_advert(&mut extra, &[]);
         let mut effect = relay::response_to_a_leg(
             &a_invite,
@@ -209,9 +214,9 @@ impl ActionExecutor<'_> {
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
         let mut extra_headers = Vec::new();
         if let Some(pem) = p_early_media {
-            extra_headers.push(sip_message::SipHeader {
-                name: "P-Early-Media".to_string().into(),
-                value: pem.to_string().into(),
+            extra_headers.push(SipHeader {
+                name: SipStr::owned(HeaderName::PEarlyMedia.as_wire_str()),
+                value: SipStr::owned(pem),
             });
         }
         fx.outbound.push(relay::response_to_a_leg(
@@ -293,13 +298,15 @@ impl ActionExecutor<'_> {
         // `header_updates` entry naming either owns it: a set value is kept
         // verbatim, a removal keeps it absent (`build_a_leg_response_headers`
         // already dropped it).
-        let service_owned: Vec<(&'static str, String)> = ["Allow", "Supported"]
+        let service_owned: Vec<Entry> = [HeaderName::Allow, HeaderName::Supported]
             .into_iter()
             .filter_map(|name| {
                 header_updates
                     .iter()
-                    .find(|(n, _)| n.eq_ignore_ascii_case(name))
-                    .map(|(_, v)| (name, v.clone().unwrap_or_default()))
+                    .find(|(n, _)| name.matches(n))
+                    .map(|(_, v)| {
+                        Entry::raw(name, SipStr::owned(v.as_deref().unwrap_or("")))
+                    })
             })
             .collect();
         relay::stamp_a_facing_invite_advert(&mut extra_headers, &service_owned);
@@ -319,47 +326,25 @@ impl ActionExecutor<'_> {
     }
 }
 
-fn top_via_dest(req: &sip_message::SipRequest) -> (String, u16) {
-    if let Some(via) = get_header(&req.headers, "via") {
-        if let Some(after) = via.split_whitespace().nth(1) {
-            if let Some(sent_by) = after.split(';').next() {
-                return relay::dest_of(sent_by.trim());
-            }
-        }
-    }
-    ("127.0.0.1".to_string(), 5060)
-}
-
-/// Structural headers the response generator owns — never settable via the flat
-/// header map (ADR-0017 X2). `Contact` is excluded because a redirect authors it
-/// from the typed contact list and a reject carries none.
-const A_LEG_RESPONSE_STRUCTURAL: &[&str] = &[
-    "from", "to", "via", "call-id", "cseq", "max-forwards", "content-length", "record-route",
-    "contact",
-];
-
 /// Build the extra a-leg response headers for a decision-authored Reject/Redirect
 /// ([`crate::rules::model::RuleAction::RespondToALeg`]): non-structural
 /// `header_updates` *sets* plus one `Contact: <uri>;q=…` per redirect target.
-/// Removals and structural keys drop.
+/// Removals and structural keys drop — the response generator owns the
+/// stack-owned set (ADR-0017 X2), including the Contact a redirect authors from
+/// its typed target list.
 fn build_a_leg_response_headers(
     header_updates: &[(String, Option<String>)],
     contacts: &[(String, Option<f32>)],
-) -> Vec<sip_message::SipHeader> {
-    let mut out: Vec<sip_message::SipHeader> = Vec::new();
+) -> Vec<SipHeader> {
+    let mut out: Vec<SipHeader> = Vec::new();
     for (name, val) in header_updates {
-        let is_structural =
-            A_LEG_RESPONSE_STRUCTURAL.contains(&name.to_ascii_lowercase().as_str());
-        if let (Some(v), false) = (val, is_structural) {
-            out.push(sip_message::SipHeader { name: name.clone().into(), value: v.clone().into() });
+        let named = HeaderName::from(name.as_str());
+        if let (Some(v), HeaderClass::EndToEnd) = (val, named.class()) {
+            out.push(SipHeader { name: SipStr::owned(name), value: SipStr::owned(v) });
         }
     }
     for (uri, q) in contacts {
-        let value = match q {
-            Some(q) => format!("<{uri}>;q={q}"),
-            None => format!("<{uri}>"),
-        };
-        out.push(sip_message::SipHeader { name: "Contact".to_string().into(), value: value.into() });
+        out.push(relay::redirect_contact(uri, *q));
     }
     out
 }

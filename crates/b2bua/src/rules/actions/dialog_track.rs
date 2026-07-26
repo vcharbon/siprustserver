@@ -5,8 +5,7 @@
 
 use call::helpers::{find_by_b_tag, set_leg_state};
 use call::{B2buaDialogExt, Call, Dialog, LegDisposition, LegState, StackDialog};
-use sip_message::message_helpers::get_header;
-use sip_message::parser::custom::structured_headers::split_top_level_commas;
+use sip_message::header::{self, HeaderValue, RecordRouteEntry};
 
 use crate::rules::model::RuleContext;
 use crate::rules::relay;
@@ -29,7 +28,7 @@ impl ActionExecutor<'_> {
             return;
         }
         let Some(resp) = ctx.response() else { return };
-        if ctx.source_leg_id != leg_id || resp.to.tag.as_deref() != Some(b_tag) {
+        if ctx.source_leg_id != leg_id || resp.to().tag() != Some(b_tag) {
             return;
         }
         self.track_b_early_dialog(call, leg_id, resp, b_tag);
@@ -48,24 +47,17 @@ impl ActionExecutor<'_> {
         resp: &sip_message::SipResponse,
         to_tag: &str,
     ) {
-        let contact = get_header(&resp.headers, "contact").map(unwrap_angle).unwrap_or_default();
+        let contact = contact_uri(resp.header::<header::Contact>()).unwrap_or_default();
         // §12.1.2: an EARLY dialog's route set is established from the reliable
-        // 1xx's Record-Route, exactly like the 2xx path below — split the
-        // comma-combined double-record-route halves first, then reverse the
-        // individual URIs (UAC side). Without this a PRACK/UPDATE on the early
-        // dialog rides the preloaded bootstrap Route only and under-reproduces
-        // the route set (the §12.2.1.1 audit catches it behind a front proxy).
-        let mut early_route_set: Vec<String> =
-            sip_message::message_helpers::get_headers(&resp.headers, "record-route")
-                .iter()
-                .flat_map(|h| split_top_level_commas(h))
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-        early_route_set.reverse();
+        // 1xx's Record-Route, exactly like the 2xx path below — one entry per
+        // recorded route (a comma-combined double-record-route is two), reversed
+        // (UAC side). Without this a PRACK/UPDATE on the early dialog rides the
+        // preloaded bootstrap Route only and under-reproduces the route set (the
+        // §12.2.1.1 audit catches it behind a front proxy).
+        let early_route_set = uac_route_set(resp);
         // The response echoes the INVITE's CSeq (§8.1.3.3); seed each forked
         // early dialog's sequence from it so they advance independently.
-        let invite_cseq = resp.cseq.seq as i64;
+        let invite_cseq = resp.cseq().seq() as i64;
         let already = call
             .b_legs
             .iter()
@@ -126,11 +118,9 @@ impl ActionExecutor<'_> {
             Some(r) => r,
             None => return,
         };
-        let remote_tag = resp.to.tag.clone().unwrap_or_default();
+        let remote_tag = resp.to().tag().unwrap_or_default().to_string();
         let remote_tag_clone = remote_tag.clone();
-        let remote_target = get_header(&resp.headers, "contact")
-            .map(unwrap_angle)
-            .unwrap_or_default();
+        let remote_target = contact_uri(resp.header::<header::Contact>()).unwrap_or_default();
         // §12.1.2: the b-leg is a UAC dialog, so its route set is the
         // dialog-creating 2xx's Record-Route values in *reverse* order (the
         // a-leg/UAS path keeps the INVITE's Record-Route forward). We must reverse
@@ -141,17 +131,11 @@ impl ActionExecutor<'_> {
         // cookie on top — so the worker→callee keepalive carries the cookie first,
         // the proxy decodes it (`w_pri`) and bounces the request back to a worker
         // after a reboot onto a new pod IP the registry has not yet learned (the
-        // long-call-loss class). Split top-level commas first so the proxy's own
-        // `;outbound` half lands on top and direction is intrinsic to its
-        // Record-Route — no `;outbound` worker-stamp and no Via/registry rescue.
-        let mut route_set: Vec<String> =
-            sip_message::message_helpers::get_headers(&resp.headers, "record-route")
-                .iter()
-                .flat_map(|h| split_top_level_commas(h))
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-        route_set.reverse();
+        // long-call-loss class). Reading the recorded routes as individual
+        // entries puts the proxy's own `;outbound` half on top, so direction is
+        // intrinsic to its Record-Route — no `;outbound` worker-stamp and no
+        // Via/registry rescue.
+        let route_set = uac_route_set(resp);
         if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
             // Forking (RFC 3261 §12.1.2): the 2xx confirms exactly ONE early
             // dialog — the one whose callee tag it carries. Promote *that* fork
@@ -178,7 +162,7 @@ impl ActionExecutor<'_> {
                     if !route_set.is_empty() {
                         d.sip.route_set = route_set;
                     }
-                    d.ext.remote_cseq = Some(resp.cseq.seq as i64);
+                    d.ext.remote_cseq = Some(resp.cseq().seq() as i64);
                 }
                 // One dialog survives confirmation (model: "one survives after
                 // confirmed") — drop the losing forks so per-call state is bounded.
@@ -264,33 +248,28 @@ impl ActionExecutor<'_> {
         }
         let tag = preferred.unwrap_or_else(|| self.id_gen.new_tag());
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let remote_target = get_header(&a_invite.headers, "contact")
-            .map(unwrap_angle)
-            .unwrap_or_else(|| a_invite.from.uri.to_string());
+        let from = a_invite.from();
+        let remote_target = contact_uri(a_invite.header::<header::Contact>())
+            .unwrap_or_else(|| from.uri().to_string());
         // §12.1.1: the a-leg is a UAS dialog — route set is the INVITE's
-        // Record-Route values in forward order. Split top-level commas so a
-        // comma-combined header (the proxy's double-record-route halves) becomes
-        // individual route URIs, same as the b-leg path above.
-        let route_set: Vec<String> =
-            sip_message::message_helpers::get_headers(&a_invite.headers, "record-route")
-                .iter()
-                .flat_map(|h| split_top_level_commas(h))
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+        // Record-Route entries in forward order, one entry per recorded route (a
+        // comma-combined header — the proxy's double-record-route halves — is
+        // two), same as the b-leg path above.
+        let route_set = uas_route_set(&a_invite);
+        let cseq = a_invite.cseq().seq() as i64;
         let dialog = Dialog {
             sip: StackDialog {
                 call_id: call.a_leg.call_id.clone(),
                 local_tag: tag.clone(),
                 remote_tag: call.a_leg.from_tag.clone(),
-                local_uri: a_invite.to.uri.to_string(),
-                remote_uri: a_invite.from.uri.to_string(),
+                local_uri: a_invite.to().uri().to_string(),
+                remote_uri: from.uri().to_string(),
                 remote_target,
-                local_cseq: a_invite.cseq.seq as i64,
+                local_cseq: cseq,
                 route_set,
             },
             ext: B2buaDialogExt {
-                remote_cseq: Some(a_invite.cseq.seq as i64),
+                remote_cseq: Some(cseq),
                 inbound_pending_requests: vec![],
                 ack_branch: None,
                 pending_invite_txn: None,
@@ -303,10 +282,31 @@ impl ActionExecutor<'_> {
     }
 }
 
-fn unwrap_angle(value: &str) -> String {
-    let t = value.trim();
-    match (t.find('<'), t.find('>')) {
-        (Some(a), Some(b)) if b > a + 1 => t[a + 1..b].to_string(),
-        _ => t.to_string(),
-    }
+/// The dialog's remote target: the URI of the peer's Contact (RFC 3261
+/// §12.1.1/§12.1.2). `None` when the peer sent none, or one no reader accepts.
+fn contact_uri(
+    contact: Option<Result<header::Contact, sip_message::SipParseError>>,
+) -> Option<String> {
+    contact.and_then(Result::ok).map(|c| c.uri().to_string())
+}
+
+/// The route set a UAC applies: the responder's recorded routes reversed
+/// (RFC 3261 §12.1.2). One entry per recorded route, so a comma-combined line —
+/// the front proxy's double record-route — yields both halves in wire order.
+fn uac_route_set(resp: &sip_message::SipResponse) -> Vec<String> {
+    let mut set = route_texts(resp.list::<RecordRouteEntry>().unwrap_or_default());
+    set.reverse();
+    set
+}
+
+/// The route set a UAS applies: the requester's recorded routes in the order
+/// they were recorded (RFC 3261 §12.1.1).
+fn uas_route_set(req: &sip_message::SipRequest) -> Vec<String> {
+    route_texts(req.list::<RecordRouteEntry>().unwrap_or_default())
+}
+
+/// Recorded routes as the text the `call` crate stores (it has no sip-message
+/// dependency, ADR-0008).
+fn route_texts(entries: Vec<RecordRouteEntry>) -> Vec<String> {
+    entries.into_iter().map(|e| e.to_wire()).collect()
 }

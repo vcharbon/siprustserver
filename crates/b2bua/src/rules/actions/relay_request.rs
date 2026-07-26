@@ -8,8 +8,8 @@ use call::helpers::{
 };
 use call::{Call, PendingRequest};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
-use sip_message::message_helpers::get_header;
-use sip_message::SipMessage;
+use sip_message::header::{HeaderName, RAck};
+use sip_message::Method;
 use sip_txn::TxnKind;
 
 use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
@@ -73,8 +73,8 @@ impl ActionExecutor<'_> {
         // ACK's body through (the delayed-offer re-INVITE answer rides the ACK,
         // RFC 3264 §4). The target may be either side (a re-INVITE answered by
         // bob is ACKed toward bob; one answered by alice is ACKed toward alice).
-        if req.method == "ACK" {
-            let content_type = get_header(&req.headers, "content-type").map(str::to_string);
+        if req.method == Method::Ack {
+            let content_type = req.raw(HeaderName::ContentType).next().map(str::to_string);
             self.ack_leg(call, fx, target_leg, req.body.to_vec(), content_type);
             return;
         }
@@ -107,7 +107,7 @@ impl ActionExecutor<'_> {
 
         // ── Per-dialog CSeq (§12.2.1.1): outbound = target.localCSeq + delta,
         //    delta = relay_cseq_delta(inbound, sourceDialog.remoteCSeq). ──
-        let inbound_cseq = req.cseq.seq as i64;
+        let inbound_cseq = req.cseq().seq() as i64;
         let source_leg_id = ctx.source_leg_id.to_string();
         let source_dialog = ctx.source_dialog().cloned();
         let source_remote_cseq = source_dialog.as_ref().and_then(|d| d.ext.remote_cseq);
@@ -127,7 +127,9 @@ impl ActionExecutor<'_> {
         // RFC 3262 §7.2: rewrite RAck's middle (CSeq) token to the INVITE CSeq
         // that produced the reliable 1xx *on the target leg*.
         let rack = if method == InDialogMethod::Prack {
-            get_header(&req.headers, "rack").map(|r| rewrite_rack(r, target_invite_cseq))
+            req.header::<RAck>()
+                .and_then(Result::ok)
+                .map(|r| RAck::new(r.rseq(), target_invite_cseq.max(0) as u32, r.method().clone()))
         } else {
             None
         };
@@ -138,14 +140,14 @@ impl ActionExecutor<'_> {
             via: Some(relay::leg_via(self.config, &call.call_ref, target_leg, call.emergency == Some(true), branch.clone())),
             contact: Some(relay::leg_contact(self.config, &call.call_ref, target_leg, call.emergency == Some(true))),
             body: req.body.to_vec(),
-            content_type: get_header(&req.headers, "content-type").map(str::to_string),
-            rack,
+            content_type: req.raw(HeaderName::ContentType).next().map(str::to_string),
             cseq: Some(outbound_cseq as u32),
             extra_headers: relay::relay_request_passthrough_headers(req),
+            values: generators::InDialogValues { rack, ..Default::default() },
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(method, &gen_dialog, &opts);
-        let dest = relay::dest_of(&relay::strip_uri(&gen_dialog.remote_target));
+        let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) =
             relay::apply_b_leg_egress(self.config, target_leg, &gen_dialog.route_set, res.request, dest);
         let kind = if method == InDialogMethod::Invite {
@@ -163,7 +165,7 @@ impl ActionExecutor<'_> {
             *call = call::helpers::update_dialog(call.clone(), target_leg, &t_id, |d| {
                 d.ext.pending_invite_txn = Some(call::InviteTxnHandle {
                     branch: branch.clone(),
-                    original_invite: sip_message::serialize(&SipMessage::Request(out_req.clone())),
+                    original_invite: out_req.raw.to_vec(),
                     destination: call::HostPort { host: dest.0.clone(), port: dest.1 },
                 });
                 // New INVITE transaction → drop the prior ACK branch (§13.2.2.4);
@@ -181,13 +183,10 @@ impl ActionExecutor<'_> {
                 method: req.method.to_string(),
                 outbound_cseq,
                 inbound_cseq,
-                source_vias: sip_message::message_helpers::get_headers(&req.headers, "via")
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-                source_call_id: req.call_id.to_string(),
-                source_from: get_header(&req.headers, "from").unwrap_or_default().to_string(),
-                source_to: get_header(&req.headers, "to").unwrap_or_default().to_string(),
+                source_vias: req.raw(HeaderName::Via).map(str::to_string).collect(),
+                source_call_id: req.call_id().as_str().to_string(),
+                source_from: req.raw(HeaderName::From).next().unwrap_or_default().to_string(),
+                source_to: req.raw(HeaderName::To).next().unwrap_or_default().to_string(),
                 direction: ctx.direction,
                 cancelled: false,
             };
@@ -201,16 +200,5 @@ impl ActionExecutor<'_> {
             label: format!("relay {} → {target_leg}", req.method),
             leg_id: Some(target_leg.to_string()),
         });
-    }
-}
-
-/// Rewrite the middle (CSeq) token of an `RAck` (`<rseq> <cseq> <method>`) to
-/// `cseq`, preserving RSeq + method (RFC 3262 §7.2).
-fn rewrite_rack(rack: &str, cseq: i64) -> String {
-    let parts: Vec<&str> = rack.split_whitespace().collect();
-    if parts.len() == 3 {
-        format!("{} {} {}", parts[0], cseq, parts[2])
-    } else {
-        rack.to_string()
     }
 }
