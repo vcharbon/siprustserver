@@ -14,15 +14,13 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use layer_harness::Stamped;
-use sip_message::message_helpers::get_headers;
+use sip_message::header::{ProxyRequire, Require};
 use sip_message::{SipMessage, SipParser};
 
 use crate::contracts::{PeerAuditRule, SignalingNetworkEvent};
 use crate::rfc_audit::dialog_model::{
-    call_id, cseq_method, extract_route_uri, msg_headers, route_is_loose, status, to_tag,
-    top_via_branch,
+    call_id, cseq_method, route_entries, status, to_tag, top_via_branch, value_of,
 };
-use crate::rfc_audit::txn_correlation::split_option_tags;
 use crate::types::UaRole;
 
 /// Methods that can legitimately initiate a transaction *outside* a dialog.
@@ -41,10 +39,11 @@ const DIALOG_INITIATING_METHODS: &[&str] = &[
     "NOTIFY",
 ];
 
-/// True iff any Require / Proxy-Require value tokenises to at least one
-/// non-empty option-tag. Mirrors the TS `hasOptionTag`.
-fn carries_option_tag(values: &[&str]) -> bool {
-    !split_option_tags(values.iter().copied()).is_empty()
+/// True iff the message names at least one option-tag on Require or
+/// Proxy-Require.
+fn carries_option_tag(m: &SipMessage) -> bool {
+    value_of::<Require>(m).is_some_and(|set| !set.is_empty())
+        || value_of::<ProxyRequire>(m).is_some_and(|set| !set.is_empty())
 }
 
 /// **RFC 3261 §8.1.1.2 — a request outside of a dialog MUST NOT carry a To
@@ -169,9 +168,7 @@ impl PeerAuditRule for NoRequireOnCancelOrAckRule {
                     if method != "CANCEL" && method != "ACK" {
                         continue;
                     }
-                    let require = get_headers(msg_headers(&m), "require");
-                    let proxy_require = get_headers(msg_headers(&m), "proxy-require");
-                    if !carries_option_tag(&require) && !carries_option_tag(&proxy_require) {
+                    if !carries_option_tag(&m) {
                         continue;
                     }
                     if method == "CANCEL" {
@@ -297,12 +294,11 @@ impl PeerAuditRule for StrictRouteShuffleOnSendRule {
             let SipMessage::Request(req) = &m else {
                 continue;
             };
-            let routes = get_headers(msg_headers(&m), "route");
+            let routes = route_entries(&m);
             let Some(first) = routes.first() else {
                 continue;
             };
-            let first_uri = extract_route_uri(first);
-            if route_is_loose(&first_uri) {
+            if first.uri().is_loose_route() {
                 continue;
             }
             out.push(format!(

@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use layer_harness::{LaneKey, Stamped};
-use sip_message::message_helpers::{extract_tag, get_header, get_headers, parse_via_params};
+use sip_message::header::Via;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
@@ -104,12 +104,12 @@ struct DialogCseqs {
 /// invisible to a test UA that answers whatever it is handed.
 pub struct CSeqInDialogOrderRule;
 
-/// The `branch=` token of the TOP (first) `Via` header, if present and
+/// The `branch=` token of a message's TOP (first) `Via`, if present and
 /// non-empty. A retransmission reuses this exact token; a new client
-/// transaction mints a fresh one.
-fn top_via_branch(req: &sip_message::SipRequest) -> Option<String> {
-    let top = get_headers(&req.headers, "via").into_iter().next()?;
-    parse_via_params(top).branch.filter(|b| !b.is_empty())
+/// transaction mints a fresh one. A response echoes the request's, which is what
+/// correlates the two (RFC 3261 §8.1.1.7, §17).
+fn branch_of(top: Via) -> Option<String> {
+    top.branch().filter(|b| !b.is_empty()).map(str::to_string)
 }
 
 impl CrossMessageAuditRule for CSeqInDialogOrderRule {
@@ -141,13 +141,11 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
         for (i, e) in to_sip_entries(events).into_iter().enumerate() {
             let Some(receiver) = e.to_lane else { continue };
             let Ok(SipMessage::Request(req)) = parser.parse(&e.raw) else { continue };
-            let (Some(cid), Some(ftag)) = (
-                get_header(&req.headers, "call-id").map(str::to_string),
-                get_header(&req.headers, "from").and_then(extract_tag),
-            ) else {
+            let Some(ftag) = req.from().tag().map(str::to_string) else {
                 continue;
             };
-            let branch = top_via_branch(&req).unwrap_or_default();
+            let cid = req.call_id.to_string();
+            let branch = branch_of(req.top_via()).unwrap_or_default();
             positions
                 .entry((receiver, cid, ftag, req.cseq.seq, req.method.to_string(), branch))
                 .or_insert(i + 1);
@@ -166,12 +164,10 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
             let Ok(SipMessage::Request(req)) = parser.parse(&packet.raw) else {
                 continue; // responses / unparseable: not our concern here
             };
-            let (Some(call_id), Some(from_tag)) = (
-                get_header(&req.headers, "call-id").map(str::to_string),
-                get_header(&req.headers, "from").and_then(extract_tag),
-            ) else {
+            let Some(from_tag) = req.from().tag().map(str::to_string) else {
                 continue;
             };
+            let call_id = req.call_id.to_string();
             let key = (bind_key.clone(), call_id, from_tag);
             if !streams.contains_key(&key) {
                 stream_order.push(key.clone());
@@ -180,7 +176,7 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
             let st = streams.get_mut(&key).unwrap();
             let seq = req.cseq.seq;
             let method = req.method.to_string();
-            let branch = top_via_branch(&req);
+            let branch = branch_of(req.top_via());
 
             // 1. A repeat of the SAME (branch, method, CSeq) is a retransmission
             //    of a transaction we already accounted for: skip entirely. Method +
@@ -385,14 +381,6 @@ fn cseq_below_anchor_msg(
     )
 }
 
-/// Top (first) `Via` branch token from a raw header list — the transaction
-/// identifier a response echoes from the request it answers (RFC 3261 §8.1.1.7,
-/// §17). Works for both requests and responses.
-fn top_via_branch_headers(headers: &[sip_message::SipHeader]) -> Option<String> {
-    let top = get_headers(headers, "via").into_iter().next()?;
-    parse_via_params(top).branch.filter(|b| !b.is_empty())
-}
-
 /// **RFC 3261 §8.1.3.5 / §17 — a response's CSeq MUST equal its request's.** A
 /// response is matched to the client transaction by the topmost `Via` branch,
 /// and §8.1.3.5 requires the response to copy the request's `CSeq` (sequence
@@ -424,7 +412,7 @@ impl CrossMessageAuditRule for ResponseCseqMatchesTransactionRule {
                 continue;
             };
             if let Ok(SipMessage::Request(req)) = parser.parse(&packet.raw) {
-                if let Some(branch) = top_via_branch_headers(&req.headers) {
+                if let Some(branch) = branch_of(req.top_via()) {
                     req_cseqs
                         .entry(branch)
                         .or_default()
@@ -440,7 +428,7 @@ impl CrossMessageAuditRule for ResponseCseqMatchesTransactionRule {
             let Ok(SipMessage::Response(resp)) = parser.parse(&packet.raw) else {
                 continue;
             };
-            let Some(branch) = top_via_branch_headers(&resp.headers) else {
+            let Some(branch) = branch_of(resp.top_via()) else {
                 continue;
             };
             // Never saw the request for this branch → cannot judge (the other
@@ -498,12 +486,10 @@ impl CrossMessageAuditRule for AckCseqMatchesInviteRule {
             let Ok(SipMessage::Request(req)) = parser.parse(&packet.raw) else {
                 continue;
             };
-            let (Some(call_id), Some(from_tag)) = (
-                get_header(&req.headers, "call-id").map(str::to_string),
-                get_header(&req.headers, "from").and_then(extract_tag),
-            ) else {
+            let Some(from_tag) = req.from().tag().map(str::to_string) else {
                 continue;
             };
+            let call_id = req.call_id.to_string();
             let key = (bind_key.clone(), call_id, from_tag);
             let method = req.method.as_str();
             if method.eq_ignore_ascii_case("INVITE") {

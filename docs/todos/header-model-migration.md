@@ -162,7 +162,7 @@ helpers listed above, run capped workspace test, tick tracker, commit.
 - [x] M6 b2bua-sdk + b2bua
 - [x] M7 scenario-harness
 - [x] M8 e2e-core + e2e-model + announcement
-- [ ] M9 sip-net rfc_audit
+- [x] M9 sip-net rfc_audit
 - [ ] M10 sip-pcap + loadgen
 - [ ] M11 harness/test crates
 - [ ] M12 teardown (delete legacy, privatize, MessageCore)
@@ -959,3 +959,93 @@ pre-existing doc-indentation warnings.
   the harness re-parses. Typing it is `e2e-model`'s own model decision, not a
   header-model one, and it is the last string round-trip on this crate's dial
   path.
+
+### M9 — sip-net (rfc_audit)
+
+`sip-net` has **zero** `message_helpers::*` / `get_header` / `get_headers` call
+sites left, `src` and `tests` alike. No reader was missing — the port needed
+nothing added to `sip-message`. The crate's only remaining raw-byte scans are
+the SDP `o=`/`m=`/`c=` line reads (a body concern, not a header one) and the
+`sniff` calls below.
+
+**Every deletion target the plan listed is gone**, plus what the sweep found:
+
+| deleted | replaced by |
+|---|---|
+| `dialog_model.rs` `route_is_loose` (the `;lr` substring walk), `split_header_list` / `split_header_values` (the angle/quote-aware comma splitter), `extract_route_uri` | `msg.list::<RouteEntry>()` → `uri().is_loose_route()` / `uri()` — one `route_entries` read stating the tolerance once |
+| `dialog_model.rs` `msg_headers` (the raw header-list escape hatch every rule reached through) | typed reads; the few genuinely opaque ones take `msg.raw(HeaderName::X)` |
+| `top_via_branch` ×4 (`dialog_model`, `cseq` ×2, `starter_peer::sent_top_branch`) | `msg.top_via().branch()` |
+| `cross_generic.rs` `read_top_via_rport` (hand-rolled `;`-split) | `via.param("rport")` + `via.rport() -> Rport` |
+| `cross_generic.rs` `route_host_port` over `message_helpers::extract_host_port` | `uri.host_port()` |
+| `cross_generic.rs` `parse_sip_uri` wire-destination peel | `Uri::parse` on the Request-URI / the Route entry's `uri()` |
+| `txn_correlation.rs` `split_option_tags` (+ `rfc3261_cross::collect_option_tags`, `header_values_owned`, `rfc3261_peer`/`rfc3262_*` `has_option_tag`) | `header::<Require/Supported/Unsupported/ProxyRequire>()` — `contains` is the set membership, `option_tags::<K>` the lower-cased list for the recognised-tag tables |
+| `rfc3262_cross.rs` `parse_rack`/`ParsedRack` and the RSeq `parse::<u64>` rows | `header::<RAck>()` / `list::<RSeq>()` |
+| `starter_peer.rs` `ToTagPresenceRule::scan` (hand-rolled line split + `extract_tag`) | `sniff::resp_status` + `sniff::to_tag` — the sanctioned raw scanners for the datagram this rule must see *before* it parses |
+| `starter_peer.rs` Max-Forwards `parse::<i64>` | `header::<MaxForwards>()`, with `raw(HeaderName::MaxForwards)` kept only to quote the offending text |
+| `rfc3264_peer.rs` `is_sdp_content_type` (length-15 split + `\b` boundary walk) | `list::<MediaType>()` → `ct.is("application/sdp")` |
+| `cseq.rs` `get_header("call-id")` / `get_header("from") + extract_tag` | the parsed `call_id` field and `req.from().tag()` |
+| `rfc3261_cross.rs` `cseq_of` (raw CSeq row, trimmed) | `msg.cseq().to_wire()` — both sides of the correlation key are now normalised |
+
+**`DialogModel::route_set` is `Vec<RouteEntry>`**, not `Vec<String>`: the model
+carries the route set *as in-dialog requests must reproduce it*, so the
+Record-Route stack is retargeted (`RecordRouteEntry::retarget`) and reversed for
+the UAC at the one place §12.1.1/§12.1.2 says it is.
+
+**The tolerance the M9 plan warned about is stated once, in
+`dialog_model::value_of` / `route_entries`:** a value no reader accepts leaves
+the rule silent instead of throwing or guessing. A rule states one invariant, and
+a message whose grammar is already wrong belongs to the grammar rules — the
+auditor still sees every deliberately-broken peer message, because the audit
+parses leniently (`lenient_parser`, unchanged) and the *rules* decide, which is
+exactly the split ADR-0007 set up. The 260 audit unit tests (many of which are
+hand-built malformed fixtures) pass unchanged.
+
+**Behaviour deltas, all deliberate:**
+- **A `;lr` inside the URI no longer needs a substring scan, so `;lrx` and a
+  `;lr` in a display name can never read as loose routing.** The old
+  `route_is_loose` walked the whole header value; the typed read asks the URI.
+- **A comma-folded Route/Record-Route line is split by the value grammar**, not
+  by an angle/quote-aware string splitter. Same result on every fixture, but a
+  fold whose *second* entry is loose no longer makes the first look loose (the
+  same delta M5/M7/M8 took on the routing side, now on the auditing side).
+- **`rfc3261.midDialogWireDestination` skips a request whose only Route line no
+  reader accepts** instead of resolving it as a destination. The old path fed
+  the raw value to `parse_sip_uri`, which saturated an out-of-range port — a
+  `sip:vip:70596` Route used to produce a wire-destination finding on a message
+  the routing layer (post-M5) does not route on at all.
+- **`rfc3261.via` stores the branch its sender minted, taken from `top_via()`**,
+  instead of re-parsing the stored top Via *line* later. A comma-folded Via line
+  now yields the first hop's branch rather than a parse of the whole line.
+- **`rfc3262.reliable1xxHeaders` asks presence and readability separately**, so
+  an `RSeq` above `u32` is reported as out of range (it is) rather than being
+  read as a `u64` in range.
+- Presence probes (`Contact`, `Content-Type`, `Route`, `Allow`, `Supported`,
+  `Accept*`, `Retry-After`, `Unsupported`) are `HeaderName`-keyed and therefore
+  compact-form aware: a `m:`/`c:`/`k:` line now answers for the header it names.
+
+Workspace: 2122 tests passed, 0 failed. Clippy on `sip-net`: identical warnings
+before and after (3 lib + 1 test, all pre-existing SDP/loop-index categories).
+
+**Suspicions raised, not fixed:**
+- **`sip_message::parser::custom::structured_headers::parse_rack` has no
+  consumer left outside `sip-message`'s own optional-header extraction and its
+  ABNF fuzz corpus.** It is not on the M12 deletion list; it should be, or the
+  optional-header path should read `header::RAck` like everyone else now does.
+- The audit still round-trips every message through a **second, lenient parse**
+  (`lenient_parser`), and several rules parse the same recorded bytes two or
+  three times (`build_branch_index` runs per slot inside two rules). Typed reads
+  made each read cheaper but did not touch the pass count; a single lenient
+  parse per wire entry, shared across rules, is the real win here and is
+  independent of ADR-0025.
+- `DialogModel`'s tags and dialog URIs are still `String`, and `from_tag` /
+  `to_tag` / `from_uri` / `to_uri` still read the OLD parsed fields — they
+  return `&str` borrowed from the message, which the transitional accessors
+  (which build a value per call) cannot do. M12's stored `MessageCore` is what
+  lets those become typed reads; porting them now would mean allocating a value
+  per rule per message.
+- `starter_peer::RecordRouteRule` still detects a B2BUA's Record-Route by
+  `rr.contains("callRef=")`, a substring probe over the raw value. It is a
+  deliberate *policy* probe for our own stack's cookie params rather than a
+  grammar read, so it stayed raw — but `RecordRouteEntry::uri().param("callRef")`
+  would say it exactly, and would stop a display name containing the text from
+  firing it.

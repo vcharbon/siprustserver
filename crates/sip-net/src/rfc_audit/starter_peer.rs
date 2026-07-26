@@ -24,13 +24,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use layer_harness::Stamped;
-use sip_message::message_helpers::get_header;
+use sip_message::header::{HeaderName, MaxForwards};
 use sip_message::parser::custom::CustomParser;
-use sip_message::{SipMessage, SipParser};
+use sip_message::{sniff, SipMessage, SipParser};
 
 use crate::contracts::{PeerAuditRule, SignalingNetworkEvent};
 use crate::rfc_audit::dialog_model::{
-    call_id, cseq_method, cseq_seq, from_tag, from_uri, msg_headers, to_tag, top_via_branch,
+    call_id, cseq_method, cseq_seq, from_tag, from_uri, to_tag, top_via_branch, value_of,
 };
 use crate::types::UaRole;
 
@@ -273,13 +273,13 @@ impl PeerAuditRule for MaxForwardsRule {
                 continue;
             };
             let method = req.method.as_str();
-            match get_header(msg_headers(&msg), "max-forwards") {
+            match msg.raw(HeaderName::MaxForwards).next() {
                 None => out.push(format!(
                     "{method} request is missing Max-Forwards — RFC 3261 §8.1.1.6 requires it on \
                      every request (a real downstream element cannot loop-protect this hop)"
                 )),
-                Some(raw) => match raw.trim().parse::<i64>() {
-                    Ok(v) if (0..=255).contains(&v) => {
+                Some(raw) => match value_of::<MaxForwards>(&msg).map(|mf| mf.value()) {
+                    Some(v) if v <= 255 => {
                         if v > 70 {
                             out.push(format!(
                                 "{method} Max-Forwards is {v}, exceeds 70 — RFC 3261 §8.1.1.6 \
@@ -384,7 +384,7 @@ impl PeerAuditRule for ContentTypeRule {
             if body.is_empty() {
                 continue;
             }
-            if get_header(msg_headers(&msg), "content-type").is_none() {
+            if !msg.has(&HeaderName::ContentType) {
                 out.push(
                     "message carries a body but no Content-Type — RFC 3261 §7.4.1 requires \
                      Content-Type whenever a body is present (the peer cannot interpret the body)"
@@ -418,7 +418,7 @@ impl PeerAuditRule for ContactPresenceRule {
             if method != "INVITE" && method != "SUBSCRIBE" {
                 continue;
             }
-            if get_header(msg_headers(&msg), "contact").is_none() {
+            if !msg.has(&HeaderName::Contact) {
                 out.push(format!(
                     "{method} request is missing Contact — RFC 3261 §8.1.1.8 requires it on \
                      dialog-establishing methods (the dialog's remote target is undefined)"
@@ -450,7 +450,7 @@ impl PeerAuditRule for NoContactOnByeRule {
             if req.method.as_str() != "BYE" {
                 continue;
             }
-            if get_header(msg_headers(&msg), "contact").is_some() {
+            if msg.has(&HeaderName::Contact) {
                 out.push(
                     "BYE carries Contact — RFC 3261 §15.1 (BYE terminates the dialog, so \
                      target-refresh has no meaning)"
@@ -477,27 +477,12 @@ pub struct ToTagPresenceRule;
 
 impl ToTagPresenceRule {
     /// `(status, has_to_tag)` for a raw SIP **response**, or `None` for a
-    /// request / unparsable start line. A lightweight scan: the status line and
-    /// the `To`/`t` header value, looking for a non-empty `tag=` parameter.
+    /// request / unparsable start line. Read with the lenient raw scanners
+    /// ([`sniff`]), which tolerate the malformed datagram this rule exists to
+    /// see.
     fn scan(raw: &[u8]) -> Option<(u16, bool)> {
-        let text = String::from_utf8_lossy(raw);
-        let mut lines = text.split('\n').map(|l| l.trim_end_matches('\r'));
-        let start = lines.next()?;
-        let rest = start.strip_prefix("SIP/2.0 ")?; // responses only
-        let status: u16 = rest.split_whitespace().next()?.parse().ok()?;
-        let mut has_tag = false;
-        for line in lines {
-            let Some((name, value)) = line.split_once(':') else {
-                continue;
-            };
-            let n = name.trim();
-            if n.eq_ignore_ascii_case("to") || n.eq_ignore_ascii_case("t") {
-                has_tag = sip_message::message_helpers::extract_tag(value.trim())
-                    .is_some_and(|t| !t.is_empty());
-                break;
-            }
-        }
-        Some((status, has_tag))
+        let status = sniff::resp_status(raw)?;
+        Some((status, !sniff::to_tag(raw).is_empty()))
     }
 }
 
@@ -550,7 +535,7 @@ impl PeerAuditRule for RecordRouteRule {
             let SipMessage::Request(_) = &msg else {
                 continue;
             };
-            for rr in sip_message::message_helpers::get_headers(msg_headers(&msg), "record-route") {
+            for rr in msg.raw(HeaderName::RecordRoute) {
                 if rr.contains("callRef=") || rr.contains("leg=") {
                     out.push(format!(
                         "B2BUA inserted Record-Route in a request — a B2BUA is a UA and MUST NOT \
@@ -591,16 +576,17 @@ impl PeerAuditRule for ViaRule {
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>], _bind_key: &str) -> Vec<String> {
         // The Via echo check needs the *full* sent request, not just (method,
-        // cseq); replay separately keeping the sent requests' Via stacks.
+        // cseq); replay separately keeping each sent request's Via stack and the
+        // branch its sender minted on top.
         let parser = super::lenient_parser();
-        let mut by_call: HashMap<String, Vec<(u32, String, Vec<String>)>> = HashMap::new();
-        let mut out = Vec::new();
-        // The branch the sender minted on a stored request's top Via.
-        fn sent_top_branch(vias: &[String]) -> Option<String> {
-            vias.first().and_then(|v| {
-                sip_message::message_helpers::parse_via_params(v).branch.filter(|b| !b.is_empty())
-            })
+        struct SentRequest {
+            seq: u32,
+            method: String,
+            vias: Vec<String>,
+            top_branch: Option<String>,
         }
+        let mut by_call: HashMap<String, Vec<SentRequest>> = HashMap::new();
+        let mut out = Vec::new();
         for step in ordered_steps(events, &parser) {
             let cid = call_id(&step.msg);
             if cid.is_empty() {
@@ -608,18 +594,12 @@ impl PeerAuditRule for ViaRule {
             }
             if step.sent {
                 if let SipMessage::Request(req) = &step.msg {
-                    let vias: Vec<String> = sip_message::message_helpers::get_headers(
-                        msg_headers(&step.msg),
-                        "via",
-                    )
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect();
-                    by_call.entry(cid.to_string()).or_default().push((
-                        req.cseq.seq,
-                        req.cseq.method.as_str().to_string(),
-                        vias,
-                    ));
+                    by_call.entry(cid.to_string()).or_default().push(SentRequest {
+                        seq: req.cseq.seq,
+                        method: req.cseq.method.as_str().to_string(),
+                        vias: step.msg.raw(HeaderName::Via).map(str::to_string).collect(),
+                        top_branch: top_via_branch(&step.msg),
+                    });
                 }
                 continue;
             }
@@ -628,23 +608,21 @@ impl PeerAuditRule for ViaRule {
             };
             let seq = cseq_seq(&step.msg);
             let method = cseq_method(&step.msg);
-            let candidates: Vec<&(u32, String, Vec<String>)> = by_call
+            let candidates: Vec<&SentRequest> = by_call
                 .get(cid)
-                .map(|v| v.iter().filter(|(s, m, _)| *s == seq && m.as_str() == method).collect())
+                .map(|v| {
+                    v.iter().filter(|r| r.seq == seq && r.method.as_str() == method).collect()
+                })
                 .unwrap_or_default();
             let Some(&most_recent) = candidates.last() else {
                 continue; // un-correlated response — cannot judge
             };
-            let resp_vias = sip_message::message_helpers::get_headers(msg_headers(&step.msg), "via");
+            let resp_vias: Vec<&str> = step.msg.raw(HeaderName::Via).collect();
             let resp_branch = top_via_branch(&step.msg);
             // §17.1.3 branch-first correlation: the sent request that minted the
             // response's top branch is the client transaction it belongs to.
             let matched = resp_branch.as_ref().and_then(|rb| {
-                candidates
-                    .iter()
-                    .rev()
-                    .find(|(_, _, vias)| sent_top_branch(vias).as_deref() == Some(rb))
-                    .copied()
+                candidates.iter().rev().find(|r| r.top_branch.as_deref() == Some(rb)).copied()
             });
             let reference = match (&resp_branch, matched) {
                 // Correlated to the transaction that minted the branch.
@@ -654,7 +632,7 @@ impl PeerAuditRule for ViaRule {
                 // when the sender minted a branch at all — a branchless legacy
                 // request cannot be branch-compared.)
                 (Some(rb), None) => {
-                    if let Some(sb) = sent_top_branch(&most_recent.2) {
+                    if let Some(sb) = &most_recent.top_branch {
                         out.push(format!(
                             "response top Via branch \"{rb}\" differs from the branch this bind \
                              sent \"{sb}\" — RFC 3261 §8.1.3 (the response cannot be matched to \
@@ -667,12 +645,12 @@ impl PeerAuditRule for ViaRule {
                 // request for the stack-echo check.
                 (None, None) => most_recent,
             };
-            if resp_vias.len() != reference.2.len() {
+            if resp_vias.len() != reference.vias.len() {
                 out.push(format!(
                     "response carries {} Via header(s) but the sent request had {} — RFC 3261 \
                      §8.1.3 requires the response to echo the request's Via stack unchanged",
                     resp_vias.len(),
-                    reference.2.len(),
+                    reference.vias.len(),
                 ));
             }
         }

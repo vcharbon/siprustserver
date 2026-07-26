@@ -15,13 +15,12 @@ use layer_harness::{LaneKey, Stamped};
 
 use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
 use crate::rfc_audit::dialog_model::{
-    advance_dialog_model, call_id, cseq_method, cseq_seq, extract_route_uri, from_uri,
-    is_in_dialog_request, msg_headers, parse_sdp_origin, project_per_dialog, route_is_loose,
-    slot_is_relay, status, to_tag, to_uri, top_via_branch, DialogModel, EventKind, OrderedEvent,
-    ParsedSdpOrigin,
+    advance_dialog_model, call_id, cseq_method, cseq_seq, from_uri, is_in_dialog_request,
+    parse_sdp_origin, project_per_dialog, route_entries, slot_is_relay, status, to_tag, to_uri,
+    top_via_branch, DialogModel, EventKind, OrderedEvent, ParsedSdpOrigin,
 };
 use crate::types::UaRole;
-use sip_message::message_helpers::{get_header, get_headers, parse_sip_uri};
+use sip_message::header::{HeaderName, ParamValue, Rport, Uri};
 use sip_message::SipMessage;
 
 /// Body bytes of a message (empty for a bodyless message). Mirrors the TS
@@ -33,39 +32,35 @@ fn body_of(m: &SipMessage) -> &[u8] {
     }
 }
 
-/// All values of `name` on a message, in wire order (TS `getAllHeaderValues`).
-fn all_header_values<'a>(m: &'a SipMessage, name: &str) -> Vec<&'a str> {
-    get_headers(msg_headers(m), name)
+/// All values of `name` on a message, in wire order — the opaque read for the
+/// rules that only ask whether a header is there and what it said.
+fn all_header_values(m: &SipMessage, name: HeaderName) -> Vec<&str> {
+    m.raw(name).collect()
 }
 
-/// First value of `name` on a message, if present (TS `getHeaderValue`). `None`
-/// distinguishes "header absent" from "header present, empty value".
-fn header_value<'a>(m: &'a SipMessage, name: &str) -> Option<&'a str> {
-    get_header(msg_headers(m), name)
+/// First value of `name` on a message, if present. `None` distinguishes "header
+/// absent" from "header present, empty value".
+fn header_value(m: &SipMessage, name: HeaderName) -> Option<&str> {
+    m.raw(name).next()
 }
 
-/// The `rport` parameter on the **top** Via header of `m`, mirroring the TS
-/// `readRport`. Returns `(present, value)`: `present` is whether `rport` appears
-/// at all; `value` is the numeric port iff it carries one (`rport=N`), `None`
-/// for the bare flag (`;rport`).
-fn read_top_via_rport(m: &SipMessage) -> (bool, Option<i64>) {
-    let Some(via) = get_headers(msg_headers(m), "via").into_iter().next() else {
-        return (false, None);
-    };
-    for piece in via.split(';').skip(1) {
-        let piece = piece.trim();
-        let (key, val) = match piece.split_once('=') {
-            Some((k, v)) => (k.trim(), Some(v.trim())),
-            None => (piece, None),
-        };
-        if key.eq_ignore_ascii_case("rport") {
-            return match val {
-                None => (true, None),
-                Some(v) => (true, v.parse::<i64>().ok()),
-            };
-        }
+/// The `rport` parameter on the **top** Via of `m`. Returns `(present, value)`:
+/// `present` is whether `rport` appears at all; `value` is the port iff it
+/// carries a readable one (`rport=N`), `None` for the bare flag (`;rport`) and
+/// for a value no reader accepts.
+fn read_top_via_rport(m: &SipMessage) -> (bool, Option<u16>) {
+    let via = m.top_via();
+    match via.param("rport") {
+        None => (false, None),
+        Some(ParamValue::Flag) => (true, None),
+        Some(_) => (
+            true,
+            match via.rport() {
+                Some(Rport::Observed(port)) => Some(port),
+                _ => None,
+            },
+        ),
     }
-    (false, None)
 }
 
 /// **RFC 3261 §12.2.1.1 — in-dialog request URIs are stable.** Once a dialog is
@@ -197,10 +192,9 @@ impl CrossMessageAuditRule for MidDialogRouteRule {
 /// The routing-significant `host:port` of a Route/Record-Route URI (params
 /// stripped). Used to compare a reproduced Route against the dialog route set
 /// without tripping on proxy-rewritten per-direction parameters.
-fn route_host_port(uri: &str) -> String {
-    sip_message::message_helpers::extract_host_port(uri)
-        .map(|(h, p)| format!("{h}:{p}"))
-        .unwrap_or_else(|| uri.to_string())
+fn route_host_port(uri: &Uri) -> String {
+    let (host, port) = uri.host_port();
+    format!("{host}:{port}")
 }
 
 /// The per-message Route check, factored out of [`MidDialogRouteRule`] to keep
@@ -212,12 +206,12 @@ fn check_mid_dialog_route(
     msg: &SipMessage,
     method: &str,
 ) {
-    // Split comma-folded Route headers so the count/sequence compares like-for-like
-    // with the (also comma-split) dialog route set — RFC 3261 §7.3.1.
-    let sent_routes = crate::rfc_audit::dialog_model::split_header_values(msg, "route");
+    // Comma folds are already split on both sides, so the count and the
+    // sequence compare like-for-like — RFC 3261 §7.3.1.
+    let sent_routes = route_entries(msg);
     let first_route = &m.route_set[0];
 
-    if route_is_loose(first_route) {
+    if first_route.uri().is_loose_route() {
         if sent_routes.is_empty() {
             out.push((
                 slot.bind_key.clone(),
@@ -238,8 +232,8 @@ fn check_mid_dialog_route(
             ));
         } else {
             for (i, sent) in sent_routes.iter().enumerate() {
-                let expected = extract_route_uri(&m.route_set[i]);
-                let actual = extract_route_uri(sent);
+                let expected = m.route_set[i].uri();
+                let actual = sent.uri();
                 // Compare the routing-significant host:port, NOT the full URI: a
                 // record-routing proxy legitimately rewrites Record-Route URI
                 // PARAMETERS per direction (a signed stateful cookie `;e=;kid=;sig=`
@@ -248,7 +242,7 @@ fn check_mid_dialog_route(
                 // every stateful proxy. The §12.2.1.1 invariant the audit must
                 // enforce is that the route set is reproduced in order to the same
                 // hops — drops/reorders/wrong-host — which host:port captures.
-                if route_host_port(&expected) != route_host_port(&actual) {
+                if route_host_port(expected) != route_host_port(actual) {
                     out.push((
                         slot.bind_key.clone(),
                         format!(
@@ -262,24 +256,25 @@ fn check_mid_dialog_route(
             }
         }
     } else {
-        let expected_uri = extract_route_uri(first_route);
+        let expected_uri = first_route.uri();
         let req_uri = match msg {
-            SipMessage::Request(r) => r.uri.as_str(),
-            SipMessage::Response(_) => "",
+            SipMessage::Request(r) => Some(r.request_uri()),
+            SipMessage::Response(_) => None,
         };
-        if req_uri != expected_uri {
+        if req_uri.as_ref() != Some(expected_uri) {
+            let shown = req_uri.map(|u| u.to_string()).unwrap_or_default();
             out.push((
                 slot.bind_key.clone(),
                 format!(
-                    "in-dialog {method} Request-URI \"{req_uri}\" should be first strict route \
+                    "in-dialog {method} Request-URI \"{shown}\" should be first strict route \
                      URI \"{expected_uri}\" — RFC 3261 §16.12"
                 ),
             ));
         }
         let expected_tail: Vec<String> =
-            m.route_set[1..].iter().map(|r| extract_route_uri(r)).collect();
+            m.route_set[1..].iter().map(|r| r.uri().to_string()).collect();
         let actual_tail: Vec<String> =
-            sent_routes.iter().map(|r| extract_route_uri(r)).collect();
+            sent_routes.iter().map(|r| r.uri().to_string()).collect();
         let matches_exact = expected_tail == actual_tail;
         let matches_with_target = actual_tail.len() == expected_tail.len() + 1
             && expected_tail
@@ -359,25 +354,29 @@ fn check_wire_destination(
     method: &str,
     ev: &OrderedEvent,
 ) {
-    let sent_routes = all_header_values(msg, "route");
-    let target_uri = if let Some(first) = sent_routes.first() {
-        extract_route_uri(first)
-    } else {
-        match msg {
-            SipMessage::Request(r) => r.uri.to_string(),
+    let sent_routes = route_entries(msg);
+    let target: Uri = match sent_routes.first() {
+        Some(first) => first.uri().clone(),
+        // A Route line no reader accepts names no destination — leave it to the
+        // grammar rules rather than judging the wire against a URI nobody can
+        // resolve.
+        None if msg.has(&HeaderName::Route) => return,
+        None => match msg {
+            SipMessage::Request(r) => match Uri::parse(&r.uri) {
+                Ok(uri) => uri,
+                Err(_) => return,
+            },
             SipMessage::Response(_) => return,
-        }
-    };
-    let Some(parsed) = parse_sip_uri(&target_uri) else {
-        return;
+        },
     };
     // Unit-test fixtures may omit wire info — skip rather than false-fire.
     let Some(peer) = ev.wire_peer else {
         return;
     };
     let peer_ip = peer.ip().to_string();
-    let peer_port = u64::from(peer.port());
-    if peer_ip != parsed.host || peer_port != parsed.port {
+    let peer_port = peer.port();
+    let (target_host, target_port) = target.host_port();
+    if peer_ip != target_host || peer_port != target_port {
         let lead = if sent_routes.is_empty() {
             "Request-URI resolves to "
         } else {
@@ -386,9 +385,8 @@ fn check_wire_destination(
         out.push((
             slot.bind_key.clone(),
             format!(
-                "in-dialog {method} wire-sent to {peer_ip}:{peer_port} but {lead}{}:{} \
-                 (\"{target_uri}\") — RFC 3261 §8.1.2 + RFC 3263 §4",
-                parsed.host, parsed.port,
+                "in-dialog {method} wire-sent to {peer_ip}:{peer_port} but {lead}\
+                 {target_host}:{target_port} (\"{target}\") — RFC 3261 §8.1.2 + RFC 3263 §4",
             ),
         ));
     }
@@ -585,7 +583,7 @@ impl CrossMessageAuditRule for RecordRoutePlacementRule {
                     let SipMessage::Response(_) = &ev.msg else {
                         continue;
                     };
-                    let rr = all_header_values(&ev.msg, "record-route");
+                    let rr = all_header_values(&ev.msg, HeaderName::RecordRoute);
                     if rr.is_empty() {
                         continue;
                     }
@@ -775,7 +773,7 @@ fn check_allow_supported(
     label: &str,
     msg: &SipMessage,
 ) {
-    if header_value(msg, "allow").is_none() {
+    if header_value(msg, HeaderName::Allow).is_none() {
         out.push((
             slot.bind_key.clone(),
             format!(
@@ -783,7 +781,7 @@ fn check_allow_supported(
             ),
         ));
     }
-    if header_value(msg, "supported").is_none() {
+    if header_value(msg, HeaderName::Supported).is_none() {
         out.push((
             slot.bind_key.clone(),
             format!(

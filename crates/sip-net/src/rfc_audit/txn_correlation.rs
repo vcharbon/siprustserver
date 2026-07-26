@@ -32,12 +32,12 @@
 use std::collections::HashMap;
 
 use layer_harness::{LaneKey, Stamped};
-use sip_message::message_helpers::get_headers;
+use sip_message::header::HeaderName;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest, SipResponse};
 
 use crate::contracts::SignalingNetworkEvent;
-use crate::rfc_audit::dialog_model::{cseq_method, cseq_seq, msg_headers, top_via_branch};
+use crate::rfc_audit::dialog_model::{cseq_method, cseq_seq, top_via_branch};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -250,34 +250,14 @@ fn status_of(m: &SipMessage) -> u16 {
 }
 
 // ---------------------------------------------------------------------------
-// Header utilities — option-tag parsing shared with the cross-message rules.
+// Header utilities
 // ---------------------------------------------------------------------------
 
-/// Split comma-separated option-tag header values (Require / Supported /
-/// Proxy-Require / Unsupported) into normalised lower-case tags. Empty pieces
-/// are dropped. Mirrors the TS `splitOptionTags`.
-pub fn split_option_tags<I, S>(values: I) -> Vec<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let mut out = Vec::new();
-    for v in values {
-        for piece in v.as_ref().split(',') {
-            let tag = piece.trim().to_ascii_lowercase();
-            if !tag.is_empty() {
-                out.push(tag);
-            }
-        }
-    }
-    out
-}
-
-/// All values of a (possibly repeated) header on the indexed message — a thin
-/// wrapper over [`get_headers`] for rules that compare Route / Record-Route /
-/// Require lists pulled straight off an [`IndexedMessage`].
-pub fn header_values<'a>(m: &'a IndexedMessage, name: &str) -> Vec<&'a str> {
-    get_headers(msg_headers(&m.msg), name)
+/// The unparsed values of a (possibly repeated) header on the indexed message,
+/// in wire order — for the rules that compare what one message carried against
+/// another byte for byte (a CANCEL's Route echo, §9.1).
+pub fn header_values(m: &IndexedMessage, name: HeaderName) -> Vec<&str> {
+    m.msg.raw(name).collect()
 }
 
 /// CSeq `(number, method)` of an indexed message — re-exported convenience so a
@@ -441,12 +421,6 @@ mod tests {
         assert_eq!(idx.requests_for(branch, Direction::Received).len(), 0);
         assert_eq!(idx.responses_for(branch, Direction::Received).len(), 1);
         assert_eq!(idx.responses_for(branch, Direction::Sent).len(), 0);
-    }
-
-    #[test]
-    fn split_option_tags_normalises_and_drops_empty() {
-        let got = split_option_tags(["100rel, Timer", "  ", "Replaces"]);
-        assert_eq!(got, vec!["100rel", "timer", "replaces"]);
     }
 
     #[test]

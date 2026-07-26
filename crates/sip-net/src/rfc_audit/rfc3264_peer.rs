@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use layer_harness::Stamped;
+use sip_message::header::MediaType;
 use sip_message::parser::custom::CustomParser;
 use sip_message::sdp::validate_sdp_body;
 use sip_message::{SipMessage, SipParser};
@@ -48,27 +49,14 @@ fn body_bytes(msg: &SipMessage) -> &[u8] {
     }
 }
 
-/// True iff a `Content-Type` header value is (case-insensitively) `application/sdp`
-/// — the `^application/sdp\b` test in the TS `isSdpBody`. A trailing `;charset=…`
-/// or other parameter after the subtype is allowed (the `\b` boundary).
+/// True iff the message's media type is (case-insensitively) `application/sdp`.
+/// Parameters (`;charset=…`) ride the value's params, so they neither hide the
+/// media type nor make a different one match.
 fn is_sdp_content_type(msg: &SipMessage) -> bool {
-    for v in msg.get_header("content-type") {
-        let t = v.trim();
-        if t.len() < 15 {
-            // shorter than "application/sdp"
-            continue;
-        }
-        let (head, rest) = t.split_at(15);
-        if head.eq_ignore_ascii_case("application/sdp") {
-            // `\b` after `sdp`: end of string or a non-word character.
-            match rest.chars().next() {
-                None => return true,
-                Some(c) if !(c.is_ascii_alphanumeric() || c == '_') => return true,
-                _ => {}
-            }
-        }
-    }
-    false
+    msg.list::<MediaType>()
+        .unwrap_or_default()
+        .iter()
+        .any(|ct| ct.is("application/sdp"))
 }
 
 /// True iff a parsed message carries a non-empty SDP body. Mirrors the TS

@@ -25,19 +25,14 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use layer_harness::{LaneKey, Stamped};
-use sip_message::message_helpers::{get_headers, parse_via_params};
-use sip_message::{SipHeader, SipMessage, SipParser, SipRequest};
+use sip_message::header::{HeaderValue, RecordRouteEntry, RouteEntry};
+use sip_message::{SipMessage, SipParser, SipRequest};
 
 use crate::contracts::SignalingNetworkEvent;
 
 // ---------------------------------------------------------------------------
 // Generic message accessors (typed where possible, lenient otherwise)
 // ---------------------------------------------------------------------------
-
-/// The raw header list, for the few multi-value lookups (Record-Route, Route).
-pub fn msg_headers(m: &SipMessage) -> &[SipHeader] {
-    m.headers()
-}
 
 /// `From` tag, in either direction (the originator's tag rides From on requests
 /// and the responses to them).
@@ -106,82 +101,52 @@ pub fn status(m: &SipMessage) -> u16 {
 
 /// The top (first) `Via` `branch=` token, if present and non-empty.
 pub fn top_via_branch(m: &SipMessage) -> Option<String> {
-    let top = get_headers(msg_headers(m), "via").into_iter().next()?;
-    parse_via_params(top).branch.filter(|b| !b.is_empty())
+    m.top_via().branch().filter(|b| !b.is_empty()).map(str::to_string)
+}
+
+/// The single logical value of `H` on `m`, or `None` when the header is absent
+/// **or when no reader accepts it**.
+///
+/// The audit reads peer output that is deliberately broken, so a value it
+/// cannot read must leave the rule silent rather than throw: a rule states one
+/// invariant, and a message whose grammar is already wrong is the grammar
+/// rules' finding to make.
+pub fn value_of<H: HeaderValue>(m: &SipMessage) -> Option<H> {
+    m.header::<H>().and_then(Result::ok)
 }
 
 // ---------------------------------------------------------------------------
-// Header utilities (TS `getHeaderValue` / `routeIsLoose` / `extractRouteUri`)
+// Route reads
 // ---------------------------------------------------------------------------
 
-/// A Route value advertises loose routing iff it carries an `;lr` parameter
-/// (followed by a delimiter / end). Mirrors the TS `/;lr(?=[;>,\s]|$)/i`.
-pub fn route_is_loose(route_value: &str) -> bool {
-    let lower = route_value.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let mut i = 0;
-    while let Some(pos) = lower[i..].find(";lr") {
-        let at = i + pos;
-        let after = at + 3;
-        match bytes.get(after) {
-            None => return true,
-            Some(&c) if c == b';' || c == b'>' || c == b',' || c.is_ascii_whitespace() => {
-                return true
-            }
-            _ => i = after,
-        }
-    }
-    false
+/// The Route entries `m` carries, in wire order and with comma folds split
+/// (RFC 3261 §7.3.1 lets a UA fold several rows into one line, so a route-set
+/// comparison that counted lines would miscount a folded header as one route).
+///
+/// A line no reader accepts contributes nothing: the audit judges the routing a
+/// peer expressed, and an unreadable header is a grammar finding, not a routing
+/// one.
+pub fn route_entries(m: &SipMessage) -> Vec<RouteEntry> {
+    m.list::<RouteEntry>().unwrap_or_default()
 }
 
-/// Split a possibly comma-combined header value (Record-Route / Route) into its
-/// individual entries, respecting angle brackets and quoted strings — RFC 3261
-/// §7.3.1 lets a UA fold multiple rows into one comma-separated header, so a
-/// route-set comparison must normalise both sides to individual routes or it
-/// miscounts a folded header as one route (the harness `RecordRouteFold` makes
-/// this routine load-bearing for the proxy/b2bua route-set checks).
-pub fn split_header_list(value: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let (mut in_angle, mut in_quote, mut start) = (false, false, 0usize);
-    for (i, c) in value.char_indices() {
-        match c {
-            '"' => in_quote = !in_quote,
-            '<' if !in_quote => in_angle = true,
-            '>' if !in_quote => in_angle = false,
-            ',' if !in_quote && !in_angle => {
-                let piece = value[start..i].trim();
-                if !piece.is_empty() {
-                    out.push(piece.to_string());
-                }
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    let last = value[start..].trim();
-    if !last.is_empty() {
-        out.push(last.to_string());
-    }
-    out
+/// The route set a UAC learns from a dialog-creating response: the recorded
+/// stack reversed (RFC 3261 §12.1.2).
+fn uac_route_set(m: &SipMessage) -> Vec<RouteEntry> {
+    let mut set = uas_route_set(m);
+    set.reverse();
+    set
 }
 
-/// All individual Route/Record-Route entries on `m` for `name`, comma-folds split.
-pub fn split_header_values(m: &SipMessage, name: &str) -> Vec<String> {
-    get_headers(msg_headers(m), name)
+/// The route set a UAS learns from the dialog-creating request: the recorded
+/// Record-Route stack in wire order (RFC 3261 §12.1.1), read with the same
+/// tolerance as [`route_entries`].
+fn uas_route_set(m: &SipMessage) -> Vec<RouteEntry> {
+    m.list::<RecordRouteEntry>()
+        .unwrap_or_default()
         .into_iter()
-        .flat_map(split_header_list)
+        .map(RecordRouteEntry::retarget)
         .collect()
-}
-
-/// The URI inside a `<...>` Route value, or the trimmed value if bare.
-pub fn extract_route_uri(route_value: &str) -> String {
-    let trimmed = route_value.trim();
-    if let Some(rest) = trimmed.strip_prefix('<') {
-        if let Some(end) = rest.find('>') {
-            return rest[..end].to_string();
-        }
-    }
-    trimmed.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -248,8 +213,9 @@ pub struct DialogModel {
     pub remote_tag: String,
     pub dialog_local_uri: String,
     pub dialog_remote_uri: String,
-    /// Record-Route values in route-set order (reversed for the UAC).
-    pub route_set: Vec<String>,
+    /// The dialog route set, in the order in-dialog requests must reproduce it
+    /// (the recorded Record-Route stack, reversed for the UAC — §12.1.1/§12.1.2).
+    pub route_set: Vec<RouteEntry>,
     pub is_uac: bool,
     pub is_uas: bool,
     pub initial_invite_sent_branch: String,
@@ -333,10 +299,7 @@ pub fn advance_dialog_model(m: &mut DialogModel, ev: &OrderedEvent) {
                 set_if_empty(&mut m.remote_tag, ft);
             }
             if m.route_set.is_empty() {
-                let rr = split_header_values(msg, "record-route");
-                if !rr.is_empty() {
-                    m.route_set = rr;
-                }
+                m.route_set = uas_route_set(msg);
             }
         }
         return;
@@ -353,11 +316,7 @@ pub fn advance_dialog_model(m: &mut DialogModel, ev: &OrderedEvent) {
         let is_dialog_creating =
             (200..300).contains(&st) || (st > 100 && st < 200 && to_tag(msg).is_some());
         if is_dialog_creating && cseq_method(msg) == "INVITE" {
-            let mut rr = split_header_values(msg, "record-route");
-            if !rr.is_empty() {
-                rr.reverse();
-                m.route_set = rr;
-            }
+            m.route_set = uac_route_set(msg);
         }
     }
 }
@@ -371,7 +330,7 @@ pub fn is_in_dialog_request(req: &SipRequest, m: &DialogModel) -> bool {
         return false;
     }
     if req.method.as_str() == "INVITE" {
-        let branch = req.via.first().branch.clone().unwrap_or_default();
+        let branch = req.top_via().branch().unwrap_or_default().to_string();
         if !branch.is_empty() && branch == m.initial_invite_sent_branch {
             return false;
         }
@@ -750,18 +709,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn route_is_loose_detects_lr() {
-        assert!(route_is_loose("<sip:p@host;lr>"));
-        assert!(route_is_loose("<sip:p@host;lr;x=1>"));
-        assert!(route_is_loose("<sip:p@host;lr>, <sip:q@h2>"));
-        assert!(!route_is_loose("<sip:p@host>"));
-        assert!(!route_is_loose("<sip:p@host;lrx>"));
-    }
-
-    #[test]
-    fn extract_route_uri_unwraps_angle_brackets() {
-        assert_eq!(extract_route_uri("<sip:p@host;lr>"), "sip:p@host;lr");
-        assert_eq!(extract_route_uri("  sip:p@host  "), "sip:p@host");
+    fn route_entries_split_a_comma_fold_and_read_loose_routing() {
+        // §7.3.1: one line, two routes. Only the first advertises `;lr`, and
+        // `;lrx` is a different parameter — a substring scan would call it loose.
+        let msg = crate::rfc_audit::lenient_parser()
+            .parse(&raw_req_with(
+                "BYE",
+                "Route: <sip:p@host;lr>, <sip:q@h2>\r\nRoute: <sip:r@h3;lrx>\r\n",
+            ))
+            .expect("parses");
+        let routes = route_entries(&msg);
+        assert_eq!(routes.len(), 3, "{routes:?}");
+        assert_eq!(routes[0].uri().host_port(), ("host", 5060));
+        assert!(routes[0].uri().is_loose_route());
+        assert!(!routes[1].uri().is_loose_route());
+        assert!(!routes[2].uri().is_loose_route());
     }
 
     #[test]
@@ -798,6 +760,22 @@ mod tests {
              Call-ID: cid-1@127.0.0.1\r\n\
              CSeq: {cseq} {method}\r\n\
              Max-Forwards: 70\r\n\
+             Content-Length: 0\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// A parseable in-dialog request carrying `extra` header lines verbatim.
+    fn raw_req_with(method: &str, extra: &str) -> Vec<u8> {
+        format!(
+            "{method} sip:peer@127.0.0.1 SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-x\r\n\
+             From: <sip:orig@127.0.0.1>;tag=at\r\n\
+             To: <sip:peer@127.0.0.1>;tag=bt\r\n\
+             Call-ID: cid-1@127.0.0.1\r\n\
+             CSeq: 2 {method}\r\n\
+             Max-Forwards: 70\r\n\
+             {extra}\
              Content-Length: 0\r\n\r\n"
         )
         .into_bytes()

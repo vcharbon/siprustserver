@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use layer_harness::{LaneKey, Stamped};
-use sip_message::message_helpers::get_headers;
+use sip_message::header::{kind, HeaderName, HeaderValue, Require, TokenListHeader};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
@@ -22,27 +22,29 @@ use crate::report::to_sip_entries;
 use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
 use crate::types::UaRole;
 use crate::rfc_audit::dialog_model::{
-    call_id, cseq_method, extract_route_uri, from_tag, msg_headers, project_per_dialog,
-    route_is_loose, slot_is_relay, status, to_tag, to_uri, top_via_branch, EventKind, OrderedEvent,
+    call_id, cseq_method, from_tag, project_per_dialog, route_entries, slot_is_relay, status,
+    to_tag, to_uri, top_via_branch, value_of, EventKind, OrderedEvent,
 };
-use crate::rfc_audit::txn_correlation::{
-    build_branch_index, header_values, split_option_tags, Direction,
-};
+use crate::rfc_audit::txn_correlation::{build_branch_index, header_values, Direction};
 
 // ---------------------------------------------------------------------------
-// Shared header helpers (ports of the TS module-level helpers)
+// Shared header helpers
 // ---------------------------------------------------------------------------
 
-/// All values of a (possibly repeated) header on a parsed message — the TS
-/// `getAllHeaderValues(msg.headers, name)` over a raw [`SipMessage`].
-fn all_header_values<'a>(m: &'a SipMessage, name: &str) -> Vec<&'a str> {
-    get_headers(msg_headers(m), name)
+/// All values of a (possibly repeated) header on a parsed message, in wire
+/// order — the opaque read for the rules that compare what one message carried
+/// against another, or only ask whether a header is there.
+fn all_header_values(m: &SipMessage, name: HeaderName) -> Vec<&str> {
+    m.raw(name).collect()
 }
 
-/// Split comma-separated option-tag values into normalised lower-case tags —
-/// the TS `collectOptionTags`. Reuses [`split_option_tags`] (same semantics).
-fn collect_option_tags(values: &[&str]) -> Vec<String> {
-    split_option_tags(values.iter().copied())
+/// The option tags a set-like header lists, lower-cased for comparison against
+/// the recognised-tag tables. Repeated rows and comma folds are one set
+/// (RFC 3261 §7.3.1).
+fn option_tags<K: kind::TokenKind>(m: &SipMessage) -> Vec<String> {
+    value_of::<TokenListHeader<K>>(m)
+        .map(|set| set.iter().map(str::to_ascii_lowercase).collect())
+        .unwrap_or_default()
 }
 
 /// Top-Via branch of a message, or empty string (the TS
@@ -186,7 +188,7 @@ impl CrossMessageAuditRule for UnsupportedMethod405AllowRule {
                             }
                             response_by_branch.entry(branch).or_insert((
                                 status(msg),
-                                all_header_values(msg, "allow").len(),
+                                all_header_values(msg, HeaderName::Allow).len(),
                             ));
                         }
                         _ => {}
@@ -243,11 +245,10 @@ impl CrossMessageAuditRule for UnsupportedExtension420Rule {
                 for (kind, msg) in slot_events(&slot.ordered) {
                     match (kind, msg) {
                         (EventKind::Received, SipMessage::Request(req)) => {
-                            let require = all_header_values(msg, "require");
-                            if require.is_empty() {
+                            let tags = option_tags::<kind::Require>(msg);
+                            if tags.is_empty() {
                                 continue;
                             }
-                            let tags = collect_option_tags(&require);
                             let unsupported: Vec<String> = tags
                                 .into_iter()
                                 .filter(|t| !recognised.contains(t.as_str()))
@@ -272,7 +273,7 @@ impl CrossMessageAuditRule for UnsupportedExtension420Rule {
                             }
                             response_by_branch.entry(branch).or_insert((
                                 status(msg),
-                                all_header_values(msg, "unsupported").len(),
+                                all_header_values(msg, HeaderName::Unsupported).len(),
                             ));
                         }
                         _ => {}
@@ -333,9 +334,9 @@ impl CrossMessageAuditRule for Unsupported415AcceptsRule {
                     if status(msg) != 415 {
                         continue;
                     }
-                    let has_accept = !all_header_values(msg, "accept").is_empty()
-                        || !all_header_values(msg, "accept-encoding").is_empty()
-                        || !all_header_values(msg, "accept-language").is_empty();
+                    let has_accept = msg.has(&HeaderName::Accept)
+                        || msg.has(&HeaderName::AcceptEncoding)
+                        || msg.has(&HeaderName::AcceptLanguage);
                     if has_accept {
                         continue;
                     }
@@ -389,8 +390,8 @@ impl CrossMessageAuditRule for ResponseExtensionsAdvertisedRule {
                             if branch.is_empty() || invite_require_by_branch.contains_key(&branch) {
                                 continue;
                             }
-                            let require = collect_option_tags(&all_header_values(msg, "require"));
-                            invite_require_by_branch.insert(branch, require);
+                            invite_require_by_branch
+                                .insert(branch, option_tags::<kind::Require>(msg));
                         }
                         (EventKind::Sent, SipMessage::Response(_)) => {
                             if !cseq_method(msg).eq_ignore_ascii_case("INVITE") {
@@ -411,12 +412,8 @@ impl CrossMessageAuditRule for ResponseExtensionsAdvertisedRule {
                                 continue;
                             }
                             let mut advertised: HashSet<String> =
-                                collect_option_tags(&all_header_values(msg, "supported"))
-                                    .into_iter()
-                                    .collect();
-                            advertised.extend(collect_option_tags(&all_header_values(
-                                msg, "require",
-                            )));
+                                option_tags::<kind::Supported>(msg).into_iter().collect();
+                            advertised.extend(option_tags::<kind::Require>(msg));
                             let missing: Vec<&String> = invite_require
                                 .iter()
                                 .filter(|t| !advertised.contains(t.as_str()))
@@ -479,7 +476,7 @@ impl CrossMessageAuditRule for RegisterNoRouteSetRule {
                     if !req.method.as_str().eq_ignore_ascii_case("REGISTER") {
                         continue;
                     }
-                    if all_header_values(msg, "route").is_empty() {
+                    if !msg.has(&HeaderName::Route) {
                         continue;
                     }
                     out.push((
@@ -556,9 +553,9 @@ impl CrossMessageAuditRule for OptionsResponseEchoesRule {
                             let Some(cid) = options_by_branch.get(&branch) else {
                                 continue;
                             };
-                            let has = !all_header_values(msg, "allow").is_empty()
-                                || !all_header_values(msg, "supported").is_empty()
-                                || !all_header_values(msg, "accept").is_empty();
+                            let has = msg.has(&HeaderName::Allow)
+                                || msg.has(&HeaderName::Supported)
+                                || msg.has(&HeaderName::Accept);
                             if has {
                                 continue;
                             }
@@ -662,8 +659,7 @@ impl CrossMessageAuditRule for ConcurrentReInvite500or491Rule {
                             if concurrent_by_branch.contains_key(&branch)
                                 && !response_by_branch.contains_key(&branch)
                             {
-                                let has_retry_after =
-                                    !all_header_values(msg, "retry-after").is_empty();
+                                let has_retry_after = msg.has(&HeaderName::RetryAfter);
                                 response_by_branch
                                     .insert(branch.clone(), (status(msg), has_retry_after));
                             }
@@ -926,7 +922,7 @@ impl CrossMessageAuditRule for NoTarget404Rule {
 /// `CSeq` value of a message as one token (number + method), for transaction
 /// correlation that survives a proxy's per-hop branch rewrite.
 fn cseq_of(m: &SipMessage) -> String {
-    all_header_values(m, "cseq").first().map(|s| s.trim().to_string()).unwrap_or_default()
+    m.cseq().to_wire()
 }
 
 // ---------------------------------------------------------------------------
@@ -958,8 +954,7 @@ impl CrossMessageAuditRule for UnsupportedExtension421Rule {
                     if status(msg) != 421 {
                         continue;
                     }
-                    let require = collect_option_tags(&all_header_values(msg, "require"));
-                    if !require.is_empty() {
+                    if value_of::<Require>(msg).is_some_and(|set| !set.is_empty()) {
                         continue;
                     }
                     out.push((
@@ -1019,11 +1014,11 @@ impl CrossMessageAuditRule for AckRequireSubsetOfInviteRule {
                     let Some(invite) = idx.find_invite_by_branch(&branch, Direction::Sent) else {
                         continue;
                     };
-                    let ack_tags = split_option_tags(header_values_owned(&ev.msg, "require"));
+                    let ack_tags = option_tags::<kind::Require>(&ev.msg);
                     if ack_tags.is_empty() {
                         continue;
                     }
-                    let invite_tags = split_option_tags(header_values(invite, "require"));
+                    let invite_tags = option_tags::<kind::Require>(&invite.msg);
                     let invite_set: HashSet<&String> = invite_tags.iter().collect();
                     let extras: Vec<&String> =
                         ack_tags.iter().filter(|t| !invite_set.contains(t)).collect();
@@ -1088,8 +1083,8 @@ impl CrossMessageAuditRule for CancelRouteEchoesInviteRule {
                     let Some(invite) = idx.find_invite_by_branch(&branch, Direction::Sent) else {
                         continue;
                     };
-                    let cancel_routes = all_header_values(&ev.msg, "route");
-                    let invite_routes = header_values(invite, "route");
+                    let cancel_routes = all_header_values(&ev.msg, HeaderName::Route);
+                    let invite_routes = header_values(invite, HeaderName::Route);
                     if routes_equal(&cancel_routes, &invite_routes) {
                         continue;
                     }
@@ -1241,7 +1236,7 @@ impl CrossMessageAuditRule for SerialRegisterRule {
                         continue;
                     }
                     let aor = to_uri(&ev.msg).to_string();
-                    let contact = all_header_values(&ev.msg, "contact").join(",");
+                    let contact = all_header_values(&ev.msg, HeaderName::Contact).join(",");
 
                     if let Some((prior_branch, _)) = in_flight_by_aor.get(&aor) {
                         if has_final_received(prior_branch) {
@@ -1523,12 +1518,12 @@ impl CrossMessageAuditRule for StrictRouteRewriteHandledRule {
                     let SipMessage::Request(req) = &ev.msg else {
                         continue;
                     };
-                    let routes = all_header_values(&ev.msg, "route");
+                    let routes = route_entries(&ev.msg);
                     let Some(first_route) = routes.first() else {
                         continue;
                     };
-                    let first_uri = extract_route_uri(first_route);
-                    if route_is_loose(first_route) {
+                    let first_uri = first_route.uri();
+                    if first_uri.is_loose_route() {
                         continue;
                     }
                     let branch = branch_of(&ev.msg);
@@ -1543,7 +1538,8 @@ impl CrossMessageAuditRule for StrictRouteRewriteHandledRule {
                             .unwrap_or(false)
                     });
                     if let Some(sent_req) = sent_req {
-                        if sent_req.as_request().map(|sr| sr.uri.as_str()) == Some(first_uri.as_str())
+                        if sent_req.as_request().map(|sr| sr.request_uri()).as_ref()
+                            == Some(first_uri)
                         {
                             continue;
                         }
@@ -1610,8 +1606,8 @@ impl CrossMessageAuditRule for AckPreservesInviteRouteRule {
                     let Some(invite) = idx.find_invite_by_branch(&branch, Direction::Sent) else {
                         continue;
                     };
-                    let ack_routes = all_header_values(&ev.msg, "route");
-                    let invite_routes = header_values(invite, "route");
+                    let ack_routes = all_header_values(&ev.msg, HeaderName::Route);
+                    let invite_routes = header_values(invite, HeaderName::Route);
                     if routes_equal(&ack_routes, &invite_routes) {
                         continue;
                     }
@@ -1981,12 +1977,6 @@ impl CrossMessageAuditRule for FailedReinviteTearsDownDialogRule {
 /// Dialog key (Call-ID + an ordered tag pair) — the TS `dialogKey`.
 fn dialog_key(call_id: &str, a: &str, b: &str) -> String {
     format!("{call_id}\x00{a}\x00{b}")
-}
-
-/// Owned copies of all values of `name` on a parsed message — needed because
-/// [`split_option_tags`] consumes the iterator while `ev.msg` is borrowed.
-fn header_values_owned(m: &SipMessage, name: &str) -> Vec<String> {
-    all_header_values(m, name).into_iter().map(String::from).collect()
 }
 
 /// In-order equality of two Route header value lists (the TS `same` loop).

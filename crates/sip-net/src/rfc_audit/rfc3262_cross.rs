@@ -9,9 +9,9 @@
 //! Authoring pattern (mirrors [`super::cross_generic`]): a unit struct per rule
 //! that projects the channel with [`project_per_dialog`], skips relay slots
 //! (`slot_is_relay`) for the per-UA dialog walks, and reads
-//! RSeq/RAck/Require/Supported/Unsupported via [`get_headers`] +
-//! [`split_option_tags`] / [`parse_rack`]. PRACK↔reliable-1xx correlation keys
-//! on the RAck `response-num` (= the 1xx's RSeq), per RFC 3262 §7.2.
+//! RSeq/RAck/Require/Supported/Unsupported as typed values. PRACK↔reliable-1xx
+//! correlation keys on the RAck `response-num` (= the 1xx's RSeq), per
+//! RFC 3262 §7.2.
 //!
 //! Subjects: the TS `adaptCrossMessageRule` maps every rule to `ALL_UA_ROLES`,
 //! so each rule here keeps the default [`all_ua_roles`](crate::types::all_ua_roles)
@@ -23,47 +23,56 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use layer_harness::{LaneKey, Stamped};
-use sip_message::message_helpers::get_headers;
-use sip_message::parser::custom::structured_headers::{parse_rack, ParsedRack};
+use sip_message::header::{RAck, RSeq, Require, Supported, Unsupported};
 use sip_message::SipMessage;
 
 use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
 use crate::rfc_audit::dialog_model::{
-    call_id, cseq_method, msg_headers, project_per_dialog, slot_is_relay, status, top_via_branch,
+    call_id, cseq_method, project_per_dialog, slot_is_relay, status, top_via_branch, value_of,
     EventKind, OrderedEvent,
 };
 use crate::types::UaRole;
-use crate::rfc_audit::txn_correlation::split_option_tags;
 
 // ---------------------------------------------------------------------------
-// Shared readers (ports of the TS `hasOptionTag`, RAck/RSeq scalar parsing).
+// Shared readers (option-tag sets, RAck/RSeq scalars).
 // ---------------------------------------------------------------------------
 
-/// True iff `header` (Require / Supported / Unsupported …) on `msg` lists the
-/// `tag` option-tag (case-insensitive, comma-folded). Mirrors the TS
-/// `hasOptionTag`.
-fn has_option_tag(msg: &SipMessage, header: &str, tag: &str) -> bool {
-    split_option_tags(get_headers(msg_headers(msg), header))
-        .iter()
-        .any(|t| t == tag)
+/// True iff `Require` on `msg` lists the `tag` option-tag (case-insensitive,
+/// comma folds and repeated rows unioned — RFC 3261 §7.3.1).
+fn requires(msg: &SipMessage, tag: &str) -> bool {
+    value_of::<Require>(msg).is_some_and(|set| set.contains(tag))
 }
 
-/// All numeric RSeq values on `msg` (a reliable 1xx carries exactly one, but the
-/// reader tolerates the lenient multi-header shape). Non-numeric values drop.
+/// True iff `Supported` on `msg` lists `tag`.
+fn supports(msg: &SipMessage, tag: &str) -> bool {
+    value_of::<Supported>(msg).is_some_and(|set| set.contains(tag))
+}
+
+/// True iff `Unsupported` on `msg` names `tag` — the extension a 420 rejects.
+fn reports_unsupported(msg: &SipMessage, tag: &str) -> bool {
+    value_of::<Unsupported>(msg).is_some_and(|set| set.contains(tag))
+}
+
+/// Every RSeq value on `msg` (a reliable 1xx carries exactly one; the reader
+/// tolerates the lenient multi-row shape). A row no reader accepts drops.
 fn rseq_values(msg: &SipMessage) -> Vec<u64> {
-    get_headers(msg_headers(msg), "rseq")
+    msg.list::<RSeq>()
+        .unwrap_or_default()
         .into_iter()
-        .filter_map(|raw| raw.trim().parse::<u64>().ok())
+        .map(|rseq| u64::from(rseq.value()))
         .collect()
 }
 
-/// The parsed RAck `(response-num, CSeq-num, method)` of a PRACK, or `None` when
-/// the header is absent / unparseable (cannot-judge ⇒ SKIP). The first RAck
-/// header wins, mirroring the TS `msg.getHeader("rack")`.
-fn rack_of(msg: &SipMessage) -> Option<ParsedRack> {
-    get_headers(msg_headers(msg), "rack")
-        .into_iter()
-        .find_map(|v| parse_rack(&sip_message::SipStr::owned(v)))
+/// The RAck a PRACK carries — `(response-num, CSeq-num, method)` — or `None`
+/// when the header is absent or no reader accepts it (cannot-judge ⇒ SKIP).
+fn rack_of(msg: &SipMessage) -> Option<RAck> {
+    value_of::<RAck>(msg)
+}
+
+/// The reliable-1xx sequence number a PRACK acknowledges — the RAck
+/// `response-num`, which is the RSeq of the 1xx it PRACKs (RFC 3262 §7.2).
+fn racked_rseq(msg: &SipMessage) -> Option<u64> {
+    rack_of(msg).map(|rack| u64::from(rack.rseq()))
 }
 
 /// A reliable 1xx INVITE response: status in `101..=199`, CSeq method INVITE,
@@ -73,7 +82,7 @@ fn is_reliable_1xx(msg: &SipMessage) -> bool {
         && cseq_method(msg).eq_ignore_ascii_case("INVITE")
         && status(msg) > 100
         && status(msg) < 200
-        && has_option_tag(msg, "require", "100rel")
+        && requires(msg, "100rel")
 }
 
 /// Is this ordered event a `PRACK` request (sent or received)?
@@ -124,7 +133,7 @@ impl CrossMessageAuditRule for RequireReliable1xxOnRequireRule {
                     if ev.kind == EventKind::Received {
                         if let SipMessage::Request(r) = msg {
                             if r.method.as_str().eq_ignore_ascii_case("INVITE")
-                                && has_option_tag(msg, "require", "100rel")
+                                && requires(msg, "100rel")
                             {
                                 let branch = branch_of(msg);
                                 if !branch.is_empty() {
@@ -145,14 +154,14 @@ impl CrossMessageAuditRule for RequireReliable1xxOnRequireRule {
                         continue;
                     }
                     let st = status(msg);
-                    if st == 420 && has_option_tag(msg, "unsupported", "100rel") {
+                    if st == 420 && reports_unsupported(msg, "100rel") {
                         satisfied_420.insert(branch);
                         continue;
                     }
                     if st <= 100 || st >= 200 {
                         continue;
                     }
-                    let reliable = has_option_tag(msg, "require", "100rel")
+                    let reliable = requires(msg, "100rel")
                         && !rseq_values(msg).is_empty();
                     if reliable {
                         continue;
@@ -232,8 +241,8 @@ impl CrossMessageAuditRule for ReliableNeedsClientOptInRule {
                                 let branch = branch_of(msg);
                                 if !branch.is_empty() {
                                     opt_in.entry(branch).or_insert_with(|| {
-                                        has_option_tag(msg, "supported", "100rel")
-                                            || has_option_tag(msg, "require", "100rel")
+                                        supports(msg, "100rel")
+                                            || requires(msg, "100rel")
                                     });
                                 }
                             }
@@ -311,7 +320,7 @@ impl CrossMessageAuditRule for NoReliable1xxOnInDialogRule {
                     if !matches!(msg, SipMessage::Response(_))
                         || status(msg) <= 100
                         || status(msg) >= 200
-                        || !has_option_tag(msg, "require", "100rel")
+                        || !requires(msg, "100rel")
                     {
                         continue;
                     }
@@ -399,15 +408,19 @@ impl CrossMessageAuditRule for UnmatchedPrackProxiedRule {
                         continue;
                     }
                     let Some(rack) = rack_of(msg) else { continue };
-                    let key = (rack.rseq, rack.seq, rack.method.to_uppercase());
+                    let key = (
+                        u64::from(rack.rseq()),
+                        u64::from(rack.seq()),
+                        rack.method().as_str().to_uppercase(),
+                    );
                     if ev.kind == EventKind::Sent {
                         sent_prack_racks.insert(key);
                         continue;
                     }
                     received_pracks.push((
-                        rack.rseq,
-                        rack.seq,
-                        rack.method.to_uppercase(),
+                        u64::from(rack.rseq()),
+                        u64::from(rack.seq()),
+                        rack.method().as_str().to_uppercase(),
                         call_id(msg).to_string(),
                         branch_of(msg),
                     ));
@@ -478,15 +491,15 @@ impl CrossMessageAuditRule for PrackResponseSemanticsRule {
                     }
 
                     if ev.kind == EventKind::Received && is_prack(ev) {
-                        let Some(rack) = rack_of(msg) else { continue };
+                        let Some(rseq) = racked_rseq(msg) else { continue };
                         let branch = branch_of(msg);
                         if branch.is_empty() {
                             continue;
                         }
                         let cid = call_id(msg).to_string();
                         let matched =
-                            sent_rseqs.get(&cid).is_some_and(|s| s.contains(&rack.rseq));
-                        pending.insert(branch, (cid, rack.rseq, matched));
+                            sent_rseqs.get(&cid).is_some_and(|s| s.contains(&rseq));
+                        pending.insert(branch, (cid, rseq, matched));
                         continue;
                     }
 
@@ -589,10 +602,10 @@ impl CrossMessageAuditRule for SerialReliable1xxRule {
                     }
 
                     if ev.kind == EventKind::Received && is_prack(ev) {
-                        let Some(rack) = rack_of(msg) else { continue };
+                        let Some(rseq) = racked_rseq(msg) else { continue };
                         let cid = call_id(msg).to_string();
                         if let Some(list) = unacked.get_mut(&cid) {
-                            if let Some(idx) = list.iter().position(|&n| n == rack.rseq) {
+                            if let Some(idx) = list.iter().position(|&n| n == rseq) {
                                 list.remove(idx);
                             }
                         }
@@ -713,11 +726,11 @@ impl CrossMessageAuditRule for Delay2xxOnUnackedReliable1xxWithSdpRule {
                     }
 
                     if ev.kind == EventKind::Received && is_prack(ev) {
-                        let Some(rack) = rack_of(msg) else { continue };
+                        let Some(rseq) = racked_rseq(msg) else { continue };
                         let prefix = format!("{}\x00", call_id(msg));
                         for (key, set) in unacked.iter_mut() {
                             if key.starts_with(&prefix) {
-                                set.remove(&rack.rseq);
+                                set.remove(&rseq);
                             }
                         }
                         continue;
@@ -884,7 +897,7 @@ impl CrossMessageAuditRule for NoNewReliable1xxAfterFinalRule {
                     if status(msg) <= 100 || status(msg) >= 200 {
                         continue;
                     }
-                    if !has_option_tag(msg, "require", "100rel") {
+                    if !requires(msg, "100rel") {
                         continue;
                     }
                     for n in rseq_values(msg) {
@@ -942,7 +955,7 @@ impl CrossMessageAuditRule for UacIgnore100rel100TryingRule {
                     if ev.kind == EventKind::Received
                         && matches!(msg, SipMessage::Response(_))
                         && status(msg) == 100
-                        && has_option_tag(msg, "require", "100rel")
+                        && requires(msg, "100rel")
                     {
                         let cid = call_id(msg).to_string();
                         let set = bogus_rseqs.entry(cid).or_default();
@@ -953,16 +966,16 @@ impl CrossMessageAuditRule for UacIgnore100rel100TryingRule {
                     }
 
                     if ev.kind == EventKind::Sent && is_prack(ev) {
-                        let Some(rack) = rack_of(msg) else { continue };
+                        let Some(rseq) = racked_rseq(msg) else { continue };
                         let cid = call_id(msg).to_string();
-                        if bogus_rseqs.get(&cid).is_some_and(|s| s.contains(&rack.rseq)) {
+                        if bogus_rseqs.get(&cid).is_some_and(|s| s.contains(&rseq)) {
                             out.push((
                                 slot.bind_key.clone(),
                                 format!(
                                     "Sent PRACK references RSeq {} from a received 100 Trying \
                                      carrying Require:100rel — UAC MUST ignore 100rel on 100 \
                                      Trying (RFC 3262 §4 / RFC3262-MUST-019)",
-                                    rack.rseq,
+                                    rseq,
                                 ),
                             ));
                         }
@@ -1009,7 +1022,7 @@ impl CrossMessageAuditRule for PrackOnReliable1xxRule {
                         && matches!(msg, SipMessage::Response(_))
                         && status(msg) > 100
                         && status(msg) < 200
-                        && has_option_tag(msg, "require", "100rel")
+                        && requires(msg, "100rel")
                     {
                         let cid = call_id(msg).to_string();
                         let inner = candidates.entry(cid).or_default();
@@ -1020,10 +1033,10 @@ impl CrossMessageAuditRule for PrackOnReliable1xxRule {
                     }
 
                     if ev.kind == EventKind::Sent && is_prack(ev) {
-                        let Some(rack) = rack_of(msg) else { continue };
+                        let Some(rseq) = racked_rseq(msg) else { continue };
                         let cid = call_id(msg).to_string();
                         if let Some(inner) = candidates.get_mut(&cid) {
-                            if let Some(c) = inner.get_mut(&rack.rseq) {
+                            if let Some(c) = inner.get_mut(&rseq) {
                                 c.1 = true;
                             }
                         }
@@ -1084,7 +1097,7 @@ impl CrossMessageAuditRule for UacRseqStrictnessRule {
                         && matches!(msg, SipMessage::Response(_))
                         && status(msg) > 100
                         && status(msg) < 200
-                        && has_option_tag(msg, "require", "100rel")
+                        && requires(msg, "100rel")
                     {
                         let cid = call_id(msg).to_string();
                         for n in rseq_values(msg) {
@@ -1105,9 +1118,9 @@ impl CrossMessageAuditRule for UacRseqStrictnessRule {
                     }
 
                     if ev.kind == EventKind::Sent && is_prack(ev) {
-                        let Some(rack) = rack_of(msg) else { continue };
+                        let Some(rseq) = racked_rseq(msg) else { continue };
                         let cid = call_id(msg).to_string();
-                        if out_of_order.get(&cid).is_some_and(|s| s.contains(&rack.rseq)) {
+                        if out_of_order.get(&cid).is_some_and(|s| s.contains(&rseq)) {
                             let exp = expected
                                 .get(&cid)
                                 .map(|e| e.to_string())
@@ -1118,7 +1131,7 @@ impl CrossMessageAuditRule for UacRseqStrictnessRule {
                                     "Sent PRACK for out-of-order RSeq={} (expected {exp}, callId \
                                      {cid}) — UAC must PRACK in order (RFC 3262 §4 / \
                                      RFC3262-MUST-024)",
-                                    rack.rseq,
+                                    rseq,
                                 ),
                             ));
                         }
@@ -1209,9 +1222,9 @@ impl CrossMessageAuditRule for PrackOfferAnswerModelRule {
                     if !is_prack(ev) {
                         continue;
                     }
-                    let Some(rack) = rack_of(msg) else { continue };
+                    let Some(rseq) = racked_rseq(msg) else { continue };
                     let cid = call_id(msg).to_string();
-                    if !offer_rseqs.get(&cid).is_some_and(|s| s.contains(&rack.rseq)) {
+                    if !offer_rseqs.get(&cid).is_some_and(|s| s.contains(&rseq)) {
                         continue;
                     }
                     if !body_of(msg).is_empty() {
@@ -1222,7 +1235,7 @@ impl CrossMessageAuditRule for PrackOfferAnswerModelRule {
                         format!(
                             "PRACK for reliable-1xx-with-offer (RSeq={}, callId {cid}) carries no \
                              body — RFC 3262 §5 / RFC3262-MUST-025",
-                            rack.rseq,
+                            rseq,
                         ),
                     ));
                 }

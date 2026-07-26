@@ -10,13 +10,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use layer_harness::Stamped;
-use sip_message::message_helpers::get_headers;
+use sip_message::header::{HeaderName, RSeq, Require};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
 use crate::contracts::{PeerAuditRule, SignalingNetworkEvent};
-use crate::rfc_audit::dialog_model::{msg_headers, status};
-use crate::rfc_audit::txn_correlation::split_option_tags;
+use crate::rfc_audit::dialog_model::{status, value_of};
 use crate::types::UaRole;
 
 /// `RSeq` MUST be in `[1, 2^31 - 1]` (RFC 3262 §3 / MUST-008).
@@ -35,9 +34,10 @@ fn sent_messages<'a>(
     })
 }
 
-/// True iff any of `values` (comma-separated option-tag rows) lists `tag`.
-fn has_option_tag(values: &[&str], tag: &str) -> bool {
-    split_option_tags(values.iter().copied()).iter().any(|t| t == tag)
+/// True iff the message's `Require` set lists `tag` — every row of the header,
+/// comma folds included (RFC 3261 §7.3.1).
+fn requires(msg: &SipMessage, tag: &str) -> bool {
+    value_of::<Require>(msg).is_some_and(|set| set.contains(tag))
 }
 
 /// **RFC 3262 §4 — `Require: 100rel` MUST NOT appear on a non-INVITE request
@@ -65,8 +65,7 @@ impl PeerAuditRule for No100relRequireOnNonInviteRule {
             if req.method.as_str() == "INVITE" {
                 continue;
             }
-            let require = get_headers(msg_headers(&msg), "require");
-            if has_option_tag(&require, "100rel") {
+            if requires(&msg, "100rel") {
                 out.push(format!(
                     "{} request carries Require: 100rel — only INVITE may (RFC 3262 §4 / \
                      RFC3262-MUST-017)",
@@ -86,8 +85,9 @@ impl PeerAuditRule for No100relRequireOnNonInviteRule {
 /// PRACK-acks against that `RSeq`, so a missing/out-of-range value or a
 /// reliable-100 breaks the PRACK matching outright; the test UAS's lenient
 /// encoder would emit the malformed response silently, so this rule inspects
-/// every sent 1xx response on the UAS's bind. `RSeq` is not a typed header, so
-/// its numeric value is recovered from the raw row.
+/// every sent 1xx response on the UAS's bind. A row no reader accepts is itself
+/// out of range, so the presence of the header and the readability of its value
+/// are asked separately.
 pub struct Reliable1xxHeadersRule;
 
 impl PeerAuditRule for Reliable1xxHeadersRule {
@@ -110,10 +110,9 @@ impl PeerAuditRule for Reliable1xxHeadersRule {
             if !(100..200).contains(&st) {
                 continue;
             }
-            let rseq_values = get_headers(msg_headers(&msg), "rseq");
-            let require = get_headers(msg_headers(&msg), "require");
+            let rseq_values: Vec<&str> = msg.raw(HeaderName::RSeq).collect();
             let has_rseq = !rseq_values.is_empty();
-            let has_100rel = has_option_tag(&require, "100rel");
+            let has_100rel = requires(&msg, "100rel");
 
             if st == 100 {
                 if has_rseq {
@@ -145,8 +144,8 @@ impl PeerAuditRule for Reliable1xxHeadersRule {
                 continue;
             }
             let raw = rseq_values[0].trim();
-            match raw.parse::<u64>() {
-                Ok(rseq) if (1..=RSEQ_MAX).contains(&rseq) => {}
+            match value_of::<RSeq>(&msg) {
+                Some(rseq) if (1..=RSEQ_MAX).contains(&u64::from(rseq.value())) => {}
                 _ => out.push(format!(
                     "Reliable {st} response RSeq={raw} outside [1, 2^31-1] — RFC 3262 §3 \
                      (RFC3262-MUST-008)",
