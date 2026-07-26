@@ -18,10 +18,10 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 use scenario_harness::{AnchorTag, RunReport};
-use sip_message::message_helpers::parse_sip_uri;
+use sip_message::header::kind::NameAddrKind;
+use sip_message::header::{self, HeaderName, NameAddr, NameAddrHeader, ParamValue, Uri};
 use sip_message::parser::custom::CustomParser;
-use sip_message::types::{ContactSet, NameAddr, ParamValue};
-use sip_message::{SipMessage, SipParser};
+use sip_message::{SipMessage, SipParseError, SipParser};
 use sip_net::RecordedSipEntry;
 
 use crate::model::{Check, CheckBlock, CheckOp, CheckSet, Input, TestCase};
@@ -326,7 +326,7 @@ fn extract(
 
     // header(Name) — raw values of any header, comma-joined in wire order.
     if let Some(name) = field.strip_prefix("header(").and_then(|s| s.strip_suffix(')')) {
-        let values = msg.get_header(name);
+        let values: Vec<&str> = msg.raw(HeaderName::from(name)).collect();
         return Ok(if values.is_empty() { None } else { Some(values.join(", ")) });
     }
 
@@ -354,41 +354,46 @@ fn extract(
         if index != 0 {
             return Err(format!("field {field:?}: ruri is not a list"));
         }
-        let ru = &r.request_uri;
+        let ru = r.request_uri();
         return Ok(match sub {
-            None | Some("uri") => Some(r.uri.to_string()),
-            Some("userInfo") => ru.user.as_deref().map(str::to_string),
-            Some("host") => Some(ru.host.to_string()),
-            Some("port") => Some(ru.port.unwrap_or(5060).to_string()),
+            None | Some("uri") => Some(ru.to_string()),
+            Some("userInfo") => ru.user().map(str::to_string),
+            Some("host") => Some(ru.host().to_string()),
+            Some("port") => Some(ru.authority().port_or_default().to_string()),
             Some(other) => match param_selector(other)? {
-                Some(p) => ru.params.get(p).map(|v| v.to_string()),
+                Some(p) => ru.param(p).map(param_text),
                 None => return Err(format!("unknown ruri subfield {other:?} in {field:?}")),
             },
         });
     }
 
-    let addr = uri_header(name, index, msg)?;
-    let Some(addr) = addr else { return Ok(None) };
-    let parsed = parse_sip_uri(&addr.uri);
+    let Some(field_value) = uri_header(name, index, msg)? else { return Ok(None) };
+    let addr = &field_value.addr;
+    let uri = addr.uri();
     Ok(match sub {
         // Bare name (or `.uri`): the URI itself — present/absent/regex over it.
-        None | Some("uri") => Some(addr.uri.to_string()),
-        Some("displayName") => addr.display_name.as_deref().map(str::to_string),
-        Some("tag") => addr.tag.as_deref().map(str::to_string),
-        Some("userInfo") => parsed.as_ref().and_then(|p| p.user.clone()),
-        Some("host") => parsed.as_ref().map(|p| p.host.clone()),
-        Some("port") => parsed.as_ref().map(|p| p.port.to_string()),
+        None | Some("uri") => Some(uri.to_string()),
+        Some("displayName") => addr.display().map(str::to_string),
+        Some("tag") => field_value.tag,
+        Some("userInfo") => uri.user().map(str::to_string),
+        Some("host") => Some(uri.host().to_string()),
+        Some("port") => Some(uri.authority().port_or_default().to_string()),
         Some(other) => match param_selector(other)? {
             // Header param first (`;tag=`-style), then URI param. A bare flag
             // param extracts as "" (use `exists`).
-            Some(p) => match addr.params.get(p) {
-                Some(ParamValue::Value(v)) => Some(v.to_string()),
-                Some(ParamValue::Flag) => Some(String::new()),
-                None => parsed.as_ref().and_then(|u| u.params.get(p).cloned()),
+            Some(p) => match addr.params().get(p) {
+                Some(value) => Some(param_text(value)),
+                None => uri.param(p).map(param_text),
             },
             None => return Err(format!("unknown subfield {other:?} in field {field:?}")),
         },
     })
+}
+
+/// A parameter as the check grammar reads it: its value, or `""` for a bare
+/// flag (which `exists` is the op for).
+fn param_text(value: &ParamValue) -> String {
+    value.as_str().unwrap_or_default().to_string()
 }
 
 /// `param(x)` → `Some("x")`; anything else → `None` (unknown subfield).
@@ -396,44 +401,37 @@ fn param_selector(sub: &str) -> Result<Option<&str>, String> {
     Ok(sub.strip_prefix("param(").and_then(|s| s.strip_suffix(')')))
 }
 
-/// The `index`-th NameAddr-shaped value of a URI-bearing header. `Ok(None)` =
+/// One address-valued header value as the check grammar sees it: the address
+/// itself, plus the dialog tag — which only From and To carry.
+struct AddrField {
+    addr: NameAddr,
+    tag: Option<String>,
+}
+
+/// The `index`-th address-shaped value of a URI-bearing header. `Ok(None)` =
 /// header (or that index) absent.
-fn uri_header(name: &str, index: usize, msg: &SipMessage) -> Result<Option<NameAddr>, String> {
-    let single = |na: &NameAddr| -> Result<Option<NameAddr>, String> {
-        if index == 0 { Ok(Some(na.clone())) } else { Ok(None) }
-    };
+fn uri_header(name: &str, index: usize, msg: &SipMessage) -> Result<Option<AddrField>, String> {
     match name {
-        "from" => match msg {
-            SipMessage::Request(r) => single(&r.from),
-            SipMessage::Response(r) => single(&r.from),
-        },
-        "to" => match msg {
-            SipMessage::Request(r) => single(&r.to),
-            SipMessage::Response(r) => single(&r.to),
-        },
-        "pai" => list(&msg.optional().p_asserted_identity, name, index),
-        "ppi" => list(&msg.optional().p_preferred_identity, name, index),
-        "diversion" => list(&msg.optional().diversion, name, index),
-        "contact" => {
-            let contacts = match msg {
-                SipMessage::Request(r) => &r.contacts,
-                SipMessage::Response(r) => &r.contacts,
-            };
-            match contacts {
-                ContactSet::Wildcard => Ok((index == 0).then(|| NameAddr {
-                    display_name: None,
-                    uri: "*".to_string().into(),
-                    tag: None,
-                    params: Default::default(),
-                })),
-                ContactSet::Contacts(list) => Ok(list.get(index).map(|c| NameAddr {
-                    display_name: c.display_name.clone(),
-                    uri: c.uri.clone(),
-                    tag: None,
-                    params: c.params.clone(),
-                })),
-            }
+        "from" => {
+            let from = msg.from();
+            let tag = from.tag().map(str::to_string);
+            Ok((index == 0).then(|| AddrField { addr: from.into_addr(), tag }))
         }
+        "to" => {
+            let to = msg.to();
+            let tag = to.tag().map(str::to_string);
+            Ok((index == 0).then(|| AddrField { addr: to.into_addr(), tag }))
+        }
+        "pai" => nth(msg.list::<header::PAssertedIdentity>(), name, index),
+        "ppi" => nth(msg.list::<header::PPreferredIdentity>(), name, index),
+        "diversion" => nth(msg.list::<header::Diversion>(), name, index),
+        // A wildcard Contact is not an address: it names every binding at once
+        // (RFC 3261 §10.2.2), so it reads back as the star the UA sent.
+        "contact" if msg.raw(HeaderName::Contact).any(|v| v.trim() == "*") => {
+            Ok((index == 0)
+                .then(|| AddrField { addr: NameAddr::new(Uri::opaque("*")), tag: None }))
+        }
+        "contact" => nth(msg.list::<header::Contact>(), name, index),
         other => Err(format!(
             "unknown field {other:?} (URI headers: from/to/ruri/pai/ppi/diversion/contact; \
              others via header(Name), body, source/dest)"
@@ -441,13 +439,16 @@ fn uri_header(name: &str, index: usize, msg: &SipMessage) -> Result<Option<NameA
     }
 }
 
-fn list(
-    parsed: &Result<Vec<NameAddr>, sip_message::SipParseError>,
+fn nth<K: NameAddrKind>(
+    parsed: Result<Vec<NameAddrHeader<K>>, SipParseError>,
     name: &str,
     index: usize,
-) -> Result<Option<NameAddr>, String> {
+) -> Result<Option<AddrField>, String> {
     match parsed {
-        Ok(v) => Ok(v.get(index).cloned()),
+        Ok(values) => Ok(values
+            .into_iter()
+            .nth(index)
+            .map(|value| AddrField { addr: value.into_addr(), tag: None })),
         Err(e) => Err(format!("header {name:?} is present but malformed: {e}")),
     }
 }

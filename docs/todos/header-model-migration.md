@@ -161,7 +161,7 @@ helpers listed above, run capped workspace test, tick tracker, commit.
 - [x] M5 sip-proxy
 - [x] M6 b2bua-sdk + b2bua
 - [x] M7 scenario-harness
-- [ ] M8 e2e-core + e2e-model + announcement
+- [x] M8 e2e-core + e2e-model + announcement
 - [ ] M9 sip-net rfc_audit
 - [ ] M10 sip-pcap + loadgen
 - [ ] M11 harness/test crates
@@ -879,3 +879,83 @@ it replaces (thaw + freeze-render + serialize-render).
 Workspace: 2123 tests passed, 0 failed. Clippy on `scenario-harness`: 18
 warnings, down from 23, all pre-existing categories (doc indentation, type
 complexity, variant size).
+
+### M8 — e2e-core + e2e-model + announcement
+
+`e2e-core` and `e2e-model` have **zero** `message_helpers::*` / `get_header` /
+`set_header` / `serialize_*_parts` call sites left, `src` and `tests` alike. No
+reader was missing — the port needed nothing added to `sip-message`.
+
+**`announcement` needed no port.** It builds `MessageTransform`s through the SDK
+façade alone (`new_ruri`, still `Option<String>`); its only sip-message contact
+is a `Cargo.toml` dependency nothing imports. See the suspicions below.
+
+**Every deletion target the plan listed is gone**, plus what the sweep found:
+
+| deleted | replaced by |
+|---|---|
+| `registrar.rs` `prepend_header`, `strip_top_route_if_self`, `strip_top_via_if_self`, `decrement_max_forwards` (header-vec surgery) | `thaw` → `set(MaxForwards)` / `pop_top::<RouteEntry>` / `push_front`+`prepend(RecordRouteEntry)` / `prepend(Via)` / `pop_top::<Via>` → `freeze_bytes` |
+| `registrar.rs` `top_via_addr` + `via_sent_by_addr` (the `split_whitespace().nth(1)` peel) | `via.sent_by().pair()` |
+| `registrar.rs` `uri_to_addr` (`parse_sip_uri` + host/port reassembly) ×4 | `uri.host_port()` |
+| `registrar.rs` `extract_contact_uri` ×3, `parse_sip_uri` ×4 | `req.to().uri().user()`, `req.request_uri().user()`, `Contact::parse(..).uri()` |
+| `registrar.rs` `effective_expires` header-level `;expires=` string scan (the `find('>')` + `split(';')` block) | `header::<Expires>()`, `contact.uri().param("expires")`, `contact.param("expires")` |
+| `registrar.rs` `get_header("route")` next-hop read | `req.list::<RouteEntry>()` |
+| `checks.rs` `msg.get_header(name)` | `msg.raw(HeaderName::from(name))` — and now compact-form aware |
+| `checks.rs` `parse_sip_uri(&addr.uri)` re-parse of an already-parsed address | `addr.uri()` (structured `Uri`) |
+| `checks.rs` `types::{ContactSet, NameAddr, ParamValue}` field reads (`r.from`, `r.contacts`, `optional().p_asserted_identity`) | `msg.from()`/`to()`, `msg.list::<PAssertedIdentity/PPreferredIdentity/Diversion/Contact>()` |
+| `transfer_refer_media.rs` `format!("<{}>", target.uri)` name-addr assembly | `ReferTo::from_uri(..).to_wire()` |
+| `registrar.rs` `serialize(&SipMessage::…)` on every forwarded message and every self-generated response | `freeze_bytes()` / `resp.raw` |
+
+**The register front proxy stops rendering twice.** Both hops are
+thaw → touch → `freeze_bytes` (no eager field extraction on a message this
+proxy forwards without reading), and its own 200/4xx/483 go out as the
+generator's image — the M4/M5 reclaim applied to this crate's proxy.
+
+**Behaviour deltas, all deliberate:**
+- **The granted Contact echo is a typed value**, so the lifetime rides as a
+  HEADER parameter: an unbracketed `sip:bob@h:p` Contact is echoed
+  `<sip:bob@h:p>;expires=N` instead of `sip:bob@h:p;expires=N`, where the old
+  `format!` made `expires` a URI parameter of the binding (RFC 3261 §10.2.4
+  puts it on the header).
+- **A Contact no reader accepts can de-register but never register.** `*` (and
+  any garbage) now yields 400 Bad Request when the effective Expires is
+  non-zero — RFC 3261 §10.3 step 6 — where the old path stored the star as a
+  binding whose lookup later answered 500.
+- **A non-numeric `Max-Forwards` never reaches the forwarding decision**: the
+  parser rejects the whole message, so the proxy's `70 - 1` default now covers
+  only the request that states no count. The old local repair was reachable
+  only through a hand-built header vec, which is what its test built.
+- The proxy's own **Record-Route opens the header block** when the request
+  carries none (§7.3), instead of riding at wire position 0 above the Via; its
+  Via is still the topmost Via. Same delta M7 took in the harness proxy.
+- **A Route the strict reader rejects yields no self-pop and no route hop**
+  (the request falls back to the Request-URI), the same tolerant read M5/M6/M7
+  took, where the old text path routed on it.
+- `header(Name)` in the check grammar resolves compact forms and casing, so
+  `header(Contact)` now also answers for a `m:` line.
+- A `.port` subfield on a URI the strict reader rejects reads as `5060` rather
+  than absent: `msg.from()`/`to()` keep an unreadable URI whole
+  (`Uri::parse_or_opaque`) instead of dropping the whole address.
+
+Workspace: 2124 tests passed, 0 failed. Clippy on the three crates: only the
+pre-existing doc-indentation warnings.
+
+**Suspicions raised, not fixed:**
+- **`announcement` declares a `sip-message` dependency it never uses.** The
+  crate's whole point is "depends ONLY on b2bua-sdk (+ call/sip-message)" as a
+  no-path-to-internals proof, so the dep may be deliberate ballast — but an
+  unused dependency is also what an out-of-tree service crate would NOT carry.
+  M12 is the moment to decide, since it is the last chance to notice.
+- **`Registrar` stores a `header::Uri` per binding, which is a 272-byte value
+  for what routing reads as a host and a port.** That is the same
+  `size_of`-of-the-value-model debt M5 logged; a binding store keyed on
+  `SocketAddr` would be smaller but would stop the store being verbatim, which
+  its sipjs parity contract states.
+- `RegisterProxy::on_response` reads the whole Via list to find the relay
+  target and then pops the top entry through the draft, so the header is read
+  twice — the `try_list` gap M5 and M6 both logged, seen from the response
+  side.
+- `CalleeTarget::uri` is still a `String` the shapes wrap in angle brackets and
+  the harness re-parses. Typing it is `e2e-model`'s own model decision, not a
+  header-model one, and it is the last string round-trip on this crate's dial
+  path.
