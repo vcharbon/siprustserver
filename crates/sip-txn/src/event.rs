@@ -3,7 +3,7 @@
 
 use std::net::SocketAddr;
 
-use sip_message::SipMessage;
+use sip_message::{Method, SipMessage};
 
 /// A deduplicated/processed event for the upstream router. The peer address is
 /// a `SocketAddr` (sip-net's everywhere-`SocketAddr` convention, ADR-0005).
@@ -79,7 +79,7 @@ impl EventQueueDropReason {
             TransactionEvent::CallQuiesced { .. } => Self::CallQuiesced,
             TransactionEvent::Message { message, .. } => match message.as_ref() {
                 SipMessage::Response(_) => Self::Response,
-                SipMessage::Request(r) if r.method == "INVITE" => Self::RequestInvite,
+                SipMessage::Request(r) if r.method == Method::Invite => Self::RequestInvite,
                 SipMessage::Request(_) => Self::RequestOther,
             },
         }

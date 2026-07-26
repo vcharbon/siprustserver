@@ -157,7 +157,7 @@ helpers listed above, run capped workspace test, tick tracker, commit.
 - [x] M2 value hierarchy + draft engine
 - [x] M3 generators → recipes
 - [x] M1–M3 review findings addressed (fallible edits, Request-URI fidelity)
-- [ ] M4 sip-txn
+- [x] M4 sip-txn
 - [ ] M5 sip-proxy
 - [ ] M6 b2bua-sdk + b2bua
 - [ ] M7 scenario-harness
@@ -496,3 +496,81 @@ workspace run ("SUT holds 1 live calls vs 0 failed — a RECOVERED call leaked")
 and passed standalone and on a clean re-run of the same lane. No sip-message
 surface is involved in that path; it matches the known loadgen-smoke contention
 flake, but it is a leak assertion, so it is worth a second look if it recurs.
+
+### M4 — sip-txn
+
+The survey was right that sip-txn is the cleanest consumer: **zero `get_header`
+call sites**. The port is therefore about the two things left — one genuine
+string re-parse, and the double render M3 left on the build path.
+
+**Reads now go through the typed surface.** Top-Via branch ×6
+(`msg.via.first().branch` → `msg.top_via().branch()`), Via `cr`/`lg` custom
+params (old `types::ParamValue::Value` match → `top_via().param(name)` +
+`header::ParamValue::as_str`), From/To tags ×6 (`msg.from.tag` →
+`msg.from().tag()`), CSeq ×2, Call-ID ×2. The one real deletion the survey
+missed is `message_helpers::parse_uri_params(&req.uri)` in
+`extract_ruri_call_ref` — a string re-parse of an already-parsed Request-URI
+into a `BTreeMap<String, String>` — now `req.request_uri().param("callRef")`.
+That trade is a strict win even transitionally: the old helper minted an owned
+`String` pair per URI parameter, the typed read parses into a small-vec
+`Params` and hands back a borrowed `&str`.
+
+`decode_param` STAYS. It lives in `message_helpers::param_codec`, not in the
+`{headers,name_addr,via}` surface M12 deletes: percent-decoding a param value a
+peer encoded is a codec concern, orthogonal to the value model, and no typed
+accessor should silently apply it (the wire spelling is what round-trips).
+
+**Method comparisons are typed too** (`req.method == "ACK"` → `Method::Ack`,
+`resp.cseq.method.as_str().eq_ignore_ascii_case("CANCEL")` →
+`resp.cseq().method() == &Method::Cancel`). Equivalent by construction —
+`Method::from_wire` already folds known methods case-insensitively, so
+`Method::Other` can never hold a known spelling.
+
+**The build path stops rendering everything twice.** M3's open item ("nothing
+reads the image a built message now carries… the first consumer port that sends
+`msg.raw` instead reclaims it") is reclaimed here for the five messages this
+layer builds itself: the auto-100 Trying, the auto-ACK for a non-2xx final, and
+the CANCEL trio (200, 487, and the unmatched-CANCEL 481). A recipe freezes into
+its own image and that image IS the wire form, so `send_buffer(&msg.raw)`
+replaces `serialize(&SipMessage::…(msg))`. Byte-identity holds by construction:
+`freeze` and `serializer::finish` write the same `Name: value\r\n` block over
+the same header list, and `freeze`'s `with_content_length` leaves nothing for
+`finish`'s Content-Length correction to change.
+
+`do_send_response` deliberately does NOT do this. The response comes from the
+TU, which may have edited the header list of a message it parsed, so its image
+is not authoritative — that path renders. It does drop its whole-`SipResponse`
+clone, though: every field the layer needs (status, top-Via branch, To-tag) is
+read first, then the response goes to the serializer by value.
+
+**Cached datagrams are `Bytes`, not `Vec<u8>`** (`Transaction::last_response`,
+`retransmit_buf`). That is what lets a built message's image be cached without a
+copy, and it makes every replay a refcount bump instead of a memcpy of the whole
+datagram: Timer A/E client retransmits, Timer G server final retransmits, and
+the cached-response replay on a duplicate request. `retransmit_buf_bytes` still
+censuses the retained bytes correctly — the layer holds the sole reference.
+
+**Per-message copies removed** (structural count, no sip-txn alloc budget
+exists — M13 owns adding one): one full datagram render per inbound INVITE (the
+100), per received non-2xx INVITE final (the ACK), and two per CANCEL (three on
+the unmatched path); one whole-`SipResponse` clone per outbound TU response; one
+datagram memcpy per retransmit / duplicate replay. Workspace: 2118 tests passed,
+0 failed.
+
+**Suspicions raised, not fixed:**
+- The transitional read accessors are not free here the way they will be after
+  M12. `msg.from()`/`to()` run `Uri::parse_or_opaque` on the name-addr URI just
+  to reach a tag, and `top_via()` copies the param list — so this layer, which
+  touches every datagram, now pays a small per-message conversion where it used
+  to read a field. It is bounded (1–2 conversions per message, no text copied —
+  `SipStr` clones are refcount bumps) and M12's stored `MessageCore` deletes it
+  outright, but a loadgen throughput run before M12 lands would be reading this
+  cost, not a regression in the protocol path.
+- `Owner::do_send_request` still clones the whole `SipRequest` to stash it as an
+  INVITE client txn's `original_request` (for the auto-ACK), and again into the
+  returned `ClientTransactionHandle`. Once messages are image-backed and
+  immutable (M12) those are refcount bumps, not deep copies; not worth touching
+  before then.
+- `flamegraph-util::capture_produces_an_svg` failed once inside the full
+  workspace run and passed standalone and on a clean re-run — the same infra
+  flake M1 logged (CPU-stack sampling starving under the capped parallel lane).

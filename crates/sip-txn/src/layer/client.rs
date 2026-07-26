@@ -6,9 +6,11 @@
 
 use std::net::SocketAddr;
 
+use bytes::Bytes;
 use sip_message::generators::generate_ack_for_non_2xx;
+use sip_message::header::ParamValue;
 use sip_message::message_helpers::decode_param;
-use sip_message::{serialize, ParamValue, SipMessage, SipRequest, SipResponse};
+use sip_message::{serialize, Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
 use crate::event::{ClientTransactionHandle, TimeoutKind, TransactionEvent, TxnKind};
@@ -28,7 +30,7 @@ impl Owner {
         // Wrap by value to serialize (avoids a full request clone just to make a
         // `&SipMessage`), then destructure `msg` back out for the rest.
         let wrapped = SipMessage::Request(msg);
-        let buf = serialize(&wrapped);
+        let buf = Bytes::from(serialize(&wrapped));
         let SipMessage::Request(msg) = wrapped else { unreachable!("just wrapped a request") };
 
         // CANCEL and ACK deliberately REUSE the branch of the request they relate
@@ -39,17 +41,17 @@ impl Owner {
         // — the same path the B2BUA already uses (OutboundTxnMode::Raw) — without
         // touching the map. This closes the branch-collision foot-gun at its source,
         // so the branch-only key never has to disambiguate by method.
-        if msg.method == "CANCEL" || msg.method == "ACK" {
+        if msg.method == Method::Cancel || msg.method == Method::Ack {
             self.send_buffer(endpoint, &buf, dest).await;
-            let branch = msg.via.first().branch.clone().unwrap_or_default();
+            let branch = msg.top_via().branch().unwrap_or_default().to_string();
             return match txn_type {
                 TxnKind::Invite => ClientTransactionHandle::Invite {
-                    branch: branch.to_string(),
+                    branch,
                     original_invite: msg,
                     destination: dest,
                 },
                 TxnKind::NonInvite => ClientTransactionHandle::NonInvite {
-                    branch: branch.to_string(),
+                    branch,
                     original_request: msg,
                     destination: dest,
                 },
@@ -57,20 +59,19 @@ impl Owner {
         }
 
         let branch = msg
-            .via
-            .first()
-            .branch
-            .clone()
+            .top_via()
+            .branch()
             .filter(|b| !b.is_empty())
-            .unwrap_or_else(|| self.id_gen.new_branch().into());
+            .map(str::to_string)
+            .unwrap_or_else(|| self.id_gen.new_branch());
         let (call_ref, leg_id) = extract_via_custom_params(&msg);
 
         let txn = Transaction {
-            branch: branch.to_string(),
+            branch: branch.clone(),
             role: TxnRole::Client,
             kind: txn_type,
-            call_id: msg.call_id.to_string(),
-            from_tag: msg.from.tag.clone().unwrap_or_default().to_string(),
+            call_id: msg.call_id().as_str().to_string(),
+            from_tag: msg.from().tag().unwrap_or_default().to_string(),
             original_request: matches!(txn_type, TxnKind::Invite).then(|| msg.clone()),
             last_response: None,
             last_response_status: None,
@@ -95,12 +96,12 @@ impl Owner {
 
         match txn_type {
             TxnKind::Invite => ClientTransactionHandle::Invite {
-                branch: branch.to_string(),
+                branch,
                 original_invite: msg,
                 destination: dest,
             },
             TxnKind::NonInvite => ClientTransactionHandle::NonInvite {
-                branch: branch.to_string(),
+                branch,
                 original_request: msg,
                 destination: dest,
             },
@@ -110,7 +111,7 @@ impl Owner {
     fn start_client_retransmit(
         &mut self,
         branch: &str,
-        buf: Vec<u8>,
+        buf: Bytes,
         dest: SocketAddr,
         max_ms: u64,
     ) {
@@ -274,7 +275,8 @@ impl Owner {
         resp: SipResponse,
         src: SocketAddr,
     ) {
-        let branch = resp.via.first().branch.clone().unwrap_or_default();
+        let top_via = resp.top_via();
+        let branch = top_via.branch().unwrap_or_default();
 
         // 100 Trying: absorb after nudging the matching client txn's state. An
         // INVITE client stops retransmitting on a provisional (§17.1.1.2); a
@@ -282,7 +284,7 @@ impl Owner {
         // so leave its timer running.
         if resp.status == 100 {
             if !branch.is_empty() {
-                let key = match self.txns.get_mut(branch.as_str()) {
+                let key = match self.txns.get_mut(branch) {
                     Some(txn) if txn.role == TxnRole::Client => {
                         txn.state = TxnState::Proceeding;
                         (txn.kind == TxnKind::Invite).then(|| txn.retransmit_key.take()).flatten()
@@ -297,7 +299,7 @@ impl Owner {
         if !branch.is_empty() {
             // CANCEL responses reuse the INVITE branch — never match them to the
             // INVITE client txn (would tear it down on the 200 and miss the 487).
-            if resp.cseq.method.as_str().eq_ignore_ascii_case("CANCEL") {
+            if resp.cseq().method() == &Method::Cancel {
                 self.emit(TransactionEvent::Message {
                     message: Box::new(SipMessage::Response(resp)),
                     src,
@@ -308,7 +310,7 @@ impl Owner {
             // Snapshot what we need before mutating.
             let client_match = self
                 .txns
-                .get(branch.as_str())
+                .get(branch)
                 .filter(|t| t.role == TxnRole::Client)
                 .map(|t| (t.kind, t.state, t.original_request.clone(), t.destination));
 
@@ -319,7 +321,7 @@ impl Owner {
                     // final). INVITE stops retransmitting (§17.1.1.2); non-INVITE
                     // continues at T2 (§17.1.2.2), so only cancel retransmit for INVITE.
                     if state != TxnState::Completed {
-                        let key = match self.txns.get_mut(branch.as_str()) {
+                        let key = match self.txns.get_mut(branch) {
                             Some(txn) => {
                                 txn.state = TxnState::Proceeding;
                                 (kind == TxnKind::Invite).then(|| txn.retransmit_key.take()).flatten()
@@ -332,8 +334,9 @@ impl Owner {
                     // Non-2xx INVITE final: (re-)ACK hop-by-hop (RFC 3261 §17.1.1.2).
                     if let (Some(orig), Some(dest)) = (original_request, destination) {
                         let ack = generate_ack_for_non_2xx(&orig, &resp);
-                        self.send_buffer(endpoint, &serialize(&SipMessage::Request(ack)), dest)
-                            .await;
+                        // The recipe froze the ACK into its own image, which IS
+                        // its wire form — send that instead of rendering it twice.
+                        self.send_buffer(endpoint, &ack.raw, dest).await;
                     }
                     if state == TxnState::Completed {
                         // A RETRANSMITTED non-2xx final (our first ACK was lost): we
@@ -346,7 +349,7 @@ impl Owner {
                     // without Timer D a lost ACK would have the UAS resend the final
                     // unanswered until its own Timer H, each resend re-emitting
                     // upstream as a duplicate.
-                    let (r, t) = match self.txns.get_mut(branch.as_str()) {
+                    let (r, t) = match self.txns.get_mut(branch) {
                         Some(txn) => {
                             txn.state = TxnState::Completed;
                             (txn.retransmit_key.take(), txn.timeout_key.take())
@@ -356,7 +359,7 @@ impl Owner {
                     self.cancel_timer(r);
                     self.cancel_timer(t);
                     let key = self.timers.insert(Timer::Cleanup(branch.to_string()), ms(TIMER_D));
-                    if let Some(txn) = self.txns.get_mut(branch.as_str()) {
+                    if let Some(txn) = self.txns.get_mut(branch) {
                         txn.cleanup_key = Some(key);
                     }
                     // Critical: we auto-ACKed (silenced the UAS's resend), so this is
@@ -369,7 +372,7 @@ impl Owner {
                 } else {
                     // 2xx INVITE (the TU ACKs end-to-end) or any non-INVITE final:
                     // terminate the client txn immediately.
-                    self.delete_txn(&branch);
+                    self.delete_txn(branch);
                     self.emit_critical(TransactionEvent::Message {
                         message: Box::new(SipMessage::Response(resp)),
                         src,
@@ -396,22 +399,19 @@ impl Owner {
 /// every non-INVITE keep the 32 s failure-detection timeout.
 fn client_timeout_ms(kind: TxnKind, req: &SipRequest) -> u64 {
     match kind {
-        TxnKind::Invite if req.to.tag.is_none() => INVITE_INITIAL_TIMEOUT,
+        TxnKind::Invite if req.to().tag().is_none() => INVITE_INITIAL_TIMEOUT,
         TxnKind::Invite => TIMER_B,
         TxnKind::NonInvite => TIMER_F,
     }
 }
 
-/// Extract + URL-decode the Via `cr` (callRef) / `lg` (legId) custom params.
-/// The B2BUA's `build_call_via` URL-encodes both (callRefs contain `|`/`@`); the
-/// parser stores raw param strings, so we decode here so `cancel_txns_for_call`
-/// matches the natural callRef the caller passes (see the cr/lg round-trip
-/// regression test).
+/// The top Via's `cr` (callRef) / `lg` (legId) custom params, URL-decoded. The
+/// B2BUA's `build_call_via` URL-encodes both (callRefs contain `|`/`@`) and a
+/// param value stays as written on the wire, so decoding here is what makes
+/// `cancel_txns_for_call` match the natural callRef the caller passes (see the
+/// cr/lg round-trip regression test).
 fn extract_via_custom_params(req: &SipRequest) -> (Option<String>, Option<String>) {
-    let params = &req.via.first().params;
-    let read = |name: &str| match params.get(name) {
-        Some(ParamValue::Value(v)) => Some(decode_param(v)),
-        _ => None,
-    };
+    let top_via = req.top_via();
+    let read = |name: &str| top_via.param(name).and_then(ParamValue::as_str).map(decode_param);
     (read("cr"), read("lg"))
 }

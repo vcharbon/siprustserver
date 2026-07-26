@@ -6,9 +6,11 @@
 
 use std::net::SocketAddr;
 
+use bytes::Bytes;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
+use sip_message::header::ParamValue;
 use sip_message::message_helpers::decode_param;
-use sip_message::{serialize, SipMessage, SipRequest, SipResponse};
+use sip_message::{serialize, Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
 use crate::event::{TransactionEvent, TxnKind};
@@ -64,12 +66,20 @@ impl Owner {
         msg: SipResponse,
         dest: SocketAddr,
     ) {
+        // Every field this layer needs is read before the response goes to the
+        // serializer BY VALUE, so keeping a `&SipMessage` alive costs no
+        // whole-message clone. The response is rendered rather than sent as its
+        // own image: the TU may have edited the header list of a message it
+        // parsed, so only a message this layer itself built carries its wire form.
         let status = msg.status;
-        let branch = msg.via.first().branch.clone();
-        let buf = serialize(&SipMessage::Response(msg.clone()));
+        let top_via = msg.top_via();
+        let branch = top_via.branch();
+        let outbound_to_tag =
+            if status > 100 { msg.to().tag().map(str::to_string) } else { None };
+        let buf = Bytes::from(serialize(&SipMessage::Response(msg)));
 
         if let Some(branch) = branch {
-            if let Some(txn) = self.txns.get_mut(branch.as_str()) {
+            if let Some(txn) = self.txns.get_mut(branch) {
                 if txn.role == TxnRole::Server {
                     // RFC 3261 §17.2.1: a Completed server txn has already sent its
                     // final and now only retransmits the STORED response on a
@@ -84,8 +94,6 @@ impl Owner {
                     }
 
                     let is_final = status >= 200;
-                    let outbound_to_tag =
-                        if status > 100 { msg.to.tag.as_deref().map(str::to_string) } else { None };
                     // Pin the UAS To-tag on the first >100 response (§17.2.1).
                     if txn.uas_to_tag.is_none() {
                         txn.uas_to_tag = outbound_to_tag;
@@ -121,7 +129,7 @@ impl Owner {
                             self.timers
                                 .insert(Timer::ServerRetransmit(branch.to_string()), ms(T1))
                         });
-                        if let Some(txn) = self.txns.get_mut(branch.as_str()) {
+                        if let Some(txn) = self.txns.get_mut(branch) {
                             txn.cleanup_key = Some(key);
                             if let Some(g_key) = g_key {
                                 txn.retransmit_key = Some(g_key);
@@ -143,7 +151,8 @@ impl Owner {
         req: SipRequest,
         src: SocketAddr,
     ) {
-        let branch = req.via.first().branch.clone().unwrap_or_default();
+        let top_via = req.top_via();
+        let branch = top_via.branch().unwrap_or_default();
 
         if branch.is_empty() {
             // No branch — pass through (pre-RFC 3261 UA).
@@ -155,8 +164,8 @@ impl Owner {
         }
 
         // ── ACK ──────────────────────────────────────────────────────────────
-        if req.method == "ACK" {
-            if let Some(existing) = self.txns.get(branch.as_str()) {
+        if req.method == Method::Ack {
+            if let Some(existing) = self.txns.get(branch) {
                 if existing.role == TxnRole::Server
                     && existing.kind == TxnKind::Invite
                     && existing.state == TxnState::Completed
@@ -164,12 +173,12 @@ impl Owner {
                     match existing.last_response_status {
                         // ACK for non-2xx (3xx-6xx) — absorb, terminate.
                         Some(s) if s >= 300 => {
-                            self.delete_txn(&branch);
+                            self.delete_txn(branch);
                             return;
                         }
                         // ACK for 2xx — pass through to app, terminate.
                         Some(s) if (200..300).contains(&s) => {
-                            self.delete_txn(&branch);
+                            self.delete_txn(branch);
                             self.emit(TransactionEvent::Message {
                                 message: Box::new(SipMessage::Request(req)),
                                 src,
@@ -183,7 +192,7 @@ impl Owner {
             // ACK with no matching server txn. A stateless-503 ACK carries no
             // To-tag and must be absorbed (not propagated); a legitimate 2xx
             // ACK always has a To-tag and passes through.
-            if req.to.tag.is_none() {
+            if req.to().tag().is_none() {
                 return;
             }
             self.emit(TransactionEvent::Message {
@@ -194,13 +203,13 @@ impl Owner {
         }
 
         // ── CANCEL ─────────────────────────────────────────────────────────────
-        if req.method == "CANCEL" {
+        if req.method == Method::Cancel {
             self.handle_cancel(endpoint, req, src).await;
             return;
         }
 
         // ── Duplicate detection for other requests ─────────────────────────────
-        if let Some(existing) = self.txns.get(branch.as_str()) {
+        if let Some(existing) = self.txns.get(branch) {
             if let Some(cached) = existing.last_response.clone() {
                 self.send_buffer(endpoint, &cached, src).await;
             }
@@ -213,7 +222,7 @@ impl Owner {
         // This layer admits unconditionally.
 
         // ── New server transaction ─────────────────────────────────────────────
-        let kind = if req.method == "INVITE" {
+        let kind = if req.method == Method::Invite {
             TxnKind::Invite
         } else {
             TxnKind::NonInvite
@@ -233,8 +242,8 @@ impl Owner {
             branch: branch.to_string(),
             role: TxnRole::Server,
             kind,
-            call_id: req.call_id.to_string(),
-            from_tag: req.from.tag.clone().unwrap_or_default().to_string(),
+            call_id: req.call_id().as_str().to_string(),
+            from_tag: req.from().tag().unwrap_or_default().to_string(),
             // INVITE server txns keep the request for the CANCEL→487 path; a
             // non-INVITE server txn never reads it, so skip that clone.
             original_request: is_invite.then(|| req.clone()),
@@ -258,10 +267,11 @@ impl Owner {
 
         // For INVITE, immediately send 100 Trying and move to proceeding.
         if is_invite {
-            let trying = generate_response(&req, 100, "Trying", &GenerateResponseOpts::default());
-            let trying_buf = serialize(&SipMessage::Response(trying));
+            // The recipe froze the 100 into its own image, which IS its wire
+            // form — send and cache that instead of rendering it twice.
+            let trying_buf = generate_response(&req, 100, "Trying", &GenerateResponseOpts::default()).raw;
             self.send_buffer(endpoint, &trying_buf, src).await;
-            if let Some(txn) = self.txns.get_mut(branch.as_str()) {
+            if let Some(txn) = self.txns.get_mut(branch) {
                 txn.state = TxnState::Proceeding;
                 // Cache the 100 as the latest provisional so a retransmitted INVITE
                 // replays it (RFC 3261 §17.2.1) instead of being absorbed silently —
@@ -287,25 +297,27 @@ impl Owner {
     }
 
     async fn handle_cancel(&mut self, endpoint: &dyn UdpEndpoint, req: SipRequest, src: SocketAddr) {
-        let call_id = req.call_id.clone();
-        let from_tag = req.from.tag.clone().unwrap_or_default();
+        let call_id = req.call_id();
+        let from = req.from();
+        let from_tag = from.tag().unwrap_or_default();
 
         // Find the matching ACTIVE INVITE server txn. The CANCEL shares the
         // INVITE's top-Via branch (RFC 3261 §9.1), so a compliant peer keys it
         // directly — an O(1) `get` instead of an O(total_txns) scan; we still
         // confirm callId+fromTag (and fall back to the scan for a peer that didn't
         // preserve the branch).
-        let cancel_branch = req.via.first().branch.clone().unwrap_or_default();
+        let cancel_via = req.top_via();
+        let cancel_branch = cancel_via.branch().unwrap_or_default();
         let is_cancel_target = |t: &Transaction| {
             t.role == TxnRole::Server
                 && t.kind == TxnKind::Invite
-                && t.call_id == call_id
+                && t.call_id == call_id.as_str()
                 && t.from_tag == from_tag
                 && t.state.is_active()
         };
         let matched_branch = self
             .txns
-            .get(cancel_branch.as_str())
+            .get(cancel_branch)
             .filter(|t| is_cancel_target(t))
             .map(|_| cancel_branch.to_string())
             .or_else(|| {
@@ -329,8 +341,7 @@ impl Owner {
                     "Call/Transaction Does Not Exist",
                     &GenerateResponseOpts::default(),
                 );
-                self.send_buffer(endpoint, &serialize(&SipMessage::Response(reject)), src)
-                    .await;
+                self.send_buffer(endpoint, &reject.raw, src).await;
                 return;
             }
         };
@@ -344,7 +355,7 @@ impl Owner {
             .txns
             .get(branch.as_str())
             .and_then(|t| t.original_request.as_ref())
-            .map(|r| (Some(r.cseq.seq), r.to.tag.is_some()))
+            .map(|r| (Some(r.cseq().seq()), r.to().tag().is_some()))
             .unwrap_or((None, false));
 
         // Resolve (and lazily pin) the UAS To-tag on the matched INVITE.
@@ -367,8 +378,7 @@ impl Owner {
                 ..Default::default()
             },
         );
-        self.send_buffer(endpoint, &serialize(&SipMessage::Response(cancel_ok)), src)
-            .await;
+        self.send_buffer(endpoint, &cancel_ok.raw, src).await;
 
         // 487 Request Terminated on the matched INVITE.
         let original = self
@@ -385,7 +395,7 @@ impl Owner {
                     ..Default::default()
                 },
             );
-            let terminated_buf = serialize(&SipMessage::Response(terminated));
+            let terminated_buf = terminated.raw;
             self.send_buffer(endpoint, &terminated_buf, src).await;
             if let Some(txn) = self.txns.get_mut(branch.as_str()) {
                 txn.state = TxnState::Completed;
@@ -402,17 +412,20 @@ impl Owner {
 
         // Critical: we already answered 200 + 487 on the wire; a dropped Cancelled
         // would leave the b-leg ringing a cancelled call (no other signal upstream).
-        self.emit_critical(TransactionEvent::Cancelled { call_id: call_id.to_string(), from_tag: from_tag.to_string(), invite_cseq, in_dialog });
+        self.emit_critical(TransactionEvent::Cancelled {
+            call_id: call_id.as_str().to_string(),
+            from_tag: from_tag.to_string(),
+            invite_cseq,
+            in_dialog,
+        });
     }
 }
 
-/// Extract + URL-decode the Request-URI `callRef` param (percent-encoded by the
-/// B2BUA's `build_call_contact`). `parse_uri_params` lower-cases param names per
-/// RFC 3261 §19.1.1, so the key is `callref`. `None` for an out-of-dialog request
-/// (no param). Used to attribute a server transaction to its call (ADR-0014
-/// self-release counting).
+/// The Request-URI `callRef` param, URL-decoded (the B2BUA's
+/// `build_call_contact` percent-encodes it). URI parameter names match
+/// case-insensitively per RFC 3261 §19.1.1. `None` for an out-of-dialog request,
+/// which carries no such param. Attributes a server transaction to its call
+/// (ADR-0014 self-release counting).
 fn extract_ruri_call_ref(req: &SipRequest) -> Option<String> {
-    sip_message::message_helpers::parse_uri_params(&req.uri)
-        .get("callref")
-        .map(|v| decode_param(v))
+    req.request_uri().param("callRef").and_then(ParamValue::as_str).map(decode_param)
 }

@@ -5,6 +5,7 @@
 
 use std::net::SocketAddr;
 
+use bytes::Bytes;
 use sip_message::SipRequest;
 use tokio_util::time::delay_queue::Key;
 
@@ -64,7 +65,10 @@ pub(super) struct Transaction {
     pub(super) call_id: String,
     pub(super) from_tag: String,
     pub(super) original_request: Option<SipRequest>,
-    pub(super) last_response: Option<Vec<u8>>,
+    /// The datagram replayed on a request retransmit. Refcounted, so caching a
+    /// freshly built message keeps its rendered image instead of copying it, and
+    /// a replay costs a refcount bump rather than a memcpy of the whole message.
+    pub(super) last_response: Option<Bytes>,
     pub(super) last_response_status: Option<u16>,
     pub(super) call_ref: Option<String>,
     pub(super) leg_id: Option<String>,
@@ -78,7 +82,9 @@ pub(super) struct Transaction {
     pub(super) timeout_key: Option<Key>,
     pub(super) cleanup_key: Option<Key>,
     // Retransmit progression.
-    pub(super) retransmit_buf: Option<Vec<u8>>,
+    /// The request datagram Timer A/E re-sends — refcounted for the same reason
+    /// as [`last_response`](Self::last_response).
+    pub(super) retransmit_buf: Option<Bytes>,
     pub(super) retransmit_interval_ms: u64,
     pub(super) retransmit_elapsed_ms: u64,
     pub(super) retransmit_max_ms: u64,
