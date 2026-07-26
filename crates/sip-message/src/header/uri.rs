@@ -94,7 +94,13 @@ impl HostPort {
 }
 
 /// A SIP/SIPS/tel/any-scheme URI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// A URI read off the wire renders the bytes it was read from until an update
+/// touches it: RFC 3261 §16.6 forbids a proxy rewriting a Request-URI it is not
+/// retargeting, and §9.1 / §17.1.1.3 require the CANCEL and the non-2xx ACK to
+/// carry the INVITE's Request-URI unchanged. Identity is the parsed parts, so
+/// two URIs spelled differently but meaning the same thing compare equal.
+#[derive(Debug, Clone, Eq)]
 pub struct Uri {
     scheme: SipStr,
     user: Option<SipStr>,
@@ -102,6 +108,18 @@ pub struct Uri {
     params: Params,
     /// The `?a=b&c=d` escaped-header list (RFC 3261 §19.1.1), verbatim.
     headers: Vec<(SipStr, SipStr)>,
+    /// The text this URI was read from, dropped by the first update.
+    source: Option<SipStr>,
+}
+
+impl PartialEq for Uri {
+    fn eq(&self, other: &Self) -> bool {
+        self.scheme == other.scheme
+            && self.user == other.user
+            && self.authority == other.authority
+            && self.params == other.params
+            && self.headers == other.headers
+    }
 }
 
 /// The scheme this stack originates URIs under.
@@ -129,6 +147,7 @@ impl Uri {
             authority,
             params: Params::new(),
             headers: Vec::new(),
+            source: None,
         }
     }
 
@@ -141,6 +160,7 @@ impl Uri {
             authority: HostPort::new(text, None),
             params: Params::new(),
             headers: Vec::new(),
+            source: None,
         }
     }
 
@@ -202,24 +222,37 @@ impl Uri {
         crate::parser::custom::structured_headers::decode_uri_component(raw).ok()
     }
 
+    /// The text this URI was read from, or `None` when it was built from parts
+    /// or has been updated since.
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_ref().map(SipStr::as_str)
+    }
+
+    /// This URI rendered from its parsed parts instead of the text it was read
+    /// from — canonical spelling, for a caller that wants one.
+    pub fn normalized(mut self) -> Self {
+        self.source = None;
+        self
+    }
+
     pub fn with_user(mut self, user: impl Into<SipStr>) -> Self {
         self.user = Some(user.into());
-        self
+        self.normalized()
     }
 
     pub fn without_user(mut self) -> Self {
         self.user = None;
-        self
+        self.normalized()
     }
 
     pub fn with_port(mut self, port: u16) -> Self {
         self.authority = self.authority.with_port(port);
-        self
+        self.normalized()
     }
 
     pub fn with_param(mut self, name: impl Into<SipStr>, value: ParamValue) -> Self {
         self.params.set(name, value);
-        self
+        self.normalized()
     }
 
     pub fn with_flag(self, name: impl Into<SipStr>) -> Self {
@@ -228,7 +261,7 @@ impl Uri {
 
     pub fn without_param(mut self, name: &str) -> Self {
         self.params.remove(name);
-        self
+        self.normalized()
     }
 
     /// Read a whole URI. The value must carry a scheme colon; anything looser
@@ -265,7 +298,7 @@ impl Uri {
             }
         }
 
-        Ok(Self { scheme, user, authority, params, headers })
+        Ok(Self { scheme, user, authority, params, headers, source: Some(value) })
     }
 
     /// [`parse`](Self::parse), falling back to [`opaque`](Self::opaque) — the
@@ -275,6 +308,10 @@ impl Uri {
     }
 
     pub fn render(&self, out: &mut Wire) {
+        if let Some(source) = &self.source {
+            out.str(source.as_str());
+            return;
+        }
         if self.scheme.is_empty() {
             out.str(self.authority.host());
             return;
@@ -347,6 +384,28 @@ mod tests {
     fn a_schemeless_value_is_opaque_not_a_uri() {
         assert!(Uri::parse(&SipStr::owned("*")).is_err());
         assert_eq!(Uri::parse_or_opaque(&SipStr::owned("*")).to_string(), "*");
+    }
+
+    #[test]
+    fn an_unedited_uri_renders_the_bytes_it_was_read_from() {
+        // Every part the field renderer would normalize away: the scheme case,
+        // an escaped-header pair with no `=`, and a parameter order.
+        let text = "SIP:Bob@biloxi.com:5060;Transport=TCP?Subject&Replaces=abc";
+        assert_eq!(uri(text).to_string(), text);
+        assert_eq!(uri(text).scheme(), "sip");
+    }
+
+    #[test]
+    fn an_edited_uri_renders_from_its_parts() {
+        let edited = uri("SIP:bob@biloxi.com").with_port(5070);
+        assert_eq!(edited.to_string(), "sip:bob@biloxi.com:5070");
+        assert_eq!(uri("SIP:bob@biloxi.com").normalized().to_string(), "sip:bob@biloxi.com");
+    }
+
+    #[test]
+    fn spelling_is_not_identity() {
+        assert_eq!(uri("SIP:bob@biloxi.com"), uri("sip:bob@biloxi.com"));
+        assert_eq!(uri("sip:bob@biloxi.com"), Uri::sip_user("bob", "biloxi.com"));
     }
 
     #[test]

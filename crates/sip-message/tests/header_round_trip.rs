@@ -117,7 +117,11 @@ fn uris_are_a_render_parse_fixpoint() {
     let mut accepted = 0usize;
     for input in &inputs {
         let Ok(uri) = Uri::parse(&SipStr::owned(input)) else { continue };
-        let rendered = uri.to_string();
+        // An unedited URI goes back out as the bytes it came in as, so the
+        // fixpoint is driven through the field renderer — which is what an
+        // edited URI is written with.
+        assert_eq!(uri.to_string(), input.trim(), "URI: an unedited value was rewritten");
+        let rendered = uri.clone().normalized().to_string();
         let reparsed = Uri::parse(&SipStr::owned(&rendered))
             .unwrap_or_else(|e| panic!("URI: rendered {rendered:?} no longer parses ({})", e.reason));
         assert_eq!(reparsed, uri, "URI: parse(render(v)) != v\n  input {input:?}");

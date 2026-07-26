@@ -88,6 +88,10 @@ fn thaw_then_freeze_is_the_identity_on_the_torture_corpus() {
                 );
                 assert_eq!(frozen.body, request.body, "{name}: body changed");
                 assert_eq!(frozen.method, request.method, "{name}: method changed");
+                // RFC 3261 §16.6: a hop that is not retargeting forwards the
+                // Request-URI it received, octet for octet.
+                assert_eq!(frozen.uri, request.uri, "{name}: Request-URI changed");
+                assert_eq!(frozen.version, request.version, "{name}: version changed");
                 assert_eq!(frozen.call_id, request.call_id, "{name}: Call-ID changed");
                 assert_eq!(frozen.cseq, request.cseq, "{name}: CSeq changed");
                 assert_eq!(frozen.from.tag, request.from.tag, "{name}: From-tag changed");
@@ -122,6 +126,7 @@ fn thaw_then_freeze_is_the_identity_on_the_torture_corpus() {
                 assert_eq!(frozen.body, response.body, "{name}: body changed");
                 assert_eq!(frozen.status, response.status, "{name}: status changed");
                 assert_eq!(frozen.reason, response.reason, "{name}: reason changed");
+                assert_eq!(frozen.version, response.version, "{name}: version changed");
                 assert_eq!(frozen.call_id, response.call_id, "{name}: Call-ID changed");
                 assert_eq!(frozen.cseq, response.cseq, "{name}: CSeq changed");
 

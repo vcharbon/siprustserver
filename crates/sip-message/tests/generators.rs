@@ -471,6 +471,36 @@ fn cancel_mirrors_request_uri_callid_from_to_cseq() {
 }
 
 #[test]
+fn cancel_and_non_2xx_ack_echo_the_invite_request_uri_octet_for_octet() {
+    // RFC 3261 §9.1 and §17.1.1.3: both requests carry the INVITE's
+    // Request-URI, so a URI whose spelling a value model would tidy — an
+    // uppercase scheme, an escaped header with no value — leaves as the octets
+    // the INVITE was sent with.
+    let r_uri = "SIP:bob@192.0.2.20:5060;transport=TCP?X-Trace";
+    let headers = vec![
+        hdr("Via", "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKinvite123"),
+        hdr("Max-Forwards", "70"),
+        hdr("From", "<sip:b2bua@10.0.0.1:5060>;tag=b2bua-local"),
+        hdr("To", "<sip:bob@192.0.2.20:5060>"),
+        hdr("Call-ID", "call-bleg-1"),
+        hdr("CSeq", "42 INVITE"),
+        hdr("Content-Length", "0"),
+    ];
+    let invite = hydrate_request("INVITE", r_uri, headers, Vec::new()).expect("invite hydrates");
+    let handle = InviteClientTransactionHandle { original_invite: invite };
+
+    assert_eq!(generate_cancel(&handle).uri, r_uri);
+
+    let final487 = generate_response(
+        &handle.original_invite,
+        487,
+        "Request Terminated",
+        &GenerateResponseOpts { to_tag: Some("uas-tag".to_string()), ..Default::default() },
+    );
+    assert_eq!(generate_ack_for_non_2xx(&handle.original_invite, &final487).uri, r_uri);
+}
+
+#[test]
 fn cancel_echoes_the_invite_route_set_verbatim() {
     // RFC 3261 §9.1: a CANCEL takes the same path as the INVITE it cancels, so
     // its Route header fields MUST equal the INVITE's. When the b-leg INVITE

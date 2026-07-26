@@ -124,9 +124,20 @@ impl<S: StartKind> Draft<S> {
         self
     }
 
-    /// Put a typed value on the first line.
+    /// Put a typed value on the first line of the whole message.
     pub fn push_front(mut self, value: impl HeaderValue) -> Self {
         self.entries.insert(0, Entry::typed(value));
+        self
+    }
+
+    /// Put a typed value on its own line immediately above the lines this
+    /// header already has — where a router's own Via and Route go. Nothing is
+    /// read, so a lower line this hop has no business parsing cannot fail the
+    /// edit; [`list`](Self::list) is the way in when the existing values matter.
+    pub fn prepend(mut self, value: impl HeaderValue) -> Self {
+        let name = value.name();
+        let at = self.entries.iter().position(|e| e.is(&name)).unwrap_or(self.entries.len());
+        self.entries.insert(at, Entry::typed(value));
         self
     }
 
@@ -172,12 +183,19 @@ impl<S: StartKind> Draft<S> {
 
     /// Edit every value of one header as a single list, in wire order. The
     /// lines are replaced by the resulting values at the position the header
-    /// already occupied. A header line that does not read as `H` leaves the
-    /// draft untouched.
+    /// already occupied; a header the draft does not carry starts as an empty
+    /// list.
+    ///
+    /// Fallible because the edits it exists for are the routing-critical ones —
+    /// the hop's own Via, the Max-Forwards decrement, popping the top Route. A
+    /// line that does not read as `H` must stop the message, not silently leave
+    /// it unedited: a request forwarded with no Via of its own has no path back
+    /// for the response, and one forwarded undecremented has lost its loop
+    /// bound.
     pub fn list<H: HeaderValue>(
         mut self,
         f: impl FnOnce(HeaderList<H>) -> HeaderList<H>,
-    ) -> Self {
+    ) -> Result<Self, SipParseError> {
         let name = H::header_name();
         let positions: Vec<usize> = self
             .entries
@@ -189,10 +207,7 @@ impl<S: StartKind> Draft<S> {
 
         let mut values = Vec::new();
         for &at in &positions {
-            match self.entries[at].read::<H>() {
-                Ok(read) => values.extend(read),
-                Err(_) => return self,
-            }
+            values.extend(self.entries[at].read::<H>()?);
         }
 
         let updated = f(HeaderList::new(values)).into_vec();
@@ -204,18 +219,23 @@ impl<S: StartKind> Draft<S> {
         for (offset, value) in updated.into_iter().enumerate() {
             self.entries.insert(at + offset, Entry::typed(value));
         }
-        self
+        Ok(self)
     }
 
     /// Rewrite the first value of one header, parsing that line on this first
-    /// touch. A header the draft does not carry, or whose value does not read
-    /// as `H`, is left as it stands.
-    pub fn update<H: HeaderValue>(self, f: impl FnOnce(H) -> H) -> Self {
+    /// touch. A header the draft does not carry is left as it stands; one that
+    /// does not read as `H` is an error, per [`list`](Self::list).
+    pub fn update<H: HeaderValue>(self, f: impl FnOnce(H) -> H) -> Result<Self, SipParseError> {
         self.list::<H>(|list| list.map_first(f))
     }
 
-    /// Edit the Via list — the hop rewrite every router performs.
-    pub fn vias(self, f: impl FnOnce(HeaderList<Via>) -> HeaderList<Via>) -> Self {
+    /// Edit the Via list — the hop rewrite every router performs. Adding this
+    /// hop's own Via needs no reading and so cannot fail: that is
+    /// [`prepend`](Self::prepend).
+    pub fn vias(
+        self,
+        f: impl FnOnce(HeaderList<Via>) -> HeaderList<Via>,
+    ) -> Result<Self, SipParseError> {
         self.list::<Via>(f)
     }
 

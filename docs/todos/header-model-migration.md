@@ -156,6 +156,7 @@ helpers listed above, run capped workspace test, tick tracker, commit.
 - [x] M1 HeaderName + one-pass dispatch
 - [x] M2 value hierarchy + draft engine
 - [x] M3 generators → recipes
+- [x] M1–M3 review findings addressed (fallible edits, Request-URI fidelity)
 - [ ] M4 sip-txn
 - [ ] M5 sip-proxy
 - [ ] M6 b2bua-sdk + b2bua
@@ -436,3 +437,62 @@ the scheme.
   The old path emitted `;tag=` and let hydrate reject it (a panic); no caller
   passes an empty local tag, and neither outcome is defensible — the typed
   `values.from` is the way out.
+
+### M1–M3 review findings — both fixed before any consumer ports
+
+Two independent reviews of the foundation raised two majors; both were real and
+both are fixed here, so M4–M11 port onto the corrected seam.
+
+**1. `Draft::list`/`update`/`vias` returned the draft UNEDITED when a line did
+not read.** The edits they exist for are the routing-critical ones — the hop's
+own Via, the Max-Forwards decrement, popping the top Route — and a silent no-op
+there forwards a request with no Via of its own (no path back for the response)
+or with its loop bound intact. They now return
+`Result<Self, SipParseError>`; the draft is never left half-edited and the
+caller cannot ignore the outcome. No consumer existed yet, so the signature
+change costs nothing.
+
+Beside them, `Draft::prepend(value)` — insert a typed value on its own line
+immediately above the lines the header already has, reading nothing. That is
+the *correct* primitive for a router adding its own Via or Route (RFC 3261
+§16.6 asks a proxy to add a hop, not to understand the ones below it), so a
+hop is not forced to reject a message over a lower Via it has no business
+parsing. `list` stays the way in when the existing values genuinely matter.
+
+**2. The Request-URI was round-tripped through `Uri::parse` + `Uri::render` on
+every thaw/freeze, and inside `generate_cancel` / `generate_ack_for_non_2xx`.**
+Rendering from parsed parts is lossy — the scheme case-folds, a `?h` escaped
+header with no `=` is dropped, bytes between the authority and the parameters
+are discarded — while RFC 3261 §9.1 and §17.1.1.3 require the CANCEL's and the
+non-2xx ACK's Request-URI to *equal* the INVITE's, and §16.6 forbids a proxy
+rewriting one it is not retargeting.
+
+`Uri` now keeps the text it was read from and renders those bytes until an
+update touches it (every `with_*`/`without_*` drops the source; `normalized()`
+drops it on request). Identity stays the parsed parts — `PartialEq` ignores the
+source, so a built URI and a parsed one that mean the same thing compare equal.
+The fix is at the value, not at the start line, so it covers the Request-URI,
+the URI inside every name-addr, and any URI a converter hands back, uniformly:
+an unedited URI is now as byte-faithful as an unedited header line.
+
+Pins added: the thaw/freeze identity pin asserts `frozen.uri == request.uri`
+and `frozen.version == request.version` (requests) and the version (responses)
+— the two start-line fields it never covered; the URI fixpoint over the ABNF
+corpus now asserts the verbatim property *and* drives `parse(render(v)) == v`
+through `normalized()`, so preserving the source cannot make the corpus pin
+vacuous; and `generators.rs` pins CANCEL and the non-2xx ACK echoing an
+awkward INVITE Request-URI (`SIP:` scheme, `?X-Trace` with no value) octet for
+octet.
+
+**Cost** (`--test alloc_budget --release`, same box, M3 → now): allocs/msg
+unchanged in every case; bytes/msg +32 on `build/invite_sdp` and +64 on
+`build/response_200` — `Uri` grew one `Option<SipStr>`, so each boxed typed
+entry carrying a URI is slightly larger. Budgets unchanged and still met.
+Workspace: 2118 tests passed, 0 failed.
+
+**Suspicion raised, not fixed:** `loadgen::smoke::
+loadgen_actor_refer_recovers_loss_without_false_audit` failed once inside a full
+workspace run ("SUT holds 1 live calls vs 0 failed — a RECOVERED call leaked")
+and passed standalone and on a clean re-run of the same lane. No sip-message
+surface is involved in that path; it matches the known loadgen-smoke contention
+flake, but it is a leak assertion, so it is worth a second look if it recurs.

@@ -95,12 +95,14 @@ fn a_proxy_hop_touches_only_the_routing_headers() {
     let original = invite();
     let hop = original
         .thaw()
-        .vias(|vias| vias.push_front(Via::udp("proxy.example", 5080).with_branch("z9hG4bKhop")))
+        .prepend(Via::udp("proxy.example", 5080).with_branch("z9hG4bKhop"))
         .update::<header::MaxForwards>(|mf| mf.decremented().unwrap_or(mf))
+        .expect("Max-Forwards reads")
         .list::<header::RouteEntry>(|mut routes| {
             routes.pop_front();
             routes
         })
+        .expect("the route set reads")
         .freeze()
         .expect("still complete");
 
@@ -112,6 +114,31 @@ fn a_proxy_hop_touches_only_the_routing_headers() {
     assert_eq!(routes.first().unwrap().uri().host(), "p2.example.com");
     // Untouched lines keep their bytes exactly.
     assert_eq!(hop.raw(HeaderName::CallId).next(), Some("3848276298220188511@atlanta.com"));
+}
+
+#[test]
+fn a_line_that_does_not_read_fails_the_edit_loudly() {
+    // A second Max-Forwards line no reader can make sense of: the decrement
+    // must report, never quietly forward the hop budget untouched.
+    let draft = invite().thaw().push_raw(HeaderName::MaxForwards, "seventy");
+    let outcome = draft.update::<header::MaxForwards>(|mf| mf.decremented().unwrap_or(mf));
+    assert!(outcome.is_err(), "an unreadable line must not leave the draft unedited");
+}
+
+#[test]
+fn prepending_a_header_the_draft_lacks_appends_it() {
+    let draft = RequestDraft::new(Method::Options, Uri::sip("biloxi.com"))
+        .push(header::CallId::new("call-1@atlanta.com"))
+        .prepend(Via::udp("atlanta.com", 5060).with_branch("z9hG4bKopt"));
+    let names: Vec<&HeaderName> = draft.entries().iter().map(|e| e.name()).collect();
+    assert_eq!(names, [&HeaderName::CallId, &HeaderName::Via]);
+}
+
+#[test]
+fn a_thawed_request_uri_is_forwarded_byte_for_byte() {
+    let original = invite();
+    let frozen = original.thaw().freeze().expect("a thawed draft is complete");
+    assert_eq!(frozen.uri, original.uri);
 }
 
 #[test]
@@ -173,7 +200,7 @@ fn a_response_draft_rides_the_same_engine() {
 fn an_untouched_entry_is_never_reparsed() {
     let draft = invite().thaw();
     assert!(draft.entries().iter().all(|e| e.is_raw()), "thaw parses nothing");
-    let edited = draft.update::<header::MaxForwards>(|mf| mf.incremented());
+    let edited = draft.update::<header::MaxForwards>(|mf| mf.incremented()).expect("reads");
     let typed: Vec<&HeaderName> =
         edited.entries().iter().filter(|e| !e.is_raw()).map(|e| e.name()).collect();
     assert_eq!(typed, [&HeaderName::MaxForwards], "only the touched header became typed");
