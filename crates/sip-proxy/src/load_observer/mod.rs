@@ -47,4 +47,4 @@ mod tests;
 pub use band::EluBand;
 pub use config::LoadObserverConfig;
 pub use observer::{AimdAction, AimdSnapshot, WorkerLoadObserver};
-pub use payload::{parse_x_overload_header, OverloadPayload};
+pub use payload::{parse_x_overload_header, OverloadPayload, X_OVERLOAD};

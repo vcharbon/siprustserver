@@ -5,41 +5,34 @@
 //! non-2xx INVITE final (the ACK itself travels end-to-end — see
 //! `core/request`).
 
-use sip_message::message_helpers::{parse_sip_uri, parse_uri_params};
-use sip_message::types::{ParamValue, SipResponse, Via};
-use sip_message::SipMessage;
+use sip_message::header::Via;
+use sip_message::types::SipResponse;
+use sip_message::{Method, SipMessage};
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::call_id_cseq_key;
-use crate::headers::remove_first_header_entry;
 use crate::observability::metrics::{Direction, MessageResult};
 use crate::registry::WorkerHealth;
 use crate::strategy::DecodeResult;
 
 use super::ProxyCore;
 
-fn param_str<'a>(via: &'a Via, name: &str) -> Option<&'a str> {
-    match via.params.get(name) {
-        Some(ParamValue::Value(s)) if !s.is_empty() => Some(s.as_str()),
-        _ => None,
-    }
-}
-
 impl ProxyCore {
     pub(super) async fn handle_response(&self, resp: SipResponse) {
+        let cseq = resp.cseq();
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
-        self.metrics.record_response(&resp.cseq.method.as_str().to_ascii_uppercase(), resp.status);
+        self.metrics.record_response(cseq.method().as_str(), resp.status);
 
         // §16.7.3: need ≥2 Via (ours + the next hop's).
-        if resp.via.len() < 2 {
+        let hops: Vec<Via> = resp.via().iter().cloned().collect();
+        if hops.len() < 2 {
             self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
             return;
         }
-        let top = resp.via.first();
-        let top_port = top.port.unwrap_or(5060);
+        let (top_host, top_port) = hops[0].host_port();
         // Dual-face: the proxy stamps its outbound Via with the EGRESS face's
         // advertise, so a response legitimately names either face here.
-        if !self.is_self_addr(&top.host, top_port) {
+        if !self.is_self_addr(top_host, top_port) {
             // Top Via is not us — not our response to relay.
             self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
             return;
@@ -52,10 +45,11 @@ impl ProxyCore {
             return;
         }
 
-        let next = resp.via.iter().nth(1).expect("len >= 2 checked");
+        let next = &hops[1];
         // received / rport take precedence over sent-by (§18.2.2 / §16.7.3).
-        let mut host = param_str(next, "received").unwrap_or(&next.host).to_string();
-        let mut port = param_str(next, "rport").and_then(|s| s.parse().ok()).unwrap_or(next.port.unwrap_or(5060));
+        let (next_host, next_port) = next.response_target();
+        let mut host = next_host.to_string();
+        let mut port = next_port;
 
         // ── Reverse-path failover ───────────────────────────────────────────
         // A response is the reply to an in-flight transaction the next-Via worker
@@ -80,7 +74,8 @@ impl ProxyCore {
         // made this whole Dead branch unreachable in production, so a dead
         // worker's in-flight responses were blackholed at its stale SNAT
         // address instead of failing over to `w_bak`.
-        let sent_by = ProxyAddr::new(next.host.clone(), next.port.unwrap_or(5060));
+        let (sent_by_host, sent_by_port) = next.sent_by().pair();
+        let sent_by = ProxyAddr::new(sent_by_host, sent_by_port);
         if let Some(dest) = self.registry.lookup_by_address(&sent_by) {
             if dest.health == WorkerHealth::Dead {
                 match self.find_own_record_route_params(&resp) {
@@ -102,12 +97,19 @@ impl ProxyCore {
             }
         }
 
-        // Pop the top Via entry (comma-aware) and forward — serialize from the
-        // surgered header list directly (no whole-response clone).
-        let mut headers = resp.headers.clone();
-        remove_first_header_entry(&mut headers, "via");
+        // Pop our own Via entry (§7.3.1 comma-aware) and forward. The thawed
+        // draft reads nothing below that top line, and freezing renders the
+        // relayed datagram once.
+        let Ok(popped) = resp.thaw().pop_top::<Via>() else {
+            self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
+            return;
+        };
+        let Ok(bytes) = popped.freeze_bytes() else {
+            self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
+            return;
+        };
         let next_hop = ProxyAddr::new(host, port);
-        self.send_to(&sip_message::serialize_response_parts(&resp, &headers), &next_hop).await;
+        self.send_to(&bytes, &next_hop).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Forwarded);
 
         // ── Relayed non-2xx INVITE final: remember the ACK-relay hop ────────
@@ -130,17 +132,19 @@ impl ProxyCore {
         // primary's INVITE (see `core/request`). Short TTL: the upstream
         // ACKs within its final-retransmit window (a re-sent final refreshes
         // the marker).
-        if (300..700).contains(&resp.status) && resp.cseq.method == "INVITE" {
+        if (300..700).contains(&resp.status) && cseq.method() == &Method::Invite {
             // The response echoes the request's From (tag included), so this
             // re-builds exactly the key the INVITE was remembered under.
-            let key = call_id_cseq_key(&resp.call_id, resp.from.tag.as_deref(), resp.cseq.seq);
+            let call_id = resp.call_id();
+            let from = resp.from();
+            let key = call_id_cseq_key(call_id.as_str(), from.tag(), cseq.seq());
             if let Some(found) = self.cancel_lru.lookup(&key) {
-                let upstream_branch = param_str(next, "branch").unwrap_or("").to_string();
+                let upstream_branch = next.branch().unwrap_or_default().to_string();
                 self.cancel_lru.remember(
                     &crate::cancel_lru::ack_hop_key(
-                        &resp.call_id,
-                        resp.from.tag.as_deref(),
-                        resp.cseq.seq,
+                        call_id.as_str(),
+                        from.tag(),
+                        cseq.seq(),
                     ),
                     crate::cancel_lru::CancelEntry {
                         target: found.target.clone(),
@@ -153,24 +157,19 @@ impl ProxyCore {
         }
     }
 
-    /// Extract the params of the proxy's own Record-Route entry from a response
-    /// (echoed by the UAS per §16.6) — the stickiness cookie for reverse-path
-    /// failover.
+    /// The params of the proxy's own Record-Route entry on a response (echoed
+    /// by the UAS per §16.6) — the stickiness cookie for reverse-path failover.
+    /// Either face's advertise is "our" Record-Route: dual-face stamps the two
+    /// halves with different hosts.
     fn find_own_record_route_params(&self, resp: &SipResponse) -> Option<crate::strategy::RouteParams> {
-        for h in resp.headers.iter().filter(|h| h.name.eq_ignore_ascii_case("record-route")) {
-            for entry in crate::headers::split_top_level_commas(&h.value) {
-                if let Some(parsed) = parse_sip_uri(&entry) {
-                    // Either face's advertise is "our" Record-Route (dual-face
-                    // stamps the two halves with different hosts).
-                    if crate::headers::uri_port_u16(parsed.port)
-                        .is_some_and(|p| self.is_self_addr(&parsed.host, p))
-                    {
-                        return Some(parse_uri_params(&entry));
-                    }
-                }
-            }
-        }
-        None
+        resp.list::<sip_message::header::RecordRouteEntry>()
+            .ok()?
+            .iter()
+            .find(|entry| {
+                let (host, port) = entry.uri().host_port();
+                self.is_self_addr(host, port)
+            })
+            .map(|entry| crate::headers::cookie_params(entry.uri()))
     }
 }
 

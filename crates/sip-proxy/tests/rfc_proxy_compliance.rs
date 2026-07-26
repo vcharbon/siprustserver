@@ -18,16 +18,10 @@ use std::time::Duration;
 
 use common::{forward_all, spawn_proxy};
 use scenario_harness::Harness;
-use sip_message::message_helpers::{get_header, get_headers};
+use sip_message::header::{MaxForwards, Unsupported, Via};
+use sip_message::HeaderName;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
-
-/// Pull the `branch=` token out of a Via header value.
-fn via_branch(via: &str) -> Option<&str> {
-    via.split(';')
-        .find_map(|p| p.trim().strip_prefix("branch="))
-        .map(str::trim)
-}
 
 // ── §16.6 step 3 + step 8 ───────────────────────────────────────────────────
 #[tokio::test]
@@ -58,16 +52,17 @@ Content-Length: 0\r\n\r\n";
     };
 
     // §16.6 step 3: Max-Forwards decremented by exactly one.
-    let mf = get_header(&req.headers, "max-forwards").expect("Max-Forwards present");
-    assert_eq!(mf.trim(), "69", "proxy must decrement Max-Forwards by one (70 → 69)");
+    let mf = req.header::<MaxForwards>().expect("Max-Forwards present").expect("reads");
+    assert_eq!(mf.value(), 69, "proxy must decrement Max-Forwards by one (70 → 69)");
 
     // §16.6 step 8: proxy adds its own Via on top, branch begins with z9hG4bK.
-    let vias = get_headers(&req.headers, "via");
+    let vias = req.via();
     assert_eq!(vias.len(), 2, "bob sees the proxy's Via + alice's");
-    let top_branch = via_branch(&vias[0]).expect("top Via has a branch");
+    let top = req.top_via();
     assert!(
-        top_branch.starts_with("z9hG4bK"),
-        "proxy Via branch must begin with the z9hG4bK magic cookie, got {top_branch:?}"
+        top.is_rfc3261_branch(),
+        "proxy Via branch must begin with the z9hG4bK magic cookie, got {:?}",
+        top.branch()
     );
     let _ = h.finish().await;
 }
@@ -157,10 +152,11 @@ Content-Length: 0\r\n\r\n";
     let SipMessage::Response(r) = CustomParser::new().parse(&got.raw).unwrap() else {
         panic!("expected a response");
     };
-    let vias = get_headers(&r.headers, "via");
+    let vias: Vec<Via> = r.via().iter().cloned().collect();
     assert_eq!(vias.len(), 1, "proxy must remove its own (top) Via before relaying");
-    assert!(
-        vias[0].contains("127.0.0.1:5060"),
+    assert_eq!(
+        vias[0].host_port(),
+        ("127.0.0.1", 5060),
         "the remaining top Via is now alice's, got {:?}",
         vias[0]
     );
@@ -203,7 +199,7 @@ Content-Length: 0\r\n\r\n";
         panic!("expected a response");
     };
     assert_eq!(resp.status, 420, "unsupported Proxy-Require → 420 Bad Extension");
-    let unsupported = get_header(&resp.headers, "unsupported").expect("420 carries Unsupported");
+    let unsupported = resp.header::<Unsupported>().expect("420 carries Unsupported").expect("reads");
     assert!(
         unsupported.contains("bogus-extension-xyz"),
         "Unsupported header must list the offending option-tag, got {unsupported:?}"
@@ -221,7 +217,7 @@ Call-ID: proxy-require@127.0.0.1\r\n\
 CSeq: 1 ACK\r\n\
 Max-Forwards: 70\r\n\
 Content-Length: 0\r\n\r\n",
-        to = get_header(&resp.headers, "to").expect("420 carries To"),
+        to = resp.raw(HeaderName::To).next().expect("420 carries To"),
     );
     client.send_to(ack.as_bytes(), proxy.addr()).await.unwrap();
 

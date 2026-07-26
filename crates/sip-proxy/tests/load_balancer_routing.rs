@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use scenario_harness::Harness;
 use sip_clock::Clock;
-use sip_message::message_helpers::get_headers;
+use sip_message::HeaderName;
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
 use sip_proxy::registry::{WorkerEntry, WorkerRegistry};
@@ -58,7 +58,7 @@ async fn new_dialog_routes_to_worker_and_in_dialog_sticks() {
     // (`w_pri=`) second. Direction is now carried by the proxy's own RRs, so the
     // worker's route set leads back out (`;outbound`) and alice's (reverse of the
     // 2xx) leads in via the cookie.
-    let rrs = get_headers(&recvd.headers, "record-route");
+    let rrs: Vec<&str> = recvd.raw(HeaderName::RecordRoute).collect();
     assert_eq!(rrs.len(), 2, "worker must see both record-route halves, got {rrs:?}");
     assert!(
         rrs[0].contains(";lr") && rrs[0].contains("outbound"),

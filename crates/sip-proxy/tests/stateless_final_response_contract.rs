@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use common::{forward_all, spawn_proxy};
 use scenario_harness::Harness;
-use sip_message::message_helpers::get_headers;
+use sip_message::HeaderName;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
 
@@ -56,7 +56,7 @@ fn parse_request(raw: &[u8]) -> SipRequest {
 /// routes it back upstream.
 fn bob_response(fwd: &SipRequest, status: u16, reason: &str, to_tag: Option<&str>) -> String {
     let vias: Vec<String> =
-        get_headers(&fwd.headers, "via").iter().map(|v| format!("Via: {v}\r\n")).collect();
+        fwd.raw(HeaderName::Via).map(|v| format!("Via: {v}\r\n")).collect();
     let to = match to_tag {
         Some(t) => format!("<sip:bob@127.0.0.1>;tag={t}"),
         None => "<sip:bob@127.0.0.1>".to_string(),

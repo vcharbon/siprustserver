@@ -27,11 +27,9 @@ mod worker_outbound_tests;
 
 use std::net::SocketAddr;
 
-use sip_message::message_helpers::parse_via_params;
 use sip_message::{SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
-use crate::headers::first_header_value;
 use crate::observability::metrics::{Direction, MessageResult, RoutingDecisionKind};
 
 use super::ProxyCore;
@@ -51,8 +49,8 @@ pub(super) struct RouteOutcome {
 /// retransmission reuses this exact token, so it is the correlator the proxy
 /// keys retransmission branch-reuse on.
 fn top_via_branch(req: &SipRequest) -> Option<String> {
-    let top = first_header_value(&req.headers, "via")?;
-    parse_via_params(top).branch.filter(|b| !b.is_empty())
+    let top = req.top_via();
+    top.branch().filter(|b| !b.is_empty()).map(str::to_owned)
 }
 
 impl ProxyCore {

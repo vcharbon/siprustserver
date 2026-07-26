@@ -5,9 +5,10 @@
 //! dispatches to [`request`](self) / [`response`](self) handling. It owns the
 //! routing-policy seam ([`RoutingStrategy`]), the worker registry, the
 //! `(Call-ID|CSeq#)` LRU, an [`IdGen`] for Via branches, a [`Clock`], metrics,
-//! a logger, and the self-gate (ELU/CPS admission). The handlers mutate the
-//! raw header list and re-serialize — `sip-message::serialize` renders from
-//! `headers`, so Via/Record-Route/Route surgery takes effect directly.
+//! a logger, and the self-gate (ELU/CPS admission). A hop thaws the received
+//! message into a draft, touches only the routing headers, and freezes it to
+//! the wire bytes it forwards — every untouched line is memcpy'd, never
+//! re-parsed (ADR-0025).
 
 mod request;
 mod response;

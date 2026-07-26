@@ -19,7 +19,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use common::ProxySut;
 use scenario_harness::Harness;
 use sip_clock::Clock;
-use sip_message::message_helpers::get_header;
+use sip_message::header::{ParamValue, Reason, RetryAfter};
+use sip_message::HeaderName;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
@@ -148,15 +149,15 @@ async fn assert_wire_503(name: &str, gate_reason: Option<&'static str>, retry: u
 
     assert_eq!(resp.status, 503, "a rejected new external INVITE must get a 503");
     assert_eq!(resp.reason, "Service Unavailable");
+    let retry_after = resp.header::<RetryAfter>().expect("503 carries Retry-After").expect("reads");
+    assert_eq!(retry_after.token(), retry.to_string(), "503 must carry the gate's Retry-After");
+    let reason = resp.header::<Reason>().expect("503 carries Reason").expect("reads");
+    assert_eq!(reason.token(), "SIP");
+    assert_eq!(reason.param("cause").and_then(ParamValue::as_str), Some("503"));
     assert_eq!(
-        get_header(&resp.headers, "retry-after"),
-        Some(retry.to_string().as_str()),
-        "503 must carry the gate's Retry-After"
-    );
-    assert_eq!(
-        get_header(&resp.headers, "reason"),
-        Some(format!("SIP;cause=503;text=\"{expect_reason_text}\"").as_str()),
-        "503 must carry the exact Reason phrase"
+        reason.param("text").and_then(ParamValue::as_str),
+        Some(expect_reason_text),
+        "503 must name the gate's rejection reason"
     );
     assert_eq!(gate.tries.load(Ordering::SeqCst), 1, "the gate is consulted exactly once");
 
@@ -184,7 +185,7 @@ To: {to}\r\n\
 Call-ID: {branch}-call@127.0.0.1\r\n\
 CSeq: 1 ACK\r\n\
 Content-Length: 0\r\n\r\n",
-        to = get_header(&resp.headers, "to").expect("final carries To"),
+        to = resp.raw(HeaderName::To).next().expect("final carries To"),
     )
     .into_bytes()
 }
@@ -249,8 +250,8 @@ async fn real_gate_cps_drain_yields_a_wire_503_cps() {
     client.send_to(&new_invite(ALICE, "z9hG4bK-shed", None), proxy.addr()).await.unwrap();
     let resp = recv_response(&*client).await;
     assert_eq!(resp.status, 503);
-    assert_eq!(get_header(&resp.headers, "reason"), Some("SIP;cause=503;text=\"proxy_overload_cps\""));
-    assert_eq!(get_header(&resp.headers, "retry-after"), Some("60"));
+    assert_eq!(resp.raw(HeaderName::Reason).next(), Some("SIP;cause=503;text=\"proxy_overload_cps\""));
+    assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("60"));
     assert_eq!(gate.metrics().rejected_cps_total, 1);
 
     // §17.1.1.3: ACK the shed 503 — absorbed at the proxy (self-generated).
@@ -284,9 +285,9 @@ async fn real_gate_elu_over_critical_yields_a_wire_503_elu() {
     client.send_to(&new_invite(ALICE, "z9hG4bK-elu", None), proxy.addr()).await.unwrap();
     let resp = recv_response(&*client).await;
     assert_eq!(resp.status, 503);
-    assert_eq!(get_header(&resp.headers, "reason"), Some("SIP;cause=503;text=\"proxy_overload_elu\""));
+    assert_eq!(resp.raw(HeaderName::Reason).next(), Some("SIP;cause=503;text=\"proxy_overload_elu\""));
     // ELU rejection carries Retry-After: 1.
-    assert_eq!(get_header(&resp.headers, "retry-after"), Some("1"));
+    assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("1"));
     assert_eq!(gate.metrics().rejected_elu_total, 1);
 
     // §17.1.1.3: ACK the shed 503 — absorbed at the proxy (self-generated).

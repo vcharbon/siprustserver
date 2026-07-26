@@ -6,11 +6,11 @@
 
 use std::net::SocketAddr;
 
-use sip_message::types::SipHeader;
+use sip_message::draft::RequestDraft;
 use sip_message::{SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
-use crate::headers::{build_record_route_value, prepend_header};
+use crate::headers::{record_route, record_route_flagged};
 
 use super::super::{is_dialog_creating, ProxyCore};
 
@@ -23,18 +23,18 @@ impl ProxyCore {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn insert_double_record_route(
         &self,
-        headers: &mut Vec<SipHeader>,
+        draft: RequestDraft,
         msg: &SipMessage,
         req: &SipRequest,
         src: SocketAddr,
         target: &ProxyAddr,
         is_worker_outbound: bool,
         via_worker_addr: &Option<ProxyAddr>,
-    ) {
+    ) -> RequestDraft {
         let method = req.method.as_str();
-        let is_initial_dialog_req = req.to.tag.as_deref().map(|t| t.is_empty()).unwrap_or(true);
+        let is_initial_dialog_req = req.to().tag().map(str::is_empty).unwrap_or(true);
         if !is_dialog_creating(method) || !is_initial_dialog_req {
-            return;
+            return draft;
         }
         // Double record-route so in-dialog DIRECTION is intrinsic to the
         // proxy's own Record-Route — no worker-stamped `;outbound`. We insert
@@ -49,7 +49,8 @@ impl ProxyCore {
         // own; here we only choose which faces the *next hop*: forwarding TO a
         // worker (inbound) puts the outbound/worker-facing RR on top, forwarding
         // to the external party (worker-outbound) puts the cookie RR on top.
-        // `prepend_header` pushes onto the top, so prepend the lower half first.
+        // `push_front` puts a line at the top of the message (§16.6 places the
+        // proxy's own headers there), so push the lower half first.
         // For a worker-originated request the cookie identifies the
         // ORIGINATING worker, taken from the SNAT-immune Via identity —
         // NOT the UDP source: behind the keepalived VIP the source is the
@@ -91,31 +92,23 @@ impl ProxyCore {
         };
         let cross_face = external_party_adv != worker_party_adv;
         let cookie_rr = match &stickiness {
-            Some(params) => build_record_route_value(external_party_adv, params.iter()),
-            None => build_record_route_value(external_party_adv, std::iter::empty()),
+            Some(params) => record_route(external_party_adv, params.iter()),
+            None => record_route(external_party_adv, std::iter::empty()),
         };
         // Cross-face, the stickiness cookie rides BOTH entries: whichever
         // self-RR a response's reverse-failover (or a diagnostic) recovers
         // params from, the signed worker pin is present. Intra-face keeps
         // the param-less `;outbound;lr` form.
         let outbound_rr = match (&stickiness, cross_face) {
-            (Some(params), true) => crate::headers::build_record_route_value_flagged(
-                worker_party_adv,
-                params.iter(),
-                "outbound",
-            ),
-            _ => format!(
-                "<sip:{}:{};outbound;lr>",
-                worker_party_adv.host, worker_party_adv.port
-            ),
+            (Some(params), true) => record_route_flagged(worker_party_adv, params.iter(), "outbound"),
+            _ => record_route_flagged(worker_party_adv, std::iter::empty(), "outbound"),
         };
-        if is_worker_outbound {
-            prepend_header(headers, "Record-Route", &outbound_rr);
-            prepend_header(headers, "Record-Route", &cookie_rr);
+        let draft = if is_worker_outbound {
+            draft.push_front(outbound_rr).push_front(cookie_rr)
         } else {
-            prepend_header(headers, "Record-Route", &cookie_rr);
-            prepend_header(headers, "Record-Route", &outbound_rr);
-        }
+            draft.push_front(cookie_rr).push_front(outbound_rr)
+        };
         self.metrics.record_route_inserted();
+        draft
     }
 }

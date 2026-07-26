@@ -1,9 +1,15 @@
 //! The `X-Overload` header-value codec — the `(elu, gc, adm)` triple workers
 //! publish on OPTIONS 200 replies. Only the *value* is parsed here; pulling the
-//! header out of a message is sip-message's job (`message_helpers::get_header`).
+//! header off a message is sip-message's job (`msg.raw(X_OVERLOAD)`).
 //! The emit side lives in the worker (`b2bua::overload`).
 
 use std::collections::HashMap;
+
+use sip_message::sip_str::SipStr;
+use sip_message::HeaderName;
+
+/// The extension header workers publish their overload triple on.
+pub const X_OVERLOAD: HeaderName = HeaderName::Other(SipStr::from_static("X-Overload"));
 
 /// The `(elu, gc, adm)` triple parsed off an `X-Overload` header.
 #[derive(Debug, Clone, Copy, PartialEq)]

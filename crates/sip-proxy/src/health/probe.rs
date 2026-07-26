@@ -64,7 +64,6 @@ use sip_message::generators::{
     generate_out_of_dialog_request, ContactSpec, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, SipTransport,
     ViaSpec,
 };
-use sip_message::message_helpers::get_header;
 use sip_message::parser::custom::CustomParser;
 use sip_message::types::SipResponse;
 use sip_message::{SipMessage, SipRequest};
@@ -74,7 +73,7 @@ use tokio::sync::mpsc;
 
 use crate::addr::ProxyAddr;
 use crate::observability::ProxyMetrics;
-use crate::load_observer::{parse_x_overload_header, WorkerLoadObserver};
+use crate::load_observer::{parse_x_overload_header, WorkerLoadObserver, X_OVERLOAD};
 use crate::registry::control::WorkerRegistryControl;
 use crate::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
 
@@ -304,7 +303,7 @@ impl HealthProbe {
 
         state.misses.insert(p.worker_id.clone(), 0);
 
-        let reason = get_header(&resp.headers, "reason");
+        let reason = resp.raw(sip_message::HeaderName::Reason).next();
         let health = match resp.status {
             200 => WorkerHealth::Alive,
             503 => classify_503(reason),
@@ -317,7 +316,7 @@ impl HealthProbe {
         // so hand it the same monotonic-anchored epoch-ms the probe timestamps
         // with — under a paused runtime this advances in lockstep with
         // `tokio::time` (CLAUDE.md).
-        if let Some(payload) = parse_x_overload_header(get_header(&resp.headers, "x-overload")) {
+        if let Some(payload) = parse_x_overload_header(resp.raw(X_OVERLOAD).next()) {
             self.observer.apply_payload(&p.worker_id, &payload, self.clock.now_ms());
         } else {
             // OPTIONS reply without a usable X-Overload header — no AIMD step,

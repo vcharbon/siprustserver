@@ -8,7 +8,7 @@ mod common;
 
 use common::{forward_all, spawn_proxy};
 use scenario_harness::Harness;
-use sip_message::message_helpers::{get_header, get_headers};
+use sip_message::HeaderName;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
@@ -29,22 +29,22 @@ async fn happy_call_invite_200_ack_bye_through_real_proxy() {
     let mut uas = bob.receive("INVITE").await;
     let recvd = uas.request();
     assert!(
-        get_header(&recvd.headers, "record-route").is_some_and(|rr| rr.contains("127.0.0.1:5080") && rr.contains(";lr")),
+        recvd.raw(HeaderName::RecordRoute).next().is_some_and(|rr| rr.contains("127.0.0.1:5080") && rr.contains(";lr")),
         "proxy must insert a ;lr Record-Route"
     );
-    assert_eq!(get_headers(&recvd.headers, "via").len(), 2, "bob sees alice's Via + the proxy's");
+    assert_eq!(recvd.via().len(), 2, "bob sees alice's Via + the proxy's");
 
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).send().await;
     let ok = call.expect(200).await;
-    assert!(get_header(&ok.headers, "record-route").is_some(), "200 OK echoes the proxy RR");
+    assert!(ok.raw(HeaderName::RecordRoute).next().is_some(), "200 OK echoes the proxy RR");
 
     // ACK — alice's learned route set sends it to the proxy, which strips its
     // Route and forwards to bob.
     let mut dialog = call.ack().await;
     let ack = bob.receive("ACK").await;
-    assert!(get_headers(&ack.request().headers, "route").is_empty(), "proxy strips its own Route from the ACK");
+    assert!(!ack.request().has(&HeaderName::Route), "proxy strips its own Route from the ACK");
 
     // BYE — same loose-routing path.
     let mut bye = dialog.bye().await;
@@ -97,7 +97,7 @@ Call-ID: mf0-call@127.0.0.1\r\n\
 CSeq: 1 ACK\r\n\
 Max-Forwards: 70\r\n\
 Content-Length: 0\r\n\r\n",
-        to = get_header(&resp.headers, "to").expect("483 carries To"),
+        to = resp.raw(HeaderName::To).next().expect("483 carries To"),
     );
     client.send_to(ack.as_bytes(), proxy.addr()).await.unwrap();
 

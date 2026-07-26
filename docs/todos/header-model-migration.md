@@ -158,7 +158,7 @@ helpers listed above, run capped workspace test, tick tracker, commit.
 - [x] M3 generators → recipes
 - [x] M1–M3 review findings addressed (fallible edits, Request-URI fidelity)
 - [x] M4 sip-txn
-- [ ] M5 sip-proxy
+- [x] M5 sip-proxy
 - [ ] M6 b2bua-sdk + b2bua
 - [ ] M7 scenario-harness
 - [ ] M8 e2e-core + e2e-model + announcement
@@ -574,3 +574,112 @@ datagram memcpy per retransmit / duplicate replay. Workspace: 2118 tests passed,
 - `flamegraph-util::capture_produces_an_svg` failed once inside the full
   workspace run and passed standalone and on a clean re-run — the same infra
   flake M1 logged (CPU-stack sampling starving under the capped parallel lane).
+
+### M5 — sip-proxy
+
+`headers.rs` is down from 237 lines of byte surgery to 122 lines of
+Record-Route **policy**: which params ride the entries this proxy records
+(`record_route`, `record_route_flagged`), the cookie read back off one
+(`cookie_params`), and the transport destination a Route names
+(`route_target`). Deleted with the mechanics: `prepend_header`,
+`upsert_header`, `first_header_value`, `remove_first_header`,
+`remove_first_header_entry`, the `split_top_level_commas` wrapper,
+`populate_received_rport_on_top_via`, `via_sent_by`/`via_sent_by_addr`,
+`route_value_to_addr` and `uri_port_u16`. `sip-proxy` has **zero**
+`get_header` / `message_helpers::{headers,name_addr,via,uri}` call sites left,
+tests included; the one surviving helper is
+`message_helpers::is_emergency_request` (the `emergency` module is not on the
+M12 deletion list).
+
+**Both hops are thaw → touch → freeze.** The request path thaws once, pops its
+own Route entries, stamps received/rport on the top Via, states Max-Forwards,
+pushes the double Record-Route and its own Via, and forwards
+`freeze_bytes()`; the response path thaws, pops the top Via entry and forwards
+the same way. `serialize_request_parts` / `serialize_response_parts` and the
+`headers.clone()` that fed them are gone from this crate.
+
+**Two draft primitives were missing and landed first** (own commit,
+`refactor(sip-message): ADR-0025 draft top-line edits + checked byte exit`):
+
+- `update_top` / `pop_top` — rewrite or drop the FIRST value of a header,
+  reading only the line that carries it. `update`/`list` read every line, which
+  is right when the values matter but wrong for a transit hop: an unreadable
+  Via five hops down must not fail a relay that only ever touches the top one.
+  `pop_top` is also the §7.3.1 entry pop the proxy used to hand-roll (a
+  comma-folded line keeps the values below the one removed).
+- `freeze_bytes` — `freeze`'s mandatory-header check and its single render,
+  without assembling the typed message. The relay reads no field of what it
+  forwards, so it must not pay the eager field extraction; ADR-0025 guardrail 2
+  says a hop never re-parses, and `freeze` does. `render_unchecked` stays the
+  only *unchecked* exit, so the "invalidity leaves only as bytes" property is
+  untouched.
+
+**Measurements — one forwarded in-dialog INVITE hop** (throwaway alloc-counter
+harness over the same fixture: 1 Route, Via stamp, Max-Forwards, double
+Record-Route, own Via; `--release`, 1000 ops):
+
+| path | allocs/hop | bytes/hop |
+|---|---|---|
+| old (clone + string surgery + `serialize_request_parts`) | 29 | 2254 |
+| new (thaw + draft ops + `freeze_bytes`), first cut | 33 | 10345 |
+| new, after the four fixes below | **27** | 6737 |
+
+The first cut was *worse* on both axes; four fixes in sip-message closed the
+alloc gap and two thirds of the byte gap, and each is a plain defect:
+`Draft::thaw` grew its entry list from zero (now sized to the header list,
+3 allocs → 1); `freeze_bytes` recorded per-header spans nobody reads (`render`
+now has a no-span path); `HeaderValue::parse_line` let a `Vec` of 432-byte
+values grow from 4 for the one-value line the wire almost always carries; and
+`Via::with_branch`/`with_received`/`with_rport` and `To::with_tag` allocated a
+`SipStr` for the *parameter name* on every call (now `from_static`).
+
+**Bytes/hop is still 3× the old path, and it is the value model, not the
+draft.** `size_of` on this branch: `RouteEntry` 432 B, `Uri` 272 B, `Via`
+232 B — so one boxed typed entry costs more than the whole rewritten datagram,
+and reading a one-entry Route set costs 2160 B. Allocation *count* is what the
+ADR budgets, and that is now below the old path; the byte figure is a
+`Params`-inline-smallvec + `Uri`-source + escaped-header-`Vec` width problem
+that M12's `MessageCore`/value-storage pass owns. Raised, not fixed here.
+
+**Behaviour deltas, all deliberate:**
+- A malformed Max-Forwards now defaults to 70 instead of being read as a signed
+  integer, so `Max-Forwards: -1` is forwarded with 69 rather than answered 483.
+  A negative hop count is not a hop count; §8.1.1.6's default is the honest
+  reading of a value no reader accepts.
+- Loose-route detection reads the first SURVIVING Route entry
+  (`uri().is_loose_route()`) instead of scanning the whole first Route *line*
+  for `;lr`, so a fold whose second entry is loose no longer makes the first
+  one look loose.
+- The 420's `Unsupported`, the 503's `Retry-After` and every proxy `Reason` are
+  built as typed values (`TokenListHeader`, `TokenParamsHeader`) and rendered
+  onto the generator's still-stringly `extra_headers` seam through one
+  `extra_header` adapter in `reply.rs`. Byte-identical — the wire assertions in
+  `self_gate_admission.rs` were left comparing exact text and still pass.
+- `reply()` sends the generated response's own image (`resp.raw`) instead of
+  re-serializing it — the M4 reclaim, applied to the proxy's self-generated
+  finals.
+
+**A Route the strict reader rejects stays tolerated.** `req.list::<RouteEntry>()`
+failing means no pop, no loose-route next hop, and the lines ride through
+byte-verbatim — which is what `oversized_route_port_does_not_alias_the_advertised_address`
+pins (a `sip:vip:70596` Route must neither alias the proxy nor drive routing).
+`Uri::parse` rejecting an out-of-range port is what replaced the old
+`uri_port_u16` guard, so the "70596 must not wrap to 5060" contract is now a
+property of the value type rather than a call-site check.
+
+**Suspicions raised, not fixed:**
+- The Route set is read twice per in-dialog request: once off the message to
+  classify, once inside each `pop_top` to edit. `Draft::list` consumes `self`
+  and cannot hand the draft back on a parse error, so a single read-and-edit
+  call cannot also implement the tolerance above. A `try_list` that returns the
+  draft alongside the error would collapse the two.
+- `route_request` is 245 lines (clippy `too_many_lines` warns at 200). It was
+  250 before this port, so the port did not cause it — but the ladder is now
+  the only thing left in the file and wants splitting.
+- `record_response` no longer uppercases the CSeq method for its metric label.
+  `Method::as_str()` is canonical for every known method, so only an unknown
+  method's label changes case; it lands in the bounded `other` slot either way.
+- `cookie_params` returns `lr` (and `outbound`) alongside the stickiness
+  fields, exactly as `parse_uri_params` did. The strategy names the fields it
+  decodes, so nothing reads them — but a cookie signature computed over "all
+  params" would.
