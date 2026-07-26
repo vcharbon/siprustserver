@@ -22,7 +22,7 @@ fn reject_drift_plan(
                     Goal::new(
                         Barrier::None,
                         GoalStep::ExpectResponse {
-                            status: 486,
+                            status: 486, cseq_method: None,
                             body: BodyExpect::Any,
                             early: None,
                             ack_body: None,

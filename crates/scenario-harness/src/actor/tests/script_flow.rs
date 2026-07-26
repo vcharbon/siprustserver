@@ -113,7 +113,7 @@ async fn expect_response_fails_fast_when_final_precedes_provisional() {
                     Goal::new(
                         Barrier::None,
                         GoalStep::ExpectResponse {
-                            status: 183,
+                            status: 183, cseq_method: None,
                             body: BodyExpect::Any,
                             early: None,
                             ack_body: None,
@@ -171,7 +171,7 @@ async fn forked_respond_template_early_ids_name_winner() {
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
     let expect_180 = |id: EarlyId| GoalStep::ExpectResponse {
-        status: 180,
+        status: 180, cseq_method: None,
         body: BodyExpect::Any,
         early: Some(id),
         ack_body: None,

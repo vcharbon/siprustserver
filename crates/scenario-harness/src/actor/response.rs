@@ -139,6 +139,7 @@ pub(super) fn record_response_fact(st: &mut ActorState<'_>, resp: &SipResponse, 
             fact: ResponseFact {
                 status: resp.status,
                 reason: resp.reason.to_string(),
+                cseq_method: resp.cseq.method.as_str().to_string(),
                 body_len: resp.body.len(),
                 body_is_sdp,
                 early_tag: resp.to.tag.as_deref().map(str::to_string),

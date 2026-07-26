@@ -240,6 +240,11 @@ pub enum GoalStep {
     /// template-match surface.
     ExpectResponse {
         status: u16,
+        /// The CSeq method of the transaction this expectation is about. `Some`
+        /// skips responses belonging to any other transaction on the leg — an
+        /// automatic PRACK's 2xx must not satisfy the call's own answer. `None`
+        /// takes the next response of the status whatever answered it.
+        cseq_method: Option<String>,
         body: BodyExpect,
         early: Option<EarlyId>,
         ack_body: Option<Vec<u8>>,

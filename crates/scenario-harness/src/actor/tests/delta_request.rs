@@ -16,7 +16,7 @@ fn bye_expecting_cancel_plan(
 ) -> CallPlan {
     use sip_message::generators::InDialogMethod;
     let expect_resp = |status: u16| GoalStep::ExpectResponse {
-        status,
+        status, cseq_method: None,
         body: BodyExpect::Any,
         early: None,
         ack_body: None,
@@ -282,7 +282,7 @@ async fn forked_early_dialogs_decline_bye_for_cancel() {
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
     let expect_resp = |status: u16| GoalStep::ExpectResponse {
-        status,
+        status, cseq_method: None,
         body: BodyExpect::Any,
         early: None,
         ack_body: None,

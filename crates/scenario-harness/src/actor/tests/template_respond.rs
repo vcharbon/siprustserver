@@ -210,7 +210,7 @@ async fn ack_body_override_rides_the_reinvite_ack() {
     let alice_confirmed =
         Barrier::pred("alice_confirmed", |s| s.leg_at_least("alice", LegPhase::Confirmed));
     let expect = |status: u16, ack_body: Option<Vec<u8>>| GoalStep::ExpectResponse {
-        status,
+        status, cseq_method: None,
         body: BodyExpect::Any,
         early: None,
         ack_body,
@@ -257,7 +257,7 @@ fn ack_body_resolution_is_cached_per_cseq() {
 
     let mut cache: HashMap<u32, String> = HashMap::new();
     let override_goal = GoalStep::ExpectResponse {
-        status: 200,
+        status: 200, cseq_method: None,
         body: BodyExpect::Any,
         early: None,
         ack_body: Some(b"custom-answer".to_vec()),

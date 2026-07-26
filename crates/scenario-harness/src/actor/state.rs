@@ -32,6 +32,11 @@ use crate::StepError;
 pub struct ResponseFact {
     pub status: u16,
     pub reason: String,
+    /// The CSeq method of the request this response answers — the transaction
+    /// it belongs to. A leg carries several concurrent transactions (the INVITE
+    /// plus every automatic: PRACK, UPDATE), so a response expectation that
+    /// names a method skips the ones that are another transaction's business.
+    pub cseq_method: String,
     pub body_len: usize,
     pub body_is_sdp: bool,
     /// The `To`-tag — the early-dialog/fork identity a reception goal's
@@ -245,9 +250,20 @@ impl StateInner {
     /// `need_final` restricts to finals (>= 200); otherwise any non-100 fact
     /// counts (100 is transaction plumbing). Borrow-based: the goal-arm gate
     /// polls this every loop iteration.
-    pub fn leg_response_ready(&self, role: &str, from: usize, need_final: bool) -> bool {
+    pub fn leg_response_ready(
+        &self,
+        role: &str,
+        from: usize,
+        need_final: bool,
+        cseq_method: Option<&str>,
+    ) -> bool {
         self.legs.get(role).is_some_and(|l| {
             l.responses.get(from..).unwrap_or(&[]).iter().any(|f| {
+                if cseq_method.is_some_and(|m| !f.cseq_method.eq_ignore_ascii_case(m)) {
+                    // Another transaction's response never readies a pinned
+                    // expectation, or the goal fires with nothing to consume.
+                    return false;
+                }
                 if need_final {
                     f.status >= 200
                 } else {

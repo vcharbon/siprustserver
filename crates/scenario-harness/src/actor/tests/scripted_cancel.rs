@@ -97,7 +97,7 @@ async fn scripted_cancel_reception_487_rides_bound_invite() {
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
     let expect_resp = |status: u16, matcher: Option<MessageTemplate>| GoalStep::ExpectResponse {
-        status,
+        status, cseq_method: None,
         body: BodyExpect::Any,
         early: None,
         ack_body: None,
@@ -276,7 +276,7 @@ async fn parked_cancel_waits_for_dwelling_cancel_expectation() {
                     Goal::new(
                         Barrier::None,
                         GoalStep::ExpectResponse {
-                            status: 180,
+                            status: 180, cseq_method: None,
                             body: BodyExpect::Any,
                             early: None,
                             ack_body: None,

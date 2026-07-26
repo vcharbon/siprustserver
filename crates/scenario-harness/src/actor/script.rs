@@ -35,13 +35,14 @@ pub(super) fn goal_arm_enabled(st: &ActorState<'_>) -> bool {
                 || st.parked.iter().any(|p| p.initial)
                 || st.parked_initial_consumed.is_some()
         }
-        Some(GoalStep::ExpectResponse { status, .. }) => {
+        Some(GoalStep::ExpectResponse { status, cseq_method, .. }) => {
             let need_final = *status >= 200;
+            let pin = cseq_method.as_deref();
             st.obs
-                .with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, need_final))
+                .with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, need_final, pin))
         }
         Some(GoalStep::ObserveFinal { .. } | GoalStep::ExpectFinal { .. }) => {
-            st.obs.with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, true))
+            st.obs.with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, true, None))
         }
         _ => true,
     }
@@ -318,19 +319,25 @@ pub(super) fn consume_final_fact(st: &mut ActorState<'_>) -> Result<ResponseFact
 pub(super) fn expect_response(
     st: &mut ActorState<'_>,
     status: u16,
+    cseq_method: Option<&str>,
     body: BodyExpect,
     early: Option<EarlyId>,
     matcher: Option<&MessageTemplate>,
 ) -> Result<(), StepError> {
     let facts: Vec<ResponseFact> =
         st.obs.with_snapshot(|s| s.leg(st.role).responses()[st.resp_seen..].to_vec());
+    // A pinned expectation is about ONE transaction; another's response is not
+    // a wrong status, it is not this expectation's business at all.
+    let other_txn = |f: &ResponseFact| {
+        cseq_method.is_some_and(|m| !f.cseq_method.eq_ignore_ascii_case(m))
+    };
     let fact = if status < 200 {
         // The NEXT response (100 Trying is transaction plumbing, skipped) must
         // be a provisional of exactly this status — a final arriving first, or
         // a different provisional, fails fast.
         let mut found = None;
         for (i, f) in facts.iter().enumerate() {
-            if f.status == 100 {
+            if f.status == 100 || other_txn(f) {
                 continue;
             }
             if f.status != status {
@@ -354,7 +361,7 @@ pub(super) fn expect_response(
         // Provisionals before the expected final are passed over.
         let mut found = None;
         for (i, f) in facts.iter().enumerate() {
-            if f.status < 200 {
+            if f.status < 200 || other_txn(f) {
                 continue;
             }
             if f.status != status {
