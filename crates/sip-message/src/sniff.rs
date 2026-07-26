@@ -78,6 +78,17 @@ pub fn req_method(raw: &[u8]) -> Option<String> {
     line.split_whitespace().next().map(str::to_string)
 }
 
+/// The Request-URI (the second token of the request line), or `None` for a
+/// response. The token is returned exactly as it appears — a demux tier that
+/// keys on the URI reads it with the URI value type.
+pub fn request_uri(raw: &[u8]) -> Option<String> {
+    let line = first_line(raw);
+    if line.starts_with("SIP/2.0") {
+        return None;
+    }
+    line.split_whitespace().nth(1).map(str::to_string)
+}
+
 /// The CSeq sequence number (the `<num>` of `CSeq: <num> <METHOD>`), or `None`
 /// if absent/unparseable. Works for requests and responses.
 pub fn cseq_number(raw: &[u8]) -> Option<u32> {
@@ -202,6 +213,19 @@ mod tests {
         assert_eq!(
             cseq_method_label(b"X sip:x SIP/2.0\r\nCSeq: 1 WEIRD\r\n\r\n"),
             "other"
+        );
+    }
+
+    #[test]
+    fn request_uri_reads_the_second_request_line_token() {
+        assert_eq!(
+            request_uri(b"INVITE sip:bob@10.0.0.1:5070 SIP/2.0\r\n\r\n").as_deref(),
+            Some("sip:bob@10.0.0.1:5070")
+        );
+        assert_eq!(
+            request_uri(b"SIP/2.0 200 OK\r\n\r\n"),
+            None,
+            "a response has no Request-URI"
         );
     }
 
