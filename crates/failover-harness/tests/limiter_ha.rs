@@ -13,8 +13,8 @@ use b2bua::decision::{CallDecisionEngine, CallLimiterEntry, NewCallResponse, Scr
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
 use failover_harness::{
-    assert_call_fully_over, FailoverHarness, ReplicatedB2buaSut, RULE_CSEQ_IN_DIALOG_ORDER,
-    WorkerHealth,
+    assert_call_fully_over, cookie_field, FailoverHarness, ReplicatedB2buaSut,
+    RULE_CSEQ_IN_DIALOG_ORDER, WorkerHealth,
 };
 use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
@@ -53,12 +53,6 @@ fn ha_harness(name: &str) -> FailoverHarness {
         "pre-existing ADR-0014 dual-owner reclaim CSeq-desync; tracked separately",
     );
     fh
-}
-
-/// w_pri ordinal from the proxy's Record-Route stickiness cookie.
-fn pri_from_cookie(rr: &str) -> String {
-    let params = sip_message::message_helpers::parse_uri_params(rr);
-    params.get("w_pri").cloned().unwrap_or_default()
 }
 
 fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
@@ -146,10 +140,7 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
     // alice INVITEs through the proxy; establish the call.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("b-leg carries the proxy cookie")
-        .to_string();
-    let primary_ord = pri_from_cookie(&rr);
+    let primary_ord = cookie_field(uas.request(), "w_pri").unwrap_or_default();
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
     let mut dialog = call.ack().await;
@@ -263,10 +254,7 @@ async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_recla
     // ── Mid-setup stall: bob rings and never answers ──────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("b-leg carries the proxy cookie")
-        .to_string();
-    let primary_ord = pri_from_cookie(&rr);
+    let primary_ord = cookie_field(uas.request(), "w_pri").unwrap_or_default();
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
 
@@ -429,12 +417,9 @@ async fn leaked_limiter_slot_recovers_via_ttl_when_primary_is_permanently_dead()
     // SECOND callee (bob2) so the two b-legs sit on distinct RFC-audit lanes.
     let mut call = alice.invite(&bob1).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob1.receive("INVITE").await;
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("b-leg carries the proxy cookie")
-        .to_string();
     // The cookie names the worker the LB picked as primary — which one is left to
     // HRW (the auto-generated Call-ID), so bind dynamically rather than assume.
-    let primary_ord = pri_from_cookie(&rr);
+    let primary_ord = cookie_field(uas.request(), "w_pri").unwrap_or_default();
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
@@ -633,10 +618,7 @@ async fn switchback_bye_on_returned_primary_decrements_the_shared_limiter() {
     // re-INVITE/reboot injections ARE the subject of this test.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("b-leg carries the proxy cookie")
-        .to_string();
-    let primary_ord = pri_from_cookie(&rr);
+    let primary_ord = cookie_field(uas.request(), "w_pri").unwrap_or_default();
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;

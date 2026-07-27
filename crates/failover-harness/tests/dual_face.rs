@@ -27,7 +27,8 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallDecisionEngine, CallTreatment, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::NoopLimiter;
 use failover_harness::FailoverHarness;
-use sip_message::types::SipHeader;
+use sip_message::header::{HeaderName, HeaderValue, ParamValue, RecordRouteEntry};
+use sip_message::types::SipRequest;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -89,38 +90,47 @@ fn assert_plane_discipline(fh: &FailoverHarness) {
     );
 }
 
-/// The Record-Route header values of a header list, in wire order.
-fn rr_values(headers: &[SipHeader]) -> Vec<String> {
-    headers
-        .iter()
-        .filter(|h| h.name.eq_ignore_ascii_case("record-route"))
-        .map(|h| h.value.to_string())
-        .collect()
+/// One recorded Record-Route entry: the proxy face it names, whether it is the
+/// worker-facing half (the `;outbound` direction marker the in-dialog
+/// classification reads) and the stickiness cookie naming the primary worker.
+fn assert_rr_entry(entry: &RecordRouteEntry, face: &str, outbound: bool, what: &str) {
+    let uri = entry.uri();
+    let expected: SocketAddr = face.parse().expect("a test-plane face address");
+    assert_eq!(
+        uri.host_port(),
+        (expected.ip().to_string().as_str(), expected.port()),
+        "{what}: entry must name {face}, got {}",
+        entry.to_wire(),
+    );
+    assert_eq!(
+        uri.param("outbound").is_some(),
+        outbound,
+        "{what}: `;outbound` marks the worker-facing half only, got {}",
+        entry.to_wire(),
+    );
+    assert_eq!(
+        uri.param("w_pri").and_then(ParamValue::as_str),
+        Some("b1"),
+        "{what}: the stickiness cookie rides every recorded entry, got {}",
+        entry.to_wire(),
+    );
 }
 
-/// No Route header naming either proxy face survives past the proxy (both
-/// self-halves popped before the forward).
-fn assert_no_proxy_route(headers: &[SipHeader], what: &str) {
-    for h in headers.iter().filter(|h| h.name.eq_ignore_ascii_case("route")) {
+/// No Route naming either proxy face survives past the proxy (both self-halves
+/// popped before the forward). Reads the unparsed values, so an entry no reader
+/// accepts cannot hide a leak.
+fn assert_no_proxy_route(req: &SipRequest, what: &str) {
+    for value in req.raw(HeaderName::Route) {
         assert!(
-            !h.value.contains("192.168.60.250") && !h.value.contains("10.244.255.250"),
-            "{what}: a proxy self-Route leaked through: {}",
-            h.value,
+            !value.contains("192.168.60.250") && !value.contains("10.244.255.250"),
+            "{what}: a proxy self-Route leaked through: {value}",
         );
     }
 }
 
-/// The `branch=` token of the topmost Via header.
-fn top_via_branch(headers: &[SipHeader]) -> String {
-    let via = headers
-        .iter()
-        .find(|h| h.name.eq_ignore_ascii_case("via"))
-        .expect("a Via header");
-    via.value
-        .split(';')
-        .find_map(|p| p.trim().strip_prefix("branch="))
-        .expect("a branch param")
-        .to_string()
+/// The `branch=` token of the hop a response to this request goes back through.
+fn top_via_branch(req: &SipRequest) -> String {
+    req.top_via().branch().expect("a branch param").to_string()
 }
 
 /// Wait for the single worker to fully reap the call (creations == removals,
@@ -200,15 +210,11 @@ async fn dual_face_establish_double_rr_and_caller_bye() {
     // (`w_pri=b1`) on BOTH entries. No proxy Route survives.
     {
         let req = bob_uas.request();
-        let rrs = rr_values(&req.headers);
+        let rrs = req.record_route_set().expect("readable Record-Route").into_vec();
         assert_eq!(rrs.len(), 2, "double record-route at the callee, got {rrs:?}");
-        assert!(rrs[0].contains("192.168.60.250:5060"), "top RR faces bob (EXT): {}", rrs[0]);
-        assert!(!rrs[0].contains("outbound"), "callee-facing RR is the cookie half: {}", rrs[0]);
-        assert!(rrs[0].contains("w_pri=b1"), "cookie on the callee-facing RR: {}", rrs[0]);
-        assert!(rrs[1].contains("10.244.255.250:5080"), "lower RR faces the worker (INT): {}", rrs[1]);
-        assert!(rrs[1].contains("outbound"), "worker-facing RR keeps the direction marker: {}", rrs[1]);
-        assert!(rrs[1].contains("w_pri=b1"), "cookie on the worker-facing RR too: {}", rrs[1]);
-        assert_no_proxy_route(&req.headers, "b-leg INVITE at bob");
+        assert_rr_entry(&rrs[0], PROXY_EXT, false, "top RR faces bob (EXT)");
+        assert_rr_entry(&rrs[1], PROXY_INT, true, "lower RR faces the worker (INT)");
+        assert_no_proxy_route(req, "b-leg INVITE at bob");
     }
 
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
@@ -219,14 +225,10 @@ async fn dual_face_establish_double_rr_and_caller_bye() {
     // §12.1.2): as-received order INT `;outbound` on top, EXT cookie below —
     // so alice's REVERSED route set starts with the face facing HER (EXT).
     {
-        let rrs = rr_values(&confirmed.headers);
+        let rrs = confirmed.record_route_set().expect("readable Record-Route").into_vec();
         assert_eq!(rrs.len(), 2, "double record-route echoed to the caller, got {rrs:?}");
-        assert!(rrs[0].contains("10.244.255.250:5080"), "top RR (worker-facing, INT): {}", rrs[0]);
-        assert!(rrs[0].contains("outbound"), "worker-facing marker: {}", rrs[0]);
-        assert!(rrs[0].contains("w_pri=b1"), "cookie on the worker-facing RR: {}", rrs[0]);
-        assert!(rrs[1].contains("192.168.60.250:5060"), "lower RR (caller-facing, EXT): {}", rrs[1]);
-        assert!(rrs[1].contains("w_pri=b1"), "cookie on the caller-facing RR: {}", rrs[1]);
-        assert!(!rrs[1].contains("outbound"), "caller-facing RR is the cookie half: {}", rrs[1]);
+        assert_rr_entry(&rrs[0], PROXY_INT, true, "top RR (worker-facing, INT)");
+        assert_rr_entry(&rrs[1], PROXY_EXT, false, "lower RR (caller-facing, EXT)");
     }
 
     let mut dialog = call.ack().await;
@@ -235,7 +237,7 @@ async fn dual_face_establish_double_rr_and_caller_bye() {
     // ── (c) caller → callee in-dialog: alice hangs up ────────────────────────
     let mut a_bye = dialog.bye().await;
     let mut bob_bye = bob.receive("BYE").await;
-    assert_no_proxy_route(&bob_bye.request().headers, "relayed BYE at bob");
+    assert_no_proxy_route(bob_bye.request(), "relayed BYE at bob");
     bob_bye.respond(200, "OK").await;
     a_bye.expect(200).await;
 
@@ -265,7 +267,7 @@ async fn dual_face_callee_initiated_bye_traverses_both_faces() {
     let mut bob_dialog = bob_uas.dialog();
     let mut b_bye = bob_dialog.bye().await;
     let mut alice_bye = alice.receive("BYE").await;
-    assert_no_proxy_route(&alice_bye.request().headers, "relayed BYE at alice");
+    assert_no_proxy_route(alice_bye.request(), "relayed BYE at alice");
     alice_bye.respond(200, "OK").await;
     b_bye.expect(200).await;
 
@@ -294,10 +296,10 @@ async fn dual_face_reinvite_mid_dialog() {
     let mut ri = dialog.reinvite(Some(OFFER)).await;
     let mut bob_ri = bob.receive("INVITE").await;
     assert!(
-        rr_values(&bob_ri.request().headers).is_empty(),
+        bob_ri.request().record_route_set().expect("readable Record-Route").is_empty(),
         "no Record-Route on a mid-dialog re-INVITE (§12.2)",
     );
-    assert_no_proxy_route(&bob_ri.request().headers, "re-INVITE at bob");
+    assert_no_proxy_route(bob_ri.request(), "re-INVITE at bob");
     bob_ri.respond(200, "OK").with_sdp(ANSWER).await;
     ri.expect(200).await;
     dialog.ack(None).await;
@@ -325,7 +327,7 @@ async fn dual_face_cancel_correlates_across_faces() {
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.ext_addr()).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
-    let invite_branch = top_via_branch(&bob_uas.request().headers);
+    let invite_branch = top_via_branch(bob_uas.request());
     bob_uas.respond(180, "Ringing").await;
     call.expect(180).await;
 
@@ -339,7 +341,7 @@ async fn dual_face_cancel_correlates_across_faces() {
     // cancel_lru correlated it across the two sockets.
     let mut bob_cancel = bob.receive_absorbing("CANCEL", &["INVITE"]).await;
     assert_eq!(
-        top_via_branch(&bob_cancel.request().headers),
+        top_via_branch(bob_cancel.request()),
         invite_branch,
         "the CANCEL must ride the b-leg INVITE's transaction (branch reuse across faces)",
     );
@@ -384,7 +386,7 @@ async fn dual_face_486_reroute_ack_correlation() {
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.ext_addr()).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
-    let invite_branch = top_via_branch(&bob_uas.request().headers);
+    let invite_branch = top_via_branch(bob_uas.request());
     bob_uas.respond(486, "Busy Here").await;
 
     // The hop ACK bob receives must belong to the INVITE transaction it 486'd
@@ -392,7 +394,7 @@ async fn dual_face_486_reroute_ack_correlation() {
     // the INT face and the worker's own ACK is absorbed there.
     let ack = bob.receive_absorbing("ACK", &["INVITE"]).await;
     assert_eq!(
-        top_via_branch(&ack.request().headers),
+        top_via_branch(ack.request()),
         invite_branch,
         "the non-2xx hop ACK must reuse the INVITE's branch across the face split",
     );

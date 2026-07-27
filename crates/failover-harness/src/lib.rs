@@ -12,17 +12,21 @@
 //!   is expected to be *transparent*.
 //! - [`oracle`] — the transparency oracle: differential (clean baseline vs
 //!   failover-injected) + strict From/To/CSeq invariants.
+//! - [`cookie`] — the proxy stickiness cookie read back off a forwarded
+//!   request, which names the primary and backup worker of a call.
 //! - the `transparent_failover!` matrix macro ([`matrix`]) — expands a
 //!   `(scenario × safe-point × fault × recovery)` table into one named
 //!   `#[tokio::test]` per legal cell (`tests/transparent_v1.rs`).
 
 pub mod combine;
+pub mod cookie;
 mod harness;
 pub mod oracle;
 pub mod runner;
 pub mod scenario;
 
 pub use combine::{combine_doc, WorkerAxis};
+pub use cookie::{cookie_field, worker_ordinals};
 pub use harness::{FailoverHarness, ProxySut, ReplicatedB2buaSut, RULE_CSEQ_IN_DIALOG_ORDER};
 pub use runner::run_cell;
 pub use scenario::{Cell, DialogState, Event, Fault, Party, Recovery};

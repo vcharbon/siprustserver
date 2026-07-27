@@ -16,7 +16,7 @@
 use std::time::Duration;
 
 use call::CdrEventType;
-use failover_harness::{FailoverHarness, PartitionRole, ReplicatedB2buaSut, WorkerHealth};
+use failover_harness::{worker_ordinals, FailoverHarness, PartitionRole, ReplicatedB2buaSut, WorkerHealth};
 use call::parse_call_ref;
 use scenario_harness::Agent;
 use sip_message::generators::InDialogMethod;
@@ -76,9 +76,7 @@ async fn canonical_failover() {
     // the b-leg INVITE bob received echoes the proxy's Record-Route cookie with
     // w_pri = the primary worker. (We could also race the worker lanes, but the
     // workers consume their own INVITE internally; the cookie is authoritative.)
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("b-leg INVITE carries the proxy Record-Route cookie");
-    let (pri_ord, bak_ord) = pri_bak_from_cookie(&rr);
+    let (pri_ord, bak_ord) = worker_ordinals(uas.request());
     // Bind B1 = the primary worker, B2 = the backup, by ordinal.
     let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) = if pri_ord == "b1" {
         (&mut w_b1, &mut w_b2)
@@ -244,9 +242,7 @@ async fn hydrated_takeover_copy_self_releases_without_leaking() {
     // ── STEP 1: establish alice ⇄ bob through the proxy on the HRW primary ────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("b-leg INVITE carries the proxy Record-Route cookie");
-    let (pri_ord, bak_ord) = pri_bak_from_cookie(&rr);
+    let (pri_ord, bak_ord) = worker_ordinals(uas.request());
     let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
         if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
     assert_eq!(bak_ord, b2.ordinal(), "cookie w_bak names the backup worker");
@@ -367,12 +363,8 @@ async fn successful_long_call_with_as_generated_options() {
     // ── establish alice ⇄ bob on the HRW primary; this is the quiescent long call.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("b-leg INVITE carries the proxy Record-Route cookie");
-    let b_leg_call_id = sip_message::message_helpers::get_header(&uas.request().headers, "call-id")
-        .expect("b-leg INVITE carries a Call-ID")
-        .to_string();
-    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let b_leg_call_id = uas.request().call_id().as_str().to_string();
+    let (pri_ord, _bak) = worker_ordinals(uas.request());
     let (b1, _b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
         if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
 
@@ -408,8 +400,8 @@ async fn successful_long_call_with_as_generated_options() {
 
         let mut bob_opts = b_txn.take().unwrap();
         assert_eq!(
-            sip_message::message_helpers::get_header(&bob_opts.request().headers, "call-id"),
-            Some(b_leg_call_id.as_str()),
+            bob_opts.request().call_id().as_str(),
+            b_leg_call_id.as_str(),
             "cycle {cycle}: the AS keepalive probes the SAME b-leg dialog it owns",
         );
         a_txn.take().unwrap().respond(200, "OK").await;
@@ -496,9 +488,7 @@ async fn keepalive_as_options_increments_dialog_cseq() {
     // ── establish alice ⇄ bob on the HRW primary; the quiescent long call. ──────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("b-leg INVITE carries the proxy Record-Route cookie");
-    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let (pri_ord, _bak) = worker_ordinals(uas.request());
     let (b1, _b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
         if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
 
@@ -583,9 +573,7 @@ async fn reboot_reclaim_exactly_one_owner_after_self_release() {
     // ── establish alice ⇄ bob on the HRW primary ─────────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("b-leg INVITE carries the cookie");
-    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let (pri_ord, _bak) = worker_ordinals(uas.request());
     let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
         if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
     let primary_ord = b1.ordinal().to_string();
@@ -684,9 +672,7 @@ async fn quiescent_long_call_survives_kill_reboot_reclaim() {
     // ── establish a LONG/quiescent call — armed keepalive, then nothing more ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("b-leg INVITE carries the cookie");
-    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let (pri_ord, _bak) = worker_ordinals(uas.request());
     let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
         if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
     let primary_ord = b1.ordinal().to_string();
@@ -783,9 +769,7 @@ async fn cseq_stays_in_order_across_failover_and_reclaim() {
     // ── establish + replicate ───────────────────────────────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("b-leg INVITE carries the proxy cookie");
-    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let (pri_ord, _bak) = worker_ordinals(uas.request());
     let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
         if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
     let primary_ord = b1.ordinal().to_string();
@@ -917,9 +901,7 @@ async fn acting_backup_terminate_leaves_no_expired_context_for_reclaim() {
     // ── establish alice ⇄ bob on the HRW primary, replicate to the backup ─────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("b-leg INVITE carries the cookie");
-    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let (pri_ord, _bak) = worker_ordinals(uas.request());
     let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
         if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
     let primary_ord = b1.ordinal().to_string();
@@ -1015,9 +997,7 @@ async fn matrix_crash_mid_invite() {
     // alice INVITEs; bob gets the b-leg. Determine the primary from the cookie.
     let call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let uas = bob.receive("INVITE").await;
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("cookie");
-    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let (pri_ord, _bak) = worker_ordinals(uas.request());
 
     // Crash the primary BEFORE answering (no 200 → no establish → no replicate).
     fh.mark(&pri_ord, None, "crash", "mid-INVITE (before answer)");
@@ -1123,9 +1103,7 @@ async fn matrix_partition_during_failover() {
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("cookie");
-    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let (pri_ord, _bak) = worker_ordinals(uas.request());
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
     let mut dialog = call.ack().await;
@@ -1192,9 +1170,7 @@ async fn matrix_double_fault() {
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("cookie");
-    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let (pri_ord, _bak) = worker_ordinals(uas.request());
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
     let mut dialog = call.ack().await;
@@ -1341,9 +1317,7 @@ async fn skew_ahead_backup_no_immediate_options_at_takeover() {
     // ── establish alice ⇄ bob ────────────────────────────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("b-leg INVITE carries the cookie");
-    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let (pri_ord, _bak) = worker_ordinals(uas.request());
     assert_eq!(
         pri_ord, "b2",
         "this test needs b2 primary so the +30 s backup (b1) is the takeover node",
@@ -1425,21 +1399,6 @@ async fn skew_ahead_backup_no_immediate_options_at_takeover() {
 // helpers
 // ===========================================================================
 
-/// Parse `w_pri` / `w_bak` out of a Record-Route cookie value.
-fn pri_bak_from_cookie(rr: &str) -> (String, String) {
-    let pri = cookie_param(rr, "w_pri").unwrap_or_default();
-    let bak = cookie_param(rr, "w_bak").unwrap_or_default();
-    (pri, bak)
-}
-
-fn cookie_param(rr: &str, key: &str) -> Option<String> {
-    rr.split(';').find_map(|p| {
-        let p = p.trim().trim_end_matches('>');
-        let (k, v) = p.split_once('=')?;
-        (k.trim() == key).then(|| v.trim().to_string())
-    })
-}
-
 /// The callRef the acting-backup `b2` holds for `primary` in its `bak:{primary}`
 /// partition (the replicated call). Scans the engine's live backup keyset.
 async fn find_backed_up_ref(b2: &ReplicatedB2buaSut, primary: &str) -> String {
@@ -1489,9 +1448,7 @@ async fn in_dialog_bye_races_bulk_reclaim_served_on_demand() {
     // ── establish alice ⇄ bob on the HRW primary ─────────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    let rr = sip_message::message_helpers::get_header(&uas.request().headers, "record-route")
-        .expect("b-leg INVITE carries the cookie");
-    let (pri_ord, _bak) = pri_bak_from_cookie(&rr);
+    let (pri_ord, _bak) = worker_ordinals(uas.request());
     let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
         if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
     let primary_ord = b1.ordinal().to_string();

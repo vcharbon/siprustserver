@@ -28,9 +28,9 @@ use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
-use sip_message::message_helpers::{extract_tag, get_header};
 use sip_message::types::{SipRequest, SipResponse};
 
+use crate::cookie::worker_ordinals;
 use crate::oracle::{NodeEndState, Observation, TeardownSweep, Who};
 use crate::scenario::{Cell, DialogState, Event, Fault, Party, Recovery};
 use crate::{FailoverHarness, ReplicatedB2buaSut, WorkerHealth};
@@ -76,27 +76,19 @@ fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
     ))
 }
 
-/// `w_pri` / `w_bak` ordinals from the proxy's Record-Route stickiness cookie.
-fn pri_bak_from_cookie(rr: &str) -> (String, String) {
-    let params = sip_message::message_helpers::parse_uri_params(rr);
+fn req_tags(r: &SipRequest) -> (String, String) {
     (
-        params.get("w_pri").cloned().unwrap_or_default(),
-        params.get("w_bak").cloned().unwrap_or_default(),
+        r.from().tag().unwrap_or_default().to_string(),
+        r.to().tag().unwrap_or_default().to_string(),
     )
 }
 
-fn req_tags(r: &SipRequest) -> (String, String) {
-    let from = get_header(&r.headers, "from").and_then(extract_tag).unwrap_or_default();
-    let to = get_header(&r.headers, "to").and_then(extract_tag).unwrap_or_default();
-    (from, to)
-}
-
 fn resp_cseq(r: &SipResponse) -> String {
-    r.cseq.seq.to_string()
+    r.cseq().seq().to_string()
 }
 
 fn req_cseq(r: &SipRequest) -> String {
-    r.cseq.seq.to_string()
+    r.cseq().seq().to_string()
 }
 
 /// The fixed `target/seq-reports/` artifact root. `CARGO_MANIFEST_DIR` points at
@@ -189,10 +181,7 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
         let (f, t) = req_tags(r);
         obs.req(Who::Bob, "INVITE", &req_cseq(r), &f, &t);
     }
-    let rr = get_header(&uas.request().headers, "record-route")
-        .expect("b-leg INVITE carries the proxy cookie")
-        .to_string();
-    let (pri_ord, bak_ord) = pri_bak_from_cookie(&rr);
+    let (pri_ord, bak_ord) = worker_ordinals(uas.request());
 
     // Provisional 180 (gives alice an early dialog).
     uas.respond(180, "Ringing").await;

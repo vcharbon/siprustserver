@@ -38,14 +38,13 @@ use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
 use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
 use failover_harness::{
-    assert_call_fully_over, assert_call_lost_no_cdr, FailoverHarness, ProxySut, ReplicatedB2buaSut,
-    WorkerHealth,
+    assert_call_fully_over, assert_call_lost_no_cdr, worker_ordinals, FailoverHarness, ProxySut,
+    ReplicatedB2buaSut, WorkerHealth,
 };
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::{Agent, Dialog};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
-use sip_message::message_helpers::get_header;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -58,16 +57,6 @@ const LIMITER_ADDR: &str = "10.0.0.1:8080";
 
 fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
-}
-
-fn pri_from_cookie(rr: &str) -> String {
-    let params = sip_message::message_helpers::parse_uri_params(rr);
-    params.get("w_pri").cloned().unwrap_or_default()
-}
-
-fn bak_from_cookie(rr: &str) -> String {
-    let params = sip_message::message_helpers::parse_uri_params(rr);
-    params.get("w_bak").cloned().unwrap_or_default()
 }
 
 fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
@@ -185,11 +174,7 @@ async fn establish_with(name: &str, decision: Arc<dyn CallDecisionEngine>) -> Es
     // INVITE → 200 → ACK (Established).
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    let rr = get_header(&uas.request().headers, "record-route")
-        .expect("b-leg INVITE carries the proxy cookie")
-        .to_string();
-    let primary_ord = pri_from_cookie(&rr);
-    let bak_ord = bak_from_cookie(&rr);
+    let (primary_ord, bak_ord) = worker_ordinals(uas.request());
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
