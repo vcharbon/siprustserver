@@ -589,6 +589,14 @@ impl InDialogTxn {
         InDialogTxn { agent, invite, wire_dst }
     }
 
+    /// The (re-)INVITE this transaction put on the wire — `None` for a
+    /// non-INVITE transaction. Reading it back is how the round's offer/answer
+    /// role is known: an offer here means the answer rides the response, so the
+    /// ACK to the 2xx is bodyless (RFC 3261 §13.2.2.4).
+    pub fn sent_invite(&self) -> Option<&SipRequest> {
+        self.invite.as_ref()
+    }
+
     /// The §17.1.1.3 auto-ACK context — `None` for a non-INVITE transaction.
     fn ack_ctx(&self) -> Option<AckCtx<'_>> {
         self.invite.as_ref().map(|invite| AckCtx {

@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use sip_message::generators::InDialogMethod;
-use sip_message::SipResponse;
+use sip_message::{SipHeader, SipResponse};
 
 use super::endpoint::{SUBFLOW_EARLY, SUBFLOW_REFER, SUBFLOW_RENEG};
 use super::goals::GoalStep;
@@ -130,9 +130,7 @@ pub(super) fn record_response_fact(st: &mut ActorState<'_>, resp: &SipResponse, 
         .goals
         .remaining_steps()
         .any(|s| matches!(s, GoalStep::ExpectResponse { matcher: Some(_), .. }));
-    let body_is_sdp = !resp.body.is_empty()
-        && sip_message::message_helpers::get_header(&resp.headers, "content-type")
-            .is_some_and(|v| v.to_ascii_lowercase().contains("sdp"));
+    let body_is_sdp = carries_sdp(&resp.headers, &resp.body);
     st.obs.record(
         Observation::LegResponse {
             leg: st.role,
@@ -279,16 +277,16 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
             }
         }
         // A 2xx to an in-dialog INVITE with NO pending initial INVITE: this
-        // caller's own delayed-offer re-INVITE (the `reinvite` body). ACK it WITH
-        // the answer SDP (RFC 3264 §4 delayed offer) — IDEMPOTENTLY, re-derived
-        // from the confirmed dialog + `resp.cseq`, NEVER gated on a one-shot a
+        // caller's own re-INVITE. ACK it IDEMPOTENTLY, re-derived from the
+        // confirmed dialog + `resp.cseq`, NEVER gated on a one-shot a
         // lost-datagram interleaving could strand (that stranding is the bug this
-        // fixes — mirrors the mux's `(Call-ID, CSeq)` re-ACK).
+        // fixes — mirrors the mux's `(Call-ID, CSeq)` re-ACK). The body follows
+        // the round's offer/answer state ([`delayed_offer_answer`]).
         // Every such 2xx the reactor is handed is ACKed; closing the `ReInvite`
         // obligation, advancing the `reneg` teardown barrier, and stamping the
         // feed happen ONCE, keyed on the CSeq of a re-INVITE THIS leg originated.
         if (200..300).contains(&resp.status) && st.dialogs.confirmed.is_some() {
-            let default = st.answer_body();
+            let default = delayed_offer_answer(st, &resp);
             let sdp = resolve_ack_body(
                 &mut st.reinvite_ack_bodies,
                 st.goals.next_step(),
@@ -296,7 +294,7 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
                 resp.cseq.seq,
             );
             if let Some(dialog) = st.dialogs.confirmed.as_mut() {
-                dialog.ack_for(resp.cseq.seq, Some(&sdp)).await;
+                dialog.ack_for(resp.cseq.seq, sdp.as_deref()).await;
             }
             if st.sent_reinvites.remove(&resp.cseq.seq) {
                 st.sent_reinvite_txns.remove(&resp.cseq.seq);
@@ -411,25 +409,49 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
     Ok(())
 }
 
+/// Whether a message carries a session description: a non-empty body typed
+/// `application/sdp`.
+fn carries_sdp(headers: &[SipHeader], body: &[u8]) -> bool {
+    !body.is_empty()
+        && sip_message::message_helpers::get_header(headers, "content-type")
+            .is_some_and(|v| v.to_ascii_lowercase().contains("sdp"))
+}
+
+/// The answer the ACK to an in-dialog INVITE 2xx owes (RFC 3261 §13.2.2.4):
+/// `Some` ONLY in the delayed-offer form — our re-INVITE was bodyless and the
+/// 2xx carries the offer, so the ACK closes the round with our answer (RFC 3264
+/// §4). When our own re-INVITE carried the offer the answer already rode the
+/// response and the round is complete: `None`, a bodyless ACK (§13.2.1). An
+/// INVITE whose transaction is no longer retained (a re-surfaced 2xx) reads as
+/// the offer-in-INVITE form; the per-CSeq cache re-emits the first ACK's body.
+fn delayed_offer_answer(st: &ActorState<'_>, resp: &SipResponse) -> Option<&'static str> {
+    let we_offered = st
+        .sent_reinvite_txns
+        .get(&resp.cseq.seq)
+        .and_then(crate::InDialogTxn::sent_invite)
+        .is_none_or(|req| carries_sdp(&req.headers, &req.body));
+    (!we_offered && carries_sdp(&resp.headers, &resp.body)).then(|| st.answer_body())
+}
+
 /// The body of the ACK to an in-dialog INVITE 2xx: the pending
-/// `ExpectResponse`'s `ack_body` override, else `default` (the engine-built
-/// answer SDP) — resolved ONCE per CSeq and cached, so the ACK to a
-/// re-surfaced 2xx is byte-identical (RFC 3261 §13.2.2.4) even after the goal
-/// cursor advanced past the override-carrying goal.
+/// `ExpectResponse`'s `ack_body` override, else `default` (the answer the round
+/// owes, `None` for a bodyless ACK) — resolved ONCE per CSeq and cached, so the
+/// ACK to a re-surfaced 2xx is byte-identical (RFC 3261 §13.2.2.4) even after
+/// the goal cursor advanced past the override-carrying goal.
 pub(super) fn resolve_ack_body(
-    cache: &mut HashMap<u32, String>,
+    cache: &mut HashMap<u32, Option<String>>,
     next_step: Option<&GoalStep>,
-    default: &str,
+    default: Option<&str>,
     cseq: u32,
-) -> String {
+) -> Option<String> {
     if let Some(cached) = cache.get(&cseq) {
         return cached.clone();
     }
     let resolved = match next_step {
         Some(GoalStep::ExpectResponse { ack_body: Some(b), .. }) => {
-            String::from_utf8_lossy(b).into_owned()
+            Some(String::from_utf8_lossy(b).into_owned())
         }
-        _ => default.to_string(),
+        _ => default.map(str::to_string),
     };
     cache.insert(cseq, resolved.clone());
     resolved

@@ -255,7 +255,7 @@ async fn ack_body_override_rides_the_reinvite_ack() {
 fn ack_body_resolution_is_cached_per_cseq() {
     use std::collections::HashMap;
 
-    let mut cache: HashMap<u32, String> = HashMap::new();
+    let mut cache: HashMap<u32, Option<String>> = HashMap::new();
     let override_goal = GoalStep::ExpectResponse {
         status: 200, cseq_method: None,
         body: BodyExpect::Any,
@@ -265,19 +265,50 @@ fn ack_body_resolution_is_cached_per_cseq() {
     };
     // First resolution: the pending override wins and is cached.
     assert_eq!(
-        crate::actor::response::resolve_ack_body(&mut cache, Some(&override_goal), "engine-sdp", 2),
-        "custom-answer",
+        crate::actor::response::resolve_ack_body(
+            &mut cache,
+            Some(&override_goal),
+            Some("engine-sdp"),
+            2,
+        ),
+        Some("custom-answer".to_string()),
     );
     // The 2xx re-surfaces after the cursor advanced (next goal is Bye):
     // the CACHED bytes are re-emitted, never the engine default.
     assert_eq!(
-        crate::actor::response::resolve_ack_body(&mut cache, Some(&GoalStep::Bye), "engine-sdp", 2),
-        "custom-answer",
+        crate::actor::response::resolve_ack_body(
+            &mut cache,
+            Some(&GoalStep::Bye),
+            Some("engine-sdp"),
+            2,
+        ),
+        Some("custom-answer".to_string()),
     );
     // A different CSeq with no pending override takes the engine default.
     assert_eq!(
-        crate::actor::response::resolve_ack_body(&mut cache, Some(&GoalStep::Bye), "engine-sdp", 3),
-        "engine-sdp",
+        crate::actor::response::resolve_ack_body(
+            &mut cache,
+            Some(&GoalStep::Bye),
+            Some("engine-sdp"),
+            3,
+        ),
+        Some("engine-sdp".to_string()),
+    );
+    // A round the INVITE already offered owes no answer: the bodyless
+    // decision is cached exactly like a body-carrying one.
+    assert_eq!(
+        crate::actor::response::resolve_ack_body(&mut cache, Some(&GoalStep::Bye), None, 4),
+        None,
+    );
+    assert_eq!(
+        crate::actor::response::resolve_ack_body(
+            &mut cache,
+            Some(&override_goal),
+            Some("engine-sdp"),
+            4,
+        ),
+        None,
+        "the cached bodyless decision survives a later override-carrying cursor",
     );
 }
 

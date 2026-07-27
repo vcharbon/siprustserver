@@ -221,10 +221,11 @@ pub struct ActorState<'c> {
     /// consumption point of the reception goals.
     pub(super) resp_seen: usize,
     /// The ACK body resolved for each in-dialog INVITE 2xx we ACKed, keyed by
-    /// CSeq — the ACK to a RETRANSMITTED 2xx must be byte-identical
-    /// (RFC 3261 §13.2.2.4), so an `ack_body` override is resolved once and
-    /// re-emitted verbatim, never re-derived from the (advanced) goal cursor.
-    pub(super) reinvite_ack_bodies: HashMap<u32, String>,
+    /// CSeq (`None` = the bodyless ACK a complete offer/answer round takes) —
+    /// the ACK to a RETRANSMITTED 2xx must be byte-identical (RFC 3261
+    /// §13.2.2.4), so the decision is resolved once and re-emitted verbatim,
+    /// never re-derived from the (advanced) goal cursor or a dropped transaction.
+    pub(super) reinvite_ack_bodies: HashMap<u32, Option<String>>,
     /// The plan's lane-chosen stack automatics.
     pub(super) automatics: Automatics,
     /// This actor's ONE CSeq deviation counter (ADR-0024 §6): a shared handle
