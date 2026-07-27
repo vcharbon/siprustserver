@@ -131,26 +131,13 @@ fn sequence_renders_verbatim(input: &str) -> bool {
     input.split_whitespace().all(|t| !(t.len() > 1 && t.starts_with('0')))
 }
 
-/// A URI [`Uri::normalized`] reproduces octet for octet.
-///
-/// Two exclusions are live parser losses, raised in the ADR-0025 migration log
-/// rather than fixed here: an escaped-header pair carrying no `=` is dropped at
-/// parse, and an unbracketed IPv6 host is truncated at its first colon. A
-/// redundant leading zero in the port renders as the port it means, which is a
-/// normalization, not a loss.
+/// A URI [`Uri::normalized`] reproduces octet for octet. The one exclusion is a
+/// redundant leading zero in the port, which renders as the port it means —
+/// a normalization, not a loss.
 fn uri_renders_verbatim(input: &str) -> bool {
-    let (authority, headers) = match input.split_once('?') {
-        Some((a, h)) => (a, Some(h)),
-        None => (input, None),
-    };
-    if headers.is_some_and(|h| h.split('&').any(|pair| !pair.contains('='))) {
-        return false;
-    }
+    let authority = input.split_once('?').map_or(input, |(a, _)| a);
     let after_scheme = authority.split_once(':').map_or("", |(_, rest)| rest);
     let host = after_scheme.rsplit('@').next().unwrap_or("").split(';').next().unwrap_or("");
-    if !host.starts_with('[') && host.matches(':').count() > 1 {
-        return false;
-    }
     match host.rsplit_once(':') {
         Some((_, port)) => !(port.len() > 1 && port.starts_with('0')),
         None => true,
@@ -218,36 +205,66 @@ fn rack_values_are_a_render_parse_fixpoint() {
 
 // --- URIs, which every address value embeds ---
 
+/// One URI through the fixpoint, plus the anti-loss length assertion wherever
+/// the render is expected to be byte-preserving. `None` when the parser refused
+/// the input, otherwise whether it was counted as byte-preserving.
+fn uri_round_trip(input: &str) -> Option<bool> {
+    let input = input.trim();
+    let uri = Uri::parse(&SipStr::owned(input)).ok()?;
+    // An unedited URI goes back out as the bytes it came in as, so the
+    // fixpoint is driven through the field renderer — which is what an
+    // edited URI is written with.
+    assert_eq!(uri.to_string(), input, "URI: an unedited value was rewritten");
+    let rendered = uri.clone().normalized().to_string();
+    let reparsed = Uri::parse(&SipStr::owned(&rendered))
+        .unwrap_or_else(|e| panic!("URI: rendered {rendered:?} no longer parses ({})", e.reason));
+    assert_eq!(reparsed, uri, "URI: parse(render(v)) != v\n  input {input:?}");
+    // The fixpoint alone cannot see a part of the URI that both passes drop;
+    // the field renderer's output must also be as long as what it was read
+    // from.
+    if !uri_renders_verbatim(input) {
+        return Some(false);
+    }
+    assert_eq!(
+        rendered.len(),
+        input.len(),
+        "URI: the field renderer lost bytes\n  input    {input:?}\n  rendered {rendered:?}"
+    );
+    Some(true)
+}
+
 #[test]
 fn uris_are_a_render_parse_fixpoint() {
     let inputs = corpus("sip-uri");
     let mut accepted = 0usize;
     let mut verbatim = 0usize;
     for input in &inputs {
-        let Ok(uri) = Uri::parse(&SipStr::owned(input)) else { continue };
-        // An unedited URI goes back out as the bytes it came in as, so the
-        // fixpoint is driven through the field renderer — which is what an
-        // edited URI is written with.
-        assert_eq!(uri.to_string(), input.trim(), "URI: an unedited value was rewritten");
-        let rendered = uri.clone().normalized().to_string();
-        let reparsed = Uri::parse(&SipStr::owned(&rendered))
-            .unwrap_or_else(|e| panic!("URI: rendered {rendered:?} no longer parses ({})", e.reason));
-        assert_eq!(reparsed, uri, "URI: parse(render(v)) != v\n  input {input:?}");
-        // The fixpoint alone cannot see a part of the URI that both passes
-        // drop; the field renderer's output must also be as long as what it
-        // was read from.
-        if uri_renders_verbatim(input.trim()) {
-            assert_eq!(
-                rendered.len(),
-                input.trim().len(),
-                "URI: the field renderer lost bytes\n  input    {input:?}\n  rendered {rendered:?}"
-            );
-            verbatim += 1;
-        }
+        let Some(byte_preserving) = uri_round_trip(input) else { continue };
+        verbatim += usize::from(byte_preserving);
         accepted += 1;
     }
     assert!(accepted >= 900, "URI: only {accepted} of {} inputs parsed", inputs.len());
     assert!(verbatim >= 800, "URI: only {verbatim} inputs were byte-preserving");
+}
+
+// The ABNF generator writes every escaped-header pair with its `=`, so the pair
+// a peer may write without one — malformed under RFC 3261 §19.1.1, and passed
+// through rather than deleted — is pinned by hand.
+#[test]
+fn an_escaped_header_pair_with_no_value_is_byte_preserving() {
+    for input in ["sip:a@h?X-Trace", "sip:a@h?a=b&X-Trace&c=d", "sip:a@h;lr?X-Trace&Replaces=1"] {
+        assert_eq!(uri_round_trip(input), Some(true), "URI: {input:?} lost its valueless pair");
+    }
+}
+
+// An IPv6 host written without its brackets is refused, so no reader is handed
+// the text before its first colon as a host.
+#[test]
+fn an_unbracketed_ipv6_host_is_refused_by_the_parser() {
+    for input in ["sip:2001:db8::1", "sip:alice@2001:db8::1;transport=udp"] {
+        assert_eq!(uri_round_trip(input), None, "URI: {input:?} was accepted");
+    }
+    assert_eq!(uri_round_trip("sip:bob@[2001:db8::1]:5060"), Some(true));
 }
 
 // --- the families the ABNF generator has no grammar for ---

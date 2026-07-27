@@ -1576,16 +1576,31 @@ change parser behaviour; both are excluded by the URI predicate):
   `without_escaped_headers`, a built URI. RFC 3261 §19.1.1's `header` production
   requires `hname "=" hvalue`, so the input is malformed; silently deleting part
   of a Request-URI is still the wrong answer to it.
+  **resolved:** the list holds `(name, Option<value>)`, so a bare name survives
+  and renders back without an `=`.
 - **An unbracketed IPv6 host is TRUNCATED, not rejected.** `sip:2001:db8::1`
   parses as host `2001` with no port, and `sip:a@2001:db8::1` likewise. RFC 3261
   §19.1.1 requires the brackets, so the value is malformed — but a router that
   resolves `2001` is worse than one that refuses the URI, and `Uri::parse`
   refuses far less malformed input elsewhere (an out-of-range port). This is the
   same class as the port guard M5 replaced with a value-type property.
+  **resolved:** a second colon in an unbracketed authority is a parse error, so
+  the Request-URI degrades to `opaque` and every fallible reader propagates.
 
 A third delta is a normalization, not a loss, and is excluded on those grounds:
 a redundant leading zero (`sip:h:007`, `CSeq: 007 INVITE`) renders as the number
 it means.
+
+**7. The URI predicate's two exclusions are gone, and one of them was
+over-broad.** With both losses fixed, `uri_renders_verbatim` excludes only the
+leading-zero port. The escaped-header exclusion had been reading the `?` of a
+URI like `SIP:8?:@0.235.246.245:19564` — where the `?` sits inside the userinfo
+and no header list exists — so it dropped 18 sound inputs while the corpus
+contains **zero** URIs with a genuine valueless pair. The generator has no
+grammar for one, so the two cases are pinned by hand next to the corpus lane
+(`an_escaped_header_pair_with_no_value_is_byte_preserving`,
+`an_unbracketed_ipv6_host_is_refused_by_the_parser`); both were verified to have
+teeth by reinstating each loss and watching only its own pin fail.
 
 **7. ADR-0025's "Performance invariants" section states the achieved number
 beside each target.** The four guardrails read as unqualified targets, so the

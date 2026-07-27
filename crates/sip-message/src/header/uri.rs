@@ -70,7 +70,9 @@ impl HostPort {
     }
 
     /// Read `host[:port]` from byte `i`; yields the value and the position
-    /// after it.
+    /// after it. An IPv6 host must come bracketed (RFC 3261 §19.1.1): an
+    /// unbracketed one is refused, never read as the text before its first
+    /// colon.
     pub(crate) fn parse_at(base: &SipStr, i: usize) -> Result<(Self, usize), SipParseError> {
         let bytes = base.as_bytes();
         let len = bytes.len();
@@ -80,7 +82,19 @@ impl HostPort {
                 None => return Err(SipParseError::new("unclosed IPv6 reference")),
             }
         } else {
-            let end = scan_until(bytes, i, b":;,> \t?");
+            // A second colon inside the authority is an IPv6 literal written
+            // without its brackets. Keeping the text before the first colon
+            // would name a host the peer never wrote — and a router that
+            // resolves it is worse than one that refuses the URI.
+            let authority = scan_until(bytes, i, b";,> \t?");
+            let colon = index_of(&bytes[..authority], b':', i);
+            if colon.is_some_and(|c| index_of(&bytes[..authority], b':', c + 1).is_some()) {
+                return Err(SipParseError::new(format!(
+                    "unbracketed IPv6 host (RFC 3261 §19.1.1 requires []): {:?}",
+                    &base.as_str()[i..authority]
+                )));
+            }
+            let end = colon.unwrap_or(authority);
             (sub(base, i, end), end)
         };
         let mut port = None;
@@ -108,8 +122,9 @@ pub struct Uri {
     user: Option<SipStr>,
     authority: HostPort,
     params: Params,
-    /// The `?a=b&c=d` escaped-header list (RFC 3261 §19.1.1), verbatim.
-    headers: Vec<(SipStr, SipStr)>,
+    /// The `?a=b&c=d` escaped-header list (RFC 3261 §19.1.1), verbatim. A pair
+    /// written without its `=` carries no value and renders back without one.
+    headers: Vec<(SipStr, Option<SipStr>)>,
     /// The text this URI was read from, dropped by the first update.
     source: Option<SipStr>,
 }
@@ -217,18 +232,22 @@ impl Uri {
         self.params.has("lr")
     }
 
-    /// The escaped-header values in wire order, undecoded.
-    pub fn escaped_headers(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.headers.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    /// The escaped-header pairs in wire order, undecoded. A pair the peer wrote
+    /// without an `=` yields `None` — a name carrying no value, kept apart from
+    /// one carrying an empty one.
+    pub fn escaped_headers(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
+        self.headers.iter().map(|(k, v)| (k.as_str(), v.as_ref().map(SipStr::as_str)))
     }
 
-    /// One escaped header, percent-decoded. `None` when absent or malformed.
+    /// One escaped header, percent-decoded. `None` when absent, written without
+    /// a value, or malformed.
     pub fn escaped_header(&self, name: &str) -> Option<String> {
         let raw = self
             .headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())?;
+            .and_then(|(_, v)| v.as_ref())?
+            .as_str();
         crate::parser::custom::structured_headers::decode_uri_component(raw).ok()
     }
 
@@ -335,7 +354,9 @@ impl Uri {
     }
 
     /// Read a whole URI. The value must carry a scheme colon; anything looser
-    /// is [`opaque`](Self::opaque) territory, not a URI.
+    /// is [`opaque`](Self::opaque) territory, not a URI. Every byte of the
+    /// authority is either read into a part or refused — an unbracketed IPv6
+    /// host is an error, not a host truncated at its first colon.
     pub fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         let value = raw.trimmed();
         let bytes = value.as_bytes();
@@ -362,9 +383,16 @@ impl Uri {
 
         let mut headers = Vec::new();
         if after_params < len && bytes[after_params] == b'?' {
+            // §19.1.1 spells the pair `hname "=" hvalue`, so a bare name is
+            // malformed — but this stack does not own the field, and passing
+            // the name through beats deleting part of a URI it is only
+            // carrying.
             for pair in value.as_str()[after_params + 1..].split('&') {
-                let Some(eq) = pair.find('=') else { continue };
-                headers.push((value.reslice(&pair[..eq]), value.reslice(&pair[eq + 1..])));
+                match pair.find('=') {
+                    Some(eq) => headers
+                        .push((value.reslice(&pair[..eq]), Some(value.reslice(&pair[eq + 1..])))),
+                    None => headers.push((value.reslice(pair), None)),
+                }
             }
         }
 
@@ -397,8 +425,10 @@ impl Uri {
         for (i, (name, value)) in self.headers.iter().enumerate() {
             out.byte(if i == 0 { b'?' } else { b'&' });
             out.str(name.as_str());
-            out.byte(b'=');
-            out.str(value.as_str());
+            if let Some(value) = value {
+                out.byte(b'=');
+                out.str(value.as_str());
+            }
         }
     }
 }
@@ -453,6 +483,25 @@ mod tests {
         assert_eq!(u.host(), "2001:db8::1");
         assert_eq!(u.port(), Some(5080));
         assert_eq!(u.to_string(), "sip:[2001:db8::1]:5080");
+        let with_user = uri("sip:bob@[2001:db8::1]:5060;transport=tcp");
+        assert_eq!(with_user.host_port(), ("2001:db8::1", 5060));
+        let text = "sip:bob@[2001:db8::1]:5060;transport=tcp";
+        assert_eq!(with_user.normalized().to_string(), text);
+        assert_eq!(uri("sip:[2001:db8::1]").host_port(), ("2001:db8::1", 5060));
+    }
+
+    // RFC 3261 §19.1.1 requires the brackets, so the value is malformed —
+    // refusing it keeps a router from resolving `2001`.
+    #[test]
+    fn an_unbracketed_ipv6_host_is_refused_not_truncated() {
+        for text in ["sip:2001:db8::1", "sip:alice@2001:db8::1", "sip:2001:db8::1;transport=udp"] {
+            assert!(Uri::parse(&SipStr::owned(text)).is_err(), "{text} was accepted");
+            let opaque = Uri::parse_or_opaque(&SipStr::owned(text));
+            assert!(opaque.is_opaque());
+            assert_eq!(opaque.to_string(), text);
+        }
+        // One colon is a port, not a truncation.
+        assert_eq!(uri("sip:h:5061").host_port(), ("h", 5061));
     }
 
     #[test]
@@ -468,11 +517,31 @@ mod tests {
 
     #[test]
     fn an_unedited_uri_renders_the_bytes_it_was_read_from() {
-        // Every part the field renderer would normalize away: the scheme case,
-        // an escaped-header pair with no `=`, and a parameter order.
-        let text = "SIP:Bob@biloxi.com:5060;Transport=TCP?Subject&Replaces=abc";
+        // Including the parts the field renderer would normalize away: the
+        // scheme case and the case of a parameter name.
+        let text = "SIP:Bob@biloxi.com:5060;Transport=TCP?Subject=hi&Replaces=abc";
         assert_eq!(uri(text).to_string(), text);
         assert_eq!(uri(text).scheme(), "sip");
+    }
+
+    // An escaped-header name written without its value is malformed under
+    // §19.1.1, and passes through as the name it is rather than vanishing.
+    #[test]
+    fn an_escaped_header_with_no_value_survives_a_render() {
+        let one = uri("sip:a@h?X-Trace").normalized();
+        assert_eq!(one.to_string(), "sip:a@h?X-Trace");
+        assert_eq!(one.escaped_headers().collect::<Vec<_>>(), vec![("X-Trace", None)]);
+        assert_eq!(one.escaped_header("X-Trace"), None);
+
+        let mixed = uri("sip:a@h?a=b&X-Trace&c=d").normalized();
+        assert_eq!(mixed.to_string(), "sip:a@h?a=b&X-Trace&c=d");
+        assert_eq!(
+            mixed.escaped_headers().collect::<Vec<_>>(),
+            vec![("a", Some("b")), ("X-Trace", None), ("c", Some("d"))],
+        );
+        // A name with an empty value is not the same value as a name without one.
+        assert_eq!(uri("sip:a@h?X-Trace=").normalized().to_string(), "sip:a@h?X-Trace=");
+        assert_ne!(uri("sip:a@h?X-Trace="), uri("sip:a@h?X-Trace"));
     }
 
     #[test]
