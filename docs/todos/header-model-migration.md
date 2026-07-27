@@ -167,7 +167,7 @@ helpers listed above, run capped workspace test, tick tracker, commit.
 - [x] M11 harness/test crates
 - [x] M12 teardown (delete legacy, privatize, MessageCore)
 - [ ] M12b `Generate*Opts` stringly fields → typed (deferred out of M12, see log)
-- [ ] M13 perf re-baseline
+- [x] M13 perf re-baseline
 - [ ] merge `feat/adr0025-header-model` → master
 
 ## Findings log
@@ -1350,3 +1350,116 @@ unreviewable commit.
 - `Draft::with_uri` on a thawed request replaces the Request-URI wholesale, and
   the proxy hop in `alloc_budget.rs` / the bench now uses it. Nothing checks the
   new URI is not opaque at that seam.
+
+### M13 — perf re-baseline
+
+The budgets gate again. Before this phase `decode/*` and `proxy_hop/*` carried
+the pre-zero-copy numbers (87/93/82/176/189 allocs), 4–7× the measured cost, so
+they passed whatever the code did; every entry is now the measured cost + 20 %.
+The cases and their fixtures moved into `tests/perf/mod.rs`, shared by
+`tests/alloc_budget.rs` and `benches/sip_parser.rs`, so the two views measure
+the same operations by construction rather than by two copies of the fixture.
+
+**Measurements** (`cargo test -p sip-message --test alloc_budget --release`,
+1000 ops/case, same box; "M12" = the numbers that phase logged).
+
+| case | allocs/msg (M12 → M13) | bytes/msg | budget allocs / bytes |
+|---|---|---|---|
+| decode/invite | 12 → **12** | 3409 | 14 / 4090 |
+| decode/invite_sdp | 13 → **13** | 3745 | 15 / 4490 |
+| decode/200_ok | 12 → **12** | 3242 | 14 / 3890 |
+| hop/rewrite_set | new → **29** | 8395 | 34 / 10070 |
+| hop/stamp_rport | new → **8** | 2343 | 9 / 2810 |
+| proxy_hop/invite | 22 → **21** | 6080 → 5729 | 25 / 6870 |
+| proxy_hop/invite_sdp | 23 → **22** | 7047 → 6464 | 26 / 7750 |
+| build/blank_draft | new → **27** | 7053 | 32 / 8460 |
+| build/invite_sdp | 45 → **45** | 6848 | 54 / 8210 |
+| build/bye | 50 → **50** | 4188 | 60 / 5020 |
+| build/response_200 | 32 → **32** | 6268 | 38 / 7520 |
+
+The `proxy_hop/*` drop is not an optimization: the case used to end in
+`.to_vec()`, so it charged one copy of the rendered datagram that no forwarding
+path performs — a hop sends the `Bytes` `freeze_bytes` hands it.
+
+**Three new cases, one per ADR-0025 guardrail that had none:**
+
+- `hop/rewrite_set` — the full RFC 3261 §16.4/§16.6 rewrite on a message parsed
+  OUTSIDE the measured region: pop the two Route entries this proxy recorded,
+  stamp received/rport on the top Via, state the decremented Max-Forwards, push
+  the direction-carrying Record-Route pair, push this hop's own Via. Guardrail 2
+  budgets the *thawed-draft hop*, so the parse must not be inside it.
+- `hop/stamp_rport` — the received/rport stamp alone, the smallest edit a hop
+  can make and therefore the floor a thaw→freeze costs.
+- `build/blank_draft` — origination straight onto `RequestDraft::new`, no
+  options struct and no string assembly, for the same INVITE the decode cases
+  parse.
+
+**Against the ADR targets: the hop target is met, the parse target is missed by
+two, and the full rewrite set misses it by a lot.** No budget was loosened to
+hide either; both gaps are below.
+
+- *Parse ≤ ~10 allocs/msg* — **measured 12–13.** The whole gap is the eager
+  Contact set: the same INVITE with its Contact line removed parses in **9**
+  allocs / 1458 bytes, one extra Via costs +1 alloc / +441 bytes, and
+  `parse_shared` (caller owns the datagram) saves the image copy at **11**. The
+  three Contact allocations are the index's `Vec<&SipStr>`, the set's
+  `Vec<header::Contact>`, and that vector's growth to the four-element minimum
+  capacity `Vec::new()` + `push` gives a 432-byte element — 1728 bytes reserved
+  for the one Contact almost every message carries.
+- *Thawed-draft hop ≤ ~12 allocs/hop* — **met by the hop itself**:
+  `hop/stamp_rport` is 8, and the minimal hop is `proxy_hop/invite` (21) minus
+  its parse (12) ≈ 9. **`hop/rewrite_set` is 29** for six edits, and the
+  dominant term is that the route set is read twice — once as
+  `req.list::<RouteEntry>()` to classify, then again inside each `pop_top`,
+  which re-parses the line it pops. That is exactly the `try_list` gap M5, M6
+  and M8 each logged from their own side, now with a number on it.
+
+**Criterion** (`cargo bench -p sip-message --bench sip_parser`, capped scope,
+`--measurement-time 2`, WSL2 — comparable to each other, not to another box):
+
+| case | time | throughput |
+|---|---|---|
+| decode/invite | 3.48 µs | 287 Kmsg/s |
+| decode/invite_sdp | 3.68 µs | 272 Kmsg/s |
+| decode/200_ok | 3.05 µs | 328 Kmsg/s |
+| decode_shared/invite | 3.46 µs | 289 Kmsg/s |
+| decode_shared/invite_sdp | 3.57 µs | 280 Kmsg/s |
+| hop/rewrite_set | 3.92 µs | 255 Kmsg/s |
+| hop/stamp_rport | 1.35 µs | 742 Kmsg/s |
+| proxy_hop/invite | 4.17 µs | 240 Kmsg/s |
+| proxy_hop/invite_sdp | 4.36 µs | 229 Kmsg/s |
+| build/blank_draft | 3.89 µs | 257 Kmsg/s |
+| build/invite_sdp | 4.11 µs | 243 Kmsg/s |
+| build/bye | 4.24 µs | 236 Kmsg/s |
+| build/response_200 | 5.78 µs | 173 Kmsg/s |
+
+**The draft engine is 40 % cheaper than the recipe over stringly options** —
+`build/blank_draft` 27 allocs against `build/invite_sdp` 45 for the same INVITE,
+with the caller's values built outside the measured region in both cases. That
+is the measurement M12b was deferred without.
+
+Workspace: 2105 tests passed, 0 failed. `loadgen --test smoke`: 27 passed, 0
+failed, 5 ignored (slow lane). Clippy on `sip-message --all-targets`: the
+workspace's pre-existing categories only, none from the new files.
+
+**Suspicions raised, not fixed:**
+- **The Contact set is the parse target's whole gap** (above). The vector
+  growth is a one-line reservation; the two vectors are the eager model. A
+  parse that filed contacts straight from the dispatch walk into one
+  right-sized vector would land the ADR's ≤ 10 without changing any semantics.
+- **A `SipRequest`/`SipMessage` is 2320 bytes by value** (`Uri` 272, `Via` 232,
+  `Contact`/`From` 432 each), so every move of a message memcpies 2.3 KB and
+  every `Option<SipMessage>` or channel of them carries it. This is the
+  `size_of` debt M5, M8, M10 and M12 each logged, now measured at the message
+  rather than at the value: shrinking `Uri` is the lever.
+- **`hop/rewrite_set` pays for reading the route set twice.** A `try_list` that
+  hands the draft back alongside the parse error — the primitive M5 asked for —
+  would collapse the classify pass and the pop pass into one and is the single
+  biggest win available on the forwarding path.
+- The benches have no committed baseline, so a regression is visible only by
+  comparing against these numbers by hand. `criterion --save-baseline` writes
+  under `target/`, which does not survive a clean; a numbers-in-the-log
+  convention is what this table is.
+- `hop/*` parses its fixture once and thaws it 1000 times, which is the honest
+  shape for the guardrail but means the case never sees a cold image. A hop on
+  a message whose image is not already in cache costs more than this says.

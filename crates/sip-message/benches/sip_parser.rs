@@ -1,92 +1,54 @@
-//! SIP-stack micro-benchmarks. Port of `bench/sip-parser-bench.ts`, extended
-//! with a proxy hot-path bench.
+//! SIP-stack micro-benchmarks, reported as **elements/sec = SIP messages/sec**
+//! (criterion `Throughput::Elements(1)`).
 //!
-//! Two measurements, both reported as **elements/sec = SIP messages/sec**
-//! (criterion `Throughput::Elements(1)`):
+//! Five groups, on the cases and fixtures `tests/alloc_budget.rs` budgets:
 //!
-//!   1. `decode/*`     — parse only (raw bytes → `SipMessage`).
-//!   2. `proxy_hop/*`  — the full per-message SIP-stack cost a B2BUA/proxy pays
-//!                       on the forwarding path: decode → thaw (the inbound
-//!                       message is immutable) → rewrite the Request-URI →
-//!                       record a Record-Route (RFC 3261 §16.6) → render back
-//!                       to wire bytes.
+//! - `decode/*` — parse only (raw bytes → `SipMessage`).
+//! - `decode_shared/*` — the receive path, where the caller owns the datagram
+//!   and the message shares that buffer.
+//! - `hop/*` — the thawed-draft edit alone, on a message parsed outside the
+//!   timed region: the full proxy rewrite set (RFC 3261 §16.4/§16.6) and the
+//!   received/rport stamp.
+//! - `proxy_hop/*` — decode plus one minimal hop: the per-inbound-datagram
+//!   SIP-stack cost.
+//! - `build/*` — origination: the blank draft driven directly, and the
+//!   generator recipes over stringly options.
 //!
-//! `proxy_hop` is the SIP-stack ceiling: it excludes routing-policy, transaction
-//! state, sockets and the HTTP decision call — so the real proxy throughput is
-//! at or below these numbers. A real proxy also stamps its own Via and
-//! decrements Max-Forwards; those are O(1) string ops in the same noise band as
-//! the Record-Route insert and are omitted to match the requested shape.
+//! `proxy_hop` is the SIP-stack ceiling: it excludes routing policy,
+//! transaction state, sockets and the HTTP decision call — so real proxy
+//! throughput is at or below these numbers.
 //!
 //! Run: `cargo bench -p sip-message`
 
+#[path = "../tests/perf/mod.rs"]
+mod perf;
+
 use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use sip_message::header::{RecordRouteEntry, Uri};
-use sip_message::{CustomParser, SipMessage, SipParser, SipStr};
+use sip_message::generators::{
+    generate_in_dialog_request, generate_out_of_dialog_request, generate_response, InDialogMethod,
+    OutOfDialogMethod,
+};
+use sip_message::{CustomParser, SipParser};
 
-const INVITE: &[u8] = b"INVITE sip:bob@example.com SIP/2.0\r\n\
-Via: SIP/2.0/UDP host.example.com;branch=z9hG4bK1\r\n\
-Max-Forwards: 70\r\n\
-From: Alice <sip:alice@example.com>;tag=1928\r\n\
-To: Bob <sip:bob@example.com>\r\n\
-Call-ID: a84b4c76e66710@pc33.example.com\r\n\
-CSeq: 314159 INVITE\r\n\
-Contact: <sip:alice@pc33.example.com>\r\n\
-Content-Length: 0\r\n\r\n";
-
-const OK_200: &[u8] = b"SIP/2.0 200 OK\r\n\
-Via: SIP/2.0/UDP host.example.com;branch=z9hG4bK1\r\n\
-From: Alice <sip:alice@example.com>;tag=1928\r\n\
-To: Bob <sip:bob@example.com>;tag=as83kf\r\n\
-Call-ID: a84b4c76e66710@pc33.example.com\r\n\
-CSeq: 314159 INVITE\r\n\
-Contact: <sip:bob@pc33.example.com>\r\n\
-Content-Length: 0\r\n\r\n";
-
-/// A realistic INVITE carrying an SDP offer (what a proxy actually forwards) —
-/// built at runtime so Content-Length matches the body exactly.
-fn invite_with_sdp() -> Vec<u8> {
-    let sdp = "v=0\r\n\
-o=alice 2890844526 2890844526 IN IP4 192.0.2.10\r\n\
-s=-\r\n\
-c=IN IP4 192.0.2.10\r\n\
-t=0 0\r\n\
-m=audio 49170 RTP/AVP 0 8 96\r\n\
-a=rtpmap:0 PCMU/8000\r\n\
-a=rtpmap:8 PCMA/8000\r\n\
-a=rtpmap:96 opus/48000/2\r\n\
-a=sendrecv\r\n";
-    format!(
-        "INVITE sip:bob@example.com SIP/2.0\r\n\
-Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-abc123\r\n\
-Max-Forwards: 70\r\n\
-From: Alice <sip:alice@example.com>;tag=1928\r\n\
-To: Bob <sip:bob@example.com>\r\n\
-Call-ID: a84b4c76e66710@pc33.example.com\r\n\
-CSeq: 314159 INVITE\r\n\
-Contact: <sip:alice@10.0.0.1:5060>\r\n\
-Content-Type: application/sdp\r\n\
-Content-Length: {}\r\n\r\n{}",
-        sdp.len(),
-        sdp
-    )
-    .into_bytes()
-}
+use perf::BlankInvite;
 
 fn bench_decode(c: &mut Criterion) {
     let parser = CustomParser::new();
-    let invite_sdp = invite_with_sdp();
+    let invite_sdp = perf::invite_with_sdp();
     let mut group = c.benchmark_group("decode");
     group.throughput(Throughput::Elements(1));
-    group.bench_function("invite", |b| b.iter(|| parser.parse(black_box(INVITE)).unwrap()));
-    group.bench_function("invite_sdp", |b| b.iter(|| parser.parse(black_box(invite_sdp.as_slice())).unwrap()));
-    group.bench_function("200_ok", |b| b.iter(|| parser.parse(black_box(OK_200)).unwrap()));
+    group.bench_function("invite", |b| b.iter(|| parser.parse(black_box(perf::INVITE)).unwrap()));
+    group.bench_function("invite_sdp", |b| {
+        b.iter(|| parser.parse(black_box(invite_sdp.as_slice())).unwrap())
+    });
+    group.bench_function("200_ok", |b| b.iter(|| parser.parse(black_box(perf::OK_200)).unwrap()));
     group.finish();
 
     // The receive path: the caller owns the datagram and hands it over, so the
     // message shares that buffer instead of copying it. `Bytes::clone` here is
     // a refcount bump standing in for the socket's per-datagram buffer.
-    let shared_invite = Bytes::from_static(INVITE);
+    let shared_invite = Bytes::from_static(perf::INVITE);
     let shared_sdp = Bytes::from(invite_sdp);
     let mut group = c.benchmark_group("decode_shared");
     group.throughput(Throughput::Elements(1));
@@ -99,32 +61,67 @@ fn bench_decode(c: &mut Criterion) {
     group.finish();
 }
 
-/// One proxy forwarding hop: decode → thaw → rewrite R-URI → record our route
-/// → render. Returns the rendered bytes so the optimizer can't elide it.
-fn proxy_hop(parser: &CustomParser, raw: &[u8]) -> Vec<u8> {
-    let msg = parser.parse(raw).expect("parse");
-    let SipMessage::Request(req) = msg else { panic!("expected request") };
-    req.thaw()
-        .with_uri(Uri::parse_or_opaque(&SipStr::from_static("sip:bob@192.0.2.99:5060")))
-        .push_front(RecordRouteEntry::from_uri(
-            Uri::sip("proxy.example.com").with_flag("lr"),
-        ))
-        .freeze_bytes()
-        .expect("a thawed draft is complete")
-        .to_vec()
-}
-
-fn bench_proxy_hop(c: &mut Criterion) {
+fn bench_hop(c: &mut Criterion) {
     let parser = CustomParser::new();
-    let invite_sdp = invite_with_sdp();
+    let in_dialog = perf::in_dialog_invite_with_sdp();
+    let inbound = perf::request(&parser, &in_dialog);
+
+    let mut group = c.benchmark_group("hop");
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("rewrite_set", |b| {
+        b.iter(|| black_box(perf::hop_rewrite_set(black_box(&inbound))))
+    });
+    group.bench_function("stamp_rport", |b| {
+        b.iter(|| black_box(perf::hop_stamp_received_rport(black_box(&inbound))))
+    });
+    group.finish();
+
+    let invite_sdp = perf::invite_with_sdp();
     let mut group = c.benchmark_group("proxy_hop");
     group.throughput(Throughput::Elements(1));
-    group.bench_function("invite", |b| b.iter(|| black_box(proxy_hop(&parser, black_box(INVITE)))));
+    group.bench_function("invite", |b| {
+        b.iter(|| black_box(perf::hop_minimal(&perf::request(&parser, black_box(perf::INVITE)))))
+    });
     group.bench_function("invite_sdp", |b| {
-        b.iter(|| black_box(proxy_hop(&parser, black_box(invite_sdp.as_slice()))))
+        b.iter(|| {
+            black_box(perf::hop_minimal(&perf::request(&parser, black_box(invite_sdp.as_slice()))))
+        })
     });
     group.finish();
 }
 
-criterion_group!(benches, bench_decode, bench_proxy_hop);
+fn bench_build(c: &mut Criterion) {
+    let parser = CustomParser::new();
+    let invite_sdp = perf::invite_with_sdp();
+    let sdp = perf::body_of(&invite_sdp);
+    let blank = BlankInvite::new(&sdp);
+    let dialog = perf::build_dialog();
+    let invite_opts = perf::invite_opts(&sdp);
+    let bye_opts = perf::bye_opts();
+    let response_opts = perf::response_opts();
+    let parsed_invite = perf::request(&parser, perf::INVITE);
+
+    let mut group = c.benchmark_group("build");
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("blank_draft", |b| b.iter(|| black_box(blank.build())));
+    group.bench_function("invite_sdp", |b| {
+        b.iter(|| {
+            black_box(generate_out_of_dialog_request(
+                OutOfDialogMethod::Invite,
+                black_box(&invite_opts),
+            ))
+        })
+    });
+    group.bench_function("bye", |b| {
+        b.iter(|| {
+            black_box(generate_in_dialog_request(InDialogMethod::Bye, &dialog, black_box(&bye_opts)))
+        })
+    });
+    group.bench_function("response_200", |b| {
+        b.iter(|| black_box(generate_response(&parsed_invite, 200, "OK", black_box(&response_opts))))
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_decode, bench_hop, bench_build);
 criterion_main!(benches);
