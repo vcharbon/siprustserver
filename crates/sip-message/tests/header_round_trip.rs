@@ -63,26 +63,129 @@ fn owned(lines: &[&str]) -> Vec<String> {
     lines.iter().map(|s| (*s).to_owned()).collect()
 }
 
+// --- the anti-loss half of the property ---
+//
+// The fixpoint above is blind to loss that happens identically in both parse
+// passes: a value whose parameter is dropped renders short, re-parses to the
+// same short value, and the fixpoint holds. On the inputs a render is expected
+// to reproduce octet for octet, the rendered LENGTH is therefore asserted
+// against the trimmed input's, so a dropped parameter, a truncated host or a
+// lost URI header fails the lane.
+
+/// Assert `render(parse(input))` is exactly as long as `input` for every input
+/// the `byte_preserving` predicate admits, and that enough inputs were admitted
+/// for the assertion to mean something.
+fn assert_no_loss<H: HeaderValue>(
+    label: &str,
+    inputs: &[String],
+    byte_preserving: fn(&str) -> bool,
+    floor: usize,
+) {
+    let mut checked = 0usize;
+    for input in inputs {
+        let trimmed = input.trim();
+        if !byte_preserving(trimmed) {
+            continue;
+        }
+        let Ok(values) = H::parse_line(&SipStr::owned(trimmed)) else { continue };
+        let [value] = &values[..] else { continue };
+        let rendered = value.to_wire();
+        assert_eq!(
+            rendered.len(),
+            trimmed.len(),
+            "{label}: render is not byte-preserving on an input that should be\n  \
+             input    {trimmed:?}\n  rendered {rendered:?}"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= floor,
+        "{label}: only {checked} of {} inputs were byte-preserving — the pin would be vacuous",
+        inputs.len()
+    );
+}
+
+/// A name-addr the renderer reproduces exactly: already bracketed (an
+/// unbracketed addr-spec gains `<>` and a bare display name gains quotes), one
+/// value per line, and no whitespace or quoted-string for the renderer to
+/// re-lay-out.
+fn addr_renders_verbatim(input: &str) -> bool {
+    input.starts_with('<')
+        && !input.contains(',')
+        && !input.contains('"')
+        && !input.bytes().any(|b| b == b' ' || b == b'\t')
+}
+
+/// A Via the renderer reproduces exactly: one value per line, and no
+/// quoted-pair — RFC 3261 §25.1 lets a quoted string escape any character, and
+/// re-rendering emits the escape only where the grammar requires one, which is
+/// a normalization rather than a loss.
+fn via_renders_verbatim(input: &str) -> bool {
+    !input.contains(',') && !input.contains('\\')
+}
+
+/// A sequence-number header the renderer reproduces exactly: no redundant
+/// leading zero, which renders as the number it means. Method case folds
+/// without changing length.
+fn sequence_renders_verbatim(input: &str) -> bool {
+    input.split_whitespace().all(|t| !(t.len() > 1 && t.starts_with('0')))
+}
+
+/// A URI [`Uri::normalized`] reproduces octet for octet.
+///
+/// Two exclusions are live parser losses, raised in the ADR-0025 migration log
+/// rather than fixed here: an escaped-header pair carrying no `=` is dropped at
+/// parse, and an unbracketed IPv6 host is truncated at its first colon. A
+/// redundant leading zero in the port renders as the port it means, which is a
+/// normalization, not a loss.
+fn uri_renders_verbatim(input: &str) -> bool {
+    let (authority, headers) = match input.split_once('?') {
+        Some((a, h)) => (a, Some(h)),
+        None => (input, None),
+    };
+    if headers.is_some_and(|h| h.split('&').any(|pair| !pair.contains('='))) {
+        return false;
+    }
+    let after_scheme = authority.split_once(':').map_or("", |(_, rest)| rest);
+    let host = after_scheme.rsplit('@').next().unwrap_or("").split(';').next().unwrap_or("");
+    if !host.starts_with('[') && host.matches(':').count() > 1 {
+        return false;
+    }
+    match host.rsplit_once(':') {
+        Some((_, port)) => !(port.len() > 1 && port.starts_with('0')),
+        None => true,
+    }
+}
+
 // --- name-addr family, driven by the ABNF corpus ---
 
 #[test]
 fn from_values_are_a_render_parse_fixpoint() {
     assert_fixpoint::<header::From>("From", &corpus("from"), 900);
+    assert_no_loss::<header::From>("From", &corpus("from"), addr_renders_verbatim, 400);
 }
 
 #[test]
 fn contact_values_are_a_render_parse_fixpoint() {
     assert_fixpoint::<header::Contact>("Contact", &corpus("contact"), 900);
+    assert_no_loss::<header::Contact>("Contact", &corpus("contact"), addr_renders_verbatim, 80);
 }
 
 #[test]
 fn p_asserted_identity_values_are_a_render_parse_fixpoint() {
     assert_fixpoint::<header::PAssertedIdentity>("P-Asserted-Identity", &corpus("pai"), 900);
+    assert_no_loss::<header::PAssertedIdentity>(
+        "P-Asserted-Identity",
+        &corpus("pai"),
+        addr_renders_verbatim,
+        100,
+    );
 }
 
 #[test]
 fn refer_to_values_are_a_render_parse_fixpoint() {
     assert_fixpoint::<header::ReferTo>("Refer-To", &corpus("refer-to"), 900);
+    assert_no_loss::<header::ReferTo>("Refer-To", &corpus("refer-to"), addr_renders_verbatim, 350);
 }
 
 #[test]
@@ -90,6 +193,7 @@ fn route_values_are_a_render_parse_fixpoint() {
     // Route entries share the name-addr grammar; the Contact corpus is the
     // richest name-addr generator we have.
     assert_fixpoint::<header::RouteEntry>("Route", &corpus("contact"), 900);
+    assert_no_loss::<header::RouteEntry>("Route", &corpus("contact"), addr_renders_verbatim, 80);
 }
 
 // --- Via, CSeq, RAck ---
@@ -97,16 +201,19 @@ fn route_values_are_a_render_parse_fixpoint() {
 #[test]
 fn via_values_are_a_render_parse_fixpoint() {
     assert_fixpoint::<Via>("Via", &corpus("via"), 900);
+    assert_no_loss::<Via>("Via", &corpus("via"), via_renders_verbatim, 450);
 }
 
 #[test]
 fn cseq_values_are_a_render_parse_fixpoint() {
     assert_fixpoint::<header::CSeq>("CSeq", &corpus("cseq"), 900);
+    assert_no_loss::<header::CSeq>("CSeq", &corpus("cseq"), sequence_renders_verbatim, 800);
 }
 
 #[test]
 fn rack_values_are_a_render_parse_fixpoint() {
     assert_fixpoint::<header::RAck>("RAck", &corpus("rack"), 900);
+    assert_no_loss::<header::RAck>("RAck", &corpus("rack"), sequence_renders_verbatim, 800);
 }
 
 // --- URIs, which every address value embeds ---
@@ -115,6 +222,7 @@ fn rack_values_are_a_render_parse_fixpoint() {
 fn uris_are_a_render_parse_fixpoint() {
     let inputs = corpus("sip-uri");
     let mut accepted = 0usize;
+    let mut verbatim = 0usize;
     for input in &inputs {
         let Ok(uri) = Uri::parse(&SipStr::owned(input)) else { continue };
         // An unedited URI goes back out as the bytes it came in as, so the
@@ -125,9 +233,21 @@ fn uris_are_a_render_parse_fixpoint() {
         let reparsed = Uri::parse(&SipStr::owned(&rendered))
             .unwrap_or_else(|e| panic!("URI: rendered {rendered:?} no longer parses ({})", e.reason));
         assert_eq!(reparsed, uri, "URI: parse(render(v)) != v\n  input {input:?}");
+        // The fixpoint alone cannot see a part of the URI that both passes
+        // drop; the field renderer's output must also be as long as what it
+        // was read from.
+        if uri_renders_verbatim(input.trim()) {
+            assert_eq!(
+                rendered.len(),
+                input.trim().len(),
+                "URI: the field renderer lost bytes\n  input    {input:?}\n  rendered {rendered:?}"
+            );
+            verbatim += 1;
+        }
         accepted += 1;
     }
     assert!(accepted >= 900, "URI: only {accepted} of {} inputs parsed", inputs.len());
+    assert!(verbatim >= 800, "URI: only {verbatim} inputs were byte-preserving");
 }
 
 // --- the families the ABNF generator has no grammar for ---

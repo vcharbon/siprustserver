@@ -1545,3 +1545,42 @@ failure. `Wire::byte` keeps the drop (it is what protects `as_str`'s UTF-8
 invariant) but now `debug_assert`s first and documents the property that makes
 the arm unreachable: every call site writes an ASCII grammar literal (`;`, `=`,
 `<`, space).
+
+**6. `header_round_trip.rs` now also gates LOSS, not just the fixpoint.**
+`parse(render(v)) == v` is blind to a value both passes lose identically: drop a
+parameter at parse and the render is short, the re-parse is short the same way,
+and the property still holds. On the subset of each corpus a render is expected
+to reproduce octet for octet, the rendered length is now asserted against the
+trimmed input's — so a dropped parameter, a truncated host or a lost URI header
+fails the lane. The subsets are stated as predicates rather than by outcome
+(that would be circular): a name-addr already bracketed with no whitespace or
+quoted string, a Via without a quoted-pair, a CSeq/RAck without a redundant
+leading zero, a URI without the two known losses below. Each carries its own
+floor, as the fixpoints do, so a shrinking subset cannot make it vacuous.
+
+Coverage on the frozen corpus: From 440, Contact/Route 93 each, Refer-To 392,
+P-Asserted-Identity 122, Via 518, CSeq 949, RAck 897, SIP-URI 1000 — all
+byte-preserving today. Verified to have teeth by making `Uri::parse` drop the
+escaped-header list: the fixpoint stays green (both passes lose it) and the new
+assertion fails, which is exactly the blind spot it was added for.
+
+**Two live parser losses, RAISED not fixed** (the step was explicitly not to
+change parser behaviour; both are excluded by the URI predicate):
+- **An escaped-header pair with no `=` is dropped.** `Uri::parse` skips a
+  `?`-section pair that carries no `=` (`uri.rs`, the `else { continue }` in the
+  header loop), so `sip:a@h?X-Trace` normalizes to `sip:a@h` and
+  `sip:a@h?a=b&X-Trace&c=d` to `sip:a@h?a=b&c=d`. Unedited URIs render their
+  source, so this shows only once something touches the URI — a retarget, a
+  `without_escaped_headers`, a built URI. RFC 3261 §19.1.1's `header` production
+  requires `hname "=" hvalue`, so the input is malformed; silently deleting part
+  of a Request-URI is still the wrong answer to it.
+- **An unbracketed IPv6 host is TRUNCATED, not rejected.** `sip:2001:db8::1`
+  parses as host `2001` with no port, and `sip:a@2001:db8::1` likewise. RFC 3261
+  §19.1.1 requires the brackets, so the value is malformed — but a router that
+  resolves `2001` is worse than one that refuses the URI, and `Uri::parse`
+  refuses far less malformed input elsewhere (an out-of-range port). This is the
+  same class as the port guard M5 replaced with a value-type property.
+
+A third delta is a normalization, not a loss, and is excluded on those grounds:
+a redundant leading zero (`sip:h:007`, `CSeq: 007 INVITE`) renders as the number
+it means.
