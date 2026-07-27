@@ -1669,3 +1669,37 @@ they mean.
 
 Workspace: 2111 tests passed, 0 failed. Clippy on `b2bua --all-targets`:
 identical warning set before and after.
+
+**3. Reconciling M11 with M12, and two commit-hygiene misses.**
+
+M11 logged the raw scans in `b2bua/tests/rules.rs` as "M12 privatizes `.headers`,
+so they must move before the teardown compiles". M12 then landed with all six
+intact and never came back to the claim, so the log carried a prediction its own
+next section falsified. The prediction was wrong on the mechanism, not on the
+verdict: M12 privatized the *field*, but `headers()` survives as a read
+accessor over `MessageCore` and `SipHeader`'s `name`/`value` are still public,
+so the scans compiled untouched. Nothing forced them to move — which is exactly
+why they had to be moved deliberately (item 2 above) rather than by the
+compiler. The lesson for the tracker: "the teardown will break it" is not a
+plan; a residue item needs an owner phase, and M11's residue should have been
+listed as M12 work, not as a consequence of it.
+
+Two commit-hygiene misses, recorded here because the hard rules for this
+migration require the tracker to be ticked and the log appended **in the same
+commit** as the work:
+
+- `2c9c597` (`refactor(failover-harness): port to ADR-0025 header model`) carried
+  no doc touch; its findings were folded into the next commit's M11 entry, which
+  covers both harness crates. So the log is complete but the commit is not
+  self-contained — reading `2c9c597` alone tells you nothing about what it
+  decided.
+- the four sip-message helper commits landed mid-port with no tracker touch
+  either: `3b6ffeb` (draft `update_top`/`pop_top`/`freeze_bytes`), `5fca647`
+  (`Uri::without_escaped_headers`), `10f1a9a` (`sniff::request_uri`) and
+  `c5f5665` (URI identity readers, `Params::parse_list`). Each is described in
+  the consumer-port entry that follows it, which is where the reason lives — but
+  each also changed the sip-message public surface, and a surface change that is
+  only documented inside someone else's phase entry is hard to find later.
+  (`6d2d9ed` is the same shape, as a fix-up of the commit that logged the item.)
+
+No code changed in this entry; it is the log correcting itself.
