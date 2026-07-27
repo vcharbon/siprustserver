@@ -35,7 +35,7 @@ impl<K: NumericKind> NumericHeader<K> {
     /// reading a peer-supplied number needs, where refusing and clamping mean
     /// different things.
     pub fn checked(value: u32) -> Option<Self> {
-        (K::MIN..=K::MAX).contains(&value).then(|| Self { value, kind: PhantomData })
+        (K::MIN..=K::MAX).contains(&value).then_some(Self { value, kind: PhantomData })
     }
 
     pub const fn value(&self) -> u32 {
