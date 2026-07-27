@@ -14,15 +14,21 @@ use std::time::Duration;
 use b2bua_harness::B2buaSut;
 use call::features::RelayFirst18xStrategy;
 use scenario_harness::Harness;
-use sip_message::message_helpers::get_header;
+use sip_message::error::SipParseError;
+use sip_message::header::kind::TokenKind;
+use sip_message::header::{RAck, RSeq, Require, Supported, TokenListHeader};
+use sip_message::Method;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 
-fn has_token(value: Option<&str>, token: &str) -> bool {
-    value
-        .map(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case(token)))
-        .unwrap_or(false)
+/// Whether an option-tag list header states `token`. An absent header states
+/// nothing; one no reader accepts is a defect the test must not hide.
+fn has_token<K: TokenKind>(
+    header: Option<Result<TokenListHeader<K>, SipParseError>>,
+    token: &str,
+) -> bool {
+    header.is_some_and(|h| h.expect("readable option-tag list").contains(token))
 }
 
 #[tokio::test]
@@ -45,7 +51,7 @@ async fn basic() {
     // Bob receives the INVITE — 100rel must be stripped from Supported (drop-sdp).
     let mut uas = bob.receive("INVITE").await;
     assert!(
-        !has_token(get_header(&uas.request().headers, "supported"), "100rel"),
+        !has_token(uas.request().header::<Supported>(), "100rel"),
         "100rel stripped from bob's Supported",
     );
 
@@ -60,17 +66,17 @@ async fn basic() {
     let p180 = call.expect(180).await;
     assert!(p180.body.is_empty(), "bare 180 has no body");
     assert!(
-        !has_token(get_header(&p180.headers, "require"), "100rel"),
+        !has_token(p180.header::<Require>(), "100rel"),
         "no Require:100rel on bare 180",
     );
-    assert!(get_header(&p180.headers, "rseq").is_none(), "no RSeq on bare 180");
-    let first_to_tag = p180.to.tag.clone().expect("180 has a To-tag");
+    assert!(p180.header::<RSeq>().is_none(), "no RSeq on bare 180");
+    let first_to_tag = p180.to().tag().expect("180 has a To-tag").to_string();
 
     // The B2BUA PRACKs bob (alice never saw the reliable provisional).
     let mut prack = bob.receive("PRACK").await;
     assert_eq!(
-        get_header(&prack.request().headers, "rack").map(|r| r.split_whitespace().collect::<Vec<_>>()),
-        Some(vec!["1", "1", "INVITE"]),
+        prack.request().header::<RAck>().expect("a RAck").expect("readable RAck"),
+        RAck::new(1, 1, Method::Invite),
         "RAck = rseq 1, INVITE cseq 1",
     );
     prack.respond(200, "OK").await;
@@ -81,7 +87,7 @@ async fn basic() {
     // Bob answers with SDP; alice's 200 reuses the first 180's To-tag.
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     let ok = call.expect(200).await;
-    assert_eq!(ok.to.tag.as_deref(), Some(first_to_tag.as_str()), "200 To-tag == 180 To-tag");
+    assert_eq!(ok.to().tag(), Some(first_to_tag.as_str()), "200 To-tag == 180 To-tag");
 
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
@@ -120,7 +126,7 @@ async fn failover_reject() {
     uas1.respond(180, "Ringing").await;
 
     let p180 = call.expect(180).await;
-    let first_to_tag = p180.to.tag.clone().expect("180 has a To-tag");
+    let first_to_tag = p180.to().tag().expect("180 has a To-tag").to_string();
 
     uas1.respond(503, "Service Unavailable").await;
     bob1.receive("ACK").await; // the b2bua completes bob1's reject txn (§17.1.1.3)
@@ -137,7 +143,7 @@ async fn failover_reject() {
     uas2.respond(200, "OK").with_sdp(ANSWER).await;
     let ok = call.expect(200).await;
     assert_eq!(
-        ok.to.tag.as_deref(),
+        ok.to().tag(),
         Some(first_to_tag.as_str()),
         "200 To-tag == first 180 To-tag across failover",
     );
@@ -179,7 +185,7 @@ async fn failover_no_answer() {
     uas1.respond(180, "Ringing").await;
 
     let p180 = call.expect(180).await;
-    let first_to_tag = p180.to.tag.clone().expect("180 has a To-tag");
+    let first_to_tag = p180.to().tag().expect("180 has a To-tag").to_string();
 
     // No-answer timeout (30 s) → CANCEL bob1 + failover to bob2. Advance just
     // past the deadline (not a full second) so the failover INVITE to bob2 is
@@ -203,7 +209,7 @@ async fn failover_no_answer() {
 
     let ok = call.expect(200).await;
     assert_eq!(
-        ok.to.tag.as_deref(),
+        ok.to().tag(),
         Some(first_to_tag.as_str()),
         "200 To-tag == first 180 To-tag across failover",
     );
@@ -251,22 +257,22 @@ async fn messages_all_relays_every_18x_downgraded() {
     uas.respond(180, "Ringing").await;
     let p1 = call.expect(180).await;
     assert!(p1.body.is_empty(), "first relayed 18x is a bare 180");
-    let a_tag = p1.to.tag.clone().expect("180 has a To-tag");
+    let a_tag = p1.to().tag().expect("180 has a To-tag").to_string();
 
     // 183 with SDP → relayed again, STILL downgraded: bare 180, same To-tag.
     uas.respond(183, "Session Progress").with_sdp(ANSWER).await;
     let p2 = call.expect(180).await;
     assert!(p2.body.is_empty(), "later relayed 18x is downgraded (no SDP)");
-    assert_eq!(p2.to.tag.as_deref(), Some(a_tag.as_str()), "same stored To-tag (one early dialog)");
+    assert_eq!(p2.to().tag(), Some(a_tag.as_str()), "same stored To-tag (one early dialog)");
 
     // A third 18x → also relayed (ALL).
     uas.respond(180, "Ringing").await;
     let p3 = call.expect(180).await;
-    assert_eq!(p3.to.tag.as_deref(), Some(a_tag.as_str()));
+    assert_eq!(p3.to().tag(), Some(a_tag.as_str()));
 
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     let ok = call.expect(200).await;
-    assert_eq!(ok.to.tag.as_deref(), Some(a_tag.as_str()), "200 To-tag == first 180 To-tag");
+    assert_eq!(ok.to().tag(), Some(a_tag.as_str()), "200 To-tag == first 180 To-tag");
 
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
@@ -301,7 +307,7 @@ async fn messages_one_per_value_dedupes_on_upstream_status() {
     uas.respond(183, "Session Progress").with_sdp(ANSWER).await;
     let p1 = call.expect(180).await;
     assert!(p1.body.is_empty(), "bare 180");
-    let a_tag = p1.to.tag.clone().expect("180 has a To-tag");
+    let a_tag = p1.to().tag().expect("180 has a To-tag").to_string();
 
     // Second 183 → suppressed (same upstream value).
     uas.respond(183, "Session Progress").with_sdp(ANSWER).await;
@@ -309,7 +315,7 @@ async fn messages_one_per_value_dedupes_on_upstream_status() {
     // First 180 → a NEW upstream value → relayed (bare 180, same To-tag).
     uas.respond(180, "Ringing").await;
     let p2 = call.expect(180).await;
-    assert_eq!(p2.to.tag.as_deref(), Some(a_tag.as_str()), "same stored To-tag");
+    assert_eq!(p2.to().tag(), Some(a_tag.as_str()), "same stored To-tag");
 
     // Second 180 → suppressed. If either suppressed 18x had been relayed, the
     // strict expect(200) below would see it first and panic.
@@ -317,7 +323,7 @@ async fn messages_one_per_value_dedupes_on_upstream_status() {
 
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     let ok = call.expect(200).await;
-    assert_eq!(ok.to.tag.as_deref(), Some(a_tag.as_str()), "200 To-tag == first 180 To-tag");
+    assert_eq!(ok.to().tag(), Some(a_tag.as_str()), "200 To-tag == first 180 To-tag");
 
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;

@@ -25,7 +25,6 @@ use std::time::Duration;
 
 use b2bua_harness::B2buaSut;
 use scenario_harness::Harness;
-use sip_message::message_helpers::get_headers;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -71,18 +70,20 @@ async fn keepalive_options_travels_via_proxy_on_both_legs() {
         h.advance(KEEPALIVE_INTERVAL).await;
 
         let mut alice_opts = alice.receive("OPTIONS").await;
+        let alice_opts_vias = alice_opts.request().via();
         assert!(
-            get_headers(&alice_opts.request().headers, "via").len() >= 2,
+            alice_opts_vias.len() >= 2,
             "cycle {cycle}: a-leg OPTIONS must carry ≥2 Via (proxy + worker), got {:?}",
-            get_headers(&alice_opts.request().headers, "via"),
+            alice_opts_vias,
         );
         alice_opts.respond(200, "OK").await;
 
         let mut bob_opts = bob.receive("OPTIONS").await;
+        let bob_opts_vias = bob_opts.request().via();
         assert!(
-            get_headers(&bob_opts.request().headers, "via").len() >= 2,
+            bob_opts_vias.len() >= 2,
             "cycle {cycle}: b-leg OPTIONS must carry ≥2 Via (proxy + worker), got {:?}",
-            get_headers(&bob_opts.request().headers, "via"),
+            bob_opts_vias,
         );
         bob_opts.respond(200, "OK").await;
     }

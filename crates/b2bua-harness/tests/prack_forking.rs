@@ -21,7 +21,8 @@
 use b2bua_harness::B2buaSut;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
-use sip_message::message_helpers::get_header;
+use sip_message::header::RAck;
+use sip_message::Method;
 
 const ANSWER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const OFFER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -46,7 +47,7 @@ async fn prack_forking_two_early_dialogs() {
         .with_sdp(OFFER)
         .await;
     let p1 = call.expect(183).await;
-    let fork1_atag = p1.to.tag.clone().expect("fork1 a-facing tag");
+    let fork1_atag = p1.to().tag().expect("fork1 a-facing tag").to_string();
 
     // Alice PRACKs fork 1 (answer in the PRACK), addressed to fork1's a-tag.
     let mut prack1 = call
@@ -58,7 +59,7 @@ async fn prack_forking_two_early_dialogs() {
         .await;
     let mut prack1_at_bob = bob.receive("PRACK").await;
     assert_eq!(
-        prack1_at_bob.request().to.tag.as_deref(),
+        prack1_at_bob.request().to().tag(),
         Some("bobfork1"),
         "PRACK for fork1 carries the callee fork1 tag",
     );
@@ -73,7 +74,7 @@ async fn prack_forking_two_early_dialogs() {
         .with_sdp(OFFER)
         .await;
     let p2 = call.expect(183).await;
-    let fork2_atag = p2.to.tag.clone().expect("fork2 a-facing tag");
+    let fork2_atag = p2.to().tag().expect("fork2 a-facing tag").to_string();
     assert_ne!(fork1_atag, fork2_atag, "each callee fork maps to a distinct a-facing tag");
 
     let mut prack2 = call
@@ -85,16 +86,20 @@ async fn prack_forking_two_early_dialogs() {
         .await;
     let mut prack2_at_bob = bob.receive("PRACK").await;
     assert_eq!(
-        prack2_at_bob.request().to.tag.as_deref(),
+        prack2_at_bob.request().to().tag(),
         Some("bobfork2"),
         "PRACK for fork2 carries the callee fork2 tag",
     );
     // RAck CSeq token is rewritten to the b-leg INVITE CSeq (RFC 3262 §7.2).
-    assert!(
-        get_header(&prack2_at_bob.request().headers, "rack")
-            .map(|r| r.contains("INVITE"))
-            .unwrap_or(false),
-        "relayed PRACK keeps an RAck",
+    assert_eq!(
+        prack2_at_bob
+            .request()
+            .header::<RAck>()
+            .expect("relayed PRACK keeps an RAck")
+            .expect("readable RAck")
+            .method(),
+        &Method::Invite,
+        "the RAck acknowledges the INVITE transaction",
     );
     prack2_at_bob.respond(200, "OK").await;
     prack2.expect(200).await;

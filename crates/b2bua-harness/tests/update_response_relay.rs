@@ -133,7 +133,7 @@ async fn update_during_pending_reroute_gets_491_and_reroute_completes() {
     let mut carol_uas = carol.receive("INVITE").await;
     carol_uas.respond(180, "Ringing").await;
     let ringing = call.expect(180).await;
-    let early_atag = ringing.to.tag.clone().expect("a-facing early-dialog tag");
+    let early_atag = ringing.to().tag().expect("a-facing early-dialog tag").to_string();
 
     carol_uas.respond(486, "Busy Here").await;
     carol.receive("ACK").await; // b2bua ACKs the failed b-leg final

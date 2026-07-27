@@ -237,7 +237,7 @@ async fn drop_sdp_no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     carol_uas.respond(183, "Session Progress").with_sdp(ANSWER).await;
     let p180 = call.expect(180).await;
     assert!(p180.body.is_empty(), "drop-sdp masked the 183 into a bare 180");
-    let first_to_tag = p180.to.tag.clone().expect("bare 180 has a To-tag");
+    let first_to_tag = p180.to().tag().expect("bare 180 has a To-tag").to_string();
 
     // Trip the no-answer timer (30 s); stay inside the reroute INVITE's Timer A
     // window (mirrors the plain no-answer test above).
@@ -262,7 +262,7 @@ async fn drop_sdp_no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     let ok = call.expect(200).await;
     assert_eq!(
-        ok.to.tag.as_deref(),
+        ok.to().tag(),
         Some(first_to_tag.as_str()),
         "200 To-tag reuses the first bare 180's tag across the reap + leg swap",
     );

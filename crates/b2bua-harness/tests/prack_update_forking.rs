@@ -36,7 +36,8 @@
 use b2bua_harness::B2buaSut;
 use scenario_harness::{Harness, RunReport};
 use sip_message::generators::InDialogMethod;
-use sip_message::message_helpers::get_header;
+use sip_message::header::{RAck, Require};
+use sip_message::Method;
 use std::path::Path;
 
 // Alice's initial offer, two codecs so the re-offer can narrow it.
@@ -71,12 +72,11 @@ async fn prack_update_forking_answer_on_second_fork() {
         .with_sdp(ANSWER_F1)
         .await;
     let p1 = call.expect(183).await;
-    assert_eq!(
-        get_header(&p1.headers, "require").as_deref(),
-        Some("100rel"),
+    assert!(
+        p1.header::<Require>().expect("a Require").expect("readable Require").contains("100rel"),
         "fork1 Require:100rel relayed to alice",
     );
-    let fork1_atag = p1.to.tag.clone().expect("fork1 a-facing tag");
+    let fork1_atag = p1.to().tag().expect("fork1 a-facing tag").to_string();
 
     // Alice PRACKs fork 1 (addressed to fork1's a-tag).
     let mut prack1 = call
@@ -87,7 +87,7 @@ async fn prack_update_forking_answer_on_second_fork() {
         .await;
     let mut prack1_at_bob = bob.receive("PRACK").await;
     assert_eq!(
-        prack1_at_bob.request().to.tag.as_deref(),
+        prack1_at_bob.request().to().tag(),
         Some("bobfork1"),
         "PRACK for fork1 carries the callee fork1 tag",
     );
@@ -102,7 +102,7 @@ async fn prack_update_forking_answer_on_second_fork() {
         .with_sdp(ANSWER_F2)
         .await;
     let p2 = call.expect(183).await;
-    let fork2_atag = p2.to.tag.clone().expect("fork2 a-facing tag");
+    let fork2_atag = p2.to().tag().expect("fork2 a-facing tag").to_string();
     assert_ne!(fork1_atag, fork2_atag, "each callee fork maps to a distinct a-facing tag");
 
     // Alice PRACKs fork 2 — its own dialog, first PRACK also at INVITE_CSeq+1.
@@ -114,7 +114,7 @@ async fn prack_update_forking_answer_on_second_fork() {
         .await;
     let mut prack2_at_bob = bob.receive("PRACK").await;
     assert_eq!(
-        prack2_at_bob.request().to.tag.as_deref(),
+        prack2_at_bob.request().to().tag(),
         Some("bobfork2"),
         "PRACK for fork2 carries the callee fork2 tag",
     );
@@ -131,7 +131,7 @@ async fn prack_update_forking_answer_on_second_fork() {
         .await;
     let mut update_at_bob = bob.receive("UPDATE").await;
     assert_eq!(
-        update_at_bob.request().to.tag.as_deref(),
+        update_at_bob.request().to().tag(),
         Some("bobfork2"),
         "UPDATE is relayed on the fork2 early dialog",
     );
@@ -151,22 +151,22 @@ async fn prack_update_forking_answer_on_second_fork() {
     uas.respond(200, "OK").with_to_tag("bobfork2").await;
     let ok = call.expect(200).await;
     assert_eq!(
-        ok.to.tag.as_deref(),
+        ok.to().tag(),
         Some(fork2_atag.as_str()),
         "the confirmed dialog is fork 2's a-facing tag",
     );
     let mut dialog = call.ack().await;
     let ack_at_bob = bob.receive("ACK").await;
     assert_eq!(
-        ack_at_bob.request().to.tag.as_deref(),
+        ack_at_bob.request().to().tag(),
         Some("bobfork2"),
         "ACK is sent on the fork2 dialog",
     );
     // The caller's confirmed dialog adopts the *winning* fork's a-facing tag —
     // the ACK toward the B2BUA carries it, not the first fork's (RFC 3261 §12.1).
     assert_eq!(
-        get_header(&ack_at_bob.request().headers, "cseq").map(|c| c.trim()),
-        Some("1 ACK"),
+        ack_at_bob.request().cseq().seq(),
+        1,
         "the 2xx ACK reuses the INVITE CSeq (1), not the post-UPDATE local CSeq (RFC 3261 §13.2.2.4)",
     );
 
@@ -175,7 +175,7 @@ async fn prack_update_forking_answer_on_second_fork() {
     let mut reinvite = dialog.request(InDialogMethod::Invite, Some(REINVITE_RESUME)).await;
     let mut reinvite_at_bob = bob.receive("INVITE").await;
     assert_eq!(
-        reinvite_at_bob.request().to.tag.as_deref(),
+        reinvite_at_bob.request().to().tag(),
         Some("bobfork2"),
         "re-INVITE stays on the fork2 confirmed dialog",
     );
@@ -193,7 +193,7 @@ async fn prack_update_forking_answer_on_second_fork() {
     let mut cupdate = dialog.request(InDialogMethod::Update, Some(REOFFER_HOLD)).await;
     let mut cupdate_at_bob = bob.receive("UPDATE").await;
     assert_eq!(
-        cupdate_at_bob.request().to.tag.as_deref(),
+        cupdate_at_bob.request().to().tag(),
         Some("bobfork2"),
         "confirmed UPDATE stays on the fork2 dialog",
     );
@@ -209,7 +209,7 @@ async fn prack_update_forking_answer_on_second_fork() {
     let mut bye = dialog.bye().await;
     let mut bye_at_bob = bob.receive("BYE").await;
     assert_eq!(
-        bye_at_bob.request().to.tag.as_deref(),
+        bye_at_bob.request().to().tag(),
         Some("bobfork2"),
         "BYE tears down the fork2 dialog",
     );
@@ -231,9 +231,10 @@ async fn prack_update_forking_answer_on_second_fork() {
 // PRACK, and SDP cache; whichever fork wins the 200, alice's answer is THAT
 // fork's cached SDP.
 
-/// The RAck header is `<rseq> <invite-cseq> INVITE` (RFC 3262 §7.2).
-fn rack_of(headers: &[sip_message::SipHeader]) -> String {
-    get_header(headers, "rack").unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ")
+/// The RAck a request acknowledges — `<rseq> <invite-cseq> INVITE`
+/// (RFC 3262 §7.2).
+fn rack_of(req: &sip_message::SipRequest) -> RAck {
+    req.header::<RAck>().expect("a RAck").expect("readable RAck")
 }
 
 /// Drive the shared fake-prack forking prelude: alice's reliable-offer INVITE,
@@ -257,14 +258,14 @@ async fn fake_prack_fork_prelude(
         .await;
     let p180 = call.expect(180).await;
     assert!(p180.body.is_empty(), "bare 180 has no body");
-    let a_tag = p180.to.tag.clone().expect("bare 180 has a To-tag");
+    let a_tag = p180.to().tag().expect("bare 180 has a To-tag").to_string();
     let mut prack1 = bob.receive("PRACK").await;
     assert_eq!(
-        prack1.request().to.tag.as_deref(),
+        prack1.request().to().tag(),
         Some("bobfork1"),
         "fork1's PRACK targets fork1's early dialog",
     );
-    assert_eq!(rack_of(&prack1.request().headers), "1 1 INVITE", "fork1 RAck");
+    assert_eq!(rack_of(prack1.request()), RAck::new(1, 1, Method::Invite), "fork1 RAck");
     prack1.respond(200, "OK").await;
 
     // Fork 2: reliable 183 (tag `bobfork2`) with answer 2 — suppressed for
@@ -278,11 +279,11 @@ async fn fake_prack_fork_prelude(
         .await;
     let mut prack2 = bob.receive("PRACK").await;
     assert_eq!(
-        prack2.request().to.tag.as_deref(),
+        prack2.request().to().tag(),
         Some("bobfork2"),
         "fork2's PRACK targets fork2's early dialog (no first-dialog fallback)",
     );
-    assert_eq!(rack_of(&prack2.request().headers), "1 1 INVITE", "fork2 RAck (own dialog CSeq space)");
+    assert_eq!(rack_of(prack2.request()), RAck::new(1, 1, Method::Invite), "fork2 RAck (own dialog CSeq space)");
     prack2.respond(200, "OK").await;
 
     (uas, a_tag.to_string())
@@ -322,15 +323,15 @@ async fn fake_prack_forking_answer_on_first_fork_keeps_its_own_cache() {
         ANSWER_F1,
         "alice's 200 carries fork 1's own cached SDP (no cross-fork overwrite)",
     );
-    assert_eq!(ok.to.tag.as_deref(), Some(a_tag.as_str()), "200 reuses the bare 180's To-tag");
+    assert_eq!(ok.to().tag(), Some(a_tag.as_str()), "200 reuses the bare 180's To-tag");
 
     let mut dialog = call.ack().await;
     let ack = bob.receive("ACK").await;
-    assert_eq!(ack.request().to.tag.as_deref(), Some("bobfork1"), "ACK rides fork 1's dialog");
+    assert_eq!(ack.request().to().tag(), Some("bobfork1"), "ACK rides fork 1's dialog");
 
     let mut bye = dialog.bye().await;
     let mut bye_at_bob = bob.receive("BYE").await;
-    assert_eq!(bye_at_bob.request().to.tag.as_deref(), Some("bobfork1"), "BYE rides fork 1's dialog");
+    assert_eq!(bye_at_bob.request().to().tag(), Some("bobfork1"), "BYE rides fork 1's dialog");
     bye_at_bob.respond(200, "OK").await;
     bye.expect(200).await;
 
@@ -373,18 +374,18 @@ async fn fake_prack_forking_answer_on_second_fork_uses_its_own_cache() {
         "alice's 200 carries fork 2's own cached SDP",
     );
     assert_eq!(
-        ok.to.tag.as_deref(),
+        ok.to().tag(),
         Some(a_tag.as_str()),
         "200 reuses the bare 180's To-tag even though the suppressed fork won",
     );
 
     let mut dialog = call.ack().await;
     let ack = bob.receive("ACK").await;
-    assert_eq!(ack.request().to.tag.as_deref(), Some("bobfork2"), "ACK rides fork 2's dialog");
+    assert_eq!(ack.request().to().tag(), Some("bobfork2"), "ACK rides fork 2's dialog");
 
     let mut bye = dialog.bye().await;
     let mut bye_at_bob = bob.receive("BYE").await;
-    assert_eq!(bye_at_bob.request().to.tag.as_deref(), Some("bobfork2"), "BYE rides fork 2's dialog");
+    assert_eq!(bye_at_bob.request().to().tag(), Some("bobfork2"), "BYE rides fork 2's dialog");
     bye_at_bob.respond(200, "OK").await;
     bye.expect(200).await;
 

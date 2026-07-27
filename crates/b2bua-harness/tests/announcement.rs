@@ -13,7 +13,7 @@ use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
-use sip_message::message_helpers::get_header;
+use sip_message::header::{HeaderName, MediaType};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
@@ -73,13 +73,16 @@ async fn announcement_happy_path() {
     // Alice receives a 183 early-media carrying the MRF's SDP (RFC 5009 PEM).
     let pem = call.expect(183).await;
     assert_eq!(String::from_utf8_lossy(&pem.body), MRF_SDP, "183 brokers the MRF SDP to A");
-    assert_eq!(get_header(&pem.headers, "p-early-media").unwrap_or(""), "sendrecv");
+    assert_eq!(pem.raw(HeaderName::PEarlyMedia).next(), Some("sendrecv"));
 
     // The B2BUA opens the MSCML control channel toward the MRF: INFO <play>.
     let mut play = mrf.receive("INFO").await;
-    assert_eq!(
-        get_header(&play.request().headers, "content-type").unwrap_or(""),
-        "application/mediaservercontrol+xml",
+    assert!(
+        play.request()
+            .header::<MediaType>()
+            .expect("INFO carries a Content-Type")
+            .expect("readable Content-Type")
+            .is("application/mediaservercontrol+xml"),
     );
     assert!(
         String::from_utf8_lossy(&play.request().body).contains("href=\"intro-001\""),

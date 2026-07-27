@@ -20,7 +20,7 @@ use b2bua_harness::{B2buaScene, B2buaSut};
 use call::features::RelayFirst18xStrategy;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
-use sip_message::message_helpers::get_header;
+use sip_message::header::MediaType;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
@@ -92,7 +92,7 @@ async fn early_not_pracked_a_to_b(name: &str, alice_port: &str, bob_port_n: u16,
     // no 100rel, no PRACK.
     uas.respond(180, "Ringing").await;
     let ringing = call.expect(180).await;
-    let atag = ringing.to.tag.clone().expect("a-facing early tag on the 180");
+    let atag = ringing.to().tag().expect("a-facing early tag on the 180").to_string();
 
     // Alice UPDATEs the early dialog (not PRACKed).
     let mut ub = call.send_request(InDialogMethod::Update).with_to_tag(&atag);
@@ -190,7 +190,7 @@ async fn early_pracked_update_no_sdp_a_to_b() {
     let mut uas = bob.receive("INVITE").await;
     uas.respond(183, "Session Progress").reliable(1).with_sdp(ANSWER).await;
     let p183 = call.expect(183).await;
-    let atag = p183.to.tag.clone().expect("a-facing tag");
+    let atag = p183.to().tag().expect("a-facing tag").to_string();
 
     // PRACK the reliable 183.
     let mut prack = call
@@ -236,17 +236,17 @@ async fn early_update_forking_no_sdp_second_fork() {
 
     uas.respond(180, "Ringing").with_to_tag("bf1").await;
     let p1 = call.expect(180).await;
-    let f1 = p1.to.tag.clone().expect("fork1 a-tag");
+    let f1 = p1.to().tag().expect("fork1 a-tag").to_string();
 
     uas.respond(180, "Ringing").with_to_tag("bf2").await;
     let p2 = call.expect(180).await;
-    let f2 = p2.to.tag.clone().expect("fork2 a-tag");
+    let f2 = p2.to().tag().expect("fork2 a-tag").to_string();
     assert_ne!(f1, f2);
 
     // Bodyless UPDATE on fork 2.
     let mut update = call.send_request(InDialogMethod::Update).with_to_tag(&f2).send().await;
     let mut at_bob = bob.receive("UPDATE").await;
-    assert_eq!(at_bob.request().to.tag.as_deref(), Some("bf2"), "UPDATE rode fork 2");
+    assert_eq!(at_bob.request().to().tag(), Some("bf2"), "UPDATE rode fork 2");
     assert!(at_bob.request().body.is_empty());
     at_bob.respond(200, "OK").await;
     update.expect(200).await;
@@ -254,7 +254,7 @@ async fn early_update_forking_no_sdp_second_fork() {
     // Answer on fork 2 with the SDP answer, teardown.
     uas.respond(200, "OK").with_to_tag("bf2").with_sdp(ANSWER).await;
     let ok = call.expect(200).await;
-    assert_eq!(ok.to.tag.as_deref(), Some(f2.as_str()));
+    assert_eq!(ok.to().tag(), Some(f2.as_str()));
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
     let mut bye = dialog.bye().await;
@@ -338,7 +338,7 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     // Fork 1: reliable 183 → PRACK fork 1.
     uas.respond(183, "Session Progress").with_to_tag("bf1").reliable(1).with_sdp(ANSWER).await;
     let p1 = call.expect(183).await;
-    let f1 = p1.to.tag.clone().expect("fork1 a-tag");
+    let f1 = p1.to().tag().expect("fork1 a-tag").to_string();
     let mut prack1 = call.send_request(InDialogMethod::Prack).with_to_tag(&f1).with_rack("1 1 INVITE").send().await;
     bob.receive("PRACK").await.respond(200, "OK").await;
     prack1.expect(200).await;
@@ -346,18 +346,18 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     // Fork 2: reliable 183 → PRACK fork 2 (its own CSeq space).
     uas.respond(183, "Session Progress").with_to_tag("bf2").reliable(1).with_sdp(ANSWER).await;
     let p2 = call.expect(183).await;
-    let f2 = p2.to.tag.clone().expect("fork2 a-tag");
+    let f2 = p2.to().tag().expect("fork2 a-tag").to_string();
     assert_ne!(f1, f2);
     let mut prack2 = call.send_request(InDialogMethod::Prack).with_to_tag(&f2).with_rack("1 1 INVITE").send().await;
     let mut prack2_at_bob = bob.receive("PRACK").await;
-    assert_eq!(prack2_at_bob.request().to.tag.as_deref(), Some("bf2"), "fork2 PRACK targets fork2");
+    assert_eq!(prack2_at_bob.request().to().tag(), Some("bf2"), "fork2 PRACK targets fork2");
     prack2_at_bob.respond(200, "OK").await;
     prack2.expect(200).await;
 
     // ── SDP re-offer UPDATE on fork 2 (hold) ──
     let mut u2 = call.send_request(InDialogMethod::Update).with_to_tag(&f2).with_sdp(REOFFER_HOLD).send().await;
     let mut u2_at_bob = bob.receive("UPDATE").await;
-    assert_eq!(u2_at_bob.request().to.tag.as_deref(), Some("bf2"), "SDP UPDATE rode fork 2");
+    assert_eq!(u2_at_bob.request().to().tag(), Some("bf2"), "SDP UPDATE rode fork 2");
     assert!(String::from_utf8_lossy(&u2_at_bob.request().body).contains("a=sendonly"), "hold re-offer relayed to bob");
     u2_at_bob.respond(200, "OK").with_sdp(REANSWER_HELD).await;
     let u2_ok = u2.expect(200).await;
@@ -366,7 +366,7 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     // ── Bodyless refresh UPDATE on fork 1 (distinct fork, distinct CSeq) ──
     let mut u1 = call.send_request(InDialogMethod::Update).with_to_tag(&f1).send().await;
     let mut u1_at_bob = bob.receive("UPDATE").await;
-    assert_eq!(u1_at_bob.request().to.tag.as_deref(), Some("bf1"), "bodyless UPDATE rode fork 1");
+    assert_eq!(u1_at_bob.request().to().tag(), Some("bf1"), "bodyless UPDATE rode fork 1");
     assert!(u1_at_bob.request().body.is_empty(), "bodyless UPDATE relayed with no body");
     u1_at_bob.respond(200, "OK").await;
     u1.expect(200).await;
@@ -374,10 +374,10 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     // ── Answer on fork 2 (the non-first fork that carried the SDP UPDATE) ──
     uas.respond(200, "OK").with_to_tag("bf2").with_sdp(ANSWER).await;
     let ok = call.expect(200).await;
-    assert_eq!(ok.to.tag.as_deref(), Some(f2.as_str()), "confirmed dialog is the winning fork 2");
+    assert_eq!(ok.to().tag(), Some(f2.as_str()), "confirmed dialog is the winning fork 2");
     let mut dialog = call.ack().await;
     let ack_at_bob = bob.receive("ACK").await;
-    assert_eq!(ack_at_bob.request().to.tag.as_deref(), Some("bf2"), "ACK rides fork 2");
+    assert_eq!(ack_at_bob.request().to().tag(), Some("bf2"), "ACK rides fork 2");
 
     // ── A confirmed in-dialog UPDATE still works after the fork collapse ──
     let mut cu = dialog.request(InDialogMethod::Update, Some(REOFFER_HOLD)).await;
@@ -417,7 +417,7 @@ async fn fake_prack_early_update_with_offer_relays_to_bob() {
     // Reliable 183 → the B2BUA downgrades it to a bare 180 for alice and PRACKs bob.
     uas.respond(183, "Session Progress").reliable(1).with_sdp(ANSWER).await;
     let bare180 = call.expect(180).await;
-    let atag = bare180.to.tag.clone().expect("a tag on bare 180");
+    let atag = bare180.to().tag().expect("a tag on bare 180").to_string();
     bob.receive("PRACK").await.respond(200, "OK").await;
 
     // Alice sends an early UPDATE carrying a NEW offer.
@@ -437,9 +437,10 @@ async fn fake_prack_early_update_with_offer_relays_to_bob() {
     let resp = update.expect(200).await;
     assert!(!resp.body.is_empty(), "bob's SDP answer relayed back to alice (offer answered)");
     assert!(
-        get_header(&resp.headers, "content-type")
-            .map(|c| c.to_ascii_lowercase().contains("application/sdp"))
-            .unwrap_or(false),
+        resp.header::<MediaType>()
+            .expect("a Content-Type")
+            .expect("readable Content-Type")
+            .is("application/sdp"),
         "answer carries application/sdp",
     );
 
@@ -475,7 +476,7 @@ async fn fake_prack_early_bodyless_update_answered_locally() {
     let mut uas = bob.receive("INVITE").await;
     uas.respond(183, "Session Progress").reliable(1).with_sdp(ANSWER).await;
     let bare180 = call.expect(180).await;
-    let atag = bare180.to.tag.clone().expect("a tag on bare 180");
+    let atag = bare180.to().tag().expect("a tag on bare 180").to_string();
     bob.receive("PRACK").await.respond(200, "OK").await;
 
     // Bodyless refresh UPDATE → answered locally, no body.

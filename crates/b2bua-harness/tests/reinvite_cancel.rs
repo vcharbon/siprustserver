@@ -72,13 +72,13 @@ async fn cancel_reinvite_ends_renegotiation_keeps_call() {
     //    CSeq number) ──
     let mut bob_cxl = bob.receive("CANCEL").await;
     assert_eq!(
-        bob_cxl.request().via.first().branch,
-        relayed_reinvite.via.first().branch,
+        bob_cxl.request().top_via().branch(),
+        relayed_reinvite.top_via().branch(),
         "the CANCEL targets the relayed re-INVITE's transaction (same branch)"
     );
     assert_eq!(
-        bob_cxl.request().cseq.seq,
-        relayed_reinvite.cseq.seq,
+        bob_cxl.request().cseq().seq(),
+        relayed_reinvite.cseq().seq(),
         "the CANCEL reuses the relayed re-INVITE's CSeq number"
     );
 

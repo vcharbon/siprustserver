@@ -16,7 +16,7 @@
 use b2bua_harness::B2buaSut;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
-use sip_message::message_helpers::get_header;
+use sip_message::header::{RSeq, Require};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -42,12 +42,11 @@ async fn prack_reliable_provisional_relayed_end_to_end() {
 
     // Alice sees the 183 with 100rel intact (the B2BUA relays it transparently).
     let p183 = call.expect(183).await;
-    assert_eq!(
-        get_header(&p183.headers, "require").as_deref(),
-        Some("100rel"),
+    assert!(
+        p183.header::<Require>().expect("a Require").expect("readable Require").contains("100rel"),
         "Require: 100rel relayed to alice",
     );
-    assert!(get_header(&p183.headers, "rseq").is_some(), "RSeq relayed to alice");
+    assert!(p183.header::<RSeq>().is_some(), "RSeq relayed to alice");
 
     // Alice PRACKs the reliable 183 on the early dialog.
     let mut prack = call

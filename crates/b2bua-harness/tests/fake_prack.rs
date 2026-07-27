@@ -16,26 +16,33 @@ use b2bua_harness::B2buaSut;
 use call::features::RelayFirst18xStrategy;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
-use sip_message::message_helpers::get_header;
+use sip_message::error::SipParseError;
+use sip_message::header::kind::TokenKind;
+use sip_message::header::{MediaType, RAck, RSeq, Require, Supported, TokenListHeader};
+use sip_message::Method;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8 18 101\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:18 G729/8000\r\na=rtpmap:101 telephone-event/8000\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
-fn has_token(value: Option<&str>, token: &str) -> bool {
-    value
-        .map(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case(token)))
-        .unwrap_or(false)
+/// Whether an option-tag list header states `token`. An absent header states
+/// nothing; one no reader accepts is a defect the test must not hide.
+fn has_token<K: TokenKind>(
+    header: Option<Result<TokenListHeader<K>, SipParseError>>,
+    token: &str,
+) -> bool {
+    header.is_some_and(|h| h.expect("readable option-tag list").contains(token))
 }
 
-fn rack_matches(headers: &[sip_message::SipHeader], rseq: i64, method: &str) -> bool {
-    get_header(headers, "rack")
-        .map(|r| {
-            let p: Vec<&str> = r.split_whitespace().collect();
-            p.len() == 3
-                && p[0] == rseq.to_string()
-                && p[2].eq_ignore_ascii_case(method)
-        })
-        .unwrap_or(false)
+/// Whether a request acknowledges `rseq` on a `method` transaction.
+fn rack_matches(req: &sip_message::SipRequest, rseq: u32, method: Method) -> bool {
+    req.header::<RAck>()
+        .map(|r| r.expect("readable RAck"))
+        .is_some_and(|r| r.rseq() == rseq && r.method() == &method)
+}
+
+/// Whether a message describes an SDP body.
+fn is_sdp(ct: Option<Result<MediaType, SipParseError>>) -> bool {
+    ct.is_some_and(|c| c.expect("readable Content-Type").is("application/sdp"))
 }
 
 async fn b2bua_fake_prack(h: &Harness, name: &str, addr: &str, dest_port: u16) -> B2buaSut {
@@ -62,7 +69,7 @@ async fn basic() {
     // fake-prack KEEPS Supported:100rel toward bob (so he goes reliable).
     let mut uas = bob.receive("INVITE").await;
     assert!(
-        has_token(get_header(&uas.request().headers, "supported"), "100rel"),
+        has_token(uas.request().header::<Supported>(), "100rel"),
         "100rel kept in bob's Supported",
     );
 
@@ -76,12 +83,12 @@ async fn basic() {
     // Alice sees a bare 180.
     let p180 = call.expect(180).await;
     assert!(p180.body.is_empty(), "bare 180, no body");
-    assert!(!has_token(get_header(&p180.headers, "require"), "100rel"));
-    assert!(get_header(&p180.headers, "rseq").is_none());
+    assert!(!has_token(p180.header::<Require>(), "100rel"));
+    assert!(p180.header::<RSeq>().is_none());
 
     // B2BUA originates the PRACK toward bob.
     let mut prack = bob.receive("PRACK").await;
-    assert!(rack_matches(&prack.request().headers, 1, "INVITE"), "RAck 1 .. INVITE");
+    assert!(rack_matches(prack.request(), 1, Method::Invite), "RAck 1 .. INVITE");
     prack.respond(200, "OK").await;
 
     // Bob's 200 OK has NO body — alice's 200 carries the cached 18x SDP.
@@ -89,9 +96,7 @@ async fn basic() {
     let ok = call.expect(200).await;
     assert!(!ok.body.is_empty(), "alice 200 carries cached SDP");
     assert!(
-        get_header(&ok.headers, "content-type")
-            .map(|c| c.to_ascii_lowercase().contains("application/sdp"))
-            .unwrap_or(false),
+        is_sdp(ok.header::<MediaType>()),
         "Content-Type application/sdp on alice's 200",
     );
 
@@ -129,7 +134,7 @@ async fn multiple_18x() {
         .await;
     call.expect(180).await;
     let mut p1 = bob.receive("PRACK").await;
-    assert!(rack_matches(&p1.request().headers, 1, "INVITE"));
+    assert!(rack_matches(p1.request(), 1, Method::Invite));
     p1.respond(200, "OK").await;
 
     // 180 (RSeq 2) with SDP #2 — suppressed for alice, PRACKed + re-cached.
@@ -139,7 +144,7 @@ async fn multiple_18x() {
         .with_sdp(ANSWER)
         .await;
     let mut p2 = bob.receive("PRACK").await;
-    assert!(rack_matches(&p2.request().headers, 2, "INVITE"));
+    assert!(rack_matches(p2.request(), 2, Method::Invite));
     p2.respond(200, "OK").await;
 
     // 200 OK with no body → alice gets the latest cached SDP.
@@ -233,7 +238,7 @@ async fn no_policy_control() {
         .await;
     let p183 = call.expect(183).await;
     assert!(
-        has_token(get_header(&p183.headers, "require"), "100rel"),
+        has_token(p183.header::<Require>(), "100rel"),
         "Require:100rel relayed verbatim (default path)",
     );
 
@@ -280,7 +285,7 @@ async fn delayed_offer_fallback() {
     // Outbound INVITE to bob must have Supported:100rel stripped.
     let mut uas = bob.receive("INVITE").await;
     assert!(
-        !has_token(get_header(&uas.request().headers, "supported"), "100rel"),
+        !has_token(uas.request().header::<Supported>(), "100rel"),
         "100rel stripped on the delayed-offer fallback",
     );
 
@@ -338,9 +343,7 @@ async fn update_happy() {
     let upd_resp = update.expect(200).await;
     assert!(!upd_resp.body.is_empty(), "skeleton-fit answer has a body");
     assert!(
-        get_header(&upd_resp.headers, "content-type")
-            .map(|c| c.to_ascii_lowercase().contains("application/sdp"))
-            .unwrap_or(false),
+        is_sdp(upd_resp.header::<MediaType>()),
         "Content-Type application/sdp on the local UPDATE answer",
     );
 
@@ -394,7 +397,7 @@ async fn run_fake_prack_failover(scenario: &str, alice_p: u16, bob1_p: u16, bob2
         .await;
     call.expect(180).await;
     let mut prack = bob1.receive("PRACK").await;
-    assert!(rack_matches(&prack.request().headers, 1, "INVITE"), "RAck 1 .. INVITE");
+    assert!(rack_matches(prack.request(), 1, Method::Invite), "RAck 1 .. INVITE");
     prack.respond(200, "OK").await;
 
     // bob1 rejects → failover to bob2.

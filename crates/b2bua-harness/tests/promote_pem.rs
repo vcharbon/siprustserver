@@ -9,16 +9,27 @@
 use b2bua_harness::B2buaSut;
 use call::features::RelayFirst18xStrategy;
 use scenario_harness::Harness;
-use sip_message::message_helpers::get_header;
+use sip_message::error::SipParseError;
+use sip_message::header::kind::TokenKind;
+use sip_message::header::{Allow, HeaderName, HeaderValue, ParamValue, Reason, Supported, TokenListHeader};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const EARLY: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const FINAL_DIFF: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
-fn has_token(value: Option<&str>, token: &str) -> bool {
-    value
-        .map(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case(token)))
-        .unwrap_or(false)
+/// The `cause` a request's Reason states.
+fn reason_cause(req: &sip_message::SipRequest) -> Option<String> {
+    let reason = req.header::<Reason>()?.expect("readable Reason");
+    Some(reason.param("cause").and_then(ParamValue::as_str)?.to_string())
+}
+
+/// Whether an option-tag list header states `token`. An absent header states
+/// nothing; one no reader accepts is a defect the test must not hide.
+fn has_token<K: TokenKind>(
+    header: Option<Result<TokenListHeader<K>, SipParseError>>,
+    token: &str,
+) -> bool {
+    header.is_some_and(|h| h.expect("readable option-tag list").contains(token))
 }
 
 async fn b2bua_pem(h: &Harness, name: &str, addr: &str, dest_port: u16) -> B2buaSut {
@@ -54,10 +65,17 @@ async fn promote_pem_happy_no_resync() {
     let ok = call.expect(200).await;
     assert!(!ok.body.is_empty(), "synthetic 200 carries bob's early SDP");
     assert_eq!(ok.body, EARLY.as_bytes(), "early SDP relayed verbatim");
-    assert!(get_header(&ok.headers, "p-early-media").is_none(), "P-Early-Media stripped");
-    let allow = get_header(&ok.headers, "allow").unwrap_or("");
-    assert!(allow.contains("INVITE") && allow.contains("BYE"), "Allow on synthetic 200");
-    assert!(!has_token(get_header(&ok.headers, "supported"), "100rel"), "no 100rel");
+    assert!(
+        ok.raw(HeaderName::PEarlyMedia).next().is_none(),
+        "P-Early-Media stripped"
+    );
+    let allow = ok.header::<Allow>().expect("an Allow").expect("readable Allow");
+    assert!(
+        allow.contains("INVITE") && allow.contains("BYE"),
+        "Allow on synthetic 200, got {}",
+        allow.to_wire()
+    );
+    assert!(!has_token(ok.header::<Supported>(), "100rel"), "no 100rel");
 
     // Alice ACKs — absorbed locally; bob receives nothing yet.
     let mut dialog = call.ack().await;
@@ -155,9 +173,12 @@ async fn resync_sdp_changed() {
         String::from_utf8_lossy(&req.body).contains("m=audio 30000"),
         "resync re-INVITE carries bob's new SDP",
     );
-    let allow = get_header(&req.headers, "allow").unwrap_or("");
-    assert!(allow.contains("INVITE"), "Allow on resync re-INVITE");
-    assert!(get_header(&req.headers, "supported").is_some(), "Supported on resync re-INVITE");
+    let allow = req.header::<Allow>().expect("an Allow").expect("readable Allow");
+    assert!(allow.contains("INVITE"), "Allow on resync re-INVITE, got {}", allow.to_wire());
+    assert!(
+        req.header::<Supported>().is_some(),
+        "Supported on resync re-INVITE"
+    );
 
     resync.respond(200, "OK").with_sdp(EARLY).await;
     // B2BUA's ACK to alice's 200 closes the window.
@@ -202,8 +223,11 @@ async fn b_fails_post_promote() {
     bob.receive("ACK").await; // the b2bua completes bob's reject txn (§17.1.1.3)
 
     let mut bye = alice.receive("BYE").await;
-    let reason = get_header(&bye.request().headers, "reason").unwrap_or("");
-    assert!(reason.contains("cause=503"), "BYE carries Reason cause=503, got {reason:?}");
+    assert_eq!(
+        reason_cause(bye.request()),
+        Some("503".to_string()),
+        "BYE carries Reason cause=503"
+    );
     bye.respond(200, "OK").await;
 
     let _ = h.finish().await;
@@ -243,14 +267,16 @@ async fn resync_failed_by_a() {
 
     // begin-termination BYEs both legs with Reason cause=488.
     let mut a_bye = alice.receive("BYE").await;
-    assert!(
-        get_header(&a_bye.request().headers, "reason").unwrap_or("").contains("cause=488"),
+    assert_eq!(
+        reason_cause(a_bye.request()),
+        Some("488".to_string()),
         "alice BYE carries Reason cause=488",
     );
     a_bye.respond(200, "OK").await;
     let mut b_bye = bob.receive("BYE").await;
-    assert!(
-        get_header(&b_bye.request().headers, "reason").unwrap_or("").contains("cause=488"),
+    assert_eq!(
+        reason_cause(b_bye.request()),
+        Some("488".to_string()),
         "bob BYE carries Reason cause=488",
     );
     b_bye.respond(200, "OK").await;
@@ -326,7 +352,7 @@ async fn forking_resync() {
     // The B2BUA-emitted local ACK toward bob carries the WINNING fork's To-tag.
     let ack = bob.receive("ACK").await;
     assert_eq!(
-        ack.request().to.tag.as_deref(),
+        ack.request().to().tag(),
         Some(FORK_T2),
         "local ACK re-seeded onto the winning fork tag",
     );

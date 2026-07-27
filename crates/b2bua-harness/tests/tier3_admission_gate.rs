@@ -17,7 +17,7 @@
 
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
-use sip_message::message_helpers::get_header;
+use sip_message::header::{HeaderValue, ParamValue, Reason, RetryAfter};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -50,16 +50,18 @@ async fn cps_bucket_empty_503s_a_new_invite_statelessly() {
     // To-tag (this codebase tags every non-100 final; the ACK is still absorbed
     // by the rejecting INVITE server txn — stateless at the call layer).
     let resp = call.expect(503).await;
-    let reason = get_header(&resp.headers, "reason").unwrap_or("");
-    assert!(
-        reason.contains("text=\"overload\""),
-        "503 Reason must mark the overload cause, got {reason:?}"
+    let reason = resp.header::<Reason>().expect("a Reason").expect("readable Reason");
+    assert_eq!(
+        reason.param("text").and_then(ParamValue::as_str),
+        Some("overload"),
+        "503 Reason must mark the overload cause, got {}",
+        reason.to_wire()
     );
     assert!(
-        get_header(&resp.headers, "retry-after").is_some(),
+        resp.header::<RetryAfter>().is_some(),
         "overload 503 must carry a Retry-After hint"
     );
-    assert!(resp.to.tag.is_some(), "non-100 final carries a To-tag (RFC §8.2.6.2)");
+    assert!(resp.to().tag().is_some(), "non-100 final carries a To-tag (RFC §8.2.6.2)");
 
     // No per-call state was created for the rejected INVITE: no live call, and the
     // worker counted the shed on its overload-reject metric.

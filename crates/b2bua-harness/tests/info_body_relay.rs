@@ -16,7 +16,7 @@
 
 use b2bua_harness::B2buaScene;
 use sip_message::generators::InDialogMethod;
-use sip_message::message_helpers::get_header;
+use sip_message::header::HeaderName;
 
 /// An established call; alice drives an in-dialog INFO with an
 /// `application/example-binary` body; the relayed INFO reaching bob carries the
@@ -46,13 +46,13 @@ async fn info_with_arbitrary_body_relays_content_type_and_bytes() {
     {
         let req = bob_uas.request();
         assert_eq!(
-            get_header(&req.headers, "Content-Type"),
+            req.raw(HeaderName::ContentType).next(),
             Some(CT),
             "relayed INFO carries the exact Content-Type",
         );
         assert_eq!(req.body, body, "relayed INFO carries the exact (binary-safe) body bytes");
         assert_eq!(
-            get_header(&req.headers, "Content-Length"),
+            req.raw(HeaderName::ContentLength).next(),
             Some(body.len().to_string().as_str()),
             "Content-Length matches the relayed body length",
         );
@@ -97,7 +97,7 @@ async fn info_with_multipart_body_relays_verbatim() {
     {
         let req = bob_uas.request();
         assert_eq!(
-            get_header(&req.headers, "Content-Type"),
+            req.raw(HeaderName::ContentType).next(),
             Some(CT),
             "multipart Content-Type survives",
         );

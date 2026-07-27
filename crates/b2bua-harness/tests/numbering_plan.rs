@@ -17,7 +17,7 @@ use std::sync::Arc;
 use b2bua::decision::ScriptedDecisionEngine;
 use b2bua_harness::B2buaSut;
 use scenario_harness::{Harness, RunReport};
-use sip_message::message_helpers::{get_header, get_headers};
+use sip_message::header::{Contact, HeaderName, HeaderValue, PAssertedIdentity, ParamValue, Reason};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -72,23 +72,31 @@ async fn route_rewrites_from_to_ruri_pai_and_pani() {
     let mut bob_uas = bob.receive("INVITE").await;
     let req = bob_uas.request();
     assert_eq!(req.uri, "sip:+18001234@carrier.example", "R-URI rewritten");
-    assert!(
-        get_header(&req.headers, "from").unwrap_or("").contains("+15551000@trunk.example"),
-        "From number rewritten: {:?}",
-        get_header(&req.headers, "from")
-    );
-    assert!(
-        get_header(&req.headers, "to").unwrap_or("").contains("+19005678@carrier.example"),
-        "To number rewritten: {:?}",
-        get_header(&req.headers, "to")
-    );
     assert_eq!(
-        get_header(&req.headers, "p-asserted-identity"),
-        Some("sip:+15551000@trunk.example"),
+        req.from().uri().user(),
+        Some("+15551000"),
+        "From number rewritten: {}",
+        req.from().to_wire()
+    );
+    assert_eq!(req.from().uri().host(), "trunk.example", "From host rewritten");
+    assert_eq!(
+        req.to().uri().user(),
+        Some("+19005678"),
+        "To number rewritten: {}",
+        req.to().to_wire()
+    );
+    assert_eq!(req.to().uri().host(), "carrier.example", "To host rewritten");
+    assert_eq!(
+        req.header::<PAssertedIdentity>()
+            .expect("PAI added")
+            .expect("readable PAI")
+            .uri()
+            .text(),
+        "sip:+15551000@trunk.example",
         "PAI added"
     );
     assert_eq!(
-        get_header(&req.headers, "p-access-network-info"),
+        req.raw(HeaderName::PAccessNetworkInfo).next(),
         Some("3GPP-E-UTRAN-FDD; utran-cell-id-3gpp=1234"),
         "PANI added"
     );
@@ -130,10 +138,8 @@ async fn reroutes_to_second_destination_on_failure() {
 
     // First destination rejects → reroute to the second.
     let mut carol_uas = carol.receive("INVITE").await;
-    assert!(carol_uas.request().headers.iter().any(|h| h
-        .name
-        .eq_ignore_ascii_case("to")
-        && h.value.contains("+1@carol")));
+    assert_eq!(carol_uas.request().to().uri().user(), Some("+1"));
+    assert_eq!(carol_uas.request().to().uri().host(), "carol");
     carol_uas.respond(503, "Service Unavailable").await;
     // Absorb the b2bua's ACK for the 503 (RFC 3261 §17.1.1.3 — the failed INVITE
     // client txn ACKs its non-2xx). Real carol's txn layer eats it silently; here
@@ -142,10 +148,8 @@ async fn reroutes_to_second_destination_on_failure() {
 
     // Second destination receives the rerouted INVITE and answers.
     let mut bob_uas = bob.receive("INVITE").await;
-    assert!(bob_uas.request().headers.iter().any(|h| h
-        .name
-        .eq_ignore_ascii_case("to")
-        && h.value.contains("+1@bob")));
+    assert_eq!(bob_uas.request().to().uri().user(), Some("+1"));
+    assert_eq!(bob_uas.request().to().uri().host(), "bob");
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
     call.ack().await;
@@ -180,11 +184,10 @@ async fn direct_reject_carries_reason_header() {
 
     let resp = call.expect(603).await;
     assert_eq!(resp.status, 603);
-    assert_eq!(
-        get_header(&resp.headers, "reason"),
-        Some("Q.850;cause=21;text=\"call rejected\""),
-        "Reason header relayed on the rejection"
-    );
+    let reason = resp.header::<Reason>().expect("a Reason").expect("readable Reason");
+    assert!(reason.is("Q.850"), "Reason protocol relayed: {}", reason.to_wire());
+    assert_eq!(reason.param("cause").and_then(ParamValue::as_str), Some("21"));
+    assert_eq!(reason.param("text").and_then(ParamValue::as_str), Some("call rejected"));
     finish_with_report(h).await;
 }
 
@@ -218,10 +221,12 @@ async fn direct_302_redirect_carries_contact_list() {
 
     let resp = call.expect(302).await;
     assert_eq!(resp.status, 302);
-    let contacts = get_headers(&resp.headers, "contact");
+    let contacts = resp.list::<Contact>().expect("readable Contact list");
     assert_eq!(contacts.len(), 2, "two Contact headers: {contacts:?}");
-    assert!(contacts[0].contains("sip:primary@alt1.example") && contacts[0].contains("q=1"));
-    assert!(contacts[1].contains("sip:backup@alt2.example") && contacts[1].contains("q=0.5"));
+    assert_eq!(contacts[0].uri().text(), "sip:primary@alt1.example");
+    assert_eq!(contacts[0].param("q").and_then(ParamValue::as_str), Some("1"));
+    assert_eq!(contacts[1].uri().text(), "sip:backup@alt2.example");
+    assert_eq!(contacts[1].param("q").and_then(ParamValue::as_str), Some("0.5"));
     finish_with_report(h).await;
 }
 
@@ -260,9 +265,9 @@ async fn reroute_exhaustion_redirects_caller() {
     // List exhausted → the plan's on_exhausted 302 reaches alice.
     let resp = call.expect(302).await;
     assert_eq!(resp.status, 302);
-    let contacts = get_headers(&resp.headers, "contact");
+    let contacts = resp.list::<Contact>().expect("readable Contact list");
     assert!(
-        contacts.iter().any(|c| c.contains("sip:overflow@alt.example")),
+        contacts.iter().any(|c| c.uri().text() == "sip:overflow@alt.example"),
         "exhaustion redirect Contact present: {contacts:?}"
     );
     finish_with_report(h).await;

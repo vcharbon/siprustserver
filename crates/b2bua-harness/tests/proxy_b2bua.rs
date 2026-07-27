@@ -26,7 +26,7 @@ mod common;
 use call::CdrEventType;
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
-use sip_message::message_helpers::get_header;
+use sip_message::header::RecordRouteEntry;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
@@ -63,11 +63,11 @@ async fn alice_calls_bob_through_proxy_and_b2bua() {
     // The LB proxy Record-Routes the b-leg INVITE so it stays in the path for
     // the whole call — bob echoes this and any bob-initiated in-dialog request
     // decodes the cookie back to the worker.
+    let b_leg_rr = uas.request().record_route_set().expect("readable Record-Route");
     assert!(
-        get_header(&uas.request().headers, "record-route")
-            .is_some_and(|rr| rr.contains("127.0.0.1:5080") && rr.contains(";lr")),
+        b_leg_rr.first().is_some_and(is_lb_proxy_route),
         "LB proxy must Record-Route the b-leg INVITE, got {:?}",
-        get_header(&uas.request().headers, "record-route"),
+        b_leg_rr,
     );
 
     uas.respond(180, "Ringing").await;
@@ -78,11 +78,11 @@ async fn alice_calls_bob_through_proxy_and_b2bua() {
     assert!(!ok.body.is_empty(), "answer relayed to alice");
     // The a-leg 200 OK echoes the proxy's Record-Route, so alice's route set is
     // [<proxy;lr>] and her in-dialog BYE returns through the proxy.
+    let a_leg_rr = ok.record_route_set().expect("readable Record-Route");
     assert!(
-        get_header(&ok.headers, "record-route")
-            .is_some_and(|rr| rr.contains("127.0.0.1:5080") && rr.contains(";lr")),
+        a_leg_rr.first().is_some_and(is_lb_proxy_route),
         "a-leg 200 OK must echo the proxy Record-Route, got {:?}",
-        get_header(&ok.headers, "record-route"),
+        a_leg_rr,
     );
 
     // ACK end-to-end.
@@ -161,6 +161,12 @@ fn assert_hop(
         find_request(entries, from, to, method).is_some(),
         "missing hop: {label} ({from} → {to} {method})"
     );
+}
+
+/// Whether a recorded entry is the LB proxy's own loose route.
+fn is_lb_proxy_route(entry: &RecordRouteEntry) -> bool {
+    let uri = entry.uri();
+    uri.host_port() == ("127.0.0.1", 5080) && uri.is_loose_route()
 }
 
 /// Find the first request `method` on the `from → to` hop.

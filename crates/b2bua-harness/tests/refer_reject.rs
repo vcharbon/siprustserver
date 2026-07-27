@@ -15,7 +15,7 @@ use b2bua_harness::B2buaSut;
 use scenario_harness::agent::ServerTxn;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
-use sip_message::message_helpers::get_header;
+use sip_message::header::{Event, SubscriptionState};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
@@ -27,14 +27,18 @@ fn x_api_call(key: &str) -> String {
     format!(r#"{{"refer_key":"{key}"}}"#)
 }
 
-/// Assert a received NOTIFY carries `Event: refer`, a `Subscription-State`
-/// starting with `prefix`, and a sipfrag body containing `frag`.
-fn assert_notify(txn: &ServerTxn, prefix: &str, frag: &str) {
+/// Assert a received NOTIFY carries `Event: refer`, the `Subscription-State`
+/// `state`, and a sipfrag body containing `frag`.
+fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
     let req = txn.request();
     assert_eq!(req.method, "NOTIFY", "expected NOTIFY");
-    assert_eq!(get_header(&req.headers, "event").unwrap_or(""), "refer", "NOTIFY Event: refer");
-    let ss = get_header(&req.headers, "subscription-state").unwrap_or("");
-    assert!(ss.starts_with(prefix), "subscription-state {ss:?} should start with {prefix:?}");
+    let event = req.header::<Event>().expect("NOTIFY carries an Event").expect("readable Event");
+    assert!(event.is("refer"), "NOTIFY Event: refer, got {:?}", event.token());
+    let ss = req
+        .header::<SubscriptionState>()
+        .expect("NOTIFY carries a Subscription-State")
+        .expect("readable Subscription-State");
+    assert!(ss.is(state), "subscription-state {:?} should be {state:?}", ss.token());
     let body = String::from_utf8_lossy(&req.body);
     assert!(body.contains(frag), "sipfrag body {body:?} should contain {frag:?}");
 }

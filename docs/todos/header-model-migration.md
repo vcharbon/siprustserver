@@ -164,7 +164,7 @@ helpers listed above, run capped workspace test, tick tracker, commit.
 - [x] M8 e2e-core + e2e-model + announcement
 - [x] M9 sip-net rfc_audit
 - [x] M10 sip-pcap + loadgen
-- [ ] M11 harness/test crates
+- [x] M11 harness/test crates
 - [ ] M12 teardown (delete legacy, privatize, MessageCore)
 - [ ] M13 perf re-baseline
 - [ ] merge `feat/adr0025-header-model` → master
@@ -1129,3 +1129,81 @@ after (the lane's only warnings are the pre-existing sip-message parser ones).
 - `Node::Ruri` at a message binding still text-matches `r.uri` (the raw
   Request-URI field) rather than `r.request_uri().text()`. Identical bytes and
   one less value built, but it is a public field M12 privatizes.
+
+### M11 — b2bua-harness + failover-harness
+
+Both crates have **zero** `message_helpers::*` / `get_header` / `get_headers`
+call sites left, and zero remaining string surgery over header values
+(`split(',')`/`split(';')`/`split_whitespace`/`trim_end_matches('>')` over a
+header, `contains(";tag=")`). No reader was missing — the port needed nothing
+added to `sip-message`. Workspace: 2127 tests passed, 0 failed.
+
+**Every deletion target the plan listed is gone**, plus what the sweep found:
+
+| deleted | replaced by |
+|---|---|
+| `failover.rs` `pri_bak_from_cookie` + `cookie_param` (the `;`-split over a Record-Route value), `runner.rs` / `limiter_ha.rs` / `call_terminate_on_backup.rs` `parse_uri_params` cookie reads ×4 | `failover_harness::cookie` — one `record_route_set()` → `uri().param(..)` reader the runner and all three test binaries share |
+| `runner.rs` `req_tags` (`get_header` + `extract_tag` ×2) | `r.from().tag()` / `r.to().tag()` |
+| `dual_face.rs` `rr_values` / `top_via_branch` (header-vec `eq_ignore_ascii_case` scans + a `branch=` prefix walk) and the twelve `rr.contains("host:port" / "outbound" / "w_pri=b1")` probes | `record_route_set()` + one `assert_rr_entry(entry, face, outbound, what)` reading `uri().host_port()` / `uri().param(..)`; `req.top_via().branch()` |
+| `suppress_18x.rs` / `promote_pem.rs` / `fake_prack.rs` `has_token(Option<&str>, &str)` — three copies of the option-tag splitter | `header::<Require/Supported>()` → `contains(token)`, behind a typed `has_token<K: TokenKind>` that states the absent/unreadable policy once |
+| `fake_prack.rs` `rack_matches` + `prack_update_forking.rs` `rack_of` (`split_whitespace` over the RAck row), `suppress_18x.rs`'s inline twin | `header::<RAck>()` compared to `RAck::new(rseq, seq, Method::Invite)` |
+| eight copies of `assert_notify`'s `get_header("event"/"subscription-state")` + `starts_with(prefix)` | `header::<Event>()?.is("refer")` + `header::<SubscriptionState>()?.is(state)` |
+| `numbering_plan.rs` From/To `contains("+1555…@trunk.example")`, PAI equality, the two `headers.iter().any(name == "to" && value.contains(..))` scans, `get_headers("contact")` + `contains("q=1")` | `from()/to().uri().user()/host()`, `header::<PAssertedIdentity>()?.uri().text()`, `list::<Contact>()` → `uri().text()` + `param("q")` |
+| `proxy_b2bua.rs` `rr.contains("127.0.0.1:5080") && rr.contains(";lr")` ×2 | `record_route_set()` → `is_lb_proxy_route` (`host_port()` + `is_loose_route()`) |
+| `tier3_admission_gate.rs` / `promote_pem.rs` Reason `contains("text=\"overload\"" / "cause=NNN")` ×3 | `header::<Reason>()` → `param("text"/"cause")` |
+| `fake_prack.rs` / `update_matrix.rs` `content-type.to_ascii_lowercase().contains("application/sdp")` ×3, `announcement.rs` / `refer_gating.rs` Content-Type equality | `header::<MediaType>()?.is(..)` |
+| `keepalive_via_proxy.rs` `get_headers(.., "via").len()` ×2 | `req.via().len()` |
+| `reinvite_cancel.rs` `via.first().branch` / `cseq.seq` field reads, `refer_*` `req.cseq.seq`, 56 `to.tag` field reads | `top_via().branch()`, `cseq().seq()`, `to().tag()` |
+
+**`failover_harness::cookie` is a new module, not a fifth copy.** Five call
+sites read the proxy's stickiness cookie and each had rolled its own splitter
+(two spellings of the same bug: `parse_uri_params` on a *header* value, and a
+`;`-split that trims a trailing `>`). The reader is one function on the harness
+lib — `record_route_set()` → first entry → `uri().param(name)` — so the tests
+ask the value model instead of the bytes, and a comma-folded Record-Route now
+yields its first ENTRY rather than the whole line.
+
+**Behaviour deltas, all deliberate:**
+- **`Event: refer` is asserted as the event package, not as the whole header
+  value.** `Event: refer;id=42` is legal RFC 3515 and used to fail the
+  equality; the token is what the assertion means. Same shape for
+  `Subscription-State`, where `starts_with(prefix)` became `is(state)` — a
+  strengthening, since every call site passed a bare state token and a prefix
+  match would also have accepted `terminated-ish`.
+- **A Contact `leg=` probe reads the URI parameter, not the header text.**
+  `contact.contains("leg=b")` matched a display name or a header parameter
+  spelling it; `uri().param("leg")` names the place the b2bua writes it.
+- **`numbering_plan`'s From/To assertions read user and host separately.** The
+  old `contains("+15551000@trunk.example")` would also pass on a display name
+  carrying the text.
+- **The dual-face Record-Route assertions read the entry, not the line.** A
+  fold whose second entry named the other face used to satisfy the first
+  entry's probe; the `w_pri` cookie is now asserted on each entry by name.
+- **A Record-Route / Route / Via no reader accepts fails the test loudly**
+  (`expect("readable …")`) where the old text probes silently read past it.
+  The one place the raw values are still scanned is `dual_face.rs`'s
+  `assert_no_proxy_route`, deliberately: it asserts the ABSENCE of a leak, so
+  an unreadable entry must not be able to hide one.
+
+**Suspicions raised, not fixed:**
+- **`b2bua/tests/rules.rs` still does header-vec string surgery** — the top-Via
+  and Route reads at `:734`, `:783`, `:795`, the Content-Type census at
+  `:1041`, and the §7.3.1 duplicate counts at `:1365`/`:1407` all walk
+  `.headers` with `eq_ignore_ascii_case`, and `:864` pushes a `SipHeader`
+  literal. They are M6 residue (that phase's sweep counted
+  `message_helpers`/`get_header` call sites, which these are not), and
+  `raw(HeaderName::X)` says every one of them. M12 privatizes `.headers`, so
+  they must move before the teardown compiles.
+- `scenario-harness/tests/template_emission.rs` reads `.headers` the same way,
+  but there it is the *subject*: the lane exists to pin captured header-name
+  spelling, which only the raw entry carries. It needs the spelling-preserving
+  `thaw` M7 logged, not a typed read.
+- **Eight copies of `assert_notify` and three of `has_token` survive as
+  copies**, one per integration-test binary. Typing them made each correct but
+  did not remove the duplication; a shared REFER-assertion module on the
+  `b2bua-harness` lib is the fix, and it is large-file-cleanup work rather than
+  header-model work.
+- `failover.rs` binds the primary worker by comparing the cookie ordinal to the
+  string `"b1"`. The cookie now comes back through a typed reader, but the
+  ordinal itself is still a `String` on both sides; a `WorkerOrdinal` newtype
+  would make the mis-bind unrepresentable.
