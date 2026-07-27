@@ -22,7 +22,7 @@ use sip_message::generators::{
     SipTransport, ViaSpec,
 };
 use sip_message::parser::custom::CustomParser;
-use sip_message::{Method, SipMessage, SipParser, SipRequest};
+use sip_message::{HeaderName, Method, SipMessage, SipParser, SipRequest};
 
 fn invite() -> SipRequest {
     let opts = GenerateOutOfDialogRequestOpts {
@@ -740,12 +740,9 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         "b-leg INVITE egresses through the front proxy"
     );
     let invite_via = match &invite_effect.body {
-        OutboundBody::Request(r) => r
-            .headers()
-            .iter()
-            .find(|h| h.name.eq_ignore_ascii_case("via"))
-            .map(|h| h.value.clone())
-            .expect("INVITE has a Via"),
+        OutboundBody::Request(r) => {
+            r.raw(HeaderName::Via).next().expect("INVITE has a Via").to_string()
+        }
         _ => panic!("INVITE is a request"),
     };
 
@@ -789,24 +786,18 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         _ => unreachable!(),
     };
     // (a) The CANCEL carries the INVITE's Route set (the preloaded proxy Route).
-    let routes: Vec<String> = cancel
-        .headers()
-        .iter()
-        .filter(|h| h.name.eq_ignore_ascii_case("route"))
-        .map(|h| h.value.to_string())
-        .collect();
+    let routes: Vec<&str> = cancel.raw(HeaderName::Route).collect();
     assert_eq!(
         routes,
-        vec!["<sip:proxy.example:5060;lr>".to_string()],
+        vec!["<sip:proxy.example:5060;lr>"],
         "CANCEL must echo the INVITE's preloaded outbound-proxy Route (RFC 3261 §9.1)"
     );
     // ... and the transaction-correlation Via branch is the INVITE's verbatim.
     let cancel_via = cancel
-        .headers()
-        .iter()
-        .find(|h| h.name.eq_ignore_ascii_case("via"))
-        .map(|h| h.value.clone())
-        .expect("CANCEL has a Via");
+        .raw(HeaderName::Via)
+        .next()
+        .expect("CANCEL has a Via")
+        .to_string();
     assert_eq!(cancel_via, invite_via, "CANCEL top Via (incl. branch) must equal the INVITE's");
 }
 
@@ -1047,12 +1038,7 @@ mod media_primitives {
                 assert_eq!(r.raw(HeaderName::from("x-example-trace")).next(), Some("abc-123"));
                 // Content-Type is owned by `content_type`: exactly one, from the
                 // body — NOT the bogus forwarded one (dedup guard).
-                let cts: Vec<&str> = r
-                    .headers()
-                    .iter()
-                    .filter(|h| h.name.eq_ignore_ascii_case("content-type"))
-                    .map(|h| h.value.as_str())
-                    .collect();
+                let cts: Vec<&str> = r.raw(HeaderName::ContentType).collect();
                 assert_eq!(
                     cts,
                     vec!["application/example-binary"],
@@ -1371,9 +1357,14 @@ mod answer_a_leg_new_dialog {
                     r.raw(HeaderName::Supported).next(),
                     Some(sip_message::generators::B2BUA_SUPPORTED),
                 );
-                for name in ["allow", "supported"] {
-                    let n = r.headers().iter().filter(|h| h.name.eq_ignore_ascii_case(name)).count();
-                    assert_eq!(n, 1, "exactly one {name} header (no §7.3.1 duplicate)");
+                for name in [HeaderName::Allow, HeaderName::Supported] {
+                    let n = r.raw(name.clone()).count();
+                    assert_eq!(
+                        n,
+                        1,
+                        "exactly one {} header (no §7.3.1 duplicate)",
+                        name.as_wire_str()
+                    );
                 }
             }
             _ => panic!("expected an outbound response"),
@@ -1414,7 +1405,7 @@ mod answer_a_leg_new_dialog {
                     Some("timer"),
                     "a set value replaces the default verbatim"
                 );
-                let n = r.headers().iter().filter(|h| h.name.eq_ignore_ascii_case("supported")).count();
+                let n = r.raw(HeaderName::Supported).count();
                 assert_eq!(n, 1, "the service value is not duplicated by the default");
                 assert_eq!(
                     r.raw(HeaderName::Allow).next(),

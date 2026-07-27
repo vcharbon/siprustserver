@@ -1652,3 +1652,20 @@ routed correctly only because every worker route goes through that one proxy. In
 a deployment with several front proxies the fallback would pin the dialog to the
 configured one rather than to the recorder — still better than pod-direct, but
 it is a deployment assumption living in a rules action.
+
+**2. `b2bua/tests/rules.rs` reads headers through the typed surface.** The six
+raw scans M11 logged (`headers().iter().find/filter(|h|
+h.name.eq_ignore_ascii_case(..))` for the b-leg INVITE's Via, the CANCEL's Route
+set and Via, the Content-Type dedup census, and the two §7.3.1 duplicate counts
+on Allow/Supported) are `raw(HeaderName::X)` reads now. The file has zero
+`headers()` / `eq_ignore_ascii_case` / `SipHeader`-literal sites left.
+
+Two things the port buys beyond tidiness: the scans were compact-form-blind, so
+a `v:`/`c:`/`k:` spelling would have made every one of them read "header absent"
+and the assertions pass vacuously (`raw` resolves the name); and the duplicate
+counts now ask the same question the assertion above them asks, through the same
+accessor, so a count and a value read can no longer disagree about which lines
+they mean.
+
+Workspace: 2111 tests passed, 0 failed. Clippy on `b2bua --all-targets`:
+identical warning set before and after.
