@@ -66,6 +66,13 @@ impl NameAddr {
         self
     }
 
+    /// The address alone — what a header whose grammar has no parameters can
+    /// carry.
+    pub fn without_params(mut self) -> Self {
+        self.params = Params::new();
+        self
+    }
+
     /// Read `[display-name] ("<" uri ">" / addr-spec) *(";" param)`.
     pub fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         let value = raw.trimmed();

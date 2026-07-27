@@ -29,7 +29,7 @@ pub fn generate_cancel(invite_txn: &InviteClientTransactionHandle) -> SipRequest
 
     let mut draft = RequestDraft::new(Method::Cancel, invite.request_uri().clone())
         .push_raw(HeaderName::Via, echoed(HeaderName::Via))
-        .push(MaxForwards::new(emit::DEFAULT_MAX_FORWARDS))
+        .push(MaxForwards::DEFAULT)
         .push_raw(HeaderName::From, echoed(HeaderName::From))
         .push_raw(HeaderName::To, echoed(HeaderName::To))
         .push_raw(HeaderName::CallId, echoed(HeaderName::CallId))

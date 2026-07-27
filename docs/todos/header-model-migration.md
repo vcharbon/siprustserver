@@ -1463,3 +1463,58 @@ workspace's pre-existing categories only, none from the new files.
 - `hop/*` parses its fixture once and thaws it 1000 times, which is the honest
   shape for the guardrail but means the case never sees a cold image. A hop on
   a message whose image is not already in cache costs more than this says.
+
+### Engine hardening — post-migration cleanup
+
+Findings from the final review of the sip-message engine, one group per commit.
+Everything here is inside `sip-message`; no consumer semantics change except
+where stated.
+
+**1. `retarget` no longer carries parameters onto a kind that has none.**
+`NameAddrHeader::retarget::<J>()` accepted any `NameAddrKind`, so
+`msg.to().retarget::<kind::PAssertedIdentity>()` produced a PAI still carrying
+`;tag=…` — a value RFC 3325 §9.1's bare `name-addr / addr-spec` has nowhere to
+render and no reader accepts. The kind axis now states both sides: `NoParams`
+joins `RichParams` as a marker trait (P-Asserted-Identity and
+P-Preferred-Identity implement it; together the two cover every
+`NameAddrKind`), `retarget` is bounded on `RichParams`, and `retarget_bare` is
+the conversion towards a `NoParams` kind — it drops the parameters, because
+carrying them would be the defect. The back door is closed at compile time:
+there is no conversion that puts a tag on a P-header. Pinned by
+`a_tag_cannot_ride_onto_a_header_whose_grammar_has_no_parameters`.
+`NameAddr::without_params` is the address-level primitive it uses.
+
+**2. `NumericHeader` is bounded by its kind's registry entry.**
+`MaxForwards::new(1000)` used to freeze into a request our own header-block
+parser (`numeric_header_rule`, gate 255) rejects — the stack could build a
+message it would not accept. `NumericKind` now carries `MIN`/`MAX`, stated once
+per header with the RFC that fixes it: Max-Forwards `0..=255` (§20.22, the same
+number the parser gates), Content-Length `0..=2^31-1` (§20.14, CSeq's ceiling),
+Expires / Min-Expires / Min-SE `0..=2^32-1` (`delta-seconds`), RSeq
+`1..=2^31-1` (RFC 3262 §7.1 — zero is not a sequence number). Enforcement is on
+every path into the type: `parse` refuses out of range, `new` clamps to the
+nearest legal value (a count computed from configuration or a body length
+cannot promise the range, and the ceiling is the honest answer for one that
+overshoots), `checked` refuses for a peer-supplied number, `decremented` stops
+at `MIN` rather than at zero. `MaxForwards::DEFAULT` names RFC 3261 §8.1.1.6's
+70 once, and `emit::DEFAULT_MAX_FORWARDS` derives from it.
+
+Two deltas worth naming: RFC 4028's "Min-SE MUST NOT be less than 90" is a
+session policy rather than a grammar bound, so it is NOT gated (gating it would
+make a peer's `Min-SE: 60` unreadable instead of refusable); and
+`rfc3262_peer::Reliable1xxHeadersRule` keeps flagging `RSeq: 0` — it reads
+through `value_of::<RSeq>`, which now yields `None` on the range error and
+lands on the same finding.
+
+**Suspicions raised, not fixed:**
+- **`MinSe` parse and the parser's numeric gate disagree about a param tail.**
+  `numeric_header_rule` allows `Min-SE: 90;refresher=uac` (RFC 4028) through the
+  header-block gate, but `NumericHeader::parse` reads the whole value as digits
+  and rejects it. Nothing reads `header::<MinSe>()` today, so it is latent; the
+  fix is either a `TokenParamsHeader` shape for Min-SE (as Session-Expires
+  already has) or a digits-prefix read.
+- The audit's `RSEQ_MAX` (`rfc3262_peer.rs`) and the parser's `INT_32_MAX` /
+  `255` registry are now a third and fourth statement of bounds the kind axis
+  states. `numeric_header_rule` could be a query against `NumericKind::MAX`;
+  it is not, because the gate is keyed on `HeaderName` at scan time and the
+  kinds are types.

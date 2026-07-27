@@ -165,8 +165,12 @@ fn token_parameter_headers_are_a_render_parse_fixpoint() {
 
 #[test]
 fn numeric_headers_are_a_render_parse_fixpoint() {
-    let inputs = owned(&["0", "1", "70", " 12 ", "4294967295", "seventy", "", "99999999999"]);
-    assert_fixpoint::<NumericHeader<header::kind::MaxForwards>>("Max-Forwards", &inputs, 5);
+    // A value outside the kind's range is rejected, so each target drives the
+    // inputs its own registry entry admits.
+    let hops = owned(&["0", "1", "70", " 12 ", "255", "256", "seventy", "", "99999999999"]);
+    assert_fixpoint::<NumericHeader<header::kind::MaxForwards>>("Max-Forwards", &hops, 5);
+    let seconds = owned(&["0", "1", "3600", " 12 ", "4294967295", "seventy", "", "99999999999"]);
+    assert_fixpoint::<NumericHeader<header::kind::Expires>>("Expires", &seconds, 5);
 }
 
 #[test]

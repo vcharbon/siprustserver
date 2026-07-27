@@ -12,6 +12,9 @@
 use super::name::HeaderName;
 use super::value::Folding;
 
+/// `2^31 - 1` — the ceiling RFC 3261 puts on the 32-bit signed counters.
+const INT_32_MAX: u32 = i32::MAX as u32;
+
 /// A header's compile-time identity.
 pub trait HeaderKind: std::fmt::Debug + Clone + Copy + Send + Sync + 'static {
     fn name() -> HeaderName;
@@ -27,6 +30,12 @@ pub trait NameAddrKind: HeaderKind {}
 /// bare `name-addr / addr-spec`.
 pub trait RichParams: NameAddrKind {}
 
+/// A name-addr header whose grammar has NO header parameters — the RFC 3325
+/// P-headers, whose value is a bare `name-addr / addr-spec`. Together with
+/// [`RichParams`] this covers every [`NameAddrKind`], so a conversion between
+/// kinds must state which side of the axis it lands on.
+pub trait NoParams: NameAddrKind {}
+
 /// A name-addr header carrying a dialog tag — From and To, and nothing else.
 pub trait TaggedKind: RichParams {}
 
@@ -36,8 +45,15 @@ pub trait TokenKind: HeaderKind {}
 /// A header whose value is a leading token followed by `;`-parameters.
 pub trait TokenParamsKind: HeaderKind {}
 
-/// A header whose value is a single number.
-pub trait NumericKind: HeaderKind {}
+/// A header whose value is a single number, bounded by the range its own
+/// registry entry states. The bounds are the same ones the header-block parser
+/// gates on, so a value this stack builds is one it would also accept.
+pub trait NumericKind: HeaderKind {
+    /// The smallest value the grammar admits.
+    const MIN: u32 = 0;
+    /// The largest value the grammar admits.
+    const MAX: u32 = u32::MAX;
+}
 
 /// A header whose value is an authentication scheme plus comma-separated
 /// parameters.
@@ -61,6 +77,20 @@ macro_rules! kinds {
 macro_rules! capability {
     ($trait_name:ident : $($marker:ident),+ $(,)?) => {
         $(impl $trait_name for $marker {})+
+    };
+}
+
+/// The numeric registry: one closed range per header, cited to the RFC that
+/// states it.
+macro_rules! numeric_kinds {
+    ($($(#[$doc:meta])* $marker:ident => $min:expr, $max:expr;)+) => {
+        $(
+            $(#[$doc])*
+            impl NumericKind for $marker {
+                const MIN: u32 = $min;
+                const MAX: u32 = $max;
+            }
+        )+
     };
 }
 
@@ -119,6 +149,8 @@ capability! { RichParams:
     Diversion, HistoryInfo, RemotePartyId,
 }
 
+capability! { NoParams: PAssertedIdentity, PPreferredIdentity }
+
 capability! { TaggedKind: From, To }
 
 capability! { TokenKind: Require, ProxyRequire, Supported, Unsupported, Allow, AllowEvents }
@@ -127,7 +159,22 @@ capability! { TokenParamsKind:
     Event, SubscriptionState, ContentType, ContentDisposition, SessionExpires, RetryAfter, Reason,
 }
 
-capability! { NumericKind: MaxForwards, ContentLength, Expires, MinExpires, MinSe, RSeq }
+numeric_kinds! {
+    /// RFC 3261 §20.22 — a hop count; 255 is the ceiling the header-block
+    /// parser gates on and the largest value any hop can honour.
+    MaxForwards => 0, 255;
+    /// RFC 3261 §20.14 — a body length, gated at `2^31 - 1` like CSeq.
+    ContentLength => 0, INT_32_MAX;
+    /// RFC 3261 §20.19 — `delta-seconds`, a 32-bit count of seconds.
+    Expires => 0, u32::MAX;
+    /// RFC 3261 §20.23 — `delta-seconds`.
+    MinExpires => 0, u32::MAX;
+    /// RFC 4028 §5 — `delta-seconds`. The 90-second floor that section states
+    /// is a session policy, not a grammar bound, so it is not gated here.
+    MinSe => 0, u32::MAX;
+    /// RFC 3262 §7.1 — `1` to `2^31 - 1`; zero is not a sequence number.
+    RSeq => 1, INT_32_MAX;
+}
 
 capability! { CredentialsKind:
     Authorization, ProxyAuthorization, WwwAuthenticate, ProxyAuthenticate,

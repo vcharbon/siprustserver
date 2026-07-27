@@ -4,12 +4,14 @@
 use bytes::Bytes;
 
 use crate::draft::{Draft, RequestDraft, ResponseDraft, StartKind};
-use crate::header::{ContentLength, HeaderName, HeaderValue, MediaType, Uri};
+use crate::header::{ContentLength, HeaderName, HeaderValue, MaxForwards, MediaType, Uri};
 use crate::sip_str::SipStr;
 use crate::types::{SipHeader, SipRequest, SipResponse};
 
-/// The hop budget a stack-originated request starts with (RFC 3261 §8.1.1.6).
-pub(super) const DEFAULT_MAX_FORWARDS: u32 = 70;
+/// The hop budget a stack-originated request starts with (RFC 3261 §8.1.1.6),
+/// as a number — the recipes that state it as a header push
+/// [`MaxForwards::DEFAULT`].
+pub(super) const DEFAULT_MAX_FORWARDS: u32 = MaxForwards::DEFAULT.value();
 
 /// The media type a body carries when the caller names none.
 const DEFAULT_CONTENT_TYPE: &str = "application/sdp";

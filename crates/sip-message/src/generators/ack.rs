@@ -59,7 +59,7 @@ pub fn generate_ack_for_2xx(
 
     let draft = RequestDraft::new(Method::Ack, uri)
         .push(hop)
-        .push(MaxForwards::new(emit::DEFAULT_MAX_FORWARDS));
+        .push(MaxForwards::DEFAULT);
     let draft = with_dialog_identity(draft, dialog).push(CSeq::new(invite_cseq, Method::Ack));
     let draft = emit::extra_headers(with_routes(draft, &routes), &opts.extra_headers);
 
@@ -86,7 +86,7 @@ pub fn generate_ack_for_non_2xx(
 
     let mut draft = RequestDraft::new(Method::Ack, original_invite.request_uri().clone())
         .push_raw(HeaderName::Via, via)
-        .push(MaxForwards::new(emit::DEFAULT_MAX_FORWARDS))
+        .push(MaxForwards::DEFAULT)
         .push_raw(HeaderName::From, echoed(HeaderName::From))
         .push_raw(HeaderName::To, echoed(HeaderName::To))
         .push_raw(HeaderName::CallId, echoed(HeaderName::CallId))

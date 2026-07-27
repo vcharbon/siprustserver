@@ -11,7 +11,7 @@ use std::marker::PhantomData;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
-use super::kind::{NameAddrKind, RichParams, TaggedKind};
+use super::kind::{NameAddrKind, NoParams, RichParams, TaggedKind};
 use super::name::HeaderName;
 use super::name_addr::NameAddr;
 use super::params::{ParamValue, Params};
@@ -65,11 +65,23 @@ impl<K: NameAddrKind> NameAddrHeader<K> {
         Self::new(self.addr.without_display())
     }
 
-    /// Re-interpret this address under another kind — the one conversion the
-    /// dialog rules need (a To becomes the next request's From, a Contact
-    /// becomes a Route entry).
-    pub fn retarget<J: NameAddrKind>(self) -> NameAddrHeader<J> {
+    /// Re-interpret this address under another kind that also carries header
+    /// parameters — the conversion the dialog rules need (a To becomes the next
+    /// request's From, a Record-Route entry becomes a Route entry). The
+    /// parameters ride along because both grammars have somewhere to render
+    /// them; a kind whose grammar has none takes
+    /// [`retarget_bare`](Self::retarget_bare).
+    pub fn retarget<J: RichParams>(self) -> NameAddrHeader<J> {
         NameAddrHeader::new(self.addr)
+    }
+
+    /// Re-interpret this address under a kind whose grammar has no header
+    /// parameters (RFC 3325 P-Asserted-Identity / P-Preferred-Identity: bare
+    /// `name-addr / addr-spec`). The address is carried over and the parameters
+    /// are dropped — a dialog tag rendered on a P-header is a value no reader
+    /// accepts, and there is nowhere on the wire to put one.
+    pub fn retarget_bare<J: NoParams>(self) -> NameAddrHeader<J> {
+        NameAddrHeader::new(self.addr.without_params())
     }
 }
 
@@ -139,7 +151,7 @@ impl<K: NameAddrKind> std::fmt::Display for NameAddrHeader<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::header::{Contact, To};
+    use crate::header::{Contact, PAssertedIdentity, RouteEntry, To};
 
     #[test]
     fn the_tag_api_reads_and_rewrites_in_place() {
@@ -157,6 +169,18 @@ mod tests {
         assert_eq!(c.uri().host_port(), ("1.2.3.4", 5070));
         assert_eq!(c.param("q").and_then(ParamValue::as_str), Some("0.5"));
         assert_eq!(c.param("EXPIRES").and_then(ParamValue::as_str), Some("300"));
+    }
+
+    #[test]
+    fn a_tag_cannot_ride_onto_a_header_whose_grammar_has_no_parameters() {
+        let to = To::parse(&SipStr::owned("<sip:bob@biloxi.com>;tag=a6c85cf")).unwrap();
+        // The only conversion the compiler offers towards a P-header drops the
+        // parameters; `retarget` does not accept a `NoParams` target at all.
+        let pai: PAssertedIdentity = to.clone().retarget_bare();
+        assert_eq!(pai.to_string(), "<sip:bob@biloxi.com>");
+        // A kind that does have parameters keeps them.
+        let route: RouteEntry = to.retarget();
+        assert_eq!(route.param("tag").and_then(ParamValue::as_str), Some("a6c85cf"));
     }
 
     #[test]

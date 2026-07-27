@@ -130,7 +130,7 @@ pub fn generate_in_dialog_request(
 
     let mut draft = RequestDraft::new(verb.clone(), uri)
         .push(hop)
-        .push(MaxForwards::new(emit::DEFAULT_MAX_FORWARDS));
+        .push(MaxForwards::DEFAULT);
     draft = with_dialog_identity(draft, dialog).push(CSeq::new(next_cseq, verb));
 
     // Contact for every in-dialog method EXCEPT BYE (RFC 3261 §15.1).
