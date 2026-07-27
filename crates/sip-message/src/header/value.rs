@@ -17,12 +17,17 @@ use super::wire::Wire;
 pub enum Folding {
     /// At most one value per message (From, To, CSeq, Call-ID, Max-Forwards).
     Single,
-    /// Several values, which may share one line comma-separated (Via, Route,
-    /// Contact, P-Asserted-Identity).
+    /// Several values, which may share one line comma-separated — RFC 3261
+    /// §7.3.1 (Via, Route, Contact, P-Asserted-Identity).
     Comma,
-    /// Several values, one per line — a comma inside a line is data, never a
-    /// separator (the credentials family, RFC 3261 §20.7).
-    LinePerValue,
+    /// One value per line, and a comma inside a line is DATA: the credentials
+    /// family (RFC 3261 §20.7) carries its parameters comma-separated inside a
+    /// single value, so splitting a line tears one value in half.
+    Opaque,
+    /// One value per line, and the value is itself the comma-separated token
+    /// set the value type parses (Require, Supported, Allow): a line reads as
+    /// one set rather than as several values, and several lines union into one.
+    SetPerLine,
 }
 
 /// A structured header value.
@@ -58,7 +63,7 @@ pub trait HeaderValue: Sized + Clone + std::fmt::Debug + Send + Sync + 'static {
                 }
                 Ok(values)
             }
-            Folding::Single | Folding::LinePerValue => Ok(vec![Self::parse(raw)?]),
+            Folding::Single | Folding::Opaque | Folding::SetPerLine => Ok(vec![Self::parse(raw)?]),
         }
     }
 

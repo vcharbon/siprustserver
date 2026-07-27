@@ -2,7 +2,9 @@
 //!
 //! The value is the option-tag *set*, so a reader asks `contains("100rel")`
 //! instead of splitting a string; several lines of the same header union into
-//! one set, which is the semantics RFC 3261 §7.3.1 gives them.
+//! one set, which is the semantics RFC 3261 §7.3.1 gives them. The family is
+//! declared [`Folding::SetPerLine`]: the commas on a line belong to this
+//! grammar, which reads them into one set, not to the line-splitting rule.
 
 use std::marker::PhantomData;
 

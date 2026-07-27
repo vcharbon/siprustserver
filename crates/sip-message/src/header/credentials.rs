@@ -2,8 +2,8 @@
 //! WWW-Authenticate and their proxy twins).
 //!
 //! Its parameters are comma-separated *inside one value*, so this header is
-//! declared [`Folding::LinePerValue`]: a comma-splitting reader can never tear
-//! a challenge in half.
+//! declared [`Folding::Opaque`]: a comma-splitting reader can never tear a
+//! challenge in half.
 
 use std::marker::PhantomData;
 
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn the_family_never_comma_splits() {
-        assert_eq!(Authorization::folding(), Folding::LinePerValue);
+        assert_eq!(Authorization::folding(), Folding::Opaque);
         let raw = SipStr::owned(r#"Digest realm="a", nonce="b""#);
         assert_eq!(Authorization::parse_line(&raw).unwrap().len(), 1);
     }

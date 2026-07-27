@@ -1518,3 +1518,30 @@ lands on the same finding.
   states. `numeric_header_rule` could be a query against `NumericKind::MAX`;
   it is not, because the gate is keyed on `HeaderName` at scan time and the
   kinds are types.
+
+**3. `push_raw` is documented as what it is: the verbatim seam.** Its doc called
+itself a test-lane escape hatch, while every generator recipe lowers its
+stringly options onto it and every verbatim echo (the CANCEL's Via, the non-2xx
+ACK, the relayed response) rides it in production. It now states the contract —
+a value carried verbatim, not parsed, not validated, memcpy'd at freeze — and
+names what still gates it (`freeze` reads the mandatory headers and the ones the
+typed core comes from, so a raw line in one of those fails). The test-lane claim
+moved to `render_unchecked` alone, which is the reviewable grep target it always
+was.
+
+**4. `Folding::LinePerValue` split into `Opaque` and `SetPerLine`.** One variant
+carried two different facts: the credentials family (RFC 3261 §20.7) keeps
+commas *inside* one value, while Require/Supported/Allow are comma-separated
+token sets that `TokenListHeader::parse` reads into one set. The doc stated only
+the first, so it was false for six of the ten kinds that used it. `Opaque` is
+"a comma on this line is data"; `SetPerLine` is "the commas are this value
+grammar's, and several lines union". `parse_line` treats them alike — one line,
+one value — which is precisely why the distinction had to be in the name rather
+than in a branch.
+
+**5. `Wire::bytes` deleted.** Zero callers, and it silently dropped a whole
+non-ASCII slice — a renderer that quietly emits nothing is the worst available
+failure. `Wire::byte` keeps the drop (it is what protects `as_str`'s UTF-8
+invariant) but now `debug_assert`s first and documents the property that makes
+the arm unreachable: every call site writes an ASCII grammar literal (`;`, `=`,
+`<`, space).

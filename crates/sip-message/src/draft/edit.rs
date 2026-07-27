@@ -141,9 +141,17 @@ impl<S: StartKind> Draft<S> {
         self
     }
 
-    /// Append a line whose value is NOT parsed or validated — the escape hatch
-    /// for an extension header and for the test lanes that need a deliberately
-    /// malformed value.
+    /// Append a line whose value is carried verbatim: not parsed, not
+    /// validated, memcpy'd at freeze exactly as it was given. This is how a
+    /// value the model has no type for reaches the wire — an extension header,
+    /// a line echoed octet for octet from the message being answered or
+    /// relayed, an option a caller states as text — and it is the seam every
+    /// generator recipe lowers such a value onto.
+    ///
+    /// `freeze` still gates the mandatory headers and reads the ones the typed
+    /// core comes from, so a raw line in one of those fails the freeze; a value
+    /// that must go out invalid leaves through
+    /// [`render_unchecked`](Self::render_unchecked).
     pub fn push_raw(mut self, name: HeaderName, value: impl Into<SipStr>) -> Self {
         self.entries.push(Entry::raw(name, value));
         self
@@ -330,6 +338,10 @@ impl<S: StartKind> Draft<S> {
     /// header check, no Content-Length correction, no typed message produced.
     /// Invalidity can leave the stack this way and no other, which is what
     /// keeps "a typed message is always valid" true.
+    ///
+    /// SUT paths freeze; this is the test lanes' seam — the peer-side
+    /// `allow_violation` scenarios, the RFC-compliance invalid corpus, the
+    /// deviation fixtures — and the reviewable grep target that says so.
     pub fn render_unchecked(self) -> Bytes {
         Bytes::from(render::<S>(&self.start, &self.entries, &self.body).bytes)
     }

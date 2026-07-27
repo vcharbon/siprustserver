@@ -111,12 +111,12 @@ kinds! {
     PAssertedIdentity => PAssertedIdentity, Comma;
     PPreferredIdentity => PPreferredIdentity, Comma;
 
-    Require => Require, LinePerValue;
-    ProxyRequire => ProxyRequire, LinePerValue;
-    Supported => Supported, LinePerValue;
-    Unsupported => Unsupported, LinePerValue;
-    Allow => Allow, LinePerValue;
-    AllowEvents => AllowEvents, LinePerValue;
+    Require => Require, SetPerLine;
+    ProxyRequire => ProxyRequire, SetPerLine;
+    Supported => Supported, SetPerLine;
+    Unsupported => Unsupported, SetPerLine;
+    Allow => Allow, SetPerLine;
+    AllowEvents => AllowEvents, SetPerLine;
 
     Event => Event, Single;
     SubscriptionState => SubscriptionState, Single;
@@ -133,10 +133,10 @@ kinds! {
     MinSe => MinSe, Single;
     RSeq => RSeq, Single;
 
-    Authorization => Authorization, LinePerValue;
-    ProxyAuthorization => ProxyAuthorization, LinePerValue;
-    WwwAuthenticate => WwwAuthenticate, LinePerValue;
-    ProxyAuthenticate => ProxyAuthenticate, LinePerValue;
+    Authorization => Authorization, Opaque;
+    ProxyAuthorization => ProxyAuthorization, Opaque;
+    WwwAuthenticate => WwwAuthenticate, Opaque;
+    ProxyAuthenticate => ProxyAuthenticate, Opaque;
 }
 
 capability! { NameAddrKind:

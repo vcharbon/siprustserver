@@ -26,17 +26,15 @@ impl Wire {
         self.buf.extend_from_slice(s.as_bytes());
     }
 
-    /// Append one ASCII byte. Non-ASCII input would break the UTF-8 invariant,
-    /// so it is dropped rather than written.
+    /// Append one grammar literal — a separator such as `;`, `=`, `<` or a
+    /// space. Every call site writes an ASCII literal, so non-ASCII is
+    /// unreachable by construction; it is asserted in debug and dropped in
+    /// release rather than breaking the UTF-8 invariant [`as_str`](Self::as_str)
+    /// relies on.
     pub fn byte(&mut self, b: u8) {
+        debug_assert!(b.is_ascii(), "Wire::byte takes ASCII grammar literals, got {b:#04x}");
         if b.is_ascii() {
             self.buf.push(b);
-        }
-    }
-
-    pub fn bytes(&mut self, b: &[u8]) {
-        if b.is_ascii() {
-            self.buf.extend_from_slice(b);
         }
     }
 
