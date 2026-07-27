@@ -23,6 +23,7 @@ fn reject_drift_plan(
                         Barrier::None,
                         GoalStep::ExpectResponse {
                             status: 486,
+                            cseq_method: None,
                             body: BodyExpect::Any,
                             early: None,
                             ack_body: None,
@@ -42,6 +43,7 @@ fn reject_drift_plan(
                 feed: CtxFeed::default(),
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![],

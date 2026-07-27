@@ -32,6 +32,7 @@ fn cancel_crossing_plan(
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             ActorSpec {
                 role: "bob",
@@ -55,6 +56,7 @@ fn cancel_crossing_plan(
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![],
@@ -155,6 +157,7 @@ async fn ring_then_silent_487s_on_cancel_and_settles() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             ActorSpec {
                 role: "bob",
@@ -168,6 +171,7 @@ async fn ring_then_silent_487s_on_cancel_and_settles() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![phase("ringing", ringing)],

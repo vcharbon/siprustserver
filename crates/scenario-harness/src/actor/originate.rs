@@ -121,6 +121,11 @@ pub(super) async fn originate_initial_invite(
         st.expected_provisional = 183;
     }
     let call = builder.send().await;
+    // Bind the new dialog to this actor at its shared endpoint, in the same poll
+    // as the send — before the actor yields, so no response can precede it.
+    if let Some(ep) = &st.endpoint {
+        ep.own_dialog(call.call_id());
+    }
     st.scope.set_early(call.cancel_handle());
     st.dialogs.pending_invite = Some(call);
     // The caller APPEARS the moment she originates — so `all_terminated`

@@ -17,6 +17,7 @@ fn bye_expecting_cancel_plan(
     use sip_message::generators::InDialogMethod;
     let expect_resp = |status: u16| GoalStep::ExpectResponse {
         status,
+        cseq_method: None,
         body: BodyExpect::Any,
         early: None,
         ack_body: None,
@@ -283,6 +284,7 @@ async fn forked_early_dialogs_decline_bye_for_cancel() {
 
     let expect_resp = |status: u16| GoalStep::ExpectResponse {
         status,
+        cseq_method: None,
         body: BodyExpect::Any,
         early: None,
         ack_body: None,

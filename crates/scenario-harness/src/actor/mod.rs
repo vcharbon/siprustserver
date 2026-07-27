@@ -21,11 +21,22 @@
 //! collapse the join). Everything is `Send`; both lanes use plain `tokio::time`
 //! (deliberately no settle-driver abstraction).
 //!
+//! # Endpoints may host SEVERAL actors ([`shared_endpoint`])
+//!
+//! Actors whose [`ActorSpec::agent`] is the same UA stack share one endpoint —
+//! a peer socket that both originates a call and receives one (an application
+//! server looping a call back to it). That endpoint gets ONE receive pump,
+//! joined with the actors here, which demultiplexes each inbound to its owner:
+//! by dialog identity, and for an initial INVITE by the actors'
+//! [`ActorSpec::claim`] rules. An actor that owns its endpoint outright pulls
+//! [`Agent::recv_any`](crate::Agent::recv_any) itself, unchanged.
+//!
 //! Module map: the declarative vocabulary is [`endpoint`] + [`goals`] +
 //! [`delta`]; the live loop is [`runner`] with its arms in [`react`] /
 //! [`response`] / [`answer`] / [`drive`] / [`originate`] / [`script`] /
-//! [`accept_delta`]; the verdict machinery is [`state`] + [`ledger`] +
-//! [`settle`]; scenario surfaces are [`spec`] + [`scenarios`].
+//! [`accept_delta`] and its inbound fan-out in [`shared_endpoint`]; the verdict
+//! machinery is [`state`] + [`ledger`] + [`settle`]; scenario surfaces are
+//! [`spec`] + [`scenarios`].
 
 mod accept_delta;
 mod answer;
@@ -41,6 +52,7 @@ mod runner;
 pub mod scenarios;
 mod script;
 mod settle;
+pub mod shared_endpoint;
 mod spec;
 mod state;
 
@@ -58,6 +70,7 @@ pub use endpoint::{
     SUBFLOW_RENEG, SUBFLOW_REFER,
 };
 pub use runner::{run_actor, ActorState};
+pub use shared_endpoint::{EndpointHandle, EndpointPump, Inbox};
 
 pub use delta::{
     AcceptedDelta, AcceptedDeltaPolicy, DeltaContext, DeltaDecision, DeltaReaction, DialogSnapshot,
@@ -221,9 +234,13 @@ pub async fn run_call_with(
     let mut scopes = Vec::with_capacity(call.actors.len());
     let mut states = Vec::with_capacity(call.actors.len());
     let automatics = call.automatics;
+    // Actors sharing ONE UA stack get ONE receive pump that demultiplexes to
+    // them; an actor that owns its endpoint keeps pulling `recv_any` itself.
+    let (pumps, mut seats) = shared_endpoint::wire_shared_endpoints(&call.actors, &obs);
     for spec in call.actors {
         let scope = Arc::new(CallScope::new());
-        states.push(ActorState::from_spec(
+        let seat = seats.remove(spec.role);
+        let mut state = ActorState::from_spec(
             spec,
             obs.clone(),
             scope.clone(),
@@ -232,7 +249,11 @@ pub async fn run_call_with(
             challenge_responder.clone(),
             automatics,
             call.delta_policy.clone(),
-        ));
+        );
+        if let Some((inbox, handle)) = seat {
+            state = state.on_shared_endpoint(inbox, handle);
+        }
+        states.push(state);
         scopes.push(scope);
     }
 
@@ -244,7 +265,14 @@ pub async fn run_call_with(
     };
 
     let drive = async {
-        let actors: FuturesUnordered<_> = states.into_iter().map(run_actor).collect();
+        // The pumps are joined with the actors: one task, one `select!` — a pump
+        // is as reactive as the actors it feeds, and a fatal receive surfaces
+        // through the same arm an actor's would.
+        let actors: FuturesUnordered<futures::future::BoxFuture<'_, Result<(), StepError>>> =
+            states.into_iter().map(|s| run_actor(s).boxed()).collect();
+        for pump in pumps {
+            actors.push(pump.run().boxed());
+        }
         tokio::select! {
             v = controller.drive_to_verdict() => v,
             e = drive_actors(actors) => CallVerdict::Failed(e),

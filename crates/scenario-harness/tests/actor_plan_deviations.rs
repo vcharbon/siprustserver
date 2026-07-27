@@ -65,6 +65,7 @@ fn caller(role: &'static str, agent: &Agent, callee: (&'static str, Agent), goal
         feed: CtxFeed::default(),
         cseq: None,
         delayed: None,
+        claim: None,
     }
 }
 
@@ -80,6 +81,7 @@ fn answering(role: &'static str, agent: &Agent, disposition: Disposition, goals:
         feed: CtxFeed::default(),
         cseq: None,
         delayed: None,
+        claim: None,
     }
 }
 

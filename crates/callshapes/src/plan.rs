@@ -374,6 +374,7 @@ impl ShapePlan {
 
             cseq: None,
             delayed: None,
+            claim: None,
         }];
         actors.extend(b.callees);
 
@@ -427,6 +428,7 @@ impl ShapePlan {
 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 });
                 let est = established_pred("bob");
                 b.phases.push(phase("established", est.clone()));
@@ -495,6 +497,7 @@ impl ShapePlan {
 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 });
                 b.callees.push(ActorSpec {
                     role: "bob2",
@@ -520,6 +523,7 @@ impl ShapePlan {
 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 });
                 b.winner = "bob2";
                 let est = established_pred("bob2");
@@ -562,6 +566,7 @@ impl ShapePlan {
 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 });
                 let est = established_pred("bob");
                 b.phases.push(phase("established", est.clone()));
@@ -585,6 +590,7 @@ impl ShapePlan {
 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 });
                 b.phases
                     .push(phase("rejected", |s| s.leg_at_least("bob", LegPhase::Terminated)));
@@ -611,6 +617,7 @@ impl ShapePlan {
 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 });
                 b.phases.push(phase("ringing", ringing));
                 b.expect = Expect::AbandonedEarly;
@@ -656,6 +663,7 @@ impl ShapePlan {
 
                     cseq: None,
                     delayed: None,
+                    claim: None,
                 });
                 b.phases.push(phase("ringing", ringing));
                 b.expect = Expect::EitherOf(E5_BRANCHES);
@@ -785,6 +793,7 @@ impl ShapePlan {
 
             cseq: None,
             delayed: None,
+            claim: None,
         });
 
         // The caller answers the post-transfer realign re-INVITE reactively

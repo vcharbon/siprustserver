@@ -520,7 +520,8 @@ async fn drive_generic(
             let r = tx.expect(200).await;
             obs.resp(Who::Alice, 200, &resp_cseq(&r));
             if method == InDialogMethod::Invite {
-                dialog.ack(Some(ANSWER)).await;
+                // The re-INVITE carried the offer, the 200 the answer — bodyless ACK.
+                dialog.ack(None).await;
                 let a = bob.receive("ACK").await;
                 let (f, t) = req_tags(a.request());
                 obs.req(Who::Bob, "ACK", &req_cseq(a.request()), &f, &t);
@@ -542,7 +543,8 @@ async fn drive_generic(
             let r = tx.expect(200).await;
             obs.resp(Who::Bob, 200, &resp_cseq(&r));
             if method == InDialogMethod::Invite {
-                bob_dialog.ack(Some(ANSWER)).await;
+                // The re-INVITE carried the offer, the 200 the answer — bodyless ACK.
+                bob_dialog.ack(None).await;
                 let a = alice.receive("ACK").await;
                 let (f, t) = req_tags(a.request());
                 obs.req(Who::Alice, "ACK", &req_cseq(a.request()), &f, &t);

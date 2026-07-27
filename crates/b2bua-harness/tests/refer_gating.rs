@@ -122,7 +122,8 @@ async fn refer_gating_a_reinvite_refer_authorizing() {
     );
     bob_reinvite.respond(200, "OK").with_sdp(AREINVITE_ANSWER).await;
     a_reinvite.expect(200).await;
-    alice_dialog.ack(Some(AREINVITE_ANSWER)).await;
+    // A's re-INVITE carried the offer, the 200 the answer — bodyless ACK.
+    alice_dialog.ack(None).await;
     bob.receive("ACK").await;
 
     // Advance toward the 60s subscription-expiry. The 30s keepalive cycle fires
@@ -201,7 +202,8 @@ async fn refer_gating_a_reinvite_c_ringing() {
     );
     bob_reinvite.respond(200, "OK").with_sdp(AREINVITE_ANSWER).await;
     a_reinvite.expect(200).await;
-    alice_dialog.ack(Some(AREINVITE_ANSWER)).await;
+    // A's re-INVITE carried the offer, the 200 the answer — bodyless ACK.
+    alice_dialog.ack(None).await;
     bob.receive("ACK").await;
 
     // C rejects 486 → NOTIFY 486 terminated → transfer cleared, A↔B alive.

@@ -22,9 +22,9 @@
 
 use std::sync::Arc;
 
-use sip_message::header::{NameAddr, Uri};
+use sip_message::header::{HeaderValue, NameAddr, To, Uri};
 use sip_message::sip_str::SipStr;
-use sip_message::sniff;
+use sip_message::{sniff, Method};
 
 /// A read-only view of an inbound datagram handed to a [`LegPicker`]. It exists
 /// purely so a scenario can disambiguate which of its receivers should own a new
@@ -66,6 +66,19 @@ impl<'a> LegInfo<'a> {
         let uri = Uri::parse(&SipStr::owned(&ruri)).ok()?;
         uri.user().filter(|user| !user.is_empty()).map(str::to_string)
     }
+    /// Whether this leg is a dialog-CREATING (out-of-dialog) INVITE — method
+    /// INVITE with a tag-less To (RFC 3261 §12.1). The test every dispatcher
+    /// applies before assigning a new leg to a receiver.
+    pub fn is_initial_invite(&self) -> bool {
+        let is_invite = self.method().is_some_and(|m| Method::from_wire(&m) == Method::Invite);
+        let tagged = self
+            .header("to")
+            .or_else(|| self.header("t"))
+            .and_then(|to| To::parse(&SipStr::owned(&to)).ok())
+            .is_some_and(|to| to.tag().is_some());
+        is_invite && !tagged
+    }
+
     /// The To header user-part.
     pub fn to_user(&self) -> Option<String> {
         let to = self.header("to").or_else(|| self.header("t"))?;

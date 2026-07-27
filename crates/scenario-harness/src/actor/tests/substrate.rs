@@ -37,6 +37,7 @@ async fn two_actor_toy_call_reaches_torn_down() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             ActorSpec {
                 role: "bob",
@@ -52,6 +53,7 @@ async fn two_actor_toy_call_reaches_torn_down() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![phase("established", |s| {
@@ -105,6 +107,7 @@ async fn two_actor_crossing_bye_both_terminate() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             ActorSpec {
                 role: "bob",
@@ -119,6 +122,7 @@ async fn two_actor_crossing_bye_both_terminate() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![phase("established", |s| {

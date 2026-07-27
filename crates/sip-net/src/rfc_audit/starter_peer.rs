@@ -940,12 +940,14 @@ impl PeerAuditRule for CancelViaBranchRule {
     }
 }
 
-/// **RFC 3262 §7.2 — a PRACK's RAck CSeq MUST reference an outstanding reliable
-/// 1xx's request.** The RAck `CSeq method` component identifies the INVITE/
-/// re-INVITE whose reliable provisional is being acknowledged; if this bind
-/// never received a request of that method+CSeq, the PRACK matches no reliable
-/// transaction. Judged on **received** PRACKs against the INVITEs this bind
-/// received.
+/// **RFC 3262 §7.2 — a PRACK's RAck CSeq-num MUST reference an outstanding
+/// reliable 1xx's request.** `RAck: response-num CSeq-num method` — the
+/// CSeq-num and method are COPIED FROM the acknowledged 1xx's `CSeq`, naming
+/// the INVITE whose RSeq space `response-num` indexes; they are NOT the PRACK's
+/// own CSeq. A CSeq-num naming a request this bind never received matches no
+/// reliable transaction. Judged on **received** PRACKs against the INVITEs this
+/// bind received, so the finding names the RECEIVER's bind and the SENDER is at
+/// fault.
 pub struct RackCorrelationRule;
 
 impl PeerAuditRule for RackCorrelationRule {
@@ -974,6 +976,7 @@ impl PeerAuditRule for RackCorrelationRule {
             if ds.received_invite_cseqs.contains(&(rack.seq() as u32)) {
                 return Vec::new();
             }
+            let method = rack.method().as_str();
             let seen = if ds.received_invite_cseqs.is_empty() {
                 "none".to_string()
             } else {
@@ -983,11 +986,21 @@ impl PeerAuditRule for RackCorrelationRule {
                     .collect::<Vec<_>>()
                     .join(", ")
             };
+            // One received INVITE ⇒ the correct header is unambiguous: name it,
+            // so the reader repairs the sender instead of re-deriving the rule.
+            let expected = match ds.received_invite_cseqs.as_slice() {
+                [only] => format!(", expected \"RAck: {} {only} {method}\"", rack.rseq()),
+                _ => String::new(),
+            };
             vec![format!(
-                "RAck CSeq {} {} does not match any received INVITE CSeq [{seen}] — RFC 3262 §7.2 \
-                 (the PRACK acknowledges no outstanding reliable 1xx)",
+                "\"RAck: {} {} {method}\" — its CSeq-num field ({}) names no INVITE this bind \
+                 received (received INVITE CSeq: {seen}){expected} — RFC 3262 §7.2 (the RAck \
+                 CSeq-num+method are copied from the acknowledged 1xx's CSeq, NOT from the PRACK's \
+                 own CSeq; this PRACK matches no reliable provisional and settles nothing, so the \
+                 1xx keeps retransmitting)",
+                rack.rseq(),
                 rack.seq(),
-                rack.method().as_str(),
+                rack.seq(),
             )]
         })
     }
@@ -1839,6 +1852,44 @@ mod tests {
         let evs = vec![recv_at("a", inv, 0), recv_at("a", prack, 1)];
         let f = RackCorrelationRule.check(&evs, "a");
         assert_eq!(f.len(), 1, "{f:?}");
-        assert!(f[0].contains("does not match any received INVITE"), "{}", f[0]);
+        assert!(f[0].contains("names no INVITE this bind received"), "{}", f[0]);
+    }
+
+    /// The finding quotes the WHOLE RAck (a bare CSeq-num reads as the PRACK's
+    /// own CSeq) and, with one received INVITE, names the header the sender
+    /// should have emitted.
+    #[test]
+    fn rack_finding_quotes_the_header_and_names_the_expected_value() {
+        let inv = build_req(
+            "INVITE", "sip:bob@127.0.0.1:5070", "z9hG4bK-i", 1, "at", None, Some("70"),
+            Some("<sip:alice@127.0.0.1>"), "", None, "", "cid-rack",
+        );
+        let prack = prack_with_rack("12800221 101 INVITE", "cid-rack");
+        let evs = vec![recv_at("a", inv, 0), recv_at("a", prack, 1)];
+        let f = RackCorrelationRule.check(&evs, "a");
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].contains("\"RAck: 12800221 101 INVITE\""), "{}", f[0]);
+        assert!(f[0].contains("expected \"RAck: 12800221 1 INVITE\""), "{}", f[0]);
+        assert!(f[0].contains("NOT from the PRACK's"), "{}", f[0]);
+    }
+
+    /// Several received INVITEs (initial + re-INVITE) leave no single correct
+    /// value, so the finding lists what was received and offers no repair.
+    #[test]
+    fn rack_finding_offers_no_expected_value_when_ambiguous() {
+        let inv = build_req(
+            "INVITE", "sip:bob@127.0.0.1:5070", "z9hG4bK-i", 1, "at", None, Some("70"),
+            Some("<sip:alice@127.0.0.1>"), "", None, "", "cid-rack",
+        );
+        let reinv = build_req(
+            "INVITE", "sip:bob@127.0.0.1:5070", "z9hG4bK-i2", 5, "at", None, Some("70"),
+            Some("<sip:alice@127.0.0.1>"), "", None, "", "cid-rack",
+        );
+        let prack = prack_with_rack("1 101 INVITE", "cid-rack");
+        let evs = vec![recv_at("a", inv, 0), recv_at("a", reinv, 1), recv_at("a", prack, 2)];
+        let f = RackCorrelationRule.check(&evs, "a");
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].contains("received INVITE CSeq: 1, 5"), "{}", f[0]);
+        assert!(!f[0].contains("expected"), "{}", f[0]);
     }
 }

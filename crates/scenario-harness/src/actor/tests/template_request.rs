@@ -51,6 +51,7 @@ async fn request_template_reinvite_completes_renegotiation() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             ActorSpec {
                 role: "bob",
@@ -64,6 +65,7 @@ async fn request_template_reinvite_completes_renegotiation() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![established_phase()],
@@ -123,6 +125,7 @@ async fn request_template_bye_tears_down() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![established_phase()],
@@ -197,6 +200,7 @@ async fn request_template_early_update_rides_early_dialog() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             ActorSpec {
                 role: "bob",
@@ -210,6 +214,7 @@ async fn request_template_early_update_rides_early_dialog() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![phase("confirmed", |s| s.leg_at_least("alice", LegPhase::Confirmed))],
@@ -270,6 +275,7 @@ async fn request_template_reinvite_glare_491_hop_acks_and_retries() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             ActorSpec {
                 role: "bob",
@@ -283,6 +289,7 @@ async fn request_template_reinvite_glare_491_hop_acks_and_retries() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![

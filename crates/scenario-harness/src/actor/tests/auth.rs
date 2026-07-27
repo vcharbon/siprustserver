@@ -111,6 +111,7 @@ async fn actor_caller_retries_through_a_401_challenge() {
         
             cseq: None,
             delayed: None,
+            claim: None,
         }],
         plan: vec![phase("confirmed", alice_confirmed)],
         settle: SettleBarrier::default_ceiling(),
@@ -199,6 +200,7 @@ async fn actor_caller_without_responder_classifies_401_unchanged() {
         
             cseq: None,
             delayed: None,
+            claim: None,
         }],
         plan: vec![phase("confirmed", alice_confirmed)],
         settle: SettleBarrier::default_ceiling(),

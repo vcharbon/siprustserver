@@ -44,6 +44,7 @@ async fn reinvite_glare_491_both_ways_then_retry_resolves() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             ActorSpec {
                 role: "bob",
@@ -58,6 +59,7 @@ async fn reinvite_glare_491_both_ways_then_retry_resolves() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![
@@ -120,6 +122,7 @@ async fn update_vs_reinvite_collision_491_then_retry_resolves() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             ActorSpec {
                 role: "bob",
@@ -134,6 +137,7 @@ async fn update_vs_reinvite_collision_491_then_retry_resolves() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![
@@ -213,6 +217,7 @@ async fn early_update_on_the_reliable_early_dialog() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             ActorSpec {
                 role: "bob",
@@ -226,6 +231,7 @@ async fn early_update_on_the_reliable_early_dialog() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![phase("confirmed", |s| s.leg_at_least("alice", LegPhase::Confirmed))],
@@ -289,6 +295,7 @@ async fn actor_originates_in_dialog_info() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             ActorSpec {
                 role: "bob",
@@ -304,6 +311,7 @@ async fn actor_originates_in_dialog_info() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![phase("established", |s| {

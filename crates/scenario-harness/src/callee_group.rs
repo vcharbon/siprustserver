@@ -92,7 +92,7 @@ impl Router {
         }
         // Unknown dialog: only an out-of-dialog INVITE (no To-tag) mints a new
         // callee leg — pick by R-URI prefix and remember the ownership.
-        if is_out_of_dialog_invite(&leg) {
+        if leg.is_initial_invite() {
             let owner = (self.pick)(&leg)?;
             if let Some(cid) = cid {
                 self.call_owner.insert(cid, owner.clone());
@@ -339,17 +339,4 @@ impl<'h> CalleeGroupBuilder<'h> {
 
         CalleeGroup { agents, addr: self.addr }
     }
-}
-
-/// Whether `leg` is a dialog-creating (out-of-dialog) INVITE — method INVITE
-/// with a tag-less To (RFC 3261 §12.1: an initial INVITE's To carries no tag).
-fn is_out_of_dialog_invite(leg: &LegInfo) -> bool {
-    let is_invite =
-        leg.method().is_some_and(|m| sip_message::Method::from_wire(&m) == sip_message::Method::Invite);
-    let to = leg.header("to").or_else(|| leg.header("t")).unwrap_or_default();
-    let tagged = <sip_message::header::To as sip_message::header::HeaderValue>::parse(
-        &sip_message::sip_str::SipStr::owned(&to),
-    )
-    .is_ok_and(|to| to.tag().is_some());
-    is_invite && !tagged
 }

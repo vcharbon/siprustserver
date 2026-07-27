@@ -259,4 +259,10 @@ pub struct ActorSpec {
     /// A declared delayed automatic (ADR-0024 §6): hold this actor's originated
     /// INVITE's automatic ACK-to-2xx for a duration. `None` = fire immediately.
     pub delayed: Option<DelayedAutomatic>,
+    /// The rule by which an inbound INITIAL INVITE arriving on this actor's
+    /// endpoint is THIS actor's, when several actors share the endpoint (see
+    /// [`crate::actor::shared_endpoint`]). `None` = the actor claims no inbound
+    /// leg: it receives only the dialogs it originates. Ignored on an unshared
+    /// endpoint, where every inbound is the sole actor's.
+    pub claim: Option<crate::claim::ClaimRule>,
 }

@@ -55,8 +55,8 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
         GoalStep::Respond { status } => {
             drive_respond(st, status, None, None, "Respond").await?;
         }
-        GoalStep::ExpectResponse { status, body, early, ack_body: _, matcher } => {
-            expect_response(st, status, body, early, matcher.as_ref())?;
+        GoalStep::ExpectResponse { status, cseq_method, body, early, ack_body: _, matcher } => {
+            expect_response(st, status, cseq_method.as_deref(), body, early, matcher.as_ref())?;
         }
         GoalStep::ExpectRequest { kind, body, matcher } => {
             expect_request(st, &kind, body, matcher.as_ref())?;

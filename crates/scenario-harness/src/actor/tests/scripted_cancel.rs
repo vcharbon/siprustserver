@@ -98,6 +98,7 @@ async fn scripted_cancel_reception_487_rides_bound_invite() {
 
     let expect_resp = |status: u16, matcher: Option<MessageTemplate>| GoalStep::ExpectResponse {
         status,
+        cseq_method: None,
         body: BodyExpect::Any,
         early: None,
         ack_body: None,
@@ -277,6 +278,7 @@ async fn parked_cancel_waits_for_dwelling_cancel_expectation() {
                         Barrier::None,
                         GoalStep::ExpectResponse {
                             status: 180,
+                            cseq_method: None,
                             body: BodyExpect::Any,
                             early: None,
                             ack_body: None,

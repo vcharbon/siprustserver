@@ -129,6 +129,7 @@ impl ActorScenario for Refer {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             // Bob rings then answers, then — established + a realistic talk
             // dwell — REFERs the call to charlie. His REFER-progress NOTIFYs
@@ -152,6 +153,7 @@ impl ActorScenario for Refer {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             // Charlie answers the transfer INVITE (180 then an immediate 200,
             // the linear shape) and the c-realign re-INVITE reactively.
@@ -170,6 +172,7 @@ impl ActorScenario for Refer {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ];
 
@@ -279,6 +282,7 @@ impl ActorScenario for ReferCharlieReject {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             // Bob rings then answers, then REFERs the call to charlie; his
             // REFER-progress NOTIFYs (incl. the failure sipfrag) are answered
@@ -299,6 +303,7 @@ impl ActorScenario for ReferCharlieReject {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             // Charlie DECLINES the transfer INVITE with 603 (the contract's
             // TransferDeclined outcome).
@@ -314,6 +319,7 @@ impl ActorScenario for ReferCharlieReject {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ];
 
@@ -405,6 +411,7 @@ impl ActorScenario for ReroutingPrack {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             // The primary callee REJECTS its b-leg (486), triggering the SUT's
             // failover to bob2. Its reject-ACK is absorbed without confirming.
@@ -420,6 +427,7 @@ impl ActorScenario for ReroutingPrack {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             // The rerouted winning leg answers RELIABLY (183/PRACK/200/ACK).
             ActorSpec {
@@ -440,6 +448,7 @@ impl ActorScenario for ReroutingPrack {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ];
 
@@ -521,6 +530,7 @@ impl ActorScenario for PrackUpdate {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             // Bob answers RELIABLY (183/PRACK/200/ACK) and reacts to the UPDATE
             // (200 + SDP) reactively; his ACK receipt stamps `connected`.
@@ -539,6 +549,7 @@ impl ActorScenario for PrackUpdate {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ];
 
@@ -609,6 +620,7 @@ impl ActorScenario for Reinvite {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             // Bob rings then answers, then answers alice's re-INVITE (200 + SDP)
             // reactively; his ACK receipt stamps `connected`, and receiving the
@@ -628,6 +640,7 @@ impl ActorScenario for Reinvite {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ];
 
@@ -696,6 +709,7 @@ impl ActorScenario for OptionsHold {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             ActorSpec {
                 role: "bob",
@@ -712,6 +726,7 @@ impl ActorScenario for OptionsHold {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ];
 
@@ -782,6 +797,7 @@ impl ActorScenario for LongCall {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             ActorSpec {
                 role: "bob",
@@ -798,6 +814,7 @@ impl ActorScenario for LongCall {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ];
 
@@ -855,6 +872,7 @@ impl ActorScenario for InviteReject {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             // Bob rejects the initial INVITE with 486; its reject-ACK is absorbed
             // without confirming.
@@ -870,6 +888,7 @@ impl ActorScenario for InviteReject {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ];
 
@@ -935,6 +954,7 @@ impl ActorScenario for AbandonRinging {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             // Bob rings (180) then would answer — but the CANCEL arrives first, so
             // his CANCEL reactor 200s the CANCEL + 487s the held INVITE and reaps.
@@ -950,6 +970,7 @@ impl ActorScenario for AbandonRinging {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ];
 
@@ -1013,6 +1034,7 @@ impl ActorScenario for BasicCall {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             ActorSpec {
                 role: "bob",
@@ -1029,6 +1051,7 @@ impl ActorScenario for BasicCall {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ];
 

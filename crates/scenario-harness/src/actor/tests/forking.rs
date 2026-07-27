@@ -20,6 +20,7 @@ fn forking_bob_plan(bob: &crate::Agent, disposition: Disposition) -> CallPlan {
         
             cseq: None,
             delayed: None,
+            claim: None,
         }],
         plan: vec![phase("established", |s| s.leg_at_least("bob", LegPhase::Confirmed))],
         settle: SettleBarrier::default_ceiling(),
@@ -239,6 +240,7 @@ fn forked_pair_plan(
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             ActorSpec {
                 role: "bob",
@@ -252,6 +254,7 @@ fn forked_pair_plan(
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![phase("established", |s| {

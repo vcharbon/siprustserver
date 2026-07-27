@@ -107,6 +107,7 @@ async fn observe_final_records_divergence_and_acks_observed_2xx() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![established_phase()],
@@ -261,6 +262,7 @@ async fn reception_goal_suppresses_incidental_shed() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![],

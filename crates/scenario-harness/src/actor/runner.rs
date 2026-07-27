@@ -23,6 +23,7 @@ use super::answer::fire_timed_answer;
 use super::delta::AcceptedDeltaPolicy;
 use super::drive::drive_goal;
 use super::endpoint::{ActorSpec, Automatics, CtxFeed, Disposition, MediaState};
+use super::shared_endpoint::{EndpointHandle, Inbox};
 use super::goals::{GoalCursor, GoalStep};
 use super::ledger::ObligationKey;
 use super::originate::{originate_reinvite, originate_update, wait_reinvite_retry, wait_update_retry};
@@ -220,10 +221,11 @@ pub struct ActorState<'c> {
     /// consumption point of the reception goals.
     pub(super) resp_seen: usize,
     /// The ACK body resolved for each in-dialog INVITE 2xx we ACKed, keyed by
-    /// CSeq — the ACK to a RETRANSMITTED 2xx must be byte-identical
-    /// (RFC 3261 §13.2.2.4), so an `ack_body` override is resolved once and
-    /// re-emitted verbatim, never re-derived from the (advanced) goal cursor.
-    pub(super) reinvite_ack_bodies: HashMap<u32, String>,
+    /// CSeq (`None` = the bodyless ACK a complete offer/answer round takes) —
+    /// the ACK to a RETRANSMITTED 2xx must be byte-identical (RFC 3261
+    /// §13.2.2.4), so the decision is resolved once and re-emitted verbatim,
+    /// never re-derived from the (advanced) goal cursor or a dropped transaction.
+    pub(super) reinvite_ack_bodies: HashMap<u32, Option<String>>,
     /// The plan's lane-chosen stack automatics.
     pub(super) automatics: Automatics,
     /// This actor's ONE CSeq deviation counter (ADR-0024 §6): a shared handle
@@ -248,6 +250,13 @@ pub struct ActorState<'c> {
     /// tag) — the [`DialogSnapshot::early_dialog_count`] source. Read only
     /// while an initial-INVITE target is still pending.
     pub(super) early_provisionals: HashSet<String>,
+    /// Where this actor's inbound comes from: its own UA (the unshared default)
+    /// or the shared endpoint's pump. Taken by [`run_actor`] at entry.
+    inbox: Option<Inbox>,
+    /// This actor's registration on its SHARED endpoint — a dialog it
+    /// originates is bound to it here so the dialog's traffic comes back.
+    /// `None` on an unshared endpoint.
+    pub(super) endpoint: Option<EndpointHandle>,
 }
 
 impl<'c> ActorState<'c> {
@@ -323,7 +332,18 @@ impl<'c> ActorState<'c> {
             originates,
             delta_policy,
             early_provisionals: HashSet::new(),
+            inbox: None,
+            endpoint: None,
         }
+    }
+
+    /// Seat this actor at a SHARED endpoint: inbound arrives through the
+    /// endpoint's one pump, and every dialog this actor originates is bound to
+    /// it so the dialog's responses and in-dialog requests come back here.
+    pub(super) fn on_shared_endpoint(mut self, inbox: Inbox, handle: EndpointHandle) -> Self {
+        self.inbox = Some(inbox);
+        self.endpoint = Some(handle);
+        self
     }
 
     /// The SDP body to answer an INVITE/UPDATE with — this endpoint's answer (or
@@ -346,9 +366,12 @@ pub async fn run_actor(mut st: ActorState<'_>) -> Result<(), StepError> {
     let agent = st.agent.clone();
     let obs = st.obs.clone();
     let step_timeout = st.step_timeout;
+    // Inbound source: this actor's own UA, or — when several actors share the
+    // endpoint — the seat its pump delivers to. Same vocabulary either way.
+    let mut inbox = st.inbox.take().unwrap_or_else(|| Inbox::Own(agent.clone()));
     loop {
         tokio::select! {
-            inbound = agent.recv_any() => {
+            inbound = inbox.recv() => {
                 match inbound {
                     Ok(m) => default_react(&mut st, m).await?,
                     // A reactor recv deadline is NOT fatal — loop again (a

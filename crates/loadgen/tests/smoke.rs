@@ -2051,6 +2051,7 @@ impl ActorScenario for ByeWithContact {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             ActorSpec {
                 role: "bob",
@@ -2064,6 +2065,7 @@ impl ActorScenario for ByeWithContact {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ];
         let plan = vec![phase("established", |s: &StateInner| {
@@ -2214,6 +2216,7 @@ impl ActorScenario for NumberPlanRefer {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             // Bob rings then answers, then — established + a talk dwell — REFERs
             // the call to the number-addressed xfer leg.
@@ -2236,6 +2239,7 @@ impl ActorScenario for NumberPlanRefer {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
             // The number-addressed transfer target answers the transfer INVITE
             // (180 then an immediate 200) and the c-realign re-INVITE reactively.
@@ -2254,6 +2258,7 @@ impl ActorScenario for NumberPlanRefer {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ];
 

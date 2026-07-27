@@ -42,6 +42,7 @@ pub(super) fn caller_spec(role: &'static str, agent: &crate::Agent, callee: (&'s
     
         cseq: None,
         delayed: None,
+        claim: None,
     }
 }
 
@@ -59,6 +60,7 @@ pub(super) fn scripted_spec(role: &'static str, agent: &crate::Agent, goals: Vec
     
         cseq: None,
         delayed: None,
+        claim: None,
     }
 }
 

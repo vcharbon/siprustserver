@@ -657,7 +657,9 @@ async fn template_reinvite_compact_supported_not_duplicated() {
 
     rbob.respond(200, "OK").with_sdp(ANSWER).await;
     re.expect(200).await;
-    dialog.ack(Some(ANSWER)).await;
+    // The re-INVITE carried the offer and the 200 the answer — the round is
+    // closed, so the ACK is bodyless (RFC 3261 §13.2.2.4).
+    dialog.ack(None).await;
     bob.receive("ACK").await;
 
     let mut bye = dialog.bye().await;

@@ -114,6 +114,7 @@ async fn expect_response_fails_fast_when_final_precedes_provisional() {
                         Barrier::None,
                         GoalStep::ExpectResponse {
                             status: 183,
+                            cseq_method: None,
                             body: BodyExpect::Any,
                             early: None,
                             ack_body: None,
@@ -134,6 +135,7 @@ async fn expect_response_fails_fast_when_final_precedes_provisional() {
             
                 cseq: None,
                 delayed: None,
+                claim: None,
             },
         ],
         plan: vec![],
@@ -171,6 +173,7 @@ async fn forked_respond_template_early_ids_name_winner() {
 
     let expect_180 = |id: EarlyId| GoalStep::ExpectResponse {
         status: 180,
+        cseq_method: None,
         body: BodyExpect::Any,
         early: Some(id),
         ack_body: None,
@@ -256,6 +259,7 @@ async fn scripted_originator_attribution_keys_on_first_goal() {
         
             cseq: None,
             delayed: None,
+            claim: None,
         },
         scripted_spec("bob", &bob, vec![]),
     ];

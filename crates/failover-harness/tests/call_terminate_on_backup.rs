@@ -615,7 +615,8 @@ async fn c11_reinvite_on_backup__primary_alive__no_terminal() {
     let mut peer = bob.receive("INVITE").await;
     peer.respond(200, "OK").with_sdp(ANSWER).await;
     tx.expect(200).await;
-    dialog.ack(Some(ANSWER)).await;
+    // The re-INVITE carried the offer, the 200 the answer — bodyless ACK.
+    dialog.ack(None).await;
     bob.receive("ACK").await;
     fh.advance(Duration::from_millis(500)).await;
 
