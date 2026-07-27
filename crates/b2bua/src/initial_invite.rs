@@ -55,20 +55,32 @@ pub(crate) const STANDARD_HEADERS: &[HeaderName] = &[
 /// `;outbound` half is topmost. So we scan all Record-Route headers for the one
 /// that actually carries the stickiness grammar rather than assuming the first.
 ///
-/// - Cookie present → `Some(CallTopology { pri: w_pri (or self_ordinal if the
-///   param is absent/empty), bak: w_bak (may be empty), gen: 1 })`. A brand-new
-///   call starts at `gen = 1`; the b2bua's update path bumps it per mutation (see
-///   [`crate::store::CallState::update`]).
-/// - No cookie (non-proxied / legacy INVITE) → `None`: the flush path then stays
-///   non-replicating (`PutOpts::default()`), preserving today's behaviour.
-fn topology_from_cookie(invite: &SipRequest, self_ordinal: &str) -> Option<CallTopology> {
+/// - Cookie present → [`CookieRead::Topology`] carrying `CallTopology { pri:
+///   w_pri (or self_ordinal if the param is absent/empty), bak: w_bak (may be
+///   empty), gen: 1 }`. A brand-new call starts at `gen = 1`; the b2bua's update
+///   path bumps it per mutation (see [`crate::store::CallState::update`]).
+/// - Every recorded route reads and none carries the stickiness grammar
+///   (non-proxied / legacy INVITE) → [`CookieRead::NoCookie`].
+/// - A recorded route no reader accepts → [`CookieRead::Unreadable`]. The cookie
+///   may well be there; this read cannot see it, which is NOT the same fact as
+///   "no proxy recorded one". The caller decides — and must say so out loud.
+///
+/// The read is all-or-nothing: one unreadable recorded route makes the whole
+/// list unreadable, including a cookie half that would have read on its own.
+fn read_topology_cookie(invite: &SipRequest, self_ordinal: &str) -> CookieRead {
     // Find the Record-Route that carries the stickiness cookie; the partner
     // `;outbound` half (direction only) has no `w_pri`/`w_bak`.
-    let recorded = invite.list::<RecordRouteEntry>().ok()?;
-    let cookie = recorded
+    let recorded = match invite.list::<RecordRouteEntry>() {
+        Ok(recorded) => recorded,
+        Err(err) => return CookieRead::Unreadable(err),
+    };
+    let Some(cookie) = recorded
         .iter()
         .map(|entry| entry.uri())
-        .find(|uri| uri.param("w_pri").is_some() || uri.param("w_bak").is_some())?;
+        .find(|uri| uri.param("w_pri").is_some() || uri.param("w_bak").is_some())
+    else {
+        return CookieRead::NoCookie;
+    };
     let pri = cookie
         .param("w_pri")
         .and_then(ParamValue::as_str)
@@ -78,7 +90,50 @@ fn topology_from_cookie(invite: &SipRequest, self_ordinal: &str) -> Option<CallT
     let bak = cookie.param("w_bak").and_then(ParamValue::as_str).unwrap_or("").to_string();
     // Brand-new call: primary counter p = 1 (the primary "created" it), backup
     // counter b = 0 (no takeover yet). See `CallTopology` / ADR-0014.
-    Some(CallTopology { pri, bak, gen: 1, bak_gen: 0 })
+    CookieRead::Topology(CallTopology { pri, bak, gen: 1, bak_gen: 0 })
+}
+
+/// What the inbound INVITE's Record-Route says about the proxy's stickiness
+/// cookie. Two of the three outcomes are ordinary; the third is a placement the
+/// call loses, so they are kept apart rather than collapsed to `Option`.
+#[derive(Debug)]
+enum CookieRead {
+    /// The cookie reads: the call's HA topology comes off it.
+    Topology(CallTopology),
+    /// The recorded routes read and carry no stickiness cookie — a non-proxied
+    /// or legacy INVITE. Non-replicating placement is correct here.
+    NoCookie,
+    /// A recorded route no reader accepts, so the cookie — if any — is
+    /// invisible.
+    Unreadable(sip_message::SipParseError),
+}
+
+/// The call's HA topology, with the unreadable read named on stderr. A recorded
+/// route no reader accepts falls back to no topology — the flush path then stays
+/// non-replicating (`PutOpts::default()`), same as a genuinely cookie-less
+/// INVITE — because inventing `pri`/`bak` from a header we cannot read would
+/// have the backup peer disagree with the proxy's rendezvous choice, which is
+/// worse than not replicating. The fallback is silent-degrade-shaped, so it is
+/// never silent: the call is placed on this worker only and does not survive a
+/// takeover.
+fn topology_from_cookie(
+    invite: &SipRequest,
+    self_ordinal: &str,
+    call_ref: &str,
+) -> Option<CallTopology> {
+    match read_topology_cookie(invite, self_ordinal) {
+        CookieRead::Topology(topology) => Some(topology),
+        CookieRead::NoCookie => None,
+        CookieRead::Unreadable(err) => {
+            eprintln!(
+                "WARN: call {call_ref} (Call-ID {}): a recorded route does not read ({err}); the \
+                 proxy's stickiness cookie cannot be read, so this call is placed NON-REPLICATING \
+                 — it does not survive a takeover",
+                invite.call_id().as_str()
+            );
+            None
+        }
+    }
 }
 
 /// Build the initial [`Call`] (a-leg only) from an inbound INVITE. Pure.
@@ -115,7 +170,7 @@ pub fn build_initial_call(
         // Derived from kind (the a-leg is always adopted); see `is_adopted`.
         adopted: None,
     };
-    let topology = topology_from_cookie(invite, &config.self_ordinal);
+    let topology = topology_from_cookie(invite, &config.self_ordinal, &call_ref);
     let a_leg_invite = ALegInviteSnapshot {
         uri: invite.request_uri().to_string(),
         headers: invite
@@ -452,6 +507,118 @@ mod emergency_on_invite_tests {
         // …and an r-value merely embedding a token does not.
         let call = build_initial_call(&invite_with_rph(Some("esnet.01")), src(), &config_for("w0"), 0);
         assert_eq!(call.emergency, None, "embedded token is not an emergency r-value");
+    }
+}
+
+#[cfg(test)]
+mod stickiness_cookie_tests {
+    //! Pins the three ways the front proxy's Record-Route reads for the
+    //! stickiness cookie, and that only one of them is quiet.
+    //!
+    //! A recorded route no reader accepts must NOT pass for "no proxy recorded
+    //! one": both end at non-replicating placement (`PutOpts::default()`), but
+    //! the first is a call that silently stops surviving a takeover, so it is
+    //! named on stderr. Pure builder, no clock.
+
+    use super::{build_initial_call, read_topology_cookie, CookieRead};
+    use crate::config::B2buaConfig;
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser, SipRequest};
+    use std::net::SocketAddr;
+
+    /// A port no reader accepts (RFC 3261 §19.1.1 `port` is 16-bit): the message
+    /// parses, the recorded route does not.
+    const UNREADABLE_RR: &str = "<sip:10.0.0.9:70596;v=3;w_pri=w0;w_bak=w1;lr>";
+
+    /// The proxy's double-record-route as it arrives on an inbound INVITE: the
+    /// direction-only `;outbound` half topmost, the cookie half below it.
+    const COOKIE_RR: &str = "<sip:10.0.0.9:5060;outbound;lr>,<sip:10.0.0.9:5060;v=3;w_pri=w7;w_bak=w9;lr>";
+
+    fn invite_with_record_route(rr: Option<&str>) -> SipRequest {
+        let rr_line = match rr {
+            Some(v) => format!("Record-Route: {v}\r\n"),
+            None => String::new(),
+        };
+        let raw = format!(
+            "INVITE sip:bob@example.com SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-cookie-iih\r\n\
+             Max-Forwards: 70\r\n\
+             From: <sip:alice@example.com>;tag=alicetag\r\n\
+             To: <sip:bob@example.com>\r\n\
+             Call-ID: cookie-iih@10.0.0.9\r\n\
+             CSeq: 1 INVITE\r\n\
+             Contact: <sip:alice@10.0.0.9:5060>\r\n\
+             {rr_line}\
+             Content-Length: 0\r\n\r\n"
+        );
+        match CustomParser::new().parse(raw.as_bytes()).expect("fixture INVITE should parse") {
+            SipMessage::Request(r) => r,
+            SipMessage::Response(_) => panic!("expected a request"),
+        }
+    }
+
+    fn call_for(invite: &SipRequest) -> call::Call {
+        let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
+        build_initial_call(invite, SocketAddr::from(([10, 0, 0, 9], 5060)), &config, 0)
+    }
+
+    #[test]
+    fn a_cookie_record_route_places_the_call_on_the_proxys_choice() {
+        let invite = invite_with_record_route(Some(COOKIE_RR));
+        assert!(
+            matches!(read_topology_cookie(&invite, "w0"), CookieRead::Topology(_)),
+            "the cookie half must be found below the `;outbound` half"
+        );
+        let topology = call_for(&invite).topology.expect("a cookie INVITE gets a topology");
+        assert_eq!((topology.pri.as_str(), topology.bak.as_str()), ("w7", "w9"));
+        assert_eq!((topology.gen, topology.bak_gen), (1, 0), "a brand-new call is (p=1, b=0)");
+    }
+
+    #[test]
+    fn no_record_route_and_a_cookieless_one_are_both_ordinary() {
+        for rr in [None, Some("<sip:10.0.0.9:5060;outbound;lr>")] {
+            let invite = invite_with_record_route(rr);
+            assert!(
+                matches!(read_topology_cookie(&invite, "w0"), CookieRead::NoCookie),
+                "readable, cookie-less recorded routes ({rr:?}) are not a failed read"
+            );
+            assert!(call_for(&invite).topology.is_none(), "non-proxied INVITE stays local-only");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_record_route_is_not_mistaken_for_an_absent_cookie() {
+        // Same placement as a cookie-less INVITE — inventing pri/bak from a
+        // header we cannot read would have the backup disagree with the proxy's
+        // rendezvous choice — but it takes the warning branch, not the quiet one.
+        let invite = invite_with_record_route(Some(UNREADABLE_RR));
+        assert!(
+            matches!(read_topology_cookie(&invite, "w0"), CookieRead::Unreadable(_)),
+            "an out-of-range port must fail the recorded-route read, not the message parse"
+        );
+        assert!(
+            call_for(&invite).topology.is_none(),
+            "an unreadable cookie falls back to non-replicating placement"
+        );
+    }
+
+    #[test]
+    fn one_unreadable_recorded_route_hides_a_readable_cookie() {
+        // The read is all-or-nothing (`list::<RecordRouteEntry>`), so a bad
+        // `;outbound` half takes the cookie half down with it. Pinned because it
+        // is the reason the warning names the *route*, not the cookie.
+        let invite =
+            invite_with_record_route(Some(&format!("<sip:10.0.0.9:70596;outbound;lr>,{COOKIE_RR}")));
+        assert!(matches!(read_topology_cookie(&invite, "w0"), CookieRead::Unreadable(_)));
+    }
+
+    #[test]
+    fn an_empty_w_pri_falls_back_to_this_worker() {
+        // `w_pri` present but empty means the proxy named no primary; the call
+        // is placed here, and `w_bak` still steers the backup.
+        let invite = invite_with_record_route(Some("<sip:10.0.0.9:5060;v=3;w_pri=;w_bak=w9;lr>"));
+        let topology = call_for(&invite).topology.expect("the cookie is still a cookie");
+        assert_eq!((topology.pri.as_str(), topology.bak.as_str()), ("w0", "w9"));
     }
 }
 

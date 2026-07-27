@@ -1818,3 +1818,54 @@ the same bytes through the value model.
   by carrying it as a bare token. That is the right answer for a relay — the
   body is the peer's — but it means a `MediaType` can hold a token no `parse`
   would produce, and the value type has no way to say "this arrived unread".
+
+### Consumer hardening, item 4 — the stickiness-cookie read
+
+The last open finding from the consumer review, and the same shape as item 1:
+`initial_invite.rs::topology_from_cookie` opened with
+`let recorded = invite.list::<RecordRouteEntry>().ok()?;`, so a Record-Route no
+reader accepts returned `None` — byte-identical to "this INVITE carries no
+stickiness cookie". `None` means no `CallTopology`, and the flush path then
+places the call non-replicating (`PutOpts::default()`): the call lives on this
+worker only and does not survive a takeover. Correct for a non-proxied INVITE;
+for a proxied one it is a lost HA placement nobody is told about, and the
+symptom appears later and elsewhere (a call the backup never had).
+
+Three outcomes are named now, by a classifying read (`read_topology_cookie` →
+`CookieRead`) with the policy at its one call site:
+- `Topology` — the cookie read; placement follows the proxy's rendezvous choice.
+- `NoCookie` — the recorded routes read and none carries `w_pri`/`w_bak`
+  (non-proxied / legacy INVITE). Quiet, non-replicating, unchanged.
+- `Unreadable` — a recorded route no reader accepts. Same non-replicating
+  fallback, because inventing `pri`/`bak` from a header we cannot read would put
+  the backup peer at odds with the proxy's HRW choice — worse than not
+  replicating (ADR-0014) — but it warns first, in the item-1 house style:
+  `WARN: call <ref> (Call-ID <id>): a recorded route does not read (<err>); the
+  proxy's stickiness cookie cannot be read, so this call is placed
+  NON-REPLICATING — it does not survive a takeover`.
+
+Read-path classification only: nothing on the decision seam or the
+final-response guarantee moved (ADR-0022), and the placement a call gets is
+unchanged in every case — only the silence is gone.
+
+Pinned by five unit tests in `initial_invite.rs`: the double-record-route with
+the cookie below the `;outbound` half yields `(pri=w7, bak=w9, p=1, b=0)`;
+absent and cookie-less Record-Routes are both `NoCookie` with no topology; the
+unreadable route (`<sip:10.0.0.9:70596;…>` — the message parses, the route does
+not) takes the `Unreadable` branch AND still lands on the default placement; an
+empty `w_pri` falls back to this worker; and one bad `;outbound` half hides an
+otherwise readable cookie.
+
+Workspace: 2120 tests passed, 0 failed. Clippy on `b2bua --all-targets`:
+unchanged from baseline (47 warnings, none in `initial_invite.rs`).
+
+**Suspicion raised, not fixed:** the read is all-or-nothing —
+`list::<RecordRouteEntry>()` fails the whole list on one bad value, so a
+malformed `;outbound` half (or any unrelated recorded route a downstream proxy
+added) takes a perfectly readable cookie down with it, and the call loses
+replication for a header it did not need. Salvaging the readable entries would
+mean per-value parsing, which is sip-message's job, not b2bua's (CLAUDE.md: no
+header extraction outside sip-message) — the fix would be a partial-read
+accessor there (`list_lenient` / an iterator of `Result`), not a splitter here.
+The last test in the new module pins the current behaviour so the day that
+accessor exists, the pin says what changes.
