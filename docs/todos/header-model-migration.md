@@ -1593,3 +1593,62 @@ log. Each item now carries its measurement, its verdict, and the one-line cause
 M13 diagnosed — the eager Contact set for parse, the route set read twice for
 the rewrite set — plus a pointer to this file for the tables. No number here is
 new; this is the ADR catching up with the measurement.
+
+### Consumer hardening — post-migration cleanup
+
+Findings from the final review of the *consumer* side of the port, one group per
+commit. Everything here is in `b2bua`.
+
+**1. An unreadable Record-Route can no longer make a dialog pod-direct.**
+`dialog_track.rs` read both dialog route sets as
+`list::<RecordRouteEntry>().unwrap_or_default()`, so a recorded route no reader
+accepts produced an EMPTY route set — silently, and indistinguishably from "the
+peer recorded nothing". An empty dialog route set sends every in-dialog request
+(BYE, keepalive OPTIONS, re-INVITE) straight at the peer's Contact, i.e.
+pod-direct, which the deployment forbids: a pod IP is not routable
+peer-to-peer, so the call is lost the moment either side moves. That is the
+long-call-loss class, and M6 logged the cliff on the way past.
+
+The route-set readers (`uac_route_set`, `uas_route_set`) are now fallible, and
+one seam — `ActionExecutor::dialog_route_set` — states the policy for all three
+call sites (early dialog, 2xx confirmation, a-leg UAS dialog): name the call on
+stderr (`WARN: call <ref> leg <id>: a recorded route does not read …`) and fall
+back to `relay::outbound_proxy_route_set(config)` — the one loose `Route` at the
+configured front proxy, the same entry the b-leg bootstrap preloads. With no
+outbound proxy configured (local/dev, where the transport IS peer-direct) the
+set stays empty, but the read still fails loudly instead of passing for an
+absent Record-Route.
+
+Swept for the same pattern on routing-critical reads, and fixed the same way:
+- `relay.rs::apply_b_leg_egress`'s freeze-error arm returned `(req, dest)` — the
+  callee's own address — so a failed Route preload fell off the proxy path
+  entirely. It now warns and forwards to the proxy WITHOUT the preload: the
+  Request-URI already names the callee, so the proxy forwards and record-routes
+  it. This also makes the arm agree with `leg_egress_dest`, whose "keep in sync"
+  contract it was quietly breaking on that branch. (The arm is still unreachable
+  — a thawed draft cannot be incomplete — but "unreachable" is not a routing
+  policy.)
+- `dialog_track.rs::contact_uri` conflated "no Contact" with "a Contact no
+  reader accepts". The unreadable case now warns and keeps the dialog's current
+  remote target rather than silently retargeting.
+- `relay.rs::target_dest` keeps its fallback (a stored dialog target that does
+  not read is resolved as a host name — the `call` crate stores text by design,
+  ADR-0008) but no longer takes it silently. Empty targets stay quiet: a dialog
+  with no learned target yet is normal, not a failure.
+
+Pinned by `dialog_track`'s new unit tests: an unreadable recorded route
+(`<sip:10.0.0.9:70596;lr>` — the message parses, the route does not) yields the
+front-proxy route set on BOTH dialog sides and never an empty one; without a
+configured proxy the fallback is empty but the read still errs; and the readable
+path keeps its dialog order (UAC reversed, UAS forward, a comma-combined line
+teaching both halves).
+
+Workspace: 2111 tests passed, 0 failed. Clippy on `b2bua --all-targets`:
+unchanged from baseline.
+
+**Suspicion raised, not fixed:** the fallback route set is the *configured*
+proxy, not the route the peer actually recorded, so a dialog that takes it is
+routed correctly only because every worker route goes through that one proxy. In
+a deployment with several front proxies the fallback would pin the dialog to the
+configured one rather than to the recorder — still better than pod-direct, but
+it is a deployment assumption living in a rules action.

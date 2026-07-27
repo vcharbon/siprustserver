@@ -125,14 +125,20 @@ pub fn leg_contact(
 /// The transport destination the address `target` names. The `call` crate keeps
 /// dialog targets and route sets as text (it has no sip-message dependency by
 /// design, ADR-0008), so reading one back is a parse; an address no reader
-/// accepts falls back to its own text on the default port.
+/// accepts falls back to its own text on the default port, and says so — the
+/// fallback resolves a host nothing routes to, so it must not pass unnamed.
 pub fn target_dest(target: &str) -> (String, u16) {
     match NameAddr::parse(&SipStr::owned(target)) {
         Ok(addr) => {
             let (host, port) = addr.uri().host_port();
             (host.to_string(), port)
         }
-        Err(_) => (target.trim().to_string(), HostPort::DEFAULT_PORT),
+        Err(err) => {
+            if !target.trim().is_empty() {
+                eprintln!("WARN: dialog target {target:?} does not read ({err}); resolving it as a host name");
+            }
+            (target.trim().to_string(), HostPort::DEFAULT_PORT)
+        }
     }
 }
 
@@ -194,14 +200,45 @@ pub fn apply_b_leg_egress(
     if leg_id == "a" {
         return (req, dest);
     }
-    let Some((host, port)) = config.b2b_outbound_proxy.clone() else {
+    let Some((route, (host, port))) = outbound_proxy_route(config) else {
         return (req, dest);
     };
-    let route = RouteEntry::from_uri(Uri::sip(host.clone()).with_port(port).with_flag("lr"));
     match req.thaw().prepend(route).freeze() {
         Ok(preloaded) => (preloaded, (host, port)),
-        Err(_) => (req, dest),
+        // The preload failed, so the request carries no Route naming the proxy —
+        // but its Request-URI already names the callee, so the proxy forwards it
+        // and record-routes the dialog. Sending it to `dest` instead would put
+        // this leg pod-direct, which the deployment forbids (every worker-
+        // originated request traverses the front proxy).
+        Err(err) => {
+            eprintln!(
+                "WARN: leg {leg_id}: b-leg egress could not preload the outbound-proxy Route \
+                 ({err}); forwarding to {host}:{port} WITHOUT it rather than pod-direct"
+            );
+            (req, (host, port))
+        }
     }
+}
+
+/// The plain loose `Route` naming the configured front proxy, with the wire
+/// destination it resolves to. `None` when no outbound proxy is configured
+/// (local/dev, where the transport IS peer-direct).
+fn outbound_proxy_route(config: &B2buaConfig) -> Option<(RouteEntry, (String, u16))> {
+    let (host, port) = config.b2b_outbound_proxy.clone()?;
+    let route = RouteEntry::from_uri(Uri::sip(host.clone()).with_port(port).with_flag("lr"));
+    Some((route, (host, port)))
+}
+
+/// The dialog route set a call falls back to when the peer's recorded routes do
+/// not read: the one loose `Route` at the configured front proxy — the same
+/// entry [`apply_b_leg_egress`] preloads for a pre-confirmation b-leg — so
+/// in-dialog requests keep traversing the proxy instead of going pod-direct.
+/// Empty when no outbound proxy is configured.
+pub fn outbound_proxy_route_set(config: &B2buaConfig) -> Vec<String> {
+    outbound_proxy_route(config)
+        .map(|(route, _)| route.to_wire())
+        .into_iter()
+        .collect()
 }
 
 /// The URI of `route` when it names a loose router (RFC 3261 §19.1.1 `;lr`).

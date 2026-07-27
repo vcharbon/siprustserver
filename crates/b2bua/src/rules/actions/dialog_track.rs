@@ -6,6 +6,7 @@
 use call::helpers::{find_by_b_tag, set_leg_state};
 use call::{B2buaDialogExt, Call, Dialog, LegDisposition, LegState, StackDialog};
 use sip_message::header::{self, HeaderValue, RecordRouteEntry};
+use sip_message::SipParseError;
 
 use crate::rules::model::RuleContext;
 use crate::rules::relay;
@@ -47,14 +48,17 @@ impl ActionExecutor<'_> {
         resp: &sip_message::SipResponse,
         to_tag: &str,
     ) {
-        let contact = contact_uri(resp.header::<header::Contact>()).unwrap_or_default();
+        let contact =
+            contact_uri(resp.header::<header::Contact>(), &call.call_ref, source_leg_id)
+                .unwrap_or_default();
         // §12.1.2: an EARLY dialog's route set is established from the reliable
         // 1xx's Record-Route, exactly like the 2xx path below — one entry per
         // recorded route (a comma-combined double-record-route is two), reversed
         // (UAC side). Without this a PRACK/UPDATE on the early dialog rides the
         // preloaded bootstrap Route only and under-reproduces the route set (the
         // §12.2.1.1 audit catches it behind a front proxy).
-        let early_route_set = uac_route_set(resp);
+        let early_route_set =
+            self.dialog_route_set(uac_route_set(resp), &call.call_ref, source_leg_id);
         // The response echoes the INVITE's CSeq (§8.1.3.3); seed each forked
         // early dialog's sequence from it so they advance independently.
         let invite_cseq = resp.cseq().seq() as i64;
@@ -120,7 +124,9 @@ impl ActionExecutor<'_> {
         };
         let remote_tag = resp.to().tag().unwrap_or_default().to_string();
         let remote_tag_clone = remote_tag.clone();
-        let remote_target = contact_uri(resp.header::<header::Contact>()).unwrap_or_default();
+        let remote_target =
+            contact_uri(resp.header::<header::Contact>(), &call.call_ref, leg_id)
+                .unwrap_or_default();
         // §12.1.2: the b-leg is a UAC dialog, so its route set is the
         // dialog-creating 2xx's Record-Route values in *reverse* order (the
         // a-leg/UAS path keeps the INVITE's Record-Route forward). We must reverse
@@ -135,7 +141,7 @@ impl ActionExecutor<'_> {
         // entries puts the proxy's own `;outbound` half on top, so direction is
         // intrinsic to its Record-Route — no `;outbound` worker-stamp and no
         // Via/registry rescue.
-        let route_set = uac_route_set(resp);
+        let route_set = self.dialog_route_set(uac_route_set(resp), &call.call_ref, leg_id);
         if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
             // Forking (RFC 3261 §12.1.2): the 2xx confirms exactly ONE early
             // dialog — the one whose callee tag it carries. Promote *that* fork
@@ -249,13 +255,16 @@ impl ActionExecutor<'_> {
         let tag = preferred.unwrap_or_else(|| self.id_gen.new_tag());
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let from = a_invite.from();
-        let remote_target = contact_uri(a_invite.header::<header::Contact>())
-            .unwrap_or_else(|| from.uri().to_string());
+        let a_leg_id = call.a_leg.leg_id.clone();
+        let remote_target =
+            contact_uri(a_invite.header::<header::Contact>(), &call.call_ref, &a_leg_id)
+                .unwrap_or_else(|| from.uri().to_string());
         // §12.1.1: the a-leg is a UAS dialog — route set is the INVITE's
         // Record-Route entries in forward order, one entry per recorded route (a
         // comma-combined header — the proxy's double-record-route halves — is
         // two), same as the b-leg path above.
-        let route_set = uas_route_set(&a_invite);
+        let route_set =
+            self.dialog_route_set(uas_route_set(&a_invite), &call.call_ref, &a_leg_id);
         let cseq = a_invite.cseq().seq() as i64;
         let dialog = Dialog {
             sip: StackDialog {
@@ -280,33 +289,208 @@ impl ActionExecutor<'_> {
         call.a_leg.dialogs = vec![dialog];
         tag
     }
+
+    /// The route set to store on a dialog, given a read of the peer's recorded
+    /// routes. A recorded route no reader accepts must NOT become an empty
+    /// route set: an empty set sends every in-dialog request straight at the
+    /// peer's Contact — pod-direct — while the deployment requires every
+    /// worker-originated request to traverse the front proxy (a peer's pod IP
+    /// is not routable peer-to-peer, so the call is lost the moment it moves).
+    /// Such a read falls back to the configured outbound proxy as the dialog's
+    /// one route and names the call on stderr; with no proxy configured
+    /// (local/dev, where the transport IS peer-direct) the set stays empty.
+    fn dialog_route_set(
+        &self,
+        read: Result<Vec<String>, SipParseError>,
+        call_ref: &str,
+        leg_id: &str,
+    ) -> Vec<String> {
+        match read {
+            Ok(set) => set,
+            Err(err) => {
+                let fallback = relay::outbound_proxy_route_set(self.config);
+                let route = fallback.first().map(String::as_str).unwrap_or("<none configured>");
+                eprintln!(
+                    "WARN: call {call_ref} leg {leg_id}: a recorded route does not read ({err}); \
+                     dialog route set falls back to the outbound proxy {route} — an empty route \
+                     set would send in-dialog requests pod-direct"
+                );
+                fallback
+            }
+        }
+    }
 }
 
 /// The dialog's remote target: the URI of the peer's Contact (RFC 3261
-/// §12.1.1/§12.1.2). `None` when the peer sent none, or one no reader accepts.
+/// §12.1.1/§12.1.2). `None` when the peer sent none; a Contact no reader
+/// accepts is named on stderr and leaves the dialog's current target in place
+/// rather than silently retargeting it at nothing.
 fn contact_uri(
-    contact: Option<Result<header::Contact, sip_message::SipParseError>>,
+    contact: Option<Result<header::Contact, SipParseError>>,
+    call_ref: &str,
+    leg_id: &str,
 ) -> Option<String> {
-    contact.and_then(Result::ok).map(|c| c.uri().to_string())
+    match contact? {
+        Ok(c) => Some(c.uri().to_string()),
+        Err(err) => {
+            eprintln!(
+                "WARN: call {call_ref} leg {leg_id}: Contact does not read ({err}); keeping the \
+                 dialog's current remote target"
+            );
+            None
+        }
+    }
 }
 
 /// The route set a UAC applies: the responder's recorded routes reversed
 /// (RFC 3261 §12.1.2). One entry per recorded route, so a comma-combined line —
 /// the front proxy's double record-route — yields both halves in wire order.
-fn uac_route_set(resp: &sip_message::SipResponse) -> Vec<String> {
-    let mut set = route_texts(resp.list::<RecordRouteEntry>().unwrap_or_default());
+/// Errs when a recorded route does not read; the caller decides, and an empty
+/// route set is never that decision (see `ActionExecutor::dialog_route_set`).
+fn uac_route_set(resp: &sip_message::SipResponse) -> Result<Vec<String>, SipParseError> {
+    let mut set = route_texts(resp.list::<RecordRouteEntry>()?);
     set.reverse();
-    set
+    Ok(set)
 }
 
 /// The route set a UAS applies: the requester's recorded routes in the order
-/// they were recorded (RFC 3261 §12.1.1).
-fn uas_route_set(req: &sip_message::SipRequest) -> Vec<String> {
-    route_texts(req.list::<RecordRouteEntry>().unwrap_or_default())
+/// they were recorded (RFC 3261 §12.1.1). Fallible for the same reason as
+/// [`uac_route_set`].
+fn uas_route_set(req: &sip_message::SipRequest) -> Result<Vec<String>, SipParseError> {
+    Ok(route_texts(req.list::<RecordRouteEntry>()?))
 }
 
 /// Recorded routes as the text the `call` crate stores (it has no sip-message
 /// dependency, ADR-0008).
 fn route_texts(entries: Vec<RecordRouteEntry>) -> Vec<String> {
     entries.into_iter().map(|e| e.to_wire()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::B2buaConfig;
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+    use sip_txn::IdGen;
+
+    const PROXY_ROUTE: &str = "<sip:10.0.0.9:5060;lr>";
+
+    /// A port no reader accepts (RFC 3261 §19.1.1 `port` is 16-bit): the message
+    /// parses, the recorded route does not.
+    const UNREADABLE_RR: &str = "<sip:10.0.0.9:70596;lr>";
+
+    fn ok_200(record_route: &str) -> sip_message::SipResponse {
+        let raw = format!(
+            "SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP 10.244.1.5:5060;branch=z9hG4bKb\r\n\
+From: <sip:svc@10.0.0.9:5060>;tag=svc\r\n\
+To: <sip:bob@10.244.2.7:5060>;tag=bob\r\n\
+Call-ID: c1@x\r\n\
+CSeq: 1 INVITE\r\n\
+Record-Route: {record_route}\r\n\
+Contact: <sip:bob@10.244.2.7:5060>\r\n\
+Content-Length: 0\r\n\r\n"
+        );
+        match CustomParser::new().parse(raw.as_bytes()).expect("parses") {
+            SipMessage::Response(r) => r,
+            _ => panic!("expected response"),
+        }
+    }
+
+    fn invite(record_route: &str) -> sip_message::SipRequest {
+        let raw = format!(
+            "INVITE sip:svc@10.244.1.5:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKa\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@10.0.0.1:5060>;tag=alice\r\n\
+To: <sip:svc@10.0.0.9:5060>\r\n\
+Call-ID: c1@x\r\n\
+CSeq: 1 INVITE\r\n\
+Record-Route: {record_route}\r\n\
+Contact: <sip:alice@10.0.0.1:5060>\r\n\
+Content-Length: 0\r\n\r\n"
+        );
+        match CustomParser::new().parse(raw.as_bytes()).expect("parses") {
+            SipMessage::Request(r) => r,
+            _ => panic!("expected request"),
+        }
+    }
+
+    fn proxied_config() -> B2buaConfig {
+        B2buaConfig {
+            b2b_outbound_proxy: Some(("10.0.0.9".to_string(), 5060)),
+            ..Default::default()
+        }
+    }
+
+    // A recorded route no reader accepts must never leave the dialog with an
+    // EMPTY route set: an empty set sends in-dialog requests at the peer's
+    // Contact (pod-direct), which the deployment forbids. Both dialog sides —
+    // the UAC route set read off a 2xx/reliable 1xx and the UAS route set read
+    // off the a-leg INVITE — fall back to the configured front proxy instead.
+    #[test]
+    fn an_unreadable_record_route_never_yields_an_empty_route_set() {
+        let config = proxied_config();
+        let id_gen = IdGen::seeded(0xD1);
+        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+
+        let resp = ok_200(UNREADABLE_RR);
+        assert!(uac_route_set(&resp).is_err(), "the fixture's recorded route must not read");
+        assert_eq!(
+            exec.dialog_route_set(uac_route_set(&resp), "call-1", "b-1"),
+            vec![PROXY_ROUTE.to_string()],
+            "UAC side: an unreadable recorded route routes via the front proxy, not pod-direct",
+        );
+
+        let req = invite(UNREADABLE_RR);
+        assert!(uas_route_set(&req).is_err(), "the fixture's recorded route must not read");
+        assert_eq!(
+            exec.dialog_route_set(uas_route_set(&req), "call-1", "a"),
+            vec![PROXY_ROUTE.to_string()],
+            "UAS side: same fallback",
+        );
+    }
+
+    // With no front proxy configured (local/dev) the transport IS peer-direct,
+    // so the fallback is empty — but the read still fails loudly rather than
+    // being mistaken for "the peer recorded no route".
+    #[test]
+    fn without_a_front_proxy_the_fallback_is_empty_but_the_read_still_fails() {
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(0xD2);
+        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+        let resp = ok_200(UNREADABLE_RR);
+        assert!(uac_route_set(&resp).is_err());
+        assert!(exec.dialog_route_set(uac_route_set(&resp), "call-1", "b-1").is_empty());
+    }
+
+    // The readable path is unchanged: the UAC reverses the recorded routes
+    // (§12.1.2), the UAS keeps them in recorded order (§12.1.1), and a
+    // comma-combined line teaches both halves.
+    #[test]
+    fn readable_recorded_routes_keep_their_dialog_order() {
+        let config = proxied_config();
+        let id_gen = IdGen::seeded(0xD3);
+        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+        let combined = "<sip:10.0.0.9:5060;outbound;lr>,<sip:10.0.0.9:5060;target=1;lr>";
+
+        let resp = ok_200(combined);
+        assert_eq!(
+            exec.dialog_route_set(uac_route_set(&resp), "call-1", "b-1"),
+            vec![
+                "<sip:10.0.0.9:5060;target=1;lr>".to_string(),
+                "<sip:10.0.0.9:5060;outbound;lr>".to_string(),
+            ],
+        );
+
+        let req = invite(combined);
+        assert_eq!(
+            exec.dialog_route_set(uas_route_set(&req), "call-1", "a"),
+            vec![
+                "<sip:10.0.0.9:5060;outbound;lr>".to_string(),
+                "<sip:10.0.0.9:5060;target=1;lr>".to_string(),
+            ],
+        );
+    }
 }
