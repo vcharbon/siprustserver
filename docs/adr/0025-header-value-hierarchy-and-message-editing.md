@@ -375,20 +375,40 @@ incremental fill.
 ## Performance invariants and guardrails
 
 Hard invariants the implementation must keep (enforced by refreshed alloc
-budgets + new benches):
+budgets + new benches). Each target carries the number M13 measured against it,
+so a met target and a missed one cannot read alike; the measurements and their
+diagnosis are in the M13 section of
+[docs/todos/header-model-migration.md](../todos/header-model-migration.md).
 
 1. Parse: exactly one text copy (the image); body/raw slicing stays
    refcount-only. Target ≤ ~10 allocs/msg (from measured 20–21) via
-   small-vec `Params` + one-pass dispatch.
+   small-vec `Params` + one-pass dispatch. **Measured 12–13 — MISSED by two.**
+   The whole gap is the eager Contact set: the same INVITE without its Contact
+   line parses in 9. Three allocations pay for it — the dispatch index's
+   `Vec<&SipStr>`, the set's `Vec<header::Contact>`, and that vector's growth to
+   the four-element minimum capacity `Vec::new()` + `push` gives a 432-byte
+   element.
 2. Thawed-draft hop (proxy Via/RR/MF/Route rewrite): one output buffer +
    O(edited) value allocations; untouched header bytes memcpy'd once, never
    re-parsed. Target ≤ ~12 allocs/hop (from measured 33 on a *simpler*
-   synthetic hop).
+   synthetic hop). **Measured 8 for the received/rport stamp and ≈9 for the
+   minimal hop — MET; 29 for the full §16.4/§16.6 rewrite set — MISSED.** The
+   dominant term in the rewrite set is that the route set is read twice: once as
+   `list::<RouteEntry>()` to classify, then again inside each `pop_top`, which
+   re-parses the line it pops. A `try_list` that hands the draft back alongside
+   the parse error collapses the two passes, and is the single biggest win left
+   on the forwarding path.
 3. Blank-draft build: one output buffer; no `hydrate`, no String→Arc double
    copies. First-ever build-path budget to be set from measurement.
+   **Measured 27 allocs, budget 32** — and 40 % below the same INVITE built
+   through a recipe over the stringly options (45), which is the measurement
+   M12b was deferred without.
 4. Re-baseline `alloc_budget.rs` (current budgets are 4–5× stale on allocs) and
    extend it + the criterion bench to cover: blank-draft build, thawed-draft
    hop with the real proxy rewrite set, and `stamp_received_rport` equivalent.
+   **Done at M13**: every budget is the measured cost + 20 %, and the cases and
+   their fixtures live once in `tests/perf/mod.rs`, shared by the budget test
+   and the bench so the two views cannot drift.
 
 ## Consequences / migration
 

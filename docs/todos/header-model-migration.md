@@ -1584,3 +1584,12 @@ change parser behaviour; both are excluded by the URI predicate):
 A third delta is a normalization, not a loss, and is excluded on those grounds:
 a redundant leading zero (`sip:h:007`, `CSeq: 007 INVITE`) renders as the number
 it means.
+
+**7. ADR-0025's "Performance invariants" section states the achieved number
+beside each target.** The four guardrails read as unqualified targets, so the
+two that are missed (parse at 12–13 against ≤ ~10, the full §16.4/§16.6 rewrite
+set at 29 against ≤ ~12) looked met to anyone reading the ADR without the M13
+log. Each item now carries its measurement, its verdict, and the one-line cause
+M13 diagnosed — the eager Contact set for parse, the route set read twice for
+the rewrite set — plus a pointer to this file for the tables. No number here is
+new; this is the ADR catching up with the measurement.
