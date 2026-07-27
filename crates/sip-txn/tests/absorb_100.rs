@@ -47,7 +47,7 @@ async fn assert_absorb_for(cseq_method: &str) {
     match &events[0] {
         TransactionEvent::Message { message, .. } => match message.as_ref() {
             SipMessage::Response(r) => {
-                assert_eq!(r.status, 180);
+                assert_eq!(r.status(), 180);
                 assert_eq!(r.to().tag(), Some("peer-tag"));
             }
             _ => panic!("expected a response"),

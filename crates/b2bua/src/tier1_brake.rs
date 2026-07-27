@@ -60,10 +60,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use sip_message::message_helpers::{
-    build_stateless_reject_503_buffer, buffer_has_emergency_marker, is_invite_request_buffer,
-    jittered_retry_after,
-};
+use sip_message::emergency::buffer_has_emergency_marker;
+use sip_message::preparse::is_invite_request_buffer;
+use sip_message::reject_503::{build_stateless_reject_503_buffer, jittered_retry_after};
 use sip_net::types::{PreIngressAction, PreIngressHook};
 
 /// Tunables for the Tier-1 brake (the subset of `AppConfig` the source hook

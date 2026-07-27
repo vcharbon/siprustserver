@@ -9,7 +9,7 @@ use sip_message::generators::{
 };
 use sip_message::header::HeaderName;
 use sip_message::{
-    apply_name_forms, apply_remote_target_emits, EmitOpts, MessageTemplate, SipHeader, SipMessage,
+    apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MessageTemplate, SipHeader, SipMessage,
     SipResponse,
 };
 
@@ -182,10 +182,12 @@ impl<'a> OutOfDialogRequest<'a> {
         }
         // Send a WIRE copy with the captured compact names; retain canonical
         // `req` for the §17.1.1.3 ACK.
-        let mut wire = req.clone();
-        wire.headers = apply_name_forms(&req.headers, &self.name_forms);
-        wire.headers = apply_remote_target_emits(&wire.headers, &self.remote_emits);
-        caller.try_send(&SipMessage::Request(wire), wire_dst).await?;
+        let msg = SipMessage::Request(req.clone());
+        let headers = apply_remote_target_emits(
+            &apply_name_forms(msg.headers(), &self.name_forms),
+            &self.remote_emits,
+        );
+        caller.try_send_wire(&emitted_wire(&msg, &headers), wire_dst).await?;
         Ok(InDialogTxn::new(
             caller.clone(),
             // An out-of-dialog INVITE's non-2xx final takes a txn-layer ACK
@@ -250,30 +252,33 @@ impl<'a> OutOfDialogRequest<'a> {
                     .freeze()
                     .expect("dropping the stack's media type leaves a complete request");
             }
-            req.headers = apply_name_forms(&req.headers, &self.name_forms);
-            req.headers = apply_remote_target_emits(&req.headers, &self.remote_emits);
-            caller.try_send(&SipMessage::Request(req), wire_dst).await?;
+            let msg = SipMessage::Request(req);
+            let headers = apply_remote_target_emits(
+                &apply_name_forms(msg.headers(), &self.name_forms),
+                &self.remote_emits,
+            );
+            caller.try_send_wire(&emitted_wire(&msg, &headers), wire_dst).await?;
             // Raw-receive so a 401/407 keeps its challenge header (a real digest
             // responder reads `nonce`/`realm` off it); a matching final returns
             // straight away, an unsolicited 100 is absorbed.
             let resp = recv_response_raw(&caller).await?;
-            if resp.status == expect {
+            if resp.status() == expect {
                 return Ok(resp);
             }
-            let is_challenge = matches!(resp.status, 401 | 407);
+            let is_challenge = matches!(resp.status(), 401 | 407);
             // Not a retriable challenge (or no retry budget): surface the
             // deviation exactly as `try_expect(expect)` would.
             if !(is_challenge && auth_retries_left > 0 && responder.is_some()) {
                 return Err(StepError::WrongStatus {
                     who: caller.name.clone(),
                     expected: expect,
-                    got: resp.status,
-                    reason: resp.reason.to_string(),
+                    got: resp.status(),
+                    reason: resp.reason().to_string(),
                 });
             }
             let responder = responder.expect("guarded above");
             let challenge = parse_challenge(&resp).unwrap_or(crate::realcall::auth::Challenge {
-                status: resp.status,
+                status: resp.status(),
                 header_value: String::new(),
             });
             // Responder declines → surface the challenge as a plain deviation.
@@ -283,8 +288,8 @@ impl<'a> OutOfDialogRequest<'a> {
                 return Err(StepError::WrongStatus {
                     who: caller.name.clone(),
                     expected: expect,
-                    got: resp.status,
-                    reason: resp.reason.to_string(),
+                    got: resp.status(),
+                    reason: resp.reason().to_string(),
                 });
             };
             // A non-INVITE final needs no ACK (§17.1.2.2). Resend with the

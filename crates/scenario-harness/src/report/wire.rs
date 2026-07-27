@@ -47,8 +47,8 @@ fn first_line(raw: &[u8]) -> String {
 
 fn has_sdp(msg: &SipMessage) -> bool {
     let body = match msg {
-        SipMessage::Request(r) => &r.body,
-        SipMessage::Response(r) => &r.body,
+        SipMessage::Request(r) => &r.body(),
+        SipMessage::Response(r) => &r.body(),
     };
     if body.is_empty() {
         return false;
@@ -74,32 +74,32 @@ pub fn facets(raw: &[u8]) -> Facets {
     let sdp_tag = if has_sdp(&msg) { " [SDP]" } else { "" };
     let (label, is_response, from_tag, to_tag, call_id) = match &msg {
         SipMessage::Request(r) => {
-            let initial_invite = r.method == "INVITE" && r.to.tag.is_none();
+            let initial_invite = r.method() == "INVITE" && r.to().tag().is_none();
             let label = if initial_invite {
-                format!("{} {}{}", r.method, r.uri, sdp_tag)
+                format!("{} {}{}", r.method(), r.request_uri().text(), sdp_tag)
             } else {
-                format!("{}{}", r.method, sdp_tag)
+                format!("{}{}", r.method(), sdp_tag)
             };
             (
                 label,
                 false,
-                r.from.tag.clone().unwrap_or_default(),
-                r.to.tag.clone().unwrap_or_default(),
-                r.call_id.clone(),
+                r.from().tag().map(str::to_owned).unwrap_or_default(),
+                r.to().tag().map(str::to_owned).unwrap_or_default(),
+                r.call_id().clone(),
             )
         }
         SipMessage::Response(r) => {
-            let method_tag = if r.cseq.method.as_str().is_empty() {
+            let method_tag = if r.cseq().method().as_str().is_empty() {
                 String::new()
             } else {
-                format!(" ({})", r.cseq.method)
+                format!(" ({})", r.cseq().method())
             };
             (
-                format!("{} {}{}{}", r.status, r.reason, method_tag, sdp_tag),
+                format!("{} {}{}{}", r.status(), r.reason(), method_tag, sdp_tag),
                 true,
-                r.from.tag.clone().unwrap_or_default(),
-                r.to.tag.clone().unwrap_or_default(),
-                r.call_id.clone(),
+                r.from().tag().map(str::to_owned).unwrap_or_default(),
+                r.to().tag().map(str::to_owned).unwrap_or_default(),
+                r.call_id().clone(),
             )
         }
     };

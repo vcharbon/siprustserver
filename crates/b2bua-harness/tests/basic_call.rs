@@ -21,14 +21,14 @@ async fn alice_calls_bob_through_b2bua() {
 
     // The B2BUA bridges to bob.
     let mut uas = bob.receive("INVITE").await;
-    assert!(!uas.request().body.is_empty(), "offer relayed to bob");
+    assert!(!uas.request().body().is_empty(), "offer relayed to bob");
 
     uas.respond(180, "Ringing").await;
     call.expect(180).await; // 100 Trying from the txn layer is absorbed by the UAC
 
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     let ok = call.expect(200).await;
-    assert!(!ok.body.is_empty(), "answer relayed to alice");
+    assert!(!ok.body().is_empty(), "answer relayed to alice");
 
     // ACK is relayed end-to-end.
     let mut dialog = call.ack().await;

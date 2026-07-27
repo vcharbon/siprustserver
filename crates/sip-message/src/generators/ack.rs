@@ -49,7 +49,7 @@ pub fn generate_ack_for_2xx(
     let values = &opts.values;
     let invite_cseq = opts
         .cseq
-        .or_else(|| invite_txn.map(|t| t.original_invite.cseq.seq))
+        .or_else(|| invite_txn.map(|t| t.original_invite.cseq().seq()))
         .expect("generate_ack_for_2xx: either invite_txn or opts.cseq must be provided");
     let remote_target = opts.request_uri.clone().unwrap_or_else(|| dialog.remote_target.clone());
     let (request_uri, routes) = route_for_in_dialog(&remote_target, &dialog.route_set);
@@ -84,13 +84,13 @@ pub fn generate_ack_for_non_2xx(
         .expect("generate_ack_for_non_2xx: INVITE missing Via");
     let echoed = |name: HeaderName| final_response.raw_text(name).next().unwrap_or(SipStr::EMPTY);
 
-    let mut draft = RequestDraft::new(Method::Ack, original_invite.request_uri())
+    let mut draft = RequestDraft::new(Method::Ack, original_invite.request_uri().clone())
         .push_raw(HeaderName::Via, via)
         .push(MaxForwards::new(emit::DEFAULT_MAX_FORWARDS))
         .push_raw(HeaderName::From, echoed(HeaderName::From))
         .push_raw(HeaderName::To, echoed(HeaderName::To))
         .push_raw(HeaderName::CallId, echoed(HeaderName::CallId))
-        .push(CSeq::new(original_invite.cseq.seq, Method::Ack));
+        .push(CSeq::new(original_invite.cseq().seq(), Method::Ack));
     for route in original_invite.raw_text(HeaderName::Route) {
         draft = draft.push_raw(HeaderName::Route, route);
     }

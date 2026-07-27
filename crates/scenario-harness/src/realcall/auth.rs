@@ -82,13 +82,13 @@ impl Challenge {
 /// rather than dropping the challenge, so a fixture responder that ignores the
 /// header (a static credential) still fires.
 pub fn parse_challenge(resp: &SipResponse) -> Option<Challenge> {
-    let name = match resp.status {
+    let name = match resp.status() {
         401 => HeaderName::WwwAuthenticate,
         407 => HeaderName::ProxyAuthenticate,
         _ => return None,
     };
     Some(Challenge {
-        status: resp.status,
+        status: resp.status(),
         header_value: resp.raw(name).next().unwrap_or_default().to_string(),
     })
 }

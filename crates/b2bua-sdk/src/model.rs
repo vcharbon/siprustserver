@@ -199,8 +199,8 @@ impl Match {
 
         if let Some(methods) = &self.methods {
             let m = match self.kind {
-                MatchKind::Request => ctx.request().map(|r| r.method.to_string()),
-                MatchKind::Response => ctx.response().map(|r| r.cseq.method.to_string()),
+                MatchKind::Request => ctx.request().map(|r| r.method().to_string()),
+                MatchKind::Response => ctx.response().map(|r| r.cseq().method().to_string()),
                 MatchKind::Timeout => ctx.timeout_method().map(str::to_string),
                 _ => None,
             };
@@ -212,7 +212,7 @@ impl Match {
 
         if self.kind == MatchKind::Response {
             if let Some(r) = ctx.response() {
-                if !self.status.accepts(r.status) {
+                if !self.status.accepts(r.status()) {
                     return false;
                 }
             }
@@ -1104,7 +1104,7 @@ impl<'a> RuleContext<'a> {
     /// service rule can own failover-pending policy; the CORE default is the
     /// `update-peer-unavailable` local 491.
     pub fn peer_relay_ready(&self) -> bool {
-        let to_tag = self.request().and_then(|r| r.to.tag.as_deref());
+        let to_tag = self.request().and_then(|r| r.to().tag());
         call::helpers::relay_peer_dialog_ready(self.call.0, self.source_leg_id, to_tag)
     }
 

@@ -60,12 +60,12 @@ impl RequestDraft {
     pub fn keep(msg: &SipRequest, keep: impl Fn(&HeaderName) -> bool) -> Self {
         Self::from_parts(
             RequestLine {
-                method: msg.method.clone(),
-                uri: Uri::parse_or_opaque(&msg.uri),
-                version: msg.version.clone(),
+                method: msg.method().clone(),
+                uri: msg.request_uri().clone(),
+                version: SipStr::owned(msg.version()),
             },
-            seed(&msg.headers, keep),
-            msg.body.clone(),
+            seed(msg.headers(), keep),
+            msg.body().clone(),
         )
     }
 
@@ -109,12 +109,12 @@ impl ResponseDraft {
     pub fn keep(msg: &SipResponse, keep: impl Fn(&HeaderName) -> bool) -> Self {
         Self::from_parts(
             StatusLine {
-                version: msg.version.clone(),
-                status: msg.status,
-                reason: msg.reason.clone(),
+                version: SipStr::owned(msg.version()),
+                status: msg.status(),
+                reason: SipStr::owned(msg.reason()),
             },
-            seed(&msg.headers, keep),
-            msg.body.clone(),
+            seed(msg.headers(), keep),
+            msg.body().clone(),
         )
     }
 

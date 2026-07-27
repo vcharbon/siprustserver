@@ -12,7 +12,7 @@ use call::{
     LegDisposition, LegKind, LegState, RemoteInfo,
 };
 use sip_message::header::{HeaderClass, HeaderName, ParamValue, RecordRouteEntry};
-use sip_message::message_helpers::is_emergency_request;
+use sip_message::emergency::is_emergency_request;
 use sip_message::{SipHeader, SipMessage, SipRequest, SipStr};
 use sip_txn::IdGen;
 
@@ -90,13 +90,13 @@ pub fn build_initial_call(
 ) -> Call {
     let call_ref = call::derive_call_ref(
         &config.self_ordinal,
-        &invite.call_id,
-        invite.from.tag.as_deref().unwrap_or(""),
+        invite.call_id().as_str(),
+        invite.from().tag().unwrap_or(""),
     );
     let a_leg = Leg {
         leg_id: "a".to_string(),
-        call_id: invite.call_id.to_string(),
-        from_tag: invite.from.tag.clone().unwrap_or_default().to_string(),
+        call_id: invite.call_id().to_string(),
+        from_tag: invite.from().tag().map(str::to_owned).unwrap_or_default().to_string(),
         source: RemoteInfo {
             address: src.ip().to_string(),
             port: src.port(),
@@ -106,9 +106,9 @@ pub fn build_initial_call(
         dialogs: vec![],
         no_answer_timeout_sec: None,
         bye_disposition: None,
-        local_uri: Some(invite.to.uri.to_string()),
-        remote_uri: Some(invite.from.uri.to_string()),
-        invite_request_uri: Some(invite.uri.to_string()),
+        local_uri: Some(invite.to().uri().to_string()),
+        remote_uri: Some(invite.from().uri().to_string()),
+        invite_request_uri: Some(invite.request_uri().to_string()),
         pending_invite_txn: None,
         ext: None,
         kind: Some(LegKind::A),
@@ -117,16 +117,16 @@ pub fn build_initial_call(
     };
     let topology = topology_from_cookie(invite, &config.self_ordinal);
     let a_leg_invite = ALegInviteSnapshot {
-        uri: invite.uri.to_string(),
+        uri: invite.request_uri().to_string(),
         headers: invite
-            .headers
+            .headers()
             .iter()
             .map(|h| call::SipHeader {
                 name: h.name.to_string(),
                 value: h.value.to_string(),
             })
             .collect(),
-        body: invite.body.to_vec(),
+        body: invite.body().to_vec(),
     };
     Call {
         call_ref,
@@ -305,7 +305,7 @@ pub(crate) fn reject_call(
 fn build_request(invite: &SipRequest) -> NewCallRequest {
     let mut sip_headers: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
-    for h in &invite.headers {
+    for h in invite.headers() {
         if STANDARD_HEADERS.iter().any(|n| n.matches(&h.name)) {
             continue;
         }
@@ -313,14 +313,14 @@ fn build_request(invite: &SipRequest) -> NewCallRequest {
     }
     NewCallRequest {
         call_id: invite.call_id().as_str().to_string(),
-        ruri: invite.uri.to_string(),
+        ruri: invite.request_uri().to_string(),
         from: invite.raw(HeaderName::From).next().unwrap_or("").to_string(),
         to: invite.raw(HeaderName::To).next().unwrap_or("").to_string(),
         via: invite.raw(HeaderName::Via).map(str::to_string).collect(),
         contact: invite.raw(HeaderName::Contact).map(str::to_string).collect(),
         content_type: invite.raw(HeaderName::ContentType).next().map(str::to_string),
         sip_headers,
-        sip_body: (!invite.body.is_empty()).then(|| String::from_utf8_lossy(&invite.body).into_owned()),
+        sip_body: (!invite.body().is_empty()).then(|| String::from_utf8_lossy(invite.body()).into_owned()),
     }
 }
 
@@ -371,7 +371,7 @@ mod emergency_on_invite_tests {
     //!
     //! These assert the *wiring* (helper → field + the None coercion), not the
     //! emergency-classification contract itself — that lives in
-    //! `sip_message::message_helpers::emergency`. Pure builder, no clock.
+    //! `sip_message::emergency`. Pure builder, no clock.
 
     use super::build_initial_call;
     use crate::config::B2buaConfig;

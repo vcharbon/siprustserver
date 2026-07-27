@@ -97,27 +97,28 @@ async fn template_invite_regenerates_dialog_fields_and_freezes_headers() {
     let req = uas.request().clone();
 
     // --- tier-1 regenerated, RFC-valid, NOT the captured values ---------------
-    let branch = req.via.first().branch.as_deref().expect("fresh Via branch");
+    let branch = req.via().first().branch().expect("fresh Via branch");
     assert!(branch.starts_with("z9hG4bK"), "fresh magic-cookie branch, got {branch}");
     assert_ne!(branch, "z9hG4bK-CAPTURED", "the captured Via branch was regenerated");
-    assert!(!req.call_id.is_empty(), "Call-ID present");
-    assert_ne!(req.call_id, "captured-call-id@203.0.113.7", "Call-ID regenerated");
-    assert!(req.from.tag.is_some(), "fresh From-tag present");
-    assert_ne!(req.from.tag.as_deref(), Some("CAP-FROM"), "From-tag regenerated");
-    assert!(req.to.tag.is_none(), "an initial INVITE carries no To-tag");
-    assert_eq!(req.cseq.seq, 1, "CSeq regenerated to the fresh dialog's 1");
-    assert_eq!(req.cseq.method, "INVITE");
-    assert_eq!(values_of(&req.headers, "Max-Forwards"), vec!["70"], "Max-Forwards regenerated (not the captured 55)");
+    assert!(!req.call_id().as_str().is_empty(), "Call-ID present");
+    assert_ne!(req.call_id(), "captured-call-id@203.0.113.7", "Call-ID regenerated");
+    assert!(req.from().tag().is_some(), "fresh From-tag present");
+    assert_ne!(req.from().tag(), Some("CAP-FROM"), "From-tag regenerated");
+    assert!(req.to().tag().is_none(), "an initial INVITE carries no To-tag");
+    assert_eq!(req.cseq().seq(), 1, "CSeq regenerated to the fresh dialog's 1");
+    assert_eq!(req.cseq().method(), "INVITE");
+    assert_eq!(values_of(req.headers(), "Max-Forwards"), vec!["70"], "Max-Forwards regenerated (not the captured 55)");
     // The Request-URI is the stack's (peer-addressed), not the captured R-URI.
-    assert!(req.uri.contains("127.0.0.1:5070"), "R-URI regenerated to the peer, got {}", req.uri);
-    assert_ne!(req.uri, "sip:+15559999@capture.example");
+    let ruri = req.request_uri().text();
+    assert!(ruri.contains("127.0.0.1:5070"), "R-URI regenerated to the peer, got {ruri}");
+    assert_ne!(req.request_uri().text(), "sip:+15559999@capture.example");
 
     // --- frozen headers byte-equal, casing + duplicate layout preserved -------
-    assert_eq!(values_of(&req.headers, "Subject"), vec!["Q3 planning"]);
-    assert_eq!(casing_of(&req.headers, "p-asserted-identity"), "p-AsSeRtEd-IdEnTiTy", "captured casing preserved");
-    assert_eq!(values_of(&req.headers, "p-asserted-identity"), vec!["<sip:+15551234@capture.example>"]);
-    assert_eq!(values_of(&req.headers, "X-Trace"), vec!["hop-a", "hop-b"], "both duplicated rows preserved in order");
-    assert_eq!(req.body, OFFER.as_bytes(), "frozen SDP body byte-preserved");
+    assert_eq!(values_of(req.headers(), "Subject"), vec!["Q3 planning"]);
+    assert_eq!(casing_of(req.headers(), "p-asserted-identity"), "p-AsSeRtEd-IdEnTiTy", "captured casing preserved");
+    assert_eq!(values_of(req.headers(), "p-asserted-identity"), vec!["<sip:+15551234@capture.example>"]);
+    assert_eq!(values_of(req.headers(), "X-Trace"), vec!["hop-a", "hop-b"], "both duplicated rows preserved in order");
+    assert_eq!(req.body(), OFFER.as_bytes(), "frozen SDP body byte-preserved");
 
     // --- carry the call to a clean, RFC-compliant teardown --------------------
     uas.respond(180, "Ringing").await;
@@ -153,8 +154,8 @@ async fn template_in_dialog_update_reuses_dialog_identifiers() {
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).send().await;
     let ok = call.expect(200).await;
-    let alice_from_tag = invite_req.from.tag.clone().expect("From-tag");
-    let bob_to_tag = ok.to.tag.clone().expect("minted To-tag");
+    let alice_from_tag = invite_req.from().tag().map(str::to_owned).expect("From-tag");
+    let bob_to_tag = ok.to().tag().map(str::to_owned).expect("minted To-tag");
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
 
@@ -174,15 +175,15 @@ async fn template_in_dialog_update_reuses_dialog_identifiers() {
     let mut ubob = bob.receive("UPDATE").await;
     let ureq = ubob.request().clone();
     // Dialog identifiers reused; CSeq advanced past the INVITE's 1.
-    assert_eq!(ureq.call_id, invite_req.call_id, "Call-ID reused from the dialog");
-    assert_eq!(ureq.from.tag.as_deref(), Some(alice_from_tag.as_str()), "From-tag reused");
-    assert_eq!(ureq.to.tag.as_deref(), Some(bob_to_tag.as_str()), "To-tag = the peer's dialog tag");
-    assert_eq!(ureq.cseq.seq, 2, "CSeq advanced to 2");
-    assert_eq!(ureq.cseq.method, "UPDATE");
+    assert_eq!(ureq.call_id(), invite_req.call_id(), "Call-ID reused from the dialog");
+    assert_eq!(ureq.from().tag(), Some(&alice_from_tag[..]), "From-tag reused");
+    assert_eq!(ureq.to().tag(), Some(&bob_to_tag[..]), "To-tag = the peer's dialog tag");
+    assert_eq!(ureq.cseq().seq(), 2, "CSeq advanced to 2");
+    assert_eq!(ureq.cseq().method(), "UPDATE");
     // Frozen headers byte-preserved.
-    assert_eq!(casing_of(&ureq.headers, "x-mixed-case"), "X-mIxEd-CaSe");
-    assert_eq!(values_of(&ureq.headers, "X-Dup"), vec!["1", "2"]);
-    assert_eq!(ureq.body, OFFER.as_bytes());
+    assert_eq!(casing_of(ureq.headers(), "x-mixed-case"), "X-mIxEd-CaSe");
+    assert_eq!(values_of(ureq.headers(), "X-Dup"), vec!["1", "2"]);
+    assert_eq!(ureq.body(), OFFER.as_bytes());
 
     ubob.respond(200, "OK").with_sdp(ANSWER).await;
     upd_txn.expect(200).await;
@@ -228,12 +229,12 @@ async fn template_response_freezes_unusual_headers() {
 
     let ok = call.expect(200).await;
     // To-tag regenerated (minted by the stack), not carried by the template.
-    assert!(ok.to.tag.is_some(), "the 200's To-tag was minted (regenerated)");
+    assert!(ok.to().tag().is_some(), "the 200's To-tag was minted (regenerated)");
     // Frozen unusual headers byte-preserved, casing + duplicate layout intact.
-    assert_eq!(casing_of(&ok.headers, "p-charging-vector"), "P-cHaRgInG-vEcToR");
-    assert_eq!(values_of(&ok.headers, "p-charging-vector"), vec!["icid-value=abc123"]);
-    assert_eq!(values_of(&ok.headers, "X-Note"), vec!["n1", "n2"]);
-    assert_eq!(ok.body, ANSWER.as_bytes(), "templated answer body carried");
+    assert_eq!(casing_of(ok.headers(), "p-charging-vector"), "P-cHaRgInG-vEcToR");
+    assert_eq!(values_of(ok.headers(), "p-charging-vector"), vec!["icid-value=abc123"]);
+    assert_eq!(values_of(ok.headers(), "X-Note"), vec!["n1", "n2"]);
+    assert_eq!(ok.body(), ANSWER.as_bytes(), "templated answer body carried");
 
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
@@ -269,10 +270,10 @@ async fn template_compact_via_does_not_duplicate_on_the_wire() {
 
     let mut uas = bob.receive("INVITE").await;
     let req = uas.request().clone();
-    assert_eq!(req.via.len(), 1, "exactly one Via on the wire (no frozen compact duplicate)");
-    assert_eq!(values_of(&req.headers, "Via").len(), 1, "exactly one raw Via header");
-    assert!(!req.via.first().branch.as_deref().unwrap().contains("CAP"), "Via branch regenerated");
-    assert_ne!(req.call_id, "captured@203.0.113.7", "compact Call-ID regenerated");
+    assert_eq!(req.via().len(), 1, "exactly one Via on the wire (no frozen compact duplicate)");
+    assert_eq!(values_of(req.headers(), "Via").len(), 1, "exactly one raw Via header");
+    assert!(!req.via().first().branch().unwrap().contains("CAP"), "Via branch regenerated");
+    assert_ne!(req.call_id(), "captured@203.0.113.7", "compact Call-ID regenerated");
 
     uas.respond(200, "OK").with_sdp(ANSWER).send().await;
     call.expect(200).await;
@@ -319,11 +320,11 @@ async fn template_frozen_non_sdp_content_type_emits_exactly_one() {
     let mut ibob = bob.receive("INFO").await;
     let ireq = ibob.request().clone();
     assert_eq!(
-        values_of(&ireq.headers, "Content-Type"),
+        values_of(ireq.headers(), "Content-Type"),
         vec!["application/xml"],
         "exactly one frozen Content-Type, no sdp default added",
     );
-    assert_eq!(ireq.body, body, "non-SDP body carried verbatim");
+    assert_eq!(&ireq.body()[..], &body[..], "non-SDP body carried verbatim");
     ibob.respond(200, "OK").await;
     info_txn.expect(200).await;
 
@@ -363,11 +364,11 @@ async fn template_body_without_content_type_emits_no_content_type() {
     let mut uas = bob.receive("INVITE").await;
     let req = uas.request().clone();
     assert!(
-        values_of(&req.headers, "Content-Type").is_empty(),
+        values_of(req.headers(), "Content-Type").is_empty(),
         "no Content-Type invented (got {:?})",
-        values_of(&req.headers, "Content-Type"),
+        values_of(req.headers(), "Content-Type"),
     );
-    assert_eq!(&req.body[..], b"opaque-bytes-no-ct", "body carried verbatim");
+    assert_eq!(&req.body()[..], b"opaque-bytes-no-ct", "body carried verbatim");
 
     // Reject so the call terminates cleanly (no offer/answer to complete).
     uas.respond(488, "Not Acceptable Here").await;
@@ -405,8 +406,8 @@ async fn template_preserves_prior_with_header() {
 
     let mut uas = bob.receive("INVITE").await;
     let req = uas.request().clone();
-    assert_eq!(values_of(&req.headers, "X-Pre"), vec!["kept"], "prior with_header survived .template()");
-    assert_eq!(values_of(&req.headers, "X-Frozen"), vec!["from-template"], "frozen header present");
+    assert_eq!(values_of(req.headers(), "X-Pre"), vec!["kept"], "prior with_header survived .template()");
+    assert_eq!(values_of(req.headers(), "X-Frozen"), vec!["from-template"], "frozen header present");
 
     uas.respond(200, "OK").with_sdp(ANSWER).send().await;
     call.expect(200).await;
@@ -469,7 +470,7 @@ l: {}\r\n\r\n{}",
     let mut call = alice.invite(&bob).template(&tmpl, EmitOpts::default()).send().await;
     let mut uas = bob.receive("INVITE").await;
     let req = uas.request().clone();
-    let text = String::from_utf8_lossy(&req.raw).into_owned();
+    let text = String::from_utf8_lossy(req.image()).into_owned();
 
     // Compact names on the wire for regenerated (v/f/t/i/m) + frozen (c).
     for line in ["\r\nv: ", "\r\nf: ", "\r\nt: ", "\r\ni: ", "\r\nm: ", "\r\nc: application/sdp"] {
@@ -486,11 +487,11 @@ l: {}\r\n\r\n{}",
     assert!(text.contains("\r\nSubject: compact-cap"));
 
     // The receiving parser handled the compact names — regenerated fields valid.
-    assert!(req.via.first().branch.as_deref().unwrap().starts_with("z9hG4bK"));
-    assert!(req.from.tag.is_some());
-    assert_eq!(req.cseq.seq, 1, "CSeq regenerated");
-    assert!(!req.call_id.is_empty());
-    assert!(req.body.starts_with(b"v=0"), "SDP offer carried");
+    assert!(req.via().first().branch().unwrap().starts_with("z9hG4bK"));
+    assert!(req.from().tag().is_some());
+    assert_eq!(req.cseq().seq(), 1, "CSeq regenerated");
+    assert!(!req.call_id().as_str().is_empty());
+    assert!(req.body().starts_with(b"v=0"), "SDP offer carried");
 
     // Complete the call cleanly.
     uas.respond(200, "OK").with_sdp(ANSWER).send().await;
@@ -532,7 +533,7 @@ async fn template_full_name_capture_replays_full_names() {
 
     let mut call = alice.invite(&bob).template(&tmpl, EmitOpts::default()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    let text = String::from_utf8_lossy(&uas.request().raw).into_owned();
+    let text = String::from_utf8_lossy(uas.request().image()).into_owned();
 
     for line in ["\r\nVia: ", "\r\nFrom: ", "\r\nTo: ", "\r\nCall-ID: ", "\r\nContact: ", "\r\nContent-Type: "] {
         assert!(text.contains(line), "expected full-name line {line:?} in:\n{text}");
@@ -587,7 +588,7 @@ Content-Length: {}\r\n\r\n{}",
     uas.respond_template(&tmpl, EmitOpts::default()).send().await;
 
     let ok = call.expect(200).await;
-    let text = String::from_utf8_lossy(&ok.raw).into_owned();
+    let text = String::from_utf8_lossy(ok.image()).into_owned();
     // Exactly one supported-family header, compact, byte-equal value.
     assert!(text.contains("\r\nk: replaces"), "compact Supported on the wire:\n{text}");
     assert!(!text.contains("\r\nSupported:"), "no full-name Supported stamped:\n{text}");
@@ -642,7 +643,7 @@ async fn template_reinvite_compact_supported_not_duplicated() {
 
     let mut rbob = bob.receive("INVITE").await;
     let rreq = rbob.request().clone();
-    let text = String::from_utf8_lossy(&rreq.raw).into_owned();
+    let text = String::from_utf8_lossy(rreq.image()).into_owned();
     assert!(text.contains("\r\nk: replaces"), "compact Supported on the re-INVITE:\n{text}");
     assert!(
         !text.contains("\r\nSupported: 100rel"),
@@ -974,8 +975,8 @@ async fn automatics_fire_though_absent_from_templates() {
     // The UAC auto-ACKs the non-2xx final (RFC 3261 §17.1.1.3) — an automatic
     // that appears in NO template.
     let rej = call.expect(486).await;
-    assert!(rej.to.tag.is_some(), "the reject's To-tag was minted by the stack, not templated");
-    assert_eq!(values_of(&rej.headers, "Retry-After"), vec!["30"], "frozen header preserved");
+    assert!(rej.to().tag().is_some(), "the reject's To-tag was minted by the stack, not templated");
+    assert_eq!(values_of(rej.headers(), "Retry-After"), vec!["30"], "frozen header preserved");
 
     // The stack-owned hop ACK reached the UAS though the test scripted no ACK.
     uas.expect_ack().await;

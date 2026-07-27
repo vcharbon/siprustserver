@@ -100,7 +100,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                         return false;
                     }
                     match ctx.response() {
-                        Some(r) => !r.body.is_empty() && has_p_early_media(r),
+                        Some(r) => !r.body().is_empty() && has_p_early_media(r),
                         None => false,
                     }
                 }),
@@ -110,7 +110,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 let rseq = reliable_rseq(resp);
                 let invite_cseq = resp.cseq().seq() as i64;
                 let leg = ctx.source_leg_id.to_string();
-                let promoted_sdp = resp.body.clone();
+                let promoted_sdp = resp.body().clone();
 
                 // 183 → 200 OK on the wire toward Alice: drop Require/RSeq
                 // (+ P-Early-Media is not in the relay passthrough set, so it
@@ -181,7 +181,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 let mut actions = vec![RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Provisional,
                     leg_id: leg.clone(),
-                    status_code: Some(resp.status as i64),
+                    status_code: Some(resp.status() as i64),
                     reason: Some("promote-pem-to-200:suppressed".to_string()),
                 }];
                 if let Some(rseq) = rseq {
@@ -210,7 +210,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 let b = ctx.source_leg_id.to_string();
                 let a = ctx.call.a_leg().leg_id.clone();
                 let b_tag = resp.to().tag().unwrap_or_default().to_string();
-                let final_sdp = resp.body.clone();
+                let final_sdp = resp.body().clone();
                 let state = ctx.call.promote_pem_state().cloned().unwrap_or_default();
                 let promoted_sdp = state.promoted_sdp.clone();
 
@@ -319,7 +319,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     let expected = ctx.call.promote_pem_state()
                         .and_then(|s| s.resync_reinvite_cseq);
                     match (ctx.response(), expected) {
-                        (Some(r), Some(c)) => r.cseq.seq as i64 == c,
+                        (Some(r), Some(c)) => r.cseq().seq() as i64 == c,
                         _ => false,
                     }
                 }),
@@ -327,28 +327,28 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 let resp = ctx.response()?;
                 // Provisional — keep waiting (leave unclaimed via empty action set
                 // is not possible here since we consume; emit no effect).
-                if resp.status < 200 {
+                if resp.status() < 200 {
                     return ok(vec![]);
                 }
-                if resp.status < 300 {
+                if resp.status() < 300 {
                     return ok(vec![
                         RuleAction::AckLeg { leg_id: "a".to_string(), body: Vec::new(), content_type: None },
                         RuleAction::AddCdrEvent {
                             event_type: CdrEventType::Answer,
                             leg_id: "a".to_string(),
-                            status_code: Some(resp.status as i64),
+                            status_code: Some(resp.status() as i64),
                             reason: Some("promote-pem-to-200:resync-success".to_string()),
                         },
                         RuleAction::SetPromotePem { state: None },
                     ]);
                 }
                 // 3xx-6xx — Alice and Bob disagree on SDP. BYE both with Reason.
-                let reason = reason_header(resp.status, &resp.reason);
+                let reason = reason_header(resp.status(), resp.reason());
                 ok(vec![
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Reject,
                         leg_id: "a".to_string(),
-                        status_code: Some(resp.status as i64),
+                        status_code: Some(resp.status() as i64),
                         reason: Some(format!("promote-pem-to-200:resync-failed:{reason}")),
                     },
                     RuleAction::SetPromotePem { state: None },
@@ -419,17 +419,17 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     if !promote_pem_active(ctx) || !promoted(ctx) {
                         return false;
                     }
-                    ctx.response().map(|r| r.status >= 300).unwrap_or(false)
+                    ctx.response().map(|r| r.status() >= 300).unwrap_or(false)
                 }),
             |ctx| {
                 let resp = ctx.response()?;
                 let b = ctx.source_leg_id.to_string();
-                let reason = reason_header(resp.status, &resp.reason);
+                let reason = reason_header(resp.status(), resp.reason());
                 ok(vec![
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Reject,
                         leg_id: b.clone(),
-                        status_code: Some(resp.status as i64),
+                        status_code: Some(resp.status() as i64),
                         reason: Some(format!("promote-pem-to-200:b-failed:{reason}")),
                     },
                     RuleAction::TerminateLeg {

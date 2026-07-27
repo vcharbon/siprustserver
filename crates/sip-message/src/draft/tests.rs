@@ -63,13 +63,13 @@ fn a_blank_draft_builds_a_message_that_reparses_to_itself() {
         .freeze()
         .expect("every mandatory header is present");
 
-    assert_eq!(frozen.method, Method::Options);
-    assert_eq!(frozen.from.tag.as_deref(), Some("t1"));
-    assert_eq!(frozen.via.first().host, "atlanta.com");
+    assert_eq!(frozen.method(), Method::Options);
+    assert_eq!(frozen.from().tag(), Some("t1"));
+    assert_eq!(frozen.via().first().host(), "atlanta.com");
     // The built message carries a real image: re-parsing its own bytes yields
     // the same header list.
-    let reparsed = CustomParser::new().parse(&frozen.raw).expect("built bytes parse");
-    assert_eq!(reparsed.headers(), frozen.headers.as_slice());
+    let reparsed = CustomParser::new().parse(frozen.image()).expect("built bytes parse");
+    assert_eq!(reparsed.headers(), frozen.headers());
 }
 
 #[test]
@@ -78,16 +78,16 @@ fn thawing_and_freezing_preserves_every_line_and_the_body() {
     let frozen = original.thaw().freeze().expect("a thawed draft is complete");
 
     let before: Vec<(String, String)> = original
-        .headers
+        .headers()
         .iter()
         .map(|h| (HeaderName::of(&h.name).as_wire_str().to_owned(), h.value.to_string()))
         .collect();
     let after: Vec<(String, String)> =
-        frozen.headers.iter().map(|h| (h.name.to_string(), h.value.to_string())).collect();
+        frozen.headers().iter().map(|h| (h.name.to_string(), h.value.to_string())).collect();
     assert_eq!(before, after);
-    assert_eq!(frozen.body, original.body);
-    assert_eq!(frozen.from.tag, original.from.tag);
-    assert_eq!(frozen.via.len(), original.via.len());
+    assert_eq!(frozen.body(), original.body());
+    assert_eq!(frozen.from().tag(), original.from().tag());
+    assert_eq!(frozen.via().len(), original.via().len());
 }
 
 #[test]
@@ -106,8 +106,8 @@ fn a_proxy_hop_touches_only_the_routing_headers() {
         .freeze()
         .expect("still complete");
 
-    assert_eq!(hop.via.len(), 2);
-    assert_eq!(hop.via.first().host, "proxy.example");
+    assert_eq!(hop.via().len(), 2);
+    assert_eq!(hop.via().first().host(), "proxy.example");
     assert_eq!(hop.raw(HeaderName::MaxForwards).next(), Some("69"));
     let routes = hop.route_set().expect("routes read back");
     assert_eq!(routes.len(), 1);
@@ -160,7 +160,7 @@ fn popping_the_only_entry_of_a_line_removes_the_line() {
 fn freeze_bytes_is_the_frozen_message_without_the_message() {
     let draft = invite().thaw();
     let frozen = draft.clone().freeze().expect("complete");
-    assert_eq!(draft.freeze_bytes().expect("complete"), frozen.raw);
+    assert_eq!(draft.freeze_bytes().expect("complete"), frozen.image());
 
     let blank = RequestDraft::new(Method::Options, Uri::sip("biloxi.com"));
     assert!(blank.freeze_bytes().is_err(), "an incomplete draft yields no wire bytes");
@@ -179,7 +179,8 @@ fn prepending_a_header_the_draft_lacks_appends_it() {
 fn a_thawed_request_uri_is_forwarded_byte_for_byte() {
     let original = invite();
     let frozen = original.thaw().freeze().expect("a thawed draft is complete");
-    assert_eq!(frozen.uri, original.uri);
+    assert_eq!(frozen.request_uri(), original.request_uri());
+    assert_eq!(frozen.request_uri().text(), original.request_uri().text());
 }
 
 #[test]
@@ -203,7 +204,7 @@ fn a_body_swap_restates_the_length_and_the_media_type() {
         .freeze()
         .expect("still complete");
     assert_eq!(frozen.raw(HeaderName::ContentLength).next(), Some("23"));
-    assert_eq!(frozen.body.len(), 23);
+    assert_eq!(frozen.body().len(), 23);
     assert_eq!(frozen.raw(HeaderName::ContentType).next(), Some("application/sdp"));
 }
 
@@ -224,17 +225,17 @@ fn a_response_draft_rides_the_same_engine() {
     let request = invite();
     let response = ResponseDraft::new(180, "Ringing")
         .push_raw(HeaderName::Via, request.raw(HeaderName::Via).next().unwrap().to_owned())
-        .push(request.from())
-        .push(request.to().with_tag("b0b"))
-        .push(request.call_id())
-        .push(request.cseq())
+        .push(request.from().clone())
+        .push(request.to().clone().with_tag("b0b"))
+        .push(request.call_id().clone())
+        .push(request.cseq().clone())
         .freeze()
         .expect("a response needs no Max-Forwards");
 
-    assert_eq!(response.status, 180);
-    assert_eq!(response.reason, "Ringing");
-    assert_eq!(response.to.tag.as_deref(), Some("b0b"));
-    assert_eq!(response.via.first().host, "client.atlanta.com");
+    assert_eq!(response.status(), 180);
+    assert_eq!(response.reason(), "Ringing");
+    assert_eq!(response.to().tag(), Some("b0b"));
+    assert_eq!(response.via().first().host(), "client.atlanta.com");
 }
 
 #[test]

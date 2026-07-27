@@ -149,8 +149,8 @@ impl ClientInvite {
         let mut provisionals = Vec::new();
         loop {
             match self.agent.try_recv().await? {
-                SipMessage::Response(r) if r.status == 100 => continue,
-                SipMessage::Response(r) if r.status < 200 => {
+                SipMessage::Response(r) if r.status() == 100 => continue,
+                SipMessage::Response(r) if r.status() < 200 => {
                     self.learn_from_response(&r);
                     provisionals.push(r);
                 }
@@ -158,12 +158,12 @@ impl ClientInvite {
                     // §17.1.1.3 txn-layer auto-ACK — matching or not, a non-2xx
                     // final to THIS INVITE completes its client transaction.
                     self.ack_ctx().ack_non_2xx(&r).await?;
-                    if r.status != status {
+                    if r.status() != status {
                         return Err(StepError::WrongStatus {
                             who: self.agent.name.clone(),
                             expected: status,
-                            got: r.status,
-                            reason: r.reason.to_string(),
+                            got: r.status(),
+                            reason: r.reason().to_string(),
                         });
                     }
                     self.learn_from_response(&r);
@@ -175,7 +175,7 @@ impl ClientInvite {
                     }
                     return Err(StepError::UnexpectedKind {
                         who: self.agent.name.clone(),
-                        detail: format!("got a {} request, expected a {status} final", r.method),
+                        detail: format!("got a {} request, expected a {status} final", r.method()),
                     });
                 }
             }
@@ -200,7 +200,7 @@ impl ClientInvite {
     pub(crate) async fn try_recv_response(&mut self) -> Result<SipResponse, StepError> {
         loop {
             match self.agent.try_recv().await? {
-                SipMessage::Response(r) if r.status == 100 => continue,
+                SipMessage::Response(r) if r.status() == 100 => continue,
                 SipMessage::Response(r) => {
                     self.ack_ctx().ack_non_2xx(&r).await?;
                     return Ok(r);
@@ -211,7 +211,7 @@ impl ClientInvite {
                     }
                     return Err(StepError::UnexpectedKind {
                         who: self.agent.name.clone(),
-                        detail: format!("got a {} request, expected a response", r.method),
+                        detail: format!("got a {} request, expected a response", r.method()),
                     });
                 }
             }
@@ -231,18 +231,18 @@ impl ClientInvite {
         &mut self,
         resp: &SipResponse,
     ) -> Result<InviteResponseFate, StepError> {
-        if resp.status < 200 {
+        if resp.status() < 200 {
             self.learn_from_response(resp);
-            return Ok(InviteResponseFate::Provisional { status: resp.status });
+            return Ok(InviteResponseFate::Provisional { status: resp.status() });
         }
-        if (200..300).contains(&resp.status) {
+        if (200..300).contains(&resp.status()) {
             self.learn_from_response(resp);
             return Ok(InviteResponseFate::Answered);
         }
         // A non-2xx final completes the client transaction — auto-ACK it on the
         // INVITE branch (§17.1.1.3), matching the `try_expect` path.
         self.ack_ctx().ack_non_2xx(resp).await?;
-        Ok(InviteResponseFate::Failed { status: resp.status })
+        Ok(InviteResponseFate::Failed { status: resp.status() })
     }
 
     /// Learn the remote tag / target / route set from a response — the dialog
@@ -255,8 +255,8 @@ impl ClientInvite {
         // another. A provisional only seeds the (early) remote tag when none is
         // known yet; the final 2xx overrides it so the ACK and every subsequent
         // in-dialog request address the dialog the 2xx actually confirmed.
-        let is_2xx_invite = (200..300).contains(&resp.status) && resp.cseq.method == "INVITE";
-        if let Some(tag) = &resp.to.tag {
+        let is_2xx_invite = (200..300).contains(&resp.status()) && resp.cseq().method() == "INVITE";
+        if let Some(tag) = &resp.to().tag() {
             if is_2xx_invite || self.dialog.remote_tag.is_empty() {
                 self.dialog.remote_tag = tag.to_string();
             }
@@ -277,7 +277,7 @@ impl ClientInvite {
     /// The Request-URI this INVITE targets (its wire R-URI) — the request-line
     /// input a credential is computed over ([`ChallengeResponder::respond`]).
     pub fn ruri(&self) -> &str {
-        &self.original_invite.uri
+        self.original_invite.request_uri().source().unwrap_or("")
     }
 
     /// The establishing INVITE's CSeq number (the RETRIED INVITE's after a
@@ -285,7 +285,7 @@ impl ClientInvite {
     /// the fork-aware caller's discriminator for a LOSING fork's late 200
     /// (same CSeq as the INVITE, different To-tag than the winner's).
     pub fn invite_cseq(&self) -> u32 {
-        self.original_invite.cseq.seq
+        self.original_invite.cseq().seq()
     }
 
     /// The early dialog's learned remote (To) tag — from the first tagged
@@ -306,7 +306,7 @@ impl ClientInvite {
     /// contiguous within its dialog (§12.2.1.1).
     pub fn fork_dialog(&self, resp: &SipResponse) -> Dialog {
         let mut dialog = self.dialog.clone();
-        if let Some(tag) = &resp.to.tag {
+        if let Some(tag) = &resp.to().tag() {
             dialog.remote_tag = tag.to_string();
         }
         if let Some(target) = first_contact_uri(resp) {
@@ -353,10 +353,10 @@ impl ClientInvite {
         //    challenge still fires the responder (a static fixture ignores it);
         //    `None` = decline → no retry.
         let parsed = parse_challenge(challenge).unwrap_or(crate::realcall::auth::Challenge {
-            status: challenge.status,
+            status: challenge.status(),
             header_value: String::new(),
         });
-        let method = self.original_invite.method.to_string();
+        let method = self.original_invite.method().to_string();
         let Some(credential) = responder.respond(&parsed, &method, self.ruri()) else {
             return Ok(false);
         };
@@ -366,13 +366,13 @@ impl ClientInvite {
         //    INVITE is thawed, so every header it does not touch rides through
         //    byte-verbatim and the retried message's typed fields (which the
         //    later ACK / CANCEL read) come from the edit itself.
-        let new_cseq = self.original_invite.cseq.seq + 1;
+        let new_cseq = self.original_invite.cseq().seq() + 1;
         let credential_name = HeaderName::from(parsed.credential_header());
         let resent = self
             .original_invite
             .thaw()
             .set(self.agent.via().value())
-            .set(CSeq::new(new_cseq, self.original_invite.method.clone()))
+            .set(CSeq::new(new_cseq, self.original_invite.method().clone()))
             // Drop any prior credential of the same header (a second challenge
             // round would replace it) then add this one.
             .remove(&credential_name)
@@ -384,7 +384,7 @@ impl ClientInvite {
             })?;
 
         // The retried INVITE was frozen here, so its image is the wire form.
-        self.agent.try_send_wire(&resent.raw, self.wire_dst).await?;
+        self.agent.try_send_wire(resent.image(), self.wire_dst).await?;
         // Re-point the transaction state at the retried INVITE: the CANCEL / ACK /
         // dialog CSeq must all follow the new transaction, not the challenged one.
         self.original_invite = resent;
@@ -449,7 +449,7 @@ impl ClientInvite {
             who: self.agent.name.clone(),
             detail: format!(
                 "cannot PRACK the {} {}: no parseable RSeq header (not a reliable provisional)",
-                reliable_1xx.status, reliable_1xx.reason
+                reliable_1xx.status(), reliable_1xx.reason()
             ),
         })?;
         self.send_request(InDialogMethod::Prack).with_rack(&rack).try_send().await
@@ -475,10 +475,10 @@ impl ClientInvite {
             who: self.agent.name.clone(),
             detail: format!(
                 "cannot PRACK the {} {}: no parseable RSeq header (not a reliable provisional)",
-                reliable_1xx.status, reliable_1xx.reason
+                reliable_1xx.status(), reliable_1xx.reason()
             ),
         })?;
-        let fork_tag = reliable_1xx.to.tag.clone();
+        let fork_tag = reliable_1xx.to().tag().map(str::to_owned);
         let mut req = self.send_request(InDialogMethod::Prack).with_rack(&rack);
         if let Some(tag) = &fork_tag {
             req = req.with_to_tag(tag);

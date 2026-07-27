@@ -14,8 +14,9 @@ use bytes::Bytes;
 
 use crate::error::SipParseError;
 use crate::parser::{SipParser, SipParserLimits};
+use crate::draft::{RequestLine, StatusLine, SIP_VERSION};
 use crate::sip_str::{SharedText, SipStr};
-use crate::types::{NonEmpty, SipMessage, SipRequest, SipResponse};
+use crate::types::{MessageCore, SipMessage, SipRequest, SipResponse};
 
 pub mod scanner;
 pub mod start_line;
@@ -51,24 +52,14 @@ pub fn hydrate_request(
     let idx = HeaderIndex::build(&headers);
     let eager = extract_request_fields(&idx, &uri, &limits, Some(method), ExtractMode::Hydrate)?;
     let optional = optional_headers::extract_optional_indexed(&idx);
-    let c = eager.common;
-    let via = non_empty_vias(c.vias)?;
-    Ok(SipRequest {
-        method: crate::method::Method::from_wire(method),
-        uri,
-        request_uri: eager.request_uri,
-        version: SipStr::from_static("SIP/2.0"),
-        from: c.from,
-        to: c.to,
-        call_id: c.call_id,
-        cseq: c.cseq,
-        via,
-        contacts: c.contacts,
-        optional,
-        headers,
-        body: body.into(),
-        raw: Bytes::new(),
-    })
+    Ok(SipRequest::new(
+        RequestLine {
+            method: crate::method::Method::from_wire(method),
+            uri: eager.request_uri,
+            version: SipStr::from_static(SIP_VERSION),
+        },
+        MessageCore::new(headers, eager.common, optional, body.into(), Bytes::new()),
+    ))
 }
 
 /// Build a trusted [`SipResponse`] from already-structured components — the
@@ -81,24 +72,16 @@ pub fn hydrate_response(
 ) -> Result<SipResponse, SipParseError> {
     let limits = SipParserLimits::default();
     let idx = HeaderIndex::build(&headers);
-    let c = extract_response_fields(&idx, status, &limits, ExtractMode::Hydrate)?;
+    let core = extract_response_fields(&idx, status, &limits, ExtractMode::Hydrate)?;
     let optional = optional_headers::extract_optional_indexed(&idx);
-    let via = non_empty_vias(c.vias)?;
-    Ok(SipResponse {
-        version: SipStr::from_static("SIP/2.0"),
-        status,
-        reason: SipStr::owned(reason),
-        from: c.from,
-        to: c.to,
-        call_id: c.call_id,
-        cseq: c.cseq,
-        via,
-        contacts: c.contacts,
-        optional,
-        headers,
-        body: body.into(),
-        raw: Bytes::new(),
-    })
+    Ok(SipResponse::new(
+        StatusLine {
+            version: SipStr::from_static(SIP_VERSION),
+            status,
+            reason: SipStr::owned(reason),
+        },
+        MessageCore::new(headers, core, optional, body.into(), Bytes::new()),
+    ))
 }
 
 /// The production parser. Built with `SipParserLimits`.
@@ -174,44 +157,26 @@ impl SipParser for CustomParser {
                 let eager: RequestEager =
                     extract_request_fields(&idx, &uri, limits, Some(&method), mode)?;
                 let optional = optional_headers::extract_optional_indexed(&idx);
-                let c = eager.common;
-                let via = non_empty_vias(c.vias)?;
-                Ok(SipMessage::Request(SipRequest {
-                    method: crate::method::Method::from_wire(&method),
-                    uri,
-                    request_uri: eager.request_uri,
-                    version: text.span(rl.version.start, rl.version.len()),
-                    from: c.from,
-                    to: c.to,
-                    call_id: c.call_id,
-                    cseq: c.cseq,
-                    via,
-                    contacts: c.contacts,
-                    optional,
-                    headers: headers_vec,
-                    body,
-                    raw,
-                }))
+                Ok(SipMessage::Request(SipRequest::new(
+                    RequestLine {
+                        method: crate::method::Method::from_wire(&method),
+                        uri: eager.request_uri,
+                        version: text.span(rl.version.start, rl.version.len()),
+                    },
+                    MessageCore::new(headers_vec, eager.common, optional, body, raw),
+                )))
             }
             StartLine::Status(sl) => {
-                let c = extract_response_fields(&idx, sl.status, limits, mode)?;
+                let core = extract_response_fields(&idx, sl.status, limits, mode)?;
                 let optional = optional_headers::extract_optional_indexed(&idx);
-                let via = non_empty_vias(c.vias)?;
-                Ok(SipMessage::Response(SipResponse {
-                    version: text.span(sl.version.start, sl.version.len()),
-                    status: sl.status,
-                    reason: text.span(sl.reason.start, sl.reason.len()),
-                    from: c.from,
-                    to: c.to,
-                    call_id: c.call_id,
-                    cseq: c.cseq,
-                    via,
-                    contacts: c.contacts,
-                    optional,
-                    headers: headers_vec,
-                    body,
-                    raw,
-                }))
+                Ok(SipMessage::Response(SipResponse::new(
+                    StatusLine {
+                        version: text.span(sl.version.start, sl.version.len()),
+                        status: sl.status,
+                        reason: text.span(sl.reason.start, sl.reason.len()),
+                    },
+                    MessageCore::new(headers_vec, core, optional, body, raw),
+                )))
             }
         }
     }
@@ -225,15 +190,5 @@ fn decode_image(header_block: &[u8]) -> SharedText {
     match std::str::from_utf8(header_block) {
         Ok(s) => SharedText::new(s),
         Err(_) => SharedText::from(String::from_utf8_lossy(header_block).into_owned()),
-    }
-}
-
-/// Build a `NonEmpty<Via>` from the extracted Via list. `extract_*_fields`
-/// already rejects an empty Via set, so this is a belt-and-suspenders guard.
-fn non_empty_vias(vias: Vec<crate::types::Via>) -> Result<NonEmpty<crate::types::Via>, SipParseError> {
-    let mut it = vias.into_iter();
-    match it.next() {
-        Some(head) => Ok(NonEmpty::from_parts(head, it.collect())),
-        None => Err(SipParseError::new("Missing mandatory Via header")),
     }
 }

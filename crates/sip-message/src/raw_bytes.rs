@@ -2,7 +2,7 @@
 
 /// First index of `needle` within `haystack` (byte substring search), or
 /// `None`. An empty `needle` matches at 0; the callers here never pass one.
-pub(super) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub(crate) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() {
         return Some(0);
     }
@@ -13,7 +13,7 @@ pub(super) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Whether `haystack` contains `needle`, comparing ASCII-case-insensitively.
-pub(super) fn contains_subslice_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
+pub(crate) fn contains_subslice_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
         return true;
     }

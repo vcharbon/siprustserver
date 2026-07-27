@@ -101,7 +101,7 @@ fn source_leg_not_cancelling(ctx: &RuleContext) -> bool {
 /// callee's real answer (an early-dialog UPDATE is the RFC 3311 §5.1 normal
 /// case; the b-leg dialog carries its callee tag, so the relay is well-formed).
 fn is_fake_prack_bodyless_update(ctx: &RuleContext) -> bool {
-    is_fake_prack(ctx) && ctx.request().map(|r| r.body.is_empty()).unwrap_or(false)
+    is_fake_prack(ctx) && ctx.request().map(|r| r.body().is_empty()).unwrap_or(false)
 }
 
 // The `relayFirst18x` callflow service (ADR-0016). `Phase` is the declared
@@ -142,9 +142,9 @@ define_service! {
                 .direction(Direction::FromB),
             handle: |ctx| {
                 let resp = ctx.response()?;
-                let b_tag = resp.to.tag.clone().unwrap_or_default();
+                let b_tag = resp.to().tag().map(str::to_owned).unwrap_or_default();
                 let rseq = reliable_rseq(resp);
-                let invite_cseq = resp.cseq.seq as i64;
+                let invite_cseq = resp.cseq().seq() as i64;
                 let leg = ctx.source_leg_id.to_string();
                 let fake_prack = is_fake_prack(ctx);
 
@@ -157,11 +157,11 @@ define_service! {
                     b_tag: b_tag.to_string(),
                 });
                 // fake-prack: cache bob's SDP per dialog when 100rel is in play.
-                let cache_action = if fake_prack && rseq.is_some() && !resp.body.is_empty() {
+                let cache_action = if fake_prack && rseq.is_some() && !resp.body().is_empty() {
                     Some(RuleAction::CacheSdpOnLegDialog {
                         leg_id: leg.clone(),
                         b_tag: b_tag.to_string(),
-                        body: resp.body.to_vec(),
+                        body: resp.body().to_vec(),
                     })
                 } else {
                     None
@@ -176,7 +176,7 @@ define_service! {
                         call::features::Relay18xMessages::All => true,
                         call::features::Relay18xMessages::First => false,
                         call::features::Relay18xMessages::OnePerValue => {
-                            !ctx.call.relay_first_18x_value_relayed(resp.status)
+                            !ctx.call.relay_first_18x_value_relayed(resp.status())
                         }
                     };
                     if !relay_again {
@@ -190,7 +190,7 @@ define_service! {
                         actions.push(RuleAction::AddCdrEvent {
                             event_type: CdrEventType::Provisional,
                             leg_id: leg,
-                            status_code: Some(resp.status as i64),
+                            status_code: Some(resp.status() as i64),
                             reason: None,
                         });
                         return ok(actions);
@@ -213,7 +213,7 @@ define_service! {
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Provisional,
                         leg_id: leg.clone(),
-                        status_code: Some(resp.status as i64),
+                        status_code: Some(resp.status() as i64),
                         reason: None,
                     },
                 ];
@@ -261,7 +261,7 @@ define_service! {
                 .filter(source_leg_not_cancelling),
             handle: |ctx| {
                 let resp = ctx.response()?;
-                let b_tag = resp.to.tag.clone().unwrap_or_default();
+                let b_tag = resp.to().tag().map(str::to_owned).unwrap_or_default();
                 let leg = ctx.source_leg_id.to_string();
                 let mut actions = Vec::new();
 
@@ -280,7 +280,7 @@ define_service! {
                         Some(b) if !b.is_empty() => {
                             actions.push(RuleAction::SetPolicyUpdateBody { body: b });
                         }
-                        _ if resp.body.is_empty() => {
+                        _ if resp.body().is_empty() => {
                             // No cache AND bob's 200 has no body — surface a CDR
                             // marker (alice's call may break: no SDP at confirm).
                             actions.push(RuleAction::AddCdrEvent {
@@ -347,10 +347,10 @@ define_service! {
                 .filter(is_fake_prack),
             handle: |ctx| {
                 let req = ctx.request()?;
-                let b_tag = req.from.tag.clone().unwrap_or_default();
+                let b_tag = req.from().tag().map(str::to_owned).unwrap_or_default();
                 let leg = ctx.source_leg_id.to_string();
 
-                if req.body.is_empty() {
+                if req.body().is_empty() {
                     return ok(vec![RuleAction::Respond {
                         status: 200,
                         reason: "OK".to_string(),
@@ -360,7 +360,7 @@ define_service! {
                 }
 
                 let alice_body = &ctx.call.a_leg_invite().body;
-                match build_answer_from_offer(&req.body, alice_body, &ctx.config.sip_local_ip, ctx.now_ms) {
+                match build_answer_from_offer(req.body(), alice_body, &ctx.config.sip_local_ip, ctx.now_ms) {
                     SdpBuildResult::Ok(body) => ok(vec![
                         RuleAction::Respond {
                             status: 200,
@@ -371,7 +371,7 @@ define_service! {
                         RuleAction::CacheSdpOnLegDialog {
                             leg_id: leg,
                             b_tag: b_tag.to_string(),
-                            body: req.body.to_vec(),
+                            body: req.body().to_vec(),
                         },
                     ]),
                     _ => ok(vec![RuleAction::Respond {

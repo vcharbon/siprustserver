@@ -86,7 +86,7 @@ impl PeerAuditRule for NoToTagOnInitialRequestRule {
                     if !first_for_call_id {
                         continue;
                     }
-                    let method = req.method.as_str();
+                    let method = req.method().as_str();
                     if !DIALOG_INITIATING_METHODS.contains(&method) {
                         continue;
                     }
@@ -164,7 +164,7 @@ impl PeerAuditRule for NoRequireOnCancelOrAckRule {
                     let SipMessage::Request(req) = &m else {
                         continue;
                     };
-                    let method = req.method.as_str();
+                    let method = req.method().as_str();
                     if method != "CANCEL" && method != "ACK" {
                         continue;
                     }
@@ -237,24 +237,25 @@ impl PeerAuditRule for CancelCseqMethodRule {
 }
 
 /// The per-message decision for [`CancelCseqMethodRule`]: a sent CANCEL whose
-/// CSeq method token is not `CANCEL` is a §9.1 violation. Factored out so the
-/// defense-in-depth path can be exercised on a [`SipMessage`] built *outside*
-/// the parser — the only way this rule ever fires, since the strict and lenient
-/// parsers both reject a wire CANCEL whose request-method differs from its CSeq
-/// method before the rule could see it (see the struct doc).
+/// CSeq method token is not `CANCEL` is a §9.1 violation.
 fn cancel_cseq_violation(m: &SipMessage) -> Option<String> {
     let SipMessage::Request(req) = m else {
         return None;
     };
-    if req.method.as_str() != "CANCEL" {
-        return None;
-    }
-    let cseq_m = cseq_method(m);
-    if cseq_m == "CANCEL" {
+    cancel_cseq_mismatch(req.method().as_str(), cseq_method(m))
+}
+
+/// The decision itself, over the two method tokens. Factored out so the
+/// defense-in-depth path stays testable: the strict and lenient parsers both
+/// reject a wire CANCEL whose request-method differs from its CSeq method, and
+/// a frozen message cannot be edited into that state, so no message carrying it
+/// can be built (see the struct doc).
+fn cancel_cseq_mismatch(method: &str, cseq_method: &str) -> Option<String> {
+    if method != "CANCEL" || cseq_method == "CANCEL" {
         return None;
     }
     Some(format!(
-        "CANCEL request carries CSeq method={cseq_m} (expected CANCEL) \
+        "CANCEL request carries CSeq method={cseq_method} (expected CANCEL) \
          — RFC 3261 §9.1 / RFC3261-MUST-045"
     ))
 }
@@ -304,7 +305,7 @@ impl PeerAuditRule for StrictRouteShuffleOnSendRule {
             out.push(format!(
                 "Sent {} request still carries strict-route topmost Route entry — §16.6 \
                  step 6 swap may not have run (RFC3261-MUST-113)",
-                req.method.as_str(),
+                req.method().as_str(),
             ));
         }
         out
@@ -479,20 +480,20 @@ mod tests {
     #[test]
     fn cancel_with_invite_cseq_is_flagged() {
         // The strict AND lenient parsers both reject a wire CANCEL whose
-        // request-method differs from its CSeq method (extract_fields.rs), so
-        // such a message can only arise from an internal builder that bypasses
-        // field extraction — exactly the defense-in-depth path this rule guards.
-        // We reproduce that path: parse a valid CANCEL, then mutate the parsed
-        // CSeq method to INVITE (a builder bug), and assert the rule's
-        // per-message decision flags it.
+        // request-method differs from its CSeq method (extract_fields.rs), and a
+        // frozen message cannot be edited into that state — so the rule is
+        // exercised on the decision itself, which is the defense-in-depth path
+        // it guards.
         let parser = super::super::lenient_parser();
-        let mut m = parser.parse(&cancel_cseq("CANCEL")).expect("valid CANCEL parses");
-        if let SipMessage::Request(req) = &mut m {
-            req.cseq.method = sip_message::Method::Invite;
-        }
-        let detail = cancel_cseq_violation(&m).expect("CSeq method mismatch must be flagged");
+        assert!(parser.parse(&cancel_cseq("INVITE")).is_err(), "the wire form is rejected");
+        let detail = cancel_cseq_mismatch("CANCEL", "INVITE")
+            .expect("CSeq method mismatch must be flagged");
         assert!(detail.contains("MUST-045"), "{detail}");
         assert!(detail.contains("method=INVITE"), "{detail}");
+        // A well-formed CANCEL is silent, on both paths.
+        assert!(cancel_cseq_mismatch("CANCEL", "CANCEL").is_none());
+        let m = parser.parse(&cancel_cseq("CANCEL")).expect("valid CANCEL parses");
+        assert!(cancel_cseq_violation(&m).is_none());
     }
 
     // ----- strictRouteShuffleOnSend -------------------------------------

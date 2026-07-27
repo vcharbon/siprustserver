@@ -11,7 +11,7 @@ use sip_message::generators::{
 };
 use sip_message::header::HeaderName;
 use sip_message::{
-    apply_name_forms, apply_remote_target_emits, DelayedAutomatic, EmitOpts, MessageTemplate,
+    apply_name_forms, apply_remote_target_emits, emitted_wire, DelayedAutomatic, EmitOpts, MessageTemplate,
     SipHeader, SipMessage,
 };
 
@@ -213,10 +213,12 @@ impl<'a> Invite<'a> {
         // Send a WIRE copy with the captured compact names on the tier-1 lines;
         // `invite` keeps the canonical spelling the §17.1.1.3 ACK / §9.1 CANCEL
         // are built from.
-        let mut wire = invite.clone();
-        wire.headers = apply_name_forms(&invite.headers, &self.name_forms);
-        wire.headers = apply_remote_target_emits(&wire.headers, &self.remote_emits);
-        caller.send(&SipMessage::Request(wire), wire_dst).await;
+        let msg = SipMessage::Request(invite.clone());
+        let headers = apply_remote_target_emits(
+            &apply_name_forms(msg.headers(), &self.name_forms),
+            &self.remote_emits,
+        );
+        caller.send_wire(&emitted_wire(&msg, &headers), wire_dst).await;
 
         let dialog = StackDialog {
             call_id,

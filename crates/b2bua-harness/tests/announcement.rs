@@ -65,14 +65,14 @@ async fn announcement_happy_path() {
 
     // The MRF answers the media leg (the B2BUA offered it alice's SDP).
     let mut mrf_uas = mrf.receive("INVITE").await;
-    assert_eq!(String::from_utf8_lossy(&mrf_uas.request().body), OFFER, "MRF gets alice's offer");
+    assert_eq!(String::from_utf8_lossy(mrf_uas.request().body()), OFFER, "MRF gets alice's offer");
     mrf_uas.respond(200, "OK").with_sdp(MRF_SDP).await;
     mrf.receive("ACK").await;
     let mut mrf_dialog = mrf_uas.dialog();
 
     // Alice receives a 183 early-media carrying the MRF's SDP (RFC 5009 PEM).
     let pem = call.expect(183).await;
-    assert_eq!(String::from_utf8_lossy(&pem.body), MRF_SDP, "183 brokers the MRF SDP to A");
+    assert_eq!(String::from_utf8_lossy(pem.body()), MRF_SDP, "183 brokers the MRF SDP to A");
     assert_eq!(pem.raw(HeaderName::PEarlyMedia).next(), Some("sendrecv"));
 
     // The B2BUA opens the MSCML control channel toward the MRF: INFO <play>.
@@ -85,7 +85,7 @@ async fn announcement_happy_path() {
             .is("application/mediaservercontrol+xml"),
     );
     assert!(
-        String::from_utf8_lossy(&play.request().body).contains("href=\"intro-001\""),
+        String::from_utf8_lossy(play.request().body()).contains("href=\"intro-001\""),
         "INFO carries the MSCML <play> for the clip",
     );
     play.respond(200, "OK").await;
@@ -103,14 +103,14 @@ async fn announcement_happy_path() {
     // The B2BUA BYEs the media leg and dials the real destination.
     mrf.receive("BYE").await.respond(200, "OK").await;
     let mut dest_uas = dest.receive("INVITE").await;
-    assert_eq!(String::from_utf8_lossy(&dest_uas.request().body), OFFER, "destination gets alice's offer");
+    assert_eq!(String::from_utf8_lossy(dest_uas.request().body()), OFFER, "destination gets alice's offer");
     dest_uas.respond(180, "Ringing").await;
     call.expect(180).await;
     dest_uas.respond(200, "OK").with_sdp(DEST_SDP).await;
 
     // Alice is answered with the destination's SDP and bridged.
     let final_200 = call.expect(200).await;
-    assert_eq!(String::from_utf8_lossy(&final_200.body), DEST_SDP, "A answered with the destination SDP");
+    assert_eq!(String::from_utf8_lossy(final_200.body()), DEST_SDP, "A answered with the destination SDP");
     let mut alice_dialog = call.ack().await;
     dest.receive("ACK").await;
 
@@ -142,7 +142,7 @@ async fn announcement_mrf_rejects() {
 
     // The caller's INVITE is failed (the MRF's status relayed) and the call ends.
     let failed = call.expect(503).await;
-    assert_eq!(failed.status, 503);
+    assert_eq!(failed.status(), 503);
 
     let _ = h.finish().await;
     assert_eq!(b2bua.active_calls(), 0, "the call is reaped");
@@ -190,7 +190,7 @@ async fn announcement_clip_fails_after_answer_rejects_caller_without_bye() {
     // Alice gets her 4xx final on the early dialog (mapped from the MSCML code) —
     // a real INVITE final, not a BYE on a phantom confirmed dialog.
     let rejected = call.expect(480).await;
-    assert_eq!(rejected.status, 480, "caller rejected with the announced 4xx");
+    assert_eq!(rejected.status(), 480, "caller rejected with the announced 4xx");
 
     // Only the (confirmed) media leg is BYE'd by the teardown.
     mrf.receive("BYE").await.respond(200, "OK").await;
@@ -250,7 +250,7 @@ async fn crossing_bye_after_reject_gets_200_and_no_second_final_to_caller() {
         .await;
     failed_info.expect(200).await;
     let rejected = call.expect(480).await;
-    assert_eq!(rejected.status, 480, "caller rejected with the announced 4xx");
+    assert_eq!(rejected.status(), 480, "caller rejected with the announced 4xx");
 
     // The MRF hangs up on its own — its BYE crosses the b2bua's teardown BYE
     // (already in flight toward the MRF) on the wire.
@@ -287,7 +287,7 @@ async fn crossing_bye_after_reject_gets_200_and_no_second_final_to_caller() {
         .iter()
         .filter(|e| e.to == alice_addr)
         .filter_map(|e| match CustomParser::new().parse(&e.raw) {
-            Ok(SipMessage::Response(r)) if r.status >= 200 => Some(r.status),
+            Ok(SipMessage::Response(r)) if r.status() >= 200 => Some(r.status()),
             _ => None,
         })
         .collect();

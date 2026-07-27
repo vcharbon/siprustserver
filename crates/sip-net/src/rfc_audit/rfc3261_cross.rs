@@ -128,7 +128,7 @@ impl UnknownDialog481Rule {
                     format!(
                         "Received in-dialog request {} for unknown dialog {}/{ft}/{tt} — \
                          {{Uas}} must respond 481 (RFC 3261 §12.2.2 / RFC3261-MUST-071)",
-                        req.method.as_str(),
+                        req.method().as_str(),
                         call_id(msg),
                     ),
                 ));
@@ -168,7 +168,7 @@ impl CrossMessageAuditRule for UnsupportedMethod405AllowRule {
                         (EventKind::Received, SipMessage::Request(req)) => {
                             if RECOGNISED_METHODS
                                 .iter()
-                                .any(|m| m.eq_ignore_ascii_case(req.method.as_str()))
+                                .any(|m| m.eq_ignore_ascii_case(req.method().as_str()))
                             {
                                 continue;
                             }
@@ -177,7 +177,7 @@ impl CrossMessageAuditRule for UnsupportedMethod405AllowRule {
                                 continue;
                             }
                             unrecognised_by_branch.entry(branch).or_insert((
-                                req.method.as_str().to_string(),
+                                req.method().as_str().to_string(),
                                 call_id(msg).to_string(),
                             ));
                         }
@@ -261,7 +261,7 @@ impl CrossMessageAuditRule for UnsupportedExtension420Rule {
                                 continue;
                             }
                             unsupported_by_branch.entry(branch).or_insert((
-                                req.method.as_str().to_string(),
+                                req.method().as_str().to_string(),
                                 call_id(msg).to_string(),
                                 unsupported,
                             ));
@@ -384,7 +384,7 @@ impl CrossMessageAuditRule for ResponseExtensionsAdvertisedRule {
                 for (kind, msg) in slot_events(&slot.ordered) {
                     match (kind, msg) {
                         (EventKind::Received, SipMessage::Request(req))
-                            if req.method.as_str().eq_ignore_ascii_case("INVITE") =>
+                            if req.method().as_str().eq_ignore_ascii_case("INVITE") =>
                         {
                             let branch = branch_of(msg);
                             if branch.is_empty() || invite_require_by_branch.contains_key(&branch) {
@@ -473,7 +473,7 @@ impl CrossMessageAuditRule for RegisterNoRouteSetRule {
                     let SipMessage::Request(req) = msg else {
                         continue;
                     };
-                    if !req.method.as_str().eq_ignore_ascii_case("REGISTER") {
+                    if !req.method().as_str().eq_ignore_ascii_case("REGISTER") {
                         continue;
                     }
                     if !msg.has(&HeaderName::Route) {
@@ -528,7 +528,7 @@ impl CrossMessageAuditRule for OptionsResponseEchoesRule {
                 for (kind, msg) in slot_events(&slot.ordered) {
                     match (kind, msg) {
                         (EventKind::Received, SipMessage::Request(req))
-                            if req.method.as_str().eq_ignore_ascii_case("OPTIONS") =>
+                            if req.method().as_str().eq_ignore_ascii_case("OPTIONS") =>
                         {
                             let branch = branch_of(msg);
                             if branch.is_empty() {
@@ -606,7 +606,7 @@ impl CrossMessageAuditRule for ConcurrentReInvite500or491Rule {
                 for (kind, msg) in slot_events(&slot.ordered) {
                     match (kind, msg) {
                         (EventKind::Received, SipMessage::Request(req)) => {
-                            if !req.method.as_str().eq_ignore_ascii_case("INVITE") {
+                            if !req.method().as_str().eq_ignore_ascii_case("INVITE") {
                                 continue;
                             }
                             let tt = to_tag(msg).unwrap_or("");
@@ -754,7 +754,7 @@ impl CrossMessageAuditRule for NoByeOutsideOrEarlyDialogRule {
                     if kind != EventKind::Sent {
                         continue;
                     }
-                    if !req.method.as_str().eq_ignore_ascii_case("BYE") {
+                    if !req.method().as_str().eq_ignore_ascii_case("BYE") {
                         continue;
                     }
                     let cid = call_id(msg);
@@ -852,7 +852,7 @@ impl CrossMessageAuditRule for NoTarget404Rule {
                     match (kind, msg) {
                         (EventKind::Sent, SipMessage::Request(req)) => {
                             forwarded
-                                .insert((txn, req.method.as_str().to_uppercase()));
+                                .insert((txn, req.method().as_str().to_uppercase()));
                         }
                         (EventKind::Received, SipMessage::Request(req)) => {
                             let branch = branch_of(msg);
@@ -860,7 +860,7 @@ impl CrossMessageAuditRule for NoTarget404Rule {
                                 continue;
                             }
                             received_by_branch.entry(branch).or_insert((
-                                req.method.as_str().to_string(),
+                                req.method().as_str().to_string(),
                                 call_id(msg).to_string(),
                                 txn,
                             ));
@@ -1004,7 +1004,7 @@ impl CrossMessageAuditRule for AckRequireSubsetOfInviteRule {
                     let SipMessage::Request(ack) = &ev.msg else {
                         continue;
                     };
-                    if !ack.method.as_str().eq_ignore_ascii_case("ACK") {
+                    if !ack.method().as_str().eq_ignore_ascii_case("ACK") {
                         continue;
                     }
                     let branch = branch_of(&ev.msg);
@@ -1073,7 +1073,7 @@ impl CrossMessageAuditRule for CancelRouteEchoesInviteRule {
                     let SipMessage::Request(cancel) = &ev.msg else {
                         continue;
                     };
-                    if !cancel.method.as_str().eq_ignore_ascii_case("CANCEL") {
+                    if !cancel.method().as_str().eq_ignore_ascii_case("CANCEL") {
                         continue;
                     }
                     let branch = branch_of(&ev.msg);
@@ -1161,7 +1161,7 @@ impl CrossMessageAuditRule for CancelAfter1xxRule {
                             first_received_status.entry(branch).or_insert(status(msg));
                         }
                         (EventKind::Sent, SipMessage::Request(req))
-                            if req.method.as_str().eq_ignore_ascii_case("CANCEL") =>
+                            if req.method().as_str().eq_ignore_ascii_case("CANCEL") =>
                         {
                             if let Some(&earliest) = first_received_status.get(&branch) {
                                 if earliest < 200 {
@@ -1228,7 +1228,7 @@ impl CrossMessageAuditRule for SerialRegisterRule {
                     let SipMessage::Request(reg) = &ev.msg else {
                         continue;
                     };
-                    if !reg.method.as_str().eq_ignore_ascii_case("REGISTER") {
+                    if !reg.method().as_str().eq_ignore_ascii_case("REGISTER") {
                         continue;
                     }
                     let branch = branch_of(&ev.msg);
@@ -1300,7 +1300,7 @@ impl CrossMessageAuditRule for NoReInviteWhileInviteInProgressRule {
                 for (kind, msg) in slot_events(&slot.ordered) {
                     match (kind, msg) {
                         (EventKind::Sent, SipMessage::Request(req)) => {
-                            if !req.method.as_str().eq_ignore_ascii_case("INVITE") {
+                            if !req.method().as_str().eq_ignore_ascii_case("INVITE") {
                                 continue;
                             }
                             let branch = branch_of(msg);
@@ -1438,7 +1438,7 @@ impl CrossMessageAuditRule for Proxy100WithinT100msRule {
             let key = (bind.clone(), branch);
             match (&msg, received) {
                 (SipMessage::Request(r), true)
-                    if r.method.as_str().eq_ignore_ascii_case("INVITE") =>
+                    if r.method().as_str().eq_ignore_ascii_case("INVITE") =>
                 {
                     invites
                         .entry(key)
@@ -1530,23 +1530,21 @@ impl CrossMessageAuditRule for StrictRouteRewriteHandledRule {
                     if branch.is_empty() {
                         continue;
                     }
-                    let method = req.method.as_str();
+                    let method = req.method().as_str();
                     let sent = idx.requests_for(&branch, Direction::Sent);
                     let sent_req = sent.iter().find(|r| {
                         r.as_request()
-                            .map(|sr| sr.method.as_str().eq_ignore_ascii_case(method))
+                            .map(|sr| sr.method().as_str().eq_ignore_ascii_case(method))
                             .unwrap_or(false)
                     });
                     if let Some(sent_req) = sent_req {
-                        if sent_req.as_request().map(|sr| sr.request_uri()).as_ref()
-                            == Some(first_uri)
-                        {
+                        if sent_req.as_request().map(|sr| sr.request_uri()) == Some(first_uri) {
                             continue;
                         }
                     }
                     let sent_req_uri = sent_req
                         .and_then(|m| m.as_request())
-                        .map(|sr| sr.uri.as_str())
+                        .and_then(|sr| sr.request_uri().source())
                         .unwrap_or("<none>");
                     out.push((
                         slot.bind_key.clone(),
@@ -1596,7 +1594,7 @@ impl CrossMessageAuditRule for AckPreservesInviteRouteRule {
                     let SipMessage::Request(ack) = &ev.msg else {
                         continue;
                     };
-                    if !ack.method.as_str().eq_ignore_ascii_case("ACK") {
+                    if !ack.method().as_str().eq_ignore_ascii_case("ACK") {
                         continue;
                     }
                     let branch = branch_of(&ev.msg);
@@ -1703,8 +1701,8 @@ impl CrossMessageAuditRule for UnackedInvite2xxByedRule {
                 // alone, so probe BOTH against the open obligations (a stray match
                 // is impossible: the key also pins the Call-ID).
                 SipMessage::Request(req)
-                    if req.method.as_str().eq_ignore_ascii_case("ACK")
-                        || req.method.as_str().eq_ignore_ascii_case("BYE") =>
+                    if req.method().as_str().eq_ignore_ascii_case("ACK")
+                        || req.method().as_str().eq_ignore_ascii_case("BYE") =>
                 {
                     let ft = from_tag(&msg).unwrap_or("");
                     let tt = to_tag(&msg).unwrap_or("");
@@ -1802,7 +1800,7 @@ impl CrossMessageAuditRule for UnackedInviteNon2xxFinalRule {
             match &msg {
                 SipMessage::Request(req)
                     if kind == EventKind::Received
-                        && req.method.as_str().eq_ignore_ascii_case("INVITE") =>
+                        && req.method().as_str().eq_ignore_ascii_case("INVITE") =>
                 {
                     uas_branches.entry(bind.clone()).or_default().insert(key_of(cid, &branch));
                 }
@@ -1810,7 +1808,7 @@ impl CrossMessageAuditRule for UnackedInviteNon2xxFinalRule {
                 // (§17.1.1.3) → discharge that transaction's obligation.
                 SipMessage::Request(req)
                     if kind == EventKind::Received
-                        && req.method.as_str().eq_ignore_ascii_case("ACK") =>
+                        && req.method().as_str().eq_ignore_ascii_case("ACK") =>
                 {
                     if let Some(m) = per_bind.get_mut(bind) {
                         if let Some(v) = m.get_mut(&key_of(cid, &branch)) {
@@ -1908,7 +1906,7 @@ impl CrossMessageAuditRule for FailedReinviteTearsDownDialogRule {
             };
             let Ok(msg) = parser.parse(raw) else { continue };
             if let SipMessage::Request(req) = &msg {
-                if req.method.as_str().eq_ignore_ascii_case("BYE") {
+                if req.method().as_str().eq_ignore_ascii_case("BYE") {
                     byed_call_ids
                         .entry(bind.clone())
                         .or_default()
@@ -1924,13 +1922,12 @@ impl CrossMessageAuditRule for FailedReinviteTearsDownDialogRule {
                 // carries a To-tag. An initial INVITE (no To-tag) that is
                 // abandoned is a different obligation (`unackedInvite2xx*` / txn
                 // timeout) and not a §14.1 prior-state violation.
-                if !req.method.as_str().eq_ignore_ascii_case("INVITE") {
+                if !req.method().as_str().eq_ignore_ascii_case("INVITE") {
                     continue;
                 }
                 let in_dialog = req
-                    .to
-                    .tag
-                    .as_deref()
+                    .to()
+                    .tag()
                     .map(|t| !t.is_empty())
                     .unwrap_or(false);
                 if !in_dialog {
@@ -1939,7 +1936,7 @@ impl CrossMessageAuditRule for FailedReinviteTearsDownDialogRule {
                 let responses = idx.responses_for(branch, Direction::Received);
                 let saw_provisional = responses
                     .iter()
-                    .any(|m| (100..200).contains(&m.as_response().map(|r| r.status).unwrap_or(0)));
+                    .any(|m| (100..200).contains(&m.as_response().map(|r| r.status()).unwrap_or(0)));
                 let saw_final = idx.has_final_response_for(branch, Direction::Received);
                 if !saw_provisional || saw_final {
                     continue;

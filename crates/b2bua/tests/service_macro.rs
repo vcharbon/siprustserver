@@ -96,15 +96,27 @@ fn invite() -> SipRequest {
     generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts)
 }
 
+/// The INVITE re-issued as an in-dialog request of `method`: both dialog tags
+/// present and the CSeq restated, which is what makes it a different
+/// transaction rather than an edited INVITE.
+fn in_dialog_request(method: sip_message::Method) -> sip_message::SipRequest {
+    let inv = invite();
+    let cseq = sip_message::header::CSeq::new(inv.cseq().seq(), method.clone());
+    inv.thaw()
+        .with_method(method)
+        .set(inv.to().clone().with_tag("btag"))
+        .set(cseq)
+        .freeze()
+        .expect("an in-dialog request of the same dialog is complete")
+}
+
 fn test_call() -> Call {
     let src: SocketAddr = "127.0.0.1:5060".parse().unwrap();
     build_initial_call(&invite(), src, &B2buaConfig::default(), 0)
 }
 
 fn info_event() -> CallEvent {
-    let mut info = invite();
-    info.method = "INFO".into();
-    info.to.tag = Some("btag".into());
+    let info = in_dialog_request(sip_message::Method::Info);
     CallEvent::Sip {
         message: Box::new(SipMessage::Request(info)),
         src: "127.0.0.1:5060".parse().unwrap(),

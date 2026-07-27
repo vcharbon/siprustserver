@@ -29,7 +29,7 @@ pub(super) fn dialog_snapshot(st: &ActorState<'_>) -> DialogSnapshot {
         || st.pending_prack_answer.is_some()
         || st.held_silent.is_some()
         || st.bound.as_ref().is_some_and(|t| {
-            t.request().method.as_str() == "INVITE" && t.request().to.tag.is_none()
+            t.request().method().as_str() == "INVITE" && t.request().to().tag().is_none()
         })
         || st.parked.iter().any(|p| p.initial);
     let early_dialog_count = if uas_initial_pending {
@@ -136,7 +136,7 @@ pub(super) async fn try_accept_request_delta(
         // `TerminatePendingInitial`: an accepted substitution never
         // double-books as divergence.
         DeltaReaction::Default => {
-            if uas.request().method.as_str() == "CANCEL" {
+            if uas.request().method().as_str() == "CANCEL" {
                 let mut uas = uas;
                 uas.respond(200, "OK").try_send().await?;
                 cancel_pending_initial(st, now, false).await?;

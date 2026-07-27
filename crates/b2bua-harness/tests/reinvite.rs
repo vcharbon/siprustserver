@@ -150,20 +150,20 @@ async fn alice_reinvite() {
 
     // Bob receives the relayed re-INVITE with no body.
     let mut bob_uas = bob.receive("INVITE").await;
-    assert!(bob_uas.request().body.is_empty(), "re-INVITE relayed to bob with no body");
+    assert!(bob_uas.request().body().is_empty(), "re-INVITE relayed to bob with no body");
 
     // Bob answers 200 with the SDP offer.
     bob_uas.respond(200, "OK").with_sdp(REOFFER).await;
 
     // Alice receives the 200 with the SDP offer.
     let ok = reinv.expect(200).await;
-    assert!(!ok.body.is_empty(), "re-INVITE 200 with offer relayed to alice");
+    assert!(!ok.body().is_empty(), "re-INVITE 200 with offer relayed to alice");
 
     // Alice ACKs the re-INVITE 2xx with the SDP answer; bob receives the relayed
     // ACK carrying the answer.
     dialog.ack(Some(REANSWER)).await;
     let bob_ack = bob.receive("ACK").await;
-    assert!(!bob_ack.request().body.is_empty(), "ACK answer relayed to bob");
+    assert!(!bob_ack.request().body().is_empty(), "ACK answer relayed to bob");
 
     // ── teardown: alice hangs up ──
     let mut bye = dialog.bye().await;
@@ -200,14 +200,14 @@ async fn bob_reinvite() {
 
     // Alice receives the relayed re-INVITE carrying the offer.
     let mut alice_uas = alice.receive("INVITE").await;
-    assert!(!alice_uas.request().body.is_empty(), "re-INVITE offer relayed to alice");
+    assert!(!alice_uas.request().body().is_empty(), "re-INVITE offer relayed to alice");
 
     // Alice answers 200 with the SDP answer.
     alice_uas.respond(200, "OK").with_sdp(REANSWER).await;
 
     // Bob receives the 200 with the answer.
     let ok = reinv.expect(200).await;
-    assert!(!ok.body.is_empty(), "re-INVITE 200 with answer relayed to bob");
+    assert!(!ok.body().is_empty(), "re-INVITE 200 with answer relayed to bob");
 
     // Bob ACKs (offer/answer already complete, no SDP); alice receives the ACK.
     bob_dialog.ack(None).await;
@@ -262,7 +262,7 @@ async fn crossing_reinvite_glare() {
 
     // Alice receives the 200 for her re-INVITE.
     let ok = alice_reinv.expect(200).await;
-    assert!(!ok.body.is_empty(), "alice's re-INVITE 200 carries the answer");
+    assert!(!ok.body().is_empty(), "alice's re-INVITE 200 carries the answer");
 
     // Alice ACKs; bob receives the ACK (the real one for alice's re-INVITE).
     alice_dialog.ack(None).await;

@@ -286,7 +286,7 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
     // Replacement b-leg toward the MRF carries A's original offer.
     let mut mrf_uas = mrf.receive("INVITE").await;
     assert_eq!(
-        String::from_utf8_lossy(&mrf_uas.request().body),
+        String::from_utf8_lossy(mrf_uas.request().body()),
         OFFER,
         "replacement INVITE carries A's INVITE-snapshot offer",
     );
@@ -297,7 +297,7 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
     // The a-leg is re-INVITEd onto the MRF's answer SDP (the bridge).
     let mut a_realign = alice.receive("INVITE").await;
     assert_eq!(
-        String::from_utf8_lossy(&a_realign.request().body),
+        String::from_utf8_lossy(a_realign.request().body()),
         MRF_ANSWER,
         "a-leg realign re-INVITE offers the replacement leg's answer SDP",
     );

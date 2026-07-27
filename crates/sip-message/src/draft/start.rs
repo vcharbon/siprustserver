@@ -17,7 +17,7 @@ use crate::parser::custom::header_index::HeaderIndex;
 use crate::parser::custom::optional_headers::extract_optional_indexed;
 use crate::parser::SipParserLimits;
 use crate::sip_str::{SharedText, SipStr};
-use crate::types::{NonEmpty, SipHeader, SipRequest, SipResponse, Via};
+use crate::types::{MessageCore, SipHeader, SipRequest, SipResponse};
 
 /// A byte range of the rendered datagram.
 pub type Span = (usize, usize);
@@ -63,7 +63,7 @@ pub mod kind {
 }
 
 /// `Method SP Request-URI SP SIP-Version`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestLine {
     pub method: Method,
     pub uri: Uri,
@@ -71,7 +71,7 @@ pub struct RequestLine {
 }
 
 /// `SIP-Version SP Status-Code SP Reason-Phrase`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusLine {
     pub version: SipStr,
     pub status: u16,
@@ -125,24 +125,14 @@ impl StartKind for kind::Request {
             ExtractMode::Hydrate,
         )?;
         let optional = extract_optional_indexed(&idx);
-        let common = eager.common;
-        let via = non_empty_vias(common.vias)?;
-        Ok(SipRequest {
-            method: line.method,
-            uri,
-            request_uri: eager.request_uri,
-            version: image.span(spans.version.0, spans.version.1),
-            from: common.from,
-            to: common.to,
-            call_id: common.call_id,
-            cseq: common.cseq,
-            via,
-            contacts: common.contacts,
-            optional,
-            headers,
-            body,
-            raw,
-        })
+        Ok(SipRequest::new(
+            RequestLine {
+                method: line.method,
+                uri: line.uri,
+                version: image.span(spans.version.0, spans.version.1),
+            },
+            MessageCore::new(headers, eager.common, optional, body, raw),
+        ))
     }
 }
 
@@ -180,31 +170,15 @@ impl StartKind for kind::Response {
     ) -> Result<Self::Message, SipParseError> {
         let limits = SipParserLimits::default();
         let idx = HeaderIndex::build(&headers);
-        let common = extract_response_fields(&idx, line.status, &limits, ExtractMode::Hydrate)?;
+        let core = extract_response_fields(&idx, line.status, &limits, ExtractMode::Hydrate)?;
         let optional = extract_optional_indexed(&idx);
-        let via = non_empty_vias(common.vias)?;
-        Ok(SipResponse {
-            version: image.span(spans.version.0, spans.version.1),
-            status: line.status,
-            reason: image.span(spans.subject.0, spans.subject.1),
-            from: common.from,
-            to: common.to,
-            call_id: common.call_id,
-            cseq: common.cseq,
-            via,
-            contacts: common.contacts,
-            optional,
-            headers,
-            body,
-            raw,
-        })
-    }
-}
-
-fn non_empty_vias(vias: Vec<Via>) -> Result<NonEmpty<Via>, SipParseError> {
-    let mut it = vias.into_iter();
-    match it.next() {
-        Some(head) => Ok(NonEmpty::from_parts(head, it.collect())),
-        None => Err(SipParseError::new("Missing mandatory Via header")),
+        Ok(SipResponse::new(
+            StatusLine {
+                version: image.span(spans.version.0, spans.version.1),
+                status: line.status,
+                reason: image.span(spans.subject.0, spans.subject.1),
+            },
+            MessageCore::new(headers, core, optional, body, raw),
+        ))
     }
 }

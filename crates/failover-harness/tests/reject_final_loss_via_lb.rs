@@ -65,11 +65,10 @@ async fn lost_relayed_603_recovers_via_worker_timer_g_and_relayed_ack() {
             "alice",
             ALICE,
             Arc::new(move |bytes: &[u8], _src, _depth| {
-                if bytes.starts_with(b"SIP/2.0 603") {
-                    if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                if bytes.starts_with(b"SIP/2.0 603")
+                    && counter.fetch_add(1, Ordering::SeqCst) == 0 {
                         return PreIngressAction::Drop;
                     }
-                }
                 PreIngressAction::Accept
             }),
         )
@@ -115,7 +114,7 @@ async fn lost_relayed_603_recovers_via_worker_timer_g_and_relayed_ack() {
 
     // Alice receives the recovered 603; the agent auto-ACKs it (§17.1.1.3).
     let rejected = call.expect(603).await;
-    assert_eq!(rejected.status, 603, "the reject reaches the caller despite the lost first copy");
+    assert_eq!(rejected.status(), 603, "the reject reaches the caller despite the lost first copy");
 
     // The ACK relays through the proxy to the worker on the INVITE's own hop,
     // confirming the server transaction. Advance PAST where Timer G would fire

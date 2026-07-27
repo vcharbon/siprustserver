@@ -198,7 +198,7 @@ Content-Length: 0\r\n\r\n";
     let SipMessage::Response(resp) = CustomParser::new().parse(&reply.raw).unwrap() else {
         panic!("expected a response");
     };
-    assert_eq!(resp.status, 420, "unsupported Proxy-Require → 420 Bad Extension");
+    assert_eq!(resp.status(), 420, "unsupported Proxy-Require → 420 Bad Extension");
     let unsupported = resp.header::<Unsupported>().expect("420 carries Unsupported").expect("reads");
     assert!(
         unsupported.contains("bogus-extension-xyz"),

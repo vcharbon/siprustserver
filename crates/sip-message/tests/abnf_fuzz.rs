@@ -15,12 +15,12 @@
 use std::fs;
 use std::path::PathBuf;
 
-use sip_message::SipStr;
+use sip_message::header::{HeaderValue, RAck, ReferTo};
 use sip_message::parser::custom::structured_headers::{
-    find_uri_embedded_headers_start, parse_contact, parse_cseq, parse_name_addr, parse_rack,
-    parse_refer_to, parse_replaces, parse_sip_uri_string, parse_via, split_top_level_commas,
-    validate_strict_sip_uri,
+    find_uri_embedded_headers_start, parse_contact, parse_cseq, parse_name_addr,
+    parse_sip_uri_string, parse_via, split_top_level_commas, validate_strict_sip_uri,
 };
+use sip_message::SipStr;
 
 /// Rejection reasons reflecting documented semantic constraints (RFC limits
 /// beyond pure ABNF) rather than parser bugs — abnfgen happily emits port=88161
@@ -134,11 +134,11 @@ fn fuzz_contact(line: &str, s: &mut Stat) {
         }
         let parsed = parse_contact(&SipStr::owned(entry));
         if parsed.uri.is_empty() {
-            s.reject(&entry, "empty parsed.uri".to_string());
+            s.reject(entry, "empty parsed.uri".to_string());
             return;
         }
         if let Some(reason) = validate_strict_sip_uri(&parsed.uri) {
-            s.reject(&entry, format!("Strict Contact URI: {reason} (\"{}\")", parsed.uri));
+            s.reject(entry, format!("Strict Contact URI: {reason} (\"{}\")", parsed.uri));
             return;
         }
     }
@@ -153,14 +153,14 @@ fn fuzz_via(line: &str, s: &mut Stat) {
         let parsed = parse_via(&SipStr::owned(entry));
         if parsed.transport.is_empty() || parsed.host.is_empty() {
             s.reject(
-                &entry,
+                entry,
                 format!("empty transport/host (transport=\"{}\" host=\"{}\")", parsed.transport, parsed.host),
             );
             return;
         }
         if let Some(port) = parsed.port {
             if port == 0 || port > 65535 {
-                s.reject(&entry, format!("port out of range ({port})"));
+                s.reject(entry, format!("port out of range ({port})"));
                 return;
             }
         }
@@ -178,30 +178,25 @@ fn fuzz_cseq(line: &str, s: &mut Stat) {
 }
 
 fn fuzz_rack(line: &str, s: &mut Stat) {
-    if parse_rack(&SipStr::owned(line)).is_none() {
-        s.reject(line, "parse_rack returned None".to_string());
-        return;
-    }
-    s.accepted += 1;
-}
-
-fn fuzz_replaces(line: &str, s: &mut Stat) {
-    if parse_replaces(&SipStr::owned(line)).is_none() {
-        s.reject(line, "parse_replaces returned None".to_string());
+    if let Err(e) = RAck::parse(&SipStr::owned(line)) {
+        s.reject(line, e.reason);
         return;
     }
     s.accepted += 1;
 }
 
 fn fuzz_refer_to(line: &str, s: &mut Stat) {
-    let Some(parsed) = parse_refer_to(&SipStr::owned(line)) else {
-        s.reject(line, "parse_refer_to returned None".to_string());
-        return;
+    let parsed = match ReferTo::parse(&SipStr::owned(line)) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            s.reject(line, e.reason);
+            return;
+        }
     };
-    let uri = &parsed.uri;
-    let head = match find_uri_embedded_headers_start(uri) {
+    let uri = parsed.uri().text();
+    let head = match find_uri_embedded_headers_start(&uri) {
         Some(q) => &uri[..q],
-        None => uri.as_str(),
+        None => &uri[..],
     };
     if let Some(reason) = validate_strict_sip_uri(head) {
         s.reject(line, format!("Strict Refer-To URI: {reason} (\"{head}\")"));
@@ -247,7 +242,7 @@ fn dispatch(target: &str, line: &str, s: &mut Stat) {
         "pai" => {
             for entry in split_top_level_commas(line) {
                 if !entry.is_empty() {
-                    fuzz_pai_entry(&entry, s);
+                    fuzz_pai_entry(entry, s);
                 }
             }
         }
@@ -255,7 +250,6 @@ fn dispatch(target: &str, line: &str, s: &mut Stat) {
         "via" => fuzz_via(line, s),
         "cseq" => fuzz_cseq(line, s),
         "rack" => fuzz_rack(line, s),
-        "replaces" => fuzz_replaces(line, s),
         "refer-to" => fuzz_refer_to(line, s),
         "request-line" => fuzz_request_line(line, s),
         other => panic!("unknown abnf target: {other}"),
@@ -270,7 +264,6 @@ const TARGETS: &[&str] = &[
     "via",
     "cseq",
     "rack",
-    "replaces",
     "refer-to",
     "request-line",
 ];

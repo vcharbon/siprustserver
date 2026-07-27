@@ -122,7 +122,7 @@ async fn proxy_emits_no_100_absorbs_workers_and_relays_18x_final() {
     let SipMessage::Response(resp) = CustomParser::new().parse(&relayed.raw).unwrap() else {
         panic!("expected the relayed 180");
     };
-    assert_eq!(resp.status, 180, "first upstream message is the worker's 180, never a 100");
+    assert_eq!(resp.status(), 180, "first upstream message is the worker's 180, never a 100");
 
     bob_ep.send_to(bob_response(&fwd, 200, "OK", Some("b1")).as_bytes(), proxy.addr()).await.unwrap();
     let relayed = tokio::time::timeout(Duration::from_secs(2), alice.recv())
@@ -132,7 +132,7 @@ async fn proxy_emits_no_100_absorbs_workers_and_relays_18x_final() {
     let SipMessage::Response(resp) = CustomParser::new().parse(&relayed.raw).unwrap() else {
         panic!("expected the relayed 200");
     };
-    assert_eq!(resp.status, 200);
+    assert_eq!(resp.status(), 200);
 
     let _ = h.finish().await;
 }
@@ -165,7 +165,7 @@ async fn blackholed_worker_leaves_caller_silent_and_retransmits_reforward() {
         .expect("the retransmit is re-forwarded to the same (dead) worker")
         .expect("queue open");
     let second = parse_request(&second.raw);
-    assert_eq!(second.method, "INVITE");
+    assert_eq!(second.method(), "INVITE");
 
     // The contract under test: over the whole window the proxy sent alice
     // NOTHING — no 100, no synthesized 408/5xx. With zero provisionals

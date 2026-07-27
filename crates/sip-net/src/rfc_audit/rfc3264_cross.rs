@@ -34,8 +34,8 @@ use sip_message::SipMessage;
 /// offer/answer rules inspect `msg.body` directly (mirrors the TS `msg.body`).
 fn msg_body(msg: &SipMessage) -> &[u8] {
     match msg {
-        SipMessage::Request(r) => &r.body,
-        SipMessage::Response(r) => &r.body,
+        SipMessage::Request(r) => r.body(),
+        SipMessage::Response(r) => r.body(),
     }
 }
 

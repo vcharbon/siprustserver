@@ -39,7 +39,7 @@ fn spawn_responder(ep: Box<dyn UdpEndpoint>, mode: Arc<Mutex<Mode>>) -> tokio::t
         let parser = CustomParser::new();
         while let Some(pkt) = ep.recv().await {
             let Ok(SipMessage::Request(req)) = parser.parse(&pkt.raw) else { continue };
-            if req.method != "OPTIONS" {
+            if req.method() != "OPTIONS" {
                 continue;
             }
             let m = *mode.lock().unwrap();
@@ -149,10 +149,10 @@ async fn single_packet_loss_is_absorbed_by_timer_e_retransmit() {
         let mut seen = std::collections::HashSet::new();
         while let Some(pkt) = worker_ep.recv().await {
             let Ok(SipMessage::Request(req)) = parser.parse(&pkt.raw) else { continue };
-            if req.method != "OPTIONS" {
+            if req.method() != "OPTIONS" {
                 continue;
             }
-            if seen.insert(req.call_id.clone()) {
+            if seen.insert(req.call_id().clone()) {
                 continue; // first transmission lost
             }
             let opts = GenerateResponseOpts { to_tag: Some("uas".into()), ..Default::default() };

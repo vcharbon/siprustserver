@@ -363,7 +363,7 @@ async fn overflow_arrival_is_recorded_with_its_disposition() {
         &snapshot
             .iter()
             .filter(|s| matches!(&s.event, SignalingNetworkEvent::RecvItem { .. }))
-            .last()
+            .next_back()
             .unwrap()
             .event
     ));

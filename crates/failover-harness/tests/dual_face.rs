@@ -219,7 +219,7 @@ async fn dual_face_establish_double_rr_and_caller_bye() {
 
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     let confirmed = call.expect(200).await;
-    assert_eq!(confirmed.status, 200);
+    assert_eq!(confirmed.status(), 200);
 
     // (b) The CALLER's view of the a-leg 200 (the RR set alice reverses per
     // §12.1.2): as-received order INT `;outbound` on top, EXT cookie below —
@@ -403,7 +403,7 @@ async fn dual_face_486_reroute_ack_correlation() {
     let mut charlie_uas = charlie.receive("INVITE").await;
     charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
     let confirmed = call.expect(200).await;
-    assert_eq!(confirmed.status, 200, "caller bridged to the reroute target");
+    assert_eq!(confirmed.status(), 200, "caller bridged to the reroute target");
     let mut dialog = call.ack().await;
     charlie.receive("ACK").await;
 

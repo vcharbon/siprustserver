@@ -131,7 +131,7 @@ fn answer_a_leg_if_unanswered(before: &Call, result: &mut HandlerResult, now_ms:
     let a_leg_id = before.a_leg.leg_id.as_str();
     let answered_this_turn = result.effects.outbound.iter().any(|e| {
         e.leg_id.as_deref() == Some(a_leg_id)
-            && matches!(&e.body, OutboundBody::Response(r) if r.status >= 200)
+            && matches!(&e.body, OutboundBody::Response(r) if r.status() >= 200)
     });
     let cancelled = result
         .call

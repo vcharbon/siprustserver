@@ -9,7 +9,7 @@ use sip_message::generators::{
 };
 use sip_message::header::{self, HeaderName, HeaderValue};
 use sip_message::{
-    apply_name_forms, apply_remote_target_emits, EmitOpts, MatchOpts, MessageTemplate, Mismatch,
+    apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MatchOpts, MessageTemplate, Mismatch,
     SipHeader, SipMessage, SipRequest,
 };
 
@@ -148,14 +148,14 @@ impl ServerTxn {
             });
         };
         loop {
-            if self.agent.acks.is_fulfilled(&self.request.call_id, &branch) {
+            if self.agent.acks.is_fulfilled(self.request.call_id().as_str(), &branch) {
                 return Ok(());
             }
             // Pull; the receive core sights (and thereby fulfils) a matching
             // ACK. Anything else arriving while the test explicitly awaits the
             // ACK is a deviation, exactly as `receive("ACK")` would treat it.
             match self.agent.try_recv().await? {
-                SipMessage::Request(r) if r.method.as_str() == "ACK" => {
+                SipMessage::Request(r) if r.method().as_str() == "ACK" => {
                     if self.agent.ack_obligation_claims(&r) {
                         continue; // ours (loop returns Ok) or another txn's obligation
                     }
@@ -168,7 +168,7 @@ impl ServerTxn {
                     return Err(StepError::WrongMethod {
                         who: self.agent.name.clone(),
                         expected: "ACK".to_string(),
-                        got: r.method.to_string(),
+                        got: r.method().to_string(),
                     })
                 }
                 SipMessage::Response(r) => {
@@ -176,7 +176,7 @@ impl ServerTxn {
                         who: self.agent.name.clone(),
                         detail: format!(
                             "got a {} {} response, expected the ACK to this txn's final",
-                            r.status, r.reason
+                            r.status(), r.reason()
                         ),
                     })
                 }
@@ -274,11 +274,11 @@ impl ServerTxn {
             .header::<header::Contact>()
             .and_then(Result::ok)
             .map(|contact| contact.uri().to_string())
-            .unwrap_or_else(|| req.from.uri.to_string());
+            .unwrap_or_else(|| req.from().uri().to_string());
         let dialog = StackDialog {
-            call_id: req.call_id.to_string(),
+            call_id: req.call_id().to_string(),
             local_tag,
-            remote_tag: req.from.tag.clone().unwrap_or_default().to_string(),
+            remote_tag: req.from().tag().map(str::to_owned).unwrap_or_default().to_string(),
             // From the UAS's view, "local" is itself and "remote" is the caller.
             // RFC 3261 §12.1.1: the dialog LOCAL URI is the To field of the
             // request, NOT the agent's own AOR — they coincide in the usual
@@ -287,8 +287,8 @@ impl ServerTxn {
             // leg carries To:dest): the callee's in-dialog requests must then
             // carry From:dest, and the recorded-trace midDialogUri audit — which
             // merges both tag orientations into one dialog slice — checks it.
-            local_uri: req.to.uri.to_string(),
-            remote_uri: req.from.uri.to_string(),
+            local_uri: req.to().uri().to_string(),
+            remote_uri: req.from().uri().to_string(),
             remote_target,
             local_cseq: 0, // UAS originates its own CSeq space; first request → 1
             route_set: self.route_set.clone(),
@@ -430,7 +430,7 @@ impl<'a> Respond<'a> {
         // add them (unless the fixture already supplied one) — the UA stays
         // RFC-compliant, matching the live SIPp endpoints.
         let mut extra_headers = self.extra_headers.clone();
-        if (200..300).contains(&self.status) && txn.request.cseq.method.as_str() == "INVITE" {
+        if (200..300).contains(&self.status) && txn.request.cseq().method().as_str() == "INVITE" {
             // Compact-aware probes: a frozen `k:` (compact Supported) must
             // suppress the stack default, else the replayed 2xx advertises
             // 100rel/timer the capture never did (RFC 3261 §7.3.3).
@@ -472,30 +472,32 @@ impl<'a> Respond<'a> {
         // separated header (RFC 3261 §7.3.1); reproduce that wire form for UAs the
         // harness picked `Combined` for, so the B2BUA's split-before-§12.1.2-reverse
         // path is exercised on the b-leg route-set capture (see `RecordRouteFold`).
+        let mut headers = resp.headers().to_vec();
         if txn.agent.rr_fold == RecordRouteFold::Combined {
-            fold_record_routes(&mut resp.headers);
+            fold_record_routes(&mut headers);
         }
         // Emit stack-regenerated headers under the captured compact names (Via/
         // From/To/…) when the template used them; identity for a full-name capture.
         if !self.name_forms.is_empty() {
-            resp.headers = apply_name_forms(&resp.headers, &self.name_forms);
+            headers = apply_name_forms(&headers, &self.name_forms);
         }
         if !self.remote_emits.is_empty() {
-            resp.headers = apply_remote_target_emits(&resp.headers, &self.remote_emits);
+            headers = apply_remote_target_emits(&headers, &self.remote_emits);
         }
         // Responses are routed by Via, not Route (RFC 3261 §18.2.2): send to the
         // request's topmost Via sent-by. With a proxy in the path that Via is
         // the proxy's, so the response correctly traverses it back.
         let dst = top_via_addr(&txn.request).unwrap_or(txn.agent.addr);
-        txn.agent.try_send(&SipMessage::Response(resp), dst).await?;
+        let msg = SipMessage::Response(resp);
+        txn.agent.try_send_wire(&emitted_wire(&msg, &headers), dst).await?;
         // §17.1.1.3 UAS obligation: a non-2xx final to an INVITE (initial or
         // re-INVITE) arms the txn-owned ACK wait — the arriving hop ACK is the
         // transaction layer's to claim, in whatever order it lands relative to
         // the body's next receive; `expect_ack` asserts it and the gating
         // `unackedInviteNon2xxFinal` wire rule settles it at finish.
-        if (300..700).contains(&self.status) && txn.request.method.as_str() == "INVITE" {
+        if (300..700).contains(&self.status) && txn.request.method().as_str() == "INVITE" {
             if let Some(branch) = top_via_branch(&txn.request) {
-                txn.agent.acks.arm(txn.request.call_id.to_string(), branch);
+                txn.agent.acks.arm(txn.request.call_id().to_string(), branch);
             }
         }
         Ok(())

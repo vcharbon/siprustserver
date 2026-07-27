@@ -51,8 +51,8 @@ pub(super) fn goal_arm_enabled(st: &ActorState<'_>) -> bool {
 pub(super) fn parked_matches(p: &ParkedRequest, kind: &RequestKind) -> bool {
     match kind {
         RequestKind::Initial => p.initial,
-        RequestKind::InDialog(m) => !p.initial && p.txn.request().method.as_str() == m.as_str(),
-        RequestKind::Cancel => !p.initial && p.txn.request().method.as_str() == "CANCEL",
+        RequestKind::InDialog(m) => !p.initial && p.txn.request().method().as_str() == m.as_str(),
+        RequestKind::Cancel => !p.initial && p.txn.request().method().as_str() == "CANCEL",
     }
 }
 
@@ -122,10 +122,10 @@ pub(super) async fn requeue_parked(st: &mut ActorState<'_>) -> Result<(), StepEr
     while i < st.parked.len() {
         let keep = if st.parked[i].initial {
             scripted_wants_initial(st)
-        } else if st.parked[i].txn.request().method.as_str() == "CANCEL" {
+        } else if st.parked[i].txn.request().method().as_str() == "CANCEL" {
             scripted_wants_cancel(st)
         } else {
-            let method = st.parked[i].txn.request().method.as_str().to_string();
+            let method = st.parked[i].txn.request().method().as_str().to_string();
             scripted_wants_in_dialog(st, &method)
         };
         if keep {
@@ -133,7 +133,7 @@ pub(super) async fn requeue_parked(st: &mut ActorState<'_>) -> Result<(), StepEr
             continue;
         }
         let entry = st.parked.remove(i);
-        let method = entry.txn.request().method.as_str().to_string();
+        let method = entry.txn.request().method().as_str().to_string();
         st.obs.record(
             Observation::ServicedStray {
                 leg: st.role,
@@ -159,11 +159,11 @@ pub(super) async fn requeue_parked(st: &mut ActorState<'_>) -> Result<(), StepEr
 /// Whether an inbound request satisfies an `ExpectRequest`'s kind — the raw
 /// twin of [`parked_matches`], evaluated before parking.
 pub(super) fn request_matches_kind(req: &SipRequest, kind: &RequestKind) -> bool {
-    let initial = req.method.as_str() == "INVITE" && req.to.tag.is_none();
+    let initial = req.method().as_str() == "INVITE" && req.to().tag().is_none();
     match kind {
         RequestKind::Initial => initial,
-        RequestKind::InDialog(m) => !initial && req.method.as_str() == m.as_str(),
-        RequestKind::Cancel => !initial && req.method.as_str() == "CANCEL",
+        RequestKind::InDialog(m) => !initial && req.method().as_str() == m.as_str(),
+        RequestKind::Cancel => !initial && req.method().as_str() == "CANCEL",
     }
 }
 
@@ -205,8 +205,8 @@ pub(super) async fn drive_respond(
         // A >100 provisional on the initial INVITE opens (or re-rides) an early
         // dialog — tracked per tag for `DialogSnapshot::early_dialog_count`.
         if status > 100
-            && txn.request().method.as_str() == "INVITE"
-            && txn.request().to.tag.is_none()
+            && txn.request().method().as_str() == "INVITE"
+            && txn.request().to().tag().is_none()
         {
             st.early_provisionals.insert(early.unwrap_or("").to_string());
         }
@@ -235,9 +235,9 @@ pub(super) async fn drive_respond(
         // existing forked-UAS surface settles them).
         txn.adopt_to_tag(id);
     }
-    let req_method = txn.request().method.as_str().to_string();
-    let is_initial = req_method == "INVITE" && txn.request().to.tag.is_none();
-    let cseq = txn.request().cseq.seq;
+    let req_method = txn.request().method().as_str().to_string();
+    let is_initial = req_method == "INVITE" && txn.request().to().tag().is_none();
+    let cseq = txn.request().cseq().seq();
 
     {
         // `respond_template` derives status from the template; an early winner
@@ -430,12 +430,12 @@ pub(super) fn expect_request(
     };
     let entry = st.parked.remove(idx);
     let req = entry.txn.request();
-    let body_is_sdp = !req.body.is_empty()
+    let body_is_sdp = !req.body().is_empty()
         && req
             .header::<sip_message::header::MediaType>()
             .and_then(Result::ok)
             .is_some_and(|media| media.token().to_ascii_lowercase().contains("sdp"));
-    check_body_expect(st.role, body, req.body.len(), body_is_sdp)?;
+    check_body_expect(st.role, body, req.body().len(), body_is_sdp)?;
     if let Some(tmpl) = matcher {
         entry.txn.expect_template(tmpl, &MatchOpts::default()).map_err(|m| {
             StepError::UnexpectedKind {

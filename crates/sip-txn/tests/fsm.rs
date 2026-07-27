@@ -20,7 +20,7 @@ fn active(stack: &Stack) -> usize {
 fn has_message_request(events: &[TransactionEvent], method: &str) -> bool {
     events.iter().any(|e| match e {
         TransactionEvent::Message { message, .. } => {
-            matches!(message.as_ref(), SipMessage::Request(r) if r.method == method)
+            matches!(message.as_ref(), SipMessage::Request(r) if r.method() == method)
         }
         _ => false,
     })
@@ -511,7 +511,7 @@ async fn client_auto_acks_non_2xx_final() {
     assert!(
         events.iter().any(|e| matches!(e,
             TransactionEvent::Message { message, .. }
-                if matches!(message.as_ref(), SipMessage::Response(r) if r.status == 480))),
+                if matches!(message.as_ref(), SipMessage::Response(r) if r.status() == 480))),
         "the 480 still surfaces to the app"
     );
     // Held in Completed for Timer D (re-ACK/absorb window), not deleted on the spot.
@@ -543,7 +543,7 @@ async fn non_2xx_invite_final_absorbs_retransmits_for_timer_d() {
             .drain_events()
             .iter()
             .filter(|e| matches!(e, TransactionEvent::Message { message, .. }
-                if matches!(message.as_ref(), SipMessage::Response(r) if r.status == 486)))
+                if matches!(message.as_ref(), SipMessage::Response(r) if r.status() == 486)))
             .count(),
         1,
         "the 486 surfaces exactly once"

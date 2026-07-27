@@ -39,7 +39,7 @@ fn refer_to_charlie() -> String {
 
 fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
     let req = txn.request();
-    assert_eq!(req.method, "NOTIFY", "expected NOTIFY");
+    assert_eq!(req.method(), "NOTIFY", "expected NOTIFY");
     let event = req.header::<Event>().expect("NOTIFY carries an Event").expect("readable Event");
     assert!(event.is("refer"), "NOTIFY Event: refer, got {:?}", event.token());
     let ss = req
@@ -47,7 +47,7 @@ fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
         .expect("NOTIFY carries a Subscription-State")
         .expect("readable Subscription-State");
     assert!(ss.is(state), "subscription-state {:?} should be {state:?}", ss.token());
-    let body = String::from_utf8_lossy(&req.body);
+    let body = String::from_utf8_lossy(req.body());
     assert!(body.contains(frag), "sipfrag body {body:?} should contain {frag:?}");
 }
 

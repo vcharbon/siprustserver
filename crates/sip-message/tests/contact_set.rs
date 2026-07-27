@@ -1,12 +1,13 @@
 //! Contact-set extraction — the eager, validate-all Contact model. Port of
 //! `tests/sip/contact-set.test.ts`.
 //!
-//! `.contacts` returns every contact (folded across repeated header lines and
+//! `contacts()` returns every contact (folded across repeated header lines and
 //! comma-separated values, RFC 3261 §7.3.1) or the `*` wildcard (§10.2.2).
 //! Every contact URI is validated at parse time, so a malformed entry anywhere
 //! rejects the whole message.
 
-use sip_message::{Contact, ContactSet, CustomParser, SipMessage, SipParser};
+use sip_message::header::Contact;
+use sip_message::{ContactSet, CustomParser, SipMessage, SipParser};
 
 fn parse_ok(raw: &str) -> SipMessage {
     CustomParser::new().parse(raw.as_bytes()).expect("parse should succeed")
@@ -17,21 +18,18 @@ fn parse_fails(raw: &str) -> bool {
 }
 
 fn contacts_of(msg: &SipMessage) -> &ContactSet {
-    match msg {
-        SipMessage::Request(r) => &r.contacts,
-        SipMessage::Response(r) => &r.contacts,
-    }
+    msg.contacts()
 }
 
 fn first_contact_uri(msg: &SipMessage) -> Option<&str> {
     match contacts_of(msg) {
         ContactSet::Wildcard => None,
-        ContactSet::Contacts(cs) => cs.first().map(|c| c.uri.as_str()),
+        ContactSet::Contacts(cs) => cs.first().and_then(|c| c.uri().source()),
     }
 }
 
 fn uris(cs: &[Contact]) -> Vec<&str> {
-    cs.iter().map(|c| c.uri.as_str()).collect()
+    cs.iter().filter_map(|c| c.uri().source()).collect()
 }
 
 const SINGLE_INVITE: &str = "INVITE sip:bob@example.test SIP/2.0\r\n\
@@ -139,8 +137,5 @@ fn wildcard_mixed_with_real_contact_is_rejected() {
 }
 
 fn param<'a>(c: &'a Contact, key: &str) -> Option<&'a str> {
-    match c.params.get(key) {
-        Some(sip_message::ParamValue::Value(v)) => Some(v.as_str()),
-        _ => None,
-    }
+    c.params().value(key)
 }

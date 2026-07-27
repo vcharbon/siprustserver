@@ -75,7 +75,7 @@ impl Agent {
             let Ok(SipMessage::Request(r)) = CustomParser::new().parse(&pkt.raw) else {
                 continue; // responses / unparseable noise: nothing to answer
             };
-            let Some((status, reason)) = release_verdict(r.method.as_str(), r.to.tag.is_some())
+            let Some((status, reason)) = release_verdict(r.method().as_str(), r.to().tag().is_some())
             else {
                 // ACK: absorbed, never answered — but still claim any matching
                 // §17.1.1.3 obligation so a later `expect_ack` sees it settled.
@@ -118,14 +118,14 @@ impl Agent {
                 SipMessage::Request(r) => r,
                 SipMessage::Response(resp) => panic!(
                     "{} drained an unexpected {} {} response (expecting only {answer_200:?})",
-                    self.name, resp.status, resp.reason
+                    self.name, resp.status(), resp.reason()
                 ),
             };
-            if r.method.as_str() == "ACK" {
+            if r.method().as_str() == "ACK" {
                 self.ack_obligation_claims(&r);
                 continue;
             }
-            if answer_200.iter().any(|m| r.method == *m) {
+            if answer_200.iter().any(|m| r.method() == *m) {
                 let mut txn = ServerTxn::from_request(self.clone(), r);
                 txn.respond(200, "OK").send().await;
                 answered += 1;
@@ -133,7 +133,7 @@ impl Agent {
             }
             panic!(
                 "{} drained an unexpected {} request (expecting only {answer_200:?})",
-                self.name, r.method
+                self.name, r.method()
             );
         }
     }
@@ -163,23 +163,23 @@ impl Agent {
                 SipMessage::Request(r) => r,
                 SipMessage::Response(r) => panic!(
                     "{} expected a {method} request, got a {} {} response",
-                    self.name, r.status, r.reason
+                    self.name, r.status(), r.reason()
                 ),
             };
             let mut txn = ServerTxn::from_request(self.clone(), r);
-            if txn.request.method == method {
+            if txn.request.method() == method {
                 return Some(txn);
             }
             if self.ack_obligation_claims(&txn.request) {
                 continue; // txn-owned §17.1.1.3 hop ACK
             }
-            if tolerate.iter().any(|t| txn.request.method == *t) {
+            if tolerate.iter().any(|t| txn.request.method() == *t) {
                 txn.respond(200, "OK").send().await;
                 continue;
             }
             panic!(
                 "{} expected a {method} request (tolerating {tolerate:?}), got {}",
-                self.name, txn.request.method
+                self.name, txn.request.method()
             );
         }
         None
@@ -217,22 +217,22 @@ impl Agent {
                         who: self.name.clone(),
                         detail: format!(
                             "got a {} {} response, expected a {method} request (tolerating {tolerate:?})",
-                            r.status, r.reason
+                            r.status(), r.reason()
                         ),
                     })
                 }
             };
             let mut txn = ServerTxn::from_request(self.clone(), r);
-            if txn.request.method == method {
+            if txn.request.method() == method {
                 return Ok((txn, absorbed));
             }
-            if txn.request.method.as_str() == "ACK" {
+            if txn.request.method().as_str() == "ACK" {
                 absorbed.push(txn.request);
                 continue;
             }
-            if tolerate.iter().any(|t| txn.request.method == *t) {
-                let is_offer_reinvite = matches!(txn.request.method.as_str(), "INVITE" | "UPDATE")
-                    && !txn.request.body.is_empty();
+            if tolerate.iter().any(|t| txn.request.method() == *t) {
+                let is_offer_reinvite = matches!(txn.request.method().as_str(), "INVITE" | "UPDATE")
+                    && !txn.request.body().is_empty();
                 let respond = txn.respond(200, "OK");
                 if is_offer_reinvite {
                     respond.with_sdp(crate::callflow::ANSWER_SDP).try_send().await?;
@@ -245,7 +245,7 @@ impl Agent {
             return Err(StepError::WrongMethod {
                 who: self.name.clone(),
                 expected: format!("{method} (tolerating {tolerate:?})"),
-                got: txn.request.method.to_string(),
+                got: txn.request.method().to_string(),
             });
         }
     }
@@ -261,13 +261,13 @@ impl Agent {
             let msg = self.recv().await;
             match msg {
                 SipMessage::Request(r) => {
-                    if r.method == method {
+                    if r.method() == method {
                         return ServerTxn::from_request(self.clone(), r);
                     }
                     if self.ack_obligation_claims(&r) {
                         continue; // txn-owned §17.1.1.3 hop ACK
                     }
-                    if tolerate.iter().any(|t| r.method == *t) {
+                    if tolerate.iter().any(|t| r.method() == *t) {
                         // Drain + answer the duplicate so the txn layer stops
                         // retransmitting it, then keep waiting for `method`.
                         let mut txn = ServerTxn::from_request(self.clone(), r);
@@ -276,12 +276,12 @@ impl Agent {
                     }
                     panic!(
                         "{} expected a {method} request (tolerating {tolerate:?}), got {}",
-                        self.name, r.method
+                        self.name, r.method()
                     );
                 }
                 SipMessage::Response(r) => panic!(
                     "{} expected a {method} request, got a {} {} response",
-                    self.name, r.status, r.reason
+                    self.name, r.status(), r.reason()
                 ),
             }
         }
@@ -311,10 +311,10 @@ impl Agent {
         loop {
             match self.recv().await {
                 SipMessage::Request(r) => {
-                    if r.method == method {
+                    if r.method() == method {
                         return ServerTxn::from_request(self.clone(), r);
                     }
-                    if absorb.iter().any(|t| r.method == *t) {
+                    if absorb.iter().any(|t| r.method() == *t) {
                         // Drop the retransmission silently — no response (a UAS that
                         // has only 100'd its INVITE absorbs retransmits, replaying at
                         // most the 100 the proxy already eats). Keep waiting.
@@ -325,12 +325,12 @@ impl Agent {
                     }
                     panic!(
                         "{} expected a {method} request (absorbing {absorb:?}), got {}",
-                        self.name, r.method
+                        self.name, r.method()
                     );
                 }
                 SipMessage::Response(r) => panic!(
                     "{} expected a {method} request, got a {} {} response",
-                    self.name, r.status, r.reason
+                    self.name, r.status(), r.reason()
                 ),
             }
         }

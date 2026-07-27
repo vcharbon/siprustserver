@@ -1,7 +1,7 @@
 //! Input shapes the generators consume: transport tag, Via / Contact
 //! specs, and the minimal dialog / INVITE-transaction views. Reading these
-//! headers back off a parsed message does NOT live here — see
-//! [`crate::message_helpers`].
+//! headers back off a parsed message is the message's own typed surface, not
+//! this module's concern.
 
 use crate::header::{Contact, HostPort, ParamValue, Uri, Via};
 use crate::sip_str::SipStr;

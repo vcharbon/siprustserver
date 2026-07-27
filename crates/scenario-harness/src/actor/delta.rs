@@ -73,7 +73,7 @@ impl ObservedStimulus<'_> {
     /// The bounded label the `AcceptedDelta` observation records.
     pub(super) fn describe(&self) -> String {
         match self {
-            ObservedStimulus::Request(r) => r.method.as_str().to_string(),
+            ObservedStimulus::Request(r) => r.method().as_str().to_string(),
             ObservedStimulus::Response { status, .. } => status.to_string(),
         }
     }

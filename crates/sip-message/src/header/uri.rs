@@ -156,14 +156,22 @@ impl Uri {
     /// A value that could not be read as a URI, kept whole so a reader can
     /// still see what the peer sent.
     pub fn opaque(text: impl Into<SipStr>) -> Self {
+        let text: SipStr = text.into();
         Self {
             scheme: SipStr::EMPTY,
             user: None,
-            authority: HostPort::new(text, None),
+            authority: HostPort::new(text.clone(), None),
             params: Params::new(),
             headers: Vec::new(),
-            source: None,
+            source: Some(text),
         }
+    }
+
+    /// Whether this value could not be read as a URI and is kept whole — the
+    /// state [`opaque`](Self::opaque) puts it in. A router must not resolve one:
+    /// its host and port mean nothing.
+    pub fn is_opaque(&self) -> bool {
+        self.scheme.is_empty()
     }
 
     pub fn scheme(&self) -> &str {

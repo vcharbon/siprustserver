@@ -49,7 +49,7 @@ pub(super) async fn cancel_pending_initial(
         // CANCEL's target and stays bound.
         .or_else(|| {
             let is_initial = st.bound.as_ref().is_some_and(|t| {
-                t.request().method.as_str() == "INVITE" && t.request().to.tag.is_none()
+                t.request().method().as_str() == "INVITE" && t.request().to().tag().is_none()
             });
             if !is_initial {
                 return None;
@@ -97,8 +97,8 @@ pub(super) async fn default_react(st: &mut ActorState<'_>, msg: Inbound) -> Resu
 }
 
 async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), StepError> {
-    let method = uas.request().method.as_str().to_string();
-    let is_initial_invite = method == "INVITE" && uas.request().to.tag.is_none();
+    let method = uas.request().method().as_str().to_string();
+    let is_initial_invite = method == "INVITE" && uas.request().to().tag().is_none();
 
     if is_initial_invite {
         return apply_disposition(st, uas).await;
@@ -116,7 +116,7 @@ async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), St
     {
         let mut uas = uas;
         uas.respond(200, "OK").try_send().await?;
-        if !st.parked.iter().any(|p| p.txn.request().method.as_str() == "CANCEL") {
+        if !st.parked.iter().any(|p| p.txn.request().method().as_str() == "CANCEL") {
             st.parked.push(ParkedRequest { txn: uas, initial: false });
         }
         return Ok(());
@@ -134,8 +134,8 @@ async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), St
             st.obs.record(
                 Observation::InDialogRequest {
                     leg: st.role,
-                    call_id: uas.request().call_id.to_string(),
-                    cseq: uas.request().cseq.seq,
+                    call_id: uas.request().call_id().to_string(),
+                    cseq: uas.request().cseq().seq(),
                     method,
                 },
                 now,
@@ -170,9 +170,9 @@ pub(super) async fn react_in_dialog_request(
     st: &mut ActorState<'_>,
     mut uas: ServerTxn,
 ) -> Result<(), StepError> {
-    let method = uas.request().method.as_str().to_string();
-    let call_id = uas.request().call_id.clone();
-    let cseq = uas.request().cseq.seq;
+    let method = uas.request().method().as_str().to_string();
+    let call_id = uas.request().call_id().clone();
+    let cseq = uas.request().cseq().seq();
     let now = Instant::now();
 
     match method.as_str() {
@@ -241,9 +241,8 @@ pub(super) async fn react_in_dialog_request(
         "BYE" => {
             let is_fork_teardown = uas
                 .request()
-                .to
-                .tag
-                .as_deref()
+                .to()
+                .tag()
                 .is_some_and(|t| st.fork_loser_tags.contains(t));
             st.ctx.anchor(&st.agent, "bye", uas.request());
             uas.respond(200, "OK").try_send().await?;
@@ -347,7 +346,7 @@ pub(super) async fn react_in_dialog_request(
         // losing fork's PRACK (identified by its To-tag) is 200'd and absorbed.
         "PRACK" => {
             st.ctx.anchor(&st.agent, "prack", uas.request());
-            let prack_tag = uas.request().to.tag.clone();
+            let prack_tag = uas.request().to().tag().map(str::to_owned);
             uas.respond(200, "OK").try_send().await?;
             st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.to_string(), cseq, method: method.clone() }, now);
             // C5: this callee holds the INVITE for an early UPDATE — mark the

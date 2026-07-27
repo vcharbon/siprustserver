@@ -1,7 +1,7 @@
 //! Mandatory-header extraction + the ADR-0007 strict-grammar gates
 //! (`Wire` vs `Hydrate` mode). Port of `src/sip/parsers/extract-fields.ts`.
 //!
-//! Produces the public eager-field model ([`crate::types`]) from the
+//! Produces the typed [`CoreHeaders`] from the
 //! [`HeaderIndex`] of one dispatch pass — this module locates nothing itself,
 //! it validates and parses what the index holds. `Wire` runs every gate (the
 //! security boundary on wire bytes);
@@ -15,10 +15,11 @@ use super::structured_headers::{
     top_level_comma_entries, validate_strict_host, validate_strict_sip_uri,
 };
 use crate::error::SipParseError;
+use crate::header::{self, HostPort, NameAddr, Uri};
 use crate::method::Method;
 use crate::parser::SipParserLimits;
 use crate::sip_str::SipStr;
-use crate::types::{Contact, ContactSet, CSeq, NameAddr, RequestUri, Via};
+use crate::types::{ContactSet, CoreHeaders, NonEmpty};
 
 /// RFC 3261 §8.1.1.7 — top-Via branch MUST start with this magic cookie.
 const VIA_BRANCH_MAGIC_COOKIE: &str = "z9hG4bK";
@@ -31,23 +32,11 @@ pub enum ExtractMode {
     Hydrate,
 }
 
-/// Common eager fields shared by requests and responses. `vias` is guaranteed
-/// non-empty (extraction fails otherwise).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommonEager {
-    pub from: NameAddr,
-    pub to: NameAddr,
-    pub call_id: SipStr,
-    pub cseq: CSeq,
-    pub vias: Vec<Via>,
-    pub contacts: ContactSet,
-}
-
-/// Request eager fields = common + parsed Request-URI.
+/// Request eager fields = the shared core + the parsed Request-URI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestEager {
-    pub common: CommonEager,
-    pub request_uri: RequestUri,
+    pub common: CoreHeaders,
+    pub request_uri: Uri,
 }
 
 /// RFC 3261 / RFC 3986 §3.2.3: SIP ports are 1..=65535.
@@ -59,12 +48,19 @@ fn is_valid_port(p: u64) -> bool {
 // Internal → public field mapping
 // ---------------------------------------------------------------------------
 
+/// A scanned name-addr as the typed address value. A URI the strict reader
+/// rejects is kept whole (the parser's own gates decide admissibility), so no
+/// reader ever loses what the peer sent.
 fn to_name_addr(p: super::structured_headers::ParsedNameAddr) -> NameAddr {
-    NameAddr { display_name: p.display_name, uri: p.uri, tag: p.tag, params: p.params }
+    NameAddr::from_parts(p.display_name, Uri::parse_or_opaque(&p.uri), p.params)
 }
 
-fn to_contact(p: super::structured_headers::ParsedContact) -> Contact {
-    Contact { display_name: p.display_name, uri: p.uri, params: p.params }
+fn to_contact(p: super::structured_headers::ParsedContact) -> header::Contact {
+    header::Contact::new(NameAddr::from_parts(
+        p.display_name,
+        Uri::parse_or_opaque(&p.uri),
+        p.params,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +320,7 @@ pub fn extract_common_fields(
     idx: &HeaderIndex,
     limits: &SipParserLimits,
     mode: ExtractMode,
-) -> Result<CommonEager, SipParseError> {
+) -> Result<CoreHeaders, SipParseError> {
     let wire = mode == ExtractMode::Wire;
 
     // From/To/Call-ID/CSeq appear exactly once; only Via may repeat.
@@ -417,7 +413,7 @@ pub fn extract_common_fields(
             }
         }
     }
-    let mut vias: Vec<Via> = Vec::with_capacity(idx.via.len());
+    let mut vias: Vec<header::Via> = Vec::with_capacity(idx.via.len());
     for (value, raw) in idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()).map(move |s| (*v, s))) {
         let v = parse_via(&value.reslice(raw));
         if let Some(p) = v.port {
@@ -458,13 +454,13 @@ pub fn extract_common_fields(
                 return Err(SipParseError::new(format!("Via transport \"{}\" not in allowed set", v.transport)));
             }
         }
-        vias.push(Via {
-            transport: v.transport,
-            host: v.host,
-            port: v.port.map(|p| p as u16),
-            branch: v.branch,
-            params: v.params,
-        });
+        vias.push(header::Via::from_parts(
+            v.protocol,
+            v.version,
+            v.transport,
+            HostPort::new(v.host, v.port.map(|p| p as u16)),
+            v.params,
+        ));
     }
 
     // Contact — fold comma-list and repeated lines. `Contact: *` must stand
@@ -479,7 +475,7 @@ pub fn extract_common_fields(
     if contact_wildcard && contact_segments().any(|(_, seg)| seg != "*") {
         return Err(SipParseError::new("Contact: * wildcard must be the only value (RFC 3261 §10.2.2)"));
     }
-    let mut contact_list: Vec<Contact> = Vec::new();
+    let mut contact_list: Vec<header::Contact> = Vec::new();
     for (value, seg) in contact_segments().filter(|(_, seg)| *seg != "*") {
         let parsed = parse_contact(&value.reslice(seg));
         if wire {
@@ -492,17 +488,20 @@ pub fn extract_common_fields(
     let contacts =
         if contact_wildcard { ContactSet::Wildcard } else { ContactSet::Contacts(contact_list) };
 
-    Ok(CommonEager {
-        from: to_name_addr(from_parsed),
-        to: to_name_addr(to_parsed),
-        call_id,
-        cseq: CSeq {
-            seq: cseq_parsed.seq.min(u32::MAX as u64) as u32,
-            method: Method::from_wire(&cseq_parsed.method),
-        },
-        vias,
+    let mut hops = vias.into_iter();
+    let top = hops.next().ok_or_else(|| SipParseError::new("Missing mandatory Via header"))?;
+
+    Ok(CoreHeaders::new(
+        header::From::new(to_name_addr(from_parsed)),
+        header::To::new(to_name_addr(to_parsed)),
+        header::CallId::new(call_id),
+        header::CSeq::new(
+            cseq_parsed.seq.min(u32::MAX as u64) as u32,
+            Method::from_wire(&cseq_parsed.method),
+        ),
+        NonEmpty::from_parts(top, hops.collect()),
         contacts,
-    })
+    ))
 }
 
 /// The sent-by colon count when a Via segment carries more than one colon
@@ -551,7 +550,7 @@ pub fn extract_request_fields(
                 || method.eq_ignore_ascii_case("SUBSCRIBE")
                 || method.eq_ignore_ascii_case("REFER");
             if dialog_creating {
-                match &common.contacts {
+                match common.contacts() {
                     ContactSet::Wildcard => {
                         return Err(SipParseError::new(format!(
                             "Contact: * wildcard is not valid in {} (RFC 3261 §10.2.2)",
@@ -616,15 +615,7 @@ pub fn extract_request_fields(
             return Err(SipParseError::new(format!("Request-URI port out of range: {p}")));
         }
     }
-    let request_uri_field = RequestUri {
-        scheme: request_uri_parsed.scheme,
-        user: request_uri_parsed.user,
-        host: request_uri_parsed.host,
-        port: request_uri_parsed.port.map(|p| p as u16),
-        params: request_uri_parsed.params,
-    };
-
-    Ok(RequestEager { common, request_uri: request_uri_field })
+    Ok(RequestEager { common, request_uri: Uri::parse_or_opaque(request_uri) })
 }
 
 // ---------------------------------------------------------------------------
@@ -636,18 +627,18 @@ pub fn extract_response_fields(
     status: u16,
     limits: &SipParserLimits,
     mode: ExtractMode,
-) -> Result<CommonEager, SipParseError> {
+) -> Result<CoreHeaders, SipParseError> {
     let common = extract_common_fields(idx, limits, mode)?;
-    if status > 100 && common.to.tag.is_none() {
+    if status > 100 && common.to().tag().is_none() {
         return Err(SipParseError::new(format!(
             "Non-100 response (status={status}) missing mandatory To-tag"
         )));
     }
     if mode == ExtractMode::Wire {
-        let cseq_method = common.cseq.method.to_string();
+        let cseq_method = common.cseq().method().as_str().to_string();
         let is_redirect = status == 485 || (300..400).contains(&status);
         if !is_redirect && (cseq_method == "INVITE" || cseq_method == "SUBSCRIBE" || cseq_method == "REFER") {
-            match &common.contacts {
+            match common.contacts() {
                 ContactSet::Wildcard => {
                     return Err(SipParseError::new(format!(
                         "Contact: * wildcard is not valid in a {status} response to {cseq_method} (RFC 3261 §10.2.2)"

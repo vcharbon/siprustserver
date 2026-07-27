@@ -11,7 +11,7 @@
 //!
 //! This is the missing other half of migration item 10: that item ported the
 //! brake *helpers* and replayed the decision predicate as pure-helper tests
-//! (`sip_message::message_helpers` tests), explicitly noting "the facade port
+//! (the `sip-message` brake-helper tests), explicitly noting "the facade port
 //! later only has to wire the (already-tested) pieces together." This file is
 //! that wiring, exercised through the real `PreIngressHook` seam honoured by
 //! `sip_net::simulated::deliver` and through the brake's own counters (the port

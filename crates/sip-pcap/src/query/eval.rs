@@ -138,11 +138,11 @@ fn eval(ctx: &Ctx, bind: Bind, node: &Node) -> bool {
 
         // --- resolved per binding: the same question at several levels ---
         Node::Ruri(m) => match bind {
-            Bind::Msg(l, i) => request_of(ctx, l, i).is_some_and(|r| m.test(r.uri.as_str())),
+            Bind::Msg(l, i) => request_of(ctx, l, i).is_some_and(|r| m.test(&r.request_uri().text())),
             Bind::Txn(l, t) => t
                 .request
                 .and_then(|i| request_of(ctx, l, i))
-                .is_some_and(|r| m.test(r.uri.as_str())),
+                .is_some_and(|r| m.test(&r.request_uri().text())),
             _ => legs_of(bind)
                 .iter()
                 .any(|&l| {
@@ -174,7 +174,7 @@ fn eval(ctx: &Ctx, bind: Bind, node: &Node) -> bool {
         // --- message-level leaves ---
         Node::Status(sm) => msgs_of(ctx, bind).iter().any(|&(l, i)| {
             match &ctx.flows.legs[l].msgs[i].parsed {
-                SipMessage::Response(r) => sm.test(Some(r.status)),
+                SipMessage::Response(r) => sm.test(Some(r.status())),
                 SipMessage::Request(_) => false,
             }
         }),
@@ -194,8 +194,8 @@ fn eval(ctx: &Ctx, bind: Bind, node: &Node) -> bool {
         Node::Body(m) => msgs_of(ctx, bind).iter().any(|&(l, i)| {
             let msg = &ctx.flows.legs[l].msgs[i];
             let body = match &msg.parsed {
-                SipMessage::Request(r) => &r.body,
-                SipMessage::Response(r) => &r.body,
+                SipMessage::Request(r) => &r.body(),
+                SipMessage::Response(r) => &r.body(),
             };
             match std::str::from_utf8(body) {
                 Ok(s) => m.test(s),
@@ -258,8 +258,8 @@ fn is_request(ctx: &Ctx, leg: LegId, msg: usize) -> bool {
 /// request.
 fn msg_method<'a>(ctx: &'a Ctx, leg: LegId, msg: usize) -> &'a Method {
     match &ctx.flows.legs[leg].msgs[msg].parsed {
-        SipMessage::Request(r) => &r.method,
-        SipMessage::Response(r) => &r.cseq.method,
+        SipMessage::Request(r) => r.method(),
+        SipMessage::Response(r) => r.cseq().method(),
     }
 }
 

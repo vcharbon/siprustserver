@@ -38,8 +38,8 @@ use crate::contracts::SignalingNetworkEvent;
 /// and the responses to them).
 pub fn from_tag(m: &SipMessage) -> Option<&str> {
     match m {
-        SipMessage::Request(r) => r.from.tag.as_deref(),
-        SipMessage::Response(r) => r.from.tag.as_deref(),
+        SipMessage::Request(r) => r.from().tag(),
+        SipMessage::Response(r) => r.from().tag(),
     }
 }
 
@@ -47,46 +47,37 @@ pub fn from_tag(m: &SipMessage) -> Option<&str> {
 /// and on 100 Trying).
 pub fn to_tag(m: &SipMessage) -> Option<&str> {
     match m {
-        SipMessage::Request(r) => r.to.tag.as_deref(),
-        SipMessage::Response(r) => r.to.tag.as_deref(),
+        SipMessage::Request(r) => r.to().tag(),
+        SipMessage::Response(r) => r.to().tag(),
     }
 }
 
 /// `From` URI (name-addr, no params).
 pub fn from_uri(m: &SipMessage) -> &str {
-    match m {
-        SipMessage::Request(r) => &r.from.uri,
-        SipMessage::Response(r) => &r.from.uri,
-    }
+    m.from().uri().source().unwrap_or("")
 }
 
 /// `To` URI (name-addr, no params).
 pub fn to_uri(m: &SipMessage) -> &str {
-    match m {
-        SipMessage::Request(r) => &r.to.uri,
-        SipMessage::Response(r) => &r.to.uri,
-    }
+    m.to().uri().source().unwrap_or("")
 }
 
 pub fn call_id(m: &SipMessage) -> &str {
-    match m {
-        SipMessage::Request(r) => &r.call_id,
-        SipMessage::Response(r) => &r.call_id,
-    }
+    m.call_id().as_str()
 }
 
 /// CSeq method token (`INVITE`, `BYE`, …).
 pub fn cseq_method(m: &SipMessage) -> &str {
     match m {
-        SipMessage::Request(r) => r.cseq.method.as_str(),
-        SipMessage::Response(r) => r.cseq.method.as_str(),
+        SipMessage::Request(r) => r.cseq().method().as_str(),
+        SipMessage::Response(r) => r.cseq().method().as_str(),
     }
 }
 
 pub fn cseq_seq(m: &SipMessage) -> u32 {
     match m {
-        SipMessage::Request(r) => r.cseq.seq,
-        SipMessage::Response(r) => r.cseq.seq,
+        SipMessage::Request(r) => r.cseq().seq(),
+        SipMessage::Response(r) => r.cseq().seq(),
     }
 }
 
@@ -95,7 +86,7 @@ pub fn cseq_seq(m: &SipMessage) -> u32 {
 pub fn status(m: &SipMessage) -> u16 {
     match m {
         SipMessage::Request(_) => 0,
-        SipMessage::Response(r) => r.status,
+        SipMessage::Response(r) => r.status(),
     }
 }
 
@@ -261,7 +252,7 @@ pub fn advance_dialog_model(m: &mut DialogModel, ev: &OrderedEvent) {
         }
     }
     fn is_establishing_invite(req: &SipRequest) -> bool {
-        req.method.as_str() == "INVITE" && req.to.tag.as_deref().is_none_or(str::is_empty)
+        req.method().as_str() == "INVITE" && req.to().tag().is_none_or(str::is_empty)
     }
 
     if ev.kind == EventKind::Sent {
@@ -324,12 +315,12 @@ pub fn advance_dialog_model(m: &mut DialogModel, ev: &OrderedEvent) {
 /// Is `req` an **in-dialog** request given the dialog state walked so far? (Both
 /// tags present, and — for a re-INVITE — not the initial INVITE by branch.)
 pub fn is_in_dialog_request(req: &SipRequest, m: &DialogModel) -> bool {
-    let ft = req.from.tag.as_deref().unwrap_or("");
-    let tt = req.to.tag.as_deref().unwrap_or("");
+    let ft = req.from().tag().unwrap_or("");
+    let tt = req.to().tag().unwrap_or("");
     if ft.is_empty() || tt.is_empty() {
         return false;
     }
-    if req.method.as_str() == "INVITE" {
+    if req.method().as_str() == "INVITE" {
         let branch = req.top_via().branch().unwrap_or_default().to_string();
         if !branch.is_empty() && branch == m.initial_invite_sent_branch {
             return false;
@@ -384,7 +375,7 @@ pub fn slot_is_relay(slot: &AgentSlot) -> bool {
     let mut recv_invite = false;
     for ev in &slot.ordered {
         if let SipMessage::Request(r) = &ev.msg {
-            if r.method.as_str() == "INVITE" && r.to.tag.as_deref().is_none_or(str::is_empty) {
+            if r.method().as_str() == "INVITE" && r.to().tag().is_none_or(str::is_empty) {
                 match ev.kind {
                     EventKind::Sent => sent_invite = true,
                     EventKind::Received => recv_invite = true,
@@ -465,10 +456,10 @@ fn establishing_tail(ordered: Vec<OrderedEvent>) -> Vec<OrderedEvent> {
         .iter()
         .filter_map(|e| match &e.msg {
             SipMessage::Request(r)
-                if r.method.as_str() == "INVITE"
-                    && r.to.tag.as_deref().is_none_or(str::is_empty) =>
+                if r.method().as_str() == "INVITE"
+                    && r.to().tag().is_none_or(str::is_empty) =>
             {
-                Some(r.cseq.seq)
+                Some(r.cseq().seq())
             }
             _ => None,
         })
@@ -477,9 +468,9 @@ fn establishing_tail(ordered: Vec<OrderedEvent>) -> Vec<OrderedEvent> {
     // Keep from the first event of the establishing INVITE transaction onward.
     let start = ordered.iter().position(|e| {
         matches!(&e.msg, SipMessage::Request(r)
-            if r.method.as_str() == "INVITE"
-                && r.to.tag.as_deref().is_none_or(str::is_empty)
-                && r.cseq.seq == est_cseq)
+            if r.method().as_str() == "INVITE"
+                && r.to().tag().is_none_or(str::is_empty)
+                && r.cseq().seq() == est_cseq)
     });
     match start {
         Some(i) => ordered.into_iter().skip(i).collect(),
@@ -922,7 +913,7 @@ mod tests {
         for s in [fork1, fork2] {
             let first = &s.per_agent[0].ordered[0].msg;
             assert!(
-                matches!(first, SipMessage::Request(r) if r.method.as_str() == "INVITE"),
+                matches!(first, SipMessage::Request(r) if r.method().as_str() == "INVITE"),
                 "fork slice must open with the establishing INVITE: {s:?}",
             );
         }

@@ -77,7 +77,7 @@ impl Txn {
     /// Statuses of the provisional (1xx) responses, in capture order.
     pub fn provisionals<'a>(&'a self, leg: &'a FlowLeg) -> impl Iterator<Item = u16> + 'a {
         self.responses.iter().filter_map(move |&i| match &leg.msgs[i].parsed {
-            SipMessage::Response(r) if r.status < 200 => Some(r.status),
+            SipMessage::Response(r) if r.status() < 200 => Some(r.status()),
             _ => None,
         })
     }
@@ -85,7 +85,7 @@ impl Txn {
     /// The first final (>=200) response observation.
     pub fn final_response(&self, leg: &FlowLeg) -> Option<usize> {
         self.responses.iter().copied().find(|&i| {
-            matches!(&leg.msgs[i].parsed, SipMessage::Response(r) if r.status >= 200)
+            matches!(&leg.msgs[i].parsed, SipMessage::Response(r) if r.status() >= 200)
         })
     }
 }
@@ -100,15 +100,15 @@ pub fn transactions(leg: &FlowLeg) -> Vec<Txn> {
     for (mi, msg) in leg.msgs.iter().enumerate() {
         let (branch, method, cseq, is_request) = match &msg.parsed {
             SipMessage::Request(r) => {
-                (branch_of(&msg.parsed), r.cseq.method.clone(), r.cseq.seq, true)
+                (branch_of(&msg.parsed), r.cseq().method().clone(), r.cseq().seq(), true)
             }
             SipMessage::Response(r) => {
-                (branch_of(&msg.parsed), r.cseq.method.clone(), r.cseq.seq, false)
+                (branch_of(&msg.parsed), r.cseq().method().clone(), r.cseq().seq(), false)
             }
         };
         let slot = index
             .iter()
-            .find(|(b, m, _)| b == &branch && m == &method)
+            .find(|(b, m, _)| b == &branch && m == method)
             .map(|(_, _, i)| *i);
         let ti = match slot {
             Some(i) => i,
@@ -138,8 +138,8 @@ pub fn transactions(leg: &FlowLeg) -> Vec<Txn> {
         } else {
             txn.responses.push(mi);
             if let SipMessage::Response(r) = &msg.parsed {
-                if r.status >= 200 && txn.final_status.is_none() {
-                    txn.final_status = Some(r.status);
+                if r.status() >= 200 && txn.final_status.is_none() {
+                    txn.final_status = Some(r.status());
                     txn.latency_us = txn
                         .request
                         .map(|ri| msg.ts_us.saturating_sub(leg.msgs[ri].ts_us));

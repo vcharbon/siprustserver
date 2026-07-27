@@ -50,7 +50,7 @@ async fn alice_and_bob_hear_each_other_through_b2bua() {
     // Bob receives the relayed offer, answers it with his own SDP, and points
     // his media session at Alice.
     let mut uas = bob.receive("INVITE").await;
-    let offer = parse_sdp(&String::from_utf8_lossy(&uas.request().body));
+    let offer = parse_sdp(&String::from_utf8_lossy(uas.request().body()));
     let answer_wire = OfferAnswerEngine::to_wire(&bob_eng.answer_to(&offer).expect("bob answers"));
     let bob_session = bob_rtp.session("call");
     bob_session
@@ -63,7 +63,7 @@ async fn alice_and_bob_hear_each_other_through_b2bua() {
 
     // Alice applies the relayed answer → points her media session at Bob.
     let ok = call.expect(200).await;
-    let answer = parse_sdp(&String::from_utf8_lossy(&ok.body));
+    let answer = parse_sdp(&String::from_utf8_lossy(ok.body()));
     let alice_negotiated = alice_eng.apply_remote(&answer, true).expect("alice applies answer");
     let alice_session = alice_rtp.session("call");
     alice_session.configure(alice_negotiated).unwrap();

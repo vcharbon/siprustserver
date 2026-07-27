@@ -79,7 +79,7 @@ impl Proxy {
         // through us (§16.6.4). A dialog-creating INVITE has no To-tag yet. Ours
         // is the topmost entry, and §7.3 asks a proxy to write what it processes
         // near the top — so a first Record-Route opens the header block.
-        if req.method == "INVITE" && req.to.tag.is_none() {
+        if req.method() == "INVITE" && req.to().tag().is_none() {
             let entry = self.record_route();
             draft = if draft.has(&HeaderName::RecordRoute) {
                 draft.prepend(entry)
@@ -91,7 +91,7 @@ impl Proxy {
         draft = draft.prepend(self.via());
         let forwarded =
             draft.freeze().expect("a thawed request stays complete through a §16 rewrite");
-        unwrap_step(self.agent.try_send_wire(&forwarded.raw, next).await);
+        unwrap_step(self.agent.try_send_wire(forwarded.image(), next).await);
         forwarded
     }
 
@@ -102,12 +102,12 @@ impl Proxy {
         };
         let mut draft = resp.thaw();
         // §16.7 step 3: the response's topmost Via is ours — drop it.
-        if via_addr(&resp.top_via()) == Some(self.agent.addr) {
+        if via_addr(resp.top_via()) == Some(self.agent.addr) {
             draft = draft.pop_top::<Via>().expect("the top Via parsed on the way in");
         }
         let forwarded =
             draft.freeze().expect("a thawed response stays complete through a §16.7 pop");
-        unwrap_step(self.agent.try_send_wire(&forwarded.raw, next).await);
+        unwrap_step(self.agent.try_send_wire(forwarded.image(), next).await);
         forwarded
     }
 }

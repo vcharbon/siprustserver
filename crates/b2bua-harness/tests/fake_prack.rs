@@ -37,7 +37,7 @@ fn has_token<K: TokenKind>(
 fn rack_matches(req: &sip_message::SipRequest, rseq: u32, method: Method) -> bool {
     req.header::<RAck>()
         .map(|r| r.expect("readable RAck"))
-        .is_some_and(|r| r.rseq() == rseq && r.method() == &method)
+        .is_some_and(|r| r.rseq() == rseq && r.method() == method)
 }
 
 /// Whether a message describes an SDP body.
@@ -82,7 +82,7 @@ async fn basic() {
 
     // Alice sees a bare 180.
     let p180 = call.expect(180).await;
-    assert!(p180.body.is_empty(), "bare 180, no body");
+    assert!(p180.body().is_empty(), "bare 180, no body");
     assert!(!has_token(p180.header::<Require>(), "100rel"));
     assert!(p180.header::<RSeq>().is_none());
 
@@ -94,7 +94,7 @@ async fn basic() {
     // Bob's 200 OK has NO body — alice's 200 carries the cached 18x SDP.
     uas.respond(200, "OK").await;
     let ok = call.expect(200).await;
-    assert!(!ok.body.is_empty(), "alice 200 carries cached SDP");
+    assert!(!ok.body().is_empty(), "alice 200 carries cached SDP");
     assert!(
         is_sdp(ok.header::<MediaType>()),
         "Content-Type application/sdp on alice's 200",
@@ -150,7 +150,7 @@ async fn multiple_18x() {
     // 200 OK with no body → alice gets the latest cached SDP.
     uas.respond(200, "OK").await;
     let ok = call.expect(200).await;
-    assert!(!ok.body.is_empty(), "alice 200 carries cached SDP");
+    assert!(!ok.body().is_empty(), "alice 200 carries cached SDP");
 
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
@@ -198,7 +198,7 @@ async fn update_codec_mismatch() {
     // Call still proceeds on the original cached SDP from the 183.
     uas.respond(200, "OK").await;
     let ok = call.expect(200).await;
-    assert!(!ok.body.is_empty(), "alice 200 carries the original cached SDP");
+    assert!(!ok.body().is_empty(), "alice 200 carries the original cached SDP");
 
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
@@ -341,7 +341,7 @@ async fn update_happy() {
     let mut update = bob_dialog.request(InDialogMethod::Update, Some(ANSWER)).await;
     // B2BUA answers locally: 200 with a skeleton-fit SDP body.
     let upd_resp = update.expect(200).await;
-    assert!(!upd_resp.body.is_empty(), "skeleton-fit answer has a body");
+    assert!(!upd_resp.body().is_empty(), "skeleton-fit answer has a body");
     assert!(
         is_sdp(upd_resp.header::<MediaType>()),
         "Content-Type application/sdp on the local UPDATE answer",
@@ -350,7 +350,7 @@ async fn update_happy() {
     // 200 OK INVITE (no body) → alice gets the latest cached SDP (UPDATE offer).
     uas.respond(200, "OK").await;
     let ok = call.expect(200).await;
-    assert!(!ok.body.is_empty(), "alice 200 carries cached SDP");
+    assert!(!ok.body().is_empty(), "alice 200 carries cached SDP");
 
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
@@ -411,7 +411,7 @@ async fn run_fake_prack_failover(scenario: &str, alice_p: u16, bob1_p: u16, bob2
 
     // alice's 200 carries bob2's SDP (bob1's cache discarded with its leg).
     let ok = call.expect(200).await;
-    assert!(!ok.body.is_empty(), "alice 200 carries bob2's SDP");
+    assert!(!ok.body().is_empty(), "alice 200 carries bob2's SDP");
 
     let mut dialog = call.ack().await;
     bob2.receive("ACK").await;

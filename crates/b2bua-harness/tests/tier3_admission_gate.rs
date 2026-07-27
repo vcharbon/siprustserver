@@ -147,10 +147,10 @@ async fn emergency_invite_bypasses_the_empty_bucket_and_establishes() {
 
     // Admitted despite the empty bucket: the B2BUA bridges to bob.
     let mut uas = bob.receive("INVITE").await;
-    assert!(!uas.request().body.is_empty(), "offer relayed to bob on the emergency call");
+    assert!(!uas.request().body().is_empty(), "offer relayed to bob on the emergency call");
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     let ok = call.expect(200).await;
-    assert!(!ok.body.is_empty(), "answer relayed back to alice");
+    assert!(!ok.body().is_empty(), "answer relayed back to alice");
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
 

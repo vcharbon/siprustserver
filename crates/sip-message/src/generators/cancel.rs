@@ -27,13 +27,13 @@ pub fn generate_cancel(invite_txn: &InviteClientTransactionHandle) -> SipRequest
             .unwrap_or_else(|| panic!("generate_cancel: INVITE missing {name}"))
     };
 
-    let mut draft = RequestDraft::new(Method::Cancel, invite.request_uri())
+    let mut draft = RequestDraft::new(Method::Cancel, invite.request_uri().clone())
         .push_raw(HeaderName::Via, echoed(HeaderName::Via))
         .push(MaxForwards::new(emit::DEFAULT_MAX_FORWARDS))
         .push_raw(HeaderName::From, echoed(HeaderName::From))
         .push_raw(HeaderName::To, echoed(HeaderName::To))
         .push_raw(HeaderName::CallId, echoed(HeaderName::CallId))
-        .push(CSeq::new(invite.cseq.seq, Method::Cancel));
+        .push(CSeq::new(invite.cseq().seq(), Method::Cancel));
     for route in invite.raw_text(HeaderName::Route) {
         draft = draft.push_raw(HeaderName::Route, route);
     }

@@ -1,6 +1,6 @@
 //! Unit tests locking the pure lens/accessor/timer helpers. No direct TS
 //! counterpart (the source exercised these via the deferred CallState tests);
-//! analogous to slice-1's `message_helpers.rs` smoke tests.
+//! analogous to slice-1's message-layer smoke tests.
 
 mod common;
 

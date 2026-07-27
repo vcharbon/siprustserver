@@ -71,5 +71,5 @@ pub(super) fn via_addr(via: &Via) -> Option<SocketAddr> {
 /// (RFC 3261 §18.2.2). (`received=`/`rport=` are not stamped by this harness's
 /// `generate_response`, so the sent-by host:port is authoritative here.)
 pub(super) fn top_via_addr(req: &SipRequest) -> Option<SocketAddr> {
-    via_addr(&req.top_via())
+    via_addr(req.top_via())
 }

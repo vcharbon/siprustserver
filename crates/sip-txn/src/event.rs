@@ -79,7 +79,7 @@ impl EventQueueDropReason {
             TransactionEvent::CallQuiesced { .. } => Self::CallQuiesced,
             TransactionEvent::Message { message, .. } => match message.as_ref() {
                 SipMessage::Response(_) => Self::Response,
-                SipMessage::Request(r) if r.method == Method::Invite => Self::RequestInvite,
+                SipMessage::Request(r) if r.method() == Method::Invite => Self::RequestInvite,
                 SipMessage::Request(_) => Self::RequestOther,
             },
         }

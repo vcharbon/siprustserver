@@ -70,7 +70,7 @@ async fn canonical_failover() {
     // The bob agent is the real callee; the worker's b-leg reaches it through
     // the proxy. The proxy HRW-routes alice's INVITE to one worker (primary).
     let mut uas = bob.receive("INVITE").await;
-    assert!(!uas.request().body.is_empty(), "offer relayed to bob");
+    assert!(!uas.request().body().is_empty(), "offer relayed to bob");
 
     // Discover which worker is the primary from the cookie the b-leg carries:
     // the b-leg INVITE bob received echoes the proxy's Record-Route cookie with
@@ -90,7 +90,7 @@ async fn canonical_failover() {
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     let ok = call.expect(200).await;
-    assert!(!ok.body.is_empty(), "answer relayed to alice");
+    assert!(!ok.body().is_empty(), "answer relayed to alice");
 
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;

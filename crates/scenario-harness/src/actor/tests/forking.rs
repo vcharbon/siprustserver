@@ -50,14 +50,14 @@ async fn forking_ring_emits_distinct_tag_18x_and_answers_winner() {
         tokio::spawn(async move {
             let mut call = alice.invite(&bob).with_sdp(OFFER_SDP).send().await;
             let p1 = call.expect(180).await;
-            let t1 = p1.to.tag.clone().expect("fork1 tag");
+            let t1 = p1.to().tag().expect("fork1 tag");
             let p2 = call.expect(180).await;
-            let t2 = p2.to.tag.clone().expect("fork2 tag");
+            let t2 = p2.to().tag().expect("fork2 tag");
             assert_ne!(t1, t2, "each fork's 18x carries a DISTINCT To-tag");
             assert_eq!(t1, "f1");
             assert_eq!(t2, "f2");
             let ok = call.expect(200).await;
-            assert_eq!(ok.to.tag.as_deref(), Some("f2"), "the 200 is under the winner tag");
+            assert_eq!(ok.to().tag(), Some("f2"), "the 200 is under the winner tag");
             let mut dialog = call.ack().await;
             let mut bye = dialog.bye().await;
             bye.expect(200).await;
@@ -105,14 +105,14 @@ async fn forking_ring_loser_late_200_is_acked_and_byed() {
             call.expect(180).await;
             // The winner's 200 (f2): ACK, keep the confirmed dialog.
             let ok = call.expect(200).await;
-            assert_eq!(ok.to.tag.as_deref(), Some("f2"));
+            assert_eq!(ok.to().tag(), Some("f2"));
             let mut winner = call.ack().await;
             // The loser's LATE 200 (f1): §13.2.2.4 — ACK it on its own fork
             // dialog, then BYE that fork. (`expect(200)` re-points the
             // ClientInvite's dialog at the latest 2xx's tag, so `ack()` here
             // addresses the LOSER fork.)
             let late = call.expect(200).await;
-            assert_eq!(late.to.tag.as_deref(), Some("f1"), "the late 200 is the loser's");
+            assert_eq!(late.to().tag(), Some("f1"), "the late 200 is the loser's");
             let mut loser = call.ack().await;
             let mut loser_bye = loser.bye().await;
             loser_bye.expect(200).await;
@@ -169,9 +169,9 @@ async fn forking_ring_reliable_answers_on_winner_prack_only() {
                 .send()
                 .await;
             let p1 = call.expect(183).await;
-            assert_eq!(p1.to.tag.as_deref(), Some("f1"));
+            assert_eq!(p1.to().tag(), Some("f1"));
             let p2 = call.expect(183).await;
-            assert_eq!(p2.to.tag.as_deref(), Some("f2"));
+            assert_eq!(p2.to().tag(), Some("f2"));
             // PRACK the LOSER fork first — the answer must NOT be released.
             let mut prack1 = call
                 .send_request(InDialogMethod::Prack)
@@ -189,7 +189,7 @@ async fn forking_ring_reliable_answers_on_winner_prack_only() {
                 .await;
             prack2.expect(200).await;
             let ok = call.expect(200).await;
-            assert_eq!(ok.to.tag.as_deref(), Some("f2"), "answered under the winner tag");
+            assert_eq!(ok.to().tag(), Some("f2"), "answered under the winner tag");
             let mut dialog = call.ack().await;
             let mut bye = dialog.bye().await;
             bye.expect(200).await;

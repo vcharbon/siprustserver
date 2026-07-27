@@ -113,7 +113,7 @@ fn extract_sip_headers(req: &sip_message::SipRequest) -> serde_json::Map<String,
         HeaderName::ReferredBy,
     ];
     let mut out = serde_json::Map::new();
-    for h in &req.headers {
+    for h in req.headers() {
         if SKIP.iter().any(|n| n.matches(&h.name)) {
             continue;
         }
@@ -389,7 +389,7 @@ define_service! {
                 // Held SDP from A's INVITE snapshot (preserves codecs, port 0,
                 // a=inactive). No profile → drop the body.
                 let a_invite = super::relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());
-                let held = sip_message::extract_codec_profile(&a_invite.body).map(|profile| {
+                let held = sip_message::extract_codec_profile(a_invite.body()).map(|profile| {
                     sip_message::build_held_sdp_from_profile(
                         &profile,
                         &sip_message::BuildHeldSdpOptions {
@@ -472,14 +472,14 @@ define_service! {
                 let st = state(ctx)?.clone();
                 let resp = ctx.response()?;
                 // Dedupe identical repeats against the *last* status only.
-                if st.last_c_leg_notified_status == Some(resp.status) {
+                if st.last_c_leg_notified_status == Some(resp.status()) {
                     return ok(vec![]);
                 }
                 let leg = st.referrer_leg_id.clone();
                 let mut new_state = st.clone();
-                new_state.last_c_leg_notified_status = Some(resp.status);
+                new_state.last_c_leg_notified_status = Some(resp.status());
                 ok(vec![
-                    notify(&leg, SUB_STATE_ACTIVE_60, resp.status, &resp.reason),
+                    notify(&leg, SUB_STATE_ACTIVE_60, resp.status(), resp.reason()),
                     RuleAction::SetTransfer { state: Some(new_state) },
                 ])
             },
@@ -513,9 +513,10 @@ define_service! {
                 let leg = st.referrer_leg_id.clone();
 
                 // Capture C's 200 SDP (drives the a-realign re-INVITE in 5b).
-                let c_initial_sdp = (!resp.body.is_empty()).then(|| resp.body.to_vec());
+                let c_initial_sdp = (!resp.body().is_empty()).then(|| resp.body().to_vec());
                 // A's SDP for the c-realign re-INVITE-C offer.
-                let a_sdp = super::relay::rebuild_a_leg_invite(ctx.call.a_leg_invite()).body;
+                let a_leg = super::relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());
+                let a_sdp = a_leg.body();
 
                 let mut new_state = st.clone();
                 new_state.phase = TransferPhase::CRealigning;
@@ -568,7 +569,7 @@ define_service! {
                 .direction(Direction::FromB)
                 .leg_states(&[LegState::Trying, LegState::Early])
                 .filter(|ctx| {
-                    let is_fail = ctx.response().map(|r| r.status >= 300).unwrap_or(false);
+                    let is_fail = ctx.response().map(|r| r.status() >= 300).unwrap_or(false);
                     is_fail
                         && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
                 }),
@@ -577,7 +578,7 @@ define_service! {
                 let resp = ctx.response()?;
                 let leg = st.referrer_leg_id.clone();
                 let mut actions = vec![
-                    notify(&leg, SUB_STATE_TERMINATED_NORESOURCE, resp.status, &resp.reason),
+                    notify(&leg, SUB_STATE_TERMINATED_NORESOURCE, resp.status(), resp.reason()),
                     RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferSubscriptionExpiry, None) },
                     RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
                 ];
@@ -586,8 +587,8 @@ define_service! {
                     actions.push(RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Reject,
                         leg_id: c_leg_id.clone(),
-                        status_code: Some(resp.status as i64),
-                        reason: Some(resp.reason.to_string()),
+                        status_code: Some(resp.status() as i64),
+                        reason: Some(resp.reason().to_string()),
                     });
                     actions.push(RuleAction::TerminateLeg {
                         leg_id: c_leg_id,
@@ -668,7 +669,7 @@ define_service! {
                 // re-INVITE (sendrecv, C's real port/codec) so A enables its
                 // send path. C's *initial* held answer would leave A inactive →
                 // one-way audio (referTransfer.ts:495-497, the load-bearing note).
-                let c_realign_sdp = resp.body.clone();
+                let c_realign_sdp = resp.body().clone();
 
                 let mut new_state = st.clone();
                 new_state.phase = TransferPhase::ARealigning;
@@ -710,7 +711,7 @@ define_service! {
                 .direction(Direction::FromB)
                 .leg_states(&[LegState::Confirmed])
                 .filter(|ctx| {
-                    let is_fail = ctx.response().map(|r| r.status >= 300).unwrap_or(false);
+                    let is_fail = ctx.response().map(|r| r.status() >= 300).unwrap_or(false);
                     is_fail
                         && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == Some(ctx.source_leg_id)
                 }),
@@ -730,7 +731,7 @@ define_service! {
                     actions.push(RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Reject,
                         leg_id: c_leg_id,
-                        status_code: Some(resp.status as i64),
+                        status_code: Some(resp.status() as i64),
                         reason: Some("transfer-rollback-c-realign".to_string()),
                     });
                 }
@@ -858,7 +859,7 @@ define_service! {
                 .method("INVITE")
                 .direction(Direction::FromA)
                 .filter(|ctx| {
-                    let is_fail = ctx.response().map(|r| r.status >= 300).unwrap_or(false);
+                    let is_fail = ctx.response().map(|r| r.status() >= 300).unwrap_or(false);
                     is_fail && ctx.source_leg_id == "a"
                 }),
             handle: |ctx| {
@@ -873,7 +874,7 @@ define_service! {
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Reject,
                         leg_id: "a".to_string(),
-                        status_code: Some(resp.status as i64),
+                        status_code: Some(resp.status() as i64),
                         reason: Some("transfer-rollback-a-realign".to_string()),
                     },
                     RuleAction::BeginTermination { reason: None },
@@ -993,7 +994,7 @@ define_service! {
                 .filter(|ctx| {
                     let method_ok = ctx
                         .request()
-                        .map(|r| r.method != "BYE")
+                        .map(|r| r.method() != "BYE")
                         .unwrap_or(false);
                     method_ok
                         && state(ctx).map(|s| s.referrer_leg_id.as_str()) == Some(ctx.source_leg_id)

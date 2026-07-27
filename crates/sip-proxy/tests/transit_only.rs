@@ -84,7 +84,7 @@ Content-Length: 0\r\n\r\n";
     let SipMessage::Response(resp) = CustomParser::new().parse(&reply.raw).unwrap() else {
         panic!("expected a response");
     };
-    assert_eq!(resp.status, 483, "Max-Forwards: 0 → 483 Too Many Hops");
+    assert_eq!(resp.status(), 483, "Max-Forwards: 0 → 483 Too Many Hops");
 
     // §17.1.1.3: ACK the 483 (same branch/CSeq, To echoed from the final). The
     // proxy generated the final itself, so it absorbs the ACK at this hop.

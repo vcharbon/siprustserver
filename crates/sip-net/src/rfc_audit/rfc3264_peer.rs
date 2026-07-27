@@ -44,8 +44,8 @@ fn sent_messages<'a>(
 /// The raw body bytes of a parsed message (request or response).
 fn body_bytes(msg: &SipMessage) -> &[u8] {
     match msg {
-        SipMessage::Request(r) => &r.body,
-        SipMessage::Response(r) => &r.body,
+        SipMessage::Request(r) => r.body(),
+        SipMessage::Response(r) => r.body(),
     }
 }
 

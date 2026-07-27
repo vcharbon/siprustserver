@@ -65,7 +65,7 @@ fn non_100_with_to_tag_succeeds() {
         let SipMessage::Response(resp) = parse(&response_with_tag(status, reason)).unwrap() else {
             panic!("expected response for status={status}");
         };
-        assert_eq!(resp.to.tag.as_deref(), Some("to-tag-2"), "status={status}");
+        assert_eq!(resp.to().tag(), Some("to-tag-2"), "status={status}");
     }
 }
 
@@ -79,6 +79,6 @@ Call-ID: trying-no-tag@10.0.0.1\r\n\
 CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n";
     let SipMessage::Response(resp) = parse(raw).unwrap() else { panic!("expected response") };
-    assert_eq!(resp.status, 100);
-    assert_eq!(resp.to.tag, None);
+    assert_eq!(resp.status(), 100);
+    assert_eq!(resp.to().tag(), None);
 }

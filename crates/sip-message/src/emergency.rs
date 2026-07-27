@@ -3,8 +3,8 @@
 //! before any parse ([`buffer_has_emergency_marker`]) — the signal the
 //! Tier-1 overload brake consults to NEVER 503 an emergency packet.
 
-use super::bytes::{contains_subslice_ignore_ascii_case, find_subslice};
-use super::headers::get_headers;
+use crate::header::HeaderName;
+use crate::raw_bytes::{contains_subslice_ignore_ascii_case, find_subslice};
 use crate::types::SipRequest;
 
 /// The emergency Resource-Priority r-values (RFC 4412 namespace.priority).
@@ -17,7 +17,7 @@ const EMERGENCY_RPH_TOKENS: [&str; 3] = ["esnet.0", "wps.0", "q735.0"];
 /// each r-value compared whole (trimmed, case-insensitive) against the
 /// emergency tokens.
 pub fn is_emergency_request(req: &SipRequest) -> bool {
-    get_headers(&req.headers, "resource-priority").iter().any(|value| {
+    req.raw(HeaderName::ResourcePriority).any(|value| {
         value
             .split(',')
             .any(|rv| EMERGENCY_RPH_TOKENS.iter().any(|tok| rv.trim().eq_ignore_ascii_case(tok)))

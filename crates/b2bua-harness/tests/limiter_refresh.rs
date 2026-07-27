@@ -93,7 +93,7 @@ async fn refresh_keeps_a_long_call_counted_across_a_window() {
     // The hold migrated, so the slot is still occupied → a second call is
     // rejected. (Without refresh, window 1 would be empty and this would admit.)
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
-    assert_eq!(call2.expect(486).await.status, 486, "refresh kept the slot occupied");
+    assert_eq!(call2.expect(486).await.status(), 486, "refresh kept the slot occupied");
 
     let _ = h.finish().await;
 }

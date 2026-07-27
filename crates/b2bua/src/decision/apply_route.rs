@@ -364,7 +364,7 @@ fn apply_supported_for_18x(
     }
 
     let alice_supported = a_invite.header::<Supported>().and_then(Result::ok);
-    let alice_has_sdp = !a_invite.body.is_empty()
+    let alice_has_sdp = !a_invite.body().is_empty()
         && a_invite
             .header::<MediaType>()
             .and_then(Result::ok)

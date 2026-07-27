@@ -11,11 +11,12 @@
 
 use std::collections::BTreeMap;
 
-use crate::message_helpers::split_top_level_commas;
+
 use crate::parser::custom::compact_forms::expanded_name;
+use crate::parser::custom::structured_headers::{
+    parse_name_addr, parse_sip_uri_string, split_top_level_commas,
+};
 use crate::sip_str::SipStr;
-use crate::parser::custom::structured_headers::{parse_name_addr, parse_sip_uri_string};
-use crate::types::ParamValue;
 
 /// Canonical, case-folded header name (compact forms expanded).
 pub(crate) fn canonical(name: &str) -> String {
@@ -41,16 +42,10 @@ pub struct RtElement {
     pub header_params: BTreeMap<String, String>,
 }
 
-fn params_to_map(params: crate::types::Params) -> BTreeMap<String, String> {
+fn params_to_map(params: crate::header::Params) -> BTreeMap<String, String> {
     params
-        .into_iter()
-        .map(|(k, v)| {
-            let val = match v {
-                ParamValue::Flag => String::new(),
-                ParamValue::Value(s) => s.to_string(),
-            };
-            (k.to_ascii_lowercase(), val)
-        })
+        .iter()
+        .map(|(k, v)| (k.to_ascii_lowercase(), v.as_str().unwrap_or("").to_string()))
         .collect()
 }
 

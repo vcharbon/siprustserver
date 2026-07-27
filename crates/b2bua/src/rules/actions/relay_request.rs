@@ -73,12 +73,12 @@ impl ActionExecutor<'_> {
         // ACK's body through (the delayed-offer re-INVITE answer rides the ACK,
         // RFC 3264 §4). The target may be either side (a re-INVITE answered by
         // bob is ACKed toward bob; one answered by alice is ACKed toward alice).
-        if req.method == Method::Ack {
+        if req.method() == Method::Ack {
             let content_type = req.raw(HeaderName::ContentType).next().map(str::to_string);
-            self.ack_leg(call, fx, target_leg, req.body.to_vec(), content_type);
+            self.ack_leg(call, fx, target_leg, req.body().to_vec(), content_type);
             return;
         }
-        let Some(method) = in_dialog_method(&req.method) else {
+        let Some(method) = in_dialog_method(req.method()) else {
             return;
         };
         let Some(t_idx) = leg_index(call, target_leg) else {
@@ -139,7 +139,7 @@ impl ActionExecutor<'_> {
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, &call.call_ref, target_leg, call.emergency == Some(true), branch.clone())),
             contact: Some(relay::leg_contact(self.config, &call.call_ref, target_leg, call.emergency == Some(true))),
-            body: req.body.to_vec(),
+            body: req.body().to_vec(),
             content_type: req.raw(HeaderName::ContentType).next().map(str::to_string),
             cseq: Some(outbound_cseq as u32),
             extra_headers: relay::relay_request_passthrough_headers(req),
@@ -165,7 +165,7 @@ impl ActionExecutor<'_> {
             *call = call::helpers::update_dialog(call.clone(), target_leg, &t_id, |d| {
                 d.ext.pending_invite_txn = Some(call::InviteTxnHandle {
                     branch: branch.clone(),
-                    original_invite: out_req.raw.to_vec(),
+                    original_invite: out_req.image().to_vec(),
                     destination: call::HostPort { host: dest.0.clone(), port: dest.1 },
                 });
                 // New INVITE transaction → drop the prior ACK branch (§13.2.2.4);
@@ -180,7 +180,7 @@ impl ActionExecutor<'_> {
         // locally and ACK has no response, so neither needs correlation.
         if !matches!(method, InDialogMethod::Bye) {
             let pending = PendingRequest {
-                method: req.method.to_string(),
+                method: req.method().to_string(),
                 outbound_cseq,
                 inbound_cseq,
                 source_vias: req.raw(HeaderName::Via).map(str::to_string).collect(),
@@ -197,7 +197,7 @@ impl ActionExecutor<'_> {
             body: OutboundBody::Request(out_req),
             mode: OutboundTxnMode::NewClient(kind),
             destination: dest,
-            label: format!("relay {} → {target_leg}", req.method),
+            label: format!("relay {} → {target_leg}", req.method()),
             leg_id: Some(target_leg.to_string()),
         });
     }

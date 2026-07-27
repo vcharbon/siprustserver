@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use scenario_harness::claim::{resolve_claim, ClaimRule};
 use scenario_harness::legpick::LegInfo;
-use sip_message::message_helpers::is_invite_request_buffer;
+use sip_message::preparse::is_invite_request_buffer;
 use sip_message::sniff::call_id;
 use sip_net::queue::PacketQueue;
 use sip_net::{UdpEndpoint, UdpPacket};

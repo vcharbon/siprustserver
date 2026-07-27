@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use bytes::Bytes;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::header::ParamValue;
-use sip_message::message_helpers::decode_param;
+use sip_message::param_codec::decode_param;
 use sip_message::{serialize, Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
@@ -71,9 +71,9 @@ impl Owner {
         // whole-message clone. The response is rendered rather than sent as its
         // own image: the TU may have edited the header list of a message it
         // parsed, so only a message this layer itself built carries its wire form.
-        let status = msg.status;
-        let top_via = msg.top_via();
-        let branch = top_via.branch();
+        let status = msg.status();
+        let branch = msg.top_via().branch().map(str::to_string);
+        let branch = branch.as_deref();
         let outbound_to_tag =
             if status > 100 { msg.to().tag().map(str::to_string) } else { None };
         let buf = Bytes::from(serialize(&SipMessage::Response(msg)));
@@ -164,7 +164,7 @@ impl Owner {
         }
 
         // ── ACK ──────────────────────────────────────────────────────────────
-        if req.method == Method::Ack {
+        if req.method() == Method::Ack {
             if let Some(existing) = self.txns.get(branch) {
                 if existing.role == TxnRole::Server
                     && existing.kind == TxnKind::Invite
@@ -203,7 +203,7 @@ impl Owner {
         }
 
         // ── CANCEL ─────────────────────────────────────────────────────────────
-        if req.method == Method::Cancel {
+        if req.method() == Method::Cancel {
             self.handle_cancel(endpoint, req, src).await;
             return;
         }
@@ -222,7 +222,7 @@ impl Owner {
         // This layer admits unconditionally.
 
         // ── New server transaction ─────────────────────────────────────────────
-        let kind = if req.method == Method::Invite {
+        let kind = if req.method() == Method::Invite {
             TxnKind::Invite
         } else {
             TxnKind::NonInvite
@@ -269,7 +269,10 @@ impl Owner {
         if is_invite {
             // The recipe froze the 100 into its own image, which IS its wire
             // form — send and cache that instead of rendering it twice.
-            let trying_buf = generate_response(&req, 100, "Trying", &GenerateResponseOpts::default()).raw;
+            let trying_buf =
+                generate_response(&req, 100, "Trying", &GenerateResponseOpts::default())
+                    .image()
+                    .clone();
             self.send_buffer(endpoint, &trying_buf, src).await;
             if let Some(txn) = self.txns.get_mut(branch) {
                 txn.state = TxnState::Proceeding;
@@ -341,7 +344,7 @@ impl Owner {
                     "Call/Transaction Does Not Exist",
                     &GenerateResponseOpts::default(),
                 );
-                self.send_buffer(endpoint, &reject.raw, src).await;
+                self.send_buffer(endpoint, reject.image(), src).await;
                 return;
             }
         };
@@ -378,7 +381,7 @@ impl Owner {
                 ..Default::default()
             },
         );
-        self.send_buffer(endpoint, &cancel_ok.raw, src).await;
+        self.send_buffer(endpoint, cancel_ok.image(), src).await;
 
         // 487 Request Terminated on the matched INVITE.
         let original = self
@@ -395,7 +398,7 @@ impl Owner {
                     ..Default::default()
                 },
             );
-            let terminated_buf = terminated.raw;
+            let terminated_buf = terminated.image().clone();
             self.send_buffer(endpoint, &terminated_buf, src).await;
             if let Some(txn) = self.txns.get_mut(branch.as_str()) {
                 txn.state = TxnState::Completed;

@@ -97,21 +97,21 @@ async fn record_routed_call_through_proxy() {
     // The BYE alice put on the wire: Route = <proxy;lr>, Request-URI = bob.
     let alice_bye = parse(&fwd_bye_source(&entries, alice_addr, proxy_addr));
     let SipMessage::Request(bye_req) = alice_bye else { panic!("BYE is a request") };
-    assert_eq!(bye_req.method, "BYE");
+    assert_eq!(bye_req.method(), "BYE");
     assert!(
-        bye_req.uri.contains("bob@127.0.0.1:5070"),
+        bye_req.request_uri().text().contains("bob@127.0.0.1:5070"),
         "BYE Request-URI is the remote target (bob), got {}",
-        bye_req.uri
+        bye_req.request_uri().text()
     );
 
     // Sanity on the proxy-forwarded BYE we captured above: Route stripped, RURI
     // unchanged (loose routing — RURI is never the route).
     assert!(fwd_bye.raw(HeaderName::Route).next().is_none());
-    assert!(fwd_bye.uri.contains("bob@127.0.0.1:5070"));
+    assert!(fwd_bye.request_uri().text().contains("bob@127.0.0.1:5070"));
 
     // The dialog CSeq still increments correctly through the proxy: BYE = 2.
-    assert_eq!(bye_req.cseq.seq, 2);
-    assert_eq!(bye_req.cseq.method, "BYE");
+    assert_eq!(bye_req.cseq().seq(), 2);
+    assert_eq!(bye_req.cseq().method(), "BYE");
 
     // Render the report (3-lane diagram) and confirm the routing headers are on
     // the wire: a ;lr Record-Route and an in-dialog Route through the proxy.
@@ -137,7 +137,7 @@ fn fwd_bye_source(
         .find(|e| {
             e.from == alice && e.to == proxy && {
                 let m = CustomParser::new().parse(&e.raw);
-                matches!(m, Ok(SipMessage::Request(ref r)) if r.method == "BYE")
+                matches!(m, Ok(SipMessage::Request(ref r)) if r.method() == "BYE")
             }
         })
         .unwrap_or_else(|| panic!("no alice→proxy BYE found (alice={}, proxy={})", fmt_addr(alice), fmt_addr(proxy)))

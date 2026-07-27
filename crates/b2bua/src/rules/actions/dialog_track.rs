@@ -191,7 +191,7 @@ impl ActionExecutor<'_> {
         // body choice (policy override else the callee's 200 body).
         let answer_body = match call.policy_update_body.clone() {
             Some(call::PolicyUpdateBody::Bytes(b)) => Some(b),
-            _ if !resp.body.is_empty() => Some(resp.body.to_vec()),
+            _ if !resp.body().is_empty() => Some(resp.body().to_vec()),
             _ => None,
         };
         if let (Some(body), Some(d)) = (answer_body, call.a_leg.dialogs.first_mut()) {

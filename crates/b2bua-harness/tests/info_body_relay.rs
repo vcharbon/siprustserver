@@ -50,7 +50,7 @@ async fn info_with_arbitrary_body_relays_content_type_and_bytes() {
             Some(CT),
             "relayed INFO carries the exact Content-Type",
         );
-        assert_eq!(req.body, body, "relayed INFO carries the exact (binary-safe) body bytes");
+        assert_eq!(&req.body()[..], &body[..], "relayed INFO carries the exact (binary-safe) body bytes");
         assert_eq!(
             req.raw(HeaderName::ContentLength).next(),
             Some(body.len().to_string().as_str()),
@@ -101,7 +101,7 @@ async fn info_with_multipart_body_relays_verbatim() {
             Some(CT),
             "multipart Content-Type survives",
         );
-        assert_eq!(req.body, body, "dual-part body relays verbatim");
+        assert_eq!(&req.body()[..], &body[..], "dual-part body relays verbatim");
     }
     bob_uas.respond(200, "OK").await;
     info.expect(200).await;

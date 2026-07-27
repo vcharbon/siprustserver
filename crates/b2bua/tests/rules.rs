@@ -22,7 +22,7 @@ use sip_message::generators::{
     SipTransport, ViaSpec,
 };
 use sip_message::parser::custom::CustomParser;
-use sip_message::{SipMessage, SipParser, SipRequest};
+use sip_message::{Method, SipMessage, SipParser, SipRequest};
 
 fn invite() -> SipRequest {
     let opts = GenerateOutOfDialogRequestOpts {
@@ -53,6 +53,20 @@ fn invite() -> SipRequest {
         ..Default::default()
     };
     generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts)
+}
+
+/// The INVITE re-issued as an in-dialog request of `method`: both dialog tags
+/// present and the CSeq restated, which is what makes it a different
+/// transaction rather than an edited INVITE.
+fn in_dialog_request(method: sip_message::Method) -> sip_message::SipRequest {
+    let inv = invite();
+    let cseq = sip_message::header::CSeq::new(inv.cseq().seq(), method.clone());
+    inv.thaw()
+        .with_method(method)
+        .set(inv.to().clone().with_tag("btag"))
+        .set(cseq)
+        .freeze()
+        .expect("an in-dialog request of the same dialog is complete")
 }
 
 fn test_call() -> call::Call {
@@ -86,9 +100,7 @@ fn timer_global_duration_selects_max_duration() {
 fn in_dialog_bye_selects_relay_bye() {
     let call = test_call();
     // An in-dialog BYE (carries a To-tag) on the active call.
-    let mut bye = invite();
-    bye.method = "BYE".into();
-    bye.to.tag = Some("btag".into());
+    let bye = in_dialog_request(sip_message::Method::Bye);
     let event = CallEvent::Sip {
         message: Box::new(SipMessage::Request(bye)),
         src: "127.0.0.1:5060".parse().unwrap(),
@@ -139,7 +151,7 @@ fn invariants_append_cleanup_on_terminated() {
     assert!(
         result.effects.outbound.iter().any(|e| {
             e.leg_id.as_deref() == Some("a")
-                && matches!(&e.body, b2bua::effects::OutboundBody::Response(r) if r.status == 503)
+                && matches!(&e.body, b2bua::effects::OutboundBody::Response(r) if r.status() == 503)
         }),
         "unanswered a-leg gets the synthesized 503"
     );
@@ -178,7 +190,7 @@ fn no_synthesized_final_when_the_turn_already_answered() {
         .iter()
         .filter(|e| {
             e.leg_id.as_deref() == Some("a")
-                && matches!(&e.body, b2bua::effects::OutboundBody::Response(r) if r.status >= 200)
+                && matches!(&e.body, b2bua::effects::OutboundBody::Response(r) if r.status() >= 200)
         })
         .count();
     assert_eq!(finals_to_a, 1, "exactly the rule's own final — no synthesized duplicate");
@@ -300,9 +312,7 @@ fn sm_rule(handle: fn(&RuleContext) -> Option<RuleHandleResult>) -> RuleDefiniti
 }
 
 fn info_event() -> CallEvent {
-    let mut info = invite();
-    info.method = "INFO".into();
-    info.to.tag = Some("btag".into());
+    let info = in_dialog_request(sip_message::Method::Info);
     CallEvent::Sip {
         message: Box::new(SipMessage::Request(info)),
         src: "127.0.0.1:5060".parse().unwrap(),
@@ -731,7 +741,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
     );
     let invite_via = match &invite_effect.body {
         OutboundBody::Request(r) => r
-            .headers
+            .headers()
             .iter()
             .find(|h| h.name.eq_ignore_ascii_case("via"))
             .map(|h| h.value.clone())
@@ -763,7 +773,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         .effects
         .outbound
         .iter()
-        .find(|e| matches!(&e.body, OutboundBody::Request(r) if r.method == "CANCEL"))
+        .find(|e| matches!(&e.body, OutboundBody::Request(r) if r.method() == "CANCEL"))
         .expect("a CANCEL was emitted");
 
     // (b) The CANCEL arrives AT THE PROXY (the INVITE's next hop), not pod-direct
@@ -780,7 +790,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
     };
     // (a) The CANCEL carries the INVITE's Route set (the preloaded proxy Route).
     let routes: Vec<String> = cancel
-        .headers
+        .headers()
         .iter()
         .filter(|h| h.name.eq_ignore_ascii_case("route"))
         .map(|h| h.value.to_string())
@@ -792,7 +802,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
     );
     // ... and the transaction-correlation Via branch is the INVITE's verbatim.
     let cancel_via = cancel
-        .headers
+        .headers()
         .iter()
         .find(|h| h.name.eq_ignore_ascii_case("via"))
         .map(|h| h.value.clone())
@@ -812,7 +822,6 @@ mod media_primitives {
     use b2bua::effects::OutboundBody;
     use b2bua::rules::MessageTransform;
     use sip_message::HeaderName;
-    use sip_message::SipHeader;
 
     /// A confirmed b-leg of the given role; its single dialog carries the callee
     /// tag so in-dialog originators have a confirmed dialog to ride.
@@ -855,17 +864,18 @@ mod media_primitives {
 
     /// An in-dialog INFO request (carries a To-tag) with a DTMF payload.
     fn in_dialog_info() -> SipRequest {
-        let mut info = super::invite();
-        info.method = "INFO".into();
-        info.to.tag = Some("svc".into());
-        info.cseq.seq = 2;
-        info.cseq.method = "INFO".into();
-        info.body = b"Signal=5\r\nDuration=160\r\n".to_vec().into();
-        info.headers.push(SipHeader {
-            name: "Content-Type".into(),
-            value: "application/dtmf-relay".into(),
-        });
-        info
+        let invite = super::invite();
+        invite
+            .thaw()
+            .with_method(Method::Info)
+            .set(invite.to().clone().with_tag("svc"))
+            .set(sip_message::header::CSeq::new(2, Method::Info))
+            .body(
+                sip_message::Bytes::from_static(b"Signal=5\r\nDuration=160\r\n"),
+                sip_message::header::MediaType::new("application/dtmf-relay"),
+            )
+            .freeze()
+            .expect("an in-dialog INFO of the same dialog is complete")
     }
 
     fn exec_on<'a>(
@@ -977,8 +987,8 @@ mod media_primitives {
         assert_eq!(eff.leg_id.as_deref(), Some("b-1"));
         match &eff.body {
             OutboundBody::Request(r) => {
-                assert_eq!(r.method, "INFO");
-                assert_eq!(r.body, mscml, "MSCML body passes through opaquely");
+                assert_eq!(r.method(), "INFO");
+                assert_eq!(&r.body()[..], &mscml[..], "MSCML body passes through opaquely");
                 assert_eq!(
                     r.raw(HeaderName::ContentType).next(),
                     Some("application/mediaservercontrol+xml")
@@ -1030,15 +1040,15 @@ mod media_primitives {
         assert_eq!(eff.leg_id.as_deref(), Some("b-1"));
         match &eff.body {
             OutboundBody::Request(r) => {
-                assert_eq!(r.method, "INFO");
-                assert_eq!(r.body, body, "opaque body passes through unchanged");
+                assert_eq!(r.method(), "INFO");
+                assert_eq!(&r.body()[..], &body[..], "opaque body passes through unchanged");
                 // Forwarded application headers survive verbatim.
                 assert_eq!(r.raw(HeaderName::from("user-to-user")).next(), Some(uui));
                 assert_eq!(r.raw(HeaderName::from("x-example-trace")).next(), Some("abc-123"));
                 // Content-Type is owned by `content_type`: exactly one, from the
                 // body — NOT the bogus forwarded one (dedup guard).
                 let cts: Vec<&str> = r
-                    .headers
+                    .headers()
                     .iter()
                     .filter(|h| h.name.eq_ignore_ascii_case("content-type"))
                     .map(|h| h.value.as_str())
@@ -1086,9 +1096,9 @@ mod media_primitives {
         assert_eq!(eff.leg_id.as_deref(), Some("a"));
         match &eff.body {
             OutboundBody::Response(r) => {
-                assert_eq!(r.status, 183);
-                assert_eq!(r.body, sdp, "the MRF SDP is brokered onto A");
-                assert!(r.to.tag.is_some(), "183 carries a B2BUA-minted early to-tag");
+                assert_eq!(r.status(), 183);
+                assert_eq!(&r.body()[..], &sdp[..], "the MRF SDP is brokered onto A");
+                assert!(r.to().tag().is_some(), "183 carries a B2BUA-minted early to-tag");
                 assert_eq!(
                     r.raw(HeaderName::ContentType).next(),
                     Some("application/sdp"),
@@ -1235,14 +1245,14 @@ mod answer_a_leg_new_dialog {
         assert_eq!(eff.leg_id.as_deref(), Some("a"));
         let a2 = match &eff.body {
             OutboundBody::Response(r) => {
-                assert_eq!(r.status, 200);
-                assert_eq!(r.body, sdp_b, "the callee SDP-B rides the 200");
+                assert_eq!(r.status(), 200);
+                assert_eq!(&r.body()[..], &sdp_b[..], "the callee SDP-B rides the 200");
                 assert_eq!(
                     r.raw(HeaderName::ContentType).next(),
                     Some("application/sdp"),
                     "an SDP body defaults to application/sdp"
                 );
-                let tag = r.to.tag.clone().expect("the 200 carries an a-facing To-tag");
+                let tag = r.to().tag().map(str::to_owned).expect("the 200 carries an a-facing To-tag");
                 assert_ne!(tag, "A1early", "A2 ≠ the early-media tag A1 (RFC 3264 §5.1)");
                 tag
             }
@@ -1284,7 +1294,7 @@ mod answer_a_leg_new_dialog {
         let eff = &result.effects.outbound[0];
         match &eff.body {
             OutboundBody::Response(r) => {
-                assert_eq!(r.to.tag.as_deref(), Some("A2explicit"), "the supplied A2 is used verbatim");
+                assert_eq!(r.to().tag(), Some("A2explicit"), "the supplied A2 is used verbatim");
                 assert_eq!(r.raw(HeaderName::from("x-served-by")).next(), Some("mrf"));
             }
             _ => panic!("expected an outbound response"),
@@ -1362,7 +1372,7 @@ mod answer_a_leg_new_dialog {
                     Some(sip_message::generators::B2BUA_SUPPORTED),
                 );
                 for name in ["allow", "supported"] {
-                    let n = r.headers.iter().filter(|h| h.name.eq_ignore_ascii_case(name)).count();
+                    let n = r.headers().iter().filter(|h| h.name.eq_ignore_ascii_case(name)).count();
                     assert_eq!(n, 1, "exactly one {name} header (no §7.3.1 duplicate)");
                 }
             }
@@ -1404,7 +1414,7 @@ mod answer_a_leg_new_dialog {
                     Some("timer"),
                     "a set value replaces the default verbatim"
                 );
-                let n = r.headers.iter().filter(|h| h.name.eq_ignore_ascii_case("supported")).count();
+                let n = r.headers().iter().filter(|h| h.name.eq_ignore_ascii_case("supported")).count();
                 assert_eq!(n, 1, "the service value is not duplicated by the default");
                 assert_eq!(
                     r.raw(HeaderName::Allow).next(),
@@ -1472,7 +1482,7 @@ mod ack_leg_body {
             .effects
             .outbound
             .iter()
-            .find(|e| matches!(&e.body, OutboundBody::Request(r) if r.method == "ACK"))
+            .find(|e| matches!(&e.body, OutboundBody::Request(r) if r.method() == "ACK"))
             .expect("AckLeg emits an ACK request");
         match &effect.body {
             OutboundBody::Request(r) => r.clone(),
@@ -1491,8 +1501,7 @@ mod ack_leg_body {
         body.push(0xFF); // a non-UTF-8 byte must survive the Vec<u8> round-trip.
 
         let ack = ack_request(body.clone(), None);
-        assert_eq!(
-            ack.body, body,
+        assert_eq!(&ack.body()[..], &body[..],
             "the delayed-offer answer rides the ACK byte-for-byte (binary-safe)"
         );
         assert_eq!(
@@ -1507,7 +1516,7 @@ mod ack_leg_body {
     fn ack_leg_honours_explicit_content_type_override() {
         let body = b"<some>opaque</some>".to_vec();
         let ack = ack_request(body.clone(), Some("application/custom".to_string()));
-        assert_eq!(ack.body, body);
+        assert_eq!(&ack.body()[..], &body[..]);
         assert_eq!(
             ack.raw(HeaderName::ContentType).next(),
             Some("application/custom"),
@@ -1520,7 +1529,7 @@ mod ack_leg_body {
     #[test]
     fn ack_leg_empty_body_sends_bare_ack_with_no_content_type() {
         let ack = ack_request(Vec::new(), None);
-        assert!(ack.body.is_empty(), "an empty AckLeg body sends a bodyless ACK");
+        assert!(ack.body().is_empty(), "an empty AckLeg body sends a bodyless ACK");
         assert_eq!(
             ack.raw(HeaderName::ContentType).next(),
             None,
@@ -1728,14 +1737,13 @@ mod default_sdp_create_leg {
             .effects
             .outbound
             .iter()
-            .find(|e| matches!(&e.body, OutboundBody::Request(r) if r.method == "INVITE"))
+            .find(|e| matches!(&e.body, OutboundBody::Request(r) if r.method() == "INVITE"))
             .expect("CreateLeg emits a b-leg INVITE");
         let inv = match &invite_effect.body {
             OutboundBody::Request(r) => r,
             _ => unreachable!(),
         };
-        assert_eq!(
-            inv.body, sdp,
+        assert_eq!(&inv.body()[..], &sdp[..],
             "the b-leg INVITE carries the config default_sdp sourced via body_override"
         );
         assert_eq!(

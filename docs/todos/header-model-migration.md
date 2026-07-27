@@ -165,7 +165,8 @@ helpers listed above, run capped workspace test, tick tracker, commit.
 - [x] M9 sip-net rfc_audit
 - [x] M10 sip-pcap + loadgen
 - [x] M11 harness/test crates
-- [ ] M12 teardown (delete legacy, privatize, MessageCore)
+- [x] M12 teardown (delete legacy, privatize, MessageCore)
+- [ ] M12b `Generate*Opts` stringly fields → typed (deferred out of M12, see log)
 - [ ] M13 perf re-baseline
 - [ ] merge `feat/adr0025-header-model` → master
 
@@ -1207,3 +1208,145 @@ yields its first ENTRY rather than the whole line.
   string `"b1"`. The cookie now comes back through a typed reader, but the
   ordinal itself is still a `String` on both sides; a `WorkerOrdinal` newtype
   would make the mis-bind unrepresentable.
+
+### M12 — teardown
+
+The deletion landed. `SipRequest` / `SipResponse` are `{ start, inner }` over a
+private [`MessageCore`], every public field is gone, and the typed core is
+populated ONCE at parse instead of twice.
+
+**Acceptance:** `grep -rE 'get_header\(|message_helpers::' crates
+--include='*.rs'` returns NOTHING — not "only sip-message internals": the
+`message_helpers` namespace no longer exists, and the two test files that kept a
+local first-value/all-values helper name it for what it does. Workspace: 2105
+tests passed, 0 failed. Clippy: the workspace's pre-existing categories only
+(doc indentation, `too_many_lines`, variant size); the needless borrows this
+port introduced are fixed.
+
+**Measurements** (`cargo test -p sip-message --test alloc_budget --release`,
+1000 ops/case, same box, M11 → now):
+
+| case | allocs/msg | bytes/msg |
+|---|---|---|
+| decode/invite | 14 → **12** | 3145 → 3409 |
+| decode/invite_sdp | 15 → **13** | 3481 → 3745 |
+| decode/200_ok | 15 → **12** | 3612 → 3242 |
+| proxy_hop/invite | 27 → **22** | 5899 → 6080 |
+| proxy_hop/invite_sdp | 27 → **23** | 6539 → 7047 |
+| build/invite_sdp | 48 → **45** | 6576 → 6848 |
+| build/bye | 54 → **50** | 5966 → 4188 |
+| build/response_200 | 37 → **32** | 7316 → 6268 |
+
+Allocations are down in every case: the parse no longer stages a second copy of
+the mandatory fields, and `freeze` no longer re-derives a legacy field set the
+message does not have. Bytes move both ways — a parsed message now holds the
+WIDE typed values (`Uri` 272 B, `Via` 232 B) where it used to hold narrow spans,
+which costs on the decode cases and pays back on the build ones, where nothing
+is converted any more. The `proxy_hop` case is also a different hop: it is
+`thaw → with_uri → push_front(Record-Route) → freeze_bytes`, the ADR-0025 shape,
+not the old clone-and-string-surgery one.
+
+**What was deleted**
+
+| deleted | replaced by |
+|---|---|
+| the whole `message_helpers` namespace: `headers` (`get_header`/`get_headers`/`set_header`/`remove_header`/`name_matches`), `header_params`, `name_addr` (`extract_tag`/`strip_tag`/`extract_contact_uri`/`extract_name_addr_uri`), `route`, `uri` (`parse_sip_uri`/`parse_uri_params`/`extract_host_port`/`ParsedSipUri`/`uri_user_identity`/`same_user_identity`), `via` (`parse_via_params`/`ViaParams`/`via_sent_by`/`stamp_received_rport_on_via`) | the typed read surface + `HeaderName` |
+| `serialize_request_parts` / `serialize_response_parts` | `Draft::freeze_bytes` on the relay paths; `template::emitted_wire` for the one header block a caller still states |
+| `types::{NameAddr, Via, Contact, CSeq, RequestUri, Uri, Rack, Replaces, ReferTo, Params, ParamValue}` | `header::*` — one shape per value, no parallel parsed model |
+| `TypedHeader` + `SipMessage::typed` + `SipMessage::get_header`/`has_header` | `msg.header::<H>()` / `msg.raw(HeaderName)` (already open to extension headers) |
+| `structured_headers::{parse_rack, parse_replaces, parse_refer_to, parse_param_list}` + `ParsedRack`/`ParsedReplaces`/`ParsedReferTo` | `RAck::parse`, `ReferTo::parse`, `Uri::escaped_header`, `Params::parse_list` |
+| `template::HeaderClass` (Regenerated/Frozen) | `header::HeaderClass` (Structural/EndToEnd) — the two names were the same axis (M1 note), so the template now queries the one table |
+
+The surviving members of the old namespace were NOT deleted, they were promoted
+out of it: `sip_message::{emergency, param_codec, preparse, reject_503}` are
+top-level modules now, because each is its own concern (emergency
+classification, the B2BUA correlation-param codec, the strict pre-parse
+classifiers, the Tier-1 503 template) and none of them is header access.
+
+**The message shape**
+
+`MessageCore { headers, core: CoreHeaders, optional, body, image }`, shared by
+both directions; `SipRequest { start: RequestLine, inner }` and
+`SipResponse { start: StatusLine, inner }`. The read surface is written once
+over the core and attached to both, so neither direction carries a copy. The
+start-line types are the draft's own `RequestLine`/`StatusLine` — thaw and
+freeze move a start line across, they do not translate one.
+
+Naming: the datagram is `msg.image()`, because `msg.raw(HeaderName)` is the
+header escape hatch. That resolves the readability trap M2 logged.
+
+**Behaviour deltas, all deliberate:**
+- **Parameter lists keep their wire order and spelling everywhere.** The
+  scan-side `Params` is now the ordered small-vec, so the old lowercase-copy of
+  a mixed-case parameter name is gone and a value read off a message renders
+  back as it arrived. This is what M2 said "nothing should round-trip before
+  M12 stores the real core" was waiting for.
+- **A URI the strict reader rejects is kept whole and says so.** The parser
+  stores `Uri::parse_or_opaque`, and `Uri::is_opaque()` is the guard a router
+  asks — the proxy's worker-outbound hop answers 400 on one instead of
+  resolving its text as a host. `Uri::opaque` also records its source, so
+  `text()` still borrows and an unreadable value is never reformatted.
+- **`Refer-To`, `RAck` and the P-header family are read by the value model.** A
+  Refer-To whose URI has no scheme is now an `Err` on `optional().refer_to`
+  where the old scanner accepted it and left the strict pass to complain; the
+  embedded `Replaces` is `uri().escaped_header("Replaces")` (decoded text), not
+  a parsed struct — nothing consumed the struct.
+- **`Method` and `CallId` compare across a borrow.** `PartialEq<Method> for
+  &Method` and `CallId`'s `str`/`String` comparisons exist because the read
+  surface hands out references and a comparison against a literal must not have
+  to clone.
+- `sip_message::Bytes` is re-exported: the public surface takes and hands back
+  `Bytes`, so a consumer must be able to name it.
+
+**Two tests changed shape because their subject became unrepresentable:**
+- `rfc3261_peer::cancel_with_invite_cseq_is_flagged` built its subject by
+  mutating a parsed CSeq. A frozen message cannot be edited into a
+  CANCEL-with-INVITE-CSeq and neither parser accepts one on the wire, so the
+  rule's decision is factored out (`cancel_cseq_mismatch`) and the test drives
+  it directly, plus asserts the wire form is rejected. Coverage is unchanged.
+- `tests/serializer.rs` (the Content-Length safety net) can no longer build a
+  message that disagrees with its own body. It exercises the net at the one
+  place a wrong length can still arrive — `emitted_wire`, where the caller
+  states the header block.
+
+`tests/message_helpers.rs` and `tests/header_registry_extension.rs` are deleted
+with the APIs they pinned (the extension-header contract is
+`msg.header::<H>()`, covered by `header_round_trip.rs`); the ABNF `replaces`
+target goes with `parse_replaces`.
+
+**Deferred, deliberately, as M12b: the stringly `Generate*Opts` fields.**
+Everything else on the M12 deletion list landed. Flattening `values` into the
+opts and typing `from`/`to`/`vias`/`cseq`/`request_uri`/`content_type` touches
+27 consumer files and — for `GenerateRelayedResponseOpts` — changes the wire
+bytes of every relayed response, because the echoed Via/From/To/CSeq stop being
+memcpy'd and start being re-rendered. It also forces the `call`-crate
+string-versus-value decision that ADR-0025 explicitly puts out of scope
+(`PendingRequest` and `StackDialog` are the source of those strings). That is a
+port with its own risk surface and its own test pass; bundling it into the
+teardown would have put the b2bua relay path and the teardown in one
+unreviewable commit.
+
+**Suspicions raised, not fixed:**
+- **A parsed message is wider than it was.** `CoreHeaders` holds `From`, `To`,
+  `CallId`, `CSeq`, `NonEmpty<Via>` and the Contact set as full values, so the
+  decode cases gained ~250 bytes each. That is the `size_of` debt M5, M8 and
+  M10 all logged, now paid once per message instead of once per read — a better
+  trade, but the value widths (`Uri` 272 B) are still the thing to shrink.
+- **`optional` is still eagerly extracted on every parse**, and nothing outside
+  `sip-message` reads it any more except one RAck site in the audit. ADR-0025
+  keeps the eager + non-fatal semantics deliberately, so it stays — but it is
+  now a pass whose only consumer is `validate_strict` and a handful of tests.
+  Worth its own decision before M13 measures it.
+- **`freeze` still re-runs the eager field extraction over the block it just
+  rendered.** M2 logged this as M12 work; it is not fixed here. Building
+  `CoreHeaders` straight from the typed entries in hand needs the draft to know
+  which entry is the From (it holds `dyn HeaderValue`, so it cannot downcast
+  cheaply), and the extraction is also where the mandatory-header gate lives.
+  This is the remaining allocation on the build path.
+- `apply_name_forms` / `apply_remote_target_emits` still rewrite a header
+  vector, and `emitted_wire` renders it. That is the template lane's
+  spelling-preservation seam and the only remaining "caller states the header
+  block" path; M7's spelling-preserving `thaw` would retire all three.
+- `Draft::with_uri` on a thawed request replaces the Request-URI wholesale, and
+  the proxy hop in `alloc_budget.rs` / the bench now uses it. Nothing checks the
+  new URI is not opaque at that seam.

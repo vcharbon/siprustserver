@@ -95,7 +95,7 @@ async fn no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee_and_failover
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     let confirmed = call.expect(200).await;
-    assert_eq!(confirmed.status, 200, "caller bridged to the reroute target");
+    assert_eq!(confirmed.status(), 200, "caller bridged to the reroute target");
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
 
@@ -177,7 +177,7 @@ async fn no_answer_reject_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     // callee has quiesced (ADR-0022; the no-answer/None path answers via the
     // →Terminated funnel), NOT dropped on the removed call.
     let failed = call.expect(503).await;
-    assert_eq!(failed.status, 503, "caller's INVITE resolves with a final failure");
+    assert_eq!(failed.status(), 503, "caller's INVITE resolves with a final failure");
 
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
@@ -236,7 +236,7 @@ async fn drop_sdp_no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     // bare 180 (no body) under a minted a-facing To-tag.
     carol_uas.respond(183, "Session Progress").with_sdp(ANSWER).await;
     let p180 = call.expect(180).await;
-    assert!(p180.body.is_empty(), "drop-sdp masked the 183 into a bare 180");
+    assert!(p180.body().is_empty(), "drop-sdp masked the 183 into a bare 180");
     let first_to_tag = p180.to().tag().expect("bare 180 has a To-tag").to_string();
 
     // Trip the no-answer timer (30 s); stay inside the reroute INVITE's Timer A

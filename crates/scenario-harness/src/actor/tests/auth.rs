@@ -64,7 +64,7 @@ async fn actor_caller_retries_through_a_401_challenge() {
         use sip_message::header::HeaderName;
         let bob = bob_srv;
         let mut c = bob.try_receive("INVITE").await.unwrap();
-        assert_eq!(c.request().cseq.seq, 1, "the first INVITE is CSeq 1");
+        assert_eq!(c.request().cseq().seq(), 1, "the first INVITE is CSeq 1");
         assert!(
             c.request().raw(HeaderName::Authorization).next().is_none(),
             "the first INVITE carries no credential",
@@ -76,10 +76,10 @@ async fn actor_caller_retries_through_a_401_challenge() {
             .unwrap();
         // The reactor auto-ACKs the 401 (§17.1.1.3) before the resend.
         let ack = bob.try_receive("ACK").await.unwrap();
-        assert_eq!(ack.request().cseq.seq, 1, "the non-2xx ACK reuses the INVITE CSeq");
+        assert_eq!(ack.request().cseq().seq(), 1, "the non-2xx ACK reuses the INVITE CSeq");
         // The authenticated resend: bumped CSeq + the responder's credential.
         let mut admit = bob.try_receive("INVITE").await.unwrap();
-        assert_eq!(admit.request().cseq.seq, 2, "the retried INVITE bumps the CSeq (§22.2)");
+        assert_eq!(admit.request().cseq().seq(), 2, "the retried INVITE bumps the CSeq (§22.2)");
         assert!(
             admit
                 .request()

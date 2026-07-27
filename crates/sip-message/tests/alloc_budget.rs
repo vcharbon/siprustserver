@@ -13,8 +13,8 @@
 //! fixtures, so the allocation and the wall-clock story line up:
 //!
 //! - `decode/*` — parse only (raw bytes → `SipMessage`).
-//! - `proxy_hop/*` — decode → clone → rewrite R-URI → insert Record-Route →
-//!   serialize, the per-message cost of one forwarding hop.
+//! - `proxy_hop/*` — decode → thaw → rewrite R-URI → record our route →
+//!   render, the per-message cost of one forwarding hop.
 //! - `build/*` — the generator recipes: a blank-draft origination (INVITE with
 //!   an SDP offer, in-dialog BYE) and a response echoing a parsed request.
 //!
@@ -26,7 +26,8 @@ use sip_message::generators::{
     GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts, GenerateResponseOpts,
     InDialogMethod, OutOfDialogMethod, SipTransport, StackDialog, ViaSpec,
 };
-use sip_message::{serialize, CustomParser, SipHeader, SipMessage, SipParser};
+use sip_message::header::{RecordRouteEntry, Uri};
+use sip_message::{CustomParser, SipMessage, SipParser, SipStr};
 
 /// Counts every allocation the test binary performs. The single test below runs
 /// on one thread and measures one region at a time, so the counters attribute
@@ -87,18 +88,19 @@ Content-Length: {}\r\n\r\n{}",
     .into_bytes()
 }
 
-/// One proxy forwarding hop, identical to the bench's: decode → clone →
-/// rewrite R-URI → add Record-Route → encode.
+/// One proxy forwarding hop, identical to the bench's: decode → thaw →
+/// rewrite R-URI → record our route → render.
 fn proxy_hop(parser: &CustomParser, raw: &[u8]) -> Vec<u8> {
     let msg = parser.parse(raw).expect("parse");
     let SipMessage::Request(req) = msg else { panic!("expected request") };
-    let mut out = req.clone();
-    out.uri = "sip:bob@192.0.2.99:5060".to_string().into();
-    out.headers.insert(
-        0,
-        SipHeader { name: "Record-Route".to_string().into(), value: "<sip:proxy.example.com;lr>".to_string().into() },
-    );
-    serialize(&SipMessage::Request(out))
+    req.thaw()
+        .with_uri(Uri::parse_or_opaque(&SipStr::from_static("sip:bob@192.0.2.99:5060")))
+        .push_front(RecordRouteEntry::from_uri(
+            Uri::sip("proxy.example.com").with_flag("lr"),
+        ))
+        .freeze_bytes()
+        .expect("a thawed draft is complete")
+        .to_vec()
 }
 
 /// The Via, Contact and dialog the build cases originate from — the shape a

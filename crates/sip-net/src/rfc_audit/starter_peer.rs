@@ -131,8 +131,8 @@ impl PeerDialog {
 fn track_sent(ds: &mut PeerDialog, msg: &SipMessage) {
     match msg {
         SipMessage::Request(req) => {
-            ds.sent_requests.push((req.method.as_str().to_string(), req.cseq.seq));
-            if req.method.as_str() == "INVITE" {
+            ds.sent_requests.push((req.method().as_str().to_string(), req.cseq().seq()));
+            if req.method().as_str() == "INVITE" {
                 ds.sent_invite = true;
             }
             if let Some(t) = from_tag(msg) {
@@ -151,13 +151,13 @@ fn track_sent(ds: &mut PeerDialog, msg: &SipMessage) {
 /// identity (URI / branch / remote From-URI), and the received-INVITE CSeqs.
 fn track_received(ds: &mut PeerDialog, msg: &SipMessage) {
     if let SipMessage::Request(req) = msg {
-        if req.method.as_str() == "INVITE" {
+        if req.method().as_str() == "INVITE" {
             ds.recv_invite = true;
-            ds.received_invites.push((top_via_branch(msg), req.uri.to_string()));
+            ds.received_invites.push((top_via_branch(msg), req.request_uri().to_string()));
             if ds.dialog_remote_uri.is_none() {
                 ds.dialog_remote_uri = Some(from_uri(msg).to_string());
             }
-            ds.received_invite_cseqs.push(req.cseq.seq);
+            ds.received_invite_cseqs.push(req.cseq().seq());
         }
     }
     let tag = match msg {
@@ -239,12 +239,12 @@ impl PeerAuditRule for BranchPrefixRule {
                     "{} top Via branch \"{branch}\" does not begin with the RFC 3261 magic \
                      cookie \"{MAGIC_COOKIE}\" (§8.1.1.7) — a downstream element cannot treat it \
                      as an RFC-3261 transaction id",
-                    req.method.as_str(),
+                    req.method().as_str(),
                 )),
                 None => out.push(format!(
                     "{} has no top Via branch parameter (RFC 3261 §8.1.1.7 requires a \
                      \"{MAGIC_COOKIE}\"-prefixed branch on every request)",
-                    req.method.as_str(),
+                    req.method().as_str(),
                 )),
             }
         }
@@ -272,7 +272,7 @@ impl PeerAuditRule for MaxForwardsRule {
             let SipMessage::Request(req) = &msg else {
                 continue;
             };
-            let method = req.method.as_str();
+            let method = req.method().as_str();
             match msg.raw(HeaderName::MaxForwards).next() {
                 None => out.push(format!(
                     "{method} request is missing Max-Forwards — RFC 3261 §8.1.1.6 requires it on \
@@ -378,8 +378,8 @@ impl PeerAuditRule for ContentTypeRule {
         let mut out = Vec::new();
         for msg in sent_messages(events, &parser) {
             let body = match &msg {
-                SipMessage::Request(r) => &r.body,
-                SipMessage::Response(r) => &r.body,
+                SipMessage::Request(r) => &r.body(),
+                SipMessage::Response(r) => &r.body(),
             };
             if body.is_empty() {
                 continue;
@@ -414,7 +414,7 @@ impl PeerAuditRule for ContactPresenceRule {
             let SipMessage::Request(req) = &msg else {
                 continue;
             };
-            let method = req.method.as_str();
+            let method = req.method().as_str();
             if method != "INVITE" && method != "SUBSCRIBE" {
                 continue;
             }
@@ -447,7 +447,7 @@ impl PeerAuditRule for NoContactOnByeRule {
             let SipMessage::Request(req) = &msg else {
                 continue;
             };
-            if req.method.as_str() != "BYE" {
+            if req.method().as_str() != "BYE" {
                 continue;
             }
             if msg.has(&HeaderName::Contact) {
@@ -595,8 +595,8 @@ impl PeerAuditRule for ViaRule {
             if step.sent {
                 if let SipMessage::Request(req) = &step.msg {
                     by_call.entry(cid.to_string()).or_default().push(SentRequest {
-                        seq: req.cseq.seq,
-                        method: req.cseq.method.as_str().to_string(),
+                        seq: req.cseq().seq(),
+                        method: req.cseq().method().as_str().to_string(),
                         vias: step.msg.raw(HeaderName::Via).map(str::to_string).collect(),
                         top_branch: top_via_branch(&step.msg),
                     });
@@ -824,7 +824,7 @@ impl PeerAuditRule for CallIdRule {
             };
             let cid = call_id(&step.msg);
             let is_dialog_creating_invite = matches!(&step.msg, SipMessage::Request(r)
-                if r.method.as_str() == "INVITE") && to_tag(&step.msg).is_none();
+                if r.method().as_str() == "INVITE") && to_tag(&step.msg).is_none();
             match dialog_call_id.get(&ft) {
                 Some(known) if known.as_str() != cid && to_tag(&step.msg).is_some() => {
                     out.push(format!(
@@ -864,7 +864,7 @@ impl PeerAuditRule for CancelRequestUriRule {
             let SipMessage::Request(req) = &step.msg else {
                 return Vec::new();
             };
-            if req.method.as_str() != "CANCEL" {
+            if req.method().as_str() != "CANCEL" {
                 return Vec::new();
             }
             let cancel_branch = top_via_branch(&step.msg);
@@ -876,11 +876,11 @@ impl PeerAuditRule for CancelRequestUriRule {
             else {
                 return Vec::new(); // no branch-matched INVITE — cancelViaBranch's finding
             };
-            if &req.uri != invite_uri {
+            let cancel_uri = req.request_uri().to_string();
+            if cancel_uri != *invite_uri {
                 vec![format!(
-                    "CANCEL Request-URI \"{}\" differs from the INVITE Request-URI \"{invite_uri}\" \
-                     — RFC 3261 §9.1 (the CANCEL cannot match the INVITE server transaction)",
-                    req.uri,
+                    "CANCEL Request-URI \"{cancel_uri}\" differs from the INVITE Request-URI \"{invite_uri}\" \
+                     — RFC 3261 §9.1 (the CANCEL cannot match the INVITE server transaction)"
                 )]
             } else {
                 Vec::new()
@@ -908,7 +908,7 @@ impl PeerAuditRule for CancelViaBranchRule {
             let SipMessage::Request(req) = &step.msg else {
                 return Vec::new();
             };
-            if req.method.as_str() != "CANCEL" {
+            if req.method().as_str() != "CANCEL" {
                 return Vec::new();
             }
             if ds.received_invites.is_empty() {
@@ -958,20 +958,20 @@ impl PeerAuditRule for RackCorrelationRule {
             let SipMessage::Request(req) = &step.msg else {
                 return Vec::new();
             };
-            if req.method.as_str() != "PRACK" {
+            if req.method().as_str() != "PRACK" {
                 return Vec::new();
             }
-            let rack = match &req.optional.rack {
+            let rack = match &req.optional().rack {
                 Ok(Some(r)) => r,
                 Ok(None) => return Vec::new(),
                 Err(e) => return vec![e.to_string()],
             };
             // The TS only correlates against received INVITEs (the request WE
             // received in our UAS role that produced the reliable 1xx).
-            if rack.method.as_str() != "INVITE" {
+            if rack.method().as_str() != "INVITE" {
                 return Vec::new();
             }
-            if ds.received_invite_cseqs.contains(&(rack.seq as u32)) {
+            if ds.received_invite_cseqs.contains(&(rack.seq() as u32)) {
                 return Vec::new();
             }
             let seen = if ds.received_invite_cseqs.is_empty() {
@@ -986,8 +986,8 @@ impl PeerAuditRule for RackCorrelationRule {
             vec![format!(
                 "RAck CSeq {} {} does not match any received INVITE CSeq [{seen}] — RFC 3262 §7.2 \
                  (the PRACK acknowledges no outstanding reliable 1xx)",
-                rack.seq,
-                rack.method.as_str(),
+                rack.seq(),
+                rack.method().as_str(),
             )]
         })
     }
@@ -1035,9 +1035,9 @@ impl PeerAuditRule for TagConsistencyRule {
             else {
                 continue;
             };
-            if resp.status > 100 && resp.status < 200 {
+            if resp.status() > 100 && resp.status() < 200 {
                 provisional_tags.entry(branch).or_default().push(tag);
-            } else if resp.status >= 200 {
+            } else if resp.status() >= 200 {
                 if let Some(priors) = provisional_tags.get(&branch) {
                     if !priors.is_empty() && !priors.contains(&tag) {
                         let mut seen: Vec<&str> = Vec::new();
@@ -1050,7 +1050,7 @@ impl PeerAuditRule for TagConsistencyRule {
                             "UAS To-tag mismatch on {} (branch {branch}): prior provisional(s) \
                              established tag(s) [{}] but the final carries \"{tag}\" — RFC 3261 \
                              §17.2.1 / §12.1.1",
-                            resp.status,
+                            resp.status(),
                             seen.join(", "),
                         ));
                     }

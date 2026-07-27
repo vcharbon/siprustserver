@@ -134,7 +134,7 @@ async fn ringing_forever_is_torn_down_at_setup_timeout_and_releases_the_limiter(
     let mut cancel = bob.receive("CANCEL").await;
     cancel.respond(200, "OK").await;
     let final_resp = call.expect(408).await;
-    assert_eq!(final_resp.status, 408, "caller's INVITE resolves with 408 at the setup timeout");
+    assert_eq!(final_resp.status(), 408, "caller's INVITE resolves with 408 at the setup timeout");
     uas.respond(487, "Request Terminated").await;
     bob.receive("ACK").await; // the b2bua completes bob's 487 txn (§17.1.1.3)
 

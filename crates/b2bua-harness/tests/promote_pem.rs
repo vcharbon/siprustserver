@@ -63,8 +63,8 @@ async fn promote_pem_happy_no_resync() {
     // Alice sees a 200 OK carrying bob's early SDP, P-Early-Media stripped,
     // explicit Allow + Supported (no 100rel).
     let ok = call.expect(200).await;
-    assert!(!ok.body.is_empty(), "synthetic 200 carries bob's early SDP");
-    assert_eq!(ok.body, EARLY.as_bytes(), "early SDP relayed verbatim");
+    assert!(!ok.body().is_empty(), "synthetic 200 carries bob's early SDP");
+    assert_eq!(ok.body(), EARLY.as_bytes(), "early SDP relayed verbatim");
     assert!(
         ok.raw(HeaderName::PEarlyMedia).next().is_none(),
         "P-Early-Media stripped"
@@ -124,7 +124,7 @@ async fn no_policy_control() {
     // relay-passthrough fidelity gap, independent of the PEM service under test
     // here; the load-bearing guard is "183 not 200, body intact".
     let p183 = call.expect(183).await;
-    assert!(!p183.body.is_empty(), "183 body survives the default relay");
+    assert!(!p183.body().is_empty(), "183 body survives the default relay");
 
     uas.respond(200, "OK").with_sdp(EARLY).await;
     call.expect(200).await;
@@ -158,7 +158,7 @@ async fn resync_sdp_changed() {
         .with_sdp(EARLY)
         .await;
     let ok = call.expect(200).await;
-    assert_eq!(ok.body, EARLY.as_bytes());
+    assert_eq!(ok.body(), EARLY.as_bytes());
 
     let mut dialog = call.ack().await;
 
@@ -170,7 +170,7 @@ async fn resync_sdp_changed() {
     let mut resync = alice.receive("INVITE").await;
     let req = resync.request();
     assert!(
-        String::from_utf8_lossy(&req.body).contains("m=audio 30000"),
+        String::from_utf8_lossy(req.body()).contains("m=audio 30000"),
         "resync re-INVITE carries bob's new SDP",
     );
     let allow = req.header::<Allow>().expect("an Allow").expect("readable Allow");
@@ -343,7 +343,7 @@ async fn forking_resync() {
         .with_sdp(EARLY)
         .await;
     let ok = call.expect(200).await;
-    assert_eq!(ok.body, EARLY.as_bytes());
+    assert_eq!(ok.body(), EARLY.as_bytes());
     let _dialog = call.ack().await;
 
     // Winning fork: 200 OK with To-tag FORK_T2 ≠ FORK_T1, different SDP.
@@ -360,7 +360,7 @@ async fn forking_resync() {
     // Alice receives the resync re-INVITE carrying the winning fork's SDP.
     let mut resync = alice.receive("INVITE").await;
     assert!(
-        String::from_utf8_lossy(&resync.request().body).contains("m=audio 30000"),
+        String::from_utf8_lossy(resync.request().body()).contains("m=audio 30000"),
         "resync re-INVITE carries the winning fork SDP",
     );
     resync.respond(200, "OK").with_sdp(EARLY).await;

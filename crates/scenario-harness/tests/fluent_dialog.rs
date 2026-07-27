@@ -26,9 +26,9 @@ fn parse(raw: &[u8]) -> SipMessage {
 fn assert_request(raw: &[u8], method: &str, cseq_seq: u32) {
     match parse(raw) {
         SipMessage::Request(r) => {
-            assert_eq!(r.method, method);
-            assert_eq!(r.cseq.method, method, "CSeq method == request method");
-            assert_eq!(r.cseq.seq, cseq_seq, "CSeq seq for {method}");
+            assert_eq!(r.method(), method);
+            assert_eq!(r.cseq().method(), method, "CSeq method == request method");
+            assert_eq!(r.cseq().seq(), cseq_seq, "CSeq seq for {method}");
         }
         other => panic!("expected {method} request, got {other:?}"),
     }
@@ -37,9 +37,9 @@ fn assert_request(raw: &[u8], method: &str, cseq_seq: u32) {
 fn assert_response(raw: &[u8], status: u16, cseq_seq: u32, cseq_method: &str) {
     match parse(raw) {
         SipMessage::Response(r) => {
-            assert_eq!(r.status, status);
-            assert_eq!(r.cseq.seq, cseq_seq, "echoed CSeq seq for {status}");
-            assert_eq!(r.cseq.method, cseq_method, "echoed CSeq method for {status}");
+            assert_eq!(r.status(), status);
+            assert_eq!(r.cseq().seq(), cseq_seq, "echoed CSeq seq for {status}");
+            assert_eq!(r.cseq().method(), cseq_method, "echoed CSeq method for {status}");
         }
         other => panic!("expected {status} response, got {other:?}"),
     }
@@ -61,7 +61,7 @@ async fn full_dialog_auto_generated() {
     let mut uas = bob.receive("INVITE").await;
     // The UAS can inspect what it got — e.g. that the offer arrived.
     assert!(
-        uas.request().body.starts_with(b"v=0"),
+        uas.request().body().starts_with(b"v=0"),
         "INVITE should carry the SDP offer body"
     );
     uas.respond(180, "Ringing").await;
@@ -69,7 +69,7 @@ async fn full_dialog_auto_generated() {
 
     uas.respond(200, "OK").with_sdp(SDP_ANSWER).send().await;
     let ok = call.expect(200).await;
-    assert!(ok.to.tag.is_some(), "200 OK must carry the UAS To-tag");
+    assert!(ok.to().tag().is_some(), "200 OK must carry the UAS To-tag");
 
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
@@ -112,17 +112,17 @@ async fn full_dialog_auto_generated() {
     // one stable To-tag (bob's) and one Call-ID.
     let invite = parse(&entries[0].raw);
     let SipMessage::Request(invite) = invite else { unreachable!() };
-    assert!(invite.to.tag.is_none(), "initial INVITE must have no To-tag");
-    let call_id = invite.call_id.clone();
+    assert!(invite.to().tag().is_none(), "initial INVITE must have no To-tag");
+    let call_id = invite.call_id().clone();
     let to_tag = match parse(&entries[2].raw) {
-        SipMessage::Response(r) => r.to.tag.clone().expect("200 has To-tag"),
+        SipMessage::Response(r) => r.to().tag().map(str::to_owned).expect("200 has To-tag"),
         _ => unreachable!(),
     };
     for e in &entries[1..] {
         let m = parse(&e.raw);
         let (cid, tag) = match &m {
-            SipMessage::Request(r) => (r.call_id.clone(), r.to.tag.clone()),
-            SipMessage::Response(r) => (r.call_id.clone(), r.to.tag.clone()),
+            SipMessage::Request(r) => (r.call_id().clone(), r.to().tag().map(str::to_owned)),
+            SipMessage::Response(r) => (r.call_id().clone(), r.to().tag().map(str::to_owned)),
         };
         assert_eq!(cid, call_id, "Call-ID continuity");
         assert_eq!(tag.as_deref(), Some(to_tag.as_str()), "stable To-tag");

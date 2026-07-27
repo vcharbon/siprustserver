@@ -695,7 +695,7 @@ async fn reclaim_materialises_into_live_map_under_serving_load() {
                     .put_call(BAK, "w9", &cr, live.clone(), &[], 300_000, 1, 0, &PutOpts::default())
                     .await;
                 j += 1;
-                if j % 64 == 0 {
+                if j.is_multiple_of(64) {
                     tokio::task::yield_now().await;
                 }
             }
@@ -859,7 +859,7 @@ async fn measure_bootstrap(
                     .await;
                 j += 1;
                 writes.fetch_add(1, Ordering::Relaxed);
-                if j % 64 == 0 {
+                if j.is_multiple_of(64) {
                     tokio::task::yield_now().await;
                 }
             }

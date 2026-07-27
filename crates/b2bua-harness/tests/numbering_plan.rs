@@ -71,7 +71,7 @@ async fn route_rewrites_from_to_ruri_pai_and_pani() {
 
     let mut bob_uas = bob.receive("INVITE").await;
     let req = bob_uas.request();
-    assert_eq!(req.uri, "sip:+18001234@carrier.example", "R-URI rewritten");
+    assert_eq!(req.request_uri().text(), "sip:+18001234@carrier.example", "R-URI rewritten");
     assert_eq!(
         req.from().uri().user(),
         Some("+15551000"),
@@ -183,7 +183,7 @@ async fn direct_reject_carries_reason_header() {
         .await;
 
     let resp = call.expect(603).await;
-    assert_eq!(resp.status, 603);
+    assert_eq!(resp.status(), 603);
     let reason = resp.header::<Reason>().expect("a Reason").expect("readable Reason");
     assert!(reason.is("Q.850"), "Reason protocol relayed: {}", reason.to_wire());
     assert_eq!(reason.param("cause").and_then(ParamValue::as_str), Some("21"));
@@ -220,7 +220,7 @@ async fn direct_302_redirect_carries_contact_list() {
         .await;
 
     let resp = call.expect(302).await;
-    assert_eq!(resp.status, 302);
+    assert_eq!(resp.status(), 302);
     let contacts = resp.list::<Contact>().expect("readable Contact list");
     assert_eq!(contacts.len(), 2, "two Contact headers: {contacts:?}");
     assert_eq!(contacts[0].uri().text(), "sip:primary@alt1.example");
@@ -264,7 +264,7 @@ async fn reroute_exhaustion_redirects_caller() {
 
     // List exhausted → the plan's on_exhausted 302 reaches alice.
     let resp = call.expect(302).await;
-    assert_eq!(resp.status, 302);
+    assert_eq!(resp.status(), 302);
     let contacts = resp.list::<Contact>().expect("readable Contact list");
     assert!(
         contacts.iter().any(|c| c.uri().text() == "sip:overflow@alt.example"),

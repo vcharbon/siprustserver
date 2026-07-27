@@ -199,7 +199,7 @@ async fn ack_body_override_rides_the_reinvite_ack() {
         re.respond(200, "OK").with_sdp(ANSWER_SDP).try_send().await.unwrap();
         let ack = bob.try_receive("ACK").await.unwrap();
         assert_eq!(
-            ack.request().body,
+            ack.request().body(),
             CUSTOM_ACK_SDP.as_bytes(),
             "the ACK carries the ack_body override",
         );

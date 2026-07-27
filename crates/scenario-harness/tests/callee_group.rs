@@ -49,9 +49,9 @@ async fn establish(alice: &Agent, callee: &Agent, digits: &str) -> (Dialog, Dial
     let mut call = alice.invite(callee).with_sdp(OFFER).ruri(&ruri).to(&ruri).send().await;
     let mut uas = callee.receive("INVITE").await;
     assert!(
-        uas.request().uri.contains(digits),
+        uas.request().request_uri().text().contains(digits),
         "leg demuxed to the wrong logical agent: R-URI {} should carry {digits}",
-        uas.request().uri,
+        uas.request().request_uri().text(),
     );
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
@@ -132,9 +132,9 @@ async fn establish_via_proxy(
     proxy.forward_request(callee.addr()).await; // proxy → shared socket
     let mut uas = callee.receive("INVITE").await;
     assert!(
-        uas.request().uri.contains(digits),
+        uas.request().request_uri().text().contains(digits),
         "proxied leg demuxed to the wrong agent: R-URI {} should carry {digits}",
-        uas.request().uri,
+        uas.request().request_uri().text(),
     );
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     proxy.forward_response(alice_addr).await;

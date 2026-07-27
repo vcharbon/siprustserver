@@ -62,7 +62,7 @@ mod auth_seam {
 
         // The server challenges with a 401 + WWW-Authenticate.
         let mut chal = server.try_receive("INVITE").await.unwrap();
-        assert_eq!(chal.request().cseq.seq, 1, "first INVITE is CSeq 1");
+        assert_eq!(chal.request().cseq().seq(), 1, "first INVITE is CSeq 1");
         chal.respond(401, "Unauthorized")
             .with_header("WWW-Authenticate", "Digest realm=\"sip\", nonce=\"abc\"")
             .try_send()
@@ -71,7 +71,7 @@ mod auth_seam {
 
         // Alice sees the 401 (raw, un-asserted) and drives the retry.
         let resp = call.try_recv_response().await.unwrap();
-        assert_eq!(resp.status, 401);
+        assert_eq!(resp.status(), 401);
         let resent = call.ack_and_resend_with_auth(&resp, &responder).await.unwrap();
         assert!(resent, "responder returned a credential → a resend happened");
 
@@ -86,11 +86,11 @@ mod auth_seam {
 
         // The server first sees the ACK for the 401 (RFC 3261 §17.1.1.3)…
         let ack = server.try_receive("ACK").await.unwrap();
-        assert_eq!(ack.request().cseq.seq, 1, "the non-2xx ACK reuses the INVITE CSeq");
+        assert_eq!(ack.request().cseq().seq(), 1, "the non-2xx ACK reuses the INVITE CSeq");
 
         // …then the resent, authenticated INVITE #2: CSeq bumped, Authorization added.
         let mut admit = server.try_receive("INVITE").await.unwrap();
-        assert_eq!(admit.request().cseq.seq, 2, "the retried INVITE bumps the CSeq (§22.2)");
+        assert_eq!(admit.request().cseq().seq(), 2, "the retried INVITE bumps the CSeq (§22.2)");
         assert!(
             admit
                 .request()
@@ -134,9 +134,9 @@ mod auth_seam {
         uas.respond(200, "OK").with_sdp(OFFER).try_send().await.unwrap();
 
         let (answer, provisionals) = call.try_expect_final(200).await.unwrap();
-        assert_eq!(answer.status, 200);
+        assert_eq!(answer.status(), 200);
         assert_eq!(
-            provisionals.iter().map(|p| p.status).collect::<Vec<_>>(),
+            provisionals.iter().map(|p| p.status()).collect::<Vec<_>>(),
             vec![180, 183],
             "every absorbed 1xx is collected, in arrival order"
         );
@@ -176,7 +176,7 @@ mod auth_seam {
             Err(e) => panic!("an absent sentinel must surface as Timeout, got {e}"),
             Ok((txn, _)) => panic!(
                 "an absent sentinel must surface as Timeout, got a {} request",
-                txn.request().method
+                txn.request().method()
             ),
         }
 
@@ -190,7 +190,7 @@ mod auth_seam {
         let (mut bye_txn, absorbed) =
             server.try_receive_tolerating_blocking("BYE", &["NOTIFY"]).await.unwrap();
         assert_eq!(
-            absorbed.iter().map(|r| r.method.to_string()).collect::<Vec<_>>(),
+            absorbed.iter().map(|r| r.method().to_string()).collect::<Vec<_>>(),
             vec!["NOTIFY".to_string()],
             "the absorbed traffic is returned, assertable"
         );
@@ -222,7 +222,7 @@ mod auth_seam {
             let server = server_rx;
             // First OPTIONS → 401.
             let mut c = server.try_receive("OPTIONS").await.unwrap();
-            assert_eq!(c.request().cseq.seq, 1);
+            assert_eq!(c.request().cseq().seq(), 1);
             assert!(c.request().raw(HeaderName::Authorization).next().is_none());
             c.respond(401, "Unauthorized")
                 .with_header("WWW-Authenticate", "Digest realm=\"sip\", nonce=\"n\"")
@@ -231,7 +231,7 @@ mod auth_seam {
                 .unwrap();
             // Credentialed resend → 200. CSeq bumped, Authorization present.
             let mut c2 = server.try_receive("OPTIONS").await.unwrap();
-            assert_eq!(c2.request().cseq.seq, 2, "the authed resend bumps the CSeq");
+            assert_eq!(c2.request().cseq().seq(), 2, "the authed resend bumps the CSeq");
             assert!(
                 c2.request().raw(HeaderName::Authorization).next().is_some(),
                 "the resend carries the Authorization",
@@ -244,7 +244,7 @@ mod auth_seam {
             .try_send_authed(Some(responder.as_ref()), 200)
             .await
             .expect("the authenticated OPTIONS resolves to 200");
-        assert_eq!(resp.status, 200);
+        assert_eq!(resp.status(), 200);
 
         srv.await.unwrap();
         let _ = h.finish().await;
@@ -271,7 +271,7 @@ mod auth_seam {
         {
             Err(StepError::WrongStatus { got: 401, expected: 200, .. }) => {}
             Err(other) => panic!("expected WrongStatus 200/401, got {other:?}"),
-            Ok(r) => panic!("expected a 401 deviation, got {}", r.status),
+            Ok(r) => panic!("expected a 401 deviation, got {}", r.status()),
         }
 
         srv.await.unwrap();
@@ -341,7 +341,7 @@ mod txn_view_end_to_end {
         server.receive("BYE").await.respond(200, "OK").send().await;
         let resp = bye.expect(200).await;
         assert_eq!(
-            resp.cseq.method.to_string(),
+            resp.cseq().method().to_string(),
             "BYE",
             "the duplicate 200-INVITE was absorbed, not returned as the BYE answer"
         );

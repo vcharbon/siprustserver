@@ -45,7 +45,7 @@ pub(super) fn find_pending_dialog(
 pub(super) fn invite_cseq_from_handle(dialog: &Dialog) -> Option<i64> {
     let handle = dialog.ext.pending_invite_txn.as_ref()?;
     match CustomParser::new().parse(&handle.original_invite).ok()? {
-        SipMessage::Request(r) => Some(r.cseq.seq as i64),
+        SipMessage::Request(r) => Some(r.cseq().seq() as i64),
         _ => None,
     }
 }
@@ -55,7 +55,7 @@ pub(super) fn invite_cseq_from_handle(dialog: &Dialog) -> Option<i64> {
 /// resolver this relay path shares with the rule-vocabulary readiness predicate
 /// (`RuleContext::peer_relay_ready`), so the two never drift.
 pub(super) fn resolve_peer(call: &Call, ctx: &RuleContext) -> (Option<String>, Option<String>) {
-    let to_tag = ctx.request().and_then(|r| r.to.tag.as_deref());
+    let to_tag = ctx.request().and_then(|r| r.to().tag());
     call::helpers::resolve_relay_peer(call, ctx.source_leg_id, to_tag)
 }
 

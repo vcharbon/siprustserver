@@ -8,7 +8,7 @@
 use std::net::SocketAddr;
 
 use sip_message::header::{MaxForwards, ProxyRequire, RetryAfter, RouteEntry, Unsupported, Uri, Via};
-use sip_message::message_helpers::is_emergency_request;
+use sip_message::emergency::is_emergency_request;
 use sip_message::{Method, SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
@@ -77,7 +77,7 @@ impl ProxyCore {
         let SipMessage::Request(req) = msg else {
             return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
         };
-        let method = req.method.clone();
+        let method = req.method().clone();
         let call_id = req.call_id();
         let from = req.from();
         let cseq = req.cseq();
@@ -338,13 +338,13 @@ impl ProxyCore {
             // An out-of-range R-URI port is malformed (400), not truncated —
             // `sip:host:70596` must not be forwarded to port 5060, and a URI
             // that states one does not read.
-            match Uri::parse(&req.uri) {
-                Ok(uri) => {
+            match req.request_uri() {
+                uri if !uri.is_opaque() => {
                     let (host, port) = uri.host_port();
                     target = Some(ProxyAddr::new(host, port));
                     decision = RoutingDecisionKind::WorkerOutbound;
                 }
-                Err(_) => {
+                _ => {
                     self.reply(req, src, 400, "Bad Request", &[]).await;
                     return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
                 }

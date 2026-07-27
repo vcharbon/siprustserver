@@ -217,7 +217,7 @@ impl HealthProbe {
                     // Timer F (32 s) backstop — the reap normally cancelled the
                     // transaction long before; count it only if still pending.
                     Some(TransactionEvent::Timeout { branch, .. }) => {
-                        if let Some(p) = state.pending.remove(branch.as_str()) {
+                        if let Some(p) = state.pending.remove(&branch[..]) {
                             self.count_miss(p, &mut state.misses);
                         }
                     }
@@ -236,7 +236,7 @@ impl HealthProbe {
         let expired: Vec<String> =
             state.pending.iter().filter(|(_, p)| p.deadline_ms <= now).map(|(b, _)| b.clone()).collect();
         for branch in expired {
-            let p = state.pending.remove(branch.as_str()).expect("collected above");
+            let p = state.pending.remove(&branch[..]).expect("collected above");
             self.txn.cancel_txns_for_call(&probe_call_ref(&branch)).await?;
             self.count_miss(p, &mut state.misses);
         }
@@ -277,8 +277,8 @@ impl HealthProbe {
     }
 
     async fn handle_reply(&self, resp: SipResponse, state: &mut ProbeState) {
-        let Some(branch) = resp.via.first().branch.clone() else { return };
-        let Some(p) = state.pending.remove(branch.as_str()) else { return };
+        let Some(branch) = resp.via().first().branch().map(str::to_owned) else { return };
+        let Some(p) = state.pending.remove(&branch[..]) else { return };
 
         // A reply proves liveness — retire any other in-flight probes to the
         // same worker so their later reap can't count a spurious miss against
@@ -304,7 +304,7 @@ impl HealthProbe {
         state.misses.insert(p.worker_id.clone(), 0);
 
         let reason = resp.raw(sip_message::HeaderName::Reason).next();
-        let health = match resp.status {
+        let health = match resp.status() {
             200 => WorkerHealth::Alive,
             503 => classify_503(reason),
             _ => WorkerHealth::Alive,

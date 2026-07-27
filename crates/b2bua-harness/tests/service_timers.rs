@@ -71,7 +71,7 @@ mod ringwatch {
             matcher: Match::response().method("INVITE").status_class(1).direction(Direction::FromB),
             handle: |ctx: &RuleContext| {
                 let b = ctx.source_leg_id.to_string();
-                let status = ctx.response().map(|r| r.status as i64);
+                let status = ctx.response().map(|r| r.status() as i64);
                 Some(RuleHandleResult::new(vec![
                     // The symmetric disarm: id minted from the ONE recipe.
                     RuleAction::cancel_timer(&T18X, None),
@@ -247,7 +247,7 @@ async fn service_timer_fires_and_owning_rule_reaps_the_silent_call() {
     uas.respond(487, "Request Terminated").await;
     bob.receive("ACK").await; // the b2bua completes bob's 487 txn (§17.1.1.3)
     let final_resp = call.expect(480).await;
-    assert_eq!(final_resp.status, 480, "service watchdog authored the caller's final");
+    assert_eq!(final_resp.status(), 480, "service watchdog authored the caller's final");
 
     settle_until(|| b2bua.cdr_records().len() == 1).await;
     let cdrs = b2bua.cdr_records();

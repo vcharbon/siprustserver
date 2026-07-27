@@ -244,7 +244,7 @@ impl BranchIndex {
 /// responses, so this is total over what we feed it.
 fn status_of(m: &SipMessage) -> u16 {
     match m {
-        SipMessage::Response(r) => r.status,
+        SipMessage::Response(r) => r.status(),
         SipMessage::Request(_) => 0,
     }
 }

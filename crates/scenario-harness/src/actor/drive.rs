@@ -101,7 +101,7 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
                 // The 202 arrives through the reactor (recv_any) — the returned
                 // transaction handle is not awaited on.
                 let (_txn, request) = refer.try_send_with_request().await?;
-                let key = ObligationKey::new(st.role, ObligationKind::Refer, request.cseq.seq);
+                let key = ObligationKey::new(st.role, ObligationKind::Refer, request.cseq().seq());
                 (key, dialog.clone(), request)
             };
             // The REFER's only receiver is the SUT itself (it builds the C leg),
@@ -151,9 +151,9 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
                     req_builder = req_builder.with_to_tag(&tag);
                 }
                 let (_txn, req) = req_builder.try_send_with_request().await?;
-                (ObligationKey::new(st.role, ObligationKind::Update, req.cseq.seq), req)
+                (ObligationKey::new(st.role, ObligationKind::Update, req.cseq().seq()), req)
             };
-            st.sent_updates.insert(req.cseq.seq);
+            st.sent_updates.insert(req.cseq().seq());
             st.obs.record(
                 Observation::RequestSent { key, detail: "early update awaiting 200".to_string() },
                 now,

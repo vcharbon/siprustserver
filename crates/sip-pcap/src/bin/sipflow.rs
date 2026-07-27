@@ -394,7 +394,7 @@ fn group_matches(group: &CallGroup, legs: &[FlowLeg], args: &Args) -> bool {
     if let Some(m) = &args.method {
         if !any_leg(&|l| {
             l.msgs.iter().any(|rec| {
-                matches!(&rec.parsed, SipMessage::Request(r) if r.method.as_str().eq_ignore_ascii_case(m))
+                matches!(&rec.parsed, SipMessage::Request(r) if r.method().as_str().eq_ignore_ascii_case(m))
             })
         }) {
             return false;
@@ -461,9 +461,15 @@ fn leg_label(pos: usize) -> String {
 
 fn summary_line(msg: &SipMessage) -> String {
     match msg {
-        SipMessage::Request(r) => format!("{} {} (CSeq {} {})", r.method, r.uri, r.cseq.seq, r.cseq.method),
+        SipMessage::Request(r) => format!(
+            "{} {} (CSeq {} {})",
+            r.method(),
+            r.request_uri().text(),
+            r.cseq().seq(),
+            r.cseq().method()
+        ),
         SipMessage::Response(r) => {
-            format!("{} {} (CSeq {} {})", r.status, r.reason, r.cseq.seq, r.cseq.method)
+            format!("{} {} (CSeq {} {})", r.status(), r.reason(), r.cseq().seq(), r.cseq().method())
         }
     }
 }

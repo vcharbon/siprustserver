@@ -61,7 +61,7 @@ impl ProxyCore {
         // Method::as_str() is already canonical-uppercase for known methods
         // (Method::from_wire normalized at parse time); unknown tokens match
         // no routing branch and land in the bounded `other` metric slot.
-        self.metrics.record_request(req.method.as_str());
+        self.metrics.record_request(req.method().as_str());
         // (`sip_proxy_calls_total` is counted inside `route_request`, where the
         // retransmission memo can exclude re-sent copies of the same INVITE.)
 

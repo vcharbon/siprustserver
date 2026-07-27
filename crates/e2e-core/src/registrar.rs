@@ -198,7 +198,7 @@ impl RegisterProxy {
 
     async fn on_request(&self, req: SipRequest, src: SocketAddr) {
         // ── REGISTER: handle locally (mimics RegisterStrategy.handle) ──────────
-        if req.method == Method::Register {
+        if req.method() == Method::Register {
             self.handle_register(&req, src).await;
             return;
         }
@@ -209,7 +209,7 @@ impl RegisterProxy {
         //    response possible) is the one request a proxy forwards without a
         //    possible 483 — but it still decrements. ────────────────────────────
         let Ok(hops) = forwarded_max_forwards(&req) else {
-            if req.method == Method::Ack {
+            if req.method() == Method::Ack {
                 // ACK is hop-by-hop with no response: drop it rather than 483.
                 return;
             }
@@ -230,7 +230,7 @@ impl RegisterProxy {
 
         // ── Dialog-creating INVITE: resolve the Request-URI AOR → Contact
         //    (mimics CoreToExtRoutingStrategy.registrarLookupLayer). ──────────
-        let next_hop = if req.method == Method::Invite && req.to().tag().is_none() {
+        let next_hop = if req.method() == Method::Invite && req.to().tag().is_none() {
             match self.resolve_aor(&req).await {
                 Ok(dest) => {
                     // §7.3 asks a proxy to write what it processes near the top,
@@ -252,7 +252,7 @@ impl RegisterProxy {
             // In-dialog / other: next hop is the top surviving Route (loose
             // routing) or the Request-URI (§16.5/§16.6).
             let route_hop = routes.get(usize::from(pop_self)).and_then(|r| uri_addr(r.uri()));
-            match route_hop.or_else(|| uri_addr(&req.request_uri())) {
+            match route_hop.or_else(|| uri_addr(req.request_uri())) {
                 Some(d) => d,
                 None => return,
             }
@@ -333,7 +333,7 @@ impl RegisterProxy {
                 ..Default::default()
             },
         );
-        self.send_wire(&resp.raw, src).await;
+        self.send_wire(resp.image(), src).await;
     }
 
     async fn reject(&self, req: &SipRequest, status: u16, reason: &str, src: SocketAddr) {
@@ -351,7 +351,7 @@ impl RegisterProxy {
                 ..Default::default()
             },
         );
-        self.send_wire(&resp.raw, src).await;
+        self.send_wire(resp.image(), src).await;
     }
 
     fn reg_tag(&self) -> String {

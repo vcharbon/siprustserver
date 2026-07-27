@@ -4,8 +4,9 @@
 //!
 //! This is the ONLY crate that extracts SIP headers/messages. Lenient
 //! raw-datagram scanning: [`sniff`]; strict pre-parse classifiers:
-//! [`message_helpers::preparse`]; parsed-header access:
-//! [`message_helpers`]; construction: [`generators`].
+//! [`preparse`]; parsed-header access: the typed read surface on
+//! [`SipRequest`] / [`SipResponse`] ([`header`] values, [`HeaderName`]);
+//! construction: [`draft`] and [`generators`].
 
 pub mod error;
 pub mod method;
@@ -19,7 +20,11 @@ pub mod parser;
 pub mod serializer;
 pub mod sdp;
 pub mod generators;
-pub mod message_helpers;
+pub mod emergency;
+pub mod param_codec;
+pub mod preparse;
+mod raw_bytes;
+pub mod reject_503;
 pub mod sipfrag;
 pub mod sniff;
 pub mod deviation;
@@ -27,13 +32,13 @@ pub mod remote_target;
 pub mod template;
 pub mod template_match;
 
+/// The body and image type the public surface hands out and takes back.
+pub use bytes::Bytes;
 pub use error::SipParseError;
-/// Header identity (ADR-0025). The classification enum stays namespaced as
-/// [`header::HeaderClass`] — the root `HeaderClass` is the template's
-/// regenerate-vs-freeze axis.
-pub use header::HeaderName;
+/// Header identity and the one ownership table (ADR-0025).
+pub use header::{HeaderClass, HeaderName};
 pub use method::Method;
-pub use serializer::{message_summary, serialize, serialize_request_parts, serialize_response_parts, sip_summary};
+pub use serializer::{message_summary, serialize, sip_summary};
 pub use sdp::{
     build_answer_from_offer, build_held_sdp_from_profile, extract_codec_profile, validate_sdp_body,
     BuildAnswerOptions, BuildHeldSdpOptions, CodecProfile, SdpBuildResult, SdpValidationError,
@@ -42,7 +47,7 @@ pub use parser::{SipParser, SipParserLimits};
 pub use sip_str::{SharedText, SipStr};
 pub use parser::custom::{hydrate_request, hydrate_response, CustomParser};
 pub use template::{
-    apply_name_forms, apply_remote_target_emits, EmitOpts, HeaderClass, MessageTemplate,
+    apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MessageTemplate,
     TemplateHeader, TemplateStart,
 };
 pub use template_match::{MatchOpts, Mismatch};
@@ -50,7 +55,6 @@ pub use deviation::{
     Automatic, CseqDeviation, CseqOp, CseqOpAt, CseqPattern, DelayedAutomatic,
 };
 pub use types::{
-    Contact, ContactSet, CSeq, InDialogRequest, InviteRequest, NameAddr, NonEmpty, NotInDialog,
-    OptionalHeaders, Params, ParamValue, Rack, ReferTo, Replaces, RequestUri, SipHeader,
-    SipMessage, SipRequest, SipResponse, SipResponseTagged, TypedHeader, Uri, Via,
+    ContactSet, CoreHeaders, InDialogRequest, InviteRequest, MessageCore, NonEmpty, NotInDialog,
+    OptionalHeaders, SipHeader, SipMessage, SipRequest, SipResponse, SipResponseTagged,
 };

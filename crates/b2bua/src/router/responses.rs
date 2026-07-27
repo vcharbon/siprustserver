@@ -51,7 +51,7 @@ pub(crate) fn build_options_health_response(
                 hdr("Allow", sip_message::generators::B2BUA_ALLOW),
                 hdr("Accept", "application/sdp"),
                 hdr("Supported", sip_message::generators::B2BUA_SUPPORTED),
-                hdr("X-Overload", &overload.x_overload_header_value()),
+                hdr("X-Overload", overload.x_overload_header_value()),
             ],
         ),
         ReadinessState::NotReady => (

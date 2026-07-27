@@ -27,8 +27,8 @@ use sip_message::SipMessage;
 /// `msg.body` accessor used by the SDP-origin continuity rule.
 fn body_of(m: &SipMessage) -> &[u8] {
     match m {
-        SipMessage::Request(r) => &r.body,
-        SipMessage::Response(r) => &r.body,
+        SipMessage::Request(r) => r.body(),
+        SipMessage::Response(r) => r.body(),
     }
 }
 
@@ -89,7 +89,7 @@ impl CrossMessageAuditRule for MidDialogUriRule {
                 for ev in &slot.ordered {
                     if ev.kind == EventKind::Sent {
                         if let SipMessage::Request(req) = &ev.msg {
-                            let method = req.method.as_str();
+                            let method = req.method().as_str();
                             // The initial INVITE (and CANCEL, which is hop-by-hop)
                             // establish/precede the dialog — not in-dialog requests.
                             let is_initial_invite = method == "INVITE"
@@ -163,7 +163,7 @@ impl CrossMessageAuditRule for MidDialogRouteRule {
                 for ev in &slot.ordered {
                     if ev.kind == EventKind::Sent {
                         if let SipMessage::Request(req) = &ev.msg {
-                            let method = req.method.as_str();
+                            let method = req.method().as_str();
                             let is_initial_invite = method == "INVITE"
                                 && m.initial_invite_sent_branch.is_empty()
                                 && m.initial_invite_received_branch.is_empty();
@@ -261,7 +261,7 @@ fn check_mid_dialog_route(
             SipMessage::Request(r) => Some(r.request_uri()),
             SipMessage::Response(_) => None,
         };
-        if req_uri.as_ref() != Some(expected_uri) {
+        if req_uri != Some(expected_uri) {
             let shown = req_uri.map(|u| u.to_string()).unwrap_or_default();
             out.push((
                 slot.bind_key.clone(),
@@ -320,7 +320,7 @@ impl CrossMessageAuditRule for MidDialogWireDestinationRule {
                 for ev in &slot.ordered {
                     if ev.kind == EventKind::Sent {
                         if let SipMessage::Request(req) = &ev.msg {
-                            let method = req.method.as_str();
+                            let method = req.method().as_str();
                             let is_initial_invite = method == "INVITE"
                                 && m.initial_invite_sent_branch.is_empty()
                                 && m.initial_invite_received_branch.is_empty();
@@ -362,10 +362,7 @@ fn check_wire_destination(
         // resolve.
         None if msg.has(&HeaderName::Route) => return,
         None => match msg {
-            SipMessage::Request(r) => match Uri::parse(&r.uri) {
-                Ok(uri) => uri,
-                Err(_) => return,
-            },
+            SipMessage::Request(r) => r.request_uri().clone(),
             SipMessage::Response(_) => return,
         },
     };
@@ -567,12 +564,12 @@ impl CrossMessageAuditRule for RecordRoutePlacementRule {
                             // To-tag) overwrite the INVITE entry, misattributing
                             // a §17.2.1-retransmitted final crossing the ACK to
                             // an "in-dialog ACK".
-                            if req.method.as_str() != "ACK" {
+                            if req.method().as_str() != "ACK" {
                                 if let Some(branch) = top_via_branch(&ev.msg) {
                                     let has_to_tag = to_tag(&ev.msg).is_some();
                                     sent_by_branch.insert(
                                         branch,
-                                        (req.method.as_str().to_string(), has_to_tag),
+                                        (req.method().as_str().to_string(), has_to_tag),
                                     );
                                 }
                             }
@@ -657,7 +654,7 @@ impl CrossMessageAuditRule for RportEchoRule {
                             if present && value.is_none() {
                                 if let Some(branch) = top_via_branch(&ev.msg) {
                                     sent_rport_by_branch
-                                        .insert(branch, req.method.as_str().to_string());
+                                        .insert(branch, req.method().as_str().to_string());
                                 }
                             }
                         }
@@ -730,7 +727,7 @@ impl CrossMessageAuditRule for AllowSupportedOnInviteRule {
                         continue;
                     }
                     match &ev.msg {
-                        SipMessage::Request(req) if req.method.as_str() == "INVITE" => {
+                        SipMessage::Request(req) if req.method().as_str() == "INVITE" => {
                             let cid = call_id(&ev.msg).to_string();
                             let branch = top_via_branch(&ev.msg).unwrap_or_default();
                             match initial_invite_branch_by_call_id.entry(cid) {
@@ -750,10 +747,10 @@ impl CrossMessageAuditRule for AllowSupportedOnInviteRule {
                             check_allow_supported(&mut out, slot, "re-INVITE", &ev.msg);
                         }
                         SipMessage::Response(resp)
-                            if (200..300).contains(&resp.status)
+                            if (200..300).contains(&resp.status())
                                 && cseq_method(&ev.msg) == "INVITE" =>
                         {
-                            let label = format!("{} OK INVITE", resp.status);
+                            let label = format!("{} OK INVITE", resp.status());
                             check_allow_supported(&mut out, slot, &label, &ev.msg);
                         }
                         _ => {}
@@ -818,7 +815,7 @@ impl CrossMessageAuditRule for Proxy100TryingNotForwardedRule {
                 for ev in &slot.ordered {
                     if ev.kind == EventKind::Sent {
                         if let SipMessage::Request(req) = &ev.msg {
-                            if req.method.as_str() == "INVITE" {
+                            if req.method().as_str() == "INVITE" {
                                 let key =
                                     format!("{}|{}", call_id(&ev.msg), cseq_seq(&ev.msg));
                                 sent_invite_key.insert(key);

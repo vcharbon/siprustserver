@@ -37,7 +37,7 @@ async fn prack_forking_two_early_dialogs() {
     // Alice INVITEs with NO SDP (delayed-offer model), advertising 100rel.
     let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
-    assert!(uas.request().body.is_empty(), "delayed offer: no SDP on the INVITE");
+    assert!(uas.request().body().is_empty(), "delayed offer: no SDP on the INVITE");
 
     // ── Fork 1: 183 with the callee fork-tag `bobfork1` + offer ──────────────
     uas.respond(183, "Session Progress")

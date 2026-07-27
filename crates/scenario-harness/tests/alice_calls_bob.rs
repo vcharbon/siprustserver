@@ -62,10 +62,10 @@ fn parse(raw: &[u8]) -> SipMessage {
 fn assert_request(raw: &[u8], method: &str, cseq_seq: u32) {
     match parse(raw) {
         SipMessage::Request(r) => {
-            assert_eq!(r.method, method, "method");
-            assert_eq!(r.cseq.method, method, "CSeq method must equal request method");
-            assert_eq!(r.cseq.seq, cseq_seq, "CSeq seq for {method}");
-            assert_eq!(r.call_id, CALL_ID, "Call-ID continuity");
+            assert_eq!(r.method(), method, "method");
+            assert_eq!(r.cseq().method(), method, "CSeq method must equal request method");
+            assert_eq!(r.cseq().seq(), cseq_seq, "CSeq seq for {method}");
+            assert_eq!(r.call_id(), CALL_ID, "Call-ID continuity");
         }
         other => panic!("expected {method} request, got {other:?}"),
     }
@@ -75,10 +75,10 @@ fn assert_request(raw: &[u8], method: &str, cseq_seq: u32) {
 fn assert_response(raw: &[u8], status: u16, cseq_seq: u32, cseq_method: &str) {
     match parse(raw) {
         SipMessage::Response(r) => {
-            assert_eq!(r.status, status, "status");
-            assert_eq!(r.cseq.seq, cseq_seq, "echoed CSeq seq for {status}");
-            assert_eq!(r.cseq.method, cseq_method, "echoed CSeq method for {status}");
-            assert_eq!(r.call_id, CALL_ID, "Call-ID continuity");
+            assert_eq!(r.status(), status, "status");
+            assert_eq!(r.cseq().seq(), cseq_seq, "echoed CSeq seq for {status}");
+            assert_eq!(r.cseq().method(), cseq_method, "echoed CSeq method for {status}");
+            assert_eq!(r.call_id(), CALL_ID, "Call-ID continuity");
         }
         other => panic!("expected {status} response, got {other:?}"),
     }

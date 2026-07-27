@@ -47,12 +47,12 @@ async fn absorb_establishing_provisional(
         }
     }
     if let Some(rseq) = reliable_rseq(resp) {
-        let fork = resp.to.tag.clone().unwrap_or_default();
+        let fork = resp.to().tag().map(str::to_owned).unwrap_or_default();
         if st.pracked_rseqs.insert((fork.to_string(), rseq)) {
             let (_txn, req) = inv.try_prack_with_request(resp).await?;
             st.obs.record(
                 Observation::RequestSent {
-                    key: ObligationKey::new(st.role, ObligationKind::Prack, req.cseq.seq),
+                    key: ObligationKey::new(st.role, ObligationKind::Prack, req.cseq().seq()),
                     detail: "prack awaiting 200".to_string(),
                 },
                 now,
@@ -106,7 +106,7 @@ async fn absorb_establishing_failure(
         }
     }
     st.obs.record(
-        Observation::LegFinal { leg: st.role, status, reason: resp.reason.to_string() },
+        Observation::LegFinal { leg: st.role, status, reason: resp.reason().to_string() },
         now,
     );
     st.obs.record(Observation::LegTerminated { leg: st.role }, now);
@@ -116,7 +116,7 @@ async fn absorb_establishing_failure(
             who: st.role.to_string(),
             expected: st.expected_provisional,
             got: status,
-            reason: resp.reason.to_string(),
+            reason: resp.reason().to_string(),
         });
     }
     Ok(false)
@@ -130,7 +130,7 @@ pub(super) fn record_response_fact(st: &mut ActorState<'_>, resp: &SipResponse, 
         .goals
         .remaining_steps()
         .any(|s| matches!(s, GoalStep::ExpectResponse { matcher: Some(_), .. }));
-    let body_is_sdp = !resp.body.is_empty()
+    let body_is_sdp = !resp.body().is_empty()
         && resp
             .header::<sip_message::header::MediaType>()
             .and_then(Result::ok)
@@ -139,11 +139,11 @@ pub(super) fn record_response_fact(st: &mut ActorState<'_>, resp: &SipResponse, 
         Observation::LegResponse {
             leg: st.role,
             fact: ResponseFact {
-                status: resp.status,
-                reason: resp.reason.to_string(),
-                body_len: resp.body.len(),
+                status: resp.status(),
+                reason: resp.reason().to_string(),
+                body_len: resp.body().len(),
                 body_is_sdp,
-                early_tag: resp.to.tag.as_deref().map(str::to_string),
+                early_tag: resp.to().tag().map(str::to_string),
                 typed: retain.then(|| Box::new(resp.clone())),
             },
         },
@@ -159,7 +159,7 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
     // other in-dialog final) sharing the early dialog must NOT be fed to the
     // INVITE transaction (`absorb_response` would misread a PRACK 200 as the
     // INVITE being answered); it falls through to the obligation-closing path.
-    if resp.cseq.method == "INVITE" {
+    if resp.cseq().method() == "INVITE" {
         if let Some(mut inv) = st.dialogs.pending_invite.take() {
         match inv.absorb_response(&resp).await? {
             InviteResponseFate::Provisional { status } => {
@@ -207,21 +207,21 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
         // open obligation), and schedule a RETRY after the §14.1 owner/non-owner
         // dwell (the dialog owner — the caller — backs off longer, so the two
         // retries no longer collide).
-        if resp.cseq.method == "INVITE"
-            && (300..700).contains(&resp.status)
-            && st.sent_reinvites.contains(&resp.cseq.seq)
+        if resp.cseq().method() == "INVITE"
+            && (300..700).contains(&resp.status())
+            && st.sent_reinvites.contains(&resp.cseq().seq())
         {
-            if let Some(txn) = st.sent_reinvite_txns.remove(&resp.cseq.seq) {
+            if let Some(txn) = st.sent_reinvite_txns.remove(&resp.cseq().seq()) {
                 txn.ack_non_2xx(&resp).await?;
             }
-            st.sent_reinvites.remove(&resp.cseq.seq);
+            st.sent_reinvites.remove(&resp.cseq().seq());
             st.obs.record(
                 Observation::ResponseObserved {
-                    key: ObligationKey::new(st.role, ObligationKind::ReInvite, resp.cseq.seq),
+                    key: ObligationKey::new(st.role, ObligationKind::ReInvite, resp.cseq().seq()),
                 },
                 now,
             );
-            if resp.status == 491 {
+            if resp.status() == 491 {
                 // §14.1: the owner of the Call-ID (the dialog's original UAC —
                 // the ORIGINATING actor, keyed on its first goal) waits a random
                 // T in [2.1, 4] s; a non-owner in [0, 2] s. Fixed in-range
@@ -244,24 +244,24 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
         // obligation (closed by its tag-mismatched 200 below — NEVER terminating
         // this leg; the winning dialog lives on). Checked BEFORE the re-INVITE
         // 2xx path: a re-INVITE's 2xx always carries the confirmed tag.
-        if (200..300).contains(&resp.status) {
+        if (200..300).contains(&resp.status()) {
             let is_losing_fork = st
                 .dialogs
                 .won_invite
                 .as_ref()
-                .is_some_and(|inv| inv.invite_cseq() == resp.cseq.seq)
+                .is_some_and(|inv| inv.invite_cseq() == resp.cseq().seq())
                 && st
                     .dialogs
                     .confirmed
                     .as_ref()
-                    .zip(resp.to.tag.as_ref())
-                    .is_some_and(|(d, t)| d.remote_tag() != t.as_str());
+                    .zip(resp.to().tag().as_ref())
+                    .is_some_and(|(d, t)| d.remote_tag() != *t);
             if is_losing_fork {
                 if let Some(inv) = st.dialogs.won_invite.as_ref() {
                     let mut fork = inv.fork_dialog(&resp);
                     // Our INVITE carried the offer, so the fork's 200 carried
                     // its answer — the ACK is bodyless (§13.2.2.4).
-                    fork.ack_for(resp.cseq.seq, None).await;
+                    fork.ack_for(resp.cseq().seq(), None).await;
                     let _bye =
                         fork.send_request(InDialogMethod::Bye).try_send().await?;
                     st.obs.record(
@@ -288,20 +288,20 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
         // Every such 2xx the reactor is handed is ACKed; closing the `ReInvite`
         // obligation, advancing the `reneg` teardown barrier, and stamping the
         // feed happen ONCE, keyed on the CSeq of a re-INVITE THIS leg originated.
-        if (200..300).contains(&resp.status) && st.dialogs.confirmed.is_some() {
+        if (200..300).contains(&resp.status()) && st.dialogs.confirmed.is_some() {
             let default = st.answer_body();
             let sdp = resolve_ack_body(
                 &mut st.reinvite_ack_bodies,
                 st.goals.next_step(),
                 default,
-                resp.cseq.seq,
+                resp.cseq().seq(),
             );
             if let Some(dialog) = st.dialogs.confirmed.as_mut() {
-                dialog.ack_for(resp.cseq.seq, Some(&sdp)).await;
+                dialog.ack_for(resp.cseq().seq(), Some(&sdp)).await;
             }
-            if st.sent_reinvites.remove(&resp.cseq.seq) {
-                st.sent_reinvite_txns.remove(&resp.cseq.seq);
-                let key = ObligationKey::new(st.role, ObligationKind::ReInvite, resp.cseq.seq);
+            if st.sent_reinvites.remove(&resp.cseq().seq()) {
+                st.sent_reinvite_txns.remove(&resp.cseq().seq());
+                let key = ObligationKey::new(st.role, ObligationKind::ReInvite, resp.cseq().seq());
                 st.obs.record(Observation::ResponseObserved { key }, now);
                 st.obs.record(
                     Observation::Subflow { leg: st.role, name: SUBFLOW_RENEG, to: SubflowState::Confirmed },
@@ -312,7 +312,7 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
                 // serializing the chain (C6). Keyed on CSeq: a re-emitted 2xx
                 // (a retransmit under loss) cannot double-count, and the
                 // sent_reinvites guard already fires this block once per CSeq.
-                st.obs.record(Observation::RenegCompleted { leg: st.role, cseq: resp.cseq.seq }, now);
+                st.obs.record(Observation::RenegCompleted { leg: st.role, cseq: resp.cseq().seq() }, now);
                 st.feed.on_reinvite_ok.stamp(st.ctx);
             }
             return Ok(());
@@ -323,13 +323,13 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
     // obligation and RETRY after the back-off. UPDATE has NO ACK, so the 491
     // alone completes the transaction — nothing to hop-ACK. (The owner/non-owner
     // dwell mirrors §14.1 for a deterministic, glare-breaking retry order.)
-    if resp.cseq.method == "UPDATE"
-        && resp.status == 491
-        && st.sent_updates.remove(&resp.cseq.seq)
+    if resp.cseq().method() == "UPDATE"
+        && resp.status() == 491
+        && st.sent_updates.remove(&resp.cseq().seq())
     {
         st.obs.record(
             Observation::ResponseObserved {
-                key: ObligationKey::new(st.role, ObligationKind::Update, resp.cseq.seq),
+                key: ObligationKey::new(st.role, ObligationKind::Update, resp.cseq().seq()),
             },
             now,
         );
@@ -345,7 +345,7 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
     // Otherwise it is a final to one of our sent in-dialog requests (our BYE's
     // 200, our REFER's 202, our NOTIFY's 200, our PRACK's 200, …) — close the
     // obligation it opened and stamp the declared feed for the flow-advancing ones.
-    if let Some(kind) = ObligationKind::from_cseq_method(resp.cseq.method.as_str()) {
+    if let Some(kind) = ObligationKind::from_cseq_method(resp.cseq().method().as_str()) {
         // The 200 to a LOSING-FORK BYE (C1/E3): same CSeq method (and possibly
         // the same CSeq number — fork spaces are independent, §12.2.1.1) as the
         // main BYE, but its To-tag echoes the LOSING fork's, not the confirmed
@@ -356,12 +356,12 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
                 .dialogs
                 .confirmed
                 .as_ref()
-                .zip(resp.to.tag.as_ref())
-                .is_some_and(|(d, t)| d.remote_tag() != t.as_str());
+                .zip(resp.to().tag().as_ref())
+                .is_some_and(|(d, t)| d.remote_tag() != *t);
         let kind = if fork_teardown { ObligationKind::ForkBye } else { kind };
-        let key = ObligationKey::new(st.role, kind, resp.cseq.seq);
+        let key = ObligationKey::new(st.role, kind, resp.cseq().seq());
         st.obs.record(Observation::ResponseObserved { key }, now);
-        if (200..300).contains(&resp.status) {
+        if (200..300).contains(&resp.status()) {
             match kind {
                 ObligationKind::Bye => {
                     st.obs.record(Observation::LegTerminated { leg: st.role }, now);
@@ -387,7 +387,7 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
                 // Advance the caller's `reneg` sub-flow so the teardown barrier
                 // holds before the BYE.
                 ObligationKind::Update => {
-                    st.sent_updates.remove(&resp.cseq.seq);
+                    st.sent_updates.remove(&resp.cseq().seq());
                     st.obs.record(
                         Observation::Subflow {
                             leg: st.role,
@@ -400,7 +400,7 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
                     // re-INVITE (C6/S6), so a glare barrier can gate on
                     // `reneg_count` regardless of the offer's method.
                     st.obs.record(
-                        Observation::RenegCompleted { leg: st.role, cseq: resp.cseq.seq },
+                        Observation::RenegCompleted { leg: st.role, cseq: resp.cseq().seq() },
                         now,
                     );
                     st.feed.on_update_ok.stamp(st.ctx);

@@ -272,12 +272,12 @@ pub fn build_b_leg(
     let branch = id_gen.new_branch();
     let from_tag = id_gen.new_tag();
     let b_call_id = format!("{}-{}@{}", leg_id, id_gen.new_tag(), config.sip_local_ip);
-    let request_uri = new_ruri.map(str::to_string).unwrap_or_else(|| a_leg_invite.uri.to_string());
-    let from_uri = new_from.map(str::to_string).unwrap_or_else(|| a_leg_invite.from.uri.to_string());
-    let to_uri = new_to.map(str::to_string).unwrap_or_else(|| a_leg_invite.to.uri.to_string());
+    let request_uri = new_ruri.map(str::to_string).unwrap_or_else(|| a_leg_invite.request_uri().to_string());
+    let from_uri = new_from.map(str::to_string).unwrap_or_else(|| a_leg_invite.from().uri().to_string());
+    let to_uri = new_to.map(str::to_string).unwrap_or_else(|| a_leg_invite.to().uri().to_string());
     let body = match body_override {
         Some(b) => b.to_vec(),
-        None => a_leg_invite.body.to_vec(),
+        None => a_leg_invite.body().to_vec(),
     };
     let content_type = if body.is_empty() {
         None
@@ -376,7 +376,7 @@ pub fn build_b_leg(
             ack_branch: None,
             pending_invite_txn: Some(InviteTxnHandle {
                 branch: branch.clone(),
-                original_invite: invite.raw.to_vec(),
+                original_invite: invite.image().to_vec(),
                 destination: call::HostPort {
                     host: wire_dest.0.clone(),
                     port: wire_dest.1,
@@ -437,7 +437,7 @@ pub fn build_b_leg(
 pub fn relay_response_passthrough_headers(resp: &sip_message::SipResponse) -> Vec<MsgHeader> {
     const PASSTHROUGH: &[HeaderName] =
         &[HeaderName::Require, HeaderName::RSeq, HeaderName::Supported];
-    copy_named(&resp.headers, PASSTHROUGH)
+    copy_named(resp.headers(), PASSTHROUGH)
 }
 
 /// The lines of `headers` naming one of `wanted`, in wire order.
@@ -510,7 +510,7 @@ pub fn relay_request_passthrough_headers(req: &SipRequest) -> Vec<MsgHeader> {
         HeaderName::Event,
         HeaderName::SubscriptionState,
     ];
-    copy_named(&req.headers, PASSTHROUGH)
+    copy_named(req.headers(), PASSTHROUGH)
 }
 
 /// Build a UAS response on a leg's inbound INVITE (toward alice). `to_tag` pins
@@ -988,7 +988,7 @@ Content-Length: 0\r\n\r\n",
             None,
         );
         match effect.body {
-            OutboundBody::Request(r) => r.headers,
+            OutboundBody::Request(r) => r.headers().to_vec(),
             OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
         }
     }

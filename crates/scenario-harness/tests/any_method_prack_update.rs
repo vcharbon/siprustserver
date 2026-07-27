@@ -72,7 +72,7 @@ async fn prack_then_update_both_directions_fallible() -> Result<(), StepError> {
         .try_send()
         .await?;
     let mut upd_uas = bob.try_receive("UPDATE").await?;
-    assert!(upd_uas.request().body.starts_with(b"v=0"), "UPDATE carries the re-offer");
+    assert!(upd_uas.request().body().starts_with(b"v=0"), "UPDATE carries the re-offer");
     upd_uas.respond(200, "OK").with_sdp(REANSWER_B).try_send().await?;
     upd_a.try_expect(200).await?;
 
@@ -115,14 +115,14 @@ async fn generic_out_of_dialog_message_fallible() -> Result<(), StepError> {
 
     let mut uas = bob.try_receive("MESSAGE").await?;
     let req = uas.request();
-    assert_eq!(req.cseq.method, "MESSAGE", "CSeq method auto-filled");
+    assert_eq!(req.cseq().method(), "MESSAGE", "CSeq method auto-filled");
     assert_eq!(req.raw(HeaderName::Subject).next(), Some("any-method"));
     assert_eq!(
         req.raw(HeaderName::ContentType).next(),
         Some("text/plain"),
         "caller-supplied Content-Type is used",
     );
-    assert_eq!(&req.body[..], b"hello via the generic surface");
+    assert_eq!(&req.body()[..], b"hello via the generic surface");
     uas.respond(200, "OK").try_send().await?;
     msg.try_expect(200).await?;
 

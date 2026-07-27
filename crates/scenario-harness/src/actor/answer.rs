@@ -22,8 +22,8 @@ use crate::{ServerTxn, StepError};
 /// agent's own ACK-obligation table (nothing to match the hop-ACK by).
 pub(super) fn arm_reject_final(st: &mut ActorState<'_>, uas: &ServerTxn, code: u16) {
     let Some(branch) = top_via_branch(uas.request()) else { return };
-    let call_id = uas.request().call_id.clone();
-    let key = ObligationKey::new(st.role, ObligationKind::RejectFinal, uas.request().cseq.seq);
+    let call_id = uas.request().call_id().clone();
+    let key = ObligationKey::new(st.role, ObligationKind::RejectFinal, uas.request().cseq().seq());
     st.obs.record(
         Observation::RequestSent { key, detail: format!("{code} final awaiting hop-ACK") },
         Instant::now(),
@@ -95,8 +95,8 @@ pub(super) async fn answer_initial_invite(
 /// (§12.2.1.1), and open the answered-awaiting-ACK obligation. Shared by the
 /// policy answer and the scripted `Respond`/`RespondTemplate` finals.
 pub(super) fn note_uas_answered(st: &mut ActorState<'_>, uas: &ServerTxn) {
-    let call_id = uas.request().call_id.clone();
-    let cseq = uas.request().cseq.seq;
+    let call_id = uas.request().call_id().clone();
+    let cseq = uas.request().cseq().seq();
     let now = Instant::now();
     let mut dialog = uas.dialog();
     // Dialog-formation point: attach this leg's shared CSeq counter (ADR-0024 §6).

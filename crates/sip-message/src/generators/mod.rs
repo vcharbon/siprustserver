@@ -2,9 +2,9 @@
 //! [`SipRequest`](crate::types::SipRequest) /
 //! [`SipResponse`](crate::types::SipResponse) is immediately sendable: no
 //! sentinels, no post-processing; Call-ID, branch, tag, local address and
-//! CSeq are arguments, never side effects. Reading/rewriting *existing*
-//! messages does NOT live here — see [`crate::message_helpers`]; lenient raw
-//! scanning is [`crate::sniff`].
+//! CSeq are arguments, never side effects. Reading *existing* messages does
+//! NOT live here — that is the typed read surface on the message itself;
+//! lenient raw scanning is [`crate::sniff`].
 //!
 //! Each generator is a recipe over a [`Draft`](crate::draft::Draft): it knows
 //! the dialog rules — CSeq stepping, route-set application, tag placement — and
@@ -52,8 +52,3 @@ pub use relay::{
 };
 pub use response::{generate_response, GenerateResponseOpts, ResponseValues};
 pub use spec::{ContactSpec, InviteClientTransactionHandle, SipTransport, StackDialog, ViaSpec};
-
-// Route/Via value readers and rewriters live on the read/rewrite side
-// (message_helpers); these re-exports keep the long-standing generator paths.
-pub use crate::message_helpers::route::{first_route_is_loose, strip_route_uri_to_request_uri};
-pub use crate::message_helpers::via::stamp_received_rport_on_via;

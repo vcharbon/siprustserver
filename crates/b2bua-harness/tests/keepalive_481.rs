@@ -56,7 +56,7 @@ async fn bob_481_on_options_byes_only_the_healthy_peer() {
         .filter(|e| {
             matches!(
                 CustomParser::new().parse(&e.raw),
-                Ok(SipMessage::Request(ref r)) if r.method == "BYE"
+                Ok(SipMessage::Request(ref r)) if r.method() == "BYE"
             )
         })
         .count();

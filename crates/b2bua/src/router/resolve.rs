@@ -22,11 +22,11 @@ pub(super) fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
     match event {
         CallEvent::Sip { message, .. } => match message.as_ref() {
             SipMessage::Request(req) => {
-                if req.method == Method::Invite && req.to().tag().is_none() {
+                if req.method() == Method::Invite && req.to().tag().is_none() {
                     let call_ref = call::derive_call_ref(
                         &ctx.config.self_ordinal,
-                        &req.call_id,
-                        req.from.tag.as_deref().unwrap_or(""),
+                        req.call_id().as_str(),
+                        req.from().tag().unwrap_or(""),
                     );
                     return Resolution {
                         call_ref: Some(call_ref),
@@ -66,7 +66,7 @@ pub(super) fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
             }
             SipMessage::Response(resp) => {
                 // Response: read our cr/lg from the top Via we stamped.
-                let ids = via_cr_lg(&resp.top_via())
+                let ids = via_cr_lg(resp.top_via())
                     .unwrap_or(ViaIds { cr: None, lg: "a".into() });
                 let call_ref = ids.cr.or_else(|| {
                     ctx.state.resolve_from_sip_key_sync(
@@ -150,11 +150,9 @@ pub(super) fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
 pub(super) async fn replica_takeover_call_ref(ctx: &RouterCtx, event: &CallEvent) -> Option<String> {
     let CallEvent::Sip { message, .. } = event else { return None };
     let SipMessage::Request(req) = message.as_ref() else { return None };
-    if req.to.tag.is_none() {
-        return None; // initial request — a brand-new dialog, not a takeover
-    }
+    req.to().tag()?;
     ctx.state
-        .resolve_from_replica_index(&req.call_id, req.from.tag.as_deref().unwrap_or(""))
+        .resolve_from_replica_index(req.call_id().as_str(), req.from().tag().unwrap_or(""))
         .await
 }
 

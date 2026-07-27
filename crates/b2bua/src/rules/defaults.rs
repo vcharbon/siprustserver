@@ -378,7 +378,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                 .method("INVITE")
                 .leg_disposition(LegDisposition::Cancelling)
                 .direction(Direction::FromB)
-                .filter(|ctx| ctx.response().map(|r| r.status >= 300).unwrap_or(false)),
+                .filter(|ctx| ctx.response().map(|r| r.status() >= 300).unwrap_or(false)),
             |ctx| {
                 let b = ctx.source_leg_id.to_string();
                 ok(vec![RuleAction::TerminateLeg {
@@ -394,7 +394,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                 .method("INVITE")
                 .leg_states(&[LegState::Terminated])
                 .direction(Direction::FromB)
-                .filter(|ctx| ctx.response().map(|r| r.status >= 300).unwrap_or(false)),
+                .filter(|ctx| ctx.response().map(|r| r.status() >= 300).unwrap_or(false)),
             |_ctx| ok(vec![]),
         ),
         // Re-INVITE glare (RFC 3261 §14.1 / §3.1 of RFC 5407): an INVITE arrives
@@ -460,7 +460,7 @@ fn core_rules() -> Vec<RuleDefinition> {
             &["relay-reinvite-response", "relay-provisional", "confirm-dialog", "route-failure"],
             Match::response().method("INVITE").filter(|ctx| {
                 let cseq = match ctx.response() {
-                    Some(r) => r.cseq.seq as i64,
+                    Some(r) => r.cseq().seq() as i64,
                     None => return false,
                 };
                 ctx.source_dialog()
@@ -470,15 +470,15 @@ fn core_rules() -> Vec<RuleDefinition> {
             }),
             |ctx| {
                 let resp = ctx.response()?;
-                if resp.status < 200 {
+                if resp.status() < 200 {
                     // Provisional on the CANCELled re-INVITE — absorb; the 487
                     // (or crossing 2xx) is still coming.
                     return ok(vec![]);
                 }
                 let leg = ctx.source_leg_id.to_string();
-                let outbound_cseq = resp.cseq.seq as i64;
+                let outbound_cseq = resp.cseq().seq() as i64;
                 let mut actions = Vec::new();
-                if (200..300).contains(&resp.status) {
+                if (200..300).contains(&resp.status()) {
                     actions.push(RuleAction::AckLeg { leg_id: leg.clone(), body: Vec::new(), content_type: None });
                 }
                 actions.push(RuleAction::ResolveCancelledReinvite { leg_id: leg, outbound_cseq });
@@ -497,7 +497,7 @@ fn core_rules() -> Vec<RuleDefinition> {
             &["relay-provisional", "confirm-dialog", "route-failure"],
             Match::response().method("INVITE").filter(|ctx| {
                 let cseq = match ctx.response() {
-                    Some(r) => r.cseq.seq as i64,
+                    Some(r) => r.cseq().seq() as i64,
                     None => return false,
                 };
                 // A `cancelled` snapshot is NOT relayable — its originator was
@@ -545,8 +545,8 @@ fn core_rules() -> Vec<RuleDefinition> {
                         return false;
                     }
                     let Some(resp) = ctx.response() else { return false };
-                    let cseq = resp.cseq.seq as i64;
-                    super::relay::acked_invite_cseq(d) == Some(resp.cseq.seq)
+                    let cseq = resp.cseq().seq() as i64;
+                    super::relay::acked_invite_cseq(d) == Some(resp.cseq().seq())
                         && call::helpers::find_pending_request(d, cseq).is_none()
                 }),
             |ctx| {
@@ -564,7 +564,7 @@ fn core_rules() -> Vec<RuleDefinition> {
             Match::response().method("INVITE").status_class(1).direction(Direction::FromB),
             |ctx| {
                 let b = ctx.source_leg_id.to_string();
-                let status = ctx.response().map(|r| r.status as i64);
+                let status = ctx.response().map(|r| r.status() as i64);
                 ok(vec![
                     RuleAction::UpdateLegState {
                         leg_id: b.clone(),
@@ -671,14 +671,14 @@ fn core_rules() -> Vec<RuleDefinition> {
                     let Some(resp) = ctx.response() else {
                         return false;
                     };
-                    if resp.status < 300 {
+                    if resp.status() < 300 {
                         return false;
                     }
-                    let cseq = resp.cseq.seq as i64;
+                    let cseq = resp.cseq().seq() as i64;
                     // Fork-correct dialog pick (mirrors `relay_response`): the
                     // responder's To-tag selects the exact source dialog, else
                     // the confirmed/first one.
-                    let to_tag = resp.to.tag.clone().unwrap_or_default();
+                    let to_tag = resp.to().tag().map(str::to_owned).unwrap_or_default();
                     ctx.source_leg()
                         .and_then(|leg| call::helpers::find_dialog_by_to_tag(leg, &to_tag))
                         .or_else(|| ctx.source_dialog())
@@ -694,12 +694,12 @@ fn core_rules() -> Vec<RuleDefinition> {
             Match::response()
                 .method("INVITE")
                 .direction(Direction::FromB)
-                .filter(|ctx| ctx.response().map(|r| r.status >= 300).unwrap_or(false)),
+                .filter(|ctx| ctx.response().map(|r| r.status() >= 300).unwrap_or(false)),
             |ctx| {
                 let b = ctx.source_leg_id.to_string();
                 let (status, reason) = ctx
                     .response()
-                    .map(|r| (r.status as i64, r.reason.clone()))
+                    .map(|r| (r.status() as i64, r.reason().to_string()))
                     .unwrap_or((500, "Server Error".into()));
                 // Tear the failed leg down + record the reject. The relay/terminate
                 // (or failover) is decided next.
@@ -730,7 +730,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                         let sip_headers: Vec<serde_json::Value> = ctx
                             .response()
                             .map(|r| {
-                                r.headers
+                                r.headers()
                                     .iter()
                                     .filter(|h| {
                                         !crate::initial_invite::STANDARD_HEADERS
@@ -936,7 +936,7 @@ fn core_rules() -> Vec<RuleDefinition> {
             // and `relay-non-invite-200` forwards the 200 to the peer. Port of
             // `absorbOptions200Rule`'s filter.
             Match::response().method("OPTIONS").status_class(2).filter(|ctx| {
-                let cseq = ctx.response().map(|r| r.cseq.seq as i64);
+                let cseq = ctx.response().map(|r| r.cseq().seq() as i64);
                 match (ctx.source_dialog(), cseq) {
                     (Some(d), Some(seq)) => call::helpers::find_pending_request(d, seq).is_none(),
                     _ => true,
@@ -958,7 +958,7 @@ fn core_rules() -> Vec<RuleDefinition> {
             // (matching the response CSeq) → this declines and `relay-non-invite-200`
             // forwards the 200 back to the requester. Mirrors `absorb-options-200`.
             Match::response().method("NOTIFY").status_class(2).filter(|ctx| {
-                let cseq = ctx.response().map(|r| r.cseq.seq as i64);
+                let cseq = ctx.response().map(|r| r.cseq().seq() as i64);
                 match (ctx.source_dialog(), cseq) {
                     (Some(d), Some(seq)) => call::helpers::find_pending_request(d, seq).is_none(),
                     _ => true,
@@ -1019,7 +1019,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                 // re-INVITE is ever pending (`reinvite-glare` 491s a second).
                 let acks_pending_reinvite = ctx
                     .request()
-                    .map(|r| r.cseq.seq as i64)
+                    .map(|r| r.cseq().seq() as i64)
                     .and_then(|c| {
                         ctx.call
                             .a_leg()

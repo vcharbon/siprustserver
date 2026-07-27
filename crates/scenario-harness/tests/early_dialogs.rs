@@ -33,9 +33,9 @@ async fn two_early_dialogs_winner_answers() {
 
     // The UAC sees two DISTINCT early dialogs (per-To-tag view of provisionals).
     let p1 = call.expect(180).await;
-    let t1 = p1.to.tag.clone().expect("e1 To-tag");
+    let t1 = p1.to().tag().map(str::to_owned).expect("e1 To-tag");
     let p2 = call.expect(183).await;
-    let t2 = p2.to.tag.clone().expect("e2 To-tag");
+    let t2 = p2.to().tag().map(str::to_owned).expect("e2 To-tag");
     assert_ne!(t1, t2, "distinct early dialogs carry distinct To-tags");
 
     // PRACK e2's reliable 183 (RFC 3262 MUST-014) — routed to e2's To-tag.
@@ -52,7 +52,7 @@ async fn two_early_dialogs_winner_answers() {
     uas.win("e2");
     uas.respond(200, "OK").send().await; // answer already sent in the reliable 183
     let ok = call.expect(200).await;
-    assert_eq!(ok.to.tag.as_deref(), Some(t2.as_str()), "the 2xx is under the winner e2");
+    assert_eq!(ok.to().tag(), Some(t2.as_str()), "the 2xx is under the winner e2");
 
     let mut dialog = call.ack().await; // ACK addresses only the winner
     bob.receive("ACK").await;
@@ -80,16 +80,16 @@ async fn three_way_fork_winner_not_last() {
     uas.respond_early("e2", 180, "Ringing").send().await;
     uas.respond_early("e3", 180, "Ringing").send().await;
 
-    let t1 = call.expect(180).await.to.tag.clone().expect("e1");
-    let t2 = call.expect(180).await.to.tag.clone().expect("e2");
-    let t3 = call.expect(180).await.to.tag.clone().expect("e3");
+    let t1 = call.expect(180).await.to().tag().map(str::to_owned).expect("e1");
+    let t2 = call.expect(180).await.to().tag().map(str::to_owned).expect("e2");
+    let t3 = call.expect(180).await.to().tag().map(str::to_owned).expect("e3");
     assert!(t1 != t2 && t2 != t3 && t1 != t3, "three distinct early dialogs");
 
     // The winner is e2 — created BEFORE e3.
     uas.win("e2");
     uas.respond(200, "OK").with_sdp(ANSWER).send().await; // offer in INVITE, answer here
     let ok = call.expect(200).await;
-    assert_eq!(ok.to.tag.as_deref(), Some(t2.as_str()), "e2 wins, not the last-created e3");
+    assert_eq!(ok.to().tag(), Some(t2.as_str()), "e2 wins, not the last-created e3");
 
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
@@ -118,8 +118,8 @@ async fn early_dialog_update_before_final() {
     uas.respond_early("e1", 180, "Ringing").send().await;
     uas.respond_early("e2", 183, "Session Progress").reliable(1).with_sdp(ANSWER).send().await;
 
-    let _t1 = call.expect(180).await.to.tag.clone().expect("e1");
-    let t2 = call.expect(183).await.to.tag.clone().expect("e2");
+    let _t1 = call.expect(180).await.to().tag().map(str::to_owned).expect("e1");
+    let t2 = call.expect(183).await.to().tag().map(str::to_owned).expect("e2");
 
     // PRACK e2 (completes the initial offer/answer on the early dialog).
     let mut prack = call
@@ -140,7 +140,7 @@ async fn early_dialog_update_before_final() {
         .await;
     let mut ubob = bob.receive("UPDATE").await;
     assert_eq!(
-        ubob.request().to.tag.as_deref(),
+        ubob.request().to().tag(),
         Some(t2.as_str()),
         "the UPDATE is routed to e2's early dialog",
     );
@@ -267,9 +267,9 @@ async fn template_provisional_targets_early_dialog() {
     uas.respond_template_early("e2", &tmpl, EmitOpts::default()).send().await;
 
     let p1 = call.expect(180).await;
-    let t1 = p1.to.tag.clone().expect("e1");
+    let t1 = p1.to().tag().map(str::to_owned).expect("e1");
     let p2 = call.expect(180).await;
-    let t2 = p2.to.tag.clone().expect("e2");
+    let t2 = p2.to().tag().map(str::to_owned).expect("e2");
     assert_ne!(t1, t2, "distinct early dialogs");
     // e2's template provisional: frozen headers byte-preserved, own To-tag.
     assert_eq!(
@@ -286,7 +286,7 @@ async fn template_provisional_targets_early_dialog() {
     uas.win("e2");
     uas.respond(200, "OK").with_sdp(ANSWER).send().await;
     let ok = call.expect(200).await;
-    assert_eq!(ok.to.tag.as_deref(), Some(t2.as_str()), "winner is e2");
+    assert_eq!(ok.to().tag(), Some(t2.as_str()), "winner is e2");
 
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;

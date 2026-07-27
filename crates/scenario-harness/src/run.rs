@@ -111,8 +111,8 @@ impl RunReport {
 
 fn matches(msg: &SipMessage, matcher: &Match) -> bool {
     match (msg, matcher) {
-        (SipMessage::Request(r), Match::Method(m)) => r.method == *m,
-        (SipMessage::Response(r), Match::Status(s)) => r.status == *s,
+        (SipMessage::Request(r), Match::Method(m)) => r.method().as_str() == m,
+        (SipMessage::Response(r), Match::Status(s)) => r.status() == *s,
         (_, Match::Any) => true,
         _ => false,
     }
@@ -120,8 +120,8 @@ fn matches(msg: &SipMessage, matcher: &Match) -> bool {
 
 fn summarize(msg: &SipMessage) -> String {
     match msg {
-        SipMessage::Request(r) => format!("{} {}", r.method, r.uri),
-        SipMessage::Response(r) => format!("{} {} ({})", r.status, r.reason, r.cseq.method),
+        SipMessage::Request(r) => format!("{} {}", r.method(), r.request_uri().text()),
+        SipMessage::Response(r) => format!("{} {} ({})", r.status(), r.reason(), r.cseq().method()),
     }
 }
 

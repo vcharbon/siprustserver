@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use bytes::Bytes;
 use sip_message::generators::generate_ack_for_non_2xx;
 use sip_message::header::ParamValue;
-use sip_message::message_helpers::decode_param;
+use sip_message::param_codec::decode_param;
 use sip_message::{serialize, Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
@@ -41,7 +41,7 @@ impl Owner {
         // — the same path the B2BUA already uses (OutboundTxnMode::Raw) — without
         // touching the map. This closes the branch-collision foot-gun at its source,
         // so the branch-only key never has to disambiguate by method.
-        if msg.method == Method::Cancel || msg.method == Method::Ack {
+        if msg.method() == Method::Cancel || msg.method() == Method::Ack {
             self.send_buffer(endpoint, &buf, dest).await;
             let branch = msg.top_via().branch().unwrap_or_default().to_string();
             return match txn_type {
@@ -170,7 +170,7 @@ impl Owner {
                 let method = t
                     .original_request
                     .as_ref()
-                    .map(|r| r.method.to_string())
+                    .map(|r| r.method().to_string())
                     .or_else(|| match t.kind {
                         TxnKind::Invite => Some("INVITE".to_string()),
                         TxnKind::NonInvite => None,
@@ -282,7 +282,7 @@ impl Owner {
         // INVITE client stops retransmitting on a provisional (§17.1.1.2); a
         // non-INVITE client KEEPS retransmitting at T2 in Proceeding (§17.1.2.2),
         // so leave its timer running.
-        if resp.status == 100 {
+        if resp.status() == 100 {
             if !branch.is_empty() {
                 let key = match self.txns.get_mut(branch) {
                     Some(txn) if txn.role == TxnRole::Client => {
@@ -299,7 +299,7 @@ impl Owner {
         if !branch.is_empty() {
             // CANCEL responses reuse the INVITE branch — never match them to the
             // INVITE client txn (would tear it down on the 200 and miss the 487).
-            if resp.cseq().method() == &Method::Cancel {
+            if resp.cseq().method() == Method::Cancel {
                 self.emit(TransactionEvent::Message {
                     message: Box::new(SipMessage::Response(resp)),
                     src,
@@ -315,7 +315,7 @@ impl Owner {
                 .map(|t| (t.kind, t.state, t.original_request.clone(), t.destination));
 
             if let Some((kind, state, original_request, destination)) = client_match {
-                if resp.status < 200 {
+                if resp.status() < 200 {
                     // Provisional 1xx>100 — Proceeding. Ignore once Completed (a
                     // late provisional must not downgrade a txn that already took its
                     // final). INVITE stops retransmitting (§17.1.1.2); non-INVITE
@@ -330,13 +330,13 @@ impl Owner {
                         };
                         self.cancel_timer(key);
                     }
-                } else if kind == TxnKind::Invite && resp.status >= 300 {
+                } else if kind == TxnKind::Invite && resp.status() >= 300 {
                     // Non-2xx INVITE final: (re-)ACK hop-by-hop (RFC 3261 §17.1.1.2).
                     if let (Some(orig), Some(dest)) = (original_request, destination) {
                         let ack = generate_ack_for_non_2xx(&orig, &resp);
                         // The recipe froze the ACK into its own image, which IS
                         // its wire form — send that instead of rendering it twice.
-                        self.send_buffer(endpoint, &ack.raw, dest).await;
+                        self.send_buffer(endpoint, ack.image(), dest).await;
                     }
                     if state == TxnState::Completed {
                         // A RETRANSMITTED non-2xx final (our first ACK was lost): we

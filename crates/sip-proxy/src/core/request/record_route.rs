@@ -31,7 +31,7 @@ impl ProxyCore {
         is_worker_outbound: bool,
         via_worker_addr: &Option<ProxyAddr>,
     ) -> RequestDraft {
-        let method = req.method.as_str();
+        let method = req.method().as_str();
         let is_initial_dialog_req = req.to().tag().map(str::is_empty).unwrap_or(true);
         if !is_dialog_creating(method) || !is_initial_dialog_req {
             return draft;

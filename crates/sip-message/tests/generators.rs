@@ -8,8 +8,25 @@ use sip_message::generators::{
     GenerateOutOfDialogRequestOpts, GenerateResponseOpts, InDialogMethod,
     InviteClientTransactionHandle, OutOfDialogMethod, SipTransport, StackDialog, ViaSpec,
 };
-use sip_message::message_helpers::{get_header, get_headers};
-use sip_message::{hydrate_request, SipHeader, SipMessage, SipRequest};
+use sip_message::header::HeaderName;
+use sip_message::header::HeaderValue;
+use sip_message::{hydrate_request, SipHeader, SipMessage, SipRequest, SipStr};
+
+fn name(header: &str) -> HeaderName {
+    HeaderName::of(&SipStr::owned(header))
+}
+
+/// First value of one header.
+fn first_value<'a>(headers: &'a [SipHeader], header: &str) -> Option<&'a str> {
+    let named = name(header);
+    headers.iter().find(|h| named.matches(&h.name)).map(|h| h.value.as_str())
+}
+
+/// Every value of one header, in wire order.
+fn all_values<'a>(headers: &'a [SipHeader], header: &str) -> Vec<&'a str> {
+    let named = name(header);
+    headers.iter().filter(|h| named.matches(&h.name)).map(|h| h.value.as_str()).collect()
+}
 
 fn hdr(name: &str, value: &str) -> SipHeader {
     SipHeader { name: name.to_string().into(), value: value.to_string().into() }
@@ -149,24 +166,24 @@ fn builds_initial_invite_with_via_contact_maxforwards_content_length() {
             ..Default::default()
         },
     );
-    assert_eq!(req.method, "INVITE");
-    assert_eq!(req.uri, "sip:bob@biloxi.example.com");
+    assert_eq!(req.method(), "INVITE");
+    assert_eq!(req.request_uri().text(), "sip:bob@biloxi.example.com");
     assert_eq!(
-        get_header(&req.headers, "Via"),
+        first_value(req.headers(), "Via"),
         Some("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKtest00000000;cr=cref1;lg=a")
     );
     assert_eq!(
-        get_header(&req.headers, "Contact"),
+        first_value(req.headers(), "Contact"),
         Some("<sip:b2bua@10.0.0.1:5060;callRef=cref1;leg=a>")
     );
-    assert_eq!(get_header(&req.headers, "Max-Forwards"), Some("70"));
-    assert_eq!(get_header(&req.headers, "From"), Some("<sip:b2bua@10.0.0.1:5060>;tag=b2bua-local"));
-    assert_eq!(get_header(&req.headers, "To"), Some("<sip:bob@biloxi.example.com>"));
-    assert_eq!(get_header(&req.headers, "Call-ID"), Some("call-bleg-1"));
-    assert_eq!(get_header(&req.headers, "CSeq"), Some("1 INVITE"));
-    assert_eq!(get_header(&req.headers, "Content-Type"), Some("application/sdp"));
-    assert_eq!(get_header(&req.headers, "Content-Length"), Some(sdp_body().len().to_string().as_str()));
-    assert_eq!(req.body, sdp_body());
+    assert_eq!(first_value(req.headers(), "Max-Forwards"), Some("70"));
+    assert_eq!(first_value(req.headers(), "From"), Some("<sip:b2bua@10.0.0.1:5060>;tag=b2bua-local"));
+    assert_eq!(first_value(req.headers(), "To"), Some("<sip:bob@biloxi.example.com>"));
+    assert_eq!(first_value(req.headers(), "Call-ID"), Some("call-bleg-1"));
+    assert_eq!(first_value(req.headers(), "CSeq"), Some("1 INVITE"));
+    assert_eq!(first_value(req.headers(), "Content-Type"), Some("application/sdp"));
+    assert_eq!(first_value(req.headers(), "Content-Length"), Some(sdp_body().len().to_string().as_str()));
+    assert_eq!(&req.body()[..], &sdp_body());
 }
 
 #[test]
@@ -185,13 +202,13 @@ fn passes_extra_headers_through_verbatim() {
             via: Some(via()),
             contact: Some(contact()),
             extra_headers: transparent,
-            body: a_leg.body.to_vec(),
+            body: a_leg.body().to_vec(),
             ..Default::default()
         },
     );
-    assert_eq!(get_header(&req.headers, "Allow"), Some("INVITE, ACK, CANCEL, BYE, OPTIONS"));
-    assert_eq!(get_header(&req.headers, "Supported"), Some("replaces, 100rel"));
-    assert_eq!(get_header(&req.headers, "P-Asserted-Identity"), Some("<sip:alice@atlanta.example.com>"));
+    assert_eq!(first_value(req.headers(), "Allow"), Some("INVITE, ACK, CANCEL, BYE, OPTIONS"));
+    assert_eq!(first_value(req.headers(), "Supported"), Some("replaces, 100rel"));
+    assert_eq!(first_value(req.headers(), "P-Asserted-Identity"), Some("<sip:alice@atlanta.example.com>"));
 }
 
 #[test]
@@ -210,8 +227,8 @@ fn omits_content_type_when_body_empty() {
             ..Default::default()
         },
     );
-    assert_eq!(get_header(&req.headers, "Content-Type"), None);
-    assert_eq!(get_header(&req.headers, "Content-Length"), Some("0"));
+    assert_eq!(first_value(req.headers(), "Content-Type"), None);
+    assert_eq!(first_value(req.headers(), "Content-Length"), Some("0"));
 }
 
 #[test]
@@ -231,7 +248,7 @@ fn honours_caller_provided_max_forwards() {
             ..Default::default()
         },
     );
-    assert_eq!(get_header(&req.headers, "Max-Forwards"), Some("42"));
+    assert_eq!(first_value(req.headers(), "Max-Forwards"), Some("42"));
 }
 
 #[test]
@@ -251,7 +268,7 @@ fn preserves_caller_name_addr_in_from_without_double_wrapping() {
         },
     );
     assert_eq!(
-        get_header(&req.headers, "From"),
+        first_value(req.headers(), "From"),
         Some("\"Alice\" <sip:alice@atlanta.example.com>;tag=alice-tag")
     );
 }
@@ -270,13 +287,13 @@ fn bumps_cseq_uses_remote_target_swaps_tags() {
         },
     );
     let request = &result.request;
-    assert_eq!(request.method, "BYE");
-    assert_eq!(request.uri, "sip:bob@192.0.2.20:5060");
-    assert_eq!(get_header(&request.headers, "CSeq"), Some("101 BYE"));
+    assert_eq!(request.method(), "BYE");
+    assert_eq!(request.request_uri().text(), "sip:bob@192.0.2.20:5060");
+    assert_eq!(first_value(request.headers(), "CSeq"), Some("101 BYE"));
     assert_eq!(result.dialog.local_cseq, 101);
-    assert_eq!(get_header(&request.headers, "From"), Some("<sip:b2bua@10.0.0.1:5060>;tag=b2bua-local"));
-    assert_eq!(get_header(&request.headers, "To"), Some("<sip:bob@192.0.2.20:5060>;tag=bob-remote"));
-    assert_eq!(get_header(&request.headers, "Call-ID"), Some("call-bleg-1"));
+    assert_eq!(first_value(request.headers(), "From"), Some("<sip:b2bua@10.0.0.1:5060>;tag=b2bua-local"));
+    assert_eq!(first_value(request.headers(), "To"), Some("<sip:bob@192.0.2.20:5060>;tag=bob-remote"));
+    assert_eq!(first_value(request.headers(), "Call-ID"), Some("call-bleg-1"));
 }
 
 #[test]
@@ -294,11 +311,11 @@ fn emits_one_route_header_per_entry_in_order() {
         &GenerateInDialogRequestOpts { via: Some(via()), contact: Some(contact()), ..Default::default() },
     );
     assert_eq!(
-        get_headers(&result.request.headers, "Route"),
+        all_values(result.request.headers(), "Route"),
         vec!["<sip:proxy1.example.com;lr>", "<sip:proxy2.example.com;lr>"]
     );
     // Loose: Request-URI stays at the remote target.
-    assert_eq!(result.request.uri, "sip:bob@192.0.2.20:5060");
+    assert_eq!(result.request.request_uri().text(), "sip:bob@192.0.2.20:5060");
 }
 
 #[test]
@@ -318,23 +335,26 @@ fn strict_route_rewrites_request_uri_and_appends_remote_target() {
         &d,
         &GenerateInDialogRequestOpts { via: Some(via()), contact: Some(contact()), ..Default::default() },
     );
-    assert_eq!(result.request.uri, "sip:strict1.example.com", "R-URI = first (strict) route");
+    assert_eq!(result.request.request_uri().text(), "sip:strict1.example.com", "R-URI = first (strict) route");
     assert_eq!(
-        get_headers(&result.request.headers, "Route"),
+        all_values(result.request.headers(), "Route"),
         vec!["<sip:proxy2.example.com;lr>", "<sip:bob@192.0.2.20:5060>"],
         "rest of route set then the remote target as the last Route"
     );
 }
 
 #[test]
-fn first_route_is_loose_detects_lr_param_only() {
-    use sip_message::generators::first_route_is_loose;
-    assert!(first_route_is_loose("<sip:p;lr>"));
-    assert!(first_route_is_loose("<sip:p;maddr=x;lr>"));
-    assert!(first_route_is_loose("<sip:p:5060;lr;ob>"));
-    assert!(!first_route_is_loose("<sip:p>"));
-    assert!(!first_route_is_loose("<sip:lr-host.example.com>")); // not a `;lr` param
-    assert!(!first_route_is_loose("<sip:p;lrx>")); // `;lr` must end the token
+fn loose_routing_is_a_uri_parameter_not_a_substring() {
+    use sip_message::header::{HeaderValue, RouteEntry};
+    let loose = |value: &str| {
+        RouteEntry::parse(&SipStr::owned(value)).expect("readable Route").uri().is_loose_route()
+    };
+    assert!(loose("<sip:p;lr>"));
+    assert!(loose("<sip:p;maddr=x;lr>"));
+    assert!(loose("<sip:p:5060;lr;ob>"));
+    assert!(!loose("<sip:p>"));
+    assert!(!loose("<sip:lr-host.example.com>")); // not a `;lr` param
+    assert!(!loose("<sip:p;lrx>")); // `;lr` must end the token
 }
 
 #[test]
@@ -349,8 +369,8 @@ fn adds_rack_on_prack() {
             ..Default::default()
         },
     );
-    assert_eq!(result.request.method, "PRACK");
-    assert_eq!(get_header(&result.request.headers, "RAck"), Some("1 101 INVITE"));
+    assert_eq!(result.request.method(), "PRACK");
+    assert_eq!(first_value(result.request.headers(), "RAck"), Some("1 101 INVITE"));
 }
 
 #[test]
@@ -369,9 +389,9 @@ fn adds_event_and_subscription_state_on_notify() {
             ..Default::default()
         },
     );
-    assert_eq!(get_header(&result.request.headers, "Event"), Some("refer"));
-    assert_eq!(get_header(&result.request.headers, "Subscription-State"), Some("active;expires=60"));
-    assert_eq!(get_header(&result.request.headers, "Content-Type"), Some("message/sipfrag;version=2.0"));
+    assert_eq!(first_value(result.request.headers(), "Event"), Some("refer"));
+    assert_eq!(first_value(result.request.headers(), "Subscription-State"), Some("active;expires=60"));
+    assert_eq!(first_value(result.request.headers(), "Content-Type"), Some("message/sipfrag;version=2.0"));
 }
 
 #[test]
@@ -381,7 +401,7 @@ fn in_dialog_bye_omits_contact() {
         &dialog(),
         &GenerateInDialogRequestOpts { via: Some(via()), contact: Some(contact()), ..Default::default() },
     );
-    assert_eq!(get_header(&result.request.headers, "Contact"), None);
+    assert_eq!(first_value(result.request.headers(), "Contact"), None);
 }
 
 // --- generate_ack_for_2xx ---
@@ -397,9 +417,9 @@ fn reads_cseq_from_invite_handle_not_dialog() {
             ..Default::default()
         },
     );
-    assert_eq!(ack.method, "ACK");
-    assert_eq!(get_header(&ack.headers, "CSeq"), Some("42 ACK"));
-    assert!(get_header(&ack.headers, "Via").unwrap().contains("branch=z9hG4bKackbranch"));
+    assert_eq!(ack.method(), "ACK");
+    assert_eq!(first_value(ack.headers(), "CSeq"), Some("42 ACK"));
+    assert!(first_value(ack.headers(), "Via").unwrap().contains("branch=z9hG4bKackbranch"));
 }
 
 #[test]
@@ -414,7 +434,7 @@ fn ack_for_2xx_empty_remote_tag_yields_tagless_to_no_panic() {
         &d,
         &GenerateAckFor2xxOpts { via: Some(via()), ..Default::default() },
     );
-    let to = get_header(&ack.headers, "To").expect("ACK has a To header");
+    let to = first_value(ack.headers(), "To").expect("ACK has a To header");
     assert!(!to.contains("tag="), "empty remote_tag → tag-less To, got {to:?}");
     assert!(!to.contains(";tag="), "no malformed empty ;tag= that hydrate_request rejects");
 }
@@ -431,8 +451,8 @@ fn ack_request_uri_is_remote_target_routes_from_route_set() {
         &d,
         &GenerateAckFor2xxOpts { via: Some(via()), ..Default::default() },
     );
-    assert_eq!(ack.uri, "sip:bob-contact@192.0.2.99:5060");
-    assert_eq!(get_headers(&ack.headers, "Route"), vec!["<sip:proxy.example.com;lr>"]);
+    assert_eq!(ack.request_uri().text(), "sip:bob-contact@192.0.2.99:5060");
+    assert_eq!(all_values(ack.headers(), "Route"), vec!["<sip:proxy.example.com;lr>"]);
 }
 
 #[test]
@@ -442,9 +462,9 @@ fn ack_carries_sdp_body() {
         &dialog(),
         &GenerateAckFor2xxOpts { via: Some(via()), body: sdp_body(), ..Default::default() },
     );
-    assert_eq!(get_header(&ack.headers, "Content-Type"), Some("application/sdp"));
-    assert_eq!(get_header(&ack.headers, "Content-Length"), Some(sdp_body().len().to_string().as_str()));
-    assert_eq!(ack.body, sdp_body());
+    assert_eq!(first_value(ack.headers(), "Content-Type"), Some("application/sdp"));
+    assert_eq!(first_value(ack.headers(), "Content-Length"), Some(sdp_body().len().to_string().as_str()));
+    assert_eq!(&ack.body()[..], &sdp_body());
 }
 
 // --- generate_cancel ---
@@ -452,9 +472,9 @@ fn ack_carries_sdp_body() {
 #[test]
 fn cancel_reuses_invite_topmost_via_verbatim() {
     let cancel = generate_cancel(&invite_handle());
-    assert_eq!(cancel.method, "CANCEL");
+    assert_eq!(cancel.method(), "CANCEL");
     assert_eq!(
-        get_header(&cancel.headers, "Via"),
+        first_value(cancel.headers(), "Via"),
         Some("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKinvite123;cr=cref1;lg=b-1")
     );
 }
@@ -462,12 +482,12 @@ fn cancel_reuses_invite_topmost_via_verbatim() {
 #[test]
 fn cancel_mirrors_request_uri_callid_from_to_cseq() {
     let cancel = generate_cancel(&invite_handle());
-    assert_eq!(cancel.uri, "sip:bob@192.0.2.20:5060");
-    assert_eq!(get_header(&cancel.headers, "Call-ID"), Some("call-bleg-1"));
-    assert_eq!(get_header(&cancel.headers, "From"), Some("<sip:b2bua@10.0.0.1:5060>;tag=b2bua-local"));
-    assert_eq!(get_header(&cancel.headers, "To"), Some("<sip:bob@192.0.2.20:5060>"));
-    assert_eq!(get_header(&cancel.headers, "CSeq"), Some("42 CANCEL"));
-    assert_eq!(get_header(&cancel.headers, "Content-Length"), Some("0"));
+    assert_eq!(cancel.request_uri().text(), "sip:bob@192.0.2.20:5060");
+    assert_eq!(first_value(cancel.headers(), "Call-ID"), Some("call-bleg-1"));
+    assert_eq!(first_value(cancel.headers(), "From"), Some("<sip:b2bua@10.0.0.1:5060>;tag=b2bua-local"));
+    assert_eq!(first_value(cancel.headers(), "To"), Some("<sip:bob@192.0.2.20:5060>"));
+    assert_eq!(first_value(cancel.headers(), "CSeq"), Some("42 CANCEL"));
+    assert_eq!(first_value(cancel.headers(), "Content-Length"), Some("0"));
 }
 
 #[test]
@@ -489,7 +509,7 @@ fn cancel_and_non_2xx_ack_echo_the_invite_request_uri_octet_for_octet() {
     let invite = hydrate_request("INVITE", r_uri, headers, Vec::new()).expect("invite hydrates");
     let handle = InviteClientTransactionHandle { original_invite: invite };
 
-    assert_eq!(generate_cancel(&handle).uri, r_uri);
+    assert_eq!(generate_cancel(&handle).request_uri().text(), r_uri);
 
     let final487 = generate_response(
         &handle.original_invite,
@@ -497,7 +517,10 @@ fn cancel_and_non_2xx_ack_echo_the_invite_request_uri_octet_for_octet() {
         "Request Terminated",
         &GenerateResponseOpts { to_tag: Some("uas-tag".to_string()), ..Default::default() },
     );
-    assert_eq!(generate_ack_for_non_2xx(&handle.original_invite, &final487).uri, r_uri);
+    assert_eq!(
+        generate_ack_for_non_2xx(&handle.original_invite, &final487).request_uri().text(),
+        r_uri
+    );
 }
 
 #[test]
@@ -523,7 +546,7 @@ fn cancel_echoes_the_invite_route_set_verbatim() {
     let cancel = generate_cancel(&InviteClientTransactionHandle { original_invite: invite });
 
     let cancel_routes: Vec<String> = cancel
-        .headers
+        .headers()
         .iter()
         .filter(|h| h.name.eq_ignore_ascii_case("Route"))
         .map(|h| h.value.to_string())
@@ -538,7 +561,7 @@ fn cancel_echoes_the_invite_route_set_verbatim() {
     );
     // Via branch (the transaction-correlation key) still matches the INVITE.
     assert_eq!(
-        get_header(&cancel.headers, "Via"),
+        first_value(cancel.headers(), "Via"),
         Some("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKinvite123;cr=cref1;lg=b-1")
     );
 }
@@ -549,11 +572,11 @@ fn cancel_echoes_the_invite_route_set_verbatim() {
 fn echoes_via_from_to_callid_cseq() {
     let req = make_a_leg_invite();
     let resp = generate_response(&req, 100, "Trying", &GenerateResponseOpts::default());
-    assert_eq!(get_header(&resp.headers, "Via"), get_header(&req.headers, "Via"));
-    assert_eq!(get_header(&resp.headers, "From"), get_header(&req.headers, "From"));
-    assert_eq!(get_header(&resp.headers, "To"), get_header(&req.headers, "To"));
-    assert_eq!(get_header(&resp.headers, "Call-ID"), get_header(&req.headers, "Call-ID"));
-    assert_eq!(get_header(&resp.headers, "CSeq"), get_header(&req.headers, "CSeq"));
+    assert_eq!(first_value(resp.headers(), "Via"), first_value(req.headers(), "Via"));
+    assert_eq!(first_value(resp.headers(), "From"), first_value(req.headers(), "From"));
+    assert_eq!(first_value(resp.headers(), "To"), first_value(req.headers(), "To"));
+    assert_eq!(first_value(resp.headers(), "Call-ID"), first_value(req.headers(), "Call-ID"));
+    assert_eq!(first_value(resp.headers(), "CSeq"), first_value(req.headers(), "CSeq"));
 }
 
 #[test]
@@ -565,7 +588,7 @@ fn adds_to_tag_when_status_gt_100_and_request_lacks_one() {
         "Ringing",
         &GenerateResponseOpts { to_tag: Some("b2bua-uas-tag".to_string()), ..Default::default() },
     );
-    assert_eq!(get_header(&resp.headers, "To"), Some("<sip:bob@biloxi.example.com>;tag=b2bua-uas-tag"));
+    assert_eq!(first_value(resp.headers(), "To"), Some("<sip:bob@biloxi.example.com>;tag=b2bua-uas-tag"));
 }
 
 #[test]
@@ -576,11 +599,11 @@ fn mints_fallback_to_tag_when_caller_supplies_none_on_non100() {
     // so a well-formed response is always emitted.
     let req = make_a_leg_invite();
     let resp = generate_response(&req, 200, "OK", &GenerateResponseOpts::default());
-    let to = get_header(&resp.headers, "To").expect("To header");
+    let to = first_value(resp.headers(), "To").expect("To header");
     assert!(to.contains(";tag=b2bua-fb-"), "expected fallback To-tag, got {to:?}");
     // Deterministic per Call-ID: a retransmit re-derives the same tag.
     let resp2 = generate_response(&req, 200, "OK", &GenerateResponseOpts::default());
-    assert_eq!(get_header(&resp2.headers, "To"), Some(to));
+    assert_eq!(first_value(resp2.headers(), "To"), Some(to));
 }
 
 #[test]
@@ -592,17 +615,19 @@ fn does_not_add_tag_on_100_trying() {
         "Trying",
         &GenerateResponseOpts { to_tag: Some("should-be-ignored".to_string()), ..Default::default() },
     );
-    assert_eq!(get_header(&resp.headers, "To"), Some("<sip:bob@biloxi.example.com>"));
+    assert_eq!(first_value(resp.headers(), "To"), Some("<sip:bob@biloxi.example.com>"));
 }
 
 #[test]
 fn preserves_already_present_to_tag() {
-    let mut req = make_a_leg_invite();
-    for h in req.headers.iter_mut() {
-        if h.name == "To" {
-            h.value = "<sip:bob@biloxi.example.com>;tag=existing".to_string().into();
-        }
-    }
+    let req = make_a_leg_invite()
+        .thaw()
+        .set(sip_message::header::To::parse(&SipStr::owned(
+            "<sip:bob@biloxi.example.com>;tag=existing",
+        ))
+        .expect("readable To"))
+        .freeze()
+        .expect("still complete");
     let resp = generate_response(
         &req,
         200,
@@ -613,7 +638,7 @@ fn preserves_already_present_to_tag() {
             ..Default::default()
         },
     );
-    assert_eq!(get_header(&resp.headers, "To"), Some("<sip:bob@biloxi.example.com>;tag=existing"));
+    assert_eq!(first_value(resp.headers(), "To"), Some("<sip:bob@biloxi.example.com>;tag=existing"));
 }
 
 #[test]
@@ -629,7 +654,7 @@ fn emits_contact_when_provided() {
             ..Default::default()
         },
     );
-    assert_eq!(get_header(&resp.headers, "Contact"), Some("<sip:b2bua@10.0.0.1:5060;callRef=cref1;leg=a>"));
+    assert_eq!(first_value(resp.headers(), "Contact"), Some("<sip:b2bua@10.0.0.1:5060;callRef=cref1;leg=a>"));
 }
 
 #[test]
@@ -641,7 +666,7 @@ fn omits_contact_when_not_provided() {
         "Busy Here",
         &GenerateResponseOpts { to_tag: Some("b2bua-uas-tag".to_string()), ..Default::default() },
     );
-    assert_eq!(get_header(&resp.headers, "Contact"), None);
+    assert_eq!(first_value(resp.headers(), "Contact"), None);
 }
 
 // --- generate_ack_for_non_2xx ---
@@ -656,13 +681,13 @@ fn ack_non_2xx_reuses_invite_via_and_copies_response_from_to() {
         &GenerateResponseOpts { to_tag: Some("uas-tag".to_string()), ..Default::default() },
     );
     let ack = generate_ack_for_non_2xx(&handle.original_invite, &final487);
-    assert_eq!(ack.method, "ACK");
-    assert_eq!(ack.uri, "sip:bob@192.0.2.20:5060");
-    assert_eq!(get_header(&ack.headers, "Via"), get_header(&handle.original_invite.headers, "Via"));
-    assert_eq!(get_header(&ack.headers, "From"), get_header(&final487.headers, "From"));
-    assert_eq!(get_header(&ack.headers, "To"), get_header(&final487.headers, "To"));
-    assert_eq!(get_header(&ack.headers, "Call-ID"), Some("call-bleg-1"));
-    assert_eq!(get_header(&ack.headers, "CSeq"), Some("42 ACK"));
+    assert_eq!(ack.method(), "ACK");
+    assert_eq!(ack.request_uri().text(), "sip:bob@192.0.2.20:5060");
+    assert_eq!(first_value(ack.headers(), "Via"), first_value(handle.original_invite.headers(), "Via"));
+    assert_eq!(first_value(ack.headers(), "From"), first_value(final487.headers(), "From"));
+    assert_eq!(first_value(ack.headers(), "To"), first_value(final487.headers(), "To"));
+    assert_eq!(first_value(ack.headers(), "Call-ID"), Some("call-bleg-1"));
+    assert_eq!(first_value(ack.headers(), "CSeq"), Some("42 ACK"));
 }
 
 #[test]
@@ -692,7 +717,7 @@ fn ack_non_2xx_echoes_the_invite_route_set_verbatim() {
     );
     let ack = generate_ack_for_non_2xx(&invite, &final486);
     let ack_routes: Vec<String> = ack
-        .headers
+        .headers()
         .iter()
         .filter(|h| h.name.eq_ignore_ascii_case("Route"))
         .map(|h| h.value.to_string())

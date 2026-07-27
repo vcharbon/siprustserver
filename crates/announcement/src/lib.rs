@@ -88,7 +88,7 @@ fn on_media_answer(ctx: &RuleContext) -> Option<RuleHandleResult> {
     let data = ann_data(&ctx.call)?;
     let media = media_leg_id(&ctx.call)?;
     let resp = ctx.response()?;
-    let mrf_sdp = resp.body.clone();
+    let mrf_sdp = resp.body().clone();
     ok(vec![
         // Establish the media dialog so the MSCML INFO can ride it.
         RuleAction::ConfirmDialog { leg_id: media.clone() },
@@ -184,7 +184,7 @@ fn mscml_reject_status(code: u16) -> (u16, &'static str) {
 fn on_mscml_failed(ctx: &RuleContext) -> Option<RuleHandleResult> {
     media_leg_id(&ctx.call)?; // fire only while a parked media leg exists
     let req = ctx.request()?;
-    let code = mscml::parse_response_code(&req.body).unwrap_or(500);
+    let code = mscml::parse_response_code(req.body()).unwrap_or(500);
     let (status, reason) = mscml_reject_status(code);
     ok(vec![
         // Answer the MRF's in-dialog INFO (the B2BUA is its UAS).
@@ -211,8 +211,8 @@ fn on_mscml_failed(ctx: &RuleContext) -> Option<RuleHandleResult> {
 fn on_media_failure(ctx: &RuleContext) -> Option<RuleHandleResult> {
     let media = media_leg_id(&ctx.call)?;
     let resp = ctx.response()?;
-    let status = resp.status;
-    let reason = resp.reason.clone();
+    let status = resp.status();
+    let reason = resp.reason().to_string();
     ok(vec![
         RuleAction::AddCdrEvent {
             event_type: CdrEventType::Reject,
@@ -309,7 +309,7 @@ define_service! {
                 .direction(Direction::FromB)
                 .filter(|ctx| {
                     on_media_leg(ctx)
-                        && ctx.request().is_some_and(|r| mscml::is_success_response(&r.body))
+                        && ctx.request().is_some_and(|r| mscml::is_success_response(r.body()))
                 }),
             handle: on_mscml_done,
         },
@@ -330,7 +330,7 @@ define_service! {
                 .direction(Direction::FromB)
                 .filter(|ctx| {
                     on_media_leg(ctx)
-                        && ctx.request().is_some_and(|r| mscml::is_failure_response(&r.body))
+                        && ctx.request().is_some_and(|r| mscml::is_failure_response(r.body()))
                 }),
             handle: on_mscml_failed,
         },
@@ -348,7 +348,7 @@ define_service! {
                 .method("INVITE")
                 .direction(Direction::FromB)
                 .filter(|ctx| {
-                    on_media_leg(ctx) && ctx.response().is_some_and(|r| r.status >= 300)
+                    on_media_leg(ctx) && ctx.response().is_some_and(|r| r.status() >= 300)
                 }),
             handle: on_media_failure,
         },

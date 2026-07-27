@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use sip_message::message_helpers::get_header;
+use sip_message::header::HeaderName;
 use sip_message::{CustomParser, SipMessage, SipParser};
 
 fn fixture(category: &str, name: &str) -> Vec<u8> {
@@ -37,44 +37,46 @@ fn request(category: &str, name: &str) -> sip_message::SipRequest {
 #[test]
 fn v3_1_1_3_valid_percent_escaping() {
     let req = request("rfc4475-valid", "validPercentEscaping");
-    assert_eq!(req.method, "INVITE");
-    assert!(req.uri.contains("example.net"), "uri: {}", req.uri);
+    assert_eq!(req.method(), "INVITE");
+    let uri = req.request_uri().text();
+    assert!(uri.contains("example.net"), "uri: {uri}");
 }
 
 #[test]
 fn v3_1_1_4_escaped_nulls() {
-    assert_eq!(request("rfc4475-valid", "escapedNulls").method, "REGISTER");
+    assert_eq!(request("rfc4475-valid", "escapedNulls").method(), "REGISTER");
 }
 
 #[test]
 fn v3_1_1_5_percent_not_escape() {
-    assert!(!request("rfc4475-valid", "percentNotEscape").method.as_str().is_empty());
+    assert!(!request("rfc4475-valid", "percentNotEscape").method().as_str().is_empty());
 }
 
 #[test]
 fn v3_1_1_6_no_lws_before_angle_bracket() {
-    assert_eq!(request("rfc4475-valid", "noLwsBeforeAngleBracket").method, "OPTIONS");
+    assert_eq!(request("rfc4475-valid", "noLwsBeforeAngleBracket").method(), "OPTIONS");
 }
 
 #[test]
 fn v3_1_1_8_extra_trailing_octets() {
-    assert_eq!(request("rfc4475-valid", "extraTrailingOctets").method, "REGISTER");
+    assert_eq!(request("rfc4475-valid", "extraTrailingOctets").method(), "REGISTER");
 }
 
 #[test]
 fn v3_1_1_9_semicolon_in_user_part() {
     let req = request("rfc4475-valid", "semicolonInUserPart");
-    assert_eq!(req.method, "OPTIONS");
-    assert!(req.uri.contains("example.com"), "uri: {}", req.uri);
+    assert_eq!(req.method(), "OPTIONS");
+    let uri = req.request_uri().text();
+    assert!(uri.contains("example.com"), "uri: {uri}");
 }
 
 #[test]
 fn v3_1_1_11_multipart_mime() {
     let req = request("rfc4475-valid", "multipartMime");
-    assert_eq!(req.method, "MESSAGE");
-    let ct = get_header(&req.headers, "Content-Type").unwrap_or("");
+    assert_eq!(req.method(), "MESSAGE");
+    let ct = req.raw(HeaderName::ContentType).next().unwrap_or("");
     assert!(ct.contains("multipart/mixed"), "Content-Type: {ct}");
-    assert!(!req.body.is_empty(), "body should be non-empty");
+    assert!(!req.body().is_empty(), "body should be non-empty");
 }
 
 // --- §3.1.1 valid-per-RFC but rejected by ADR-0007 ---

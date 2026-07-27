@@ -2,13 +2,15 @@
 //! `tests/sip/lazy-headers.test.ts`.
 //!
 //! In the TS source these were lazily parsed on first `getHeader(name)`; ADR-0003
-//! ports them as **eager + non-fatal** fields on [`OptionalHeaders`] (parsed once
+//! ports them as **eager + non-fatal** fields on `OptionalHeaders` (parsed once
 //! at parse time, a malformed value captured as `Err` rather than rejecting the
 //! message). So `msg.getHeader("p-asserted-identity")` → `msg.optional().p_asserted_identity`.
 //! The TS "memoization — second call returns the same Result" tests become the
 //! trivially-true "the stored field is the same reference on each access".
 
-use sip_message::{CustomParser, NameAddr, ParamValue, Rack, SipMessage, SipParser};
+use sip_message::header::{NameAddr, RAck};
+use sip_message::method::Method;
+use sip_message::{CustomParser, SipMessage, SipParser};
 
 const BASE: &str = "Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-test\r\n\
 From: <sip:alice@example.com>;tag=tagA\r\n\
@@ -38,10 +40,7 @@ fn invite(optional: &str) -> SipMessage {
 }
 
 fn na_param<'a>(na: &'a NameAddr, key: &str) -> Option<&'a str> {
-    match na.params.get(key) {
-        Some(ParamValue::Value(v)) => Some(v.as_str()),
-        _ => None,
-    }
+    na.params().value(key)
 }
 
 // --- P-Asserted-Identity (RFC 3325) ---
@@ -57,8 +56,8 @@ fn pai_single_value() {
     let msg = invite("P-Asserted-Identity: \"Cullen Jennings\" <sip:fluffy@cisco.com>\r\n");
     let list = msg.optional().p_asserted_identity.as_ref().unwrap();
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0].display_name.as_deref(), Some("Cullen Jennings"));
-    assert_eq!(list[0].uri, "sip:fluffy@cisco.com");
+    assert_eq!(list[0].display(), Some("Cullen Jennings"));
+    assert_eq!(list[0].uri().text(), "sip:fluffy@cisco.com");
 }
 
 #[test]
@@ -66,8 +65,8 @@ fn pai_two_values_comma_separated() {
     let msg = invite("P-Asserted-Identity: <sip:fluffy@cisco.com>, <tel:+14085551212>\r\n");
     let list = msg.optional().p_asserted_identity.as_ref().unwrap();
     assert_eq!(list.len(), 2);
-    assert_eq!(list[0].uri, "sip:fluffy@cisco.com");
-    assert_eq!(list[1].uri, "tel:+14085551212");
+    assert_eq!(list[0].uri().text(), "sip:fluffy@cisco.com");
+    assert_eq!(list[1].uri().text(), "tel:+14085551212");
 }
 
 #[test]
@@ -91,9 +90,9 @@ fn pai_comma_splitter_ignores_quoted_commas() {
     let msg = invite("P-Asserted-Identity: \"Smith, John\" <sip:js@example.com>, <sip:jane@example.com>\r\n");
     let list = msg.optional().p_asserted_identity.as_ref().unwrap();
     assert_eq!(list.len(), 2);
-    assert_eq!(list[0].display_name.as_deref(), Some("Smith, John"));
-    assert_eq!(list[0].uri, "sip:js@example.com");
-    assert_eq!(list[1].uri, "sip:jane@example.com");
+    assert_eq!(list[0].display(), Some("Smith, John"));
+    assert_eq!(list[0].uri().text(), "sip:js@example.com");
+    assert_eq!(list[1].uri().text(), "sip:jane@example.com");
 }
 
 // --- Diversion (RFC 5806) ---
@@ -103,7 +102,7 @@ fn diversion_entry_params() {
     let msg = invite("Diversion: <sip:divert@example.com>;reason=user-busy;counter=2;privacy=full\r\n");
     let list = msg.optional().diversion.as_ref().unwrap();
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0].uri, "sip:divert@example.com");
+    assert_eq!(list[0].uri().text(), "sip:divert@example.com");
     assert_eq!(na_param(&list[0], "reason"), Some("user-busy"));
     assert_eq!(na_param(&list[0], "counter"), Some("2"));
     assert_eq!(na_param(&list[0], "privacy"), Some("full"));
@@ -127,8 +126,8 @@ fn geolocation_list() {
     let msg = invite("Geolocation: <https://ls.example.com/loc1>, <https://ls.example.com/loc2>\r\n");
     let list = msg.optional().geolocation.as_ref().unwrap();
     assert_eq!(list.len(), 2);
-    assert_eq!(list[0].uri, "https://ls.example.com/loc1");
-    assert_eq!(list[1].uri, "https://ls.example.com/loc2");
+    assert_eq!(list[0].uri().text(), "https://ls.example.com/loc1");
+    assert_eq!(list[1].uri().text(), "https://ls.example.com/loc2");
 }
 
 #[test]
@@ -158,16 +157,16 @@ fn rack_absent_is_none() {
 fn rack_well_formed() {
     let msg = build("PRACK", PRACK_BASE, "RAck: 776656 1 INVITE\r\n");
     let rack = msg.optional().rack.as_ref().unwrap().as_ref().unwrap();
-    assert_eq!(rack, &Rack { rseq: 776656, seq: 1, method: "INVITE".into() });
+    assert_eq!(rack, &RAck::new(776656, 1, Method::Invite));
 }
 
 #[test]
 fn rack_extra_whitespace_tolerated() {
     let msg = build("PRACK", PRACK_BASE, "RAck:    42   7   INVITE\r\n");
     let rack = msg.optional().rack.as_ref().unwrap().clone().unwrap();
-    assert_eq!(rack.rseq, 42);
-    assert_eq!(rack.seq, 7);
-    assert_eq!(rack.method, "INVITE");
+    assert_eq!(rack.rseq(), 42);
+    assert_eq!(rack.seq(), 7);
+    assert_eq!(rack.method(), &Method::Invite);
 }
 
 #[test]
@@ -191,55 +190,58 @@ fn refer_to_absent_is_none() {
 fn refer_to_blind_transfer() {
     let msg = refer("Refer-To: <sip:carol@example.com>\r\n");
     let r = msg.optional().refer_to.as_ref().unwrap().as_ref().unwrap();
-    assert_eq!(r.uri, "sip:carol@example.com");
-    assert!(r.replaces.is_none());
-    assert!(r.embedded_headers.is_empty());
-    assert_eq!(r.parsed_uri.as_ref().unwrap().user.as_deref(), Some("carol"));
-    assert_eq!(r.parsed_uri.as_ref().unwrap().host, "example.com");
+    assert_eq!(r.uri().text(), "sip:carol@example.com");
+    assert!(r.uri().escaped_header("Replaces").is_none());
+    assert_eq!(r.uri().escaped_headers().count(), 0);
+    assert_eq!(r.uri().user(), Some("carol"));
+    assert_eq!(r.uri().host(), "example.com");
 }
 
 #[test]
 fn refer_to_attended_with_replaces() {
     let msg = refer("Refer-To: <sip:carol@example.com?Replaces=abc-call-id%3Bto-tag%3Dt1%3Bfrom-tag%3Dt2>\r\n");
     let r = msg.optional().refer_to.as_ref().unwrap().as_ref().unwrap();
-    assert_eq!(r.parsed_uri.as_ref().unwrap().user.as_deref(), Some("carol"));
-    let replaces = r.replaces.as_ref().unwrap();
-    assert_eq!(replaces.call_id, "abc-call-id");
-    assert_eq!(replaces.to_tag, "t1");
-    assert_eq!(replaces.from_tag, "t2");
-    assert!(!replaces.early_only);
+    assert_eq!(r.uri().user(), Some("carol"));
+    // The embedded Replaces is percent-decoded on read; its own grammar is the
+    // dialog matcher's concern, not the header model's.
+    assert_eq!(
+        r.uri().escaped_header("Replaces").as_deref(),
+        Some("abc-call-id;to-tag=t1;from-tag=t2")
+    );
 }
 
 #[test]
 fn refer_to_early_only() {
     let msg = refer("Refer-To: <sip:carol@example.com?Replaces=cid%3Bto-tag%3Dx%3Bfrom-tag%3Dy%3Bearly-only>\r\n");
     let r = msg.optional().refer_to.as_ref().unwrap().as_ref().unwrap();
-    assert!(r.replaces.as_ref().unwrap().early_only);
+    assert_eq!(
+        r.uri().escaped_header("Replaces").as_deref(),
+        Some("cid;to-tag=x;from-tag=y;early-only")
+    );
 }
 
 #[test]
 fn refer_to_display_name_literal_replaces_not_matched() {
     let msg = refer("Refer-To: \"Replaces?replaces=foo\" <sip:carol@example.com>\r\n");
     let r = msg.optional().refer_to.as_ref().unwrap().as_ref().unwrap();
-    assert_eq!(r.display_name.as_deref(), Some("Replaces?replaces=foo"));
-    assert!(r.replaces.is_none());
-    assert!(r.embedded_headers.is_empty());
+    assert_eq!(r.display(), Some("Replaces?replaces=foo"));
+    assert!(r.uri().escaped_header("Replaces").is_none());
+    assert_eq!(r.uri().escaped_headers().count(), 0);
 }
 
 #[test]
 fn refer_to_replaces_missing_tags_keeps_raw_but_no_struct() {
     let msg = refer("Refer-To: <sip:carol@example.com?Replaces=just-callid>\r\n");
     let r = msg.optional().refer_to.as_ref().unwrap().as_ref().unwrap();
-    assert!(r.replaces.is_none());
-    assert_eq!(r.embedded_headers.get("Replaces").map(|v| v.as_str()), Some("just-callid"));
+    assert_eq!(r.uri().escaped_header("Replaces").as_deref(), Some("just-callid"));
 }
 
 #[test]
 fn refer_to_header_level_params() {
     let msg = refer("Refer-To: <sip:carol@example.com>;method=INVITE\r\n");
     let r = msg.optional().refer_to.as_ref().unwrap().as_ref().unwrap();
-    assert!(matches!(r.params.get("method"), Some(ParamValue::Value(v)) if v == "INVITE"));
-    assert!(r.replaces.is_none());
+    assert_eq!(r.params().value("method"), Some("INVITE"));
+    assert!(r.uri().escaped_header("Replaces").is_none());
 }
 
 // --- Remote-Party-ID, P-Preferred-Identity ---
@@ -259,5 +261,5 @@ fn p_preferred_identity_present() {
     let msg = invite("P-Preferred-Identity: <sip:alice@example.com>\r\n");
     let list = msg.optional().p_preferred_identity.as_ref().unwrap();
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0].uri, "sip:alice@example.com");
+    assert_eq!(list[0].uri().text(), "sip:alice@example.com");
 }

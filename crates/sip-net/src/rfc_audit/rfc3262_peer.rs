@@ -62,14 +62,14 @@ impl PeerAuditRule for No100relRequireOnNonInviteRule {
             let SipMessage::Request(req) = &msg else {
                 continue;
             };
-            if req.method.as_str() == "INVITE" {
+            if req.method().as_str() == "INVITE" {
                 continue;
             }
             if requires(&msg, "100rel") {
                 out.push(format!(
                     "{} request carries Require: 100rel — only INVITE may (RFC 3262 §4 / \
                      RFC3262-MUST-017)",
-                    req.method.as_str(),
+                    req.method().as_str(),
                 ));
             }
         }

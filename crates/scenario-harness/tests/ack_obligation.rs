@@ -57,14 +57,14 @@ async fn ack_races_next_invite_in_either_order() {
     // ── Order 1: ACK arrives BEFORE the next INVITE is received ────────────
     let mut call1 = alice.invite(&bob).send().await;
     let mut uas1 = bob.receive("INVITE").await;
-    let call1_id = uas1.request().call_id.clone();
+    let call1_id = uas1.request().call_id().clone();
     uas1.respond(486, "Busy Here").await;
     call1.expect(486).await; // auto-ACK goes on the wire now
 
     let mut call2 = alice.invite(&bob).send().await;
     // bob's queue: [ACK(call1), INVITE(call2)] — the txn-owned ACK is absorbed.
     let mut uas2 = bob.receive("INVITE").await;
-    assert_ne!(uas2.request().call_id, call1_id, "the surfaced request is the NEW invite");
+    assert_ne!(uas2.request().call_id(), call1_id, "the surfaced request is the NEW invite");
     // The obligation was already claimed in passing: this returns immediately.
     uas1.expect_ack().await;
 
@@ -74,7 +74,7 @@ async fn ack_races_next_invite_in_either_order() {
     // call2's 486 is still unread at alice, so its auto-ACK has not been sent:
     // bob sees the new INVITE first.
     let uas3 = bob.receive("INVITE").await;
-    assert_ne!(uas3.request().call_id, uas2.request().call_id);
+    assert_ne!(uas3.request().call_id(), uas2.request().call_id());
     call2.expect(486).await; // now the ACK for call2's reject goes out
     uas2.expect_ack().await; // pulled (or already sighted) — keyed, not positional
 

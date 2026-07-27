@@ -82,32 +82,36 @@ fn thaw_then_freeze_is_the_identity_on_the_torture_corpus() {
                     }
                 };
                 assert_eq!(
-                    lines(&frozen.headers, frozen.body.len()),
-                    lines(&request.headers, request.body.len()),
+                    lines(frozen.headers(), frozen.body().len()),
+                    lines(request.headers(), request.body().len()),
                     "{name}: header list changed"
                 );
-                assert_eq!(frozen.body, request.body, "{name}: body changed");
-                assert_eq!(frozen.method, request.method, "{name}: method changed");
+                assert_eq!(frozen.body(), request.body(), "{name}: body changed");
+                assert_eq!(frozen.method(), request.method(), "{name}: method changed");
                 // RFC 3261 §16.6: a hop that is not retargeting forwards the
                 // Request-URI it received, octet for octet.
-                assert_eq!(frozen.uri, request.uri, "{name}: Request-URI changed");
-                assert_eq!(frozen.version, request.version, "{name}: version changed");
-                assert_eq!(frozen.call_id, request.call_id, "{name}: Call-ID changed");
-                assert_eq!(frozen.cseq, request.cseq, "{name}: CSeq changed");
-                assert_eq!(frozen.from.tag, request.from.tag, "{name}: From-tag changed");
-                assert_eq!(frozen.to.tag, request.to.tag, "{name}: To-tag changed");
-                assert_eq!(frozen.via.len(), request.via.len(), "{name}: Via count changed");
+                assert_eq!(
+                    frozen.request_uri().text(),
+                    request.request_uri().text(),
+                    "{name}: Request-URI changed"
+                );
+                assert_eq!(frozen.version(), request.version(), "{name}: version changed");
+                assert_eq!(frozen.call_id(), request.call_id(), "{name}: Call-ID changed");
+                assert_eq!(frozen.cseq(), request.cseq(), "{name}: CSeq changed");
+                assert_eq!(frozen.from().tag(), request.from().tag(), "{name}: From-tag changed");
+                assert_eq!(frozen.to().tag(), request.to().tag(), "{name}: To-tag changed");
+                assert_eq!(frozen.via().len(), request.via().len(), "{name}: Via count changed");
 
                 // The frozen message carries a real image: parsing its own
                 // bytes yields the same header list and body.
                 let reparsed = CustomParser::new()
-                    .parse(&frozen.raw)
+                    .parse(frozen.image())
                     .unwrap_or_else(|e| panic!("{name}: frozen bytes do not parse: {}", e.reason));
-                assert_eq!(reparsed.headers(), frozen.headers, "{name}: image disagrees");
+                assert_eq!(reparsed.headers(), frozen.headers(), "{name}: image disagrees");
 
                 // Freezing is idempotent: a second pass is byte-identical.
                 let again = frozen.thaw().freeze().expect("a frozen message thaws complete");
-                assert_eq!(again.raw, frozen.raw, "{name}: second freeze differs");
+                assert_eq!(again.image(), frozen.image(), "{name}: second freeze differs");
                 frozen_count += 1;
             }
             SipMessage::Response(response) => {
@@ -119,24 +123,24 @@ fn thaw_then_freeze_is_the_identity_on_the_torture_corpus() {
                     }
                 };
                 assert_eq!(
-                    lines(&frozen.headers, frozen.body.len()),
-                    lines(&response.headers, response.body.len()),
+                    lines(frozen.headers(), frozen.body().len()),
+                    lines(response.headers(), response.body().len()),
                     "{name}: header list changed"
                 );
-                assert_eq!(frozen.body, response.body, "{name}: body changed");
-                assert_eq!(frozen.status, response.status, "{name}: status changed");
-                assert_eq!(frozen.reason, response.reason, "{name}: reason changed");
-                assert_eq!(frozen.version, response.version, "{name}: version changed");
-                assert_eq!(frozen.call_id, response.call_id, "{name}: Call-ID changed");
-                assert_eq!(frozen.cseq, response.cseq, "{name}: CSeq changed");
+                assert_eq!(frozen.body(), response.body(), "{name}: body changed");
+                assert_eq!(frozen.status(), response.status(), "{name}: status changed");
+                assert_eq!(frozen.reason(), response.reason(), "{name}: reason changed");
+                assert_eq!(frozen.version(), response.version(), "{name}: version changed");
+                assert_eq!(frozen.call_id(), response.call_id(), "{name}: Call-ID changed");
+                assert_eq!(frozen.cseq(), response.cseq(), "{name}: CSeq changed");
 
                 let reparsed = CustomParser::new()
-                    .parse(&frozen.raw)
+                    .parse(frozen.image())
                     .unwrap_or_else(|e| panic!("{name}: frozen bytes do not parse: {}", e.reason));
-                assert_eq!(reparsed.headers(), frozen.headers, "{name}: image disagrees");
+                assert_eq!(reparsed.headers(), frozen.headers(), "{name}: image disagrees");
 
                 let again = frozen.thaw().freeze().expect("a frozen message thaws complete");
-                assert_eq!(again.raw, frozen.raw, "{name}: second freeze differs");
+                assert_eq!(again.image(), frozen.image(), "{name}: second freeze differs");
                 frozen_count += 1;
             }
         }

@@ -6,10 +6,10 @@
 //!
 //!   1. `decode/*`     — parse only (raw bytes → `SipMessage`).
 //!   2. `proxy_hop/*`  — the full per-message SIP-stack cost a B2BUA/proxy pays
-//!                       on the forwarding path: decode → clone (work on a copy,
-//!                       leaving the inbound message intact) → rewrite the
-//!                       Request-URI → insert a Record-Route header
-//!                       (RFC 3261 §16.6) → encode back to wire bytes.
+//!                       on the forwarding path: decode → thaw (the inbound
+//!                       message is immutable) → rewrite the Request-URI →
+//!                       record a Record-Route (RFC 3261 §16.6) → render back
+//!                       to wire bytes.
 //!
 //! `proxy_hop` is the SIP-stack ceiling: it excludes routing-policy, transaction
 //! state, sockets and the HTTP decision call — so the real proxy throughput is
@@ -21,7 +21,8 @@
 
 use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use sip_message::{serialize, CustomParser, SipHeader, SipMessage, SipParser};
+use sip_message::header::{RecordRouteEntry, Uri};
+use sip_message::{CustomParser, SipMessage, SipParser, SipStr};
 
 const INVITE: &[u8] = b"INVITE sip:bob@example.com SIP/2.0\r\n\
 Via: SIP/2.0/UDP host.example.com;branch=z9hG4bK1\r\n\
@@ -98,25 +99,19 @@ fn bench_decode(c: &mut Criterion) {
     group.finish();
 }
 
-/// One proxy forwarding hop: decode → clone → rewrite R-URI → add Record-Route
-/// → encode. Returns the re-serialized bytes so the optimizer can't elide it.
+/// One proxy forwarding hop: decode → thaw → rewrite R-URI → record our route
+/// → render. Returns the rendered bytes so the optimizer can't elide it.
 fn proxy_hop(parser: &CustomParser, raw: &[u8]) -> Vec<u8> {
     let msg = parser.parse(raw).expect("parse");
     let SipMessage::Request(req) = msg else { panic!("expected request") };
-
-    // Work on a copy, leaving the inbound message intact (B2BUA two-leg model).
-    let mut out = req.clone();
-
-    // Rewrite the Request-URI to the next-hop target.
-    out.uri = "sip:bob@192.0.2.99:5060".to_string().into();
-
-    // Insert our Record-Route at the top of the header set (RFC 3261 §16.6).
-    out.headers.insert(
-        0,
-        SipHeader { name: "Record-Route".to_string().into(), value: "<sip:proxy.example.com;lr>".to_string().into() },
-    );
-
-    serialize(&SipMessage::Request(out))
+    req.thaw()
+        .with_uri(Uri::parse_or_opaque(&SipStr::from_static("sip:bob@192.0.2.99:5060")))
+        .push_front(RecordRouteEntry::from_uri(
+            Uri::sip("proxy.example.com").with_flag("lr"),
+        ))
+        .freeze_bytes()
+        .expect("a thawed draft is complete")
+        .to_vec()
 }
 
 fn bench_proxy_hop(c: &mut Criterion) {

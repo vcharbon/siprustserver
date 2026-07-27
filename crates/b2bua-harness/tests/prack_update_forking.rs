@@ -62,7 +62,7 @@ async fn prack_update_forking_answer_on_second_fork() {
     // Alice INVITEs with the offer in the INVITE, advertising 100rel support.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
-    assert!(!uas.request().body.is_empty(), "offer relayed to bob on the INVITE");
+    assert!(!uas.request().body().is_empty(), "offer relayed to bob on the INVITE");
 
     // ── Fork 1: reliable 183 (callee tag `bobfork1`) with answer 1 ───────────
     uas.respond(183, "Session Progress")
@@ -137,11 +137,11 @@ async fn prack_update_forking_answer_on_second_fork() {
     );
     // Media fidelity (RFC 3264): the re-offer's media direction (hold) is
     // relayed to bob verbatim, so RTP renegotiates end-to-end correctly.
-    let bob_offer = String::from_utf8_lossy(&update_at_bob.request().body).to_string();
+    let bob_offer = String::from_utf8_lossy(update_at_bob.request().body()).to_string();
     assert!(bob_offer.contains("a=sendonly"), "hold re-offer direction relayed to bob: {bob_offer}");
     update_at_bob.respond(200, "OK").with_sdp(REANSWER_HELD).await;
     let upd_ok = update.expect(200).await;
-    let alice_answer = String::from_utf8_lossy(&upd_ok.body).to_string();
+    let alice_answer = String::from_utf8_lossy(upd_ok.body()).to_string();
     assert!(
         alice_answer.contains("a=recvonly"),
         "held answer direction relayed back to alice: {alice_answer}",
@@ -179,7 +179,7 @@ async fn prack_update_forking_answer_on_second_fork() {
         Some("bobfork2"),
         "re-INVITE stays on the fork2 confirmed dialog",
     );
-    let resume_offer = String::from_utf8_lossy(&reinvite_at_bob.request().body).to_string();
+    let resume_offer = String::from_utf8_lossy(reinvite_at_bob.request().body()).to_string();
     assert!(
         resume_offer.contains("a=sendrecv"),
         "resume (un-hold) re-offer direction relayed to bob: {resume_offer}",
@@ -257,7 +257,7 @@ async fn fake_prack_fork_prelude(
         .with_sdp(ANSWER_F1)
         .await;
     let p180 = call.expect(180).await;
-    assert!(p180.body.is_empty(), "bare 180 has no body");
+    assert!(p180.body().is_empty(), "bare 180 has no body");
     let a_tag = p180.to().tag().expect("bare 180 has a To-tag").to_string();
     let mut prack1 = bob.receive("PRACK").await;
     assert_eq!(
@@ -319,7 +319,7 @@ async fn fake_prack_forking_answer_on_first_fork_keeps_its_own_cache() {
     uas.respond(200, "OK").with_to_tag("bobfork1").await;
     let ok = call.expect(200).await;
     assert_eq!(
-        String::from_utf8_lossy(&ok.body),
+        String::from_utf8_lossy(ok.body()),
         ANSWER_F1,
         "alice's 200 carries fork 1's own cached SDP (no cross-fork overwrite)",
     );
@@ -369,7 +369,7 @@ async fn fake_prack_forking_answer_on_second_fork_uses_its_own_cache() {
     uas.respond(200, "OK").with_to_tag("bobfork2").await;
     let ok = call.expect(200).await;
     assert_eq!(
-        String::from_utf8_lossy(&ok.body),
+        String::from_utf8_lossy(ok.body()),
         ANSWER_F2,
         "alice's 200 carries fork 2's own cached SDP",
     );

@@ -12,7 +12,7 @@ use sip_message::generators::{
 };
 use sip_message::header::HeaderName;
 use sip_message::{
-    apply_name_forms, apply_remote_target_emits, CseqDeviation, CseqPattern, EmitOpts,
+    apply_name_forms, apply_remote_target_emits, emitted_wire, CseqDeviation, CseqPattern, EmitOpts,
     MessageTemplate, SipHeader, SipMessage, SipRequest, SipResponse,
 };
 
@@ -552,10 +552,12 @@ impl<'a> InDialogRequest<'a> {
         // the canonical `request` is retained/returned as the message the
         // §17.1.1.3 ACK is built from.
         let request = res.request;
-        let mut wire = request.clone();
-        wire.headers = apply_name_forms(&request.headers, &self.name_forms);
-        wire.headers = apply_remote_target_emits(&wire.headers, &self.remote_emits);
-        self.agent.try_send(&SipMessage::Request(wire), dst).await?;
+        let msg = SipMessage::Request(request.clone());
+        let headers = apply_remote_target_emits(
+            &apply_name_forms(msg.headers(), &self.name_forms),
+            &self.remote_emits,
+        );
+        self.agent.try_send_wire(&emitted_wire(&msg, &headers), dst).await?;
         Ok((
             InDialogTxn::new(
                 self.agent.clone(),

@@ -73,7 +73,7 @@ fn parse_sdp(text: &str) -> ParsedSdp {
     while i < lines.len() {
         let m_line = lines[i];
         i += 1;
-        let parts: Vec<&str> = m_line[2..].trim().split_whitespace().collect();
+        let parts: Vec<&str> = m_line[2..].split_whitespace().collect();
         let media = parts.first().copied().unwrap_or("").to_string();
         let port = parts.get(1).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
         let proto = parts.get(2).copied().unwrap_or("RTP/AVP").to_string();
@@ -279,12 +279,10 @@ pub fn build_answer_from_offer(
 
     let origin_ip = sdp_origin_address(local_ip);
     let sess_id = sdp_session_id(now_ms);
-    let session_lines = vec![
-        "v=0".to_string(),
+    let session_lines = ["v=0".to_string(),
         format!("o=b2bua {sess_id} {sess_id} IN IP4 {origin_ip}"),
         "s=-".to_string(),
-        "t=0 0".to_string(),
-    ];
+        "t=0 0".to_string()];
     let body = session_lines.join(CRLF) + CRLF + &sections.join(CRLF) + CRLF;
     SdpBuildResult::Ok(body.into_bytes())
 }

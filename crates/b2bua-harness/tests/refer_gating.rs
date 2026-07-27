@@ -50,7 +50,7 @@ fn refer_to_charlie() -> String {
 /// `state`, and a sipfrag body containing `frag`.
 fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
     let req = txn.request();
-    assert_eq!(req.method, "NOTIFY", "expected NOTIFY");
+    assert_eq!(req.method(), "NOTIFY", "expected NOTIFY");
     let event = req.header::<Event>().expect("NOTIFY carries an Event").expect("readable Event");
     assert!(event.is("refer"), "NOTIFY Event: refer, got {:?}", event.token());
     let ss = req
@@ -58,12 +58,12 @@ fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
         .expect("NOTIFY carries a Subscription-State")
         .expect("readable Subscription-State");
     assert!(ss.is(state), "subscription-state {:?} should be {state:?}", ss.token());
-    let body = String::from_utf8_lossy(&req.body);
+    let body = String::from_utf8_lossy(req.body());
     assert!(body.contains(frag), "sipfrag body {body:?} should contain {frag:?}");
 }
 
 fn assert_reinvite(req: &sip_message::SipRequest, body: &str, leg: &str) {
-    assert_eq!(req.method, "INVITE", "expected re-INVITE");
+    assert_eq!(req.method(), "INVITE", "expected re-INVITE");
     assert!(req.cseq().seq() > 1, "re-INVITE CSeq.seq {} should be > 1", req.cseq().seq());
     let contact =
         req.header::<Contact>().expect("a Contact").expect("readable Contact");
@@ -116,7 +116,7 @@ async fn refer_gating_a_reinvite_refer_authorizing() {
         .await;
     let mut bob_reinvite = bob.receive("INVITE").await;
     assert_eq!(
-        String::from_utf8_lossy(&bob_reinvite.request().body),
+        String::from_utf8_lossy(bob_reinvite.request().body()),
         AREINVITE,
         "A's re-INVITE body relayed verbatim to B"
     );
@@ -195,7 +195,7 @@ async fn refer_gating_a_reinvite_c_ringing() {
         .await;
     let mut bob_reinvite = bob.receive("INVITE").await;
     assert_eq!(
-        String::from_utf8_lossy(&bob_reinvite.request().body),
+        String::from_utf8_lossy(bob_reinvite.request().body()),
         AREINVITE,
         "A's re-INVITE body relayed verbatim to B"
     );
@@ -336,7 +336,7 @@ async fn refer_gating_a_info_refer_authorizing() {
         .expect("readable Content-Type");
     assert!(relayed_ct.is("application/dtmf-relay"), "INFO Content-Type relayed");
     assert_eq!(
-        String::from_utf8_lossy(&bob_info.request().body),
+        String::from_utf8_lossy(bob_info.request().body()),
         DTMF,
         "INFO body relayed verbatim to B"
     );
@@ -407,7 +407,7 @@ async fn refer_gating_a_info_c_ringing() {
         .await;
     let mut bob_info = bob.receive("INFO").await;
     assert_eq!(
-        String::from_utf8_lossy(&bob_info.request().body),
+        String::from_utf8_lossy(bob_info.request().body()),
         DTMF,
         "INFO body relayed verbatim to B"
     );
@@ -468,7 +468,7 @@ async fn refer_gating_b_info_refer_authorizing() {
         .await;
     let mut alice_info = alice.receive("INFO").await;
     assert_eq!(
-        String::from_utf8_lossy(&alice_info.request().body),
+        String::from_utf8_lossy(alice_info.request().body()),
         DTMF,
         "INFO body relayed verbatim to A"
     );

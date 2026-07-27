@@ -101,7 +101,7 @@ async fn reroute_on_486_via_lb_keeps_response_txn_correlation() {
     let mut charlie_uas = charlie.receive("INVITE").await;
     charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
     let confirmed = call.expect(200).await;
-    assert_eq!(confirmed.status, 200, "caller bridged to the reroute target");
+    assert_eq!(confirmed.status(), 200, "caller bridged to the reroute target");
     let mut dialog = call.ack().await;
     charlie.receive("ACK").await;
 
@@ -155,7 +155,7 @@ async fn bye_bye_glare_via_lb_keeps_response_txn_correlation() {
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     let confirmed = call.expect(200).await;
-    assert_eq!(confirmed.status, 200);
+    assert_eq!(confirmed.status(), 200);
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
 

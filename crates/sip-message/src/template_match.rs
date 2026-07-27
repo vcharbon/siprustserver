@@ -236,7 +236,7 @@ fn compare_element(
 /// The effective match class of a template header name group (first row's class;
 /// `from_message` assigns one class per name).
 fn effective_class(rows: &[&TemplateHeader]) -> HeaderClass {
-    rows.first().map(|h| h.class).unwrap_or(HeaderClass::Frozen)
+    rows.first().map(|h| h.class).unwrap_or(HeaderClass::EndToEnd)
 }
 
 impl MessageTemplate {
@@ -249,37 +249,37 @@ impl MessageTemplate {
         // Start line: kind + method (request) / status code + reason (response).
         match (self.start(), msg) {
             (TemplateStart::Request(m), SipMessage::Request(r)) => {
-                if r.method.as_str() != m.as_str() {
+                if r.method().as_str() != m.as_str() {
                     return Err(Mismatch::StartLine {
                         expected: m.as_str().to_string(),
-                        got: r.method.as_str().to_string(),
+                        got: r.method().as_str().to_string(),
                     });
                 }
             }
             (TemplateStart::Response { status, reason }, SipMessage::Response(r)) => {
-                if r.status != *status {
+                if r.status() != *status {
                     return Err(Mismatch::StartLine {
                         expected: status.to_string(),
-                        got: r.status.to_string(),
+                        got: r.status().to_string(),
                     });
                 }
-                if r.reason != *reason {
+                if r.reason() != *reason {
                     return Err(Mismatch::ReasonPhrase {
                         expected: reason.clone(),
-                        got: r.reason.to_string(),
+                        got: r.reason().to_string(),
                     });
                 }
             }
             (TemplateStart::Request(m), SipMessage::Response(r)) => {
                 return Err(Mismatch::StartLine {
                     expected: format!("request {}", m.as_str()),
-                    got: format!("response {}", r.status),
+                    got: format!("response {}", r.status()),
                 })
             }
             (TemplateStart::Response { status, .. }, SipMessage::Request(r)) => {
                 return Err(Mismatch::StartLine {
                     expected: format!("response {status}"),
-                    got: format!("request {}", r.method.as_str()),
+                    got: format!("request {}", r.method().as_str()),
                 })
             }
         }
@@ -310,7 +310,7 @@ impl MessageTemplate {
             let class = effective_class(&t_headers);
 
             // Regenerated tier-1: structural only (presence for the mandatory core).
-            if class == HeaderClass::Regenerated
+            if class == HeaderClass::Structural
                 && TIER1.contains(&key.as_str())
                 && !is_remote_target(key)
             {
@@ -329,7 +329,7 @@ impl MessageTemplate {
             }
 
             // Regenerated remote-target: user + params (host:port ignored).
-            if class == HeaderClass::Regenerated && is_remote_target(key) {
+            if class == HeaderClass::Structural && is_remote_target(key) {
                 for (row, (tv, iv)) in t_rows.iter().zip(&i_rows).enumerate() {
                     if let Some(m) = compare_remote_target(key, row, tv, iv, &ignore) {
                         return Err(m);
@@ -356,10 +356,10 @@ impl MessageTemplate {
         // inbound (no opt-out in v1).
         let tb = self.body();
         let ib = match msg {
-            SipMessage::Request(r) => &r.body,
-            SipMessage::Response(r) => &r.body,
+            SipMessage::Request(r) => r.body(),
+            SipMessage::Response(r) => r.body(),
         };
-        if tb != ib {
+        if tb != &ib[..] {
             let first_diff = tb.iter().zip(ib.iter()).position(|(a, b)| a != b).or({
                 if tb.len() != ib.len() {
                     Some(tb.len().min(ib.len()))

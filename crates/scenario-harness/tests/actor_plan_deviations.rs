@@ -25,7 +25,7 @@ fn parse(raw: &[u8]) -> SipMessage {
 /// The CSeq number of the first request of `method` on the recorded wire.
 fn req_cseq(entries: &[sip_net::RecordedSipEntry], method: &str) -> Option<u32> {
     entries.iter().find_map(|e| match parse(&e.raw) {
-        SipMessage::Request(r) if r.method == method => Some(r.cseq.seq),
+        SipMessage::Request(r) if r.method() == method => Some(r.cseq().seq()),
         _ => None,
     })
 }
@@ -33,7 +33,7 @@ fn req_cseq(entries: &[sip_net::RecordedSipEntry], method: &str) -> Option<u32> 
 /// The `sent_ms` of the first request of `method`.
 fn req_sent_ms(entries: &[sip_net::RecordedSipEntry], method: &str) -> Option<u64> {
     entries.iter().find_map(|e| match parse(&e.raw) {
-        SipMessage::Request(r) if r.method == method => Some(e.sent_ms),
+        SipMessage::Request(r) if r.method() == method => Some(e.sent_ms),
         _ => None,
     })
 }
@@ -41,7 +41,7 @@ fn req_sent_ms(entries: &[sip_net::RecordedSipEntry], method: &str) -> Option<u6
 /// The `sent_ms` of the first response of `status` whose CSeq echoes `cseq_method`.
 fn status_sent_ms(entries: &[sip_net::RecordedSipEntry], status: u16, cseq_method: &str) -> Option<u64> {
     entries.iter().find_map(|e| match parse(&e.raw) {
-        SipMessage::Response(r) if r.status == status && r.cseq.method == cseq_method => {
+        SipMessage::Response(r) if r.status() == status && r.cseq().method() == cseq_method => {
             Some(e.sent_ms)
         }
         _ => None,
@@ -50,7 +50,7 @@ fn status_sent_ms(entries: &[sip_net::RecordedSipEntry], status: u16, cseq_metho
 
 /// Whether any recorded response carries `status`.
 fn has_status(entries: &[sip_net::RecordedSipEntry], status: u16) -> bool {
-    entries.iter().any(|e| matches!(parse(&e.raw), SipMessage::Response(r) if r.status == status))
+    entries.iter().any(|e| matches!(parse(&e.raw), SipMessage::Response(r) if r.status() == status))
 }
 
 fn caller(role: &'static str, agent: &Agent, callee: (&'static str, Agent), goals: Vec<Goal>) -> ActorSpec {

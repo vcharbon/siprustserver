@@ -119,7 +119,7 @@ pub(super) async fn process_result(
         // OPTIONS lands here) — pairs with inbound responses_total{OPTIONS,200} to
         // isolate the keepalive round-trip (sent vs answered) on the b2bua itself.
         if let OutboundBody::Request(req) = &eff.body {
-            ctx.metrics.record_request_out(req.method.as_str());
+            ctx.metrics.record_request_out(req.method().as_str());
         }
         match (&eff.body, &eff.mode) {
             // A 2xx retransmit (RFC 3261 §13.3.1.4) must bypass the server txn:

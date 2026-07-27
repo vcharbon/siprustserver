@@ -106,7 +106,7 @@ fn spawn_late_responder(
         let parser = CustomParser::new();
         while let Some(pkt) = ep.recv().await {
             let Ok(SipMessage::Request(req)) = parser.parse(&pkt.raw) else { continue };
-            if req.method != "OPTIONS" {
+            if req.method() != "OPTIONS" {
                 continue;
             }
             if !gate.load(Ordering::SeqCst) {
@@ -171,7 +171,7 @@ fn spawn_capture_responder(ep: Box<dyn UdpEndpoint>) -> (tokio::task::JoinHandle
                 pkt = ep.recv() => {
                     let Some(pkt) = pkt else { return };
                     let Ok(SipMessage::Request(req)) = parser.parse(&pkt.raw) else { continue };
-                    if req.method != "OPTIONS" {
+                    if req.method() != "OPTIONS" {
                         continue;
                     }
                     let opts = GenerateResponseOpts { to_tag: Some("probe-uas".into()), ..Default::default() };

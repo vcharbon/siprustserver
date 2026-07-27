@@ -23,6 +23,40 @@ impl CallId {
     }
 }
 
+/// A Call-ID is an opaque token compared byte-exactly, so comparing one to the
+/// text a caller holds is the comparison itself — not a conversion.
+impl PartialEq<str> for CallId {
+    fn eq(&self, other: &str) -> bool {
+        self.0.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for CallId {
+    fn eq(&self, other: &&str) -> bool {
+        self.0.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for CallId {
+    fn eq(&self, other: &String) -> bool {
+        self.0.as_str() == other.as_str()
+    }
+}
+
+/// The read surface hands out `&CallId`; a comparison against an owned one must
+/// not have to dereference.
+impl PartialEq<CallId> for &CallId {
+    fn eq(&self, other: &CallId) -> bool {
+        *self == other
+    }
+}
+
+impl std::fmt::Display for CallId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.as_str())
+    }
+}
+
 impl HeaderValue for CallId {
     fn header_name() -> HeaderName {
         HeaderName::CallId

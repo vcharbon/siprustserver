@@ -57,7 +57,7 @@ fn shell_request(
     raw: &[u8],
 ) -> crate::types::SipRequest {
     use crate::types::{ContactSet, SipRequest};
-    let uri = req.uri.to_string();
+    let uri = req.request_uri().to_string();
     SipRequest {
         method: req.method.to_string(),
         request_uri: placeholder_request_uri(),

@@ -39,7 +39,7 @@ async fn established_update_no_sdp_a_to_b() {
 
     let mut update = dialog.request(InDialogMethod::Update, None).await;
     let mut at_bob = s.bob.receive("UPDATE").await;
-    assert!(at_bob.request().body.is_empty(), "bodyless UPDATE relayed with no body");
+    assert!(at_bob.request().body().is_empty(), "bodyless UPDATE relayed with no body");
     at_bob.respond(200, "OK").await;
     update.expect(200).await;
 
@@ -65,7 +65,7 @@ async fn established_update_no_sdp_b_to_a() {
 
     let mut update = bob_dialog.request(InDialogMethod::Update, None).await;
     let mut at_alice = alice.receive("UPDATE").await;
-    assert!(at_alice.request().body.is_empty(), "bodyless UPDATE relayed to alice");
+    assert!(at_alice.request().body().is_empty(), "bodyless UPDATE relayed to alice");
     at_alice.respond(200, "OK").await;
     update.expect(200).await;
 
@@ -101,7 +101,7 @@ async fn early_not_pracked_a_to_b(name: &str, alice_port: &str, bob_port_n: u16,
     }
     let mut update = ub.send().await;
     let mut at_bob = bob.receive("UPDATE").await;
-    assert_eq!(at_bob.request().body.is_empty(), !with_sdp, "body presence relayed faithfully");
+    assert_eq!(at_bob.request().body().is_empty(), !with_sdp, "body presence relayed faithfully");
     if with_sdp {
         at_bob.respond(200, "OK").with_sdp(ANSWER).await;
     } else {
@@ -152,7 +152,7 @@ async fn early_not_pracked_update_b_to_a() {
     let mut update = bob_dialog.request(InDialogMethod::Update, Some(REOFFER_HOLD)).await;
     let mut at_alice = alice.receive("UPDATE").await;
     assert!(
-        String::from_utf8_lossy(&at_alice.request().body).contains("a=sendonly"),
+        String::from_utf8_lossy(at_alice.request().body()).contains("a=sendonly"),
         "callee early-media re-offer relayed to alice",
     );
     at_alice.respond(200, "OK").with_sdp(OFFER).await;
@@ -205,7 +205,7 @@ async fn early_pracked_update_no_sdp_a_to_b() {
     // Bodyless early UPDATE.
     let mut update = call.send_request(InDialogMethod::Update).with_to_tag(&atag).send().await;
     let mut at_bob = bob.receive("UPDATE").await;
-    assert!(at_bob.request().body.is_empty(), "bodyless early UPDATE relayed");
+    assert!(at_bob.request().body().is_empty(), "bodyless early UPDATE relayed");
     at_bob.respond(200, "OK").await;
     update.expect(200).await;
 
@@ -247,7 +247,7 @@ async fn early_update_forking_no_sdp_second_fork() {
     let mut update = call.send_request(InDialogMethod::Update).with_to_tag(&f2).send().await;
     let mut at_bob = bob.receive("UPDATE").await;
     assert_eq!(at_bob.request().to().tag(), Some("bf2"), "UPDATE rode fork 2");
-    assert!(at_bob.request().body.is_empty());
+    assert!(at_bob.request().body().is_empty());
     at_bob.respond(200, "OK").await;
     update.expect(200).await;
 
@@ -292,7 +292,7 @@ async fn early_update_forking_b_to_a_second_fork() {
     let mut update = fork2.request(InDialogMethod::Update, Some(REOFFER_HOLD)).await;
     let mut at_alice = alice.receive("UPDATE").await;
     assert!(
-        String::from_utf8_lossy(&at_alice.request().body).contains("a=sendonly"),
+        String::from_utf8_lossy(at_alice.request().body()).contains("a=sendonly"),
         "fork-2 callee UPDATE relayed to alice",
     );
     at_alice.respond(200, "OK").with_sdp(OFFER).await;
@@ -358,16 +358,16 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     let mut u2 = call.send_request(InDialogMethod::Update).with_to_tag(&f2).with_sdp(REOFFER_HOLD).send().await;
     let mut u2_at_bob = bob.receive("UPDATE").await;
     assert_eq!(u2_at_bob.request().to().tag(), Some("bf2"), "SDP UPDATE rode fork 2");
-    assert!(String::from_utf8_lossy(&u2_at_bob.request().body).contains("a=sendonly"), "hold re-offer relayed to bob");
+    assert!(String::from_utf8_lossy(u2_at_bob.request().body()).contains("a=sendonly"), "hold re-offer relayed to bob");
     u2_at_bob.respond(200, "OK").with_sdp(REANSWER_HELD).await;
     let u2_ok = u2.expect(200).await;
-    assert!(String::from_utf8_lossy(&u2_ok.body).contains("a=recvonly"), "held answer relayed back to alice");
+    assert!(String::from_utf8_lossy(u2_ok.body()).contains("a=recvonly"), "held answer relayed back to alice");
 
     // ── Bodyless refresh UPDATE on fork 1 (distinct fork, distinct CSeq) ──
     let mut u1 = call.send_request(InDialogMethod::Update).with_to_tag(&f1).send().await;
     let mut u1_at_bob = bob.receive("UPDATE").await;
     assert_eq!(u1_at_bob.request().to().tag(), Some("bf1"), "bodyless UPDATE rode fork 1");
-    assert!(u1_at_bob.request().body.is_empty(), "bodyless UPDATE relayed with no body");
+    assert!(u1_at_bob.request().body().is_empty(), "bodyless UPDATE relayed with no body");
     u1_at_bob.respond(200, "OK").await;
     u1.expect(200).await;
 
@@ -430,12 +430,12 @@ async fn fake_prack_early_update_with_offer_relays_to_bob() {
     // The offer must reach bob (relayed, not locally short-circuited).
     let mut at_bob = bob.receive("UPDATE").await;
     assert!(
-        String::from_utf8_lossy(&at_bob.request().body).contains("a=sendonly"),
+        String::from_utf8_lossy(at_bob.request().body()).contains("a=sendonly"),
         "alice's UPDATE offer relayed to bob",
     );
     at_bob.respond(200, "OK").with_sdp(ANSWER).await;
     let resp = update.expect(200).await;
-    assert!(!resp.body.is_empty(), "bob's SDP answer relayed back to alice (offer answered)");
+    assert!(!resp.body().is_empty(), "bob's SDP answer relayed back to alice (offer answered)");
     assert!(
         resp.header::<MediaType>()
             .expect("a Content-Type")
@@ -482,7 +482,7 @@ async fn fake_prack_early_bodyless_update_answered_locally() {
     // Bodyless refresh UPDATE → answered locally, no body.
     let mut update = call.send_request(InDialogMethod::Update).with_to_tag(&atag).send().await;
     let resp = update.expect(200).await;
-    assert!(resp.body.is_empty(), "local 200 to a bodyless refresh UPDATE carries no body");
+    assert!(resp.body().is_empty(), "local 200 to a bodyless refresh UPDATE carries no body");
 
     // The call proceeds normally (bob was never woken by the refresh).
     uas.respond(200, "OK").await;

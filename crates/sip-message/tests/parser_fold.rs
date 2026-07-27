@@ -7,8 +7,13 @@
 //! round-trip byte-identical so `InitialInviteHandler` can `JSON.parse` it.
 //! (The TS `jssip`/`native` oracle columns are dropped — see ADR-0001.)
 
-use sip_message::message_helpers::get_headers;
+use sip_message::header::HeaderName;
 use sip_message::{CustomParser, SipMessage, SipParser};
+
+/// Every value of one header, in wire order.
+fn all_values<'a>(msg: &'a SipMessage, name: &str) -> Vec<&'a str> {
+    msg.raw(HeaderName::of(&sip_message::SipStr::owned(name))).collect()
+}
 
 const API_CALL_REROUTE: &str = r#"{"action":"route","destination":{"host":"172.20.0.1","port":25081},"new_ruri":"sip:bob1@172.20.0.1:25081","on_failure":{"action":"failover","destination":{"host":"172.20.0.1","port":25081},"new_ruri":"sip:bob2@172.20.0.1:25081"}}"#;
 
@@ -31,7 +36,7 @@ Content-Length: 0\r\n\r\n"
 }
 
 fn x_api_call_values(msg: &SipMessage) -> Vec<&str> {
-    get_headers(msg.headers(), "x-api-call")
+    all_values(msg, "x-api-call")
 }
 
 #[test]

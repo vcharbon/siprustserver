@@ -108,7 +108,7 @@ pub struct CSeqInDialogOrderRule;
 /// non-empty. A retransmission reuses this exact token; a new client
 /// transaction mints a fresh one. A response echoes the request's, which is what
 /// correlates the two (RFC 3261 §8.1.1.7, §17).
-fn branch_of(top: Via) -> Option<String> {
+fn branch_of(top: &Via) -> Option<String> {
     top.branch().filter(|b| !b.is_empty()).map(str::to_string)
 }
 
@@ -144,10 +144,10 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
             let Some(ftag) = req.from().tag().map(str::to_string) else {
                 continue;
             };
-            let cid = req.call_id.to_string();
+            let cid = req.call_id().to_string();
             let branch = branch_of(req.top_via()).unwrap_or_default();
             positions
-                .entry((receiver, cid, ftag, req.cseq.seq, req.method.to_string(), branch))
+                .entry((receiver, cid, ftag, req.cseq().seq(), req.method().to_string(), branch))
                 .or_insert(i + 1);
         }
         let pos_of = |key: &(LaneKey, String, String), seq: u32, method: &str, branch: &str| {
@@ -167,15 +167,15 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
             let Some(from_tag) = req.from().tag().map(str::to_string) else {
                 continue;
             };
-            let call_id = req.call_id.to_string();
+            let call_id = req.call_id().to_string();
             let key = (bind_key.clone(), call_id, from_tag);
             if !streams.contains_key(&key) {
                 stream_order.push(key.clone());
                 streams.insert(key.clone(), StreamState::default());
             }
             let st = streams.get_mut(&key).unwrap();
-            let seq = req.cseq.seq;
-            let method = req.method.to_string();
+            let seq = req.cseq().seq();
+            let method = req.method().to_string();
             let branch = branch_of(req.top_via());
 
             // 1. A repeat of the SAME (branch, method, CSeq) is a retransmission
@@ -199,7 +199,7 @@ impl CrossMessageAuditRule for CSeqInDialogOrderRule {
             //    that has none yet); each dialog owns an independent CSeq space. We
             //    only ACCUMULATE here — contiguity is judged below, over the whole
             //    set, because arrival order is irrelevant to §12.2.1.1.
-            let to_tag = req.to.tag.as_deref().unwrap_or_default().to_string();
+            let to_tag = req.to().tag().unwrap_or_default().to_string();
             let branch = branch.unwrap_or_default();
             let position = pos_of(&key, seq, &method, &branch);
             let dlg = st.dialogs.entry(to_tag).or_default();
@@ -416,7 +416,7 @@ impl CrossMessageAuditRule for ResponseCseqMatchesTransactionRule {
                     req_cseqs
                         .entry(branch)
                         .or_default()
-                        .insert((req.cseq.seq, req.cseq.method.as_str().to_string()));
+                        .insert((req.cseq().seq(), req.cseq().method().as_str().to_string()));
                 }
             }
         }
@@ -436,7 +436,7 @@ impl CrossMessageAuditRule for ResponseCseqMatchesTransactionRule {
             let Some(reqs) = req_cseqs.get(&branch) else {
                 continue;
             };
-            let pair = (resp.cseq.seq, resp.cseq.method.as_str().to_string());
+            let pair = (resp.cseq().seq(), resp.cseq().method().as_str().to_string());
             if !reqs.contains(&pair) {
                 findings.push((
                     bind_key.clone(),
@@ -446,7 +446,7 @@ impl CrossMessageAuditRule for ResponseCseqMatchesTransactionRule {
                          on that transaction had that CSeq — a real UAC drops a response whose \
                          CSeq/method does not match the request it sent (the test UA accepts it, \
                          hiding the bug)",
-                        resp.status, resp.reason, resp.cseq.seq, resp.cseq.method.as_str(),
+                        resp.status(), resp.reason(), resp.cseq().seq(), resp.cseq().method().as_str(),
                     ),
                 ));
             }
@@ -489,16 +489,16 @@ impl CrossMessageAuditRule for AckCseqMatchesInviteRule {
             let Some(from_tag) = req.from().tag().map(str::to_string) else {
                 continue;
             };
-            let call_id = req.call_id.to_string();
+            let call_id = req.call_id().to_string();
             let key = (bind_key.clone(), call_id, from_tag);
-            let method = req.method.as_str();
+            let method = req.method().as_str();
             if method.eq_ignore_ascii_case("INVITE") {
-                invite_cseqs.entry(key).or_default().insert(req.cseq.seq);
+                invite_cseqs.entry(key).or_default().insert(req.cseq().seq());
             } else if method.eq_ignore_ascii_case("ACK") {
                 // Only judge when an INVITE was seen on this stream (an ACK always
                 // follows its INVITE on the wire). No INVITE → cannot judge.
                 if let Some(seen) = invite_cseqs.get(&key) {
-                    if !seen.contains(&req.cseq.seq) {
+                    if !seen.contains(&req.cseq().seq()) {
                         findings.push((
                             bind_key.clone(),
                             format!(
@@ -507,7 +507,7 @@ impl CrossMessageAuditRule for AckCseqMatchesInviteRule {
                                  stream sent (an INVITE 2xx ACK reuses the INVITE's CSeq; a running \
                                  dialog CSeq advanced by an intervening PRACK/UPDATE is wrong) — a \
                                  real UAS cannot match it to the INVITE server transaction",
-                                req.cseq.seq, key.1, key.2,
+                                req.cseq().seq(), key.1, key.2,
                             ),
                         ));
                     }

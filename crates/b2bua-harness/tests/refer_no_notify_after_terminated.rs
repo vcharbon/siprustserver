@@ -44,7 +44,7 @@ fn refer_to_charlie() -> String {
 
 fn assert_notify(txn: &ServerTxn, state: &str) {
     let req = txn.request();
-    assert_eq!(req.method, "NOTIFY", "expected NOTIFY");
+    assert_eq!(req.method(), "NOTIFY", "expected NOTIFY");
     let event = req.header::<Event>().expect("NOTIFY carries an Event").expect("readable Event");
     assert!(event.is("refer"), "NOTIFY Event: refer, got {:?}", event.token());
     let ss = req

@@ -147,8 +147,8 @@ async fn two_shards_serve_many_flows_and_cross_shard_responses() {
             .unwrap();
         match parser.parse(&pkt.raw) {
             Ok(SipMessage::Response(resp)) => {
-                assert_eq!(resp.status, 200, "uac-{i}");
-                assert_eq!(resp.call_id, format!("shard-e2e-{i}@127.0.0.1"));
+                assert_eq!(resp.status(), 200, "uac-{i}");
+                assert_eq!(resp.call_id().as_str(), format!("shard-e2e-{i}@127.0.0.1"));
             }
             other => panic!("uac-{i} expected a 200 response, got {other:?}"),
         }

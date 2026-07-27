@@ -38,10 +38,10 @@ const DEFAULT_DRAIN_GRACE_MS: u64 = 5_000;
 const DEFAULT_FRESH_POD_GUARD_MS: u64 = 20_000;
 
 /// Emergency RPH classification (RFC 4412) — delegates to the single
-/// implementation in [`sip_message::message_helpers::emergency`].
+/// implementation in [`sip_message::emergency`].
 fn is_emergency_invite(msg: &SipMessage) -> bool {
     match msg {
-        SipMessage::Request(r) => sip_message::message_helpers::is_emergency_request(r),
+        SipMessage::Request(r) => sip_message::emergency::is_emergency_request(r),
         SipMessage::Response(_) => false,
     }
 }
@@ -50,21 +50,21 @@ fn is_emergency_invite(msg: &SipMessage) -> bool {
 /// new-call knob — never applied to in-dialog traffic).
 fn is_in_dialog(msg: &SipMessage) -> bool {
     match msg {
-        SipMessage::Request(r) => r.to.tag.as_deref().is_some_and(|t| !t.is_empty()),
+        SipMessage::Request(r) => r.to().tag().is_some_and(|t| !t.is_empty()),
         SipMessage::Response(_) => false,
     }
 }
 
 fn is_ack_or_cancel(msg: &SipMessage) -> bool {
-    matches!(msg, SipMessage::Request(r) if r.method == "ACK" || r.method == "CANCEL")
+    matches!(msg, SipMessage::Request(r) if r.method() == "ACK" || r.method() == "CANCEL")
 }
 
 fn call_id_of(msg: &SipMessage) -> Option<&str> {
     let id = match msg {
-        SipMessage::Request(r) => &r.call_id,
-        SipMessage::Response(r) => &r.call_id,
+        SipMessage::Request(r) => r.call_id().as_str(),
+        SipMessage::Response(r) => r.call_id().as_str(),
     };
-    (!id.is_empty()).then_some(id.as_str())
+    (!id.is_empty()).then_some(id)
 }
 
 /// Adapter so a `WorkerEntry` (by id) can feed `rendezvous_select`.

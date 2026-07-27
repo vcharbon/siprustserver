@@ -66,6 +66,17 @@ impl Via {
         Self::new(SipStr::from_static("TLS"), HostPort::new(host, Some(port)))
     }
 
+    /// Assemble from already-scanned parts — the parser's seam.
+    pub(crate) fn from_parts(
+        protocol: SipStr,
+        version: SipStr,
+        transport: SipStr,
+        sent_by: HostPort,
+        params: Params,
+    ) -> Self {
+        Self { protocol, version, transport, sent_by, params }
+    }
+
     pub fn protocol(&self) -> &str {
         self.protocol.as_str()
     }

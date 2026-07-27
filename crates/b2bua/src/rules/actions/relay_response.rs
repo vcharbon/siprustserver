@@ -35,8 +35,8 @@ impl ActionExecutor<'_> {
         transform: &MessageTransform,
         resp: &sip_message::SipResponse,
     ) {
-        let status = transform.status.unwrap_or(resp.status);
-        let reason = transform.reason.clone().unwrap_or_else(|| resp.reason.to_string());
+        let status = transform.status.unwrap_or(resp.status());
+        let reason = transform.reason.clone().unwrap_or_else(|| resp.reason().to_string());
         // The body relayed toward alice: dropped (bare-180 downgrade), replaced
         // by a staged policy body (fake-prack cached SDP on the 200 OK), or the
         // response's own body verbatim.
@@ -46,7 +46,7 @@ impl ActionExecutor<'_> {
             (b, Some("application/sdp".to_string()))
         } else {
             (
-                resp.body.to_vec(),
+                resp.body().to_vec(),
                 resp.raw(HeaderName::ContentType).next().map(str::to_string),
             )
         };
@@ -158,7 +158,7 @@ impl ActionExecutor<'_> {
                 {
                     if let Some(d) = call.a_leg.dialogs.first_mut() {
                         d.ext.pending_reinvite_2xx = Some(call::PendingReinvite2xx {
-                            response: relayed.raw.to_vec(),
+                            response: relayed.image().to_vec(),
                             dest_host: dest.0.clone(),
                             dest_port: dest.1,
                             // The relayed 2xx echoes the originator's re-INVITE
@@ -202,7 +202,7 @@ impl ActionExecutor<'_> {
         // fork's primary (RFC 3261 §13.2.2.4) — so the caller's ACK/in-dialog
         // requests address the dialog the B2BUA actually established.
         if cseq_method == "INVITE"
-            && (100..300).contains(&resp.status)
+            && (100..300).contains(&resp.status())
             && !to_tag.is_empty()
             && source_leg_id != "a"
         {
@@ -318,7 +318,7 @@ impl ActionExecutor<'_> {
         );
         *call = call::helpers::set_relay_first_18x_relayed(call.clone(), &a_facing_tag);
         if let Some(resp) = ctx.response() {
-            *call = call::helpers::record_relay_first_18x_value(call.clone(), resp.status);
+            *call = call::helpers::record_relay_first_18x_value(call.clone(), resp.status());
         }
         let transform = MessageTransform {
             status: Some(180),

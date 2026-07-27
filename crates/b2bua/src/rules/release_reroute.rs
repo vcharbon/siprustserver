@@ -218,7 +218,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     RuleAction::cancel_timer(&TimerType::NoAnswer, Some(&new_leg)),
                     RuleAction::SendReinvite {
                         leg_id: "a".to_string(),
-                        body: resp.body.to_vec(),
+                        body: resp.body().to_vec(),
                         add_headers: vec![],
                     },
                     RuleAction::AddCdrEvent {
@@ -239,7 +239,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 .method("INVITE")
                 .direction(Direction::FromB)
                 .filter(|ctx| {
-                    ctx.response().map(|r| r.status >= 300).unwrap_or(false) && is_new_leg(ctx)
+                    ctx.response().map(|r| r.status() >= 300).unwrap_or(false) && is_new_leg(ctx)
                 }),
             |ctx| {
                 let resp = ctx.response()?;
@@ -248,7 +248,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Reject,
                         leg_id: new_leg.clone(),
-                        status_code: Some(resp.status as i64),
+                        status_code: Some(resp.status() as i64),
                         reason: Some("release-reroute-failed".into()),
                     },
                     RuleAction::TerminateLeg {
@@ -337,7 +337,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 .method("INVITE")
                 .direction(Direction::FromA)
                 .filter(|ctx| {
-                    ctx.response().map(|r| r.status >= 300).unwrap_or(false)
+                    ctx.response().map(|r| r.status() >= 300).unwrap_or(false)
                         && ctx.source_leg_id == "a"
                         && ctx.call.reroute_state().map(|r| r.phase)
                             == Some(ReroutePhase::ARealigning)
@@ -347,7 +347,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 let mut actions = vec![RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Reject,
                     leg_id: "a".to_string(),
-                    status_code: Some(resp.status as i64),
+                    status_code: Some(resp.status() as i64),
                     reason: Some("release-reroute-failed".into()),
                 }];
                 actions.extend(fail_teardown(ctx, "release-reroute-failed"));

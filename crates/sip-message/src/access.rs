@@ -1,16 +1,25 @@
-//! The typed read surface of ADR-0025 on a parsed message.
+//! The typed read surface of ADR-0025 on a frozen message.
 //!
 //! A reader asks the message for the value it wants — `msg.from().tag()`,
 //! `msg.top_via().branch()`, `msg.header::<Require>()` — instead of looking a
-//! header up by string and re-parsing it. The mandatory values are derived from
-//! the fields the parser already validated, so they are infallible; everything
+//! header up by string and re-parsing it. The mandatory values are the ones the
+//! parser validated and stored, so they are infallible and borrowed; everything
 //! else reads the header line on demand and reports its own parse errors.
+//!
+//! The surface is written once here and attached to both message types, so
+//! neither direction carries a copy of it.
+
+use bytes::Bytes;
 
 use crate::draft::{HeaderList, RequestDraft, ResponseDraft};
 use crate::error::SipParseError;
-use crate::header::{self, HeaderName, HeaderValue, HostPort, NameAddr, ParamValue, Uri};
+use crate::header::{self, HeaderName, HeaderValue, Uri};
+use crate::method::Method;
 use crate::sip_str::SipStr;
-use crate::types::{self, NonEmpty, SipHeader, SipMessage, SipRequest, SipResponse};
+use crate::types::{
+    ContactSet, MessageCore, NonEmpty, OptionalHeaders, SipHeader, SipMessage, SipRequest,
+    SipResponse,
+};
 
 // ---------------------------------------------------------------------------
 // Header-list reads
@@ -47,105 +56,93 @@ fn header_of<H: HeaderValue>(headers: &[SipHeader]) -> Option<Result<H, SipParse
     }
 }
 
-// ---------------------------------------------------------------------------
-// Old typed field -> new value. Total: the parser already gated these, so a URI
-// it accepted but the strict reader rejects is kept whole rather than lost.
-// ---------------------------------------------------------------------------
-
-fn param_value(old: &types::ParamValue) -> ParamValue {
-    match old {
-        types::ParamValue::Flag => ParamValue::Flag,
-        types::ParamValue::Value(v) => ParamValue::text(v.clone()),
-    }
-}
-
-fn name_addr(old: &types::NameAddr) -> NameAddr {
-    let mut addr = NameAddr::new(Uri::parse_or_opaque(&old.uri));
-    if let Some(display) = &old.display_name {
-        addr = addr.with_display(display.clone());
-    }
-    for (name, value) in old.params.iter() {
-        addr = addr.with_param(name.clone(), param_value(value));
-    }
-    addr
-}
-
-fn via(old: &types::Via) -> header::Via {
-    let mut hop = header::Via::new(
-        old.transport.clone(),
-        HostPort::new(old.host.clone(), old.port),
-    );
-    for (name, value) in old.params.iter() {
-        hop = hop.with_param(name.clone(), param_value(value));
-    }
-    hop
-}
-
-fn vias(old: &NonEmpty<types::Via>) -> NonEmpty<header::Via> {
-    let mut it = old.iter().map(via);
-    let head = it.next().expect("NonEmpty invariant: at least one Via");
-    NonEmpty::from_parts(head, it.collect())
-}
-
-/// The read surface shared by requests and responses. Written once here and
-/// attached to both message types, so neither direction carries a copy.
-macro_rules! typed_read_surface {
+/// The read surface every message has, spelled once over the shared core and
+/// delegated by both directions.
+macro_rules! core_read_surface {
     ($message:ty) => {
         impl $message {
+            fn core(&self) -> &MessageCore {
+                &self.inner
+            }
+
             /// The originator of the dialog leg.
-            pub fn from(&self) -> header::From {
-                header::From::new(name_addr(&self.from))
+            pub fn from(&self) -> &header::From {
+                &self.core().core.from
             }
 
             /// The target of the dialog leg.
-            pub fn to(&self) -> header::To {
-                header::To::new(name_addr(&self.to))
+            pub fn to(&self) -> &header::To {
+                &self.core().core.to
             }
 
-            pub fn call_id(&self) -> header::CallId {
-                header::CallId::new(self.call_id.clone())
+            pub fn call_id(&self) -> &header::CallId {
+                &self.core().core.call_id
             }
 
-            pub fn cseq(&self) -> header::CSeq {
-                header::CSeq::new(self.cseq.seq, self.cseq.method.clone())
+            pub fn cseq(&self) -> &header::CSeq {
+                &self.core().core.cseq
             }
 
             /// Every hop, top first.
-            pub fn via(&self) -> NonEmpty<header::Via> {
-                vias(&self.via)
+            pub fn via(&self) -> &NonEmpty<header::Via> {
+                &self.core().core.via
             }
 
             /// The hop a response to this message goes back through.
-            pub fn top_via(&self) -> header::Via {
-                via(self.via.first())
+            pub fn top_via(&self) -> &header::Via {
+                self.core().core.via.first()
+            }
+
+            /// Every Contact this message carries.
+            pub fn contacts(&self) -> &ContactSet {
+                &self.core().core.contacts
+            }
+
+            /// The eagerly-parsed optional structured headers.
+            pub fn optional(&self) -> &OptionalHeaders {
+                &self.core().optional
+            }
+
+            /// The full header list in wire order.
+            pub fn headers(&self) -> &[SipHeader] {
+                &self.core().headers
+            }
+
+            pub fn body(&self) -> &Bytes {
+                &self.core().body
+            }
+
+            /// The datagram this message is — received or rendered at freeze.
+            pub fn image(&self) -> &Bytes {
+                &self.core().image
             }
 
             /// The single logical value of `H`, or `None` when the message
             /// carries no such header.
             pub fn header<H: HeaderValue>(&self) -> Option<Result<H, SipParseError>> {
-                header_of::<H>(&self.headers)
+                header_of::<H>(self.headers())
             }
 
             /// Every value of `H`, flattening comma folds where the header's
             /// grammar admits them.
             pub fn list<H: HeaderValue>(&self) -> Result<Vec<H>, SipParseError> {
-                values_of::<H>(&self.headers)
+                values_of::<H>(self.headers())
             }
 
             /// The unparsed values of one header, in wire order — the escape
             /// hatch for a header that genuinely stays opaque.
             pub fn raw(&self, name: HeaderName) -> impl Iterator<Item = &str> {
-                raw_values(&self.headers, name)
+                raw_values(self.headers(), name)
             }
 
             /// The unparsed values of one header as shared text — the seam a
             /// verbatim echo seeds from, copying no bytes.
             pub fn raw_text(&self, name: HeaderName) -> impl Iterator<Item = SipStr> + '_ {
-                raw_text_values(&self.headers, name)
+                raw_text_values(self.headers(), name)
             }
 
             pub fn has(&self, name: &HeaderName) -> bool {
-                self.headers.iter().any(|h| name.matches(&h.name))
+                self.headers().iter().any(|h| name.matches(&h.name))
             }
 
             /// The Route set carried on this message, top first.
@@ -161,71 +158,104 @@ macro_rules! typed_read_surface {
             ) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
                 Ok(HeaderList::new(self.list::<header::RecordRouteEntry>()?))
             }
+
+            /// Strict header-content validation — the opt-in re-parse pass.
+            pub fn validate_strict(&self) -> Result<(), SipParseError> {
+                crate::parser::custom::optional_headers::run_all_strict(self.headers())
+            }
         }
     };
 }
 
-typed_read_surface!(SipRequest);
-typed_read_surface!(SipResponse);
+core_read_surface!(SipRequest);
+core_read_surface!(SipResponse);
 
 impl SipRequest {
+    pub fn method(&self) -> &Method {
+        &self.start.method
+    }
+
+    /// The Request-URI — where this request is aimed.
+    pub fn request_uri(&self) -> &Uri {
+        &self.start.uri
+    }
+
+    pub fn version(&self) -> &str {
+        self.start.version.as_str()
+    }
+
     /// The editable twin of this request — the only path to a modified message.
     pub fn thaw(&self) -> RequestDraft {
         RequestDraft::thaw(self)
     }
-
-    /// The Request-URI, structured.
-    pub fn request_uri(&self) -> Uri {
-        Uri::parse_or_opaque(&self.uri)
-    }
 }
 
 impl SipResponse {
+    pub fn status(&self) -> u16 {
+        self.start.status
+    }
+
+    pub fn reason(&self) -> &str {
+        self.start.reason.as_str()
+    }
+
+    pub fn version(&self) -> &str {
+        self.start.version.as_str()
+    }
+
     pub fn thaw(&self) -> ResponseDraft {
         ResponseDraft::thaw(self)
     }
 }
 
+/// The dispatch point forwards to the one core rather than re-implementing it.
 impl SipMessage {
-    pub fn from(&self) -> header::From {
+    pub fn from(&self) -> &header::From {
         match self {
             SipMessage::Request(r) => r.from(),
             SipMessage::Response(r) => r.from(),
         }
     }
 
-    pub fn to(&self) -> header::To {
+    pub fn to(&self) -> &header::To {
         match self {
             SipMessage::Request(r) => r.to(),
             SipMessage::Response(r) => r.to(),
         }
     }
 
-    pub fn call_id(&self) -> header::CallId {
+    pub fn call_id(&self) -> &header::CallId {
         match self {
             SipMessage::Request(r) => r.call_id(),
             SipMessage::Response(r) => r.call_id(),
         }
     }
 
-    pub fn cseq(&self) -> header::CSeq {
+    pub fn cseq(&self) -> &header::CSeq {
         match self {
             SipMessage::Request(r) => r.cseq(),
             SipMessage::Response(r) => r.cseq(),
         }
     }
 
-    pub fn via(&self) -> NonEmpty<header::Via> {
+    pub fn via(&self) -> &NonEmpty<header::Via> {
         match self {
             SipMessage::Request(r) => r.via(),
             SipMessage::Response(r) => r.via(),
         }
     }
 
-    pub fn top_via(&self) -> header::Via {
+    pub fn top_via(&self) -> &header::Via {
         match self {
             SipMessage::Request(r) => r.top_via(),
             SipMessage::Response(r) => r.top_via(),
+        }
+    }
+
+    pub fn contacts(&self) -> &ContactSet {
+        match self {
+            SipMessage::Request(r) => r.contacts(),
+            SipMessage::Response(r) => r.contacts(),
         }
     }
 
@@ -247,5 +277,15 @@ impl SipMessage {
 
     pub fn has(&self, name: &HeaderName) -> bool {
         self.headers().iter().any(|h| name.matches(&h.name))
+    }
+
+    pub fn route_set(&self) -> Result<HeaderList<header::RouteEntry>, SipParseError> {
+        Ok(HeaderList::new(self.list::<header::RouteEntry>()?))
+    }
+
+    pub fn record_route_set(
+        &self,
+    ) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
+        Ok(HeaderList::new(self.list::<header::RecordRouteEntry>()?))
     }
 }

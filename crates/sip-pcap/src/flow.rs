@@ -170,8 +170,8 @@ impl FlowMsg {
     /// Exact wire bytes (header order and casing preserved).
     pub fn raw(&self) -> &[u8] {
         match &self.parsed {
-            SipMessage::Request(r) => &r.raw,
-            SipMessage::Response(r) => &r.raw,
+            SipMessage::Request(r) => r.image(),
+            SipMessage::Response(r) => r.image(),
         }
     }
 }
@@ -250,7 +250,7 @@ impl FlowLeg {
     pub fn invite_observations(&self) -> impl Iterator<Item = (SocketAddr, SocketAddr)> + '_ {
         self.msgs
             .iter()
-            .filter(|m| matches!(&m.parsed, SipMessage::Request(r) if r.method == Method::Invite))
+            .filter(|m| matches!(&m.parsed, SipMessage::Request(r) if r.method() == Method::Invite))
             .map(|m| (m.src, m.dst))
     }
 
@@ -263,7 +263,7 @@ impl FlowLeg {
         let mut src = BTreeSet::new();
         let mut dst = BTreeSet::new();
         for m in &self.msgs {
-            if matches!(&m.parsed, SipMessage::Request(r) if r.method == Method::Invite) {
+            if matches!(&m.parsed, SipMessage::Request(r) if r.method() == Method::Invite) {
                 src.insert(m.src.ip());
                 dst.insert(m.dst.ip());
             }
@@ -380,8 +380,8 @@ pub fn build_flows(datagrams: &[Datagram], cfg: &FlowConfig) -> Flows {
         };
         stats.sip_messages += 1;
         let call_id = match &msg {
-            SipMessage::Request(r) => r.call_id.clone(),
-            SipMessage::Response(r) => r.call_id.clone(),
+            SipMessage::Request(r) => r.call_id().clone(),
+            SipMessage::Response(r) => r.call_id().clone(),
         };
         let idx = *leg_by_call_id.entry(call_id.to_string()).or_insert_with(|| {
             legs.push(FlowLeg {
@@ -455,32 +455,32 @@ fn ingest(
     }
     match &msg {
         SipMessage::Request(r) => {
-            if r.method == Method::Invite && leg.invite.is_none() {
+            if r.method() == Method::Invite && leg.invite.is_none() {
                 leg.invite = Some(InviteSummary {
-                    ruri: r.request_uri(),
+                    ruri: r.request_uri().clone(),
                     from_uri: r.from().uri().clone(),
                     to_uri: r.to().uri().clone(),
-                    cseq: r.cseq.seq,
+                    cseq: r.cseq().seq(),
                 });
             }
-            if r.method == Method::Bye && leg.terminated_by.is_none() {
+            if r.method() == Method::Bye && leg.terminated_by.is_none() {
                 leg.terminated_by = Some(Terminator::Bye);
             }
-            if r.method == Method::Cancel && leg.terminated_by.is_none() {
+            if r.method() == Method::Cancel && leg.terminated_by.is_none() {
                 leg.terminated_by = Some(Terminator::Cancel);
             }
         }
         SipMessage::Response(r) => {
-            if r.cseq.method == Method::Invite {
-                if r.status == 180 {
+            if r.cseq().method() == Method::Invite {
+                if r.status() == 180 {
                     leg.saw_180 = true;
                 }
                 let initial = leg.invite.as_ref().map(|inv| inv.cseq);
-                if r.status >= 200
+                if r.status() >= 200
                     && leg.final_status.is_none()
-                    && (initial.is_none() || initial == Some(r.cseq.seq))
+                    && (initial.is_none() || initial == Some(r.cseq().seq()))
                 {
-                    leg.final_status = Some(r.status);
+                    leg.final_status = Some(r.status());
                 }
             }
         }
@@ -491,13 +491,13 @@ fn ingest(
             && m.dst == dst
             && match (&m.parsed, &msg) {
                 (SipMessage::Request(a), SipMessage::Request(b)) => {
-                    a.method == b.method
-                        && a.cseq.seq == b.cseq.seq
+                    a.method() == b.method()
+                        && a.cseq().seq() == b.cseq().seq()
                         && a.top_via().branch() == b.top_via().branch()
                 }
                 (SipMessage::Response(a), SipMessage::Response(b)) => {
-                    a.status == b.status
-                        && a.cseq == b.cseq
+                    a.status() == b.status()
+                        && a.cseq() == b.cseq()
                         && a.top_via().branch() == b.top_via().branch()
                 }
                 _ => false,
@@ -867,8 +867,8 @@ mod tests {
         assert_eq!(leg.msgs_at(2).count(), 2);
         // Per-hop selection sees a complete INVITE/200 exchange at hop 0.
         let at0: Vec<_> = leg.msgs_at(0).collect();
-        assert!(matches!(&at0[0].parsed, SipMessage::Request(r) if r.method == Method::Invite));
-        assert!(matches!(&at0[1].parsed, SipMessage::Response(r) if r.status == 200));
+        assert!(matches!(&at0[0].parsed, SipMessage::Request(r) if r.method() == Method::Invite));
+        assert!(matches!(&at0[1].parsed, SipMessage::Response(r) if r.status() == 200));
     }
 
     /// Same (src, dst, payload) within the capture-dup window is the capture

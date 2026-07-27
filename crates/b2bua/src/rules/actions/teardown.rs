@@ -95,7 +95,7 @@ impl ActionExecutor<'_> {
                         // its 503.
                         let answered_this_turn = fx.outbound.iter().any(|e| {
                             e.leg_id.as_deref() == Some(id.as_str())
-                                && matches!(&e.body, OutboundBody::Response(r) if r.status >= 200)
+                                && matches!(&e.body, OutboundBody::Response(r) if r.status() >= 200)
                         });
                         if answered_this_turn {
                             *call = set_leg_state(call.clone(), &id, LegState::Terminated);
@@ -279,7 +279,7 @@ impl ActionExecutor<'_> {
         // Defensive: the handle must be the re-INVITE this pending entry tracks
         // (the glare guard makes a second in-flight INVITE on this dialog
         // impossible, but never CANCEL a mismatched transaction).
-        if req.cseq.seq as i64 != outbound_cseq {
+        if req.cseq().seq() as i64 != outbound_cseq {
             return;
         }
         let cancel = generators::generate_cancel(&InviteClientTransactionHandle {

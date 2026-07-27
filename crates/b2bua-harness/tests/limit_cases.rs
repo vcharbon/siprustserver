@@ -283,7 +283,7 @@ async fn provisional_storm_before_connect_trips_the_cap_and_releases_the_limiter
     // router cap path replies before begin-termination — see router.rs), and the
     // still-ringing b-leg gets a CANCEL.
     let final_resp = call.expect(503).await;
-    assert_eq!(final_resp.status, 503, "a-leg INVITE resolves with the 503 cap cause");
+    assert_eq!(final_resp.status(), 503, "a-leg INVITE resolves with the 503 cap cause");
     let mut cancel = bob.receive("CANCEL").await;
     cancel.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
@@ -366,7 +366,7 @@ async fn prack_loop_storm_before_connect_trips_the_cap_and_releases_the_limiter(
     // then drain the rest (relayed PRACK 200 / CANCEL ordering) and force-resolve
     // past the 32 s TerminatingTimeout.
     let final_resp = call.expect(503).await;
-    assert_eq!(final_resp.status, 503, "a-leg INVITE resolves with the 503 cap cause");
+    assert_eq!(final_resp.status(), 503, "a-leg INVITE resolves with the 503 cap cause");
     h.advance(Duration::from_secs(1)).await;
     alice.drain().await;
     bob.drain().await;

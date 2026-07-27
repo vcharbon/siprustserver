@@ -115,6 +115,11 @@ impl Agent {
         unwrap_step(self.try_send(msg, dst).await)
     }
 
+    /// Panicking veneer over [`try_send_wire`](Agent::try_send_wire).
+    pub(super) async fn send_wire(&self, wire: &[u8], dst: SocketAddr) {
+        unwrap_step(self.try_send_wire(wire, dst).await)
+    }
+
     /// Panicking veneer over [`try_recv`](Agent::try_recv).
     pub(super) async fn recv(&self) -> SipMessage {
         unwrap_step(self.try_recv().await)
@@ -185,8 +190,8 @@ impl Agent {
     /// the ACK-races-the-next-INVITE interleave, in either order, never trips
     /// a body.
     pub(crate) fn ack_obligation_claims(&self, r: &SipRequest) -> bool {
-        r.method.as_str() == "ACK"
-            && top_via_branch(r).is_some_and(|b| self.acks.note_ack(&r.call_id, &b))
+        r.method().as_str() == "ACK"
+            && top_via_branch(r).is_some_and(|b| self.acks.note_ack(r.call_id().as_str(), &b))
     }
 
     /// THE request-receive core: receive the next request and check its method,
@@ -201,14 +206,14 @@ impl Agent {
         loop {
             match self.try_recv().await? {
                 SipMessage::Request(r) => {
-                    if r.method != method {
+                    if r.method() != method {
                         if self.ack_obligation_claims(&r) {
                             continue;
                         }
                         return Err(StepError::WrongMethod {
                             who: self.name.clone(),
                             expected: method.to_string(),
-                            got: r.method.to_string(),
+                            got: r.method().to_string(),
                         });
                     }
                     return Ok(ServerTxn::from_request(self.clone(), r));
@@ -218,7 +223,7 @@ impl Agent {
                         who: self.name.clone(),
                         detail: format!(
                             "got a {} {} response, expected a {method} request",
-                            r.status, r.reason
+                            r.status(), r.reason()
                         ),
                     })
                 }

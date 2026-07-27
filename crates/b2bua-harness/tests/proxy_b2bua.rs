@@ -59,7 +59,7 @@ async fn alice_calls_bob_through_proxy_and_b2bua() {
 
     // The INVITE arrives at bob (proxy → b2bua → proxy → bob).
     let mut uas = bob.receive("INVITE").await;
-    assert!(!uas.request().body.is_empty(), "offer relayed to bob");
+    assert!(!uas.request().body().is_empty(), "offer relayed to bob");
     // The LB proxy Record-Routes the b-leg INVITE so it stays in the path for
     // the whole call — bob echoes this and any bob-initiated in-dialog request
     // decodes the cookie back to the worker.
@@ -75,7 +75,7 @@ async fn alice_calls_bob_through_proxy_and_b2bua() {
 
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     let ok = call.expect(200).await;
-    assert!(!ok.body.is_empty(), "answer relayed to alice");
+    assert!(!ok.body().is_empty(), "answer relayed to alice");
     // The a-leg 200 OK echoes the proxy's Record-Route, so alice's route set is
     // [<proxy;lr>] and her in-dialog BYE returns through the proxy.
     let a_leg_rr = ok.record_route_set().expect("readable Record-Route");
@@ -133,9 +133,9 @@ async fn alice_calls_bob_through_proxy_and_b2bua() {
     // (loose routing: the proxy never rewrote the R-URI).
     let bob_invite = find_request(&entries, proxy_a, bob_a, "INVITE").expect("proxy → bob INVITE");
     assert!(
-        bob_invite.uri.contains("@127.0.0.1:5070"),
+        bob_invite.request_uri().text().contains("@127.0.0.1:5070"),
         "INVITE R-URI at bob, got {}",
-        bob_invite.uri
+        bob_invite.request_uri().text()
     );
 
     // ── Render the HTML / SVG / txt reports (clickable sequence diagram +
@@ -181,7 +181,7 @@ fn find_request(
             return None;
         }
         match CustomParser::new().parse(&e.raw) {
-            Ok(SipMessage::Request(r)) if r.method == method => Some(r),
+            Ok(SipMessage::Request(r)) if r.method() == method => Some(r),
             _ => None,
         }
     })

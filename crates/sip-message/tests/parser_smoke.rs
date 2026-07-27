@@ -38,25 +38,25 @@ Content-Length: 0\r\n\r\n";
 fn parses_well_formed_invite() {
     let msg = parse(INVITE).expect("INVITE should parse");
     let SipMessage::Request(req) = msg else { panic!("expected request") };
-    assert_eq!(req.method, "INVITE");
-    assert_eq!(req.uri, "sip:bob@example.com");
-    assert_eq!(req.from.uri, "sip:alice@example.com");
-    assert_eq!(req.from.tag.as_deref(), Some("1928"));
-    assert_eq!(req.to.tag, None); // initial INVITE: no To-tag yet
-    assert_eq!(req.call_id, "a84b4c76e66710@pc33.example.com");
-    assert_eq!(req.cseq.seq, 314159);
-    assert_eq!(req.cseq.method, "INVITE");
-    assert_eq!(req.via.first().branch.as_deref(), Some("z9hG4bK1"));
-    assert_eq!(req.via.first().host, "host.example.com");
-    assert_eq!(req.request_uri.host, "example.com");
+    assert_eq!(req.method().as_str(), "INVITE");
+    assert_eq!(req.request_uri().text(), "sip:bob@example.com");
+    assert_eq!(req.from().uri().text(), "sip:alice@example.com");
+    assert_eq!(req.from().tag(), Some("1928"));
+    assert_eq!(req.to().tag(), None); // initial INVITE: no To-tag yet
+    assert_eq!(req.call_id().as_str(), "a84b4c76e66710@pc33.example.com");
+    assert_eq!(req.cseq().seq(), 314159);
+    assert_eq!(req.cseq().method().as_str(), "INVITE");
+    assert_eq!(req.via().first().branch(), Some("z9hG4bK1"));
+    assert_eq!(req.via().first().host(), "host.example.com");
+    assert_eq!(req.request_uri().host(), "example.com");
 }
 
 #[test]
 fn parses_200_ok_with_totag() {
     let msg = parse(OK_200).expect("200 OK should parse");
     let SipMessage::Response(resp) = msg else { panic!("expected response") };
-    assert_eq!(resp.status, 200);
-    assert_eq!(resp.reason, "OK");
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.reason(), "OK");
     // status > 100 ⇒ To-tag guaranteed; the refined view proves it.
     let tagged = SipResponseTagged::new(&resp).expect("200 has a To-tag");
     assert_eq!(tagged.to_tag(), "as83kf");
@@ -70,7 +70,7 @@ fn in_dialog_request_exposes_infallible_tags() {
     assert_eq!(in_dialog.from_tag(), "as83kf");
     assert_eq!(in_dialog.to_tag(), "1928");
     // Deref still exposes the base accessors.
-    assert_eq!(in_dialog.method, "BYE");
+    assert_eq!(in_dialog.method(), "BYE");
 }
 
 #[test]
@@ -148,10 +148,10 @@ Call-ID: x@y\r\n\
 CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n";
     let SipMessage::Request(req) = parse(raw).unwrap() else { unreachable!() };
-    let pai = req.optional.p_asserted_identity.as_ref().expect("PAI ok");
+    let pai = req.optional().p_asserted_identity.as_ref().expect("PAI ok");
     assert_eq!(pai.len(), 1);
-    assert_eq!(pai[0].uri, "sip:alice@example.com");
-    assert_eq!(req.optional.diversion.as_ref().unwrap().len(), 1);
+    assert_eq!(pai[0].uri().text(), "sip:alice@example.com");
+    assert_eq!(req.optional().diversion.as_ref().unwrap().len(), 1);
 }
 
 #[test]
@@ -168,7 +168,7 @@ CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n";
     let msg = parse(raw).expect("message still parses (non-fatal optional header)");
     let SipMessage::Request(ref req) = msg else { unreachable!() };
-    assert!(req.optional.diversion.is_err(), "malformed Diversion captured as Err");
+    assert!(req.optional().diversion.is_err(), "malformed Diversion captured as Err");
     assert!(msg.validate_strict().is_err(), "validate_strict surfaces it");
 }
 

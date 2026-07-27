@@ -21,7 +21,7 @@ impl ProxyCore {
     pub(super) async fn handle_response(&self, resp: SipResponse) {
         let cseq = resp.cseq();
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
-        self.metrics.record_response(cseq.method().as_str(), resp.status);
+        self.metrics.record_response(cseq.method().as_str(), resp.status());
 
         // §16.7.3: need ≥2 Via (ours + the next hop's).
         let hops: Vec<Via> = resp.via().iter().cloned().collect();
@@ -40,7 +40,7 @@ impl ProxyCore {
 
         // §16.7 / §16.11: 100 Trying is hop-by-hop — it quenched OUR hop's
         // retransmissions and must not be forwarded upstream.
-        if resp.status == 100 {
+        if resp.status() == 100 {
             self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
             return;
         }
@@ -132,7 +132,7 @@ impl ProxyCore {
         // primary's INVITE (see `core/request`). Short TTL: the upstream
         // ACKs within its final-retransmit window (a re-sent final refreshes
         // the marker).
-        if (300..700).contains(&resp.status) && cseq.method() == &Method::Invite {
+        if (300..700).contains(&resp.status()) && cseq.method() == Method::Invite {
             // The response echoes the request's From (tag included), so this
             // re-builds exactly the key the INVITE was remembered under.
             let call_id = resp.call_id();

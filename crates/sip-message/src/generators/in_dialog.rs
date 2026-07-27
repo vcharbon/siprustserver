@@ -7,10 +7,9 @@ use super::methods::{InDialogMethod, B2BUA_ALLOW, B2BUA_SUPPORTED};
 use super::spec::{ContactSpec, StackDialog, ViaSpec};
 use crate::draft::RequestDraft;
 use crate::header::{
-    self, CSeq, CallId, Event, HeaderName, MaxForwards, MediaType, RAck, SubscriptionState, Uri,
-    Via,
+    self, CSeq, CallId, Event, HeaderName, HeaderValue, MaxForwards, MediaType, RAck, RouteEntry,
+    SubscriptionState, Uri, Via,
 };
-use crate::message_helpers::route::{first_route_is_loose, strip_route_uri_to_request_uri};
 use crate::method::Method;
 use crate::sip_str::SipStr;
 use crate::types::{SipHeader, SipRequest};
@@ -19,22 +18,27 @@ use crate::types::{SipHeader, SipRequest};
 /// request, given the dialog's remote target and route set (RFC 3261
 /// §12.2.1.1 / §16.12):
 ///   - empty route set → `(remote_target, [])`;
-///   - loose (first route has `;lr`) → `(remote_target, route_set)` as-is;
+///   - loose (the first route's URI carries `;lr`) → `(remote_target,
+///     route_set)` as-is;
 ///   - strict → `(first route URI, rest of route_set ++ <remote_target>)`.
+///
+/// A first route no reader accepts is carried through untouched, so an
+/// unreadable entry never redirects the request at itself.
 pub(super) fn route_for_in_dialog(
     remote_target: &str,
     route_set: &[String],
 ) -> (String, Vec<String>) {
-    if route_set.is_empty() {
+    let Some(first) = route_set.first() else {
         return (remote_target.to_string(), Vec::new());
-    }
-    if first_route_is_loose(&route_set[0]) {
-        (remote_target.to_string(), route_set.to_vec())
-    } else {
-        let request_uri = strip_route_uri_to_request_uri(&route_set[0]);
-        let mut routes: Vec<String> = route_set[1..].to_vec();
-        routes.push(format!("<{remote_target}>"));
-        (request_uri, routes)
+    };
+    match RouteEntry::parse(&SipStr::owned(first)) {
+        Ok(entry) if !entry.uri().is_loose_route() => {
+            let request_uri = entry.uri().text().into_owned();
+            let mut routes: Vec<String> = route_set[1..].to_vec();
+            routes.push(format!("<{remote_target}>"));
+            (request_uri, routes)
+        }
+        _ => (remote_target.to_string(), route_set.to_vec()),
     }
 }
 

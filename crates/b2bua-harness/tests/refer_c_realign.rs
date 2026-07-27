@@ -44,7 +44,7 @@ fn refer_to_charlie() -> String {
 /// `state`, and a sipfrag body containing `frag`.
 fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
     let req = txn.request();
-    assert_eq!(req.method, "NOTIFY", "expected NOTIFY");
+    assert_eq!(req.method(), "NOTIFY", "expected NOTIFY");
     let event = req.header::<Event>().expect("NOTIFY carries an Event").expect("readable Event");
     assert!(event.is("refer"), "NOTIFY Event: refer, got {:?}", event.token());
     let ss = req
@@ -52,7 +52,7 @@ fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
         .expect("NOTIFY carries a Subscription-State")
         .expect("readable Subscription-State");
     assert!(ss.is(state), "subscription-state {:?} should be {state:?}", ss.token());
-    let body = String::from_utf8_lossy(&req.body);
+    let body = String::from_utf8_lossy(req.body());
     assert!(
         body.contains(frag),
         "sipfrag body {body:?} should contain {frag:?}"
@@ -62,9 +62,9 @@ fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
 /// Assert a re-INVITE carries `body`, an INVITE CSeq > 1 (a re-INVITE, not the
 /// initial INVITE), and a Contact whose URI carries `leg=<leg>`.
 fn assert_reinvite(req: &sip_message::SipRequest, body: &str, leg: &str) {
-    assert_eq!(req.method, "INVITE", "expected re-INVITE");
+    assert_eq!(req.method(), "INVITE", "expected re-INVITE");
     assert_eq!(
-        String::from_utf8_lossy(&req.body),
+        String::from_utf8_lossy(req.body()),
         body,
         "re-INVITE body should equal expected SDP"
     );

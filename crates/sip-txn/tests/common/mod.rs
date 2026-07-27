@@ -128,12 +128,12 @@ pub fn parse_response(raw: &[u8]) -> sip_message::SipResponse {
 /// Count requests of `method` / responses of `status` in a drained batch.
 pub fn count_requests(msgs: &[SipMessage], method: &str) -> usize {
     msgs.iter()
-        .filter(|m| matches!(m, SipMessage::Request(r) if r.method == method))
+        .filter(|m| matches!(m, SipMessage::Request(r) if r.method() == method))
         .count()
 }
 pub fn count_responses(msgs: &[SipMessage], status: u16) -> usize {
     msgs.iter()
-        .filter(|m| matches!(m, SipMessage::Response(r) if r.status == status))
+        .filter(|m| matches!(m, SipMessage::Response(r) if r.status() == status))
         .count()
 }
 

@@ -3,7 +3,7 @@
 //! lines verbatim out of an inbound INVITE — no parse, no transaction, no
 //! `To`-tag — plus the jittered `Retry-After` seam that feeds it.
 
-use super::bytes::find_subslice;
+use crate::raw_bytes::find_subslice;
 
 /// Compute a jittered `Retry-After` value (seconds).
 ///

@@ -41,7 +41,7 @@ impl ProxyCore {
         };
         // A recipe freezes into its own image, and that image IS the wire form.
         let resp = generate_response(req, status, reason, &opts);
-        self.reply_to_source(&resp.raw, src).await;
+        self.reply_to_source(resp.image(), src).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Responded);
 
         // ── §16.7 / §17.1.1.3: absorb the ACK to our OWN non-2xx INVITE final ─
@@ -52,7 +52,7 @@ impl ProxyCore {
         // the matching ACK rather than relay it (no downstream exists for a
         // self-generated reject; relaying would run the strategy and hand a
         // worker a stray ACK matching no transaction it ever created).
-        if (300..700).contains(&status) && req.method == Method::Invite {
+        if (300..700).contains(&status) && req.method() == Method::Invite {
             if let Some(upstream_branch) = top_via_branch(req) {
                 let from = req.from();
                 self.cancel_lru.remember(

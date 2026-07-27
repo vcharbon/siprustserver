@@ -64,7 +64,7 @@ async fn basic() {
 
     // Alice sees a bare 180 — no body, no Require:100rel, no RSeq.
     let p180 = call.expect(180).await;
-    assert!(p180.body.is_empty(), "bare 180 has no body");
+    assert!(p180.body().is_empty(), "bare 180 has no body");
     assert!(
         !has_token(p180.header::<Require>(), "100rel"),
         "no Require:100rel on bare 180",
@@ -133,7 +133,7 @@ async fn failover_reject() {
 
     // Failover to bob2 (new R-URI per the on_failure decision).
     let mut uas2 = bob2.receive("INVITE").await;
-    assert_eq!(uas2.request().uri, "sip:+1234@127.0.0.1:5614", "bob2 R-URI is the failover new_ruri");
+    assert_eq!(uas2.request().request_uri().text(), "sip:+1234@127.0.0.1:5614", "bob2 R-URI is the failover new_ruri");
 
     // Bob2's 18x are suppressed (alice already saw the bare 180 from bob1).
     uas2.respond(180, "Ringing").await;
@@ -201,7 +201,7 @@ async fn failover_no_answer() {
 
     // Bob2 receives the failover INVITE with the configured new R-URI.
     let mut uas2 = bob2.receive("INVITE").await;
-    assert_eq!(uas2.request().uri, "sip:+1234@127.0.0.1:5616", "bob2 R-URI is the failover new_ruri");
+    assert_eq!(uas2.request().request_uri().text(), "sip:+1234@127.0.0.1:5616", "bob2 R-URI is the failover new_ruri");
 
     // Bob2's 180 is suppressed; its 200 OK carries the (delayed) SDP offer.
     uas2.respond(180, "Ringing").await;
@@ -217,7 +217,7 @@ async fn failover_no_answer() {
     // Alice answers the delayed offer in the ACK (RFC 3264 §4).
     let mut dialog = call.ack_with(Some(ANSWER)).await;
     let ack = bob2.receive("ACK").await;
-    assert!(!ack.request().body.is_empty(), "ACK carries the SDP answer");
+    assert!(!ack.request().body().is_empty(), "ACK carries the SDP answer");
 
     let mut bye = dialog.bye().await;
     bob2.receive("BYE").await.respond(200, "OK").await;
@@ -256,13 +256,13 @@ async fn messages_all_relays_every_18x_downgraded() {
     // 180 → bare 180 (mints the stored a-facing tag).
     uas.respond(180, "Ringing").await;
     let p1 = call.expect(180).await;
-    assert!(p1.body.is_empty(), "first relayed 18x is a bare 180");
+    assert!(p1.body().is_empty(), "first relayed 18x is a bare 180");
     let a_tag = p1.to().tag().expect("180 has a To-tag").to_string();
 
     // 183 with SDP → relayed again, STILL downgraded: bare 180, same To-tag.
     uas.respond(183, "Session Progress").with_sdp(ANSWER).await;
     let p2 = call.expect(180).await;
-    assert!(p2.body.is_empty(), "later relayed 18x is downgraded (no SDP)");
+    assert!(p2.body().is_empty(), "later relayed 18x is downgraded (no SDP)");
     assert_eq!(p2.to().tag(), Some(a_tag.as_str()), "same stored To-tag (one early dialog)");
 
     // A third 18x → also relayed (ALL).
@@ -306,7 +306,7 @@ async fn messages_one_per_value_dedupes_on_upstream_status() {
     // First 183 → relayed as the bare 180 (value 183 now spent).
     uas.respond(183, "Session Progress").with_sdp(ANSWER).await;
     let p1 = call.expect(180).await;
-    assert!(p1.body.is_empty(), "bare 180");
+    assert!(p1.body().is_empty(), "bare 180");
     let a_tag = p1.to().tag().expect("180 has a To-tag").to_string();
 
     // Second 183 → suppressed (same upstream value).

@@ -87,7 +87,7 @@ fn is_reliable_1xx(msg: &SipMessage) -> bool {
 
 /// Is this ordered event a `PRACK` request (sent or received)?
 fn is_prack(ev: &OrderedEvent) -> bool {
-    matches!(&ev.msg, SipMessage::Request(r) if r.method.as_str().eq_ignore_ascii_case("PRACK"))
+    matches!(&ev.msg, SipMessage::Request(r) if r.method().as_str().eq_ignore_ascii_case("PRACK"))
 }
 
 /// The top-Via branch, or empty when absent — matches the TS `?? ""` guard so a
@@ -132,7 +132,7 @@ impl CrossMessageAuditRule for RequireReliable1xxOnRequireRule {
                     let msg = &ev.msg;
                     if ev.kind == EventKind::Received {
                         if let SipMessage::Request(r) = msg {
-                            if r.method.as_str().eq_ignore_ascii_case("INVITE")
+                            if r.method().as_str().eq_ignore_ascii_case("INVITE")
                                 && requires(msg, "100rel")
                             {
                                 let branch = branch_of(msg);
@@ -237,7 +237,7 @@ impl CrossMessageAuditRule for ReliableNeedsClientOptInRule {
                     let msg = &ev.msg;
                     if ev.kind == EventKind::Received {
                         if let SipMessage::Request(r) = msg {
-                            if r.method.as_str().eq_ignore_ascii_case("INVITE") {
+                            if r.method().as_str().eq_ignore_ascii_case("INVITE") {
                                 let branch = branch_of(msg);
                                 if !branch.is_empty() {
                                     opt_in.entry(branch).or_insert_with(|| {
@@ -311,7 +311,7 @@ impl CrossMessageAuditRule for NoReliable1xxOnInDialogRule {
                             let branch = branch_of(msg);
                             if !branch.is_empty() {
                                 requests.entry(branch).or_insert_with(|| {
-                                    (r.to.tag.is_some(), r.method.as_str().to_uppercase())
+                                    (r.to().tag().is_some(), r.method().as_str().to_uppercase())
                                 });
                             }
                         }
@@ -1197,7 +1197,7 @@ impl CrossMessageAuditRule for PrackOfferAnswerModelRule {
                     let msg = &ev.msg;
 
                     if let SipMessage::Request(r) = msg {
-                        if r.method.as_str().eq_ignore_ascii_case("INVITE") {
+                        if r.method().as_str().eq_ignore_ascii_case("INVITE") {
                             let had = invite_had_offer
                                 .entry(call_id(msg).to_string())
                                 .or_insert(false);
@@ -1249,8 +1249,8 @@ impl CrossMessageAuditRule for PrackOfferAnswerModelRule {
 /// presence test used by the offer/answer-flavoured rules.
 fn body_of(msg: &SipMessage) -> &[u8] {
     match msg {
-        SipMessage::Request(r) => &r.body,
-        SipMessage::Response(r) => &r.body,
+        SipMessage::Request(r) => r.body(),
+        SipMessage::Response(r) => r.body(),
     }
 }
 

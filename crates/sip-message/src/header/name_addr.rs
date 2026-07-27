@@ -23,6 +23,11 @@ impl NameAddr {
         Self { display: None, uri, params: Params::new() }
     }
 
+    /// Assemble from already-scanned parts — the parser's seam.
+    pub(crate) fn from_parts(display: Option<SipStr>, uri: Uri, params: Params) -> Self {
+        Self { display, uri, params }
+    }
+
     pub fn uri(&self) -> &Uri {
         &self.uri
     }

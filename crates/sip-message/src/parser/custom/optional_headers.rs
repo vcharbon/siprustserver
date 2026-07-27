@@ -13,17 +13,16 @@
 use super::header_index::HeaderIndex;
 use super::scanner::is_token_char;
 use super::structured_headers::{
-    find_uri_embedded_headers_start, parse_name_addr, parse_rack, parse_refer_to,
-    top_level_comma_entries, validate_strict_sip_uri, ParsedNameAddr, ParsedReferTo,
+    find_uri_embedded_headers_start, parse_name_addr, top_level_comma_entries,
+    validate_strict_sip_uri, ParsedNameAddr,
 };
 use crate::error::SipParseError;
-use crate::header::HeaderName;
-use crate::method::Method;
+use crate::header::{HeaderName, HeaderValue, NameAddr, RAck, ReferTo, Uri};
 use crate::sip_str::SipStr;
-use crate::types::{NameAddr, OptionalHeaders, Rack, ReferTo, Replaces, SipHeader, Uri};
+use crate::types::{OptionalHeaders, SipHeader};
 
 fn to_name_addr(p: ParsedNameAddr) -> NameAddr {
-    NameAddr { display_name: p.display_name, uri: p.uri, tag: p.tag, params: p.params }
+    NameAddr::from_parts(p.display_name, Uri::parse_or_opaque(&p.uri), p.params)
 }
 
 // ---------------------------------------------------------------------------
@@ -71,57 +70,37 @@ fn parse_geolocation_routing(value: Option<&SipStr>) -> Result<Option<bool>, Sip
     }
 }
 
-fn parse_rack_header(value: Option<&SipStr>) -> Result<Option<Rack>, SipParseError> {
+fn parse_rack_header(value: Option<&SipStr>) -> Result<Option<RAck>, SipParseError> {
     let Some(value) = value else {
         return Ok(None);
     };
-    match parse_rack(value) {
-        Some(r) => Ok(Some(Rack { rseq: r.rseq, seq: r.seq, method: Method::from_wire(&r.method) })),
-        None => Err(SipParseError::new(format!("Malformed RAck: \"{value}\""))),
-    }
-}
-
-fn to_refer_to(rt: ParsedReferTo) -> ReferTo {
-    ReferTo {
-        display_name: rt.display_name,
-        uri: rt.uri,
-        parsed_uri: rt.parsed_uri.map(|u| Uri {
-            scheme: u.scheme,
-            user: u.user,
-            host: u.host,
-            port: u.port,
-            params: u.params,
-        }),
-        params: rt.params,
-        embedded_headers: rt.embedded_headers,
-        replaces: rt.replaces.map(|r| Replaces {
-            call_id: r.call_id,
-            to_tag: r.to_tag,
-            from_tag: r.from_tag,
-            early_only: r.early_only,
-        }),
-    }
+    RAck::parse(value)
+        .map(Some)
+        .map_err(|_| SipParseError::new(format!("Malformed RAck: \"{value}\"")))
 }
 
 fn parse_refer_to_header(value: Option<&SipStr>) -> Result<Option<ReferTo>, SipParseError> {
     let Some(value) = value else {
         return Ok(None);
     };
-    let parsed = match parse_refer_to(value) {
-        Some(rt) => rt,
-        None => return Err(SipParseError::new(format!("Malformed Refer-To: \"{value}\""))),
-    };
+    let parsed = ReferTo::parse(value)
+        .map_err(|_| SipParseError::new(format!("Malformed Refer-To: \"{value}\"")))?;
     // Strict SIP-URI on the target URI head (without embedded headers).
     // `find_uri_embedded_headers_start` returns a byte index at the `?` (ASCII
-    // → char boundary), so the head is a plain borrow.
-    let uri_head = match find_uri_embedded_headers_start(&parsed.uri) {
-        None => parsed.uri.as_str(),
-        Some(q) => &parsed.uri[..q],
+    // -> char boundary), so the head is a plain borrow.
+    let violation = {
+        let text = parsed.uri().text();
+        let uri_head = match find_uri_embedded_headers_start(&text) {
+            None => &text[..],
+            Some(q) => &text[..q],
+        };
+        validate_strict_sip_uri(uri_head)
+            .map(|reason| format!("Strict Refer-To URI: {reason} (\"{uri_head}\")"))
     };
-    if let Some(reason) = validate_strict_sip_uri(uri_head) {
-        return Err(SipParseError::new(format!("Strict Refer-To URI: {reason} (\"{uri_head}\")")));
+    match violation {
+        Some(reason) => Err(SipParseError::new(reason)),
+        None => Ok(Some(parsed)),
     }
-    Ok(Some(to_refer_to(parsed)))
 }
 
 /// Parse every optional structured header eagerly + non-fatally, from the
@@ -210,7 +189,7 @@ fn parse_date_value_strict(value: &str) -> Result<(), SipParseError> {
     if tz != "GMT" {
         return Err(SipParseError::new(format!("Malformed Date: expected \"GMT\", got \"{tz}\"")));
     }
-    if day < 1 || day > 31 || hh > 23 || mm > 59 || ss > 59 {
+    if !(1..=31).contains(&day) || hh > 23 || mm > 59 || ss > 59 {
         return bad("out-of-range field");
     }
     Ok(())

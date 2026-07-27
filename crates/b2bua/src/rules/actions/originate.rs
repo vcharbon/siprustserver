@@ -210,7 +210,7 @@ impl ActionExecutor<'_> {
         *call = call::helpers::update_dialog(call.clone(), leg_id, &t_id, |d| {
             d.ext.pending_invite_txn = Some(call::InviteTxnHandle {
                 branch: branch.clone(),
-                original_invite: out_req.raw.to_vec(),
+                original_invite: out_req.image().to_vec(),
                 destination: call::HostPort { host: dest.0.clone(), port: dest.1 },
             });
             d.ext.ack_branch = None;

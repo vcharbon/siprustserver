@@ -46,6 +46,15 @@ pub enum Method {
     Other(String),
 }
 
+/// A borrowed method compares to an owned one — the read surface hands out
+/// `&Method`, and a comparison against a literal variant must not have to
+/// clone or dereference.
+impl PartialEq<Method> for &Method {
+    fn eq(&self, other: &Method) -> bool {
+        *self == other
+    }
+}
+
 impl Method {
     /// The canonical wire spelling. Known methods are RFC uppercase; an
     /// [`Other`](Method::Other) returns its preserved token verbatim.

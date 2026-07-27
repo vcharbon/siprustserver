@@ -339,13 +339,13 @@ async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
         "\n──── actual message the UAC receives for its end-of-hold BYE ────\n\
          SIP/2.0 {} {}\n  CSeq: {} {}\n  Call-ID: {}\n\
          ────────────────────────────────────────────────────────────────\n",
-        the_481.status,
-        the_481.reason,
+        the_481.status(),
+        the_481.reason(),
         the_481.cseq().seq(),
         the_481.cseq().method(),
         the_481.call_id().as_str(),
     );
-    assert_eq!(the_481.status, 481, "the UAC gets 481, not the 200 it expects");
+    assert_eq!(the_481.status(), 481, "the UAC gets 481, not the 200 it expects");
 
     // The body IS locally present and reclaimable: the resolve path simply
     // refuses to look. `peek_reclaimable` (today reachable ONLY via a backup's

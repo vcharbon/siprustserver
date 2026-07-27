@@ -36,9 +36,9 @@ impl AckCtx<'_> {
     /// to a CANCEL/BYE on the same socket, a 2xx (whose ACK is a dialog-level
     /// act the scenario performs, §13.2.2.4) — is left alone.
     pub(super) async fn ack_non_2xx(&self, resp: &SipResponse) -> Result<(), StepError> {
-        if resp.status < 300
-            || resp.cseq().method() != &Method::Invite
-            || resp.cseq.seq != self.invite.cseq.seq
+        if resp.status() < 300
+            || resp.cseq().method() != Method::Invite
+            || resp.cseq().seq() != self.invite.cseq().seq()
         {
             return Ok(());
         }
@@ -80,12 +80,12 @@ pub(super) async fn expect_response(
 pub(super) async fn recv_response_raw(agent: &Agent) -> Result<SipResponse, StepError> {
     loop {
         match agent.try_recv().await? {
-            SipMessage::Response(r) if r.status == 100 => continue,
+            SipMessage::Response(r) if r.status() == 100 => continue,
             SipMessage::Response(r) => return Ok(r),
             SipMessage::Request(r) => {
                 return Err(StepError::UnexpectedKind {
                     who: agent.name.clone(),
-                    detail: format!("got a {} request, expected a response", r.method),
+                    detail: format!("got a {} request, expected a response", r.method()),
                 })
             }
         }
@@ -120,22 +120,22 @@ pub(super) async fn try_expect_response_tolerating(
 ) -> Result<SipResponse, StepError> {
     loop {
         match agent.try_recv().await? {
-            SipMessage::Response(r) if r.status == 100 && status != 100 => continue,
+            SipMessage::Response(r) if r.status() == 100 && status != 100 => continue,
             SipMessage::Response(r) => {
                 if let Some(ctx) = ack {
                     ctx.ack_non_2xx(&r).await?;
                 }
-                if r.status != status {
+                if r.status() != status {
                     return Err(StepError::WrongStatus {
                         who: agent.name.clone(),
                         expected: status,
-                        got: r.status,
-                        reason: r.reason.to_string(),
+                        got: r.status(),
+                        reason: r.reason().to_string(),
                     });
                 }
                 return Ok(r);
             }
-            SipMessage::Request(r) if tolerate.iter().any(|t| r.method == *t) => {
+            SipMessage::Request(r) if tolerate.iter().any(|t| r.method() == *t) => {
                 let mut txn = ServerTxn::from_request(agent.clone(), r);
                 txn.respond(200, "OK").try_send().await?;
                 continue;
@@ -153,7 +153,7 @@ pub(super) async fn try_expect_response_tolerating(
                     who: agent.name.clone(),
                     detail: format!(
                         "got a {} request, expected a {status} response{tolerating}",
-                        r.method
+                        r.method()
                     ),
                 });
             }

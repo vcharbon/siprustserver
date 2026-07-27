@@ -90,7 +90,7 @@ fn bye_for_cancel_policy_with(reaction: DeltaReaction) -> AcceptedDeltaPolicy {
         );
         let observed_cancel = matches!(
             &ctx.observed,
-            ObservedStimulus::Request(r) if r.method.as_str() == "CANCEL"
+            ObservedStimulus::Request(r) if r.method().as_str() == "CANCEL"
         );
         if expects_bye && observed_cancel && ctx.dialog.early_dialog_count == 1 {
             DeltaDecision::Accepted(AcceptedDelta {

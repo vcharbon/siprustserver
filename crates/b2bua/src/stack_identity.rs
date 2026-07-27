@@ -12,7 +12,7 @@ use sip_message::generators::{ContactSpec, SipTransport, ViaSpec};
 // The cr/lg/callRef param codec lives in sip-message so the encoder and its
 // inverse can't drift across crates; re-export so existing `stack_identity::`
 // callers (the router's read path) are unchanged.
-pub use sip_message::message_helpers::{decode_param, encode_param};
+pub use sip_message::param_codec::{decode_param, encode_param};
 
 /// Inputs shared by the Via + Contact builders.
 pub struct StackIdentityOpts<'a> {

@@ -147,8 +147,8 @@ async fn assert_wire_503(name: &str, gate_reason: Option<&'static str>, retry: u
     client.send_to(&new_invite(ALICE, "z9hG4bK-rej", None), proxy.addr()).await.unwrap();
     let resp = recv_response(&*client).await;
 
-    assert_eq!(resp.status, 503, "a rejected new external INVITE must get a 503");
-    assert_eq!(resp.reason, "Service Unavailable");
+    assert_eq!(resp.status(), 503, "a rejected new external INVITE must get a 503");
+    assert_eq!(resp.reason(), "Service Unavailable");
     let retry_after = resp.header::<RetryAfter>().expect("503 carries Retry-After").expect("reads");
     assert_eq!(retry_after.token(), retry.to_string(), "503 must carry the gate's Retry-After");
     let reason = resp.header::<Reason>().expect("503 carries Reason").expect("reads");
@@ -249,7 +249,7 @@ async fn real_gate_cps_drain_yields_a_wire_503_cps() {
     // Second INVITE: bucket empty → 503 proxy_overload_cps, Retry-After 60.
     client.send_to(&new_invite(ALICE, "z9hG4bK-shed", None), proxy.addr()).await.unwrap();
     let resp = recv_response(&*client).await;
-    assert_eq!(resp.status, 503);
+    assert_eq!(resp.status(), 503);
     assert_eq!(resp.raw(HeaderName::Reason).next(), Some("SIP;cause=503;text=\"proxy_overload_cps\""));
     assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("60"));
     assert_eq!(gate.metrics().rejected_cps_total, 1);
@@ -284,7 +284,7 @@ async fn real_gate_elu_over_critical_yields_a_wire_503_elu() {
 
     client.send_to(&new_invite(ALICE, "z9hG4bK-elu", None), proxy.addr()).await.unwrap();
     let resp = recv_response(&*client).await;
-    assert_eq!(resp.status, 503);
+    assert_eq!(resp.status(), 503);
     assert_eq!(resp.raw(HeaderName::Reason).next(), Some("SIP;cause=503;text=\"proxy_overload_elu\""));
     // ELU rejection carries Retry-After: 1.
     assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("1"));

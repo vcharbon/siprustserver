@@ -312,8 +312,8 @@ fn extract(
         "dest.port" => return Ok(Some(entry.to.port().to_string())),
         "body" => {
             let body = match msg {
-                SipMessage::Request(r) => &r.body,
-                SipMessage::Response(r) => &r.body,
+                SipMessage::Request(r) => &r.body(),
+                SipMessage::Response(r) => &r.body(),
             };
             return Ok(if body.is_empty() {
                 None
@@ -415,12 +415,12 @@ fn uri_header(name: &str, index: usize, msg: &SipMessage) -> Result<Option<AddrF
         "from" => {
             let from = msg.from();
             let tag = from.tag().map(str::to_string);
-            Ok((index == 0).then(|| AddrField { addr: from.into_addr(), tag }))
+            Ok((index == 0).then(|| AddrField { addr: from.addr().clone(), tag }))
         }
         "to" => {
             let to = msg.to();
             let tag = to.tag().map(str::to_string);
-            Ok((index == 0).then(|| AddrField { addr: to.into_addr(), tag }))
+            Ok((index == 0).then(|| AddrField { addr: to.addr().clone(), tag }))
         }
         "pai" => nth(msg.list::<header::PAssertedIdentity>(), name, index),
         "ppi" => nth(msg.list::<header::PPreferredIdentity>(), name, index),

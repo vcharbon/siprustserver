@@ -1740,12 +1740,12 @@ async fn loadgen_inprocess_endurance_lossy() {
     let failed = reporter.total_calls().saturating_sub(total);
     let leaked = b2bua.metrics().creations_total().saturating_sub(b2bua.metrics().removals_total());
     assert!(
-        leaked <= failed as u64,
+        leaked <= failed,
         "SUT leaked {leaked} calls but only {failed} failed under loss — a SUCCESSFUL call leaked:\n{}",
         reporter.render_prometheus()
     );
     assert!(
-        b2bua.active_calls() as u64 <= failed as u64,
+        b2bua.active_calls() as u64 <= failed,
         "SUT holds {} live calls vs {failed} failed",
         b2bua.active_calls()
     );

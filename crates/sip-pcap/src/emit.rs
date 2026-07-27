@@ -198,8 +198,8 @@ fn payload_repr(m: &FlowMsg) -> Repr<'_> {
         return Repr::Text(s);
     }
     let body = match &m.parsed {
-        SipMessage::Request(r) => &r.body,
-        SipMessage::Response(r) => &r.body,
+        SipMessage::Request(r) => &r.body(),
+        SipMessage::Response(r) => &r.body(),
     };
     // The split is trusted only when the parsed body is literally the raw
     // tail — reassembly (head ++ body) must reproduce the exact wire bytes.
@@ -220,7 +220,7 @@ fn summary_json(msg: &SipMessage) -> Value {
     match msg {
         SipMessage::Request(r) => json!({
             "kind": "request",
-            "method": r.method.as_str(),
+            "method": r.method().as_str(),
             "uri": r.request_uri().text(),
             "cseq": cseq,
             "from": from,
@@ -228,8 +228,8 @@ fn summary_json(msg: &SipMessage) -> Value {
         }),
         SipMessage::Response(r) => json!({
             "kind": "response",
-            "status": r.status,
-            "reason": r.reason,
+            "status": r.status(),
+            "reason": r.reason(),
             "cseq": cseq,
             "from": from,
             "to": to,

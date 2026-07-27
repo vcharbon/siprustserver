@@ -9,38 +9,35 @@
 
 use crate::types::{SipHeader, SipMessage, SipRequest, SipResponse};
 
-/// Serialize a request whose header list was modified out-of-place (the
-/// proxy's header-surgery path): first line + body from `req`, headers from
-/// the caller — no whole-message clone just to swap the header vector.
-pub fn serialize_request_parts(req: &SipRequest, headers: &[SipHeader]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(wire_size(headers, req.body.len()));
-    write_request_line(&mut out, req);
-    finish(out, headers, &req.body)
-}
-
-/// Response twin of [`serialize_request_parts`].
-pub fn serialize_response_parts(resp: &SipResponse, headers: &[SipHeader]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(wire_size(headers, resp.body.len()));
-    write_status_line(&mut out, resp);
-    finish(out, headers, &resp.body)
-}
-
 /// Serialize a structured SIP message to wire-format bytes.
 pub fn serialize(msg: &SipMessage) -> Vec<u8> {
     match msg {
-        SipMessage::Request(r) => serialize_request_parts(r, &r.headers),
-        SipMessage::Response(r) => serialize_response_parts(r, &r.headers),
+        SipMessage::Request(r) => render(r.headers(), r.body(), |out| write_request_line(out, r)),
+        SipMessage::Response(r) => render(r.headers(), r.body(), |out| write_status_line(out, r)),
     }
 }
 
-fn write_request_line(out: &mut Vec<u8>, req: &SipRequest) {
-    use std::io::Write;
-    let _ = write!(out, "{} {} {}", req.method, req.uri, req.version);
+/// Render a message whose header block is stated by the caller — the template
+/// lane's emission seam, where the capture's header-name spelling and
+/// remote-target rewrites are applied to the block a generator produced.
+pub(crate) fn render(
+    headers: &[SipHeader],
+    body: &[u8],
+    start_line: impl FnOnce(&mut Vec<u8>),
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(wire_size(headers, body.len()));
+    start_line(&mut out);
+    finish(out, headers, body)
 }
 
-fn write_status_line(out: &mut Vec<u8>, resp: &SipResponse) {
+pub(crate) fn write_request_line(out: &mut Vec<u8>, req: &SipRequest) {
     use std::io::Write;
-    let _ = write!(out, "{} {} {}", resp.version, resp.status, resp.reason);
+    let _ = write!(out, "{} {} {}", req.method(), req.request_uri().text(), req.version());
+}
+
+pub(crate) fn write_status_line(out: &mut Vec<u8>, resp: &SipResponse) {
+    use std::io::Write;
+    let _ = write!(out, "{} {} {}", resp.version(), resp.status(), resp.reason());
 }
 
 /// Exact-enough capacity for the whole datagram, so a serialization is ONE
@@ -111,7 +108,7 @@ pub fn sip_summary(raw: &[u8]) -> String {
 /// One-line summary from a structured message (no buffer needed).
 pub fn message_summary(msg: &SipMessage) -> String {
     match msg {
-        SipMessage::Request(r) => format!("{} {}", r.method, r.uri),
-        SipMessage::Response(r) => format!("{} {}", r.status, r.reason),
+        SipMessage::Request(r) => format!("{} {}", r.method(), r.request_uri().text()),
+        SipMessage::Response(r) => format!("{} {}", r.status(), r.reason()),
     }
 }

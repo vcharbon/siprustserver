@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use call::{Call, CallModelState, LegState, TimerEntry, TimerType};
 use sip_message::generators::{generate_response, GenerateResponseOpts};
-use sip_message::message_helpers::is_emergency_request;
+use sip_message::emergency::is_emergency_request;
 use sip_message::SipMessage;
 
 use super::interpret::process_result;
@@ -303,7 +303,7 @@ async fn in_dialog_store_fault_gate(
     if let CallEvent::Sip { message, src } = event {
         if let SipMessage::Request(req) = message.as_ref() {
             if ctx.store_faults.check(StoreFaultPoint::LiveInDialog).is_err() {
-                if req.method != "ACK" {
+                if req.method() != "ACK" {
                     let resp = generate_response(
                         req,
                         500,
@@ -593,7 +593,7 @@ async fn handle_limiter_refresh(ctx: &Arc<RouterCtx>, mut call: Call, now_ms: i6
 async fn maybe_reject_orphan(ctx: &RouterCtx, event: &CallEvent) {
     if let CallEvent::Sip { message, src } = event {
         if let SipMessage::Request(req) = message.as_ref() {
-            if req.method != "ACK" {
+            if req.method() != "ACK" {
                 let resp = generate_response(
                     req,
                     481,

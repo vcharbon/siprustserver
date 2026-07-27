@@ -140,7 +140,7 @@ async fn silent_callee_no_answer_via_lb__reject__reaps_crossing_200() {
     // The caller still gets its final reject (ADR-0022 unanswered-a-leg synthesis,
     // once the abandoned callee has quiesced) — NOT dropped on a removed call.
     let failed = call.expect(503).await;
-    assert_eq!(failed.status, 503, "caller's INVITE resolves with a final failure");
+    assert_eq!(failed.status(), 503, "caller's INVITE resolves with a final failure");
     // Flush alice's §17.1.1.3 ACK for the 503 (sent by the receive above) the
     // one hop to the proxy before the Drop-time RFC gate snapshots the trace.
     fh.advance(Duration::from_millis(10)).await;
@@ -201,7 +201,7 @@ async fn silent_callee_no_answer_via_lb__reject__delayed_crossing_200_still_reap
     bye.respond(200, "OK").await;
 
     let failed = call.expect(503).await;
-    assert_eq!(failed.status, 503, "caller's INVITE resolves with a final failure after a late reap");
+    assert_eq!(failed.status(), 503, "caller's INVITE resolves with a final failure after a late reap");
     // Flush alice's §17.1.1.3 ACK for the 503 the one hop to the proxy before
     // the Drop-time RFC gate snapshots the trace.
     fh.advance(Duration::from_millis(10)).await;
@@ -283,7 +283,7 @@ async fn silent_callee_no_answer_via_lb__reroute__reaps_crossing_200_and_reroute
     let mut charlie_uas = charlie.receive("INVITE").await;
     charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
     let confirmed = call.expect(200).await;
-    assert_eq!(confirmed.status, 200, "caller bridged to the reroute target");
+    assert_eq!(confirmed.status(), 200, "caller bridged to the reroute target");
     let mut dialog = call.ack().await;
     charlie.receive("ACK").await;
 

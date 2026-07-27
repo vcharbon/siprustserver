@@ -88,7 +88,7 @@ async fn rejected_call_gets_486_and_no_second_increment() {
     // Second concurrent call: trunk-A at cap 1 → 486 Busy Here.
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let resp = call2.expect(486).await;
-    assert_eq!(resp.status, 486);
+    assert_eq!(resp.status(), 486);
 
     // No second increment happened (transactional reject).
     assert_eq!(store.stats().current_total, 1, "reject did not increment");
@@ -188,7 +188,7 @@ async fn shared_counting_across_two_workers() {
 
     // Call through w1 sees the SAME counter → rejected 486.
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(w1.addr).send().await;
-    assert_eq!(call2.expect(486).await.status, 486);
+    assert_eq!(call2.expect(486).await.status(), 486);
     let _ = h.finish().await;
 }
 

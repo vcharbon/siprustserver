@@ -58,7 +58,7 @@ pub(super) async fn originate_in_dialog(
         // goal opens under its own kind so its final still matches.
         let kind =
             ObligationKind::from_cseq_method(method.as_str()).unwrap_or(ObligationKind::InDialog);
-        (ObligationKey::new(st.role, kind, request.cseq.seq), dialog.clone())
+        (ObligationKey::new(st.role, kind, request.cseq().seq()), dialog.clone())
     };
     st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
     st.obs.record(
@@ -183,7 +183,7 @@ pub(super) async fn send_request_template(
             dialog.send_request(method).template(template, opts).try_send_with_request().await?;
         (txn, req, Some(dialog.clone()))
     };
-    let cseq = req.cseq.seq;
+    let cseq = req.cseq().seq();
     let kind = ObligationKind::from_cseq_method(method.as_str()).unwrap_or(ObligationKind::InDialog);
     match method {
         InDialogMethod::Invite => {
