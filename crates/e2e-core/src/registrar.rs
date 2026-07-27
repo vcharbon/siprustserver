@@ -330,7 +330,6 @@ impl RegisterProxy {
                 content_type: None,
                 extra_headers: vec![contact_echo, extra_header(Expires::new(expires_sec))],
                 incoming_source: Some((src.ip().to_string(), src.port())),
-                ..Default::default()
             },
         );
         self.send_wire(resp.image(), src).await;
@@ -348,7 +347,6 @@ impl RegisterProxy {
                 content_type: None,
                 extra_headers: vec![],
                 incoming_source: Some((src.ip().to_string(), src.port())),
-                ..Default::default()
             },
         );
         self.send_wire(resp.image(), src).await;

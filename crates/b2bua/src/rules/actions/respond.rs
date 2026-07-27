@@ -34,7 +34,7 @@ impl ActionExecutor<'_> {
         if let Some(req) = ctx.request() {
             let opts = GenerateResponseOpts {
                 body: body.to_vec(),
-                content_type: content_type.map(str::to_string),
+                content_type: content_type.and_then(relay::media_type),
                 ..Default::default()
             };
             let resp = generators::generate_response(req, status, reason, &opts);
@@ -119,11 +119,7 @@ impl ActionExecutor<'_> {
             return;
         }
         let body = d.ext.cached_sdp.clone().unwrap_or_default();
-        let content_type = if body.is_empty() {
-            None
-        } else {
-            Some("application/sdp".to_string())
-        };
+        let content_type = (!body.is_empty()).then(relay::sdp);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
         // A 2xx INVITE answer carries the B2BUA's own Allow/Supported (RFC 3261
@@ -207,9 +203,8 @@ impl ActionExecutor<'_> {
             None => self.ensure_a_dialog(call),
         };
         // SDP early-media body defaults to application/sdp (mirrors the request path).
-        let content_type = content_type
-            .map(str::to_string)
-            .or_else(|| (!body.is_empty()).then(|| "application/sdp".to_string()));
+        let content_type =
+            content_type.and_then(relay::media_type).or_else(|| (!body.is_empty()).then(relay::sdp));
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
         let mut extra_headers = Vec::new();
@@ -287,9 +282,8 @@ impl ActionExecutor<'_> {
             }
         }
         // SDP answer defaults to application/sdp (mirrors the provisional path).
-        let content_type = content_type
-            .map(str::to_string)
-            .or_else(|| (!body.is_empty()).then(|| "application/sdp".to_string()));
+        let content_type =
+            content_type.and_then(relay::media_type).or_else(|| (!body.is_empty()).then(relay::sdp));
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
         let mut extra_headers = build_a_leg_response_headers(header_updates, &[]);

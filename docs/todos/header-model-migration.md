@@ -166,7 +166,7 @@ helpers listed above, run capped workspace test, tick tracker, commit.
 - [x] M10 sip-pcap + loadgen
 - [x] M11 harness/test crates
 - [x] M12 teardown (delete legacy, privatize, MessageCore)
-- [ ] M12b `Generate*Opts` stringly fields → typed (deferred out of M12, see log)
+- [x] M12b `Generate*Opts` stringly fields → typed (deferred out of M12, see log)
 - [x] M13 perf re-baseline
 - [ ] merge `feat/adr0025-header-model` → master
 
@@ -1324,7 +1324,9 @@ string-versus-value decision that ADR-0025 explicitly puts out of scope
 (`PendingRequest` and `StackDialog` are the source of those strings). That is a
 port with its own risk surface and its own test pass; bundling it into the
 teardown would have put the b2bua relay path and the teardown in one
-unreviewable commit.
+unreviewable commit. (Landed as the M12b entry at the end of this log; the
+relayed-response wire delta was avoided by making those five fields a draft
+`Entry` rather than a typed value, so the snapshot bytes still memcpy through.)
 
 **Suspicions raised, not fixed:**
 - **A parsed message is wider than it was.** `CoreHeaders` holds `From`, `To`,
@@ -1703,3 +1705,101 @@ commit** as the work:
   (`6d2d9ed` is the same shape, as a fix-up of the commit that logged the item.)
 
 No code changed in this entry; it is the log correcting itself.
+
+### M12b — `Generate*Opts` stringly fields → typed
+
+The deferred half of the teardown landed. **No `Generate*Opts` field names a
+header as text any more**: every header input is a typed value, or — where the
+RFC makes the header an echo of bytes the caller already holds — a draft
+`Entry`. `grep -rn 'ViaSpec|ContactSpec|SipTransport' crates` returns nothing.
+
+**One commit, not the three the plan allowed.** Deleting a public field breaks
+every consumer at once, so "green before every commit" and "sip-message first,
+consumers after" cannot both hold. The hard rule wins: one commit covering
+sip-message plus the consumer ports — 29 files, tests included.
+
+**What each opts struct became.** The `values` twins M3 added were flattened
+into the opts under the header's own name, and the stringly siblings deleted:
+
+| struct | deleted | now |
+|---|---|---|
+| `GenerateOutOfDialogRequestOpts` | `request_uri: String`, `from_uri`+`from_tag`, `to_uri`+`to_tag`, `via: ViaSpec`, `contact: ContactSpec`, `content_type: String` | `Option<Uri>`, `Option<header::From>`, `Option<header::To>`, `Option<Via>`, `Option<header::Contact>`, `Option<MediaType>` |
+| `GenerateInDialogRequestOpts` | the same Via / Contact / Content-Type, plus `rack` / `event` / `subscription_state` / `request_uri` as `String` | `RAck` / `Event` / `SubscriptionState` / `Uri` |
+| `GenerateAckFor2xxOpts` | `via`, `content_type`, `request_uri` | `Via`, `MediaType`, `Uri` |
+| `GenerateResponseOpts` | `contact: ContactSpec`, `content_type: String` | `header::Contact`, `MediaType` |
+| `GenerateRelayedResponseOpts` | `vias: Vec<String>`, `from` / `to` / `call_id` / `cseq` as `String`, `record_routes: Vec<String>`, `contact`, `content_type` | `Vec<Entry>` / `Option<Entry>` for the five §8.2.6.2 echoes; typed Contact / Content-Type |
+
+`ViaSpec`, `ContactSpec` and `SipTransport` went with the fields they typed:
+each existed only to be lowered into a `Via` / `Contact` at the generator, so
+with the field gone they were a stringly builder sip-message no longer used.
+Their four factory sites (`b2bua::stack_identity`, the sip-proxy health probe,
+the harness `Agent`, and the fixture builders) return the value directly now.
+`StackDialog` and `InviteClientTransactionHandle` stay in `spec.rs` — they are
+not header inputs, and typing the dialog is the `call`-crate decision ADR-0025
+puts out of scope.
+
+**The relayed response is an `Entry` seam, not a typed one — deliberately.**
+RFC 3261 §8.2.6.2 says the response's Via / From / To / Call-ID / CSeq MUST
+equal the request's, and the only source the b2bua has for them is
+`PendingRequest`, which stores the originator's own bytes as text (the `call`
+crate has no sip-message dependency, ADR-0008). Typing those fields would mean
+parse-then-re-render on every relayed response — the exact wire delta M12
+deferred this step over. `Entry` states both halves honestly: `Entry::raw` for
+the snapshot bytes (memcpy'd at freeze, byte-identical to the `push_raw` path it
+replaces), `Entry::typed` for a caller that holds the value. `Draft::push_entry`
+is the one engine addition this needed.
+
+**Wire-delta inventory.** Every changed byte is canonical spelling of a header
+the stack itself states; nothing an SUT reads for routing, ordering, params or
+tags moves.
+
+| header | before | after | delta |
+|---|---|---|---|
+| Via, Contact (every generator) | `ViaSpec` / `ContactSpec` lowered to `Via` / `Contact`, then rendered | the same values, stated directly | **none** — the lowering was already typed; param order (`branch`, `cr`, `lg`, `rport`[, `em`]) is unchanged |
+| From / To (out-of-dialog) | `emit::name_addr_text` spliced `<uri>;tag=t` | `header::From::from_uri(uri).with_tag(t)` rendered | **none for any caller**: each passes a `Uri` carrying its source bytes, and a `NameAddr` always renders `<uri>` — the brackets the splice added. A caller stating a display-name form keeps it, because the harness identities read through `NameAddr::parse` first |
+| Request-URI (out-of-dialog / in-dialog / ACK) | text → `Uri::parse_or_opaque` → render | the `Uri` the caller holds | **none** — `Uri::render` emits its source verbatim, so the round-trip removed was already the identity |
+| Route (in-dialog / ACK) | `push_raw` per dialog route-set entry | unchanged | **none** — the dialog's route set is still text and still rides verbatim |
+| Via / From / To / Call-ID / CSeq (relayed response) | `push_raw` of the snapshot text | `Entry::raw` of the same text | **none** — the same seam, now named |
+| Content-Type (b2bua relay + originate) | the peer's raw text copied | `MediaType` parsed, re-rendered | **canonical spelling only**: `application/sdp;charset=x` is unchanged; whitespace around the `;` re-renders without it. A value the reader rejects is carried as `MediaType::new(text)` — the peer's bytes verbatim — rather than replaced by the stack default, so the malformed case has no delta either |
+| RAck (PRACK), Event / Subscription-State (NOTIFY) | `format!` text on `push_raw` | `RAck::new(..)` / parsed values | **none** — every in-tree caller states a well-formed value and the render is the same token sequence; Event and Subscription-State take the same reader-rejects-it fallback as Content-Type, so a policy value nothing reads still goes out as the policy wrote it |
+
+No test pinned bytes that moved, so no assertion was rewritten or loosened; the
+one test whose *subject* became unrepresentable is
+`preserves_caller_name_addr_in_from_without_double_wrapping`, which asserted the
+splice did not double-bracket a name-addr. A `header::From` cannot double-bracket
+one, so the test is now `renders_a_from_display_name_and_its_tag_once` and pins
+the same bytes through the value model.
+
+**Behaviour deltas, both deliberate and both narrower than what they replace:**
+- A mandatory input is `Option<T>` with an `expect` naming the field
+  (`"via required"`, `"from required"`), where the stringly fields defaulted to
+  `""` and built a malformed message the freeze rejected later. The panic moved
+  earlier and says which field. ADR-0025 §5's "recipes take the mandatory fields
+  as arguments" would move it to the type system; that is five public signature
+  changes for no wire effect, so it is not done here.
+- `GenerateResponseOpts::to_tag` and `GenerateOutOfDialogRequestOpts::call_id`
+  stay `String`. Neither had a typed twin and neither is a header value: a tag
+  and a Call-ID are opaque tokens the caller mints, and the generator is what
+  places them in a header.
+
+**Suspicions raised, not fixed:**
+- **`extra_headers` / `transparent_headers` are still `Vec<SipHeader>`** — the
+  one remaining name-plus-text pair on the opts. It is deliberate (that is the
+  verbatim seam the template lane needs: caller lines keep their exact spelling
+  under `HeaderName::Other`), but `Vec<Entry>` would say the same in the draft's
+  own vocabulary and let a caller mix typed values in, which
+  `MessageTransform::add_headers` has done since M6. The two shapes now sit
+  either side of one call — `relay_response.rs` converts `Entry` → `SipHeader`
+  to pass a transform's stamps through `transparent_headers`.
+- **`emit::name_addr_text` survives** for the in-dialog From/To, because
+  `StackDialog` states `local_uri` / `remote_uri` / `local_tag` as text. That is
+  the last text-spliced header value in the generators, and it goes when the
+  dialog is typed — the `call`-crate decision M6, M7 and M8 each logged.
+- **`build_b_leg` converts its typed URIs back to text** (`Uri::text()`) to
+  write `StackDialog` / `Leg`, so the b-leg identity is parsed once, rendered
+  once and stored as bytes the next in-dialog request re-parses. Same root
+  cause; it is now visible at one line instead of spread through the builder.
+- `b2bua::rules::relay::media_type` tolerates a Content-Type the reader rejects
+  by carrying it as a bare token. That is the right answer for a relay — the
+  body is the peer's — but it means a `MediaType` can hold a token no `parse`
+  would produce, and the value type has no way to say "this arrived unread".

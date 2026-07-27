@@ -11,12 +11,12 @@ use call::{
 };
 use sip_message::draft::{Entry, RequestDraft};
 use sip_message::generators::{
-    self, ContactSpec, GenerateAckFor2xxOpts, GenerateOutOfDialogRequestOpts, GenerateResponseOpts,
-    OutOfDialogMethod, ViaSpec,
+    self, GenerateAckFor2xxOpts, GenerateOutOfDialogRequestOpts, GenerateResponseOpts,
+    OutOfDialogMethod,
 };
 use sip_message::header::{
-    self, HeaderClass, HeaderName, HeaderValue, HostPort, MaxForwards, NameAddr, ParamValue,
-    RouteEntry, Uri,
+    self, HeaderClass, HeaderName, HeaderValue, HostPort, MaxForwards, MediaType, NameAddr,
+    ParamValue, RouteEntry, Uri, Via,
 };
 use sip_message::{Method, SipHeader as MsgHeader, SipRequest, SipStr};
 use sip_txn::{IdGen, TxnKind};
@@ -24,6 +24,19 @@ use sip_txn::{IdGen, TxnKind};
 use crate::config::B2buaConfig;
 use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode};
 use crate::stack_identity::{build_call_contact, build_call_via, StackIdentityOpts};
+
+/// The media type a policy- or peer-supplied value names. The B2BUA emits its
+/// own body, so the header describing it is the stack's to state (§16.6). Text
+/// the reader rejects is carried as the peer wrote it rather than replaced by a
+/// media type this stack invented — the body is still the peer's.
+pub fn media_type(text: &str) -> Option<MediaType> {
+    Some(MediaType::parse(&SipStr::owned(text)).unwrap_or_else(|_| MediaType::new(SipStr::owned(text))))
+}
+
+/// `application/sdp` — the media type the B2BUA's own offers and answers carry.
+pub fn sdp() -> MediaType {
+    MediaType::new(SipStr::from_static("application/sdp"))
+}
 
 /// Whether the generator owns this header on a message the B2BUA mints: the
 /// stack-owned structural set (RFC 3261 §16.6) plus `Content-Type` — the B2BUA
@@ -91,7 +104,7 @@ pub fn leg_via(
     leg_id: &str,
     is_emergency: bool,
     branch: String,
-) -> ViaSpec {
+) -> Via {
     build_call_via(
         &StackIdentityOpts {
             local_ip: &config.sip_local_ip,
@@ -112,7 +125,7 @@ pub fn leg_contact(
     call_ref: &str,
     leg_id: &str,
     is_emergency: bool,
-) -> ContactSpec {
+) -> header::Contact {
     build_call_contact(&StackIdentityOpts {
         local_ip: &config.sip_local_ip,
         local_port: config.sip_local_port,
@@ -309,9 +322,11 @@ pub fn build_b_leg(
     let branch = id_gen.new_branch();
     let from_tag = id_gen.new_tag();
     let b_call_id = format!("{}-{}@{}", leg_id, id_gen.new_tag(), config.sip_local_ip);
-    let request_uri = new_ruri.map(str::to_string).unwrap_or_else(|| a_leg_invite.request_uri().to_string());
-    let from_uri = new_from.map(str::to_string).unwrap_or_else(|| a_leg_invite.from().uri().to_string());
-    let to_uri = new_to.map(str::to_string).unwrap_or_else(|| a_leg_invite.to().uri().to_string());
+    let uri_of = |text: &str| Uri::parse_or_opaque(&SipStr::owned(text));
+    let request_uri =
+        new_ruri.map(uri_of).unwrap_or_else(|| a_leg_invite.request_uri().clone());
+    let from_uri = new_from.map(uri_of).unwrap_or_else(|| a_leg_invite.from().uri().clone());
+    let to_uri = new_to.map(uri_of).unwrap_or_else(|| a_leg_invite.to().uri().clone());
     let body = match body_override {
         Some(b) => b.to_vec(),
         None => a_leg_invite.body().to_vec(),
@@ -322,8 +337,8 @@ pub fn build_b_leg(
         a_leg_invite
             .raw(HeaderName::ContentType)
             .next()
-            .map(str::to_string)
-            .or_else(|| body_override.map(|_| "application/sdp".to_string()))
+            .and_then(media_type)
+            .or_else(|| body_override.map(|_| sdp()))
     };
     // `(name, Some(v))` sets, `(name, None)` removes. Removals never apply to
     // structural headers (the generator owns those); only extra sets ride here.
@@ -372,12 +387,10 @@ pub fn build_b_leg(
     }
 
     let opts = GenerateOutOfDialogRequestOpts {
-        request_uri: request_uri.clone(),
+        request_uri: Some(request_uri.clone()),
         call_id: b_call_id.clone(),
-        from_uri: from_uri.clone(),
-        from_tag: from_tag.clone(),
-        to_uri: to_uri.clone(),
-        to_tag: None,
+        from: Some(header::From::from_uri(from_uri.clone()).with_tag(SipStr::owned(&from_tag))),
+        to: Some(header::To::from_uri(to_uri.clone())),
         cseq: 1,
         via: Some(leg_via(config, call_ref, leg_id, is_emergency, branch.clone())),
         contact: Some(leg_contact(config, call_ref, leg_id, is_emergency)),
@@ -385,7 +398,6 @@ pub fn build_b_leg(
         body,
         content_type,
         extra_headers,
-        ..Default::default()
     };
     let invite = generators::generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
     // Behind the front proxy, the b-leg INVITE traverses the proxy: preload a
@@ -395,6 +407,12 @@ pub fn build_b_leg(
     // transaction's send + retransmits; the preloaded Route rides the snapshot so
     // retransmits carry it too.
     let (invite, wire_dest) = apply_b_leg_egress(config, leg_id, &[], invite, dest.clone());
+
+    // The `call` crate stores dialog identity as text (ADR-0008), so the values
+    // this INVITE was built from are written down as the bytes it carries.
+    let from_uri = from_uri.text().into_owned();
+    let to_uri = to_uri.text().into_owned();
+    let request_uri = request_uri.text().into_owned();
 
     let dialog = Dialog {
         sip: StackDialog {
@@ -558,9 +576,9 @@ pub fn response_to_a_leg(
     status: u16,
     reason: &str,
     to_tag: Option<String>,
-    contact: Option<ContactSpec>,
+    contact: Option<header::Contact>,
     body: Vec<u8>,
-    content_type: Option<String>,
+    content_type: Option<MediaType>,
     incoming_source: Option<(String, u16)>,
     extra_headers: Vec<MsgHeader>,
 ) -> OutboundSipEffect {
@@ -571,7 +589,6 @@ pub fn response_to_a_leg(
         content_type,
         extra_headers,
         incoming_source,
-        ..Default::default()
     };
     let resp = generators::generate_response(a_leg_invite, status, reason, &opts);
     // Routed by the txn layer to the a-leg server transaction; dest is alice
@@ -602,7 +619,7 @@ pub fn ack_b_leg(
     config: &B2buaConfig,
     id_gen: &IdGen,
     body: Vec<u8>,
-    content_type: Option<String>,
+    content_type: Option<MediaType>,
 ) -> Option<(OutboundSipEffect, String)> {
     let dialog = leg.dialogs.first()?;
     let gen_dialog = to_gen_dialog(&dialog.sip);

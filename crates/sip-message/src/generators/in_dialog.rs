@@ -4,7 +4,7 @@
 
 use super::emit;
 use super::methods::{InDialogMethod, B2BUA_ALLOW, B2BUA_SUPPORTED};
-use super::spec::{ContactSpec, StackDialog, ViaSpec};
+use super::spec::StackDialog;
 use crate::draft::RequestDraft;
 use crate::header::{
     self, CSeq, CallId, Event, HeaderName, HeaderValue, MaxForwards, MediaType, RAck, RouteEntry,
@@ -24,25 +24,24 @@ use crate::types::{SipHeader, SipRequest};
 ///
 /// A first route no reader accepts is carried through untouched, so an
 /// unreadable entry never redirects the request at itself.
-pub(super) fn route_for_in_dialog(
-    remote_target: &str,
-    route_set: &[String],
-) -> (String, Vec<String>) {
+pub(super) fn route_for_in_dialog(remote_target: Uri, route_set: &[String]) -> (Uri, Vec<String>) {
     let Some(first) = route_set.first() else {
-        return (remote_target.to_string(), Vec::new());
+        return (remote_target, Vec::new());
     };
     match RouteEntry::parse(&SipStr::owned(first)) {
         Ok(entry) if !entry.uri().is_loose_route() => {
-            let request_uri = entry.uri().text().into_owned();
+            let request_uri = entry.uri().clone();
             let mut routes: Vec<String> = route_set[1..].to_vec();
-            routes.push(format!("<{remote_target}>"));
+            routes.push(format!("<{}>", remote_target.text()));
             (request_uri, routes)
         }
-        _ => (remote_target.to_string(), route_set.to_vec()),
+        _ => (remote_target, route_set.to_vec()),
     }
 }
 
-/// Put a route set on the request, one Route line per entry, in order.
+/// Put a route set on the request, one Route line per entry, in order. The
+/// dialog stores its route set as text (it learned it from the wire), so each
+/// line rides verbatim.
 pub(super) fn with_routes(mut draft: RequestDraft, routes: &[String]) -> RequestDraft {
     for route in routes {
         draft = draft.push_raw(HeaderName::Route, SipStr::owned(route));
@@ -65,45 +64,29 @@ pub(super) fn with_dialog_identity(draft: RequestDraft, dialog: &StackDialog) ->
         .push(CallId::new(SipStr::owned(&dialog.call_id)))
 }
 
-/// The typed twin of the stringly fields of [`GenerateInDialogRequestOpts`]:
-/// each value supersedes the text that names the same header.
-#[derive(Debug, Clone, Default)]
-pub struct InDialogValues {
-    /// Supersedes `request_uri`.
-    pub uri: Option<Uri>,
-    /// Supersedes `via`.
-    pub hop: Option<Via>,
-    /// Supersedes `contact`.
-    pub contact: Option<header::Contact>,
-    /// Supersedes `rack`.
-    pub rack: Option<RAck>,
-    /// Supersedes `event`.
-    pub event: Option<Event>,
-    /// Supersedes `subscription_state`.
-    pub subscription_state: Option<SubscriptionState>,
-    /// Supersedes `content_type`.
-    pub content_type: Option<MediaType>,
-}
-
+/// Inputs for [`generate_in_dialog_request`]. Every header is a typed value;
+/// the dialog contributes From / To / Call-ID / Route.
 #[derive(Debug, Clone, Default)]
 pub struct GenerateInDialogRequestOpts {
-    pub via: Option<ViaSpec>,
-    pub contact: Option<ContactSpec>,
+    /// This hop's own Via. Required.
+    pub via: Option<Via>,
+    /// Contact — required for every in-dialog method except BYE (§15.1).
+    pub contact: Option<header::Contact>,
     pub body: Vec<u8>,
-    pub content_type: Option<String>,
+    pub content_type: Option<MediaType>,
+    /// Caller-stated header lines, carried verbatim (name spelling included).
     pub extra_headers: Vec<SipHeader>,
     /// Required when method == PRACK (RFC 3262).
-    pub rack: Option<String>,
+    pub rack: Option<RAck>,
     /// Required when method == NOTIFY (RFC 6665 §7.2).
-    pub event: Option<String>,
+    pub event: Option<Event>,
     /// Required when method == NOTIFY (RFC 6665 §4.1.3).
-    pub subscription_state: Option<String>,
+    pub subscription_state: Option<SubscriptionState>,
     /// Explicit CSeq override; defaults to `dialog.local_cseq + 1`.
     pub cseq: Option<u32>,
-    /// Request-URI override; defaults to `dialog.remote_target`.
-    pub request_uri: Option<String>,
-    /// Typed values, each superseding its stringly counterpart above.
-    pub values: InDialogValues,
+    /// Remote-target override; defaults to `dialog.remote_target`. The route
+    /// set still decides the Request-URI (§12.2.1.1).
+    pub request_uri: Option<Uri>,
 }
 
 /// Result of [`generate_in_dialog_request`]: the request plus the dialog with
@@ -119,51 +102,35 @@ pub fn generate_in_dialog_request(
     dialog: &StackDialog,
     opts: &GenerateInDialogRequestOpts,
 ) -> InDialogResult {
-    let values = &opts.values;
     let next_cseq = opts.cseq.unwrap_or(dialog.local_cseq + 1);
-    let remote_target = opts.request_uri.clone().unwrap_or_else(|| dialog.remote_target.clone());
-    let (request_uri, routes) = route_for_in_dialog(&remote_target, &dialog.route_set);
-    let uri = values.uri.clone().unwrap_or_else(|| emit::uri(&request_uri));
-    let hop =
-        values.hop.clone().unwrap_or_else(|| opts.via.as_ref().expect("ViaSpec required").value());
+    let remote_target =
+        opts.request_uri.clone().unwrap_or_else(|| emit::uri(&dialog.remote_target));
+    let (uri, routes) = route_for_in_dialog(remote_target, &dialog.route_set);
+    let hop = opts.via.clone().expect("via required");
     let verb = Method::from(method);
 
-    let mut draft = RequestDraft::new(verb.clone(), uri)
-        .push(hop)
-        .push(MaxForwards::DEFAULT);
+    let mut draft = RequestDraft::new(verb.clone(), uri).push(hop).push(MaxForwards::DEFAULT);
     draft = with_dialog_identity(draft, dialog).push(CSeq::new(next_cseq, verb));
 
     // Contact for every in-dialog method EXCEPT BYE (RFC 3261 §15.1).
     if method != InDialogMethod::Bye {
-        let contact = values
-            .contact
-            .clone()
-            .unwrap_or_else(|| opts.contact.as_ref().expect("ContactSpec required").value());
-        draft = draft.push(contact);
+        draft = draft.push(opts.contact.clone().expect("contact required"));
     }
 
     draft = with_routes(draft, &routes);
 
     if method == InDialogMethod::Prack {
-        draft = match (&values.rack, &opts.rack) {
-            (Some(rack), _) => draft.push(rack.clone()),
-            (None, Some(text)) => draft.push_raw(HeaderName::RAck, SipStr::owned(text)),
-            (None, None) => draft,
-        };
+        if let Some(rack) = &opts.rack {
+            draft = draft.push(rack.clone());
+        }
     }
     if method == InDialogMethod::Notify {
-        draft = match (&values.event, &opts.event) {
-            (Some(event), _) => draft.push(event.clone()),
-            (None, Some(text)) => draft.push_raw(HeaderName::Event, SipStr::owned(text)),
-            (None, None) => draft,
-        };
-        draft = match (&values.subscription_state, &opts.subscription_state) {
-            (Some(state), _) => draft.push(state.clone()),
-            (None, Some(text)) => {
-                draft.push_raw(HeaderName::SubscriptionState, SipStr::owned(text))
-            }
-            (None, None) => draft,
-        };
+        if let Some(event) = &opts.event {
+            draft = draft.push(event.clone());
+        }
+        if let Some(state) = &opts.subscription_state {
+            draft = draft.push(state.clone());
+        }
     }
     if method == InDialogMethod::Invite {
         // Advertise capabilities — but never duplicate a header the caller
@@ -178,8 +145,8 @@ pub fn generate_in_dialog_request(
     }
 
     draft = emit::extra_headers(draft, &opts.extra_headers);
-    let content_type = emit::media_type(&values.content_type, &opts.content_type);
-    let request = emit::request(emit::framed(draft, opts.body.clone(), content_type));
+    let request =
+        emit::request(emit::framed(draft, opts.body.clone(), opts.content_type.clone()));
     let next_dialog = StackDialog { local_cseq: next_cseq, ..dialog.clone() };
     InDialogResult { request, dialog: next_dialog }
 }

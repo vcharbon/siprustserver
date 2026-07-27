@@ -3,11 +3,8 @@
 //! peer leg from snapshotted fields (RFC 3261 §16.6 / §12.1.1).
 
 use super::emit;
-use super::spec::ContactSpec;
-use crate::draft::{Draft, ResponseDraft, StartKind};
-use crate::header::{
-    self, CSeq, CallId, HeaderClass, HeaderName, HeaderValue, MediaType, RecordRouteEntry, Via,
-};
+use crate::draft::{Entry, ResponseDraft};
+use crate::header::{self, HeaderClass, HeaderName, MediaType};
 use crate::sip_str::SipStr;
 use crate::types::{SipHeader, SipMessage, SipResponse};
 
@@ -27,76 +24,38 @@ pub fn extract_non_structural_headers(msg: &SipMessage) -> Vec<SipHeader> {
     msg.headers().iter().filter(|hdr| !relay_owns(&hdr.name)).cloned().collect()
 }
 
-/// The typed twin of the stringly fields of [`GenerateRelayedResponseOpts`]:
-/// each value supersedes the text that names the same header, so a relay that
-/// already holds parsed values never round-trips them through a string.
-#[derive(Debug, Clone, Default)]
-pub struct RelayedResponseValues {
-    /// Supersedes `vias`.
-    pub hops: Vec<Via>,
-    /// Supersedes `record_routes`.
-    pub record_routes: Vec<RecordRouteEntry>,
-    /// Supersedes `from`.
-    pub from: Option<header::From>,
-    /// Supersedes `to`.
-    pub to: Option<header::To>,
-    /// Supersedes `call_id`.
-    pub call_id: Option<CallId>,
-    /// Supersedes `cseq`.
-    pub cseq: Option<CSeq>,
-    /// Supersedes `contact`.
-    pub contact: Option<header::Contact>,
-    /// Supersedes `content_type`.
-    pub content_type: Option<MediaType>,
-}
-
+/// Inputs for [`generate_relayed_response`]. RFC 3261 §8.2.6.2 makes Via /
+/// From / To / Call-ID / CSeq echoes of the request being answered, so each is
+/// a draft [`Entry`]: a relay holding the peer's own bytes passes
+/// [`Entry::raw`] and they are memcpy'd through untouched; a relay holding a
+/// parsed value passes [`Entry::typed`] and it renders once.
 #[derive(Debug, Clone, Default)]
 pub struct GenerateRelayedResponseOpts {
-    /// Via headers from the target-facing request (one per entry).
-    pub vias: Vec<String>,
-    pub from: String,
-    pub to: String,
-    pub call_id: String,
-    /// Full CSeq value (`"<number> <METHOD>"`).
-    pub cseq: String,
+    /// Via lines from the target-facing request, echoed in order. Required.
+    pub vias: Vec<Entry>,
+    /// From of the request being answered. Required.
+    pub from: Option<Entry>,
+    /// To of the request being answered, tagged. Required.
+    pub to: Option<Entry>,
+    /// Call-ID of the request being answered. Required.
+    pub call_id: Option<Entry>,
+    /// CSeq of the request being answered. Required.
+    pub cseq: Option<Entry>,
     pub body: Vec<u8>,
-    pub content_type: Option<String>,
+    pub content_type: Option<MediaType>,
     /// Non-structural headers carried through from the source response (§16.6).
     pub transparent_headers: Vec<SipHeader>,
-    /// Record-Route headers reflected verbatim, in received order.
-    pub record_routes: Vec<String>,
-    pub contact: Option<ContactSpec>,
-    /// Typed values, each superseding its stringly counterpart above.
-    pub values: RelayedResponseValues,
+    /// Record-Route headers reflected in received order.
+    pub record_routes: Vec<Entry>,
+    pub contact: Option<header::Contact>,
 }
 
-/// Put a list of typed values on the draft, or the text lines they supersede.
-fn lines<S: StartKind, H: HeaderValue>(
-    mut draft: Draft<S>,
-    values: &[H],
-    text: &[String],
-) -> Draft<S> {
-    if values.is_empty() {
-        for line in text {
-            draft = draft.push_raw(H::header_name(), SipStr::owned(line));
-        }
-        return draft;
-    }
-    for value in values {
-        draft = draft.push(value.clone());
-    }
-    draft
-}
-
-/// Put one typed value on the draft, or the text line it supersedes.
-fn line<S: StartKind, H: HeaderValue>(
-    draft: Draft<S>,
-    value: &Option<H>,
-    text: &str,
-) -> Draft<S> {
-    match value {
-        Some(value) => draft.push(value.clone()),
-        None => draft.push_raw(H::header_name(), SipStr::owned(text)),
+/// Put an echoed header on the draft, naming the header it must carry so a
+/// missing input fails at the freeze gate rather than silently.
+fn echo(draft: ResponseDraft, entry: &Option<Entry>, name: HeaderName) -> ResponseDraft {
+    match entry {
+        Some(entry) => draft.push_entry(entry.clone()),
+        None => draft.push_raw(name, SipStr::EMPTY),
     }
 }
 
@@ -107,22 +66,20 @@ pub fn generate_relayed_response(
     reason: &str,
     opts: &GenerateRelayedResponseOpts,
 ) -> SipResponse {
-    let values = &opts.values;
     let mut draft = ResponseDraft::new(status, SipStr::owned(reason));
-    draft = lines(draft, &values.hops, &opts.vias);
-    draft = lines(draft, &values.record_routes, &opts.record_routes);
-    draft = line(draft, &values.from, &opts.from);
-    draft = line(draft, &values.to, &opts.to);
-    draft = line(draft, &values.call_id, &opts.call_id);
-    draft = line(draft, &values.cseq, &opts.cseq);
+    for entry in opts.vias.iter().chain(&opts.record_routes) {
+        draft = draft.push_entry(entry.clone());
+    }
+    draft = echo(draft, &opts.from, HeaderName::From);
+    draft = echo(draft, &opts.to, HeaderName::To);
+    draft = echo(draft, &opts.call_id, HeaderName::CallId);
+    draft = echo(draft, &opts.cseq, HeaderName::CSeq);
 
     draft = emit::extra_headers(draft, &opts.transparent_headers);
 
-    let contact = values.contact.clone().or_else(|| opts.contact.as_ref().map(ContactSpec::value));
-    if let Some(contact) = contact {
+    if let Some(contact) = opts.contact.clone() {
         draft = draft.push(contact);
     }
 
-    let content_type = emit::media_type(&values.content_type, &opts.content_type);
-    emit::response(emit::framed(draft, opts.body.clone(), content_type))
+    emit::response(emit::framed(draft, opts.body.clone(), opts.content_type.clone()))
 }

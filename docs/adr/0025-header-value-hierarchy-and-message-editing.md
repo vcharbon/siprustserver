@@ -306,7 +306,12 @@ application, tag placement — is the valuable part and stays; the string
 assembly goes. The stringly `Generate*Opts` fields (`from: String`,
 `vias: Vec<String>`, `cseq: String`) become typed (`From`, `Vec<Via>`,
 `CSeq`), so the b2bua stops round-tripping parsed messages through strings to
-relay them. Recipes take the mandatory fields as arguments, so they stay
+relay them. Where the RFC makes the header an *echo* rather than a statement —
+§8.2.6.2's Via/From/To/Call-ID/CSeq on a relayed response — the field is a
+draft `Entry` instead: `Entry::typed` for a relay that holds the value,
+`Entry::raw` for one that holds the originator's own bytes, which memcpy
+through unaltered. Either way no field names a header as bare text.
+Recipes take the mandatory fields as arguments, so they stay
 infallible (`freeze` cannot miss). **`hydrate_request` disappears from the
 build path** — and with it the self-re-parse and the ten optional-header scans
 over generated headers; it survives only for genuinely raw input (snapshot
@@ -421,7 +426,11 @@ step deletes its local surgery module as it lands. Casualty list on completion:
 - deleted: `message_helpers::{headers, name_addr, via}` free-function surface,
   `ViaParams`, `extract_tag`/`strip_tag`/`extract_name_addr_uri`,
   `set_header`-returns-new-Vec, `serialize_*_parts`, stringly `Generate*Opts`
-  fields, `sip-proxy/src/headers.rs` mechanics, scenario-harness/e2e-core
+  fields (done at M12b, with the stringly input shapes that fed them —
+  `ViaSpec`, `ContactSpec`, `SipTransport`; a field now names a header only as
+  a typed value, or as a draft `Entry` where §8.2.6.2 makes the header an echo
+  of bytes the caller already holds),
+  `sip-proxy/src/headers.rs` mechanics, scenario-harness/e2e-core
   `prepend_header` copies, the six b2bua header-name arrays, the
   five Via-sent-by and nine branch hand-rolls, `template.rs`'s
   `REGENERATED_HEADERS` vs `relay.rs`'s `STRUCTURAL_HEADERS` split;

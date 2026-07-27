@@ -371,7 +371,7 @@ impl ClientInvite {
         let resent = self
             .original_invite
             .thaw()
-            .set(self.agent.via().value())
+            .set(self.agent.via())
             .set(CSeq::new(new_cseq, self.original_invite.method().clone()))
             // Drop any prior credential of the same header (a second challenge
             // round would replace it) then add this one.

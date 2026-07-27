@@ -124,6 +124,14 @@ impl<S: StartKind> Draft<S> {
         self
     }
 
+    /// Append a line the caller already holds as an [`Entry`] — typed or
+    /// verbatim. The seam for a caller that decides per line whether it states
+    /// a value or echoes bytes.
+    pub fn push_entry(mut self, entry: Entry) -> Self {
+        self.entries.push(entry);
+        self
+    }
+
     /// Put a typed value on the first line of the whole message.
     pub fn push_front(mut self, value: impl HeaderValue) -> Self {
         self.entries.insert(0, Entry::typed(value));

@@ -8,7 +8,8 @@ use call::{Call, CdrEvent, LegKind, TimerType};
 use sip_message::generators::{
     self, GenerateInDialogRequestOpts, InDialogMethod,
 };
-use sip_message::Method;
+use sip_message::header::{Event, HeaderValue, RAck, SubscriptionState};
+use sip_message::{Method, SipStr};
 use sip_txn::TxnKind;
 
 use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
@@ -131,10 +132,18 @@ impl ActionExecutor<'_> {
             via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, call.emergency == Some(true), branch)),
             contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id, call.emergency == Some(true))),
             body: body.to_vec(),
-            content_type: content_type.map(str::to_string),
+            content_type: content_type.and_then(relay::media_type),
             cseq: Some(outbound_cseq as u32),
-            event: Some(event.to_string()),
-            subscription_state: Some(subscription_state.to_string()),
+            // A value the reader rejects still reaches the peer as the policy
+            // stated it — this stack does not invent an event package.
+            event: Some(
+                Event::parse(&SipStr::owned(event))
+                    .unwrap_or_else(|_| Event::new(SipStr::owned(event))),
+            ),
+            subscription_state: Some(
+                SubscriptionState::parse(&SipStr::owned(subscription_state))
+                    .unwrap_or_else(|_| SubscriptionState::new(SipStr::owned(subscription_state))),
+            ),
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(InDialogMethod::Notify, &gen_dialog, &opts);
@@ -193,7 +202,7 @@ impl ActionExecutor<'_> {
             via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, call.emergency == Some(true), branch.clone())),
             contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id, call.emergency == Some(true))),
             body: body.to_vec(),
-            content_type: (!body.is_empty()).then(|| "application/sdp".to_string()),
+            content_type: (!body.is_empty()).then(relay::sdp),
             cseq: Some(outbound_cseq as u32),
             extra_headers: extra,
             ..Default::default()
@@ -294,9 +303,8 @@ impl ActionExecutor<'_> {
 
         // Opaque body carrier (MSCML INFO rides here): default the content type
         // to `application/sdp` when a body is present and none was given.
-        let content_type = content_type
-            .map(str::to_string)
-            .or_else(|| (!body.is_empty()).then(|| "application/sdp".to_string()));
+        let content_type =
+            content_type.and_then(relay::media_type).or_else(|| (!body.is_empty()).then(relay::sdp));
         // Forward the service-nominated application headers verbatim (e.g. a held
         // `User-To-User` re-emitted toward the peer on a deferred INFO_UUI relay).
         // Body-owned headers are dropped: `body`/`content_type` own
@@ -385,7 +393,11 @@ impl ActionExecutor<'_> {
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, call.emergency == Some(true), branch)),
             contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id, call.emergency == Some(true))),
-            rack: Some(format!("{rseq} {invite_cseq} INVITE")),
+            rack: Some(RAck::new(
+                rseq.max(0) as u32,
+                invite_cseq.max(0) as u32,
+                Method::Invite,
+            )),
             cseq: Some(outbound_cseq as u32),
             ..Default::default()
         };

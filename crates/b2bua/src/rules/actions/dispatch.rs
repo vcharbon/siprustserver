@@ -11,6 +11,7 @@ use call::{Call, CdrEvent, TagMapping};
 
 use crate::effects::{CriticalStateEffect, HandlerEffects};
 use crate::rules::model::{MessageTransform, RuleAction, RuleContext};
+use crate::rules::relay;
 
 use super::select::{find_pending_dialog, resolve_peer};
 use super::teardown::terminate_all;
@@ -43,7 +44,10 @@ impl ActionExecutor<'_> {
                 let ct = if body.is_empty() {
                     None
                 } else {
-                    content_type.clone().or_else(|| Some("application/sdp".to_string()))
+                    content_type
+                        .as_deref()
+                        .and_then(relay::media_type)
+                        .or_else(|| Some(relay::sdp()))
                 };
                 self.ack_leg(call, fx, leg_id, body.clone(), ct);
             }

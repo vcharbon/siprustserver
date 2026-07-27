@@ -54,12 +54,13 @@ use std::time::Duration;
 use scenario_harness::Harness;
 use sip_clock::Clock;
 use sip_message::generators::{
-    generate_out_of_dialog_request, generate_response, ContactSpec, GenerateOutOfDialogRequestOpts,
-    GenerateResponseOpts, OutOfDialogMethod, SipTransport, ViaSpec,
+    generate_out_of_dialog_request, generate_response, GenerateOutOfDialogRequestOpts,
+    GenerateResponseOpts, OutOfDialogMethod,
 };
+use sip_message::header::{self, Uri, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::types::SipHeader;
-use sip_message::{serialize, SipMessage, SipParser};
+use sip_message::{serialize, SipMessage, SipParser, SipStr};
 use sip_net::UdpEndpoint;
 use sip_proxy::health::{HealthProbe, HealthProbeConfig};
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
@@ -508,21 +509,28 @@ fn synthetic_200(branch: &str, worker_sock: &std::net::SocketAddr, probe_sock: &
     let fake_options = generate_out_of_dialog_request(
         OutOfDialogMethod::Options,
         &GenerateOutOfDialogRequestOpts {
-            request_uri: format!("sip:{worker_host}:{worker_port}"),
+            request_uri: Some(Uri::sip(SipStr::owned(&worker_host)).with_port(worker_port)),
             call_id: format!("evil-not-a-probe@{worker_host}"),
-            from_uri: format!("sip:probe@{probe_host}"),
-            from_tag: "spoof-from".into(),
-            to_uri: format!("sip:probe@{worker_host}:{worker_port}"),
-            to_tag: None,
+            from: Some(
+                header::From::from_uri(Uri::sip_user(
+                    SipStr::from_static("probe"),
+                    SipStr::owned(&probe_host),
+                ))
+                .with_tag(SipStr::from_static("spoof-from")),
+            ),
+            to: Some(header::To::from_uri(
+                Uri::sip_user(SipStr::from_static("probe"), SipStr::owned(&worker_host))
+                    .with_port(worker_port),
+            )),
             cseq: 1,
-            via: Some(ViaSpec {
-                local_ip: probe_host.clone(),
-                local_port: probe_port,
-                transport: SipTransport::Udp,
-                branch: branch.to_string(),
-                custom_params: vec![],
-            }),
-            contact: Some(ContactSpec { user: "probe".into(), host: probe_host, port: probe_port, uri_params: vec![] }),
+            via: Some(
+                Via::udp(SipStr::owned(&probe_host), probe_port)
+                    .with_branch(SipStr::owned(branch)),
+            ),
+            contact: Some(header::Contact::from_uri(
+                Uri::sip_user(SipStr::from_static("probe"), SipStr::owned(&probe_host))
+                    .with_port(probe_port),
+            )),
             max_forwards: Some(70),
             ..Default::default()
         },

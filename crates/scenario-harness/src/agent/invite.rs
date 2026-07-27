@@ -17,6 +17,7 @@ use sip_message::{
 
 use super::client_invite::ClientInvite;
 use super::Agent;
+use super::ua::{from_of, to_of, uri_of};
 
 /// Builder for an outgoing INVITE (lets the SDP offer be attached fluently).
 pub struct Invite<'a> {
@@ -181,12 +182,10 @@ impl<'a> Invite<'a> {
         let to_uri = self.to_uri.clone().unwrap_or_else(|| peer.uri.clone());
 
         let opts = GenerateOutOfDialogRequestOpts {
-            request_uri: request_uri.clone(),
+            request_uri: Some(uri_of(&request_uri)),
             call_id: call_id.clone(),
-            from_uri: from_uri.clone(),
-            from_tag: from_tag.clone(),
-            to_uri: to_uri.clone(),
-            to_tag: None,
+            from: Some(from_of(&from_uri, &from_tag)),
+            to: Some(to_of(&to_uri)),
             cseq: 1,
             via: Some(caller.via()),
             contact: Some(caller.contact()),
@@ -200,7 +199,6 @@ impl<'a> Invite<'a> {
                 .unwrap_or_default(),
             content_type: None,
             extra_headers: self.extra_headers.clone(),
-            ..Default::default()
         };
         let mut invite = generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
         if self.suppress_default_ct {

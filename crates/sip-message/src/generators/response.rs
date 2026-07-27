@@ -3,7 +3,6 @@
 //! B2BUA-snapshotted fields lives in [`super::relay`].
 
 use super::emit;
-use super::spec::ContactSpec;
 use crate::draft::ResponseDraft;
 use crate::header::{self, HeaderName, HeaderValue, MediaType, To, Via};
 use crate::sip_str::SipStr;
@@ -21,29 +20,20 @@ fn fallback_to_tag(call_id: &str) -> String {
     format!("b2bua-fb-{:016x}", hasher.finish())
 }
 
-/// The typed twin of the stringly fields of [`GenerateResponseOpts`]: each
-/// value supersedes the text that names the same header.
-#[derive(Debug, Clone, Default)]
-pub struct ResponseValues {
-    /// Supersedes `contact`.
-    pub contact: Option<header::Contact>,
-    /// Supersedes `content_type`.
-    pub content_type: Option<MediaType>,
-}
-
+/// Inputs for [`generate_response`]. Via / From / To / Call-ID / CSeq are not
+/// inputs at all — §8.2.6.2 makes them echoes of the request, carried verbatim.
 #[derive(Debug, Clone, Default)]
 pub struct GenerateResponseOpts {
     /// Tag added to To when status > 100 and the request's To lacks one.
     pub to_tag: Option<String>,
-    pub contact: Option<ContactSpec>,
+    pub contact: Option<header::Contact>,
     pub body: Vec<u8>,
-    pub content_type: Option<String>,
+    pub content_type: Option<MediaType>,
+    /// Caller-stated header lines, carried verbatim (name spelling included).
     pub extra_headers: Vec<SipHeader>,
     /// Source the request arrived from — stamps `received=` / `rport=` on the
     /// topmost echoed Via (RFC 3261 §18.2.1 + RFC 3581 §4).
     pub incoming_source: Option<(String, u16)>,
-    /// Typed values, each superseding its stringly counterpart above.
-    pub values: ResponseValues,
 }
 
 /// Echo one Via line. The topmost records what the receiving side observed
@@ -101,7 +91,6 @@ pub fn generate_response(
     reason: &str,
     opts: &GenerateResponseOpts,
 ) -> SipResponse {
-    let values = &opts.values;
     let line = |name: HeaderName| incoming_request.raw_text(name).next().unwrap_or(SipStr::EMPTY);
     let call_id = line(HeaderName::CallId);
 
@@ -126,12 +115,10 @@ pub fn generate_response(
         .push_raw(HeaderName::CallId, call_id)
         .push_raw(HeaderName::CSeq, line(HeaderName::CSeq));
 
-    let contact = values.contact.clone().or_else(|| opts.contact.as_ref().map(ContactSpec::value));
-    if let Some(contact) = contact {
+    if let Some(contact) = opts.contact.clone() {
         draft = draft.push(contact);
     }
 
     draft = emit::extra_headers(draft, &opts.extra_headers);
-    let content_type = emit::media_type(&values.content_type, &opts.content_type);
-    emit::response(emit::framed(draft, opts.body.clone(), content_type))
+    emit::response(emit::framed(draft, opts.body.clone(), opts.content_type.clone()))
 }

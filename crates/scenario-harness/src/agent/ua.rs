@@ -9,13 +9,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sip_message::generators::{
-    generate_in_dialog_request, generate_out_of_dialog_request, ContactSpec,
-    GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts, InDialogMethod,
-    OutOfDialogMethod, SipTransport, StackDialog, ViaSpec,
+    generate_in_dialog_request, generate_out_of_dialog_request, GenerateInDialogRequestOpts,
+    GenerateOutOfDialogRequestOpts, InDialogMethod, OutOfDialogMethod, StackDialog,
 };
-use sip_message::header;
+use sip_message::header::{self, HeaderValue, NameAddr, Uri, Via};
 use sip_message::parser::custom::CustomParser;
-use sip_message::{serialize, SipHeader, SipMessage, SipParser, SipRequest, SipResponse};
+use sip_message::{serialize, SipHeader, SipMessage, SipParser, SipRequest, SipResponse, SipStr};
 use sip_net::UdpEndpoint;
 
 use super::addressing::top_via_branch;
@@ -28,6 +27,39 @@ use super::server_txn::ServerTxn;
 use super::step::{unwrap_step, StepError};
 use super::txn_view::{AckObligations, TxnVerdict, TxnView};
 use super::Invite;
+
+/// The media type a scenario names as text. A value the reader rejects still
+/// reaches the wire as the test wrote it — a scenario states the bytes it means
+/// to send, including a deliberately awkward one.
+pub(super) fn media_type(text: &str) -> header::MediaType {
+    header::MediaType::parse(&SipStr::owned(text))
+        .unwrap_or_else(|_| header::MediaType::new(SipStr::owned(text)))
+}
+
+/// The URI a scenario names as text. A test case states identities as strings
+/// (they come from scenario data); the value model is what reaches the wire, and
+/// an address no reader accepts is carried whole so the peer sees what the test
+/// wrote.
+pub(super) fn uri_of(text: &str) -> Uri {
+    Uri::parse_or_opaque(&SipStr::owned(text))
+}
+
+/// The address a scenario names, as a name-addr: a bare URI, a bracketed one
+/// or a display-name form all read here, so a test states the identity in the
+/// spelling its scenario uses and the wire carries it back.
+fn addr_of(text: &str) -> NameAddr {
+    NameAddr::parse(&SipStr::owned(text)).unwrap_or_else(|_| NameAddr::new(uri_of(text)))
+}
+
+/// The From a scenario names: the address plus this UA's local tag.
+pub(super) fn from_of(uri: &str, tag: &str) -> header::From {
+    header::From::new(addr_of(uri)).with_tag(SipStr::owned(tag))
+}
+
+/// The To a scenario names — tag-less, as an out-of-dialog request requires.
+pub(super) fn to_of(uri: &str) -> header::To {
+    header::To::new(addr_of(uri))
+}
 
 /// One inbound SIP message surfaced through the §17.2 receive view — a request
 /// (as a UAS-side [`ServerTxn`]) or a response — WITHOUT asserting either the
@@ -92,22 +124,15 @@ impl Agent {
     pub(super) fn tag(&self) -> String {
         format!("{}-tag-{}", self.name, self.ids.next())
     }
-    pub(super) fn via(&self) -> ViaSpec {
-        ViaSpec {
-            local_ip: self.addr.ip().to_string(),
-            local_port: self.addr.port(),
-            transport: SipTransport::Udp,
-            branch: self.branch(),
-            custom_params: vec![],
-        }
+    pub(super) fn via(&self) -> Via {
+        Via::udp(SipStr::owned(&self.addr.ip().to_string()), self.addr.port())
+            .with_branch(SipStr::owned(&self.branch()))
     }
-    pub(super) fn contact(&self) -> ContactSpec {
-        ContactSpec {
-            user: self.name.clone(),
-            host: self.addr.ip().to_string(),
-            port: self.addr.port(),
-            uri_params: vec![],
-        }
+    pub(super) fn contact(&self) -> header::Contact {
+        header::Contact::from_uri(
+            Uri::sip_user(SipStr::owned(&self.name), SipStr::owned(&self.addr.ip().to_string()))
+                .with_port(self.addr.port()),
+        )
     }
 
     /// Panicking veneer over [`try_send`](Agent::try_send).
@@ -383,12 +408,10 @@ impl Agent {
         let call_id = format!("reg-{}-{}@{}", self.name, self.ids.next(), self.addr.ip());
         let opts = GenerateOutOfDialogRequestOpts {
             // The REGISTER Request-URI is the registrar (domain), not a user.
-            request_uri: format!("sip:{}", registrar.ip()),
+            request_uri: Some(Uri::sip(SipStr::owned(&registrar.ip().to_string()))),
             call_id,
-            from_uri: aor.to_string(),
-            from_tag: self.tag(),
-            to_uri: aor.to_string(),
-            to_tag: None,
+            from: Some(from_of(aor, &self.tag())),
+            to: Some(to_of(aor)),
             cseq: 1,
             via: Some(self.via()),
             // The Contact the registrar stores verbatim is this agent's wire
@@ -402,7 +425,6 @@ impl Agent {
                 name: "Expires".into(),
                 value: ttl_sec.to_string().into(),
             }],
-            ..Default::default()
         };
         let req = generate_out_of_dialog_request(OutOfDialogMethod::Register, &opts);
         self.send(&SipMessage::Request(req), registrar).await;

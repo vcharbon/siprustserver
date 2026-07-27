@@ -4,7 +4,7 @@
 use bytes::Bytes;
 
 use crate::draft::{Draft, RequestDraft, ResponseDraft, StartKind};
-use crate::header::{ContentLength, HeaderName, HeaderValue, MaxForwards, MediaType, Uri};
+use crate::header::{ContentLength, HeaderName, MaxForwards, MediaType, Uri};
 use crate::sip_str::SipStr;
 use crate::types::{SipHeader, SipRequest, SipResponse};
 
@@ -63,13 +63,6 @@ pub(super) fn extra_headers<S: StartKind>(mut draft: Draft<S>, extra: &[SipHeade
 /// (RFC 3261 §7.3.3).
 pub(super) fn carries(extra: &[SipHeader], name: &HeaderName) -> bool {
     extra.iter().any(|header| name.matches(&header.name))
-}
-
-/// The typed media type, preferring the value over the text that names it.
-pub(super) fn media_type(typed: &Option<MediaType>, text: &Option<String>) -> Option<MediaType> {
-    typed
-        .clone()
-        .or_else(|| text.as_deref().and_then(|t| MediaType::parse(&SipStr::owned(t)).ok()))
 }
 
 /// Frame the body: the media type when there is a body and the caller has not

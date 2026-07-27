@@ -13,12 +13,11 @@
 //!   on its own.
 //! - `proxy_hop/*` — decode plus one hop, the per-inbound-datagram cost.
 //! - `build/*` — origination: the blank draft driven directly, and the
-//!   generator recipes over stringly options.
+//!   generator recipes over typed options.
 
 use sip_message::draft::RequestDraft;
 use sip_message::generators::{
-    ContactSpec, GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts, GenerateResponseOpts,
-    SipTransport, StackDialog, ViaSpec,
+    GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts, GenerateResponseOpts, StackDialog,
 };
 use sip_message::header::{
     self, CSeq, CallId, Contact, MaxForwards, MediaType, ParamValue, RecordRouteEntry, RouteEntry,
@@ -230,23 +229,18 @@ impl BlankInvite {
 
 /// The Via, Contact and dialog the generator build cases originate from — the
 /// shape a B2BUA b-leg carries (custom correlation params on both).
-pub fn build_via() -> ViaSpec {
-    ViaSpec {
-        local_ip: "10.0.0.1".to_string(),
-        local_port: 5060,
-        transport: SipTransport::Udp,
-        branch: "z9hG4bK-abc123".to_string(),
-        custom_params: vec![("cr".to_string(), "cref1".to_string())],
-    }
+pub fn build_via() -> Via {
+    Via::udp("10.0.0.1", 5060)
+        .with_branch("z9hG4bK-abc123")
+        .with_param("cr", ParamValue::Token(SipStr::from_static("cref1")))
 }
 
-pub fn build_contact() -> ContactSpec {
-    ContactSpec {
-        user: "b2bua".to_string(),
-        host: "10.0.0.1".to_string(),
-        port: 5060,
-        uri_params: vec![("callRef".to_string(), "cref1".to_string())],
-    }
+pub fn build_contact() -> header::Contact {
+    header::Contact::from_uri(
+        Uri::sip_user("b2bua", "10.0.0.1")
+            .with_port(5060)
+            .with_param("callRef", ParamValue::Token(SipStr::from_static("cref1"))),
+    )
 }
 
 pub fn build_dialog() -> StackDialog {
@@ -267,11 +261,13 @@ pub fn build_dialog() -> StackDialog {
 /// construction cost and not the caller's own bookkeeping.
 pub fn invite_opts(sdp: &[u8]) -> GenerateOutOfDialogRequestOpts {
     GenerateOutOfDialogRequestOpts {
-        request_uri: "sip:bob@example.com".to_string(),
+        request_uri: Some(Uri::sip_user("bob", "example.com")),
         call_id: "a84b4c76e66710@pc33.example.com".to_string(),
-        from_uri: "sip:alice@example.com".to_string(),
-        from_tag: "1928".to_string(),
-        to_uri: "sip:bob@example.com".to_string(),
+        from: Some(
+            header::From::from_uri(Uri::sip_user("alice", "example.com"))
+                .with_tag(SipStr::from_static("1928")),
+        ),
+        to: Some(header::To::from_uri(Uri::sip_user("bob", "example.com"))),
         cseq: 314159,
         via: Some(build_via()),
         contact: Some(build_contact()),

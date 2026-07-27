@@ -4,12 +4,14 @@
 use sip_message::generators::{
     extract_non_structural_headers, generate_ack_for_2xx, generate_ack_for_non_2xx,
     generate_cancel, generate_in_dialog_request, generate_out_of_dialog_request, generate_response,
-    ContactSpec, GenerateAckFor2xxOpts, GenerateInDialogRequestOpts,
-    GenerateOutOfDialogRequestOpts, GenerateResponseOpts, InDialogMethod,
-    InviteClientTransactionHandle, OutOfDialogMethod, SipTransport, StackDialog, ViaSpec,
+    GenerateAckFor2xxOpts, GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts,
+    GenerateResponseOpts, InDialogMethod, InviteClientTransactionHandle, OutOfDialogMethod,
+    StackDialog,
 };
-use sip_message::header::HeaderName;
-use sip_message::header::HeaderValue;
+use sip_message::header::{
+    self, Event, HeaderName, HeaderValue, MediaType, ParamValue, RAck, SubscriptionState, Uri, Via,
+};
+use sip_message::method::Method;
 use sip_message::{hydrate_request, SipHeader, SipMessage, SipRequest, SipStr};
 
 fn name(header: &str) -> HeaderName {
@@ -32,35 +34,42 @@ fn hdr(name: &str, value: &str) -> SipHeader {
     SipHeader { name: name.to_string().into(), value: value.to_string().into() }
 }
 
-fn via() -> ViaSpec {
-    ViaSpec {
-        local_ip: "10.0.0.1".to_string(),
-        local_port: 5060,
-        transport: SipTransport::Udp,
-        branch: "z9hG4bKtest00000000".to_string(),
-        custom_params: vec![],
-    }
+fn uri_of(text: &str) -> Uri {
+    Uri::parse(&SipStr::owned(text)).expect("readable URI")
 }
 
-fn via_with_params() -> ViaSpec {
-    ViaSpec {
-        custom_params: vec![("cr".to_string(), "cref1".to_string()), ("lg".to_string(), "a".to_string())],
-        ..via()
-    }
+fn token(value: &str) -> ParamValue {
+    ParamValue::Token(SipStr::owned(value))
 }
 
-fn contact() -> ContactSpec {
-    ContactSpec { user: "b2bua".to_string(), host: "10.0.0.1".to_string(), port: 5060, uri_params: vec![] }
+fn from_hdr(uri: &str, tag: &str) -> header::From {
+    header::From::from_uri(uri_of(uri)).with_tag(SipStr::owned(tag))
 }
 
-fn contact_with_params() -> ContactSpec {
-    ContactSpec {
-        uri_params: vec![
-            ("callRef".to_string(), "cref1".to_string()),
-            ("leg".to_string(), "a".to_string()),
-        ],
-        ..contact()
-    }
+fn to_hdr(uri: &str) -> header::To {
+    header::To::from_uri(uri_of(uri))
+}
+
+fn via() -> Via {
+    Via::udp("10.0.0.1", 5060).with_branch("z9hG4bKtest00000000")
+}
+
+fn via_with_params() -> Via {
+    via().with_param("cr", token("cref1")).with_param("lg", token("a"))
+}
+
+fn contact_uri() -> Uri {
+    Uri::sip_user("b2bua", "10.0.0.1").with_port(5060)
+}
+
+fn contact() -> header::Contact {
+    header::Contact::from_uri(contact_uri())
+}
+
+fn contact_with_params() -> header::Contact {
+    header::Contact::from_uri(
+        contact_uri().with_param("callRef", token("cref1")).with_param("leg", token("a")),
+    )
 }
 
 fn dialog() -> StackDialog {
@@ -154,11 +163,10 @@ fn builds_initial_invite_with_via_contact_maxforwards_content_length() {
     let req = generate_out_of_dialog_request(
         OutOfDialogMethod::Invite,
         &GenerateOutOfDialogRequestOpts {
-            request_uri: "sip:bob@biloxi.example.com".to_string(),
+            request_uri: Some(uri_of("sip:bob@biloxi.example.com")),
             call_id: "call-bleg-1".to_string(),
-            from_uri: "sip:b2bua@10.0.0.1:5060".to_string(),
-            from_tag: "b2bua-local".to_string(),
-            to_uri: "sip:bob@biloxi.example.com".to_string(),
+            from: Some(from_hdr("sip:b2bua@10.0.0.1:5060", "b2bua-local")),
+            to: Some(to_hdr("sip:bob@biloxi.example.com")),
             cseq: 1,
             via: Some(via_with_params()),
             contact: Some(contact_with_params()),
@@ -193,11 +201,10 @@ fn passes_extra_headers_through_verbatim() {
     let req = generate_out_of_dialog_request(
         OutOfDialogMethod::Invite,
         &GenerateOutOfDialogRequestOpts {
-            request_uri: "sip:bob@biloxi.example.com".to_string(),
+            request_uri: Some(uri_of("sip:bob@biloxi.example.com")),
             call_id: "call-bleg-1".to_string(),
-            from_uri: "sip:b2bua@10.0.0.1:5060".to_string(),
-            from_tag: "b2bua-local".to_string(),
-            to_uri: "sip:bob@biloxi.example.com".to_string(),
+            from: Some(from_hdr("sip:b2bua@10.0.0.1:5060", "b2bua-local")),
+            to: Some(to_hdr("sip:bob@biloxi.example.com")),
             cseq: 1,
             via: Some(via()),
             contact: Some(contact()),
@@ -216,11 +223,10 @@ fn omits_content_type_when_body_empty() {
     let req = generate_out_of_dialog_request(
         OutOfDialogMethod::Options,
         &GenerateOutOfDialogRequestOpts {
-            request_uri: "sip:bob@biloxi.example.com".to_string(),
+            request_uri: Some(uri_of("sip:bob@biloxi.example.com")),
             call_id: "cid".to_string(),
-            from_uri: "sip:b2bua@10.0.0.1:5060".to_string(),
-            from_tag: "ft".to_string(),
-            to_uri: "sip:bob@biloxi.example.com".to_string(),
+            from: Some(from_hdr("sip:b2bua@10.0.0.1:5060", "ft")),
+            to: Some(to_hdr("sip:bob@biloxi.example.com")),
             cseq: 1,
             via: Some(via()),
             contact: Some(contact()),
@@ -236,11 +242,10 @@ fn honours_caller_provided_max_forwards() {
     let req = generate_out_of_dialog_request(
         OutOfDialogMethod::Invite,
         &GenerateOutOfDialogRequestOpts {
-            request_uri: "sip:x@y".to_string(),
+            request_uri: Some(uri_of("sip:x@y")),
             call_id: "cid".to_string(),
-            from_uri: "sip:a@b".to_string(),
-            from_tag: "ft".to_string(),
-            to_uri: "sip:x@y".to_string(),
+            from: Some(from_hdr("sip:a@b", "ft")),
+            to: Some(to_hdr("sip:x@y")),
             cseq: 1,
             via: Some(via()),
             contact: Some(contact()),
@@ -252,15 +257,18 @@ fn honours_caller_provided_max_forwards() {
 }
 
 #[test]
-fn preserves_caller_name_addr_in_from_without_double_wrapping() {
+fn renders_a_from_display_name_and_its_tag_once() {
     let req = generate_out_of_dialog_request(
         OutOfDialogMethod::Invite,
         &GenerateOutOfDialogRequestOpts {
-            request_uri: "sip:bob@biloxi.example.com".to_string(),
+            request_uri: Some(uri_of("sip:bob@biloxi.example.com")),
             call_id: "cid".to_string(),
-            from_uri: "\"Alice\" <sip:alice@atlanta.example.com>".to_string(),
-            from_tag: "alice-tag".to_string(),
-            to_uri: "sip:bob@biloxi.example.com".to_string(),
+            from: Some(
+                header::From::from_uri(uri_of("sip:alice@atlanta.example.com"))
+                    .with_display(SipStr::owned("Alice"))
+                    .with_tag(SipStr::owned("alice-tag")),
+            ),
+            to: Some(to_hdr("sip:bob@biloxi.example.com")),
             cseq: 1,
             via: Some(via()),
             contact: Some(contact()),
@@ -365,7 +373,7 @@ fn adds_rack_on_prack() {
         &GenerateInDialogRequestOpts {
             via: Some(via()),
             contact: Some(contact()),
-            rack: Some("1 101 INVITE".to_string()),
+            rack: Some(RAck::new(1, 101, Method::Invite)),
             ..Default::default()
         },
     );
@@ -382,9 +390,15 @@ fn adds_event_and_subscription_state_on_notify() {
         &GenerateInDialogRequestOpts {
             via: Some(via()),
             contact: Some(contact()),
-            event: Some("refer".to_string()),
-            subscription_state: Some("active;expires=60".to_string()),
-            content_type: Some("message/sipfrag;version=2.0".to_string()),
+            event: Some(Event::parse(&SipStr::from_static("refer")).expect("readable Event")),
+            subscription_state: Some(
+                SubscriptionState::parse(&SipStr::from_static("active;expires=60"))
+                    .expect("readable Subscription-State"),
+            ),
+            content_type: Some(
+                MediaType::parse(&SipStr::from_static("message/sipfrag;version=2.0"))
+                    .expect("readable Content-Type"),
+            ),
             body,
             ..Default::default()
         },
@@ -413,7 +427,7 @@ fn reads_cseq_from_invite_handle_not_dialog() {
         Some(&invite_handle()),
         &d,
         &GenerateAckFor2xxOpts {
-            via: Some(ViaSpec { branch: "z9hG4bKackbranch".to_string(), ..via() }),
+            via: Some(via().with_branch("z9hG4bKackbranch")),
             ..Default::default()
         },
     );

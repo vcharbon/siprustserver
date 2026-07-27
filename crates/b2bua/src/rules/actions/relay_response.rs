@@ -6,8 +6,9 @@
 
 use call::helpers::{add_tag_mapping, find_by_b_tag, remove_pending_request, find_pending_request};
 use call::{Call, TagMapping, TimerType};
+use sip_message::draft::Entry;
 use sip_message::generators::{self, GenerateRelayedResponseOpts};
-use sip_message::header::{HeaderName, HeaderValue, Via};
+use sip_message::header::{HeaderName, HeaderValue, MediaType, Via};
 use sip_message::{SipHeader, SipStr};
 
 use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
@@ -40,14 +41,15 @@ impl ActionExecutor<'_> {
         // The body relayed toward alice: dropped (bare-180 downgrade), replaced
         // by a staged policy body (fake-prack cached SDP on the 200 OK), or the
         // response's own body verbatim.
-        let (relay_body, relay_content_type): (Vec<u8>, Option<String>) = if transform.drop_body {
+        let (relay_body, relay_content_type): (Vec<u8>, Option<MediaType>) = if transform.drop_body
+        {
             (vec![], None)
         } else if let Some(call::PolicyUpdateBody::Bytes(b)) = call.policy_update_body.clone() {
-            (b, Some("application/sdp".to_string()))
+            (b, Some(relay::sdp()))
         } else {
             (
                 resp.body().to_vec(),
-                resp.raw(HeaderName::ContentType).next().map(str::to_string),
+                resp.raw(HeaderName::ContentType).next().and_then(relay::media_type),
             )
         };
         // Passthrough headers minus any the transform suppresses (e.g.
@@ -109,18 +111,29 @@ impl ActionExecutor<'_> {
                         &transform.add_headers,
                     );
                 }
+                // §8.2.6.2 makes Via / From / To / Call-ID / CSeq equal the
+                // originator's, and the snapshot holds the originator's own
+                // bytes (the `call` crate stores text, ADR-0008) — so each
+                // rides as a raw entry and reaches the wire unaltered.
+                let echo = |name: HeaderName, text: &str| Entry::raw(name, SipStr::owned(text));
                 let opts = GenerateRelayedResponseOpts {
-                    vias: pending.source_vias.clone(),
+                    vias: pending
+                        .source_vias
+                        .iter()
+                        .map(|v| echo(HeaderName::Via, v))
+                        .collect(),
                     record_routes: vec![],
-                    from: pending.source_from.clone(),
-                    to: pending.source_to.clone(),
-                    call_id: pending.source_call_id.clone(),
-                    cseq: format!("{} {}", pending.inbound_cseq, cseq_method),
+                    from: Some(echo(HeaderName::From, &pending.source_from)),
+                    to: Some(echo(HeaderName::To, &pending.source_to)),
+                    call_id: Some(echo(HeaderName::CallId, &pending.source_call_id)),
+                    cseq: Some(echo(
+                        HeaderName::CSeq,
+                        &format!("{} {}", pending.inbound_cseq, cseq_method),
+                    )),
                     body: relay_body.clone(),
                     transparent_headers,
                     content_type: relay_content_type.clone(),
                     contact: Some(contact),
-                    ..Default::default()
                 };
                 let relayed = generators::generate_relayed_response(status, &reason, &opts);
                 let s_id = dialog_identity_tag(&source_leg_id, &src_dialog);

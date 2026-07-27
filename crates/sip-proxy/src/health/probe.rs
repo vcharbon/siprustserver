@@ -61,12 +61,12 @@ use std::time::Duration;
 
 use sip_clock::Clock;
 use sip_message::generators::{
-    generate_out_of_dialog_request, ContactSpec, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, SipTransport,
-    ViaSpec,
+    generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
+use sip_message::header::{self, ParamValue, Uri, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::types::SipResponse;
-use sip_message::{SipMessage, SipRequest};
+use sip_message::{SipMessage, SipRequest, SipStr};
 use sip_net::UdpEndpoint;
 use sip_txn::{IdGen, TransactionConfig, TransactionEvent, TransactionLayer, TransactionLayerClosed, TxnKind};
 use tokio::sync::mpsc;
@@ -355,27 +355,32 @@ impl HealthProbe {
         generate_out_of_dialog_request(
             OutOfDialogMethod::Options,
             &GenerateOutOfDialogRequestOpts {
-                request_uri: format!("sip:{}:{}", w.address.host, w.address.port),
+                request_uri: Some(
+                    Uri::sip(SipStr::owned(&w.address.host)).with_port(w.address.port),
+                ),
                 // Diagnostic only — correlation is the transaction branch.
                 call_id: format!("probe-{}-{}@{}", w.id, now_ms, self.probe_host),
-                from_uri: format!("sip:probe@{}", self.probe_host),
-                from_tag: "probe".into(),
-                to_uri: format!("sip:probe@{}:{}", w.address.host, w.address.port),
-                to_tag: None,
+                from: Some(
+                    header::From::from_uri(Uri::sip_user(
+                        SipStr::from_static("probe"),
+                        SipStr::owned(&self.probe_host),
+                    ))
+                    .with_tag(SipStr::from_static("probe")),
+                ),
+                to: Some(header::To::from_uri(
+                    Uri::sip_user(SipStr::from_static("probe"), SipStr::owned(&w.address.host))
+                        .with_port(w.address.port),
+                )),
                 cseq: 1,
-                via: Some(ViaSpec {
-                    local_ip: self.probe_host.clone(),
-                    local_port: self.probe_port,
-                    transport: SipTransport::Udp,
-                    branch: branch.to_string(),
-                    custom_params: vec![("cr".into(), probe_call_ref(branch))],
-                }),
-                contact: Some(ContactSpec {
-                    user: "probe".into(),
-                    host: self.probe_host.clone(),
-                    port: self.probe_port,
-                    uri_params: vec![],
-                }),
+                via: Some(
+                    Via::udp(SipStr::owned(&self.probe_host), self.probe_port)
+                        .with_branch(SipStr::owned(branch))
+                        .with_param("cr", ParamValue::Token(SipStr::owned(&probe_call_ref(branch)))),
+                ),
+                contact: Some(header::Contact::from_uri(
+                    Uri::sip_user(SipStr::from_static("probe"), SipStr::owned(&self.probe_host))
+                        .with_port(self.probe_port),
+                )),
                 max_forwards: Some(70),
                 ..Default::default()
             },

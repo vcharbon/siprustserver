@@ -4,37 +4,27 @@
 
 use super::emit;
 use super::in_dialog::{route_for_in_dialog, with_dialog_identity, with_routes};
-use super::spec::{InviteClientTransactionHandle, StackDialog, ViaSpec};
+use super::spec::{InviteClientTransactionHandle, StackDialog};
 use crate::draft::RequestDraft;
 use crate::header::{CSeq, ContentLength, HeaderName, MaxForwards, MediaType, Uri, Via};
 use crate::method::Method;
 use crate::sip_str::SipStr;
 use crate::types::{SipHeader, SipRequest, SipResponse};
 
-/// The typed twin of the stringly fields of [`GenerateAckFor2xxOpts`]: each
-/// value supersedes the text that names the same header.
-#[derive(Debug, Clone, Default)]
-pub struct AckFor2xxValues {
-    /// Supersedes `request_uri`.
-    pub uri: Option<Uri>,
-    /// Supersedes `via`.
-    pub hop: Option<Via>,
-    /// Supersedes `content_type`.
-    pub content_type: Option<MediaType>,
-}
-
+/// Inputs for [`generate_ack_for_2xx`]. Every header is a typed value; the
+/// dialog contributes From / To / Call-ID / Route.
 #[derive(Debug, Clone, Default)]
 pub struct GenerateAckFor2xxOpts {
-    pub via: Option<ViaSpec>,
+    /// This hop's own Via. Required.
+    pub via: Option<Via>,
     pub body: Vec<u8>,
-    pub content_type: Option<String>,
+    pub content_type: Option<MediaType>,
+    /// Caller-stated header lines, carried verbatim (name spelling included).
     pub extra_headers: Vec<SipHeader>,
     /// Explicit CSeq override; required when `invite_txn` is `None`.
     pub cseq: Option<u32>,
-    /// Request-URI override; defaults to `dialog.remote_target`.
-    pub request_uri: Option<String>,
-    /// Typed values, each superseding its stringly counterpart above.
-    pub values: AckFor2xxValues,
+    /// Remote-target override; defaults to `dialog.remote_target`.
+    pub request_uri: Option<Uri>,
 }
 
 /// Build an ACK for a 2xx response. The CSeq number comes from the INVITE
@@ -46,25 +36,20 @@ pub fn generate_ack_for_2xx(
     dialog: &StackDialog,
     opts: &GenerateAckFor2xxOpts,
 ) -> SipRequest {
-    let values = &opts.values;
     let invite_cseq = opts
         .cseq
         .or_else(|| invite_txn.map(|t| t.original_invite.cseq().seq()))
         .expect("generate_ack_for_2xx: either invite_txn or opts.cseq must be provided");
-    let remote_target = opts.request_uri.clone().unwrap_or_else(|| dialog.remote_target.clone());
-    let (request_uri, routes) = route_for_in_dialog(&remote_target, &dialog.route_set);
-    let uri = values.uri.clone().unwrap_or_else(|| emit::uri(&request_uri));
-    let hop =
-        values.hop.clone().unwrap_or_else(|| opts.via.as_ref().expect("ViaSpec required").value());
+    let remote_target =
+        opts.request_uri.clone().unwrap_or_else(|| emit::uri(&dialog.remote_target));
+    let (uri, routes) = route_for_in_dialog(remote_target, &dialog.route_set);
+    let hop = opts.via.clone().expect("via required");
 
-    let draft = RequestDraft::new(Method::Ack, uri)
-        .push(hop)
-        .push(MaxForwards::DEFAULT);
+    let draft = RequestDraft::new(Method::Ack, uri).push(hop).push(MaxForwards::DEFAULT);
     let draft = with_dialog_identity(draft, dialog).push(CSeq::new(invite_cseq, Method::Ack));
     let draft = emit::extra_headers(with_routes(draft, &routes), &opts.extra_headers);
 
-    let content_type = emit::media_type(&values.content_type, &opts.content_type);
-    emit::request(emit::framed(draft, opts.body.clone(), content_type))
+    emit::request(emit::framed(draft, opts.body.clone(), opts.content_type.clone()))
 }
 
 /// Build an ACK for a non-2xx final response inside the INVITE client

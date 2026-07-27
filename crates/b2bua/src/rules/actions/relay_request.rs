@@ -8,7 +8,7 @@ use call::helpers::{
 };
 use call::{Call, PendingRequest};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
-use sip_message::header::{HeaderName, RAck};
+use sip_message::header::{HeaderName, MediaType, RAck};
 use sip_message::Method;
 use sip_txn::TxnKind;
 
@@ -28,7 +28,7 @@ impl ActionExecutor<'_> {
         fx: &mut HandlerEffects,
         leg_id: &str,
         body: Vec<u8>,
-        content_type: Option<String>,
+        content_type: Option<MediaType>,
     ) {
         let leg = if leg_id == call.a_leg.leg_id {
             Some(&call.a_leg)
@@ -74,7 +74,7 @@ impl ActionExecutor<'_> {
         // RFC 3264 §4). The target may be either side (a re-INVITE answered by
         // bob is ACKed toward bob; one answered by alice is ACKed toward alice).
         if req.method() == Method::Ack {
-            let content_type = req.raw(HeaderName::ContentType).next().map(str::to_string);
+            let content_type = req.raw(HeaderName::ContentType).next().and_then(relay::media_type);
             self.ack_leg(call, fx, target_leg, req.body().to_vec(), content_type);
             return;
         }
@@ -140,10 +140,10 @@ impl ActionExecutor<'_> {
             via: Some(relay::leg_via(self.config, &call.call_ref, target_leg, call.emergency == Some(true), branch.clone())),
             contact: Some(relay::leg_contact(self.config, &call.call_ref, target_leg, call.emergency == Some(true))),
             body: req.body().to_vec(),
-            content_type: req.raw(HeaderName::ContentType).next().map(str::to_string),
+            content_type: req.raw(HeaderName::ContentType).next().and_then(relay::media_type),
             cseq: Some(outbound_cseq as u32),
             extra_headers: relay::relay_request_passthrough_headers(req),
-            values: generators::InDialogValues { rack, ..Default::default() },
+            rack,
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(method, &gen_dialog, &opts);

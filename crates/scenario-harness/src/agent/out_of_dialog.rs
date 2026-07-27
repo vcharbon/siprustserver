@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
-use sip_message::header::HeaderName;
+use sip_message::header::{HeaderName, MediaType};
 use sip_message::{
     apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MessageTemplate, SipHeader, SipMessage,
     SipResponse,
@@ -17,6 +17,7 @@ use super::client_txn::recv_response_raw;
 use super::dialog::InDialogTxn;
 use super::step::{unwrap_step, StepError};
 use super::Agent;
+use super::ua::{from_of, media_type, to_of, uri_of};
 use crate::realcall::auth::{parse_challenge, ChallengeResponder};
 
 /// Builder for a generic out-of-dialog request (any [`OutOfDialogMethod`]) —
@@ -29,7 +30,7 @@ pub struct OutOfDialogRequest<'a> {
     method: OutOfDialogMethod,
     body: Option<Vec<u8>>,
     /// Content-Type for a non-empty body (defaults to `application/sdp`).
-    content_type: Option<String>,
+    content_type: Option<MediaType>,
     extra_headers: Vec<SipHeader>,
     /// A template body carried NO Content-Type: suppress the generator's default
     /// `application/sdp` stamp (see [`Invite::template`](super::Invite::template)).
@@ -76,7 +77,7 @@ impl<'a> OutOfDialogRequest<'a> {
     /// Attach an arbitrary body with an explicit Content-Type.
     pub fn with_body(mut self, content_type: &str, body: impl Into<Vec<u8>>) -> Self {
         self.body = Some(body.into());
-        self.content_type = Some(content_type.to_string());
+        self.content_type = Some(media_type(content_type));
         self
     }
 
@@ -157,12 +158,13 @@ impl<'a> OutOfDialogRequest<'a> {
             .request_uri
             .unwrap_or_else(|| format!("sip:{}@{}:{}", peer.name, peer.addr.ip(), peer.addr.port()));
         let opts = GenerateOutOfDialogRequestOpts {
-            request_uri,
+            request_uri: Some(uri_of(&request_uri)),
             call_id: format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip()),
-            from_uri: self.from_uri.unwrap_or_else(|| caller.uri.clone()),
-            from_tag: caller.tag(),
-            to_uri: self.to_uri.unwrap_or_else(|| peer.uri.clone()),
-            to_tag: None,
+            from: Some(from_of(
+                &self.from_uri.unwrap_or_else(|| caller.uri.clone()),
+                &caller.tag(),
+            )),
+            to: Some(to_of(&self.to_uri.unwrap_or_else(|| peer.uri.clone()))),
             cseq: 1,
             via: Some(caller.via()),
             contact: Some(caller.contact()),
@@ -170,7 +172,6 @@ impl<'a> OutOfDialogRequest<'a> {
             body: self.body.unwrap_or_default(),
             content_type: self.content_type,
             extra_headers: self.extra_headers,
-            ..Default::default()
         };
         let mut req = generate_out_of_dialog_request(self.method, &opts);
         if self.suppress_default_ct {
@@ -224,12 +225,13 @@ impl<'a> OutOfDialogRequest<'a> {
             .clone()
             .unwrap_or_else(|| format!("sip:{}@{}:{}", peer.name, peer.addr.ip(), peer.addr.port()));
         let mut opts = GenerateOutOfDialogRequestOpts {
-            request_uri: request_uri.clone(),
+            request_uri: Some(uri_of(&request_uri)),
             call_id: format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip()),
-            from_uri: self.from_uri.clone().unwrap_or_else(|| caller.uri.clone()),
-            from_tag: caller.tag(),
-            to_uri: self.to_uri.clone().unwrap_or_else(|| peer.uri.clone()),
-            to_tag: None,
+            from: Some(from_of(
+                &self.from_uri.clone().unwrap_or_else(|| caller.uri.clone()),
+                &caller.tag(),
+            )),
+            to: Some(to_of(&self.to_uri.clone().unwrap_or_else(|| peer.uri.clone()))),
             cseq: 1,
             via: Some(caller.via()),
             contact: Some(caller.contact()),
@@ -237,7 +239,6 @@ impl<'a> OutOfDialogRequest<'a> {
             body: self.body.clone().unwrap_or_default(),
             content_type: self.content_type.clone(),
             extra_headers: self.extra_headers.clone(),
-            ..Default::default()
         };
         let method = self.method;
 

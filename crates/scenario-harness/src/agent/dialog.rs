@@ -10,10 +10,10 @@ use sip_message::generators::{
     generate_ack_for_2xx, generate_in_dialog_request, GenerateAckFor2xxOpts,
     GenerateInDialogRequestOpts, InDialogMethod, StackDialog,
 };
-use sip_message::header::HeaderName;
+use sip_message::header::{HeaderName, HeaderValue, MediaType, RAck};
 use sip_message::{
     apply_name_forms, apply_remote_target_emits, emitted_wire, CseqDeviation, CseqPattern, EmitOpts,
-    MessageTemplate, SipHeader, SipMessage, SipRequest, SipResponse,
+    MessageTemplate, SipHeader, SipMessage, SipRequest, SipResponse, SipStr,
 };
 
 use super::addressing::next_hop;
@@ -21,6 +21,7 @@ use super::client_txn::{
     try_expect_response, try_expect_response_tolerating, try_send_cancel, AckCtx,
 };
 use super::step::{unwrap_step, StepError};
+use super::ua::media_type;
 use super::Agent;
 
 /// A confirmed dialog. In-dialog requests auto-increment CSeq and route to the
@@ -334,8 +335,8 @@ pub struct InDialogRequest<'a> {
     fallback: SocketAddr,
     method: InDialogMethod,
     body: Vec<u8>,
-    content_type: Option<String>,
-    rack: Option<String>,
+    content_type: Option<MediaType>,
+    rack: Option<RAck>,
     extra_headers: Vec<SipHeader>,
     /// A template body carried NO Content-Type: suppress the generator's default
     /// `application/sdp` stamp (see [`Invite::template`](super::Invite::template)).
@@ -411,7 +412,7 @@ impl<'a> InDialogRequest<'a> {
     /// pins `Content-Type: application/sdp`.
     pub fn with_sdp(mut self, sdp: &str) -> Self {
         self.body = sdp.as_bytes().to_vec();
-        self.content_type = Some("application/sdp".to_string());
+        self.content_type = Some(media_type("application/sdp"));
         self
     }
 
@@ -424,13 +425,13 @@ impl<'a> InDialogRequest<'a> {
     /// a non-empty body) — for a bodyless typed header use `with_header`.
     pub fn with_body(mut self, content_type: &str, bytes: Vec<u8>) -> Self {
         self.body = bytes;
-        self.content_type = Some(content_type.to_string());
+        self.content_type = Some(media_type(content_type));
         self
     }
 
     /// Set the `RAck` header (`<rseq> <cseq> <method>`, RFC 3262 §7.2).
     pub fn with_rack(mut self, rack: &str) -> Self {
-        self.rack = Some(rack.to_string());
+        self.rack = Some(RAck::parse(&SipStr::owned(rack)).expect("a readable RAck"));
         self
     }
 

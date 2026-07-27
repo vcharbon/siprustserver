@@ -18,10 +18,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use sip_message::generators::{
-    generate_out_of_dialog_request, ContactSpec, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
-    SipTransport, ViaSpec,
+    generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
 use sip_message::HeaderName;
+use sip_message::header::{self, Uri, Via};
+use sip_message::SipStr;
 use sip_message::SipRequest;
 use sip_txn::IdGen;
 
@@ -56,33 +57,27 @@ impl ReadinessSource for FlagSource {
 }
 
 /// A bare out-of-dialog OPTIONS keepalive (tagless To), like a proxy probe.
+
+/// The URI a fixture names as text.
+fn uri_of(text: &str) -> Uri {
+    Uri::parse(&SipStr::owned(text)).expect("readable URI")
+}
+
 fn options_probe() -> SipRequest {
     let opts = GenerateOutOfDialogRequestOpts {
-        request_uri: "sip:b2bua@127.0.0.1:5070".into(),
+        request_uri: Some(uri_of("sip:b2bua@127.0.0.1:5070")),
         call_id: "probe-w0-1234-ab@10.0.0.1".into(),
-        from_uri: "sip:probe@10.0.0.1".into(),
-        from_tag: "probe".into(),
-        to_uri: "sip:b2bua@127.0.0.1:5070".into(),
-        to_tag: None,
+        from: Some(header::From::from_uri(uri_of("sip:probe@10.0.0.1")).with_tag(SipStr::from_static("probe"))),
+        to: Some(header::To::from_uri(uri_of("sip:b2bua@127.0.0.1:5070"))),
         cseq: 1,
-        via: Some(ViaSpec {
-            local_ip: "10.0.0.1".into(),
-            local_port: 5060,
-            transport: SipTransport::Udp,
-            branch: "z9hG4bKprobe".into(),
-            custom_params: vec![],
-        }),
-        contact: Some(ContactSpec {
-            user: "probe".into(),
-            host: "10.0.0.1".into(),
-            port: 5060,
-            uri_params: vec![],
-        }),
+        via: Some(Via::udp("10.0.0.1", 5060).with_branch(SipStr::from_static("z9hG4bKprobe"))),
+        contact: Some(header::Contact::from_uri(
+            Uri::sip_user("probe", "10.0.0.1").with_port(5060),
+        )),
         max_forwards: Some(70),
         body: vec![],
         content_type: None,
         extra_headers: vec![],
-        ..Default::default()
     };
     generate_out_of_dialog_request(OutOfDialogMethod::Options, &opts)
 }
