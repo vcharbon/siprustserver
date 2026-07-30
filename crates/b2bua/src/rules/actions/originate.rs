@@ -68,7 +68,11 @@ impl ActionExecutor<'_> {
         let n = call.b_legs.len() + 1;
         let leg_id = format!("b-{n}");
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let (leg, effect) = relay::build_b_leg(
+        // Same refusal as the admission reject above, for the other way a
+        // decision can name no destination: an address field that does not read
+        // (055). The leg is not created and no INVITE goes out — originating on
+        // a fabricated target would dial an address the decision never stated.
+        let (leg, effect) = match relay::build_b_leg(
             &call.call_ref,
             &leg_id,
             call.emergency == Some(true),
@@ -83,7 +87,28 @@ impl ActionExecutor<'_> {
             body_override,
             header_updates,
             kind,
-        );
+        ) {
+            Ok(built) => built,
+            Err(err) => {
+                eprintln!(
+                    "WARN: call {}: leg {leg_id} not created — {}",
+                    call.call_ref,
+                    err.detail()
+                );
+                *call = add_cdr_event(
+                    call.clone(),
+                    CdrEvent {
+                        event_type: call::CdrEventType::Reject,
+                        timestamp: self.now_ms,
+                        leg_id: ctx.source_leg_id.to_string(),
+                        status_code: Some(500),
+                        reason: Some(format!("unreadable_address field={}", err.field)),
+                    },
+                );
+                terminate_all(call);
+                return;
+            }
+        };
         if let Some(ctx_str) = callback_context {
             call.callback_context = Some(ctx_str.to_string());
         }

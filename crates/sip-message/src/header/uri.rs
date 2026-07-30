@@ -399,9 +399,22 @@ impl Uri {
         Ok(Self { scheme, user, authority, params, headers, source: Some(value) })
     }
 
-    /// [`parse`](Self::parse), falling back to [`opaque`](Self::opaque) — the
-    /// total reading a converter from an already-validated message needs.
-    pub fn parse_or_opaque(raw: &SipStr) -> Self {
+    /// [`parse`](Self::parse), falling back to [`opaque`](Self::opaque): text no
+    /// reader accepts is **carried whole** rather than refused.
+    ///
+    /// Two lanes only, and in both of them carrying the bytes forward verbatim
+    /// is the feature:
+    ///   - a **reader** converting an already-gated message, where losing what
+    ///     the peer wrote is worse than holding an address this stack cannot
+    ///     take apart (the parser's own strict gates decide admissibility);
+    ///   - **test-side replay emission**, where a scenario states an address as
+    ///     text and the wire must carry that spelling back.
+    ///
+    /// NEVER on a path that routes, addresses or answers a call. There a value
+    /// that does not read is an [`Err`] the caller propagates to a seam that can
+    /// act on it — the opaque URI's host is the whole raw text, so routing on
+    /// one dials an address nobody named (ADR/upstreamneed-055).
+    pub fn parse_or_verbatim(raw: &SipStr) -> Self {
         Self::parse(raw).unwrap_or_else(|_| Self::opaque(raw.clone()))
     }
 
@@ -496,7 +509,7 @@ mod tests {
     fn an_unbracketed_ipv6_host_is_refused_not_truncated() {
         for text in ["sip:2001:db8::1", "sip:alice@2001:db8::1", "sip:2001:db8::1;transport=udp"] {
             assert!(Uri::parse(&SipStr::owned(text)).is_err(), "{text} was accepted");
-            let opaque = Uri::parse_or_opaque(&SipStr::owned(text));
+            let opaque = Uri::parse_or_verbatim(&SipStr::owned(text));
             assert!(opaque.is_opaque());
             assert_eq!(opaque.to_string(), text);
         }
@@ -512,7 +525,7 @@ mod tests {
     #[test]
     fn a_schemeless_value_is_opaque_not_a_uri() {
         assert!(Uri::parse(&SipStr::owned("*")).is_err());
-        assert_eq!(Uri::parse_or_opaque(&SipStr::owned("*")).to_string(), "*");
+        assert_eq!(Uri::parse_or_verbatim(&SipStr::owned("*")).to_string(), "*");
     }
 
     #[test]

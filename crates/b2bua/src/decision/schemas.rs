@@ -65,6 +65,9 @@ pub struct SipDestination {
 }
 
 impl SipDestination {
+    /// The port a peer reaches when the decision names none (RFC 3261 §19.1.2).
+    pub const DEFAULT_PORT: u16 = 5060;
+
     pub fn new(host: impl Into<String>, port: u16) -> Self {
         Self {
             host: host.into(),
@@ -73,7 +76,29 @@ impl SipDestination {
         }
     }
     pub fn port(&self) -> u16 {
-        self.port.unwrap_or(5060)
+        self.port.unwrap_or(Self::DEFAULT_PORT)
+    }
+}
+
+/// The port a decision payload states, or `None` when it states one that is no
+/// port. The one place the two kinds of "missing" are told apart
+/// (upstreamneed-055):
+///
+///   - **absent / `null`** — RFC 3261 §19.1.2 says an unstated port means 5060.
+///     That default is what the protocol *means*, so it is correct and stays
+///     (same rule as [`SipDestination::port`]).
+///   - **stated but unreadable** (out of range, zero, not a number) — no
+///     default is right. Collapsing it onto 5060 dials the default port of a
+///     host the decision never named, which is a live address that can very
+///     plausibly answer; the caller then reaches a destination nobody chose.
+///     The reader refuses, and the seam above turns that into a call outcome.
+pub fn read_stated_port(stated: Option<&serde_json::Value>) -> Option<u16> {
+    match stated {
+        None | Some(serde_json::Value::Null) => Some(SipDestination::DEFAULT_PORT),
+        Some(v) => v
+            .as_u64()
+            .and_then(|p| u16::try_from(p).ok())
+            .filter(|p| *p != 0),
     }
 }
 

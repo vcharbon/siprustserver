@@ -321,15 +321,53 @@ impl RuleDefinition {
     }
 }
 
+/// An input a rule could not read, stated as a fact instead of absorbed into a
+/// fabricated value. A rule that hits one names the field and why, emits
+/// whatever refusal it owns (a reject response, a terminated subscription), and
+/// lets the engine log and count the diagnostic — the alternative a rule surface
+/// without this seam is forced into is choosing between silence and acting as if
+/// the input were fine (upstreamneed-055).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleDiagnostic {
+    /// The input that did not read (`refer_to`, `destination.port`, …).
+    pub field: String,
+    /// Why it did not read.
+    pub reason: String,
+}
+
+impl RuleDiagnostic {
+    pub fn unreadable(field: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self { field: field.into(), reason: reason.into() }
+    }
+}
+
+impl std::fmt::Display for RuleDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unreadable {}: {}", self.field, self.reason)
+    }
+}
+
 /// What a rule emits when it handles an event.
 #[derive(Debug, Clone, Default)]
 pub struct RuleHandleResult {
     pub actions: Vec<RuleAction>,
+    /// Inputs this rule refused to read. Carried alongside the actions rather
+    /// than in place of them: a rule reports the defect **and** emits the
+    /// refusal it owns. The engine logs and counts these; they emit no wire
+    /// traffic of their own, so a rule can never route on one.
+    pub diagnostics: Vec<RuleDiagnostic>,
 }
 
 impl RuleHandleResult {
     pub fn new(actions: Vec<RuleAction>) -> Self {
-        Self { actions }
+        Self { actions, diagnostics: Vec::new() }
+    }
+
+    /// The same actions, carrying `diagnostic` — what a rule returns when an
+    /// input did not read and the actions are its refusal.
+    pub fn with_diagnostic(mut self, diagnostic: RuleDiagnostic) -> Self {
+        self.diagnostics.push(diagnostic);
+        self
     }
 }
 

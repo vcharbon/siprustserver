@@ -12,7 +12,7 @@ use crate::obligations::ObligationSet;
 
 use super::actions::ActionExecutor;
 use super::invariants;
-use super::model::{EffectKind, RuleAction, RuleContext, RuleDefinition};
+use super::model::{EffectKind, RuleAction, RuleContext, RuleDefinition, RuleHandleResult};
 
 /// A machine-bound rule (ADR-0016 X1) is a candidate only when its owner
 /// machine's cursor is one of its `active_states`. A machine-less core rule is
@@ -70,6 +70,7 @@ pub fn execute_rules(
     for rule in pick_ranked(rules, call, ctx) {
         if let Some(outcome) = (rule.handle)(ctx) {
             let before = call.clone();
+            report_diagnostics(rule, call, &outcome);
             check_declared_effects(rule, &outcome.actions);
             let result = exec.execute(&outcome.actions, call, ctx);
             check_declared_transition(rule, &before.sm_cursors, &result.call.sm_cursors);
@@ -78,6 +79,17 @@ pub fn execute_rules(
         }
     }
     HandlerResult::new(call.clone())
+}
+
+/// Report the inputs the winning rule refused to read. This is the engine end
+/// of the rule SDK's diagnostic seam (upstreamneed-055): a rule that cannot read
+/// an input says so here and emits its own refusal, instead of choosing between
+/// silence and acting as if the input were fine. The diagnostic itself produces
+/// no wire traffic — the rule's actions do.
+fn report_diagnostics(rule: &RuleDefinition, call: &Call, outcome: &RuleHandleResult) {
+    for d in &outcome.diagnostics {
+        eprintln!("WARN: call {}: rule {} refused an input — {d}", call.call_ref, rule.id);
+    }
 }
 
 /// Assert any cursor move the winning rule caused on its **own** machine is a

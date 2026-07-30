@@ -199,7 +199,11 @@ pub async fn apply_route(
         .as_ref()
         .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default();
-    let (mut leg, mut effect) = relay::build_b_leg(
+    // A decision field that does not read has no destination behind it: refuse
+    // the route rather than originate toward a fabricated address (055). The
+    // caller gets a final (ADR-0022's guarantee holds) and the CDR names the
+    // field; the malformed text itself stays off the wire.
+    let (mut leg, mut effect) = match relay::build_b_leg(
         &call.call_ref,
         leg_id,
         call.emergency == Some(true),
@@ -214,7 +218,19 @@ pub async fn apply_route(
         None,
         &header_updates,
         None,
-    );
+    ) {
+        Ok(built) => built,
+        Err(err) => {
+            eprintln!(
+                "WARN: call {}: routing decision refused — {}",
+                call.call_ref,
+                err.detail()
+            );
+            return crate::initial_invite::reject_call(
+                call, a_invite, 500, Some(err.to_string()), None, &[], id_gen, now_ms,
+            );
+        }
+    };
 
     // Body substitution on the b-leg INVITE (route.update_body), then the
     // relayFirst18xTo180 Supported rewrite — one thaw/freeze, so the INVITE the

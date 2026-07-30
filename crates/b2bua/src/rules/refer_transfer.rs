@@ -36,6 +36,7 @@ use sip_message::{Method, SipStr};
 use super::model::{
     Effect, Match, RuleAction, RuleContext, RuleDefinition, CORE_LAYER,
 };
+use super::relay;
 use super::Terminal;
 
 // Subscription-State fragments (RFC 3265 §3.2.4).
@@ -88,11 +89,46 @@ fn refer_to_has_replaces(ctx: &RuleContext) -> bool {
 /// Reduce a Refer-To to the bare `sip:user@host:port;params` URI a
 /// Request-URI may carry: the display name and the `?headers` list drop
 /// (RFC 3261 §19.1.1 forbids escaped headers in a Request-URI).
-fn to_bare_uri(refer_to: &str) -> String {
-    match ReferTo::parse(&SipStr::owned(refer_to)) {
-        Ok(value) => value.uri().clone().without_escaped_headers().to_string(),
-        Err(_) => refer_to.trim().to_string(),
-    }
+///
+/// Errs when the value does not read. The transfer target is what the C leg
+/// dials, so keeping unreadable text verbatim would originate toward an address
+/// nobody named — the referrer is told the transfer failed instead (055).
+fn to_bare_uri(refer_to: &str) -> Result<String, relay::UnreadableAddress> {
+    ReferTo::parse(&SipStr::owned(refer_to))
+        .map(|value| value.uri().clone().without_escaped_headers().to_string())
+        .map_err(|err| relay::UnreadableAddress {
+            field: "refer_to",
+            value: refer_to.to_string(),
+            reason: err.reason,
+        })
+}
+
+/// End a transfer whose authorization named a target no reader accepts: tell the
+/// referrer the transfer failed (NOTIFY `terminated`, 502), disarm the transfer
+/// watchdogs and clear the slice — the same terminal shape a `/call/refer` denial
+/// takes. The call itself survives; only the transfer is abandoned.
+fn refuse_transfer(
+    ctx: &RuleContext,
+    field: &str,
+    reason: &str,
+) -> Option<super::model::RuleHandleResult> {
+    let leg = state(ctx)?.referrer_leg_id.clone();
+    Some(
+        super::model::RuleHandleResult::new(vec![
+            notify(
+                &leg,
+                SUB_STATE_TERMINATED_NORESOURCE,
+                502,
+                &format!("Unreadable Transfer Target ({field})"),
+            ),
+            RuleAction::CancelTimer {
+                id: timer_id(call::TimerType::ReferSubscriptionExpiry, None),
+            },
+            RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
+            RuleAction::SetTransfer { state: None },
+        ])
+        .with_diagnostic(super::model::RuleDiagnostic::unreadable(field, reason)),
+    )
 }
 
 /// Non-structural REFER headers forwarded verbatim to `/call/refer`
@@ -348,14 +384,24 @@ define_service! {
                 ])
             },
         },
-        // ── transfer-http-allow — /call/refer authorized → create C leg.
+        // ── transfer-http-allow — /call/refer authorized → create C leg. An
+        //    authorization naming a target no reader accepts (unreadable
+        //    Refer-To, out-of-range port) takes the same terminal path as a
+        //    denial rather than dialing a fabricated address (055) — hence the
+        //    second transition edge and the NOTIFY/guard-timer effects.
         sm_rule! {
             id: "transfer-http-allow",
             machine: TRANSFER_MACHINE,
             active: [ Phase::ReferAuthorizing ],
-            transitions: [ Phase::ReferAuthorizing => Phase::CRinging ],
+            transitions: [
+                Phase::ReferAuthorizing => Phase::CRinging,
+                Phase::ReferAuthorizing => Terminal,
+            ],
             effects: [
                 Effect::Originate { method: Method::Invite, label: "INVITE → C (transfer target)" },
+                Effect::Originate { method: Method::Notify, label: "NOTIFY terminated → referrer (unreadable target)" },
+                Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry" },
+                Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall-safety" },
             ],
             matcher: Match::internal_event()
                 .topic("refer-http-result")
@@ -367,12 +413,18 @@ define_service! {
                     _ => return None,
                 };
                 let host = payload.get("destination").and_then(|d| d.get("host")).and_then(|v| v.as_str())?.to_string();
-                let port = payload
-                    .get("destination")
-                    .and_then(|d| d.get("port"))
-                    .and_then(|v| v.as_u64())
-                    .map(|p| p as u16)
-                    .unwrap_or(5060);
+                let port = match crate::decision::read_stated_port(
+                    payload.get("destination").and_then(|d| d.get("port")),
+                ) {
+                    Some(p) => p,
+                    None => {
+                        return refuse_transfer(
+                            ctx,
+                            "destination.port",
+                            "not a port number in 1..=65535",
+                        )
+                    }
+                };
                 let no_answer = payload.get("no_answer_timeout_sec").and_then(|v| v.as_i64());
                 let callback_context = payload.get("callback_context").and_then(|v| v.as_str()).map(str::to_string);
                 let new_refer_to = payload.get("new_refer_to").and_then(|v| v.as_str()).map(str::to_string);
@@ -403,7 +455,10 @@ define_service! {
                 let body_override = Some(held.unwrap_or_default());
 
                 let raw_refer_to = new_refer_to.unwrap_or_else(|| st.refer_to_uri.clone());
-                let effective = to_bare_uri(&raw_refer_to);
+                let effective = match to_bare_uri(&raw_refer_to) {
+                    Ok(uri) => uri,
+                    Err(err) => return refuse_transfer(ctx, err.field, &err.reason),
+                };
                 let c_leg_id = format!("b-{}", ctx.call.b_legs().len() + 1);
 
                 let mut new_state = st.clone();

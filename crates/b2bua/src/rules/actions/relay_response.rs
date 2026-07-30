@@ -98,6 +98,21 @@ impl ActionExecutor<'_> {
             .cloned();
         if let Some(src_dialog) = src_dialog {
             if let Some(pending) = find_pending_request(&src_dialog, cseq_num).cloned() {
+                // §18.2.2: a relayed response goes to the originator's top Via
+                // sent-by, and the snapshot holds that Via verbatim. A Via no
+                // reader accepts names no address — drop the relay and say so
+                // (the originator retransmits, then times out its own request).
+                // Answering it toward a fabricated destination would post the
+                // caller's response to whatever that address happens to be; the
+                // loopback this used to fall back to swallowed it silently (055).
+                let Some(dest) = pending.source_vias.first().and_then(|v| via_sent_by(v)) else {
+                    eprintln!(
+                        "WARN: call {}: leg {source_leg_id}: relayed {status} dropped — the \
+                         originator's top Via does not read, so it names no destination",
+                        call.call_ref
+                    );
+                    return;
+                };
                 let contact = relay::leg_contact(self.config, &call.call_ref, target_leg, call.emergency == Some(true));
                 let mut transparent_headers =
                     filter_passthrough(relay::relay_response_passthrough_headers(resp));
@@ -147,11 +162,6 @@ impl ActionExecutor<'_> {
                 if status >= 200 {
                     *call = remove_pending_request(call.clone(), &source_leg_id, &s_id, cseq_num);
                 }
-                let dest = pending
-                    .source_vias
-                    .first()
-                    .and_then(|v| via_sent_by(v))
-                    .unwrap_or_else(|| ("127.0.0.1".to_string(), 5060));
                 // RFC 3261 §13.3.1.4 (in-dialog): a **2xx to a re-INVITE the
                 // originator (a-leg) issued** was relayed via the a-leg server
                 // txn, which goes `Completed` on this final and will NOT

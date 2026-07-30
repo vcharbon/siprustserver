@@ -727,7 +727,8 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         None,
         &[],
         None,
-    );
+    )
+    .expect("no identity rewrites, so nothing to refuse");
     // Sanity: the topology is via-LB — the INVITE itself went to the proxy.
     assert_eq!(
         invite_effect.destination,

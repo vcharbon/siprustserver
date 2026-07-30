@@ -330,7 +330,23 @@ pub(crate) fn reject_call(
     now_ms: i64,
 ) -> HandlerResult {
     let reason = reason.unwrap_or_else(|| default_reason(status));
-    let extra_headers = build_reject_headers(update_headers, contacts);
+    // A redirect whose target does not read cannot be authored: the caller dials
+    // what a 3xx Contact names, so an invented one sends it at an address the
+    // decision never stated (055). Answer the plain server error instead — the
+    // re-entry carries no contacts, so it always terminates.
+    let extra_headers = match build_reject_headers(update_headers, contacts) {
+        Ok(headers) => headers,
+        Err(err) => {
+            eprintln!(
+                "WARN: call {}: redirect refused — {}",
+                call.call_ref,
+                err.detail()
+            );
+            return reject_call(
+                call, a_invite, 500, Some(err.to_string()), update_headers, &[], id_gen, now_ms,
+            );
+        }
+    };
     // A non-100 final response needs a To-tag (the B2BUA's a-facing tag).
     let effect = relay::response_to_a_leg(
         a_invite,
@@ -397,10 +413,13 @@ fn default_reason(status: u16) -> String {
 /// redirect target. Removals and stack-owned keys are dropped — the response
 /// generator owns the structural set (ADR-0017 X2), including the Contact a
 /// redirect authors from its typed target list.
+/// Errs when a redirect target does not read — the whole redirect is refused,
+/// never partially authored (dropping the unreadable entry would send the caller
+/// at whichever targets happened to parse).
 fn build_reject_headers(
     update_headers: Option<&SipHeaderUpdates>,
     contacts: &[RedirectContact],
-) -> Vec<SipHeader> {
+) -> Result<Vec<SipHeader>, relay::UnreadableAddress> {
     let mut out: Vec<SipHeader> = Vec::new();
     if let Some(map) = update_headers {
         for (name, val) in map {
@@ -411,9 +430,9 @@ fn build_reject_headers(
         }
     }
     for c in contacts {
-        out.push(relay::redirect_contact(&c.uri, c.q));
+        out.push(relay::redirect_contact(&c.uri, c.q)?);
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
