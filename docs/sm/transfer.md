@@ -31,10 +31,11 @@ stateDiagram-v2
     CRinging --> CRinging : timer ReferOverallSafety ⇒ cancel subscription-expiry + both re-INVITE watchdogs · terminate (overall-safety watchdog rollback)
     CRinging --> [*] : INVITE (B) [leg Trying/Early] [guard] ⇒ NOTIFY terminated (C failed) → referrer · BYE → C (terminate failed leg) · cancel subscription-expiry + overall + C no-answer
     CRinging --> [*] : timer NoAnswer [guard] ⇒ NOTIFY terminated,timeout → referrer · BYE → C (no answer) · cancel subscription-expiry + overall
-    ReferAuthorizing --> CRinging : refer-http-result/allow ⇒ INVITE → C (transfer target)
+    ReferAuthorizing --> CRinging : refer-http-result/allow ⇒ INVITE → C (transfer target) · NOTIFY terminated → referrer (unreadable target) · cancel subscription-expiry · cancel overall-safety
     ReferAuthorizing --> ReferAuthorizing : REFER (B) ⇒ 491 → B (second REFER pending)
     ReferAuthorizing --> ReferAuthorizing : timer ReferOverallSafety ⇒ cancel subscription-expiry + both re-INVITE watchdogs · terminate (overall-safety watchdog rollback)
     ReferAuthorizing --> [*] : refer-http-result [guard] ⇒ NOTIFY terminated → referrer · cancel subscription-expiry · cancel overall-safety
+    ReferAuthorizing --> [*] : refer-http-result/allow ⇒ INVITE → C (transfer target) · NOTIFY terminated → referrer (unreadable target) · cancel subscription-expiry · cancel overall-safety
     ReferAuthorizing --> [*] : timer ReferSubscriptionExpiry ⇒ NOTIFY terminated,timeout → referrer · cancel overall-safety
     [*] --> ReferAuthorizing
 ```

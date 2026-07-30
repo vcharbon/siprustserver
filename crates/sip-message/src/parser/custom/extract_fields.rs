@@ -52,13 +52,13 @@ fn is_valid_port(p: u64) -> bool {
 /// rejects is kept whole (the parser's own gates decide admissibility), so no
 /// reader ever loses what the peer sent.
 fn to_name_addr(p: super::structured_headers::ParsedNameAddr) -> NameAddr {
-    NameAddr::from_parts(p.display_name, Uri::parse_or_opaque(&p.uri), p.params)
+    NameAddr::from_parts(p.display_name, Uri::parse_or_verbatim(&p.uri), p.params)
 }
 
 fn to_contact(p: super::structured_headers::ParsedContact) -> header::Contact {
     header::Contact::new(NameAddr::from_parts(
         p.display_name,
-        Uri::parse_or_opaque(&p.uri),
+        Uri::parse_or_verbatim(&p.uri),
         p.params,
     ))
 }
@@ -615,7 +615,7 @@ pub fn extract_request_fields(
             return Err(SipParseError::new(format!("Request-URI port out of range: {p}")));
         }
     }
-    Ok(RequestEager { common, request_uri: Uri::parse_or_opaque(request_uri) })
+    Ok(RequestEager { common, request_uri: Uri::parse_or_verbatim(request_uri) })
 }
 
 // ---------------------------------------------------------------------------

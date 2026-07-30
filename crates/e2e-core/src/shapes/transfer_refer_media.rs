@@ -105,7 +105,7 @@ impl CallflowShape for TransferReferMedia {
         // ── bob1 REFERs the call to bob2 → 202 Accepted ───────────────────
         let mut bob1_dialog = uas.dialog();
         let refer_to =
-            ReferTo::from_uri(Uri::parse_or_opaque(&SipStr::owned(&bob2_target.uri))).to_wire();
+            ReferTo::from_uri(Uri::parse_or_verbatim(&SipStr::owned(&bob2_target.uri))).to_wire();
         let x_api_refer = ApiCall::refer(
             "refer-allow-c",
             bob2_target.addr.ip().to_string(),

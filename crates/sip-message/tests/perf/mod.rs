@@ -121,7 +121,7 @@ pub fn request(parser: &CustomParser, raw: &[u8]) -> SipRequest {
 /// route → render.
 pub fn hop_minimal(req: &SipRequest) -> Bytes {
     req.thaw()
-        .with_uri(Uri::parse_or_opaque(&SipStr::from_static("sip:bob@192.0.2.99:5060")))
+        .with_uri(Uri::parse_or_verbatim(&SipStr::from_static("sip:bob@192.0.2.99:5060")))
         .push_front(RecordRouteEntry::from_uri(Uri::sip(PROXY_HOST).with_flag("lr")))
         .freeze_bytes()
         .expect("a thawed draft is complete")

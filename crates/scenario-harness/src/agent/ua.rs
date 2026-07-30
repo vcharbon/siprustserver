@@ -41,7 +41,7 @@ pub(super) fn media_type(text: &str) -> header::MediaType {
 /// an address no reader accepts is carried whole so the peer sees what the test
 /// wrote.
 pub(super) fn uri_of(text: &str) -> Uri {
-    Uri::parse_or_opaque(&SipStr::owned(text))
+    Uri::parse_or_verbatim(&SipStr::owned(text))
 }
 
 /// The address a scenario names, as a name-addr: a bare URI, a bracketed one

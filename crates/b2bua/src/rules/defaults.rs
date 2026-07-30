@@ -72,12 +72,14 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
         .and_then(|d| d.get("host"))
         .and_then(|v| v.as_str())?
         .to_string();
-    let port = payload
-        .get("destination")
-        .and_then(|d| d.get("port"))
-        .and_then(|v| v.as_u64())
-        .map(|p| p as u16)
-        .unwrap_or(5060);
+    // Absent ⇒ RFC 3261 §19.1.2's 5060; stated-but-no-port ⇒ no fold, so the
+    // reroute never dials 5060 on a host the decision did not name (055). The
+    // payload is this stack's own round-trip of a typed `Option<u16>`
+    // (`callouts::route_payload`), so the refusal is unreachable by
+    // construction — it is the reader's contract, not a live branch.
+    let port = crate::decision::read_stated_port(
+        payload.get("destination").and_then(|d| d.get("port")),
+    )?;
     Some(RouteFold {
         destination: (host, port),
         new_ruri: payload.get("new_ruri").and_then(|v| v.as_str()).map(str::to_string),

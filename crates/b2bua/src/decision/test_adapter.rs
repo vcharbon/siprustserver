@@ -243,7 +243,7 @@ fn parse_contacts(v: Option<&serde_json::Value>) -> Vec<RedirectContact> {
 fn route_from_obj(obj: &serde_json::Value) -> Option<RouteDecision> {
     let dest = obj.get("destination")?;
     let host = dest.get("host")?.as_str()?.to_string();
-    let port = dest.get("port").and_then(|p| p.as_u64()).map(|p| p as u16).unwrap_or(5060);
+    let port = super::read_stated_port(dest.get("port"))?;
     let mut r = route_to(&host, port);
     r.new_ruri = obj.get("new_ruri").and_then(|v| v.as_str()).map(str::to_string);
     r.new_from = obj.get("new_from").and_then(|v| v.as_str()).map(str::to_string);
@@ -1089,5 +1089,40 @@ mod tests {
             NewCallResponse::Reject(rj) => assert_eq!(rj.reject_code, 404),
             _ => panic!("expected 404"),
         }
+    }
+
+    // upstreamneed-055: an absent port is RFC 3261 §19.1.2's default; a port that
+    // is STATED and does not read is a refusal. Collapsing the second onto 5060
+    // dials the default port of a host the plan never named — the same
+    // fabricated-default class as an opaque routing URI.
+    #[test]
+    fn only_an_absent_port_defaults_to_5060() {
+        use serde_json::json;
+        assert_eq!(super::super::read_stated_port(None), Some(5060), "absent ⇒ the RFC default");
+        assert_eq!(super::super::read_stated_port(Some(&json!(null))), Some(5060), "null ⇒ the RFC default");
+        assert_eq!(super::super::read_stated_port(Some(&json!(5070))), Some(5070));
+        assert_eq!(super::super::read_stated_port(Some(&json!(65535))), Some(65535));
+        for stated in [json!(65536), json!(0), json!(-1), json!("5070"), json!({})] {
+            assert_eq!(
+                super::super::read_stated_port(Some(&stated)),
+                None,
+                "a stated but unreadable port ({stated}) must refuse, not become 5060"
+            );
+        }
+    }
+
+    // The refusal reaches the decision: a plan route whose port does not read
+    // yields no route at all, rather than a route to :5060 on the same host.
+    #[test]
+    fn a_route_with_an_unreadable_port_is_not_built() {
+        use serde_json::json;
+        let obj = json!({"destination": {"host": "10.0.0.9", "port": 88161}});
+        assert!(route_from_obj(&obj).is_none(), "an out-of-range port must refuse the route");
+        let ok = json!({"destination": {"host": "10.0.0.9", "port": 5070}});
+        let route = route_from_obj(&ok).expect("a readable port routes");
+        assert_eq!((route.destination.host.as_str(), route.destination.port()), ("10.0.0.9", 5070));
+        let portless = json!({"destination": {"host": "10.0.0.9"}});
+        let route = route_from_obj(&portless).expect("a portless destination routes");
+        assert_eq!(route.destination.port(), 5060, "absent port ⇒ RFC default");
     }
 }

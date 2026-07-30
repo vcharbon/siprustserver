@@ -29,8 +29,14 @@ pub(super) fn response(draft: ResponseDraft) -> SipResponse {
 
 /// The Request-URI a caller named as text. A value that does not read as a URI
 /// is carried whole, so the freeze reports it rather than this line.
+///
+/// Reached only for a dialog's stored `remote_target` — text this stack wrote
+/// from an address it already read, re-read here because the dialog layer keeps
+/// it as a string (ADR-0008). A caller that has the address as a value passes it
+/// through `opts.request_uri`, which is typed. Nothing routes a *decision* here:
+/// there an unreadable address is an `Err` (upstreamneed-055).
 pub(super) fn uri(text: &str) -> Uri {
-    Uri::parse_or_opaque(&SipStr::owned(text))
+    Uri::parse_or_verbatim(&SipStr::owned(text))
 }
 
 /// A `[display-name] <uri>[;tag=…]` header value assembled from text: the URI

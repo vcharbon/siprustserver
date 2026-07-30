@@ -93,11 +93,25 @@ impl ActionExecutor<'_> {
     ) {
         let a_tag = self.ensure_a_dialog(call);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let extra = build_a_leg_response_headers(header_updates, contacts);
+        // A redirect target that does not read is refused, not invented: the
+        // caller dials what a 3xx Contact names (055). The caller still gets a
+        // final — the plain server error, with no Contact list.
+        let (status, reason, extra) =
+            match build_a_leg_response_headers(header_updates, contacts) {
+                Ok(headers) => (status, reason.to_string(), headers),
+                Err(err) => {
+                    eprintln!(
+                        "WARN: call {}: redirect refused — {}",
+                        call.call_ref,
+                        err.detail()
+                    );
+                    (500, err.to_string(), Vec::new())
+                }
+            };
         fx.outbound.push(relay::response_to_a_leg(
             &a_invite,
             status,
-            reason,
+            &reason,
             Some(a_tag),
             None,
             vec![],
@@ -286,7 +300,7 @@ impl ActionExecutor<'_> {
             content_type.and_then(relay::media_type).or_else(|| (!body.is_empty()).then(relay::sdp));
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
-        let mut extra_headers = build_a_leg_response_headers(header_updates, &[]);
+        let mut extra_headers = header_update_lines(header_updates);
         // An a-facing INVITE 2xx carries the B2BUA's own Allow/Supported (RFC
         // 3261 §13.2.1/§20.37), same as the confirm-dialog relay. A
         // `header_updates` entry naming either owns it: a set value is kept
@@ -326,19 +340,32 @@ impl ActionExecutor<'_> {
 /// Removals and structural keys drop — the response generator owns the
 /// stack-owned set (ADR-0017 X2), including the Contact a redirect authors from
 /// its typed target list.
+/// The non-structural `header_updates` *sets*. Removals and structural keys
+/// drop — the response generator owns the stack-owned set (ADR-0017 X2).
+fn header_update_lines(header_updates: &[(String, Option<String>)]) -> Vec<SipHeader> {
+    header_updates
+        .iter()
+        .filter_map(|(name, val)| {
+            let named = HeaderName::from(name.as_str());
+            match (val, named.class()) {
+                (Some(v), HeaderClass::EndToEnd) => {
+                    Some(SipHeader { name: SipStr::owned(name), value: SipStr::owned(v) })
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Errs when a redirect target does not read — the whole redirect is refused,
+/// never partially authored.
 fn build_a_leg_response_headers(
     header_updates: &[(String, Option<String>)],
     contacts: &[(String, Option<f32>)],
-) -> Vec<SipHeader> {
-    let mut out: Vec<SipHeader> = Vec::new();
-    for (name, val) in header_updates {
-        let named = HeaderName::from(name.as_str());
-        if let (Some(v), HeaderClass::EndToEnd) = (val, named.class()) {
-            out.push(SipHeader { name: SipStr::owned(name), value: SipStr::owned(v) });
-        }
-    }
+) -> Result<Vec<SipHeader>, relay::UnreadableAddress> {
+    let mut out = header_update_lines(header_updates);
     for (uri, q) in contacts {
-        out.push(relay::redirect_contact(uri, *q));
+        out.push(relay::redirect_contact(uri, *q)?);
     }
-    out
+    Ok(out)
 }

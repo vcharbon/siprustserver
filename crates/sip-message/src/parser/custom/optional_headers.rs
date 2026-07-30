@@ -22,7 +22,7 @@ use crate::sip_str::SipStr;
 use crate::types::{OptionalHeaders, SipHeader};
 
 fn to_name_addr(p: ParsedNameAddr) -> NameAddr {
-    NameAddr::from_parts(p.display_name, Uri::parse_or_opaque(&p.uri), p.params)
+    NameAddr::from_parts(p.display_name, Uri::parse_or_verbatim(&p.uri), p.params)
 }
 
 // ---------------------------------------------------------------------------
