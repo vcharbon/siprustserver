@@ -144,7 +144,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         if let CallEvent::Sip { message, src } = &event {
             if let SipMessage::Request(req) = message.as_ref() {
                 let resp = crate::overload::build_reject_new_call_503(
-                    &ctx.id_gen,
+                    ctx.id_gen.new_tag(),
                     req,
                     ctx.config.retry_after_base_sec,
                 );

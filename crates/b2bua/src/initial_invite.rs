@@ -212,10 +212,11 @@ pub fn build_initial_call(
         topology,
         // A non-emergency INVITE writes *absence* (`None`), never `Some(false)`
         // — production only ever stamps `Some(true)` or leaves the field unset
-        // (see `call` codec_roundtrip emergency contract). Downstream consumers
-        // — the `;emerg=1`/`;em=1` URI/Via markers in `stack_identity`, and the
-        // overload tiers that never reject an emergency call — depend on this
-        // being derived from the INVITE here, not hard-coded.
+        // (see `call` codec_roundtrip emergency contract). The field carries the
+        // call's emergency state to the `;emerg=1`/`;em=1` URI/Via markers in
+        // `stack_identity`, so it is derived from the INVITE here, not
+        // hard-coded. The overload tiers classify the wire request directly and
+        // never read this field.
         emergency: is_emergency_request(invite).then_some(true),
         features: None,
         policy_update_headers: None,
@@ -439,9 +440,9 @@ fn build_reject_headers(
 mod emergency_on_invite_tests {
     //! Pins that [`build_initial_call`] stamps `Call.emergency` from the
     //! inbound INVITE: `Some(true)` for an emergency Resource-Priority,
-    //! *absence* (`None`) otherwise — never `Some(false)`. Every downstream
-    //! emergency consumer (the `;emerg=1`/`;em=1` markers, the overload tiers'
-    //! never-reject-an-emergency rule) depends on this seam being live.
+    //! *absence* (`None`) otherwise — never `Some(false)`. The field feeds the
+    //! `;emerg=1`/`;em=1` stack-identity markers stamped on the call's outbound
+    //! hops.
     //!
     //! These assert the *wiring* (helper → field + the None coercion), not the
     //! emergency-classification contract itself — that lives in

@@ -20,7 +20,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use b2bua::tier1_brake::{build_tier1_brake_hook, RollFn, Tier1BrakeConfig, Tier1BrakeCounters};
+use b2bua::tier1_brake::{build_tier1_brake_hook, Tier1BrakeConfig, Tier1BrakeCounters};
 use b2bua::UdpTransportMetrics;
 use sip_txn::IdGen;
 use sip_net::types::BindUdpOpts;
@@ -47,11 +47,6 @@ fn brake_config() -> Tier1BrakeConfig {
         retry_after_base_sec: 5,
         retry_after_jitter_sec: 0,
     }
-}
-
-/// A roll that panics — proves jitter==0 never draws it.
-fn never_roll() -> RollFn {
-    Arc::new(|| panic!("jitter==0 must not draw the Retry-After roll"))
 }
 
 /// A new (To-tag-less) INVITE. With `emergency`, carries the
@@ -86,8 +81,7 @@ async fn setup() -> (
 ) {
     let net = SimulatedSignalingNetwork::new(TRANSIT_MS);
     let brake = Tier1BrakeCounters::new();
-    let hook =
-        build_tier1_brake_hook(brake_config(), brake.clone(), Arc::new(IdGen::seeded(3)), never_roll());
+    let hook = build_tier1_brake_hook(brake_config(), brake.clone(), &IdGen::seeded(3));
 
     let b2bua: Arc<dyn UdpEndpoint> = net
         .bind_udp(BindUdpOpts::new(b2bua_addr(), QUEUE_MAX).with_pre_ingress(hook))

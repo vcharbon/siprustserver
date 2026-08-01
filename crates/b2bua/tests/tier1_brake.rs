@@ -19,10 +19,9 @@
 //! wall-clock cost — default lane.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
-use b2bua::tier1_brake::{build_tier1_brake_hook, RollFn, Tier1BrakeConfig, Tier1BrakeCounters};
+use b2bua::tier1_brake::{build_tier1_brake_hook, Tier1BrakeConfig, Tier1BrakeCounters};
 use sip_net::types::BindUdpOpts;
 use sip_net::{SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
 use sip_txn::IdGen;
@@ -41,8 +40,7 @@ fn flooder_addr() -> SocketAddr {
     FLOODER_ADDR.parse().unwrap()
 }
 
-/// Threshold 2, jitter 0 — so the reject's `Retry-After` is exactly the base and
-/// the roll is never consulted.
+/// Threshold 2, jitter 0 — so the reject's `Retry-After` is exactly the base.
 fn brake_config() -> Tier1BrakeConfig {
     Tier1BrakeConfig {
         queue_max: QUEUE_MAX,
@@ -50,11 +48,6 @@ fn brake_config() -> Tier1BrakeConfig {
         retry_after_base_sec: 5,
         retry_after_jitter_sec: 0,
     }
-}
-
-/// A roll that panics — proves jitter==0 never draws it.
-fn never_roll() -> RollFn {
-    Arc::new(|| panic!("jitter==0 must not draw the Retry-After roll"))
 }
 
 /// An INVITE. `to_tag` makes it in-dialog (a re-INVITE); `emergency` adds the
@@ -116,12 +109,7 @@ async fn setup() -> (
 ) {
     let net = SimulatedSignalingNetwork::new(TRANSIT_MS);
     let counters = Tier1BrakeCounters::new();
-    let hook = build_tier1_brake_hook(
-        brake_config(),
-        counters.clone(),
-        Arc::new(IdGen::seeded(11)),
-        never_roll(),
-    );
+    let hook = build_tier1_brake_hook(brake_config(), counters.clone(), &IdGen::seeded(11));
 
     let b2bua = net
         .bind_udp(BindUdpOpts::new(b2bua_addr(), QUEUE_MAX).with_pre_ingress(hook))
@@ -243,7 +231,7 @@ async fn emergency_invites_bypass_the_brake_even_above_the_threshold() {
 /// calls only, so an established call is never disturbed by ingress overload.
 #[tokio::test(start_paused = true)]
 async fn in_dialog_reinvites_are_never_braked() {
-    let (net, _b2bua, flooder, counters) = setup().await;
+    let (net, b2bua, flooder, counters) = setup().await;
 
     // Saturate with new INVITEs (rejected past the threshold), then send a
     // re-INVITE for an established dialog at the same saturated depth.
@@ -258,6 +246,9 @@ async fn in_dialog_reinvites_are_never_braked() {
 
     // Only the new INVITEs above the threshold were refused (indexes 2..).
     assert_eq!(counters.tier1_reject_sent(), 1);
+    // The re-INVITE was ADMITTED, not merely un-rejected: the two
+    // below-threshold INVITEs plus the re-INVITE are on the ingress queue.
+    assert_eq!(b2bua.queue_depth(), 3, "the re-INVITE must be enqueued for the pipeline");
     let replies = drain(flooder.as_ref());
     assert_eq!(replies.len(), 1, "the re-INVITE draws no reject");
     assert_eq!(status_line(&replies[0]), b"SIP/2.0 503 Service Unavailable");
@@ -267,7 +258,7 @@ async fn in_dialog_reinvites_are_never_braked() {
 /// depth.
 #[tokio::test(start_paused = true)]
 async fn non_invite_requests_are_not_rejected_by_the_brake() {
-    let (net, _b2bua, flooder, counters) = setup().await;
+    let (net, b2bua, flooder, counters) = setup().await;
 
     // Saturate with INVITEs so the queue is at/above threshold, then fire an
     // OPTIONS — accepted, since the brake refuses new calls only.
@@ -279,6 +270,9 @@ async fn non_invite_requests_are_not_rejected_by_the_brake() {
 
     // Brake refused 3 of the 5 INVITEs (depth >= 2 for indexes 2..4).
     assert_eq!(counters.tier1_reject_sent(), 3);
+    // The OPTIONS was ADMITTED, not merely un-rejected: it sits on the ingress
+    // queue behind the two below-threshold INVITEs.
+    assert_eq!(b2bua.queue_depth(), 3, "the OPTIONS must be enqueued for the pipeline");
 
     let replies = drain(flooder.as_ref());
     assert_eq!(replies.len(), 3, "exactly the 3 INVITE rejects; the OPTIONS draws none");

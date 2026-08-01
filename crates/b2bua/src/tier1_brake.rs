@@ -7,10 +7,13 @@
 //! the packet is accepted untouched.
 //!
 //! At or above `floor(queue_max * tier1_threshold_pct / 100)` the datagram is
-//! parsed with the pipeline's own parser and classified:
+//! classified:
 //!
-//!   - unparseable, a response, or a non-INVITE request → accept (the normal
-//!     pipeline owns it);
+//!   - anything whose first bytes are not an `INVITE ` request line — a
+//!     response, any other method, garbage — → accept unparsed (the normal
+//!     pipeline owns it). The hook runs inline on the socket's drain loop, so
+//!     the classes the brake always admits must never cost a parse;
+//!   - an `INVITE ` the pipeline's own parser cannot read → accept;
 //!   - INVITE carrying a `To`-tag (in-dialog / re-INVITE) → accept — the brake
 //!     never touches an existing call;
 //!   - initial INVITE that [`is_emergency_request`] marks emergency → accept,
@@ -19,6 +22,11 @@
 //!     [`build_reject_new_call_503`], counted on
 //!     [`Tier1BrakeCounters::drops_tier1_brake`] /
 //!     [`tier1_reject_sent`](Tier1BrakeCounters::tier1_reject_sent).
+//!
+//! The reject carries no transaction state, so this tier is a stateless UAS:
+//! its `To`-tag and `Retry-After` jitter are derived from the request through
+//! [`StatelessRejectTagger`], and a retransmitted INVITE is answered with the
+//! identical 503 (RFC 3261 §8.2.7).
 //!
 //! Tier-3 ([`crate::overload`]) sheds the same class of traffic with the same
 //! response once the message has reached the router; this tier exists to shed
@@ -32,11 +40,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use sip_message::emergency::is_emergency_request;
-use sip_message::{serialize, CustomParser, Method, SipMessage, SipParser};
+use sip_message::preparse::is_invite_request_buffer;
+use sip_message::{serialize, CustomParser, SipMessage, SipParser};
 use sip_net::types::{PreIngressAction, PreIngressHook};
 use sip_txn::IdGen;
 
-use crate::overload::{build_reject_new_call_503, jittered_retry_after};
+use crate::overload::{build_reject_new_call_503, jittered_retry_after, StatelessRejectTagger};
 
 /// Tunables for the Tier-1 brake. Cheap to copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,8 +59,9 @@ pub struct Tier1BrakeConfig {
     pub tier1_threshold_pct: u32,
     /// `Retry-After` base seconds stamped on the reject.
     pub retry_after_base_sec: u32,
-    /// `Retry-After` jitter span seconds; `0` disables jitter and the injected
-    /// roll is never consulted.
+    /// `Retry-After` jitter span seconds; `0` pins every reject to the base.
+    /// Otherwise the offset is request-derived, so it spreads a shed fleet
+    /// without varying between retransmissions of one call.
     pub retry_after_jitter_sec: u32,
 }
 
@@ -118,68 +128,29 @@ impl Tier1BrakeCounters {
     }
 }
 
-/// The injected `Retry-After` jitter source — yields a fresh value in
-/// `[0, u64::MAX]` per shed. `Arc<dyn Fn>` so it clones into the hook closure;
-/// `Send + Sync` because the hook runs on the recv task(s). Production:
-/// [`entropy_roll`]. Tests: a constant.
-pub type RollFn = Arc<dyn Fn() -> u64 + Send + Sync>;
-
-/// A dependency-free, process-seeded `Retry-After` jitter source.
-///
-/// Seeds an xorshift64* once per process from a `RandomState` hash (OS-seeded)
-/// folded with the wall clock + PID, then steps it per call behind an
-/// [`AtomicU64`] CAS loop so concurrent recv tasks each draw a distinct value
-/// — the same idiom as [`IdGen::from_entropy`]. Overload-protection
-/// nondeterminism is out of scope for the seeded-`Random` plumbing, so a
-/// per-process xorshift is the right tool. When `retry_after_jitter_sec == 0`
-/// the brake never calls this.
-pub fn entropy_roll() -> RollFn {
-    use std::hash::{BuildHasher, Hasher};
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x1234_5678_9ABC_DEF0);
-    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-    h.write_u64(nanos);
-    h.write_u64(std::process::id() as u64);
-    let seed = h.finish() ^ 0xD1B5_4A32_D192_ED03;
-    // Avoid the xorshift fixed point at 0.
-    let state = Arc::new(AtomicU64::new(if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed }));
-    Arc::new(move || {
-        loop {
-            let cur = state.load(Ordering::Relaxed);
-            let mut x = cur;
-            x ^= x >> 12;
-            x ^= x << 25;
-            x ^= x >> 27;
-            if state
-                .compare_exchange_weak(cur, x, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                return x.wrapping_mul(0x2545_F491_4F6C_DD1D);
-            }
-        }
-    })
-}
-
 /// Build the Tier-1 brake [`PreIngressHook`] for the worker's UDP bind.
 ///
 /// The returned closure runs at arrival time for every datagram, with the live
 /// inbound-queue `depth`, and applies the classification in the module doc.
-/// `id_gen` mints the reject's To-tag; `roll` feeds the `Retry-After` jitter
-/// (pass [`entropy_roll`] in production).
+/// `id_gen` seeds the [`StatelessRejectTagger`] the rejects are identified by;
+/// it is consulted here, not per datagram.
 pub fn build_tier1_brake_hook(
     config: Tier1BrakeConfig,
     counters: Tier1BrakeCounters,
-    id_gen: Arc<IdGen>,
-    roll: RollFn,
+    id_gen: &IdGen,
 ) -> PreIngressHook {
     let threshold = config.threshold();
     let base = config.retry_after_base_sec;
     let jitter = config.retry_after_jitter_sec;
     let parser = CustomParser::new();
+    let tagger = StatelessRejectTagger::from_id_gen(id_gen);
     Arc::new(move |raw: &[u8], _src, depth: usize| {
         if depth < threshold {
+            return PreIngressAction::Accept;
+        }
+        // Seven bytes decide every class the brake always admits — responses,
+        // other methods, garbage — before any parse touches the drain loop.
+        if !is_invite_request_buffer(raw) {
             return PreIngressAction::Accept;
         }
         // Anything the pipeline itself could not read is the pipeline's problem,
@@ -187,17 +158,18 @@ pub fn build_tier1_brake_hook(
         let Ok(SipMessage::Request(req)) = parser.parse(raw) else {
             return PreIngressAction::Accept;
         };
-        // The brake sheds NEW calls only: a non-INVITE method, or an INVITE that
-        // already names a dialog (To-tag → in-dialog re-INVITE), is admitted.
-        if *req.method() != Method::Invite || req.to().tag().is_some() {
+        // The brake sheds NEW calls only: an INVITE that already names a dialog
+        // (To-tag → in-dialog re-INVITE) is admitted.
+        if req.to().tag().is_some() {
             return PreIngressAction::Accept;
         }
         if is_emergency_request(&req) {
             counters.record_emergency_bypass();
             return PreIngressAction::Accept;
         }
-        let retry_after = jittered_retry_after(base, jitter, || roll());
-        let resp = build_reject_new_call_503(&id_gen, &req, retry_after);
+        let (to_tag, roll) = tagger.for_request(&req);
+        let retry_after = jittered_retry_after(base, jitter, || roll);
+        let resp = build_reject_new_call_503(to_tag, &req, retry_after);
         counters.record_shed();
         PreIngressAction::Reply(serialize(&SipMessage::Response(resp)))
     })
@@ -292,19 +264,23 @@ Content-Length: 0\r\n\r\n"
         .into_bytes()
     }
 
-    /// Brake hook under test: threshold 2, jitter 0 (so the roll is never
-    /// consulted — a panicking roll proves it).
-    fn brake() -> (PreIngressHook, Tier1BrakeCounters) {
+    /// Brake hook under test: threshold 2, jitter `jitter_sec`.
+    fn brake_with_jitter(jitter_sec: u32) -> (PreIngressHook, Tier1BrakeCounters) {
         let counters = Tier1BrakeCounters::new();
         let cfg = Tier1BrakeConfig {
             queue_max: 5,
             tier1_threshold_pct: 40,
             retry_after_base_sec: 5,
-            retry_after_jitter_sec: 0,
+            retry_after_jitter_sec: jitter_sec,
         };
-        let roll: RollFn = Arc::new(|| panic!("jitter==0 must not draw the roll"));
-        let hook = build_tier1_brake_hook(cfg, counters.clone(), Arc::new(IdGen::seeded(1)), roll);
+        let hook = build_tier1_brake_hook(cfg, counters.clone(), &IdGen::seeded(1));
         (hook, counters)
+    }
+
+    /// Brake hook under test: threshold 2, jitter 0 (so `Retry-After` is
+    /// exactly the base).
+    fn brake() -> (PreIngressHook, Tier1BrakeCounters) {
+        brake_with_jitter(0)
     }
 
     fn src() -> std::net::SocketAddr {
@@ -368,6 +344,32 @@ Content-Length: 0\r\n\r\n"
         let text = String::from_utf8(resp).expect("utf-8 reject");
         let to_line = text.lines().find(|l| l.starts_with("To:")).expect("a To line");
         assert!(to_line.contains(";tag="), "Tier-1 reject must tag To: {to_line}");
+    }
+
+    /// The brake answers without transaction state, so RFC 3261 §8.2.7 binds
+    /// it: a retransmitted INVITE draws the identical 503 — same To-tag, same
+    /// jittered `Retry-After` — never a freshly rolled one.
+    #[test]
+    fn a_retransmitted_invite_draws_the_identical_reject() {
+        let (hook, counters) = brake_with_jitter(30);
+        let invite = new_invite(4);
+        let PreIngressAction::Reply(first) = hook(&invite, src(), 2) else {
+            panic!("a new non-emergency INVITE above threshold must be rejected");
+        };
+        let PreIngressAction::Reply(again) = hook(&invite, src(), 2) else {
+            panic!("the retransmission must be rejected too");
+        };
+        assert_eq!(first, again, "a retransmission must draw a byte-identical 503");
+        assert_eq!(counters.tier1_reject_sent(), 2);
+        // Jitter is applied, and stays inside [base, base + jitter].
+        let text = String::from_utf8(first).expect("utf-8 reject");
+        let value: u32 = text
+            .lines()
+            .find_map(|l| l.strip_prefix("Retry-After: "))
+            .expect("a Retry-After line")
+            .parse()
+            .expect("numeric Retry-After");
+        assert!((5..=35).contains(&value), "Retry-After {value} outside [5, 35]");
     }
 
     #[test]

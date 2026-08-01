@@ -346,9 +346,9 @@ pub fn build_b_leg(
     call_ref: &str,
     leg_id: &str,
     // The call's emergency state (`call.emergency == Some(true)`); stamps the
-    // `;em=1` / `;emerg=1` markers on the originated b-leg INVITE's Via + Contact
-    // (port of `buildBLegInvite`, helpers.ts L214/L266-280). Every subsequent
-    // in-dialog packet then carries it (the Tier-1 overload-brake signal).
+    // `;em=1` / `;emerg=1` markers on the originated b-leg INVITE's Via +
+    // Contact, so every subsequent in-dialog packet of the call stays
+    // identifiable as emergency traffic on the wire.
     is_emergency: bool,
     a_leg_invite: &SipRequest,
     dest: (String, u16),

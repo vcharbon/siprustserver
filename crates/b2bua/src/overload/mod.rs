@@ -9,8 +9,10 @@
 //! backstop. This module also publishes the `X-Overload` load signal the front
 //! proxy's ELU-band AIMD consumes.
 //!
-//! - `reject` — [`build_reject_new_call_503`] + [`jittered_retry_after`]: the
-//!   single reject-new-call primitive both tiers send.
+//! - `reject` — [`build_reject_new_call_503`] + [`jittered_retry_after`] +
+//!   [`StatelessRejectTagger`]: the single reject-new-call primitive both tiers
+//!   send, and the request-derived identity the transactionless tier answers
+//!   with.
 //! - `sampler` — the [`LoadSampler`] read seam: the live tokio busy-ratio
 //!   sampler and the injectable [`simulated`] pair for paused-clock tests.
 //! - `ewma` — the smoothing primitive behind the published readings.
@@ -43,7 +45,7 @@ mod sampler;
 mod signal;
 
 pub use admission::{AdmitDecision, AdmitReason};
-pub use reject::{build_reject_new_call_503, jittered_retry_after};
+pub use reject::{build_reject_new_call_503, jittered_retry_after, StatelessRejectTagger};
 pub use sampler::{simulated, LoadSampler, SimulatedLoadControl, SimulatedLoadSampler};
 pub use signal::{OverloadMetrics, OverloadSignal};
 

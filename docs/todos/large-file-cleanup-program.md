@@ -376,6 +376,18 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
    demux still uses it. The `;em=1`/`;emerg=1` stack-identity markers keep
    being stamped as an on-the-wire emergency signal but no longer feed any
    in-tree reader.
+   `resolved:` 2026-08-01 (review follow-up) — the brake's parse is now gated
+   on `preparse::is_invite_request_buffer`, so above the threshold responses,
+   non-INVITE methods and garbage are still admitted for seven bytes on the
+   socket's drain loop. The transactionless reject became a proper stateless
+   UAS: `overload::StatelessRejectTagger` derives its `To`-tag AND its
+   `Retry-After` jitter from a keyed hash of the request's dialog identity, so
+   a retransmitted INVITE draws a byte-identical 503 (RFC 3261 §8.2.7) — the
+   per-shed `RollFn`/`entropy_roll` are deleted, and
+   `build_reject_new_call_503` now takes the tag its caller owes. The
+   admission (not just non-rejection) of the re-INVITE and the OPTIONS is
+   pinned on the ingress queue depth, and the docs claiming the overload tiers
+   read `Call.emergency` / the markers are corrected.
 
 ### 2026-07-16 — scenario-harness agent split
 
