@@ -419,6 +419,17 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
    behavior kept; comments condensed to the contract. Worth a check some day
    that the recorded-trace audit would flag a tagless in-dialog request if
    this path ever fired outside the takeover corner.
+   `resolved:` 2026-08-01 — generator behavior unchanged; the audit gap was
+   real and is closed. New peer rule `rfc3261.inDialogToTag`
+   (`sip-net/src/rfc_audit/rfc3261_peer.rs`, RFC3261-MUST-066) flags a SENT
+   request that carries no To-tag on a Call-ID this bind watched reach a
+   confirmed dialog (To-tagged 2xx to INVITE). Guarded against noise:
+   out-of-dialog requests, CANCEL, the ACK for a non-2xx (branch-correlated),
+   establishing-INVITE retransmissions and relay binds are not judged; subject
+   is `{Uac, Uas}`. Pinned both ways in the module's tests (tagless BYE / 2xx
+   ACK fire, compliant twins silent). Whole default lane stays green — no
+   existing flow trips it, so the tagless path indeed only fires in the
+   takeover corner.
 
 ### 2026-07-24 — call model/helpers split
 
