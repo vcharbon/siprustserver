@@ -202,7 +202,7 @@ Severity = operational risk if the behaviour is wrong.
 | SDP-HOLD-3 | 3264 §8.4 | `c=0.0.0.0` non-zero port | Recognize hold, not reject | med | ✅ | rfc-audit `c0PortNonZero`, media port-0 hold |
 | SDP-MLINE-COUNT-1 | 3264 §6 | Answer m-line count = offer | Preserve count, port-0 rejects | high | ✅ | rfc-audit `answerMLineCountMatchesOffer`, media |
 | SDP-MLINE-ORDER-1 | 3264 §8 | Re-offer m-line count monotonic | Don't drop slots | high | ✅ | rfc-audit `reOfferMLineCountMonotonic` |
-| SDP-NOINTERSECT-1 | 3264 §6.1 | Empty codec intersection | Reject stream; all-reject → 488 | high | 🟡 | sdp_answer `no_overlap_is_no_common_codec` (unit); add call-level 488 |
+| SDP-NOINTERSECT-1 | 3264 §6.1 | Empty codec intersection | Reject stream; all-reject → 488 | high | 🟡 | sdp_answer `no_common_codec_returns_offending_index` (unit); add call-level 488 |
 | SDP-CANTBRIDGE-1 | 3264 §6 | Unbridgeable transport (e.g. SCTP) | Reject/488, never relay dead media | high | ❌ | add `unbridgeable_media_488` |
 | SDP-PT-STABLE-1 | 3264 §8.3.2 | Re-offer rebinds dynamic PT | PT→codec map stable for session | med | ✅ | rfc-audit `payloadTypeMappingStable` |
 | SDP-ORIGIN-1 | 3264 §8 | `o=` continuity per leg | Same username/sess-id, version+1 | med | ✅ (advisory) | rfc-audit `sdpOriginContinuity`, sdp_diff |

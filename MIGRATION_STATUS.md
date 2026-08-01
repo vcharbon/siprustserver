@@ -995,8 +995,8 @@ custom headers, per-fork To-tag).
   `drop-sdp` (suppress, wire `true`) and `fake-prack` strategies: bare-180
   downgrade, 18x suppression, B2BUA-originated PRACK, per-dialog SDP cache +
   cached-SDP-at-200 injection, To-tag continuity, UPDATE skeleton-fit answer/488,
-  delayed-offer self-disable. `crates/b2bua/src/rules/relay_first_18x.rs` +
-  `sdp_answer.rs`. The `keep-sdp` strategy variant is carried in the enum but has
+  delayed-offer self-disable. `crates/b2bua/src/rules/relay_first_18x.rs`, over
+  `sip_message::sdp::build_answer_from_offer`. The `keep-sdp` strategy variant is carried in the enum but has
   no dedicated scenario (none exists in the TS corpus). `promote-pem-to-200` is
   owned by the PEM service (Slice 4) — the enum variant is wired through but the
   rule is not implemented here.

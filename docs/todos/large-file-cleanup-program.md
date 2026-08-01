@@ -445,6 +445,17 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
     `parse_rack`. Migration is NOT byte-neutral — e.g. `unwrap_angle` keeps
     `;params` on a non-angle Contact where `parse_contact` splits them off
     the URI — so it needs its own commit with the delta reasoned per site.
+    `resolved:` 2026-08-01 — dissolved by the ADR-0025 header-model port
+    (merge bce0d4b): `relay_request.rs` reads the `RAck` header type,
+    `respond.rs` reads `req.top_via()`, and `dialog_track.rs` reads the
+    structured Contact, so `top_via_dest`, `unwrap_angle` and `rewrite_rack`
+    have no remaining call sites. The one survivor is compliant: `via_sent_by`
+    in `actions/relay_response.rs` is a thin wrapper over sip-message
+    `Via::parse` — the pending-request snapshot stores its Vias as text (the
+    `call` crate has no sip-message dependency), so reading one back is a
+    parse, not a hand-rolled reader. A sweep of the whole of `rules/` for
+    header-value splitting, angle unwrapping and RAck/CSeq token splitting
+    found nothing else; it did surface the SDP duplicate logged as #12.
 
 ### 2026-07-26 — sip-proxy load_observer split
 
@@ -460,3 +471,21 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
     `apply_payload` is one line, and the real work is (a) stamping the header
     on worker 503s and (b) teaching the LB response path to sniff relayed 503s
     without violating its transaction-less design (ADR-0022 X4).
+
+### 2026-08-01 — b2bua rules wire-reader sweep
+
+12. **`rules/sdp_answer.rs` was a 322-line second copy of the RFC 3264 answer
+    builder that already lives in `sip_message::sdp`** — body extraction
+    outside sip-message, and a fork that had drifted from the original.
+    `resolved:` 2026-08-01 — deleted; the sole consumer
+    (`relay_first_18x.rs`, the fake-PRACK UPDATE handler) now calls
+    `sip_message::build_answer_from_offer` with `BuildAnswerOptions`, and the
+    b2bua unit tests are subsumed by `sip-message/tests/sdp_answer.rs` (16
+    cases against 3). The switch is byte-neutral on well-formed SDP; the four
+    deltas all widen leniency on malformed input: sip-message parses m-line
+    ports and payload types with JS `parseInt` semantics (`5004x` → 5004,
+    where the fork yielded 0), keys `a=rtpmap`/`a=fmtp` by payload type so a
+    repeated PT is last-wins rather than first-wins, splits lines on `\n`
+    with an optional trailing `\r` rather than on either character, and
+    echoes session-level `a=x-offer-id:` attributes into the answer (inert —
+    no peer in this repo emits one).
