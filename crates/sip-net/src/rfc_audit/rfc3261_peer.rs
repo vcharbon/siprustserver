@@ -19,7 +19,7 @@ use sip_message::{SipMessage, SipParser};
 
 use crate::contracts::{PeerAuditRule, SignalingNetworkEvent};
 use crate::rfc_audit::dialog_model::{
-    call_id, cseq_method, route_entries, status, to_tag, top_via_branch, value_of,
+    call_id, cseq_method, from_tag, route_entries, status, to_tag, top_via_branch, value_of,
 };
 use crate::types::UaRole;
 
@@ -118,9 +118,14 @@ impl PeerAuditRule for NoToTagOnInitialRequestRule {
 /// judgement.
 #[derive(Default)]
 struct DialogWitness {
-    /// A 2xx to INVITE carrying a To-tag was observed — the dialog is confirmed,
-    /// so both its tags exist and every later request in it must reproduce them.
-    confirmed: bool,
+    /// A To-tagged 2xx to INVITE was observed, in either direction — the INVITE
+    /// is answered, so a dialog exists.
+    answered: bool,
+    /// The peer's dialog tag as this bind RECEIVED it: the From-tag of a request
+    /// it was sent, the To-tag of a response to a request it sent. Empty until
+    /// the peer names itself — a 2xx this bind sends carries its own local tag
+    /// and says nothing about the remote one.
+    remote_tag: String,
     /// Top-`Via` branches of To-tag-less INVITE requests: the dialog-establishing
     /// transaction, whose retransmissions stay legitimately tag-less even after
     /// the 2xx lands.
@@ -143,13 +148,22 @@ impl DialogWitness {
         self.sent_establishing && self.recv_establishing
     }
 
+    /// The dialog is confirmed **and** its remote tag exists: the answered
+    /// INVITE gives the dialog, the tag the peer named gives the value every
+    /// later request must reproduce. A peer that minted no tag leaves the remote
+    /// tag null, and §12.2.1.1 then requires the To tag parameter to be omitted
+    /// — nothing to demand, so the rule stays silent.
+    fn confirmed(&self) -> bool {
+        self.answered && !self.remote_tag.is_empty()
+    }
+
     /// The violation detail for a request this bind sends, or `None` when the
     /// request is out of dialog, echoes another message's To, or carries the tag.
     fn violation(&self, m: &SipMessage) -> Option<String> {
         let SipMessage::Request(req) = m else {
             return None;
         };
-        if !self.confirmed || self.is_relay() {
+        if !self.confirmed() || self.is_relay() {
             return None;
         }
         if to_tag(m).is_some_and(|t| !t.is_empty()) {
@@ -174,6 +188,15 @@ impl DialogWitness {
 
     /// Fold one carried message into the witness.
     fn observe(&mut self, m: &SipMessage, sent: bool) {
+        if !sent {
+            let peer_tag = match m {
+                SipMessage::Request(_) => from_tag(m),
+                SipMessage::Response(_) => to_tag(m),
+            };
+            if let Some(tag) = peer_tag.filter(|t| !t.is_empty()) {
+                self.remote_tag = tag.to_string();
+            }
+        }
         match m {
             SipMessage::Request(req) => {
                 if req.method().as_str() != "INVITE" || to_tag(m).is_some_and(|t| !t.is_empty()) {
@@ -194,7 +217,7 @@ impl DialogWitness {
                     && (200..300).contains(&st)
                     && to_tag(m).is_some_and(|t| !t.is_empty())
                 {
-                    self.confirmed = true;
+                    self.answered = true;
                 }
                 if (300..700).contains(&st) {
                     if let Some(b) = top_via_branch(m) {
@@ -211,8 +234,13 @@ impl DialogWitness {
 /// identifier: a UAS receiving a tag-less in-dialog request cannot match it to
 /// the dialog and answers 481. The sender mints the header from its own dialog
 /// state, so this bind's **sent** requests are judged, on a Call-ID this bind has
-/// watched reach a *confirmed* dialog (a To-tagged 2xx to INVITE — both tags then
-/// exist, whichever side the request comes from).
+/// watched reach a *confirmed* dialog: a To-tagged 2xx to INVITE answered it, and
+/// the peer named the remote tag on a message this bind received (the From-tag of
+/// a request sent to it, the To-tag of a response to its own request). The
+/// received tag is what makes the demand well-founded on either side — a UAS
+/// reads its own local tag off the 2xx it sends, and a caller that minted no tag
+/// leaves the remote tag null, which §12.2.1.1 requires the sender to express by
+/// omitting the To tag parameter.
 ///
 /// The guards keep it to genuine sender defects: a request whose To is a verbatim
 /// echo of another message is not the sender's to fill — CANCEL copies the INVITE
@@ -547,13 +575,20 @@ mod tests {
 
     // ----- inDialogToTag -------------------------------------------------
 
-    /// A request whose To params (`""` = tag-less) and transaction identity are
-    /// spelled by the caller, on the shared `cid-d@h` dialog.
-    fn dialog_req(method: &str, branch: &str, cseq: u32, to_params: &str) -> Vec<u8> {
+    /// A request on the shared `cid-d@h` dialog with both tag positions spelled
+    /// by the caller (`""` = tag-less). The URIs stay caller→callee whichever
+    /// side sends: the rule reads the To *tag*, method, branch and Call-ID.
+    fn dialog_req_tags(
+        method: &str,
+        branch: &str,
+        cseq: u32,
+        from_params: &str,
+        to_params: &str,
+    ) -> Vec<u8> {
         format!(
             "{method} sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
-             From: <sip:alice@127.0.0.1>;tag=at\r\n\
+             From: <sip:alice@127.0.0.1>{from_params}\r\n\
              To: <sip:bob@127.0.0.1>{to_params}\r\n\
              Call-ID: cid-d@h\r\n\
              CSeq: {cseq} {method}\r\n\
@@ -563,17 +598,33 @@ mod tests {
         .into_bytes()
     }
 
-    fn dialog_resp(status: u16, cseq: u32, cseq_method: &str, branch: &str) -> Vec<u8> {
+    /// The common shape: a caller that minted its From-tag.
+    fn dialog_req(method: &str, branch: &str, cseq: u32, to_params: &str) -> Vec<u8> {
+        dialog_req_tags(method, branch, cseq, ";tag=at", to_params)
+    }
+
+    fn dialog_resp_tags(
+        status: u16,
+        cseq: u32,
+        cseq_method: &str,
+        branch: &str,
+        from_params: &str,
+        to_params: &str,
+    ) -> Vec<u8> {
         format!(
             "SIP/2.0 {status} X\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
-             From: <sip:alice@127.0.0.1>;tag=at\r\n\
-             To: <sip:bob@127.0.0.1>;tag=bt\r\n\
+             From: <sip:alice@127.0.0.1>{from_params}\r\n\
+             To: <sip:bob@127.0.0.1>{to_params}\r\n\
              Call-ID: cid-d@h\r\n\
              CSeq: {cseq} {cseq_method}\r\n\
              Content-Length: 0\r\n\r\n"
         )
         .into_bytes()
+    }
+
+    fn dialog_resp(status: u16, cseq: u32, cseq_method: &str, branch: &str) -> Vec<u8> {
+        dialog_resp_tags(status, cseq, cseq_method, branch, ";tag=at", ";tag=bt")
     }
 
     /// INVITE → 200(tag=bt) → ACK, as the caller bind recorded it.
@@ -647,12 +698,59 @@ mod tests {
 
     #[test]
     fn out_of_dialog_request_is_clean() {
-        // No confirmed dialog on the Call-ID — a tag-less request is correct.
+        // Unconfirmed prior traffic on the SAME Call-ID: an unanswered INVITE
+        // creates no dialog, so the tag-less OPTIONS that follows is correct.
         let evs = vec![
-            sent_at("alice", invite_with_to("", "cid-o@h"), 0),
-            sent_at("alice", dialog_req("OPTIONS", "z9hG4bK-o", 1, ""), 1),
+            sent_at("alice", dialog_req("INVITE", "z9hG4bK-i", 1, ""), 0),
+            sent_at("alice", dialog_req("OPTIONS", "z9hG4bK-o", 2, ""), 1),
         ];
         assert!(InDialogToTagRule.check(&evs, "alice").is_empty());
+    }
+
+    #[test]
+    fn reissued_tagless_invite_after_a_non_2xx_is_clean() {
+        // Auth-retry / reroute: the 401 kills the first INVITE, the retry rides a
+        // fresh branch on the same Call-ID and is still out of any dialog. Only a
+        // 2xx confirms, so the retry — and nothing before the 200 — is judged.
+        let evs = vec![
+            sent_at("alice", dialog_req("INVITE", "z9hG4bK-1", 1, ""), 0),
+            recv_at("alice", dialog_resp(401, 1, "INVITE", "z9hG4bK-1"), 1),
+            sent_at("alice", dialog_req("ACK", "z9hG4bK-1", 1, ";tag=bt"), 2),
+            sent_at("alice", dialog_req("INVITE", "z9hG4bK-2", 2, ""), 3),
+            recv_at("alice", dialog_resp(200, 2, "INVITE", "z9hG4bK-2"), 4),
+            sent_at("alice", dialog_req("ACK", "z9hG4bK-3", 2, ";tag=bt"), 5),
+            sent_at("alice", dialog_req("BYE", "z9hG4bK-4", 3, ";tag=bt"), 6),
+        ];
+        assert!(InDialogToTagRule.check(&evs, "alice").is_empty());
+    }
+
+    #[test]
+    fn tagless_bye_from_the_answering_side_is_flagged() {
+        // A UAS bind: the remote tag is the caller's From-tag, witnessed on the
+        // INVITE it received — the 2xx it sends carries only its own local tag.
+        let evs = vec![
+            recv_at("bob", dialog_req("INVITE", "z9hG4bK-i", 1, ""), 0),
+            sent_at("bob", dialog_resp(200, 1, "INVITE", "z9hG4bK-i"), 1),
+            recv_at("bob", dialog_req("ACK", "z9hG4bK-k", 1, ";tag=bt"), 2),
+            sent_at("bob", dialog_req_tags("BYE", "z9hG4bK-b", 2, ";tag=bt", ""), 3),
+        ];
+        let f = InDialogToTagRule.check(&evs, "bob");
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].starts_with("BYE"), "{}", f[0]);
+    }
+
+    #[test]
+    fn tagless_bye_to_a_caller_that_minted_no_tag_is_not_judged() {
+        // The caller named no From-tag, so this dialog's remote tag is null and
+        // §12.2.1.1 requires the To tag parameter to be omitted: the answering
+        // side's tag-less BYE is the compliant one.
+        let evs = vec![
+            recv_at("bob", dialog_req_tags("INVITE", "z9hG4bK-i", 1, "", ""), 0),
+            sent_at("bob", dialog_resp_tags(200, 1, "INVITE", "z9hG4bK-i", "", ";tag=bt"), 1),
+            recv_at("bob", dialog_req_tags("ACK", "z9hG4bK-k", 1, "", ";tag=bt"), 2),
+            sent_at("bob", dialog_req_tags("BYE", "z9hG4bK-b", 2, ";tag=bt", ""), 3),
+        ];
+        assert!(InDialogToTagRule.check(&evs, "bob").is_empty());
     }
 
     #[test]

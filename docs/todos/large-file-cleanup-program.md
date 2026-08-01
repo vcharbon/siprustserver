@@ -430,6 +430,15 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
    ACK fire, compliant twins silent). Whole default lane stays green — no
    existing flow trips it, so the tagless path indeed only fires in the
    takeover corner.
+   `resolved:` 2026-08-01 (review follow-up) — the confirmed-dialog gate now
+   also requires the remote tag the bind actually RECEIVED (a request's
+   From-tag, a response's To-tag), so a UAS no longer reads its own local tag
+   off the 2xx it sends and a caller that minted no tag leaves the rule silent
+   (§12.2.1.1 requires the To tag parameter to be omitted then). Three pins
+   added — answering-side tagless BYE fires, null-remote-tag peer is silent,
+   re-issued tagless INVITE after a non-2xx (auth-retry / reroute) is silent —
+   and the out-of-dialog pin now runs on a single Call-ID so it exercises
+   unconfirmed prior traffic instead of an empty witness.
 
 ### 2026-07-24 — call model/helpers split
 
