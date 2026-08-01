@@ -13,7 +13,6 @@ pub mod refer_transfer;
 pub mod relay;
 pub mod relay_first_18x;
 pub mod release_reroute;
-pub mod sdp_diff;
 pub mod service;
 
 pub use actions::ActionExecutor;

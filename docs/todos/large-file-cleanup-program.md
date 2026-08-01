@@ -455,7 +455,8 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
     `call` crate has no sip-message dependency), so reading one back is a
     parse, not a hand-rolled reader. A sweep of the whole of `rules/` for
     header-value splitting, angle unwrapping and RAck/CSeq token splitting
-    found nothing else; it did surface the SDP duplicate logged as #12.
+    found no other **header-level** reader; the same sweep did surface two
+    body-level ones, logged as #12 and #13.
 
 ### 2026-07-26 — sip-proxy load_observer split
 
@@ -480,12 +481,49 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
     `resolved:` 2026-08-01 — deleted; the sole consumer
     (`relay_first_18x.rs`, the fake-PRACK UPDATE handler) now calls
     `sip_message::build_answer_from_offer` with `BuildAnswerOptions`, and the
-    b2bua unit tests are subsumed by `sip-message/tests/sdp_answer.rs` (16
-    cases against 3). The switch is byte-neutral on well-formed SDP; the four
-    deltas all widen leniency on malformed input: sip-message parses m-line
-    ports and payload types with JS `parseInt` semantics (`5004x` → 5004,
-    where the fork yielded 0), keys `a=rtpmap`/`a=fmtp` by payload type so a
-    repeated PT is last-wins rather than first-wins, splits lines on `\n`
-    with an optional trailing `\r` rather than on either character, and
-    echoes session-level `a=x-offer-id:` attributes into the answer (inert —
-    no peer in this repo emits one).
+    b2bua unit tests are subsumed by `sip-message/tests/sdp_answer.rs` (12
+    cases against 3). The switch is byte-neutral on well-formed SDP; on
+    malformed input the four deltas do NOT all point the same way — three
+    widen or are inert, one narrows:
+
+    1. *widens* — JS `parseInt` semantics. The m-line **port** reads `5004x`
+       as 5004 where the fork's `parse::<i64>()` failed and fell back to 0;
+       a payload type reads `96x` as 96 where the fork's
+       `filter_map(parse::<i64>().ok())` dropped the token from the list
+       entirely (it never became a 0 — that fallback was port-only).
+    2. *tie-break only* — `a=rtpmap`/`a=fmtp` are keyed by payload type in a
+       map, so a repeated PT is last-wins; the fork's `Vec` + `find` was
+       first-wins. Neither is more lenient.
+    3. **narrows** — lines split on `\n` with an optional trailing `\r`,
+       where the fork split on either character. A bare-CR-separated body no
+       longer parses into lines: if the body has no `\n`-terminated `m=`
+       line at all, `media_sections` comes back empty and the result is
+       `NoAliceSdp`; if the `m=` line opens the body, `split_whitespace`
+       absorbs the following `a=rtpmap:` text into the m-line token list,
+       the dynamic PT loses its codec name, `codec_key` returns `None` and
+       the result is `NoCommonCodec`. Either way the fake-PRACK UPDATE
+       handler now replies 488 where the fork replied 200 with an answer.
+       That body is malformed under RFC 4566 §5 and the stricter reading is
+       the correct one — it is the only delta that can turn a 200 into a
+       488, so it is called out here rather than being lumped in.
+    4. *inert* — session-level `a=x-offer-id:` attributes are echoed into
+       the answer; no peer in this repo emits one.
+
+    The commit message (24e574e) states delta 1's payload-type case and
+    delta 3's direction wrongly; this entry is the correct record.
+
+13. **`rules/sdp_diff.rs` hand-parsed SDP bodies into `m=` blocks** — same
+    violation class as #12 (body extraction outside sip-message), and it
+    carried a second, divergent SDP line-splitter: it split on either `\r` or
+    `\n`, the very semantics #12 retired for the answer builder.
+    `resolved:` 2026-08-01 — moved to `crates/sip-message/src/sdp_diff.rs`
+    (`sip_message::sdp_media_equivalent`, re-exported at the crate root) and
+    rebuilt on `sdp::split_lines`, so one splitter now serves every SDP
+    reader. This is a move, not a swap: sip-message had no comparator, and
+    the sole consumer (`rules/promote_pem.rs`, the 183→200 resync decision)
+    is unchanged apart from the import. Two byte-level deltas, both on
+    malformed input: a bare-CR-separated body now yields zero `m=` blocks, so
+    it compares equal to any other block-less body (suppressing the resync
+    re-INVITE) and unequal to any well-formed one (forcing it); and each
+    line keeps its interior text but is compared `trim_end`-ed exactly as
+    before, so trailing-whitespace tolerance is preserved.

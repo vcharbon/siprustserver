@@ -112,7 +112,7 @@ PromotePemTo200`.
 
 ### sdpMediaEquivalent
 Ported as `call`-free pure fn `sdp_media_equivalent(a,b)` in a new
-`crates/b2bua/src/rules/sdp_diff.rs` (m= blocks + sorted c/b/a/i/k attribute
+`crates/sip-message/src/sdp_diff.rs` (m= blocks + sorted c/b/a/i/k attribute
 sets; session-level lines ignored; both-empty equal, one-empty differ).
 
 ### Rule selection

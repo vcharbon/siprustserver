@@ -949,7 +949,7 @@ latent gap — port the fix back.**
 **Source release:** sipjsserver @ `fffc4ac69c8aeef26cf48fe73469503145c9732b`.
 Source rule: `src/b2bua/rules/custom/promote18xPemTo200.ts` + shared
 `_shared/sdpDiff.ts`. Rust: `crates/b2bua/src/rules/promote_pem.rs` +
-`rules/sdp_diff.rs`; per-call state `Call.promote_pem` (`PromotePemState`) +
+`sip_message::sdp_diff`; per-call state `Call.promote_pem` (`PromotePemState`) +
 `call::helpers`; new RuleActions `SendReinvite`/`SetPromotePem`; `AckLeg`
 extended to the a-leg; `BeginTermination` now emits a RFC 3326 `Reason:` header
 on teardown BYEs when the firing rule supplies a `SIP;cause=…` value;
@@ -1023,7 +1023,8 @@ custom headers, per-fork To-tag).
   491, INFO→488), silent confirm on B's real 200, SDP-diff resync re-INVITE
   toward A, upstream-fork re-seed onto the winning To-tag, B-fails-post-promote
   and resync-failure teardown BYEs carrying RFC 3326 `Reason`, A-BYE-during-
-  window CANCEL of B. `crates/b2bua/src/rules/promote_pem.rs` + `sdp_diff.rs`.
+  window CANCEL of B. `crates/b2bua/src/rules/promote_pem.rs` +
+  `sip_message::sdp_diff`.
 - **REFER transfer** (`referTransfer`, `TransferRules`, `/call/refer`) —
   SERVICE_LAYER policy module; Slice 5.
 - **`prack-forking.ts` per-fork CSeq-independence assertion** — the source
