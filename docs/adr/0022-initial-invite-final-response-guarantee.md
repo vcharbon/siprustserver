@@ -145,7 +145,7 @@ synthesis to ride — the caller heard the auto-100 and then nothing.
 `router::on_event` closes it: for an **initial INVITE** (`res.initial_invite`)
 whose new call_ref `would_drop_new_at_cap`, it sends a **stateless 503** through
 the INVITE server txn (the same shape as the Tier-3 admission gate —
-`build_stateless_overload_503`, no per-call state born) and returns, before
+`overload::build_reject_new_call_503`, no per-call state born) and returns, before
 `dispatch`. In-dialog events for an at-cap new call_ref keep the silent
 `dispatch` cap-drop: an in-dialog request with no live call is an orphan the peer
 481s / the protocol resends; only the initial INVITE owes a final. The check is

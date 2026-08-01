@@ -1,5 +1,6 @@
-//! Locally-authored response builders: the OPTIONS health reply and the two
-//! call-layer-stateless rejects (overload 503, store-fault 500).
+//! Locally-authored response builders: the OPTIONS health reply and the
+//! call-layer-stateless store-fault 500. The overload reject lives with the
+//! policy that owns it — [`crate::overload::build_reject_new_call_503`].
 
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::types::SipHeader;
@@ -81,47 +82,10 @@ pub(crate) fn build_options_health_response(
     )
 }
 
-/// Build the **stateless 503** the Tier-3 admission gate sends when it rejects a
-/// new INVITE.
-///
-/// Stateless because no server transaction (and no call) is created — the router
-/// sends this via [`TransactionLayer::send_raw`](sip_txn::TransactionLayer::send_raw)
-/// and returns before `build_initial_call`. It echoes the INVITE's Via/From/To/
-/// Call-ID/CSeq (via [`generate_response`]) and adds:
-///   - `Reason: SIP;cause=503;text="overload"` — the overload cause token
-///     (distinct from the readiness 503's `not-ready` / `draining`).
-///   - `Retry-After: <retry_after_sec>` — the gate's hint (bucket time-to-token for
-///     `bucket_empty`, the configured base for `panic_elu`).
-///
-/// Stamps a fresh To-tag: this codebase enforces a To-tag on every non-100 final
-/// (RFC 3261 §8.2.6.2; `generate_response` adds a fallback, the RFC audit gate
-/// flags a tagless final, and the sibling `reject_call` / readiness-503 paths
-/// both tag). It stays stateless regardless: with no server txn the ACK still
-/// can't match a dialog and is dropped at the orphan-ACK path, exactly the
-/// cheap-rejection contract.
-pub(super) fn build_stateless_overload_503(
-    id_gen: &IdGen,
-    req: &sip_message::SipRequest,
-    retry_after_sec: u32,
-) -> sip_message::SipResponse {
-    generate_response(
-        req,
-        503,
-        "Service Unavailable",
-        &GenerateResponseOpts {
-            to_tag: Some(id_gen.new_tag()),
-            extra_headers: vec![
-                hdr("Reason", "SIP;cause=503;text=\"overload\""),
-                hdr("Retry-After", retry_after_sec.to_string()),
-            ],
-            ..Default::default()
-        },
-    )
-}
-
 /// Build the fail-closed **500 Server Internal Error** for an initial INVITE
 /// whose dialog-existence store lookup failed (ADR-0023). Same call-layer-
-/// stateless shape as [`build_stateless_overload_503`]: sent through the INVITE
+/// stateless shape as [`crate::overload::build_reject_new_call_503`]: sent
+/// through the INVITE
 /// server txn (`send_response` supersedes the cached 100, retransmits the final
 /// and absorbs the ACK) with **no** call/dialog/CDR/limiter state born. Fresh
 /// To-tag — this codebase enforces a tag on every non-100 final (RFC 3261

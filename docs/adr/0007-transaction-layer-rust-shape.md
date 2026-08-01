@@ -82,6 +82,8 @@ proxy's path. The single-writer property the dispatcher provides downstream is,
   Tier-3 gate, and the `buildStatelessReject503Buffer` / `isEmergencyRequest`
   helpers it needs, defer with their dependencies. This layer admits
   unconditionally for now.
+  *Amendment (2026-08-01):* both tiers shipped in `b2bua`; the byte templater
+  was dropped for one shared reject, `b2bua::overload::build_reject_new_call_503`.
 - **`transactionBreakdown` gauge** (per-(method,role,state) walk of the map) —
   observability not asserted by the ported tests; the `method` field is carried
   so it is a pure addition later. `messagesProcessed` / inbound+outbound byte

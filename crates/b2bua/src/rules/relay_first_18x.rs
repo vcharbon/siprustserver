@@ -42,12 +42,11 @@ use b2bua_sdk::{define_service, sm_rule};
 use call::features::RelayFirst18xStrategy;
 use call::{Call, CdrEventType, Direction, LegDisposition, LegState, TimerType};
 use sip_message::header::{RSeq, Require};
-use sip_message::{Method, SipResponse};
+use sip_message::{build_answer_from_offer, BuildAnswerOptions, Method, SdpBuildResult, SipResponse};
 
 use super::model::{
     Effect, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
 };
-use super::sdp_answer::{build_answer_from_offer, SdpBuildResult};
 
 fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
     Some(RuleHandleResult::new(actions))
@@ -360,7 +359,11 @@ define_service! {
                 }
 
                 let alice_body = &ctx.call.a_leg_invite().body;
-                match build_answer_from_offer(req.body(), alice_body, &ctx.config.sip_local_ip, ctx.now_ms) {
+                let options = BuildAnswerOptions {
+                    local_ip: ctx.config.sip_local_ip.clone(),
+                    now_ms: ctx.now_ms,
+                };
+                match build_answer_from_offer(req.body(), Some(alice_body), &options) {
                     SdpBuildResult::Ok(body) => ok(vec![
                         RuleAction::Respond {
                             status: 200,

@@ -1,7 +1,18 @@
-//! Worker-side overload surface: the `X-Overload` publish signal the front
-//! proxy's ELU-band AIMD consumes, plus the Tier-3 admission gate that sheds
-//! new-dialog INVITEs with a stateless 503 when the worker itself saturates.
+//! Worker-side overload policy. Its one goal on the wire: **reject new
+//! non-emergency calls when the worker is overloaded** — everything else
+//! (in-dialog traffic, non-INVITE methods, emergency calls) is admitted.
 //!
+//! Two tiers shed, both emitting the same reject
+//! ([`build_reject_new_call_503`]): the Tier-1 ingress brake
+//! ([`crate::tier1_brake`]) fires at arrival time on a queue-depth threshold,
+//! the Tier-3 admission gate here fires on the CPS bucket / panic-ELU
+//! backstop. This module also publishes the `X-Overload` load signal the front
+//! proxy's ELU-band AIMD consumes.
+//!
+//! - `reject` — [`build_reject_new_call_503`] + [`jittered_retry_after`] +
+//!   [`StatelessRejectTagger`]: the single reject-new-call primitive both tiers
+//!   send, and the request-derived identity the transactionless tier answers
+//!   with.
 //! - `sampler` — the [`LoadSampler`] read seam: the live tokio busy-ratio
 //!   sampler and the injectable [`simulated`] pair for paused-clock tests.
 //! - `ewma` — the smoothing primitive behind the published readings.
@@ -15,8 +26,7 @@
 //!
 //! The consumer of the published header is the front proxy —
 //! `sip_proxy::load_observer` parses exactly the `v=1` schema built here.
-//! The Tier-1 ingress brake does NOT live here — see [`crate::tier1_brake`];
-//! the proxy's own self-gate is `sip_proxy::self_gate`.
+//! The proxy's own self-gate is `sip_proxy::self_gate`.
 //!
 //! Clock contract: the token bucket refills off `tokio::time::Instant`, so a
 //! `start_paused` test drives it with `tokio::time::advance`; the live busy
@@ -30,10 +40,12 @@ mod admission;
 mod bucket;
 mod ewma;
 mod prometheus;
+mod reject;
 mod sampler;
 mod signal;
 
 pub use admission::{AdmitDecision, AdmitReason};
+pub use reject::{build_reject_new_call_503, jittered_retry_after, StatelessRejectTagger};
 pub use sampler::{simulated, LoadSampler, SimulatedLoadControl, SimulatedLoadSampler};
 pub use signal::{OverloadMetrics, OverloadSignal};
 

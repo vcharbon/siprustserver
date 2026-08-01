@@ -19,12 +19,11 @@ pub mod parser;
 
 pub mod serializer;
 pub mod sdp;
+pub mod sdp_diff;
 pub mod generators;
 pub mod emergency;
 pub mod param_codec;
 pub mod preparse;
-mod raw_bytes;
-pub mod reject_503;
 pub mod sipfrag;
 pub mod sniff;
 pub mod deviation;
@@ -43,6 +42,7 @@ pub use sdp::{
     build_answer_from_offer, build_held_sdp_from_profile, extract_codec_profile, validate_sdp_body,
     BuildAnswerOptions, BuildHeldSdpOptions, CodecProfile, SdpBuildResult, SdpValidationError,
 };
+pub use sdp_diff::sdp_media_equivalent;
 pub use parser::{SipParser, SipParserLimits};
 pub use sip_str::{SharedText, SipStr};
 pub use parser::custom::{hydrate_request, hydrate_response, CustomParser};

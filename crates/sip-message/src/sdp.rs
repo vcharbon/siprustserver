@@ -18,7 +18,7 @@ const CRLF: &str = "\r\n";
 
 /// Split into non-empty lines, tolerating CRLF or LF endings — mirrors the TS
 /// `split(/\r\n|\n/).filter(l => l.length > 0)`.
-fn split_lines(text: &str) -> Vec<&str> {
+pub(crate) fn split_lines(text: &str) -> Vec<&str> {
     text.split('\n')
         .map(|l| l.strip_suffix('\r').unwrap_or(l))
         .filter(|l| !l.is_empty())

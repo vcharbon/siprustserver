@@ -360,6 +360,34 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
    `build_stateless_reject_503_buffer` would be templated into a 503 reply.
    Benign today (the brake only feeds it requests); noted in
    `first_line_without_sip_version_returns_none`.
+   `resolved:` 2026-08-01 — the guard was not patched; per user the whole
+   byte-templating design was scrapped. The Tier-1 brake's goal is now stated
+   as one rule — *reject new non-emergency calls when overloaded* — and above
+   its queue-depth threshold it PARSES the datagram with the pipeline's own
+   parser: unparseable / response / non-INVITE → accept, To-tagged INVITE
+   (in-dialog re-INVITE) → accept, emergency initial INVITE → accept +
+   bypass counter, initial non-emergency INVITE → reject. Below the threshold
+   it never parses. Tier-1 and Tier-3 now emit ONE reject,
+   `b2bua::overload::build_reject_new_call_503` (To-tagged, overload `Reason`,
+   jittered `Retry-After`), with `jittered_retry_after` relocated beside it as
+   overload policy. Deleted: `sip-message/src/reject_503.rs`,
+   `emergency::buffer_has_emergency_marker` and `raw_bytes.rs` (all lost their
+   last consumer); `preparse::is_invite_request_buffer` stays — loadgen's mux
+   demux still uses it. The `;em=1`/`;emerg=1` stack-identity markers keep
+   being stamped as an on-the-wire emergency signal but no longer feed any
+   in-tree reader.
+   `resolved:` 2026-08-01 (review follow-up) — the brake's parse is now gated
+   on `preparse::is_invite_request_buffer`, so above the threshold responses,
+   non-INVITE methods and garbage are still admitted for seven bytes on the
+   socket's drain loop. The transactionless reject became a proper stateless
+   UAS: `overload::StatelessRejectTagger` derives its `To`-tag AND its
+   `Retry-After` jitter from a keyed hash of the request's dialog identity, so
+   a retransmitted INVITE draws a byte-identical 503 (RFC 3261 §8.2.7) — the
+   per-shed `RollFn`/`entropy_roll` are deleted, and
+   `build_reject_new_call_503` now takes the tag its caller owes. The
+   admission (not just non-rejection) of the re-INVITE and the OPTIONS is
+   pinned on the ingress queue depth, and the docs claiming the overload tiers
+   read `Call.emergency` / the markers are corrected.
 
 ### 2026-07-16 — scenario-harness agent split
 
@@ -419,6 +447,26 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
    behavior kept; comments condensed to the contract. Worth a check some day
    that the recorded-trace audit would flag a tagless in-dialog request if
    this path ever fired outside the takeover corner.
+   `resolved:` 2026-08-01 — generator behavior unchanged; the audit gap was
+   real and is closed. New peer rule `rfc3261.inDialogToTag`
+   (`sip-net/src/rfc_audit/rfc3261_peer.rs`, RFC3261-MUST-066) flags a SENT
+   request that carries no To-tag on a Call-ID this bind watched reach a
+   confirmed dialog (To-tagged 2xx to INVITE). Guarded against noise:
+   out-of-dialog requests, CANCEL, the ACK for a non-2xx (branch-correlated),
+   establishing-INVITE retransmissions and relay binds are not judged; subject
+   is `{Uac, Uas}`. Pinned both ways in the module's tests (tagless BYE / 2xx
+   ACK fire, compliant twins silent). Whole default lane stays green — no
+   existing flow trips it, so the tagless path indeed only fires in the
+   takeover corner.
+   `resolved:` 2026-08-01 (review follow-up) — the confirmed-dialog gate now
+   also requires the remote tag the bind actually RECEIVED (a request's
+   From-tag, a response's To-tag), so a UAS no longer reads its own local tag
+   off the 2xx it sends and a caller that minted no tag leaves the rule silent
+   (§12.2.1.1 requires the To tag parameter to be omitted then). Three pins
+   added — answering-side tagless BYE fires, null-remote-tag peer is silent,
+   re-issued tagless INVITE after a non-2xx (auth-retry / reroute) is silent —
+   and the out-of-dialog pin now runs on a single Call-ID so it exercises
+   unconfirmed prior traffic instead of an empty witness.
 
 ### 2026-07-24 — call model/helpers split
 
@@ -445,6 +493,18 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
     `parse_rack`. Migration is NOT byte-neutral — e.g. `unwrap_angle` keeps
     `;params` on a non-angle Contact where `parse_contact` splits them off
     the URI — so it needs its own commit with the delta reasoned per site.
+    `resolved:` 2026-08-01 — dissolved by the ADR-0025 header-model port
+    (merge bce0d4b): `relay_request.rs` reads the `RAck` header type,
+    `respond.rs` reads `req.top_via()`, and `dialog_track.rs` reads the
+    structured Contact, so `top_via_dest`, `unwrap_angle` and `rewrite_rack`
+    have no remaining call sites. The one survivor is compliant: `via_sent_by`
+    in `actions/relay_response.rs` is a thin wrapper over sip-message
+    `Via::parse` — the pending-request snapshot stores its Vias as text (the
+    `call` crate has no sip-message dependency), so reading one back is a
+    parse, not a hand-rolled reader. A sweep of the whole of `rules/` for
+    header-value splitting, angle unwrapping and RAck/CSeq token splitting
+    found no other **header-level** reader; the same sweep did surface two
+    body-level ones, logged as #12 and #13.
 
 ### 2026-07-26 — sip-proxy load_observer split
 
@@ -460,3 +520,58 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
     `apply_payload` is one line, and the real work is (a) stamping the header
     on worker 503s and (b) teaching the LB response path to sniff relayed 503s
     without violating its transaction-less design (ADR-0022 X4).
+
+### 2026-08-01 — b2bua rules wire-reader sweep
+
+12. **`rules/sdp_answer.rs` was a 322-line second copy of the RFC 3264 answer
+    builder that already lives in `sip_message::sdp`** — body extraction
+    outside sip-message, and a fork that had drifted from the original.
+    `resolved:` 2026-08-01 — deleted; the sole consumer
+    (`relay_first_18x.rs`, the fake-PRACK UPDATE handler) now calls
+    `sip_message::build_answer_from_offer` with `BuildAnswerOptions`, and the
+    b2bua unit tests are subsumed by `sip-message/tests/sdp_answer.rs` (12
+    cases against 3). The switch is byte-neutral on well-formed SDP; on
+    malformed input the four deltas do NOT all point the same way — three
+    widen or are inert, one narrows:
+
+    1. *widens* — JS `parseInt` semantics. The m-line **port** reads `5004x`
+       as 5004 where the fork's `parse::<i64>()` failed and fell back to 0;
+       a payload type reads `96x` as 96 where the fork's
+       `filter_map(parse::<i64>().ok())` dropped the token from the list
+       entirely (it never became a 0 — that fallback was port-only).
+    2. *tie-break only* — `a=rtpmap`/`a=fmtp` are keyed by payload type in a
+       map, so a repeated PT is last-wins; the fork's `Vec` + `find` was
+       first-wins. Neither is more lenient.
+    3. **narrows** — lines split on `\n` with an optional trailing `\r`,
+       where the fork split on either character. A bare-CR-separated body no
+       longer parses into lines: if the body has no `\n`-terminated `m=`
+       line at all, `media_sections` comes back empty and the result is
+       `NoAliceSdp`; if the `m=` line opens the body, `split_whitespace`
+       absorbs the following `a=rtpmap:` text into the m-line token list,
+       the dynamic PT loses its codec name, `codec_key` returns `None` and
+       the result is `NoCommonCodec`. Either way the fake-PRACK UPDATE
+       handler now replies 488 where the fork replied 200 with an answer.
+       That body is malformed under RFC 4566 §5 and the stricter reading is
+       the correct one — it is the only delta that can turn a 200 into a
+       488, so it is called out here rather than being lumped in.
+    4. *inert* — session-level `a=x-offer-id:` attributes are echoed into
+       the answer; no peer in this repo emits one.
+
+    The commit message (24e574e) states delta 1's payload-type case and
+    delta 3's direction wrongly; this entry is the correct record.
+
+13. **`rules/sdp_diff.rs` hand-parsed SDP bodies into `m=` blocks** — same
+    violation class as #12 (body extraction outside sip-message), and it
+    carried a second, divergent SDP line-splitter: it split on either `\r` or
+    `\n`, the very semantics #12 retired for the answer builder.
+    `resolved:` 2026-08-01 — moved to `crates/sip-message/src/sdp_diff.rs`
+    (`sip_message::sdp_media_equivalent`, re-exported at the crate root) and
+    rebuilt on `sdp::split_lines`, so one splitter now serves every SDP
+    reader. This is a move, not a swap: sip-message had no comparator, and
+    the sole consumer (`rules/promote_pem.rs`, the 183→200 resync decision)
+    is unchanged apart from the import. Two byte-level deltas, both on
+    malformed input: a bare-CR-separated body now yields zero `m=` blocks, so
+    it compares equal to any other block-less body (suppressing the resync
+    re-INVITE) and unequal to any well-formed one (forcing it); and each
+    line keeps its interior text but is compared `trim_end`-ed exactly as
+    before, so trailing-whitespace tolerance is preserved.

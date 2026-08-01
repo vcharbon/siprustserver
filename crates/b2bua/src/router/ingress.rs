@@ -11,7 +11,7 @@ use super::peer_metrics::classify_b2bua_peer;
 use super::process::process;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::{replica_takeover_call_ref, resolve};
-use super::responses::{build_options_health_response, build_stateless_overload_503};
+use super::responses::build_options_health_response;
 use super::RouterCtx;
 use crate::event::CallEvent;
 
@@ -143,8 +143,8 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     if res.initial_invite && ctx.dispatcher.would_drop_new_at_cap(&call_ref) {
         if let CallEvent::Sip { message, src } = &event {
             if let SipMessage::Request(req) = message.as_ref() {
-                let resp = build_stateless_overload_503(
-                    &ctx.id_gen,
+                let resp = crate::overload::build_reject_new_call_503(
+                    ctx.id_gen.new_tag(),
                     req,
                     ctx.config.retry_after_base_sec,
                 );

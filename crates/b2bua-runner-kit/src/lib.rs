@@ -59,9 +59,7 @@ use b2bua::metrics::{B2buaMetrics, UdpTransportMetrics};
 use b2bua::rules::ServiceDef;
 use b2bua::store::InMemoryCallStore;
 use b2bua::target_admission::{classify_admission, AdmissionVerdict};
-use b2bua::tier1_brake::{
-    build_tier1_brake_hook, entropy_roll, Tier1BrakeConfig, Tier1BrakeCounters,
-};
+use b2bua::tier1_brake::{build_tier1_brake_hook, Tier1BrakeConfig, Tier1BrakeCounters};
 use b2bua::{B2buaCore, B2buaDeps};
 use call::Call;
 use http_net::RealHttpNetwork;
@@ -388,9 +386,10 @@ impl RunnerEnv {
                 retry_after_jitter_sec: self.retry_after_jitter_sec,
             },
             brake_counters.clone(),
-            // Dependency-free per-process jitter source (xorshift64*); only
-            // consulted when retry_after_jitter_sec > 0.
-            entropy_roll(),
+            // Seeds the secret the rejects' request-derived To-tags are keyed
+            // by. Independent of the core's generator: the brake replies before
+            // the datagram is ever queued, so no core state is involved.
+            &IdGen::from_entropy(),
         );
 
         // Real, non-recording transport: a plain tokio UDP socket. Bind into an

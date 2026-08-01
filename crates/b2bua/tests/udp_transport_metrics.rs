@@ -1,21 +1,16 @@
-//! `UdpTransportMetrics` shape — end-to-end through the simulated fabric (port of
-//! the *metrics-read* assertions in `tests/sip/UdpTransport-brake.test.ts`).
+//! `UdpTransportMetrics` shape — end-to-end through the simulated fabric.
 //!
-//! The brake-decision half of that TS test (which INVITEs get a stateless 503,
-//! emergency bypass, non-INVITE pass-through) is already ported in
-//! `tests/tier1_brake.rs`. THIS file ports the other half: the test's reads of
-//! the transport's metrics shape — `udp.metrics.dropsTier1Brake`,
-//! `udp.metrics.tier1RejectSent`, `udp.metrics.queueDepth`, and
-//! `udp.metrics.dropsTailDrop` — proved to be the LIVE values the TS getters
-//! return (`get queueDepth() { return endpoint.queueDepth() }`,
-//! `get dropsTailDrop() { return endpoint.counters.tailDropped }`).
+//! The brake's *decision* half (which INVITEs are rejected, emergency bypass,
+//! non-INVITE and in-dialog pass-through) is covered in `tests/tier1_brake.rs`.
+//! THIS file proves the metrics shape reports the LIVE values: brake drops /
+//! rejects sent from the hook's counters, and queue depth / tail-drops read
+//! through the bound endpoint.
 //!
-//! Setup mirrors the brake test: one B2BUA bind (production brake hook installed,
-//! its counters folded into a `UdpTransportMetrics`, NEVER drained so the queue
-//! fills) + one raw flooder on the same fabric. We flood past the Tier-1
-//! threshold AND past `queue_max` so the metrics shape reports a real
-//! `queueDepth` AND a non-zero `dropsTailDrop` (the queue tail-drops the
-//! below-threshold-but-over-capacity arrivals).
+//! Setup mirrors the brake test: one B2BUA bind (production brake hook
+//! installed, its counters folded into a `UdpTransportMetrics`, NEVER drained so
+//! the queue fills) + one raw flooder on the same fabric. We flood past the
+//! Tier-1 threshold AND past `queue_max` so the shape reports a real queue depth
+//! AND a non-zero tail-drop count.
 //!
 //! Clock: `#[tokio::test(start_paused = true)]` (CLAUDE.md) — same spawn-per-
 //! datagram quiescence discipline as `tier1_brake.rs` (advance one transit hop,
@@ -25,8 +20,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use b2bua::tier1_brake::{build_tier1_brake_hook, RollFn, Tier1BrakeConfig, Tier1BrakeCounters};
+use b2bua::tier1_brake::{build_tier1_brake_hook, Tier1BrakeConfig, Tier1BrakeCounters};
 use b2bua::UdpTransportMetrics;
+use sip_txn::IdGen;
 use sip_net::types::BindUdpOpts;
 use sip_net::{SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
 
@@ -53,13 +49,8 @@ fn brake_config() -> Tier1BrakeConfig {
     }
 }
 
-/// A roll that panics — proves jitter==0 never draws it.
-fn never_roll() -> RollFn {
-    Arc::new(|| panic!("jitter==0 must not draw the Retry-After roll"))
-}
-
-/// Minimal valid INVITE buffer (mirror of the TS `buildInviteBuffer`). With
-/// `emergency`, add a `Resource-Priority: esnet.0` (the marker the brake bypasses).
+/// A new (To-tag-less) INVITE. With `emergency`, carries the
+/// `Resource-Priority: esnet.0` the brake bypasses on.
 fn invite_buf(i: u32, emergency: bool) -> Vec<u8> {
     let mut s = format!(
         "INVITE sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
@@ -90,7 +81,7 @@ async fn setup() -> (
 ) {
     let net = SimulatedSignalingNetwork::new(TRANSIT_MS);
     let brake = Tier1BrakeCounters::new();
-    let hook = build_tier1_brake_hook(brake_config(), brake.clone(), never_roll());
+    let hook = build_tier1_brake_hook(brake_config(), brake.clone(), &IdGen::seeded(3));
 
     let b2bua: Arc<dyn UdpEndpoint> = net
         .bind_udp(BindUdpOpts::new(b2bua_addr(), QUEUE_MAX).with_pre_ingress(hook))
@@ -132,12 +123,12 @@ async fn settle(net: &SimulatedSignalingNetwork) {
     panic!("simulated fabric never settled; in_flight={}", net.in_flight());
 }
 
-/// Port of `UdpTransport-brake.test.ts` case 1, read through the
-/// `UdpTransportMetrics` shape. Flood 10 INVITEs into an undrained queue: the
+/// Flood 10 INVITEs into an undrained queue, read through the
+/// `UdpTransportMetrics` shape: the
 /// first two (depth 0,1) are accepted and enqueued; depth then sits at the
 /// threshold (2) and every later non-emergency INVITE is shed. The metrics shape
-/// reports `dropsTier1Brake == tier1RejectSent == floodCount - 2` and
-/// `queueDepth == 2` — exactly the TS assertions, but via the live getters.
+/// reports `drops == rejects_sent == flood - 2` and `queue_depth == 2`, via the
+/// live getters.
 #[tokio::test(start_paused = true)]
 async fn metrics_shape_reports_brake_drops_and_queue_depth() {
     let (net, _b2bua, flooder, metrics) = setup().await;
@@ -149,10 +140,10 @@ async fn metrics_shape_reports_brake_drops_and_queue_depth() {
     settle(&net).await;
 
     let expected_rejects = (flood - 2) as u64;
-    assert_eq!(metrics.drops_tier1_brake(), expected_rejects, "udp.metrics.dropsTier1Brake");
-    assert_eq!(metrics.tier1_reject_sent(), expected_rejects, "udp.metrics.tier1RejectSent");
+    assert_eq!(metrics.drops_tier1_brake(), expected_rejects, "brake drops");
+    assert_eq!(metrics.tier1_reject_sent(), expected_rejects, "brake rejects sent");
     // queueDepth is the live endpoint depth — the two below-threshold INVITEs.
-    assert_eq!(metrics.queue_depth(), 2, "udp.metrics.queueDepth");
+    assert_eq!(metrics.queue_depth(), 2, "live queue depth");
     assert_eq!(metrics.queue_max(), QUEUE_MAX);
     // Below threshold + at capacity (5): the brake shed everything over the
     // threshold (2) before the queue could fill, so nothing tail-dropped.
@@ -166,7 +157,7 @@ async fn metrics_shape_reports_brake_drops_and_queue_depth() {
     assert!(txt.contains("b2bua_udp_tail_dropped_total 0"));
 }
 
-/// `dropsTailDrop` is a LIVE proxy of `endpoint.counters.tailDropped`. The brake
+/// The tail-drop count is a LIVE proxy of `endpoint.counters.tail_dropped`. The brake
 /// only sheds INVITEs; an OPTIONS flood past `queue_max` is accepted by the hook
 /// but TAIL-DROPPED by the full bounded queue once depth hits the cap — and the
 /// metrics shape surfaces that count (the blind spot a depth-only view misses).
@@ -204,9 +195,8 @@ Content-Length: 0\r\n\r\n"
     assert!(txt.contains(&format!("b2bua_udp_tail_dropped_total {}", n as u64 - QUEUE_MAX as u64)));
 }
 
-/// Port of `UdpTransport-brake.test.ts` case 2's metrics read: emergency INVITEs
-/// bypass the brake, so the metrics shape's brake counters stay at zero even
-/// above the threshold, and `queueDepth` reflects all three enqueued INVITEs.
+/// Emergency INVITEs bypass the brake, so the shape's brake counters stay at
+/// zero even above the threshold and the depth reflects all three enqueued.
 #[tokio::test(start_paused = true)]
 async fn metrics_shape_emergency_bypass_keeps_brake_counters_zero() {
     let (net, _b2bua, flooder, metrics) = setup().await;
@@ -216,8 +206,8 @@ async fn metrics_shape_emergency_bypass_keeps_brake_counters_zero() {
     flooder.send_to(&invite_buf(2, true), b2bua_addr()).await.unwrap();
     settle(&net).await;
 
-    assert_eq!(metrics.drops_tier1_brake(), 0, "udp.metrics.dropsTier1Brake");
-    assert_eq!(metrics.tier1_reject_sent(), 0, "udp.metrics.tier1RejectSent");
-    assert_eq!(metrics.queue_depth(), 3, "udp.metrics.queueDepth — all three enqueued");
+    assert_eq!(metrics.drops_tier1_brake(), 0, "brake drops");
+    assert_eq!(metrics.tier1_reject_sent(), 0, "brake rejects sent");
+    assert_eq!(metrics.queue_depth(), 3, "live queue depth — all three enqueued");
     assert_eq!(metrics.drops_tail_drop(), 0);
 }

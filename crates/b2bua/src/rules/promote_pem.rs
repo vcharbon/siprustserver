@@ -13,13 +13,13 @@ use call::features::RelayFirst18xStrategy;
 use call::{CdrEventType, Direction, LegDisposition, LegState, PromotePemState, TimerType};
 use sip_message::draft::Entry;
 use sip_message::header::{Allow, HeaderName, RSeq, Require, Supported};
+use sip_message::sdp_media_equivalent;
 use sip_message::SipResponse;
 
 use super::model::{
     Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
     SERVICE_LAYER,
 };
-use super::sdp_diff::sdp_media_equivalent;
 
 /// RFC 3261 §13.3.1 / §20.5: methods the B2BUA relays end-to-end, advertised on
 /// the synthetic 200 OK / resync re-INVITE toward Alice.

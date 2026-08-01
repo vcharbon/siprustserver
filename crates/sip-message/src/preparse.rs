@@ -6,9 +6,10 @@
 /// Does the datagram start with the seven bytes `INVITE ` — i.e. a
 /// new-INVITE request line? `false` for every other method and for
 /// responses (`SIP/2.0 …`); a too-short buffer is trivially not an INVITE.
-/// Case-SENSITIVE: method tokens are upper-case on the wire (RFC 3261 §7.1)
-/// and this runs in the overload brake's hot path, which sheds only
-/// canonical new-INVITEs.
+/// Case-SENSITIVE: method tokens are case-sensitive on the wire (RFC 3261
+/// §7.1), so `invite ` is not the INVITE method and this classifies it as
+/// something else. Callers are ingress fast paths that only special-case
+/// canonical INVITEs and hand every other datagram to the full parser.
 pub fn is_invite_request_buffer(raw: &[u8]) -> bool {
     raw.starts_with(b"INVITE ")
 }
