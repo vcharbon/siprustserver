@@ -1258,10 +1258,12 @@ not the old clone-and-string-surgery one.
 | `template::HeaderClass` (Regenerated/Frozen) | `header::HeaderClass` (Structural/EndToEnd) — the two names were the same axis (M1 note), so the template now queries the one table |
 
 The surviving members of the old namespace were NOT deleted, they were promoted
-out of it: `sip_message::{emergency, param_codec, preparse, reject_503}` are
-top-level modules now, because each is its own concern (emergency
-classification, the B2BUA correlation-param codec, the strict pre-parse
-classifiers, the Tier-1 503 template) and none of them is header access.
+out of it: `sip_message::{emergency, param_codec, preparse}` are top-level
+modules now, because each is its own concern (emergency classification, the
+B2BUA correlation-param codec, the strict pre-parse classifiers) and none of
+them is header access. (`reject_503` was promoted alongside them and later
+deleted — the Tier-1 503 template was scrapped for a parse + the shared
+`b2bua::overload::build_reject_new_call_503`.)
 
 **The message shape**
 

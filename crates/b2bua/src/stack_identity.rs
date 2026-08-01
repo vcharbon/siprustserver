@@ -159,10 +159,10 @@ mod tests {
         params.iter().map(|(name, _)| name.as_str()).collect()
     }
 
-    // --- emergency stack-identity markers (the subject of this slice) ------
-    // `buildCallVia` appends `;em=1` and `buildCallContact` appends `;emerg=1`
-    // iff `opts.isEmergency` (stack-identity.ts L42 / L58). These are the
-    // in-dialog markers `bufferHasEmergencyMarker` scans for on the read side.
+    // --- emergency stack-identity markers ---------------------------------
+    // `build_call_via` appends `;em=1` and `build_call_contact` appends
+    // `;emerg=1` iff `opts.is_emergency`, so every in-dialog packet of an
+    // admitted emergency call is identifiable on the wire.
 
     #[test]
     fn via_appends_em_marker_when_emergency() {

@@ -360,6 +360,22 @@ Append entries as found; never delete an entry, mark it `resolved:` instead.
    `build_stateless_reject_503_buffer` would be templated into a 503 reply.
    Benign today (the brake only feeds it requests); noted in
    `first_line_without_sip_version_returns_none`.
+   `resolved:` 2026-08-01 — the guard was not patched; per user the whole
+   byte-templating design was scrapped. The Tier-1 brake's goal is now stated
+   as one rule — *reject new non-emergency calls when overloaded* — and above
+   its queue-depth threshold it PARSES the datagram with the pipeline's own
+   parser: unparseable / response / non-INVITE → accept, To-tagged INVITE
+   (in-dialog re-INVITE) → accept, emergency initial INVITE → accept +
+   bypass counter, initial non-emergency INVITE → reject. Below the threshold
+   it never parses. Tier-1 and Tier-3 now emit ONE reject,
+   `b2bua::overload::build_reject_new_call_503` (To-tagged, overload `Reason`,
+   jittered `Retry-After`), with `jittered_retry_after` relocated beside it as
+   overload policy. Deleted: `sip-message/src/reject_503.rs`,
+   `emergency::buffer_has_emergency_marker` and `raw_bytes.rs` (all lost their
+   last consumer); `preparse::is_invite_request_buffer` stays — loadgen's mux
+   demux still uses it. The `;em=1`/`;emerg=1` stack-identity markers keep
+   being stamped as an on-the-wire emergency signal but no longer feed any
+   in-tree reader.
 
 ### 2026-07-16 — scenario-harness agent split
 

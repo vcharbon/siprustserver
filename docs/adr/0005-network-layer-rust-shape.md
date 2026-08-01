@@ -49,6 +49,9 @@ the available methods on Rust" directive, slice 2 reshapes this to tokio idioms.
   `BufferedUdpEndpoint` per-peer drainer) — depends on `AppConfig` /
   `MetricsRegistry`, which are later slices. The `PreIngressHook` primitive the
   brake is built on **is** ported.
+  *Amendment (2026-08-01):* the brake + metrics shape now live in
+  `b2bua::tier1_brake` / `b2bua::UdpTransportMetrics`, still on this
+  `PreIngressHook`; only the per-peer drainer stays unported.
 - The legacy `NetworkTraceEntry` / `drainTrace` path — superseded by the typed
   `Recorder` channel (the single recording path in this port). The `realTracing`
   on/off boolean split therefore disappears: recording is a decorator, not a

@@ -24,8 +24,6 @@ pub mod generators;
 pub mod emergency;
 pub mod param_codec;
 pub mod preparse;
-mod raw_bytes;
-pub mod reject_503;
 pub mod sipfrag;
 pub mod sniff;
 pub mod deviation;

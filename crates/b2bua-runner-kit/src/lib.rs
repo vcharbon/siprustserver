@@ -388,6 +388,10 @@ impl RunnerEnv {
                 retry_after_jitter_sec: self.retry_after_jitter_sec,
             },
             brake_counters.clone(),
+            // Mints the reject's To-tag. Independent of the core's generator:
+            // the tag only has to be unique, and the brake replies before the
+            // datagram is ever queued.
+            Arc::new(IdGen::from_entropy()),
             // Dependency-free per-process jitter source (xorshift64*); only
             // consulted when retry_after_jitter_sec > 0.
             entropy_roll(),

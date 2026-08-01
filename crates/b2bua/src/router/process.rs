@@ -16,7 +16,7 @@ use super::peer_metrics::{classify_b2bua_peer, keepalive_timeout_peer};
 use super::reclaim::discharge_as_own;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
-use super::responses::{build_stateless_overload_503, build_store_fault_500};
+use super::responses::build_store_fault_500;
 use super::restore_hygiene::sanitize_restored_timers;
 use super::RouterCtx;
 use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
@@ -229,7 +229,8 @@ async fn initial_invite_turn(
     let is_emergency = is_emergency_request(req);
     let decision = ctx.overload.should_admit(is_emergency);
     if !decision.admit {
-        let resp = build_stateless_overload_503(&ctx.id_gen, req, decision.retry_after_sec);
+        let resp =
+            crate::overload::build_reject_new_call_503(&ctx.id_gen, req, decision.retry_after_sec);
         let _ = ctx.txn.send_response(resp, src).await;
         // The reject is observable via `b2bua_overload_rejected_total`; the
         // `reason`/`retry_after_sec` are carried on the 503 itself (Reason +

@@ -145,10 +145,8 @@ pub fn rebuild_a_leg_invite(snap: &call::ALegInviteSnapshot) -> SipRequest {
 
 /// The B2BUA's Via for a leg's outbound message. `is_emergency` is the call's
 /// emergency state (`call.emergency == Some(true)`); when set it stamps the
-/// `;em=1` marker every subsequent in-dialog packet then carries — the in-dialog
-/// signal the Tier-1 overload brake (`buffer_has_emergency_marker`) scans to
-/// never 503 an admitted emergency call. Port of `legStackIdentity`'s
-/// `isEmergency = call.emergency === true` (stack-identity.ts L137).
+/// `;em=1` marker every subsequent in-dialog packet of the call then carries,
+/// so an admitted emergency call stays identifiable on the wire.
 pub fn leg_via(
     config: &B2buaConfig,
     call_ref: &str,
@@ -1037,14 +1035,12 @@ Content-Length: 0\r\n\r\n",
         )
     }
 
-    // The wiring contract this slice closes: an EMERGENCY call's initial b-leg
-    // INVITE (the single mint point) carries `;em=1` on its Via and `;emerg=1`
-    // on its Contact ON THE WIRE — the in-dialog markers `buffer_has_emergency_
-    // marker` scans so the Tier-1 overload brake never 503s an admitted
-    // emergency call. The pure-builder tests prove the `if is_emergency` branch
-    // in isolation; this proves a production relay path actually passes `true`
-    // and the markers reach the serialized message (port of `buildBLegInvite`,
-    // helpers.ts L266-280).
+    // The wiring contract: an EMERGENCY call's initial b-leg INVITE (the single
+    // mint point) carries `;em=1` on its Via and `;emerg=1` on its Contact ON
+    // THE WIRE, so the call stays identifiable in-dialog. The pure-builder tests
+    // prove the `if is_emergency` branch in isolation; this proves a production
+    // relay path actually passes `true` and the markers reach the serialized
+    // message.
     #[test]
     fn emergency_b_leg_invite_via_and_contact_carry_the_markers() {
         let (via, contact) = b_leg_invite_via_contact(true);
