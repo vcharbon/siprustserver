@@ -121,6 +121,15 @@ pub(super) async fn process_result(
         if let OutboundBody::Request(req) = &eff.body {
             ctx.metrics.record_request_out(req.method().as_str());
         }
+        // Traced call: the message as it leaves, raw (ADR-0026). Guarded, so an
+        // unsampled call never serializes a second copy.
+        if crate::trace::sampled(&result.call) {
+            let wire = match &eff.body {
+                OutboundBody::Request(req) => serialize(&SipMessage::Request(req.clone())),
+                OutboundBody::Response(resp) => serialize(&SipMessage::Response(resp.clone())),
+            };
+            crate::trace::emit::sip_out(&result.call, now_ms, dest, &wire);
+        }
         match (&eff.body, &eff.mode) {
             // A 2xx retransmit (RFC 3261 §13.3.1.4) must bypass the server txn:
             // the a-leg INVITE server txn is already `Completed`, so the txn layer
@@ -150,7 +159,15 @@ pub(super) async fn process_result(
                         limiter_id: limiter_id.clone(),
                         window: *window,
                     }])
-                    .await
+                    .await;
+                if crate::trace::sampled(&result.call) {
+                    crate::trace::emit::limiter(
+                        &result.call,
+                        now_ms,
+                        "release",
+                        &format!("{limiter_id} @ {window}"),
+                    );
+                }
             }
         }
     }

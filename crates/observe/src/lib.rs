@@ -27,6 +27,7 @@
 
 mod admission;
 mod attr;
+mod call_span;
 pub mod counters;
 mod init;
 mod node;
@@ -35,12 +36,14 @@ mod otlp;
 mod rate_draw;
 mod test_buffer;
 mod token_bucket;
+pub mod trace_ids;
 mod wave;
 mod wave_set;
 mod writer;
 
-pub use admission::{Denied, SampleAdmission, TraceLease};
+pub use admission::{Denied, SampleAdmission, TraceLease, DEFAULT_MAX_ACTIVE};
 pub use attr::{cap_bytes, cap_str, ATTR_CAP_BYTES, TRUNCATED_FIELD};
+pub use call_span::{CallIdentity, CallSpan, ChildSpan, TraceEvent, BODY_CAP_BYTES};
 pub use init::{init_production, ObserveGuard};
 pub use node::{node, set_node_identity};
 pub use rate_draw::RateDraw;

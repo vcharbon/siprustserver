@@ -86,6 +86,18 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return;
         };
+        // Traced call: the message as it arrived, raw (ADR-0026). Guarded, so an
+        // unsampled call never serializes a copy of what it just parsed.
+        if let CallEvent::Sip { message, src } = &event {
+            if crate::trace::sampled(&call) {
+                crate::trace::emit::sip_in(
+                    &call,
+                    now_ms,
+                    *src,
+                    &sip_message::serialize(message.as_ref()),
+                );
+            }
+        }
         // The limiter-refresh timer is async (an HTTP call to migrate holds), so
         // it is handled outside the synchronous rule chain — like initial-INVITE.
         if matches!(
@@ -407,7 +419,11 @@ async fn hydrate_or_reclaim(ctx: &Arc<RouterCtx>, call_ref: &str) -> Option<Call
         // `bak:{self}`) still orphans — recovering THAT population needs an
         // on-demand pull from the peer (s11 CASE B, open).
         None => {
-            let (call, skew_offset_ms) = ctx.state.peek_reclaimable(call_ref).await?;
+            let (mut call, skew_offset_ms) = ctx.state.peek_reclaimable(call_ref).await?;
+            // Same hydration seam as the takeover path: a traced call re-served
+            // here opens this node's own linked root span (ADR-0026 §5). Stamped
+            // on the copy we return too, so the turn that follows records.
+            crate::trace::adopt_replicated(&mut call, ctx.clock.now_ms());
             let mut timers = call.timers.clone();
             // Same restore-hygiene seam as the bulk/reactive reclaim paths:
             // re-anchor by the skew offset, drop the stale timeout, apply the
@@ -573,6 +589,14 @@ async fn handle_limiter_refresh(ctx: &Arc<RouterCtx>, mut call: Call, now_ms: i6
     // entry. On a backend failure `refresh` returns the holds unchanged, so the
     // windows simply stay put and we retry next cycle.
     let updated = ctx.limiter.refresh(&holds).await;
+    if crate::trace::sampled(&call) {
+        crate::trace::emit::limiter(
+            &call,
+            now_ms,
+            "refresh",
+            &format!("{} hold(s) -> window {:?}", holds.len(), updated.first().map(|h| h.window)),
+        );
+    }
     if let Some(new_window) = updated.first().map(|h| h.window) {
         for e in call.limiter_entries.iter_mut() {
             if e.increment_succeeded != Some(false) {

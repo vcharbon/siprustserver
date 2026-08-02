@@ -30,6 +30,7 @@ pub mod deviation;
 pub mod remote_target;
 pub mod template;
 pub mod template_match;
+pub mod trace_sample;
 
 /// The body and image type the public surface hands out and takes back.
 pub use bytes::Bytes;

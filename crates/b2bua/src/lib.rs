@@ -14,6 +14,8 @@
 //! - [`router`] — consumes the transaction-layer event stream, resolves the
 //!   `callRef`, runs the handler, interprets the typed [`effects`].
 //! - [`lifecycle`] — the aggregated lifecycle-log vocabulary (ADR-0026).
+//! - [`trace`] — the per-call trace gate, root spans and guarded emission
+//!   vocabulary (ADR-0026).
 //! - [`b2bua_core`] — wires it all together.
 //!
 //! Builds on the already-ported `call` data model; see MIGRATION_STATUS + ADR-0010.
@@ -43,6 +45,7 @@ pub mod store;
 pub mod target_admission;
 pub mod tier1_brake;
 pub mod timers;
+pub mod trace;
 
 pub use b2bua_core::{B2buaCore, B2buaDeps, ReplicationSetup};
 pub use router::AdaptationHttpPort;

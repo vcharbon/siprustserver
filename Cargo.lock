@@ -493,6 +493,7 @@ dependencies = [
 name = "b2bua"
 version = "0.1.0"
 dependencies = [
+ "alloc-counter",
  "async-trait",
  "b2bua-sdk",
  "call",
@@ -527,6 +528,7 @@ dependencies = [
  "layer-harness",
  "media",
  "media-harness",
+ "observe",
  "scenario-harness",
  "serde_json",
  "sip-clock",

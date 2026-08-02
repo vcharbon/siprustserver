@@ -2,10 +2,11 @@
 //! `src/decision/schemas/*`. `FeatureActivations` is reused from `call` (it is
 //! the canonical feature shape; the data model already carries it on `Call`).
 //!
-//! Only [`NewCallRequest`] derives serde — it is what the future HTTP adapter
+//! [`NewCallRequest`] round-trips serde — it is what the future HTTP adapter
 //! POSTs and what the scripted test adapter inspects. The response types are
-//! constructed in-process (by the scripted adapter / a future JSON decoder), so
-//! they stay plain Rust values here.
+//! constructed in-process (by the scripted adapter / a future JSON decoder) and
+//! serialize one way only: a traced call records the treatment it got as the
+//! JSON body of its decision round trip (ADR-0026).
 
 use std::collections::BTreeMap;
 
@@ -57,7 +58,7 @@ impl NewCallRequest {
 }
 
 /// A downstream SIP peer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SipDestination {
     pub host: String,
     pub port: Option<u16>,
@@ -104,7 +105,7 @@ pub fn read_stated_port(stated: Option<&serde_json::Value>) -> Option<u16> {
 
 /// Three-way body directive on a route: leave the inbound body, drop it, or
 /// substitute a new one (the source's `update_body` absent/null/value).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub enum BodyUpdate {
     #[default]
     Keep,
@@ -112,14 +113,14 @@ pub enum BodyUpdate {
     Replace(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CallLimiterEntry {
     pub id: String,
     pub limit: i64,
 }
 
 /// A "route" decision — bridge the call to `destination`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RouteDecision {
     pub destination: SipDestination,
     pub new_ruri: Option<String>,
@@ -146,11 +147,18 @@ pub struct RouteDecision {
     /// in-process type carries no serde; the persistence/back-compat default
     /// lives on `Call.subscriptions`, which is `#[serde(default)]`.)
     pub subscriptions: Vec<call::ReleaseEventKind>,
+    /// **Engine force-enable** for per-call tracing (ADR-0026). An absent field
+    /// is `false`, so an engine that never heard of tracing keeps today's
+    /// behaviour and the ADR-0017 response contract is unchanged. Honoring it
+    /// still runs the full admission chain (bucket + active cap) and is
+    /// monotonic: it can only turn a call's trace ON.
+    #[serde(default)]
+    pub trace: bool,
 }
 
 /// A "reject" decision — answer the INVITE with a failure response the decision
 /// layer authors (code + reason-phrase + extra headers, e.g. `Reason:`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RejectDecision {
     pub reject_code: u16,
     pub reject_reason: Option<String>,
@@ -160,7 +168,7 @@ pub struct RejectDecision {
 /// One redirect target in a [`RedirectDecision`]'s Contact list. `q` is the
 /// advisory caller-side preference (RFC 3261 §20.10); rendered verbatim in list
 /// order (the platform does not reorder — ADR-0017 X5).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RedirectContact {
     pub uri: String,
     pub q: Option<f32>,
@@ -169,7 +177,7 @@ pub struct RedirectContact {
 /// A "redirect" decision — answer the caller with a 3xx (default 302) carrying an
 /// ordered Contact list. Contact is the one header the decision layer owns *only*
 /// on a redirect (ADR-0017 header-ownership matrix).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RedirectDecision {
     /// 3xx status (300/301/302/305); defaults to 302 when built via helpers.
     pub code: u16,
@@ -186,7 +194,7 @@ pub struct RedirectDecision {
 ///   - `Relay`    — pass the last attempted b-leg's failure response verbatim
 ///     (only meaningful on the failover path; with no captured failure it falls
 ///     back to 480, ADR-0017 X5).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 #[allow(clippy::large_enum_variant)] // Route is the hot path; boxing adds an alloc per call.
 pub enum CallTreatment {
     Route(RouteDecision),
@@ -207,7 +215,7 @@ pub type CallFailureResponse = CallTreatment;
 /// What failed on a b-leg, for the failover decision. Carries the
 /// **event-scoped** facts only — everything the emitting site alone knows.
 /// Call-scoped context rides the [`CallSnapshot`] the framework attaches.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct FailureInfo {
     pub origin: String,
     pub status_code: Option<u16>,
@@ -221,7 +229,7 @@ pub struct FailureInfo {
     pub sip_headers: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct CallFailureRequest {
     pub callback_context: Option<String>,
     pub failure: FailureInfo,

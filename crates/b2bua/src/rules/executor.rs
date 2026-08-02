@@ -74,6 +74,7 @@ pub fn execute_rules(
             check_declared_effects(rule, &outcome.actions);
             let result = exec.execute(&outcome.actions, call, ctx);
             check_declared_transition(rule, &before.sm_cursors, &result.call.sm_cursors);
+            record_transitions(rule, &before, &result.call, exec.now_ms);
             let result = invariants::finalize(result);
             return invariants::enforce(obligations, &before, result, exec.now_ms, true);
         }
@@ -89,6 +90,46 @@ pub fn execute_rules(
 fn report_diagnostics(rule: &RuleDefinition, call: &Call, outcome: &RuleHandleResult) {
     for d in &outcome.diagnostics {
         tracing::warn!(call_ref = %call.call_ref, rule = %rule.id, detail = %d, "rule refused an input");
+    }
+}
+
+/// Record what the winning rule did on a traced call (ADR-0026): which rule
+/// handled the event, every state-machine cursor it moved, and the call's own
+/// lifecycle transition. Guarded — an unsampled call reads one `Option<bool>`
+/// and returns, evaluating no format argument.
+fn record_transitions(rule: &RuleDefinition, before: &Call, after: &Call, now_ms: i64) {
+    if !crate::trace::sampled(after) {
+        return;
+    }
+    crate::trace::emit::rule_fired(after, now_ms, rule.id);
+    for (machine, to) in &after.sm_cursors {
+        if before.sm_cursors.get(machine) != Some(to) {
+            let from = before.sm_cursors.get(machine).map(call::StateLabel::as_str).unwrap_or("");
+            crate::trace::emit::rule_transition(
+                after,
+                now_ms,
+                rule.id,
+                machine.as_str(),
+                from,
+                to.as_str(),
+            );
+        }
+    }
+    // A removed cursor is machine deactivation (`ClearState`, ADR-0016 X9).
+    for (machine, from) in &before.sm_cursors {
+        if !after.sm_cursors.contains_key(machine) {
+            crate::trace::emit::rule_transition(
+                after,
+                now_ms,
+                rule.id,
+                machine.as_str(),
+                from.as_str(),
+                "terminal",
+            );
+        }
+    }
+    if before.state != after.state {
+        crate::trace::emit::context_transition(after, now_ms, before.state, after.state);
     }
 }
 

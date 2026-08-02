@@ -114,7 +114,27 @@ rate and counted (`trace_header_malformed_total`).
 
 Header extraction lives ONLY in `sip-message` (full-parse path) and
 `sip_message::sniff` (the proxy's raw INVITE path), per the repo-wide rule that
-no other crate extracts SIP headers.
+no other crate extracts SIP headers. The reader keeps "absent" and "present but
+unreadable" apart (`TraceSample::{Absent, Malformed, Rate}`) so a rig that
+mistyped its rate does not look like a call that asked for nothing.
+
+The engine force-enable is a `trace: bool` on `RouteDecision` — the treatment
+that carries a call forward, and therefore the one that can turn its trace on.
+`#[serde(default)]`, so an engine that never heard of tracing is unchanged.
+
+#### Correlation ids
+
+Ids are W3C-shaped (32-hex trace, 16-hex span) and are minted by `observe`, not
+by the exporter, and ride every span as the `trace_id` / `span_id` attributes.
+That is what lets a domain crate populate `Call.trace_id` / `Call.root_span_id`
+and link a takeover span while the OpenTelemetry dependency tree stays inside
+`observe`. For the same reason the HA link is recorded as the `link.trace_id` /
+`link.span_id` attributes on the backup's root span rather than as an SDK link
+object — the correlation is identical, and the emitting crate stays OTel-free.
+
+Every span EVENT carries `at_ms`: when the fact HAPPENED. The subscriber's own
+timestamp is the emission time, which on the backfill path is not the same
+thing, so a reader that wants the call's timeline reads `at_ms`.
 
 ### 4. No wire propagation
 

@@ -525,6 +525,7 @@ pub fn route_to(host: &str, port: u16) -> RouteDecision {
         features: default_platform_features(),
         service_ext: Default::default(),
         subscriptions: Vec::new(),
+        trace: false,
     }
 }
 

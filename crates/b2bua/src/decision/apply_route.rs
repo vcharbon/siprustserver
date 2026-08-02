@@ -84,7 +84,16 @@ pub async fn apply_route(
                 limit: e.limit,
             })
             .collect();
-        match limiter.admit(&entries).await {
+        let outcome = limiter.admit(&entries).await;
+        if crate::trace::sampled(&call) {
+            crate::trace::emit::limiter(
+                &call,
+                now_ms,
+                "admit",
+                &format!("{entries:?} -> {outcome:?}"),
+            );
+        }
+        match outcome {
             AdmitOutcome::Admitted { window } => {
                 for e in &route.call_limiter {
                     call.limiter_entries.push(CallLimiterState {
@@ -122,7 +131,11 @@ pub async fn apply_route(
                         },
                         snapshot: crate::decision::CallSnapshot::of(&call),
                     };
-                    match decision.call_failure(req).await {
+                    let request_json = crate::trace::sampled(&call)
+                        .then(|| serde_json::to_vec(&req).unwrap_or_default());
+                    let response = decision.call_failure(req).await;
+                    record_failure_round_trip(&call, request_json, &response, now_ms);
+                    match response {
                         Ok(CallTreatment::Route(route2)) => {
                             return Box::pin(apply_route(
                                 call, route2, a_invite, decision, limiter, config, id_gen, now_ms,
@@ -303,6 +316,33 @@ pub async fn apply_route(
     arm_setup_timeout(&mut call, &mut fx, config.setup_timeout_sec, now_ms);
 
     HandlerResult { call, effects: fx }
+}
+
+/// Record the limiter-reject `/call/failure` consult as a child span on a traced
+/// call (ADR-0026). `request_json` is `None` for an unsampled call, which is
+/// also when this returns immediately — nothing was serialized for it.
+fn record_failure_round_trip(
+    call: &Call,
+    request_json: Option<Vec<u8>>,
+    response: &Result<CallTreatment, crate::decision::CallDecisionError>,
+    now_ms: i64,
+) {
+    let Some(request) = request_json else {
+        return;
+    };
+    let (outcome, body) = match response {
+        Ok(treatment) => (
+            match treatment {
+                CallTreatment::Route(_) => "route",
+                CallTreatment::Redirect(_) => "redirect",
+                CallTreatment::Reject(_) => "reject",
+                CallTreatment::Relay => "relay",
+            },
+            serde_json::to_vec(treatment).unwrap_or_default(),
+        ),
+        Err(err) => ("error", err.to_string().into_bytes()),
+    };
+    crate::trace::emit::round_trip(call, "/call/failure", now_ms, &request, now_ms, outcome, &body);
 }
 
 /// Arm the GlobalDuration absolute-cap backstop on the call (idempotent by id).

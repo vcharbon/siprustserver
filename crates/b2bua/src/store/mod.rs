@@ -255,9 +255,13 @@ impl CallState {
             return None;
         }
         let body = repl.get_call(role, &primary, call_ref).await.ok().flatten()?;
-        let call = self.codec.decode(&body).ok()?;
+        let mut call = self.codec.decode(&body).ok()?;
         let skew = repl.skew_offset_ms(call_ref).unwrap_or(0);
         let now_ms = self.clock.now_ms();
+        // A traced call taken over from a crashed primary gets THIS node's own
+        // root span, linked to the nominal's (ADR-0026 §5) — never parented to
+        // it: that span is closed or lost by definition.
+        crate::trace::adopt_replicated(&mut call, now_ms);
         let mut inner = self.inner.lock().unwrap();
         // Re-check under the lock (a concurrent hydrate may have won the race).
         if let Some(c) = inner.calls.get(call_ref) {
@@ -580,7 +584,11 @@ impl CallState {
     /// `CallMeta.backup == None` and the call invisible to its backup's bootstrap
     /// scan until the next keepalive re-flush — re-establishing it here closes that
     /// un-backed-up window the instant the call is re-served.
-    pub fn materialize_if_absent(&self, call: Call) -> bool {
+    pub fn materialize_if_absent(&self, mut call: Call) -> bool {
+        // Reclaim is a hydration site too: a traced call re-served here opens
+        // this node's own root span, linked to the one that served it before
+        // (ADR-0026 §5). Idempotent — a call already holding a span keeps it.
+        crate::trace::adopt_replicated(&mut call, self.clock.now_ms());
         let backup = call
             .topology
             .as_ref()

@@ -369,6 +369,12 @@ impl RunnerEnv {
     /// composed from this kit logs and traces identically without wiring it.
     pub async fn bind(self, name: &str) -> RunnerBase {
         let observe = observe::init_production(name);
+        // The per-call trace gate, configured once from the environment before
+        // any call arrives (ADR-0026): with no OTLP endpoint it is inert and no
+        // call path pays more than one boolean check.
+        b2bua::trace::install_process_traces(std::sync::Arc::new(
+            b2bua::trace::CallTraces::from_env(0),
+        ));
         validate_tier1_pct(self.udp_tier1_pct)
             .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
         validate_outbound_proxy_requirement(self.require_outbound_proxy, self.outbound_proxy.is_some())

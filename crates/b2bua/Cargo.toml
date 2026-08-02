@@ -38,6 +38,9 @@ call-limiter = { path = "../call-limiter" }
 [dev-dependencies]
 # Paused-clock lever for timer tests (tokio::time::pause/advance).
 tokio = { workspace = true, features = ["test-util"] }
+# The counting global allocator behind the trace machinery's zero-cost budget
+# (ADR-0026 explicit-guard discipline).
+alloc-counter = { path = "../alloc-counter" }
 # Integration tests bind a real LimiterServer on the simulated HTTP fabric.
 http-net = { path = "../http-net" }
 call-limiter = { path = "../call-limiter" }
