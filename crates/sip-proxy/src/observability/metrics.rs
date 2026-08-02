@@ -185,6 +185,12 @@ pub struct ProxyMetrics {
     calls: AtomicU64,                // initial (dialog-creating, no To-tag) INVITEs
     routing_decisions: [AtomicU64; RoutingDecisionKind::ALL.len()], // indexed by RoutingDecisionKind
     hmac_failures: LabeledCounter,   // keyed reason
+    /// Locally decided rejections (`RouteOutcome` kind `reject`), keyed by a
+    /// bounded static reason — where the reject also answers on the wire, the
+    /// same string the SIP `Reason` header states. The per-cause split of the
+    /// aggregate `sip_routing_decision_total{kind="reject"}`, so a
+    /// proxy-generated 503 is attributable from metrics alone.
+    rejects: LabeledCounter,
     cancel_lookups: LabeledCounter,  // keyed outcome
     decode_forward_promoted: LabeledCounter, // keyed from-reason
     fresh_pod_forward: LabeledCounter, // keyed age-bucket
@@ -311,6 +317,14 @@ impl ProxyMetrics {
 
     pub fn record_hmac_failure(&self, reason: HmacFailureReason) {
         self.hmac_failures.inc(reason.as_str());
+    }
+
+    /// Count one locally decided reject by reason, for
+    /// `sip_proxy_rejects_total{reason}`. Callers pass strings from a bounded
+    /// static set (the emit sites' `&'static str` reasons plus the self-gate's
+    /// two reason constants), keeping label cardinality bounded.
+    pub fn record_reject(&self, reason: &str) {
+        self.rejects.inc(reason);
     }
 
     pub fn record_cancel_lookup(&self, outcome: &str) {
@@ -461,6 +475,9 @@ impl ProxyMetrics {
     pub fn overload_rejection_count(&self, reason: &str) -> u64 {
         self.overload_rejections.snapshot().get(reason).copied().unwrap_or(0)
     }
+    pub fn reject_count(&self, reason: &str) -> u64 {
+        self.rejects.snapshot().get(reason).copied().unwrap_or(0)
+    }
 
     /// Render Prometheus text exposition (the `/metrics` body).
     pub fn prometheus_text(&self) -> String {
@@ -532,6 +549,7 @@ impl ProxyMetrics {
         labeled2(&mut s, "sip_proxy_responses_total", "Inbound SIP responses by CSeq method + status code.", ("method", "code"), &self.responses.snapshot());
         g(&mut s, "sip_proxy_calls_total", "New calls: initial dialog-creating INVITEs (no To-tag).", "counter", self.calls.load(Ordering::Relaxed));
         labeled(&mut s, "sip_routing_decision_total", "Routing decisions by kind.", "counter", "kind", &decisions_map);
+        labeled(&mut s, "sip_proxy_rejects_total", "Locally decided rejects by reason (the per-cause split of sip_routing_decision_total kind=reject).", "counter", "reason", &self.rejects.snapshot());
         labeled(&mut s, "sip_proxy_hmac_failures_total", "HMAC verify failures by reason.", "counter", "reason", &self.hmac_failures.snapshot());
 
         // Histogram (count + sum only — the slice does not bucket).
@@ -647,6 +665,25 @@ mod tests {
         // Emergency-bypass visibility series (the LB critical-filter + AIMD skip).
         assert!(txt.contains("sip_proxy_lb_emergency_bypassed_total 2"));
         assert!(txt.contains("# TYPE sip_proxy_lb_emergency_bypassed_total counter"));
+    }
+
+    #[test]
+    fn reject_reason_counter_renders() {
+        // Every reason must surface as its own labelled series — the aggregate
+        // kind="reject" bucket alone leaves a locally generated 503
+        // unattributable from metrics.
+        let m = ProxyMetrics::new();
+        m.record_reject("worker_rate_capped");
+        m.record_reject("worker_rate_capped");
+        m.record_reject("no_target_available");
+        m.record_reject("too_many_hops");
+        assert_eq!(m.reject_count("worker_rate_capped"), 2);
+        assert_eq!(m.reject_count("no_target_available"), 1);
+        let txt = m.prometheus_text();
+        assert!(txt.contains("# TYPE sip_proxy_rejects_total counter"));
+        assert!(txt.contains("sip_proxy_rejects_total{reason=\"worker_rate_capped\"} 2"));
+        assert!(txt.contains("sip_proxy_rejects_total{reason=\"no_target_available\"} 1"));
+        assert!(txt.contains("sip_proxy_rejects_total{reason=\"too_many_hops\"} 1"));
     }
 
     #[test]

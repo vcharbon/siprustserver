@@ -70,11 +70,13 @@ impl ProxyCore {
     /// edit on the wire is a request with no path back for its response.
     fn drop_unforwardable(&self) -> RouteOutcome {
         self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
+        self.metrics.record_reject("drop_unforwardable");
         RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }
     }
 
     pub(in crate::core) async fn route_request(&self, msg: &SipMessage, src: SocketAddr) -> RouteOutcome {
         let SipMessage::Request(req) = msg else {
+            self.metrics.record_reject("non_request");
             return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
         };
         let method = req.method().clone();
@@ -93,9 +95,11 @@ impl ProxyCore {
             // answered — a response to an ACK is a stray message (the ACK
             // terminates a transaction; nothing upstream awaits a reply to it).
             if method == Method::Ack {
+                self.metrics.record_reject("ack_max_forwards_exhausted");
                 return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
             }
             self.reply(req, src, 483, "Too Many Hops", &[]).await;
+            self.metrics.record_reject("too_many_hops");
             return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
         };
 
@@ -109,10 +113,12 @@ impl ProxyCore {
         if let Some(Ok(required)) = req.header::<ProxyRequire>() {
             if !required.is_empty() {
                 if method == Method::Ack {
+                    self.metrics.record_reject("ack_proxy_require_unsupported");
                     return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
                 }
                 let extra = [extra_header(Unsupported::of(required.iter()))];
                 self.reply(req, src, 420, "Bad Extension", &extra).await;
+                self.metrics.record_reject("proxy_require_unsupported");
                 return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
             }
         }
@@ -285,6 +291,9 @@ impl ProxyCore {
                         extra_header(proxy_reason(503, &reason)),
                     ];
                     self.reply(req, src, 503, "Service Unavailable", &extra).await;
+                    // Bounded set: the self-gate's own reason constants
+                    // (proxy_overload_elu / proxy_overload_cps).
+                    self.metrics.record_reject(&reason);
                     return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
                 }
             } else if is_new_dialog_invite && is_emergency {
@@ -346,6 +355,7 @@ impl ProxyCore {
                 }
                 _ => {
                     self.reply(req, src, 400, "Bad Request", &[]).await;
+                    self.metrics.record_reject("malformed_request_uri");
                     return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
                 }
             }
@@ -361,6 +371,9 @@ impl ProxyCore {
                 }
                 DecodeResult::Reject { status, reason } => {
                     self.reply(req, src, status, &reason, &[]).await;
+                    // The decode reasons are free-form diagnostics — one
+                    // static label keeps the reason set bounded.
+                    self.metrics.record_reject("stickiness_decode_rejected");
                     return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
                 }
                 DecodeResult::Unknown { is_emergency } => {
@@ -397,6 +410,7 @@ impl ProxyCore {
 
         let Some(target) = target else {
             // Defensive — every branch above either set `target` or returned.
+            self.metrics.record_reject("no_target_selected");
             return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
         };
 
