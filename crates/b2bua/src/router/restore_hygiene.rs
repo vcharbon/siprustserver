@@ -88,6 +88,22 @@ fn smooth_keepalives(
     }
 }
 
+/// Clamp every `Keepalive` to at most one interval out — the seam's ceiling.
+///
+/// The `keepalive` rule re-arms at exactly `+interval` from each fire, so a
+/// deadline beyond that is an origin-frame residual [`reanchor_timers`] could not
+/// remove, never a legitimate intent — and a call held past a cadence unprobed
+/// loses its UAC's keepalive tolerance. Applies on every hydration path; moves a
+/// probe only earlier, so no settle or handback is introduced (ADR-0014 untouched).
+fn cap_future_keepalives(timers: &mut [TimerEntry], now_ms: i64, keepalive_interval_ms: i64) {
+    let ceiling = now_ms + keepalive_interval_ms;
+    for t in timers.iter_mut() {
+        if matches!(t.timer_type, TimerType::Keepalive) {
+            t.fire_at = t.fire_at.min(ceiling);
+        }
+    }
+}
+
 /// Re-anchor **deadband** (ms): a persisted `skew_offset_ms` whose magnitude is
 /// below this is NOT applied — it is dominated by replication transit latency +
 /// clock jitter, not a genuine inter-node clock disagreement worth correcting.
@@ -133,7 +149,12 @@ pub(super) fn reanchor_timers(timers: &mut [TimerEntry], skew_offset_ms: i64) {
 ///    [`smooth_keepalives`] correct.
 /// 2. **Drop stale `KeepaliveTimeout`** ([`drop_stale_keepalive_timeout`]) — the
 ///    OPTIONS it guarded died with the crashed node.
-/// 3. **Defensive floor — ONLY when the offset is UNKNOWN** (`None`: a path that
+/// 3. **Ceiling — always** ([`cap_future_keepalives`]), and re-asserted after step
+///    5: applied before the spread it bounds that spread's window, and after it
+///    bounds the past-due catch-up offset (which scales with a batch-wide `l_max`
+///    one poisoned deadline can inflate). Together: no restored call waits more
+///    than a cadence for its first probe.
+/// 4. **Defensive floor — ONLY when the offset is UNKNOWN** (`None`: a path that
 ///    could not re-anchor). A `Keepalive` past-due by ≥ 1× `keepalive_interval` is
 ///    then treated as uncorrected skew/backlog pathology and re-based to `now +
 ///    (stable_jitter % interval)` rather than firing an immediate OPTIONS at
@@ -144,7 +165,7 @@ pub(super) fn reanchor_timers(timers: &mut [TimerEntry], skew_offset_ms: i64) {
 ///    transparent (skew is a known 0, so reclaim keeps the source's OPTIONS
 ///    timing token-for-token). Deterministic per `(call_ref, timer id)` so a
 ///    reboot re-pass is idempotent.
-/// 4. **Cohort smoothing** ([`smooth_keepalives`]) when `smoothing` is requested
+/// 5. **Cohort smoothing** ([`smooth_keepalives`]) when `smoothing` is requested
 ///    (the bulk reboot sweep).
 pub(super) fn sanitize_restored_timers(
     timers: &mut Vec<TimerEntry>,
@@ -160,7 +181,11 @@ pub(super) fn sanitize_restored_timers(
     }
     // 2. Stale keepalive-timeout hygiene.
     drop_stale_keepalive_timeout(timers);
-    // 3. Defensive floor — only for an UNKNOWN offset (see the doc above). Skipped
+    // 3. Ceiling — every path, so the spread in step 5 is bounded to one interval.
+    if keepalive_interval_ms > 0 {
+        cap_future_keepalives(timers, now_ms, keepalive_interval_ms);
+    }
+    // 4. Defensive floor — only for an UNKNOWN offset (see the doc above). Skipped
     //    when the offset is known so a well-anchored past-due keepalive fires
     //    promptly (single-clock transparency).
     if skew_offset_ms.is_none() && keepalive_interval_ms > 0 {
@@ -175,10 +200,14 @@ pub(super) fn sanitize_restored_timers(
             }
         }
     }
-    // 4. Cohort smoothing (bulk reboot sweep only). Runs AFTER re-anchoring so its
-    //    past-due/future classification keys on skew-corrected deadlines.
+    // 5. Cohort smoothing (bulk reboot sweep only). Runs AFTER re-anchoring so its
+    //    past-due/future classification keys on skew-corrected deadlines, then
+    //    re-asserts the step-3 ceiling over its past-due catch-up offsets.
     if let Some(s) = smoothing {
         smooth_keepalives(timers, call_ref, s.now_ms, s.l_max, s.speedup, s.cap_ms);
+        if keepalive_interval_ms > 0 {
+            cap_future_keepalives(timers, now_ms, keepalive_interval_ms);
+        }
     }
 }
 
@@ -311,6 +340,107 @@ mod tests {
         assert!(
             fire_rx2.try_recv().is_err(),
             "FIX: no spurious keepalive-timeout fires on reclaim; the call survives",
+        );
+    }
+
+    /// A restored `Keepalive` never lands more than one interval out, on EVERY
+    /// hydration path. `fire_at` is an absolute deadline minted in a FOREIGN clock
+    /// frame, so a re-anchor residual over-future-dates it; `smooth_keepalives`
+    /// then spreads the cohort across `[now, fire_at]`, and every call landing past
+    /// `now + interval` goes a full extra cadence unprobed — the UAC's keepalive
+    /// tolerance expires and it BYEs a healthy hold. The ceiling bounds the future
+    /// side; the defensive floor covers the past-due side.
+    #[test]
+    fn restored_keepalive_is_capped_at_one_interval() {
+        let now = 1_000_000;
+        let interval = 300_000;
+        let ceiling = now + interval;
+        // Residual frame error: deadlines land 1.5 intervals out instead of ≤ 1.
+        let deadline = now + interval + interval / 2;
+        let smoothing = Smoothing { now_ms: now, l_max: 0, speedup: 10, cap_ms: None };
+
+        // Bulk reboot sweep (`reclaim_all`): offset already applied + smoothing.
+        let mut late = 0;
+        let mut fire_ats = std::collections::HashSet::new();
+        for i in 0..1000 {
+            let call_ref = format!("w1|call-{i}|tag-{i}");
+            let mut timers = vec![keepalive(deadline)];
+            sanitize_restored_timers(
+                &mut timers,
+                &call_ref,
+                now,
+                Some(0),
+                interval,
+                Some(smoothing),
+            );
+            if timers[0].fire_at > ceiling {
+                late += 1;
+            }
+            fire_ats.insert(timers[0].fire_at);
+        }
+        assert_eq!(
+            late, 0,
+            "{late}/1000 restored keepalives scheduled beyond one interval — each is a \
+             cadence of silence the UAC tolerance does not cover",
+        );
+        // Clamped BEFORE the spread, not after: clamping after would collapse the
+        // whole over-ceiling tail onto `ceiling` — a re-correlated OPTIONS burst.
+        assert!(
+            fire_ats.len() > 900,
+            "clamped cohort is still de-correlated: {} distinct fire_at over 1000 calls",
+            fire_ats.len(),
+        );
+
+        // Reactive takeover / on-demand straggler: no cohort, so no smoothing —
+        // the ceiling still applies, exactly.
+        let mut t = vec![keepalive(deadline)];
+        sanitize_restored_timers(&mut t, "w1|solo|solo", now, Some(0), interval, None);
+        assert_eq!(t[0].fire_at, ceiling, "un-smoothed restore is clamped to the ceiling");
+
+        // A deadline already within one interval is trusted token-for-token (the
+        // single-clock transparency property, future-side counterpart of the floor).
+        let inside = now + interval / 3;
+        let mut t = vec![keepalive(inside)];
+        sanitize_restored_timers(&mut t, "w1|inside|inside", now, Some(0), interval, None);
+        assert_eq!(t[0].fire_at, inside, "a within-interval deadline is left untouched");
+
+        // Keepalive-only: a policy deadline legitimately outlives one keepalive
+        // interval (GlobalDuration caps an hour-long call) and must NOT be clamped.
+        let duration_at = now + 3_600_000;
+        let mut t = vec![
+            keepalive(deadline),
+            TimerEntry {
+                id: TimerType::GlobalDuration.timer_id(None),
+                timer_type: TimerType::GlobalDuration,
+                fire_at: duration_at,
+                leg_id: None,
+            },
+        ];
+        sanitize_restored_timers(&mut t, "w1|mixed|mixed", now, Some(0), interval, None);
+        assert_eq!(t[0].fire_at, ceiling, "the keepalive is clamped");
+        assert_eq!(t[1].fire_at, duration_at, "GlobalDuration keeps its absolute deadline");
+    }
+
+    /// The past-due catch-up drains within one interval too. `smooth_keepalives`
+    /// schedules an overdue keepalive at `now + (l_max - l)/speedup`, and `l_max`
+    /// is the whole batch's worst gap with no cap by default — so ONE poisoned
+    /// deadline pushes every barely-overdue healthy call past a cadence. Same loss
+    /// as the un-clamped future side, reached through the other branch.
+    #[test]
+    fn catchup_drain_stays_within_one_interval() {
+        let now = 1_000_000;
+        let interval = 300_000;
+        // One entry overdue by 40 intervals poisons the batch-wide l_max; this call
+        // is overdue by 1 s, so it lands at the far end of the catch-up band.
+        let smoothing =
+            Smoothing { now_ms: now, l_max: 40 * interval, speedup: 10, cap_ms: None };
+        let mut timers = vec![keepalive(now - 1_000)];
+        sanitize_restored_timers(&mut timers, "w1|od|od", now, Some(0), interval, Some(smoothing));
+        assert!(
+            timers[0].fire_at <= now + interval,
+            "catch-up offset bounded by the ceiling: {} > {}",
+            timers[0].fire_at,
+            now + interval,
         );
     }
 
