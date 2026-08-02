@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/sip-message",
+    "crates/observe",
     "crates/alloc-counter",
     "crates/sip-clock",
     "crates/layer-harness",
@@ -144,6 +145,18 @@ rustfft = "6"
 # `webrtc-util` provides the Marshal/Unmarshal traits they implement.
 bytes = "1"
 webrtc-util = "0.10"
+# Observability (ADR-0026). `tracing` is the instrumentation facade every crate
+# may depend on; `tracing-subscriber` builds the process subscriber (registry +
+# compact fmt layer) and `tracing-opentelemetry`/`opentelemetry*` the OTLP span
+# export — those three are reachable ONLY from `crates/observe`, so the OTel
+# dependency tree never reaches a domain crate. OTLP speaks http/protobuf over
+# the `reqwest` client already in the tree (no second HTTP stack, no tonic).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "registry", "env-filter", "ansi"] }
+tracing-opentelemetry = { version = "0.33", default-features = false, features = ["tracing-log"] }
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-client"] }
 # CDR-on-RabbitMQ sink (b2bua-runner) + the dedicated CDR metrics consumer
 # (cdr-consumer-runner). `lapin` is the async AMQP 0-9-1 client; it is runtime-
 # agnostic, so the two `*-trait` shims bind its executor/reactor to the same

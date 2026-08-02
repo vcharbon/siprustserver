@@ -25,3 +25,6 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 futures-util = "0.3"
+# Process subscriber + lifecycle logging (ADR-0026).
+observe = { path = "../observe" }
+tracing = { workspace = true }

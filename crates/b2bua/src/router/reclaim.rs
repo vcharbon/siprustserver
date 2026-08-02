@@ -269,15 +269,19 @@ pub(super) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
         }
     }
     // Per-reboot completeness telemetry. The gauges expose the pass's
-    // denominator/numerator; the structured stderr line (visible in
+    // denominator/numerator; the structured lifecycle line (visible in
     // `kubectl logs`) records the per-pass triple.
     ctx.metrics.set_repl_reclaim_pass(scanned, materialized);
     let active_after = ctx.state.active_count() as u64;
     let duration_ms = ctx.clock.now_ms() - start_ms;
-    eprintln!(
-        "b2bua-runner reboot reclaim: active_before={active_before} scanned={scanned} \
-         materialized={materialized} active_after={active_after} l_max_ms={l_max} \
-         duration_ms={duration_ms}"
+    tracing::info!(
+        active_before,
+        scanned,
+        materialized,
+        active_after,
+        l_max_ms = l_max,
+        duration_ms,
+        "reboot reclaim"
     );
 }
 

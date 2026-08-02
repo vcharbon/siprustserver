@@ -106,10 +106,12 @@ impl ActionExecutor<'_> {
                 // caller's response to whatever that address happens to be; the
                 // loopback this used to fall back to swallowed it silently (055).
                 let Some(dest) = pending.source_vias.first().and_then(|v| via_sent_by(v)) else {
-                    eprintln!(
-                        "WARN: call {}: leg {source_leg_id}: relayed {status} dropped — the \
-                         originator's top Via does not read, so it names no destination",
-                        call.call_ref
+                    tracing::warn!(
+                        call_ref = %call.call_ref,
+                        leg_id = %source_leg_id,
+                        status,
+                        "relayed response dropped — the originator's top Via does not read, so it \
+                         names no destination"
                     );
                     return;
                 };

@@ -88,7 +88,7 @@ pub fn execute_rules(
 /// no wire traffic — the rule's actions do.
 fn report_diagnostics(rule: &RuleDefinition, call: &Call, outcome: &RuleHandleResult) {
     for d in &outcome.diagnostics {
-        eprintln!("WARN: call {}: rule {} refused an input — {d}", call.call_ref, rule.id);
+        tracing::warn!(call_ref = %call.call_ref, rule = %rule.id, detail = %d, "rule refused an input");
     }
 }
 
@@ -132,12 +132,12 @@ fn check_declared_transition(
                 to.map(call::StateLabel::as_str),
             );
         } else {
-            eprintln!(
-                "WARN: rule '{}' caused an undeclared transition on machine '{}': {:?} -> {:?}",
-                rule.id,
-                machine.as_str(),
-                from.map(call::StateLabel::as_str),
-                to.map(call::StateLabel::as_str),
+            tracing::warn!(
+                rule = %rule.id,
+                machine = machine.as_str(),
+                from = ?from.map(call::StateLabel::as_str),
+                to = ?to.map(call::StateLabel::as_str),
+                "rule caused an undeclared transition"
             );
         }
     }
@@ -166,10 +166,7 @@ fn check_declared_effects(rule: &RuleDefinition, emitted: &[RuleAction]) {
                     rule.id, kind,
                 );
             } else {
-                eprintln!(
-                    "WARN: rule '{}' emitted an undeclared {:?} side effect",
-                    rule.id, kind,
-                );
+                tracing::warn!(rule = %rule.id, effect = ?kind, "rule emitted an undeclared side effect");
             }
         }
     }

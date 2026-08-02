@@ -337,7 +337,7 @@ fn env_f64_opt(key: &str) -> Option<f64> {
         Ok(raw) => match raw.trim().parse::<f64>() {
             Ok(v) if v.is_finite() => Some(v),
             _ => {
-                eprintln!("sip-proxy-runner: ignoring malformed {key}={raw:?} (not a finite number)");
+                tracing::warn!(%key, value = %raw, "ignoring malformed env override (not a finite number)");
                 None
             }
         },
@@ -375,9 +375,9 @@ fn load_observer_cfg_from_env(mut cfg: LoadObserverConfig) -> LoadObserverConfig
     set("LB_CAP_CEILING_CPS", &mut cfg.cap_ceiling_cps);
     set("LB_CAP_FLOOR_CPS", &mut cfg.cap_floor_cps);
     if applied.is_empty() {
-        eprintln!("sip-proxy-runner: load-observer bands = shipped defaults (no LB_* overrides)");
+        tracing::info!("load-observer bands = shipped defaults (no LB_* overrides)");
     } else {
-        eprintln!("sip-proxy-runner: load-observer band/AIMD overrides applied: {}", applied.join(" "));
+        tracing::info!(overrides = %applied.join(" "), "load-observer band/AIMD overrides applied");
     }
     cfg
 }
@@ -455,7 +455,7 @@ where
                         started.elapsed().as_millis(),
                     ));
                 }
-                eprintln!("sip-proxy-runner waiting for {addr} release ({what}): attempt {attempt}");
+                tracing::warn!(%addr, bind = what, attempt, "waiting for address release");
                 tokio::time::sleep(interval).await;
             }
         }
@@ -478,7 +478,7 @@ async fn build_registry(
         let reg = StaticWorkerRegistry::from_string_with_clock(workers, "PROXY_WORKERS", clock)
             .unwrap_or_else(|e| panic!("bad PROXY_WORKERS {workers:?}: {e}"));
         let control = reg.control();
-        eprintln!("sip-proxy-runner worker pool: static PROXY_WORKERS={workers}");
+        tracing::info!(source = "PROXY_WORKERS", %workers, "worker pool");
         return (Arc::new(reg), control);
     }
 
@@ -494,8 +494,12 @@ async fn build_registry(
     let _ = rustls::crypto::ring::default_provider().install_default();
     match kube::Client::try_default().await {
         Ok(client) => {
-            eprintln!(
-                "sip-proxy-runner worker pool: k8s EndpointSlice informer (svc={service}, ns={namespace}, port={sip_port})"
+            tracing::info!(
+                source = "k8s-endpointslice",
+                %service,
+                %namespace,
+                port = sip_port,
+                "worker pool"
             );
             let membership: Arc<dyn Membership> =
                 Arc::new(K8sMembership::spawn(client, namespace, service));
@@ -505,8 +509,10 @@ async fn build_registry(
         }
         Err(e) => {
             let fallback = "w0@127.0.0.1:5060";
-            eprintln!(
-                "sip-proxy-runner no kube client ({e}) and no PROXY_WORKERS — falling back to {fallback}"
+            tracing::warn!(
+                error = %e,
+                %fallback,
+                "no kube client and no PROXY_WORKERS — falling back to a single local worker"
             );
             let reg =
                 StaticWorkerRegistry::from_string(fallback, "fallback").expect("fallback pool");
@@ -518,6 +524,10 @@ async fn build_registry(
 
 #[tokio::main]
 async fn main() {
+    // Subscriber first (ADR-0026): every line below it is a lifecycle log, and
+    // the guard drains the writer + flushes spans at exit.
+    let _observe = observe::init_production("sip-proxy-runner");
+
     // Loud confirmation the jemalloc decay config (_RJEM_MALLOC_CONF) parsed —
     // a typo is silently ignored. Mirrored by the jemalloc_opt_*_decay_ms gauges.
     #[cfg(not(target_env = "msvc"))]
@@ -568,9 +578,8 @@ async fn main() {
     )
     .unwrap_or_else(|e| panic!("sip-proxy-runner: {e}"));
     if listen_ext.is_none() && env::var("PROXY_FACE_INT_CIDRS").is_ok() {
-        eprintln!(
-            "sip-proxy-runner: PROXY_FACE_INT_CIDRS set but PROXY_LISTEN_EXT unset — \
-             single-face mode, CIDR list ignored"
+        tracing::warn!(
+            "PROXY_FACE_INT_CIDRS set but PROXY_LISTEN_EXT unset — single-face mode, CIDR list ignored"
         );
     }
     let ext_face: Option<(SocketAddr, ProxyAddr, FaceCidrs)> = listen_ext.map(|l| {
@@ -840,10 +849,11 @@ async fn main() {
         for core in &cores {
             core.prewarm_named_targets(prewarm_targets.clone());
         }
-        eprintln!(
-            "sip-proxy-runner resolver prewarm: [{}] pinned warm across {recv_shards} shard cache(s) \
-             (outcomes: sip_proxy_resolver_refresh_total{{outcome=prewarmed|prewarm_failed}})",
-            prewarm_targets.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(","),
+        tracing::info!(
+            targets = %prewarm_targets.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(","),
+            recv_shards,
+            outcomes = "sip_proxy_resolver_refresh_total{outcome=prewarmed|prewarm_failed}",
+            "resolver prewarm pinned warm across every shard cache"
         );
     }
 
@@ -854,17 +864,20 @@ async fn main() {
         ),
         None => String::new(),
     };
-    eprintln!(
-        "sip-proxy-runner pid={} listening UDP {listen_sa} advertise={}:{}{face_note} workers=[{}] (queue={queue_max}, recv_shards={recv_shards})",
-        std::process::id(),
-        advertised.host,
-        advertised.port,
-        registry
+    tracing::info!(
+        pid = std::process::id(),
+        listen = %listen_sa,
+        advertise = %format_args!("{}:{}", advertised.host, advertised.port),
+        faces = %face_note,
+        workers = %registry
             .snapshot()
             .iter()
             .map(|w| format!("{}@{}:{}", w.id, w.address.host, w.address.port))
             .collect::<Vec<_>>()
             .join(","),
+        queue = queue_max,
+        recv_shards,
+        "listening"
     );
 
     // Readiness gate (ADR-0012 D4): the proxy is fit to take traffic only with
@@ -973,6 +986,8 @@ async fn main() {
         metrics: Arc::new(move || {
             let mut t = metrics.prometheus_text();
             t.push_str(&self_gate_prometheus_text(&metrics_gate));
+            // Dropped log lines + trace-admission denials (ADR-0026).
+            t.push_str(&observe::counters::prometheus_text());
             #[cfg(not(target_env = "msvc"))]
             t.push_str(&jemalloc_stats::prometheus_text());
             t
@@ -989,10 +1004,7 @@ async fn main() {
         .unwrap_or_else(|e| {
             panic!("sip-proxy-runner FATAL: metrics server on {metrics_sa} failed to start: {e}")
         });
-    eprintln!(
-        "sip-proxy-runner metrics on http://{}/metrics (readiness /readyz)",
-        _metrics_server.addr()
-    );
+    tracing::info!(addr = %_metrics_server.addr(), "metrics server listening (/metrics, readiness /readyz)");
 
     let probe_task = tokio::spawn(probe.run());
     let mut core_tasks = tokio::task::JoinSet::new();
@@ -1014,20 +1026,20 @@ async fn main() {
     // the container restart the moment ANY recv shard or the probe dies.
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
-            eprintln!("sip-proxy-runner SIGINT — shutting down");
+            tracing::info!(signal = "SIGINT", "shutting down");
         }
         _ = wait_sigterm() => {
-            eprintln!("sip-proxy-runner SIGTERM — draining ({drain_grace_ms}ms grace)");
+            tracing::info!(signal = "SIGTERM", drain_grace_ms, "draining");
             draining.store(true, Ordering::Relaxed);
             tokio::time::sleep(std::time::Duration::from_millis(drain_grace_ms)).await;
-            eprintln!("sip-proxy-runner drain grace elapsed — exiting");
+            tracing::info!("drain grace elapsed — exiting");
         }
         res = core_tasks.join_next() => {
-            eprintln!("sip-proxy-runner FATAL: a SIP recv shard exited ({res:?}) — exiting for restart");
+            tracing::error!(outcome = ?res, "FATAL: a SIP recv shard exited — exiting for restart");
             std::process::exit(1);
         }
         res = probe_task => {
-            eprintln!("sip-proxy-runner FATAL: health probe exited ({res:?}) — exiting for restart");
+            tracing::error!(outcome = ?res, "FATAL: health probe exited — exiting for restart");
             std::process::exit(1);
         }
     }
@@ -1044,7 +1056,7 @@ async fn wait_sigterm() {
             s.recv().await;
         }
         Err(e) => {
-            eprintln!("sip-proxy-runner cannot install SIGTERM handler: {e}");
+            tracing::warn!(error = %e, "cannot install SIGTERM handler");
             std::future::pending::<()>().await;
         }
     }

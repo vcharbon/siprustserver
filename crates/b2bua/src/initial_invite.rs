@@ -125,11 +125,12 @@ fn topology_from_cookie(
         CookieRead::Topology(topology) => Some(topology),
         CookieRead::NoCookie => None,
         CookieRead::Unreadable(err) => {
-            eprintln!(
-                "WARN: call {call_ref} (Call-ID {}): a recorded route does not read ({err}); the \
-                 proxy's stickiness cookie cannot be read, so this call is placed NON-REPLICATING \
-                 — it does not survive a takeover",
-                invite.call_id().as_str()
+            tracing::warn!(
+                %call_ref,
+                call_id = invite.call_id().as_str(),
+                error = %err,
+                "a recorded route does not read; the proxy's stickiness cookie cannot be read, so \
+                 this call is placed NON-REPLICATING — it does not survive a takeover"
             );
             None
         }
@@ -338,10 +339,10 @@ pub(crate) fn reject_call(
     let extra_headers = match build_reject_headers(update_headers, contacts) {
         Ok(headers) => headers,
         Err(err) => {
-            eprintln!(
-                "WARN: call {}: redirect refused — {}",
-                call.call_ref,
-                err.detail()
+            tracing::warn!(
+                call_ref = %call.call_ref,
+                detail = %err.detail(),
+                "redirect refused"
             );
             return reject_call(
                 call, a_invite, 500, Some(err.to_string()), update_headers, &[], id_gen, now_ms,

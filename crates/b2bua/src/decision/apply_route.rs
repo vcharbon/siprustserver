@@ -221,10 +221,10 @@ pub async fn apply_route(
     ) {
         Ok(built) => built,
         Err(err) => {
-            eprintln!(
-                "WARN: call {}: routing decision refused — {}",
-                call.call_ref,
-                err.detail()
+            tracing::warn!(
+                call_ref = %call.call_ref,
+                detail = %err.detail(),
+                "routing decision refused"
             );
             return crate::initial_invite::reject_call(
                 call, a_invite, 500, Some(err.to_string()), None, &[], id_gen, now_ms,

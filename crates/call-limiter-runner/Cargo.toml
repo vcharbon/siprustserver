@@ -14,6 +14,9 @@ http-net = { path = "../http-net", features = ["real"] }
 call-limiter = { path = "../call-limiter" }
 sip-clock = { path = "../sip-clock" }
 tokio = { workspace = true }
+# Process subscriber + lifecycle logging (ADR-0026).
+observe = { path = "../observe" }
+tracing = { workspace = true }
 
 [dev-dependencies]
 http-net = { path = "../http-net", features = ["real"] }

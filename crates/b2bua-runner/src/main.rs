@@ -198,8 +198,8 @@ impl PeerResolver for ReplResolver {
         // proves the puller redirected to a restarted peer (handoff §7 / ADR-0012
         // D3). `None` → unresolvable now; the puller backs off and retries.
         match addr {
-            Some(a) => eprintln!("b2bua-runner repl: peer={} resolved -> {a}", peer.ordinal),
-            None => eprintln!("b2bua-runner repl: peer={} unresolvable (will retry)", peer.ordinal),
+            Some(a) => tracing::info!(peer = %peer.ordinal, addr = %a, "repl peer resolved"),
+            None => tracing::warn!(peer = %peer.ordinal, "repl peer unresolvable (will retry)"),
         }
         addr
     }
@@ -220,11 +220,11 @@ async fn build_membership() -> Option<(Arc<dyn Membership>, ReplAddressing)> {
     if !peers.trim().is_empty() {
         match StaticMembership::from_string(&peers, "B2BUA_PEERS") {
             Ok(m) => {
-                eprintln!("b2bua-runner replication membership: static B2BUA_PEERS={peers}");
+                tracing::info!(source = "B2BUA_PEERS", %peers, "replication membership");
                 return Some((Arc::new(m), ReplAddressing::Static));
             }
             Err(e) => {
-                eprintln!("b2bua-runner B2BUA_PEERS parse error: {e} — replication disabled");
+                tracing::warn!(error = %e, "B2BUA_PEERS parse error — replication disabled");
                 return None;
             }
         }
@@ -238,8 +238,11 @@ async fn build_membership() -> Option<(Arc<dyn Membership>, ReplAddressing)> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     match kube::Client::try_default().await {
         Ok(client) => {
-            eprintln!(
-                "b2bua-runner replication membership: k8s EndpointSlice informer (svc={service}, ns={namespace})"
+            tracing::info!(
+                source = "k8s-endpointslice",
+                %service,
+                %namespace,
+                "replication membership"
             );
             // Reach peers by their stable per-pod DNS name (ADR-0012 D3), built from
             // the ordinal + this Service + namespace.
@@ -247,7 +250,7 @@ async fn build_membership() -> Option<(Arc<dyn Membership>, ReplAddressing)> {
             Some((Arc::new(topology::K8sMembership::spawn(client, namespace, service)), addressing))
         }
         Err(e) => {
-            eprintln!("b2bua-runner no kube client ({e}) and no B2BUA_PEERS — replication disabled");
+            tracing::warn!(error = %e, "no kube client and no B2BUA_PEERS — replication disabled");
             None
         }
     }
@@ -294,9 +297,12 @@ async fn main() {
             let max_len: i64 = env_or("B2BUA_CDR_RABBITMQ_MAX_LEN", "100000")
                 .parse()
                 .expect("B2BUA_CDR_RABBITMQ_MAX_LEN");
-            eprintln!(
-                "b2bua-runner CDR sink: RabbitMQ queue={queue:?} max_len={max_len} (buffer={})",
-                base.env.cdr_queue
+            tracing::info!(
+                sink = "rabbitmq",
+                %queue,
+                max_len,
+                buffer = base.env.cdr_queue,
+                "CDR sink wired"
             );
             Some(Arc::new(cdr_rabbitmq::RabbitMqCdrWriter::new(
                 url,
@@ -328,8 +334,11 @@ async fn main() {
                     env_or("B2BUA_REPL_PORT", &repl_listen.port().to_string()).parse().expect("B2BUA_REPL_PORT");
                 let incarnation_gen = boot_incarnation();
                 let store = Arc::new(ReplicatingCallStore::new(incarnation_gen, base.clock.clone()));
-                eprintln!(
-                    "b2bua-runner replication ENABLED: listen={repl_listen} peer_port={repl_port} incarnation_gen={incarnation_gen}"
+                tracing::info!(
+                    listen = %repl_listen,
+                    peer_port = repl_port,
+                    incarnation_gen,
+                    "replication ENABLED"
                 );
                 // Diagnostic: log the discovered peer set a few times so we can
                 // see whether the K8sMembership informer actually populates peers
@@ -345,7 +354,7 @@ async fn main() {
                                 .into_iter()
                                 .map(|p| format!("{}@{}", p.ordinal, p.host))
                                 .collect();
-                            eprintln!("b2bua-runner repl membership snapshot: [{}]", peers.join(", "));
+                            tracing::info!(peers = %peers.join(", "), "repl membership snapshot");
                         }
                     });
                 }
@@ -369,13 +378,15 @@ async fn main() {
     // doc-generation registry.
     let core = base.spawn(deps, Vec::new());
 
-    eprintln!(
-        "b2bua-runner pid={} listening UDP {} -> routing all calls to {dest_host}:{dest_port} (resolved per-call; ordinal={}, queue={}, cdr_queue={})",
-        std::process::id(),
-        base.local,
-        base.env.ordinal,
-        base.env.queue_max,
-        base.env.cdr_queue
+    tracing::info!(
+        pid = std::process::id(),
+        listen = %base.local,
+        %dest_host,
+        dest_port,
+        ordinal = %base.env.ordinal,
+        queue = base.env.queue_max,
+        cdr_queue = base.env.cdr_queue,
+        "listening; all calls route to the default callee (resolved per-call)"
     );
 
     // jemalloc footprint/purge/decay-config counters appended to `/metrics`,

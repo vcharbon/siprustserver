@@ -90,10 +90,11 @@ impl ActionExecutor<'_> {
         ) {
             Ok(built) => built,
             Err(err) => {
-                eprintln!(
-                    "WARN: call {}: leg {leg_id} not created — {}",
-                    call.call_ref,
-                    err.detail()
+                tracing::warn!(
+                    call_ref = %call.call_ref,
+                    %leg_id,
+                    detail = %err.detail(),
+                    "leg not created"
                 );
                 *call = add_cdr_event(
                     call.clone(),
@@ -302,17 +303,14 @@ impl ActionExecutor<'_> {
                 // swallow it.
                 let leg = leg_at(call, idx);
                 if leg.state == call::LegState::Confirmed {
-                    eprintln!(
-                        "B2BUA INVARIANT VIOLATION: call_ref={} leg={} is Confirmed but has \
-                         no dialog with a remote tag ({} dialog(s), all tag-less) — cannot \
-                         originate in-dialog {} (keepalive will never fire for this leg). \
-                         A tag-less INVITE is rejected at ingest, so an established dialog \
-                         must never reach this state; the call context preserves the empty \
-                         tag across hydration, leaving this leg permanently un-probeable.",
-                        call.call_ref,
-                        leg_id,
-                        leg.dialogs.len(),
-                        method,
+                    tracing::error!(
+                        call_ref = %call.call_ref,
+                        %leg_id,
+                        dialogs = leg.dialogs.len(),
+                        %method,
+                        "INVARIANT VIOLATION: leg is Confirmed but has no dialog with a remote \
+                         tag (all tag-less) — cannot originate the in-dialog request, so \
+                         keepalive will never fire and this leg is permanently un-probeable"
                     );
                 }
                 return;

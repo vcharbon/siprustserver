@@ -102,7 +102,7 @@ impl CdrWriter for RabbitMqCdrWriter {
                 // A record that won't serialize is a bug, not a transient fault;
                 // count it as dropped and move on (never poison the drainer).
                 self.metrics.bump_cdr_dropped();
-                eprintln!("cdr-rabbitmq: serialize failed for {}: {e}", record.call_ref);
+                tracing::warn!(call_ref = %record.call_ref, error = %e, "CDR serialize failed");
                 return;
             }
         };
@@ -113,7 +113,7 @@ impl CdrWriter for RabbitMqCdrWriter {
                 Ok(c) => *guard = Some(c),
                 Err(e) => {
                     self.metrics.bump_cdr_dropped();
-                    eprintln!("cdr-rabbitmq: connect to {} failed: {e}", self.url);
+                    tracing::warn!(url = %self.url, error = %e, "CDR broker connect failed");
                     return;
                 }
             }
@@ -137,7 +137,7 @@ impl CdrWriter for RabbitMqCdrWriter {
             }
             Err(e) => {
                 self.metrics.bump_cdr_dropped();
-                eprintln!("cdr-rabbitmq: publish failed: {e}; will reconnect");
+                tracing::warn!(error = %e, "CDR publish failed; will reconnect");
                 // Drop the channel/connection so the next write reconnects.
                 *guard = None;
             }

@@ -32,6 +32,9 @@ fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
 
 #[tokio::main]
 async fn main() {
+    // Subscriber first (ADR-0026); the guard drains the log writer at exit.
+    let _observe = observe::init_production("call-limiter-runner");
+
     let listen: String = env_or("LIMITER_LISTEN", "0.0.0.0:8080".to_string());
     let cfg = LimiterConfig {
         window_sec: env_or("LIMITER_WINDOW_SECONDS", 300),
@@ -55,9 +58,13 @@ async fn main() {
         .serve(addr, server)
         .await
         .unwrap_or_else(|e| panic!("failed to bind {addr}: {e}"));
-    eprintln!(
-        "call-limiter listening on http://{addr} (window={}s active={} ttl={}s janitor={}s)",
-        cfg.window_sec, cfg.active_windows, cfg.ttl_sec, janitor_secs
+    tracing::info!(
+        %addr,
+        window_sec = cfg.window_sec,
+        active_windows = cfg.active_windows,
+        ttl_sec = cfg.ttl_sec,
+        janitor_sec = janitor_secs,
+        "call-limiter listening"
     );
 
     // Periodic janitor: reclaim TTL-expired keys even with no traffic.
@@ -68,14 +75,14 @@ async fn main() {
             tick.tick().await;
             let swept = janitor_store.sweep_now();
             if swept > 0 {
-                eprintln!("call-limiter janitor swept {swept} expired keys");
+                tracing::info!(swept, "janitor swept expired keys");
             }
         }
     });
 
     // Run until terminated.
     match tokio::signal::ctrl_c().await {
-        Ok(()) => eprintln!("call-limiter shutting down"),
-        Err(e) => eprintln!("call-limiter signal error: {e}"),
+        Ok(()) => tracing::info!(signal = "SIGINT", "shutting down"),
+        Err(e) => tracing::warn!(error = %e, "signal handler error"),
     }
 }
