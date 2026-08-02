@@ -1194,6 +1194,17 @@ fn core_rules() -> Vec<RuleDefinition> {
         }),
         // ── timers ──────────────────────────────────────────────────────────
         rule("no-answer", &[], Match::timer().timer_type(TimerType::NoAnswer), |ctx| {
+            // Answer raced the fire (e.g. a reclaim restored a stale ledger
+            // entry whose cancel was lost with the crashed node): absorb, and
+            // scrub the spent entry so a later reclaim cannot re-fire it.
+            let answered = ctx.call.a_leg().state == LegState::Confirmed
+                || ctx.call.b_legs().iter().any(|b| b.state == LegState::Confirmed);
+            if answered {
+                return ok(vec![RuleAction::cancel_timer(
+                    &TimerType::NoAnswer,
+                    Some(ctx.source_leg_id),
+                )]);
+            }
             let leg = ctx.source_leg_id.to_string();
             let mut actions = vec![
                 RuleAction::AddCdrEvent { event_type: CdrEventType::Timeout, leg_id: leg.clone(), status_code: None, reason: Some("no_answer_timeout".into()) },

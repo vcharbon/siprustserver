@@ -92,6 +92,44 @@ fn timer_global_duration_selects_max_duration() {
 }
 
 #[test]
+fn no_answer_fire_on_a_confirmed_call_absorbs_to_cancel_only() {
+    // A reclaim-restored stale `NoAnswer` ledger entry firing on an answered
+    // call must be absorbed: the only action is the scrub of the spent entry.
+    let mut call = test_call();
+    call.a_leg.state = LegState::Confirmed;
+    let mut b = b_leg_pending();
+    b.state = LegState::Confirmed;
+    call = call::helpers::add_b_leg(call, b);
+    let event = CallEvent::Timer {
+        timer_type: TimerType::NoAnswer,
+        call_ref: call.call_ref.clone(),
+        leg_id: Some("b-1".into()),
+    };
+    let ctx = RuleContext {
+        call: RuleCall::new(&call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "b-1",
+        direction: Direction::FromB,
+        now_ms: 0,
+        config: &B2buaConfig::default(),
+    };
+    let rules = default_rules();
+    let ranked = pick_ranked(&rules, &call, &ctx);
+    let no_answer =
+        ranked.iter().find(|r| r.id == "no-answer").expect("no-answer is a candidate");
+    let result = (no_answer.handle)(&ctx).expect("no-answer handles its own timer");
+    assert!(
+        matches!(
+            result.actions.as_slice(),
+            [RuleAction::CancelTimer { id }] if id == "NoAnswer:b-1"
+        ),
+        "absorb: exactly the canonical per-leg scrub, got {:?}",
+        result.actions,
+    );
+}
+
+#[test]
 fn in_dialog_bye_selects_relay_bye() {
     let call = test_call();
     // An in-dialog BYE (carries a To-tag) on the active call.
