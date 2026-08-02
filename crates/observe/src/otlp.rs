@@ -4,6 +4,9 @@
 //! process installs no tracer provider at all, so no span is ever constructed
 //! and the export tree stays idle. Spans leave over OTLP http/protobuf through
 //! a batch processor, so a slow or absent collector never blocks a SIP task.
+//! That processor owns a dedicated OS thread outside the tokio runtime, so the
+//! HTTP client under it is the blocking one — see the workspace `[workspace
+//! .dependencies]` note on `opentelemetry-otlp`.
 
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};

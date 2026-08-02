@@ -526,7 +526,7 @@ async fn build_registry(
 async fn main() {
     // Subscriber first (ADR-0026): every line below it is a lifecycle log, and
     // the guard drains the writer + flushes spans at exit.
-    let _observe = observe::init_production("sip-proxy-runner");
+    let observe_guard = observe::init_production("sip-proxy-runner");
 
     // Loud confirmation the jemalloc decay config (_RJEM_MALLOC_CONF) parsed —
     // a typo is silently ignored. Mirrored by the jemalloc_opt_*_decay_ms gauges.
@@ -1024,26 +1024,36 @@ async fn main() {
     // leave the process alive with /healthz green — k8s never restarted the
     // pod and every datagram was silently black-holed. Exiting non-zero makes
     // the container restart the moment ANY recv shard or the probe dies.
-    tokio::select! {
+    //
+    // The select only DECIDES the exit code: `process::exit` runs no
+    // destructor, so the fatal line would die queued on the log writer. It runs
+    // below, after the observe guard has drained.
+    let exit_code = tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             tracing::info!(signal = "SIGINT", "shutting down");
+            0
         }
         _ = wait_sigterm() => {
             tracing::info!(signal = "SIGTERM", drain_grace_ms, "draining");
             draining.store(true, Ordering::Relaxed);
             tokio::time::sleep(std::time::Duration::from_millis(drain_grace_ms)).await;
             tracing::info!("drain grace elapsed — exiting");
+            0
         }
         res = core_tasks.join_next() => {
             tracing::error!(outcome = ?res, "FATAL: a SIP recv shard exited — exiting for restart");
-            std::process::exit(1);
+            1
         }
         res = probe_task => {
             tracing::error!(outcome = ?res, "FATAL: health probe exited — exiting for restart");
-            std::process::exit(1);
+            1
         }
-    }
+    };
     drop(_metrics_server);
+    drop(observe_guard);
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
 }
 
 /// Await a SIGTERM (k8s sends this on pod termination). On non-unix this future

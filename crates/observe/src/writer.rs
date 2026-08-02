@@ -51,24 +51,36 @@ pub fn spawn() -> (LossyStdout, LogWriterGuard) {
     )
 }
 
-/// The writer thread body: write each line, flushing whenever the queue has
-/// gone quiet so an idle process still shows its last line immediately.
+/// The writer thread body.
 fn drain(rx: Receiver<Msg>) {
     let stdout = io::stdout();
-    let mut out = io::BufWriter::with_capacity(64 * 1024, stdout.lock());
-    while let Ok(msg) = rx.recv() {
-        match msg {
-            Msg::Line(line) => {
-                let _ = out.write_all(&line);
-                if rx.try_recv().is_err() {
-                    let _ = out.flush();
-                }
-            }
+    drain_into(rx, io::BufWriter::with_capacity(64 * 1024, stdout.lock()));
+}
+
+/// Write every queued line to `out` until the sentinel or a disconnect, flushing
+/// whenever the queue has gone quiet so an idle process shows its last line
+/// immediately.
+///
+/// The quiet probe is a lookahead: the message it takes is carried into the next
+/// iteration, never discarded — a queued line is written and the queued sentinel
+/// ends the loop, whatever the arrival timing.
+fn drain_into<W: Write>(rx: Receiver<Msg>, mut out: W) {
+    let mut next = rx.recv().ok();
+    while let Some(msg) = next.take() {
+        let line = match msg {
+            Msg::Line(line) => line,
             Msg::Shutdown => break,
-        }
+        };
+        let _ = out.write_all(&line);
+        next = match rx.try_recv() {
+            Ok(queued) => Some(queued),
+            Err(_) => {
+                let _ = out.flush();
+                rx.recv().ok()
+            }
+        };
     }
-    // `try_recv` above may have consumed a line; the remaining backlog is
-    // written before the thread ends.
+    // Lines that raced the sentinel still belong to this process.
     while let Ok(Msg::Line(line)) = rx.try_recv() {
         let _ = out.write_all(&line);
     }
@@ -137,7 +149,89 @@ impl<'a> MakeWriter<'a> for LossyStdout {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
     use super::*;
+
+    /// How long a test waits for the writer thread before calling it hung.
+    const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// A `Write` sink the test reads once the writer thread has ended.
+    #[derive(Clone)]
+    struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedBuf {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Queue `msgs`, run [`drain_into`] on its own thread with the sender still
+    /// alive, and return what it wrote. Panics rather than hangs if the thread
+    /// never ends.
+    fn drained(msgs: Vec<Msg>) -> Vec<u8> {
+        let (tx, rx) = sync_channel::<Msg>(16);
+        for m in msgs {
+            tx.send(m).expect("queue fits the test burst");
+        }
+        let buf = SharedBuf(Arc::new(Mutex::new(Vec::new())));
+        let sink = buf.clone();
+        let (done_tx, done_rx) = sync_channel::<()>(1);
+        let handle = std::thread::spawn(move || {
+            drain_into(rx, sink);
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(JOIN_TIMEOUT)
+            .expect("writer thread ends on the queued sentinel while a sender is still alive");
+        handle.join().unwrap();
+        drop(tx);
+        let out = buf.0.lock().unwrap().clone();
+        out
+    }
+
+    #[test]
+    fn a_queued_burst_is_written_in_full_and_the_queued_sentinel_ends_the_thread() {
+        let out = drained(vec![
+            Msg::Line(b"one\n".to_vec()),
+            Msg::Line(b"two\n".to_vec()),
+            Msg::Line(b"three\n".to_vec()),
+            Msg::Shutdown,
+        ]);
+        assert_eq!(String::from_utf8(out).unwrap(), "one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn lines_queued_behind_the_sentinel_are_still_written() {
+        let out = drained(vec![
+            Msg::Line(b"before\n".to_vec()),
+            Msg::Shutdown,
+            Msg::Line(b"raced\n".to_vec()),
+        ]);
+        assert_eq!(String::from_utf8(out).unwrap(), "before\nraced\n");
+    }
+
+    #[test]
+    fn dropping_the_guard_joins_the_spawned_writer() {
+        let (done_tx, done_rx) = sync_channel::<()>(1);
+        // The guard is dropped on another thread so a join that never returns
+        // fails this test instead of hanging the lane.
+        std::thread::spawn(move || {
+            let (make, guard) = spawn();
+            drop(guard);
+            // The `MakeWriter` outlives the guard, as it does in a real process
+            // where the global subscriber owns it.
+            drop(make);
+            let _ = done_tx.send(());
+        });
+        done_rx.recv_timeout(JOIN_TIMEOUT).expect("guard drop joins the writer thread");
+    }
 
     /// One test, because both halves read the same process-wide drop counter
     /// and the default lane runs tests concurrently.
