@@ -104,8 +104,8 @@ pub struct DeadlineDecisionEngine {
     deadline: std::time::Duration,
     /// Deadline-breach aggregation keyed by decision method (ADR-0026): an
     /// unreachable backend is ONE episode per method — rising edge, ~5 s
-    /// summaries, falling-edge totals — closed by the first answer that lands
-    /// inside the deadline again.
+    /// summaries, falling-edge totals — ended once answers have landed inside
+    /// the deadline for the idle window.
     breaches: std::sync::Arc<observe::WaveSet>,
 }
 
@@ -136,8 +136,9 @@ impl DeadlineDecisionEngine {
 
     /// Fold one round-trip outcome into `method`'s degradation episode: a
     /// deadline breach and a backend-reported `Unavailable` belong to the SAME
-    /// episode (both are "the decision engine is not answering calls"); any
-    /// real answer ends it. Aggregated, never one line per call (ADR-0026).
+    /// episode (both are "the decision engine is not answering calls"); real
+    /// answers for the idle window end it. Aggregated, never one line per call
+    /// (ADR-0026).
     fn observe_outcome<T>(
         &self,
         method: &'static str,
@@ -146,7 +147,7 @@ impl DeadlineDecisionEngine {
         match outcome {
             Ok(Ok(v)) => {
                 if self.breaches.is_active() {
-                    self.breaches.close(method);
+                    self.breaches.recovered(method);
                 }
                 Ok(v)
             }

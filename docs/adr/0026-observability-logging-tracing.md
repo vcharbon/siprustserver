@@ -43,7 +43,12 @@ helpers only.
   Mechanised by `observe::WaveSet`: an episode per key (dead peer, failing
   target, shed reason) with named counters, one driver task per open episode,
   and a bounded key space (keys can be wire-influenceable). An episode ends on
-  an explicit close — the recovery that ended it — or on an idle window.
+  quiet only: a recovery ARMS the falling edge, which lands after the idle
+  window with no further failure, and a failure inside that window revives the
+  same episode silently. Without that hysteresis a source flapping at its cap —
+  a token bucket alternating reject/admit, a backend answering every other
+  request — would emit a rising/falling pair per call, i.e. the per-call line
+  this discipline exists to forbid.
 - Every line carries node identity, and peer / epoch / `(p,b)` where relevant.
 
 ### 2. Per-call traces — sampled, OTLP, explicit-guard

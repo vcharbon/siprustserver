@@ -454,7 +454,8 @@ pub struct EluCpsGate {
     sampler_interval: std::time::Duration,
     /// Intake-shed aggregation keyed by rejection reason (ADR-0026): a shedding
     /// window is ONE episode — shed-on line, ~5 s summaries with the shed
-    /// count, shed-off line with the totals — closed by the first admit.
+    /// count, shed-off line with the totals — ended once admits have run clean
+    /// for the idle window, so a bucket at its cap does not print per call.
     shed: Arc<observe::WaveSet>,
     // Lock-free counters — bumped off the EWMA lock on the admission/bypass paths.
     external_admitted: Arc<AtomicU64>,
@@ -571,12 +572,14 @@ impl ProxySelfGate for EluCpsGate {
             return AdmitDecision::reject(REASON_CPS, retry);
         }
 
-        // 3. Admit (a token has been consumed above). An admit ends whatever
-        // shedding window was open — one relaxed load while nothing is shedding.
+        // 3. Admit (a token has been consumed above). An admit reports the
+        // recovery of whatever shedding window was open; the episode itself
+        // ends on quiet, so a bucket flapping at its cap stays one episode.
+        // One relaxed load per admit while nothing is shedding.
         drop(inner);
         self.external_admitted.fetch_add(1, Ordering::Relaxed);
         if self.shed.is_active() {
-            self.shed.close_all();
+            self.shed.recovered_all();
         }
         AdmitDecision::admit()
     }

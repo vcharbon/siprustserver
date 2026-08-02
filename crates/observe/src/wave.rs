@@ -10,6 +10,12 @@
 //! Time rides `tokio::time::Instant`, so a `start_paused` test drives the
 //! summary and the idle close with `advance` like any other behaviour timer.
 //!
+//! An episode ends on quiet, never on a single good event: a recovery only
+//! *requests* the close, and the falling edge lands once the key has stayed
+//! quiet for the idle window. A flapping source — a token bucket alternating
+//! reject/admit at its cap, a backend answering every other request — therefore
+//! stays ONE episode instead of one rising/falling pair per event.
+//!
 //! This file is the state machine only: it decides *when* a line is due and
 //! *what* it totals. Emission (and the driver that polls a quiet episode to its
 //! falling edge) is [`crate::wave_set`].
@@ -129,6 +135,9 @@ struct Episode {
     last_event: Instant,
     last_summary: Instant,
     tally: Tally,
+    /// A recovery has landed; the episode is waiting out the idle window and a
+    /// further event revives it in place rather than opening a new one.
+    close_requested: bool,
 }
 
 /// The rising-edge / summary / falling-edge state machine for ONE event class.
@@ -137,8 +146,8 @@ struct Episode {
 /// event and thereafter returns a line only when the summary cadence has
 /// elapsed. [`poll`](Wave::poll) is the driver path: it produces a due summary
 /// (or the idle falling edge) for an episode that has gone quiet.
-/// [`close`](Wave::close) ends an episode whose end is known — a recovery, a
-/// completed sweep — without waiting for the idle window.
+/// [`request_close`](Wave::request_close) is the recovery path: it arms the
+/// falling edge without emitting one, so only quiet ends an episode.
 pub struct Wave {
     summary_every: Duration,
     idle_close_after: Duration,
@@ -170,6 +179,12 @@ impl Wave {
         self.open.is_some()
     }
 
+    /// Whether the open episode has already seen its recovery and is only
+    /// waiting out the idle window. `false` when no episode is open.
+    pub fn is_close_requested(&self) -> bool {
+        self.open.map(|ep| ep.close_requested).unwrap_or(false)
+    }
+
     /// The summary cadence — the period a driver sleeps between [`poll`](Wave::poll)s.
     pub fn summary_every(&self) -> Duration {
         self.summary_every
@@ -177,6 +192,8 @@ impl Wave {
 
     /// Record one event. Returns the line it owes: the rising edge that opened
     /// the episode, a summary when the cadence has elapsed, otherwise nothing.
+    /// An event landing on an episode that has requested its close revives that
+    /// episode in place — a flap owes no line at all.
     pub fn record(&mut self, counter: &'static str, n: u64) -> Option<WaveReport> {
         let now = Instant::now();
         match &mut self.open {
@@ -188,6 +205,7 @@ impl Wave {
                     last_event: now,
                     last_summary: now,
                     tally,
+                    close_requested: false,
                 });
                 self.generation = self.generation.wrapping_add(1);
                 Some(WaveReport { edge: Edge::Rising, elapsed_ms: 0, tally })
@@ -195,6 +213,7 @@ impl Wave {
             Some(ep) => {
                 ep.tally.add(counter, n);
                 ep.last_event = now;
+                ep.close_requested = false;
                 if now.duration_since(ep.last_summary) >= self.summary_every {
                     ep.last_summary = now;
                     Some(WaveReport {
@@ -216,7 +235,7 @@ impl Wave {
         let now = Instant::now();
         let ep = self.open.as_mut()?;
         if now.duration_since(ep.last_event) >= self.idle_close_after {
-            return self.close();
+            return self.close_now();
         }
         if now.duration_since(ep.last_summary) >= self.summary_every {
             ep.last_summary = now;
@@ -229,9 +248,26 @@ impl Wave {
         None
     }
 
-    /// End the open episode now and return its falling edge. `None` if no
-    /// episode is open (a close is idempotent).
-    pub fn close(&mut self) -> Option<WaveReport> {
+    /// Arm the falling edge: the open episode ends at the next idle window
+    /// instead of on the next event. Returns `true` when this call armed a
+    /// live episode — repeating it, or calling it with nothing open, is a
+    /// no-op that owes no line.
+    pub fn request_close(&mut self) -> bool {
+        match &mut self.open {
+            Some(ep) if !ep.close_requested => {
+                ep.close_requested = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// End the open episode immediately and return its falling edge, bypassing
+    /// the idle window. The quiet path ([`poll`](Wave::poll)) owns it; a
+    /// recovery uses [`request_close`](Wave::request_close) instead so a
+    /// flapping source cannot restart the episode line-per-event. `None` if no
+    /// episode is open (closing is idempotent).
+    pub fn close_now(&mut self) -> Option<WaveReport> {
         let ep = self.open.take()?;
         Some(WaveReport {
             edge: Edge::Falling,
@@ -303,17 +339,50 @@ mod tests {
         assert!(w.poll().is_none(), "a closed episode owes nothing");
     }
 
+    /// The flap contract: a recovery arms the falling edge but never emits it,
+    /// so reject/admit alternating at a token bucket's cap stays ONE episode.
     #[tokio::test(start_paused = true)]
-    async fn explicit_close_is_idempotent_and_reopening_bumps_the_generation() {
+    async fn a_recovery_arms_the_close_and_a_flap_revives_the_same_episode() {
+        // Cadence wider than the idle window, so the advance below trips the
+        // idle deadline alone (docs/testing/test-clock.md: one at a time).
+        let mut w = Wave::new(Duration::from_secs(12), Duration::from_secs(5));
+        let rising = w.record("shed", 1).expect("first shed opens the episode");
+        assert_eq!(rising.edge, Edge::Rising);
+        let gen_first = w.generation();
+
+        // 1000 reject/admit flaps well inside the cadence: not one further line.
+        for _ in 0..1_000 {
+            assert!(w.request_close(), "a recovery arms the close");
+            assert!(!w.request_close(), "arming twice owes nothing");
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert!(w.record("shed", 1).is_none(), "a flap revives, it does not re-rise");
+        }
+        assert_eq!(w.generation(), gen_first, "still the same episode");
+        assert!(!w.is_close_requested(), "the last event revived it");
+
+        // Only real quiet ends it: arm, then let the idle window elapse.
+        assert!(w.request_close());
+        assert!(w.is_close_requested());
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let falling = w.poll().expect("quiet after a recovery → falling edge");
+        assert_eq!(falling.edge, Edge::Falling);
+        assert_eq!(falling.tally.get("shed"), 1_001);
+        assert!(!w.is_open());
+        assert!(!w.is_close_requested(), "nothing is open to close");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn immediate_close_is_idempotent_and_reopening_bumps_the_generation() {
         let mut w = Wave::default();
         w.record("fail_open", 1).unwrap();
         let gen_first = w.generation();
 
         tokio::time::advance(Duration::from_secs(2)).await;
-        let falling = w.close().expect("explicit close ends the episode");
+        let falling = w.close_now().expect("an immediate close ends the episode");
         assert_eq!(falling.edge, Edge::Falling);
         assert_eq!(falling.elapsed_ms, 2_000);
-        assert!(w.close().is_none(), "closing twice owes nothing");
+        assert!(w.close_now().is_none(), "closing twice owes nothing");
+        assert!(!w.request_close(), "nothing is open to arm");
 
         // A later burst is a NEW episode: rising edge again, fresh totals.
         tokio::time::advance(Duration::from_secs(30)).await;

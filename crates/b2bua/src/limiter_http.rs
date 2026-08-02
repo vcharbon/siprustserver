@@ -26,7 +26,7 @@ pub struct HttpCallLimiter {
     timeout: Duration,
     /// Fail-open aggregation keyed by the limiter address (ADR-0026): a limiter
     /// outage is ONE episode — rising edge, ~5 s summaries, falling-edge totals
-    /// — closed by the first request that comes back 200.
+    /// — ended once 200s have come back for the idle window.
     fail_open: Arc<observe::WaveSet>,
     /// `addr` rendered once — the episode key, so an outage costs no
     /// per-request allocation.
@@ -51,10 +51,11 @@ impl HttpCallLimiter {
     async fn call(&self, req: HttpRequest) -> Option<HttpResponse> {
         match tokio::time::timeout(self.timeout, self.transport.request(self.addr, req)).await {
             Ok(Ok(resp)) if resp.status == 200 => {
-                // A 200 ends any open fail-open episode; one relaxed load while
-                // the backend is healthy.
+                // A 200 reports the recovery; the episode ends once the
+                // limiter stops failing, so a limiter answering every other
+                // request stays one episode. One relaxed load while healthy.
                 if self.fail_open.is_active() {
-                    self.fail_open.close(&self.addr_key);
+                    self.fail_open.recovered(&self.addr_key);
                 }
                 Some(resp)
             }

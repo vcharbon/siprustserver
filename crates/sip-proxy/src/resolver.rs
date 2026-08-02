@@ -275,9 +275,10 @@ struct Inner {
     metrics: Arc<ProxyMetrics>,
     /// Resolution-failure aggregation keyed by name (ADR-0026): a name that
     /// stops resolving is ONE episode — rising edge, ~5 s summaries, falling
-    /// edge with the totals — closed by the first successful resolve. Names are
-    /// wire-influenceable, so the set's own key bound is what keeps this
-    /// bounded.
+    /// edge with the totals — ended once the name resolves again for the idle
+    /// window, so a name flapping does not print a pair of lines per packet.
+    /// Names are wire-influenceable, so the set's own key bound is what keeps
+    /// this bounded.
     resolve_failures: Arc<observe::WaveSet>,
 }
 
@@ -291,7 +292,7 @@ impl Inner {
         match outcome {
             Some(_) => {
                 if self.resolve_failures.is_active() {
-                    self.resolve_failures.close(&key);
+                    self.resolve_failures.recovered(&key);
                 }
                 self.arm_refresh(target);
             }

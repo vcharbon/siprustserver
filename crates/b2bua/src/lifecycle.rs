@@ -48,7 +48,8 @@ pub fn keepalive_timeout_waves() -> Arc<WaveSet> {
 
 /// A backend degradation episode — decision-engine deadline breaches, limiter
 /// fail-open — keyed by the target the calls were headed for. `backend` names
-/// which dependency; the episode closes on the first success after the burst.
+/// which dependency; the episode ends once successes have run for the idle
+/// window, so a backend answering intermittently stays one episode.
 pub fn backend_waves(backend: &'static str) -> Arc<WaveSet> {
     WaveSet::new(move |target: &str, r: &WaveReport| {
         tracing::info!(
