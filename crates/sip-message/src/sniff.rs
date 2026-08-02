@@ -160,6 +160,59 @@ pub fn rack_rseq(raw: &[u8]) -> Option<u64> {
     header_value(raw, "rack")?.split_whitespace().next()?.parse().ok()
 }
 
+/// Selective intake-shed classifier: whether a raw datagram is a NEW-DIALOG,
+/// NON-EMERGENCY INVITE — the only class a depth-watermarked pre-ingress hook
+/// may drop under overload. Called per-datagram at the socket pump, zero
+/// allocation; `false` = admit.
+///
+/// `true` requires ALL of: the canonical `INVITE ` request line
+/// ([`crate::preparse::is_invite_request_buffer`]), a To header (full or
+/// compact `t` form, like [`to_tag`]) WITHOUT a `tag=` parameter (new
+/// dialog), and no emergency Resource-Priority — any `Resource-Priority`
+/// header (case-insensitive name, comma-separated r-values) carrying an
+/// emergency r-value classifies exactly as [`crate::emergency`]'s
+/// parsed-side check. Everything else — in-dialog requests, responses,
+/// other methods, emergency INVITEs, truncated/garbage datagrams — is
+/// admitted (garbage is cheap to admit; the parse layer discards it).
+pub fn is_sheddable_new_invite(raw: &[u8]) -> bool {
+    if !crate::preparse::is_invite_request_buffer(raw) {
+        return false;
+    }
+    let mut lines = raw.split(|&b| b == b'\n');
+    lines.next(); // request line
+    let mut tagless_to_seen = false;
+    for line in lines {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            break; // end of headers
+        }
+        let Some(colon) = line.iter().position(|&b| b == b':') else { continue };
+        let name = line[..colon].trim_ascii();
+        let value = &line[colon + 1..];
+        if name.eq_ignore_ascii_case(b"to") || name.eq_ignore_ascii_case(b"t") {
+            if contains_ignore_ascii_case(value, b"tag=") {
+                return false; // in-dialog
+            }
+            tagless_to_seen = true;
+        } else if name.eq_ignore_ascii_case(b"resource-priority")
+            && value.split(|&b| b == b',').any(|rv| {
+                crate::emergency::EMERGENCY_RPH_TOKENS
+                    .iter()
+                    .any(|tok| rv.trim_ascii().eq_ignore_ascii_case(tok.as_bytes()))
+            })
+        {
+            return false; // emergency
+        }
+    }
+    tagless_to_seen
+}
+
+/// ASCII-case-insensitive substring search, allocation-free. `needle` must be
+/// non-empty.
+fn contains_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
+}
+
 /// The `branch` parameter of the TOP-most Via header (RFC 3261 §17 transaction
 /// key), or `None` if absent. Only the first Via matters — on a request we sent
 /// it is OUR Via, echoed by the UAS onto the matching response.
@@ -227,6 +280,110 @@ mod tests {
             None,
             "a response has no Request-URI"
         );
+    }
+
+    /// Assemble a request with the given request-line method token and extra
+    /// header lines (fixture only — the classifier under test never allocates).
+    fn req(method: &str, headers: &str) -> Vec<u8> {
+        format!(
+            "{method} sip:bob@10.0.0.2:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-shed\r\n\
+From: <sip:alice@example.com>;tag=a1\r\n\
+{headers}Call-ID: shed@10.0.0.1\r\n\
+CSeq: 1 {method}\r\n\
+Content-Length: 0\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn new_invite_is_sheddable() {
+        assert!(is_sheddable_new_invite(&req("INVITE", "To: <sip:bob@example.com>\r\n")));
+    }
+
+    #[test]
+    fn to_tag_marks_in_dialog_and_admits() {
+        assert!(!is_sheddable_new_invite(&req(
+            "INVITE",
+            "To: <sip:bob@example.com>;tag=b2\r\n"
+        )));
+    }
+
+    #[test]
+    fn to_header_name_casing_and_compact_form_are_recognised() {
+        for tagless in ["TO: <sip:bob@h>\r\n", "to: <sip:bob@h>\r\n", "t: <sip:bob@h>\r\n"] {
+            assert!(is_sheddable_new_invite(&req("INVITE", tagless)), "{tagless:?}");
+        }
+        for tagged in ["TO: <sip:bob@h>;TAG=B2\r\n", "t: <sip:bob@h>;tag=b2\r\n"] {
+            assert!(!is_sheddable_new_invite(&req("INVITE", tagged)), "{tagged:?}");
+        }
+    }
+
+    #[test]
+    fn non_invite_methods_are_admitted() {
+        for m in ["ACK", "BYE", "CANCEL", "OPTIONS", "REGISTER"] {
+            assert!(
+                !is_sheddable_new_invite(&req(m, "To: <sip:bob@example.com>\r\n")),
+                "{m} must be admitted"
+            );
+        }
+    }
+
+    #[test]
+    fn responses_are_admitted() {
+        assert!(!is_sheddable_new_invite(
+            b"SIP/2.0 200 OK\r\nTo: <sip:bob@h>\r\nCSeq: 1 INVITE\r\n\r\n"
+        ));
+        assert!(!is_sheddable_new_invite(b"SIP/2.0 180 Ringing\r\nTo: <sip:bob@h>\r\n\r\n"));
+    }
+
+    #[test]
+    fn emergency_invites_are_admitted() {
+        // Each canonical r-value, mixed case, and a comma-separated list.
+        for rph in ["esnet.0", "wps.0", "q735.0", "ESNET.0", "Wps.0", "dsn.flash, q735.0"] {
+            let raw = req(
+                "INVITE",
+                &format!("To: <sip:bob@h>\r\nResource-Priority: {rph}\r\n"),
+            );
+            assert!(!is_sheddable_new_invite(&raw), "{rph:?} must be admitted");
+        }
+        // Case-insensitive header name.
+        assert!(!is_sheddable_new_invite(&req(
+            "INVITE",
+            "To: <sip:bob@h>\r\nRESOURCE-PRIORITY: esnet.0\r\n"
+        )));
+        // Any of multiple Resource-Priority headers flags.
+        assert!(!is_sheddable_new_invite(&req(
+            "INVITE",
+            "To: <sip:bob@h>\r\nResource-Priority: dsn.flash\r\nResource-Priority: wps.0\r\n"
+        )));
+    }
+
+    #[test]
+    fn non_emergency_resource_priority_stays_sheddable() {
+        // r-values compare whole (comma-split, trimmed) — mirrors
+        // `crate::emergency`: `dsn.flash` and the embedded `esnet.01` are not
+        // emergency, so the new INVITE remains sheddable.
+        for rph in ["dsn.flash", "esnet.01"] {
+            let raw = req(
+                "INVITE",
+                &format!("To: <sip:bob@h>\r\nResource-Priority: {rph}\r\n"),
+            );
+            assert!(is_sheddable_new_invite(&raw), "{rph:?} is not emergency");
+        }
+    }
+
+    #[test]
+    fn truncated_and_garbage_datagrams_are_admitted() {
+        for raw in [
+            &b""[..],
+            &b"INVITE"[..],
+            &b"INVITE sip:bob@h SIP/2.0\r\nVia: SIP/2.0/UDP x\r\n\r\n"[..], // no To at all
+            &b"invite sip:bob@h SIP/2.0\r\nTo: <sip:bob@h>\r\n\r\n"[..],    // method case-sensitive
+            &b"\x00\x01\x02 garbage \xff\xfe"[..],
+        ] {
+            assert!(!is_sheddable_new_invite(raw), "{raw:?} must be admitted");
+        }
     }
 
     #[test]

@@ -19,6 +19,8 @@ mod ack_hop_tests;
 #[cfg(test)]
 mod cookie_identity_tests;
 #[cfg(test)]
+mod reject_metric_tests;
+#[cfg(test)]
 mod retransmission_tests;
 #[cfg(test)]
 mod rfc_small_fix_tests;

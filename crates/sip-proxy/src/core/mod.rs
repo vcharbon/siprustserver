@@ -32,7 +32,7 @@ use crate::observability::metrics::Face;
 use crate::observability::ProxyMetrics;
 use crate::registry::WorkerRegistry;
 use crate::resolver::{HostResolver, NamedForwarder, ResolverConfig, SystemResolver};
-use crate::self_gate::{AlwaysAdmitGate, ProxySelfGate};
+use crate::self_gate::{AlwaysAdmitGate, IntakeAgeRecorder, ProxySelfGate};
 use crate::strategy::RoutingStrategy;
 
 /// Methods that create a dialog (RFC 3261) — the proxy inserts a Record-Route
@@ -80,6 +80,10 @@ pub(crate) struct ProxyCoreParts {
     pub clock: Clock,
     pub metrics: Arc<ProxyMetrics>,
     pub self_gate: Arc<dyn ProxySelfGate>,
+    /// Shared max-dequeue-age cell feeding the self-gate's ELU arm; the recv
+    /// loop records every dequeued packet's age into it (one recorder across
+    /// all shards and both faces).
+    pub intake_age: IntakeAgeRecorder,
     /// Resolver for DNS-named forward targets (worker-outbound b-leg R-URIs).
     /// IP-literal traffic never touches it; see [`crate::resolver`].
     pub resolver: Arc<dyn HostResolver>,
@@ -106,6 +110,7 @@ pub struct ProxyCore {
     clock: Clock,
     metrics: Arc<ProxyMetrics>,
     self_gate: Arc<dyn ProxySelfGate>,
+    intake_age: IntakeAgeRecorder,
     parser: CustomParser,
     /// Off-loop send path for DNS-named targets (cache + single-flight resolve).
     named: NamedForwarder,
@@ -150,6 +155,7 @@ impl ProxyCore {
             clock: parts.clock,
             metrics: parts.metrics,
             self_gate: parts.self_gate,
+            intake_age: parts.intake_age,
             parser: CustomParser::default(),
             named,
             shard: parts.shard,
@@ -323,6 +329,7 @@ impl ProxyCore {
         let stats = {
             let metrics = self.metrics.clone();
             let endpoint = self.endpoint.clone();
+            let ext_endpoint = self.external.as_ref().map(|e| e.endpoint.clone());
             let shard = self.shard;
             tokio::spawn(async move {
                 let mut tick =
@@ -331,12 +338,19 @@ impl ProxyCore {
                 loop {
                     tick.tick().await;
                     let c = endpoint.counters();
+                    // Intake-shed drops are counted on BOTH faces — in
+                    // dual-face mode callers arrive on the external socket, so
+                    // its pre-ingress drops must not be invisible.
+                    let ext_shed = ext_endpoint
+                        .as_ref()
+                        .map_or(0, |e| e.counters().pre_ingress_dropped);
                     metrics.set_udp_endpoint_stats(
                         shard,
                         endpoint.queue_depth() as u64,
                         endpoint.queue_max() as u64,
                         c.enqueued,
                         c.tail_dropped,
+                        c.pre_ingress_dropped + ext_shed,
                     );
                 }
             })
@@ -357,6 +371,9 @@ impl ProxyCore {
                 None => (self.endpoint.recv().await, Face::Internal),
             };
             let Some(pkt) = pkt else { break };
+            // Intake-saturation signal: the packet's age at dequeue (arrival →
+            // now) feeds the self-gate's ELU arm through the shared recorder.
+            self.intake_age.record(self.now_ms().saturating_sub(pkt.arrival_ms));
             self.metrics.record_face_ingress(face);
             let src = pkt.src;
             // Hand the receive buffer to the parser instead of lending it: the
@@ -434,6 +451,7 @@ pub struct ProxyCoreBuilder {
     clock: Option<Clock>,
     metrics: Option<Arc<ProxyMetrics>>,
     self_gate: Option<Arc<dyn ProxySelfGate>>,
+    intake_age: Option<IntakeAgeRecorder>,
     resolver: Option<Arc<dyn HostResolver>>,
     resolver_cfg: Option<ResolverConfig>,
     shard: usize,
@@ -451,6 +469,7 @@ impl ProxyCoreBuilder {
             clock: None,
             metrics: None,
             self_gate: None,
+            intake_age: None,
             resolver: None,
             resolver_cfg: None,
             shard: 0,
@@ -479,6 +498,13 @@ impl ProxyCoreBuilder {
     }
     pub fn self_gate(mut self, gate: Arc<dyn ProxySelfGate>) -> Self {
         self.self_gate = Some(gate);
+        self
+    }
+    /// The shared max-dequeue-age recorder feeding the self-gate's ELU arm.
+    /// Pass ONE clone to every recv-shard core so the window max spans the
+    /// whole intake; defaults to a private (unread) recorder.
+    pub fn intake_age(mut self, recorder: IntakeAgeRecorder) -> Self {
+        self.intake_age = Some(recorder);
         self
     }
     pub fn cancel_lru(mut self, lru: Arc<CancelBranchLru>) -> Self {
@@ -518,6 +544,7 @@ impl ProxyCoreBuilder {
             clock,
             metrics: self.metrics.unwrap_or_else(|| Arc::new(ProxyMetrics::new())),
             self_gate: self.self_gate.unwrap_or_else(|| Arc::new(AlwaysAdmitGate)),
+            intake_age: self.intake_age.unwrap_or_default(),
             resolver: self.resolver.unwrap_or_else(|| Arc::new(SystemResolver)),
             resolver_cfg: self.resolver_cfg.unwrap_or_default(),
             shard: self.shard,
@@ -529,6 +556,7 @@ impl ProxyCoreBuilder {
 mod sweeper_tests {
     use super::*;
     use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::sync::Mutex;
 
     use async_trait::async_trait;
     use sip_net::{SendError, UdpEndpointCounters, UdpPacket};
@@ -615,6 +643,75 @@ mod sweeper_tests {
         assert_eq!(metrics.pending_invite_lru_size(), 0, "gauge must follow the reclaimed map down");
 
         task.abort();
+    }
+
+    /// A `UdpEndpoint` that yields its queued packets once, then closes
+    /// (`recv` → `None`), so `run()` dequeues them and exits.
+    struct DrainOnceEndpoint(Mutex<Vec<UdpPacket>>);
+
+    #[async_trait]
+    impl UdpEndpoint for DrainOnceEndpoint {
+        async fn send_to(&self, _buf: &[u8], _dst: SocketAddr) -> Result<(), SendError> {
+            Ok(())
+        }
+        async fn recv(&self) -> Option<UdpPacket> {
+            let mut q = self.0.lock().unwrap();
+            if q.is_empty() {
+                None
+            } else {
+                Some(q.remove(0))
+            }
+        }
+        fn try_recv(&self) -> Option<UdpPacket> {
+            None
+        }
+        fn local_addr(&self) -> SocketAddr {
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 5060))
+        }
+        fn queue_depth(&self) -> usize {
+            0
+        }
+        fn queue_max(&self) -> usize {
+            0
+        }
+        fn counters(&self) -> UdpEndpointCounters {
+            UdpEndpointCounters::default()
+        }
+    }
+
+    /// The recv loop records every dequeued packet's age (`now_ms −
+    /// arrival_ms`) into the shared [`IntakeAgeRecorder`] — the max wins, and a
+    /// malformed (dropped-silently) datagram still counts: the signal measures
+    /// intake queueing, not parse outcomes. `Clock::test_at(0)` rides the
+    /// paused tokio timeline, so the advance below IS the packets' age.
+    #[tokio::test(start_paused = true)]
+    async fn run_records_packet_age_at_dequeue() {
+        let clock = Clock::test_at(0);
+        // Move the paused clock to now_ms = 700 in 100 ms chunks (no pending
+        // timers exist yet — nothing can fire mid-advance).
+        for _ in 0..7 {
+            tokio::time::advance(Duration::from_millis(100)).await;
+        }
+        // Two packets queued in the past: ages at dequeue 500 ms and 200 ms.
+        // Raw bytes are deliberately unparseable — no SIP flow is involved.
+        let ep = DrainOnceEndpoint(Mutex::new(vec![
+            UdpPacket { raw: b"not-sip".to_vec(), src: "127.0.0.1:9999".parse().unwrap(), arrival_ms: 200 },
+            UdpPacket { raw: b"not-sip".to_vec(), src: "127.0.0.1:9999".parse().unwrap(), arrival_ms: 500 },
+        ]));
+        let recorder = IntakeAgeRecorder::default();
+
+        let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new("10.0.0.2", 5070)));
+        let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
+        let core = ProxyCoreBuilder::new(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
+            .clock(clock)
+            .intake_age(recorder.clone())
+            .build(Box::new(ep));
+
+        // Drain both packets; the endpoint then closes and run() returns.
+        core.run().await;
+
+        assert_eq!(recorder.drain_max(), 500, "the window max is the OLDEST packet's dequeue age");
+        assert_eq!(recorder.drain_max(), 0, "drained — no new traffic reads 0");
     }
 
     /// Per-peer metric classification: a destination that resolves to a known

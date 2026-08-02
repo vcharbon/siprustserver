@@ -87,6 +87,7 @@ impl ProxyCore {
             extra_header(proxy_reason(503, reason_text)),
         ];
         self.reply(req, src, 503, "Service Unavailable", &extra).await;
+        self.metrics.record_reject(reason_text);
         RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }
     }
 }

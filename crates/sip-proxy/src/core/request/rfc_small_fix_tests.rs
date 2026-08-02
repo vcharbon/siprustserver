@@ -57,6 +57,7 @@ Content-Length: 0\r\n\r\n"
     let outcome = core.route_request(&req, format!("{UAC}:5060").parse().unwrap()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
     assert_eq!(metrics.messages_total(), before, "no response (and no forward) may be generated for the ACK");
+    assert_eq!(metrics.reject_count("ack_max_forwards_exhausted"), 1, "the silent discard still attributes its reject");
 }
 
 // §7.3.1: a UA may fold its route set into ONE comma-combined Route header.

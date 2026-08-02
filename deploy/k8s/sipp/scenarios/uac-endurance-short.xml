@@ -2,8 +2,11 @@
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
 <!--
   Endurance background "short-hold" UAC — EMERGENCY half of the short stream
-  (role=short_em): INVITE → 200 → ACK → 30s hold → BYE. No call limiter, no
-  in-dialog OPTIONS (calls complete well before B2BUA's 900s keepalive timer).
+  (role=short_em): INVITE → 200 → ACK → 30s hold → BYE. No call limiter. The
+  hold answers any in-dialog OPTIONS (RFC 3261 §11): the B2BUA keepalive
+  interval is 300s and a rebooted worker's reclaim (router::reclaim_all →
+  smooth_keepalives) re-spreads restored dialogs' keepalives EARLIER, so even
+  a 30s call can receive a probe mid-hold.
 
   This half carries `Resource-Priority: esnet.0` (below), the canonical
   emergency token `sip_message::is_emergency_request` recognises. The B2BUA
@@ -13,10 +16,10 @@
   IS sheddable. Run both at SHORT_CPS/2 each so the overload experiment can
   prove emergency new calls survive while non-emergency new calls get 503'd.
 
-  Hold is hardcoded to 30000ms because sipp's `[$variable]` macro does
-  not expand inside `<pause milliseconds="...">` attributes — it only
-  works in `<send>` CDATA bodies. Endurance harness keeps the hold
-  literal here; the orchestrator does not pass -set hold_ms.
+  The 30000ms hold is hardcoded in the recv timeout attribute because
+  sipp's `[$variable]` macro only expands in `<send>` CDATA bodies, not
+  in attributes. Endurance harness keeps the hold literal here; the
+  orchestrator does not pass -set hold_ms.
 -->
 <scenario name="K8s UAC endurance short-hold — INVITE / 200 / hold / BYE">
 
@@ -65,7 +68,27 @@
     ]]>
   </send>
 
-  <pause milliseconds="30000"/>
+  <!-- 30s hold that answers in-dialog OPTIONS (RFC 3261 §11). The recv is
+       MANDATORY (sipp rejects an all-optional recv before a send); ontimeout
+       reproduces the former bare 30s pause when no keepalive probe arrives.
+       An answered probe re-parks and restarts the 30s hold. -->
+  <label id="hold"/>
+  <recv request="OPTIONS" crlf="true" timeout="30000" ontimeout="hold_done"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop next="hold"/>
+  <label id="hold_done"/>
 
   <send retrans="500">
     <![CDATA[
@@ -85,5 +108,5 @@
   <recv response="200" crlf="true"/>
 
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
-  <CallLengthRepartition value="100, 1000, 10000, 30000, 60000"/>
+  <CallLengthRepartition value="100, 1000, 10000, 30000, 60000, 120000"/>
 </scenario>

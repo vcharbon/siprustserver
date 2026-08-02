@@ -91,6 +91,96 @@ fn timer_global_duration_selects_max_duration() {
     assert_eq!(ranked.first().map(|r| r.id), Some("max-duration"));
 }
 
+/// The `no-answer` rule's output for a fire naming `fired_leg_id` on `call`.
+fn no_answer_result(call: &call::Call, fired_leg_id: &str) -> Vec<RuleAction> {
+    let event = CallEvent::Timer {
+        timer_type: TimerType::NoAnswer,
+        call_ref: call.call_ref.clone(),
+        leg_id: Some(fired_leg_id.into()),
+    };
+    let ctx = RuleContext {
+        call: RuleCall::new(call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: fired_leg_id,
+        direction: Direction::FromB,
+        now_ms: 0,
+        config: &B2buaConfig::default(),
+    };
+    let rules = default_rules();
+    let ranked = pick_ranked(&rules, call, &ctx);
+    let no_answer =
+        ranked.iter().find(|r| r.id == "no-answer").expect("no-answer is a candidate");
+    (no_answer.handle)(&ctx).expect("no-answer handles its own timer").actions
+}
+
+#[test]
+fn no_answer_fire_on_a_confirmed_call_absorbs_to_cancel_only() {
+    // A reclaim-restored stale `NoAnswer` ledger entry firing on its own
+    // answered leg must be absorbed: the only action is the scrub of the
+    // spent entry.
+    let mut call = test_call();
+    call.a_leg.state = LegState::Confirmed;
+    let mut b = b_leg_pending();
+    b.state = LegState::Confirmed;
+    call = call::helpers::add_b_leg(call, b);
+    let actions = no_answer_result(&call, "b-1");
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [RuleAction::CancelTimer { id }] if id == "NoAnswer:b-1"
+        ),
+        "absorb: exactly the canonical per-leg scrub, got {actions:?}",
+    );
+}
+
+#[test]
+fn no_answer_fire_naming_an_absent_leg_absorbs_to_cancel_only() {
+    // A restored stale entry can name a leg displaced/destroyed before the
+    // crash: firing DestroyLeg + /calls/failure against a dead leg id on a
+    // possibly-answered call is the same bug class — absorb and scrub.
+    let mut call = test_call();
+    call.a_leg.state = LegState::Confirmed;
+    let mut b = b_leg_pending();
+    b.state = LegState::Confirmed;
+    call = call::helpers::add_b_leg(call, b);
+    let actions = no_answer_result(&call, "b-ghost");
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [RuleAction::CancelTimer { id }] if id == "NoAnswer:b-ghost"
+        ),
+        "absorb: exactly the canonical per-leg scrub, got {actions:?}",
+    );
+}
+
+#[test]
+fn no_answer_fire_on_own_pending_leg_fires_despite_other_leg_confirmed() {
+    // The guard is per-leg, not call-level: another leg being Confirmed does
+    // not spend a fire whose OWN leg is still awaiting an answer — the normal
+    // body (CDR timeout + DestroyLeg on the fired leg) runs.
+    let mut call = test_call();
+    let mut confirmed = b_leg_pending();
+    confirmed.state = LegState::Confirmed;
+    call = call::helpers::add_b_leg(call, confirmed);
+    let mut pending = b_leg_pending();
+    pending.leg_id = "b-2".into();
+    pending.state = LegState::Trying;
+    call = call::helpers::add_b_leg(call, pending);
+    let actions = no_answer_result(&call, "b-2");
+    match actions.as_slice() {
+        [RuleAction::AddCdrEvent { leg_id, reason, .. }, RuleAction::DestroyLeg { leg_id: destroyed }, tail]
+            if leg_id == "b-2"
+                && reason.as_deref() == Some("no_answer_timeout")
+                && destroyed == "b-2"
+                && matches!(
+                    tail,
+                    RuleAction::BeginTermination { .. } | RuleAction::FailureAsyncHttp { .. }
+                ) => {}
+        other => panic!("genuine fire runs the normal no-answer body, got {other:?}"),
+    }
+}
+
 #[test]
 fn in_dialog_bye_selects_relay_bye() {
     let call = test_call();

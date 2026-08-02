@@ -11,9 +11,10 @@
 //!     from new-dialog selection). Health writes flow through the registry's
 //!     `control()` seam, so an unanswered worker is demoted (Dead/NotReady/
 //!     Draining) and routing reacts — for the static pool too.
-//!   - `EluCpsGate` self-gate (migration/14): EWMA-smoothed proxy-self ELU + a
-//!     per-class CPS token bucket shed external new-dialog non-emergency INVITEs
-//!     under self-overload (a stateless 503 + `Retry-After`/`Reason`). A 100 ms
+//!   - `EluCpsGate` self-gate (migration/14): EWMA-smoothed intake pressure
+//!     (packet age at dequeue, recorded by every recv shard) + a per-class CPS
+//!     token bucket shed external new-dialog non-emergency INVITEs under
+//!     self-overload (a stateless 503 + `Retry-After`/`Reason`). A 100 ms
 //!     `tokio::time::interval` task drives its load sampler. `PROXY_SELF_GATE=0`
 //!     reverts to the always-admit gate.
 //!   - Prometheus `/metrics` + `/healthz` + `/readyz` via the shared `probe-http`.
@@ -43,6 +44,11 @@
 //!                    the serial recv loop — the ~550 OPTIONS/s burst ceiling —
 //!                    across N sockets; kernel flow-hashing keeps each UAC
 //!                    src:port on one socket so per-flow ordering holds)
+//!   PROXY_BIND_RETRY_INTERVAL_MS  cadence of bind retries while a port is
+//!                    still held (EADDRINUSE)                (default 200)
+//!   PROXY_BIND_RETRY_DEADLINE_MS  bind-retry give-up deadline; exceeds the 5 s
+//!                    SIGTERM drain grace so a recreated pod waits out its
+//!                    predecessor instead of crash-looping   (default 10000)
 //!   PROXY_HMAC_KID   stickiness cookie key id              (default k0)
 //!   PROXY_HMAC_KEY   stickiness cookie secret (>=16 bytes) (default dev key)
 //!   HEALTH_INTERVAL_MS / HEALTH_TIMEOUT_MS / HEALTH_THRESHOLD  (probe tuning)
@@ -73,8 +79,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sip_clock::Clock;
-use sip_net::types::BindUdpOpts;
-use sip_net::{RealSignalingNetwork, SignalingNetwork};
+use sip_net::types::{BindUdpOpts, PreIngressAction, PreIngressHook};
+use sip_net::{BindError, RealSignalingNetwork, SignalingNetwork};
 use sip_proxy::health::{HealthProbe, HealthProbeConfig};
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use sip_proxy::observability::ProxyMetrics;
@@ -85,7 +91,7 @@ use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
 use topology::{K8sMembership, Membership};
 use sip_proxy::resolver::ResolverConfig;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
-use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, ProxySelfGate, ProxySelfGateConfig};
+use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, IntakeAgeRecorder, ProxySelfGate, ProxySelfGateConfig};
 use sip_proxy::strategies::{LoadBalancerConfig, LoadBalancerStrategy};
 use sip_proxy::{ExternalFaceParts, FaceCidrs, ProxyAddr, ProxyCoreBuilder, RoutingStrategy};
 use sip_txn::IdGen;
@@ -107,6 +113,31 @@ fn parse_u64(key: &str, default: u64) -> u64 {
 
 fn parse_f64(key: &str, default: f64) -> f64 {
     env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Depth-watermark selective intake shed (062): the LAST-line guard below the
+/// admission layer (the self-gate, 063, is the first-line brake). At or above
+/// `watermark` queued datagrams the socket pump drops only what
+/// [`sip_message::sniff::is_sheddable_new_invite`] classifies as a NEW
+/// non-emergency INVITE; in-dialog traffic, responses, ACK/BYE/CANCEL,
+/// emergency INVITEs, and garbage are always admitted. Drops land on the
+/// endpoint's `pre_ingress_dropped` counter → `sip_proxy_intake_shed_total`.
+fn intake_shed_hook(watermark: usize) -> PreIngressHook {
+    Arc::new(move |raw, _src, depth| {
+        if depth >= watermark && sip_message::sniff::is_sheddable_new_invite(raw) {
+            PreIngressAction::Drop
+        } else {
+            PreIngressAction::Accept
+        }
+    })
+}
+
+/// The shed watermark in queued datagrams: `PROXY_INTAKE_SHED_PCT` percent of
+/// `queue_max` (default 50), floored at 1 so `0%` sheds whenever anything is
+/// queued rather than on an idle socket; `>= 100%` only sheds at a full queue.
+fn intake_shed_watermark(queue_max: usize) -> usize {
+    let pct = parse_u64("PROXY_INTAKE_SHED_PCT", 50) as usize;
+    (queue_max.saturating_mul(pct) / 100).max(1)
 }
 
 /// `1`/`true`/`yes`/`on` → on; `0`/`false`/`no`/`off` → off; anything else uses
@@ -382,6 +413,55 @@ fn self_gate_prometheus_text(gate: &Option<EluCpsGate>) -> String {
     s
 }
 
+/// Bounded bind retry for a port a predecessor process may still hold.
+///
+/// A recreated `hostNetwork` pod lands in the node netns its predecessor just
+/// vacated, so a bind can hit a transient `EADDRINUSE` while the old sockets
+/// linger. Re-attempts `bind` every `interval` while `is_addr_in_use(&err)`,
+/// logging each wait so a slow release is visible, until `deadline`. The
+/// default deadline (10 s) deliberately exceeds the 5 s SIGTERM drain grace so
+/// a fast pod recreation waits out its predecessor — instances serialize on
+/// the node, never overlap.
+///
+/// Any other bind error, or addr-in-use past the deadline, returns a message
+/// naming the address. The caller MUST treat that as fatal (panic → non-zero
+/// exit): the process never runs with a subset of its ports.
+async fn bind_with_retry<T, E, Fut>(
+    what: &str,
+    addr: SocketAddr,
+    interval: Duration,
+    deadline: Duration,
+    is_addr_in_use: impl Fn(&E) -> bool,
+    mut bind: impl FnMut() -> Fut,
+) -> Result<T, String>
+where
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    let started = tokio::time::Instant::now();
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        match bind().await {
+            Ok(t) => return Ok(t),
+            Err(e) if !is_addr_in_use(&e) => {
+                return Err(format!("bind {what} {addr} failed: {e}"));
+            }
+            Err(e) => {
+                if started.elapsed() + interval > deadline {
+                    return Err(format!(
+                        "bind {what} {addr} still in use after {attempt} attempt(s) over {}ms — \
+                         the address belongs to someone else: {e}",
+                        started.elapsed().as_millis(),
+                    ));
+                }
+                eprintln!("sip-proxy-runner waiting for {addr} release ({what}): attempt {attempt}");
+                tokio::time::sleep(interval).await;
+            }
+        }
+    }
+}
+
 /// Build the worker pool registry + its health-write control seam.
 ///
 /// `PROXY_WORKERS` (a static `id@host:port,..` list) takes precedence for
@@ -540,16 +620,59 @@ async fn main() {
 
     let net = RealSignalingNetwork::new();
 
+    // Every bind below rides the same bounded EADDRINUSE retry, and ANY bind
+    // still failing at the deadline aborts the process — it never runs with a
+    // subset of its ports.
+    let bind_interval = Duration::from_millis(parse_u64("PROXY_BIND_RETRY_INTERVAL_MS", 200));
+    let bind_deadline = Duration::from_millis(parse_u64("PROXY_BIND_RETRY_DEADLINE_MS", 10_000));
+    let is_udp_in_use = |e: &BindError| e.is_addr_in_use();
+    let is_tcp_in_use = |e: &std::io::Error| e.kind() == std::io::ErrorKind::AddrInUse;
+
+    // BIND ORDER: metrics/probe HTTP listener FIRST, then the internal-face
+    // signaling sockets, then the external-face sockets LAST. The SIP stack is
+    // never exposed unless the process can already report health, and the
+    // metrics port — inherently exclusive TCP — is the node-singleton lock:
+    // holding it proves no other proxy instance is alive on the node in every
+    // shard config, whereas the data sockets may carry SO_REUSEPORT
+    // (recv_shards > 1) and would silently overlap a predecessor. The accept
+    // loop starts later (ProbeServer::serve_on) — the bind is the lock.
+    let metrics_listener = bind_with_retry(
+        "metrics",
+        metrics_sa,
+        bind_interval,
+        bind_deadline,
+        is_tcp_in_use,
+        || tokio::net::TcpListener::bind(metrics_sa),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("sip-proxy-runner FATAL: {e}"));
+
     // Main signaling endpoint(s) — one per recv shard. With N > 1 every bind
     // (including the first) sets SO_REUSEPORT; the kernel flow-hashes on the
     // 4-tuple so all datagrams from one UAC src:port land on ONE socket and
     // per-flow ordering (INVITE→CANCEL, retransmits) is preserved.
+    //
+    // Every signaling bind (both faces, all shards) carries the selective
+    // intake-shed hook — a blind tail-drop at the queue cap would otherwise
+    // kill emergency and in-dialog traffic first-come-first-served (062).
+    let intake_shed = intake_shed_hook(intake_shed_watermark(queue_max));
     let mut endpoints = Vec::with_capacity(recv_shards);
     for _ in 0..recv_shards {
-        let ep = net
-            .bind_udp(BindUdpOpts::new(listen_sa, queue_max).with_reuse_port(recv_shards > 1))
-            .await
-            .unwrap_or_else(|e| panic!("bind {listen_sa} failed: {e:?}"));
+        let ep = bind_with_retry(
+            "internal face",
+            listen_sa,
+            bind_interval,
+            bind_deadline,
+            is_udp_in_use,
+            || {
+                let opts = BindUdpOpts::new(listen_sa, queue_max)
+                    .with_reuse_port(recv_shards > 1)
+                    .with_pre_ingress(intake_shed.clone());
+                async move { net.bind_udp(opts).await }
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("sip-proxy-runner FATAL: {e}"));
         endpoints.push(ep);
     }
 
@@ -560,22 +683,41 @@ async fn main() {
     let mut ext_endpoints = Vec::new();
     if let Some((ext_sa, _, _)) = &ext_face {
         for _ in 0..recv_shards {
-            let ep = net
-                .bind_udp(BindUdpOpts::new(*ext_sa, queue_max).with_reuse_port(recv_shards > 1))
-                .await
-                .unwrap_or_else(|e| panic!("bind external face {ext_sa} failed: {e:?}"));
+            let ep = bind_with_retry(
+                "external face",
+                *ext_sa,
+                bind_interval,
+                bind_deadline,
+                is_udp_in_use,
+                || {
+                    let opts = BindUdpOpts::new(*ext_sa, queue_max)
+                        .with_reuse_port(recv_shards > 1)
+                        .with_pre_ingress(intake_shed.clone());
+                    async move { net.bind_udp(opts).await }
+                },
+            )
+            .await
+            .unwrap_or_else(|e| panic!("sip-proxy-runner FATAL: {e}"));
             ext_endpoints.push(ep);
         }
     }
 
     // Separate endpoint for the OPTIONS health probe (its own source socket).
-    let probe_ep = net
-        .bind_udp(BindUdpOpts::new(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-            1024,
-        ))
-        .await
-        .unwrap_or_else(|e| panic!("bind probe socket failed: {e:?}"));
+    // Port 0 (ephemeral) never conflicts; the retry wrapper keeps the fatal
+    // contract uniform across every bind.
+    let probe_sa = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+    let probe_ep = bind_with_retry(
+        "probe socket",
+        probe_sa,
+        bind_interval,
+        bind_deadline,
+        is_udp_in_use,
+        || {
+            async move { net.bind_udp(BindUdpOpts::new(probe_sa, 1024)).await }
+        },
+    )
+    .await
+    .unwrap_or_else(|e| panic!("sip-proxy-runner FATAL: {e}"));
 
     let hmac = Arc::new(
         StaticHmacKeyProvider::new(HmacKey::new(hmac_kid, hmac_key.into_bytes()), None)
@@ -586,14 +728,17 @@ async fn main() {
     let clock = Clock::system();
     let id_gen = Arc::new(IdGen::from_entropy());
 
-    // Proxy-self ELU/CPS admission gate (migration/14). On by default; the live
-    // ELU sampler is driven by the 100 ms task spawned below. `PROXY_SELF_GATE=0`
-    // reverts to the always-admit gate (then `self_gate` is `None`, no sampler
-    // task, no self-gate /metrics). Build the concrete `EluCpsGate` once so the
-    // sampler task + the /metrics exposition can read it; hand each core an
-    // `Arc<dyn ProxySelfGate>` view of the same gate.
+    // Proxy-self ELU/CPS admission gate (migration/14). On by default; the ELU
+    // arm observes intake saturation — every recv shard records each packet's
+    // age at dequeue into this ONE shared recorder, and the 100 ms sampler task
+    // spawned below drains the window max into the gate's EWMA.
+    // `PROXY_SELF_GATE=0` reverts to the always-admit gate (then `self_gate` is
+    // `None`, no sampler task, no self-gate /metrics). Build the concrete
+    // `EluCpsGate` once so the sampler task + the /metrics exposition can read
+    // it; hand each core an `Arc<dyn ProxySelfGate>` view of the same gate.
+    let intake_age = IntakeAgeRecorder::default();
     let self_gate: Option<EluCpsGate> = if parse_bool("PROXY_SELF_GATE", true) {
-        Some(EluCpsGate::live_with(ProxySelfGateConfig {
+        Some(EluCpsGate::intake(intake_age.clone(), ProxySelfGateConfig {
             elu_critical: parse_f64("PROXY_SELF_GATE_ELU_CRITICAL", 0.8),
             cps_bucket_size: parse_u64("PROXY_SELF_GATE_CPS_SIZE", 50) as u32,
             cps_bucket_rate: parse_u64("PROXY_SELF_GATE_CPS_RATE", 100) as u32,
@@ -678,6 +823,7 @@ async fn main() {
             .metrics(metrics.clone())
             .cancel_lru(cancel_lru.clone())
             .self_gate(gate_dyn.clone())
+            .intake_age(intake_age.clone())
             .resolver_config(resolver_cfg)
             .shard(shard);
         if let Some((_, ext_adv, cidrs)) = &ext_face {
@@ -801,10 +947,10 @@ async fn main() {
     }
 
     // Proxy-self gate sampler (migration/14). Rides `tokio::time::interval` (NOT
-    // the TS raw `setInterval`) so behaviour stays on one clock; each tick reads
-    // the ELU/GC load sampler and feeds the gate's EWMA. Only spawned when the
-    // real gate is enabled. Owns no per-call state, so it needs no release path;
-    // the live sampler's busy proxy keys on how late this task lands under load.
+    // the TS raw `setInterval`) so behaviour stays on one clock; each tick
+    // drains the shared intake-age recorder's window max into the gate's EWMA.
+    // Only spawned when the real gate is enabled. Owns no per-call state, so it
+    // needs no release path.
     if let Some(g) = self_gate.clone() {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(g.sampler_interval());
@@ -836,16 +982,17 @@ async fn main() {
         // feature off here). /debug/heap → 503.
         heap: None,
     };
-    let _metrics_server = match probe_http::ProbeServer::start(metrics_sa, routes).await {
-        Ok(s) => {
-            eprintln!("sip-proxy-runner metrics on http://{}/metrics (readiness /readyz)", s.addr());
-            Some(s)
-        }
-        Err(e) => {
-            eprintln!("sip-proxy-runner metrics server failed to bind {metrics_sa}: {e}");
-            None
-        }
-    };
+    // The listener was bound FIRST (metrics-first bind order above); this only
+    // starts the accept loop. A failure here is fatal — a proxy without its
+    // health endpoint gets liveness-killed 30 s later with a lying /readyz.
+    let _metrics_server = probe_http::ProbeServer::serve_on(metrics_listener, routes)
+        .unwrap_or_else(|e| {
+            panic!("sip-proxy-runner FATAL: metrics server on {metrics_sa} failed to start: {e}")
+        });
+    eprintln!(
+        "sip-proxy-runner metrics on http://{}/metrics (readiness /readyz)",
+        _metrics_server.addr()
+    );
 
     let probe_task = tokio::spawn(probe.run());
     let mut core_tasks = tokio::task::JoinSet::new();
@@ -1248,5 +1395,162 @@ mod tests {
         let cfg = load_observer_cfg_from_env(LoadObserverConfig::default());
         clear_lb_vars();
         assert_valid_config(HELM_PROBE, &cfg); // panics: refusing to start
+    }
+
+    // ── bind_with_retry — bounded EADDRINUSE wait ───────────────────────────
+    //
+    // Real sockets ⇒ real clock (docs/testing/test-clock.md forbids pausing
+    // tokio time under real socket readiness). Intervals are test-short
+    // (10 ms / 300 ms) so the whole group stays sub-second — default lane.
+
+    const TEST_INTERVAL: Duration = Duration::from_millis(10);
+    const TEST_DEADLINE: Duration = Duration::from_millis(300);
+
+    fn tcp_in_use(e: &std::io::Error) -> bool {
+        e.kind() == std::io::ErrorKind::AddrInUse
+    }
+
+    /// (a) The holder releases the port mid-retry: the bind lands well before
+    /// the deadline instead of the process dying on the first attempt.
+    #[tokio::test]
+    async fn bind_retry_succeeds_once_the_holder_releases() {
+        let holder = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = holder.local_addr().unwrap();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(holder);
+        });
+        let bound = bind_with_retry("test", addr, TEST_INTERVAL, TEST_DEADLINE, tcp_in_use, || {
+            tokio::net::TcpListener::bind(addr)
+        })
+        .await
+        .expect("retry must win once the holder releases");
+        assert_eq!(bound.local_addr().unwrap(), addr);
+        release.await.unwrap();
+    }
+
+    /// (b) The holder never releases: the deadline expires and the error names
+    /// the contested address. Exercises the UDP side end-to-end — the real
+    /// network's `BindError` classifies EADDRINUSE structurally.
+    #[tokio::test]
+    async fn bind_retry_gives_up_at_the_deadline_naming_the_addr() {
+        let holder = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = holder.local_addr().unwrap();
+        let net = RealSignalingNetwork::new();
+        let err = bind_with_retry(
+            "test",
+            addr,
+            TEST_INTERVAL,
+            TEST_DEADLINE,
+            |e: &BindError| e.is_addr_in_use(),
+            || {
+                async move { net.bind_udp(BindUdpOpts::new(addr, 8)).await }
+            },
+        )
+        .await;
+        // Manual unwrap of the Err arm — `Box<dyn UdpEndpoint>` is not Debug.
+        let err = match err {
+            Ok(_) => panic!("the addr stays held — the deadline must expire"),
+            Err(e) => e,
+        };
+        assert!(err.contains(&addr.to_string()), "error must name the addr: {err}");
+        assert!(err.contains("still in use"), "{err}");
+        drop(holder);
+    }
+
+    /// A non-addr-in-use failure is NOT retried — it surfaces immediately
+    /// (still naming the address) so a genuine misconfiguration fails fast.
+    #[tokio::test]
+    async fn bind_retry_fails_fast_on_a_non_in_use_error() {
+        let holder = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = holder.local_addr().unwrap();
+        let started = std::time::Instant::now();
+        let err = bind_with_retry(
+            "test",
+            addr,
+            TEST_INTERVAL,
+            TEST_DEADLINE,
+            |_: &std::io::Error| false,
+            || tokio::net::TcpListener::bind(addr),
+        )
+        .await
+        .expect_err("a non-retryable error must surface at once");
+        assert!(started.elapsed() < TEST_DEADLINE, "must not wait out the deadline");
+        assert!(err.contains(&addr.to_string()) && err.contains("failed"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod intake_shed_tests {
+    //! Pins [`intake_shed_hook`] (062): the hook is pure over `(raw, depth)`
+    //! — no socket needed — so each case invokes it directly.
+
+    use super::*;
+
+    const WATERMARK: usize = 8;
+
+    fn src() -> SocketAddr {
+        "192.0.2.9:5060".parse().unwrap()
+    }
+
+    const NEW_INVITE: &[u8] = b"INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-shed\r\n\
+From: <sip:alice@example.com>;tag=a1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: shed@10.0.0.1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
+
+    const IN_DIALOG_INVITE: &[u8] = b"INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-re\r\n\
+From: <sip:alice@example.com>;tag=a1\r\n\
+To: <sip:bob@example.com>;tag=b2\r\n\
+Call-ID: shed@10.0.0.1\r\nCSeq: 2 INVITE\r\nContent-Length: 0\r\n\r\n";
+
+    const EMERGENCY_INVITE: &[u8] = b"INVITE sip:911@10.0.0.2:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-em\r\n\
+From: <sip:alice@example.com>;tag=a1\r\n\
+To: <sip:911@example.com>\r\n\
+Resource-Priority: esnet.0\r\n\
+Call-ID: em@10.0.0.1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
+
+    const BYE: &[u8] = b"BYE sip:bob@10.0.0.2:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-bye\r\n\
+From: <sip:alice@example.com>;tag=a1\r\n\
+To: <sip:bob@example.com>;tag=b2\r\n\
+Call-ID: shed@10.0.0.1\r\nCSeq: 3 BYE\r\nContent-Length: 0\r\n\r\n";
+
+    const OK_200: &[u8] = b"SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-shed\r\n\
+From: <sip:alice@example.com>;tag=a1\r\n\
+To: <sip:bob@example.com>;tag=b2\r\n\
+Call-ID: shed@10.0.0.1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
+
+    #[test]
+    fn below_the_watermark_everything_is_admitted() {
+        let hook = intake_shed_hook(WATERMARK);
+        for raw in [NEW_INVITE, IN_DIALOG_INVITE, EMERGENCY_INVITE, BYE, OK_200] {
+            assert_eq!(hook(raw, src(), WATERMARK - 1), PreIngressAction::Accept);
+        }
+    }
+
+    #[test]
+    fn at_the_watermark_only_the_new_non_emergency_invite_is_dropped() {
+        let hook = intake_shed_hook(WATERMARK);
+        assert_eq!(hook(NEW_INVITE, src(), WATERMARK), PreIngressAction::Drop);
+        for admitted in [IN_DIALOG_INVITE, EMERGENCY_INVITE, BYE, OK_200] {
+            assert_eq!(hook(admitted, src(), WATERMARK), PreIngressAction::Accept);
+        }
+    }
+
+    #[test]
+    fn deeper_than_the_watermark_still_sheds_new_invites() {
+        let hook = intake_shed_hook(WATERMARK);
+        assert_eq!(hook(NEW_INVITE, src(), WATERMARK * 100), PreIngressAction::Drop);
+    }
+
+    #[test]
+    fn watermark_defaults_to_half_the_queue_and_floors_at_one() {
+        // No env override in the test process — the 50% default applies.
+        assert_eq!(intake_shed_watermark(8192), 4096);
+        assert_eq!(intake_shed_watermark(1), 1);
     }
 }

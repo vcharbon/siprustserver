@@ -39,7 +39,14 @@ impl RealSignalingNetwork {
 impl SignalingNetwork for RealSignalingNetwork {
     async fn bind_udp(&self, opts: BindUdpOpts) -> Result<Box<dyn UdpEndpoint>, BindError> {
         let os_err = |e: std::io::Error| BindError {
-            reason: BindErrorReason::OsError,
+            // EADDRINUSE is kept structurally distinguishable: it is the one
+            // bind failure a caller can meaningfully wait out (a predecessor
+            // process releasing the port).
+            reason: if e.kind() == std::io::ErrorKind::AddrInUse {
+                BindErrorReason::AddrInUse
+            } else {
+                BindErrorReason::OsError
+            },
             addr: opts.addr,
             message: e.to_string(),
         };
